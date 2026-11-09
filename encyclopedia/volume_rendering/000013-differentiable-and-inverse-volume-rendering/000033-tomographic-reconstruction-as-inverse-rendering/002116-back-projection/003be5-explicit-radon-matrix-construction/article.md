@@ -1,0 +1,134 @@
+# Explicit Radon Matrix Construction
+
+Also called: Explicit Radon Transform Matrix Construction, Forward Projection Matrix, System Matrix
+
+## Overview
+Explicit Radon Matrix Construction computes the full forward projection matrix $A$ for a parallel-beam CT geometry, mapping voxel values to sinogram bins [S1, unofficial]. It differs from iterative or approximate methods by materializing the complete linear operator, enabling direct algebraic solutions or explicit adjoint verification, at the cost of high memory usage for large volumes [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Volume dimensions: height $v$, width $h$.
+- Projection parameters: number of angles $n\_angles$, maximum angle $max\_angle$, number of detector samples $n\_samples$.
+- SVD mode: boolean `sparse_svd` (default `True`) [S1, unofficial].
+
+**Outputs:**
+- Explicit projection matrix $A$ of shape $(n\_samples \times n\_angles, v \times h)$ [S1, unofficial].
+- Right singular vectors $W$ (if SVD is computed) [S1, unofficial].
+
+**Data Structures:**
+- `vol_geom`: Volume geometry object defining the voxel grid $v \times h$ [S1, unofficial].
+- `proj_geom`: Projection geometry object defining parallel beam geometry with $n\_samples$ detectors and $n\_angles$ angles [S1, unofficial].
+- `projector_id`: Identifier for the 'strip' projector type, linking `vol_geom` and `proj_geom` [S1, unofficial].
+- `A_exp`: List of column vectors, each of shape $(n\_samples \times n\_angles, 1)$ [S1, unofficial].
+
+**Steps:**
+1. Define angle vector: $\theta_i = i \cdot \frac{max\_angle}{n\_angles}$ for $i \in [0, n\_angles-1]$ [S1, unofficial].
+2. Create volume geometry `vol_geom` for dimensions $v \times h$ [S1, unofficial].
+3. Create projection geometry `proj_geom` with type 'parallel', detector spacing $1.0$, $n\_samples$ samples, and angles $\theta$ [S1, unofficial].
+4. Create projector ID using 'strip' projector type with `proj_geom` and `vol_geom` [S1, unofficial].
+5. Initialize empty list `A_exp` [S1, unofficial].
+6. For each column `col` from $0$ to $v-1$:
+   a. For each row `row` from $0$ to $h-1$:
+      i. Create dummy image `dummy_img` of shape $(v, h)$ initialized to zeros [S1, unofficial].
+      ii. Set `dummy_img[row][col] = 1.0` [S1, unofficial].
+      iii. Compute sinogram `sino` by projecting `dummy_img.T` using `projector_id` [S1, unofficial].
+      iv. Reshape `sino` to shape $(-1, 1)$ using Fortran order [S1, unofficial].
+      v. Append `sino` to `A_exp` [S1, unofficial].
+7. Horizontally stack `A_exp` into matrix $A$ [S1, unofficial].
+8. If `sparse_svd` is true, compute right singular vectors $W$ using sparse SVD on $A$; otherwise, use dense SVD [S1, unofficial].
+9. Return $A$ and $W$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import scipy.sparse as sp
+import scipy.sparse.linalg
+
+def explicit_radon_matrix(v, h, n_angles, max_angle, n_samples, sparse_svd=True):
+    # Step 1: Define angles
+    angles = np.linspace(0, max_angle, n_angles, endpoint=False)
+    
+    # Step 2-4: Create geometries and projector
+    # Note: astra.create_vol_geom and astra.create_proj_geom are assumed available
+    # as per the source environment. In a pure implementation, these would define
+    # the geometric mapping. Here we assume the astra library functions are used
+    # as per the source code [S1, unofficial].
+    vol_geom = astra.create_vol_geom(v, h)
+    proj_geom = astra.create_proj_geom('parallel', 1.0, n_samples, angles)
+    projector_id = astra.create_projector('strip', proj_geom, vol_geom)
+    
+    # Step 5: Initialize list
+    A_exp = []
+    
+    # Step 6: Iterate over basis images
+    for col in range(v):
+        for row in range(h):
+            # Create dummy image
+            dummy_img = np.zeros((v, h))
+            dummy_img[row, col] = 1.0
+            
+            # Compute sinogram for this basis vector
+            # astra.create_sino projects the image using the projector_id
+            sino = astra.create_sino(dummy_img.T, projector_id)
+            
+            # Reshape to column vector (Fortran order)
+            sino_col = sino.reshape(-1, 1, order='F')
+            
+            # Append to list
+            A_exp.append(sino_col)
+            
+    # Step 7: Stack into matrix
+    A = np.hstack(A_exp)
+    
+    # Step 8: Compute SVD if needed
+    if sparse_svd:
+        W = sp.sparse.linalg.svds(A, k=min(A.shape)) # k not specified, assuming full rank or dominant
+    else:
+        W = sp.linalg.svd(A) # Returns U, s, Vh; source implies returning W which might be Vh or similar
+        
+    # Step 9: Return
+    return A, W
+```
+
+**Parameters:**
+- `sparse_svd`: Boolean flag to control sparse SVD application. Default `True` [S1, unofficial].
+
+**Edge Cases:**
+- Memory usage grows as $O(v \cdot h \cdot n\_samples \cdot n\_angles)$, which can be prohibitive for large volumes [S1, unofficial].
+- The 'strip' projector assumes parallel beam geometry; using it with other geometries may yield incorrect results [S1, unofficial].
+
+## Subtopics
+
+### [Forward Projection](4740-forward-projection.md)
+Computes projections without storing the full matrix, suitable for large-scale problems.
+
+### [GPU Backprojection with Global Memory Buffer](4991-gpu-backprojection-with-global-memory-buffer.md)
+Optimized backprojection using GPU global memory.
+
+### [GPU Backprojection using OpenCL Buffers](5110-gpu-backprojection-using-opencl-buffers.md)
+OpenCL-based backprojection using buffer objects.
+
+### [GPU Backprojection using OpenCL Image Textures](5111-gpu-backprojection-using-opencl-image-textures.md)
+OpenCL-based backprojection using image textures.
+
+### [Fourier-space Projection Operations](6356-fourier-space-projection-operations.md)
+Uses Fourier transforms for projection operations.
+
+### [Gradient w.r.t Source/Detector Geometry](8258-gradient-w-r-t-source-detector-geometry.md)
+Computes gradients with respect to geometric parameters.
+
+## Operating characteristics
+- **Time Complexity:** $O(v \cdot h \cdot n\_samples \cdot n\_angles)$ to construct the matrix, as each voxel requires a full projection [S1, unofficial].
+- **Memory Complexity:** $O(v \cdot h \cdot n\_samples \cdot n\_angles)$ to store the explicit matrix $A$ [S1, unofficial].
+- **Strengths:** Provides exact forward projection operator; enables direct algebraic methods and explicit adjoint verification [S1, unofficial].
+- **Limitations:** High memory consumption makes it infeasible for large 3D volumes or high-resolution 2D volumes [S1, unofficial].
+- **When to use:** Small-scale problems, educational purposes, or when explicit matrix properties (e.g., SVD) are required [S1, unofficial].
+- **When not to use:** Large-scale tomographic reconstruction where memory is constrained [S1, unofficial].
+
+## Background
+The method originates from the ASTRA Toolbox ecosystem, specifically utilizing its 'strip' projector for parallel-beam geometry [S1, unofficial]. It is used in inverse problem contexts for CT scans, particularly in iterative thresholding algorithms where the explicit system matrix is needed for regularization or analysis [S1, unofficial].
+
+## Sources
+[S1] imanfs/inverse-problems-CT-scans, https://github.com/imanfs/inverse-problems-CT-scans, fetched 2026-10-27 (unofficial)

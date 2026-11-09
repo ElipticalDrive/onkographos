@@ -2,64 +2,131 @@
 
 
 ## Overview
-Point Feature Generation creates per-ray feature vectors by indexing volume features and constructing color volumes from input images [S1, unofficial]. It serves as the data preparation step for ray-based volume rendering, transforming raw image and depth inputs into structured feature tensors suitable for neural network processing [S1, unofficial]. It differs from sibling methods by focusing on the aggregation of multi-view image features into ray-aligned tensors rather than generating static voxel grids or point clouds directly.
+Point Feature Generation constructs per-ray feature vectors by indexing volume features and building color volumes from input images [S1, unofficial]. It serves as the data preparation step for ray-based volume rendering, transforming raw image and depth inputs into structured feature tensors suitable for subsequent neural processing [S1, unofficial]. Unlike sibling methods that focus on geometric voxelization or point cloud storage, this method specifically prepares the feature space for ray sampling [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `view_ids`: List of view identifiers (1-based index for file naming).
-- `data_dir`: Directory path containing `Rectified` and `Depths_raw` folders.
+- `view_ids`: List of view identifiers.
+- `data_dir`: Directory path containing rectified images and raw depth maps.
 - `scan`: Scan identifier string.
 - `light_idx`: Lighting condition index.
 - `downSample`: Scaling factor for image resolution.
-- `img_feat`: Optional spatial feature tensor from images.
-- `use_color_volume`: Boolean flag indicating whether to build a color volume.
+- `remap`: Mapping from view ID to projection matrix index.
+- `proj_mats`, `intrinsics`, `world2cams`, `cam2worlds`: Pre-computed camera matrices.
+- `img_feat` (optional): Spatial feature map associated with images.
 
 **Outputs:**
-- `ray_feats`: Tensor of shape `(N, 8)` containing the first 8 channels of input features for $N$ rays.
-- `color_volume`: Optional tensor built from images if `use_color_volume` is true.
-- `index_volume`: Volume features indexed for ray access.
+- `ray_feats`: Tensor of shape $(N_{rays}, 8)$ containing the first 8 channels of input features.
+- `color_volume`: Tensor representing the color volume built from images (if used).
+- `volume_features`: Indexed volume features (if using color volume).
 
 **Data Structures:**
+- `imgs`: List of resized image tensors.
 - `affine_mat`: List of projection matrices for each view.
 - `affine_mat_inv`: List of inverse projection matrices.
-- `imgs`: List of resized image tensors.
-- `intrinsics`, `w2cs`, `c2ws`: Camera parameters per view.
-- `near_fars`: Near and far clipping planes per view.
+- `depths_h`: List of height-adjusted depth maps.
 
 **Steps:**
-1. Initialize empty lists for `affine_mat`, `affine_mat_inv`, `imgs`, `depths_h`, `proj_mats`, `intrinsics`, `w2cs`, `c2ws`, and `near_fars`.
+1. Initialize empty lists for `affine_mat`, `affine_mat_inv`, `imgs`, `depths_h`, `proj_mats`, `intrinsics`, `w2cs`, `c2ws`, and `near_fars` [S1, unofficial].
 2. For each view ID `vid` in `view_ids`:
-   a. Construct `img_filename` using `Rectified/{scan}_train/rect_{vid + 1:03d}_{light_idx}_r5000.png`.
-   b. Construct `depth_filename` using `Depths_raw/{scan}/depth_map_{vid:04d}.pfm`.
-   c. Load and resize image to `img_wh = round(img.size * downSample)`.
-   d. Apply transformation `self.transform(img)` and append to `imgs`.
-   e. Retrieve `index_mat = self.remap[vid]`.
-   f. Get `proj_mat_ls` and `near_far` from `self.proj_mats[index_mat]`.
-   g. Append `self.intrinsics[index_mat]` to `intrinsics`, `self.world2cams[index_mat]` to `w2cs`, and `self.cam2worlds[index_mat]` to `c2ws`.
-   h. Append `proj_mat_ls` to `affine_mat` and its inverse to `affine_mat_inv`.
-   i. If `depth_filename` exists, read depth, mask, and `depth_h` using `self.read_depth`.
-3. Determine `feat_dim`: If `img_feat` is provided, add its spatial dimensions to the base feature dimension.
-4. If `use_color_volume` is false:
-   a. Initialize `input_feat` and index volume features.
-   b. Assign the first 8 channels of `input_feat` to `ray_feats`.
-   c. Assign remaining channels to the color volume built from images.
-5. If `use_color_volume` is true:
-   a. Directly index volume features.
+   a. Construct `img_filename` using the pattern `Rectified/{scan}_train/rect_{vid+1:03d}_{light_idx}_r5000.png` [S1, unofficial].
+   b. Construct `depth_filename` using the pattern `Depths_raw/{scan}/depth_map_{vid:04d}.pfm` [S1, unofficial].
+   c. Load and resize the image to `img_wh = round(img.size * downSample)` using bilinear interpolation [S1, unofficial].
+   d. Apply image transformation `self.transform` to the resized image [S1, unofficial].
+   e. Append the transformed image to `imgs` [S1, unofficial].
+   f. Retrieve `index_mat` from `self.remap[vid]` [S1, unofficial].
+   g. Extract `proj_mat_ls` and `near_far` from `self.proj_mats[index_mat]` [S1, unofficial].
+   h. Append `self.intrinsics[index_mat]` to `intrinsics` [S1, unofficial].
+   i. Append `self.world2cams[index_mat]` to `w2cs` [S1, unofficial].
+   j. Append `self.cam2worlds[index_mat]` to `c2ws` [S1, unofficial].
+   k. Append `proj_mat_ls` to `affine_mat` [S1, unofficial].
+   l. Append `np.linalg.inv(proj_mat_ls)` to `affine_mat_inv` [S1, unofficial].
+   m. If `depth_filename` exists:
+      i. Read depth, mask, and `depth_h` using `self.read_depth` [S1, unofficial].
+      ii. Append `depth_h` to `depths_h` [S1, unofficial].
+3. Determine `feat_dim`: If `img_feat` is provided, add its spatial dimensions to `feat_dim` [S1, unofficial].
+4. If not using a color volume:
+   a. Initialize `input_feat` [S1, unofficial].
+   b. Index volume features [S1, unofficial].
+   c. Assign the first 8 channels of `input_feat` to `ray_feats` [S1, unofficial].
+   d. Assign the remaining channels to the color volume built from images [S1, unofficial].
+5. If using a color volume:
+   a. Directly index volume features [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_point_features(view_ids, data_dir, scan, light_idx, downSample, remap, proj_mats, intrinsics, world2cams, cam2worlds, img_feat=None):
+    affine_mat = []
+    affine_mat_inv = []
+    imgs = []
+    depths_h = []
+    intrinsics_list = []
+    w2cs = []
+    c2ws = []
+    near_fars = []
+    
+    for vid in view_ids:
+        # Construct filenames (1-based index for images)
+        img_filename = os.path.join(data_dir, f'Rectified/{scan}_train/rect_{vid + 1:03d}_{light_idx}_r5000.png')
+        depth_filename = os.path.join(data_dir, f'Depths_raw/{scan}/depth_map_{vid:04d}.pfm')
+        
+        # Load and process image
+        img = Image.open(img_filename)
+        img_wh = np.round(np.array(img.size) * downSample).astype('int')
+        img = img.resize(img_wh, Image.BILINEAR)
+        img = transform(img) # Assuming transform is defined elsewhere
+        imgs.append(img)
+        
+        # Retrieve camera matrices
+        index_mat = remap[vid]
+        proj_mat_ls, near_far = proj_mats[index_mat]
+        intrinsics_list.append(intrinsics[index_mat])
+        w2cs.append(world2cams[index_mat])
+        c2ws.append(cam2worlds[index_mat])
+        
+        affine_mat.append(proj_mat_ls)
+        affine_mat_inv.append(np.linalg.inv(proj_mat_ls))
+        
+        # Process depth if available
+        if os.path.exists(depth_filename):
+            depth, mask, depth_h = read_depth(depth_filename) # Assuming read_depth is defined
+            depths_h.append(depth_h)
+            
+    # Feature generation logic
+    if img_feat is not None:
+        feat_dim += img_feat.spatial_dimensions # [G] Assuming spatial_dimensions is a property
+        
+    if not use_color_volume:
+        input_feat = initialize_input_feat() # [G] Placeholder for initialization
+        volume_features = index_volume_features(input_feat) # [G] Placeholder for indexing
+        ray_feats = input_feat[:, :8]
+        color_volume = input_feat[:, 8:]
+    else:
+        volume_features = index_volume_features_directly() # [G] Placeholder for direct indexing
+        
+    return ray_feats, color_volume, volume_features
+```
 
 **Parameters:**
-- `downSample`: Typical value depends on resolution requirements; not specified in sources [G].
-- `light_idx`: Specific to dataset lighting conditions; not specified in sources [G].
+- `downSample`: Typical value not specified in sources [S1, unofficial].
+- `light_idx`: Varies by scene [S1, unofficial].
 
 **Edge Cases:**
-- Depth files may not exist for all views; handled by existence check [S1, unofficial].
-- Image file IDs are 1-based, requiring `vid + 1` for filename construction [S1, unofficial].
+- Missing depth files: The method checks for existence before reading [S1, unofficial].
+- Image resizing: Bilinear interpolation is used, which may introduce artifacts at low resolutions [S1, unofficial].
 
 ## Subtopics
+
+### [Voxel Feature Composition](7021-voxel-feature-composition.md)
+Generates per-voxel feature vectors by sampling points within Gaussian volumes and weighting by attenuation. It bridges 3D Gaussian Splatting and discrete voxel grids for quantile rendering. Choose this when embedding high-dimensional features for voxel-based storage.
+
 ## Operating characteristics
-Time complexity is linear with respect to the number of views and rays processed. Memory usage depends on the size of the color volume and feature tensors. Performance scales with image resolution and downSample factor. Strengths include efficient multi-view feature aggregation. Limitations include dependency on precise camera calibration and depth data availability. Use when ray-based rendering requires pre-computed image features. Avoid when static voxel representations are sufficient.
+Time and memory complexity are not given in the sources [S1, unofficial]. Measured performance with specific hardware, resolution, and scene is not given in the sources [S1, unofficial]. Strengths and limitations are not given in the sources [S1, unofficial].
 
 ## Background
-Originated in the context of neural radiance fields and point-based rendering methods, specifically within the PointNeRF framework [S1, unofficial]. It addresses the need to efficiently transfer multi-view image information into a ray-centric feature space for subsequent neural network processing.
+Origin: This method is part of the PointNeRF framework [S1, unofficial]. History and development: It is used in the context of neural radiance fields for point-based feature generation [S1, unofficial]. Where it is used: In the PointNeRF repository for generating features from multi-view images and depths [S1, unofficial].
 
 ## Sources
 [S1] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)

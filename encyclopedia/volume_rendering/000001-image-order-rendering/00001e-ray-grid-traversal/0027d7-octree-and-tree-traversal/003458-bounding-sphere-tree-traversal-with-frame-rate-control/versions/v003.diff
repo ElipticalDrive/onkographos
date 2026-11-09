@@ -1,0 +1,140 @@
+--- v002.md
++++ v003.md
+@@ -7,9 +7,9 @@
+ 
+ ## How it works
+-The algorithm traverses a hierarchical tree where nodes are represented by bounding spheres. It combines visibility culling tests with an adaptive refinement strategy to balance performance and visual quality [S1, unofficial].
++The algorithm traverses a hierarchical tree where nodes are represented by bounding spheres [S1, unofficial]. It combines visibility culling tests with an adaptive refinement strategy to balance performance and visual quality [S1, unofficial].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Root node of the hierarchical tree (Shell or Solid); current camera parameters (view frustum); current frame rate metrics.
+-*   **Output:** Rendered image via splatting primitives.
++*   **Input:** Root node of the hierarchical tree (Shell or Solid), current camera parameters (view frustum), and current frame rate metrics [S1, unofficial].
++*   **Output:** Rendered image via splatting primitives [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -21,12 +21,9 @@
+ 
+ **Steps:**
+-1.  **Frame-Rate Feedback:** Check the current frame rate. If it is too low, smoothly increase $\delta_r$ and $\delta_b$. If the frame rate is too high (after a completed traversal), allow $\delta_r$ and $\delta_b$ to decrease [S1, unofficial].
++1.  **Frame-Rate Feedback:** Check the current frame rate. If it is too low, smoothly increase $\delta_r$ and $\delta_b$. If the frame rate is too high after a completed traversal, allow $\delta_r$ and $\delta_b$ to decrease [S1, unofficial].
+ 2.  **Traversal Initiation:** Call `TraverseTree` on the root node [S1, unofficial].
+-3.  **Attribute Decompression:** For each child node, perform fast on-the-fly table lookups to decompress bounding sphere attributes [S1, unofficial].
+-4.  **Culling Tests:** Apply visibility culling tests to the decompressed bounding sphere:
+-    *   **View-Frustum Culling:**
+-        *   If the bounding sphere is completely outside the viewing frustum, ignore the node and all its children [S1, unofficial].
+-        *   If the bounding sphere intersects any plane of the view frustum, traverse to its children [S1, unofficial].
+-        *   If the bounding sphere is completely inside the view frustum, disable this culling test for all its children [S1, unofficial].
++3.  **Attribute Decompression:** For each child node, perform fast on-the-fly table lookups to decompress bounding sphere attributes before culling tests [S1, unofficial].
++4.  **Culling Tests:** Apply visibility culling tests to the decompressed bounding sphere [S1, unofficial].
++    *   **View-Frustum Culling:** If the bounding sphere is completely outside the viewing frustum, ignore the node and all its children. If the bounding sphere intersects any plane of the view frustum, traverse to its children. If the bounding sphere is completely inside the view frustum, disable this culling test for all its children [S1, unofficial].
+     *   **Back-Face Culling (Shell):** Use hierarchically encoded normal vectors and bounding normal cones to eliminate branches where all nodes point entirely away from the camera [S1, unofficial].
+     *   **Back-Face Culling (Solid):** Solid nodes lack normal information during traversal. Perform back-face culling only before rendering individual Solid splats using normals derived from the CSG probe [S1, unofficial].
+@@ -41,57 +38,35 @@
+ **Pseudocode:**
+ ```python
+-def traverse_tree(node, delta_r, delta_b, camera):
+-    """
+-    Recursively traverse the bounding-sphere tree.
+-    
+-    Args:
+-        node: The current tree node.
+-        delta_r: Minimum regular splat size in pixels.
+-        delta_b: Minimum boundary splat size in pixels.
+-        camera: Object containing view frustum planes and camera position.
+-    """
+-    # Step 1: Decompress attributes
+-    sphere = decompress_bounding_sphere(node)
+-    
+-    # Step 2: View-Frustum Culling
+-    if is_completely_outside_frustum(sphere, camera):
+-        return # Ignore node and children
+-    
+-    if is_completely_inside_frustum(sphere, camera):
+-        # Disable frustum culling for children
+-        children_pass_frustum = True
+-    else:
+-        # Intersects frustum, traverse children
+-        children_pass_frustum = True # Implicitly handled by recursion
+-        
+-    # Note: If completely outside, we returned above.
+-    # If intersects, we proceed. If inside, we proceed but skip frustum check for children.
+-    
+-    # Step 3: Back-Face Culling (Shell specific)
+-    if node.type == SHELL:
+-        if is_back_faced(sphere, node.normals, camera.position):
+-            return # Eliminate branch
++def traverse_tree(node, delta_r, delta_b, camera, frustum_culling_enabled=True):
++    # Fast on-the-fly table lookups to decompress bounding sphere attributes [S1, unofficial]
++    sphere = decompress_attributes(node)
+ 
+-    # Step 4: Calculate screen size
+-    S = calculate_screen_size(sphere, camera.projection)
+-    
+-    # Step 5: Process Node
++    # View-frustum culling
++    if frustum_culling_enabled:
++        if sphere_center_dist_to_frustum_planes(sphere, camera) > sphere.radius:
++            return
++        if sphere_center_dist_to_frustum_planes(sphere, camera) < -sphere.radius:
++            frustum_culling_enabled = False
++
++    # Back-face culling (Shell)
++    if node.node_type == "SHELL":
++        if dot_product(sphere.normal, camera.view_direction) > 0:
++            return
++
++    # Calculate screen size in pixels
++    S = sphere.radius * camera.focal_length / sphere.depth
++
++    # Node processing
+     if node.is_leaf():
+         render_splat(node, S)
+-    elif node.type == REGULAR and S < delta_r:
++    elif node.node_type == "REGULAR" and S < delta_r:
+         render_splat(node, delta_r)
+-    elif node.type == BOUNDARY and S < delta_b:
++    elif node.node_type == "BOUNDARY" and S < delta_b:
+         render_splat(node, delta_b)
+     else:
+-        # Recurse
+         for child in node.children:
+-            # If inside frustum, skip frustum check for children
+-            # This is handled by the camera state or a flag passed down
+-            traverse_tree(child, delta_r, delta_b, camera)
++            traverse_tree(child, delta_r, delta_b, camera, frustum_culling_enabled)
+ 
+-def adjust_parameters(current_fps, target_fps, delta_r, delta_b):
+-    """
+-    Adjust delta_r and delta_b based on frame rate.
+-    """
++def adjust_parameters(current_fps, target_fps, delta_r, delta_b, traversal_completed):
+     if current_fps < target_fps:
+         delta_r = smooth_increase(delta_r)
+@@ -101,4 +76,12 @@
+         delta_b = smooth_decrease(delta_b)
+     return delta_r, delta_b
++
++# Standard operations [G]
++def decompress_attributes(node): return node.attributes # Fast table lookup
++def sphere_center_dist_to_frustum_planes(sphere, camera): return min(dist(plane, sphere.center) for plane in camera.frustum_planes)
++def dot_product(a, b): return sum(x*y for x, y in zip(a, b))
++def render_splat(node, size): pass # Hardware rasterization of point primitive
++def smooth_increase(val): return val * 1.1
++def smooth_decrease(val): return val * 0.9
+ ```
+ 
+@@ -108,5 +91,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the tree depth and the adaptive refinement. The feedback loop adjusts $\delta_r$ and $\delta_b$ to maintain a target frame rate, effectively culling distant or small details [S1, unofficial].
++*   **Time Complexity:** Depends on the tree depth and the adaptive refinement [S1, unofficial]. The feedback loop adjusts $\delta_r$ and $\delta_b$ to maintain a target frame rate, effectively culling distant or small details [S1, unofficial].
+ *   **Memory Complexity:** Breath-first storage allows progressive loading, reducing memory pressure by only loading parts of the data structure actually rendered [S1, unofficial].
+ *   **Strengths:** Real-time performance for large datasets; adaptive fidelity; efficient culling of invisible branches [S1, unofficial].
+@@ -116,5 +99,5 @@
+ 
+ ## Background
+-The method was introduced by Museth and Lombeyda in 2004 as part of the TetSplat system for real-time rendering and volume clipping of large datasets [S1, unofficial]. It addresses the challenge of rendering complex volumetric data (Shell and Solid structures) in real-time by combining hierarchical tree traversal with adaptive splatting and frame-rate control [S1, unofficial].
++The method is described in the context of rendering hierarchical tree structures (Shell and Solid) using point-based splatting and adaptive volumetric clipping [S1, unofficial]. It addresses the challenge of rendering complex volumetric data in real-time by combining hierarchical tree traversal with adaptive splatting and frame-rate control [S1, unofficial].
+ 
+ ## Sources

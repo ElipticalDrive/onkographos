@@ -1,0 +1,114 @@
+# YUV Color Space Shading with Glow
+
+Also called: YUV Shading, YUV Volume Shading
+
+## Overview
+This method performs volume raycasting illumination in the YUV color space to decouple luminance from chrominance, allowing for independent control of brightness and color [S1, unofficial]. It differs from standard RGB shading by computing lighting effects (such as specular highlights and glow) primarily on the luminance channel, while interpolating color channels based on a technique-derived factor [S1, unofficial]. This approach is particularly useful for capturing indirect illumination independently of the transfer function [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Surface point $\mathbf{p}$ and normal $\mathbf{n}$ (derived from SDF gradient [G]).
+*   View direction $\mathbf{v}$ and light direction $\mathbf{l}$ [G].
+*   Base color values $C_1, C_2$ (in YUV space) [S1, unofficial].
+*   Interpolation factor $\alpha$ derived from the technique's output (e.g., density or depth) [S1, unofficial].
+*   Glow mapping function $G(\cdot)$ and additional texture fetch for glow [S1, unofficial].
+
+**Outputs:**
+*   Final shaded color $C_{final}$ in YUV space, potentially converted back to RGB for display.
+
+**Data Structures:**
+*   YUV Color Vector: $\mathbf{C} = [Y, U, V]^T$.
+*   Glow Texture: 2D or 3D texture storing precomputed or runtime glow intensity [S1, unofficial].
+
+**Steps:**
+1.  **Geometric Setup:** Compute normal $\mathbf{n}$, view vector $\mathbf{v}$, and light vector $\mathbf{l}$ [G].
+2.  **Luminance Calculation:** Calculate the luminance component $Y$ as the minimum of two values, $Y_1$ and $Y_2$, which may represent different lighting contributions or material states [S1, unofficial]:
+    $$ Y = \min(Y_1, Y_2) $$
+3.  **Color Interpolation:** Interpolate the chrominance components ($U, V$) between two color states $C_1$ and $C_2$ using the factor $\alpha$:
+    $$ C_{interp} = (1 - \alpha) C_1 + \alpha C_2 $$
+    Where $C_1$ and $C_2$ are YUV vectors [S1, unofficial].
+4.  **Specular Highlight (Optional):** Add specular highlights to the result. This is typically computed in the luminance channel or as an additive term to the final YUV vector [S1, unofficial].
+5.  **Volumetric Glow:** Realize volumetric glow by exploiting an additional texture fetch. Sample a glow texture at the current position or screen coordinates and apply a glow mapping function $G(\cdot)$ to modulate the final color:
+    $$ C_{final} = C_{interp} + G(\text{GlowTexture}(\mathbf{p})) $$
+    This allows indirect illumination to be captured independently of the transfer function [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def yuv_shading_with_glow(p, n, v, l, C1_yuv, C2_yuv, alpha, glow_texture, glow_func):
+    """
+    p: surface point
+    n: surface normal
+    v: view direction
+    l: light direction
+    C1_yuv: YUV color vector 1
+    C2_yuv: YUV color vector 2
+    alpha: interpolation factor
+    glow_texture: texture for glow intensity
+    glow_func: function mapping glow intensity to color contribution
+    """
+    # Step 1: Geometric Setup (Assumed done by parent context)
+    # n, v, l are inputs
+
+    # Step 2: Luminance Calculation
+    # Y1 and Y2 are luminance components from lighting model
+    Y1 = compute_luminance(C1_yuv, n, v, l)
+    Y2 = compute_luminance(C2_yuv, n, v, l)
+    Y = min(Y1, Y2)
+
+    # Step 3: Color Interpolation
+    # Interpolate U and V components
+    U = (1 - alpha) * C1_yuv[1] + alpha * C2_yuv[1]
+    V = (1 - alpha) * C1_yuv[2] + alpha * C2_yuv[2]
+
+    # Step 4: Specular Highlights (Optional)
+    # Add specular to Y channel
+    specular = compute_specular(n, v, l)
+    Y += specular
+
+    # Step 5: Volumetric Glow
+    # Fetch glow intensity and apply mapping
+    glow_intensity = glow_texture.sample(p)
+    glow_contribution = glow_func(glow_intensity)
+    
+    # Add glow to luminance
+    Y += glow_contribution
+
+    # Return final YUV color
+    return [Y, U, V]
+```
+
+**Parameters:**
+*   $\alpha$: Interpolation factor. Typical values depend on the technique's output (e.g., density). Not given in the sources.
+*   Glow Mapping Function: Specific implementation details not given in the sources.
+
+**Edge Cases:**
+*   Precision: YUV conversion and interpolation may introduce precision errors if not handled carefully [S2, unofficial].
+*   Boundaries: Ensure glow texture sampling is within bounds [S1, unofficial].
+
+## Subtopics
+
+### RGB to YUV Conversion
+Converts RGB images to YUV color space and back using JPEG standard conversion matrices [S2, unofficial].
+*   **Definition:** Linear transformation using fixed 3x3 matrices [S2, unofficial].
+*   **Parameters:**
+    *   `RGB_TO_YUV`: Matrix `[[0.299, 0.587, 0.114], [-0.168736, -0.331264, 0.5], [0.5, -0.418688, -0.081312]]` [S2, unofficial].
+    *   `YUV_TO_RGB`: Matrix `[[1.0, 0.0, 1.402], [1.0, -0.34414, -0.71414], [1.0, 1.772, 0.0]]` [S2, unofficial].
+    *   `YUV_OFFSET`: Array `[0, 128.0, 128.0]` reshaped to `(1,1,-1)`, added to YUV output to handle unsigned integer representation [S2, unofficial].
+*   **When to use:** When integrating YUV shading with existing RGB pipelines or when JPEG-compatibility is required [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Similar to RGB shading, with additional overhead for YUV conversion and glow texture fetch [S1, unofficial].
+*   **Memory Complexity:** Requires storage for YUV color vectors and glow texture [S1, unofficial].
+*   **Strengths:** Decouples luminance and chrominance, allowing for more intuitive control over brightness and color [S1, unofficial]. Can capture indirect illumination independently of the transfer function [S1, unofficial].
+*   **Limitations:** Requires conversion steps if input/output is RGB [S2, unofficial]. Glow implementation adds texture fetch overhead [S1, unofficial].
+*   **When to use:** When independent control of brightness and color is desired, or when integrating with systems that benefit from YUV processing [S1, unofficial].
+*   **When not to use:** When performance is critical and YUV conversion overhead is unacceptable, or when RGB-based lighting models are sufficient [S1, unofficial].
+
+## Background
+Originated in Timo Ropinski's work on advanced illumination techniques for GPU-based volume raycasting [S1, unofficial]. The method leverages the YUV color space to simplify lighting calculations and enhance visual effects like glow [S1, unofficial]. The RGB to YUV conversion matrices are based on JPEG standards [S2, unofficial].
+
+## Sources
+[S1] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)
+[S2] weiyithu/NerfingMVS, https://github.com/weiyithu/NerfingMVS, fetched 2026-10-27 (unofficial)

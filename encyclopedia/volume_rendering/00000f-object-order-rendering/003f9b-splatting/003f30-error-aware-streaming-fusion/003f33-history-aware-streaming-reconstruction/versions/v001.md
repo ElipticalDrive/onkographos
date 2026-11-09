@@ -1,0 +1,72 @@
+# History-Aware Streaming Reconstruction
+
+Also called: Dynamic Scene Fusion
+
+## Overview
+History-Aware Streaming Reconstruction is a zero-shot extension for dynamic scenes that uses historical information to fuse primitives across time, avoiding error accumulation and redundant primitives [S1]. It generalizes static-scene-trained feed-forward 3D Gaussian Splatting models to video by merging previous and current frame information to model occluded regions and improve temporal stability [S1]. Unlike per-frame reconstruction methods prone to flickering, this method merges history to provide a consistent set of primitives [S1]. It builds on [Error-aware Streaming Fusion](9936-error-aware-streaming-fusion.md) by providing the mechanism to integrate past states into the current reconstruction pipeline.
+
+## How it works
+The method operates in a streaming fashion, maintaining a set of past keyframes and fusing their information with the current frame.
+
+**Inputs:**
+*   Current frame input views (images).
+*   Previous keyframe Gaussian primitives (position, covariance, opacity, color, features).
+*   Camera poses for current and keyframe views.
+
+**Outputs:**
+*   Refined Gaussian primitives for the current frame.
+
+**Data Structures:**
+*   **Splat-Voxel Representation:** A hybrid structure where splat features are deposited onto a coarse-to-fine voxel grid [S1].
+*   **Keyframe Buffer:** Maintains primitives from a set of past keyframes. In practice, two keyframes are used, placed 5 frames apart, each lasting for 10 frames [S1].
+
+**Steps:**
+
+1.  **Scene Flow Estimation and Deformation:**
+    Compute triangulated scene flow from input views to estimate motion between the current frame and past keyframes [S1].
+    *   **Triangulation:** Solve for the closest point to $N$ camera rays originating from 2D projections $p_i^t$ [S1]. This depends on depth-based visibility, determined by comparing the projected depth of a splat with the depth map obtained by rendering all splats to a given view using alpha blending [S1]. If the projected depth is smaller, the splat is unoccluded [S1].
+    *   **Deformation:** Use an Embedded Deformation Graph (EDG) based on optical flow (e.g., RAFT [S1]) to identify regions of significant movement. Select keypoints and compute deformations. Let $\delta_p$ be the deformation displacement. If the distance to anchors is greater than $\lambda \bar{d}$ (where $\bar{d}$ is the mean distance between anchor points and $\lambda \in [0.2, 0.5]$), set $\delta_p$ to zero [S1].
+    *   Apply these deformations to the previous keyframe primitives to warp them to the current frame [S1].
+
+2.  **Warping and Filtering:**
+    Warp primitives from the past frame to the current frame using the computed scene flow [S1]. Filter out primitives with large warping errors to prevent artifacts [S1].
+
+3.  **Splat Fusion (Deposit):**
+    Deposit primitives from both the warped past frame and the current frame onto the Splat-Voxel representation [S1].
+    *   Extract input image features using a multi-view transformer, outputting pixel-aligned Gaussian splats with associated features [S1].
+    *   Deposit splat features onto the coarse-to-fine voxel grid using the decoded position [S1].
+
+4.  **Fuse-and-Refine:**
+    Process the combined voxel representation through a secondary sparse voxel transformer to output final Gaussian parameters [S1].
+    *   Let $\mathbf{G}_j$ be the initial Gaussian rendering attributes on voxels obtained through Splat Fusion [S1].
+    *   Let $\mathbf{E}_j$ be the fused splat feature [S1].
+    *   Compute the refinement offset $\Delta \mathbf{G}_j$ using a fine-level MLP:
+        $$ \Delta \mathbf{G}_j = \text{MLP}_{fine}([\mathbf{O}_j, \mathbf{E}_j]) $$
+        where $\mathbf{O}_j$ represents the voxel features [S1].
+    *   Update the Gaussian parameters:
+        $$ \mathbf{G}'_j = \mathbf{G}_j + \Delta \mathbf{G}_j \tag{12} $$
+        [S1]
+
+5.  **Output:**
+    The resulting refined primitives $\mathbf{G}'_j$ are used for rendering [S1].
+
+**Parameters:**
+*   $\lambda$: Hyperparameter controlling the motion graph's extent, typically between 0.2 and 0.5 [S1].
+*   Keyframe spacing: Two keyframes placed 5 frames apart, each lasting 10 frames [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Occlusion:** Depth-based visibility checks are required to ensure correct warping and fusion, preventing artifacts from occluded regions [S1].
+*   **Motion Extent:** Large motions beyond the deformation graph's extent ($\lambda \bar{d}$) are treated as zero displacement, which may cause artifacts if $\lambda$ is too small [S1].
+
+## Operating characteristics
+*   **Performance:** Runs at 15 fps with a 350ms delay on a single H100 GPU [S1].
+*   **Resolution:** Tested with two view inputs of resolution $320 \times 240$ [S1].
+*   **Capacity:** The model processes around 200k primitives within 15ms for the refinement step [S1].
+*   **Strengths:** Improves temporal stability, handles occlusions, and avoids redundant primitives compared to per-frame methods [S1].
+*   **Limitations:** Requires maintaining a buffer of past keyframes; performance depends on the efficiency of scene flow estimation and deformation [S1].
+
+## Background
+This method was introduced in "Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting" [S1]. It addresses the limitation of feed-forward 3D Gaussian Splatting methods, which are typically trained on static scenes and struggle with dynamic scenes due to flickering and lack of temporal coherence [S1]. By leveraging historical information, it extends these models to dynamic scenes without additional training [S1].
+
+## Sources
+[S1] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27

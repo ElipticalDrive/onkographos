@@ -32,35 +32,35 @@ The framework is represented by a full binary tree and stored in a linear array 
     *   All 12 initial tetrahedra are classified as **Case 1** [S1].
 
 3.  **Recursive Subdivision:**
-    The subdivision is a vertex-adding process where each step picks a vertex from the original volume and inserts it into the framework, dividing a tetrahedron into two. Each vertex is added only once [S1]. The process involves three specific steps (Step 1, Step 2, Step 3) that cycle based on the configuration of the tetrahedra [S1].
+    The subdivision is a vertex-adding process where each step picks a vertex from the original volume and inserts it into the framework, dividing a tetrahedron into two [S1]. Each vertex is added only once [S1]. The process involves three specific steps (Step 1, Step 2, Step 3) that cycle based on the configuration of the tetrahedra [S1].
 
     *   **Step 1 Subdivision:**
-        *   Applies to tetrahedra in **Case 1**.
+        *   Applies to tetrahedra in **Case 1** [S1].
         *   Adds the midpoint of an edge of the tetrahedron. The point added has an index equal to the average of the index values of the two endpoints [S1].
         *   The tetrahedron is bisected into two by the plane passing through the added point and its opposite edge [S1].
         *   The resulting new tetrahedra are in **Case 2** [S1].
 
     *   **Step 2 Subdivision:**
-        *   Applies to tetrahedra in **Case 2**.
+        *   Applies to tetrahedra in **Case 2** [S1].
         *   Performs a similar bisection operation [S1].
         *   The resulting new tetrahedra are in **Case 3** [S1].
 
     *   **Step 3 Subdivision:**
-        *   Applies to tetrahedra in **Case 3**.
+        *   Applies to tetrahedra in **Case 3** [S1].
         *   Performs a similar bisection operation [S1].
         *   The resulting new tetrahedra recursively return to **Case 1** [S1].
 
     *   **Execution Order:**
-        *   After Initial Subdivision, perform Step 1.
-        *   After Step 1, perform Step 2.
-        *   After Step 2, perform Step 3.
+        *   After Initial Subdivision, perform Step 1 [S1].
+        *   After Step 1, perform Step 2 [S1].
+        *   After Step 2, perform Step 3 [S1].
         *   If more vertices remain, return to Step 1 [S1].
         *   For a volume with parameter $N=n$, the total required steps are: $n$ Steps 1, $n$ Steps 2, and $n-1$ Steps 3 [S1].
 
 4.  **Subdivision Strategies:**
     The recursive subdivision can be implemented in two ways [S1]:
-    *   **Breadth Priority Subdivision (BPS):** All tetrahedra at the same level undergo the same subdivision step before moving to the next level. After each BPS step, all tetrahedra undergo the same subdivision (a tetrahedron breaks into two). After one level is finished, the process proceeds to the next step [S1].
-    *   **Depth Priority Subdivision (DPS):** A single tetrahedron descends through all steps (1, 2, 3) before other tetrahedra are subdivided [S1].
+    *   **Breadth Priority Subdivision (BPS):** All tetrahedra at the same level undergo the same subdivision step before moving to the next level [S1]. After each BPS step, all tetrahedra undergo the same subdivision (a tetrahedron breaks into two) [S1]. After one level is finished, the process proceeds to the next step [S1].
+    *   **Depth Priority Subdivision (DPS):** A single tetrahedron descends through all steps before other tetrahedra are subdivided [S1].
 
 5.  **Termination:**
     The subdivision continues until all vertices from the original volume grid are added to the framework [S1]. Regardless of the order (BPS or DPS), when subdivision stops, each original volume cell is divided into exactly **six tetrahedra** [S1].
@@ -84,36 +84,37 @@ def build_multi_tetra_framework(volume_data, N):
     dim = 2 * N + 1
     # [G] Pad volume_data to (dim, dim, dim) with zeros.
     
-    # Initial Subdivision: 12 tetrahedra, all Case 1
-    # Each tetrahedron stores its case type and vertex indices
-    tree = [{'case': 1, 'vertices': []} for _ in range(12)]
+    # Linear array to store tetrahedra. Each element: [case, v0, v1, v2, v3, children_indices]
+    # Initial subdivision generates 12 tetrahedra, all Case 1.
+    # We initialize them with placeholder vertex indices that will be mapped later.
+    tetrahedra = [{'case': 1, 'verts': [0]*4, 'children': [-1, -1]} for _ in range(12)]
     
-    # Recursive Subdivision sequence for N=n: n Steps 1, n Steps 2, n-1 Steps 3
+    # Step sequence for N=n: n Steps 1, n Steps 2, n-1 Steps 3
     step_sequence = [1] * N + [2] * N + [3] * (N - 1)
     
-    current_level = tree
     for step in step_sequence:
-        next_level = []
-        for tet in current_level:
-            if tet['case'] == step:
-                # Subdivide: add midpoint of an edge, bisect into two
-                # [Comment] Source does not specify which edge is chosen for each case.
-                # We select an edge based on case geometry.
-                v1_idx = tet['vertices'][0]
-                v2_idx = tet['vertices'][1]
-                mid_idx = (v1_idx + v2_idx) // 2
-                
-                new_case = (step % 3) + 1
-                child1 = {'case': new_case, 'vertices': []}
-                child2 = {'case': new_case, 'vertices': []}
-                tet['children'] = [child1, child2]
-                next_level.append(child1)
-                next_level.append(child2)
-            else:
-                next_level.append(tet)
-        current_level = next_level
-        
-    return tree
+        # Collect tetrahedra of the current step's case
+        current_tets = [t for t in tetrahedra if t['case'] == step]
+        for tet in current_tets:
+            # [Comment] Source does not specify which edge midpoint is chosen for each case.
+            # Implementation must select the correct edge based on the tetrahedron's geometry/case.
+            # The added vertex index is the average of the two endpoints' indices.
+            v_a, v_b = tet['verts'][0], tet['verts'][1] # Placeholder edge
+            mid_v = (v_a + v_b) // 2
+            
+            new_case = (step % 3) + 1
+            # Create two child tetrahedra
+            child1 = {'case': new_case, 'verts': [0]*4, 'children': [-1, -1]}
+            child2 = {'case': new_case, 'verts': [0]*4, 'children': [-1, -1]}
+            
+            # Link children to parent
+            idx1 = len(tetrahedra)
+            idx2 = len(tetrahedra) + 1
+            tetrahedra.append(child1)
+            tetrahedra.append(child2)
+            tet['children'] = [idx1, idx2]
+            
+    return tetrahedra
 ```
 
 **Edge Cases and Pitfalls:**

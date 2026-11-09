@@ -3,53 +3,121 @@
 Also called: HPO Stereogram, Horizontal-Parallax-Only Stereogram, Stereogram
 
 ## Overview
-A Holographic Stereogram is a type of computer-generated hologram composed of a series of discrete 2D perspective views of an object scene [S1]. It produces a view-dependent image that presents the corresponding perspective view in each horizontally displaced direction, functioning similarly to a lenticular or parallax barrier display [S1]. Unlike full-parallax methods, it restricts vertical parallax, significantly reducing computational complexity while maintaining horizontal depth cues [S1].
+A Holographic Stereogram is a type of computer-generated hologram composed of a series of discrete 2D perspective views of an object scene [S1]. It produces a view-dependent image that presents the corresponding perspective view in each horizontally displaced direction, functioning similarly to lenticular or parallax barrier displays [S1]. This method sets itself apart from full-wavefront approaches by trading vertical parallax for computational efficiency, allowing for nearly interactive rates on specialized hardware [S1].
 
 ## How it works
-**Inputs:** A 3D object scene (represented as points, voxels, or meshes) and camera parameters (lateral step size, field of view).
-**Outputs:** A 1D fringe pattern (or 2D hologram plane with vertical uniformity) suitable for display on an SLM.
+**Inputs:**
+1.  A 3D object scene or point cloud.
+2.  Camera parameters defining the lateral movement steps and Field of View (FOV) [S1, S2].
+
+**Outputs:**
+1.  A 2D holographic fringe pattern (the stereogram) suitable for display on an SLM or print medium [S1].
 
 **Data Structures:**
-1.  **View Array:** A sequence of 2D images $V_j$, where $j$ indexes the lateral camera position.
-2.  **Hologram Plane:** A 1D array (or 2D array with constant vertical rows) $H(x)$ representing the interference fringe.
+*   **View Array:** A sequence of 2D images, each representing a perspective view of the object.
+*   **Hologram Plane:** The final 2D array where views are interleaved or combined into fringes.
 
 **Steps:**
-1.  **View Generation:** Generate a sequence of perspective views by moving a virtual camera laterally in discrete steps across the scene [S1]. The number of views $N$ depends on the desired Field of View (FOV) and the viewing distance [S2].
-2.  **Fringe Combination:** Combine the generated views to generate a fringe for display [S1]. This involves mapping each view to a specific horizontal position in the hologram plane. The vertical dimension of the hologram typically corresponds to the height of a single view or is replicated [S1].
-
-**Formulas:**
-The lateral position $x_j$ of the $j$-th view in the hologram plane is determined by the camera step size $\Delta x_{cam}$ and the hologram pixel pitch $p$:
-$$ x_j = j \cdot \Delta x_{cam} \cdot \frac{p}{f} $$
-where $f$ is the focal length of the virtual camera [G]. The total width of the hologram $W_H$ is:
-$$ W_H = N \cdot \Delta x_{view} $$
-where $\Delta x_{view}$ is the horizontal width of a single view projected onto the hologram plane [G].
+1.  **View Generation:** Generate a sequence of 2D perspective views of the object scene by moving a virtual camera laterally in discrete steps [S1]. The number of views is determined by the desired FOV; larger FOVs require more views and increase computational complexity [S2].
+2.  **Fringe Combination:** Combine the generated sequence of view images to generate a single fringe pattern for display [S1]. This involves mapping each view to a specific horizontal position or sub-region within the hologram plane.
 
 **Parameters:**
-*   **Lateral Step Size:** Determines the angular resolution. Smaller steps increase quality but computation time [S1].
-*   **Number of Views ($N$):** Must be large enough to avoid sampling artifacts (jagged depth transitions) [S1].
-*   **Field of View (FOV):** Larger FOVs require more views and increased computational complexity [S2].
+*   **View Density:** The number of perspective views. A large number is required to create a high-quality image free from sampling artifacts [S1].
+*   **Field of View (FOV):** Determines the angular range of the reconstructed image. Bigger FOVs require more views [S2].
 
-**Pitfalls:**
-*   **Sampling Artifacts:** A small number of perspective views leads to low-quality images with visible sampling artifacts [S1].
-*   **Computation Speed:** The need for a large number of views limits computation speed, although specialized hardware can achieve nearly interactive rates [S1].
-*   **Vertical Parallax Absence:** The method does not support vertical parallax, which may cause distortion if the viewer moves vertically [S1].
+**Edge Cases and Pitfalls:**
+*   **Sampling Artifacts:** Insufficient views lead to visible sampling artifacts in the reconstructed image [S1].
+*   **Computational Load:** The need for a large number of views limits computation speed [S1].
+*   **Aperture Diffraction:** When extracting views from the hologram (for reconstruction or analysis), sharp rectangular aperture edges can produce diffraction artifacts. Apodization is proposed to smoothly bring aperture edges to zero, suppressing side-lobe leakage, though this may decrease resolution [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_holographic_stereogram(object_scene, camera_params):
+    """
+    Generates a Holographic Stereogram by creating discrete perspective views.
+    
+    Args:
+        object_scene: 3D representation of the object.
+        camera_params: Dictionary containing lateral_step_size, fov, and resolution.
+        
+    Returns:
+        hologram_fringe: 2D array representing the combined stereogram.
+    """
+    # 1. Determine number of views based on FOV and step size
+    # Note: Exact formula for view count depends on specific camera model and FOV definition.
+    num_views = calculate_view_count(camera_params['fov'], camera_params['lateral_step_size'])
+    
+    views = []
+    for i in range(num_views):
+        # Move camera laterally
+        camera_position = get_lateral_position(i, camera_params['lateral_step_size'])
+        
+        # Render 2D perspective view
+        view_image = render_view(object_scene, camera_position, camera_params['resolution'])
+        views.append(view_image)
+        
+    # 2. Combine views to generate fringe
+    # Implementation detail: The specific interleaving or combination method 
+    # is not fully detailed in sources, but typically involves mapping 
+    # view i to horizontal segment i in the hologram plane.
+    hologram_fringe = combine_views_into_fringe(views, camera_params['hologram_resolution'])
+    
+    return hologram_fringe
+
+def extract_views_from_stereogram(hologram_fringe, vertical_resolution, fov):
+    """
+    Extracts individual views from a generated stereogram for reconstruction/analysis.
+    
+    Args:
+        hologram_fringe: The 2D hologram array.
+        vertical_resolution: Height of the view in pixels.
+        fov: Field of view to determine view density.
+        
+    Returns:
+        extracted_views: List of 2D view images.
+    """
+    extracted_views = []
+    
+    # Move window along horizontal axis
+    # Window height matches vertical resolution of hologram
+    window_height = vertical_resolution
+    
+    # Determine number of views based on FOV
+    # Overlapping apertures can be chosen to improve rendering
+    num_views = calculate_view_count(fov, step_size=1) # Step size may vary
+    
+    for i in range(num_views):
+        # Acquire sub-hologram simulating pinhole camera view
+        sub_hologram = get_sub_hologram(hologram_fringe, i, window_height)
+        
+        # Apply apodization to suppress aperture diffraction
+        # Smoothly brings aperture edges to zero to suppress side-lobe leakage
+        apodized_sub_hologram = apply_apodization(sub_hologram)
+        
+        # Numerical reconstruction of the view
+        view = reconstruct_view(apodized_sub_hologram)
+        extracted_views.append(view)
+        
+    return extracted_views
+```
 
 ## Subtopics
 
 ### View Extraction
-View extraction is a technique used to acquire different views from a pre-computed hologram, often for light field displays. A window with the resolution of the vertical axis of the hologram moves along the horizontal axis to acquire sub-holograms that simulate a pinhole camera view [S2]. The apertures extracted can be chosen densely enough to overlap, as increasing the number of views improves final rendering quality [S2]. However, the targeted FOV is crucial; bigger FOVs require more views and increased computational complexity [S2].
+View extraction is a technique used to acquire different views from a hologram, often for reconstruction on light field displays or analysis. It involves moving a window with the resolution of the vertical axis of the hologram along the horizontal axis to acquire sub-holograms that simulate a pinhole camera view [S2]. The apertures extracted can be chosen densely enough to overlap, as increasing the number of views improves final rendering quality [S2]. However, this increases computational complexity, and the targeted FOV dictates the number of views required [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of views $N$ and the resolution of each view. The need for a large number of views to ensure high quality limits computation speed [S1].
-*   **Memory Complexity:** Proportional to the storage of all generated views and the final hologram fringe.
-*   **Performance:** Allows computation at nearly interactive rates when implemented on specialized hardware [S1].
-*   **Strengths:** Significantly faster than full CGH calculation methods; suitable for real-time applications with hardware acceleration [S1].
-*   **Limitations:** Lacks vertical parallax; requires many views for high-quality rendering, which can be computationally expensive for high-resolution displays [S1].
-*   **When to Use:** When horizontal depth cues are sufficient and computational resources are limited or real-time performance is required [S1].
-*   **When Not to Use:** When full 3D parallax (vertical and horizontal) is required [S1].
+*   **Time Complexity:** The method allows for computation at nearly interactive rates when implemented on specialized hardware [S1]. However, the need for a large number of perspective views to avoid sampling artifacts limits computation speed compared to simpler approximations [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** High computational efficiency compared to full-wavefront CGH; suitable for interactive displays on specialized hardware [S1].
+*   **Limitations:** Limited to horizontal parallax only (no vertical depth cues from perspective shift); requires many views for high quality, which can be computationally expensive [S1].
+*   **When to use:** When interactive or near-interactive 3D display is required and vertical parallax is not critical.
+*   **When not to use:** When full 3D parallax (both horizontal and vertical) is required, or when computational resources are extremely limited and high-quality full-wavefront methods are not feasible.
 
 ## Background
-The holographic stereogram approach was introduced as a method to produce 3D images with resolution finer than can be utilized by the human visual system, avoiding the need for supercomputers for simple images [S1]. It was developed as an alternative to interference-based approaches that generally employ supercomputers [S1]. The method is cited in foundational works on interactive 3D holographic displays [S1].
+The Holographic Stereogram approach was described in the context of interactive three-dimensional holographic displays [S1]. It is part of the broader family of computer-generated holography (CGH) calculation methods, specifically those that break from traditional simulation of optical holographic interference by using discrete views [S1]. The method is analogous to lenticular or parallax barrier displays but implemented via holographic fringe generation [S1].
 
 ## Sources
 [S1] Interactive three-dimensional holographic displays, https://doi.org/10.1145/271283.271312, fetched 2026-11-05

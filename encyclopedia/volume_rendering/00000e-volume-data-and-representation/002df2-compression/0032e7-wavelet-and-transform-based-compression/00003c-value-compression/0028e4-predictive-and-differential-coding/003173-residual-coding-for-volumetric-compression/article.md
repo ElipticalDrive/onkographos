@@ -3,60 +3,42 @@
 Also called: Residual Coding
 
 ## Overview
-Residual coding improves the visual quality of reconstructed volumetric images by encoding the difference between the original image and a direct, unquantized reconstruction from the volume data [S1]. Unlike standard video codecs where residuals depend on quantization, these residuals are derived from the unquantized volume, making them consistent across all bitrates [S1]. This method enhances compression performance (PSNR) but may degrade view synthesis quality, particularly at high bitrates [S1].
+Residual Coding is a technique that improves the compression performance (reconstructed image quality) of a volumetric codec by encoding the difference between the original image and the direct reconstructed image from the volume without quantization or coding [S1]. It does not contribute to view synthesis quality and may deteriorate it [S1]. Unlike standard video codecs where residuals depend on the quantized output, these residuals are derived from the unquantized volume reconstruction, making them consistent across all bitrates [S1].
 
 ## How it works
-**Inputs:** Original image data $I_{orig}$, reconstructed image data from the volume without quantization or coding $I_{rec\_vol}$, and a target bitrate budget.
-**Outputs:** Encoded volume data and encoded residual data.
+**Inputs:** Original image data $I_{orig}$, direct reconstructed image data $I_{recon}$ (generated from the volume without quantization or entropy coding).
+**Outputs:** Residual bitstream $B_{res}$, Volume bitstream $B_{vol}$.
+
 **Data Structures:**
-- $I_{orig}$: Array of voxel or pixel values representing the ground truth.
-- $I_{rec\_vol}$: Array of values reconstructed directly from the volume representation, bypassing quantization/coding steps that would introduce error.
-- Residual Array $R$: Same dimensions as $I_{orig}$, storing $R = I_{orig} - I_{rec\_vol}$.
+The residual is a 2D image (or set of images for multi-view) with the same dimensions as the original view. Each pixel value $r$ is an integer difference.
 
 **Steps:**
-1. **Calculate Residuals:** For each view, compute the residual $R$ as the difference between the original image and the direct reconstructed image from the volume without quantization or coding [S1]:
-   $$ R(x,y,z) = I_{orig}(x,y,z) - I_{rec\_vol}(x,y,z) $$
-   [S1]
-2. **Encode Residuals:** Encode the residual array $R$ alongside the volume data. In open-loop operation, the same residuals are encoded for all bitrates to preserve scalability [S1].
-3. **Decoder Selection:** At the decoder, first select the quality of the volume data. Then, decode parts of the residual bitstream until the target bitrate is obtained [S1].
-   - Example: If the acceptable quality of the object requires 0.53 bpv for the volume, and the total required size is 0.7 bpv, decode significant parts of the residuals with the remaining 0.17 bpv budget [S1].
+1.  **Generate Direct Reconstruction:** Construct the image $I_{recon}$ directly from the volumetric representation. This step bypasses quantization and entropy coding to ensure the residual reflects only the geometric/topological error of the volume representation, not the quantization error [S1].
+2.  **Calculate Residual:** For each pixel $p$, compute the residual $r_p$:
+    $$ r_p = I_{orig}(p) - I_{recon}(p) $$
+    Because $I_{recon}$ is derived from the same volume for all bitrates, the residuals $r_p$ are identical regardless of the final bitrate selected [S1].
+3.  **Entropy Encode:** Encode the residuals $r_p$ using an entropy coder (e.g., Huffman or Arithmetic coding) [S1]. The residuals are encoded alongside the volume data. In open-loop operation, the same residuals are coded for all bitrates to preserve scalability [S1].
+4.  **Bitrate Allocation Strategy:** Residuals are employed only at bitrates higher than those where view synthesis quality drops below a specific lossless threshold. Common thresholds are -0.05 dB, -0.1 dB, or -0.5 dB relative to lossless quality [S1].
+5.  **Decoding:**
+    a. Select the desired quality level for the volume (decode $B_{vol}$).
+    b. Decode parts of the residual bitstream $B_{res}$ until the target total bitrate is obtained [S1].
+    c. Reconstruct the final image:
+    $$ I_{final}(p) = I_{recon}(p) + r_p $$
 
-**Parameters:**
-- Bitrate thresholds for residual application: Residuals are employed at bitrates higher than those where view synthesis quality drops below lossless quality by specific margins: -0.05 dB, -0.1 dB, or -0.5 dB [S1].
-  - -0.5 dB: Applications where views at original camera positions are significant.
-  - -0.05 dB: Applications requiring good quality of virtual views (e.g., 3D rendering, look-around, free-view point) [S1].
-
-**Edge Cases and Pitfalls:**
-- Residuals do not greatly improve reconstructed image quality at low bitrates but significantly exacerbate view synthesis quality [S1].
-- Highest compression performance cannot be achieved by choosing the low-quality decoded volume because residuals are obtained from the original volume, not directly from reconstructed images at each particular bitrate [S1].
-- View synthesis performance can degrade up to 0.1 dB at high bitrate when residuals are added [S1].
-
-## Subtopics
-
-### Delta Encoding
-Delta encoding is a simpler form of residual coding where the residual is the difference between a sample and its immediate predecessor in a scan order. It is chosen when spatial coherence is high and simple linear prediction suffices. See [Delta Encoding](1096-delta-encoding.md).
-
-### Residual Updates in Transform Domain
-This method computes residuals in the transform domain (e.g., DCT) rather than the spatial domain. It is chosen when frequency-domain coherence is stronger than spatial coherence. See [Residual Updates in Transform Domain](5256-residual-updates-in-transform-domain.md).
-
-### Optimal Linear Volumetric Predictor with Truncated Huffman Coding
-This method uses an optimal linear predictor to estimate voxel values based on neighbors, followed by truncated Huffman coding for the residuals. It is chosen when maximum compression efficiency is required at the cost of higher computational complexity. See [Optimal Linear Volumetric Predictor with Truncated Huffman Coding](7759-optimal-linear-volumetric-predictor-with-truncated-huffman-c.md).
-
-### Lorenz Predictor with Arithmetic Coding
-This method uses the Lorenz system to predict voxel values, leveraging chaotic dynamics for prediction, followed by arithmetic coding. It is chosen for scenes with complex, non-linear structures where linear predictors fail. See [Lorenz Predictor with Arithmetic Coding](8070-lorenz-predictor-with-arithmetic-coding.md).
+**Pitfalls:**
+*   **View Synthesis Degradation:** Residuals do not greatly improve reconstructed image quality at low bitrates but significantly exacerbate the quality of view synthesis [S1]. View synthesis performance can degrade up to 0.1 dB at high bitrates when residuals are added [S1].
+*   **Suboptimal Low-Bitrate Performance:** The highest compression performance cannot be achieved by choosing a low-quality decoded volume because the residuals are obtained from the original volume, not directly from the reconstructed images at each particular bitrate [S1].
+*   **Scalability vs. Efficiency Trade-off:** While coding the same residuals for all bitrates preserves scalability, it prevents optimizing the residual for specific quantization levels, potentially leading to suboptimal PSNR at specific bitrates compared to closed-loop methods [S1].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** At 0.42 bpv with a -0.5 dB acceptable quality criterion, the method achieves the same PSNR (34 dB) as higher bitrate methods (0.68 bpv and 0.56 bpv) but with lower bitrate [S1].
-- **Scaling:** The method preserves scalability in open-loop operation, as residuals are consistent across bitrates [S1].
-- **Strengths:** Enhances compression performance (PSNR) by correcting errors at edges caused by imperfect volume construction or loss of high frequencies due to bitstream truncation [S1]. Allows flexibility in image size and quality by allocating bit budget between volume and residuals [S1].
-- **Limitations:** May deteriorate view synthesis quality, especially at high bitrates (up to 0.1 dB degradation) [S1]. Does not significantly improve quality at low bitrates [S1].
-- **When to use:** When high reconstructed image quality (PSNR) is prioritized over view synthesis quality, or when edge sharpness is critical. Suitable for applications where original camera position views are significant (-0.5 dB threshold) or where virtual view quality is paramount (-0.05 dB threshold) [S1].
-- **When not to use:** When view synthesis quality is the primary metric and bitrates are low, as residuals may exacerbate synthesis errors [S1].
+*   **Time Complexity:** Linear with respect to the number of pixels for residual calculation and encoding. The overhead is the storage of the residual bitstream.
+*   **Memory Complexity:** Requires storing the residual bitstream in addition to the volume data.
+*   **Performance:** At 0.42 bpv with a -0.5 dB acceptable quality criterion, the method achieves the same PSNR (34 dB) as higher bitrate methods (0.68 bpv and 0.56 bpv) but with lower bitrate [S1]. However, subjective quality differs: lower bitrates with residuals yield sharper edges, while higher bitrates yield smoother textures [S1].
+*   **Strengths:** Enhances reconstructed image quality (PSNR) at high bitrates; corrects errors at edges caused by imperfect volume construction or loss of high frequencies due to bitstream truncation [S1].
+*   **Limitations:** Deteriorates view synthesis quality; not suitable for applications where virtual view quality is critical (e.g., free-view point applications) unless the bitrate threshold is set very strictly (-0.05 dB) [S1].
 
 ## Background
-Originated in research on colour volumetric compression for realistic view synthesis applications [S1]. The method was investigated to improve the quality of reconstructed images in volumetric codecs, highlighting the trade-off between reconstruction quality and view synthesis performance [S1].
+Residual Coding in this context was investigated in the context of colour volumetric compression for realistic view synthesis applications [S1]. It addresses the limitation of volumetric codecs where the reconstructed texture may lack high-frequency details or contain edge artifacts due to imperfect volume construction or bitstream truncation [S1].
 
 ## Sources
 [S1] Colour volumetric compression for realistic view synthesis applications, https://doi.org/10.1007/s11042-010-0484-4, fetched 2026-10-26

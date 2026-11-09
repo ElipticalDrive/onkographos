@@ -3,53 +3,46 @@
 Also called: torch-projectors
 
 ## Overview
-Fourier-space projection operations compute 2D and 3D forward and backward projections by operating exclusively in the Fourier domain using the Real Fast Fourier Transform (RFFT) format. This method solves the problem of efficient, differentiable tomographic projection for machine learning pipelines, where standard spatial-domain implementations are too slow for practical training. It is distinguished from spatial-domain siblings like [Back-projection](2450-back-projection.md) by its use of frequency-domain phase modulation for translations and separable interpolation kernels, offering performance improvements of 1–2 orders of magnitude over earlier Fourier libraries like `torch-fourier-slice` [S1, unofficial].
+Fourier-space projection operations compute 2D and 3D forward and backward (adjoint) projection operators for tomographic reconstruction by operating exclusively in the Fourier domain. It solves the problem of efficiently computing line integrals and their gradients for differentiable volume rendering, specifically addressing the performance limitations of standard spatial-domain implementations in deep learning frameworks [S1, unofficial]. It distinguishes itself by maintaining data in the Real Fast Fourier Transform (RFFT) format throughout the pipeline, avoiding intermediate format conversions, and achieving performance improvements of 1–2 orders of magnitude over libraries like `torch-fourier-slice` [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Reconstruction Tensor:** Real-space volume data.
-    *   2D shape: $[B, N, N/2+1]$ where $N$ is even.
-    *   3D shape: $[B, D, H, W/2+1]$ where $D, H, W$ are even.
-*   **Projection Tensor:** Real-space projection data.
-    *   Shape: $[B, P, N, N/2+1]$ (2D) or $[B, P, D, H, W/2+1]$ (3D), where $P$ is the number of poses.
-*   **Rotation Matrices:**
-    *   2D shape: $[B, P, 2, 2]$.
-    *   3D shape: $[B, P, 3, 3]$.
-*   **Translation Vectors:**
-    *   Shape: $[B, P, 2]$ (2D) or $[B, P, 3]$ (3D, implied by 3D rotation context, though source specifies 2D shift shape explicitly; 3D shifts follow analogous logic).
-*   **Interpolation Parameter:** $a = -0.5$ for cubic interpolation [S1, unofficial].
+*   **Reconstruction Volume:** A tensor representing the 3D or 2D object in Fourier space.
+*   **Projection Data:** A tensor representing the 2D projections in Fourier space.
+*   **Geometry:** Rotation matrices and translation vectors defining the pose of each projection.
+*   **Interpolation Type:** Linear (bilinear/trilinear) or Cubic (Catmull-Rom).
 
-**Data Structures:**
-The library maintains data in RFFT format throughout the operation to avoid intermediate format conversions. The RFFT format stores only the non-redundant half of the spectrum for real-valued inputs, reducing memory usage by half compared to full FFT [S1, unofficial].
+**Data Structures and Layouts:**
+The library uses PyTorch's RFFT format (following FFTW conventions), where the last spatial dimension is halved plus one to store real-valued symmetry [S1, unofficial]. All spatial dimensions must be even.
 
-**Steps:**
+*   **2D Reconstruction Tensor:** Shape `[B, N, N/2+1]`, where $B$ is batch size and $N$ is the even spatial size.
+*   **3D Reconstruction Tensor:** Shape `[B, D, H, W/2 + 1]`, where $B$ is batch size, and $D, H, W$ are even spatial dimensions.
+*   **Projection Tensor:** Shape `[B, P, N, N/2+ 1]`, where $P$ is the number of poses (views).
+*   **2D Rotation Matrix:** Shape `[B, P, 2, 2]`.
+*   **3D Rotation Matrix:** Shape `[B, P, 3, 3]`.
+*   **Translation Shift Vector:** Shape `[B, P, 2]`.
 
-1.  **Preprocessing (Shift):**
-    Apply `fftshift` to the reconstruction tensor in real space to center the zero-frequency component at the 0th tensor element. This is required before the FFT [S1, unofficial].
+**Parameters:**
+*   **Catmull-Rom Parameter ($a$):** Set to $-0.5$ for cubic interpolation [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Preprocessing (Real Space Shift):**
+    Apply `fftshift` to the reconstruction volume in real space to center the data at the 0th tensor element before performing the FFT. For back-projection, inverse shifts are applied in the opposite direction to ensure the adjoint relationship [S1, unofficial].
 
 2.  **Transform to Fourier Space:**
-    Compute the RFFT of the shifted reconstruction tensor. Let $V$ be the reconstruction tensor and $\hat{V}$ be its Fourier representation [S1, unofficial].
+    Compute the FFT of the shifted real-space data to obtain the RFFT-formatted tensor.
 
-3.  **Rotation:**
-    Apply the rotation matrix $R$ to the Fourier coordinates. In Fourier space, rotation is implemented by interpolating the values at rotated coordinate locations. For a coordinate vector $\mathbf{k}$, the rotated coordinate is $\mathbf{k}' = R \mathbf{k}$ [S1, unofficial].
+3.  **Interpolation (Sampling):**
+    Sample the Fourier volume at non-integer coordinates defined by the projection geometry.
+    *   **Linear Interpolation:** Uses standard multilinear kernels. Bilinear for 2D (4-point support) and trilinear for 3D (8-point support) [S1, unofficial].
+    *   **Cubic Interpolation:** Uses separable Catmull-Rom kernels. Bicubic samples a $4 \times 4$ neighborhood; tricubic samples a $4 \times 4 \times 4$ neighborhood [S1, unofficial].
 
-4.  **Translation:**
-    Apply translation $\mathbf{t}$ via phase modulation in Fourier space. If $\hat{V}(\mathbf{k})$ is the Fourier volume, the translated volume $\hat{V}_{trans}(\mathbf{k})$ is:
-    $$ \hat{V}_{trans}(\mathbf{k}) = \hat{V}(\mathbf{k}) \cdot e^{-2\pi i \mathbf{k} \cdot \mathbf{t}} $$
-    Positive shift values move image contents along the positive axis direction [S1, unofficial].
+4.  **Phase Modulation (Translation):**
+    Apply translation shifts via phase modulation in the Fourier domain. A shift vector $\mathbf{t}$ corresponds to multiplying by $e^{-i 2\pi \mathbf{k} \cdot \mathbf{t}}$, where $\mathbf{k}$ is the frequency coordinate [S1, unofficial].
 
-5.  **Interpolation:**
-    Sample the Fourier volume at non-integer coordinates resulting from rotation and translation.
-    *   **Linear:** Use bilinear (2D) or trilinear (3D) interpolation with 4-point or 8-point support, respectively [S1, unofficial].
-    *   **Cubic:** Use separable Catmull-Rom kernels with parameter $a = -0.5$. The 1D kernel weight $w(s)$ for a distance $s$ is:
-        $$ w(s) = \begin{cases} (a+2)|s|^3 - (a+3)|s|^2 + 1 & \text{if } |s| \leq 1 \\ a|s|^3 - 5a|s|^2 + 8a|s| - 4a & \text{if } 1 < |s| \leq 2 \\ 0 & \text{if } |s| > 2 \end{cases} $$
-        For bicubic interpolation, a $4 \times 4$ neighborhood is sampled; for tricubic, a $4 \times 4 \times 4$ neighborhood. The final value is the separable product of 1D kernel evaluations along each dimension [S1, unofficial].
-
-6.  **Inverse Transform:**
-    Compute the inverse RFFT (IRFFT) of the interpolated Fourier data.
-
-7.  **Postprocessing (Shift):**
-    Apply `ifftshift` in real space to restore conventional centering of the projection data [S1, unofficial].
+5.  **Inverse Transform (if Back-projection):**
+    Apply `ifftshift` to restore conventional centering in real space, then compute the Inverse FFT (IFFT) to return to real space if the output is required in real space, or keep in RFFT format if staying in Fourier space.
 
 **Pseudocode:**
 
@@ -59,179 +52,105 @@ The library maintains data in RFFT format throughout the operation to avoid inte
 import torch
 import torch.fft
 
-def fourier_forward_projection(volume, rotations, translations, interpolation='linear'):
+def fourier_projection(volume, projections, rotations, translations, interpolation='linear'):
     """
-    volume: Tensor of shape [B, N, N/2+1] (2D) or [B, D, H, W/2+1] (3D)
-    rotations: Tensor of shape [B, P, 2, 2] (2D) or [B, P, 3, 3] (3D)
-    translations: Tensor of shape [B, P, 2] (2D) or [B, P, 3] (3D)
+    volume: torch.Tensor, shape [B, D, H, W/2+1] (3D) or [B, N, N/2+1] (2D) in RFFT format.
+    projections: torch.Tensor, shape [B, P, N, N/2+1] in RFFT format.
+    rotations: torch.Tensor, shape [B, P, 2, 2] or [B, P, 3, 3].
+    translations: torch.Tensor, shape [B, P, 2].
     """
-    # 1. Preprocessing: Shift to center
-    shifted_volume = torch.fft.fftshift(volume, dim=list(range(1, volume.dim())))
+    # 1. Preprocessing: Shift to center at 0th element in real space
+    # Note: If input is already in RFFT, we must shift in real space first.
+    # Assuming input 'volume' is in RFFT, we need to convert to real, shift, then FFT?
+    # The source states: "Reconstruction and projection data must be shifted (fftshift) 
+    # in real space... before fast Fourier transform (FFT)."
+    # This implies the input to this function should be real-space data, or we handle the shift.
+    # However, the library operates in Fourier space. Let's assume the standard workflow:
+    # Real Space -> Shift -> FFT -> Fourier Ops.
     
-    # 2. Transform to Fourier Space
-    # Note: torch.fft.rfft handles real input to RFFT output
-    # We need to handle dimensions carefully. 
-    # For 2D: volume is [B, N, N/2+1]. fftshift is on dims 1,2.
-    # rfft on dim 2 (last dim) is implicit in rfft2 if we treat it as real?
-    # Actually, torch.fft.rfft2 expects real input and returns RFFT.
-    # But we shifted in real space.
+    # If volume is passed as RFFT, we must inverse FFT to real, shift, then FFT again?
+    # Or does the library expect real-space input?
+    # "torch-projectors operates exclusively in Fourier space... tensors remain RFFT-formatted 
+    # throughout projection operations".
+    # This suggests the inputs are already in RFFT. But the shift instruction is for "before FFT".
+    # This implies the library handles the real-to-complex transition internally or expects 
+    # the user to provide real-space data which is then shifted and FFT'd.
+    # Given "inputs and outputs" usually implies the API signature, and the shapes are RFFT,
+    # let's assume the function takes RFFT data but the internal logic requires the shift 
+    # to have been applied to the real-space representation before the RFFT was taken, 
+    # OR the library provides a helper to shift RFFT data correctly.
+    # Actually, fftshift on RFFT data is non-trivial. The source says "shift ... in real space ... before FFT".
+    # This implies the standard pipeline is: Real Data -> fftshift -> FFT -> RFFT Data.
+    # If the function takes RFFT data, it assumes the shift was done prior.
     
-    # Let's assume standard torch.fft.rfft2 for 2D and rfftn for 3D
-    if volume.dim() == 3: # 2D case: [B, N, N/2+1]
-        # rfft2 on last two dims? No, the last dim is already half-complex.
-        # The source says "RFFT format". torch.fft.rfft2 returns shape [B, N, N//2+1]
-        # from input [B, N, N]. But our input is already [B, N, N/2+1]?
-        # Wait, source says: "2D reconstructions use shape [B, N, N/2+1]".
-        # This implies the input to the function is ALREADY in RFFT format?
-        # "torch-projectors operates exclusively in Fourier space... tensors remain RFFT-formatted"
-        # "Reconstruction and projection data must be shifted (fftshift) in real space... before FFT"
-        # This implies the INPUT to the library function is REAL SPACE data, 
-        # but the SHAPE described [B, N, N/2+1] is the RFFT shape.
-        # Contradiction? 
-        # "2D reconstructions use shape [B, N, N/2+1] ... Projections follow the same RFFT convention"
-        # "Reconstruction and projection data must be shifted (fftshift) in real space ... before fast Fourier transform (FFT)"
-        # This implies the user provides REAL space data of shape [B, N, N] (full) or the library handles the conversion?
-        # "torch-projectors ... provides 2D and 3D forward and backward projection operators"
-        # "2D reconstructions use shape [B, N, N/2+1]" -> This likely refers to the INTERNAL representation or the output of the FFT step.
-        # However, "Reconstruction and projection data must be shifted ... before FFT" suggests the input is real.
-        # Let's assume the input `volume` is REAL space [B, N, N] for 2D.
-        # But the source explicitly lists the shape [B, N, N/2+1] under "layout".
-        # And "torch-projectors operates exclusively in Fourier space ... tensors remain RFFT-formatted".
-        # This suggests the library expects RFFT-formatted inputs?
-        # "Reconstruction and projection data must be shifted (fftshift) in real space ... before FFT"
-        # This is a preprocessing step described in the paper.
-        # If the library expects RFFT, why shift in real space?
-        # Perhaps the library takes REAL space [B, N, N] and converts?
-        # Or perhaps the "layout" describes the internal tensor shape after the initial shift/FFT?
-        # Let's look at "Projections follow the same RFFT convention with shape [B, P, N, N/2+1]".
-        # If the input is real, it would be [B, P, N, N].
-        # The source says: "2D reconstructions use shape [B, N, N/2+1]".
-        # This is ambiguous. However, "torch-projectors ... provides ... operators".
-        # Usually, differentiable libraries take real inputs.
-        # But "operates exclusively in Fourier space" suggests the core math is in freq domain.
-        # Let's assume the input `volume` is REAL space [B, N, N] (2D) or [B, D, H, W] (3D).
-        # The "layout" section might describe the shape of the data *after* the initial FFT if the library wraps it, 
-        # OR it describes the shape of the RFFT data if the user is expected to provide RFFT data.
-        # "Reconstruction and projection data must be shifted (fftshift) in real space ... before FFT"
-        # This is a step the USER must do? Or the library does it?
-        # "torch-projectors ... provides ... operators".
-        # "Optimized for ... torch-projectors outperforms ...".
-        # If the user has to do fftshift, the library is just the interpolation/rotation.
-        # But "supporting gradient calculation for all inputs".
-        # Let's assume the library function `forward_projection` takes REAL space data.
-        
-        # Re-reading: "Reconstruction and projection data must be shifted (fftshift) in real space to center at the 0th tensor element before fast Fourier transform (FFT)."
-        # This is listed under "step". It is likely a step performed by the library internally or required by the API.
-        # Given "operates exclusively in Fourier space", it likely converts Real->RFFT internally.
-        
-        # Let's write pseudocode assuming the library handles the Real->RFFT conversion, 
-        # but we must follow the "shift" requirement.
-        
-        # If the input is [B, N, N/2+1], it is ALREADY RFFT.
-        # If it is RFFT, we cannot fftshift in real space easily without IFFT.
-        # This suggests the input is REAL space [B, N, N].
-        # The "layout" section might be describing the shape of the *result* or the *internal* tensor.
-        # Or, the library expects RFFT input?
-        # "torch-projectors operates exclusively in Fourier space ... tensors remain RFFT-formatted throughout"
-        # This strongly implies the INPUT is RFFT.
-        # But then "shift in real space before FFT" makes no sense if input is already RFFT.
-        # Unless "before FFT" means "before the FFT that was ALREADY done to get to RFFT"? No.
-        
-        # Hypothesis: The library expects REAL space input [B, N, N].
-        # The "layout" section describes the shape of the RFFT data which is used internally.
-        # Or, the library expects RFFT input, and the "shift" note is for users who want to use standard FFT libraries?
-        # "torch-projectors ... provides ... operators".
-        # Let's look at TorchRadon [S2, unofficial]. It takes real images.
-        # Let's assume the input is REAL space [B, N, N] (2D).
-        
-        # However, the source explicitly says: "2D reconstructions use shape [B, N, N/2+1]".
-        # And "Projections follow the same RFFT convention with shape [B, P, N, N/2+1]".
-        # If the input was [B, N, N], the shape would be [B, N, N].
-        # The fact that the shape is [B, N, N/2+1] suggests the input IS RFFT.
-        # If the input is RFFT, how do we handle translation?
-        # Translation in Fourier space is phase modulation.
-        # Rotation in Fourier space is interpolation.
-        # So, if input is RFFT, we skip the FFT/IFFT steps?
-        # "Reconstruction and projection data must be shifted (fftshift) in real space ... before FFT"
-        # This might be a note about how the data was PREPARED before being passed to the library?
-        # "torch-projectors ... provides ... operators".
-        # If the operator takes RFFT data, it doesn't need to do FFT.
-        # But "supporting gradient calculation for all inputs".
-        
-        # Let's assume the library function `forward_projection` takes:
-        # 1. Real space volume [B, N, N]
-        # 2. Rotations
-        # 3. Translations
-        # And returns Real space projections [B, P, N, N].
-        # But the source says "Projections follow the same RFFT convention with shape [B, P, N, N/2+1]".
-        # This implies the OUTPUT is RFFT.
-        
-        # So: Input Real [B, N, N] -> Output RFFT [B, P, N, N/2+1]?
-        # Or Input RFFT [B, N, N/2+1] -> Output RFFT [B, P, N, N/2+1]?
-        
-        # "Reconstruction and projection data must be shifted (fftshift) in real space ... before FFT"
-        # This is a preprocessing step.
-        # If the library does the FFT, it must do the shift first.
-        # If the library expects RFFT, the user must have done the shift and FFT.
-        
-        # Given "torch-projectors ... provides ... operators", it likely wraps the whole process.
-        # But "operates exclusively in Fourier space" suggests the core is freq domain.
-        
-        # Let's assume the input is REAL space [B, N, N] (2D).
-        # The "layout" section describes the shape of the RFFT data used internally.
-        
-        # Pseudocode:
-        
-        # 1. Shift real space volume
-        vol_shifted = torch.fft.fftshift(volume, dim=[1, 2])
-        
-        # 2. FFT to RFFT
-        # torch.fft.rfft2(vol_shifted) -> [B, N, N/2+1]
-        vol_rfft = torch.fft.rfft2(vol_shifted)
-        
-        # 3. Prepare output tensor [B, P, N, N/2+1]
-        # ...
-        
-        # 4. For each pose p:
-        #    a. Rotate coordinates
-        #    b. Translate (phase mod)
-        #    c. Interpolate
-        #    d. Store in output
-        
-        # 5. If output is expected to be Real, IFFT and ifftshift.
-        # But source says "Projections follow the same RFFT convention".
-        # So output is RFFT.
-        
-        pass
+    # Let's write the core Fourier-space operation assuming inputs are correctly shifted RFFT tensors.
+    
+    B, P = rotations.shape[0], rotations.shape[1]
+    
+    # 2. Generate Frequency Grid
+    # This depends on the spatial dimensions of the volume.
+    # For 3D: D, H, W. For 2D: N.
+    # We need the frequency coordinates k_x, k_y, k_z corresponding to the RFFT grid.
+    # This is a standard operation: torch.fft.fftfreq or similar, adjusted for RFFT.
+    # Not given in sources, but standard for Fourier methods. [G]
+    
+    # 3. Apply Rotation and Translation to Frequency Coordinates
+    # The projection direction is determined by the rotation matrix.
+    # The translation is applied via phase modulation.
+    
+    # 4. Interpolation
+    # Sample the volume at the projected coordinates.
+    # This involves mapping the 2D projection grid to the 3D Fourier volume.
+    # The source mentions "oversampling" is supported but doesn't detail the grid generation.
+    
+    # 5. Compute Projection
+    # Sum/Integrate along the projection path in Fourier space.
+    # This is the core "Fourier Slice Theorem" application.
+    
+    # Since the exact interpolation kernel application in RFFT is complex and not fully detailed 
+    # in the provided text beyond the kernel definition, we outline the logical steps.
+    
+    # Cubic Kernel Definition (Catmull-Rom, a = -0.5)
+    def catmull_rom(s, a=-0.5):
+        abs_s = torch.abs(s)
+        w = torch.zeros_like(abs_s)
+        # Case 1: |s| <= 1
+        mask1 = abs_s <= 1
+        w[mask1] = (a + 2) * abs_s[mask1]**3 - (a + 3) * abs_s[mask1]**2 + 1
+        # Case 2: 1 < |s| <= 2
+        mask2 = (abs_s > 1) & (abs_s <= 2)
+        w[mask2] = a * abs_s[mask2]**3 - 5 * a * abs_s[mask2]**2 + 8 * a * abs_s[mask2] - 4 * a
+        return w
 
-    # 3D case
-    elif volume.dim() == 4: # [B, D, H, W]
-        vol_shifted = torch.fft.fftshift(volume, dim=[1, 2, 3])
-        vol_rfft = torch.fft.rfftn(vol_shifted, dim=[1, 2, 3])
-        pass
+    # Linear Interpolation (Bilinear/Trilinear)
+    # Uses 4-point (2D) or 8-point (3D) support.
+    
+    # The actual implementation of sampling RFFT data at arbitrary coordinates 
+    # requires careful handling of the Hermitian symmetry.
+    
+    return projections # Placeholder for the computed projection tensor
 ```
 
 **Edge Cases and Pitfalls:**
 *   **Even Dimensions:** All spatial dimensions must be even. Odd sizes are not supported [S1, unofficial].
 *   **Square/Cubic:** 2D reconstructions must be square; 3D reconstructions must be cubic [S1, unofficial].
-*   **Batch Broadcasting:** The batch dimension $B$ can be 1 or match the reconstruction batch size. The pose dimension $P$ in rotations or shifts can be 1 for shared values across poses, but not both simultaneously for independent values [S1, unofficial].
-*   **Translation Direction:** In back-projection, shifts are applied in the opposite direction to ensure the inverse relationship with forward projection [S1, unofficial].
+*   **Shift Direction:** In back-projection, translation shifts must be applied in the opposite direction to the forward projection to maintain the adjoint relationship [S1, unofficial].
+*   **Batch Broadcasting:** The batch dimension $B$ can be 1 or match the reconstruction batch size. The pose dimension $P$ in rotations or shifts can be 1 for shared values across poses [S1, unofficial].
 
 ## Subtopics
 
-### TorchRadon
-A PyTorch-integrated library for differentiable Radon forward and backward projections. It computes the forward projection (product with matrix $A$) and backward projection (product with $A^T$) and allows backpropagation of gradients. It is used in generative tomography reconstruction models [S2, unofficial].
+### [TorchRadon](7278-torchradon.md)
+TorchRadon is a PyTorch-integrated library providing differentiable forward and backward Radon projection operators for computed tomography. It solves the problem of computing line integrals (forward projection) and their adjoints (backward projection) within a deep learning framework, enabling gradient-based optimization for tomographic reconstruction. It distinguishes itself by offering high-performance CUDA implementations of these linear operators with support for both parallel-beam and fan-beam geometries, directly supporting backpropagation through the projection steps.
 
 ## Operating characteristics
 *   **Performance:** Outperforms `torch-fourier-slice` by 1–2 orders of magnitude [S1, unofficial].
 *   **Hardware:** Optimized for CPU, Apple Silicon (MPS), and CUDA devices [S1, unofficial].
-*   **Complexity:** Linear in the number of pixels/voxels and poses, but with a smaller constant factor due to FFT efficiency and optimized interpolation [S1, unofficial].
-*   **Strengths:** High performance, differentiable, supports linear and cubic interpolation [S1, unofficial].
-*   **Limitations:** Requires even, square/cubic dimensions [S1, unofficial].
+*   **Complexity:** Not given in the sources.
+*   **Strengths:** High performance, differentiable, supports linear and cubic interpolation, works in RFFT format.
+*   **Limitations:** Requires even spatial dimensions, square/cubic volumes, and specific tensor layouts.
 
 ## Background
-The method was introduced in the paper "torch-projectors: A High-Performance Differentiable Projection Library for PyTorch" to address the slowness of PyTorch's built-in operations for transmission electron microscopy and electron tomography algorithms [S1, unofficial]. It is used in machine learning methods for end-to-end model training in tomographic reconstruction [S1, unofficial].
+The method originates from the `torch-projectors` library, introduced in a paper focusing on electron-particle analysis and electron tomography algorithms [S1, unofficial]. Machine learning methods in this domain require differentiable implementations for end-to-end model training, but PyTorch's built-in operations were too slow for practical use [S1, unofficial]. The library follows FFTW conventions for RFFT format, distinguishing itself from implementations like RELION by avoiding intermediate format changes [S1, unofficial].
 
 ## Sources
 [S1] torch-projectors: A High-Performance Differentiable Projection Library for PyTorch, https://doi.org/10.64898/2026.03.10.710885, fetched 2026-10-26 (unofficial)
-[S2] Generative Tomography Reconstruction, https://core.ac.uk/works/91148923, fetched 2026-10-31 (unofficial)

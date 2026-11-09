@@ -3,175 +3,181 @@
 Also called: Point-based Volume Rendering
 
 ## Overview
-Out-of-core point-based rendering is a method for the interactive visualization of very large volumetric datasets that exceed available main memory [S1, unofficial]. It solves the problem of real-time interaction with high-resolution data by treating voxels as discrete points rather than connected mesh elements, thereby avoiding the computational cost of topology extraction [S1, unofficial]. Unlike mesh-based methods which fail to provide interactive frame rates at full resolution for massive datasets, this approach allows rendering isovalue structures (contours) at the highest possible resolution by sorting voxels by function value and storing them in a single file [S1, unofficial].
+Out-of-Core Point-Based Rendering is an interactive visualization technique for very large volumetric datasets that bypasses memory constraints by storing voxel data on disk and retrieving only the necessary subsets for rendering [S1, unofficial]. It solves the problem of real-time interaction with high-resolution data that exceeds available RAM by assuming voxel density is sufficient to represent isovalue structures as point clouds, eliminating the need for connectivity or topology information [S1, unofficial]. Unlike mesh-based methods which fail to provide interactive frame rates at full resolution for large datasets, this approach renders contours and volume approximations directly from sorted points, allowing real-time adjustment of viewing parameters without expensive spectrum reconstruction [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** A gridded volumetric dataset (scalar field) defined on a Cartesian grid.
-*   **Output:** A single file containing sorted voxel data and a look-up table, enabling real-time rendering of specific isovalue sets.
+*   **Output:** A rendered image of point primitives representing specific isovalue structures.
 
 **Data Structures:**
-1.  **Voxel File:** A single contiguous file storing all voxel sets $\{V\}$. Each voxel set $V_{(r,g,b)}$ contains the 3D coordinates $(x,y,z)$ of all voxels sharing a specific function value (mapped to color).
-2.  **Look-up Table (LUT):** A structure stored alongside or within the file header. For each unique function value (indexed by color), it stores:
-    *   `offset`: The byte position in the file where the voxel set begins.
-    *   `length`: The number of voxels (or byte count) in that set.
-3.  **Indexing Scheme:** A mapping from RGB color values to linear indices in the LUT. For RGB data, a Morton order scheme is used. For 8-bit greyscale data, the value itself serves as the index.
+1.  **Data File:** A single file containing all voxel position data.
+2.  **Look-up Table (LUT):** An array stored alongside or within the file header. Each entry corresponds to a specific color (function value) and contains:
+    *   `offset`: The byte position in the data file where the voxel set begins.
+    *   `length`: The number of voxels (or bytes) in that set.
+3.  **Voxel Set $V(r,g,b)$:** A contiguous block of position data in the file for all voxels mapping to color $(r,g,b)$.
 
-**Steps:**
+**Numbered Steps:**
 
-1.  **Pre-processing (Data Generation):**
-    *   Iterate through the input gridded dataset.
-    *   Map each voxel's grid coordinates $(x, y, z)$ to a function value $fv$. For RGB-colored datasets, this is a mapping $fv : (x, y, z) \rightarrow (r, g, b)$ [S1, unofficial].
-    *   Group voxels by their function value. A voxel set is defined as $V_{(r,g,b)} = \{v_i \mid fv(v_i) = (r, g, b)\}$ [S1, unofficial].
-    *   Sort the voxel sets. The sorting order determines the linear index $k$ for each color.
-    *   Write the voxel coordinates for each set $V_k$ to the output file.
-    *   Record the `offset` (start position) and `length` (count of voxels) for each set $k$ in the Look-up Table.
+1.  **Pre-processing (Data File Generation):**
+    *   Iterate through all voxels in the input grid.
+    *   Map each voxel's grid coordinates $(x, y, z)$ to a color value $(r, g, b)$ using the function $f_v$.
+    *   Sort the voxels based on their function values (colors).
+    *   Group voxels with identical $(r, g, b)$ values into sets $V(r,g,b)$.
+    *   Calculate the Morton index for each unique $(r, g, b)$ triplet to determine the linear order of storage.
+    *   Write the position data for each set $V(r,g,b)$ to the data file in Morton order.
+    *   Construct the Look-up Table with the `offset` and `length` for each set.
 
-2.  **Indexing (Morton Order for RGB):**
-    *   To allow fast retrieval of a specific color $(r, g, b)$, convert the 3-byte RGB value into a single linear index $k$ using a Morton order scheme [S1, unofficial].
-    *   Morton order interleaves the bits of the three color components to create a linear index that preserves spatial locality in color space.
-    *   **Constraint:** The index for the background color (values not encoded or rendered) must be zero [S1, unofficial].
-    *   *Note:* For 8-bit greyscale data, skip Morton indexing; use the greyscale value directly as the index [S1, unofficial].
+2.  **Indexing (Morton Order):**
+    *   Convert the 3D RGB color space into a 1D linear index to optimize disk locality.
+    *   For an RGB value encoded by three bytes, apply the Morton mapping $M: \mathbb{N}^3 \rightarrow \mathbb{N}$ [S1, unofficial].
+    *   This places colors close in RGB space close to each other on disk.
+    *   **Constraint:** The index for the background color (points not encoded/rendered) must equal zero [S1, unofficial].
+    *   **Exception:** For 8-bit greyscale datasets, Morton indexing is skipped; greyscale values are used directly as indices [S1, unofficial].
 
-3.  **Data Retrieval (Interactive Phase):**
-    *   User selects a target function value (color) $C_{target}$.
-    *   Compute the linear index $k$ for $C_{target}$ using the indexing scheme (Morton for RGB, direct for greyscale).
-    *   Access the Look-up Table to retrieve `offset` and `length` for index $k$.
-    *   Perform a single seek/read operation to load the voxel coordinates for $V_k$ from the file into memory [S1, unofficial].
+3.  **Data Retrieval:**
+    *   User selects a target color (isovalue) $(r, g, b)$.
+    *   Compute the Morton index for $(r, g, b)$.
+    *   Access the Look-up Table at this index to retrieve `offset` and `length`.
+    *   Perform a single seek/read operation to load the corresponding voxel set $V(r,g,b)$ from disk into memory.
 
 4.  **Rendering:**
-    *   Render the loaded points as small volumetric primitives (points) [S1, unofficial].
-    *   No connectivity or topology information is used; rendering relies solely on the spatial distribution of the points [S1, unofficial].
+    *   Render the loaded points as small volumetric primitives (points).
+    *   No connectivity or topology information is used.
+    *   The result is one or multiple contours or "isoclouds" depending on the spatial distribution of the selected voxels [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def preprocess_volumetric_data(grid, output_file_path):
+def preprocess_volumetric_data(grid, color_mapping_func, output_file_path):
     """
-    grid: 3D array of function values (e.g., RGB tuples or integers).
-    output_file_path: Path to the output file.
+    grid: 3D array of scalar values.
+    color_mapping_func: function mapping scalar value to (r, g, b) tuple.
+    output_file_path: path to the output data file.
     """
-    # Step 1: Group voxels by function value
-    # Dictionary mapping index k to list of (x, y, z) coordinates
-    voxel_sets = {}
-    
-    # Determine indexing scheme based on data type
-    is_greyscale = isinstance(grid[0,0,0], int) # Simplified check
+    # Step 1: Map and Group
+    voxel_sets = {} # Key: (r,g,b), Value: list of (x,y,z)
     
     for x in range(grid.shape[0]):
         for y in range(grid.shape[1]):
             for z in range(grid.shape[2]):
-                value = grid[x, y, z]
+                scalar_val = grid[x, y, z]
+                color = color_mapping_func(scalar_val)
                 
-                # Determine index k
-                if is_greyscale:
-                    k = value
-                else:
-                    # Morton order for RGB (r, g, b)
-                    r, g, b = value
-                    k = morton_order_3d(r, g, b)
-                
-                if k not in voxel_sets:
-                    voxel_sets[k] = []
-                voxel_sets[k].append((x, y, z))
-    
-    # Step 2: Sort indices to ensure consistent ordering
-    sorted_indices = sorted(voxel_sets.keys())
-    
-    # Step 3: Write to file and build Look-up Table
-    lut = {}
+                if color not in voxel_sets:
+                    voxel_sets[color] = []
+                voxel_sets[color].append((x, y, z))
+
+    # Step 2: Sort and Index using Morton Order
+    # Define Morton encoding for 3D coordinates (r,g,b)
+    def morton_encode_3d(r, g, b):
+        # Interleave bits of r, g, b
+        # Implementation details of bit interleaving omitted for brevity, 
+        # assumed to be a standard Morton Z-order curve function.
+        pass 
+
+    indexed_sets = []
+    for color, positions in voxel_sets.items():
+        r, g, b = color
+        index = morton_encode_3d(r, g, b)
+        indexed_sets.append({
+            'color': color,
+            'morton_index': index,
+            'positions': positions
+        })
+
+    # Sort by Morton index to ensure linear storage order
+    indexed_sets.sort(key=lambda k: k['morton_index'])
+
+    # Step 3: Write to Disk and Build LUT
+    look_up_table = []
     current_offset = 0
     
     with open(output_file_path, 'wb') as f:
-        for k in sorted_indices:
-            points = voxel_sets[k]
-            num_points = len(points)
+        for entry in indexed_sets:
+            positions = entry['positions']
+            # Write positions as binary data (e.g., 3 floats per voxel)
+            for pos in positions:
+                f.write(pack_floats(pos)) # [G] Helper to pack 3 floats into bytes
             
-            # Write voxel coordinates (e.g., as 3 floats or ints)
-            # Implementation detail: packing format depends on precision requirements
-            for (x, y, z) in points:
-                write_voxel(f, x, y, z)
-            
-            # Record LUT entry
-            lut[k] = {
+            look_up_table.append({
+                'color': entry['color'],
+                'morton_index': entry['morton_index'],
                 'offset': current_offset,
-                'length': num_points
-            }
-            
-            # Update offset for next set
-            current_offset += num_points * bytes_per_voxel
-            
-    # Save LUT (e.g., to header or separate file)
-    save_lut(lut, output_file_path)
+                'length': len(positions)
+            })
+            current_offset += len(positions) * 12 # [G] Assuming 3 floats * 4 bytes
 
-def retrieve_and_render(target_color, output_file_path):
+    # Save LUT (e.g., as JSON or binary header)
+    save_lut(look_up_table, output_file_path + '.lut')
+
+def render_isovalue(data_file_path, lut_path, target_color):
     """
-    target_color: RGB tuple or integer value.
-    Returns list of (x, y, z) coordinates for the target isovalue.
+    data_file_path: path to the voxel data file.
+    lut_path: path to the look-up table.
+    target_color: (r, g, b) tuple to render.
     """
-    # Determine index k
-    if is_greyscale_data:
-        k = target_color
-    else:
-        r, g, b = target_color
-        k = morton_order_3d(r, g, b)
+    # Step 1: Load LUT
+    lut = load_lut(lut_path)
     
-    # Load LUT
-    lut = load_lut(output_file_path)
+    # Step 2: Find target in LUT
+    # Compute Morton index for target color
+    target_morton = morton_encode_3d(*target_color)
     
-    if k not in lut:
-        return []
-    
-    entry = lut[k]
-    offset = entry['offset']
-    length = entry['length']
-    
+    # Search LUT for matching Morton index
+    entry = None
+    for item in lut:
+        if item['morton_index'] == target_morton:
+            entry = item
+            break
+            
+    if entry is None:
+        return [] # Color not present or background
+
+    # Step 3: Retrieve Data
     # Single seek/read operation
-    with open(output_file_path, 'rb') as f:
-        f.seek(offset)
-        raw_data = f.read(length * bytes_per_voxel)
+    with open(data_file_path, 'rb') as f:
+        f.seek(entry['offset'])
+        raw_data = f.read(entry['length'] * 12) # [G] Assuming 3 floats * 4 bytes
         
-    # Parse raw data into coordinates
-    points = parse_voxels(raw_data, length)
-    return points
-
-def morton_order_3d(r, g, b):
-    """
-    Converts 3D RGB coordinates to a 1D Morton index.
-    Interleaves bits of r, g, b.
-    """
-    # Standard bit-interleaving algorithm
-    index = 0
-    for i in range(8): # Assuming 8-bit components
-        index |= ((r >> i) & 1) << (3 * i)
-        index |= ((g >> i) & 1) << (3 * i + 1)
-        index |= ((b >> i) & 1) << (3 * i + 2)
-    return index
+    # Step 4: Parse Positions
+    positions = []
+    for i in range(0, len(raw_data), 12):
+        x, y, z = unpack_floats(raw_data[i:i+12])
+        positions.append((x, y, z))
+        
+    return positions
 ```
 
-**Parameters and Constraints:**
-*   **Background Color Index:** Must be 0 [S1, unofficial].
-*   **Limiting Factors:**
-    1.  Number of points renderable at a sufficient frame rate [S1, unofficial].
-    2.  Number of bits used to store position data (precision vs. file size) [S1, unofficial].
-    3.  Maximum file size supported by the operating system [S1, unofficial].
+**Parameters:**
+*   **Volumetric Dimension Limit:** Determined by:
+    1.  The number of points renderable at a sufficient frame rate.
+    2.  The number of bits used to store position data.
+    3.  The maximum file size supported by the operating system [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Background Color:** The index for the background color must be zero. Points with this color are neither encoded nor rendered [S1, unofficial].
+*   **Greyscale Data:** For 8-bit greyscale datasets, the Morton indexing scheme is unnecessary; greyscale values serve directly as indices [S1, unofficial].
+*   **Precision:** Position data storage bit-depth limits the spatial resolution of the dataset that can be handled [S1, unofficial].
 
 ## Subtopics
 
 ### [Hierarchical Sampled Point Volume Visualization](9322-hierarchical-sampled-point-volume-visualization.md)
-Replaces voxels with hierarchically sampled points for real-time previewing and LOD control, allowing constant frame rates by estimating point counts in advance.
+Replaces voxels with hierarchically sampled points for real-time previewing. It differs by using level-of-detail control to estimate point counts in advance for constant time rendering, whereas Out-of-Core Point-Based Rendering relies on disk retrieval of full-resolution isovalue sets.
 
 ## Operating characteristics
-*   **Time Complexity:** Pre-processing is $O(N)$ where $N$ is the number of voxels, dominated by sorting/grouping. Interactive retrieval is $O(1)$ for LUT access plus $O(M)$ for reading $M$ points, where $M$ is the size of the selected isovalue set.
-*   **Memory Complexity:** Out-of-core. Main memory usage is limited to the size of the currently loaded voxel set, not the entire dataset. Disk usage is proportional to $N \times \text{bytes\_per\_voxel}$.
-*   **Performance:** Enables real-time interaction and full-resolution rendering of isovalue structures for datasets too large for main memory [S1, unofficial].
-*   **Strengths:** No connectivity/topology computation required; handles very large datasets; real-time isovalue switching.
-*   **Limitations:** Result is a set of points ("isoclouds") rather than a continuous surface; quality depends on voxel density; limited by OS file size limits and rendering throughput [S1, unofficial].
+*   **Time Complexity:** Pre-processing is $O(N)$ where $N$ is the number of voxels (sorting and grouping). Data retrieval is $O(1)$ seek + $O(K)$ read, where $K$ is the number of voxels in the selected isovalue set. Rendering is $O(K)$.
+*   **Memory Complexity:** $O(K)$ for the currently loaded voxel set. The rest of the data remains on disk.
+*   **Measured Performance:** Allows interactive frame rates for datasets too large for main memory, limited only by disk I/O speed and GPU point rendering capacity [S1, unofficial].
+*   **Strengths:** Handles datasets exceeding RAM; no connectivity/topology computation required; real-time isovalue switching.
+*   **Limitations:** Limited by OS file size limits; position precision limits spatial accuracy; requires high voxel density for effective point-based approximation [S1, unofficial].
+*   **When to Use:** Interactive exploration of very large volumetric datasets where full resolution is desired but memory is constrained.
+*   **When Not to Use:** When connectivity-based rendering (meshes) is required, or when the dataset is small enough to fit entirely in memory.
 
 ## Background
-The method was introduced by Nuber, Bruckschen, Hamann, and Joy from the Center for Image Processing and Integrated Computing (CIPIC) at the University of California, Davis [S1, unofficial]. It addresses the limitations of established techniques like isosurface extraction and volume rendering, which typically cannot support real-time interaction with very large discretized volumetric scalar fields [S1, unofficial]. The approach leverages the high density of voxels with the same function value to approximate contours using points.
+The method was introduced by Nuber, Bruckschen, Hamann, and Joy from the Center for Image Processing and Integrated Computing (CIPIC) at the University of California, Davis [S1, unofficial]. It addresses the limitations of established techniques like isosurface extraction and volume rendering, which typically cannot support real-time interaction with very large datasets [S1, unofficial]. The approach leverages out-of-core techniques to shift the limiting factor from available memory to hard-drive size [S1, unofficial].
 
 ## Sources
 [S1] Interactive Visualization of Very Large Datasets Using an Out-of-Core Point-based Approach, https://core.ac.uk/download/484268453.pdf, fetched 2026-10-27 (unofficial)

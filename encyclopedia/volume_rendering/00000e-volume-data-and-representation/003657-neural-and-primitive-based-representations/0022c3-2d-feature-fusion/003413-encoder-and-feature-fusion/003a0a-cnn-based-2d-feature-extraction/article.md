@@ -1,0 +1,103 @@
+# CNN-based 2D Feature Extraction
+
+Also called: CNN Feature Extraction, Per-pixel CNN Feature Extractor
+
+## Overview
+This method extracts robust, generalizable per-pixel features from input RGB images to serve as a compact description of the light ray emitted from the camera center to the 3D surface [S1]. It solves the problem of raw RGB values being sensitive to lighting conditions and environmental noise by learning higher-level patterns [S1]. It differs from sibling methods like [ResNet Architecture](8378-resnet-architecture.md) by explicitly stacking camera position data to each pixel to encode 3D spatial awareness, and from [Attention-based Multi-View Density Prediction](10674-attention-based-multi-view-density-prediction.md) by relying on convolutional skip connections rather than attention mechanisms for feature fusion [S1].
+
+## How it works
+**Inputs:** A set of input RGB images with known camera poses. Each image has resolution $H \times W$. The camera pose provides the 3D location (xyz) of the camera center.
+**Outputs:** A feature map of size $H \times W \times 128$ containing robust per-pixel features [S1].
+
+**Data Structures:**
+The input tensor is constructed by stacking the camera xyz location to each pixel of the input RGB image.
+*   Input Tensor Shape: $H \times W \times (3 + 3)$, where the first 3 channels are RGB values and the next 3 channels are the duplicated camera xyz coordinates [S1].
+*   Output Tensor Shape: $H \times W \times 128$ [S1].
+
+**Algorithm Steps:**
+1.  **Preprocessing:** For each input image, duplicate the camera's 3D position (xyz) and append it as additional channels to every pixel's RGB vector. This creates an input tensor of dimension $H \times W \times 6$ [S1].
+2.  **Encoding:** Pass the preprocessed tensor through a convolutional encoder. The encoder uses skip connections to preserve high-frequency local features [S1].
+3.  **Global Feature Learning (Optional):** Integrate fully connected (FC) layers in the middle of the CNN module to learn global features. This creates a mixture of hierarchical features that is more general and representative [S1].
+4.  **Decoding:** Pass the encoded features through a convolutional decoder, utilizing skip connections from the encoder to restore spatial detail [S1].
+5.  **Output:** Produce the final per-pixel feature map [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cnn_feature_extraction(input_rgb: Tensor, camera_xyz: Vector3) -> Tensor:
+    """
+    Extracts per-pixel features using a CNN with stacked camera positions.
+    
+    Args:
+        input_rgb: Tensor of shape (H, W, 3) containing RGB values.
+        camera_xyz: Vector3 containing the camera's 3D position (x, y, z).
+        
+    Returns:
+        Tensor of shape (H, W, 128) containing per-pixel features.
+    """
+    # Step 1: Stack camera position to each pixel
+    # Duplicate camera_xyz for every pixel in the image
+    # Shape: (H, W, 3)
+    camera_pos_grid = torch.stack([
+        torch.full((H, W), camera_xyz.x),
+        torch.full((H, W), camera_xyz.y),
+        torch.full((H, W), camera_xyz.z)
+    ], dim=-1)
+    
+    # Concatenate RGB and Camera Position
+    # Input Tensor Shape: (H, W, 6)
+    input_tensor = torch.cat([input_rgb, camera_pos_grid], dim=-1)
+    
+    # Step 2 & 3: Encoder-Decoder with Skip Connections and Optional FC
+    # Note: The specific architecture (layers, filters) is not detailed in sources [S1].
+    # The source mentions "encoder-decoder based convolutional neural network"
+    # with skip connections and optional FC layers in the middle.
+    # We assume a standard U-Net-like structure or similar CNN module.
+    
+    # Placeholder for the specific CNN implementation defined in the source's appendix
+    # [G] In practice, this would be a defined PyTorch/TensorFlow model class.
+    # The source states: "Details of the CNN module are presented in appendix"
+    # and "identifying an optimal CNN module is not in the scope of this paper".
+    # Since the exact layer definitions are not in the provided text, we describe the flow.
+    
+    features = cnn_module(input_tensor)
+    
+    return features
+
+# Note: The source [S1] explicitly states that stacking camera rotation and intrinsics
+# does not noticeably improve performance, so they are excluded.
+```
+
+**Parameters:**
+*   Input dimension: $H \times W \times 6$ (3 RGB + 3 Camera XYZ) [S1].
+*   Output dimension: $H \times W \times 128$ [S1].
+*   Typical values: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Camera Intrinsics/Rotations:** Stacking additional camera rotation and intrinsics to each pixel does not noticeably improve performance [S1].
+*   **Lighting Sensitivity:** Raw RGB values are sensitive to lighting conditions; this method mitigates that by learning robust patterns [S1].
+
+## Subtopics
+
+### ResUNet Image Encoder
+An asymmetric ResUNet used as an image encoder $E_I$ to extract feature maps from observed images, providing a large perceptual field to avoid ambiguity [S2].
+*   **Definition:** Uses an asymmetric ResUNet architecture [S2].
+*   **Inputs:** Original image $I_{4\times} \in \mathbb{R}^{4H \times 4W \times 3}$ [S2].
+*   **Outputs:** Feature map $F_{p'} \in \mathbb{R}^{H \times W \times n}$ and downsampled image $I \in \mathbb{R}^{H \times W \times 3}$ [S2].
+*   **When to choose:** When a large perceptual field is required to resolve ambiguity in pixel features, such as in partial-invertible neural radiance fields [S2].
+
+## Operating characteristics
+*   **Time and Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Extracts robust per-pixel features that are less sensitive to lighting and noise than raw RGB; explicitly encodes 3D spatial awareness via camera position stacking [S1].
+*   **Limitations:** The specific optimal CNN architecture is not defined in the primary source, requiring implementation choices [S1]. Stacking rotation/intrinsics yields no benefit [S1].
+*   **When to use:** When robust per-pixel feature extraction from RGB images is needed for 3D representation, particularly when reprojecting 2D features to 3D space [S1].
+*   **When not:** When computational resources are extremely limited and raw RGB is deemed sufficient (though sub-optimal) [S1].
+
+## Background
+The method originates from the paper "GRF: Learning a General Radiance Field for 3D Representation and Rendering" [S1]. It was developed to address the sub-optimality of using raw RGB values directly, which are sensitive to environmental noise and lighting [S1]. The approach leverages an encoder-decoder CNN with skip connections and optional fully connected layers to learn general patterns for each pixel [S1].
+
+## Sources
+[S1] GRF: Learning a General Radiance Field for 3D Representation and Rendering, https://doi.org/10.1109/iccv48922.2021.01490, fetched 2026-10-26
+[S2] PI-NeRF: A Partial-Invertible Neural Radiance Fields for Pose Estimation, https://doi.org/10.1145/3581783.3612590, fetched 2026-11-08

@@ -1,66 +1,93 @@
 # iNGP Texture Storage
-
 Also called: Texture Storage for Real-Time Rendering, iNGP Texture Storage for Real-Time Rendering
-
 ## Overview
-This method optimizes the rendering performance of Instant-NGP (INGP) by replacing hash-table-based feature lookups with explicit texture storage, leveraging hardware-accelerated texture interpolation and memory locality [S2]. It reduces the number of texture fetches per MLP evaluation from 24 to 8 by storing presummed multi-resolution features, enabling a 3× reduction in fetch overhead [S2].
-
+This method replaces hash-table-based feature storage with explicit 3D grid and triplane textures to leverage hardware-accelerated memory locality and bilinear interpolation [S1]. It reduces the number of texture fetches per neural network evaluation by storing presummed multi-resolution features, enabling a 3× reduction in fetch overhead compared to the original InstantNGP approach [S1].
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Multi-resolution feature grids $g(v, l)$ trained during the model fitting phase, where $v$ is the spatial coordinate and $l$ is the resolution level index.
-*   **Output:** A set of texture maps (presumed features) ready for real-time rendering, and the rendered RGB color and opacity for a given ray.
+- Input: A set of multi-resolution feature grids (3D) and triplanes (2D) optimized during training.
+- Output: Anti-aliased feature vectors for a given 3D sample point $x$ at render time.
 
 **Data Structures:**
-The method replaces the hash table lookup used in standard INGP with explicit 3D texture grids.
-*   **Texture Grids:** For each resolution level $L$, a 3D texture is stored.
-*   **Presumed Features:** Instead of storing individual level features $g(v, l)$, the method stores presummed features $g'(v, l)$ defined as the cumulative sum of features from level 0 to $l$:
-    $$ g'(v, l) = \sum_{k=0}^{l} g(v, k) $$
-    This allows the retrieval of the total feature vector for any resolution level by interpolating between two adjacent presummed levels [S2].
+- **Feature Grids/Triplanes:** Explicit 3D or 2D arrays of floating-point values. Unlike hash tables, these are stored as textures in GPU memory.
+- **Presummed Features:** For each resolution level $L$, the stored value $g'(v)$ is the sum of features from level $0$ to $L$:
+  $$g'(v) = \sum_{l=0}^{L} g(v, l)$$
+  where $g(v, l)$ is the feature at location $v$ and resolution level $l$ [S1].
 
-**Numbered Steps:**
-1.  **Training Phase:** Train the multi-resolution feature grids $g(v, l)$ using the standard INGP optimization process. The features are initialized in the range $[-10^{-4}, 10^{-4}]$ [S1].
-2.  **Presumption Calculation:** After training, compute the presummed feature grids $g'(v, l)$ for each level $l$ by summing the features from the coarsest level (0) up to level $l$ [S2].
-3.  **Texture Upload:** Upload the presummed feature grids $g'(v, l)$ to GPU texture memory. The number of levels $L$ and resolutions depend on the INGP configuration (e.g., $L=16$, $N_{min}=2$, $N_{max}=16$) [S1, S2].
-4.  **Ray Sampling:** For a given ray, determine the sample points $x$.
-5.  **Pixel Area Estimation:** Calculate the pixel area $p(x)$ at each sample point to determine the effective resolution required for anti-aliasing [S2].
-6.  **Level Selection:** Identify the two adjacent resolution levels $l_1$ and $l_2$ implied by the pixel area $p(x)$ [S2].
-7.  **Texture Fetching:** Perform texture lookups (interpolation) on the presummed feature grids $g'$ at levels $l_1$ and $l_2$ for the sample point $x$. This requires fetching features from 8 texture units (assuming 3D grids and 7 triplane levels in the specific HybridNeRF implementation cited, or generally fewer than the original 24 fetches) [S2].
-8.  **Feature Interpolation:** Interpolate between the fetched presummed features to obtain the final feature vector $y$ for the sample point [S2].
-9.  **MLP Evaluation:** Pass the feature vector $y$ (and potentially other inputs like view direction) into the density and color MLPs to compute volume density $\sigma$ and color $C$ [S1, S2].
-10. **Volume Rendering:** Composite the colors and densities along the ray to produce the final pixel color [S2].
-
-**Formulas:**
-*   **Presumed Feature Storage:**
-    $$ g'(v, l) = \sum_{k=0}^{l} g(v, k) $$
-    Where $g(v, k)$ is the feature vector at level $k$ [S2].
-*   **Feature Retrieval:** The feature vector $y$ at a sample point $x$ is obtained by interpolating between $g'(x, l_1)$ and $g'(x, l_2)$ based on the pixel area $p(x)$ [S2].
-*   **Density Computation:**
-    $$ \sigma = \text{MLP}_{\Phi_1}(y) $$
-    Where $y$ is the interpolated feature vector [S1].
+**Algorithm:**
+1. **Training Phase:** Optimize the multi-resolution feature grids and triplanes. During this phase, features at different resolution levels are summed to form the presummed features $g'$ stored in the texture memory [S1].
+2. **Render-Time Fetch:** For a sample point $x$, determine the required resolution based on the pixel area $p(x)$ [S1].
+3. **Interpolation:** Perform bilinear (or trilinear) interpolation on the presummed feature textures at the two resolution levels implied by $p(x)$ [S1]. This interpolation effectively averages the features across resolutions, providing anti-aliasing [S1].
+4. **MLP Input:** Pass the interpolated feature vector to the MLP for color/density prediction [S1].
 
 **Parameters:**
-*   **Number of Levels ($L$):** Determines the number of resolution levels. In the cited INGP configuration, $L=16$ [S1].
-*   **Coarsest Resolution ($N_{min}$):** The resolution of the coarsest grid. Typically $N_{min}=2$ [S1].
-*   **Finest Resolution ($N_{max}$):** The resolution of the finest grid. Typically $N_{max}=16$ [S1].
-*   **Texture Fetches:** The method reduces fetches to 8 per MLP evaluation, compared to 24 in the original hash-table approach (assuming 3D grids and 7 triplane levels) [S2].
+- **Resolution Levels:** The number of levels depends on the scene complexity and desired quality. In the cited example, seven triplane levels and three 3D grids were used [S1].
+- **Pixel Area Threshold:** Determines which two resolution levels to interpolate between based on $p(x)$ [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Memory Locality:** The primary benefit relies on the GPU's texture cache. If the access pattern is not coherent, the performance gain may be reduced [S2].
-*   **Anti-Aliasing:** The method assumes that interpolating between presummed levels provides a good approximation of the anti-aliased feature. Degenerate cases where pixel area changes rapidly may require careful level selection [S2].
-*   **Hash Table Replacement:** This method is specific to explicit grid representations. It cannot be directly applied to hash-based encodings without converting them to grids, which may incur significant memory overhead for large scenes [S2].
+- **Memory Locality:** While this method improves locality over hash tables, it still requires careful management of texture memory size for high-resolution grids [S1].
+- **Interpolation Artifacts:** Bilinear interpolation may introduce slight blurring compared to nearest-neighbor hash lookups, but this is mitigated by the multi-resolution presummed storage [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_feature_anti_aliased(x, pixel_area_p, feature_grids, feature_triplanes):
+    """
+    Retrieve anti-aliased features for point x using presummed textures.
+    
+    Args:
+        x: 3D point coordinates.
+        pixel_area_p: Area of the pixel in 3D space, determines resolution.
+        feature_grids: List of 3D feature grids, stored as presummed textures.
+        feature_triplanes: List of 2D triplane features, stored as presummed textures.
+        
+    Returns:
+        Interpolated feature vector.
+    """
+    # Determine the two resolution levels to interpolate between based on pixel_area_p
+    # This logic is specific to the implementation but generally involves mapping p(x) to levels
+    level_low, level_high = determine_levels_from_pixel_area(pixel_area_p)
+    
+    # Fetch presummed features from the lower resolution level
+    # For 3D grids, use trilinear interpolation; for triplanes, use bilinear
+    features_low = interpolate_texture(feature_grids, feature_triplanes, x, level_low)
+    
+    # Fetch presummed features from the higher resolution level
+    features_high = interpolate_texture(feature_grids, feature_triplanes, x, level_high)
+    
+    # Interpolate between the two levels to get the final anti-aliased feature
+    # The interpolation weight is determined by how close p(x) is to the boundaries of the levels
+    weight = calculate_interpolation_weight(pixel_area_p, level_low, level_high)
+    final_features = lerp(features_low, features_high, weight)
+    
+    return final_features
+
+def interpolate_texture(grids, triplanes, x, level):
+    """
+    Interpolate features from the specified resolution level.
+    """
+    # Implementation depends on whether x falls within a 3D grid or a triplane
+    # For 3D grids:
+    if in_3d_grid(x, level):
+        return trilinear_interpolate(grids[level], x)
+    # For triplanes:
+    else:
+        return bilinear_interpolate(triplanes[level], x)
+```
+[G] The `determine_levels_from_pixel_area` and `calculate_interpolation_weight` functions are implementation-specific details not provided in the source. The core idea is interpolating between two presummed levels based on the sample's footprint [S1].
+
+## Subtopics
+
+### [CAwa-NeRF](11288-cawa-nerf.md)
+A method for instant learning of compression-aware NeRF features that applies an entropy-aware training scheme with a rate-distortion trade-off to learn low entropy features, allowing export of zip-compressed feature grids with negligible overhead without changing the storage architecture or parameters of the base INGP method.
 
 ## Operating characteristics
-*   **Time Complexity:** The number of texture fetches is reduced by 3× (from 24 to 8) per MLP evaluation compared to the original INGP hash-table approach [S2]. This leads to faster rendering times, particularly on hardware with efficient texture interpolation units.
-*   **Memory Complexity:** Storing explicit grids instead of hash tables may increase memory usage for very large scenes or high resolutions, as the grid size is fixed by $N_{max}$ and $L$. However, for typical INGP resolutions, the memory overhead is manageable [S1, S2].
-*   **Performance:** The method is designed for real-time rendering. The reduction in fetches and improved memory locality significantly boost frame rates [S2].
-*   **Strengths:** High rendering speed, hardware-accelerated interpolation, simplified anti-aliasing via level interpolation [S2].
-*   **Limitations:** Fixed memory footprint based on grid resolution; less flexible than hash tables for highly sparse or irregular scenes [S2].
-*   **When to use:** Real-time rendering applications where performance is critical and the scene can be represented efficiently with explicit grids [S2].
-*   **When not to use:** Scenes with extremely high detail that would require prohibitively large grids, or when dynamic scene updates require frequent grid resizing [S2].
-
+- **Time Complexity:** The number of texture fetches per MLP evaluation is reduced to 8, compared to 24 (3+3×7) in the original hash-table-based InstantNGP approach, representing a 3× reduction [S1].
+- **Memory Complexity:** Uses explicit 3D grids and triplanes, which have a fixed memory footprint based on resolution, unlike hash tables which can have variable overhead [S1].
+- **Performance:** Benefits from hardware-accelerated texture interpolation and improved memory locality [S1].
+- **Strengths:** Reduced fetch overhead, better memory locality, suitability for real-time rendering [S1].
+- **Limitations:** Fixed memory usage, potential for interpolation artifacts if not carefully tuned [S1].
 ## Background
-The concept of storing features as textures for real-time rendering was introduced in the context of HybridNeRF, which combines neural rendering with explicit volumetric surfaces [S2]. While Instant-NGP (INGP) popularized multi-resolution hash encoding for fast training and rendering, it relies on hash table lookups which can be less efficient on some hardware due to memory latency and lack of hardware interpolation [S2]. The texture storage method adapts the INGP feature representation to explicit grids to leverage GPU texture units [S2].
-
+This method is part of the HybridNeRF architecture, which combines neural rendering with adaptive volumetric surfaces [S1]. It was introduced to optimize real-time rendering performance by leveraging explicit grid structures instead of hash tables [S1].
 ## Sources
-[S1] CAwa-NeRF: Instant Learning of Compression-Aware NeRF Features, https://doi.org/10.1109/sds60720.2024.00015, fetched 2026-10-26
-[S2] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26
+[S1] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26

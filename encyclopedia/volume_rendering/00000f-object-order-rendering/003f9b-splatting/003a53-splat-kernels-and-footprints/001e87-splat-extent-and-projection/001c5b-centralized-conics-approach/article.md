@@ -3,89 +3,49 @@
 Also called: Botsch et al. Splat Extent Approximation, Botsch et al.'s approximation, Zwicker et al. Centralized Conics Approach
 
 ## Overview
-The Centralized Conics Approach is an efficient approximation for computing the screen-space position and extents of a splat [S1, unofficial]. It sets itself apart from [Exact Half-Space Clipping](3395-exact-half-space-clipping.md) and [Mueller's Splatting Approach](5752-mueller-s-splatting-approach.md) by relying on a projective mapping approximation rather than exact geometric clipping or ray-based evaluation, prioritizing computational speed over strict geometric precision [S1, unofficial].
+The Centralized Conics Approach is an efficient approximation method for computing the screen-space position and extents of a splat in point-based rendering [S1, unofficial]. It solves the problem of determining the bounding region of a projected Gaussian kernel by utilizing the inverse of a 2D-to-2D projective mapping from the splat's parameter space to screen space [S1, unofficial]. It sets itself apart from its siblings by prioritizing computational efficiency over geometric exactness, whereas methods like [Exact Half-Space Clipping](3395-exact-half-space-clipping.md) or [Mueller's Splatting Approach](5752-mueller-s-splatting-approach.md) aim for robustness or exactness at higher computational cost.
 
 ## How it works
-The method computes the screen-space bounding region of a splat by approximating the projection of its parameter space onto the image plane [S1, unofficial].
+The method approximates the screen-space footprint by inverting the projective transformation that maps the splat's local parameter space to the image plane [S1, unofficial].
 
 **Inputs and Outputs:**
-*   **Input:** Splat parameters consisting of a center position and two vectors spanning the ellipse in parameter space [S1, unofficial].
-*   **Output:** Screen-space position and extents of the splat [S1, unofficial].
+*   **Input:** The splat's center position, the two vectors spanning its elliptical shape in local space, and the camera projection matrix.
+*   **Output:** The screen-space center and the approximate extents (bounding box or ellipse) of the splat.
 
 **Data Structures:**
-The method relies on a 2D-to-2D projective mapping matrix derived from the splat's geometry and the camera projection [S1, unofficial]. Not given in the sources.
+The method relies on the 2D-to-2D projective mapping matrix $M$. This matrix is derived from the 3D-to-2D projection matrix by restricting it to the plane spanned by the splat's local basis vectors [S1, unofficial].
 
 **Steps:**
-1.  Formulate the 2D-to-2D projective mapping from the splat's parameter space (center and two spanning vectors) to screen-space [S1, unofficial].
-2.  Compute the inverse of this projective mapping matrix [S1, unofficial].
-3.  Apply the inverse mapping to the boundary of the parameter space to determine the screen-space extents [S1, unofficial].
+1.  Construct the 2D-to-2D projective mapping matrix $M$ that maps coordinates from the splat's local parameter space (defined by its center and spanning vectors) to screen space [S1, unofficial].
+2.  Compute the inverse of this mapping matrix, $M^{-1}$ [S1, unofficial].
+3.  Apply $M^{-1}$ to the screen-space coordinates to determine the exact screen-space position and extents of the splat [S1, unofficial].
 
 **Formulas:**
-Let $M$ be the 2D-to-2D projective mapping matrix from parameter space to screen space. The screen-space coordinates $x_s$ are related to parameter space coordinates $x_p$ by:
-$$ x_s \approx M x_p $$
-The extents are computed using the inverse mapping:
-$$ x_p \approx M^{-1} x_s $$
-The exact formula for $M$ is not provided in the sources, but it is derived from the splat's center and spanning vectors [S1, unofficial].
+Let $M$ be the $3 \times 3$ projective mapping matrix. The screen-space position $\mathbf{p}_{screen}$ is related to the local parameter space position $\mathbf{p}_{local}$ by:
+$$ \mathbf{p}_{screen} \sim M \mathbf{p}_{local} $$
+The approach computes the extents by inverting this relationship:
+$$ \mathbf{p}_{local} \sim M^{-1} \mathbf{p}_{screen} $$
+Every symbol in $M$ and its inverse is defined by the camera projection and the splat's local geometry [S1, unofficial].
 
 **Parameters:**
-*   Splat cutoff threshold: Not given in the sources.
-*   Precision: Floating-point precision is critical due to numerical instability issues [S1, unofficial].
+Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Numerical Instability:** The method is numerically unstable when the projection of a splat approaches a line, as the condition number of the mapping increases rapidly, leading to large roundoff errors [S1, unofficial].
-*   **Underestimation:** Under certain conditions, the screen-space extents are underestimated by this approximation, which causes rendering artifacts [S1, unofficial].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_centralized_conics_extents(center, span1, span2, projection_matrix):
-    # 1. Construct the 2D-to-2D projective mapping matrix M
-    # from the splat's parameter space (center, span1, span2) to screen-space.
-    # Exact construction details are not provided in the sources.
-    M = construct_projective_mapping(center, span1, span2, projection_matrix)
-    
-    # 2. Compute the inverse of the mapping matrix.
-    M_inv = invert_matrix(M)
-    
-    # 3. Map the parameter space boundary to screen space using M_inv.
-    screen_extents = map_boundary_with_inverse(M_inv, span1, span2)
-    
-    return screen_extents
-
-def construct_projective_mapping(center, span1, span2, projection_matrix):
-    # Exact formula for the 2D-to-2D projective mapping matrix M
-    # from the splat's parameter space to screen-space is not provided in the sources.
-    return projection_matrix
-
-def invert_matrix(M):
-    # Standard matrix inversion operation
-    return [[M[0][0]*M[1][1] - M[0][1]*M[1][0], 0], [0, M[0][0]*M[1][1] - M[0][1]*M[1][0]]]
-
-def map_boundary_with_inverse(M_inv, span1, span2):
-    # Apply M_inv to the boundary defined by span1 and span2
-    return [M_inv @ span1, M_inv @ span2]
-```
+The method is numerically unstable when the projection of the splat approaches a line [S1, unofficial]. In such cases, the condition number of the mapping matrix $M$ increases rapidly, leading to large roundoff errors in the inversion process [S1, unofficial]. This instability can cause the screen-space extents to be underestimated, resulting in rendering artifacts [S1, unofficial].
 
 ## Subtopics
 
 ### [Projective Splat Rasterization with Depth Optimization](2088-projective-splat-rasterization-with-depth-optimization.md)
-A rasterization technique for point-based rendering that uses the inverse of a projective mapping matrix to transform screen coordinates back to object space for kernel evaluation, while simultaneously computing window-space depth values via linear interpolation of homogeneous coordinates. It sets itself apart from standard perspective splatting by avoiding explicit matrix inversion through the use of adjoint matrices and optimizing depth computation by embedding the window-space depth formula directly into the homogeneous interpolation weights. Choose this method when depth optimization and avoiding matrix inversion are prioritized.
+A rasterization technique that uses the inverse of a projective mapping matrix to transform screen coordinates back to object space for kernel evaluation, while simultaneously computing window-space depth values via linear interpolation of homogeneous coordinates. It sets itself apart from standard perspective splatting by avoiding explicit matrix inversion through the use of adjoint matrices and optimizing depth computation by embedding the window-space depth formula directly into the homogeneous interpolation weights.
 
 ### [Perspective Accurate Splatting via Projective Conic Mapping](3485-perspective-accurate-splatting-via-projective-conic-mapping.md)
-This method computes perspective-correct splat shapes for point-based rendering by approximating the projective mapping of Gaussian reconstruction kernels from their local tangent planes to image space using affine mappings derived from conic isocontours. Unlike previous methods that used affine approximations exact only at the kernel center, this approach ensures accuracy at the kernel cutoff boundary, preventing artifacts such as holes and incorrect elongation under extreme perspective projections. It solves the problem where previous projections integrated kernels along the z-axis rather than the oblique ray from the camera, causing particles to be too faint by $\cos(\theta)$ and insufficiently elongated radially. Choose this method when extreme perspective accuracy and boundary correctness are required.
+This method computes perspective-correct splat shapes for point-based rendering by approximating the projective mapping of Gaussian reconstruction kernels from their local tangent planes to image space using affine mappings derived from conic isocontours. Unlike previous methods that used affine approximations exact only at the kernel center, this approach ensures accuracy at the kernel cutoff boundary, preventing artifacts such as holes and incorrect elongation under extreme perspective projections. It solves the problem where previous projections integrated kernels along the z-axis rather than the oblique ray from the camera, causing particles to be too faint by $\cos(\theta)$ and insufficiently elongated radially.
 
 ## Operating characteristics
-*   **Time Complexity:** Efficient to compute compared to exact methods [S1, unofficial].
-*   **Memory Complexity:** Low, as it does not require complex data structures for exact clipping [S1, unofficial].
-*   **Performance:** Considered efficient for computing screen-space extents [S1, unofficial].
-*   **Strengths:** Computational efficiency [S1, unofficial].
-*   **Limitations:** Numerical instability near line projections; potential for underestimation leading to artifacts [S1, unofficial].
-*   **When to use:** When performance is critical and splat projections are unlikely to approach degenerate line cases [S1, unofficial].
-*   **When not to use:** When high geometric accuracy is required or when splats are projected near parallel to the view plane [S1, unofficial].
+The Centralized Conics Approach is computationally efficient, making it suitable for real-time rendering on hardware such as NVIDIA GPUs [S1, unofficial]. However, its primary limitation is numerical instability under extreme perspective projections where the splat projects to a near-line [S1, unofficial]. This instability can lead to underestimation of extents and visual artifacts [S1, unofficial]. It is best used when performance is critical and extreme perspective distortions are rare or acceptable to approximate.
 
 ## Background
-The method is attributed to Zwicker et al. and is also associated with Botsch et al. [S1, unofficial]. It was proposed as an efficient alternative to exact screen-space extent computation [S1, unofficial]. Sigg et al. later noted the limitations of this approach, particularly the reliance on the inverse of the projective mapping, and suggested alternative robust solutions [S1, unofficial].
+The method is attributed to Zwicker et al. and is also referred to as Botsch et al.'s approximation [S1, unofficial]. It was noted in the context of GPU-based raycasting of quadric surfaces by Sigg et al. as an efficient but potentially unstable solution compared to methods that avoid matrix inversion [S1, unofficial].
 
 ## Sources
 [S1] sebastianlipponer/surface_splatting, https://github.com/sebastianlipponer/surface_splatting, fetched 2026-10-28 (unofficial)

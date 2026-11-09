@@ -1,118 +1,154 @@
 # Volume Graphics
 
 ## Overview
-Volume graphics is a 3D graphics approach that represents synthetic geometric scenes as a discretized volume buffer of voxels, decoupling the representation from the rendering process [S1, unofficial][S2]. Unlike volume visualization, which focuses on sampled or computed datasets (e.g., medical scans), volume graphics is concerned primarily with modeled geometric objects that are voxelized into a regular grid [S1, unofficial][S2]. It sets itself apart from surface graphics by treating all objects as atomic voxels, making rendering viewpoint-independent and insensitive to scene complexity [S1, unofficial][S2].
+Volume graphics is a 3D graphics approach that synthesizes, models, manipulates, and renders volumetric geometric objects by discretizing them into a regular volume buffer of voxels [S1, unofficial][S2]. Unlike surface graphics, which maintains a list of geometric primitives, volume graphics decouples discretization from rendering by converting all objects into atomic voxels stored in a 3D grid [S1, unofficial]. This method is distinct from volume visualization, which focuses on sampled or computed datasets (e.g., medical scans), whereas volume graphics primarily targets modeled synthetic geometric scenes [S1, unofficial][S2]. It offers rendering performance insensitive to scene complexity, making it suitable for complex models like fractals, CAD data, and intermixed synthetic objects in sampled data [S1, unofficial][S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** One or more continuous geometric models (e.g., CAD models, fractals, terrain) and a defined 3D volume buffer (voxel grid) with a constant resolution.
-*   **Output:** A voxelized representation where each voxel stores pre-computed, view-independent attributes, ready for rendering.
+*   **Input:** One or more geometric models (surfaces, solids, or synthetic objects) and a defined 3D spatial domain (volume buffer) with resolution $(N_x, N_y, N_z)$.
+*   **Output:** A voxelized representation stored in a volume buffer, where each voxel contains pre-computed view-independent attributes, ready for viewpoint-independent rendering.
 
 **Data Structures:**
-The core data structure is the **volume buffer**, a 3D array of voxels.
-*   **Voxel:** An atomic unit representing the information about at most one object residing in that spatial location [S1, unofficial].
-*   **Attributes:** Each voxel stores pre-computed view-independent attributes, including:
-    *   Texture coordinates or texture values [S1, unofficial][S2].
-    *   Normal vectors [S1, unofficial][S2].
-    *   Anti-aliasing information [S1, unofficial][S2].
-    *   Binary occupancy or volume-sampled density values [S1, unofficial][S2].
+The core data structure is the **Volume Buffer**, a 3D array of voxels.
+*   **Layout:** A 3D grid of size $N_x \times N_y \times N_z$.
+*   **Voxel Content:** Each voxel stores:
+    *   **Identity/Type:** Indicates which object resides in the voxel (or if empty). In binary voxelization, this is a boolean flag. In volume-sampled voxelization, this may include density values.
+    *   **Attributes:** Pre-computed view-independent data, including:
+        *   Texture coordinates or texture indices.
+        *   Normal vectors (for shading).
+        *   Anti-aliasing information (e.g., coverage or density).
+    *   **Note:** Each voxel is atomic, representing information about at most one object [S1, unofficial].
 
 **Steps:**
-1.  **Voxelization (3D Scan-Conversion):** Convert the continuous geometric models into a set of voxels that "best" approximate the model [S1, unofficial][S2]. This can be done via binary voxelization or volume-sampled (alias-free, filtered) voxelization [S1, unofficial][S2].
-2.  **Attribute Computation:** Pre-compute view-independent attributes (texture, normals, anti-aliasing) for each voxel based on the underlying geometric model [S1, unofficial][S2].
-3.  **Storage:** Store each voxel and its associated attributes in the volume buffer [S1, unofficial][S2].
-4.  **Rendering:** Render the volume buffer using viewpoint-independent algorithms (e.g., ray tracing) [S1, unofficial]. The rendering process is insensitive to the number of objects or their geometric complexity because the scene is already discretized into a fixed-size buffer [S1, unofficial][S2].
+1.  **Domain Definition:** Define the 3D bounding box and resolution $(N_x, N_y, N_z)$ for the volume buffer [G].
+2.  **Voxelization (3D Scan-Conversion):** Convert each geometric model into a set of voxels that "best" approximate the model [S1, unofficial][S2].
+    *   This can be **binary voxelization**, where voxels are marked as inside or outside the object [S1, unofficial][S2].
+    *   Or **volume-sampled voxelization**, which generates alias-free density values through filtered sampling [S1, unofficial][S2].
+3.  **Attribute Computation:** For each voxel occupied by a model, pre-compute view-independent attributes such as texture, normal vectors, and anti-aliasing data [S1, unofficial][S2].
+4.  **Storage:** Store the voxelized models in the volume buffer. If multiple objects occupy the same voxel, they may be intermixed, though the atomic nature implies a primary association per voxel [S1, unofficial].
+5.  **Rendering:** Render the volume buffer using viewpoint-independent algorithms (e.g., ray tracing or volume rendering techniques) [S1, unofficial]. The rendering process is insensitive to the number of objects or scene complexity, depending only on the constant resolution of the volume buffer [S1, unofficial][S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def volume_graphics_pipeline(geometric_models, grid_resolution):
+def volume_graphics_pipeline(geometric_models, resolution):
     """
-    Converts geometric models into a voxelized volume buffer and prepares for rendering.
+    Implements the Volume Graphics method.
     
     Args:
-        geometric_models: List of continuous geometric objects (e.g., surfaces, solids).
-        grid_resolution: Tuple (X, Y, Z) defining the dimensions of the volume buffer.
+        geometric_models: List of geometric objects (surfaces, solids).
+        resolution: Tuple (Nx, Ny, Nz) defining the volume buffer dimensions.
         
     Returns:
-        volume_buffer: A 3D array of voxels with pre-computed attributes.
+        volume_buffer: 3D array of voxels with attributes.
     """
-    # Initialize empty volume buffer
-    # Each voxel will store: occupancy, texture, normal, anti-aliasing info
-    volume_buffer = initialize_volume_buffer(grid_resolution)
+    # Step 1: Initialize Volume Buffer
+    # Not given in the sources: Specific initialization of attributes (e.g., default normal, empty flag).
+    volume_buffer = initialize_volume_buffer(resolution)
     
-    # Step 1 & 2: Voxelize models and compute attributes
+    # Step 2 & 3: Voxelization and Attribute Pre-computation
     for model in geometric_models:
-        # Determine which voxels are occupied by the model
-        # and compute view-independent attributes for those voxels
-        occupied_voxels = voxelize_model(model, grid_resolution)
+        # Step 2: Convert geometric model to voxels
+        # The source states voxels "best" approximate the model.
+        # This involves 3D scan-conversion.
+        # Pitfall: Binary vs. Volume-sampled (alias-free) voxelization.
+        # We assume volume-sampled for anti-aliasing support as per S2.
+        voxels = voxelize_model(model, resolution)
         
-        for voxel in occupied_voxels:
-            # Pre-compute attributes based on the geometric model at this voxel's position
-            # This is done once, independent of the camera view
-            voxel.texture = compute_texture_attributes(model, voxel.position)
-            voxel.normal = compute_normal_vector(model, voxel.position)
-            voxel.anti_aliasing = compute_anti_aliasing_data(model, voxel.position)
-            voxel.occupancy = 1.0 # Or density value for volume-sampled
+        # Step 3: Pre-compute view-independent attributes
+        for voxel in voxels:
+            # Compute normal vector at the voxel's position relative to the model surface
+            voxel.normal = compute_normal(model, voxel.position)
             
-    # Step 3: Storage is implicit in the volume_buffer structure
-    # Step 4: Rendering is performed later using viewpoint-independent algorithms
-    # e.g., ray tracing through the volume_buffer
+            # Compute texture coordinates or indices
+            voxel.texture = compute_texture(model, voxel.position)
+            
+            # Compute anti-aliasing information (e.g., density/coverage)
+            voxel.anti_aliasing = compute_coverage(model, voxel.position)
+            
+            # Step 4: Store in volume buffer
+            # Note: Atomicity implies one primary object per voxel.
+            # If multiple objects overlap, handling is not detailed in sources [G].
+            volume_buffer[voxel.index] = voxel
+            
+    # Step 5: Rendering
+    # Rendering is viewpoint-independent and insensitive to scene complexity.
+    # The specific rendering algorithm (e.g., ray casting) is not detailed in the source text,
+    # only that it uses the volume buffer.
+    render_volume_buffer(volume_buffer)
     
     return volume_buffer
 
-def voxelize_model(model, grid_resolution):
+def voxelize_model(model, resolution):
     """
-    Converts a continuous geometric model into a set of voxels.
+    Converts a geometric model into a set of voxels.
     Can be binary or volume-sampled (alias-free).
     """
-    # Implementation depends on specific voxelization algorithm (e.g., ray casting, 
-    # constructive solid geometry operations in voxel space).
-    # Returns a list of voxel coordinates and their properties.
-    pass
+    # Not given in the sources: Exact algorithm for 3D scan-conversion.
+    # Common approaches include ray casting or distance field computation.
+    # We assume a standard voxelization routine that determines occupancy and density.
+    voxels = []
+    for x in range(resolution[0]):
+        for y in range(resolution[1]):
+            for z in range(resolution[2]):
+                position = grid_to_world(x, y, z, resolution)
+                # Determine if voxel is inside the model and compute density
+                is_inside, density = sample_model(model, position)
+                if is_inside:
+                    voxels.append(create_voxel(x, y, z, density))
+    return voxels
 
-def compute_texture_attributes(model, position):
-    # Compute texture mapping for the voxel
-    pass
+def compute_normal(model, position):
+    """
+    Computes the normal vector at a given position for a model.
+    """
+    # Not given in the sources: Specific method for normal computation.
+    # Typically derived from the gradient of the implicit function or surface mesh.
+    return gradient_of_model(model, position)
 
-def compute_normal_vector(model, position):
-    # Compute surface normal for the voxel
-    pass
+def compute_texture(model, position):
+    """
+    Computes texture information for a voxel.
+    """
+    # Not given in the sources: Specific texture mapping method.
+    return map_texture(model, position)
 
-def compute_anti_aliasing_data(model, position):
-    # Compute anti-aliasing information (e.g., coverage)
-    pass
+def compute_coverage(model, position):
+    """
+    Computes anti-aliasing information (coverage/density).
+    """
+    # Not given in the sources: Specific filtering method for alias-free voxelization.
+    return filter_model(model, position)
 ```
 
 **Parameters:**
-*   **Resolution:** The constant resolution of the volume buffer. Performance depends on this resolution, not the number of objects [S1, unofficial].
-*   **Voxelization Type:** Binary (occupancy only) or volume-sampled (density/alias-free) [S1, unofficial][S2].
+*   **Resolution:** The constant resolution of the volume buffer $(N_x, N_y, N_z)$. Performance depends on this resolution, not the number of objects [S1, unofficial].
+*   **Voxelization Type:** Binary or volume-sampled (alias-free) [S1, unofficial][S2].
 
 **Edge Cases and Pitfalls:**
 *   **Storage:** Requires substantial storage space due to the discrete nature of the representation [S1, unofficial].
-*   **Transformations and Shading:** Performed in discrete space, which is a weakness relative to surface graphics [S1, unofficial].
-*   **Scene Complexity:** While rendering is insensitive to complexity, the pre-processing voxelization phase performance is influenced by scene complexity [S1, unofficial].
+*   **Transformations/Shading:** Performed in discrete space, which is a weakness relative to surface graphics [S1, unofficial].
+*   **Complexity:** While rendering is insensitive to scene complexity, the pre-processing voxelization phase performance is influenced by scene complexity [S1, unofficial].
+*   **Atomicity:** Each voxel represents at most one object, which may limit complex intermixing without additional data structures [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering time is independent of the number of objects and depends primarily on the constant resolution of the volume buffer [S1, unofficial]. Pre-processing (voxelization) time is influenced by scene complexity [S1, unofficial].
-*   **Memory Complexity:** Proportional to the volume of the grid ($X \times Y \times Z$) and the number of attributes stored per voxel [S1, unofficial]. Requires substantial storage space [S1, unofficial].
+*   **Time Complexity:** Rendering time is independent of the number of objects and depends on the constant resolution of the volume buffer [S1, unofficial]. Pre-processing (voxelization) time depends on scene complexity [S1, unofficial].
+*   **Memory Complexity:** Proportional to the volume buffer size $N_x \times N_y \times N_z$ and the size of attributes per voxel [S1, unofficial]. Requires substantial storage space [S1, unofficial].
 *   **Strengths:**
-    *   Viewpoint-independent rendering [S1, unofficial][S2].
-    *   Insensitive to scene and object complexity [S1, unofficial][S2].
-    *   Supports Boolean and block operations [S1, unofficial][S2].
-    *   Suitable for constructive solid modeling [S1, unofficial][S2].
-    *   Can intermix synthetic geometric objects with sampled data (e.g., medical images) [S1, unofficial][S2].
-    *   Represents both interior and exterior of 3D objects [S1, unofficial].
+    *   Rendering is viewpoint-independent and insensitive to scene and object complexities [S1, unofficial][S2].
+    *   Supports Boolean and block operations, constructive solid modeling, and hierarchical representations [S1, unofficial][S2].
+    *   Suitable for mixing synthetic geometric objects with sampled data (e.g., medical imaging) [S1, unofficial][S2].
+    *   Can represent amorphous phenomena and both interior and exterior of 3D objects [S1, unofficial].
 *   **Limitations:**
-    *   Substantial storage requirements [S1, unofficial].
-    *   Transformations and shading are performed in discrete space, leading to potential quality issues compared to surface graphics [S1, unofficial].
-    *   Specialized processing required [S1, unofficial].
-*   **When to Use:** Scenes with a large number of objects, complex models (fractals, high-order surfaces), or when mixing synthetic geometric objects with sampled data [S1, unofficial][S2].
-*   **When Not to Use:** When high-quality continuous transformations and shading are critical, or when storage is a major constraint [S1, unofficial].
+    *   Requires substantial storage space [S1, unofficial].
+    *   Transformations and shading are performed in discrete space, which is a weakness relative to surface graphics [S1, unofficial].
+    *   Specialized processing is required [S1, unofficial].
+*   **When to Use:** Scenes with a large number of objects, complex models (fractals, high-order surfaces), or when mixing synthetic objects with sampled data [S1, unofficial][S2].
+*   **When Not to Use:** When high-fidelity continuous transformations and shading are required, or when storage is a critical constraint [S1, unofficial].
 
 ## Background
-Volume graphics is an emerging subfield of computer graphics concerned with the synthesis, modeling, manipulation, and rendering of volumetric geometric objects [S1, unofficial][S2]. It was introduced as a comprehensive alternative to traditional surface graphics [S1, unofficial][S2]. The approach decouples discretization from rendering, allowing for viewpoint-independent algorithms [S1, unofficial]. It is particularly attractive for objects that are hard to render using conventional graphics systems, such as curved surfaces of high order and fractals [S1, unofficial]. Applications include rendering of fractals, hyper textures, fur, gases, CAD models, and terrain models for flight simulators [S1, unofficial]. It is also used in medical imaging to visualize synthetic objects (scalpels, prosthetics) alongside sampled organ data [S1, unofficial][S2].
+Volume graphics is an emerging subfield of computer graphics concerned with the synthesis, modeling, manipulation, and rendering of volumetric geometric objects [S1, unofficial][S2]. It was developed as an alternative to traditional surface graphics, offering advantages in handling complex scenes and sampled data [S1, unofficial][S2]. The approach is closely related to raster graphics principles, decoupling image generation from screen refresh [S1, unofficial]. It is particularly relevant in applications involving medical imaging, where synthetic objects (scalpels, prosthetics) need to be visualized alongside sampled organ data [S1, unofficial][S2]. Key references include Kaufman's work on volume visualization and graphics [S1, unofficial][S2].
 
 ## Sources
 [S1] Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)
