@@ -1,21 +1,19 @@
 # Camera Ray Generation
-
-Also called: Primary Ray Generation, View-space ray reconstruction, Ray Origin and Direction Setup, Ray Origin/Direction Computation
+Also called: unproject, Camera Projection & Unprojection
 
 ## Overview
-Camera Ray Generation computes the 3D origin $\mathbf{o}$ and direction $\mathbf{d}$ for primary rays corresponding to each pixel (or sample) in an image, mapping 2D raster coordinates to 3D world-space rays for volume rendering or ray tracing [S2, S5, S7, unofficial]. It differs from [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) by supporting perspective projection (converging rays) and from [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md) by explicitly constructing and utilizing camera parameters (intrinsic/extrinsic or basis vectors) rather than assuming a canonical pinhole model [S2172, S5058]. It serves as the foundational step for [Ray Casting](6080-ray-casting.md) and [Ray Marching](3487-compute-shader-ray-marching-setup.md).
+Camera Ray Generation computes the 3D origin $\mathbf{o}$ and direction $\mathbf{d}$ for primary rays corresponding to each pixel in an image, mapping 2D raster coordinates to 3D world-space rays for volume rendering or ray tracing [S6, S7, unofficial]. It differs from [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) by supporting perspective projection (converging rays) and from [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md) by explicitly constructing and utilizing camera parameters (intrinsic/extrinsic or basis vectors) rather than assuming a canonical pinhole model [G]. It serves as the foundational step for [Ray Casting](6080-ray-casting.md) and [Ray Marching](3487-compute-shader-ray-marching-setup.md) [G].
 
 ## How it works
 **Inputs:**
-*   Pixel coordinates $(i, j)$ and optional sub-pixel offsets $(sx, sy)$ [S5, unofficial].
-*   Viewport dimensions: width $W$, height $H$ [S5, S7, unofficial].
+*   Pixel coordinates $(i, j)$ and optional sub-pixel offsets $(sx, sy)$ [S7, unofficial].
+*   Viewport dimensions: width $W$, height $H$ [S7, unofficial].
 *   Camera parameters:
-    *   Eye position $\mathbf{e}$ (view or world space) [S2, S5, unofficial].
-    *   Basis vectors: right $\mathbf{u}$, up $\mathbf{v}$, forward $\mathbf{w}$ (or view direction) [S5, S6, unofficial].
-    *   View plane distance $dist$ (focal length equivalent) [S5, unofficial].
-    *   Viewport bounds: left $l$, right $r$, top $t$, bottom $b$ [S5, unofficial].
-    *   Alternatively, camera matrices: View $V$, Projection $P$, and their inverses [S2, S6, S7, unofficial].
-    *   Field of View (FOV) and aspect ratio [S6, S7, unofficial].
+    *   Eye position $\mathbf{e}$ (view or world space) [S7, unofficial].
+    *   Basis vectors: right $\mathbf{u}$, up $\mathbf{v}$, forward $\mathbf{w}$ [S7, unofficial].
+    *   View plane distance $dist$ (focal length equivalent) [S7, unofficial].
+    *   Viewport bounds: left $l$, right $r$, top $t$, bottom $b$ [S7, unofficial].
+    *   Alternatively, camera matrices: inverse view $V^{-1}$, inverse view-projection $VP^{-1}$, field of view $\text{FOV}$, aspect ratio [S8, S10, unofficial].
 
 **Outputs:**
 *   A `Ray` structure containing:
@@ -24,133 +22,89 @@ Camera Ray Generation computes the 3D origin $\mathbf{o}$ and direction $\mathbf
 
 **Data Structures:**
 *   `Ray`: Struct with fields `origin` (vec3) and `direction` (vec3, normalized) [S7, unofficial].
-*   `Camera`: Class or object holding matrices ($V, P$) and position [S7, unofficial].
 
 **Steps:**
+1.  **Compute View-Plane Coordinates or NDC:**
+    *   *Basis/Viewport method:* Calculate coordinates on the view plane using viewport bounds and pixel indices [S7, unofficial].
+        $$ vp_x = l + (r - l) \cdot \frac{i + sx}{W} $$
+        $$ vp_y = t - (t - b) \cdot \frac{j + sy}{H} $$
+    *   *Matrix/Clip-space method:* Convert pixel coordinates to normalized device coordinates $[-1, 1]$ and apply aspect correction [S8, unofficial].
+        $$ uv_x = \left(\frac{2i}{W} - 1\right) \cdot \text{aspect} $$
+        $$ uv_y = 1 - \frac{2j}{H} $$
+        (Y-axis convention varies; Vulkan flips Y [S8, unofficial]).
 
-1.  **Compute Normalized Device Coordinates (NDC) or View-Plane Coordinates:**
-    *   *Method A (Matrix-based):* Convert pixel coordinates to clip space, then unproject using inverse view-projection matrices to get a point on the near plane in world space [S7, unofficial].
-        $$ \text{clipPos} = \begin{bmatrix} \frac{2i}{W} - 1 \\ 1 - \frac{2j}{H} \\ -1 \\ 1 \end{bmatrix} $$
-        (Note: Y-axis convention varies; Vulkan flips Y [S6, unofficial]).
-    *   *Method B (Basis/FOV-based):* Compute aspect-corrected UV coordinates in $[-1, 1]$ [S3, S7, unofficial].
-        $$ uv_x = \left(\frac{2(i + sx)}{W} - 1\right) \cdot \frac{W}{H} $$
-        $$ uv_y = 1 - \left(\frac{2(j + sy)}{H} - 1\right) $$
-        (Y-flip depends on coordinate system [S1, S6, unofficial]).
-
-2.  **Compute Ray Direction in View Space:**
-    *   Using FOV and tangent:
+2.  **Compute Ray Direction in View/Local Space:**
+    *   Using Basis Vectors:
+        $$ \mathbf{s} = vp_x \cdot \mathbf{u} + vp_y \cdot \mathbf{v} - dist \cdot \mathbf{w} $$
+        $$ \mathbf{d}_{\text{local}} = \text{normalize}(\mathbf{s}) $$
+        [S7, unofficial].
+    *   Using FOV/Tangent:
         $$ \text{tan\_fov}_x = \tan(\frac{\text{FOV}}{2}) \cdot \text{aspect} $$
         $$ \text{tan\_fov}_y = \tan(\frac{\text{FOV}}{2}) $$
         $$ \mathbf{d}_{\text{view}} = \text{normalize}(uv_x \cdot \text{tan\_fov}_x, -uv_y \cdot \text{tan\_fov}_y, -1.0) $$
-        (Negate Y for clip-space conventions [S6, unofficial]).
-    *   Using Basis Vectors:
-        $$ \mathbf{d}_{\text{view}} = \text{normalize}(uv_x \mathbf{u} + uv_y \mathbf{v} - dist \cdot \mathbf{w}) $$
-        [S5, unofficial].
-    *   Using Forward/Right/Up vectors directly:
-        $$ \mathbf{d}_{\text{view}} = \text{normalize}(\mathbf{fwd} + \text{FOV\_SCALE} \cdot (uv_x \mathbf{right} + uv_y \mathbf{up})) $$
-        [S3, unofficial].
+        [S8, unofficial].
 
 3.  **Transform Direction to World Space:**
     *   Using Inverse View Matrix:
         $$ \mathbf{d}_{\text{world}} = \text{normalize}(\mathbf{R}_{\text{inv\_view}} \cdot \mathbf{d}_{\text{view}}) $$
-        where $\mathbf{R}_{\text{inv\_view}}$ is the upper-left $3 \times 3$ rotation part of the inverse view matrix [S6, unofficial].
-    *   Using Basis Vectors (if $\mathbf{u}, \mathbf{v}, \mathbf{w}$ are already in world space):
-        $$ \mathbf{d}_{\text{world}} = \mathbf{d}_{\text{view}} \text{ expressed in world basis} $$
-        [S5, unofficial].
+        where $\mathbf{R}_{\text{inv\_view}}$ is the upper-left $3 \times 3$ rotation part of the inverse view matrix [S8, unofficial].
+    *   If basis vectors $\mathbf{u}, \mathbf{v}, \mathbf{w}$ are already defined in world space, $\mathbf{d}_{\text{world}} = \mathbf{d}_{\text{local}}$ [S7, unofficial].
 
 4.  **Set Ray Origin:**
-    *   The origin is typically the camera eye position $\mathbf{e}$ in world space [S5, S7, unofficial].
+    *   The origin is the camera eye position $\mathbf{e}$ in world space [S7, unofficial].
     *   If the input position is in view space, transform it:
-        $$ \mathbf{o}_{\text{world}} = V^{-1} \cdot [\mathbf{e}_{\text{view}}, 1]^T $$
-        [S2, unofficial].
+        $$ \mathbf{o}_{\text{world}} = \text{extract\_xyz}(V^{-1} \cdot [\mathbf{e}_{\text{view}}, 1]^T) $$
+        [S3, unofficial].
 
 5.  **Construct Ray:**
-    *   Return `Ray(origin = \mathbf{o}_{\text{world}}, direction = \mathbf{d}_{\text{world}})` [S5, S7, unofficial].
+    *   Return `Ray(origin = \mathbf{o}_{\text{world}}, direction = \mathbf{d}_{\text{world}})` [S7, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_camera_ray(pixel_i, pixel_j, viewport_width, viewport_height, 
-                        camera_eye_world, camera_right_world, camera_up_world, 
-                        camera_forward_world, focal_length, aspect_ratio):
-    """
-    Generates a world-space ray for a given pixel using basis vectors.
-    
-    Args:
-        pixel_i, pixel_j: Integer pixel coordinates.
-        viewport_width, viewport_height: Dimensions of the viewport.
-        camera_eye_world: vec3, camera position in world space.
-        camera_right_world: vec3, right basis vector (normalized).
-        camera_up_world: vec3, up basis vector (normalized).
-        camera_forward_world: vec3, forward/view direction (normalized).
-        focal_length: float, distance to view plane.
-        aspect_ratio: float, width / height.
-        
-    Returns:
-        Ray: Struct with origin and normalized direction.
-    """
-    # 1. Compute normalized coordinates in [-1, 1]
-    # X is corrected for aspect ratio
-    ndc_x = (2.0 * (pixel_i + 0.5) / viewport_width - 1.0) * aspect_ratio
-    ndc_y = 1.0 - (2.0 * (pixel_j + 0.5) / viewport_height - 1.0)
-    
-    # 2. Compute view-space direction components
-    # Using the basis vectors directly scaled by focal length
-    # Direction vector in the camera's local frame:
-    # d_view = ndc_x * right + ndc_y * up - focal_length * forward
-    # Note: Forward points INTO the scene. In a right-handed system where 
-    # camera looks down -Z, forward is (0,0,-1). Here we assume explicit basis.
-    
-    # Scale basis vectors by NDC and focal length
-    # The view plane is at distance 'focal_length' along the negative forward axis
-    # relative to the eye, or we construct the direction vector directly.
-    
-    # Method: Construct direction vector from basis
-    # d = normalize( ndc_x * right + ndc_y * up - focal_length * forward )
-    # This assumes 'forward' is the vector pointing from eye to scene center.
-    
-    dir_x = ndc_x * camera_right_world.x + ndc_y * camera_up_world.x - focal_length * camera_forward_world.x
-    dir_y = ndc_x * camera_right_world.y + ndc_y * camera_up_world.y - focal_length * camera_forward_world.y
-    dir_z = ndc_x * camera_right_world.z + ndc_y * camera_up_world.z - focal_length * camera_forward_world.z
-    
-    direction = normalize(vec3(dir_x, dir_y, dir_z))
-    
-    # 3. Set origin
-    origin = camera_eye_world
-    
-    return Ray(origin=origin, direction=direction)
+import math
 
-def generate_camera_ray_matrix(pixel_i, pixel_j, viewport_width, viewport_height,
-                               inv_view_proj, inv_view, camera_eye_world):
-    """
-    Generates a ray using inverse matrices (unprojection).
-    """
-    # 1. Convert to NDC [-1, 1]
-    ndc_x = (2.0 * pixel_i / viewport_width) - 1.0
-    ndc_y = 1.0 - (2.0 * pixel_j / viewport_height) # Flip Y for clip space
-    
-    # 2. Create clip space point (z=-1 for near plane, w=1)
-    clip_pos = vec4(ndc_x, ndc_y, -1.0, 1.0)
-    
-    # 3. Unproject to World Space
-    # world_pos = inv_view_proj * clip_pos
-    # This gives a point on the near plane in world space.
-    # However, standard unprojection often yields a point. 
-    # To get direction, we can subtract eye from this point, or use the ray origin as eye.
-    
-    # More robust: Unproject to get a point on the near plane
-    # Note: inv_view_proj transforms clip to world.
-    world_near_point = inv_view_proj * clip_pos
-    world_near_point /= world_near_point.w # Perspective divide
-    
-    # 4. Direction is from eye to this point
-    direction = normalize(world_near_point.xyz - camera_eye_world)
-    
-    # 5. Origin is eye
-    origin = camera_eye_world
-    
-    return Ray(origin=origin, direction=direction)
+class Ray:
+    def __init__(self, origin, direction):
+        self.origin = origin
+        self.direction = direction
+
+def vec3(x, y, z):
+    return (x, y, z)
+
+def normalize(v):
+    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    if length == 0.0:
+        return vec3(0.0, 0.0, 0.0)
+    return vec3(v[0]/length, v[1]/length, v[2]/length)
+
+def mat3_mul_vec(M, v):
+    return vec3(
+        M[0][0]*v[0] + M[0][1]*v[1] + M[0][2]*v[2],
+        M[1][0]*v[0] + M[1][1]*v[1] + M[1][2]*v[2],
+        M[2][0]*v[0] + M[2][1]*v[1] + M[2][2]*v[2]
+    )
+
+def generate_camera_ray_basis(i, j, sx, sy, W, H, l, r, t, b, eye, u, v, w, dist):
+    """Generates a ray using viewport bounds and basis vectors [S7, unofficial]."""
+    vp_x = l + (r - l) * (i + sx) / W
+    vp_y = t - (t - b) * (j + sy) / H
+    dir_x = vp_x * u[0] + vp_y * v[0] - dist * w[0]
+    dir_y = vp_x * u[1] + vp_y * v[1] - dist * w[1]
+    dir_z = vp_x * u[2] + vp_y * v[2] - dist * w[2]
+    direction = normalize(vec3(dir_x, dir_y, dir_z))
+    return Ray(origin=eye, direction=direction)
+
+def generate_camera_ray_matrix(i, j, W, H, inv_view, tan_fov_x, tan_fov_y, camera_pos):
+    """Generates a ray using inverse view matrix and FOV [S8, unofficial]."""
+    ndc_x = (2.0 * i / W) - 1.0
+    ndc_y = 1.0 - (2.0 * j / H)
+    view_x = ndc_x * tan_fov_x
+    view_y = -ndc_y * tan_fov_y
+    view_dir = normalize(vec3(view_x, view_y, -1.0))
+    world_dir = mat3_mul_vec(inv_view, view_dir)
+    return Ray(origin=camera_pos, direction=world_dir)
 ```
 
 **Parameters:**
@@ -158,63 +112,73 @@ def generate_camera_ray_matrix(pixel_i, pixel_j, viewport_width, viewport_height
 *   `Aspect Ratio`: $W/H$ [S3, S7, unofficial].
 *   `Focal Length` / `View Plane Distance`: Distance from eye to view plane [S5, unofficial].
 *   `Near/Far`: Clipping plane distances (used for matrix generation, not ray direction directly) [S4, unofficial].
+*   `downsample`: Factor to reduce image resolution, affecting $W, H$ and resize [S10, unofficial].
+*   `mode`: Determines pixel centering ('lefttop', 'center', 'random') [S2, unofficial].
+*   `cameraPosition`: Uniform vec3 specifying camera position in view space [S3, unofficial].
+*   `modelMatrix`: Uniform mat4 specifying model transformation [S3, unofficial].
+*   `projectionMatrix`: Uniform mat4 specifying projection matrix [S3, unofficial].
 
 **Edge Cases:**
 *   **Degenerate Matrices:** Check for zero viewport height or singular matrices to avoid NaNs [S7, unofficial].
-*   **Y-Axis Convention:** Vulkan/OpenGL clip space Y-flip requires negating Y during reconstruction [S6, unofficial].
+*   **Y-Axis Convention:** Vulkan/OpenGL clip space Y-flip requires negating Y during reconstruction [S8, unofficial].
 *   **Missing Camera:** Handle null camera pointers gracefully, returning a default ray (e.g., looking forward from origin) [S7, unofficial].
 
 ## Subtopics
 
 ### [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md)
-Generates parallel rays with origins distributed on a grid; no perspective distortion.
+Constructs ray origins distributed on a grid perpendicular to the viewing direction and assigns identical normalized directions to all rays for an orthographic camera. It avoids perspective distortion by maintaining parallel ray directions and linear spacing of origins across the image plane. Orthographic projection ensures parallel lines in the 3D scene remain parallel on the screen. Choose it when perspective distortion is undesirable or for technical/medical volume visualization. [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md)
 
 ### [Sample Streaming Payload Ray Computation](1509-sample-streaming-payload-ray-computation.md)
-Regenerates rays from stored pixel indices for streaming/resumption.
+Regenerates ray geometry (origin and direction) from stored pixel indices and camera parameters, enabling sample streaming and resumption in volume rendering pipelines. It maps pixel coordinates to Normalized Device Coordinates (NDC) and unprojects them to world space to compute unit-length direction vectors. Unlike static ray generation, this method is designed for payloads that persist across frames or batches, allowing rays to be reconstructed on-demand from minimal state. Choose it for streaming or checkpointed rendering. [Sample Streaming Payload Ray Computation](1509-sample-streaming-payload-ray-computation.md)
 
 ### [OptiX Ray Generation & Traversal Setup](1552-optix-ray-generation-traversal-setup.md)
-Integrates ray generation with NVIDIA OptiX 7 API and SBT.
+Implements the ray generation and initial traversal setup for volume rendering within the NVIDIA OptiX 7 API. It computes pixel rays, initializes the random number generator (RNG) for anti-aliasing, and dispatches volume tracing via `optixTrace`. It differs from generic ray generation methods by integrating specific OptiX 7 launch parameters, SBT indexing, and visibility masks to restrict traversal to volume geometry. Choose it when targeting NVIDIA hardware with OptiX. [OptiX Ray Generation & Traversal Setup](1552-optix-ray-generation-traversal-setup.md)
 
 ### [Object Space Ray Setup](1642-object-space-ray-setup.md)
-Constructs rays in the local coordinate system of a mesh.
+Constructs ray origins and directions in the local coordinate system of the rendered mesh rather than world space. This ensures that the raytraced object moves, scales, and rotates rigidly with the mesh transform, treating the object as a self-contained volume. Unlike world-space methods where the object acts as a static window into a larger world, this approach simplifies scene graph transformations for isolated volume rendering. Choose it for isolated object rendering or instancing. [Object Space Ray Setup](1642-object-space-ray-setup.md)
 
 ### [Custom Frustum Ray Generation via Vertex Z-Index](1753-custom-frustum-ray-generation-via-vertex-z-index.md)
-Encodes frustum corner indices in vertex Z for lookup.
+Generates per-pixel ray directions for volume rendering by encoding the index of pre-computed frustum corner vectors into the Z-coordinate of a full-screen quad's vertices, allowing the vertex shader to look up the correct ray direction from a uniform array. It differs from [Camera Matrix Ray Generation](2172-camera-matrix-ray-generation.md) by avoiding per-fragment matrix multiplications for direction calculation, instead using a discrete lookup based on vertex attributes. Choose it for vertex-shader-optimized frustum culling or directional lookups. [Custom Frustum Ray Generation via Vertex Z-Index](1753-custom-frustum-ray-generation-via-vertex-z-index.md)
 
 ### [Ray Origin Offset Noise](2118-ray-origin-offset-noise.md)
-Perturbs ray origins to avoid banding artifacts.
+Perturbs the starting position of a ray march to avoid banding artifacts caused by the regular sampling grid. It differs from sibling methods like [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) or [Camera Matrix Ray Generation](2172-camera-matrix-ray-generation.md), which define the geometric ray path, by adding a stochastic perturbation to the ray's origin or initial step. Choose it when anti-aliasing or reducing grid artifacts is required. [Ray Origin Offset Noise](2118-ray-origin-offset-noise.md)
 
 ### [Camera Matrix Ray Generation](2172-camera-matrix-ray-generation.md)
-Uses explicit intrinsic/extrinsic matrices for ray computation.
+Computes the origin and direction vectors for primary rays corresponding to each pixel in an image, based on explicit camera intrinsic and extrinsic parameters. It solves the problem of mapping 2D raster coordinates to 3D world-space rays for volume rendering or ray tracing. It differs from [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) by using perspective projection (converging rays) and from [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md) by explicitly constructing and utilizing a calibration matrix $K$ rather than assuming a canonical pinhole model with unit focal length and center at the image center. Choose it when working with calibrated or real-world camera data. [Camera Matrix Ray Generation](2172-camera-matrix-ray-generation.md)
 
 ### [Basic GPU Ray Generation via Fragment Shader](2208-basic-gpu-ray-generation-via-fragment-shader.md)
-Renders a quad to compute rays in fragment shaders.
+Generates camera rays for ray tracing by rendering a single quad to the screen, allowing the fragment shader to compute the ray origin and direction for each pixel using interpolated vertex coordinates. It differs from [Camera Matrix Ray Generation](2172-camera-matrix-ray-generation.md) by avoiding explicit matrix multiplications in favor of geometric basis vectors derived from camera parameters, and from [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) by supporting perspective projection through a viewing plane distance. Choose it for simple, shader-based ray generation without compute shaders. [Basic GPU Ray Generation via Fragment Shader](2208-basic-gpu-ray-generation-via-fragment-shader.md)
 
 ### [Ray Position Calculation](2895-ray-position-calculation.md)
-Computes 3D query points along a ray for volume sampling.
+Computes the 3D query points along a ray within specified near and far depth bounds, optionally adding random noise for jittering. It calculates the 3D position along a ray given a starting camera position, ray direction, and distance. This method transforms 1D depth samples into 3D world coordinates, serving as the bridge between ray generation and volume sampling. Unlike [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) which focuses on direction derivation, or [Sample Streaming Payload Ray Computation](1509-sample-streaming-payload-ray-computation.md) which handles data transfer, this method specifically handles the spatial interpolation along the ray axis. Choose it when marching or sampling along existing rays. [Ray Position Calculation](2895-ray-position-calculation.md)
 
-### [Grid Ray Sampler](3930-grid-ray-sampler.md)
-Samples pixel coordinates from a 2D grid and lifts to 3D.
+### [Epipolar Ray Intersection](7644-epipolar-ray-intersection.md)
+Calculates the 3D positions and depths corresponding to specified 2D points on epipolar lines defined by camera origins and directions, using image extrinsics and intrinsics. It constructs rays from the 2D points in their respective camera frames and intersects them with given world-space rays. This method serves as a geometric primitive for lifting 2D image coordinates into 3D space constrained by epipolar geometry, distinct from general ray generation methods like [Camera Matrix Ray Generation](2172-camera-matrix-ray-generation.md) which produce rays for all pixels, or [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) which assumes parallel projection. Choose it for multi-view geometry or stereo matching pipelines. [Epipolar Ray Intersection](7644-epipolar-ray-intersection.md)
 
-### [Ray Structure](4026-ray-structure.md)
-Data container for ray origin and direction.
+### [Flattened Ray Generation for Training](8180-flattened-ray-generation-for-training.md)
+Converts a set of 2D training images into a single, contiguous 1D tensor of 3D rays and corresponding color values. It solves the problem of efficient mini-batch sampling for neural volume rendering by pre-computing all ray origins, directions, and view directions for every pixel in every training image, then stacking them into a flat array. This allows the training loop to sample random indices from a single large tensor rather than managing a list of image-specific ray batches. It differs from [Camera Ray Generation](7456-camera-ray-generation.md) by aggregating all views into a unified flat structure suitable for stochastic gradient descent, and from [Sample Streaming Payload Ray Computation](1509-sample-streaming-payload-ray-computation.md) by pre-computing all rays in memory rather than computing them on-the-fly per batch. Choose it for neural rendering training pipelines. [Flattened Ray Generation for Training](8180-flattened-ray-generation-for-training.md)
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per pixel/ray. The computation involves a constant number of vector operations and matrix multiplications.
-*   **Memory Complexity:** $O(1)$ per thread. Only local variables and camera parameters are needed.
-*   **Performance:** Highly parallelizable. Each thread computes one ray independently. On GPUs, coalesced memory access to camera matrices (uniforms) is critical [Parent].
-*   **Strengths:** Flexible; supports various camera models (perspective, orthographic, custom).
-*   **Limitations:** Requires accurate camera matrices or basis vectors. Precision issues can arise with very large scene coordinates or small FOVs if not handled carefully [S7, unofficial].
+*   **Time Complexity:** $O(1)$ per pixel/ray [G].
+*   **Memory Complexity:** $O(1)$ per thread [G].
+*   **Performance:** Highly parallelizable; each thread computes one ray independently [G]. On GPUs, coalesced memory access to camera matrices (uniforms) is critical [Parent].
+*   **Strengths:** Flexible; supports various camera models (perspective, orthographic, custom) and handles varying aspect ratios and viewport sizes correctly [S7, unofficial].
+*   **Limitations:** Requires accurate camera matrices or basis vectors; precision issues can arise with very large scene coordinates or small FOVs if not handled carefully [S7, unofficial].
+*   **When to use:** Standard volume rendering, ray casting, and neural rendering pipelines where 2D raster coordinates must be lifted to 3D [S6, S7, unofficial].
+*   **When not to use:** When parallel projection is explicitly required (use [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md)) or when rays must be reconstructed from streaming payloads (use [Sample Streaming Payload Ray Computation](1509-sample-streaming-payload-ray-computation.md)).
 
 ## Background
-Camera ray generation is a fundamental technique in computer graphics, originating from the early days of ray tracing [S1, S7, unofficial]. It bridges the gap between 2D rasterization coordinates and 3D geometric space. Modern implementations often leverage GPU fragment shaders or compute shaders for parallel execution [S4, S7, unofficial]. Variants like the "PathCamera" [S3, unofficial] and "PinholeRayTracer" [S8, unofficial] demonstrate specific applications in procedural rendering and sensor simulation.
+Camera ray generation originates from standard computer graphics techniques for mapping screen coordinates to 3D rays [S7, unofficial]. It is implemented in GLSL shaders [S1, unofficial], Vulkan compute pipelines using push constants [S8, unofficial], and Python-based neural rendering datasets [S10, unofficial]. The method is used in volume rendering, ray casting utilities that intersect rays with axis-aligned boxes [S7, unofficial], and procedural camera systems that glide along paths or follow touch input [S1, S4, unofficial].
 
 ## Sources
 [S1] GitHub - razzle-reinizu/Voxel-World-Shader: A GLSL voxel-world shader ..., https://github.com/razzle-reinizu/Voxel-World-Shader, fetched 2026-10-25 (unofficial)
-[S2] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
-[S3] PIGJET/neon-raymarcher, https://github.com/PIGJET/neon-raymarcher, fetched 2026-10-27 (unofficial)
-[S4] Ne0nWinds/WebGPU-Volumetrics-Demo, https://github.com/Ne0nWinds/WebGPU-Volumetrics-Demo, fetched 2026-10-27 (unofficial)
-[S5] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
-[S6] migaelstrydom/VoxelPhase, https://github.com/migaelstrydom/VoxelPhase, fetched 2026-10-28 (unofficial)
-[S7] Implement Visualization/RayCaster, https://github.com/rp-bot/ASE-final-project/issues/54, fetched 2026-10-29 (unofficial)
-[S8] RMonica/basic_next_best_view, https://github.com/RMonica/basic_next_best_view, fetched 2026-10-24 (unofficial)
+[S2] sjtuytc/UnboundedNeRFPytorch, https://github.com/sjtuytc/UnboundedNeRFPytorch, fetched 2026-10-26 (unofficial)
+[S3] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S4] PIGJET/neon-raymarcher, https://github.com/PIGJET/neon-raymarcher, fetched 2026-10-27 (unofficial)
+[S5] Ne0nWinds/WebGPU-Volumetrics-Demo, https://github.com/Ne0nWinds/WebGPU-Volumetrics-Demo, fetched 2026-10-27 (unofficial)
+[S6] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)
+[S7] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
+[S8] migaelstrydom/VoxelPhase, https://github.com/migaelstrydom/VoxelPhase, fetched 2026-10-28 (unofficial)
+[S9] Implement Visualization/RayCaster, https://github.com/rp-bot/ASE-final-project/issues/54, fetched 2026-10-29 (unofficial)
+[S10] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+[S11] RMonica/basic_next_best_view, https://github.com/RMonica/basic_next_best_view, fetched 2026-10-24 (unofficial)

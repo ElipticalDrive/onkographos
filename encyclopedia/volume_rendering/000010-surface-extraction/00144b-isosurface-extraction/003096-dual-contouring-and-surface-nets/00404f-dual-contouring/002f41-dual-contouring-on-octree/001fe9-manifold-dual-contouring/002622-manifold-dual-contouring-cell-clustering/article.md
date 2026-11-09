@@ -3,11 +3,11 @@
 Also called: ClusterCell, MDC, Manifold Dual Contouring (Java Implementation)
 
 ## Overview
-Manifold Dual Contouring - Cell Clustering is a vertex aggregation step within the Manifold Dual Contouring pipeline that consolidates vertices from an octree cell's children into a single manifold-compliant vertex per topological feature. It solves the problem of non-manifold geometry and redundant vertices that arise when multiple child nodes intersect the same surface edge or face, ensuring the output mesh maintains a valid 2-manifold structure. It differs from standard Dual Contouring by explicitly tracking surface indices and collapsing vertices across child boundaries using parent pointers and Euler characteristic constraints, building on [Manifold Dual Contouring](2138-manifold-dual-contouring.md).
+Manifold Dual Contouring - Cell Clustering is a vertex aggregation step within the Manifold Dual Contouring pipeline that consolidates vertices from an octree cell's children into a single manifold-compliant vertex per topological feature [S2, unofficial]. It solves the problem of non-manifold geometry and redundant vertices that arise when multiple child nodes intersect the same surface edge or face, ensuring the output mesh maintains a valid 2-manifold structure [S2, unofficial]. It differs from standard Dual Contouring by explicitly tracking surface indices and collapsing vertices across child boundaries using parent pointers and Euler characteristic constraints, building on [Manifold Dual Contouring](2138-manifold-dual-contouring.md) [S2, unofficial].
 
 ## How it works
-**Inputs:** An octree node (`MdcOctreeNode`) representing a cell, which may contain child nodes (`MdcOctreeNode`) and existing vertices (`MdcVertex`). The implicit field values at the cell corners are stored in `node.corners` (bitmask).
-**Outputs:** The input node’s `vertices` array is replaced with a new array of aggregated `MdcVertex` objects. Each new vertex represents a collapsed cluster of child vertices.
+**Inputs:** An octree node (`MdcOctreeNode`) representing a cell, which may contain child nodes (`MdcOctreeNode`) and existing vertices (`MdcVertex`) [S2, unofficial]. The implicit field values at the cell corners are stored in `node.corners` (bitmask) [S2, unofficial].
+**Outputs:** The input node’s `vertices` array is replaced with a new array of aggregated `MdcVertex` objects [S2, unofficial]. Each new vertex represents a collapsed cluster of child vertices [S2, unofficial].
 
 **Data Structures:**
 *   `MdcOctreeNode`:
@@ -34,103 +34,98 @@ Manifold Dual Contouring - Cell Clustering is a vertex aggregation step within t
 
 **Algorithm Steps:**
 
-1.  **Recursive Child Processing:**
-    *   If `node.Type` is not `Node_Internal`, return.
-    *   Initialize `signs` array of size 8 to -1. Initialize `mid_sign` to -1. Initialize `is_collapsible` to `true`.
+1.  **Recursive Child Processing & Sign Propagation:**
+    *   If `node.Type` is not `Node_Internal`, return [S2, unofficial].
+    *   Initialize `signs` array of size 8 to -1, `mid_sign` to -1, and `is_collapsible` to `true` [S2, unofficial].
     *   Loop `i` from 0 to 7:
-        *   If `node.children[i]` is `null`, continue.
-        *   Recursively call `ClusterCell(node.children[i], error)`.
-        *   If `node.children[i].Type == Node_Internal`, set `is_collapsible = false`.
-        *   Else (leaf), extract the corner bit: `mid_sign = (node.children[i].corners >> (7 - i)) & 1`. Set `signs[i] = (node.children[i].corners >> i) & 1`.
-    *   Reset `node.corners` to 0.
+        *   If `node.children[i]` is `null`, continue [S2, unofficial].
+        *   Recursively call `ClusterCell(node.children[i], error)` [S2, unofficial].
+        *   If `node.children[i].Type == Node_Internal`, set `is_collapsible = false` [S2, unofficial].
+        *   Else (leaf), extract the corner bit: `mid_sign = (node.children[i].corners >> (7 - i)) & 1` [S2, unofficial].
+        *   Set `signs[i] = (node.children[i].corners >> i) & 1` [S2, unofficial].
+    *   Reset `node.corners` to 0 [S2, unofficial].
     *   Loop `i` from 0 to 7:
-        *   If `signs[i] == -1`, `node.corners |= (byte)(mid_sign << i)`.
-        *   Else, `node.corners |= (byte)(signs[i] << i)`.
+        *   If `signs[i] == -1`, `node.corners |= (byte)(mid_sign << i)` [S2, unofficial].
+        *   Else, `node.corners |= (byte)(signs[i] << i)` [S2, unofficial].
 
 2.  **Face and Edge Clustering Initialization:**
-    *   Initialize `surface_index` counter to 0.
-    *   Initialize `collected_vertices` list.
-    *   **Process Faces:** Loop `i` from 0 to 11 (representing the 6 Euclidean edges, each associated with 2 faces in the topology logic, or specifically the 12 face-adjacent edge pairs defined by `Utilities.EdgePairs`):
-        *   Get `c1`, `c2` from `Utilities.EdgePairs[i]`.
-        *   Set `face_nodes[0] = node.children[c1]`, `face_nodes[1] = node.children[c2]`.
-        *   Call `ClusterFace(face_nodes, Utilities.EdgePairs[i][2], surface_index, collected_vertices)`.
-    *   **Process Internal Edges:** Loop `i` from 0 to 5 (internal edges of the cell):
-        *   Get `edge_nodes` from `node.children` using `Utilities.TCellProcEdgeMask[i][0..3]`.
-        *   Call `ClusterEdge(edge_nodes, Utilities.TCellProcEdgeMask[i][4], surface_index, collected_vertices)`.
+    *   Initialize `surface_index` to 0, `collected_vertices` list, and `new_vertices` list [S2, unofficial].
+    *   **Process Faces:** Loop `i` from 0 to 11:
+        *   Get `c1`, `c2` from `Utilities.EdgePairs[i]` [S2, unofficial].
+        *   Set `face_nodes[0] = node.children[c1]`, `face_nodes[1] = node.children[c2]` [S2, unofficial].
+        *   Call `ClusterFace(face_nodes, Utilities.EdgePairs[i][2], surface_index, collected_vertices)` [S2, unofficial].
+    *   **Process Internal Edges:** Loop `i` from 0 to 5:
+        *   Get `edge_nodes` from `node.children` using `Utilities.TCellProcEdgeMask[i][0..3]` [S2, unofficial].
+        *   Call `ClusterEdge(edge_nodes, Utilities.TCellProcEdgeMask[i][4], surface_index, collected_vertices)` [S2, unofficial].
 
 3.  **Stray Vertex Assignment:**
-    *   Set `highest_index = surface_index.value`. If `highest_index == -1`, set `highest_index = 0`.
+    *   Set `highest_index = surface_index.value` [S2, unofficial].
+    *   If `highest_index == -1`, set `highest_index = 0` [S2, unofficial].
     *   Loop over `n` in `node.children`:
-        *   If `n` is `null`, continue.
+        *   If `n` is `null`, continue [S2, unofficial].
         *   Loop over `v` in `n.vertices`:
-            *   If `v` is `null`, continue.
-            *   If `v.surface_index == -1`:
-                *   Set `v.surface_index = highest_index++`.
-                *   Add `v` to `collected_vertices`.
+            *   If `v` is `null`, continue [S2, unofficial].
+            *   If `v.surface_index == -1`, set `v.surface_index = highest_index++` and add `v` to `collected_vertices` [S2, unofficial].
 
 4.  **Vertex Aggregation and QEF Solving:**
-    *   Initialize `clustered_count = 0`.
-    *   If `collected_vertices.size() > 0`:
-        *   Loop `i` from 0 to `highest_index`:
-            *   Create `QEFData qef` with `LevenQefSolver`.
-            *   Initialize `normal = Vec3f(0)`, `count = 0`.
-            *   Initialize `edges` array of size 12 to 0.
-            *   Initialize `euler = 0`, `e = 0`.
+    *   Initialize `clustered_count = 0` [S2, unofficial].
+    *   If `collected_vertices.size() > 0`, loop `i` from 0 to `highest_index`:
+        *   Create `QEFData qef` with `LevenQefSolver` [S2, unofficial].
+        *   Initialize `normal = Vec3f(0)`, `count = 0`, `edges` array of size 12 to 0, `euler = 0`, `e = 0` [S2, unofficial].
+        *   Loop over `v` in `collected_vertices`:
+            *   If `v.surface_index == i`:
+                *   For `k` from 0 to 2: `edge = Utilities.TExternalEdges[v.in_cell][k]`, `edges[edge] += v.eis[edge]` [S2, unofficial].
+                *   For `k` from 0 to 8: `edge = Utilities.TInternalEdges[v.in_cell][k]`, `e += v.eis[edge]` [S2, unofficial].
+                *   `euler += v.euler` [S2, unofficial].
+                *   `qef.add(v.qef)` [S2, unofficial].
+                *   `normal = normal.add(v.normal)` [S2, unofficial].
+                *   `count++` [S2, unofficial].
+        *   If `count == 0`, continue to next `i` [S2, unofficial].
+        *   **Face Property Check:** Set `face_prop2 = true` [S2, unofficial]. Loop `f` from 0 to 5:
+            *   If `face_prop2`, `intersections = 0` [S2, unofficial].
+            *   Loop `ei` from 0 to 3: `intersections += edges[Utilities.TFaces[f][ei]]` [S2, unofficial].
+            *   If `intersections != 0` and `intersections != 2`, set `face_prop2 = false` [S2, unofficial].
+        *   **Create New Vertex:**
+            *   `new_vertex = new MdcVertex()` [S2, unofficial].
+            *   `normal = normal.div(count)` [S2, unofficial].
+            *   `normal.normalize()` [S2, unofficial].
+            *   `new_vertex.normal = normal` [S2, unofficial].
+            *   `new_vertex.qef = qef` [S2, unofficial].
+            *   `new_vertex.eis = edges` [S2, unofficial].
+            *   `new_vertex.euler = euler - e / 4` [S2, unofficial].
+            *   `new_vertex.in_cell = node.child_index` [S2, unofficial].
+            *   `new_vertex.face_prop2 = face_prop2` [S2, unofficial].
+            *   Add `new_vertex` to `new_vertices` [S2, unofficial].
+        *   **Set Parent Pointers:**
             *   Loop over `v` in `collected_vertices`:
                 *   If `v.surface_index == i`:
-                    *   For `k` from 0 to 2: `edge = Utilities.TExternalEdges[v.in_cell][k]`. `edges[edge] += v.eis[edge]`.
-                    *   For `k` from 0 to 8: `edge = Utilities.TInternalEdges[v.in_cell][k]`. `e += v.eis[edge]`.
-                    *   `euler += v.euler`.
-                    *   `qef.add(v.qef)`.
-                    *   `normal = normal.add(v.normal)`.
-                    *   `count++`.
-            *   If `count == 0`, continue to next `i`.
-            *   **Face Property Check:** Set `face_prop2 = true`. Loop `f` from 0 to 5:
-                *   If `face_prop2`:
-                    *   `intersections = 0`.
-                    *   Loop `ei` from 0 to 3: `intersections += edges[Utilities.TFaces[f][ei]]`.
-                    *   If `intersections != 0` and `intersections != 2`, set `face_prop2 = false`.
-            *   **Create New Vertex:**
-                *   `new_vertex = new MdcVertex()`.
-                *   `normal = normal.div(count)`. `normal.normalize()`.
-                *   `new_vertex.normal = normal`.
-                *   `new_vertex.qef = qef`.
-                *   `new_vertex.eis = edges`.
-                *   `new_vertex.euler = euler - e / 4`.
-                *   `new_vertex.in_cell = node.child_index`.
-                *   `new_vertex.face_prop2 = face_prop2`.
-                *   Add `new_vertex` to `new_vertices` list.
-            *   **Set Parent Pointers:**
-                *   Loop over `v` in `collected_vertices`:
-                    *   If `v.surface_index == i`:
-                        *   If `v != new_vertex`: `v.parent = new_vertex`.
-                        *   Else: `v.parent = null`.
+                    *   If `v != new_vertex`, `v.parent = new_vertex` [S2, unofficial].
+                    *   Else, `v.parent = null` [S2, unofficial].
 
 5.  **Finalization:**
-    *   If `collected_vertices.size() == 0`, return.
-    *   Reset `surface_index` for all `v2` in `collected_vertices`: `v2.surface_index = -1`.
-    *   Set `node.vertices = new_vertices` array.
+    *   If `collected_vertices.size() == 0`, return [S2, unofficial].
+    *   Loop over `v2` in `collected_vertices`, set `v2.surface_index = -1` [S2, unofficial].
+    *   Set `node.vertices = new_vertices` array [S2, unofficial].
 
 **Formulas:**
 *   **Intersection Point (used in child leaf construction):**
     $$p = p_1 + \frac{-d_1}{d_2 - d_1} (p_2 - p_1)$$
-    Where $p_1, p_2$ are endpoints of an edge, and $d_1, d_2$ are scalar field values at those endpoints.
+    Where $p_1, p_2$ are endpoints of an edge, and $d_1, d_2$ are scalar field values at those endpoints [S2, unofficial].
 *   **Surface Normal (used in child leaf construction):**
     $$n = \frac{1}{2H} [f(x+H,y,z)-f(x-H,y,z), f(x,y+H,z)-f(x,y-H,z), f(x,y,z+H)-f(x,y,z-H)]^T$$
-    Normalized, where $H=1$.
+    Normalized, where $H=1$ [S2, unofficial].
 
 **Parameters:**
 *   `EnforceManifold`: Boolean flag controlling manifold enforcement; default value is `true` [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Null Children:** The algorithm skips null children in loops. If all children are null, no vertices are processed.
-*   **Sign Propagation:** The `mid_sign` logic handles cases where a parent node covers a region where child signs are ambiguous or missing, ensuring consistent corner bit propagation [S2, unofficial].
+*   **Null Children:** The algorithm skips null children in loops. If all children are null, the function returns early without processing vertices [S2, unofficial].
 *   **Face Property 2:** The check `intersections != 0 && intersections != 2` validates that the face has exactly two edge intersections, a requirement for manifold validity in this topology [S2, unofficial].
 
 ## Subtopics
 
 ### Manifold Dual Contouring - Face Clustering
-This method processes the vertices of a single octree cell's faces to determine triangle indices and resolve vertex conflicts by traversing parent pointers. It differs from standard dual contouring by enforcing manifold constraints through parent traversal and specific flip logic, building on [Manifold Dual Contouring - Cell Clustering](3677-manifold-dual-contouring-cell-clustering.md) [S1]. It handles the recursive descent into sub-faces and sub-edges using `TFaceProcFaceMask` and `TFaceProcEdgeMask` to aggregate vertices along face boundaries [S2, unofficial].
+This method processes the vertices of a single octree cell's faces to determine triangle indices and resolve vertex conflicts by traversing parent pointers [S1]. It differs from standard dual contouring by enforcing manifold constraints through parent traversal, building on [Manifold Dual Contouring - Cell Clustering](3677-manifold-dual-contouring-cell-clustering.md) [S1]. It is chosen when face-level topology consistency is required before index generation.
 
 ### [Connectivity Generation via Recursive Traversal](7454-connectivity-generation-via-recursive-traversal.md)
 This algorithm extracts surface connectivity from an octree-based dual contouring representation by traversing the tree to enumerate minimal edges intersected by the surface. It establishes a one-to-one relationship between surface patches and these minimal edges, ensuring manifold output. It differs from sibling methods by focusing exclusively on topological traversal and patch generation via recursive cell, face, and edge processing, rather than index processing or triangle generation.

@@ -3,229 +3,202 @@
 Also called: Voxel Chunking, Chunked Voxel World, Block chunking, Chunk-Based Block Storage, Voxel Chunk Data Structure, Chunked Voxel World Storage, Block Storage
 
 ## Overview
-The Chunk-based Voxel Data Structure organizes a 3D voxel grid into fixed-size 3D blocks (chunks) to enable spatial locality, flat array indexing, and incremental updates [S1, S4, S5, unofficial]. It solves the problem of managing infinite or large-scale voxel worlds by dividing space into manageable units that can be independently meshed, serialized, and loaded/unloaded [S5, unofficial]. Unlike dense grids that allocate memory for the entire world volume, or sparse octrees that use complex tree traversal, chunks provide a flat, predictable memory layout with constant-time access, trading some memory overhead for simplified meshing and I/O operations [S4, S5, unofficial].
+The Chunk-based Voxel Data Structure divides an infinite or large 3D voxel world into fixed-size 3D blocks (chunks) to manage memory usage and update locality [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the problem of unbounded memory consumption and inefficient global updates by allowing operations (such as meshing, serialization, or modification) to be performed on manageable units rather than the entire world grid [S1, unofficial][S2, unofficial][S3, unofficial]. It differs from [Sparse Voxel Octree Representation](2340-sparse-voxel-octree-representation.md) by using fixed-size dense arrays per chunk rather than hierarchical tree structures [S2, unofficial].
 
 ## How it works
-**Inputs:** Global voxel coordinates $(x, y, z)$ and chunk dimensions ($C_x, C_y, C_z$) [S1, unofficial].
-**Outputs:** A pointer or index to the specific voxel data within a chunk, or the chunk object itself [S3, unofficial].
+**Inputs and Outputs:**
+- Input: Global voxel coordinates $(x, y, z)$, voxel data (e.g., material ID, block type), and chunk configuration parameters (size, maximum dimensions).
+- Output: A structured storage system mapping global coordinates to chunk indices and local voxel indices, enabling $O(1)$ access to voxel data and efficient chunk management.
 
 **Data Structures:**
-1.  **Chunk:** A container holding voxel data and metadata [S3, unofficial].
-    *   `data`: A flat 1D array (e.g., `Uint8Array` or `byte[]`) of size $C_x \times C_y \times C_z$. Stores voxel IDs (0 for air, 1+ for solid/material) [S2, S4, unofficial].
-    *   `cx, cz`: Chunk coordinates in the world grid (integer indices) [S4, unofficial].
-    *   `mesh`: Reference to the generated mesh geometry for this chunk [S4, unofficial].
-    *   `present`: Optional 1D boolean/integer array indicating if a block exists at a position (used for sparse-like behavior within a chunk) [S5, unofficial].
-2.  **World/Map:** A collection of chunks.
-    *   Can be implemented as a hash map (keyed by chunk coordinates) [S4, unofficial] or a pre-allocated flat array of chunk pointers/structs [S1, unofficial].
-    *   If flat array: `chunks` array of size $MaxChunkAmount^3$ [S1, unofficial].
+The core structure consists of a global map or array of chunks, where each chunk contains a flat array of voxel data.
 
-**Indexing Formulas:**
-1.  **Global to Chunk Index:**
-    Given global voxel $(x, y, z)$ and chunk size $S$ (assuming cubic chunks $C_x=C_y=C_z=S$ for simplicity, or using bit shifts for powers of 2):
-    $$
-    f = \lfloor x / C_x \rfloor, \quad g = \lfloor y / C_y \rfloor, \quad h = \lfloor z / C_z \rfloor
-    $$
-    If using bit shifts (where $S = 2^k$):
-    $$
-    f = x \gg k, \quad g = y \gg k, \quad h = z \gg k
-    $$
-    [S1, S4, unofficial]
+1. **Chunk ID Generation:**
+   Chunks are identified by their global position. A common method uses a string key or a hash of the chunk coordinates [S1, unofficial].
+   - Formula: $cx = \lfloor x / \text{ChunkSize} \rfloor$, $cy = \lfloor y / \text{ChunkSize} \rfloor$, $cz = \lfloor z / \text{ChunkSize} \rfloor$ [S1, unofficial].
+   - Key: Often formatted as `"cx,cy,cz"` or encoded (e.g., base64) [S1, unofficial].
+   - Alternative: Bit-shift indexing for power-of-two chunk sizes. $f = x \gg \text{ChunkShift}$, $g = y \gg \text{ChunkShift}$, $h = z \gg \text{ChunkShift}$ [S2, unofficial].
 
-2.  **Chunk Array Index (Flat Array Layout):**
-    If the world is a flat array of chunks with dimensions $MaxX, MaxY, MaxZ$:
-    $$
-    index_{chunk} = f + g \cdot MaxX + h \cdot MaxX \cdot MaxY
-    $$
-    [S1, unofficial]
-    *Note: Some implementations use a hash map to support infinite worlds, avoiding fixed $MaxX$ bounds [S4, unofficial].*
+2. **Chunk Layout:**
+   Each chunk stores voxel data in a flat 1D array. The indexing formula depends on the dimension order.
+   - Common Layout (Z-major or Y-major): $\text{index}(x, y, z) = x + y \cdot s + z \cdot s \cdot s$, where $s$ is the chunk size along each axis [S3, unofficial].
+   - Alternative Layout (Minecraft-style): $\text{index}(x, y, z) = y \cdot CX \cdot CZ + z \cdot CX + x$, where $CX, CY, CZ$ are chunk dimensions [S5, unofficial].
+   - Data Type: Typically `Uint8Array` or `uint8_t` for block IDs/materials [S3, unofficial][S5, unofficial][S7, unofficial].
+   - Size: Default is often $32^3$ voxels [S4, unofficial], but $16^3$ [S6, unofficial] or non-cubic dimensions like $16 \times 256 \times 16$ [S5, unofficial][S7, unofficial] are also used.
 
-3.  **Local Voxel Index within Chunk:**
-    $$
-    x_{local} = x \pmod{C_x}, \quad y_{local} = y \pmod{C_y}, \quad z_{local} = z \pmod{C_z}
-    $$
-    Or using bitwise AND (for power-of-2 sizes):
-    $$
-    x_{local} = x \ \& \ (C_x - 1)
-    $$
-    [S1, unofficial]
+3. **Global Map/Array:**
+   - **Hash Map Approach:** A map from Chunk ID to Chunk Object. Active chunks are tracked in a list (`chunkIdMap`) to avoid sparse array allocation [S1, unofficial].
+   - **Flat Array Approach:** A pre-allocated array of chunks indexed by global chunk coordinates. Index calculation: $\text{index} = g + f \cdot \text{MaxChunkAmount} + h \cdot \text{MaxChunkAmount}^2$ [S2, unofficial]. This requires knowing the maximum world extent or using a sparse allocation strategy [S2, unofficial].
 
-4.  **Flat Voxel Data Index:**
-    Row-major layout (Y is the major stride in some implementations, Z in others; standard is often X fastest, then Y, then Z, or Z fastest):
-    *   **Layout A (from S4, S7):** $Y$ is major stride [S4, S7, unofficial].
-        $$
-        index_{voxel} = y_{local} \cdot (C_x \cdot C_z) + z_{local} \cdot C_x + x_{local}
-        $$
-    *   **Layout B (from S2):** $X$ is major stride [S2, unofficial].
-        $$
-        index_{voxel} = x_{local} + y_{local} \cdot s + z_{local} \cdot s \cdot s
-        $$
-        Where $s$ is the chunk size [S2, unofficial].
-    *   *Implementation Note:* Consistency is key [G]. The pseudocode below uses Layout A as it is common in Minecraft-like engines [S4, S7, unofficial].
+**Numbered Steps for Access and Modification:**
 
-**Parameters:**
-*   **Chunk Size:** Typically $16^3$ or $32^3$ voxels [S5, unofficial].
-    *   $16 \times 256 \times 16$ is used in some engines to keep height data small and re-meshing fast while allowing tall structures [S4, unofficial].
-    *   Too large: Slow remeshing when a single block changes [S5, unofficial].
-    *   Too small: Excessive triangle counts and overhead [S5, unofficial].
-*   **Boundary Policy:** "Air" (return 0 if out of bounds) or "Solid" [S2, unofficial].
+1. **Coordinate Conversion:**
+   Given global voxel coordinates $(x, y, z)$:
+   - Compute chunk indices: $f = \lfloor x / \text{ChunkSize} \rfloor$, $g = \lfloor y / \text{ChunkSize} \rfloor$, $h = \lfloor z / \text{ChunkSize} \rfloor$ [S2, unofficial].
+   - Compute local voxel coordinates: $lx = x \pmod{\text{ChunkSize}}$, $ly = y \pmod{\text{ChunkSize}}$, $lz = z \pmod{\text{ChunkSize}}$ [S2, unofficial]. Note: For negative coordinates, modulo arithmetic must handle negatives correctly (e.g., using bitwise AND for power-of-two sizes: $lx = x \ \& \ (\text{ChunkSize} - 1)$) [S2, unofficial].
 
-**Algorithm Steps:**
-1.  **Get Voxel:**
-    *   Calculate chunk indices $(f, g, h)$ from global $(x, y, z)$ [S1, unofficial].
-    *   Retrieve the chunk object from the World container [G].
-    *   Calculate local indices $(x_{local}, y_{local}, z_{local})$ [G].
-    *   Compute flat index and return `chunk.data[index]` [S1, unofficial].
-    *   If chunk is null or coordinates are out of world bounds, return Air (0) [S2, S4, unofficial].
-2.  **Set Voxel:**
-    *   Retrieve or initialize the chunk at $(f, g, h)$ [G].
-    *   Compute local index.
-    *   Set `chunk.data[index] = material_id` [G].
-    *   Mark chunk as "dirty" or "modified" to trigger mesh regeneration [S7, unofficial].
-3.  **Meshing Trigger:**
-    *   When a voxel is set, check if it is on the chunk boundary [G].
-    *   If on boundary, add adjacent chunks to a modification queue [S7, unofficial].
-    *   Regenerate mesh for the modified chunk and its neighbors [S5, S7, unofficial].
+2. **Chunk Retrieval:**
+   - If using a Hash Map: Look up the chunk using the generated Chunk ID. If not found, the chunk is empty (all air) [S1, unofficial].
+   - If using a Flat Array: Calculate the flat index using the global chunk coordinates and bounds checking [S2, unofficial].
+
+3. **Voxel Access:**
+   - Calculate local index: $idx = \text{IndexFormula}(lx, ly, lz)$ [S3, unofficial].
+   - Return `chunk.data[idx]` [S3, unofficial].
+
+4. **Voxel Modification:**
+   - If the chunk does not exist, initialize it (allocate memory, set to default/air) [S1, unofficial].
+   - Update `chunk.data[idx] = new_value` [S3, unofficial].
+   - Mark the chunk as dirty/modified to trigger mesh regeneration or neighbor updates [S8, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants
-CHUNK_SIZE_X = 16
-CHUNK_SIZE_Y = 256
-CHUNK_SIZE_Z = 16
-AIR_ID = 0
-
 class Chunk:
-    def __init__(self, cx, cz):
-        self.cx = cx
-        self.cz = cz
-        # Flat array for voxel data (Layout A: Y is major stride)
-        self.data = [AIR_ID] * (CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z)
+    def __init__(self, size=32):
+        self.size = size
+        # Flat array for voxel data, initialized to 0 (air)
+        self.data = [0] * (size * size * size)
         self.mesh = None
-        self.dirty = True
+        self.dirty = False
+
+    def get_index(self, x, y, z):
+        # Row-major layout: x + y*s + z*s*s
+        return x + y * self.size + z * (self.size * self.size)
 
     def get_voxel(self, x, y, z):
-        # Boundary check
-        if x < 0 or x >= CHUNK_SIZE_X or \
-           y < 0 or y >= CHUNK_SIZE_Y or \
-           z < 0 or z >= CHUNK_SIZE_Z:
-            return AIR_ID
-        # Row-major index: y is major stride
-        idx = y * (CHUNK_SIZE_X * CHUNK_SIZE_Z) + z * CHUNK_SIZE_X + x
-        return self.data[idx]
+        if not self.is_inside(x, y, z):
+            return 0 # Air
+        return self.data[self.get_index(x, y, z)]
 
-    def set_voxel(self, x, y, z, material_id):
-        if x < 0 or x >= CHUNK_SIZE_X or \
-           y < 0 or y >= CHUNK_SIZE_Y or \
-           z < 0 or z >= CHUNK_SIZE_Z:
+    def set_voxel(self, x, y, z, value):
+        if not self.is_inside(x, y, z):
             return
-        idx = y * (CHUNK_SIZE_X * CHUNK_SIZE_Z) + z * CHUNK_SIZE_X + x
-        self.data[idx] = material_id
+        self.data[self.get_index(x, y, z)] = value
         self.dirty = True
+
+    def is_inside(self, x, y, z):
+        return 0 <= x < self.size and 0 <= y < self.size and 0 <= z < self.size
 
 class VoxelWorld:
-    def __init__(self):
-        # Using a dictionary for infinite world support
-        self.chunks = {}
+    def __init__(self, chunk_size=32):
+        self.chunk_size = chunk_size
+        self.chunks = {} # Map: chunk_id -> Chunk
+        self.chunk_id_map = [] # List of active chunk IDs for iteration
 
-    def _get_chunk_coords(self, x, y, z):
-        cx = x // CHUNK_SIZE_X
-        cy = y // CHUNK_SIZE_Y
-        cz = z // CHUNK_SIZE_Z
-        return (cx, cy, cz)
+    def get_chunk_id(self, x, y, z):
+        cx = x // self.chunk_size
+        cy = y // self.chunk_size
+        cz = z // self.chunk_size
+        return f"{cx},{cy},{cz}"
 
-    def _get_local_coords(self, x, y, z):
-        lx = x % CHUNK_SIZE_X
-        ly = y % CHUNK_SIZE_Y
-        lz = z % CHUNK_SIZE_Z
-        return (lx, ly, lz)
+    def get_local_coords(self, x, y, z):
+        lx = x % self.chunk_size
+        ly = y % self.chunk_size
+        lz = z % self.chunk_size
+        return lx, ly, lz
 
     def get_voxel(self, x, y, z):
-        cx, cy, cz = self._get_chunk_coords(x, y, z)
-        key = (cx, cz) # Assuming 2D chunk grid for infinite world (common in Minecraft)
-        chunk = self.chunks.get(key)
+        chunk_id = self.get_chunk_id(x, y, z)
+        chunk = self.chunks.get(chunk_id)
         if chunk is None:
-            return AIR_ID
-        lx, ly, lz = self._get_local_coords(x, y, z)
+            return 0 # Air
+        lx, ly, lz = self.get_local_coords(x, y, z)
         return chunk.get_voxel(lx, ly, lz)
 
-    def set_voxel(self, x, y, z, material_id):
-        cx, cy, cz = self._get_chunk_coords(x, y, z)
-        key = (cx, cz)
+    def set_voxel(self, x, y, z, value):
+        chunk_id = self.get_chunk_id(x, y, z)
         
-        if key not in self.chunks:
-            self.chunks[key] = Chunk(cx, cz)
+        if chunk_id not in self.chunks:
+            # Initialize new chunk
+            self.chunks[chunk_id] = Chunk(self.chunk_size)
+            if chunk_id not in self.chunk_id_map:
+                self.chunk_id_map.append(chunk_id)
         
-        chunk = self.chunks[key]
-        lx, ly, lz = self._get_local_coords(x, y, z)
-        chunk.set_voxel(lx, ly, lz, material_id)
+        chunk = self.chunks[chunk_id]
+        lx, ly, lz = self.get_local_coords(x, y, z)
+        chunk.set_voxel(lx, ly, lz, value)
         
-        # Queue mesh regeneration for this chunk and neighbors if on boundary
-        if self._is_on_boundary(lx, ly, lz):
-            self._queue_chunk_for_meshing(key)
-            self._queue_neighbors_for_meshing(key)
+        # Handle neighbor updates if necessary (e.g., for meshing)
+        self._check_neighbors(chunk_id, lx, ly, lz)
 
-    def _is_on_boundary(self, lx, ly, lz):
-        return (lx == 0 or lx == CHUNK_SIZE_X - 1 or
-                ly == 0 or ly == CHUNK_SIZE_Y - 1 or
-                lz == 0 or lz == CHUNK_SIZE_Z - 1)
-
-    def _queue_chunk_for_meshing(self, key):
-        # Implementation detail: add to a list of chunks to regenerate
-        pass
-
-    def _queue_neighbors_for_meshing(self, key):
-        # Not given in sources: neighbor key calculation
+    def _check_neighbors(self, chunk_id, lx, ly, lz):
+        # If voxel is on chunk boundary, mark adjacent chunks as dirty
+        # This is a simplified placeholder for neighbor chunk management
         pass
 ```
+
+**Parameters:**
+- `ChunkSize`: Typically $16^3$ or $32^3$ voxels [S6, unofficial]. Non-cubic sizes like $16 \times 256 \times 16$ are used in some engines to optimize for vertical terrain [S5, unofficial][S7, unofficial].
+- `ChunkShift`: Bit shift amount for power-of-two chunk sizes (e.g., 5 for 32) [S2, unofficial].
+- `MaxChunkAmount`: Maximum number of chunks along an axis if using a flat array map [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Access:** Accessing voxels at chunk boundaries requires checking adjacent chunks. Failure to do so causes visual artifacts or logic errors in meshing [S8, unofficial].
+- **Duplicate Detection:** When adding blocks, ensure duplicate detection uses value equality, not object reference equality, to avoid redundant storage [S1, unofficial].
+- **Memory Management:** Using value semantics (copying) for Chunk instances in loops can cause memory disasters due to large data arrays [S7, unofficial]. Use pointers or references [S7, unofficial].
+- **Negative Coordinates:** Modulo operations with negative numbers must be handled carefully to ensure correct chunk and local coordinate calculation [S2, unofficial].
 
 ## Subtopics
 
 ### [Sparse Voxel Octree Representation](2340-sparse-voxel-octree-representation.md)
-A Sparse Voxel Octree (SVO) is a hierarchical data structure for representing 3D space that eliminates sparse memory by not storing empty volumes. It enables efficient storage and traversal of voxel data, particularly for indirect illumination calculations at geometry-independent costs. Unlike dense grids or chunk-based structures, it adapts resolution to content density, trading traversal performance for memory efficiency.
+Sparse Voxel Octree (SVO) is a hierarchical data structure for representing 3D geometry as a sparse set of voxels, enabling fast raytracing and real-time rendering of complex scenes. Unlike dense grids or naive octrees, it achieves tight compression of sparsely populated spaces by storing only nodes containing geometry, using pointers to establish relationships between parent and child nodes. It sets itself apart from its siblings by unifying coarse geometry and fine detail through a pointer-based layout that supports efficient traversal, making it suitable for static geometry rendering where construction speed is secondary to rendering performance.
+
+### [Terrain Chunk Data Structure](2420-terrain-chunk-data-structure.md)
+A value type struct representing a terrain chunk with its index, world position, size, and LOD.
 
 ### [Chunk-Based World Storage](2858-chunk-based-world-storage.md)
-Divides the voxel world into fixed-size chunks to manage memory and rendering distance. Handles coordinate translation between world space and local chunk space.
+Chunk-Based World Storage maps world voxel coordinates to fixed-size 3D blocks (chunks) to enable direct coordinate-based access to voxel data. It solves the problem of managing infinite or large voxel worlds by dividing the space into manageable units, allowing efficient lookup and modification of individual voxels without scanning the entire world. It differs from [Sparse Voxel Octree Representation](2340-sparse-voxel-octree-representation.md) by using fixed-size dense arrays per chunk rather than hierarchical tree structures.
 
 ### [Chunk Border Neighbor Access](2860-chunk-border-neighbor-access.md)
-A strategy for handling neighbor lookups at chunk boundaries by using a read-only neighborhood view trait, treating chunk borders as semantically identical to internal voxels.
+Chunk Border Neighbor Access is a strategy for handling neighbor lookups at chunk boundaries by using a read-only neighborhood view trait, treating chunk borders as semantically identical to internal voxels. It solves the problem of cross-chunk data access during operations like meshing or ray marching, where an algorithm expects a uniform local neighborhood but the data is partitioned into separate memory blocks [G]. It sets itself apart from sibling methods like [Sparse Voxel Octree Representation](2340-sparse-voxel-octree-representation.md) by maintaining a dense grid layout within chunks while abstracting the boundary logic, and differs from [Compact Voxel Section Storage](4219-compact-voxel-section-storage.md) by explicitly providing a unified interface for both intra-chunk and inter-chunk queries [G].
 
 ### [Compact Voxel Section Storage](4219-compact-voxel-section-storage.md)
-A data structure representing a 16x16x16 voxel section that uses three storage modes to minimize memory: Empty (no allocation for all-air), Uniform (no allocation for single material), and Palette (packed indices for mixed materials).
+Compact Voxel Section Storage is a memory-optimized representation for a fixed-size $16 \times 16 \times 16$ voxel section (4096 voxels) that minimizes heap allocation by distinguishing between empty, uniform, and sparse material distributions. Unlike dense arrays which always consume fixed memory, or complex tree structures, this method uses bit-packed palette indices for mixed materials, achieving $O(1)$ bytes for trivial sections and compact storage for low-entropy terrain, while supporting $O(1)$ random access. It serves as the core data container within the Chunk-based Voxel Data Structure, providing the localized memory layout that enables efficient greedy meshing and neighbor access.
 
-### Terrain Chunk Data Structure
-A value type struct representing a terrain chunk with its index, world position, size, and LOD. A reference type class representing a terrain chunk includes a computed max corner. A collection class manages an array of terrain chunks with global resolution and dimensions [S8, unofficial].
-*   **TerrainChunk_Val:** Fields are `ChunkIndex` (int3), `MinCornerWS` (float3), `ChunkSize` (float3), `ChunkLOD` (TerrainLod) [S8, unofficial].
-*   **TerrainChunk_Ref:** Fields are `ChunkIndex` (int3), `MinCornerWS` (float3), `ChunkSize` (float3), `MaxCornerWS` (computed float3), `ChunkLOD` (TerrainLod) [S8, unofficial].
-*   **TerrainChunkCollection:** Fields are `TerrainChunks` (TerrainChunk_Val array), `Resolution` (int3), `ChunkDimension` (int3), `Origin` (float3) [S8, unofficial].
+### [Voxel Chunk Data Management and Residency](6751-voxel-chunk-data-management-and-residency.md)
+This method manages the memory residency of voxel chunks in an infinite voxel world by tracking state transitions between raw, uniform, and compressed forms to reduce memory footprint for distant chunks. It solves the problem of unbounded memory usage in dense voxel grids by converting raw voxel arrays into compact representations (Uniform or Compressed) and dropping the resident raw array, while maintaining data consistency through versioning and mutation flags. Unlike sibling structures that focus on spatial partitioning or octree traversal, this method operates on the data lifecycle within a fixed-size chunk, using distance-keyed asynchronous compression to prioritize memory savings for far chunks.
+
+### [Clustered Grid Cell (CGC) Data Structure](9217-clustered-grid-cell-cgc-data-structure.md)
+The Clustered Grid Cell (CGC) data structure is a memory-efficient representation for isosurface rendering that stores active grid cells directly as rendering primitives, eliminating the need for the original volume scalar data during the rendering phase. It sets itself apart from previous cell rasterization approaches, such as Liu et al.'s method, by storing eight corner scalar values with each cell, allowing full rendering without GPU-resident volume textures, while achieving approximately 37% of the memory usage of typical efficient mesh-based representations.
 
 ### Chunk Data Modification & Queue Management
-Processes chunk modifications, expands voxel arrays if sparse, updates block types, tracks adjacent chunks for mesh regeneration, and queues affected chunks for mesh loading [S9, unofficial].
-*   **Steps:**
-    1.  Retrieve mutable chunk data. If `None`, skip [S9, unofficial].
-    2.  If voxel array length is 1, expand to full chunk size (`CHUNK_SIZE_I32^3`) by duplicating the single block data [S9, unofficial].
-    3.  Update voxel block type at calculated index: `i = vec3_to_index(local_pos, 32)` [S9, unofficial].
-    4.  If modification is at chunk edge, add adjacent chunk to `adj_chunk_set` [S9, unofficial].
-    5.  Queue adjacent chunks and current chunk for mesh loading [S9, unofficial].
+Processes chunk modifications, expands voxel arrays if sparse, updates block types, tracks adjacent chunks for mesh regeneration, and queues affected chunks for mesh loading [S8, unofficial].
+- **Steps:**
+  1. Retrieve mutable chunk data. If `None`, skip [S8, unofficial].
+  2. If voxel array length is 1, expand to full chunk size (`CHUNK_SIZE_I32^3`) by duplicating the single block data [S8, unofficial].
+  3. Update voxel block type at calculated index: $i = \text{vec3\_to\_index}(\text{local\_pos}, 32)$ [S8, unofficial].
+  4. If modification is at chunk edge, add adjacent chunk to `adj_chunk_set` [S8, unofficial].
+  5. Queue adjacent chunks and current chunk for mesh loading [S8, unofficial].
+
+### Voxel Layer System
+A data structure system allowing non-destructive changes to voxel worlds by storing voxels in separate VoxelLayer structures rather than directly in the chunk array, enabling toggling visibility of different content sets (e.g., terrain vs. castle) [S9, unofficial].
+- **Steps:**
+  1. Move voxel storage from the chunk array to separate VoxelLayer structures [S9, unofficial].
+  2. Assign voxels to specific layers (e.g., background for terrain, top for castles) [S9, unofficial].
+  3. Toggle visibility of specific layers to show/hide content without modifying the underlying voxel data [S9, unofficial].
+- **Parameters:** Default Layer Count is two (background and top), though the system supports more [S9, unofficial].
+- **Layout:** VoxelLayer is a separate data structure containing voxels, distinct from the chunk array. Each chunk contains two layers: a 'background' layer for terrain and a 'top' layer for structures like castles [S9, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Access is $O(1)$ for both get and set operations [S1, S4, unofficial]. Meshing is performed only on modified chunks [S5, unofficial].
-*   **Memory Complexity:** $O(C_x \cdot C_y \cdot C_z)$ per chunk [S2, S3, unofficial]. For a $32^3$ chunk with 1-byte voxel IDs, this is 32,768 bytes [S2, unofficial]. (Note: some implementations use 4-byte VoxelData structs [S3, unofficial]).
-*   **Measured Performance:** Using $16 \times 256 \times 16$ chunks keeps data small and re-meshing fast [S4, unofficial]. Greedy meshing can reduce triangle count by 10× [S5, unofficial].
-*   **Strengths:** Efficient meshing (only changed chunks are regenerated), easy serialization (save/load individual chunks), spatial locality for cache performance [S5, unofficial].
-*   **Limitations:** Fixed resolution within a chunk (cannot have high-res caves and low-res sky in the same chunk without sub-chunking), boundary handling complexity for meshing [S5, S7, unofficial].
-*   **When to use:** Voxel-based games, terrain generation, real-time editing [S3, S5, unofficial].
-*   **When not to use:** Highly sparse data with large empty volumes (use SVO), or when variable resolution is critical without sub-chunking overhead [S4, unofficial].
+- **Time Complexity:** Access and modification are $O(1)$ for both chunk lookup (assuming hash map) and local voxel access [S1, unofficial][S2, unofficial]. Meshing is $O(N)$ where $N$ is the number of voxels in the chunk [S6, unofficial].
+- **Memory Complexity:** $O(C \cdot S^3)$ where $C$ is the number of active chunks and $S$ is the chunk size [S1, unofficial]. This is significantly more memory-efficient than a global dense grid for sparse worlds.
+- **Measured Performance:** On an RTX 3050, rendering ~5,000 chunks can achieve over 200fps [S7, unofficial]. Greedy meshing can reduce triangle count by 10x [S5, unofficial].
+- **Scaling:** Scales well with world size as only nearby chunks are loaded and processed [S1, unofficial][S2, unofficial].
+- **Strengths:** Efficient memory usage for sparse worlds, fast local updates, easy serialization [S6, unofficial].
+- **Limitations:** Fixed chunk size may lead to inefficiencies if not tuned for the scene (too large = slow remeshing, too small = high triangle count) [S6, unofficial]. Boundary handling adds complexity [S8, unofficial].
 
 ## Background
-The chunk-based approach is foundational in voxel engine development [S4, S5, unofficial]. It allows for efficient meshing and world serialization by grouping blocks into manageable units [S5, unofficial]. Early implementations used fixed-size chunks (e.g., $16 \times 16 \times 16$) to balance memory usage and meshing speed [S5, unofficial]. Modern implementations often use larger or non-cubic chunks (e.g., $16 \times 256 \times 16$) to optimize for height and rendering performance [S4, unofficial]. The technique is widely used in both CPU-based (Unity Jobs) and GPU-based (Compute Shaders) voxel engines [S3, unofficial].
+The chunk-based approach is a foundational technique in voxel engine development, popularized by games like Minecraft. It allows for the management of infinite worlds by dividing them into manageable units. Early implementations used JavaScript and WebGL for browser-based voxel engines [S1, unofficial], while C++ and OpenGL implementations have been used for more performant desktop applications [S7, unofficial]. The technique has evolved to include optimizations like greedy meshing [S5, unofficial], layer systems for non-destructive editing [S9, unofficial], and advanced memory management for residency [S1, unofficial].
 
 ## Sources
-[S1] vercidium-patreon/meshing, https://github.com/vercidium-patreon/meshing, fetched 2026-10-26 (unofficial)
-[S2] m2-md/voxel-greedy-meshing-typescript, https://github.com/m2-md/voxel-greedy-meshing-typescript, fetched 2026-10-26 (unofficial)
-[S3] Add foundational voxel engine: generic, terrain, and smooth voxel support, https://github.com/Five-Squared-Interactive/StraightFour/pull/40, fetched 2026-10-26 (unofficial)
-[S4] Build a 3D Voxel Engine in WebGL | Tutorials, https://www.mysimulator.uk/content/tutorials/voxel-engine.html, fetched 2026-10-27 (unofficial)
-[S5] kotychok/mutiny, https://github.com/kotychok/mutiny, fetched 2026-10-27 (unofficial)
-[S6] 2JacT/Marching-Cubes-Terrain, https://github.com/2JacT/Marching-Cubes-Terrain, fetched 2026-10-27 (unofficial)
-[S7] Binary Greedy Voxel Meshing Algorithm, https://github.com/TanTanDev/binary_greedy_mesher_demo, fetched 2026-10-26 (unofficial)
+[S1] Show HN: Basic voxel engine in WebGL/JavaScript with full source, https://github.com/Lallassu/vox2, fetched 2026-10-26 (unofficial)
+[S2] vercidium-patreon/meshing, https://github.com/vercidium-patreon/meshing, fetched 2026-10-26 (unofficial)
+[S3] m2-md/voxel-greedy-meshing-typescript, https://github.com/m2-md/voxel-greedy-meshing-typescript, fetched 2026-10-26 (unofficial)
+[S4] Add foundational voxel engine: generic, terrain, and smooth voxel support, https://github.com/Five-Squared-Interactive/StraightFour/pull/40, fetched 2026-10-26 (unofficial)
+[S5] Build a 3D Voxel Engine in WebGL | Tutorials, https://www.mysimulator.uk/content/tutorials/voxel-engine.html, fetched 2026-10-27 (unofficial)
+[S6] kotychok/mutiny, https://github.com/kotychok/mutiny, fetched 2026-10-27 (unofficial)
+[S7] Creating a Voxel Engine with OpenGL | Walker McGilvary, https://theslabby.github.io/2023/12/24/start-voxelengine.html, fetched 2026-10-28 (unofficial)
+[S8] Binary Greedy Voxel Meshing Algorithm, https://github.com/TanTanDev/binary_greedy_mesher_demo, fetched 2026-10-26 (unofficial)
+[S9] Procedural Generation of Voxel Worlds with Castles, https://researchcommons.waikato.ac.nz/entities/publication/70d98783-1629-43df-9d01-b973ddbb5d75, fetched 2026-10-28 (unofficial)

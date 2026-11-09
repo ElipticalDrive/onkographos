@@ -1,0 +1,157 @@
+--- v007.md
++++ v008.md
+@@ -4,120 +4,48 @@
+ 
+ ## Overview
+-On-the-Fly Dynamic NeRF Training (OD-NeRF) is a method for training dynamic Neural Radiance Fields concurrently with the acquisition of training frames, enabling the streaming of dynamic scenes as they unfold rather than reconstructing them after the event [S1]. Unlike standard dynamic NeRFs that optimize over full video sequences to reconstruct 4D space-time, this approach treats the radiance field as a hidden state updated incrementally, requiring minimum optimization iterations per frame to achieve interactive speeds [S1]. It is specifically designed for dynamic scenes captured by multi-view forward-facing cameras [S1].
++On-the-fly Dynamic NeRF Training (OD-NeRF) is a method for reconstructing dynamic scenes by training a Neural Radiance Field concurrently with the acquisition of training frames, enabling real-time streaming of the event as it unfolds [S1]. Unlike traditional dynamic NeRFs that require full video sequences for offline 4D reconstruction, this approach minimizes optimization iterations per frame to achieve interactive speeds, allowing novel views to be rendered at the current time step $t_k$ using only images up to $C_{0:k}$ and the radiance field from the previous step $F_{0:k-1}$ [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Inputs:** A sequence of observed images $C_{0:K}$ from $K$ time steps $t_{0:K}$, and the radiance field estimate $F_{k-1}$ from the previous time step.
+-*   **Outputs:** The updated radiance field function $F_k$ at the current time step $t_k$, capable of rendering novel views for that specific time [S1].
++**Inputs and Outputs:**
++*   **Inputs:** A sequence of multi-view forward-facing images $C_{0:K}$ arriving over time; the radiance field estimate from the previous time step $F_{k-1}$; an occupancy grid $G$ for efficient sampling [S1].
++*   **Outputs:** The updated radiance field function $F_k$ at the current time step $t_k$, which maps spatial coordinates $x \in \mathbb{R}^3$, viewing directions $d$, and time $t$ to volume density $\sigma \in \mathbb{R}$ and RGB color $c \in \mathbb{R}^3$ [S1].
+ 
+-**Data Structures**
+-The method relies on a neural network representation of the radiance field. While specific network architectures (e.g., MLP depth, grid resolution) are not detailed in the source text, the field $F_k$ maps spatial coordinates $\mathbf{x} \in \mathbb{R}^3$ and viewing directions $\mathbf{d}$ to volume density $\sigma \in \mathbb{R}$ and RGB color $c \in \mathbb{R}^3$ [S1]. The source notes the introduction of a transition function for an occupancy grid $G$ used for efficient sampling, implying a grid-based acceleration structure is part of the implementation, but does not specify its layout or bit-packing [S1].
++**Data Structures:**
++The radiance field $F$ is typically implemented as a neural network. The method utilizes an occupancy grid $G$ to accelerate sampling [S1]. The specific bit-packing or layout of $G$ is not detailed in the sources, but it serves as a sparse representation to guide ray marching [S1].
+ 
+-**Algorithm Steps**
+-The training process is formulated as estimating hidden states in a Hidden Markov Model (HMM), where radiance fields $F_{0:K}$ are hidden states and images $C_{0:K}$ are observations [S1].
++**Algorithm Steps:**
++1.  **Initialization:** Initialize the radiance field $F_0$ and occupancy grid $G_0$ for the first time step $t_0$ using standard NeRF training procedures on the initial set of images $C_0$ [S1].
++2.  **Iterative Update:** For each subsequent time step $k = 1, \dots, K$:
++    a.  **Markov Assumption:** Apply the first-order Markov assumption to simplify the probability model. Assume conditional independence such that the current radiance field $F_k$ depends only on the current observations $C_k$ and the previous state $F_{k-1}$, ignoring older history $\{C_{0:k-1}, F_{0:k-2}\}$ [S1].
++    $$F_k = \arg\max_{F_k} P(F_k | C_k, F_{k-1})$$
++    b.  **Loss Formulation:** Define the objective as minimizing the rendering loss between the predicted pixel colors $\hat{C}_k(r)$ and the observed colors $C_k(r)$ for all rays $r$ in the current view set $R$ [S1]:
++    $$F_k = \arg\min_{F_k} \sum_{r \in R} ||\hat{C}_k(r) - C_k(r)||^2_2$$
++    c.  **Volume Rendering:** To compute $\hat{C}_k(r)$, aggregate the color of $N$ points sampled along ray $r$ with interval $\delta_i$:
++    $$\hat{C}(r) = \sum_{i=0}^{N-1} T_i (1 - \exp(-\sigma_i \delta_i)) c_i$$
++    where the transmittance $T_i$ is:
++    $$T_i = \exp\left(-\sum_{j=0}^{i-1} \sigma_j \delta_j\right)$$
++    Here, $\sigma_i$ and $c_i$ are the density and color predicted by $F_k$ at the $i$-th sample point [S1].
++    d.  **Optimization:** Perform gradient descent to update the parameters of $F_k$ (and potentially $G_k$) to minimize the loss. The transition from $F_{k-1}$ to $F_k$ is constrained to require minimum optimization iterations, often leveraging the similarity between consecutive frames [S1].
++    e.  **Grid Update:** Update the occupancy grid $G$ to reflect changes in the scene geometry, using a transition function $P(G_k | G_{k-1})$ to maintain efficient sampling for the next step [S1].
+ 
+-1.  **Initialize:** Start with the radiance field $F_0$ trained on the initial frame $C_0$.
+-2.  **Iterate for each time step $k = 1 \dots K$:**
+-    a.  **Markov Assumption:** Simplify the probability model by assuming conditional independence. The current radiance field $F_k$ depends only on the current observation $C_k$ and the previous field $F_{k-1}$, ignoring older history $\{C_{0:k-1}, F_{0:k-2}\}$ [S1].
+-    $$ F_k = \arg\max_{F_k} P(F_k | C_k, F_{k-1}) $$
+-    b.  **Loss Formulation:** Convert the maximization problem into a minimization of the rendering loss. The goal is to find $F_k$ that minimizes the squared error between the rendered color $\hat{C}_k(r)$ and the observed color $C_k(r)$ for all rays $r$ in the current view [S1]:
+-    $$ F_k = \arg\min_{F_k} \sum_{r \in R} ||\hat{C}_k(r) - C_k(r)||^2_2 $$
+-    c.  **Volume Rendering:** Compute the rendered color $\hat{C}_k(r)$ for a ray $r$ by aggregating $N$ points with interval $\delta$ along the ray [S1]:
+-    $$ \hat{C}(r) = \sum_{i=0}^{N-1} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+-    where the transmittance $T_i$ is:
+-    $$ T_i = \exp\left(-\sum_{j=0}^{i-1} \sigma_j \delta_j\right) $$
+-    Here, $\sigma_i$ and $c_i$ are the density and color predicted by the network $F_k$ at the $i$-th sample point on ray $r$ [S1].
+-    d.  **Optimization:** Update the parameters of $F_k$ (initialized from or constrained by $F_{k-1}$) to minimize the loss. The source emphasizes that this transition requires "minimum optimization" to ensure fast training [S1].
+-    e.  **Grid Update (Implicit):** Update the occupancy grid $G_k$ using a transition function $P(G_k | G_{k-1})$ to maintain efficient sampling for the next step [S1].
++**Parameters:**
++*   **Time Step Interval:** The method assumes discrete time steps $t_0, \dots, t_K$. The interval is not specified but must be small enough to maintain temporal continuity [S1].
++*   **Number of Samples ($N$):** Not given in the sources.
++*   **Ray Interval ($\delta$):** Not given in the sources.
+ 
+-**Pseudocode**
+-```python
+-def on_the_fly_training(observations: List[Image], initial_field: RadianceField) -> RadianceField:
+-    """
+-    Trains a dynamic NeRF on-the-fly using the Markov assumption.
+-    
+-    Args:
+-        observations: List of images C_0, C_1, ..., C_K.
+-        initial_field: The radiance field F_0 trained on the first frame.
+-        
+-    Returns:
+-        The final radiance field F_K.
+-    """
+-    current_field = initial_field
+-    occupancy_grid = initialize_grid(current_field) # [G]
+-    
+-    for k in range(1, len(observations)):
+-        current_observation = observations[k]
+-        
+-        # 1. Define Loss Function based on Markov Assumption
+-        # F_k = argmin sum || C_hat_k(r) - C_k(r) ||^2
+-        def loss_function(field_params):
+-            rendered_colors = []
+-            observed_colors = []
+-            
+-            # Sample rays from current observation
+-            rays = sample_rays(current_observation)
+-            
+-            for r in rays:
+-                # 2. Volume Rendering
+-                # Aggregate N points along ray r
+-                sigma_samples = []
+-                c_samples = []
+-                for i in range(N):
+-                    # Sample point p_i along ray r with interval delta
+-                    p_i = r.origin + r.direction * (i * delta)
+-                    
+-                    # Query field for density and color
+-                    # Note: Field maps (x, d) -> (sigma, c)
+-                    sigma, c = current_field.query(p_i, r.direction)
+-                    sigma_samples.append(sigma)
+-                    c_samples.append(c)
+-                
+-                # Compute transmittance T_i
+-                # T_i = exp(-sum_{j=0}^{i-1} sigma_j * delta)
+-                transmittance = 1.0
+-                accumulated_loss = 0.0
+-                
+-                for i in range(N):
+-                    # Weight for current sample
+-                    weight = transmittance * (1.0 - exp(-sigma_samples[i] * delta))
+-                    accumulated_loss += weight * c_samples[i]
+-                    
+-                    # Update transmittance for next sample
+-                    transmittance *= exp(-sigma_samples[i] * delta)
+-                
+-                rendered_colors.append(accumulated_loss)
+-                observed_colors.append(current_observation.get_pixel_color(r))
+-            
+-            # Compute MSE Loss
+-            loss = mean_squared_error(rendered_colors, observed_colors)
+-            return loss
+-
+-        # 3. Optimize Field Parameters
+-        # Minimize loss using gradient descent
+-        # The source implies minimal optimization steps are needed
+-        current_field = optimize(current_field, loss_function, steps=MIN_STEPS)
+-        
+-        # 4. Update Occupancy Grid
+-        # Transition function P(G_k | G_{k-1})
+-        occupancy_grid = update_grid(occupancy_grid, current_field)
+-        
+-    return current_field
+-```
+-
+-**Parameters and Edge Cases**
+-*   **Camera Setup:** Limited to multi-view forward-facing cameras [S1]. Monocular or 360-degree inward-facing setups are excluded due to hardware complexity or photographer movement requirements [S1].
+-*   **Optimization Steps:** The method relies on "minimum optimization iterations" per frame to maintain interactivity [S1]. The exact number is not specified in the sources [S1].
+-*   **Scalability:** The Markov assumption is critical to prevent complexity growth as time $t_k$ increases [S1].
++**Edge Cases and Pitfalls:**
++*   **Scalability:** Estimating $F_k$ conditioned on all previous images and fields is not scalable as $t_k$ increases. The Markov assumption is critical to mitigate this complexity growth [S1].
++*   **Camera Setup:** The method is limited to dynamic scenes captured by multi-view forward-facing cameras. Monocular setups are excluded due to the need for camera movement, and 360-degree setups are excluded due to hardware complexity [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Designed for interactive speed. By using the Markov assumption and minimal optimization steps per frame, it avoids the $O(K)$ dependency on the full sequence length for each update, focusing instead on $O(1)$ updates relative to the current frame [S1].
+-*   **Memory Complexity:** Depends on the radiance field representation and the occupancy grid. The source mentions an occupancy grid $G$ for efficient sampling but does not specify its memory footprint [S1].
+-*   **Strengths:** Enables real-time streaming of dynamic scenes; suitable for social media, VR/AR, and gaming applications [S1].
+-*   **Limitations:** Restricted to multi-view forward-facing camera setups; may suffer from error accumulation if the Markov assumption is violated (i.e., if long-term dependencies are crucial) [S1].
+-*   **When to use:** When the goal is to stream a dynamic scene as it happens, rather than post-processing a recorded video [S1].
++*   **Time Complexity:** The method is designed for "interactive speed," requiring minimum optimization iterations per frame compared to full-sequence training [S1]. Exact complexity is not given.
++*   **Memory Complexity:** Uses an occupancy grid $G$ for efficient sampling, which reduces memory overhead compared to dense voxel grids, but specific memory usage is not given [S1].
++*   **Strengths:** Enables real-time streaming of dynamic scenes; does not require waiting for the entire event to finish; suitable for social media, VR/AR, and gaming applications [S1].
++*   **Limitations:** Limited to multi-view forward-facing camera setups; relies on the Markov assumption which may lose long-term temporal context; performance depends on the speed of the underlying NeRF acceleration techniques [S1].
++*   **When to use:** When real-time or near-real-time streaming of a dynamic scene is required, and the scene can be captured by a static multi-view forward-facing camera rig [S1].
++*   **When not to use:** When offline high-fidelity 4D reconstruction of a completed event is sufficient, or when only monocular or sparse-view data is available [S1].
+ 
+ ## Background
+-On-the-Fly Dynamic NeRF Training (OD-NeRF) was introduced to address the limitation of existing dynamic NeRFs that require full video sequences for reconstruction [S1]. The method leverages the success of NeRF acceleration techniques to train small scenes in seconds, extending this to dynamic scenes on-the-fly [S1]. It formulates the problem as a Hidden Markov Model, where the radiance field is the hidden state and images are observations [S1].
++The method was introduced in the paper "OD-NeRF: Efficient Training of On-the-Fly Dynamic Neural Radiance Fields" [S1]. It addresses the limitation of existing dynamic NeRFs, which typically reconstruct 4D space-time from full video sequences after the event has occurred [S1]. The work builds on recent successes in NeRF acceleration, which allow training small scenes in seconds, making on-the-fly training feasible [S1]. The approach formulates the problem as estimating hidden states in a Hidden Markov Model (HMM), where radiance fields are hidden states and images are observations [S1].
+ 
+ ## Sources

@@ -3,140 +3,99 @@
 Also called: LOD Volume Rendering with Temporal Coherence
 
 ## Overview
-Multi-resolution LOD Volume Rendering with Temporal Coherence is a technique that assigns different resolution levels to subvolumes based on their visual importance (such as projection area, gaze distance, or viewer proximity) to optimize rendering performance while maintaining visual quality [S1]. It distinguishes itself from standard LOD methods by explicitly addressing the visual instability caused by frequent resolution changes during view updates, using a temporal coherence mechanism to prevent flickering [S1]. Unlike [Hierarchical Culling & Multi-resolution Approximation](2010-hierarchical-culling-multi-resolution-approximation.md) which may rely on strict hierarchical traversal, this method allows arbitrary texture resolutions for subvolumes provided level transitions are constrained [S1].
+Multi-resolution LOD Volume Rendering with Temporal Coherence assigns different resolution levels to subvolumes based on visual importance metrics (projection area, gaze distance, or viewer proximity) to optimize rendering performance while maintaining visual quality [S1]. It distinguishes itself from standard LOD methods by explicitly preventing flickering during view changes through a temporal coherence mechanism that stabilizes resolution assignments across consecutive frames [S1]. Unlike [Hierarchical Culling & Multi-resolution Approximation](2010-hierarchical-culling-multi-resolution-approximation.md) which may rely on strict hierarchical traversal, this method allows arbitrary texture resolutions for subvolumes provided level transitions are constrained to at most one step per frame [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume dataset, current camera/view parameters, optional gaze area center, and previous frame's subvolume importance values and LOD assignments.
-*   **Output:** A rendered image where each subvolume is sampled from a texture resolution appropriate to its calculated importance, with smooth transitions between adjacent subvolumes.
+*   **Input:** A 3D volume dataset, current camera/view parameters, an optional gaze area center, and the previous frame's subvolume importance values and LOD assignments [S1].
+*   **Output:** A rendered image where each subvolume is sampled from a texture resolution appropriate to its calculated importance, with smooth transitions between adjacent subvolumes [S1].
 
 **Data Structures:**
-The method operates on a decomposition of the volume into subvolumes. Each subvolume requires the following state to be maintained across frames for temporal coherence:
-1.  **Importance Value ($I_{prev}$):** A scalar value representing the subvolume's priority from the last frame.
-2.  **Current LOD Level ($L_{curr}$):** The index or resolution level currently assigned to the subvolume.
-3.  **Bounding Box:** Used to calculate projection area and distance metrics.
+The method operates on a decomposition of the volume into subvolumes [S1]. Each subvolume maintains state across frames for temporal coherence: an importance value from the previous frame ($I_{prev}$) representing its priority [G], and a current LOD level ($L_{curr}$) indicating the assigned resolution index [G]. A bounding box is stored for each subvolume to calculate projection area and distance metrics [S1].
 
 **Parameters:**
-*   **Level Transition Constraint ($\Delta L_{max}$):** The maximum allowed change in LOD level between frames. The source specifies $\Delta L_{max} = 1$, meaning a subvolume can only move to an adjacent resolution level (e.g., from Level $k$ to $k+1$ or $k-1$) [S1].
-*   **Stability Threshold ($T_{stab}$):** A percentage threshold used to determine if the change in importance value is significant enough to warrant an LOD update. If the relative change in importance is below $T_{stab}$, the LOD remains unchanged [S1]. The exact numerical value of $T_{stab}$ is not given in the sources [S1].
+*   **Level Transition Constraint ($\Delta L_{max}$):** The maximum allowed change in LOD level between frames is one, meaning a subvolume can only move to an adjacent resolution level (e.g., from Level $k$ to $k+1$ or $k-1$) [S1]. This constraint allows arbitrary texture resolution for every subvolume [S1].
+*   **Stability Threshold ($T_{stab}$):** A percentage threshold used to determine if the change in importance value is significant enough to warrant an LOD update [S1]. The exact numerical value of $T_{stab}$ is not given in the sources [S1].
 
 **Steps:**
-
-1.  **Temporal Coherence Initialization:**
-    At the start of the rendering session, initialize $I_{prev}$ and $L_{curr}$ for all subvolumes. This may involve an initial pass to calculate base importance values [S1].
-
-2.  **Frame Start - Check for View Change:**
-    Determine if the viewing direction or gaze area has changed since the last frame.
-    *   If **No**: Proceed to Step 4 (Stability Check) using $I_{prev}$ from the last frame.
-    *   If **Yes**: Proceed to Step 3.
-
-3.  **Importance Recalculation:**
-    For each subvolume, calculate the new importance value $I_{new}$ based on one or more of the following metrics [S1]:
-    *   **Projection Area:** Calculate the projected area of the subvolume's bounding box on the image plane. Larger projected areas yield higher importance.
-    *   **Gaze Distance:** Calculate the Euclidean distance between the center of the gaze area and the center of the subvolume's projected area. Closer proximity yields higher importance.
-    *   **View Point Distance:** Calculate the distance between the camera viewpoint and the center of the subvolume. Closer subvolumes yield higher importance.
-    
-    *Note: The source describes these as distinct metrics; implementation may combine them or select one based on the rendering mode (e.g., gaze-directed vs. standard view) [S1].*
-
-4.  **LOD Stability Check:**
-    For each subvolume, compare $I_{new}$ with $I_{prev}$.
-    Calculate the relative change:
-    $$ \Delta I = \frac{|I_{new} - I_{prev}|}{I_{prev}} $$
-    If $\Delta I < T_{stab}$, the importance is considered stable. Set $L_{new} = L_{curr}$ and skip to Step 6.
-    If $\Delta I \ge T_{stab}$, proceed to Step 5.
-
-5.  **LOD Selection:**
-    Determine the target LOD level $L_{target}$ based on the magnitude of $I_{new}$. Higher importance values map to higher resolution levels (finer textures).
-    Apply the **Level Transition Constraint**:
-    $$ L_{new} = \text{clamp}(L_{target}, L_{curr} - 1, L_{curr} + 1) $$
-    This ensures that the LOD changes by at most one level per frame [S1].
-
-6.  **Update State:**
-    Set $I_{prev} = I_{new}$ and $L_{curr} = L_{new}$ for the next frame.
-
-7.  **Rendering:**
-    Render the volume using the assigned LOD levels. To avoid artifacts at subvolume boundaries due to incorrect texture interpolation and opacity correction, apply two extensions (not detailed in the source text, but noted as beneficial) to ensure continuous transitions and correct pixel opacities [S1].
+1.  **Temporal Coherence Initialization:** At the start of the rendering session, initialize $I_{prev}$ and $L_{curr}$ for all subvolumes by recording their importance values from the last rendering frame [S1].
+2.  **Frame Start - Check for View Change:** Determine if the viewing direction or gaze area has changed since the last frame [S1]. If no, proceed to Step 4 using $I_{prev}$ from the last frame [G]. If yes, proceed to Step 3 [G].
+3.  **Importance Recalculation:** When a new frame is rendered and the view changes, recalculate the importance value of each subvolume [S1]. Calculate the **Projection Area** based on the subvolume's bounding box, where larger projected areas yield higher importance [S1]. Calculate the **Gaze Distance** as the Euclidean distance between the center of the gaze area and the center of the subvolume's projected area, where closer proximity yields higher importance [S1]. Calculate the **View Point Distance** as the distance between the camera viewpoint and the center of the subvolume, where closer subvolumes yield higher importance [S1].
+4.  **LOD Stability Check:** For each subvolume, compare the new importance value ($I_{new}$) with $I_{prev}$ [S1]. Calculate the relative change $\Delta I = |I_{new} - I_{prev}| / I_{prev}$ [G]. If $\Delta I < T_{stab}$, the importance is considered stable [G]. Set $L_{new} = L_{curr}$ and skip to Step 6 [G]. If $\Delta I \ge T_{stab}$, proceed to Step 5 [G].
+5.  **LOD Selection:** Determine the target LOD level based on the magnitude of $I_{new}$, mapping higher importance to higher resolution levels [G]. Apply the Level Transition Constraint to ensure the LOD changes by at most one level per frame: $L_{new} = \text{clamp}(L_{target}, L_{curr} - 1, L_{curr} + 1)$ [S1].
+6.  **Update State:** Set $I_{prev} = I_{new}$ and $L_{curr} = L_{new}$ for the next frame [G].
+7.  **Rendering:** Render the volume using the assigned LOD levels [S1]. Apply two extensions to avoid artifacts caused by incorrect texture interpolation and opacity correction at subvolume boundaries, ensuring continuous transitions and correct pixel opacities [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_frame(volume_data, camera, gaze_area, previous_state):
+def render_frame(volume_data, camera, gaze_area, previous_state, T_STAB):
     """
-    volume_data: The 3D volume dataset.
-    camera: Object containing view direction and position.
-    gaze_area: Object containing center coordinates (or None if not gaze-directed).
-    previous_state: Dictionary mapping subvolume_id -> {'importance': float, 'lod': int}
-    
-    Returns: Rendered image and updated state.
+    volume_data: 3D volume dataset.
+    camera: Object with .position and .view_direction.
+    gaze_area: Object with .center, or None.
+    previous_state: Dict mapping subvol_id -> {'importance': float, 'lod': int}.
+    T_STAB: Stability threshold percentage (e.g., 0.1 for 10%).
     """
+    # [G] Standard grid partitioning
     subvolumes = decompose_volume(volume_data)
     current_state = {}
-    
-    # Step 2: Check for view change
-    view_changed = check_view_change(camera, gaze_area, previous_state.get('camera'))
-    
+    # [G] Compare camera/gaze parameters
+    view_changed = (camera != previous_state.get('camera')) or (gaze_area != previous_state.get('gaze_area'))
+
     for subvol in subvolumes:
         subvol_id = subvol.id
         prev_info = previous_state.get(subvol_id, {'importance': 0.0, 'lod': 0})
         prev_importance = prev_info['importance']
         prev_lod = prev_info['lod']
-        
-        # Step 3: Importance Recalculation
+
         if view_changed:
-            # Calculate metrics based on current camera and gaze
-            proj_area = calculate_projection_area(subvol.bounding_box, camera)
+            # [G] Project bounding box to screen space
+            proj_area = project_bounding_box(subvol.bounding_box, camera)
             view_dist = distance(camera.position, subvol.center)
-            
             if gaze_area is not None:
                 gaze_dist = distance(gaze_area.center, subvol.projected_center)
-                # Combine metrics. Source implies these are distinct options.
-                # A simple weighted sum or max is a common implementation choice [G].
-                # Here we assume a normalized importance function.
-                importance = calculate_importance(proj_area, view_dist, gaze_dist)
+                # [G] Combine metrics; source implies distinct options, here summed
+                importance = proj_area + (1.0 / (1.0 + view_dist)) + (1.0 / (1.0 + gaze_dist))
             else:
-                importance = calculate_importance(proj_area, view_dist, None)
+                importance = proj_area + (1.0 / (1.0 + view_dist))
         else:
-            # If view hasn't changed, importance remains the same as last frame
             importance = prev_importance
-            
-        # Step 4: LOD Stability Check
-        # Avoid division by zero if importance is 0
+
         if prev_importance == 0:
             stability_diff = 0.0
         else:
             stability_diff = abs(importance - prev_importance) / prev_importance
-            
-        # Threshold T_stab is not specified numerically in sources [S1]
+
         if stability_diff < T_STAB:
             current_lod = prev_lod
         else:
-            # Step 5: LOD Selection
-            # Map importance to a target LOD level. 
-            # Higher importance -> Higher LOD index.
-            # The exact mapping function is not specified [S1].
-            target_lod = map_importance_to_lod(importance)
-            
-            # Apply Level Transition Constraint (max change of 1)
-            current_lod = clamp(target_lod, prev_lod - 1, prev_lod + 1)
-            
-        # Step 6: Update State
-        current_state[subvol_id] = {
-            'importance': importance,
-            'lod': current_lod
-        }
-        
-    # Step 7: Rendering
-    # Render using the LODs in current_state.
-    # Apply boundary smoothing extensions to prevent artifacts [S1].
-    image = render_subvolumes(subvolumes, current_state, volume_data)
-    
-    return image, {
-        'camera': camera,
-        'gaze_area': gaze_area,
-        **current_state
-    }
+            target_lod = normalize_importance_to_lod(importance)
+            # [S1] Clamp to adjacent levels
+            current_lod = max(prev_lod - 1, min(target_lod, prev_lod + 1))
+
+        current_state[subvol_id] = {'importance': importance, 'lod': current_lod}
+
+    # [G] Render with assigned LODs, applying boundary extensions
+    image = render_with_lods(subvolumes, current_state, volume_data)
+    return image, {'camera': camera, 'gaze_area': gaze_area, **current_state}
+
+# [G] Helper definitions
+def decompose_volume(data):
+    return [Subvolume(id=i, center=compute_center(i), bbox=compute_bbox(i)) for i in range(num_subvolumes)]
+
+def project_bounding_box(bbox, cam):
+    return bbox.width * cam.focal_length / cam.z
+
+def distance(p1, p2):
+    return sqrt(sum((a-b)**2 for a, b in zip(p1, p2)))
+
+def normalize_importance_to_lod(imp):
+    return int(imp * max_lod)
+
+def render_with_lods(sv_list, state, data):
+    return [sample_texture(sv, state[sv.id]['lod']) for sv in sv_list]
 ```
 
 ## Subtopics

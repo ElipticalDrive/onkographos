@@ -1,0 +1,161 @@
+--- v002.md
++++ v003.md
+@@ -4,92 +4,99 @@
+ 
+ ## Overview
+-Streaming MIP is a rendering technique that approximates the Maximum Intensity Projection (MIP) of volumetric data by projecting pre-sorted detail coefficients from a morphological pyramid directly to the frame buffer [S1]. It solves the problem of rendering large datasets with limited memory bandwidth by streaming coefficients in order of their contribution to the L1-error, allowing for progressive refinement or early termination based on a quality threshold [S1]. Unlike level-by-level MIP rendering, which processes entire resolution levels sequentially, Streaming MIP projects individual coefficients regardless of their pyramid level, requiring a local dilation operation to correctly propagate the maximum value to neighboring pixels [S1].
++Streaming MIP is a multiresolution volume rendering technique that constructs a progressive coefficient stream from a morphological pyramid to allow interactive frame rates on large datasets that do not fit in GPU memory [S1]. It solves the problem of discrete quality jumps in level-by-level rendering by resorting detail coefficients from all pyramid levels simultaneously based on decreasing magnitude of an error measure, providing near-continuous error control [S1]. It sets itself apart from basic texture-based MIP by storing only necessary voxels and from level-by-level MMIP by offering finer granularity in approximation error control [S1].
+ 
+ ## How it works
+-**Inputs:** A morphological pyramid of detail coefficients $\{d_j(x, y, z)\}$, sorted by error contribution (L1-error reduction) [S1].
+-**Outputs:** A 2D frame buffer image representing the MIP [S1].
++**Inputs:** A morphological pyramid of detail coefficients $\{d_j(x, y, z)\}$ sorted by decreasing magnitude of an error measure (typically L1-error reduction) [S1].
++**Outputs:** A rendered image approximating the Maximum Intensity Projection (MIP) of the volume.
+ 
+ **Data Structures:**
+-The implementation requires storing detail coefficients with specific attributes to support the projection logic [S1]. Each voxel (coefficient) is stored with:
+-1.  **Position:** 4 bytes. The pyramid level $j$ is encoded into two bits of the position attribute [S1].
+-2.  **Intensity:** 2 bytes (short), storing the coefficient value [S1].
+-Total memory footprint: 6 bytes per voxel [S1].
++The implementation requires storing detail coefficients with specific attributes to support level-dependent dilation.
++*   **Position Attribute:** 4 bytes. Contains the spatial coordinates $(x, y, z)$ and the originating pyramid level $j$ encoded in the lower two bits [S1].
++*   **Intensity Attribute:** 2 bytes (short). Stores the voxel intensity value [S1].
++*   **Total Size:** 6 bytes per voxel [S1].
+ 
+-**Numbered Steps:**
+-1.  **Initialization:** Initialize the frame buffer with the minimum possible intensity value (e.g., 0 or background) [G].
+-2.  **Iteration:** Iterate through the sorted list of detail coefficients $\{d_j\}$ [S1].
+-3.  **Projection Condition:** For each coefficient $k$ with value $val$ and pyramid level $j$, determine the projection point $(x, y)$ [S1].
+-4.  **Local Dilation:** Define a neighborhood around the projection point based on the level $j$ [S1]. The dilation size is $j \cdot \tilde{A}$, where $\tilde{A}$ is the structuring element used in the pyramid synthesis [S1]. For a square $2 \times 2$ structuring element, the point size corresponds to 1, 2, and 4 for levels 0, 1, and 2 respectively [S1].
+-5.  **Update:** For all pixels in the dilated neighborhood:
+-    *   Let $curval$ be the current value in the frame buffer at that pixel [S1].
+-    *   If $curval < val$, overwrite $curval$ with $val$ [S1].
+-6.  **Termination:** Stop when a pre-defined maximum number of coefficients has been projected or the desired accuracy threshold is met [S1].
+-
+-**Formulas:**
+-The update rule for a pixel $p$ in the neighborhood of coefficient $k$ is:
+-$$ \text{buffer}[p] = \max(\text{buffer}[p], val) $$
+-where $val$ is the intensity of the current coefficient [S1].
+-
+-**Parameters:**
+-*   **Structuring Element $\tilde{A}$:** Typically a square $2 \times 2$ block [S1].
+-*   **Point Size:** Mapped to the hardware vertex program's `PSIZE` semantic [S1]. For level $j$, the point size scales with $j$ [S1].
+-*   **Sorting Criterion:** Coefficients are sorted by the reduction in L1-error between the partial reconstruction and the original data [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Global Dilation Invalid:** Global dilation cannot be used because the scale index (pyramid level) varies per coefficient, unlike level-by-level projection where the scale is constant for all coefficients in a level [S1].
+-*   **Ordering Loss:** Because coefficients are projected by error rather than intensity, voxels are no longer ordered by intensity in the rendering stream [S1]. This necessitates using the maximum operator for frame buffer writes, which may cause performance loss compared to alpha-blending or simple overwriting, although the impact is mitigated by the small size of the blended primitives [S1].
+-*   **Holes:** For non-axis-aligned parallel projections, the voxel-based method may yield pixel-sized holes in the result [S1]. This is typically addressed in a post-processing step using morphological closing with the structuring element $\tilde{A}$ [S1].
++**Algorithm Steps:**
++1.  **Preprocessing:** Construct the morphological pyramid and sort all detail coefficients $\{d_j\}$ by decreasing error magnitude [S1].
++2.  **Initialization:** Initialize the frame buffer (or output texture) with the minimum possible intensity value (e.g., 0 or background) [G].
++3.  **Iteration:** Iterate through the sorted list of coefficients. For each coefficient $k$ with value $val$ and pyramid level $j$:
++    a.  **Projection:** Project the coefficient to the 2D screen space based on the current view direction [S1].
++    b.  **Local Dilation:** Determine the dilation neighborhood based on level $j$. For a square structuring element of size $2 \times 2$, the dilation size is $2^j$ (e.g., size 1 at level 0, size 2 at level 1, size 4 at level 2) [S1].
++    c.  **Update:** For all pixels in the dilated neighborhood around the projection point:
++        i.   Compare the coefficient value $val$ with the current frame buffer value $curval$ at that pixel.
++        ii.  If $curval < val$, overwrite $curval$ with $val$ [S1].
++    d.  **Termination:** Stop when a maximum number of coefficients is projected or a desired accuracy threshold is met [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def streaming_mip_basic(coefficients, frame_buffer, width, height, structuring_element_size=2):
++def streaming_mip_basic(coefficients, frame_buffer, view_direction):
+     """
+-    coefficients: List of tuples (level, x, y, z, value), sorted by error contribution.
+-    frame_buffer: 2D array initialized to min_value.
+-    width, height: Frame buffer dimensions.
+-    structuring_element_size: Size of the base structuring element (e.g., 2 for 2x2).
++    coefficients: List of tuples (level, intensity, x, y, z), sorted by error magnitude descending.
++    frame_buffer: 2D array initialized to minimum value.
++    view_direction: Vector defining the projection.
+     """
+-    for level, x, y, z, val in coefficients:
+-        # Dilation size matches the explicit example: 1, 2, 4 for levels 0, 1, 2 with a 2x2 element
++    for level, intensity, x, y, z in coefficients:
++        # Project 3D point to 2D screen coordinates
++        sx, sy = project_to_screen(x, y, z, view_direction)
++        
++        # Determine dilation size based on pyramid level
++        # Assuming square 2x2 structuring element
+         dilation_size = 2 ** level
+-        half = dilation_size // 2
+         
+-        for dy in range(-half, half + 1):
+-            for dx in range(-half, half + 1):
+-                px = x + dx
+-                py = y + dy
+-                
+-                if 0 <= px < width and 0 <= py < height:
+-                    if frame_buffer[py, px] < val:
+-                        frame_buffer[py, px] = val
++        # Define neighborhood bounds
++        min_x = int(sx) - dilation_size
++        max_x = int(sx) + dilation_size
++        min_y = int(sy) - dilation_size
++        max_y = int(sy) + dilation_size
++        
++        # Clip to frame buffer boundaries
++        min_x = max(0, min_x)
++        max_x = min(frame_buffer.width, max_x)
++        min_y = max(0, min_y)
++        max_y = min(frame_buffer.height, max_y)
++        
++        # Update frame buffer with maximum operator
++        for px in range(min_x, max_x):
++            for py in range(min_y, max_y):
++                if frame_buffer[px, py] < intensity:
++                    frame_buffer[px, py] = intensity
+ ```
++
++**Parameters:**
++*   **Structuring Element:** Typically a square $2 \times 2$ element [S1].
++*   **Point Size:** Mapped to hardware point size extension (PSIZE in Cg) to implement dilation [S1].
++*   **Point Sprite:** Used if the projection of the structuring element is not square [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Global Dilation:** Cannot be used because the scale index varies per coefficient, unlike level-by-level projection where the scale is constant per level [S1].
++*   **Performance:** Voxels are no longer ordered by intensity, requiring writes to the frame buffer to use the maximum operator (blended primitives), causing some performance loss compared to ordered alpha blending [S1].
++*   **Memory:** The 6-byte overhead per voxel increases memory usage compared to standard 4-byte representations [S1].
+ 
+ ## Subtopics
+ 
+ ### Optimized Streaming MIP
+-This variant avoids the performance drawbacks of the basic implementation (point sprites, frame buffer blending, 6-byte overhead) by using only 4 bytes per voxel and no point sprites [S1]. It retains the error-sorted list but uses a second histogram-sorting step with one bin per (level, intensity) pair to guide rendering [S1]. The algorithm selects a percentage of coefficients to render, then traverses the sorted list to render voxels for each pyramid level in low-to-high intensity order, guided by the histogram [S1]. This allows for efficient rendering without the need for maximum operator blending during the write phase, as the intensity ordering ensures correct MIP approximation [S1].
++This variant avoids the drawbacks of the basic implementation (point sprites, frame buffer blending, 6-byte overhead) by using a histogram-based selection strategy [S1]. It uses only 4 bytes per voxel and avoids point sprites [S1]. The error-sorted list is used only to guide the error for speed/quality tradeoff, not strictly for rendering order [S1]. A second histogram-sorting step groups coefficients by (level, intensity) pairs, maintaining error ordering within bins [S1]. Rendering traverses the sorted list for a chosen percentage of coefficients, rendering voxels in low-to-high intensity order per level [S1].
+ 
+ ### Advanced Algorithm with Mipmap Fallback
+-This method handles missing data at the needed resolution by triggering a fallback to a higher mipmap level [S2, unofficial]. If no higher level is present or the data is too coarse, it resorts to iterative interrupt/resume methods [S2, unofficial]. This approach provides a stable frame rate by fixing a budget for data upload, leveraging the fact that users perceive fewer details during strong motion when missing data is most likely [S2, unofficial].
++An approximation method where missing data at the needed resolution triggers a fallback to a higher mipmap level, resorting to iterative interrupt/resume only if no higher level is present or data is too coarse [S2, unofficial]. Fixing a budget for upload delivers a relatively stable frame rate [S2, unofficial].
+ 
+ ### Center-Precomputed MIP Approximation
+-This technique reduces per-intersection cost by precomputing MIP-filtered weights using the inverse covariance matrix of the surfel's tangent frame [S3, unofficial]. The weight $w$ is calculated as $w = n_f \cdot \exp(-0.5 \cdot \rho_{\text{mip}}^2)$, where $\rho_{\text{mip}}^2 = \Sigma_{uu}^{-1} u^2 + 2 \Sigma_{uv}^{-1} uv + \Sigma_{vv}^{-1} v^2$ [S3, unofficial]. This avoids per-pixel Jacobian evaluation without visual loss in filtering quality [S3, unofficial].
++Reduces per-intersection cost compared to per-pixel Jacobian evaluation without visual loss in filtering quality [S3, unofficial]. Uses the formula $\rho_{\text{mip}}^2 = \Sigma_{uu}^{-1} u^2 + 2 \Sigma_{uv}^{-1} uv + \Sigma_{vv}^{-1} v^2$ and weight $w = n_f \cdot \exp(-0.5 \cdot \rho_{\text{mip}}^2)$ [S3, unofficial].
+ 
+-### [Block Inspection (Streamed)](6010-block-inspection-streamed.md)
+-Streamed volume block inspection by opening a second streamed volume over the same store, cropped to picked brick's common-grid box, letting octree pull crop toward level 0 [G].
++### Sparse Volume Texture Mip Mapping
++Supports mip levels in Sparse Volume Texture Sample nodes, allowing for level-of-detail management similar to other texture types [S4]. Setting the MipLevel input pin attempts to sample at a specific mip level provided it has been streamed in, but streaming itself is not driven from there [S4]. If the requested mip level is not streamed in, sampling may fail or fall back [S4].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of coefficients projected [S1]. In the worst case, all coefficients are projected, but early termination allows for $O(k)$ where $k$ is the number of coefficients needed for the desired accuracy [S1].
+-*   **Memory Complexity:** 6 bytes per voxel for the basic implementation (4 bytes position + 2 bytes intensity) [S1]. The optimized variant uses 4 bytes per voxel [S1].
+-*   **Performance:** The basic implementation suffers from some performance loss due to the need for maximum operator writes to the frame buffer, as voxels are not ordered by intensity [S1]. However, the impact is limited because the blended primitives (dilated points) are small [S1]. The optimized variant eliminates this bottleneck [S1].
+-*   **Strengths:** Allows for progressive refinement; efficient use of memory bandwidth by streaming only necessary coefficients; hardware-accelerated via point rendering extensions [S1].
+-*   **Limitations:** Requires preprocessing to build the morphological pyramid and sort coefficients; basic implementation has higher memory overhead and blending overhead; non-axis-aligned projections may require post-processing to fill holes [S1].
++*   **Time Complexity:** Depends on the number of coefficients projected. The method allows stopping early based on accuracy, providing variable rendering time [S1].
++*   **Memory Complexity:** Requires storing the sorted list of detail coefficients. The basic implementation uses 6 bytes per voxel, while the optimized version uses 4 bytes [S1].
++*   **Performance:** The basic implementation suffers from performance loss due to the need for the maximum operator in frame buffer writes and the use of point sprites [S1]. The optimized version improves performance by avoiding these drawbacks [S1].
++*   **Strengths:** Provides near-continuous error control and interactive frame rates for large datasets that do not fit in GPU memory [S1].
++*   **Limitations:** The basic implementation has higher memory overhead and performance costs due to blending and point sprites [S1].
+ 
+ ## Background
+-Streaming MIP was introduced in the context of multiresolution MIP rendering of large volumetric data accelerated on graphics hardware [S1]. It builds on the concept of morphological pyramids, where detail coefficients are computed to minimize L1-error [S1]. The method was developed to address the limitations of level-by-level rendering, which cannot easily support progressive refinement or adaptive quality control [S1]. The basic implementation leverages graphics hardware features such as point size extensions and point sprites to implement level-dependent local dilation [S1].
++Streaming MIP was introduced in the paper "Multiresolution MIP Rendering of Large Volumetric Data Accelerated on Graphics Hardware" [S1]. It builds on the principles of multiresolution and level of detail [Parent].
+ 
+ ## Sources
+ [S1] Multiresolution MIP Rendering of Large Volumetric Data Accelerated on Graphics Hardware, https://doi.org/10.2312/vissym/eurovis07/243-250, fetched 2026-10-26
+-[S2] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)
++[S2] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)
+ [S3] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)
+-[S4] feat(niivue): streamed multi-LOD rendering fixes, LOD compensation, budget plans, and block inspection, https://github.com/niivue/mono/pull/138, fetched 2026-10-27+[S4] Sparse Volume Textures in Unreal Engine | Unreal Engine 5.8 ... - Epic Dev, https://dev.epicgames.com/documentation/en-us/unreal-engine/sparse-volume-textures-in-unreal-engine, fetched 2026-10-28

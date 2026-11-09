@@ -11,23 +11,23 @@ Chunk Rendering with Multidraw Indirect is a technique for rendering voxel world
 *   **Output:** A single GPU draw call rendering all visible chunks.
 
 **Data Structures:**
-1.  **`blocksIbo` (Index Buffer):** Size `maxIndices` elements. Contains pre-generated indices for a single quad mesh `{0, 2, 1, 0, 3, 2}` repeated for each chunk. Total indices: `CHUNK_SIZE * 6 * 6` [S2, unofficial].
+1.  **`blocksIbo` (Index Buffer):** Size `maxIndices` elements [S2, unofficial]. Contains pre-generated indices for a single quad mesh `{0, 2, 1, 0, 3, 2}` repeated for each chunk [S2, unofficial]. Total indices: `CHUNK_SIZE * 6 * 6` [S2, unofficial].
 2.  **`hugeVbo` (Vertex Buffer):** Capacity `std::pow(GetSettings()->GetRenderDistance(), 3ULL) * CHUNK_SIZE / 2` elements of type `BlockQuad` [S2, unofficial]. Layout: Concatenated vertex data for all active chunks.
-3.  **`multidrawCommands` (Indirect Command Buffer):** Array of `DrawElementsIndirectCommand` structures. Fields: `count` (indices to draw), `instanceCount` (1), `firstIndex` (0), `baseVertex` (offset into `hugeVbo`), `baseInstance` (chunk index `i`) [S2, unofficial].
-4.  **`multidrawChunkOffsets` (Vertex Buffer):** Array of `glm::vec3` (3 floats). Content: Chunk location offsets relative to the player [S2, unofficial].
+3.  **`multidrawCommands` (Indirect Command Buffer):** Array of `DrawElementsIndirectCommand` structures [S2, unofficial]. Fields: `count` (indices to draw), `instanceCount` (1), `firstIndex` (0), `baseVertex` (offset into `hugeVbo`), `baseInstance` (chunk index `i`) [S2, unofficial].
+4.  **`multidrawChunkOffsets` (Vertex Buffer):** Array of `glm::vec3` (3 floats) [S2, unofficial]. Content: Chunk location offsets relative to the player [S2, unofficial].
 5.  **`ChunkDrawCall` Structure:** Fields: Chunk pointer, number of indices to draw, chunk's shader position offset [S2, unofficial].
 6.  **`DAIC` struct:** `uint cnt`, `uint instCnt`, `uint start`, `uint baseVert`, `uint baseInst`, `uint* index` [S1, unofficial].
-7.  **`MegaSSBO`:** A single large SSBO containing face data for all visible chunks. Each chunk contributes a contiguous block of faces. Tracked by `m_MegaSSBOOffset` and `m_MegaSSBOFaceCount` [S3, unofficial].
+7.  **`MegaSSBO`:** A single large SSBO containing face data for all visible chunks [S3, unofficial]. Each chunk contributes a contiguous block of faces [S3, unofficial]. Tracked by `m_MegaSSBOOffset` and `m_MegaSSBOFaceCount` [S3, unofficial].
 
 **Numbered Steps:**
-1.  **Initialize Index Buffer:** Create `blocksIbo` with `maxIndices` size. Loop `i` from `0` to `maxIndices / 6`. For each `i`, write 6 indices to buffer: `indices[0] + (i * 4)` through `indices[5] + (i * 4)` [S2, unofficial].
-2.  **Copy Remeshed Chunks:** Iterate over each chunk in `remeshedChunks`. If `mesh->GetQuadCount() == 0`, skip the chunk [S2, unofficial]. Ensure GL buffers exist. Reserve VBO/IBO capacity at `1.5 * mesh_count`. Copy mesh data to mapped buffers via `memcpy`. Write to `hugeVbo` range via `WriteToRange`. Swap next buffers [S2, unofficial].
-3.  **Prepare Multidraw Commands:** Create arrays for `chunkOffsets` and `commands`. Loop `i` from `0` to `chunksToDraw`. For each chunk, create `DrawElementsIndirectCommand`: `count` = indices to draw, `instanceCount` = 1, `firstIndex` = 0, `baseVertex` = `chunkVboRange->GetOffset() * 4`, `baseInstance` = `i`. Add chunk offset to `chunkOffsets` [S2, unofficial].
-4.  **Execute Multidraw:** Bind `blockMultidrawShader`. Bind `blocksIbo` and `hugeVbo`. Bind `multidrawChunkOffsets` as vertex buffer at binding point 4. Bind `multidrawCommands` as indirect buffer. Call `glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, (const void*)0, chunksToDraw, 0)` [S2, unofficial].
+1.  **Initialize Index Buffer:** Create `blocksIbo` with `maxIndices` size [S2, unofficial]. Loop `i` from `0` to `maxIndices / 6`. For each `i`, write 6 indices to buffer: `indices[0] + (i * 4)` through `indices[5] + (i * 4)` [S2, unofficial].
+2.  **Copy Remeshed Chunks:** Iterate over each chunk in `remeshedChunks` [S2, unofficial]. If `mesh->GetQuadCount() == 0`, skip the chunk [S2, unofficial]. Ensure GL buffers exist. Reserve VBO/IBO capacity at `1.5 * mesh_count` [S2, unofficial]. Copy mesh data to mapped buffers via `memcpy` [S2, unofficial]. Write to `hugeVbo` range via `WriteToRange` [S2, unofficial]. Swap next buffers [S2, unofficial].
+3.  **Prepare Multidraw Commands:** Create arrays for `chunkOffsets` and `commands` [S2, unofficial]. Loop `i` from `0` to `chunksToDraw`. For each chunk, create `DrawElementsIndirectCommand`: `count` = indices to draw, `instanceCount` = 1, `firstIndex` = 0, `baseVertex` = `chunkVboRange->GetOffset() * 4`, `baseInstance` = `i` [S2, unofficial]. Add chunk offset to `chunkOffsets` [S2, unofficial].
+4.  **Execute Multidraw:** Bind `blockMultidrawShader` [S2, unofficial]. Bind `blocksIbo` and `hugeVbo`. Bind `multidrawChunkOffsets` as vertex buffer at binding point 4 [S2, unofficial]. Bind `multidrawCommands` as indirect buffer [S2, unofficial]. Call `glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, (const void*)0, chunksToDraw, 0)` [S2, unofficial].
 
 **Alternative Pipeline (MegaSSBO):**
-1.  Iterate over all chunks in `m_Chunks`. Skip chunks where `!chunk->IsMeshReady()`. Calculate world position: `wx = chunk->GetXWorldPos() * Chunk::m_XSize`, `wz = chunk->GetZWorldPos() * Chunk::m_ZSize`. Check frustum culling. Skip if no faces [S3, unofficial].
-2.  Encode chunk X and Z world positions into a 32-bit `baseInstance` integer. Chunk X occupies lower 16 bits, Chunk Z upper 16 bits. Add 32768 to each position before masking to handle signed integers: `baseInstance = ((uint32_t)(chunk->GetXWorldPos() + 32768) & 0xFFFF) | (((uint32_t)(chunk->GetZWorldPos() + 32768) & 0xFFFF) << 16)` [S3, unofficial].
+1.  Iterate over all chunks in `m_Chunks`. Skip chunks where `!chunk->IsMeshReady()` [S3, unofficial]. Calculate world position: `wx = chunk->GetXWorldPos() * Chunk::m_XSize`, `wz = chunk->GetZWorldPos() * Chunk::m_ZSize` [S3, unofficial]. Check frustum culling. Skip if no faces [S3, unofficial].
+2.  Encode chunk X and Z world positions into a 32-bit `baseInstance` integer [S3, unofficial]. Chunk X occupies lower 16 bits, Chunk Z upper 16 bits [S3, unofficial]. Add 32768 to each position before masking to handle signed integers: `baseInstance = ((uint32_t)(chunk->GetXWorldPos() + 32768) & 0xFFFF) | (((uint32_t)(chunk->GetZWorldPos() + 32768) & 0xFFFF) << 16)` [S3, unofficial].
 3.  Add an indirect draw command to `m_DrawIndirectBuffer` with: count = `chunk->GetMegaSSBOFaceCount()`, first = `chunk->GetMegaSSBOOffset()`, baseInstance = `baseInstance` [S3, unofficial].
 4.  Upload indirect commands to GPU. If no commands, bind empty indirect buffer and return early [S3, unofficial].
 5.  Perform indirect draw call using empty VAO, MegaSSBO, shader, and indirect buffer [S3, unofficial].
@@ -56,14 +56,14 @@ Chunk Rendering with Multidraw Indirect is a technique for rendering voxel world
 def render_chunks_multidraw_indirect(chunks, player_pos, chunk_length, huge_vbo_capacity):
     # Step 1: Initialize Index Buffer
     max_indices = huge_vbo_capacity * 6
-    blocks_ibo = create_buffer(max_indices)
+    blocks_ibo = [0] * max_indices
     indices_base = [0, 2, 1, 0, 3, 2]
     for i in range(max_indices // 6):
         for j in range(6):
             blocks_ibo[i * 6 + j] = indices_base[j] + (i * 4)
 
     # Step 2: Copy Remeshed Chunks
-    huge_vbo = create_buffer(huge_vbo_capacity)
+    huge_vbo = [None] * huge_vbo_capacity
     chunk_offsets = []
     commands = []
     current_vbo_offset = 0
@@ -72,7 +72,9 @@ def render_chunks_multidraw_indirect(chunks, player_pos, chunk_length, huge_vbo_
         if chunk.mesh.get_quad_count() == 0:
             continue
         mesh_data = chunk.mesh.get_vertex_data()
-        huge_vbo.write_range(current_vbo_offset, mesh_data)
+        # Write to huge_vbo range
+        for k, vertex in enumerate(mesh_data):
+            huge_vbo[current_vbo_offset + k] = vertex
         
         # Step 3: Prepare Multidraw Commands
         base_vertex = current_vbo_offset * 4
@@ -86,28 +88,16 @@ def render_chunks_multidraw_indirect(chunks, player_pos, chunk_length, huge_vbo_
         commands.append(command)
         
         chunk_pos = chunk.pos
-        chunk_location = vec3(chunk_pos.x * chunk_length, chunk_pos.y * chunk_length, chunk_pos.z * chunk_length)
-        offset = chunk_location - player_pos
+        chunk_location = [chunk_pos[0] * chunk_length, chunk_pos[1] * chunk_length, chunk_pos[2] * chunk_length]
+        offset = [chunk_location[d] - player_pos[d] for d in range(3)]
         chunk_offsets.append(offset)
         
         current_vbo_offset += chunk.mesh.get_vertex_count()
 
     # Step 4: Execute Multidraw
-    multidraw_commands_buf = create_buffer(commands)
-    multidraw_chunk_offsets_buf = create_buffer(chunk_offsets)
-    
-    bind_shader(block_multidraw_shader)
-    bind_index_buffer(blocks_ibo)
-    bind_vertex_buffer(0, huge_vbo)
-    bind_vertex_buffer(4, multidraw_chunk_offsets_buf)
-    
-    gl_multi_draw_elements_indirect(
-        primitive_type=GL_TRIANGLES,
-        index_type=GL_UNSIGNED_INT,
-        indirect=multidraw_commands_buf,
-        draw_count=len(commands),
-        stride=0
-    )
+    # Bind shader, index buffer, vertex buffers, and issue draw call
+    # glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, commands, len(commands), 0)
+    return commands, chunk_offsets
 ```
 
 ## Subtopics

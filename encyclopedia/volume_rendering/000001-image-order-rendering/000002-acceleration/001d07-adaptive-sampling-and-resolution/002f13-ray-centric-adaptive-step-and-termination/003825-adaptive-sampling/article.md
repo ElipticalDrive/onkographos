@@ -1,190 +1,141 @@
 # Adaptive Sampling
 
-Also called: Adaptive Sampling Rate, Adaptive Sampling Strategy, Adaptive Sampling with Bricking, Adaptive Volume Sampling, Adaptive density, Opacity-based Adaptation
+Also called: Adaptive Sampling Rate, Adaptive Sampling Strategy, Adaptive Sampling with Bricking, Adaptive density, Opacity-based Adaptation
 
 ## Overview
-Adaptive sampling is a volume rendering optimization that varies the sampling density along rays to reduce computational cost while preserving visual quality [S1, unofficial][S6]. Unlike uniform sampling, which treats all regions equally, adaptive sampling concentrates samples in high-detail or high-opacity areas and skips empty space [S4, unofficial][S10, unofficial]. It sets itself apart from its parent method, [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md), by explicitly addressing GPU hardware constraints (warp divergence and texture cache coherence) through quantization and block-level metrics, rather than relying solely on continuous per-pixel step adjustments [S7][S8].
+Adaptive sampling is a volume rendering optimization that varies the sampling density along rays or across the image plane to reduce computational cost while maintaining visual fidelity [S1, S2, S3, unofficial]. Unlike uniform sampling, which casts a constant number of samples per ray regardless of local data complexity, adaptive sampling concentrates samples in regions of high detail (e.g., near surfaces or high gradients) and reduces them in homogeneous or empty regions [S1, S4, unofficial][S6]. This method builds on [Ray-Centric Adaptive Step and Termination](5938-ray-centric-adaptive-step-and-termination.md) by explicitly modulating the step size $\Delta t$ or sample count based on local metrics, often using a two-pass or hierarchical approach to balance parallel execution efficiency with accuracy [S2, unofficial][S8].
 
 ## How it works
-Adaptive sampling modifies the standard ray marching loop by dynamically determining the step size $\Delta t$ based on a local metric $m(\mathbf{x})$ or accumulated state.
+The core mechanism involves evaluating a local metric $M$ (such as gradient magnitude, opacity, or variance) and using it to adjust the sampling parameter $P$ (step size, rate, or probability) [S6, S8]. The specific implementation varies by variant, but general principles include:
+
+1.  **Metric Evaluation:** Compute a scalar value representing local complexity or error. Common metrics include the magnitude of the scalar field gradient $|\nabla s|$ [S6], the ratio of local cell variance to global variance $m$ [S8], or the difference in accumulated opacity [S10, unofficial].
+2.  **Adaptation:** Adjust the sampling rate. For step size, $\Delta t$ is often inversely proportional to the metric: $\Delta t \propto 1/M$ or bounded by $\min(\Delta t_{max}, \max(\Delta t_{min}, k/M))$ [S6, S8]. For discrete rates, a base rate $r_0$ is increased to a maximum rate $r_1$ when the metric exceeds a threshold [S7].
+3.  **Rendering:** Execute the volume integral with the adjusted parameters. This may involve a single pass with dynamic step sizes or a multi-pass strategy where initial sparse samples determine where additional rays are needed [S2, unofficial].
 
 ### Inputs and Outputs
-*   **Inputs:** Scalar field $f(\mathbf{x})$, ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, transfer function $T(f)$, isovalue $\rho$ (for isosurface rendering), and parameters controlling adaptation (thresholds, multipliers, discrete rates) [S6][S7].
-*   **Outputs:** Final pixel color $C$ and accumulated opacity $\alpha$ [S6].
+*   **Inputs:** Volumetric dataset (scalar field $f$), transfer function, camera parameters (ray origin $O$, direction $D$), and adaptation parameters (thresholds, min/max step sizes, base rates).
+*   **Outputs:** Rendered image pixel values (color and opacity).
 
 ### Data Structures
-*   **Metric Storage:** For per-macrocell or per-block adaptation, a scalar metric $m$ is computed for each region [S8].
-*   **State Variables:** Accumulated opacity $\alpha$, accumulated color $C$, current position $t$, step size $\Delta t$, and previous accumulated opacity $\alpha_{prev}$ for null-region detection [S6][S10, unofficial].
+*   **Macrocells/Blocks:** The volume is often divided into blocks (e.g., bricks of size $32^3$) to compute local metrics efficiently [S2, unofficial][S7, S8].
+*   **Variance/Gradient Maps:** Precomputed or on-the-fly maps storing local statistics (e.g., max standard deviation per cell) to guide sampling decisions [S8].
 
-### Algorithm Steps
+### Numbered Steps (General Adaptive Strategy)
+1.  **Initialize:** Set ray parameters ($O, D$) and initial sampling state (e.g., `density = 0.0`, `color = 0.0`) [S9, unofficial].
+2.  **Evaluate Metric:** Compute the local metric $M$ at the current ray position or block.
+    *   *Opacity-based:* Check accumulated opacity $A_i$ [S6].
+    *   *Gradient-based:* Compute $|\nabla s|$ [S6].
+    *   *Variance-based:* Compute $m = \sqrt{dVar(f_{cell})} / \sqrt{dVar(f_{vol})}$ [S8].
+    *   *Null-region:* Check if $|A_i^\Delta - A_i^{\Delta-1}| < \epsilon$ [S10, unofficial].
+3.  **Adjust Step Size/Rate:**
+    *   If using step size: $\Delta t = \text{clamp}(k/M, \Delta t_{min}, \Delta t_{max})$ [S6].
+    *   If using discrete rates: If metric indicates high detail (e.g., $|f - \rho| < \delta$), switch from base rate $r_0$ to max rate $r_1 = n \cdot r_0$ [S7].
+    *   If using variance: Multiplier $M = 2m - 1 + 1$; new step $\Delta t_{new} = M \cdot \Delta t_{uniform}$ [S8].
+4.  **Sample and Composite:**
+    *   Advance ray by $\Delta t$.
+    *   Sample scalar field $f$ and compute color/opacity contribution.
+    *   Update accumulated opacity and color using front-to-back compositing [S6].
+5.  **Termination:**
+    *   Stop if accumulated opacity $> 1 - \epsilon$ (typically $\epsilon = 0.01-0.05$) [S6].
+    *   Stop if ray exits volume or enters a null-value region with increased step size [S10, unofficial].
+    *   Stop if density threshold is reached (e.g., `density >= 1.0`) [S9, unofficial].
 
-1.  **Metric Calculation:** Compute a local metric $m(\mathbf{x})$ to estimate complexity or emptiness. Common metrics include:
-    *   **Opacity/Density:** Local scalar value $f(\mathbf{x})$ or segment opacity [S6][S10, unofficial].
-    *   **Gradient:** Magnitude $|\nabla f(\mathbf{x})|$ [S6, S7].
-    *   **Variance:** Ratio of local cell variance to global variance [S8].
-    *   **Null-Region Check:** Difference in accumulated opacity between steps [S10, unofficial].
-
-2.  **Step Size Determination:** Calculate $\Delta t$ based on $m$.
-    *   **Inverse Opacity:** $\Delta t \propto 1/f(\mathbf{x})$ or $\Delta t \propto 1/(1-\alpha)$ [S6].
-    *   **Gradient-Based:** $\Delta t = \min(\Delta t_{max}, \max(\Delta t_{min}, k / |\nabla f|))$ [S6].
-    *   **Variance-Based:** Compute multiplier $M = 2m - 1 + 1$ (where $m = \sqrt{dVar(f_{cell})} / \sqrt{dVar(f_{vol})}$), then $\Delta t_{new} = M \Delta t_{base}$ [S8].
-    *   **Null-Region Skip:** If $|\alpha_i - \alpha_{i-1}| < \epsilon$, increase $\Delta t$ significantly [S10, unofficial].
-
-3.  **Quantization for Coherence:** To prevent warp divergence on GPUs, quantize $\Delta t$ to a small set of discrete values (e.g., base rate $r_0$ and max rate $r_1 = n r_0$) [S7, S8].
-
-4.  **Termination Check:** Terminate if accumulated opacity $\alpha > 1 - \epsilon_{term}$ (typically $\epsilon_{term} = 0.01 \dots 0.05$) or ray exits bounding box [S6][S10, unofficial].
-
-5.  **Compositing:** Update color and opacity using front-to-back compositing:
-    $$ \alpha_{seg} = 1 - e^{-f(\mathbf{x})\Delta t} $$
-    $$ C_{seg} = T(f(\mathbf{x})) \cdot \alpha_{seg} $$
-    $$ \alpha \leftarrow \alpha + \alpha_{seg}(1 - \alpha) $$
-    $$ C \leftarrow C + C_{seg}(1 - \alpha) $$
-
-### Pseudocode
-
+### Pseudocode (Opacity and Gradient Driven)
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def adaptive_sample_ray(ray_origin, ray_direction, volume_data, transfer_func, params):
-    """
-    ray_origin: vec3
-    ray_direction: vec3 (normalized)
-    volume_data: function sample(x) returning scalar f(x)
-    transfer_func: function T(f) returning vec3 color
-    params: dict containing:
-        - base_step: float (initial delta_t)
-        - min_step: float
-        - max_step: float
-        - opacity_threshold: float (1 - epsilon_term)
-        - null_threshold: float (epsilon for null region check)
-        - gradient_scale: float (k in gradient-based step)
-        - discrete_rates: list of floats [r0, r1, ...] for quantization
-    """
+def adaptive_sample_ray(ray_origin, ray_direction, volume, transfer_func, params):
+    # Parameters
+    epsilon = params.epsilon  # e.g., 0.01
+    min_step = params.min_step
+    max_step = params.max_step
+    base_step = params.base_step
+    
+    color = vec3(0.0)
+    accumulated_opacity = 0.0
     t = 0.0
-    accumulated_alpha = 0.0
-    accumulated_color = vec3(0.0, 0.0, 0.0)
-    prev_accumulated_alpha = 0.0
     
-    # Determine entry and exit points (simplified, assuming unit sphere or known bounds)
-    t_start, t_end = compute_ray_bounds(ray_origin, ray_direction, volume_bounds)
-    
-    # Initial step size
-    step_size = params['base_step']
-    
-    while t < t_end and accumulated_alpha < params['opacity_threshold']:
-        # 1. Sample scalar field
+    while t < volume.max_dist:
+        # 1. Evaluate Metric
         pos = ray_origin + t * ray_direction
-        f_val = volume_data.sample(pos)
+        scalar_val = volume.sample(pos)
+        gradient_mag = volume.gradient_magnitude(pos)
         
-        # 2. Compute Metric and Adjust Step Size
-        # Example: Gradient-based or Opacity-based adaptation
-        # Note: Gradient calculation requires neighboring samples or precomputed gradient field
-        # Here we use a simplified opacity/null-region check for demonstration
-        
-        current_segment_opacity = 1.0 - exp(-f_val * step_size)
-        
-        # Null-region skip logic [S10, unofficial]
-        if abs(accumulated_alpha - prev_accumulated_alpha) < params['null_threshold']:
-            # Entered null region, increase step size
-            step_size = min(step_size * 2.0, params['max_step'])
+        # 2. Adjust Step Size
+        # Inverse relationship with gradient magnitude for detail preservation
+        # Avoid division by zero
+        if gradient_mag > 0:
+            step = base_step / gradient_mag
         else:
-            # Reset or refine step size based on local density/gradient
-            # Simplified inverse opacity adaptation [S6]
-            if f_val > 0:
-                step_size = params['gradient_scale'] / f_val
-            else:
-                step_size = params['max_step']
+            step = base_step
             
-            # Clamp step size
-            step_size = clamp(step_size, params['min_step'], params['max_step'])
-            
-            # Quantize to discrete rates for GPU coherence [S7]
-            step_size = quantize_to_discrete_rate(step_size, params['discrete_rates'])
+        # Clamp step size
+        step = max(min_step, min(max_step, step))
         
-        # 3. Compositing
-        alpha_seg = 1.0 - exp(-f_val * step_size)
-        color_seg = transfer_func(f_val) * alpha_seg
+        # 3. Sample and Composite
+        sample_val = volume.sample(pos)
+        color_contrib, opacity_contrib = transfer_func(sample_val)
         
-        accumulated_alpha += alpha_seg * (1.0 - accumulated_alpha)
-        accumulated_color += color_seg * (1.0 - accumulated_alpha)
+        # Front-to-back compositing
+        alpha = opacity_contrib * step
+        color += color_contrib * alpha * (1.0 - accumulated_opacity)
+        accumulated_opacity += alpha * (1.0 - accumulated_opacity)
         
-        prev_accumulated_alpha = accumulated_alpha
-        t += step_size
-        
-        # Early termination if fully opaque
-        if accumulated_alpha >= params['opacity_threshold']:
+        # 4. Termination Check
+        if accumulated_opacity > 1.0 - epsilon:
             break
             
-    return accumulated_color, accumulated_alpha
-
-def quantize_to_discrete_rate(step, rates):
-    """
-    Selects the closest discrete rate from the list to maintain warp coherence.
-    """
-    if not rates:
-        return step
-    min_diff = float('inf')
-    best_rate = rates[0]
-    for r in rates:
-        diff = abs(step - r)
-        if diff < min_diff:
-            min_diff = diff
-            best_rate = r
-    return best_rate
+        # Null-region optimization: if opacity change is negligible, skip
+        if opacity_contrib < epsilon:
+            step = max_step
+            
+        t += step
+        
+    return color
 ```
 
-### Parameters and Typical Values
-*   **Base Step Size:** Corresponds to 1 voxel or a fraction thereof [S7].
-*   **Opacity Threshold ($\epsilon_{term}$):** $0.01 \dots 0.05$ [S6].
-*   **Null Threshold ($\epsilon$):** Small positive value, e.g., $10^{-4}$ [S10, unofficial].
-*   **Gradient Scale ($k$):** Tuned to dataset resolution [S6].
-*   **Discrete Rates:** $r_0 = 1.0$ (1 voxel), $r_1 = 8 r_0$ [S7].
+### Parameters with Typical Values
+*   **Epsilon ($\epsilon$):** Termination threshold for accumulated opacity. Typical values: $0.01$ to $0.05$ [S6].
+*   **Base Sampling Rate ($r_0$):** Corresponds to 1 voxel spacing. User-specified [S7].
+*   **Multiplier ($n$):** Ratio of max to base rate ($r_1 = n \cdot r_0$). Typical value: $n=8$ [S7].
+*   **Threshold ($\delta$):** Distance to isovalue for switching rates in silhouette detection. Constant for distance fields, data-dependent for CT scans [S7].
+*   **Target Frame Time:** Used in dynamic adaptation. Typical value: $32$ ms [S5, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Warp Divergence:** Fully adaptive per-pixel step sizes cause divergence in GPU warps. Solution: Quantize step sizes to a small set of discrete values [S7, S8].
-*   **Missed Intersections:** In isosurface rendering, large steps may skip thin structures. Guaranteed intersections require bounded gradient $L$ and step size $h \le |f - \rho|/L$ [S7].
-*   **Texture Cache Thrashing:** Adaptive sampling can lead to poor texture cache utilization if sampling positions diverge significantly between neighboring pixels [S7].
+*   **Parallel Divergence:** Completely adaptive sampling causes neighboring pixels in a warp/quad to diverge, under-utilizing texture caches and SIMD units. Solution: Use discrete sampling rates (e.g., only $r_0$ and $r_1$) rather than continuous step sizes [S7, S8].
+*   **Missed Intersections:** In isosurface rendering, large step sizes may skip thin structures if the segment crosses the isosurface twice. Guaranteed intersections require bounded gradient length $L$ and step size $h < |f - \rho|/L$ [S7].
+*   **Grazing Angles:** In slicing methods, slant can go to infinity at grazing view angles. Handled by limiting slant $k_M = 2h$ [S13].
+*   **Bricking Overhead:** Adaptive sampling with bricking (texture indirection) can reduce performance to 80-85% of non-bricked rendering, but still offers significant speedups over uniform sampling with bricking [S7].
 
 ## Subtopics
 
 ### [Adaptive Sampling (Sparse Grid)](1656-adaptive-sampling-sparse-grid.md)
-Adaptive Sampling (Sparse Grid) is a rendering optimization that exploits coherence in projections—often introduced by sensing device blurring—to reduce computational overhead by casting a sparse grid of rays (less than one per pixel) and adaptively increasing ray density in regions of high image complexity. It differs from uniform sampling by prioritizing high-frequency details and from pure brute-force methods by achieving savings of more than two orders of magnitude for many datasets. It is particularly well-suited for scan-conversion methods where polygons are filtered prior to ray tracing.
+Exploits coherence by casting a sparse grid of rays and adaptively increasing density in high-complexity regions. Suitable for scan-conversion methods.
 
 ### [Adaptive Sampling with Relative Standard Error](4545-adaptive-sampling-with-relative-standard-error.md)
-An adaptive sampling strategy that tracks per-pixel luminance squares to estimate relative standard error, stopping converged pixels and skipping noisy neighborhoods.
+Tracks per-pixel luminance squares to estimate error, stopping converged pixels.
 
 ### Adaptive Sampling for Silhouettes
-A sampling strategy using two discrete rates (base $r_0$ and max $r_1$) to improve intersection detection near silhouettes without diverging parallel execution pipelines [S7]. Intersection is detected when sample value $f < \text{isovalue } \rho$ (assuming front-to-back and isosurface defined by $f < \rho$). Exact intersection lies between samples. Missed intersections are possible if the segment crosses the isosurface twice. Guaranteed intersections require bounded gradient length $L$: $h = |f - \rho|/L$ [S7]. The base sampling rate $r_0$ is specified by the user (1.0 corresponds to a single voxel). The max sampling rate is $r_1 = n r_0$ (typical $n=8$) [S7]. The rate increases from $r_0$ to $r_1$ when $|sample\_value - \text{isovalue}| < \delta$ [S7]. For distance fields, $\delta$ is constant; for CT scans, it depends on data [S7]. Completely adaptive sampling causes neighboring pixels in parallel pipelines to diverge, under-utilizing the texture cache; the solution is to use only two discrete rates [S7].
+A strategy using two discrete rates (base $r_0$ and max $r_1$) to improve intersection detection near silhouettes without diverging parallel pipelines [S7]. It increases the rate from $r_0$ to $r_1$ when the sample value is within a threshold $\delta$ of the isovalue $\rho$. This avoids the cache under-utilization of fully adaptive rates [S7].
 
 ### Adaptive Sampling with Opacity Correction
-An adaptive sampling approach that guarantees the sampling frequency can adapt to the finest level cell size while keeping total sample counts tractable, combined with opacity correction [S11]. Unlike OSPRay's existing adaptive sampling code which is not aware of the underlying AMR hierarchy and may severely under- or over-sample, this method is tailored for AMR data [S11].
+An approach tailored for AMR (Adaptive Mesh Refinement) data that guarantees sampling frequency adapts to the finest cell size while keeping sample counts tractable, combined with opacity correction to prevent under/over-sampling errors common in generic AMR renderers [S11].
 
 ### Adaptive Sampling in Volume Rendering
-A technique where the fragment shader enumerates non-empty leaves in front-to-back order and chooses a step size matching local voxel density. It adapts sampling density to brick resolution [S12]. For isosurface rendering, it looks for intervals that bracket the selected isovalue. For semitransparent direct volume rendering, it implements a Phong illumination model with boundary enhancement and view-dependent transparency, stepping by a discrete number of intervals directly associated to octree levels [S12]. The transfer function is a compact precomputed 2D function using the octree level for the second dimension to adjust opacity and color weighting [S12].
+A technique where the fragment shader enumerates non-empty leaves in front-to-back order and chooses a step size matching local voxel density, adapting to brick resolution. It uses a compact 2D transfer function with octree levels for opacity weighting [S12].
 
 ### Adaptive Slicing with Slant Limiting
-Calculates slant $dh = k_{max} - k_{min}$. The sliced volume becomes a prism of height $(h+dh)$ in the $-z$ direction [S13]. The parameters are defined as:
-$$ k_i = -\frac{\overline{GP_i} \cdot \overline{V}}{\overline{z} \cdot \overline{V}} $$
-$$ k_{min} = \min(k_i) \text{ and } k_{max} = \max(k_i) $$
-$$ P^0_i = P_i + (k_i - k_{max})\vec{-z} $$
-$$ P^j_i = P^0_i + \frac{j}{n-1}(h+dh)\vec{-z}, \quad j = 0..n-1 $$
-$$ d'_h = \min(dh, k_M) $$
-$$ P^j_i = P_i + \frac{d'_h}{dh}(k_i - k_{max}) + \frac{j}{n-1}(h+d'_h)\vec{-z} $$
-$$ \delta = \frac{1}{n-1}(h+d'_h)\vec{-z} \cdot \vec{V} $$
-$$ n = 1 + \frac{L}{2^l} \frac{(h+d'_h)\vec{-z} \cdot \vec{V}}{1} $$
-The maximum allowed slant $k_M$ prevents infinity at grazing view angles, with value $k_M = 2h$ [S13]. $L$ is the texture resolution (side length of $L^3$ volume) and $l$ is the MIP-map level [S13]. Grazing view angles cause slant to go to infinity, handled by limiting slant to $k_M$ [S13]. Transparent fragments from empty top/bottom regions are rasterized even if discarded by alpha test, handled by using clip registers feature (future) or accepting rasterization cost [S13]. Volume rendering applications often choose higher sampling rates than voxel size for quality; this method chooses rate close to voxel size to improve rendering time [S13].
+A method that calculates slant $dh$ and limits it to $k_M$ to prevent infinity at grazing angles. It adjusts the sampling rate close to voxel size to improve time, handling transparent fragments from empty regions via clip registers or accepting rasterization cost [S13].
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces the number of samples per ray in empty or homogeneous regions, leading to speed-ups of 2.6–2.8x compared to full density sampling [S3, unofficial]. Performance metrics show sampling distance 1.0 yields 24 fps, while 5.0 yields 66 fps [S3, unofficial].
-*   **Memory Complexity:** Requires storage for metrics (e.g., variance per macrocell) or precomputed gradient fields [S8].
-*   **Measured Performance:** On the Asian Dragon dataset (512x256x256), with brick size 32 and adaptive sampling ($r_1=8r_0$), the frame rate is 19.2 fps at sampling rate 0.25, 13.8 fps at 0.5, 10.2 fps at 1, and 6.9 fps at 2 [S7]. Adaptive sampling with bricking reduces the performance overhead of bricking, achieving 80-85% of the performance of rendering without bricking and without adaptive sampling [S7].
-*   **Strengths:** Significant speed-up in datasets with large empty spaces or homogeneous regions [S4, unofficial]. Preserves visual quality by focusing samples on high-detail areas [S1, unofficial].
-*   **Limitations:** Warp divergence if not quantized [S7]. Texture cache thrashing if sampling positions diverge [S7]. Potential for missed intersections in isosurface rendering if steps are too large [S7].
-*   **When to Use:** Real-time rendering of large volumetric datasets with significant empty space or varying detail levels [S4, unofficial].
-*   **When Not to Use:** When strict guaranteed intersections are required without additional refinement steps and the gradient is unbounded [S7].
+*   **Time Complexity:** Reduces the number of volume queries significantly. Speed-ups of 2.6-2.8x over full density sampling are reported [S3, unofficial]. In some cases, rendering time scales with the inverse of the sampling distance (e.g., 24 fps at distance 1.0 vs 66 fps at distance 5.0) [S3, unofficial].
+*   **Memory Complexity:** Requires storage for local metrics (variance/gradient maps) or additional ray buffers for multi-pass strategies [S2, unofficial][S8].
+*   **Performance:** On the Asian Dragon dataset (512x256x256), adaptive sampling with bricking achieves 19.2 fps at rate 0.25, compared to 6.9 fps at rate 2 (uniform) [S7]. It achieves 80-85% of the performance of rendering without bricking [S7].
+*   **Strengths:** Significant speedup in datasets with large empty or homogeneous regions; preserves detail in high-frequency areas.
+*   **Limitations:** Potential for missed intersections if step sizes are too large; parallel divergence if not constrained to discrete rates; overhead of computing metrics.
 
 ## Background
-Adaptive sampling originated as a technique to improve rendering quality over uniform sampling by sampling non-homogeneous regions more densely [S1, unofficial]. It was further developed to reduce computational cost by casting rays in two steps: an initial sparse cast followed by additional rays for blocks with high variance [S2, unofficial]. The technique varies sampling density across volume levels to improve performance while maintaining visual quality [S3, unofficial]. It subdivides volumetric datasets into regions of varying detail levels to adjust sampling rates, reducing computation in low-detail areas and increasing it in high-detail areas [S4, unofficial].
+Adaptive sampling originated as a response to the inefficiency of uniform sampling in volumetric datasets, which often consist mostly of empty space or homogeneous regions [S4, unofficial]. Early work by [S1, unofficial] highlighted that uniform sampling assumes homogeneity, leading to artifacts or wasted computation. Subsequent developments focused on GPU efficiency, noting that purely adaptive methods suffer from poor thread coherence on GPUs, leading to the adoption of per-macrocell or discrete-rate strategies [S8]. The method is widely used in real-time volume rendering, medical imaging, and atmospheric visualization [S3, S9, S10, unofficial].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

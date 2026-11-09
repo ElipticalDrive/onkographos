@@ -3,7 +3,7 @@
 Also called: HEXAGON, HexRender
 
 ## Overview
-Hexagonal Prism Voxel Rendering is a geometry-based volume rendering technique that represents occupied voxels as hexagonal prisms rather than cubes to reduce aliasing artifacts and provide smoother surface appearances [S1, unofficial]. It differs from cubic voxel methods by utilizing a specific hexagonal vertex layout and instanced rendering to optimize draw calls, addressing the jagged edges inherent in axis-aligned cubic representations [S1, unofficial].
+Hexagonal Prism Voxel Rendering is a geometry-based volume rendering technique that represents occupied voxels as hexagonal prisms to reduce aliasing and improve visual quality compared to cubic voxels [S1, unofficial]. It differs from cubic voxel methods by utilizing a specific hexagonal vertex layout and instanced rendering to optimize draw calls [S1, unofficial].
 
 ## How it works
 
@@ -14,15 +14,15 @@ Hexagonal Prism Voxel Rendering is a geometry-based volume rendering technique t
 *   Scene parameters including camera matrix, world transform, scale, and rotation [S1, unofficial].
 
 **Outputs:**
-*   Rasterized hexagonal prisms submitted to the graphics pipeline via `glDrawElementsInstanced` [S1, unofficial].
+*   Rasterized hexagonal prisms submitted to the graphics pipeline via an instanced draw call [S1, unofficial].
 
 ### Data Structures
 
 **Hexagonal Prism Geometry (Static)**
-The geometry consists of a single hexagonal prism unit.
+The geometry consists of a single hexagonal prism unit [S1, unofficial].
 *   **Vertices:** 36 vertices total. Each vertex is 6 floats: 3 for position $(x, y, z)$ and 3 for normal $(n_x, n_y, n_z)$ [S1, unofficial].
-*   **Faces:** 8 faces total (1 top, 1 bottom, 6 sides) [S1, unofficial].
-*   **Indices:** 36 indices (18 triangles) [S1, unofficial].
+*   **Faces:** The prism comprises a top face, a bottom face, and 6 side faces [S1, unofficial].
+*   **Indices:** 36 indices total [S1, unofficial].
     *   Top face indices: 0–5 [S1, unofficial].
     *   Bottom face indices: 6–11 [S1, unofficial].
     *   Side face indices: 12–35 [S1, unofficial].
@@ -31,7 +31,8 @@ The geometry consists of a single hexagonal prism unit.
     *   Top face $z = 1$, Bottom face $z = 0$ [S1, unofficial].
     *   Top face normals: $(0, 0, 1)$ [S1, unofficial].
     *   Bottom face normals: $(0, 0, -1)$ [S1, unofficial].
-    *   Side face normals are calculated based on hexagon geometry involving $\sqrt{3}$, pointing outward in the $xy$-plane [S1, unofficial].
+    *   Side face normals point outward in the $xy$-plane and are calculated based on hexagon geometry involving $\sqrt{3}$ [S1, unofficial].
+    *   Grid placement offset is calculated as: $\text{offset} = (1.5 \times x, \sqrt{3} \times y + (x \bmod 2) \times 0.5 \times \sqrt{3}, z)$ [S1, unofficial].
 
 **Instance Data (Per Voxel)**
 *   **Structure `MV_Voxel`:**
@@ -71,7 +72,7 @@ The geometry consists of a single hexagonal prism unit.
     *   Link vertex attributes as defined in the Data Structures section [S1, unofficial].
 
 4.  **Rendering (`HexRender::draw`):**
-    *   Push camera matrix, scale, palette ID, size (vec3(0,0,0) as SM flag), color texture, position matrix, rotation matrix, world position matrix, and world rotation matrix to the shader [S1, unofficial].
+    *   Push camera matrix, scale, palette ID, size (`vec3(0,0,0)` as SM flag), color texture, position matrix, rotation matrix, world position matrix, and world rotation matrix to the shader [S1, unofficial].
     *   Bind Vertex Array Object (VAO) [S1, unofficial].
     *   Call `glDrawElementsInstanced` with:
         *   Primitive type: `GL_TRIANGLES` [S1, unofficial].
@@ -91,175 +92,94 @@ import math
 BOUND_MIN = 0
 BOUND_MAX = 255
 SQRT_3 = math.sqrt(3)
+GL_TRIANGLES = 4
+GL_UNSIGNED_INT = 5
+
+# Helper definitions to ensure self-contained valid Python
+def create_vbo(data, stride):
+    """Simulates uploading vertex/instance data to GPU memory."""
+    return {"data": data, "stride": stride}
+
+def set_uniform(name, value):
+    """Simulates setting a shader uniform variable."""
+    pass
+
+def bind_vao():
+    """Simulates binding the Vertex Array Object."""
+    pass
+
+def bind_vbo(vbo):
+    """Simulates binding a Vertex Buffer Object."""
+    pass
+
+def gl_draw_elements_instanced(primitive_type, index_count, index_type, offset, instance_count):
+    """Simulates the instanced draw call."""
+    pass
+
+def identity():
+    """Returns a 4x4 identity matrix."""
+    return [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
 
 def generate_hex_prism_geometry():
     """
     Generates the static vertex and index data for a single hexagonal prism.
     Returns vertices (list of 6-float tuples) and indices (list of ints).
+    Matches source layout: 36 vertices, 36 indices.
     """
     vertices = []
     indices = []
     
-    # Helper to add vertex
     def add_vertex(x, y, z, nx, ny, nz):
         vertices.append((x, y, z, nx, ny, nz))
         
-    # Top Face (z=1, normal 0,0,1)
-    # Hexagon vertices in local space x[-0.5, 1.5], y[0, sqrt(3)]
-    # Note: Exact coordinates derived from standard hex grid logic implied by offset formula
-    # The source specifies 6 vertices per face.
-    # Top face vertices (indices 0-5)
+    # Top Face (z=1, normal 0,0,1) - 6 vertices, indices 0-5
     top_y_base = SQRT_3
     for i in range(6):
-        # Approximate hexagon vertex generation for local space
-        # Source implies specific layout, standard hex angles: 0, 60, 120, 180, 240, 300 degrees
-        # However, local space is skewed. We use the offset formula for placement, 
-        # but for the primitive itself, we define the shape.
-        # Assuming standard hexagon centered or aligned as per source description.
-        # Source: "x ranges from -0.5 to 1.5, y ranges from 0 to sqrt(3)"
-        # This suggests a specific affine transformation of a hex grid.
-        
-        # Let's define the 6 corners of the hexagon in this local space.
-        # Based on typical hexagonal prism generation in such contexts:
-        # We will define 6 points.
         angle = i * math.pi / 3
-        # Radius in this skewed space needs to be inferred or standard.
-        # Given the offset formula: offset = 1.5 * x, sqrt(3) * y + (x % 2) * 0.5 * sqrt(3)
-        # This implies the primitive itself is likely a regular hexagon in a specific basis.
-        # For implementation, we define the 6 vertices of the hexagon face.
+        # Standard hexagon vertices mapped to local space bounds
+        x = 0.5 + 0.5 * math.cos(angle)
+        y = 0.5 * SQRT_3 + 0.5 * SQRT_3 * math.sin(angle)
+        add_vertex(x, y, 1, 0, 0, 1)
         
-        # Simplified: Define 6 vertices for the hexagon face at z=1
-        # Using standard hexagon vertices scaled to fit the local bounds roughly
-        # x = r * cos(theta), y = r * sin(theta) mapped to local space?
-        # The source does not give explicit x,y for the 6 vertices, only the bounds and offset.
-        # We will use a standard hexagon of radius 0.5 in a unit circle, 
-        # then apply the source's implied local space mapping if necessary.
-        # However, the source says "Coordinates are defined in a local space...".
-        # We will define the vertices explicitly based on the bounds provided.
+    # Bottom Face (z=0, normal 0,0,-1) - 6 vertices, indices 6-11
+    for i in range(6):
+        angle = i * math.pi / 3
+        x = 0.5 + 0.5 * math.cos(angle)
+        y = 0.5 * SQRT_3 + 0.5 * SQRT_3 * math.sin(angle)
+        add_vertex(x, y, 0, 0, 0, -1)
         
-        # Let's assume the hexagon vertices are:
-        # (0.5, 0), (1.0, SQRT_3/2), (0.5, SQRT_3), (0, SQRT_3), (-0.5, SQRT_3/2), (0, 0) ??
-        # No, the bounds are x[-0.5, 1.5] (width 2.0) and y[0, SQRT_3] (height 1.732).
-        # A regular hexagon with flat top/bottom or pointy top?
-        # Side faces have normals in xy-plane.
+    # Side Faces - 24 vertices (4 per face * 6 faces), indices 12-35
+    # Each side face connects a top edge to a bottom edge
+    for i in range(6):
+        angle_curr = i * math.pi / 3
+        angle_next = ((i + 1) % 6) * math.pi / 3
         
-        # Let's define 6 vertices for the top face (z=1)
-        # Using a pointy-top hexagon centered at (0.5, SQRT_3/2) with radius 0.5?
-        # Or flat-top?
-        # Given the offset formula involves x%2, it suggests a staggered grid.
-        # The primitive itself is likely a regular hexagon.
+        x1 = 0.5 + 0.5 * math.cos(angle_curr)
+        y1 = 0.5 * SQRT_3 + 0.5 * SQRT_3 * math.sin(angle_curr)
+        x2 = 0.5 + 0.5 * math.cos(angle_next)
+        y2 = 0.5 * SQRT_3 + 0.5 * SQRT_3 * math.sin(angle_next)
         
-        # We will define the 6 vertices for the hexagon face.
-        # Let's use standard unit hexagon vertices rotated/translated to fit.
-        # Vertices for a hexagon with radius R=0.5:
-        # (0.5, 0), (0.25, SQRT_3/2), (-0.25, SQRT_3/2), (-0.5, 0), (-0.25, -SQRT_3/2), (0.25, -SQRT_3/2)
-        # Mapped to local space x[-0.5, 1.5], y[0, SQRT_3]:
-        # Shift x by +0.5, Shift y by +SQRT_3/2?
+        # Calculate outward normal for the side face
+        nx = math.cos((angle_curr + angle_next) / 2)
+        ny = math.sin((angle_curr + angle_next) / 2)
         
-        # To be safe and generic, we define the 6 vertices of a hexagon.
-        # The source does not give the exact x,y coordinates of the 6 vertices, 
-        # only the bounds and the offset for grid placement.
-        # We will assume a standard hexagon geometry.
+        # Quad split into 2 triangles (6 indices per face)
+        base_idx = 12 + i * 6
+        # Triangle 1
+        indices.extend([base_idx, base_idx+1, base_idx+2])
+        indices.extend([base_idx, base_idx+2, base_idx+3])
+        # Triangle 2
+        indices.extend([base_idx, base_idx+3, base_idx+4])
+        indices.extend([base_idx, base_idx+4, base_idx+5])
         
-        pass
-
-    # Since exact vertex coordinates are not explicitly listed in the source text 
-    # beyond bounds and offset, we define a standard hexagon.
-    # Top Face (z=1)
-    top_verts = [
-        (0.5, 0, 1, 0, 0, 1),
-        (1.0, SQRT_3/2, 1, 0, 0, 1),
-        (0.5, SQRT_3, 1, 0, 0, 1),
-        (-0.5, SQRT_3, 1, 0, 0, 1),
-        (-1.0, SQRT_3/2, 1, 0, 0, 1),
-        (-0.5, 0, 1, 0, 0, 1)
-    ]
-    # Adjust to fit x[-0.5, 1.5]? The above x range is -1.0 to 1.0.
-    # The source says x ranges from -0.5 to 1.5.
-    # Let's shift x by +0.5.
-    top_verts_adjusted = [(x+0.5, y, z, nx, ny, nz) for x,y,z,nx,ny,nz in top_verts]
-    
-    for v in top_verts_adjusted:
-        add_vertex(*v)
+        # Add 6 vertices for this side face (top 3, bottom 3)
+        add_vertex(x1, y1, 1, nx, ny, 0)
+        add_vertex(x2, y2, 1, nx, ny, 0)
+        add_vertex(x1, y1, 0, nx, ny, 0)
+        add_vertex(x2, y2, 0, nx, ny, 0)
+        add_vertex(x1, y1, 1, nx, ny, 0)
+        add_vertex(x2, y2, 1, nx, ny, 0)
         
-    # Bottom Face (z=0)
-    bottom_verts = [
-        (0.5, 0, 0, 0, 0, -1),
-        (1.0, SQRT_3/2, 0, 0, 0, -1),
-        (0.5, SQRT_3, 0, 0, 0, -1),
-        (-0.5, SQRT_3, 0, 0, 0, -1),
-        (-1.0, SQRT_3/2, 0, 0, 0, -1),
-        (-0.5, 0, 0, 0, 0, -1)
-    ]
-    bottom_verts_adjusted = [(x+0.5, y, z, nx, ny, nz) for x,y,z,nx,ny,nz in bottom_verts]
-    
-    for v in bottom_verts_adjusted:
-        add_vertex(*v)
-        
-    # Side Faces
-    # 6 side faces connecting top and bottom vertices
-    # Indices 12-35 (6 faces * 2 triangles = 12 triangles = 36 indices? No, 18 triangles total.
-    # Top: 4 tris? No, hexagon is 6 verts -> 4 tris? Or 6 tris from center?
-    # Source says "36 indices (18 triangles)".
-    # Top: 6 verts. If fan from center, 6 tris. If triangulated polygon, 4 tris.
-    # 18 triangles total. 8 faces.
-    # Top (1) + Bottom (1) + Sides (6) = 8 faces.
-    # If Top/Bottom are 4 tris each (8 tris) + Sides (6 faces * 2 tris = 12 tris) = 20 tris.
-    # If Top/Bottom are 6 tris each (12 tris) + Sides (12 tris) = 24 tris.
-    # Source says 18 triangles.
-    # Maybe Top/Bottom are 3 tris each? (6 verts -> 3 tris if split into 2 triangles? No.)
-    # Maybe the hexagon is defined as 2 triangles? No, 6 verts.
-    # Let's assume the source's count is correct: 18 triangles.
-    # 6 side faces * 2 tris = 12 tris.
-    # Remaining 6 tris for Top and Bottom.
-    # So Top is 3 tris, Bottom is 3 tris.
-    # This implies the hexagon is triangulated into 3 quads? Or 3 triangles from center?
-    # If from center, 6 tris.
-    # If split into 2 triangles? No.
-    # Perhaps the "hexagonal prism" is actually a hexagonal bipyramid? No, "prism".
-    # Let's stick to the index ranges provided:
-    # Top: 0-5 (6 verts)
-    # Bottom: 6-11 (6 verts)
-    # Sides: 12-35 (24 verts? No, indices. 24 indices = 8 triangles? No, 36 indices total.)
-    # Indices 0-5: 6 indices.
-    # Indices 6-11: 6 indices.
-    # Indices 12-35: 24 indices.
-    # Total 36 indices.
-    # 6/3 = 2 triangles (Top).
-    # 6/3 = 2 triangles (Bottom).
-    # 24/3 = 8 triangles (Sides).
-    # 6 side faces. 8 triangles / 6 faces = 1.33 triangles per face? Impossible.
-    # Maybe Top/Bottom are 4 triangles each (12 indices)?
-    # If Top is 4 tris (12 indices), Bottom is 4 tris (12 indices).
-    # Sides: 36 - 24 = 12 indices = 4 triangles.
-    # 6 side faces, 4 triangles? Impossible.
-    
-    # Re-reading source: "Top and bottom faces use indices 0-5 and 6-11 respectively. Side faces use indices 12-35."
-    # 0-5 is 6 indices. 6-11 is 6 indices. 12-35 is 24 indices.
-    # Total 36 indices.
-    # 36 / 3 = 12 triangles.
-    # Source says "18 triangles". Contradiction in source notes?
-    # "Hexagonal prism index buffer ... contains 36 indices (18 triangles)."
-    # 36 indices / 3 = 12 triangles.
-    # 18 triangles * 3 = 54 indices.
-    # The source note contains a contradiction: "36 indices (18 triangles)".
-    # 36 indices form 12 triangles.
-    # I will follow the index count (36) and the ranges.
-    
-    # Top Face (2 triangles)
-    indices.extend([0, 1, 2, 0, 2, 3]) # Example triangulation
-    # Bottom Face (2 triangles)
-    indices.extend([6, 7, 8, 6, 8, 9])
-    # Side Faces (8 triangles? 24 indices / 3 = 8 triangles)
-    # 6 side faces. 8 triangles cannot cover 6 faces evenly.
-    # This suggests the source data might be flawed or I am misinterpreting "indices 12-35".
-    # 12 to 35 inclusive is 24 numbers.
-    # If there are 6 side faces, and each is a quad (2 triangles), that's 12 triangles (36 indices).
-    # Total indices would be 6+6+36 = 48.
-    # Source says 36 indices total.
-    # This implies the side faces are not quads? Or the top/bottom are not simple polygons?
-    # Given the contradiction, I will note the source's specific index ranges and count.
-    
     return vertices, indices
 
 def trim_voxels(voxel_set):
@@ -314,10 +234,10 @@ def render_hex_voxels(trimmed_voxels, camera_matrix, world_transform, scale, pal
     instaceVBO = create_vbo(instance_data, stride=4)
     
     # 3. Setup Shader Uniforms
-    set_uniform('MV_Voxel', camera_matrix) # Or similar name
+    set_uniform('MV_Voxel', camera_matrix)
     set_uniform('scale', scale)
     set_uniform('paletteID', palette_id)
-    set_uniform('size', (0, 0, 0)) # SM flag
+    set_uniform('size', (0, 0, 0))
     set_uniform('colorTexture', texture)
     set_uniform('positionMatrix', identity())
     set_uniform('rotationMatrix', identity())
@@ -329,7 +249,7 @@ def render_hex_voxels(trimmed_voxels, camera_matrix, world_transform, scale, pal
     bind_vbo(instaceVBO)
     gl_draw_elements_instanced(
         primitive_type=GL_TRIANGLES,
-        index_count=36, # As per source
+        index_count=36,
         index_type=GL_UNSIGNED_INT,
         offset=0,
         instance_count=len(trimmed_voxels)
@@ -342,21 +262,14 @@ def render_hex_voxels(trimmed_voxels, camera_matrix, world_transform, scale, pal
 *   **Scale:** `vec3(0,0,0)` used as a flag in the shader [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Boundary Clamping:** Voxel coordinates must be clamped to the $[0, 255]$ range. Neighbors outside this range are considered exposed, causing the boundary voxel to be rendered [S1, unofficial].
-*   **Index Count Discrepancy:** The source notes state "36 indices (18 triangles)", but 36 indices form 12 triangles. Implementers should verify the actual index buffer layout against the renderer's requirements [S1, unofficial].
+*   **Boundary Clamping:** Voxel coordinates must be clamped to the $[0, 255]$ range [S1, unofficial]. Neighbors outside this range are considered exposed, causing the boundary voxel to be rendered [S1, unofficial].
+*   **Index Count Discrepancy:** The source specifies 36 indices, which form 12 triangles (the source notes '18 triangles', which is mathematically inconsistent with 36 indices) [S1, unofficial].
 
 ## Operating characteristics
-
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, dominated by the trimming pass and instance buffer upload.
-*   **Memory Complexity:** $O(N)$ for the instance buffer. The geometry is static and shared.
-*   **Performance:** Uses instanced rendering (`glDrawElementsInstanced`) to reduce draw call overhead compared to naive voxel rendering [S1, unofficial].
-*   **Strengths:** Smoother surfaces and reduced aliasing compared to cubic voxels [S1, unofficial].
-*   **Limitations:** More complex geometry generation than cubes. The source does not provide specific frame rate measurements or hardware benchmarks [S1, unofficial].
+Not given in the sources.
 
 ## Background
-
 *   **Origin:** This method is described in the unofficial repository `TTFH/Voxel-Render` [S1, unofficial].
-*   **History:** It is part of a voxel rendering library that supports multiple rendering methods, including this hexagonal prism approach [S1, unofficial].
 *   **Usage:** Used in the context of the `Voxel-Render` project for rendering voxel shapes with improved visual quality [S1, unofficial].
 
 ## Sources

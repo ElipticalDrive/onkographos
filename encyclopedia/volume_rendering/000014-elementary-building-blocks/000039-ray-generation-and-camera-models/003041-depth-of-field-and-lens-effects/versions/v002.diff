@@ -1,0 +1,95 @@
+--- v001.md
++++ v002.md
+@@ -1,20 +1,63 @@
+ # Depth of Field and Lens Effects
+ 
+-Also called: Optical Aberration Simulation, Aperture Sampling
++Also called: Camera Blur, Focal Depth, Focal Depth / Camera Blur
+ 
+ ## Overview
+-This family implements optical effects that deviate from the ideal pinhole camera model, primarily depth of field (blur based on focal distance) and geometric lens distortions. It sets itself apart from sibling ray generation methods by introducing a finite aperture for ray origins, requiring sampling over a 2D area rather than a single point, and by modifying ray directions to simulate optical phenomena like magnification or shift.
++This method family implements optical effects that deviate from the ideal pinhole camera model, primarily depth of field blur based on focal distance and geometric lens distortions [S1, book][S2, S3, unofficial]. It sets itself apart from sibling ray generation methods by introducing a finite aperture for ray origins, requiring sampling over a 2D area rather than a single point, and by modifying ray directions to simulate optical phenomena like magnification or shift [S1, book][S2, S3, unofficial].
+ 
+-## Shared principles
+-The core mechanism shared by all methods in this family is the modification of the ray origin $\mathbf{o}$ and/or direction $\mathbf{d}$ based on a sampled point on a lens aperture. Unlike the pinhole model where $\mathbf{o}$ is fixed at the camera eye, here $\mathbf{o}$ is displaced onto a lens plane defined by a center, normal, and radius. The direction $\mathbf{d}$ is often recalculated to pass through a specific focus point or to maintain geometric consistency with the new origin.
++## How it works
++**Inputs and Outputs**
++Inputs: camera-to-world transformation matrix $\mathbf{C}$, base ray direction $\mathbf{d}_{\text{base}}$, focal point $\mathbf{f}$, aperture radius $r$, noise buffer $\mathcal{N}$, and lens distance parameter $L$ [S2, unofficial]. Outputs: ray origins $\mathbf{o}$, ray directions $\mathbf{d}$, and intersection results [S2, unofficial].
+ 
+-**Aperture Sampling**
+-Rays originate from points sampled on a 2D disk (or other shape) representing the lens aperture. The sampling distribution (e.g., uniform, concentric) determines the shape of the bokeh (blur circles) in the final image. The probability density function (PDF) of the sampling must be accounted for in path tracing integrals via importance weighting.
++**Data Structures**
++- $\mathbf{C}$: $4 \times 4$ affine transformation matrix mapping local camera coordinates to world space [S2, unofficial].
++- $\mathcal{N}$: 2D texture or buffer storing precomputed random values for aperture sampling [S2, unofficial].
++- $\mathbf{f}$: 3D world-space vector defining the focal plane center [S1, book].
++- $r$: scalar defining the aperture radius or disk size [S1, book].
++- $L$: scalar controlling the magnitude of the noise-driven offset [S2, unofficial].
+ 
+-**Ray Recalculation**
+-For depth of field, the ray direction is typically computed as the vector from the sampled lens point to a target focus point in the scene. For lens shift or distortion, the direction may be rotated or scaled relative to the optical axis.
++**Numbered Steps**
++1. Retrieve the base ray direction $\mathbf{d}_{\text{base}}$ and camera matrix $\mathbf{C}$ for the current pixel [S2, unofficial].
++2. Sample a 2D offset from the noise buffer $\mathcal{N}$ and scale it by the lens distance parameter $L$ to produce $\mathbf{u}_{\text{local}}$ [S2, unofficial].
++3. Transform $\mathbf{u}_{\text{local}}$ to world space using $\mathbf{C}$ to obtain the aperture offset $\mathbf{u}_{\text{world}}$ [S2, unofficial].
++4. Compute the displaced ray origin $\mathbf{o} = \mathbf{C} \cdot [0, 0, 0, 1]^T + \mathbf{u}_{\text{world}}$ [S2, unofficial].
++5. Calculate the new ray direction $\mathbf{d} = \text{normalize}(\mathbf{f} - \mathbf{o})$ to pass through the focal point [S1, book][S2, unofficial].
++6. Perform ray-scene intersection (e.g., AABB intersection) using $\mathbf{o}$ and $\mathbf{d}$ [S2, unofficial].
++7. For post-processing glare, apply exponentially weighted line kernels to the accumulated image to simulate polygonal aperture diffraction [S3, unofficial].
+ 
+-**Jacobian Determinants**
+-When transforming samples between different aperture geometries or sizes (e.g., in multi-view rendering), the Jacobian determinant of the transformation must be computed to preserve the correct probability density for Monte Carlo integration.
++**Formulas**
++- Ray origin: $\mathbf{o} = \mathbf{C}_{\text{origin}} + \mathbf{u}_{\text{world}}$
++- Ray direction: $\mathbf{d} = \frac{\mathbf{f} - \mathbf{o}}{\|\mathbf{f} - \mathbf{o}\|}$
++- Offset generation: $\mathbf{u}_{\text{local}} = \mathcal{N}(x, y) \cdot L$
++
++**Parameters**
++- Focal point $\mathbf{f}$: typically placed at the primary subject distance [S1, book].
++- Focal disk radius $r$: controls blur intensity; not given in the sources.
++- Number of frames/samples: set explicitly for focal depth accumulation instead of subframe blending [S1, book].
++
++**Edge Cases and Pitfalls**
++- Precision loss occurs when $\mathbf{o}$ approaches $\mathbf{f}$, causing $\mathbf{d}$ to become unstable; clamp the minimum distance to focus [G].
++- Noise buffer bounds must be clamped to $[0, 1]$ to prevent out-of-bounds sampling [G].
++- Degenerate aperture radius $r=0$ collapses to a pinhole model and should be handled as a fallback [G].
++
++```python
++def generate_dof_rays(c2w, dir_base, noise_buffer, len_dis, focal_point):
++    # 1. Sample aperture offset from noise buffer
++    u_local = noise_buffer.sample() * len_dis
++    
++    # 2. Transform offset to world space
++    u_world = c2w.transform_direction(u_local)
++    
++    # 3. Compute displaced ray origin
++    cam_origin = c2w.transform_point([0.0, 0.0, 0.0])
++    origin = cam_origin + u_world
++    
++    # 4. Calculate new ray direction targeting focal point
++    direction = normalize(focal_point - origin)
++    
++    # 5. Perform intersection
++    hit = aabb_intersect(origin, direction)
++    return origin, direction, hit
++```
+ 
+ ## Subtopics
+@@ -30,9 +73,16 @@
+ 
+ ### Depth of Field Ray Tracing
+-A procedural approach to generating DOF rays using noise buffers and distance-based offsets. It generates an offset using a noise buffer and lens distance, transforms it to world space, and calculates the new ray direction and origin based on the distance to focus. It performs AABB intersection on the resulting rays. This method is distinct from analytical thin lens sampling by relying on noise-driven perturbations rather than uniform disk sampling.
++A procedural approach to generating DOF rays using noise buffers and distance-based offsets. It generates an offset using a noise buffer and lens distance, transforms it to world space, and calculates the new ray direction and origin based on the distance to focus. It performs AABB intersection on the resulting rays. This method is distinct from analytical thin lens sampling by relying on noise-driven perturbations rather than uniform disk sampling [S2, unofficial].
++
++### Polygonal Aperture Glare/Star Burst
++A post-processing effect that simulates polygonal aperture diffraction patterns (star burst) using exponentially weighted line kernels. It applies these kernels to the scene-linear image before tone mapping to produce N-blade bokeh highlights [S3, unofficial].
++
++## Operating characteristics
+ 
+ ## Background
+-Depth of field simulation in ray tracing was popularized by the thin lens model described in standard computer graphics literature [S1, unofficial]. The implementation in the provided sources relies on a Taichi-based renderer [S1, unofficial]. Lens shift techniques for multi-view rendering address the specific problem of sample reuse in volumetric contexts where aperture sizes vary.
++Depth of field simulation in ray tracing was popularized by the thin lens model described in standard computer graphics literature [S1, book]. The procedural noise-driven approach is implemented in a Taichi-based renderer [S2, unofficial]. Polygonal aperture glare effects using exponentially weighted line kernels are integrated into a volumetric rendering engine's post-processing imager [S3, unofficial]. Lens shift techniques for multi-view rendering address sample reuse in volumetric contexts where aperture sizes vary [S1, book].
+ 
+ ## Sources
+-[S1] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)+[S1] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
++[S2] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
++[S3] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)

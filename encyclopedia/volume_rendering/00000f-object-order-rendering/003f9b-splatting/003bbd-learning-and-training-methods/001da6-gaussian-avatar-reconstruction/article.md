@@ -1,51 +1,53 @@
 # Gaussian Avatar Reconstruction
 
-Also called: Gaussian Avatars, 3DGS-Avatar, Relightable Gaussian Codec Avatars, NoPoSplat, GaussianShader, Animatable Gaussians, SplattingAvatar, Codec Avatar 3D, OmniRe, SplatArmor, HuGS, HiFi4G
+Also called: Gaussian Avatars (family), Parametric Gaussian Avatars
 
 ## Overview
-Gaussian Avatar Reconstruction is a family of methods that reconstruct animatable, dynamic 3D human or head avatars from video by representing them as collections of 3D Gaussians [S2, unofficial]. It solves the problem of generating high-fidelity, real-time renderable avatars that can be driven by parametric body models (SMPL/FLAME) or pose features, serving as a dynamic alternative to static Neural Radiance Fields (NeRF) or traditional mesh-based animation [S2, unofficial]. It is distinguished from its sibling [Gaussian Splatting](946-gaussian-splatting.md) by its explicit dependency on a parametric structural prior to drive deformation, and from [Gaussian Avatars](1477-gaussian-avatars.md) which typically focus on head-only reconstruction using the FLAME model.
+Gaussian Avatar Reconstruction methods represent dynamic human subjects (typically heads or full bodies) as a set of deformable 3D Gaussian primitives driven by parametric models like FLAME or SMPL [S1, unofficial][S2, unofficial]. Unlike static [Gaussian Splatting](946-gaussian-splatting.md) which assumes a rigid scene, this family solves the problem of rendering animatable, high-fidelity avatars from video by constraining Gaussian geometry to the parametric mesh surface and optimizing pose-dependent deformations [S1, unofficial][S2, unofficial]. It differs from sibling methods like [Pose-free and Feed-forward Training](6500-pose-free-and-feed-forward-training.md) by explicitly relying on known or estimated camera poses and parametric priors for deformation, rather than learning implicit mappings from unposed images [S1, unofficial].
 
 ## Shared principles
-The family builds on [Splatting](23-splatting.md) by treating volumetric data as a set of parametric primitives that are transformed and rasterized [S1, unofficial][S2, unofficial].
-1. **Parametric Prior:** The geometry and deformation of the avatar are constrained by a parametric model (e.g., SMPL for full-body, FLAME for heads) [S2, unofficial].
-2. **Pose-Conditioned Deformation:** Gaussian parameters (position, rotation, scale) are functions of the parametric model's pose and shape parameters [S2, unofficial].
-3. **Differentiable Rendering:** The rendering process uses differentiable splatting to compute gradients from the rendered image to the Gaussian parameters and/or the deformation network weights [S1, unofficial][S2, unofficial].
-4. **Optimization:** The model is trained by minimizing photometric loss between rendered images and input video frames [S2, unofficial].
+The methods in this family share the fundamental mechanism of treating volumetric data as a set of parametric primitives that are transformed and rasterized [S1, unofficial][S2, unofficial]. All variants rely on differentiable rendering to compute gradients from the rendered image to the Gaussian parameters (position, covariance, opacity, spherical harmonics) and/or network weights [S1, 6136-instantsplat.md, 6464-pixelsplat.md, unofficial]. The rendering process remains differentiable with respect to the scene representation [S1, 6136-instantsplat.md, 6464-pixelsplat.md, unofficial]. Loss functions typically combine photometric reconstruction error, such as $\mathcal{L}_{L1}$ or $\mathcal{L}_{MSE}$, with perceptual or structural metrics like $\mathcal{L}_{MS-SSIM}$ or $\mathcal{L}_{LPIPS}$ [6136-instantsplat.md][6464-pixelsplat.md].
+
+Specific to this family:
+*   **Parametric Constraint:** Gaussian positions and orientations are initialized and constrained to the surface of a parametric mesh (e.g., FLAME for heads, SMPL for bodies) [S1, unofficial][S2, unofficial].
+*   **Deformation:** Gaussian parameters are functions of the parametric model's pose and shape parameters [S2, unofficial]. This allows the avatar to be animated by changing the pose/shape inputs.
+*   **Initialization:** Gaussians are typically initialized per triangle or vertex of the parametric mesh [S1, unofficial][S2, unofficial].
 
 ## Subtopics
 
 ### [Gaussian Splatting](946-gaussian-splatting.md)
-A novel-view synthesis method that represents a scene as an explicit collection of anisotropic 3D Gaussians, each carrying opacity and view-dependent color encoded via spherical harmonics. It solves the computational bottleneck of implicit neural radiance fields (NeRFs) by replacing ray marching with a tile-based differentiable rasterizer, enabling real-time rendering speeds (≥30 fps at 1080p) while maintaining photorealistic quality. It sets itself apart from its siblings by optimizing Gaussian parameters directly from images using adaptive density control (cloning, splitting, pruning) rather than relying on a fixed mesh or implicit network, and from [Gaussian Avatar Reconstruction](1575-gaussian-avatar-reconstruction.md) by lacking pose-conditioned deformation constraints, treating the scene as static geometry.
+3D Gaussian Splatting (3DGS) is the baseline architecture for explicit, learnable Gaussian primitives optimized directly from images. It solves the computational bottleneck of implicit neural radiance fields (NeRFs) by replacing ray marching with a tile-based differentiable rasterization pipeline, enabling real-time rendering speeds (≥30 fps at 1080p) while maintaining photorealistic quality. Unlike its siblings [SpotlessSplats](1476-spotlesssplats.md) and [Gaussian Avatars](1477-gaussian-avatars.md) which focus on specific deformation or optimization constraints, 3DGS establishes the baseline architecture for static scene representation.
 
 ### [SpotlessSplats](1476-spotlesssplats.md)
-A robust Gaussian Avatar Reconstruction method designed to improve reconstruction quality in casual captures by ignoring transient distractors. It enhances the standard Gaussian Splatting pipeline by detecting outliers in a richer, pre-trained feature space, thereby increasing robustness against noise and occlusions. It builds on [Gaussian Avatar Reconstruction](1575-gaussian-avatar-reconstruction.md) by adding a feature-based outlier rejection mechanism.
+SpotlessSplats is a robust Gaussian Avatar Reconstruction method designed to improve reconstruction quality in casual captures by ignoring transient distractors. It enhances robustness by detecting outliers in a richer, pre-trained feature space. Unlike standard Gaussian Splatting which may be sensitive to noise, SpotlessSplats builds on [Gaussian Avatar Reconstruction](1575-gaussian-avatar-reconstruction.md) by integrating a feature-based outlier detection mechanism to filter out transient effects and occluders.
 
 ### [Gaussian Avatars](1477-gaussian-avatars.md)
-A method for reconstructing photorealistic, animatable head avatars by associating 3D Gaussians with the triangles of a FLAME parametric head model. It solves the challenge of dynamic avatar reconstruction by constraining each Gaussian to remain within its corresponding mesh triangle, enabling riggable animation driven by pose and expression parameters. It is distinguished from sibling methods like Gaussian Head Avatar (which uses MLPs for position prediction) and Gaussian Avatar (which uses SMPL for full-body) by its explicit triangle-constrained initialization and optimization strategy for bust-level reconstruction.
+Gaussian Avatars is a head-driven, riggable avatar reconstruction method that uses the FLAME parametric model to constrain 3D Gaussians to the surface of a bust mesh. It differs from full-body approaches like [Gaussian Avatar](1575-gaussian-avatar-reconstruction.md) by focusing on high-fidelity facial details and enabling relighting through a light rig.
 
 ### [Relightable Gaussian Codec Avatars](1482-relightable-gaussian-codec-avatars.md)
-A method for creating photorealistic, animatable 3D head avatars that support dynamic relighting. It builds on [Gaussian Avatar Reconstruction](1575-gaussian-avatar-reconstruction.md) by integrating a relightable appearance model with the FLAME parametric head rig. It distinguishes itself from standard Gaussian Avatars by explicitly modeling lighting interactions, allowing the avatar to be rendered under diverse, novel lighting conditions rather than being fixed to the capture lighting.
+Relightable Gaussian Codec Avatars is a method for creating photorealistic, animatable 3D head avatars that support dynamic relighting under diverse illumination conditions. It extends the Gaussian Avatar Reconstruction family by decoupling geometry and appearance from the capture lighting, allowing the avatar to be rendered under arbitrary light sources. Unlike standard Gaussian Avatars which bake lighting into the spherical harmonics or color attributes, this method explicitly models the BRDF, enabling physically plausible relighting.
 
 ### [NoPoSplat](1484-noposplat.md)
-A 3D Gaussian Splatting method designed for novel view synthesis from sparse or unposed input images. It eliminates the requirement for known camera poses by establishing a canonical coordinate system anchored to a single input view and utilizing intrinsics token embeddings to resolve scale ambiguity. This approach achieves superior reconstruction quality compared to pose-dependent methods, particularly in scenarios with minimal view overlap.
+NoPoSplat is a 3D Gaussian Splatting method that eliminates the requirement for known camera poses during reconstruction. It addresses the critical limitation of pose-dependent methods by anchoring the canonical coordinate system to a single input view and introducing intrinsics token embeddings to resolve scale ambiguity. This approach achieves superior novel view synthesis quality, particularly in scenarios with minimal view overlap.
 
 ### [SMPL-based rigid/non-rigid deformation](8385-smpl-based-rigid-non-rigid-deformation.md)
-This family reconstructs animatable human avatars by initializing 3D Gaussian primitives on a parametric body model (SMPL or SMPL-X) and conditioning their deformation on pose parameters. It differs from static [Gaussian Splatting](946-gaussian-splatting.md) by introducing pose-dependent geometry updates, and from head-focused methods like [Gaussian Avatars](1477-gaussian-avatars.md) which use the FLAME model for facial reconstruction. The approach solves the problem of high-fidelity, real-time rendering of dynamic full-body humans from video by combining differentiable splatting with a parametric prior.
+This family reconstructs animatable 3D human avatars by driving 3D Gaussian primitives with the SMPL parametric model. It solves the problem of rendering dynamic, pose-dependent cloth deformation and fine geometric details that standard static splatting cannot capture. It differs from static [Gaussian Splatting](946-gaussian-splatting.md) by predicting Gaussian parameters as functions of the model's pose, and from sibling methods like [Gaussian Avatar](1479-gaussian-avatar.md) by using explicit rigid/non-rigid transformation combinations rather than purely feed-forward networks for deformation.
 
 ### GaussianShader
-Enriches Gaussians with material parameters such as diffusiveness, specularity, roughness, and normals to handle specular and reflective objects [S1, unofficial].
+- [S1, unofficial] Enriches Gaussians with material parameters such as diffusiveness, specularity, roughness, and normals.
 
 ### Codec Avatar 3D
-A production-grade GS-based head model for volumetric telepresence by Meta [S2, unofficial].
+- [S2, unofficial] A production-grade GS-based head model for volumetric telepresence by Meta.
 
 ### OmniRe
-A holistic scene reconstruction method including humans, vehicles, and static background [S2, unofficial].
+- [S2, unofficial] A holistic scene reconstruction method including humans, vehicles, and static background.
 
 ### SplatArmor
-Leverages two different MLPs to predict large motions built upon the SMPL and canonical space, allowing pose-dependent effects via SE(3) fields [S3].
+- [S3] Leverage two different MLPs to predict large motions built upon the SMPL and canonical space.
+- [S3] Allow pose-dependent effects by the proposed SE(3) fields.
 
 ## Background
-The method originates from the application of 3D Gaussian Splatting to dynamic human reconstruction. Early works introduced SMPL-driven body Gaussians [S2, unofficial]. Subsequent methods such as 3DGS-Avatar, GaussianAvatars, GoMAvatar, and AnimatableGaussians refined the approach using SMPL-X or FLAME models with various deformation strategies [S2, unofficial]. Relightable variants like PSAvatar added BRDF modeling for lighting synthesis [S2, unofficial]. Meta's Codec Avatar 3D represents a production-grade implementation for telepresence [S2, unofficial]. The field has expanded to holistic scene reconstruction (OmniRe) and SLAM applications (SplaTAM, MonoGS) [S2, unofficial].
+The concept of using Gaussian primitives for avatar reconstruction emerged as an extension of 3D Gaussian Splatting (3DGS) [S1, unofficial][S2, unofficial]. While 3DGS was originally designed for static scene reconstruction [S7, unofficial], researchers adapted it to dynamic subjects by integrating parametric models like FLAME and SMPL [S1, unofficial][S2, unofficial]. This allowed for the creation of animatable avatars that could be driven by pose and shape parameters. The field has since expanded to include robustness against transient artifacts [S1, unofficial][S2, unofficial], relightable appearance models [S1, unofficial][S2, unofficial], and pose-free training [S1, unofficial][S2, unofficial]. Production-grade implementations, such as Meta's Codec Avatars 3D, have further refined these techniques for applications like volumetric telepresence [S2, unofficial].
 
 ## Sources
 [S1] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)

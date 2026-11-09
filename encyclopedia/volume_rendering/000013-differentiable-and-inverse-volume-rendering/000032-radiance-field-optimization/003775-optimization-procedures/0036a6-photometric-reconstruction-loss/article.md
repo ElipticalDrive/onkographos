@@ -1,0 +1,124 @@
+# Photometric Reconstruction Loss
+
+Also called: Geometric Photometric Loss, Lrec, Multi-view Photometric Loss, Reprojection Loss
+
+## Overview
+Photometric reconstruction loss minimizes the difference between rendered pixels and input training images during joint optimization of scene representation and camera poses [S2, unofficial]. It serves as the primary supervisory signal for differentiable volume rendering, ensuring that the reconstructed radiance field accurately reproduces the observed views [S2, unofficial]. Unlike sibling methods that focus on initialization or regularization, this loss directly drives the geometric and photometric consistency of the scene by penalizing pixel-wise errors [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $L$ 2D training images $I = \{I_1, \dots, I_L\}$, their corresponding camera poses $P = \{P_1, \dots, P_L\}$, and the radiance field parameters (density $\sigma$ and color $c$).
+*   **Outputs:** A scalar loss value $L_{rec}$ used for gradient-based optimization.
+
+**Data Structures:**
+*   **Camera Poses ($P$):** Parameterized as elements of the $se(3)$ Lie algebra, representing rigid 3D transformations [S2, unofficial].
+*   **Radiance Field:** Defined by functions $F_\sigma$ (density) and $F_c$ (color) [S2, unofficial].
+*   **Warping Function ($W_{3d}$):** Maps 3D coordinates from a canonical ray to a camera-specific ray [S2, unofficial].
+
+**Steps:**
+1.  **Ray Sampling:** For each training image $i$ and pixel $u \in U$ (where $U$ is the set of all 2D coordinates in the input images), generate a canonical ray $\vec{r}$ starting at origin $\vec{0}$ with direction $\vec{d_u}$ [S2, unofficial].
+2.  **3D Warping:** Map each sample 3D coordinate $s(\vec{0}, \vec{d_u})$ in the canonical ray to the 3D sample coordinate of the camera ray with pose $P_i$ using the warping function $W_{3d}(P_i, \cdot)$ [S2, unofficial]. This function performs a rigid 3D transformation parameterized by $P_i \in se(3)$ [S2, unofficial].
+3.  **Volume Rendering:** Compute the rendered color $V(F_\sigma, F_c, \cdot)$ at the warped sample coordinates using the standard emission-absorption model [S2, unofficial].
+4.  **Pixel Comparison:** Compare the rendered color with the ground truth RGB color $I_{iu} \in \mathbb{R}^3$ of pixel $u$ in image $I_i$ [S2, unofficial].
+5.  **Loss Aggregation:** Sum the errors over all images and pixels [S2, unofficial].
+
+**Formula:**
+The photometric reconstruction loss is defined as [S2, unofficial]:
+
+$$
+L_{rec}(F_\sigma, F_c) = \sum_{i=1}^{L} \sum_{u \in U} \| V(F_\sigma, F_c, W_{3d}(P_i, s(\vec{0}, \vec{d_u}))) - I_{iu} \|
+$$
+
+Where:
+*   $L$ is the number of 2D images.
+*   $U$ is the set of all possible 2D coordinates in the input images.
+*   $I_{iu}$ is the RGB color of pixel location $u$ on training image $I_i$.
+*   $W_{3d}(P, \cdot): \mathbb{R}^3 \rightarrow \mathbb{R}^3$ performs rigid 3D transformation parameterized by $P \in se(3)$ [S2, unofficial].
+*   $s(\vec{0}, \vec{d_u})$ represents the sample points along the ray [S2, unofficial].
+
+**Parameters:**
+*   **Camera Poses ($P$):** Typically optimized jointly with the radiance field in joint optimization settings [S2, unofficial].
+*   **Norm:** The norm $\|\cdot\|$ is typically the $L_1$ or $L_2$ norm [S2, unofficial][S3].
+
+**Edge Cases and Pitfalls:**
+*   **Ill-posedness:** The problem is ill-posed due to shape-radiance ambiguity [S2, unofficial].
+*   **Joint Optimization:** When camera poses are unknown, the problem becomes even more ill-defined, requiring careful initialization and regularization [S2, unofficial].
+*   **Precision:** The warping function $W_{3d}$ must accurately handle the Lie algebra parameterization to avoid geometric distortions [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def photometric_reconstruction_loss(images, poses, radiance_field, warping_function, ray_sampler):
+    """
+    Computes the photometric reconstruction loss.
+    
+    Args:
+        images: List of L 2D images I_i.
+        poses: List of L camera poses P_i in se(3).
+        radiance_field: Radiance field functions F_sigma and F_c.
+        warping_function: W_3d(P, s) mapping canonical samples to camera rays.
+        ray_sampler: Generates samples s(0, d_u) for each pixel u.
+        
+    Returns:
+        loss: Scalar photometric reconstruction loss.
+    """
+    total_loss = 0.0
+    L = len(images)
+    
+    for i in range(L):
+        image_i = images[i]
+        pose_i = poses[i]
+        
+        # Get all pixel coordinates U for image i
+        U = get_pixel_coordinates(image_i)
+        
+        for u in U:
+            # Get ground truth color
+            I_iu = get_pixel_color(image_i, u)
+            
+            # Generate canonical ray samples
+            samples = ray_sampler.generate_samples(origin=[0,0,0], direction=get_ray_direction(u))
+            
+            # Warp samples to camera ray coordinates
+            warped_samples = []
+            for s in samples:
+                warped_s = warping_function.warp_3d(pose_i, s)
+                warped_samples.append(warped_s)
+            
+            # Render color at warped samples
+            rendered_color = volume_render(radiance_field, warped_samples)
+            
+            # Compute pixel-wise error (e.g., L1 or L2)
+            error = norm(rendered_color - I_iu)
+            total_loss += error
+            
+    return total_loss
+```
+
+## Subtopics
+
+### [Photometric Loss (RawNeRF Variant)](9563-photometric-loss-rawnerf-variant.md)
+A training loss for inverse rendering that minimizes the difference between predicted radiance and ground truth while correctly propagating gradients through a Monte Carlo estimator using a gradient trick [9563-photometric-loss-rawnerf-variant.md].
+
+### [Photometric Loss (RawNeRF Variant)](9563-photometric-loss-rawnerf-variant.md)
+A photometric objective combining $L_1$ and D-SSIM: $\mathcal{L}_{\text{photo}} = (1-\lambda)\mathcal{L}_1 + \lambda \mathcal{L}_{\text{D-SSIM}}$. It is often part of a total loss that includes depth distortion and normal consistency terms: $\mathcal{L} = \mathcal{L}_{\text{photo}} + \lambda_{\text{dist}}\mathcal{L}_{\text{dist}} + \lambda_{\text{normal}}\mathcal{L}_{\text{normal}}$.
+
+### Reprojection Loss
+Minimizes the error between pixel correspondences across frames by reprojecting points from one camera to another [S1]. Defined as $L_{\text{reproj}} = \sum_{(m,n)} \| I_m(K_m P_m), I_n(K_n(R_m P_m + t_{nm})) \|$, where $(R_m, t_{nm})$ is the rotation/translation from camera $m$ to $n$, $P_m$ is the point cloud from the $m$-th depth/RGB, $K_m$ is the projection matrix, and $I(\cdot)$ is the pixel value [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(L \cdot |U| \cdot N)$, where $L$ is the number of images, $|U|$ is the number of pixels, and $N$ is the number of samples per ray [S2, unofficial].
+*   **Memory Complexity:** Depends on the differentiation strategy. Reverse-mode AD requires $O(kn)$ intermediate states, while analytic inversion reduces it to $O(n)$ [44-radiance-field-optimization.md].
+*   **Strengths:** Provides direct supervision for both geometry and appearance; differentiable through the rendering process [S2, unofficial].
+*   **Limitations:** Ill-posed without regularization; sensitive to camera pose errors in joint optimization [S2, unofficial].
+*   **When to use:** Standard supervision for differentiable volume rendering; joint optimization of poses and scene [S2, unofficial].
+*   **When not to use:** When ground truth poses are unavailable and no joint optimization is performed; when only geometric priors are desired without photometric consistency.
+
+## Background
+The photometric reconstruction loss is a fundamental component of differentiable volume rendering and neural radiance fields (NeRF) [S2, unofficial]. It was introduced to enable the optimization of scene representations from multi-view images by minimizing the pixel-wise difference between rendered and observed images [S2, unofficial]. The use of $se(3)$ Lie algebra for camera pose parameterization is a common technique in robotics and has been adopted in NeRF optimization [S2, unofficial]. The method has been extended with various variants, including reprojection losses for multi-view consistency [S1] and combined losses with depth and normal constraints [S3].
+
+## Sources
+[S1] TD-NeRF: Novel Truncated Depth Prior for Joint Camera Pose and Neural Radiance Field Optimization, https://doi.org/10.1109/iros58592.2024.10802634, fetched 2026-10-26
+[S2] Improving Robustness for Joint Optimization of Camera Poses and Decomposed Low-Rank Tensorial Radiance Fields, https://doi.org/10.48550/arxiv.2402.13252, fetched 2026-10-26 (unofficial)
+[S3] Fourier Splatting: Generalized Fourier encoded primitives for scalable radiance fields, https://doi.org/10.48550/arXiv.2603.19834, fetched 2026-10-30

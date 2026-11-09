@@ -1,0 +1,91 @@
+# Octree-based Mesh Voxelization
+
+Also called: Recursive Octree Voxelization, Sparse Voxel Octree Triangle Filling, Mesh to Sparse Voxel Octree Conversion, Voxelization using octree spatial partitioning
+
+## Overview
+Octree-based mesh voxelization converts a 3D triangle mesh into a sparse hierarchical voxel representation by recursively subdividing the mesh's bounding volume into eight equal sub-cubes and marking those intersecting the mesh as active [S1, abstract only][S3, unofficial]. Unlike uniform grid voxelization, which wastes memory on empty space, this method builds a sparse structure where only occupied regions are stored, making it suitable for large or complex geometries [S3, unofficial]. It differs from [Voxel Placement in Octree](3097-voxel-placement-in-octree.md) by focusing on the initial construction from geometry rather than dynamic insertion, and from [Dynamic Sparse Voxel Octree with Morton Codes](4099-dynamic-sparse-voxel-octree-with-morton-codes.md) by using a recursive subdivision approach rather than Morton-code-based spatial hashing for the initial fill [S2, S3, unofficial].
+
+## How it works
+**Inputs:** A triangle mesh (vertices, indices), a target `voxelSize`, and optional parameters `currentDepth` (default 6) and `maxDepth` (default 10) [S3, unofficial].
+**Outputs:** An Octree structure where leaf nodes represent voxels intersecting the mesh surface [S1, abstract only][S3, unofficial].
+
+**Data Structures:**
+The core structure is the `OctreeNode` [S3, unofficial]:
+*   `isLeaf` (bool): True if the node has no children.
+*   `isActive` (bool): True if the node intersects the mesh.
+*   `position` (vec3): The center of the voxel in world space.
+*   `size` (vec3): The side length of the voxel (uniform cube).
+*   `color` (vec3): Optional attribute (e.g., sampled from mesh) [S3, unofficial].
+*   `children` (OctreeNode*[8]): Array of pointers to child nodes. Null if `isLeaf` is true.
+
+**Algorithm Steps:**
+
+1.  **Initialize Bounds:**
+    Calculate the aligned center of the mesh bounds to ensure grid alignment [S2, unofficial]:
+    $$ octreePos[i] = \text{round}\left(\frac{mesh.bounds.center[i]}{voxelSize}\right) \times voxelSize $$
+    Calculate the required size to cover the mesh, rounded up to the next power of two multiple of `voxelSize` [S2, unofficial]:
+    $$ octreeSize = 2 \times \max_i(|max[i] - octreePos[i]|, |min[i] - octreePos[i]|) $$
+    $$ octreeSize = \text{nextPowerOfTwo}\left(\text{ceil}\left(\frac{octreeSize}{voxelSize}\right)\right) \times voxelSize $$
+    Create the root node with `position = (0,0,0)` and `size = octreeSize` (or fixed initial size like 2.0 if normalized) [S3, unofficial]. Set `currentDepth` and `maxDepth` [S3, unofficial].
+
+2.  **Process Triangles:**
+    Iterate through all triangles in the mesh [S3, unofficial]. For each triangle with vertices $v_0, v_1, v_2$:
+    a. Transform vertices into the octree's local coordinate space (normalized to $[-0.5, 0.5]$ or $[0, 1]$ depending on implementation) [S2, unofficial]:
+       $$ triVerts[v] = (vertices[triIndices[v]] - octreeCenter) \times octreeSizeInv $$
+    b. Call the recursive voxelization function: `voxelizeTriangle(root, v0, v1, v2, depth=1)` [S3, unofficial].
+
+3.  **Recursive Voxelization (`voxelizeTriangle`):**
+    Given a `node`, triangle vertices $v_0, v_1, v_2$, and current `depth`:
+    a. **Calculate Bounding Box:**
+       $$ halfSize = node.size \times 0.5 $$
+       $$ boxMin = node.position - halfSize $$
+       $$ boxMax = node.position + halfSize $$
+    b. **Intersection Test:**
+       Check if the triangle intersects the node's bounding box.
+       *Note:* Sources indicate a simplified AABB-AABB overlap test is often used for speed, computing $triMin = \min(v_0, v_1, v_2)$ and $triMax = \max(v_0, v_1, v_2)$, then checking for overlap along axes. This is not a precise triangle-box intersection but a bounding box overlap test [S3, unofficial]. If no intersection, return [S3, unofficial].
+    c. **Termination Conditions:**
+       If `depth >= currentDepth` (target resolution) OR `depth >= maxDepth` (safety limit), mark the node as `isLeaf = true` and `isActive = true`. Return [S3, unofficial].
+    d. **Subdivision:**
+       If not terminated, mark `isLeaf = false`. Iterate through 8 children ($i = 0 \dots 7$):
+       i. Allocate new `OctreeNode` if null.
+       ii. Calculate child position offset based on bit flags of $i$:
+           - x-offset: $\pm halfSize.x \times 0.5$ if $(i \& 1)$
+           - y-offset: $\pm halfSize.y \times 0.5$ if $(i \& 2)$
+           - z-offset: $\pm halfSize.z \times 0.5$ if $(i \& 4)$
+       iii. Set child `position` and `size` (half of parent).
+       iv. Recursively call `voxelizeTriangle(child, v0, v1, v2, depth + 1)` [S3, unofficial].
+
+4.  **Attribute Generation (Optional):**
+    If attributes (color, normal) are required, interpolate them at the voxel's position or use triangle barycentric coordinates to sample vertex attributes (normals, UVs) and texture colors [S2, unofficial]. Encode normals using a standard encoder (e.g., cubic mapping) [S2, unofficial].
+
+**Pitfalls:**
+*   **Precision:** If the calculated depth exceeds 12, the voxel size is too small for the mesh bounds, potentially causing overflow or infinite recursion; throw `NotSupportedException` [S2, unofficial].
+*   **Intersection Accuracy:** The simplified AABB-AABB test may produce false positives (marking empty voxels as active) if the triangle passes near the corner of the box without intersecting the volume [S3, unofficial].
+*   **Watertightness:** For closed meshes, this method primarily identifies surface voxels. Distinguishing inside from outside voxels requires additional logic (e.g., ray casting or flood fill) not inherent to the basic recursive split [S1, abstract only].
+
+## Subtopics
+
+### Sparse Voxel Octree Construction via Triangle Overlap Testing
+A GPU-parallel variant where one thread is allocated per triangle [S4]. It determines the triangle's bounding box and checks for overlap with Sparse Grid (SG) voxel centers in the yz plane. It derives the yz range of level-0 tiles, sets up edge functions, and loops over tiles to check for overlap. If an active tile is found, it loops over 4x4 SG voxel columns, projects centers onto the triangle plane to find the first voxel to flip, and uses atomic XOR operations to flip voxels in the column. Navigation uses x-neighbor pointers and Morton code ancestor derivation for fast access [S4].
+
+### Octree-Based Sparse Solid Voxelization
+A method that creates a space-efficient representation directly from the mesh without an intermediate full voxelization [S4]. Finest-level voxels are stored only near the boundary, while uniform interior/exterior regions use coarser-level voxels. This enables voxelizations of grid size $4096^3$ (saving memory compared to the 8 GB required for a full bit array) and accelerates ray traversal [S4].
+
+### Mesh to Octree Conversion with Standard Attributes
+A variant that converts a mesh into a sparse voxel octree by sampling vertex attributes (normals, UVs, texture colors) at triangle barycentric coordinates [S2, unofficial]. It interpolates UVs and normals using barycentric weights relative to the voxel mesh bounds center, samples texture colors bilinearly, and encodes the normal vector using a standard attribute encoder (cubic mapping) [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot D)$, where $N$ is the number of triangles and $D$ is the average depth of the octree. In the worst case (highly detailed mesh), it approaches $O(V)$ where $V$ is the number of voxels.
+*   **Memory Complexity:** Proportional to the number of active nodes in the octree. Significantly less than uniform grids for sparse or large scenes [S4].
+*   **Performance:** Efficient for large meshes due to early rejection of non-intersecting nodes. The simplified AABB test is fast but may overestimate occupancy [S3, unofficial].
+*   **Strengths:** Handles arbitrary mesh complexity; memory efficient; supports hierarchical attribute storage [S2, unofficial][S4].
+*   **Limitations:** Recursive nature can cause stack overflow for very deep trees; simplified intersection tests may lead to "bloated" voxels (false positives) [S2, S3, unofficial]. Not suitable for real-time dynamic updates without careful management of tree growth [S2, unofficial].
+
+## Background
+Originating from the need to convert CAD and 3D models into voxel representations for manufacturing and AI applications, this method was developed as a tool for Product Manufacturing Information (PMI) storage [S1, abstract only]. It allows structured, dimensionality-reducing storage of geometry and PMI, enabling applications like similarity search and clustering [S1, abstract only]. The recursive octree approach is a standard technique in computer graphics for spatial partitioning, implemented in various open-source tools like `model_voxelizer` and Unity-based SVO libraries [S2, S3, unofficial]. The parallel GPU variants were introduced to handle unprecedented voxelization sizes (e.g., $4096^3$) by avoiding intermediate full grids [S4].
+
+## Sources
+[S1] Development of a voxelization tool for the calculation of vector-based workpiece representations, https://doi.org/10.1016/j.procir.2021.05.022, fetched 2026-10-26 (abstract only)
+[S2] xandergos/unity-sparse-voxel-octrees, https://github.com/xandergos/unity-sparse-voxel-octrees, fetched 2026-10-26 (unofficial)
+[S3] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)
+[S4] PDF Fast Parallel Surface and Solid Voxelization on GPUs, https://www.michael-schwarz.com/research/publ/files/vox-siga10.pdf, fetched 2026-10-27

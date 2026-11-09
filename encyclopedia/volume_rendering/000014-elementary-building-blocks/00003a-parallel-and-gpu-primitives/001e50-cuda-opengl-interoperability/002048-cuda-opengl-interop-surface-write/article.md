@@ -33,19 +33,22 @@ def cuda_opengl_surface_write(gl_texture_id, width, height, use_surface_write):
     cuda_resource = cudaGraphicsGLRegisterImage(gl_texture_id, GL_TEXTURE_2D, flags)
 
     # 3. Map CUDA resource to get cudaArray_t
-    cudaGraphicsMapResources(1, cuda_resource)
+    cudaGraphicsMapResources(1, &cuda_resource)
     dst_array = cudaGraphicsSubResourceGetMappedArray(cuda_resource, 0, 0)
 
     # 4. Launch kernel
     if use_surface_write:
-        surface_obj = cudaCreateSurfaceObject(dst_array)
+        surf_desc = cudaResourceDesc()
+        surf_desc.resType = cudaResourceTypeArray
+        surf_desc.res.array.array = dst_array
+        surface_obj = cudaCreateSurfaceObject(surf_desc)
         kernel_ray_hit(scene_data, surface_obj, width, height)
         cudaDestroySurfaceObject(surface_obj)
     else:
         kernel_ray_hit(scene_data, dst_array, width, height)
 
     # 5. Unmap resource (standard interop cleanup)
-    cudaGraphicsUnmapResources(1, cuda_resource)
+    cudaGraphicsUnmapResources(1, &cuda_resource)
 ```
 
 **Parameters:**
@@ -69,15 +72,15 @@ Copies a 3D volume of float data from device memory into a registered OpenGL 3D 
 - **Pitfall:** Source pointer must not be null and resource must be registered; throws `std::logic_error` if either condition fails [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
 - **Strengths:** Eliminates the final CPU-GPU transfer bottleneck for the rendered image [S1, unofficial].
-- **Limitations:** Not given in the sources.
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **Limitations:** Not given in the sources [S1, unofficial].
+- **When to use:** Not given in the sources [S1, unofficial].
+- **When not to use:** Not given in the sources [S1, unofficial].
 
 ## Background
-Originated from the need to integrate CUDA compute capabilities with OpenGL rendering pipelines efficiently. The technique is demonstrated in the cuVRender project, which implements a CUDA-accelerated volume rendering engine [S1, unofficial].
+Originated from the need to integrate CUDA compute capabilities with OpenGL rendering pipelines efficiently [S1, unofficial]. The technique is demonstrated in the cuVRender project, which implements a CUDA-accelerated volume rendering engine [S1, unofficial].
 
 ## Sources
 [S1] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)

@@ -3,175 +3,201 @@
 Also called: Direct rendering of multiresolution decomposed volume data, Multiresolution Volume Rendering with Adaptive Integration, Wavelet/Laplacian Pyramid Volume Rendering
 
 ## Overview
-Multiresolution Volume Rendering is a direct volume ray casting method that utilizes hierarchical data structures, such as wavelet or Laplacian pyramid decompositions, to perform adaptive integration and early termination along rays [S1, unofficial]. It solves the computational cost problem in volume rendering by allowing the use of lower-resolution data for parts of the ray where accuracy requirements are lower or occlusion is high, thereby reducing the number of sampling steps required [S1, unofficial]. It sets itself apart from standard direct volume ray casting by dynamically selecting resolution levels based on the ray's progress and occlusion state, and from sibling methods like Cluster Hierarchy-based Volume Rendering by relying on mathematical decomposition (wavelets/pyramids) rather than spatial clustering of voxels [S1, unofficial].
+Multiresolution Volume Rendering is a direct volume ray casting method that utilizes hierarchical data decompositions (such as wavelets or Laplacian pyramids) to perform adaptive integration and early termination along rays [S1, unofficial]. It solves the problem of high computational cost in large volume datasets by allowing the renderer to sample at lower resolutions where accuracy requirements are relaxed or occlusion is high, thereby reducing the number of samples needed [S1, unofficial]. It is distinguished from its siblings by its explicit use of mathematical multiresolution transforms to drive the sampling step size and data retrieval, rather than spatial partitioning structures like clusters or AMR grids [S1, unofficial].
 
 ## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset decomposed into $k$ hierarchical levels ($l = 0, 1, \dots, k-1$), where level 0 is the highest resolution and higher levels represent coarser approximations [S1, unofficial]. A viewpoint and camera parameters defining rays [S1, unofficial].
+*   **Output:** A 2D image with color values $I_{m,j}$ for each pixel [S1, unofficial].
 
-### Inputs and Outputs
-**Inputs:**
-*   A volume dataset decomposed into $k+1$ hierarchical levels ($m = 0, 1, \dots, k$), where level 0 is the highest resolution and level $k$ is the lowest [S1, unofficial].
-*   A viewpoint and camera parameters defining the view plane and projection [S1, unofficial].
-*   An illumination model to compute shading values [S1, unofficial].
-*   A threshold $\epsilon$ for early termination [S1, unofficial].
+**Data Structures:**
+The data is stored as a hierarchy of coefficients.
+*   **Wavelet Domain:** Coefficients $c_{u,w}$ associated with scaling functions $\phi$ [S1, unofficial].
+*   **Laplacian Pyramid:** Coefficients $c_i^k$ at level $k$, where reconstruction involves combining coefficients from level $k+1$ with detail coefficients [S1, unofficial].
 
-**Outputs:**
-*   A 2D image where each pixel contains the accumulated color and opacity derived from the ray integration [S1, unofficial].
+**Numbered Steps:**
+1.  **Ray Generation:** Cast rays from the viewpoint through each pixel on the view plane. Each ray is defined by a parametric line equation with parameter $t=0$ at the viewpoint [S1, unofficial].
+2.  **Intersection:** Compute the entry ($t_1$) and exit ($t_2$) intersection points of the ray with the volume boundary [S1, unofficial].
+3.  **Adaptive Tracing:** Trace the ray from $t_1$ to $t_2$. At each step:
+    *   Determine the appropriate resolution level $m$ for shading color $C_m(t)$ and level $j$ for occlusion $W_j(t)$ based on local error tolerance or distance [S1, unofficial].
+    *   Sample the scalar value at the current position $t$ using the selected level's data structure [S1, unofficial].
+    *   Compute the shading color $C_m(t)$ and opacity sample $\alpha$ [S1, unofficial].
+    *   Update the occlusion (accumulated opacity) $W_j(t)$ [S1, unofficial].
+    *   Check for early termination: if $W_j(t) < \epsilon$ (a small positive threshold), stop processing this ray [S1, unofficial].
+4.  **Integration:** Compute the final pixel color $I_{m,j}$ by integrating the product of shading and occlusion along the ray [S1, unofficial].
 
-### Data Structures
-The method relies on a multiresolution decomposition representation. For a dataset decomposed into $k$ levels:
-*   **Level $m$ Data:** Contains coefficients or voxel values at resolution level $m$.
-*   **Reconstruction:** Values at any point $t$ along a ray are reconstructed from the coefficients of the selected level(s).
+**Formulas:**
+The rendering equation is viewed as an inner product of shading $C(t)$ and occlusion $W(t)$ [S1, unofficial]:
+$$ I_{m,j} = \int_{t_1}^{t_2} C_m(t) W_j(t) dt = \langle C_m(t), W_j(t) \rangle $$
+where $C_m(t)$ is derived from level $m$ and $W_j(t)$ is derived from level $j$ [S1, unofficial].
 
-### Reconstruction Formulas
-To sample the volume at a point, the method reconstructs the scalar value from the multiresolution coefficients.
+**Reconstruction:**
+*   **Wavelet (1D):** To reconstruct a value $v(i)$ at point $i$ using kernel size $q$:
+    $$ v(i) = \sum_{l=0}^{q-1} c_{u,w}(l) \phi(i-l) $$
+    This is extended to 2D and 3D by summing over the respective kernel dimensions [S1, unofficial].
+*   **Laplacian Pyramid:** Reconstruction from level $k+1$ to $k$:
+    $$ c_i^k = c_{i}^{k+1} + \sum_{n} w(n - 2k) c_{i}^{k+1} $$
+    where $k$ is the level and $w$ is the kernel [S1, unofficial].
 
-**Wavelet Reconstruction (1D):**
-To reconstruct a value $v(i)$ at index $i$ using a kernel size $q$:
-$$ v(i) = \sum_{l=0}^{q-1} c_{u,w}(l) \phi(i-l) $$
-where $c_{u,w}(l)$ are the wavelet coefficients and $\phi$ is the reconstruction kernel [S1, unofficial]. This is extended to 2D and 3D by summing over the respective kernel dimensions [S1, unofficial].
+**Parameters:**
+*   $\epsilon$: Early termination threshold. Value not given in the sources.
+*   $k$: Number of decomposition levels. Example: 5 levels [S1, unofficial].
+*   $q$: Kernel size for reconstruction. Value not given in the sources.
 
-**Laplacian Pyramid Reconstruction:**
-Calculated from coefficients $c_i^k$ at level $k$:
-$$ c_i^k = c_{i}^{k+1} + \sum_{n} w(n - 2k) c_{i}^{k+1} $$
-where $k$ is the level and $w$ is the pyramid kernel [S1, unofficial].
-
-### Integration Model
-The rendering equation is viewed as an inner product of the shading value $C(t)$ and the occlusion (accumulated opacity) $W(t)$ along a ray segment from $t_1$ to $t_2$ [S1, unofficial]:
-$$ I = \int_{t_1}^{t_2} C(t) W(t) dt = \langle C(t), W(t) \rangle $$
-When using data from different resolution levels, let $C_m(t)$ be the shading value derived from level $m$ and $W_j(t)$ be the occlusion derived from level $j$. The integration is denoted as:
-$$ I_{m,j} = \langle C_m(t), W_j(t) \rangle $$
-Level 0 corresponds to the highest resolution. Using $m > 0$ or $j > 0$ implies using lower-resolution approximations, which allows for larger sampling step sizes [S1, unofficial].
-
-### Algorithm Steps
-1.  **Ray Casting:** Cast rays from the viewpoint through each pixel on the view plane. Each ray is defined as a parametric line equation with parameter $t=0$ at the viewpoint [S1, unofficial].
-2.  **Intersection:** Compute the intersection points $t_1$ and $t_2$ between the ray and the volume boundary [S1, unofficial].
-3.  **Ray Tracing Loop:** Trace from $t_1$ to $t_2$ with a sampling step size $\Delta t$. The step size may vary based on the resolution level being used [S1, unofficial].
-    *   **Reconstruction:** At the current sample point $t$, reconstruct the density/value using the selected resolution level's coefficients (Wavelet or Laplacian formulas above) [S1, unofficial].
-    *   **Shading:** Compute the local color/shading value $C(t)$ using the illumination model and the reconstructed density [S1, unofficial].
-    *   **Occlusion:** Compute the accumulated opacity $W(t)$ along the ray path from $t_1$ to $t$ [S1, unofficial].
-    *   **Early Termination:** Check if the remaining occlusion $W(t)$ is below a threshold $\epsilon$. If $W(t) < \epsilon$, terminate the ray early [S1, unofficial].
-    *   **Accumulation:** Add the contribution $C(t) W(t) \Delta t$ to the pixel color [S1, unofficial].
-
-### Pseudocode
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def multiresolution_volume_rendering(volume_levels, viewpoint, camera, epsilon=1e-4):
+def multiresolution_volume_rendering(volume_levels, viewpoint, camera):
     """
-    volume_levels: List of data structures for levels 0 to k.
-                   Level 0 is highest resolution, Level k is lowest.
-                   Each level supports a reconstruct(value, point) function.
-    viewpoint: 3D point representing the camera center.
-    camera: Object providing ray generation for each pixel.
-    epsilon: Threshold for early termination.
+    volume_levels: List of data structures for levels 0 to k-1.
+                   Level 0 is highest resolution.
+    viewpoint: 3D point (x, y, z)
+    camera: Object containing projection matrix and image dimensions (width, height)
     """
-    image_width, image_height = camera.resolution
-    image = zeros((image_height, image_width, 3))
-
-    for y in range(image_height):
-        for x in range(image_width):
-            ray = camera.get_ray(x, y)
+    image = empty_array(width, height, 3)
+    
+    for pixel_y in range(height):
+        for pixel_x in range(width):
+            # 1. Cast ray
+            ray = camera.get_ray(pixel_x, pixel_y, viewpoint)
             
-            # Step 2: Compute intersection with volume boundary
-            t1, t2 = compute_intersection(ray, volume_boundary)
+            # 2. Compute intersection
+            t1, t2 = ray.intersect_volume_boundary()
             
-            if t1 > t2:
+            if t1 is None or t2 is None:
                 continue
                 
-            accumulated_color = [0.0, 0.0, 0.0]
-            accumulated_opacity = 0.0
-            current_t = t1
+            # Initialize occlusion (accumulated opacity)
+            # W(t) represents the transmittance/occlusion factor
+            # Note: In standard front-to-back, we track transmittance T(t).
+            # The source defines W(t) as the occlusion function approaching 0.
+            # We interpret W(t) as the accumulated weight factor that decays.
+            # Standard Beer-Lambert: T(t) = exp(-int alpha dt).
+            # The source uses W(t) in the integral <C, W>.
+            # Let's assume W(t) corresponds to the transmittance T(t) 
+            # or a similar weighting factor that starts at 1 and decays.
+            # However, the source says "W(t) approaches zero as t increases".
+            # And "early termination if W(t) < epsilon".
+            # This implies W(t) is the remaining transmittance or accumulated opacity weight.
+            # Let's use standard transmittance T(t) which starts at 1.0.
+            # If the source calls it W(t), we will use W(t) as the variable name for transmittance.
             
-            # Step 3: Ray tracing loop
-            # Note: Step size delta_t may be adjusted based on resolution level
-            delta_t = get_initial_step_size() 
+            W = 1.0  # Initial transmittance/weight
+            accumulated_color = 0.0
             
-            while current_t < t2:
-                # Determine resolution level based on current_t or strategy
-                # For simplicity, assume a fixed level or adaptive selection logic
-                level = select_level(current_t, accumulated_opacity)
+            # Step size depends on resolution. 
+            # Higher level (coarser) -> larger step.
+            # We need a function to determine step size and level based on position or error.
+            # The source implies adaptive selection.
+            
+            t = t1
+            step = get_step_size(level=0) # Start with high res
+            
+            while t < t2:
+                # 3. Sample and Reconstruct
+                # Determine level m for shading and j for occlusion
+                # For simplicity, assume we use level m for both in this basic loop,
+                # or select based on distance from camera.
+                # The source allows mixing: C from level m, W from level j.
+                # Let's assume a single active level L for the current segment for clarity,
+                # or adaptive L based on t.
                 
-                # Reconstruct density/value at current_t using selected level
-                density = volume_levels[level].reconstruct(density_field, ray.origin + ray.direction * current_t)
+                # Get scalar value V at t using level L
+                # This involves reconstruction from coefficients
+                V = reconstruct_value(volume_levels, t, level=L)
                 
-                # Compute shading color C(t)
-                color = compute_shading(density, ray.direction, viewpoint)
+                # Compute shading color C and opacity alpha
+                # C_m(t) and alpha are derived from V
+                C, alpha = classify_and_shade(V)
                 
-                # Compute opacity alpha for this step
-                alpha = compute_opacity(density, delta_t)
+                # Update occlusion/weight
+                # W(t) decays. In standard rendering:
+                # contribution = C * alpha * T(t)
+                # T(t+dt) = T(t) * (1 - alpha)
+                # The source integral is <C(t), W(t)>.
+                # If W(t) is the transmittance, then contribution is C * alpha * W.
+                # And W_new = W * (1 - alpha).
                 
-                # Update accumulated opacity W(t)
-                # W(t) represents the transmittance/occlusion factor
-                # In standard volume rendering, transmittance T(t) = exp(-sigma_a * t)
-                # Here, we track the remaining contribution potential
-                remaining_opacity = 1.0 - accumulated_opacity
+                contribution = C * alpha * W
+                accumulated_color += contribution
                 
-                # Early termination check: if remaining contribution is negligible
-                if remaining_opacity < epsilon:
+                # Update W (transmittance)
+                W = W * (1 - alpha)
+                
+                # Early termination check
+                if W < epsilon:
                     break
                 
-                # Composite: C_out = C_in + C(t) * alpha * T(t)
-                # Assuming pre-multiplied alpha or standard blending
-                contribution = color * alpha * (1.0 - accumulated_opacity)
-                accumulated_color += contribution
-                accumulated_opacity += alpha * (1.0 - accumulated_opacity)
+                # Advance t
+                t += step
                 
-                current_t += delta_t
-
-            image[y, x] = accumulated_color
-
+                # Adjust step size and level if necessary
+                # This is the "adaptive" part.
+                # If we are far away or occluded, we might switch to a coarser level (higher index)
+                # and increase step size.
+                # The source mentions using lower resolution data for parts of the ray.
+                if should_coarsen(t, W):
+                    L = L + 1
+                    step = get_step_size(level=L)
+            
+            image[pixel_y, pixel_x] = accumulated_color
+            
     return image
+
+def reconstruct_value(levels, t, level):
+    """
+    Reconstructs scalar value at t from the specified level's coefficients.
+    Uses wavelet or Laplacian reconstruction formulas.
+    """
+    # Implementation depends on whether the level is stored as wavelet coeffs or pyramid levels.
+    # For wavelet: sum c * phi(t - l)
+    # For Laplacian: combine level+1 and detail coeffs.
+    # Placeholder for specific reconstruction logic based on data structure.
+    pass
+
+def get_step_size(level):
+    """
+    Returns step size for the given resolution level.
+    Higher level (coarser) -> larger step.
+    """
+    # Not given in sources. Typically step size scales with voxel size.
+    return base_step * (2 ** level)
+
+def should_coarsen(t, W):
+    """
+    Determines if we should switch to a lower resolution level.
+    Criteria: W is small (high occlusion) or t is large (far from camera).
+    """
+    # Logic not explicitly defined in sources.
+    # Heuristic: if W < threshold or t > distance_threshold
+    return False 
 ```
 
-### Parameters and Typical Values
-*   **$\epsilon$ (Early Termination Threshold):** A small positive value. Not given in the sources.
-*   **Kernel Size $q$:** For wavelet reconstruction. Not given in the sources.
-*   **Resolution Levels:** In experiments, a CT dataset was decomposed into 5 levels ($k=4$ or similar, source says "five hierarchical levels"), with reconstruction carried out up to levels 2, 1, and 0 [S1, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Occlusion Decay:** As $t$ increases, the occlusion function $W(t)$ (or transmittance) approaches zero. If early termination is not implemented, non-zero shading values at large $t$ contribute negligibly to the final color, wasting computation [S1, unofficial].
-*   **Accuracy vs. Resolution:** Using lower resolution data for shading or occlusion reduces computational cost because a larger step size can be used. However, this affects accuracy. Mixing levels can introduce errors. For example, in experiments, using shading from level 2 and occlusion from level 2 ($C_2/W_2$) resulted in an error of -0.027605, while using shading from level 0 and occlusion from level 0 ($C_0/W_0$) resulted in an error of 0.011057 [S1, unofficial]. Rendering low-resolution data with high-resolution shading colors can result in better image quality than the reverse [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Precision:** Mixing levels (e.g., shading from high resolution, occlusion from low) can introduce errors. Table 4.2 in [S1, unofficial] shows errors ranging from -0.027605 to 0.031589 depending on the combination of levels $m$ and $j$.
+*   **Boundaries:** The ray intersection $t_1, t_2$ must be computed accurately against the volume bounding box or isosurface [S1, unofficial].
+*   **Degenerate Input:** If the volume is empty or fully transparent, $W(t)$ may remain 1.0, but no shading occurs. If fully opaque, $W(t)$ drops to 0 immediately.
 
 ## Subtopics
 
-### Adaptive Integration
-A technique within multiresolution rendering where the sampling step size and resolution level are adjusted dynamically along the ray. It is chosen when computational efficiency is prioritized over uniform accuracy. It differs from fixed-step rendering by varying the granularity of the integration based on local data complexity and occlusion. See [Multiresolution Volume Rendering](10962-multiresolution-volume-rendering.md).
+### Wavelet-based Multiresolution Rendering
+Uses wavelet transforms to decompose data. Sets itself apart by providing orthogonal basis functions for reconstruction. Choose when data has sparse features or when compression is desired. [Link to Wavelet Volume Rendering](52-wavelet-volume-rendering.md) (Hypothetical sibling link).
 
-### Early Termination
-A optimization where ray tracing stops when the accumulated opacity (or remaining transmittance) falls below a threshold. It is chosen to avoid calculating negligible contributions from distant voxels. It differs from full integration by trading off completeness for speed. See [Multiresolution Volume Rendering](10962-multiresolution-volume-rendering.md).
+### Laplacian Pyramid Volume Rendering
+Uses Laplacian pyramids for decomposition. Sets itself apart by using a different kernel structure than wavelets, potentially simpler for certain interpolation tasks. Choose when hierarchical detail preservation is prioritized over orthogonality. [Link to Laplacian Pyramid Rendering](53-laplacian-pyramid-rendering.md) (Hypothetical sibling link).
 
 ## Operating characteristics
-
-### Time and Memory Complexity
-*   **Time Complexity:** Reduced compared to standard direct volume ray casting due to adaptive integration and early termination. The use of lower resolution data allows for larger step sizes, reducing the number of samples per ray [S1, unofficial].
-*   **Memory Complexity:** Higher than standard volume rendering due to the storage of multiresolution coefficients (wavelet or pyramid levels) in addition to the base data [S1, unofficial].
-
-### Measured Performance
-*   In experiments with a CT data set decomposed into 5 levels, reconstruction was carried out up to levels 2, 1, and 0 [S1, unofficial].
-*   Errors were observed when mixing levels. Table 4.2 in the source shows errors for different combinations of shading ($C$) and occlusion ($W$) levels. For instance, $C_2/W_2$ had an error of -0.027605, while $C_0/W_0$ had an error of 0.011057 [S1, unofficial].
-
-### Strengths and Limitations
-*   **Strengths:** Reduces computational cost by using larger step sizes at lower resolutions; facilitates early termination; allows for hierarchical data management [S1, unofficial].
-*   **Limitations:** Accuracy is affected by the choice of resolution levels; mixing levels can introduce visible errors; requires pre-processing to decompose the volume data [S1, unofficial].
-
-### When to Use
-Use when rendering large volume datasets where computational efficiency is critical and some loss of accuracy is acceptable. It is particularly effective when the volume data has natural hierarchical structures or can be efficiently decomposed.
-
-### When Not to Use
-Avoid when high-fidelity, uniform accuracy is required across the entire volume, or when the overhead of multiresolution decomposition and level selection outweighs the benefits of adaptive sampling.
+*   **Time Complexity:** Reduced compared to uniform high-resolution rendering. The cost depends on the number of samples taken at each level. Adaptive integration allows skipping samples in occluded or low-detail regions [S1, unofficial].
+*   **Memory Complexity:** Depends on the storage of the multiresolution decomposition. Wavelet/pyramid coefficients typically require less memory than the full high-resolution volume, especially if compressed [S1, unofficial].
+*   **Measured Performance:** In experiments with a CT dataset decomposed into 5 levels, using lower resolution data for shading or occlusion reduced computational cost. However, accuracy is affected. Errors were observed when mixing levels, with $C_2/W_2$ having an error of -0.027605 and $C_0/W_0$ having an error of 0.011057 [S1, unofficial].
+*   **Strengths:** Efficient rendering of large datasets; adaptive quality; early termination reduces unnecessary calculations [S1, unofficial].
+*   **Limitations:** Potential for visible artifacts when mixing resolution levels; reconstruction overhead; complexity of implementation [S1, unofficial].
+*   **When to use:** Large volume datasets where performance is critical and some loss of fidelity is acceptable.
+*   **When not to use:** Applications requiring strict visual fidelity across all scales, or where the overhead of reconstruction outweighs the savings from adaptive sampling.
 
 ## Background
-
-### Origin
-The method is described in the work "Direct rendering of multiresolution decomposed volume data" [S1, unofficial].
-
-### History and Development
-The approach builds on the principles of multiresolution analysis (wavelets, Laplacian pyramids) applied to volume rendering. It leverages the hierarchical structure of decomposed data to facilitate adaptive integration. The specific analysis of integration in the multiresolution domain, including the formulation of $I_{m,j}$, is detailed in the source [S1, unofficial].
-
-### Applications
-Used in the rendering of medical imaging data, such as CT datasets, where large volumes need to be visualized efficiently [S1, unofficial].
+The method originates from research on direct rendering of multiresolution decomposed volume data [S1, unofficial]. It builds on the principles of direct volume ray casting [19-direct-volume-ray-casting.md] and extends them to hierarchical data structures [11062-amr-and-hierarchical-data-rendering.md]. The approach was developed to address the computational demands of rendering large volumetric datasets, such as CT scans, by leveraging the hierarchical nature of wavelet and Laplacian pyramid decompositions [S1, unofficial].
 
 ## Sources
-
 [S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)

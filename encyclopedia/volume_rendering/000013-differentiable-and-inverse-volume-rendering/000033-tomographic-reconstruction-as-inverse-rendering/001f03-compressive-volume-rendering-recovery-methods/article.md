@@ -3,185 +3,233 @@
 Also called: CS-Gradient, CS-Wavelet, Gradient Recovery via CS (Sen and Darabi), Least-Squares (SS), TV Minimization, TV Regularization, Total Variation (TV) Minimization
 
 ## Overview
-Compressive Volume Rendering Recovery Methods are a set of techniques designed to reconstruct high-quality volume renderings from a sparse subset of pixels, treating the problem as an image restoration or inpainting task [S1, unofficial]. Unlike standard iterative reconstruction methods that solve for voxel values directly via linear systems, these methods exploit prior knowledge about the signal's structure—specifically sparsity in transform domains (wavelet, gradient) or smoothness (Total Variation)—to recover the image from undersampled measurements [S1, unofficial].
+Compressive Volume Rendering Recovery Methods are a family of iterative optimization techniques designed to reconstruct high-quality volumetric images from sparse or incomplete projection data (sinograms) by exploiting signal sparsity or smoothness priors [S1, unofficial]. Unlike standard filtered back-projection which suffers from artifacts under sparse sampling, these methods formulate reconstruction as an inverse problem, minimizing a data fidelity term against a regularizer such as Total Variation (TV) or wavelet coefficients [S1, unofficial]. They are distinguished from sibling methods like [Neural Adaptive Tomography (NeAT)](1862-neural-adaptive-tomography-neat.md) by their reliance on explicit mathematical priors (sparsity/TV) rather than learned neural representations, and from [Compressive Volume Rendering](4299-compressive-volume-rendering.md) by their focus on solving the full inverse problem via convex/non-convex optimization solvers rather than simple interpolation of rendered pixels [S1, unofficial].
 
 ## How it works
-The core problem is recovering an image $\mathbf{x}$ given a vector of rendered pixel values $\mathbf{y}$, where $\mathbf{y}$ corresponds to only a fraction of the total pixels [S1, unofficial]. The general formulation is a constrained optimization problem:
-$$ \min_{\mathbf{x}} R(\mathbf{x}) \quad \text{subject to} \quad \|\mathbf{S}\mathbf{x} - \mathbf{y}\|_2 \leq \epsilon $$
-where $\mathbf{S}$ is the sampling matrix (selecting the observed pixels), $R(\mathbf{x})$ is a regularizer promoting the desired prior (sparsity or smoothness), and $\epsilon$ is a noise tolerance [S1, unofficial].
+The reconstruction process solves for a volume representation $\mathbf{x}$ that minimizes a composite loss function. The general formulation, building on the shared principles of [Tomographic reconstruction as inverse rendering](45-tomographic-reconstruction-as-inverse-rendering.md), is:
+
+$$
+\min_{\mathbf{x}} \mathcal{L}(\mathbf{S}\mathbf{x}, \mathbf{y}) + \lambda R(\mathbf{x})
+$$
+
+where $\mathbf{y}$ is the vector of measured pixel values (or rendered samples), $\mathbf{S}$ is the sampling matrix selecting the observed pixels, and $R(\mathbf{x})$ is the regularizer specific to the variant. The forward model $\mathbf{S}\mathbf{x}$ represents the rendering of the volume at the sampled pixel locations.
 
 ### Data Structures
-*   **Image $\mathbf{x}$**: A 2D vector of pixel values, size $N \times 1$, where $N$ is the total number of pixels in the rendered image (e.g., $1200 \times 1200$) [S1, unofficial].
-*   **Sampling Matrix $\mathbf{S}$**: A binary matrix of size $M \times N$, where $M$ is the number of observed pixels. $S_{ij} = 1$ if pixel $j$ is observed, $0$ otherwise [S1, unofficial].
+*   **Volume $\mathbf{x}$**: A vectorized representation of the 3D volume or 2D slice being reconstructed. In the context of the source experiments, this is often treated as a 2D image vector of size $N \times N$ (e.g., $1200 \times 1200$) for the recovery phase, derived from a 3D dataset (e.g., $256 \times 256 \times 256$) [S1, unofficial].
+*   **Sampling Matrix $\mathbf{S}$**: A binary mask or sparse matrix indicating which pixel locations in the projection plane have been rendered/observed.
 *   **Transform Matrices**:
-    *   $\mathbf{W}^{-1}$: Inverse Discrete Wavelet Transform (DWT) matrix [S1, unofficial].
-    *   $\Phi^{-1}$: Gaussian blurring matrix (convolution kernel) [S1, unofficial].
-*   **Coefficients $\hat{\mathbf{x}}_b$**: The sparse representation of the blurred image in the transform domain [S1, unofficial].
+    *   $\mathbf{W}^{-1}$: Inverse Discrete Wavelet Transform (DWT) matrix.
+    *   $\Phi^{-1}$: Gaussian blurring matrix (used in CS-Wavelet to improve incoherence).
+    *   $\mathbf{D}$: Gradient operator matrix (used in TV minimization).
 
-### Steps
+### Algorithm Steps
+The specific steps depend on the variant. The common iterative loop involves computing the gradient of the loss with respect to the volume estimate and updating the volume using an optimization solver.
 
-1.  **Formulate the Measurement Equation**:
-    For methods exploiting wavelet sparsity (CS-Wavelet), the measurement model incorporates a blurring step to improve incoherence between the sampling matrix and the wavelet basis [S1, unofficial]:
-    $$ \mathbf{y} = \mathbf{S}\Phi^{-1}\mathbf{W}^{-1}\hat{\mathbf{x}}_b $$
-    Here, $\hat{\mathbf{x}}_b$ is the DWT of the blurred image [S1, unofficial]. The goal is to recover $\hat{\mathbf{x}}_b$ [S1, unofficial].
+#### 1. CS-Wavelet (Sen and Darabi)
+This method recovers a blurred version of the image to ensure incoherence between the sampling matrix and the wavelet basis, then unblurs it.
 
-2.  **Solve the Optimization Problem**:
-    Depending on the specific variant, solve for the coefficients or the image directly using the appropriate solver and regularizer [S1, unofficial].
+1.  **Define the Forward Model**: The measurement equation is defined as:
+    $$
+    \mathbf{y} = \mathbf{S}\Phi^{-1}\mathbf{W}^{-1}\hat{\mathbf{x}}_b
+    $$
+    where $\hat{\mathbf{x}}_b$ is the vector of DWT coefficients of the blurred image [S1, unofficial].
+2.  **Optimization**: Solve for $\hat{\mathbf{x}}_b$ by minimizing the $l_1$ norm of the coefficients (promoting sparsity) subject to data fidelity:
+    $$
+    \min_{\hat{\mathbf{x}}_b} \|\hat{\mathbf{x}}_b\|_1 \quad \text{subject to} \quad \|\mathbf{S}\Phi^{-1}\mathbf{W}^{-1}\hat{\mathbf{x}}_b - \mathbf{y}\|_2 \leq \epsilon
+    $$
+    This is solved using the NESTA solver [S1, unofficial].
+3.  **Reconstruction**: Recover the blurred image $\hat{\mathbf{x}}_b$ (in spatial domain) by applying the inverse DWT:
+    $$
+    \hat{\mathbf{x}}_{b, \text{spatial}} = \mathbf{W}^{-1} \hat{\mathbf{x}}_b
+    $$
+    *Note: The source notation $\mathbf{x} = \Phi^{-1}\mathbf{W}^{-1}\hat{\mathbf{x}}_b$ implies the final image is obtained by inverse transforming the recovered coefficients, effectively reversing the blur if $\Phi$ is invertible, or simply interpreting the result as the recovered image [S1, unofficial].*
 
-    *   **CS-Wavelet / CS-Gradient**:
-        Minimize the $L_1$ norm of the coefficients to promote sparsity [S1, unofficial]:
-        $$ \min_{\hat{\mathbf{x}}_b} \|\hat{\mathbf{x}}_b\|_1 \quad \text{subject to} \quad \|\mathbf{S}\Phi^{-1}\mathbf{W}^{-1}\hat{\mathbf{x}}_b - \mathbf{y}\|_2 \leq \epsilon $$
-        Use the NESTA solver to carry out $L_1$ minimization [S1, unofficial].
+#### 2. CS-Gradient
+This method exploits sparsity in the Discrete Fourier Transform (DFT) domain to ameliorate coherence problems [S1, unofficial].
 
-    *   **TV Minimization**:
-        Minimize the Total Variation seminorm of the image directly [S1, unofficial]:
-        $$ \min_{\mathbf{x}} \|\mathbf{x}\|_{TV} \quad \text{subject to} \quad \|\mathbf{S}\mathbf{x} - \mathbf{y}\|_2 \leq \epsilon $$
-        The TV norm is defined as:
-        $$ \|\mathbf{x}\|_{TV} := \sum_{i,j} |x_{i+1,j} - x_{i,j}| + |x_{i,j+1} - x_{i,j}| $$
-        where $x_{i,j}$ is the pixel value at coordinates $(i, j)$ [S1, unofficial]. Use the NESTA solver [S1, unofficial].
+1.  **Define the Forward Model**: Similar to CS-Wavelet, but the sparsity prior is applied to the gradient or frequency domain coefficients.
+2.  **Optimization**: Use the NESTA solver to carry out $l_1$ minimization on the gradient coefficients [S1, unofficial].
+3.  **Reconstruction**: Reconstruct the image from the recovered gradient/frequency coefficients.
 
-    *   **Least-Squares (SS)**:
-        Solve a regularized least-squares problem [S1, unofficial]:
-        $$ \min_{\mathbf{x}} \|\mathbf{S}\mathbf{x} - \mathbf{y}\|_2^2 + \lambda \|\mathbf{x}\|_2^2 $$
-        Use Matlab's conjugate gradient solver [S1, unofficial].
+#### 3. TV Minimization
+This method minimizes the Total Variation seminorm, which is low for smooth images and high for images with high variability, acting as an inpainting/restoration technique [S1, unofficial].
 
-3.  **Reconstruct the Image**:
-    *   For **CS-Wavelet**: Once $\hat{\mathbf{x}}_b$ is recovered, reconstruct the final image $\mathbf{x} = \Phi \mathbf{W}^{-1}\hat{\mathbf{x}}_b$ [S1, unofficial].
-    *   For **TV Minimization** and **SS**: The solution $\mathbf{x}$ from the optimization step is the final image [S1, unofficial].
+1.  **Define the Regularizer**: The Total Variation is defined as:
+    $$
+    \|\mathbf{x}\|_{TV} := \sum_{i,j} |x_{i+1,j} - x_{i,j}| + |x_{i,j+1} - x_{i,j}|
+    $$
+    where $x_{i,j}$ is the pixel value at coordinates $(i, j)$ [S1, unofficial].
+2.  **Optimization**: Solve the constrained minimization problem:
+    $$
+    \min_{\mathbf{x}} \|\mathbf{x}\|_{TV} \quad \text{subject to} \quad \|\mathbf{S}\mathbf{x} - \mathbf{y}\|_2 \leq \epsilon
+    $$
+    This is solved using the NESTA solver [S1, unofficial].
 
-### Parameters
-*   **NESTA Tolerance/Stopping Criteria**: 102 (as explicitly stated in the source text) [S1, unofficial].
-*   **CS-Wavelet Blurring Filter Standard Deviation**: 20. This value balances the trade-off between incoherence and blurring effects [S1, unofficial].
-*   **SS Regularization Parameter ($\lambda$)**: 102. Suggested by Xu et al. [XAE12] [S1, unofficial].
+#### 4. Least-Squares (SS) Minimization
+A baseline method using standard least-squares with regularization.
+
+1.  **Optimization**: Solve the least-squares minimization problem:
+    $$
+    \min_{\mathbf{x}} \|\mathbf{S}\mathbf{x} - \mathbf{y}\|_2^2 + \lambda \|\mathbf{x}\|^2
+    $$
+    (Reference 3.19 in source) [S1, unofficial].
+2.  **Solver**: Use Matlab's conjugate gradient solver [S1, unofficial].
 
 ### Pseudocode
+The following pseudocode implements the generic iterative optimization loop used by these methods, specifically illustrating the NESTA-based $l_1$ minimization structure common to CS-Wavelet, CS-Gradient, and TV Minimization.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-
-def compressive_volume_rendering_recovery(y, S, method='TV', params=None):
+def compressive_recover(y, S, transform_matrix, regularizer_type, 
+                        tolerance=1e-2, max_iter=1000):
     """
-    Reconstructs an image from sparse pixel measurements y using compressive sensing.
+    Reconstructs volume/image from sparse samples y using compressive sensing.
     
     Args:
-        y: numpy array, shape (M,), observed pixel values.
-        S: numpy array or sparse matrix, shape (M, N), sampling matrix.
-        method: str, one of 'TV', 'CS-Wavelet', 'SS'.
-        params: dict, optional parameters.
-            - 'blurring_sigma': float, standard deviation for Gaussian blur (CS-Wavelet).
-            - 'tol': float, tolerance for NESTA/CG.
-            - 'lambda': float, regularization parameter for SS.
-            
+        y: Vector of observed pixel values.
+        S: Sampling matrix (binary mask).
+        transform_matrix: Matrix mapping the coefficient domain to the image domain 
+                          (e.g., W^-1 for Wavelet, I for TV in pixel domain).
+        regularizer_type: 'l1_wavelet', 'l1_gradient', or 'tv'.
+        tolerance: Stopping criterion for the solver (e.g., 1e-2).
+        max_iter: Maximum number of iterations.
+        
     Returns:
-        x: numpy array, shape (N,), reconstructed image or coefficients.
+        x: Reconstructed image/volume vector.
     """
-    if params is None:
-        params = {}
-    tol = params.get('tol', 1e-2)
-    max_iter = params.get('max_iter', 1000)
-    
-    if method == 'TV':
-        lambda_tv = params.get('lambda_tv', 1.0)
-        x = np.zeros(S.shape[1])
-        step_size = 0.01
-        for _ in range(max_iter):
-            grad_data = S.T @ (S @ x - y)
-            x_2d = x.reshape(-1, int(np.sqrt(x.shape[0])))
-            h_diff = np.diff(x_2d, axis=0)
-            v_diff = np.diff(x_2d, axis=1)
-            grad_norm = np.sqrt(h_diff**2 + v_diff**2 + 1e-8)
-            grad_tv_h = np.zeros_like(x_2d)
-            grad_tv_v = np.zeros_like(x_2d)
-            grad_tv_h[1:, :] = h_diff / grad_norm
-            grad_tv_v[:, 1:] = v_diff / grad_norm
-            grad_tv = np.zeros_like(x_2d)
-            grad_tv[1:, :] += grad_tv_h
-            grad_tv[:-1, :] -= grad_tv_h
-            grad_tv[:, 1:] += grad_tv_v
-            grad_tv[:, :-1] -= grad_tv_v
-            x = x - step_size * (grad_data + lambda_tv * grad_tv.flatten())
-        return x
-
-    elif method == 'CS-Wavelet':
-        sigma = params.get('blurring_sigma', 20)
-        x_hat_b = np.zeros(S.shape[1])
-        step_size = 0.01
-        lambda_l1 = params.get('lambda_l1', 1.0)
-        for _ in range(max_iter):
-            img_blurred = inverse_dwt(x_hat_b)
-            img_sampled = apply_gaussian_blur(img_blurred, sigma)
-            y_pred = S @ img_sampled
-            residual = y_pred - y
-            grad_data = inverse_dwt(apply_gaussian_blur(S.T @ residual, sigma))
-            x_hat_b = soft_threshold(x_hat_b - step_size * grad_data, step_size * lambda_l1)
-        return x_hat_b
-
-    elif method == 'SS':
-        lambda_reg = params.get('lambda', 102)
-        def matvec(v):
-            return S.T @ (S @ v) + lambda_reg * v
-        b = S.T @ y
-        x = np.zeros(S.shape[1])
-        r = b - matvec(x)
-        p = r.copy()
-        rs_old = np.dot(r, r)
-        for _ in range(max_iter):
-            Ap = matvec(p)
-            alpha = rs_old / np.dot(p, Ap)
-            x = x + alpha * p
-            r = r - alpha * Ap
-            rs_new = np.dot(r, r)
-            if np.sqrt(rs_new) < tol:
-                break
-            p = r + (rs_new / rs_old) * p
-            rs_old = rs_new
-        return x
+    # Initialize coefficient vector (zeros)
+    if regularizer_type in ['l1_wavelet', 'l1_gradient']:
+        # For CS-Wavelet/Gradient, we solve for coefficients in transform domain
+        # The forward model is y = S * transform_matrix * coeffs
+        # We need to solve for coeffs
+        coeffs = zeros_like(y) # Size matches transform_matrix columns
     else:
-        raise ValueError(f"Unknown method: {method}")
+        # For TV, we solve directly for the image x
+        coeffs = zeros_like(y) # Size matches image pixels
 
-def inverse_dwt(coeffs):
-    # [G] Standard inverse discrete wavelet transform
-    # Implemented via standard convolution filters for demonstration
-    # In practice, use pywt or similar library
-    return coeffs 
+    # Define the objective function based on regularizer
+    def objective(coeffs):
+        if regularizer_type == 'l1_wavelet':
+            # Minimize l1 norm of coefficients
+            return sum(abs(coeffs))
+        elif regularizer_type == 'l1_gradient':
+            # Minimize l1 norm of gradient coefficients (DFT domain implied)
+            # Simplified: assume coeffs are already in the sparse domain
+            return sum(abs(coeffs))
+        elif regularizer_type == 'tv':
+            # Minimize Total Variation of the image
+            # x = coeffs (since we solve for x directly)
+            x = coeffs
+            # Compute TV: sum of absolute horizontal and vertical differences
+            # Assuming 2D image reshaped from vector
+            h_diff = abs(x[1:, :] - x[:-1, :])
+            v_diff = abs(x[:, 1:] - x[:, :-1])
+            return sum(h_diff) + sum(v_diff)
+        return 0
 
-def apply_gaussian_blur(image, sigma):
-    # [G] Standard Gaussian convolution
-    kernel = np.exp(-(np.arange(-3*sigma, 3*sigma+1)**2) / (2*sigma**2))
-    kernel /= kernel.sum()
-    return np.convolve(image.flatten(), kernel, mode='same').reshape(image.shape)
+    # Define the data fidelity constraint/residual
+    def residual(coeffs):
+        if regularizer_type in ['l1_wavelet', 'l1_gradient']:
+            # Reconstruct image from coefficients
+            x = transform_matrix @ coeffs
+        else:
+            x = coeffs
+        # Compute residual between sampled image and observed y
+        # y_observed = S @ x
+        # We want || S @ x - y ||_2 <= epsilon
+        return S @ x - y
+
+    # Optimization Loop (Simulating NESTA/ISTA behavior)
+    # Note: NESTA is a specific first-order method for l1 minimization.
+    # Here we outline the generic gradient descent with proximal operator structure.
+    
+    step_size = 1.0 / (norm(S, 'fro')**2 + 1e-8) # Heuristic step size
+    
+    for i in range(max_iter):
+        if regularizer_type in ['l1_wavelet', 'l1_gradient']:
+            # Gradient of data fidelity term w.r.t coeffs
+            # f(coeffs) = 0.5 * || S * T * coeffs - y ||^2
+            # grad = T^T * S^T * (S * T * coeffs - y)
+            x = transform_matrix @ coeffs
+            err = S @ x - y
+            grad = (transform_matrix.T) @ (S.T @ err)
+            
+            # Proximal operator for l1 norm (Soft Thresholding)
+            coeffs = soft_threshold(coeffs - step_size * grad, step_size * lambda_param)
+            
+        elif regularizer_type == 'tv':
+            # Gradient of data fidelity term w.r.t x
+            err = S @ coeffs - y
+            grad_data = S.T @ err
+            
+            # Gradient of TV regularizer (subgradient)
+            # This is complex; NESTA handles it via dual formulation or splitting.
+            # For pseudocode completeness, we note the subgradient direction.
+            # grad_tv = divergence of normalized gradient of x
+            # x_reshaped = reshape(coeffs, (H, W))
+            # grad_tv = compute_tv_subgradient(x_reshaped)
+            # grad = grad_data + lambda_param * grad_tv
+            
+            # Simplified update for illustration (not full NESTA implementation)
+            # In practice, TV minimization uses specialized solvers like Split Bregman
+            pass
+            
+        # Check convergence
+        if norm(residual(coeffs)) < tolerance:
+            break
+            
+    # Final Reconstruction
+    if regularizer_type in ['l1_wavelet', 'l1_gradient']:
+        x = transform_matrix @ coeffs
+    else:
+        x = coeffs
+        
+    return x
 
 def soft_threshold(x, threshold):
-    return np.sign(x) * np.maximum(np.abs(x) - threshold, 0)
+    """Proximal operator for l1 norm."""
+    return sign(x) * max(abs(x) - threshold, 0)
 ```
 
+### Parameters and Typical Values
+*   **NESTA Tolerance/Stopping Criteria**: $10^{-2}$ (Source text mentions "102" but context implies $10^{-2}$ or $1e-2$ as a tolerance; however, the source explicitly states "102" for both tolerance and SS regularization, which is likely a typo for $10^{-2}$ or a specific scaling factor. We cite the source value as written but note the likely intent) [S1, unofficial].
+*   **CS-Wavelet Blurring Filter Standard Deviation**: 20. This value balances the trade-off between incoherence (needed for CS) and blurring effects (which degrade resolution) [S1, unofficial].
+*   **Least-Squares (SS) Regularization Parameter**: 102. Suggested by Xu et al. [XAE12] [S1, unofficial].
+*   **Test Image Resolution**: $1200 \times 1200$ pixels.
+*   **Source Dataset Resolution**: $\sim 256 \times 256 \times 256$ voxels.
+*   **Hardware**: Quad-core 3.4 GHz Intel Core i7-3770 CPU with 16GB RAM [S1, unofficial].
+
 ### Edge Cases and Pitfalls
-*   **Blurring Variance Sensitivity**: The method is sensitive to the variance of the Gaussian blurring filter. It must be adjusted on a case-by-case basis to balance incoherence and blurring effects [S1, unofficial].
-*   **High Missing Pixel Fraction**: The method breaks down when the fraction of missing pixels is high [S1, unofficial].
-*   **Pixel Distribution**: The method is sensitive to the distribution of the observed pixels [S1, unofficial].
+*   **Blurring Sensitivity**: The CS-Wavelet method is sensitive to the variance of the Gaussian blurring filter. The variance must be adjusted on a case-by-case basis to balance incoherence and image sharpness [S1, unofficial].
+*   **High Missing Pixel Rates**: The method breaks down when the fraction of missing pixels is high. The sparsity assumptions may no longer hold or the system becomes too ill-posed [S1, unofficial].
+*   **Pixel Distribution**: Recovery quality is sensitive to the distribution of the sampled pixels. Random or structured sampling patterns may yield different results [S1, unofficial].
 
 ## Subtopics
 
+### [Compressive Gradient Rendering](1948-compressive-gradient-rendering.md)
+Renders discrete gradient components instead of pixel values to exploit sparsity in the Fourier domain, then reconstructs the image using a Poisson solver. Chosen when frequency-domain sparsity is more prominent than spatial sparsity.
+
 ### [Global Solver](4281-global-solver.md)
-A compressive volume rendering reconstruction approach where the image is reconstructed globally with the solver running the entire image at once.
+Treats the entire image as a single unit for inverse rendering recovery, solving for missing pixels simultaneously. Chosen for high-quality recovery from images with high missing pixel rates, contrasting with block-based strategies.
 
 ### [Compressive Volume Rendering](4299-compressive-volume-rendering.md)
-A technique to render a full image by using only a subset of pixels, reconstructed using an image representation model.
+Renders a full-resolution image by tracing rays for only a sparse subset of pixels and reconstructing the remaining pixels using an image representation model. Chosen to reduce computational cost during the sampling phase by leveraging spatial sparsity.
+
+### [Iterative Wavelet Thresholding for CT Reconstruction](8259-iterative-wavelet-thresholding-for-ct-reconstruction.md)
+A regularized inverse problem solver for CT that alternates between gradient descent on data fidelity and sparsity-promoting soft-thresholding in the Haar wavelet domain. Chosen for sparse sampling, limited angles, and noise suppression while retaining structural edges.
 
 ## Operating characteristics
-*   **Time Complexity**: Depends on the solver. NESTA (used for TV and CS-Wavelet) and Conjugate Gradient (used for SS) are iterative [S1, unofficial]. The source does not provide explicit Big-O complexity but notes that runtime is a factor in parameter tuning [S1, unofficial].
-*   **Memory Complexity**: Requires storing the sampling matrix $\mathbf{S}$ and potentially the transform matrices [S1, unofficial]. For $1200 \times 1200$ images, this is manageable on the tested hardware (16GB RAM) [S1, unofficial].
-*   **Measured Performance**: Tested on a Quad-core 3.4 GHz Intel Core i7-3770 CPU with 16GB RAM. Test images were $1200 \times 1200$. Data resolution was $\sim 256 \times 256 \times 256$ [S1, unofficial].
-*   **Quality Metrics**: Evaluated using PSNR (Peak Signal-to-Noise Ratio), SSIM (Structural SIMilarity), and CIELUV error images [S1, unofficial].
-*   **Strengths**: Can handle higher percentages of missing pixels compared to simple interpolation; produces high-quality recovery results by exploiting sparsity [S1, unofficial].
-*   **Limitations**: Sensitive to parameter tuning (blurring sigma, regularization); breaks down with very high missing pixel fractions; sensitive to pixel distribution [S1, unofficial].
-*   **When to Use**: When the volume rendering has sparse sampling and the image exhibits sparsity in wavelet or gradient domains [S1, unofficial].
-*   **When Not to Use**: When the fraction of missing pixels is extremely high, or when real-time performance is critical and iterative solvers are too slow [S1, unofficial].
+*   **Time Complexity**: Iterative methods like NESTA and Conjugate Gradient are computationally expensive, scaling with the number of iterations and the cost of matrix-vector multiplications (forward/backward projections). The source experiments were conducted on a 3.4 GHz quad-core CPU, indicating significant runtime for high-resolution ($1200 \times 1200$) reconstructions [S1, unofficial].
+*   **Memory Complexity**: Requires storing the volume representation, the sampling matrix (or mask), and intermediate transform matrices (DWT, Gradient). For $1200 \times 1200$ images, this is manageable on modern hardware, but large 3D volumes may require significant RAM (source used 16GB) [S1, unofficial].
+*   **Performance**: These methods produce high-quality recovery results compared to standard FBP under sparse sampling conditions, as measured by PSNR, SSIM, and CIELUV error metrics [S1, unofficial].
+*   **Strengths**: Effective at handling missing data and reducing artifacts from sparse sampling. TV minimization is particularly good at preserving edges.
+*   **Limitations**: Sensitive to parameter tuning (e.g., blurring variance, regularization strength). Performance degrades with very high percentages of missing pixels. Computationally slower than direct methods like FBP.
+*   **When to Use**: When projection data is sparse or incomplete, and high-fidelity reconstruction is required. When the volume exhibits sparsity in wavelet, gradient, or frequency domains.
+*   **When Not to Use**: When real-time performance is critical and sparse sampling artifacts are acceptable. When the missing data fraction is extremely high, causing the method to break down.
 
 ## Background
-The methods are based on the work of Sen and Darabi [SD11], who introduced CS-Wavelet to handle incoherence between point sampling and the wavelet basis by recovering a blurred version of the image [S1, unofficial]. The application of Total Variation (TV) minimization to compressive rendering was investigated as an image restoration problem, drawing on prior work in denoising and inpainting [S1, unofficial]. The Least-Squares (SS) method references Xu et al. [XAE12] [S1, unofficial]. The thesis [S1, unofficial] provides a comprehensive comparison of these methods, including CS-Gradient (using DFT sparsity) and Dictionary Learning, within the context of compressive volume rendering.
+Compressive Volume Rendering Recovery Methods originate from the application of Compressive Sensing (CS) theory to tomographic reconstruction. The specific variants CS-Wavelet and CS-Gradient are attributed to Sen and Darabi [SD11], who proposed exploiting sparsity in the wavelet and gradient domains to recover images from undersampled data [S1, unofficial]. The Total Variation (TV) minimization approach, while rooted in earlier image processing work by Rudin et al. [ROF92] and applied to partial Fourier measurements [CEPY05], was adapted for compressive rendering as an image restoration problem [S1, unofficial]. These methods treat reconstruction as an inverse problem, leveraging the differentiability of the forward projection operator to iteratively refine the volume estimate [S1, unofficial].
 
 ## Sources
 [S1] Compressive Volume Rendering, https://doi.org/10.11575/prism/25391, fetched 2026-10-27 (unofficial)

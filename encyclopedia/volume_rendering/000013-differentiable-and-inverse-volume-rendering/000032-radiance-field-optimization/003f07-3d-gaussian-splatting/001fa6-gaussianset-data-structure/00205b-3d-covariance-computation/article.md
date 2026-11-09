@@ -3,33 +3,38 @@
 Also called: 3D Covariance Construction, Covariance Matrix Computation from Quaternions and Scales, Gaussian covariance from quaternion and scale
 
 ## Overview
-Computes the 3D covariance matrix of a Gaussian from its scale and rotation parameters [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the problem of representing the spatial extent and orientation of a 3D Gaussian in world coordinates by transforming local axis-aligned variances into a full symmetric positive-definite matrix [S2, unofficial][S3, unofficial]. What sets it apart from direct covariance optimization is that it derives the covariance from unconstrained rotation (quaternion) and scale parameters, ensuring the resulting matrix is always valid without requiring projection steps [S2, unofficial][S3, unofficial].
+3D Covariance Computation calculates the $3 \times 3$ spatial covariance matrix for a set of 3D Gaussians given their orientation (quaternion) and scale parameters [S1, S2, S3, unofficial]. It solves the problem of representing the anisotropic spatial extent and orientation of each Gaussian in world coordinates, which is required for projecting the Gaussian to 2D screen space during rendering [S1, S2, S3, unofficial]. It sets itself apart from direct covariance optimization by deriving the covariance from unconstrained rotation and scale parameters, ensuring the resulting matrix is always positive semi-definite [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- **Inputs:**
-  - `quats`: Tensor of shape $(N, 4)$ containing unit quaternions representing orientations [S2, unofficial].
-  - `scales`: Tensor of shape $(N, 3)$ containing scales along each axis, representing standard deviations in 3D [S2, unofficial].
-- **Output:**
-  - `cov3d`: Float32 tensor of shape $(N, 3, 3)$ containing the computed covariance matrices for each of the $N$ Gaussians [S2, unofficial].
+**Inputs:**
+- `quats`: Tensor of shape $(N, 4)$ containing unit quaternions representing the orientation of $N$ Gaussians [S2, unofficial].
+- `scales`: Tensor of shape $(N, 3)$ containing the scale factors along the local x, y, and z axes, representing standard deviations [S2, unofficial].
+
+**Outputs:**
+- `cov3d`: Tensor of shape $(N, 3, 3)$ containing the computed $3 \times 3$ covariance matrices for each Gaussian [S2, unofficial].
 
 **Data Structures:**
-- The rotation matrix $R$ is a $3 \times 3$ matrix derived from the quaternion [S2, unofficial].
-- The local scale matrix $S$ is a $3 \times 3$ diagonal matrix where diagonal elements are the squared scale values (variances) [S2, unofficial].
+- Rotation Matrix $R$: $3 \times 3$ matrix derived from the quaternion.
+- Scale Matrix $S$: $3 \times 3$ diagonal matrix containing squared scale values.
 
 **Steps:**
-1. **Convert Quaternions to Rotation Matrix:** Convert the input quaternions to a batch of $3 \times 3$ rotation matrices $R$ [S1, unofficial][S2, unofficial][S3, unofficial].
-2. **Construct Local Scale Matrix:** Create a diagonal matrix $S$ where the diagonal elements are the squared scale values [S1, unofficial][S2, unofficial].
-3. **Compute Covariance:** Compute the covariance matrix using the similarity transformation $\Sigma = R S R^T$ [S2, unofficial][S3, unofficial].
-4. **Store Result:** Store the result in `self.cov3d` [S1, unofficial].
+1. **Convert Quaternions to Rotation Matrices:**
+   Convert the input quaternion tensor `quats` into a batched rotation matrix tensor $R$ of shape $(N, 3, 3)$. This is typically done using a standard quaternion-to-matrix conversion function [S1, S2, S3, unofficial].
+   
+2. **Construct the Local Scale Matrix:**
+   Initialize a zero tensor $S$ of shape $(N, 3, 3)$ with the same data type and device as the input scales [S2, unofficial].
+   - If the scales are isotropic (shape $[-1] == 1$), construct the scale matrix from a single scalar value repeated on the diagonal [S2, unofficial].
+   - Otherwise, set the diagonal elements of $S$ to the squared scale values:
+     $$ S[:, 0, 0] = \text{scales}[:, 0]^2 $$
+     $$ S[:, 1, 1] = \text{scales}[:, 1]^2 $$
+     $$ S[:, 2, 2] = \text{scales}[:, 2]^2 $$
+     [S2, unofficial]
 
-**Formulas:**
-The covariance matrix $\Sigma$ is defined as:
-$$ \Sigma = R \cdot S \cdot R^T $$
-where:
-- $R$ is the rotation matrix derived from the quaternion [S2, unofficial].
-- $S = \text{diag}(s_x^2, s_y^2, s_z^2)$ is the local covariance matrix with variances along each axis [S2, unofficial].
-- $s_x, s_y, s_z$ are the scale components [S3, unofficial].
+3. **Compute the World Covariance Matrix:**
+   Compute the final covariance matrix $\Sigma$ (or $C_{3D}$) using the similarity transformation:
+   $$ \Sigma = R S R^T $$
+   [S2, S3, unofficial]
+   This is implemented as a batched matrix multiplication [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -39,82 +44,113 @@ import torch
 
 def compute_cov3d(quats: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
     """
-    Computes the 3D covariance matrix from quaternions and scales.
+    Compute 3D covariance matrices from quaternions and scales.
     
     Args:
         quats: Tensor of shape (N, 4) containing unit quaternions.
-        scales: Tensor of shape (N, 3) containing scales along each axis.
+        scales: Tensor of shape (N, 3) containing scale factors.
         
     Returns:
-        cov3d: Tensor of shape (N, 3, 3) containing the covariance matrices.
+        cov3d: Tensor of shape (N, 3, 3) containing covariance matrices.
     """
     # Step 1: Convert quaternions to rotation matrices
-    R = quaternion_to_rotation_matrix(quats)
+    # Assuming a standard quaternion_to_matrix function is available
+    R = quaternion_to_matrix(quats)  # Shape: (N, 3, 3)
     
-    # Step 2: Construct local scale matrix S
-    scales_sq = scales ** 2  # Shape (N, 3)
-    S = torch.zeros((quats.shape[0], 3, 3), dtype=scales.dtype, device=scales.device)
-    S[:, 0, 0] = scales_sq[:, 0]
-    S[:, 1, 1] = scales_sq[:, 1]
-    S[:, 2, 2] = scales_sq[:, 2]
+    # Step 2: Construct the diagonal scale matrix S
+    # Initialize S with zeros
+    S = torch.zeros_like(R)
     
-    # Step 3: Compute covariance matrix using similarity transformation
-    # cov3d = R @ S @ R^T
+    # Set diagonal elements to squared scales
+    # scales shape: (N, 3)
+    # S[:, 0, 0] = scales[:, 0] ** 2
+    # S[:, 1, 1] = scales[:, 1] ** 2
+    # S[:, 2, 2] = scales[:, 2] ** 2
+    
+    # More efficient indexing:
+    S[:, 0, 0] = scales[:, 0] ** 2
+    S[:, 1, 1] = scales[:, 1] ** 2
+    S[:, 2, 2] = scales[:, 2] ** 2
+    
+    # Step 3: Compute covariance via similarity transformation R @ S @ R^T
+    # Using einsum for batched matrix multiplication
+    # "nij,njk,nlk->nil" corresponds to R[i,j,k] * S[j,k,l] * R[i,m,l] -> Cov[i,j,m]
+    # Note: R^T is R.mT in PyTorch
     cov3d = torch.einsum("nij,njk,nlk->nil", R, S, R)
     
     return cov3d
 
-def quaternion_to_rotation_matrix(quats: torch.Tensor) -> torch.Tensor:
+def quaternion_to_matrix(quaternions: torch.Tensor) -> torch.Tensor:
     """
-    Converts a batch of quaternions to rotation matrices.
-    
-    Args:
-        quats: Tensor of shape (N, 4) containing unit quaternions [w, x, y, z].
-        
-    Returns:
-        R: Tensor of shape (N, 3, 3) containing rotation matrices.
+    Convert a batch of quaternions to rotation matrices.
+    This is a standard mathematical operation.
     """
     # Normalize quaternions to ensure they are unit quaternions
-    quats = quats / quats.norm(dim=1, keepdim=True)
+    quaternions = quaternions / quaternions.norm(p=2, dim=-1, keepdim=True)
     
-    w, x, y, z = quats[:, 0], quats[:, 1], quats[:, 2], quats[:, 3]
+    w, x, y, z = torch.unbind(quaternions, dim=-1)
     
-    R = torch.zeros((quats.shape[0], 3, 3), dtype=quats.dtype, device=quats.device)
+    # Construct rotation matrix elements
+    # R = [ 1-2(y^2+z^2)   2(xy-wz)       2(xz+wy)     ]
+    #     [ 2(xy+wz)       1-2(x^2+z^2)   2(yz-wx)     ]
+    #     [ 2(xz-wy)       2(yz+wx)       1-2(x^2+y^2) ]
     
-    R[:, 0, 0] = 1 - 2 * (y**2 + z**2)
-    R[:, 0, 1] = 2 * (x*y - w*z)
-    R[:, 0, 2] = 2 * (x*z + w*y)
+    xx, yy, zz = x*x, y*y, z*z
+    xy, xz, yz = x*y, x*z, y*z
+    xw, yw, zw = x*w, y*w, z*w
     
-    R[:, 1, 0] = 2 * (x*y + w*z)
-    R[:, 1, 1] = 1 - 2 * (x**2 + z**2)
-    R[:, 1, 2] = 2 * (y*z - w*x)
-    
-    R[:, 2, 0] = 2 * (x*z - w*y)
-    R[:, 2, 1] = 2 * (y*z + w*x)
-    R[:, 2, 2] = 1 - 2 * (x**2 + y**2)
+    R = torch.stack([
+        1 - 2*(yy + zz), 2*(xy - zw), 2*(xz + yw),
+        2*(xy + zw), 1 - 2*(xx + zz), 2*(yz - xw),
+        2*(xz - yw), 2*(yz + xw), 1 - 2*(xx + yy)
+    ], dim=-1).reshape(quaternions.shape[:-1] + (3, 3))
     
     return R
 ```
 
+**Parameters:**
+- `quats`: Input tensor of shape $(N, 4)$ [S2, unofficial].
+- `scales`: Input tensor of shape $(N, 3)$ [S2, unofficial].
+
 **Edge Cases and Pitfalls:**
-- **Precision:** Ensure quaternions are normalized before conversion to avoid rotation matrix errors [G].
-- **Boundaries:** The method assumes valid input quaternions and non-negative scales [G].
-- **Degenerate Input:** If scales are zero, the covariance matrix will be zero, which may cause issues in rendering [G].
+- **Isotropic Scales:** If scales are provided as a single scalar (isotropic), the scale matrix construction must handle this case by repeating the scalar on the diagonal [S2, unofficial].
+- **Quaternion Normalization:** Quaternions must be normalized before conversion to ensure valid rotation matrices [G].
+- **Precision:** The computation involves squaring scale values, which can lead to numerical instability if scales are very large or very small. Using `float32` is standard, but `float64` may be needed for extreme ranges [G].
 
 ## Subtopics
 
 ### [Pre-computed Covariance and Color Buffer Generation](2817-pre-computed-covariance-and-color-buffer-generation.md)
-This method is a preprocessing step that converts raw Gaussian splat parameters (position, scale, rotation, color) into pre-computed 3x3 covariance matrices and normalized float colors to accelerate rendering. It solves the problem of per-frame matrix multiplication and color decoding by computing these values once during load, thereby reducing GPU compute overhead during the rasterization phase. It builds on [3D Covariance Computation](2231-3d-covariance-computation.md) by providing the final symmetric covariance representation required for the splatting shader.
+This method is a preprocessing step that converts raw Gaussian splat parameters (position, scale, rotation, color) into pre-computed $3 \times 3$ covariance matrices and normalized float colors to accelerate rendering. It solves the problem of per-frame matrix multiplication and color decoding by computing these values once during load.
 
 ### [Covariance Factorisation](2894-covariance-factorisation.md)
-Covariance Factorisation parameterizes the 3D Gaussian covariance matrix by decomposing it into unconstrained rotation and scale components, ensuring the resulting matrix remains positive semi-definite (PSD) during gradient-based optimization. This approach distinguishes itself from direct covariance optimization by decoupling geometric shape (scale) from orientation (rotation), allowing stable unconstrained gradient descent without requiring projection steps to enforce PSD constraints.
+Covariance Factorisation is a parameterization technique for 3D Gaussian splats that decomposes the covariance matrix into a rotation matrix and a scaling matrix, ensuring the covariance remains positive semi-definite under unconstrained gradient descent. It sets itself apart from direct covariance optimization by embedding geometric constraints directly into the parameter space, and from Cholesky parameterization by explicitly separating rotation and scale for physical interpretability.
+
+#### Gsplat to CovSplat Conversion
+**Steps:**
+1. Initialize `covsplat.flags` to `0u` [S4, unofficial].
+2. Check if `isGsplatActive(gsplat.flags)` is true [S4, unofficial].
+3. If active, copy `flags`, `index`, `rgba`, and `center` from `gsplat` [S4, unofficial].
+4. Compute rotation matrix `m` by calling `scaleQuaternionToMatrix(gsplat.scales, gsplat.quaternion)` [S4, unofficial].
+5. Compute the symmetric covariance matrix components: `m = m * transpose(m)` [S4, unofficial].
+6. Extract diagonal elements into `covsplat.xxyyzz = vec3(m[0][0], m[1][1], m[2][2])` [S4, unofficial].
+7. Extract off-diagonal elements into `covsplat.xyxzyz = vec3(m[0][1], m[0][2], m[1][2])` [S4, unofficial].
+
+**Pitfalls:**
+- If the input `gsplat` is null or inactive, the output `covsplat.flags` remains `0u`, and other fields are not updated (or initialized to defaults in the JS wrapper) [S4, unofficial].
 
 ## Operating characteristics
+- **Time Complexity:** $O(N)$ for $N$ Gaussians, as each Gaussian's covariance is computed independently using constant-time matrix operations.
+- **Memory Complexity:** $O(N)$ to store the resulting $(N, 3, 3)$ covariance tensor.
+- **Strengths:** Efficiently computes the full spatial covariance from compact quaternion and scale representations. Ensures positive semi-definiteness by construction.
+- **Limitations:** Requires quaternion normalization. Computation is done per-frame or during preprocessing, which can be a bottleneck for dynamic scenes if not optimized [S1, unofficial].
+- **When to Use:** When rendering 3D Gaussians and the covariance matrix is needed for projection to 2D screen space.
+- **When Not to Use:** When the covariance is pre-computed and stored (e.g., in pre-computed buffers) [S1, unofficial].
 
 ## Background
-Originated in the context of 3D Gaussian Splatting for novel view synthesis [S1, unofficial][S2, unofficial][S3, unofficial]. The method is a fundamental component of the GaussianSet Data Structure, which stores means, orientations, scales, opacities, and spherical harmonics coefficients [Parent]. It is used in various implementations of 3D Gaussian Splatting, including [thomasantony/splat](https://github.com/thomasantony/splat) [S1, unofficial], [sascha-kirch/splaty](https://github.com/sascha-kirch/splaty) [S2, unofficial], and [Fhz2346/3D-Gaussian-Splatting](https://github.com/Fhz2346/3D-Gaussian-Splatting) [S3, unofficial].
+3D Gaussian Splatting (3DGS) was introduced by Kerbl et al. in 2023 [S1, S2, S3, unofficial]. The method represents a scene as a set of 3D Gaussians, each defined by a mean, covariance, opacity, and spherical harmonics coefficients. The covariance matrix is a critical component for projecting these 3D Gaussians to 2D screen space for rasterization. The computation of the covariance from quaternion and scale parameters is a standard part of the 3DGS pipeline, as described in various implementations [S1, S2, S3, unofficial].
 
 ## Sources
 [S1] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
 [S2] sascha-kirch/splaty, https://github.com/sascha-kirch/splaty, fetched 2026-10-27 (unofficial)
 [S3] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
+[S4] sparkjsdev/spark, https://github.com/sparkjsdev/spark, fetched 2026-10-27 (unofficial)
