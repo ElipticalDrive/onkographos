@@ -1,0 +1,4957 @@
+# mrGSplat
+
+Collection of nodes to run gsplat in meshroom.
+Relies on the rez package gsplat, containing an install and a version of nerfstudio's gsplat https://github.com/nerfstudio-project/gsplat
+
+Utilisation: rez env meshroom-develop mrGSplat-version
+
+This also give you access to templates to run the optimisation/render, and the clean plate pipeline.
+
+## Nodes
+
+### PrepareImagesForGSPlat
+
+This node will prepare images by downscaling images and converting the codec/colorspace
+- *scale* is the downscaling factor
+- *mask folder* can be used to input masks. 
+- In this case *reference* is a SFM file used to link masks images to their intrinsics ID so that we know what mask corresponds to what image in the dataset
+
+### GaussianSplattingOptim
+
+This node is used to train the model
+- *scale* needs to be the same as the scale from PrepareImagesForGSplat
+- *number of steps* is the number of iterations
+- *resume from model* is an input from a model output of a previous `GaussianSplattingOptim`. It is mainly used to create checkpoints. If you set the scale correctly you can mix trained models from different scales with this (so for example you can first train with downscaled images, and later train refine by training on full size)
+
+### GaussianSplattingRender
+
+This node is used to render a model. It uses a model and poses from a SFM file.
+
+### ConvertGSplatModel
+
+This node will convert the model to different format.
+For now it supports ".ply" which corresponds to what [GSOPs](https://github.com/cgnomads/GSOPs) uses to render splats
+
+### ImageCompo
+
+When you use masks to remove moving objects you may want to composite back on the image. This node is here for that.
+You can composite back what was removed using the mask input, and a background (usually the gsplat render) and the foreground (the original image).
+
+
+## Additional Nodes
+
+### ImportAlembicCamera
+
+This node can be used to import an alembic camera and create a SFM file that can be used to render.
+You can additionally override the camera intrinsics parameters.
+
+### MeshViz
+
+This will take a model, sample N points (e.g. keep N splats) and export them as `.obj`, so that they can be displayed in Meshroom's 3D viewer
+
+### ExtractPosesFromSfm
+
+This is a node that can be used to extract poses when there are multiple intrinsics that were mixed.
+It's probably only doing things that SfMTransfer does.
+
+
+## Experimental / WIP Nodes
+
+These node address future optimizations that we wanted to try.
+
+### MeshSample
+
+First an idea was that instead of taking the result from the SfM to initialize splats, we could take the result from the Meshing step.
+The logic behind is that SfM will spawn a lot of points in the air and by using Meshing we would avoid a lot of "fake" points.
+The MeshSample node was here to test this because we could sample points on the mesh, export them as a SfM file and then use this as the Optim input.
+However for now this doesn't really solve the issue, and I think for 2 reasons :
+- first the result is better when the splats are initialized with the correct color, and this is not the case here
+- then it sample uniformly on the mesh, while by using the SfM we get more points where SfM found more landmarks. Usually we get better results with SfM and I think this is the main reason.
+
+### InitializeSplats
+
+This was an attempt of improving MeshSample
+
+### CleanSplats
+
+The second improvement we thought about was to clean splats that were too far away from the mesh, but after the optimization.
+This is not helping the optim itself but it's here to remove "floating" splats.
+So this node is supposed to check the minimum distance between each splats and the mesh, and to remove those whe are too far.
+
+### RandomizePoses, ExportPoses, SfmPoseDistance
+
+The next thing we wanted to test was the post optimization through gaussian splatting.
+These nodes are used to :
+- *RandomizePoses* will add random noise to each pose (translation, rotation)
+- Then in *GaussianSplattingOptim* you can check the pose optimization checkbox
+- *ExportPoses* will export optimized poses as a Sfm file
+- Finally *SfmPoseDistance* compute the difference between the original SfM and the optimized poses. It will check if the pose optimization step helped improving the poses.
+
+Unfortunately for now I didn"t find that the pose optimization really worked. We can clearly see that gsplat is modifying the poses but the result is not closer to the original sfm that the randomized poses.
+
+### gsplatInterface/__init__.py
+```
+
+```
+
+### gsplatInterface/argparse_dataclass.py
+```
+"""
+``argparse_dataclass``
+======================
+
+- Code from https://github.com/mivade/argparse_dataclass/blob/main/argparse_dataclass.py
+- Modifications inspired by tyro 
+
+Contributors of argparse_dataclass
+----------------------------------
+
+* @adsharma
+* @asasine
+* @frank113
+* @jayvdb
+* @jcal-15
+* @mivade
+* @rafi-cohen
+
+License
+-------
+
+MIT License
+
+Copyright (c) 2019-2023 argparse_dataclass contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+"""
+
+import argparse
+from argparse import BooleanOptionalAction
+from typing import (
+    TypeVar,
+    Optional,
+    Sequence,
+    Type,
+    Tuple,
+    get_origin,
+    Literal,
+    get_args,
+    Union,
+    Any,
+    Generic,
+)
+from dataclasses import (
+    Field,
+    is_dataclass,
+    fields,
+    MISSING,
+    dataclass as real_dataclass,
+)
+
+# In Python 3.10, we can use types.NoneType
+NoneType = type(None)
+
+OptionsType = TypeVar("OptionsType")
+ArgsType = Optional[Sequence[str]]
+
+
+def parse_args(options_class: Type[OptionsType], args: ArgsType = None) -> OptionsType:
+    """Parse arguments and return as the dataclass type."""
+    parser = argparse.ArgumentParser()
+    _add_dataclass_options(options_class, parser)
+    kwargs = _get_kwargs(parser.parse_args(args))
+    return options_class(**kwargs)
+
+
+def parse_known_args(
+    options_class: Type[OptionsType], args: ArgsType = None
+) -> Tuple[OptionsType, list[str]]:
+    """Parse known arguments and return tuple containing dataclass type
+    and list of remaining arguments.
+    """
+    parser = argparse.ArgumentParser()
+    _add_dataclass_options(options_class, parser)
+    namespace, others = parser.parse_known_args(args=args)
+    kwargs = _get_kwargs(namespace)
+    return options_class(**kwargs), others
+
+
+def _add_dataclass_options(
+    options_class: Type[OptionsType], parser: argparse.ArgumentParser
+) -> None:
+    if not is_dataclass(options_class):
+        raise TypeError("cls must be a dataclass")
+
+    for field in fields(options_class):
+        args = field.metadata.get("args", [f"--{_get_arg_name(field)}"])
+        positional = not args[0].startswith("-")
+        kwargs = {
+            "type": field.metadata.get("type", field.type),
+            "help": field.metadata.get("help", None),
+        }
+
+        if field.metadata.get("args") and not positional:
+            # We want to ensure that we store the argument based on the
+            # name of the field and not whatever flag name was provided
+            kwargs["dest"] = field.name
+
+        if field.metadata.get("choices") is not None:
+            kwargs["choices"] = field.metadata["choices"]
+
+        # Support Literal types as an alternative means of specifying choices.
+        if get_origin(field.type) is Literal:
+            # Prohibit a potential collision with the choices field
+            if field.metadata.get("choices") is not None:
+                raise ValueError(
+                    f"Cannot infer type of items in field: {field.name}. "
+                    "Literal type arguments should not be combined with choices in the metadata. "
+                    "Remove the redundant choices field from the metadata."
+                )
+
+            # Get the types of the arguments of the Literal
+            types = [type(arg) for arg in get_args(field.type)]
+
+            # Make sure just a single type has been used
+            if len(set(types)) > 1:
+                raise ValueError(
+                    f"Cannot infer type of items in field: {field.name}. "
+                    "Literal type arguments should contain choices of a single type. "
+                    f"Instead, {len(set(types))} types where found: "
+                    + ", ".join([type_.__name__ for type_ in set(types)])
+                    + "."
+                )
+
+            # Overwrite the type kwarg
+            kwargs["type"] = types[0]
+            # Use the literal arguments as choices
+            kwargs["choices"] = get_args(field.type)
+
+        if field.metadata.get("metavar") is not None:
+            kwargs["metavar"] = field.metadata["metavar"]
+
+        if field.metadata.get("nargs") is not None:
+            kwargs["nargs"] = field.metadata["nargs"]
+            if field.metadata.get("type") is None:
+                # When nargs is specified, field.type should be a list,
+                # or something equivalent, like typing.List.
+                # Using it would most likely result in an error, so if the user
+                # did not specify the type of the elements within the list, we
+                # try to infer it:
+                try:
+                    kwargs["type"] = get_args(field.type)[0]  # get_args returns a tuple
+                except IndexError:
+                    # get_args returned an empty tuple, type cannot be inferred
+                    raise ValueError(
+                        f"Cannot infer type of items in field: {field.name}. "
+                        "Try using a parameterized type hint, or "
+                        "specifying the type explicitly using metadata['type']"
+                    )
+
+        if field.default == field.default_factory == MISSING and not positional:
+            kwargs["required"] = True
+        else:
+            kwargs["default"] = MISSING
+
+        if field.type is bool:
+            _handle_bool_type(field, args, kwargs)
+        elif get_origin(field.type) is Union:
+            if field.metadata.get("type") is None:
+                # Optional[X] is equivalent to Union[X, None].
+                f_args = get_args(field.type)
+                if len(f_args) == 2 and NoneType in f_args:
+                    arg = next(a for a in f_args if a is not NoneType)
+                    kwargs["type"] = arg
+                else:
+                    print(field)
+                    raise TypeError(
+                        "For Union types other than 'Optional', a custom 'type' must be specified using "
+                        "'metadata'."
+                    )
+
+        if "group" in field.metadata:
+            _handle_argument_group(parser, field, args, kwargs)
+        else:
+            parser.add_argument(*args, **kwargs)
+
+
+def _get_kwargs(namespace: argparse.Namespace) -> dict[str, Any]:
+    """Converts a Namespace to a dictionary containing the items that
+    to be used as keyword arguments to the Options class.
+    """
+    return {k: v for k, v in vars(namespace).items() if v != MISSING}
+
+
+def _handle_bool_type(field: Field, args: list, kwargs: dict):
+    """Handles configuring the parser argument for boolean types.
+
+    Different field configurations:
+        No default value specified: action='store_true'
+        Default value set to True : action='store_true'
+        Default value set to False: action='store_false'
+            Add a 'no-' prefix to the name if no custom args specified.
+        if 'required' is specified: action=BooleanOptionalAction
+    """
+    kwargs["action"] = "store_true"
+    for key in ("type", "required"):
+        kwargs.pop(key, None)
+    if "default" in kwargs:
+        if field.default is True:
+            kwargs["action"] = "store_false"
+            if "args" not in field.metadata:
+                args[0] = f"--no-{_get_arg_name(field)}"
+                kwargs["dest"] = field.name
+    elif field.metadata.get("required") is True:
+        kwargs["action"] = BooleanOptionalAction
+        kwargs["required"] = True
+
+
+def _handle_argument_group(
+    parser: argparse.ArgumentParser, field: Field, args: list, kwargs: dict
+) -> None:
+    """Handles adding the argument to an argument group."""
+    groups = {x.title: x for x in parser._action_groups}
+    group = field.metadata.get("group")
+    if isinstance(group, str):
+        title = group
+        description = None
+    elif isinstance(group, dict):
+        title = group.get("title")
+        description = group.get("description")
+    elif isinstance(group, Sequence):
+        len_ = len(group)
+        title = group[0] if len_ > 0 else None
+        description = group[1] if len_ > 1 else None
+    else:
+        raise TypeError("'group' must be a group title, dictionary, or sequence")
+    group = groups.get(title)
+    if title is None or group is None:
+        group = parser.add_argument_group(title, description)
+    group.add_argument(*args, **kwargs)
+
+
+def _get_arg_name(field: Field):
+    if field.metadata.get("keep_underscores", True):
+        return field.name
+    return field.name.replace("_", "-")
+
+
+class ArgumentParser(Generic[OptionsType]):
+    """Command line argument parser that derives its options from a dataclass.
+
+    Parameters
+    ----------
+    options_class
+        The dataclass that defines the options.
+    args, kwargs
+        Passed along to :class:`argparse.ArgumentParser`.
+
+    """
+
+    def __init__(self, config, prebuilt=False, **kwargs):
+        self.config = {}
+        self.prebuilt = prebuilt
+        self.parser = argparse.ArgumentParser(**kwargs)
+        subparsers = self.parser.add_subparsers(help='subcommands', dest="subparser_name")
+        for config_name, config in config.items():
+            help_txt, config = config
+            self.config[config_name] = config
+            sub_parser = subparsers.add_parser(config_name, help=help_txt)
+            _add_dataclass_options(config, sub_parser)
+    
+    def parse_args(self, args: ArgsType = None, namespace=None) -> OptionsType:
+        """Parse arguments and return as the dataclass type."""
+        if namespace is not None:
+            raise ValueError("supplying a namespace is not allowed")
+        kwargs = _get_kwargs(self.parser.parse_args(args))
+        config_name = kwargs.pop('subparser_name')
+        object_to_build = self.config[config_name]
+        if self.prebuilt:
+            for k, v in kwargs.items():
+                object_to_build.__setattr__(k, v)
+        else:
+            # object_to_build = object_to_build.__class__
+            object_to_build = object_to_build(**kwargs)
+        return object_to_build
+
+    def parse_known_args(
+        self, args: ArgsType = None, namespace=None
+    ) -> Tuple[OptionsType, list[str]]:
+        """Parse known arguments and return tuple containing dataclass type
+        and list of remaining arguments.
+        """
+        if namespace is not None:
+            raise ValueError("supplying a namespace is not allowed")
+        namespace, others = self.parser.parse_known_args(args=args)
+        kwargs = _get_kwargs(namespace)
+        config_name = kwargs.pop('subparser_name')
+        object_to_build = self.config[config_name]
+        if self.prebuilt:
+            for k, v in kwargs.items():
+                object_to_build.__setattr__(k, v)
+        else:
+            object_to_build = object_to_build(**kwargs)
+        return object_to_build, others
+```
+
+### gsplatInterface/avImage.py
+```
+# -*- coding: utf-8 -*-
+
+import os
+from typing import Tuple, Union
+
+import cv2
+import numpy as np
+
+from pyalicevision import image as avimg
+
+
+class AvImage:
+    """
+    Format-agnostic class to manage images, resize them, handle colorspace conversions
+    """
+    
+    COLOR_SPACES = {
+        "AUTO": avimg.EImageColorSpace_AUTO,
+        "LINEAR": avimg.EImageColorSpace_LINEAR,
+        "SRGB": avimg.EImageColorSpace_SRGB,
+        "ACES2065_1": avimg.EImageColorSpace_ACES2065_1,
+        "ACEScg": avimg.EImageColorSpace_ACEScg,
+        "REC709": avimg.EImageColorSpace_REC709,
+        "Linear_ARRI_Wide_Gamut_3": avimg.EImageColorSpace_Linear_ARRI_Wide_Gamut_3,
+        "ARRI_LogC3_EI800": avimg.EImageColorSpace_ARRI_LogC3_EI800,
+        "Linear_ARRI_Wide_Gamut_4": avimg.EImageColorSpace_Linear_ARRI_Wide_Gamut_4,
+        "ARRI_LogC4": avimg.EImageColorSpace_ARRI_LogC4,
+        "Linear_BMD_WideGamut_Gen5": avimg.EImageColorSpace_Linear_BMD_WideGamut_Gen5,
+        "BMDFilm_WideGamut_Gen5": avimg.EImageColorSpace_BMDFilm_WideGamut_Gen5,
+        "CanonLog2_CinemaGamut_D55": avimg.EImageColorSpace_CanonLog2_CinemaGamut_D55,
+        "CanonLog3_CinemaGamut_D55": avimg.EImageColorSpace_CanonLog3_CinemaGamut_D55,
+        "Linear_CinemaGamut_D55": avimg.EImageColorSpace_Linear_CinemaGamut_D55,
+        "Linear_V_Gamut": avimg.EImageColorSpace_Linear_V_Gamut,
+        "V_Log_V_Gamut": avimg.EImageColorSpace_V_Log_V_Gamut,
+        "Linear_REDWideGamutRGB": avimg.EImageColorSpace_Linear_REDWideGamutRGB,
+        "Log3G10_REDWideGamutRGB": avimg.EImageColorSpace_Log3G10_REDWideGamutRGB,
+        "Linear_Venice_S_Gamut3_Cine": avimg.EImageColorSpace_Linear_Venice_S_Gamut3_Cine,
+        "S_Log3_Venice_S_Gamut3_Cine": avimg.EImageColorSpace_S_Log3_Venice_S_Gamut3_Cine,
+        "LAB": avimg.EImageColorSpace_LAB,
+        "XYZ": avimg.EImageColorSpace_XYZ,
+        "NO_CONVERSION": avimg.EImageColorSpace_NO_CONVERSION,
+    }
+    
+    @classmethod
+    def get_colorspace(cls, colorspace):
+        if isinstance(colorspace, str):
+            return cls.COLOR_SPACES.get(colorspace, cls.COLOR_SPACES["AUTO"])
+        return colorspace
+    
+    @classmethod
+    def get_default_colorspace(cls, path, img_shape=None):
+        ext = os.path.splitext(path)[1]
+        if img_shape < 3:
+            # Non-RGB images (greyscale, ...) -> no conversion to do
+            return cls.get_colorspace("NO_CONVERSION")
+        if ext.lower() == ".exr":
+            return cls.get_colorspace("LINEAR")
+        if ext.lower() == ".jpg":
+            return cls.get_colorspace("SRGB")
+        # TODO : other files
+        else:
+            return cls.get_colorspace("NO_CONVERSION")
+    
+    def __init__(self, path, greyscale=False, alpha=False, open=False, colorspace=None):
+        self.mode = "greyscale" if greyscale else "rgb" 
+        self.hasAlpha = alpha
+        self.nb_channels = 1 if greyscale else 3 + (1 if alpha else 0)
+        self.path = str(path)
+        self.buf = None
+        if open:
+            self.open(colorspace)
+    
+    @classmethod
+    def from_numpy(cls, array):
+        # Find image shape
+        im_shape = 3
+        if len(array.shape) == 2:
+            im_shape = 1
+        elif len(array.shape) == 3:
+            im_shape = array.shape[2]
+        else:
+            raise ValueError("Array shape {array.shape} is not valid")
+        av_image = cls(None, greyscale=(im_shape==1), open=False)
+        if im_shape == 1:
+            av_image.buf = avimg.Image_float()
+        elif im_shape == 3:
+            av_image.buf = avimg.Image_RGBfColor()
+        else:
+            av_image.buf = avimg.Image_RGBAfColor()
+        av_image.buf.fromNumpyArray(array)
+        return av_image
+    
+    def open(self, colorspace=None): 
+        self.buf = self.open_RGB_image(self.path, im_shape=self.nb_channels, colorspace=colorspace)
+    
+    @classmethod
+    def open_RGB_image(cls, p, im_shape=3, colorspace=None):
+        if colorspace is None:
+            colorspace = cls.get_default_colorspace(p, img_shape=im_shape)
+        else:
+            colorspace = cls.get_colorspace(colorspace)
+        if im_shape == 1:
+            av_image = avimg.Image_float()
+        elif im_shape == 3:
+            av_image = avimg.Image_RGBfColor()
+        elif im_shape == 4:
+            av_image = avimg.Image_RGBAfColor()
+        else:
+            raise ValueError(f"Images with {im_shape} dimensions are not supported")
+        # Read image
+        avOptRead = avimg.ImageReadOptions(colorspace)
+        try:
+            avimg.readImage(p, av_image, avOptRead)
+        except Exception as err:
+            # raise ValueError(f"[open_RGB_image] Read image {p} ({im_shape}/{colorspace} -> {str(av_image.__class__)})\n{err}")
+            raise ValueError(f"[open_RGB_image] Read image {p} ({im_shape}/{colorspace})\n{err}")
+        return av_image
+    
+    @property
+    def pixels(self):
+        img = self.buf.getNumpyArray()[:,:,:3]
+        return np.clip(img, 0, 1)
+    
+    def get_alpha_mask(self):
+        img = self.buf.getNumpyArray()[:,:,3]
+        return np.clip(img, 0, 1)
+
+    def resize(self, factor):
+        # New size
+        W = int(self.buf.width() / float(factor))
+        H = int(self.buf.height()/ float(factor))
+        img = self.pixels
+        res = cv2.resize(img, dsize=(W, H), interpolation=cv2.INTER_AREA)  # Best for downscaling
+        if len(res.shape) == 2:
+            res = np.reshape(res, (*res.shape, 1))
+        self.buf.fromNumpyArray(res)
+    
+    def write(self, output, colorspace=None):
+        if colorspace is None:
+            # colorspace = self.get_default_colorspace(output, img_shape=self.buf.channels())
+            colorspace = self.get_colorspace("AUTO")
+        else:
+            colorspace = self.get_colorspace(colorspace)
+        optWrite = avimg.ImageWriteOptions()
+        optWrite.toColorSpace(colorspace)
+        oiio_params = avimg.oiioParams(1, 1, "zips")
+        avimg.writeImage(output, self.buf, optWrite, oiio_params.get())
+```
+
+### gsplatInterface/common.py
+```
+# -*- coding: utf-8 -*-
+
+import dataclasses
+
+from typing import Annotated, Literal, Optional, Tuple
+import logging
+import numpy as np
+import numpy.typing as npt
+import torch
+from torch import Tensor
+import matplotlib as mpl
+
+from pyalicevision.system import ConsoleProgressDisplay
+
+
+
+# Define types for ndarray of specific shape
+# Could use np.generic instead of np.float32
+NDArray4x4 = Annotated[npt.NDArray[np.dtype[np.float32]], Literal[4, 4]]
+NDArray3x3 = Annotated[npt.NDArray[np.dtype[np.float32]], Literal[4, 4]]
+
+Colormaps = Literal["turbo", "viridis", "magma", "inferno", "cividis", "gray"]
+
+
+def apply_float_colormap(image: Annotated[Tensor, "*bs 1"], colormap: Colormaps = "viridis") -> Annotated[Tensor, "*bs rgb=3"]:
+    """Copied from nerfstudio/utils/colormaps.py
+    Convert single channel to a color image.
+
+    Args:
+        image: Single channel image.
+        colormap: Colormap for image.
+
+    Returns:
+        Tensor: Colored image with colors in [0, 1]
+    """
+
+    image = torch.nan_to_num(image, 0)
+    if colormap == "gray":
+        return image.repeat(1, 1, 3)
+    image_long = (image * 255).long()
+    image_long_min = torch.min(image_long)
+    image_long_max = torch.max(image_long)
+    assert image_long_min >= 0, f"the min value is {image_long_min}"
+    assert image_long_max <= 255, f"the max value is {image_long_max}"
+    return torch.tensor(mpl.colormaps[colormap].colors, device=image.device)[
+        image_long[..., 0]
+    ]
+
+
+
+@dataclasses.dataclass
+class RenderTabState:
+    """Useful GUI handles exposed by the render tab."""
+    num_train_rays_per_sec: Optional[float] = None
+    num_view_rays_per_sec: float = 100000.0
+    preview_render: bool = False
+    preview_fov: float = 0.0
+    preview_time: float = 0.0
+    preview_aspect: float = 1.0
+    viewer_res: int = 2048
+    render_width: int = 1280
+    render_height: int = 960
+
+
+class GSplatRenderTabState(RenderTabState):
+    # non-controlable parameters
+    total_gs_count: int = 0
+    rendered_gs_count: int = 0
+
+    # controlable parameters
+    max_sh_degree: int = 5
+    near_plane: float = 1e-2
+    far_plane: float = 1e2
+    radius_clip: float = 0.0
+    eps2d: float = 0.3
+    backgrounds: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    render_mode: Literal[
+        "rgb", "depth(accumulated)", "depth(expected)", "alpha"
+    ] = "rgb"
+    normalize_nearfar: bool = False
+    inverse: bool = False
+    colormap: Literal[
+        "turbo", "viridis", "magma", "inferno", "cividis", "gray"
+    ] = "turbo"
+    rasterize_mode: Literal["classic", "antialiased"] = "classic"
+    camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
+
+
+# @dataclasses.dataclass
+# class CameraState(object):
+#     fov: float
+#     aspect: float
+#     c2w: NDArray4x4
+
+#     def get_K(self, img_wh: Tuple[int, int]) -> NDArray3x3:
+#         W, H = img_wh
+#         focal_length = H / 2.0 / np.tan(self.fov / 2.0)
+#         K = np.array(
+#             [
+#                 [focal_length, 0.0, W / 2.0],
+#                 [0.0, focal_length, H / 2.0],
+#                 [0.0, 0.0, 1.0],
+#             ]
+#         )
+#         return K
+
+@dataclasses.dataclass
+class CameraState(object):
+    c2w: NDArray4x4
+    K: NDArray3x3
+
+    @staticmethod
+    def build_K(fov, img_wh: Tuple[int, int]) -> NDArray3x3:
+        W, H = img_wh
+        focal_length = H / 2.0 / np.tan(fov / 2.0)
+        K = np.array(
+            [
+                [focal_length, 0.0, W / 2.0],
+                [0.0, focal_length, H / 2.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        return K
+
+    @classmethod
+    def build(cls, fov, c2w, img_wh):
+        return cls(
+            c2w=c2w,
+            K=cls.get_K(fov, img_wh)
+        )
+
+    def get_K(self, img_wh: Tuple[int, int]) -> NDArray3x3:
+        return self.K
+
+
+class ProgressBar:
+    def __init__(self, items, desc="", useProgressBar=True):
+        self.items = items
+        self.__useProgressBar = useProgressBar
+        self.__progress = ConsoleProgressDisplay(self.length, desc + "\n") if useProgressBar else None
+        self.__count = 0
+
+    @property
+    def length(self):
+        return len(self.items)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        count = self.__progress.count() if self.__useProgressBar else self.__count
+        if self.__useProgressBar:
+            self.__progress += 1
+        else:
+            self.__count += 1
+        if count < self.length:
+            return self.items[count]
+        raise StopIteration
+
+def createProgressBar(items, desc="", useIt=True):
+    return iter(ProgressBar(items, desc, useIt))
+
+def createProgressBarRange(maxValue, desc=""):
+    return iter(ProgressBar(range(maxValue), desc))
+```
+
+### gsplatInterface/lib_bilagrid.py
+```
+# # Copyright 2024 Yuehao Wang (https://github.com/yuehaowang). This part of code is borrowed form ["Bilateral Guided Radiance Field Processing"](https://bilarfpro.github.io/).
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+This is a standalone PyTorch implementation of 3D bilateral grid and CP-decomposed 4D bilateral grid.
+To use this module, you can download the "lib_bilagrid.py" file and simply put it in your project directory.
+
+For the details, please check our research project: ["Bilateral Guided Radiance Field Processing"](https://bilarfpro.github.io/).
+
+#### Dependencies
+
+In addition to PyTorch and Numpy, please install [tensorly](https://github.com/tensorly/tensorly).
+We have tested this module on Python 3.9.18, PyTorch 2.0.1 (CUDA 11), tensorly 0.8.1, and Numpy 1.25.2.
+
+#### Overview
+
+- For bilateral guided training, you need to construct a `BilateralGrid` instance, which can hold multiple bilateral grids
+  for input views. Then, use `slice` function to obtain transformed RGB output and the corresponding affine transformations.
+
+- For bilateral guided finishing, you need to instantiate a `BilateralGridCP4D` object and use `slice4d`.
+
+#### Examples
+
+- Bilateral grid for approximating ISP:
+    <a target="_blank" href="https://colab.research.google.com/drive/1tx2qKtsHH9deDDnParMWrChcsa9i7Prr?usp=sharing">
+    <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
+
+- Low-rank 4D bilateral grid for MR enhancement:
+    <a target="_blank" href="https://colab.research.google.com/drive/17YOjQqgWFT3QI1vysOIH494rMYtt_mHL?usp=sharing">
+    <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/></a>
+
+
+Below is the API reference.
+
+"""
+
+import tensorly as tl
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+tl.set_backend("pytorch")
+
+
+def color_correct(
+    img: torch.Tensor, ref: torch.Tensor, num_iters: int = 5, eps: float = 0.5 / 255
+) -> torch.Tensor:
+    """
+    Warp `img` to match the colors in `ref_img` using iterative color matching.
+
+    This function performs color correction by warping the colors of the input image
+    to match those of a reference image. It uses a least squares method to find a
+    transformation that maps the input image's colors to the reference image's colors.
+
+    The algorithm iteratively solves a system of linear equations, updating the set of
+    unsaturated pixels in each iteration. This approach helps handle non-linear color
+    transformations and reduces the impact of clipping.
+
+    Args:
+        img (torch.Tensor): Input image to be color corrected. Shape: [..., num_channels]
+        ref (torch.Tensor): Reference image to match colors. Shape: [..., num_channels]
+        num_iters (int, optional): Number of iterations for the color matching process.
+                                   Default is 5.
+        eps (float, optional): Small value to determine the range of unclipped pixels.
+                               Default is 0.5 / 255.
+
+    Returns:
+        torch.Tensor: Color corrected image with the same shape as the input image.
+
+    Note:
+        - Both input and reference images should be in the range [0, 1].
+        - The function works with any number of channels, but typically used with 3 (RGB).
+    """
+    if img.shape[-1] != ref.shape[-1]:
+        raise ValueError(
+            f"img's {img.shape[-1]} and ref's {ref.shape[-1]} channels must match"
+        )
+    num_channels = img.shape[-1]
+    img_mat = img.reshape([-1, num_channels])
+    ref_mat = ref.reshape([-1, num_channels])
+
+    def is_unclipped(z):
+        return (z >= eps) & (z <= 1 - eps)  # z \in [eps, 1-eps].
+
+    mask0 = is_unclipped(img_mat)
+    # Because the set of saturated pixels may change after solving for a
+    # transformation, we repeatedly solve a system `num_iters` times and update
+    # our estimate of which pixels are saturated.
+    for _ in range(num_iters):
+        # Construct the left hand side of a linear system that contains a quadratic
+        # expansion of each pixel of `img`.
+        a_mat = []
+        for c in range(num_channels):
+            a_mat.append(img_mat[:, c : (c + 1)] * img_mat[:, c:])  # Quadratic term.
+        a_mat.append(img_mat)  # Linear term.
+        a_mat.append(torch.ones_like(img_mat[:, :1]))  # Bias term.
+        a_mat = torch.cat(a_mat, dim=-1)
+        warp = []
+        for c in range(num_channels):
+            # Construct the right hand side of a linear system containing each color
+            # of `ref`.
+            b = ref_mat[:, c]
+            # Ignore rows of the linear system that were saturated in the input or are
+            # saturated in the current corrected color estimate.
+            mask = mask0[:, c] & is_unclipped(img_mat[:, c]) & is_unclipped(b)
+            ma_mat = torch.where(mask[:, None], a_mat, torch.zeros_like(a_mat))
+            mb = torch.where(mask, b, torch.zeros_like(b))
+            w = torch.linalg.lstsq(ma_mat, mb, rcond=-1)[0]
+            assert torch.all(torch.isfinite(w))
+            warp.append(w)
+        warp = torch.stack(warp, dim=-1)
+        # Apply the warp to update img_mat.
+        img_mat = torch.clip(torch.matmul(a_mat, warp), 0, 1)
+    corrected_img = torch.reshape(img_mat, img.shape)
+    return corrected_img
+
+
+def bilateral_grid_tv_loss(model, config):
+    """Computes total variations of bilateral grids."""
+    total_loss = 0.0
+
+    for bil_grids in model.bil_grids:
+        total_loss += config.bilgrid_tv_loss_mult * total_variation_loss(
+            bil_grids.grids
+        )
+
+    return total_loss
+
+
+def color_affine_transform(affine_mats, rgb):
+    """Applies color affine transformations.
+
+    Args:
+        affine_mats (torch.Tensor): Affine transformation matrices. Supported shape: $(..., 3, 4)$.
+        rgb  (torch.Tensor): Input RGB values. Supported shape: $(..., 3)$.
+
+    Returns:
+        Output transformed colors of shape $(..., 3)$.
+    """
+    return (
+        torch.matmul(affine_mats[..., :3], rgb.unsqueeze(-1)).squeeze(-1)
+        + affine_mats[..., 3]
+    )
+
+
+def _num_tensor_elems(t):
+    return max(torch.prod(torch.tensor(t.size()[1:]).float()).item(), 1.0)
+
+
+def total_variation_loss(x):  # noqa: F811
+    """Returns total variation on multi-dimensional tensors.
+
+    Args:
+        x (torch.Tensor): The input tensor with shape $(B, C, ...)$, where $B$ is the batch size and $C$ is the channel size.
+    """
+    batch_size = x.shape[0]
+    tv = 0
+    for i in range(2, len(x.shape)):
+        n_res = x.shape[i]
+        idx1 = torch.arange(1, n_res, device=x.device)
+        idx2 = torch.arange(0, n_res - 1, device=x.device)
+        x1 = x.index_select(i, idx1)
+        x2 = x.index_select(i, idx2)
+        count = _num_tensor_elems(x1)
+        tv += torch.pow((x1 - x2), 2).sum() / count
+    return tv / batch_size
+
+
+def slice(bil_grids, xy, rgb, grid_idx):
+    """Slices a batch of 3D bilateral grids by pixel coordinates `xy` and gray-scale guidances of pixel colors `rgb`.
+
+    Supports 2-D, 3-D, and 4-D input shapes. The first dimension of the input is the batch size
+    and the last dimension is 2 for `xy`, 3 for `rgb`, and 1 for `grid_idx`.
+
+    The return value is a dictionary containing the affine transformations `affine_mats` sliced from bilateral grids and
+    the output color `rgb_out` after applying the afffine transformations.
+
+    In the 2-D input case, `xy` is a $(N, 2)$ tensor, `rgb` is  a $(N, 3)$ tensor, and `grid_idx` is a $(N, 1)$ tensor.
+    Then `affine_mats[i]` can be obtained via slicing the bilateral grid indexed at `grid_idx[i]` by `xy[i, :]` and `rgb2gray(rgb[i, :])`.
+    For 3-D and 4-D input cases, the behavior of indexing bilateral grids and coordinates is the same with the 2-D case.
+
+    .. note::
+        This function can be regarded as a wrapper of `color_affine_transform` and `BilateralGrid` with a slight performance improvement.
+        When `grid_idx` contains a unique index, only a single bilateral grid will used during the slicing. In this case, this function will not
+        perform tensor indexing to avoid data copy and extra memory
+        (see [this](https://discuss.pytorch.org/t/does-indexing-a-tensor-return-a-copy-of-it/164905)).
+
+    Args:
+        bil_grids (`BilateralGrid`): An instance of $N$ bilateral grids.
+        xy (torch.Tensor): The x-y coordinates of shape $(..., 2)$ in the range of $[0,1]$.
+        rgb (torch.Tensor): The RGB values of shape $(..., 3)$ for computing the guidance coordinates, ranging in $[0,1]$.
+        grid_idx (torch.Tensor): The indices of bilateral grids for each slicing. Shape: $(..., 1)$.
+
+    Returns:
+        A dictionary with keys and values as follows:
+        ```
+        {
+            "rgb": Transformed RGB colors. Shape: (..., 3),
+            "rgb_affine_mats": The sliced affine transformation matrices from bilateral grids. Shape: (..., 3, 4)
+        }
+        ```
+    """
+
+    sh_ = rgb.shape
+
+    grid_idx_unique = torch.unique(grid_idx)
+    if len(grid_idx_unique) == 1:
+        # All pixels are from a single view.
+        grid_idx = grid_idx_unique  # (1,)
+        xy = xy.unsqueeze(0)  # (1, ..., 2)
+        rgb = rgb.unsqueeze(0)  # (1, ..., 3)
+    else:
+        # Pixels are randomly sampled from different views.
+        if len(grid_idx.shape) == 4:
+            grid_idx = grid_idx[:, 0, 0, 0]  # (chunk_size,)
+        elif len(grid_idx.shape) == 3:
+            grid_idx = grid_idx[:, 0, 0]  # (chunk_size,)
+        elif len(grid_idx.shape) == 2:
+            grid_idx = grid_idx[:, 0]  # (chunk_size,)
+        else:
+            raise ValueError(
+                "The input to bilateral grid slicing is not supported yet."
+            )
+
+    affine_mats = bil_grids(xy, rgb, grid_idx)
+    rgb = color_affine_transform(affine_mats, rgb)
+
+    return {
+        "rgb": rgb.reshape(*sh_),
+        "rgb_affine_mats": affine_mats.reshape(
+            *sh_[:-1], affine_mats.shape[-2], affine_mats.shape[-1]
+        ),
+    }
+
+
+class BilateralGrid(nn.Module):
+    """Class for 3D bilateral grids.
+
+    Holds one or more than one bilateral grids.
+    """
+
+    def __init__(self, num, grid_X=16, grid_Y=16, grid_W=8):
+        """
+        Args:
+            num (int): The number of bilateral grids (i.e., the number of views).
+            grid_X (int): Defines grid width $W$.
+            grid_Y (int): Defines grid height $H$.
+            grid_W (int): Defines grid guidance dimension $L$.
+        """
+        super(BilateralGrid, self).__init__()
+
+        self.grid_width = grid_X
+        """Grid width. Type: int."""
+        self.grid_height = grid_Y
+        """Grid height. Type: int."""
+        self.grid_guidance = grid_W
+        """Grid guidance dimension. Type: int."""
+
+        # Initialize grids.
+        grid = self._init_identity_grid()
+        self.grids = nn.Parameter(grid.tile(num, 1, 1, 1, 1))  # (N, 12, L, H, W)
+        """ A 5-D tensor of shape $(N, 12, L, H, W)$."""
+
+        # Weights of BT601 RGB-to-gray.
+        self.register_buffer("rgb2gray_weight", torch.Tensor([[0.299, 0.587, 0.114]]))
+        self.rgb2gray = lambda rgb: (rgb @ self.rgb2gray_weight.T) * 2.0 - 1.0
+        """ A function that converts RGB to gray-scale guidance in $[-1, 1]$."""
+
+    def _init_identity_grid(self):
+        grid = torch.tensor(
+            [
+                1.0,
+                0,
+                0,
+                0,
+                0,
+                1.0,
+                0,
+                0,
+                0,
+                0,
+                1.0,
+                0,
+            ]
+        ).float()
+        grid = grid.repeat(
+            [self.grid_guidance * self.grid_height * self.grid_width, 1]
+        )  # (L * H * W, 12)
+        grid = grid.reshape(
+            1, self.grid_guidance, self.grid_height, self.grid_width, -1
+        )  # (1, L, H, W, 12)
+        grid = grid.permute(0, 4, 1, 2, 3)  # (1, 12, L, H, W)
+        return grid
+
+    def tv_loss(self):
+        """Computes and returns total variation loss on the bilateral grids."""
+        return total_variation_loss(self.grids)
+
+    def forward(self, grid_xy, rgb, idx=None):
+        """Bilateral grid slicing. Supports 2-D, 3-D, 4-D, and 5-D input.
+        For the 2-D, 3-D, and 4-D cases, please refer to `slice`.
+        For the 5-D cases, `idx` will be unused and the first dimension of `xy` should be
+        equal to the number of bilateral grids. Then this function becomes PyTorch's
+        [`F.grid_sample`](https://pytorch.org/docs/stable/generated/torch.nn.functional.grid_sample.html).
+
+        Args:
+            grid_xy (torch.Tensor): The x-y coordinates in the range of $[0,1]$.
+            rgb (torch.Tensor): The RGB values in the range of $[0,1]$.
+            idx (torch.Tensor): The bilateral grid indices.
+
+        Returns:
+            Sliced affine matrices of shape $(..., 3, 4)$.
+        """
+
+        grids = self.grids
+        input_ndims = len(grid_xy.shape)
+        assert len(rgb.shape) == input_ndims
+
+        if input_ndims > 1 and input_ndims < 5:
+            # Convert input into 5D
+            for i in range(5 - input_ndims):
+                grid_xy = grid_xy.unsqueeze(1)
+                rgb = rgb.unsqueeze(1)
+            assert idx is not None
+        elif input_ndims != 5:
+            raise ValueError(
+                "Bilateral grid slicing only takes either 2D, 3D, 4D and 5D inputs"
+            )
+
+        grids = self.grids
+        if idx is not None:
+            grids = grids[idx]
+        assert grids.shape[0] == grid_xy.shape[0]
+
+        # Generate slicing coordinates.
+        grid_xy = (grid_xy - 0.5) * 2  # Rescale to [-1, 1].
+        grid_z = self.rgb2gray(rgb)
+
+        # print(grid_xy.shape, grid_z.shape)
+        # exit()
+        grid_xyz = torch.cat([grid_xy, grid_z], dim=-1)  # (N, m, h, w, 3)
+
+        affine_mats = F.grid_sample(
+            grids, grid_xyz, mode="bilinear", align_corners=True, padding_mode="border"
+        )  # (N, 12, m, h, w)
+        affine_mats = affine_mats.permute(0, 2, 3, 4, 1)  # (N, m, h, w, 12)
+        affine_mats = affine_mats.reshape(
+            *affine_mats.shape[:-1], 3, 4
+        )  # (N, m, h, w, 3, 4)
+
+        for _ in range(5 - input_ndims):
+            affine_mats = affine_mats.squeeze(1)
+
+        return affine_mats
+
+
+def slice4d(bil_grid4d, xyz, rgb):
+    """Slices a 4D bilateral grid by point coordinates `xyz` and gray-scale guidances of radiance colors `rgb`.
+
+    Args:
+        bil_grid4d (`BilateralGridCP4D`): The input 4D bilateral grid.
+        xyz (torch.Tensor): The xyz coordinates with shape $(..., 3)$.
+        rgb (torch.Tensor): The RGB values with shape $(..., 3)$.
+
+    Returns:
+        A dictionary with keys and values as follows:
+        ```
+        {
+            "rgb": Transformed radiance RGB colors. Shape: (..., 3),
+            "rgb_affine_mats": The sliced affine transformation matrices from the 4D bilateral grid. Shape: (..., 3, 4)
+        }
+        ```
+    """
+
+    affine_mats = bil_grid4d(xyz, rgb)
+    rgb = color_affine_transform(affine_mats, rgb)
+
+    return {"rgb": rgb, "rgb_affine_mats": affine_mats}
+
+
+class _ScaledTanh(nn.Module):
+    def __init__(self, s=2.0):
+        super().__init__()
+        self.scaler = s
+
+    def forward(self, x):
+        return torch.tanh(self.scaler * x)
+
+
+class BilateralGridCP4D(nn.Module):
+    """Class for low-rank 4D bilateral grids."""
+
+    def __init__(
+        self,
+        grid_X=16,
+        grid_Y=16,
+        grid_Z=16,
+        grid_W=8,
+        rank=5,
+        learn_gray=True,
+        gray_mlp_width=8,
+        gray_mlp_depth=2,
+        init_noise_scale=1e-6,
+        bound=2.0,
+    ):
+        """
+        Args:
+            grid_X (int): Defines grid width.
+            grid_Y (int): Defines grid height.
+            grid_Z (int): Defines grid depth.
+            grid_W (int): Defines grid guidance dimension.
+            rank (int): Rank of the 4D bilateral grid.
+            learn_gray (bool): If True, an MLP will be learned to convert RGB colors to gray-scale guidances.
+            gray_mlp_width (int): The MLP width for learnable guidance.
+            gray_mlp_depth (int): The number of MLP layers for learnable guidance.
+            init_noise_scale (float): The noise scale of the initialized factors.
+            bound (float): The bound of the xyz coordinates.
+        """
+        super(BilateralGridCP4D, self).__init__()
+
+        self.grid_X = grid_X
+        """Grid width. Type: int."""
+        self.grid_Y = grid_Y
+        """Grid height. Type: int."""
+        self.grid_Z = grid_Z
+        """Grid depth. Type: int."""
+        self.grid_W = grid_W
+        """Grid guidance dimension. Type: int."""
+        self.rank = rank
+        """Rank of the 4D bilateral grid. Type: int."""
+        self.learn_gray = learn_gray
+        """Flags of learnable guidance is used. Type: bool."""
+        self.gray_mlp_width = gray_mlp_width
+        """The MLP width for learnable guidance. Type: int."""
+        self.gray_mlp_depth = gray_mlp_depth
+        """The MLP depth for learnable guidance. Type: int."""
+        self.init_noise_scale = init_noise_scale
+        """The noise scale of the initialized factors. Type: float."""
+        self.bound = bound
+        """The bound of the xyz coordinates. Type: float."""
+
+        self._init_cp_factors_parafac()
+
+        self.rgb2gray = None
+        """ A function that converts RGB to gray-scale guidances in $[-1, 1]$.
+        If `learn_gray` is True, this will be an MLP network."""
+
+        if self.learn_gray:
+
+            def rgb2gray_mlp_linear(layer):
+                return nn.Linear(
+                    self.gray_mlp_width,
+                    self.gray_mlp_width if layer < self.gray_mlp_depth - 1 else 1,
+                )
+
+            def rgb2gray_mlp_actfn(_):
+                return nn.ReLU(inplace=True)
+
+            self.rgb2gray = nn.Sequential(
+                *(
+                    [nn.Linear(3, self.gray_mlp_width)]
+                    + [
+                        nn_module(layer)
+                        for layer in range(1, self.gray_mlp_depth)
+                        for nn_module in [rgb2gray_mlp_actfn, rgb2gray_mlp_linear]
+                    ]
+                    + [_ScaledTanh(2.0)]
+                )
+            )
+        else:
+            # Weights of BT601/BT470 RGB-to-gray.
+            self.register_buffer(
+                "rgb2gray_weight", torch.Tensor([[0.299, 0.587, 0.114]])
+            )
+            self.rgb2gray = lambda rgb: (rgb @ self.rgb2gray_weight.T) * 2.0 - 1.0
+
+    def _init_identity_grid(self):
+        grid = torch.tensor(
+            [
+                1.0,
+                0,
+                0,
+                0,
+                0,
+                1.0,
+                0,
+                0,
+                0,
+                0,
+                1.0,
+                0,
+            ]
+        ).float()
+        grid = grid.repeat([self.grid_W * self.grid_Z * self.grid_Y * self.grid_X, 1])
+        grid = grid.reshape(self.grid_W, self.grid_Z, self.grid_Y, self.grid_X, -1)
+        grid = grid.permute(4, 0, 1, 2, 3)  # (12, grid_W, grid_Z, grid_Y, grid_X)
+        return grid
+
+    def _init_cp_factors_parafac(self):
+        # Initialize identity grids.
+        init_grids = self._init_identity_grid()
+        # Random noises are added to avoid singularity.
+        init_grids = torch.randn_like(init_grids) * self.init_noise_scale + init_grids
+        from tensorly.decomposition import parafac
+
+        # Initialize grid CP factors
+        _, facs = parafac(init_grids.clone().detach(), rank=self.rank)
+
+        self.num_facs = len(facs)
+
+        self.fac_0 = nn.Linear(facs[0].shape[0], facs[0].shape[1], bias=False)
+        self.fac_0.weight = nn.Parameter(facs[0])  # (12, rank)
+
+        for i in range(1, self.num_facs):
+            fac = facs[i].T  # (rank, grid_size)
+            fac = fac.view(1, fac.shape[0], fac.shape[1], 1)  # (1, rank, grid_size, 1)
+            self.register_buffer(f"fac_{i}_init", fac)
+
+            fac_resid = torch.zeros_like(fac)
+            self.register_parameter(f"fac_{i}", nn.Parameter(fac_resid))
+
+    def tv_loss(self):
+        """Computes and returns total variation loss on the factors of the low-rank 4D bilateral grids."""
+
+        total_loss = 0
+        for i in range(1, self.num_facs):
+            fac = self.get_parameter(f"fac_{i}")
+            total_loss += total_variation_loss(fac)
+
+        return total_loss
+
+    def forward(self, xyz, rgb):
+        """Low-rank 4D bilateral grid slicing.
+
+        Args:
+            xyz (torch.Tensor): The xyz coordinates with shape $(..., 3)$.
+            rgb (torch.Tensor): The corresponding RGB values with shape $(..., 3)$.
+
+        Returns:
+            Sliced affine matrices with shape $(..., 3, 4)$.
+        """
+        sh_ = xyz.shape
+        xyz = xyz.reshape(-1, 3)  # flatten (N, 3)
+        rgb = rgb.reshape(-1, 3)  # flatten (N, 3)
+
+        xyz = xyz / self.bound
+        assert self.rgb2gray is not None
+        gray = self.rgb2gray(rgb)
+        xyzw = torch.cat([xyz, gray], dim=-1)  # (N, 4)
+        xyzw = xyzw.transpose(0, 1)  # (4, N)
+        coords = torch.stack([torch.zeros_like(xyzw), xyzw], dim=-1)  # (4, N, 2)
+        coords = coords.unsqueeze(1)  # (4, 1, N, 2)
+
+        coef = 1.0
+        for i in range(1, self.num_facs):
+            fac = self.get_parameter(f"fac_{i}") + self.get_buffer(f"fac_{i}_init")
+            coef = coef * F.grid_sample(
+                fac, coords[[i - 1]], align_corners=True, padding_mode="border"
+            )  # [1, rank, 1, N]
+        coef = coef.squeeze([0, 2]).transpose(0, 1)  # (N, rank) #type: ignore
+        mat = self.fac_0(coef)
+        return mat.reshape(*sh_[:-1], 3, 4)
+```
+
+### gsplatInterface/trainer.py
+```
+# -*- coding: utf-8 -*-
+
+import os
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+from common import (
+    CameraState,
+    RenderTabState, GSplatRenderTabState,
+    apply_float_colormap,
+    createProgressBar, createProgressBarRange
+)
+
+import json
+import math
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
+
+import imageio
+import numpy as np
+import torch
+import torch.nn.functional as F
+import yaml
+from datasets.sfm import Dataset, Parser
+from datasets.traj import (
+    generate_ellipse_path_z,
+    generate_interpolated_path,
+    generate_spiral_path,
+)
+from fused_ssim import fused_ssim
+from torch import Tensor
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.tensorboard import SummaryWriter
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from typing import Literal, assert_never
+from utils import AppearanceOptModule, CameraOptModule, knn, rgb_to_sh, set_random_seed
+
+from numpy.core.multiarray import scalar as npscalar
+from numpy.dtypes import Float64DType as npFloat64DType
+from numpy import dtype as npdtype
+
+from gsplat import export_splats
+from gsplat.distributed import cli
+from gsplat.optimizers import SelectiveAdam
+from gsplat.rendering import rasterization
+from gsplat.strategy import DefaultStrategy, MCMCStrategy
+
+import logging
+loggingFormat = os.environ.get("GSPLAT_LOG_FORMAT",
+                               '[%(asctime)s.%(msecs)03d][%(levelname)s] (%(filename)s:%(lineno)d) %(message)s')
+dateFormat = os.environ.get("GSPLAT_LOG_DATEFORMAT", '%H:%M:%S')
+logging.basicConfig(level=logging.INFO, format=loggingFormat, datefmt=dateFormat)
+
+@dataclass
+class Config:
+    # Path to the .pt files. If provided, it will skip training and run evaluation only.
+    ckpt: Optional[List[str]] = None
+    # Path to the .pt files to load and resume training
+    resume_ckpt: Optional[str] = ""
+
+    # Whether to retrieve optimizer state from the checkpoint
+    retrieve_optimizer_state: bool = True
+
+    # Path to the dataset
+    sfm_file: str = "sfm.json"
+    image_alpha: bool = False
+    metadata_folder: str = ""
+
+    # Directory to save results
+    result_dir: str = "results/garden"
+    # Random crop size for training  (experimental)
+    patch_size: Optional[int] = None
+    # A global scaler that applies to the scene size related parameters
+    global_scale: float = 1.0
+
+    # Camera model
+    camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
+
+    # Batch size for training. Learning rates are scaled automatically
+    batch_size: int = 1
+
+    # Number of training steps
+    max_epochs: int = 600
+
+    # Steps to save the model
+    save_epochs: List[int] = field(
+        default_factory=lambda: [150, 600],
+        metadata=dict(nargs="*")
+    )
+
+    # Views to remove from the training set
+    mask_views: List[int] = field(
+            default_factory = lambda: [],
+            metadata = dict(nargs="*")
+        )
+
+    # Use progress bar in the logging
+    use_progress_bar: bool = False
+
+    # Degree of spherical harmonics
+    sh_degree: int = 3
+    # Turn on another SH degree every this steps
+    sh_degree_interval: int = 1000
+    # Initial opacity of GS
+    init_opa: float = 0.1
+    # Initial scale of GS
+    init_scale: float = 1.0
+    # Weight for SSIM loss
+    ssim_lambda: float = 0.2
+
+    # Near plane clipping distance
+    near_plane: float = 0.01
+    # Far plane clipping distance
+    far_plane: float = 1e10
+
+    # Strategy for GS densification
+    strategy: Union[DefaultStrategy, MCMCStrategy] = field(
+        default_factory=DefaultStrategy,
+        metadata=dict(type=str)
+    )
+    # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
+    packed: bool = False
+    # Use sparse gradients for optimization. (experimental)
+    sparse_grad: bool = False
+    # Use visible adam from Taming 3DGS. (experimental)
+    visible_adam: bool = False
+    # Anti-aliasing in rasterization. Might slightly hurt quantitative metrics.
+    antialiased: bool = False
+
+    # Use random background for training to discourage transparency
+    random_bkgd: bool = False
+
+    # Whether to use schedulers for the learning rates (only for MCMC)
+    use_scheduler: bool = True
+
+    # LR for 3D point positions
+    means_lr: float = 1.6e-4
+    # LR for Gaussian scale factors
+    scales_lr: float = 5e-3
+    # LR for alpha blending weights
+    opacities_lr: float = 5e-2
+    # LR for orientation (quaternions)
+    quats_lr: float = 1e-3
+    # LR for SH band 0 (brightness)
+    sh0_lr: float = 2.5e-3
+    # LR for higher-order SH (detail)
+    shN_lr: float = 2.5e-3 / 20
+
+    # Opacity regularization
+    opacity_reg: float = 0.0
+    # Scale regularization
+    scale_reg: float = 0.0
+
+    # Enable camera optimization.
+    pose_opt: bool = False
+    # Learning rate for camera optimization
+    pose_opt_lr: float = 1e-5
+    # Regularization for camera optimization as weight decay
+    pose_opt_reg: float = 1e-6
+
+    # Enable appearance optimization. (experimental)
+    app_opt: bool = False
+    # Appearance embedding dimension
+    app_embed_dim: int = 16
+    # Learning rate for appearance optimization
+    app_opt_lr: float = 1e-3
+    # Regularization for appearance optimization as weight decay
+    app_opt_reg: float = 1e-6
+
+    # Enable bilateral grid. (experimental)
+    use_bilateral_grid: bool = False
+
+    # Whether use fused-bilateral grid
+    use_fused_bilagrid: bool = False
+    # Shape of the bilateral grid (X, Y, W)
+    bilateral_grid_shape: Tuple[int, int, int] = (16, 16, 8)
+
+    # Enable depth loss. (experimental)
+    depth_loss: bool = False
+    # Weight for depth loss
+    depth_lambda: float = 1e-2
+
+    # tile size
+    tile_size: int = 16
+
+    # 3DGUT (uncented transform + eval 3D)
+    with_ut: bool = False
+    with_eval3d: bool = False
+
+    #Strategy default
+    prune_opa: float = 0.005
+    grow_grad2d: float = 0.0002
+    grow_scale3d: float = 0.01
+    grow_scale2d: float = 0.05
+    prune_scale3d: float = 0.1
+    prune_scale2d: float = 0.15
+    refine_scale2d_stop_iter: int = 0
+    refine_start_iter: int = 500
+    refine_stop_iter: int = 15_000
+    reset_every: int = 3000
+    refine_every: int = 100
+    pause_refine_after_reset: int = 0
+    absgrad: bool = False
+    revised_opacity: bool = False
+
+    #Strategy mcmc
+    cap_max: int = 1_000_000
+    noise_lr: float = 5e5
+    min_opacity: float = 0.005
+
+
+def create_splats_with_optimizers(
+    parser: Parser,
+    init_opacity: float = 0.1,
+    init_scale: float = 1.0,
+    means_lr: float = 1.6e-4,
+    scales_lr: float = 5e-3,
+    opacities_lr: float = 5e-2,
+    quats_lr: float = 1e-3,
+    sh0_lr: float = 2.5e-3,
+    shN_lr: float = 2.5e-3 / 20,
+    scene_scale: float = 1.0,
+    sh_degree: int = 3,
+    sparse_grad: bool = False,
+    visible_adam: bool = False,
+    batch_size: int = 1,
+    feature_dim: Optional[int] = None,
+    device: str = "cuda",
+    world_rank: int = 0,
+    world_size: int = 1,
+    strategy: Union[DefaultStrategy, MCMCStrategy] = DefaultStrategy,
+) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
+
+    #initialize from sfm
+    points = torch.from_numpy(parser.points).float()
+    rgbs = torch.from_numpy(parser.points_rgb / 255.0).float()
+
+    # Initialize the GS size to be the average dist of the 3 nearest neighbors
+    dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
+    dist_avg = torch.sqrt(dist2_avg)
+    scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)  # [N, 3]
+
+    # Distribute the GSs to different ranks (also works for single rank)
+    points = points[world_rank::world_size]
+    rgbs = rgbs[world_rank::world_size]
+    scales = scales[world_rank::world_size]
+
+    N = points.shape[0]
+    quats = torch.rand((N, 4))  # [N, 4]
+    opacities = torch.logit(torch.full((N,), init_opacity))  # [N,]
+
+    global_lr_factor = 1.
+
+    # Adapt means_lr parameter so that a same value has a similar effect for the default strategy and MCMC
+    means_lr_factor = (1. if isinstance(strategy, MCMCStrategy) else 0.001) * global_lr_factor
+    logging.info(f"means_lr_factor: {means_lr_factor}")
+    scales_lr_factor = global_lr_factor
+    quats_lr_factor = global_lr_factor
+    opacities_lr_factor = global_lr_factor
+    sh0_lr_factor = global_lr_factor
+    shN_lr_factor = global_lr_factor
+
+    params = [
+        # name, value, lr
+        ("means", torch.nn.Parameter(points), means_lr_factor * means_lr * scene_scale),
+        ("scales", torch.nn.Parameter(scales), scales_lr_factor * scales_lr),
+        ("quats", torch.nn.Parameter(quats), quats_lr_factor * quats_lr),
+        ("opacities", torch.nn.Parameter(opacities), opacities_lr_factor * opacities_lr),
+    ]
+
+    if feature_dim is None:
+        # color is SH coefficients.
+        colors = torch.zeros((N, (sh_degree + 1) ** 2, 3))  # [N, K, 3]
+        colors[:, 0, :] = rgb_to_sh(rgbs)
+        params.append(("sh0", torch.nn.Parameter(colors[:, :1, :]), sh0_lr_factor * sh0_lr))
+        params.append(("shN", torch.nn.Parameter(colors[:, 1:, :]), shN_lr_factor * shN_lr))
+    else:
+        # features will be used for appearance and view-dependent shading
+        features = torch.rand(N, feature_dim)  # [N, feature_dim]
+        params.append(("features", torch.nn.Parameter(features), sh0_lr_factor * sh0_lr))
+        colors = torch.logit(rgbs)  # [N, 3]
+        params.append(("colors", torch.nn.Parameter(colors), sh0_lr_factor * sh0_lr))
+
+    splats = torch.nn.ParameterDict({n: v for n, v, _ in params}).to(device)
+    # Scale learning rate based on batch size, reference:
+    # https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
+    # Note that this would not make the training exactly equivalent, see
+    # https://arxiv.org/pdf/2402.18824v1
+    BS = batch_size * world_size
+    optimizer_class = None
+    if sparse_grad:
+        optimizer_class = torch.optim.SparseAdam
+    elif visible_adam:
+        optimizer_class = SelectiveAdam
+    else:
+        optimizer_class = torch.optim.Adam
+    optimizers = {
+        name: optimizer_class(
+            [{"params": splats[name], "lr": lr * math.sqrt(BS), "name": name}],
+            eps=1e-15 / math.sqrt(BS),
+            # TODO: check betas logic when BS is larger than 10 betas[0] will be zero.
+            betas=(1 - BS * (1 - 0.9), 1 - BS * (1 - 0.999)),
+        )
+        for name, _, lr in params
+    }
+    return splats, optimizers
+
+
+class Runner:
+    """Engine for training and testing."""
+
+    def __init__(
+        self, local_rank: int, world_rank, world_size: int, cfg: Config
+    ) -> None:
+        set_random_seed(42 + local_rank)
+
+        self.cfg = cfg
+        self.world_rank = world_rank
+        self.local_rank = local_rank
+        self.world_size = world_size
+        self.device = f"cuda:{local_rank}"
+
+        # Where to dump results.
+        os.makedirs(cfg.result_dir, exist_ok=True)
+
+        # Setup output directories.
+        self.ckpt_dir = f"{cfg.result_dir}/ckpts"
+        os.makedirs(self.ckpt_dir, exist_ok=True)
+
+        # Load data: Training data should contain initial points and colors.
+        self.parser = Parser(
+            sfmFile=cfg.sfm_file,
+            normalize=False,
+            metadataFolder=cfg.metadata_folder,
+            image_alpha=cfg.image_alpha,
+            maskedViewIDs=cfg.mask_views,
+        )
+
+        self.trainset = Dataset(
+            self.parser,
+            patch_size=cfg.patch_size,
+            load_depths=cfg.depth_loss,
+        )
+
+        self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
+
+        logging.info(f"Scene scale: {self.scene_scale}")
+
+        retrieve_optimizer_state = cfg.retrieve_optimizer_state and cfg.resume_ckpt != ""
+        if retrieve_optimizer_state and isinstance(cfg.strategy, MCMCStrategy):
+            # In case of MCMC, the scheduler reduces the effective learning rate by 100
+            # This line updates the learning rate accordingly
+            cfg.means_lr = 0.01 * cfg.means_lr
+
+        # Model
+        feature_dim = 32 if cfg.app_opt else None
+        self.splats, self.optimizers = create_splats_with_optimizers(
+            self.parser,
+            init_opacity=cfg.init_opa,
+            init_scale=cfg.init_scale,
+            means_lr=cfg.means_lr,
+            scales_lr=cfg.scales_lr,
+            opacities_lr=cfg.opacities_lr,
+            quats_lr=cfg.quats_lr,
+            sh0_lr=cfg.sh0_lr,
+            shN_lr=cfg.shN_lr,
+            scene_scale=self.scene_scale,
+            sh_degree=cfg.sh_degree,
+            sparse_grad=cfg.sparse_grad,
+            visible_adam=cfg.visible_adam,
+            batch_size=cfg.batch_size,
+            feature_dim=feature_dim,
+            device=self.device,
+            world_rank=world_rank,
+            world_size=world_size,
+            strategy=cfg.strategy,
+        )
+        logging.info(f"Model initialized. Number of GS: {len(self.splats['means'])}")
+
+        # Densification Strategy
+
+        self.cfg.strategy.check_sanity(self.splats, self.optimizers)
+
+        if isinstance(self.cfg.strategy, DefaultStrategy):
+            self.cfg.strategy.prune_opa = self.cfg.prune_opa
+            self.cfg.strategy.grow_grad2d = self.cfg.grow_grad2d
+            self.cfg.strategy.grow_scale3d = self.cfg.grow_scale3d
+            self.cfg.strategy.grow_scale2d = self.cfg.grow_scale2d
+            self.cfg.strategy.prune_scale3d = self.cfg.prune_scale3d
+            self.cfg.strategy.prune_scale2d = self.cfg.prune_scale2d
+            self.cfg.strategy.refine_scale2d_stop_iter = self.cfg.refine_scale2d_stop_iter
+            self.cfg.strategy.refine_start_iter = self.cfg.refine_start_iter
+            self.cfg.strategy.refine_stop_iter = self.cfg.refine_stop_iter
+            self.cfg.strategy.reset_every = self.cfg.reset_every
+            self.cfg.strategy.refine_every = self.cfg.refine_every
+            self.cfg.strategy.pause_refine_after_reset = self.cfg.pause_refine_after_reset
+            self.cfg.strategy.absgrad = self.cfg.absgrad
+            self.cfg.strategy.revised_opacity = self.cfg.revised_opacity
+            self.strategy_state = self.cfg.strategy.initialize_state(
+                scene_scale=self.scene_scale
+            )
+        elif isinstance(self.cfg.strategy, MCMCStrategy):
+            self.cfg.strategy.cap_max = self.cfg.cap_max
+            self.cfg.strategy.noise_lr = self.cfg.noise_lr
+            self.cfg.strategy.refine_start_iter = self.cfg.refine_start_iter
+            self.cfg.strategy.refine_stop_iter = self.cfg.refine_stop_iter
+            self.cfg.strategy.refine_every = self.cfg.refine_every
+            self.cfg.strategy.min_opacity = self.cfg.min_opacity
+            self.cfg.strategy.verbose = True
+            self.strategy_state = self.cfg.strategy.initialize_state()
+        else:
+            assert_never(self.cfg.strategy)
+
+
+        self.pose_optimizers = []
+        if cfg.pose_opt:
+            self.pose_adjust = CameraOptModule(len(self.trainset)).to(self.device)
+            self.pose_adjust.zero_init()
+            self.pose_optimizers = [
+                torch.optim.Adam(
+                    self.pose_adjust.parameters(),
+                    lr=cfg.pose_opt_lr * math.sqrt(cfg.batch_size),
+                    weight_decay=cfg.pose_opt_reg,
+                )
+            ]
+            if world_size > 1:
+                self.pose_adjust = DDP(self.pose_adjust)
+
+
+        self.app_optimizers = []
+        if cfg.app_opt:
+            assert feature_dim is not None
+            self.app_module = AppearanceOptModule(
+                len(self.trainset), feature_dim, cfg.app_embed_dim, cfg.sh_degree
+            ).to(self.device)
+            # initialize the last layer to be zero so that the initial output is zero.
+            torch.nn.init.zeros_(self.app_module.color_head[-1].weight)
+            torch.nn.init.zeros_(self.app_module.color_head[-1].bias)
+            self.app_optimizers = [
+                torch.optim.Adam(
+                    self.app_module.embeds.parameters(),
+                    lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size) * 10.0,
+                    weight_decay=cfg.app_opt_reg,
+                ),
+                torch.optim.Adam(
+                    self.app_module.color_head.parameters(),
+                    lr=cfg.app_opt_lr * math.sqrt(cfg.batch_size),
+                ),
+            ]
+            if world_size > 1:
+                self.app_module = DDP(self.app_module)
+
+        self.bil_grid_optimizers = []
+        if cfg.use_bilateral_grid:
+            self.bil_grids = BilateralGrid(
+                len(self.trainset),
+                grid_X=cfg.bilateral_grid_shape[0],
+                grid_Y=cfg.bilateral_grid_shape[1],
+                grid_W=cfg.bilateral_grid_shape[2],
+            ).to(self.device)
+            self.bil_grid_optimizers = [
+                torch.optim.Adam(
+                    self.bil_grids.parameters(),
+                    lr=2e-3 * math.sqrt(cfg.batch_size),
+                    eps=1e-15,
+                ),
+            ]
+
+        # Losses & Metrics.
+        self.ssim = StructuralSimilarityIndexMeasure(data_range=1.0).to(self.device)
+        self.psnr = PeakSignalNoiseRatio(data_range=1.0).to(self.device)
+
+    def rasterize_splats(
+        self,
+        camtoworlds: Tensor,
+        Ks: Tensor,
+        width: int,
+        height: int,
+        rasterize_mode: Optional[Literal["classic", "antialiased"]] = None,
+        camera_model: Optional[Literal["pinhole", "ortho", "fisheye"]] = None,
+        **kwargs,
+    ) -> Tuple[Tensor, Tensor, Dict]:
+        means = self.splats["means"]  # [N, 3]
+        # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
+        # rasterization does normalization internally
+        quats = self.splats["quats"]  # [N, 4]
+        scales = torch.exp(self.splats["scales"])  # [N, 3]
+        opacities = torch.sigmoid(self.splats["opacities"])  # [N,]
+
+        image_ids = kwargs.pop("image_ids", None)
+        if self.cfg.app_opt:
+            colors = self.app_module(
+                features=self.splats["features"],
+                embed_ids=image_ids,
+                dirs=means[None, :, :] - camtoworlds[:, None, :3, 3],
+                sh_degree=kwargs.pop("sh_degree", self.cfg.sh_degree),
+            )
+            colors = colors + self.splats["colors"]
+            colors = torch.sigmoid(colors)
+        else:
+            colors = torch.cat([self.splats["sh0"], self.splats["shN"]], 1)  # [N, K, 3]
+
+        if rasterize_mode is None:
+            rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
+        if camera_model is None:
+            camera_model = self.cfg.camera_model
+        render_colors, render_alphas, info = rasterization(
+            means=means,
+            quats=quats,
+            scales=scales,
+            opacities=opacities,
+            colors=colors,
+            viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
+            Ks=Ks,  # [C, 3, 3]
+            width=width,
+            height=height,
+            packed=self.cfg.packed,
+            absgrad=(
+                self.cfg.strategy.absgrad
+                if isinstance(self.cfg.strategy, DefaultStrategy)
+                else False
+            ),
+            sparse_grad=self.cfg.sparse_grad,
+            rasterize_mode=rasterize_mode,
+            distributed=self.world_size > 1,
+            camera_model=self.cfg.camera_model,
+            with_ut=self.cfg.with_ut,
+            with_eval3d=self.cfg.with_eval3d,
+            tile_size=self.cfg.tile_size,
+            **kwargs,
+        )
+
+        return render_colors, render_alphas, info
+
+    def train(self):
+
+        cfg = self.cfg
+        device = self.device
+        world_rank = self.world_rank
+        world_size = self.world_size
+
+        #Compute effective steps
+        max_steps = cfg.max_epochs * len(self.trainset)
+
+        schedulers = []
+        if isinstance(cfg.strategy, MCMCStrategy) and cfg.use_scheduler:
+
+            logging.info("Create schedulers")
+
+            schedulers = [
+                # means has a learning rate schedule that ends at 0.01 of the initial value
+                torch.optim.lr_scheduler.ExponentialLR(
+                    self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
+                ),
+            ]
+
+            if cfg.pose_opt:
+                # pose optimization has a learning rate schedule
+                schedulers.append(
+                    torch.optim.lr_scheduler.ExponentialLR(
+                        self.pose_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
+                    )
+                )
+
+            if cfg.use_bilateral_grid:
+                # bilateral grid has a learning rate schedule. Linear warmup for 1000 steps.
+                schedulers.append(
+                    torch.optim.lr_scheduler.ChainedScheduler(
+                        [
+                            torch.optim.lr_scheduler.LinearLR(
+                                self.bil_grid_optimizers[0],
+                                start_factor=0.01,
+                                total_iters=1000,
+                            ),
+                            torch.optim.lr_scheduler.ExponentialLR(
+                                self.bil_grid_optimizers[0], gamma=0.01 ** (1.0 / max_steps)
+                            ),
+                        ]
+                    )
+                )
+
+        trainloader = torch.utils.data.DataLoader(
+            self.trainset,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            num_workers=4,
+            persistent_workers=True,
+            pin_memory=True,
+        )
+
+        step = -1
+
+        if cfg.resume_ckpt != "":
+            torch.serialization.add_safe_globals([npscalar, npdtype, npFloat64DType])
+            logging.info("Loading Gaussians from checkpoint")
+            ckpt = torch.load(cfg.resume_ckpt, map_location=device, weights_only=True)
+            for k in self.splats.keys():
+                self.splats[k].data = torch.cat([ckpt["splats"][k]])
+            if cfg.pose_opt and "pose_adjust" in ckpt:
+                pose_adjust = self.pose_adjust.module if world_size > 1 else self.pose_adjust
+                pose_adjust.load_state_dict(ckpt["pose_adjust"])
+            if cfg.app_opt and "app_module" in ckpt:
+                app_module = self.app_module.module if world_size > 1 else self.app_module
+                app_module.load_state_dict(ckpt["app_module"])
+            if  cfg.retrieve_optimizer_state:
+                logging.info("Loading optimizer state from checkpoint")
+                self.strategy_state = ckpt["strategy_state"]
+                for name, opt_state_dict in ckpt["optimizer_state_dicts"].items():
+                    self.optimizers[name].load_state_dict(opt_state_dict)
+                if cfg.pose_opt and "pose_optimizer_state_dicts" in ckpt:
+                    for optimizer, opt_state_dict in zip(self.pose_optimizers, ckpt["pose_optimizer_state_dicts"]):
+                        optimizer.load_state_dict(opt_state_dict)
+                if cfg.app_opt and "app_optimizer_state_dicts" in ckpt:
+                    for optimizer, opt_state_dict in zip(self.app_optimizers, ckpt["app_optimizer_state_dicts"]):
+                        optimizer.load_state_dict(opt_state_dict)
+                if cfg.use_bilateral_grid and "bil_grid_optimizer_state_dicts" in ckpt:
+                    for optimizer, opt_state_dict in zip(self.bil_grid_optimizers, ckpt["bil_grid_optimizer_state_dicts"]):
+                        optimizer.load_state_dict(opt_state_dict)
+                step = ckpt["step"] - 1
+
+        if not cfg.use_progress_bar:
+            logging.info("Training started")
+
+        # Training loop.
+        dsize = len(self.trainset)
+        pbar = createProgressBar(range(0, cfg.max_epochs), "Training progress:", cfg.use_progress_bar)
+        for epoch in pbar:
+
+            trainloader_iter = iter(trainloader)
+
+            epochLoss = 0.
+
+            for substep in range(0, dsize):
+
+                step = step + 1
+                data = next(trainloader_iter)
+
+                #Load data sample
+                camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
+                Ks = data["K"].to(device)  # [1, 3, 3]
+                pixels = data["image"].to(device)  # [1, H, W, 3] -> already float
+                num_train_rays_per_step = (
+                    pixels.shape[0] * pixels.shape[1] * pixels.shape[2]
+                )
+                image_ids = data["image_id"].to(device)
+                masks = data["mask"].to(device) if "mask" in data else None  # [1, H, W]
+
+                if cfg.depth_loss:
+                    points = data["points"].to(device)  # [1, M, 2]
+                    depths_gt = data["depths"].to(device)  # [1, M]
+
+                height, width = pixels.shape[1:3]
+
+
+                if cfg.pose_opt:
+                    camtoworlds = self.pose_adjust(camtoworlds, image_ids)
+
+                # sh schedule
+                sh_degree_to_use = min(step // cfg.sh_degree_interval, cfg.sh_degree)
+
+                torch.cuda.empty_cache()
+                # forward
+                renders, alphas, info = self.rasterize_splats(
+                    camtoworlds=camtoworlds,
+                    Ks=Ks,
+                    width=width,
+                    height=height,
+                    sh_degree=sh_degree_to_use,
+                    near_plane=cfg.near_plane,
+                    far_plane=cfg.far_plane,
+                    image_ids=image_ids,
+                    render_mode="RGB+ED" if cfg.depth_loss else "RGB",
+                )
+                torch.cuda.empty_cache()
+
+                if renders.shape[-1] == 4:
+                    colors, depths = renders[..., 0:3], renders[..., 3:4]
+                else:
+                    colors, depths = renders, None
+
+                if cfg.use_bilateral_grid:
+                    grid_y, grid_x = torch.meshgrid(
+                        (torch.arange(height, device=self.device) + 0.5) / height,
+                        (torch.arange(width, device=self.device) + 0.5) / width,
+                        indexing="ij",
+                    )
+                    grid_xy = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)
+                    colors = slice(
+                        self.bil_grids,
+                        grid_xy.expand(colors.shape[0], -1, -1, -1),
+                        colors,
+                        image_ids.unsqueeze(-1),
+                    )["rgb"]
+
+                if cfg.random_bkgd:
+                    bkgd = torch.rand(1, 3, device=device)
+                    colors = colors + bkgd * (1.0 - alphas)
+
+                self.cfg.strategy.step_pre_backward(
+                    params=self.splats,
+                    optimizers=self.optimizers,
+                    state=self.strategy_state,
+                    step=step,
+                    info=info,
+                )
+
+                if masks is not None:
+                    colors[~masks] = pixels[~masks]
+
+                # loss
+                l1loss = F.l1_loss(colors, pixels)
+                ssimloss = 1.0 - fused_ssim(
+                    colors.permute(0, 3, 1, 2), pixels.permute(0, 3, 1, 2), padding="valid"
+                )
+                loss = l1loss * (1.0 - cfg.ssim_lambda) + ssimloss * cfg.ssim_lambda
+                epochLoss += loss.item()
+
+                if cfg.depth_loss:
+                    # query depths from depth map
+                    points = torch.stack(
+                        [
+                            points[:, :, 0] / (width - 1) * 2 - 1,
+                            points[:, :, 1] / (height - 1) * 2 - 1,
+                        ],
+                        dim=-1,
+                    )  # normalize to [-1, 1]
+                    grid = points.unsqueeze(2)  # [1, M, 1, 2]
+                    depths = F.grid_sample(
+                        depths.permute(0, 3, 1, 2), grid, align_corners=True
+                    )  # [1, 1, M, 1]
+                    depths = depths.squeeze(3).squeeze(1)  # [1, M]
+                    # calculate loss in disparity space
+                    disp = torch.where(depths > 0.0, 1.0 / depths, torch.zeros_like(depths))
+                    disp_gt = 1.0 / depths_gt  # [1, M]
+                    depthloss = F.l1_loss(disp, disp_gt) * self.scene_scale
+                    loss += depthloss * cfg.depth_lambda
+
+                if cfg.use_bilateral_grid:
+                    tvloss = 10 * total_variation_loss(self.bil_grids.grids)
+                    loss += tvloss
+
+                # regularizations
+                if cfg.opacity_reg > 0.0:
+                    loss += cfg.opacity_reg * torch.sigmoid(self.splats["opacities"]).mean()
+                if cfg.scale_reg > 0.0:
+                    loss += cfg.scale_reg * torch.exp(self.splats["scales"]).mean()
+
+                loss.backward()
+
+                # Turn Gradients into Sparse Tensor before running optimizer
+                if cfg.sparse_grad:
+                    assert cfg.packed, "Sparse gradients only work with packed mode."
+                    gaussian_ids = info["gaussian_ids"]
+                    for k in self.splats.keys():
+                        grad = self.splats[k].grad
+                        if grad is None or grad.is_sparse:
+                            continue
+                        self.splats[k].grad = torch.sparse_coo_tensor(
+                            indices=gaussian_ids[None],  # [1, nnz]
+                            values=grad[gaussian_ids],  # [nnz, ...]
+                            size=self.splats[k].size(),  # [N, ...]
+                            is_coalesced=len(Ks) == 1,
+                        )
+
+                if cfg.visible_adam:
+                    gaussian_cnt = self.splats.means.shape[0]
+                    if cfg.packed:
+                        visibility_mask = torch.zeros_like(
+                            self.splats["opacities"], dtype=bool
+                        )
+                        visibility_mask.scatter_(0, info["gaussian_ids"], 1)
+                    else:
+                        visibility_mask = (info["radii"] > 0).all(-1).any(0)
+
+                # optimize
+                for optimizer in self.optimizers.values():
+                    if cfg.visible_adam:
+                        optimizer.step(visibility_mask)
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                for optimizer in self.pose_optimizers:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                for optimizer in self.app_optimizers:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                for optimizer in self.bil_grid_optimizers:
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                for scheduler in schedulers:
+                    scheduler.step()
+
+                # Run post-backward steps after backward and optimizer
+                if isinstance(self.cfg.strategy, DefaultStrategy):
+                    self.cfg.strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        packed=cfg.packed,
+                    )
+                elif isinstance(self.cfg.strategy, MCMCStrategy):
+                    means_lr = schedulers[0].get_last_lr()[0] if cfg.use_scheduler else self.optimizers["means"].param_groups[0]["lr"]
+                    self.cfg.strategy.step_post_backward(
+                        params=self.splats,
+                        optimizers=self.optimizers,
+                        state=self.strategy_state,
+                        step=step,
+                        info=info,
+                        lr=means_lr,
+                    )
+                else:
+                    assert_never(self.cfg.strategy)
+
+            if not cfg.use_progress_bar:
+                logging.info(f"Epoch ({epoch}) Loss: {epochLoss}")
+
+            if epoch in [i - 1 for i in cfg.save_epochs] or epoch == cfg.max_epochs - 1:
+
+                path = f"{self.ckpt_dir}/ckpt_{epoch}_rank{self.world_rank}.pt"
+                data = {"step": step,
+                        "splats": self.splats.state_dict(),
+                        "strategy_state": self.strategy_state,
+                        "optimizer_state_dicts": {name: opt.state_dict() for name, opt in self.optimizers.items()}}
+
+                if cfg.pose_opt:
+                    data["pose_optimizer_state_dicts"] = [optimizer.state_dict() for optimizer in self.pose_optimizers]
+                    if world_size > 1:
+                        data["pose_adjust"] = self.pose_adjust.module.state_dict()
+                    else:
+                        data["pose_adjust"] = self.pose_adjust.state_dict()
+                if cfg.app_opt:
+                    data["app_optimizer_state_dicts"] = [optimizer.state_dict() for optimizer in self.app_optimizers]
+                    if world_size > 1:
+                        data["app_module"] = self.app_module.module.state_dict()
+                    else:
+                        data["app_module"] = self.app_module.state_dict()
+                if cfg.use_bilateral_grid:
+                    data["bil_grid_optimizer_state_dicts"] = [optimizer.state_dict() for optimizer in self.bil_grid_optimizers]
+
+                torch.save(data, path)
+
+
+def main(local_rank: int, world_rank, world_size: int, cfg: Config):
+
+    #Create object for computation
+    runner = Runner(local_rank, world_rank, world_size, cfg)
+
+    #Launch training
+    runner.train()
+
+
+if __name__ == "__main__":
+
+    import sys
+    from argparse_dataclass import ArgumentParser
+
+    # Config objects we can choose between.
+    # Each is a tuple of (CLI description, config object).
+    configs = {
+        "default": (
+            "Gaussian splatting training using densification heuristics from the original paper.",
+            Config(
+                strategy=DefaultStrategy(verbose=True),
+            ),
+        ),
+        "mcmc": (
+            "Gaussian splatting training using densification from the paper '3D Gaussian Splatting as Markov Chain Monte Carlo'.",
+            Config(
+                init_opa=0.5,
+                init_scale=0.1,
+                opacity_reg=0.01,
+                scale_reg=0.01,
+                strategy=MCMCStrategy(verbose=True),
+            ),
+        ),
+    }
+
+    parser = ArgumentParser(configs, prebuilt=True)
+    cfg = parser.parse_args(sys.argv[1:])
+
+    if cfg.sparse_grad:
+        cfg.visible_adam = False
+
+    # Import BilateralGrid and related functions based on configuration
+    if cfg.use_bilateral_grid or cfg.use_fused_bilagrid:
+        if cfg.use_fused_bilagrid:
+            cfg.use_bilateral_grid = True
+            from fused_bilagrid import (
+                BilateralGrid,
+                color_correct,
+                slice,
+                total_variation_loss,
+            )
+        else:
+            cfg.use_bilateral_grid = True
+            from lib_bilagrid import (
+                BilateralGrid,
+                color_correct,
+                slice,
+                total_variation_loss,
+            )
+
+
+    if cfg.with_ut:
+        assert cfg.with_eval3d, "Training with UT requires setting `with_eval3d` flag."
+
+    cli(main, cfg, verbose=True)
+```
+
+### gsplatInterface/utils.py
+```
+# -*- coding: utf-8 -*-
+
+import random
+
+import numpy as np
+import torch
+from sklearn.neighbors import NearestNeighbors
+from torch import Tensor
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+from matplotlib import colormaps
+
+
+class CameraOptModule(torch.nn.Module):
+    """Camera pose optimization module."""
+
+    def __init__(self, n: int):
+        super().__init__()
+        # Delta positions (3D) + Delta rotations (6D)
+        self.embeds = torch.nn.Embedding(n, 9)
+        # Identity rotation in 6D representation
+        self.register_buffer("identity", torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]))
+
+    def zero_init(self):
+        torch.nn.init.zeros_(self.embeds.weight)
+
+    def random_init(self, std: float):
+        torch.nn.init.normal_(self.embeds.weight, std=std)
+
+    def forward(self, camtoworlds: Tensor, embed_ids: Tensor) -> Tensor:
+        """Adjust camera pose based on deltas.
+
+        Args:
+            camtoworlds: (..., 4, 4)
+            embed_ids: (...,)
+
+        Returns:
+            updated camtoworlds: (..., 4, 4)
+        """
+        assert camtoworlds.shape[:-2] == embed_ids.shape
+        batch_dims = camtoworlds.shape[:-2]
+        pose_deltas = self.embeds(embed_ids)  # (..., 9)
+        dx, drot = pose_deltas[..., :3], pose_deltas[..., 3:]
+        rot = rotation_6d_to_matrix(
+            drot + self.identity.expand(*batch_dims, -1)
+        )  # (..., 3, 3)
+        transform = torch.eye(4, device=pose_deltas.device).repeat((*batch_dims, 1, 1))
+        transform[..., :3, :3] = rot
+        transform[..., :3, 3] = dx
+        return torch.matmul(camtoworlds, transform)
+
+
+class AppearanceOptModule(torch.nn.Module):
+    """Appearance optimization module."""
+
+    def __init__(
+        self,
+        n: int,
+        feature_dim: int,
+        embed_dim: int = 16,
+        sh_degree: int = 3,
+        mlp_width: int = 64,
+        mlp_depth: int = 2,
+    ):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.sh_degree = sh_degree
+        self.embeds = torch.nn.Embedding(n, embed_dim)
+        layers = []
+        layers.append(
+            torch.nn.Linear(embed_dim + feature_dim + (sh_degree + 1) ** 2, mlp_width)
+        )
+        layers.append(torch.nn.ReLU(inplace=True))
+        for _ in range(mlp_depth - 1):
+            layers.append(torch.nn.Linear(mlp_width, mlp_width))
+            layers.append(torch.nn.ReLU(inplace=True))
+        layers.append(torch.nn.Linear(mlp_width, 3))
+        self.color_head = torch.nn.Sequential(*layers)
+
+    def forward(
+        self, features: Tensor, embed_ids: Tensor, dirs: Tensor, sh_degree: int
+    ) -> Tensor:
+        """Adjust appearance based on embeddings.
+
+        Args:
+            features: (N, feature_dim)
+            embed_ids: (C,)
+            dirs: (C, N, 3)
+
+        Returns:
+            colors: (C, N, 3)
+        """
+        from gsplat.cuda._torch_impl import _eval_sh_bases_fast
+
+        C, N = dirs.shape[:2]
+        # Camera embeddings
+        if embed_ids is None:
+            embeds = torch.zeros(C, self.embed_dim, device=features.device)
+        else:
+            embeds = self.embeds(embed_ids)  # [C, D2]
+        embeds = embeds[:, None, :].expand(-1, N, -1)  # [C, N, D2]
+        # GS features
+        features = features[None, :, :].expand(C, -1, -1)  # [C, N, D1]
+        # View directions
+        dirs = F.normalize(dirs, dim=-1)  # [C, N, 3]
+        num_bases_to_use = (sh_degree + 1) ** 2
+        num_bases = (self.sh_degree + 1) ** 2
+        sh_bases = torch.zeros(C, N, num_bases, device=features.device)  # [C, N, K]
+        sh_bases[:, :, :num_bases_to_use] = _eval_sh_bases_fast(num_bases_to_use, dirs)
+        # Get colors
+        if self.embed_dim > 0:
+            h = torch.cat([embeds, features, sh_bases], dim=-1)  # [C, N, D1 + D2 + K]
+        else:
+            h = torch.cat([features, sh_bases], dim=-1)
+        colors = self.color_head(h)
+        return colors
+
+
+def rotation_6d_to_matrix(d6: Tensor) -> Tensor:
+    """
+    Converts 6D rotation representation by Zhou et al. [1] to rotation matrix
+    using Gram--Schmidt orthogonalization per Section B of [1]. Adapted from pytorch3d.
+    Args:
+        d6: 6D rotation representation, of size (*, 6)
+
+    Returns:
+        batch of rotation matrices of size (*, 3, 3)
+
+    [1] Zhou, Y., Barnes, C., Lu, J., Yang, J., & Li, H.
+    On the Continuity of Rotation Representations in Neural Networks.
+    IEEE Conference on Computer Vision and Pattern Recognition, 2019.
+    Retrieved from http://arxiv.org/abs/1812.07035
+    """
+
+    a1, a2 = d6[..., :3], d6[..., 3:]
+    b1 = F.normalize(a1, dim=-1)
+    b2 = a2 - (b1 * a2).sum(-1, keepdim=True) * b1
+    b2 = F.normalize(b2, dim=-1)
+    b3 = torch.cross(b1, b2, dim=-1)
+    return torch.stack((b1, b2, b3), dim=-2)
+
+
+def knn(x: Tensor, K: int = 4) -> Tensor:
+    x_np = x.cpu().numpy()
+    model = NearestNeighbors(n_neighbors=K, metric="euclidean").fit(x_np)
+    distances, _ = model.kneighbors(x_np)
+    return torch.from_numpy(distances).to(x)
+
+
+def rgb_to_sh(rgb: Tensor) -> Tensor:
+    C0 = 0.28209479177387814
+    return (rgb - 0.5) / C0
+
+
+def set_random_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+# ref: https://github.com/hbb1/2d-gaussian-splatting/blob/main/utils/general_utils.py#L163
+def colormap(img, cmap="jet"):
+    W, H = img.shape[:2]
+    dpi = 300
+    fig, ax = plt.subplots(1, figsize=(H / dpi, W / dpi), dpi=dpi)
+    im = ax.imshow(img, cmap=cmap)
+    ax.set_axis_off()
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    fig.canvas.draw()
+    data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    img = torch.from_numpy(data).float().permute(2, 0, 1)
+    plt.close()
+    return img
+
+
+def apply_float_colormap(img: torch.Tensor, colormap: str = "turbo") -> torch.Tensor:
+    """Convert single channel to a color img.
+
+    Args:
+        img (torch.Tensor): (..., 1) float32 single channel image.
+        colormap (str): Colormap for img.
+
+    Returns:
+        (..., 3) colored img with colors in [0, 1].
+    """
+    img = torch.nan_to_num(img, 0)
+    if colormap == "gray":
+        return img.repeat(1, 1, 3)
+    img_long = (img * 255).long()
+    img_long_min = torch.min(img_long)
+    img_long_max = torch.max(img_long)
+    assert img_long_min >= 0, f"the min value is {img_long_min}"
+    assert img_long_max <= 255, f"the max value is {img_long_max}"
+    return torch.tensor(
+        colormaps[colormap].colors,  # type: ignore
+        device=img.device,
+    )[img_long[..., 0]]
+
+
+def apply_depth_colormap(
+    depth: torch.Tensor,
+    acc: torch.Tensor = None,
+    near_plane: float = None,
+    far_plane: float = None,
+) -> torch.Tensor:
+    """Converts a depth image to color for easier analysis.
+
+    Args:
+        depth (torch.Tensor): (..., 1) float32 depth.
+        acc (torch.Tensor | None): (..., 1) optional accumulation mask.
+        near_plane: Closest depth to consider. If None, use min image value.
+        far_plane: Furthest depth to consider. If None, use max image value.
+
+    Returns:
+        (..., 3) colored depth image with colors in [0, 1].
+    """
+    near_plane = near_plane or float(torch.min(depth))
+    far_plane = far_plane or float(torch.max(depth))
+    depth = (depth - near_plane) / (far_plane - near_plane + 1e-10)
+    depth = torch.clip(depth, 0.0, 1.0)
+    img = apply_float_colormap(depth, colormap="turbo")
+    if acc is not None:
+        img = img * acc + (1.0 - acc)
+    return img
+```
+
+### gsplatInterface/viewer.py
+```
+# -*- coding: utf-8 -*-
+
+from common import apply_float_colormap, GSplatRenderTabState, CameraState
+from common import createProgressBar
+
+import argparse
+import math
+import os
+import time
+
+import torch
+import torch.nn.functional as F
+
+from gsplatInterface.avImage import AvImage
+
+from gsplat.distributed import cli
+from gsplat.rendering import rasterization
+
+from datasets.sfm.sceneManager import PoseParser
+# from cameraPosesParser import CameraParser
+from numpy.core.multiarray import scalar as npscalar
+from numpy.dtypes import Float64DType as npFloat64DType
+from numpy import dtype as npdtype
+
+
+def get_cameras_from_sfm(sfmFile):
+    cameras = []
+
+    psr = PoseParser(
+        sfmFile=sfmFile,
+        normalize=True
+    )
+
+    # Find a default intrinsic
+    valid_intrinsics = [el for el in psr.camera_ids if el is not None]
+    default_cam_id = None
+    if len(valid_intrinsics) > 0:
+        # Take the intrinsic of the first pose that has a valid view
+        default_cam_id = valid_intrinsics[0]
+    else:
+        # Take the first intrinsic we have
+        default_cam_id = list(psr.Ks_dict.keys())[0]
+
+    # Build list of cameras
+    for pose_id, img_name, camId, c2w in zip(psr.pose_ids, psr.image_names, psr.camera_ids, psr.camtoworlds):
+        if camId is None:
+            camId = default_cam_id
+        K = psr.Ks_dict[camId].copy()
+        imsize = psr.imsize_dict[camId]
+        cam = CameraState(
+            c2w=c2w,
+            K=K
+        )
+        cameras.append((pose_id, cam, img_name, imsize))
+
+    return cameras
+
+
+def main(local_rank: int, world_rank, world_size: int, args):
+    torch.manual_seed(42)
+    device = torch.device("cuda", local_rank)
+    torch.serialization.add_safe_globals([npscalar, npdtype, npFloat64DType])
+
+    means, quats, scales, opacities, sh0, shN = [], [], [], [], [], []
+    for ckpt_path in args.ckpt:
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)["splats"]
+        means.append(ckpt["means"])
+        quats.append(F.normalize(ckpt["quats"], p=2, dim=-1))
+        scales.append(torch.exp(ckpt["scales"]))
+        opacities.append(torch.sigmoid(ckpt["opacities"]))
+        sh0.append(ckpt["sh0"])
+        shN.append(ckpt["shN"])
+    means = torch.cat(means, dim=0)
+    quats = torch.cat(quats, dim=0)
+    scales = torch.cat(scales, dim=0)
+    opacities = torch.cat(opacities, dim=0)
+    sh0 = torch.cat(sh0, dim=0)
+    shN = torch.cat(shN, dim=0)
+    colors = torch.cat([sh0, shN], dim=-2)
+    sh_degree = int(math.sqrt(colors.shape[-2]) - 1)
+
+    print("Number of Gaussians:", len(means))
+
+    @torch.no_grad()
+    def viewer_render_fn(camera_state: CameraState, render_tab_state: GSplatRenderTabState):
+        width = render_tab_state.render_width
+        height = render_tab_state.render_height
+
+        c2w = camera_state.c2w
+        K = camera_state.get_K((width, height))
+        c2w = torch.from_numpy(c2w).float().to(device)
+        K = torch.from_numpy(K).float().to(device)
+        viewmat = c2w.inverse()
+
+        RENDER_MODE_MAP = {
+            "rgb": "RGB",
+            "depth(accumulated)": "D",
+            "depth(expected)": "ED",
+            "alpha": "RGB",
+        }
+
+        render_colors, render_alphas, info = rasterization(
+            means,  # [N, 3]
+            quats,  # [N, 4]
+            scales,  # [N, 3]
+            opacities,  # [N]
+            colors,  # [N, S, 3]
+            viewmat[None],  # [1, 4, 4]
+            K[None],  # [1, 3, 3]
+            width,
+            height,
+            sh_degree=(
+                min(render_tab_state.max_sh_degree, sh_degree)
+                if sh_degree is not None
+                else None
+            ),
+            near_plane=render_tab_state.near_plane,
+            far_plane=render_tab_state.far_plane,
+            radius_clip=render_tab_state.radius_clip,
+            eps2d=render_tab_state.eps2d,
+            backgrounds=torch.tensor([render_tab_state.backgrounds], device=device)
+            / 255.0,
+            render_mode=RENDER_MODE_MAP[render_tab_state.render_mode],
+            rasterize_mode=render_tab_state.rasterize_mode,
+            camera_model=render_tab_state.camera_model,
+            packed=False
+        )
+        render_tab_state.total_gs_count = len(means)
+        render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()
+
+        if render_tab_state.render_mode == "rgb":
+            # colors represented with sh are not guranteed to be in [0, 1]
+            render_colors = render_colors[0, ..., 0:3].clamp(0, 1)
+            renders = render_colors.cpu().numpy()
+        elif render_tab_state.render_mode in ["depth(accumulated)", "depth(expected)"]:
+            # normalize depth to [0, 1]
+            depth = render_colors[0, ..., 0:1]
+            if render_tab_state.normalize_nearfar:
+                near_plane = render_tab_state.near_plane
+                far_plane = render_tab_state.far_plane
+            else:
+                near_plane = depth.min()
+                far_plane = depth.max()
+            depth_norm = (depth - near_plane) / (far_plane - near_plane + 1e-10)
+            depth_norm = torch.clip(depth_norm, 0, 1)
+            if render_tab_state.inverse:
+                depth_norm = 1 - depth_norm
+            renders = (
+                apply_float_colormap(depth_norm, render_tab_state.colormap)
+                .cpu()
+                .numpy()
+            )
+        elif render_tab_state.render_mode == "alpha":
+            alpha = render_alphas[0, ..., 0:1]
+            renders = (
+                apply_float_colormap(alpha, render_tab_state.colormap).cpu().numpy()
+            )
+        return renders
+
+    cameras = get_cameras_from_sfm(args.cameras)
+    render_tab_state = GSplatRenderTabState()
+
+    total_render_time = 0.
+    min_render_time, max_render_time = None, 0.
+    for pose_id, camera, imgName, imgSize in createProgressBar(cameras, desc="Rendering images..."):
+        print(f"Rendering {imgName} (pose_id={pose_id})")
+        # Set RenderTabState (if we render with different render settings... which should never happen)
+        W, H = imgSize
+        render_tab_state.render_width  = W
+        render_tab_state.render_height = H
+        # Render image
+        t0 = time.time()
+        render = viewer_render_fn(camera, render_tab_state)
+        render_time = time.time() - t0
+        total_render_time += render_time
+        if min_render_time == None or render_time < min_render_time: min_render_time = render_time
+        if render_time > max_render_time: max_render_time = render_time
+        # Convert and export image
+        if imgName is None:
+            imgName = f"pose_{pose_id:06d}.jpg"
+        imgBasename = os.path.splitext(imgName)[0]  # Remove extension
+        outputFormat = args.output_format
+        if not outputFormat or outputFormat == "auto":
+            outputFormat = os.path.splitext(imgName)[1]
+        im_path = os.path.join(args.output_dir, f"{imgBasename}{outputFormat}")
+        img = AvImage.from_numpy(render)
+        img.write(im_path, colorspace=args.output_colorspace)
+    print("="*10 + " RENDER STAT " + "="*10)
+    print(f"* Render of {len(cameras)} images took {total_render_time:.02f}s.")
+    print(f"* Average of {total_render_time/len(cameras):.02f}s. per frame, or {int(len(cameras)/total_render_time)} fps")
+    print(f"* Min : {min_render_time:.02f}s., Max : {max_render_time:.02f}s.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model", dest="ckpt", type=str, nargs="+", default=None, help="path to the .pt file"
+    )
+    parser.add_argument(
+        "-c", "--cameras", type=str, help="SFM file containing cameras (poses)"
+    )
+    parser.add_argument(
+        "--output_dir", type=str, default="results/", help="where to dump outputs"
+    )
+    parser.add_argument(
+        "--output_format", type=str, help="Output format"
+    )
+    parser.add_argument(
+        "--output_colorspace", type=str, help="Output colorspace (you can use AUTO, SRGB, ...)"
+    )
+
+    args = parser.parse_args()
+
+    output_dir = os.path.join(args.output_dir, "renders")
+    if os.path.exists(output_dir):
+        os.rmdir(output_dir)
+    os.makedirs(output_dir)
+    args.output_dir = output_dir
+
+    cli(main, args, verbose=True)
+```
+
+### scripts/convertGSplatModel.py
+```
+import argparse
+import torch
+import numpy as np
+from plyfile import PlyData,PlyElement
+
+
+class Gaussian:
+    paramSet1 = ["nx","ny","nz","f_dc_0","f_dc_1","f_dc_2"]
+    paramSet2 = ["opacity","scale_0","scale_1","scale_2","rot_0","rot_1","rot_2","rot_3"]
+    
+    # ['f_dc_0', 'f_dc_1', 'f_dc_2', 'f_rest_0', 'f_rest_1', 'f_rest_2', 'f_rest_3', 'f_rest_4', 'f_rest_5', 'f_rest_6', 'f_rest_7', 'f_rest_8', 'f_rest_9', 'f_rest_10', 'f_rest_11', 'f_rest_12', 'f_rest_13', 'f_rest_14', 'opacity', 'scale_0', 'scale_1', 'scale_2', 'rot_0', 'rot_1', 'rot_2', 'rot_3']
+    
+    def __init__(self, xyz, rot, scale, opacity, sh0, shN):
+        x, y, z = xyz
+        self.P = [x, y, z]
+        self.rot = rot
+        self.scale = scale
+        self.opacity = opacity
+        self.sh0 = sh0
+        self.shN = shN
+    
+    def getAttribute(self, attributeName):
+        if attributeName.startswith("f_dc_"):
+            index = int(attributeName.replace("f_dc_", ""))
+            return self.sh0[index]
+        elif attributeName.startswith("f_rest_"):
+            index = int(attributeName.replace("f_rest_", ""))
+            return self.shN[index]
+            
+        return self.attributes.get(attributeName)
+    
+    @property
+    def dtype(self):
+        return self.P.dtype
+
+    @property
+    def shMax(self):
+        shMax = 0
+        attribute = f"f_rest_{shMax}"
+        while 1 :
+            try :
+                self.getAttribute(attribute)
+                shMax += 1
+                attribute = f"f_rest_{shMax}"
+            except :
+                break
+        if shMax > 71 :
+            return 72
+        elif shMax > 44 :
+            return 45
+        elif shMax > 23 :
+            return 24
+        elif shMax > 8 :
+            return 9
+        else :
+            return 0
+
+
+class Splats:
+    def __init__(self, splats):
+        self.splats = splats
+
+    def construct_list_of_attributes(self):
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # All channels except the 3 DC
+        for i in range(self.splats["sh0"].shape[1]*self.splats["sh0"].shape[2]):
+            l.append('f_dc_{}'.format(i))
+        for i in range(self.splats["shN"].shape[1]*self.splats["shN"].shape[2]):
+            l.append('f_rest_{}'.format(i))
+        l.append('opacity')
+        for i in range(self.splats["scales"].shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(self.splats["quats"].shape[1]):
+            l.append('rot_{}'.format(i))
+        return l
+    
+    def export_to_ply(self, outputFile):
+        xyz = self.splats["means"].detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        f_dc =   self.splats["sh0"].detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        f_rest = self.splats["shN"].detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self.splats["opacities"].detach().unsqueeze(-1).cpu().numpy()
+        scale =  self.splats["scales"].detach().cpu().numpy()
+        rotation = self.splats["quats"].detach().cpu().numpy()
+        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        elements[:] = list(map(tuple, attributes))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(outputFile)
+
+
+def open_gaussians(path) -> Splats:
+    checkpoint_data = torch.load(path, map_location='cpu')
+    splats = checkpoint_data["splats"]
+    return Splats(splats)
+
+
+def main(modelPath, _format, outputPath):
+    splats = open_gaussians(modelPath)
+    if _format == ".ply":
+        splats.export_to_ply(outputPath)
+    else:
+        raise NotImplementedError(f"Format {_format} is not implemented yet")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input", type=str, help="Input model")
+    parser.add_argument("format", type=str, help="Output format")
+    parser.add_argument("output", type=str, help="Output model")
+    args = parser.parse_args()
+    main(args.input, args.format, args.output)
+```
+
+### gsplatInterface/datasets/__init__.py
+```
+
+```
+
+### gsplatInterface/datasets/mesh.py
+```
+import numpy as np
+import os
+import sys
+
+class Mesh:
+    def __init__(self, path):
+        self.path = path
+        self.load()
+    
+    def load(self):
+        # TODO : load mesh
+        pass
+    
+    def distance_to_point(self, point):
+        # TODO : return distance to point
+        return 1
+```
+
+### gsplatInterface/datasets/normalize.py
+```
+import numpy as np
+
+
+def similarity_from_cameras(c2w, strict_scaling=False, center_method="focus"):
+    """
+    reference: nerf-factory
+    Get a similarity transform to normalize dataset
+    from c2w (OpenCV convention) cameras
+    :param c2w: (N, 4)
+    :return T (4,4) , scale (float)
+    """
+    t = c2w[:, :3, 3]
+    R = c2w[:, :3, :3]
+
+    # (1) Rotate the world so that z+ is the up axis
+    # we estimate the up axis by averaging the camera up axes
+    ups = np.sum(R * np.array([0, -1.0, 0]), axis=-1)
+    world_up = np.mean(ups, axis=0)
+    world_up /= np.linalg.norm(world_up)
+
+    up_camspace = np.array([0.0, -1.0, 0.0])
+    c = (up_camspace * world_up).sum()
+    cross = np.cross(world_up, up_camspace)
+    skew = np.array(
+        [
+            [0.0, -cross[2], cross[1]],
+            [cross[2], 0.0, -cross[0]],
+            [-cross[1], cross[0], 0.0],
+        ]
+    )
+    if c > -1:
+        R_align = np.eye(3) + skew + (skew @ skew) * 1 / (1 + c)
+    else:
+        # In the unlikely case the original data has y+ up axis,
+        # rotate 180-deg about x axis
+        R_align = np.array([[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+
+    #  R_align = np.eye(3) # DEBUG
+    R = R_align @ R
+    fwds = np.sum(R * np.array([0, 0.0, 1.0]), axis=-1)
+    t = (R_align @ t[..., None])[..., 0]
+
+    # (2) Recenter the scene.
+    if center_method == "focus":
+        # find the closest point to the origin for each camera's center ray
+        nearest = t + (fwds * -t).sum(-1)[:, None] * fwds
+        translate = -np.median(nearest, axis=0)
+    elif center_method == "poses":
+        # use center of the camera positions
+        translate = -np.median(t, axis=0)
+    else:
+        raise ValueError(f"Unknown center_method {center_method}")
+
+    transform = np.eye(4)
+    transform[:3, 3] = translate
+    transform[:3, :3] = R_align
+
+    # (3) Rescale the scene using camera distances
+    scale_fn = np.max if strict_scaling else np.median
+    scale = 1.0 / scale_fn(np.linalg.norm(t + translate, axis=-1))
+    transform[:3, :] *= scale
+
+    return transform
+
+
+def align_principle_axes(point_cloud):
+    # Compute centroid
+    centroid = np.median(point_cloud, axis=0)
+
+    # Translate point cloud to centroid
+    translated_point_cloud = point_cloud - centroid
+
+    # Compute covariance matrix
+    covariance_matrix = np.cov(translated_point_cloud, rowvar=False)
+
+    # Compute eigenvectors and eigenvalues
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance_matrix)
+
+    # Sort eigenvectors by eigenvalues (descending order) so that the z-axis
+    # is the principal axis with the smallest eigenvalue.
+    sort_indices = eigenvalues.argsort()[::-1]
+    eigenvectors = eigenvectors[:, sort_indices]
+
+    # Check orientation of eigenvectors. If the determinant of the eigenvectors is
+    # negative, then we need to flip the sign of one of the eigenvectors.
+    if np.linalg.det(eigenvectors) < 0:
+        eigenvectors[:, 0] *= -1
+
+    # Create rotation matrix
+    rotation_matrix = eigenvectors.T
+
+    # Create SE(3) matrix (4x4 transformation matrix)
+    transform = np.eye(4)
+    transform[:3, :3] = rotation_matrix
+    transform[:3, 3] = -rotation_matrix @ centroid
+
+    return transform
+
+
+def transform_points(matrix, points):
+    """Transform points using an SE(3) matrix.
+
+    Args:
+        matrix: 4x4 SE(3) matrix
+        points: Nx3 array of points
+
+    Returns:
+        Nx3 array of transformed points
+    """
+    assert matrix.shape == (4, 4)
+    assert len(points.shape) == 2 and points.shape[1] == 3
+    return points @ matrix[:3, :3].T + matrix[:3, 3]
+
+
+def transform_cameras(matrix, camtoworlds):
+    """Transform cameras using an SE(3) matrix.
+
+    Args:
+        matrix: 4x4 SE(3) matrix
+        camtoworlds: Nx4x4 array of camera-to-world matrices
+
+    Returns:
+        Nx4x4 array of transformed camera-to-world matrices
+    """
+    assert matrix.shape == (4, 4)
+    assert len(camtoworlds.shape) == 3 and camtoworlds.shape[1:] == (4, 4)
+    camtoworlds = np.einsum("nij, ki -> nkj", camtoworlds, matrix)
+    scaling = np.linalg.norm(camtoworlds[:, 0, :3], axis=1)
+    camtoworlds[:, :3, :3] = camtoworlds[:, :3, :3] / scaling[:, None, None]
+    return camtoworlds
+
+
+def normalize(camtoworlds, points=None):
+    T1 = similarity_from_cameras(camtoworlds)
+    camtoworlds = transform_cameras(T1, camtoworlds)
+    if points is not None:
+        points = transform_points(T1, points)
+        T2 = align_principle_axes(points)
+        camtoworlds = transform_cameras(T2, camtoworlds)
+        points = transform_points(T2, points)
+        return camtoworlds, points, T2 @ T1
+    else:
+        return camtoworlds, T1
+```
+
+### gsplatInterface/datasets/traj.py
+```
+"""
+Code borrowed from
+
+https://github.com/google-research/multinerf/blob/5b4d4f64608ec8077222c52fdf814d40acc10bc1/internal/camera_utils.py
+"""
+
+import numpy as np
+import scipy
+
+
+def normalize(x: np.ndarray) -> np.ndarray:
+    """Normalization helper function."""
+    return x / np.linalg.norm(x)
+
+
+def viewmatrix(lookdir: np.ndarray, up: np.ndarray, position: np.ndarray) -> np.ndarray:
+    """Construct lookat view matrix."""
+    vec2 = normalize(lookdir)
+    vec0 = normalize(np.cross(up, vec2))
+    vec1 = normalize(np.cross(vec2, vec0))
+    m = np.stack([vec0, vec1, vec2, position], axis=1)
+    return m
+
+
+def focus_point_fn(poses: np.ndarray) -> np.ndarray:
+    """Calculate nearest point to all focal axes in poses."""
+    directions, origins = poses[:, :3, 2:3], poses[:, :3, 3:4]
+    m = np.eye(3) - directions * np.transpose(directions, [0, 2, 1])
+    mt_m = np.transpose(m, [0, 2, 1]) @ m
+    focus_pt = np.linalg.inv(mt_m.mean(0)) @ (mt_m @ origins).mean(0)[:, 0]
+    return focus_pt
+
+
+def average_pose(poses: np.ndarray) -> np.ndarray:
+    """New pose using average position, z-axis, and up vector of input poses."""
+    position = poses[:, :3, 3].mean(0)
+    z_axis = poses[:, :3, 2].mean(0)
+    up = poses[:, :3, 1].mean(0)
+    cam2world = viewmatrix(z_axis, up, position)
+    return cam2world
+
+
+def generate_spiral_path(
+    poses,
+    bounds,
+    n_frames=120,
+    n_rots=2,
+    zrate=0.5,
+    spiral_scale_f=1.0,
+    spiral_scale_r=1.0,
+    focus_distance=0.75,
+):
+    """Calculates a forward facing spiral path for rendering."""
+    # Find a reasonable 'focus depth' for this dataset as a weighted average
+    # of conservative near and far bounds in disparity space.
+    near_bound = bounds.min()
+    far_bound = bounds.max()
+    # All cameras will point towards the world space point (0, 0, -focal).
+    focal = 1 / (((1 - focus_distance) / near_bound + focus_distance / far_bound))
+    focal = focal * spiral_scale_f
+
+    # Get radii for spiral path using 90th percentile of camera positions.
+    positions = poses[:, :3, 3]
+    radii = np.percentile(np.abs(positions), 90, 0)
+    radii = radii * spiral_scale_r
+    radii = np.concatenate([radii, [1.0]])
+
+    # Generate poses for spiral path.
+    render_poses = []
+    cam2world = average_pose(poses)
+    up = poses[:, :3, 1].mean(0)
+    for theta in np.linspace(0.0, 2.0 * np.pi * n_rots, n_frames, endpoint=False):
+        t = radii * [np.cos(theta), -np.sin(theta), -np.sin(theta * zrate), 1.0]
+        position = cam2world @ t
+        lookat = cam2world @ [0, 0, -focal, 1.0]
+        z_axis = position - lookat
+        render_poses.append(viewmatrix(z_axis, up, position))
+    render_poses = np.stack(render_poses, axis=0)
+    return render_poses
+
+
+def generate_ellipse_path_z(
+    poses: np.ndarray,
+    n_frames: int = 120,
+    # const_speed: bool = True,
+    variation: float = 0.0,
+    phase: float = 0.0,
+    height: float = 0.0,
+) -> np.ndarray:
+    """Generate an elliptical render path based on the given poses."""
+    # Calculate the focal point for the path (cameras point toward this).
+    center = focus_point_fn(poses)
+    # Path height sits at z=height (in middle of zero-mean capture pattern).
+    offset = np.array([center[0], center[1], height])
+
+    # Calculate scaling for ellipse axes based on input camera positions.
+    sc = np.percentile(np.abs(poses[:, :3, 3] - offset), 90, axis=0)
+    # Use ellipse that is symmetric about the focal point in xy.
+    low = -sc + offset
+    high = sc + offset
+    # Optional height variation need not be symmetric
+    z_low = np.percentile((poses[:, :3, 3]), 10, axis=0)
+    z_high = np.percentile((poses[:, :3, 3]), 90, axis=0)
+
+    def get_positions(theta):
+        # Interpolate between bounds with trig functions to get ellipse in x-y.
+        # Optionally also interpolate in z to change camera height along path.
+        return np.stack(
+            [
+                low[0] + (high - low)[0] * (np.cos(theta) * 0.5 + 0.5),
+                low[1] + (high - low)[1] * (np.sin(theta) * 0.5 + 0.5),
+                variation
+                * (
+                    z_low[2]
+                    + (z_high - z_low)[2]
+                    * (np.cos(theta + 2 * np.pi * phase) * 0.5 + 0.5)
+                )
+                + height,
+            ],
+            -1,
+        )
+
+    theta = np.linspace(0, 2.0 * np.pi, n_frames + 1, endpoint=True)
+    positions = get_positions(theta)
+
+    # if const_speed:
+    #     # Resample theta angles so that the velocity is closer to constant.
+    #     lengths = np.linalg.norm(positions[1:] - positions[:-1], axis=-1)
+    #     theta = stepfun.sample(None, theta, np.log(lengths), n_frames + 1)
+    #     positions = get_positions(theta)
+
+    # Throw away duplicated last position.
+    positions = positions[:-1]
+
+    # Set path's up vector to axis closest to average of input pose up vectors.
+    avg_up = poses[:, :3, 1].mean(0)
+    avg_up = avg_up / np.linalg.norm(avg_up)
+    ind_up = np.argmax(np.abs(avg_up))
+    up = np.eye(3)[ind_up] * np.sign(avg_up[ind_up])
+
+    return np.stack([viewmatrix(center - p, up, p) for p in positions])
+
+
+def generate_ellipse_path_y(
+    poses: np.ndarray,
+    n_frames: int = 120,
+    # const_speed: bool = True,
+    variation: float = 0.0,
+    phase: float = 0.0,
+    height: float = 0.0,
+) -> np.ndarray:
+    """Generate an elliptical render path based on the given poses."""
+    # Calculate the focal point for the path (cameras point toward this).
+    center = focus_point_fn(poses)
+    # Path height sits at y=height (in middle of zero-mean capture pattern).
+    offset = np.array([center[0], height, center[2]])
+
+    # Calculate scaling for ellipse axes based on input camera positions.
+    sc = np.percentile(np.abs(poses[:, :3, 3] - offset), 90, axis=0)
+    # Use ellipse that is symmetric about the focal point in xy.
+    low = -sc + offset
+    high = sc + offset
+    # Optional height variation need not be symmetric
+    y_low = np.percentile((poses[:, :3, 3]), 10, axis=0)
+    y_high = np.percentile((poses[:, :3, 3]), 90, axis=0)
+
+    def get_positions(theta):
+        # Interpolate between bounds with trig functions to get ellipse in x-z.
+        # Optionally also interpolate in y to change camera height along path.
+        return np.stack(
+            [
+                low[0] + (high - low)[0] * (np.cos(theta) * 0.5 + 0.5),
+                variation
+                * (
+                    y_low[1]
+                    + (y_high - y_low)[1]
+                    * (np.cos(theta + 2 * np.pi * phase) * 0.5 + 0.5)
+                )
+                + height,
+                low[2] + (high - low)[2] * (np.sin(theta) * 0.5 + 0.5),
+            ],
+            -1,
+        )
+
+    theta = np.linspace(0, 2.0 * np.pi, n_frames + 1, endpoint=True)
+    positions = get_positions(theta)
+
+    # if const_speed:
+    #     # Resample theta angles so that the velocity is closer to constant.
+    #     lengths = np.linalg.norm(positions[1:] - positions[:-1], axis=-1)
+    #     theta = stepfun.sample(None, theta, np.log(lengths), n_frames + 1)
+    #     positions = get_positions(theta)
+
+    # Throw away duplicated last position.
+    positions = positions[:-1]
+
+    # Set path's up vector to axis closest to average of input pose up vectors.
+    avg_up = poses[:, :3, 1].mean(0)
+    avg_up = avg_up / np.linalg.norm(avg_up)
+    ind_up = np.argmax(np.abs(avg_up))
+    up = np.eye(3)[ind_up] * np.sign(avg_up[ind_up])
+
+    return np.stack([viewmatrix(p - center, up, p) for p in positions])
+
+
+def generate_interpolated_path(
+    poses: np.ndarray,
+    n_interp: int,
+    spline_degree: int = 5,
+    smoothness: float = 0.03,
+    rot_weight: float = 0.1,
+):
+    """Creates a smooth spline path between input keyframe camera poses.
+
+    Spline is calculated with poses in format (position, lookat-point, up-point).
+
+    Args:
+      poses: (n, 3, 4) array of input pose keyframes.
+      n_interp: returned path will have n_interp * (n - 1) total poses.
+      spline_degree: polynomial degree of B-spline.
+      smoothness: parameter for spline smoothing, 0 forces exact interpolation.
+      rot_weight: relative weighting of rotation/translation in spline solve.
+
+    Returns:
+      Array of new camera poses with shape (n_interp * (n - 1), 3, 4).
+    """
+
+    def poses_to_points(poses, dist):
+        """Converts from pose matrices to (position, lookat, up) format."""
+        pos = poses[:, :3, -1]
+        lookat = poses[:, :3, -1] - dist * poses[:, :3, 2]
+        up = poses[:, :3, -1] + dist * poses[:, :3, 1]
+        return np.stack([pos, lookat, up], 1)
+
+    def points_to_poses(points):
+        """Converts from (position, lookat, up) format to pose matrices."""
+        return np.array([viewmatrix(p - l, u - p, p) for p, l, u in points])
+
+    def interp(points, n, k, s):
+        """Runs multidimensional B-spline interpolation on the input points."""
+        sh = points.shape
+        pts = np.reshape(points, (sh[0], -1))
+        k = min(k, sh[0] - 1)
+        tck, _ = scipy.interpolate.splprep(pts.T, k=k, s=s)
+        u = np.linspace(0, 1, n, endpoint=False)
+        new_points = np.array(scipy.interpolate.splev(u, tck))
+        new_points = np.reshape(new_points.T, (n, sh[1], sh[2]))
+        return new_points
+
+    points = poses_to_points(poses, dist=rot_weight)
+    new_points = interp(
+        points, n_interp * (points.shape[0] - 1), k=spline_degree, s=smoothness
+    )
+    return points_to_poses(new_points)
+```
+
+### meshroom/mrGSplat/ConvertGSplatModel.py
+```
+import os
+from pathlib import Path
+
+from meshroom.core import desc
+
+exe_path = os.path.join(os.path.dirname(__file__), '../../scripts', 'convertGSplatModel.py')
+
+DOC = """# ConvertGSplatModel
+
+Converts a GSplat model to a model that can be used outside of Meshroom.
+The PLY format can be used with GSOPs in Houdini
+"""
+
+
+class ConvertGSplatModel(desc.CommandLineNode):
+
+    category = 'Gsplat'
+    documentation = DOC
+
+    commandLine = 'python '+exe_path+' {inputValue} {formatValue} {outputValue}'
+
+    inputs = [
+        desc.File(
+            name="input",
+            label="Input Model",
+            description="Gaussian splats (.ckpt) to render.",
+            value="",
+        ),
+        
+        desc.ChoiceParam(
+            name='format',
+            label='Format',
+            description='''Output format''',
+            value='.ply',
+            values=['.ply'],
+            exclusive=True,
+        )
+    ]
+    
+    outputs = [
+        desc.File(
+            name='output',
+            label='Output Model',
+            description='Output model',
+            value="{nodeCacheFolder}/gsplat_model{formatValue}"
+        )
+    ]
+```
+
+### meshroom/mrGSplat/GaussianSplattingOptim.py
+```
+__version__ = "1.1"
+
+from meshroom.core import desc
+
+
+class GaussianSplattingOptim(desc.CommandLineNode):
+
+    commandLine = "gaussianSplattingOptim {allParams}"
+
+    gpu = desc.Level.INTENSIVE
+    cpu = desc.Level.NORMAL
+    ram = desc.Level.INTENSIVE
+
+    category = 'Gsplat'
+    documentation = '''
+This node creates and optimizes a gaussian splatting model based on sfm data and images.
+'''
+
+    def buildCommandLine(self, chunk):
+
+        node = chunk.node
+
+        cmdLine = "gaussianSplattingOptim"
+        cmdLine += f" {node.strategy.value} "
+        cmdLine += "{allParams}"
+
+        saveEpochs = str(node.max_epochs.value)
+        if node.custom_ckpts.value:
+            saveEpochs = " ".join([str(e.value) for e in node.save_epochs.value])
+
+        cmdLine += f" --save_epochs {saveEpochs}"
+
+        if node.mask_views.value and len(node.masked_views.value) > 0:
+            maskedViews = " ".join([str(e.value) for e in node.masked_views.value])
+            cmdLine += f" --mask_views {maskedViews}"
+
+        if node.patchSize.value > 0:
+            cmdLine += f" --patch_size {node.patchSize.value}"
+
+        if node.image_alpha.value:
+            cmdLine += f" --image_alpha"
+
+        if node.sparseGradient.value:
+            cmdLine += " --sparse_grad --packed"
+
+        if node.visibleAdam.value:
+            cmdLine += " --visible_adam"
+
+        if node.randomBkgd.value:
+            cmdLine += " --random_bkgd"
+
+        if node.poseOpt.value:
+            cmdLine += " --pose_opt"
+
+        # if node.appOpt.value:
+        #     cmdLine += " --app_opt"
+
+        if node.useBilateralGrid.value:
+            cmdLine += " --use_bilateral_grid"
+
+        if node.useFusedBilagrid.value:
+            cmdLine += " --use_fused_bilagrid"
+
+        if node.useDepthLoss.value:
+            cmdLine += " --depth_loss"
+
+        if node.use3DGut.value:
+            cmdLine += " --with_ut --with_eval3d"
+
+        if node.absGrad.value:
+            cmdLine += " --absgrad"
+
+        if node.revisedOpacity.value:
+            cmdLine += " --revised_opacity"
+
+        if not node.retrieveOptimState.value:
+            cmdLine += " --no-retrieve_optimizer_state"
+
+        if node.useProgressBar.value:
+            cmdLine += f" --use_progress_bar"
+
+        node.nodeDesc.commandLine = cmdLine
+
+        return super().buildCommandLine(chunk)
+
+    inputs = [
+        desc.File(
+            name="sfm_file",
+            label="sfmData",
+            description="SfMData with the views, poses and intrinsics to use.",
+            value="",
+        ),
+        desc.BoolParam(
+            name="image_alpha",
+            label="Images have alpha channel",
+            description="Set to True if images has an alpha channel.",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.File(
+            name="resume_ckpt",
+            label="Resume From Model",
+            description="Resume from Model",
+            value="",
+        ),
+        desc.BoolParam(
+            name="retrieveOptimState",
+            label="Retrieve Optimizer State",
+            description="Whether to retrieve optimizer state from the checkpoint.",
+            value=True,
+            commandLineGroup=None,
+            enabled=lambda node: node.resume_ckpt.value != ""
+        ),
+        desc.ChoiceParam(
+            name='strategy',
+            label='Densification Strategy',
+            description='''Densification Strategy to use (Default or Mcmc)''',
+            value='default',
+            values=['default', 'mcmc'],
+            exclusive=True,
+            commandLineGroup=None
+        ),
+        desc.IntParam(
+            name="max_epochs",
+            label="Number Of Epochs",
+            description="The number of epochs performed by the optimization.\n"
+                        "60 for quick debug, 600 for good quality.",
+            value=600,
+        ),
+        desc.IntParam(
+            name="patchSize",
+            label="Patch Size",
+            description="Size of randomly cropped patches\n"
+                        "Use a value of 0 to disable random crop.",
+            value=0,
+            commandLineGroup=None,
+        ),
+        desc.IntParam(
+            name="sh_degree",
+            label="Degrees Of Spherical Harmonics",
+            description="How many degrees are we using to describe texture in a splat.",
+            value=3,
+            range=[0, 6, 1],
+        ),
+        desc.IntParam(
+            name="sh_degree_interval",
+            label="Steps For Spherical Harmonics",
+            description="One degree is activate at a time.\n"
+            "We start with 0 degree and activate a new harmonic degree each sh_degree_interval steps.",
+            value=1000,
+            range=[100, 100000, 100],
+        ),
+        desc.FloatParam(
+            name="init_opa",
+            label="Initial Opacity",
+            description="A gaussian splat is initialized with an opacity between 0 and 1",
+            value=0.1,
+            range=[0.0, 1.0, 0.1],
+        ),
+        desc.FloatParam(
+            name="init_scale",
+            label="Initial Scale",
+            description="A gaussian splat is initialized with a scale",
+            value=1.0,
+            range=[0.0, 1.0, 0.1],
+        ),
+        desc.FloatParam(
+            name="ssim_lambda",
+            label="Weight SSIM",
+            description="Weight of the SSIM loss in the total loss",
+            value=0.2,
+        ),
+        desc.IntParam(
+            name="tile_size",
+            label="Tile Size",
+            description="Size of a gpu tile for rendering.",
+            value=16,
+        ),
+        desc.FloatParam(
+            name="near_plane",
+            label="Rendering Near Plane",
+            description="Near plane used for rendering frustum",
+            value=0.01,
+        ),
+        desc.FloatParam(
+            name="far_plane",
+            label="Rendering Far Plane",
+            description="Far plane used for rendering frustum",
+            value=1e10,
+        ),
+        desc.FloatParam(
+            name="means_lr",
+            label="Gaussian Centers LR",
+            description="Gaussian Centers Learning Rate",
+            value=1.6e-4,
+        ),
+        desc.FloatParam(
+            name="scales_lr",
+            label="Gaussian Scales LR",
+            description="Gaussian Scales Learning Rate",
+            value=5e-3,
+        ),
+        desc.FloatParam(
+            name="opacities_lr",
+            label="Gaussian Opacities LR",
+            description="Gaussian Opacities Learning Rate",
+            value=5e-2,
+        ),
+        desc.FloatParam(
+            name="quats_lr",
+            label="Gaussian Orientation LR",
+            description="Gaussian Orientation Learning Rate",
+            value=1e-3,
+        ),
+        desc.FloatParam(
+            name="sh0_lr",
+            label="Gaussian Brightness LR",
+            description="Gaussian Brightness Learning Rate (Spherical harmonics 1st degree)",
+            value=2.5e-3,
+        ),
+        desc.FloatParam(
+            name="opacity_reg",
+            label="Opacity regularization",
+            description="Opacity regularization weight",
+            value=0.0,
+        ),
+        desc.FloatParam(
+            name="scale_reg",
+            label="Scale regularization",
+            description="Scale regularization weight",
+            value=0.0,
+        ),
+        desc.BoolParam(
+            name="sparseGradient",
+            label="Use Sparse Gradients",
+            description="Use sparse gradients for optimization.",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.BoolParam(
+            name="visibleAdam",
+            label="Use Visible Adam",
+            description="Use visible adam from Taming 3DGS.",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.BoolParam(
+            name="randomBkgd",
+            label="Use Random Background",
+            description="Use random background for training to discourage transparency.",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.BoolParam(
+            name="poseOpt",
+            label="Use Pose Optimization",
+            description="Use pose optimization.",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.FloatParam(
+            name="pose_opt_lr",
+            label="Pose optimization LR",
+            description="Pose Optimization Learning Rate",
+            value=1e-5,
+            enabled=lambda node: node.poseOpt.value
+        ),
+        desc.FloatParam(
+            name="pose_opt_reg",
+            label="Pose optimization regularization",
+            description="Regularization for camera optimization as weight decay",
+            value=1e-6,
+            enabled=lambda node: node.poseOpt.value
+        ),
+        # Rendering doesn't work for the moment with that ?
+        # desc.BoolParam(
+        #     name="appOpt",
+        #     label="Use Appearance Optimization",
+        #     description="Use appearance optimization.",
+        #     value=False,
+        #     commandLineGroup=None
+        # ),
+        # desc.FloatParam(
+        #     name="app_opt_lr",
+        #     label="Appearance optimization LR",
+        #     description="Appearance Optimization Learning Rate",
+        #     value=1e-3,
+        #     enabled=lambda node: node.appOpt.value
+        # ),
+        # desc.FloatParam(
+        #     name="app_opt_reg",
+        #     label="Appearance optimization regularization",
+        #     description="Regularization for Appearance optimization as weight decay",
+        #     value=1e-6,
+        #     enabled=lambda node: node.appOpt.value
+        # ),
+        desc.BoolParam(
+            name="useBilateralGrid",
+            label="Use Bilateral Grid",
+            description="Use Bilateral Grid.",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.BoolParam(
+            name="useFusedBilagrid",
+            label="Use Fused Bilateral Grid",
+            description="Use Fused Bilateral Grid.",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.BoolParam(
+            name="useDepthLoss",
+            label="Use Depth Loss",
+            description="Use Depth Loss in optimization.",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.FloatParam(
+            name="depth_lambda",
+            label="Depth weight",
+            description="depth weight in optimization",
+            value=1e-2,
+            enabled=lambda node: node.useDepthLoss.value
+        ),
+        desc.BoolParam(
+            name="use3DGut",
+            label="Use 3DGut Method",
+            description="Use 3DGut method.",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.FloatParam(
+            name="prune_opa",
+            label="prune_opa",
+            description="GSs with opacity below this value will be pruned.",
+            value=0.005,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.FloatParam(
+            name="grow_grad2d",
+            label="grow_grad2d",
+            description="GSs with image plane gradient above this value will be split/duplicated.",
+            value=0.0002,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.FloatParam(
+            name="grow_scale3d",
+            label="grow_scale3d",
+            description="GSs with 3d scale (normalized by scene_scale) below this value will be duplicated. Above will be split.",
+            value=0.01,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.FloatParam(
+            name="grow_scale2d",
+            label="grow_scale2d",
+            description="GSs with 2d scale (normalized by image resolution) above this value will be split",
+            value=0.05,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.FloatParam(
+            name="prune_scale3d",
+            label="prune_scale3d",
+            description="GSs with 3d scale (normalized by scene_scale) above this value will be pruned.",
+            value=0.1,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.FloatParam(
+            name="prune_scale2d",
+            label="prune_scale2d",
+            description="GSs with 2d scale (normalized by image resolution) above this value will be pruned",
+            value=0.15,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.IntParam(
+            name="refine_scale2d_stop_iter",
+            label="refine_scale2d_stop_iter",
+            description="Stop refining GSs based on 2d scale after this iteration.",
+            value=0,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.IntParam(
+            name="refine_start_iter",
+            label="refine_start_iter",
+            description="Start refining GSs after this iteration.",
+            value=500,
+        ),
+        desc.IntParam(
+            name="refine_stop_iter",
+            label="refine_stop_iter",
+            description="Stop refining GSs after this iteration.",
+            value=15000,
+        ),
+        desc.IntParam(
+            name="reset_every",
+            label="reset_every",
+            description="Reset opacities every this steps.",
+            value=3000,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.IntParam(
+            name="refine_every",
+            label="refine_every",
+            description=" Refine GSs every this steps.",
+            value=100,
+        ),
+        desc.IntParam(
+            name="pause_refine_after_reset",
+            label="pause_refine_after_reset",
+            description="Pause refining GSs until this number of steps after reset, Default is 0 (no pause at all) and one might want to set this number to the number of images in training set.",
+            value=0,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.BoolParam(
+            name="absGrad",
+            label="absgrad",
+            description="Use absolute gradients for GS splitting.",
+            value=False,
+            commandLineGroup=None,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.BoolParam(
+            name="revisedOpacity",
+            label="revised_opacity",
+            description="hether to use revised opacity heuristic from arXiv:2404.06109 (experimental).",
+            value=False,
+            commandLineGroup=None,
+            enabled=lambda node: node.strategy.value == "default"
+        ),
+        desc.IntParam(
+            name="cap_max",
+            label="cap_max",
+            description="Maximum number of GS.",
+            value=1000000,
+            enabled=lambda node: node.strategy.value == "mcmc"
+        ),
+        desc.FloatParam(
+            name="noise_lr",
+            label="noise_lr",
+            description="MCMC samping noise learning rate.",
+            value=5e5,
+            enabled=lambda node: node.strategy.value == "mcmc"
+        ),
+        desc.FloatParam(
+            name="min_opacity",
+            label="min_opacity",
+            description="GSs with opacity below this value will be pruned.",
+            value=0.005,
+            enabled=lambda node: node.strategy.value == "mcmc"
+        ),
+        desc.BoolParam(
+            name="custom_ckpts",
+            label="Use custom checkpoints",
+            description="Set to True to provide custom checkpoints; default behavior is to save the model once, at the end of the optimization.",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.ListAttribute(
+            desc.IntParam(
+                name="save_epoch",
+                label="Saving epoch",
+                description="Epoch at which the model will be saved as checkpoint.",
+                value=600,
+            ),
+            name="save_epochs",
+            label="Saving epochs",
+            description="All the epochs at which the model will be saved as a check point.",
+            commandLineGroup=None,
+            enabled=lambda node: node.custom_ckpts.value
+        ),
+        desc.BoolParam(
+            name="useProgressBar",
+            label="Use Progress Bar",
+            description="Use progress bar in the logging.",
+            value=False,
+            commandLineGroup=None,
+        ),
+        desc.BoolParam(
+            name="mask_views",
+            label="Mask Views",
+            description="Activate to specify which views to remove from the training set (e.g. to use them for evaluation only).",
+            value=False,
+            commandLineGroup=None
+        ),
+        desc.ListAttribute(
+            desc.IntParam(
+                name="masked_view",
+                label="Masked View",
+                description="View to remove from the training set.",
+                value=0,
+            ),
+            name="masked_views",
+            label="Masked Views",
+            description="All the views to remove from the training set.",
+            commandLineGroup=None,
+            enabled=lambda node: node.mask_views.value
+        )
+    ]
+
+    outputs = [
+        desc.File(
+            name="result_dir",
+            label="Output",
+            description="Output folder.",
+            value="{nodeCacheFolder}",
+        ),
+        desc.File(
+            name="model",
+            label="Model",
+            description="Optimized gaussian splatting model",
+            value = lambda attr: "{nodeCacheFolder}" + f"/ckpts/ckpt_{attr.node.max_epochs.value-1}_rank0.pt",
+            commandLineGroup=""
+        )
+    ]
+```
+
+### meshroom/mrGSplat/GaussianSplattingRender.py
+```
+__version__ = "1.0"
+
+from meshroom.core import desc
+import os.path
+
+COLOR_SPACES = [
+    "AUTO", "LINEAR", "SRGB", "ACES2065_1", "ACEScg", "REC709", "Linear_ARRI_Wide_Gamut_3", 
+    "ARRI_LogC3_EI800", "Linear_ARRI_Wide_Gamut_4", "ARRI_LogC4", "Linear_BMD_WideGamut_Gen5", 
+    "BMDFilm_WideGamut_Gen5", "CanonLog2_CinemaGamut_D55", "CanonLog3_CinemaGamut_D55", 
+    "Linear_CinemaGamut_D55", "Linear_V_Gamut", "V_Log_V_Gamut", "Linear_REDWideGamutRGB", 
+    "Log3G10_REDWideGamutRGB", "Linear_Venice_S_Gamut3_Cine", "S_Log3_Venice_S_Gamut3_Cine", 
+    "LAB", "XYZ", "NO_CONVERSION"
+]
+
+class GaussianSplattingRender(desc.CommandLineNode):
+
+    commandLine = 'gaussianSplattingRender {allParams}'
+
+    gpu = desc.Level.INTENSIVE
+    cpu = desc.Level.NORMAL
+    ram = desc.Level.INTENSIVE
+
+    category = 'Gsplat'
+    documentation = '''
+This node computes the rasterization of a given gaussian splatting model from given viewpoints.
+'''
+
+    inputs = [
+        desc.File(
+            name="cameras",
+            label="Cameras",
+            description="SfMData with the views, poses and intrinsics to use (in JSON format).",
+            value="",
+            commandLineGroup="allParams"
+        ),
+        desc.File(
+            name="model",
+            label="Model",
+            description="Gaussian splats (.ckpt) to render.",
+            value="",
+            commandLineGroup="allParams"
+        ),
+        desc.ChoiceParam(
+            name='output_format',
+            label='Output format',
+            description='''auto will try to find the extension from views in the sfm (cameras) input''',
+            value='auto',
+            values=['auto', '.jpg', '.png', '.exr'],
+            exclusive=True,
+            commandLineGroup="allParams"
+        ),
+        desc.ChoiceParam(
+            name='output_colorspace',
+            label='Output colorspace',
+            description='''''',
+            value='AUTO',
+            values=COLOR_SPACES,
+            exclusive=True,
+            commandLineGroup="allParams"
+        ),
+    ]
+
+    outputs = [
+        desc.File(
+            name="output_dir",
+            label="Output",
+            description="Output folder.",
+            value="{nodeCacheFolder}",
+            commandLineGroup="allParams"
+        ),
+        desc.File(
+            name="frames",
+            label="Frames",
+            description="Frames rendered using gaussian splatting.",
+            semantic="image", # use "image" for <VIEW_ID> logic
+            value="{nodeCacheFolder}/renders/<VIEW_ID>.exr",  # _<FILESTEM>
+            commandLineGroup="",
+        ),
+        desc.File(
+            name="render_folder",
+            label="Render Folder",
+            description="Output folder.",
+            value="{nodeCacheFolder}/renders",
+            commandLineGroup="",
+        ),
+    ]
+```
+
+### meshroom/mrGSplat/__init__.py
+```
+
+```
+
+### gsplatInterface/datasets/sfm/__init__.py
+```
+from .sceneManager import Parser
+from .sceneManager import Dataset
+```
+
+### gsplatInterface/datasets/sfm/camera.py
+```
+# -*- coding: utf-8 -*-
+
+from typing import Tuple
+from .types import NDArray3x3
+from .utils import pose3ToNp, poseDictToNp
+
+import math
+
+import numpy as np
+from scipy.optimize import root
+
+from pyalicevision import sfmData
+from pyalicevision import camera
+from pyalicevision.camera import IntrinsicBase
+
+IntrinsicsBaseType = (sfmData.IntrinsicBase, IntrinsicBase)
+
+
+class SfmIntrinsic:
+    KEYS = ["type", "focalLength", "width", "height", "sensorWidth", "sensorHeight", "principalPoint"]
+    
+    def __init__(self, intrinsicId: int, intrinsicDict: dict):
+        self.intrinsicId = int(intrinsicId)
+        assert all([key in intrinsicDict.keys() for key in self.KEYS]), f"missing keys in dict : {intrinsicDict}"
+        self.__intrinsic = intrinsicDict
+    
+    @classmethod
+    def from_pyalicevision(cls, intrinsic: Tuple[int, IntrinsicBase]):
+        # Assert we have the correct type
+        typeErrMsg = f"Expected type Tuple[int, IntrinsicBase], found {type(intrinsic)} : {intrinsic}"
+        assert isinstance(intrinsic, tuple), typeErrMsg
+        typeErrMsg = f"Expected type Tuple[int, IntrinsicBase], found {type(intrinsic)}(size={len(intrinsic)}): {intrinsic}"
+        assert len(intrinsic)==2, typeErrMsg
+        intrinsicId, intrinsic = intrinsic
+        typeErrMsg = f"Expected type Tuple[int, IntrinsicBase], element 2 has type {type(intrinsic)}: {intrinsic}"
+        assert isinstance(intrinsic, IntrinsicsBaseType), typeErrMsg
+        pinholeIntrinsic = camera.Pinhole.cast(intrinsic)
+        # Get intrinsic infos
+        hfov = pinholeIntrinsic.getHorizontalFov()
+        sensorWidth = pinholeIntrinsic.sensorWidth()
+        fx = (sensorWidth)/(2.0*math.tan(hfov/2.0))
+        vfov = pinholeIntrinsic.getVerticalFov()
+        sensorHeight = pinholeIntrinsic.sensorHeight()
+        fy = (sensorHeight)/(2.0*math.tan(vfov/2.0))
+        # Get principal point
+        pp = pinholeIntrinsic.getOffset()  # .getPrincipalPoint()
+        intrinsicDict = {
+            "type": pinholeIntrinsic.getTypeStr(),
+            "focalLength": fx,
+            "width": pinholeIntrinsic.w(),
+            "height": pinholeIntrinsic.h(),
+            "sensorWidth": sensorWidth, 
+            "sensorHeight": sensorHeight, 
+            "principalPoint": pp
+        }
+        return cls(intrinsicId, intrinsicDict)
+
+    def __repr__(self):
+        return f"<Intrinsic[{self.type}] {self.intrinsicId}>"
+
+    @property
+    def type(self):
+        return self.__intrinsic.get("type")
+    
+    @property
+    def isPinhole(self):
+        return self.__intrinsic.get("type") == "pinhole"
+    
+    @property
+    def H(self):
+        return float(self.__intrinsic.get("height"))
+    
+    @property
+    def W(self):
+        return float(self.__intrinsic.get("width"))
+    
+    @property
+    def focal_length(self):
+        return float(self.__intrinsic.get("focalLength"))
+    
+    @property
+    def sensorWidth(self):
+        return float(self.__intrinsic.get("sensorWidth"))
+    
+    @property
+    def sensorHeight(self):
+        return float(self.__intrinsic.get("sensorHeight"))
+    
+    @property
+    def principalPoint(self):
+        return list(map(float, self.__intrinsic.get("principalPoint")))
+    
+    @property
+    def fx(self):
+        # return self.focal_length
+        return max(self.W, self.H) * self.focal_length / self.sensorWidth
+    
+    @property
+    def fy(self):
+        # return self.focal_length
+        return max(self.W, self.H) * self.focal_length / self.sensorWidth
+    
+    @property
+    def cx(self):
+        # return self.W / 2.0
+        return float(self.W) / 2.0 + self.principalPoint[0]
+    
+    @property
+    def cy(self):
+        # return self.H / 2.0
+        return float(self.H) / 2.0 + self.principalPoint[1]
+    
+    def get_K(self) -> NDArray3x3:
+        """
+        Get intrinsics camera
+        """
+        fx = self.fx
+        fy = self.fy
+        s = 0.
+        cx = self.cx
+        cy = self.cy
+        K = np.array(
+            [
+                [fx , s  , cx ],
+                [0.0, fy , cy ],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        return K
+
+    def get_K_inv(self) -> NDArray3x3:
+        """
+        Get inverse intrinsics camera
+        """
+        fx = self.fx
+        fy = self.fy
+        cx = self.cx
+        cy = self.cy
+        inv_K = np.array(
+            [
+                [1./fx , 0    , -cx/fx ],
+                [0     , 1./fy, -cy/fy ],
+                [0     , 0    , 1      ],
+            ]
+        )
+        return inv_K
+
+
+class SfmExtrinsic:
+    def __init__(self, transform: dict):
+        self.R = transform.get("rotation")
+        self.T = transform.get("translation")
+        self.C = transform.get("center")
+        
+    @classmethod
+    def from_camerapose(cls, pose):
+        transform = pose3ToNp(pose.getTransform())
+        return cls(transform)
+    
+    @classmethod
+    def from_dict(cls, poseDict: dict):
+        transform = poseDictToNp(poseDict)
+        return cls(transform)
+```
+
+### gsplatInterface/datasets/sfm/interface.py
+```
+# -*- coding: utf-8 -*-
+
+import os
+from pathlib import Path
+
+from .camera import SfmIntrinsic, SfmExtrinsic
+from .views import SfmView
+
+from pyalicevision import sfmData
+from pyalicevision import sfmDataIO
+
+import numpy as np
+from numpy.linalg import inv as invert
+import json
+import logging
+
+
+FORCE_JSON_TYPE = False
+
+
+class SfmPose:
+    def __init__(self, poseId: int, poseDict: dict):
+        self.__poseId = int(poseId)
+        if "extrinsic" in poseDict.keys():
+            self._extrinsic = poseDict.get("extrinsic")
+        else:
+            self._extrinsic = SfmExtrinsic.from_dict(poseDict)
+    
+    @classmethod
+    def from_pyalicevision(cls, poseId: int, pose: sfmData.CameraPose):
+        # Assert we have the correct type
+        assert isinstance(pose, sfmData.CameraPose)
+        # Get view infos
+        extrinsic = SfmExtrinsic.from_camerapose(pose)
+        poseDict = {
+            "extrinsic": extrinsic
+        }
+        return cls(poseId, poseDict)
+    
+    def __repr__(self):
+        return f"<Pose {self.__poseId}>"
+    
+    def get_w2c(self):
+        bottom = np.array([0, 0, 0, 1]).reshape(1, 4)
+        rot = self.R
+        trans = self.T.reshape(3, 1)
+        mat = np.concatenate([np.concatenate([rot, trans], 1), bottom], axis=0)
+        return mat
+    
+    @property
+    def extrinsic(self):
+        return self._extrinsic
+    
+    @property
+    def T(self):
+        return self.extrinsic.T
+    
+    @property
+    def R(self):
+        return self.extrinsic.R
+    
+    @property
+    def C(self):
+        return self.extrinsic.C
+
+
+class SfmObservation:
+    def __init__(self):
+        pass
+    
+    def __repr__(self):
+        return ""
+
+
+class SfmLandmark:
+    def __init__(self, landmarkId: int, position: np.ndarray, color: np.ndarray, observations: dict):
+        self.landmarkId = int(landmarkId)
+        # Landmark point coordinates
+        self.position = position
+        self.x, self.y, self.z = self.position
+        self.color = color  # RGB (0 to 255)
+        self.observations =  observations
+    
+    @classmethod
+    def from_pyalicevision(cls, landmarkId: int, landmark: sfmData.Landmark):
+        # Assert we have the correct type
+        assert isinstance(landmark, sfmData.Landmark)
+        # Get view infos
+        position = np.array(landmark.X.reshape(3), dtype=np.float32)
+        color = np.array(landmark.rgb.reshape(3), dtype=np.int16)
+
+        observations = {}
+        for view_id, _ in landmark.getMapObservations().items():
+            observations[view_id] = SfmObservation()
+
+        return cls(landmarkId, position, color, observations)
+    
+    @classmethod
+    def from_dict(cls, landmarkDict: dict):
+        landmarkId = int(landmarkDict.pop("landmarkId"))
+        position = np.array(landmarkDict["X"], dtype=np.float32)
+        color = np.array(landmarkDict["color"], dtype=np.int16)
+        observations = {}
+        for obs in landmarkDict["observations"]:
+            obsId = int(obs["observationId"])
+            observations[obsId] = SfmObservation()
+        return cls(landmarkId, position, color, observations)
+    
+    def __repr__(self):
+        return f"<Landmark {self.landmarkId}>"
+
+
+class SfmFile:
+    def __init__(self, path: Path):
+        logging.info(f"Read SfmFile {path}")
+        self.__path = path
+        self.__content = sfmData.SfMData()
+        if not sfmDataIO.load(self.__content, str(path), sfmDataIO.ALL):
+            raise SystemError(f"Could not load sfm file {path}")
+    
+    def __repr__(self):
+        return f"<SfmFile {self.__path}>"
+    
+    def getIntrinsics(self):
+        intrinsics = []
+        for item in self.__content.getIntrinsics().iteritems():
+            intrinsics.append(SfmIntrinsic.from_pyalicevision(item))
+        return intrinsics
+    
+    def getViews(self):
+        views = []
+        for item in self.__content.getViews().iteritems():
+            views.append(SfmView.from_pyalicevision(item))
+        return views
+    
+    def getPoses(self):
+        poses = {}
+        for key, value in self.__content.getPoses().iteritems():
+            poses[key] = SfmPose.from_pyalicevision(key, value)
+        return poses
+    
+    def getLandmarks(self):
+        landmarks = []
+        for landmarkId, landmark in self.__content.getLandmarks().iteritems():
+            landmarks.append(SfmLandmark.from_pyalicevision(landmarkId, landmark))
+        return landmarks
+
+
+class SfmReader:
+    def __init__(self, inputSfmPath: Path):
+        self.sfmFile = inputSfmPath
+        self.dataAV = None
+        self.viewFiles = None
+        self.load()
+
+    
+    def load(self):
+        self.dataAV = SfmFile(self.sfmFile)
+    
+    @property
+    def intrinsics(self):
+        if getattr(self, "_intrinsics", None) is None:
+            self._intrinsics = self.dataAV.getIntrinsics()
+        return self._intrinsics
+    
+    @intrinsics.setter
+    def intrinsics(self, value):
+        if value is None:
+            self._intrinsics = None
+            return
+        if not isinstance(value, list):
+            value = [value]
+        for item in value:
+            if not isinstance(item, SfmIntrinsic):
+                raise TypeError(f"Element {item} cannot be converted to an intrinsic")
+        self._intrinsics = value
+    
+    @property
+    def views(self):
+        if getattr(self, "_views", None) is None:
+            self._views = self.dataAV.getViews()
+        return self._views
+    
+    @views.setter
+    def views(self, value):
+        if value is None:
+            self._views = None
+            return
+        if not isinstance(value, list):
+            value = [value]
+        for item in value:
+            if not isinstance(item, SfmView):
+                raise TypeError(f"Element {item} cannot be converted to a view")
+        self._views = value
+    
+    @property
+    def poses(self):
+        if getattr(self, "_poses", None) is None:
+            self._poses = self.dataAV.getPoses()
+        return self._poses
+    
+    @poses.setter
+    def poses(self, value):
+        if value is None:
+            self._poses = None
+            return
+        if not isinstance(value, dict):
+            raise TypeError(f"Pose {value} should be a dictionnary")
+        for _, item in value.items():
+            if not isinstance(item, SfmPose):
+                raise TypeError(f"Element {item} cannot be converted to a pose")
+        self._poses = value
+    
+    @property
+    def landmarks(self):
+        if getattr(self, "_landmarks", None) is None:
+            self._landmarks = self.dataAV.getLandmarks()
+        return self._landmarks
+    
+    @landmarks.setter
+    def landmarks(self, value):
+        if value is None:
+            self._landmarks = None
+            return
+        if not isinstance(value, dict):
+            raise TypeError(f"Pose {value} should be a dictionnary")
+        for _, item in value.items():
+            if not isinstance(item, SfmLandmark):
+                raise TypeError(f"Element {item} cannot be converted to a landmark")
+        self._landmarks = value
+```
+
+### gsplatInterface/datasets/sfm/sceneManager.py
+```
+# -*- coding: utf-8 -*-
+
+import os
+import json
+import logging
+from pathlib import Path
+
+from typing import Union, List, Dict, Tuple
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+import torch
+
+from gsplatInterface.avImage import AvImage
+from .interface import SfmReader, SfmPose, SfmLandmark
+from .views import SfmView
+from .camera import SfmIntrinsic
+from ..normalize import (
+    align_principle_axes,
+    similarity_from_cameras,
+    transform_cameras,
+    transform_points,
+)
+
+from ..mesh import Mesh
+
+
+class SfmSceneManager:
+    def __init__(self, path: Union[str, Path]):
+        if isinstance(path, str):
+            path = Path(path)
+        self._path = path
+        self._sfmData = SfmReader(path)
+
+    @property
+    def intrinsics(self) -> List[SfmIntrinsic]:
+        """
+        Intrinsics are the camera parameters
+        """
+        return self._sfmData.intrinsics
+
+    @property
+    def views(self) -> List[SfmView]:
+        """
+        Views are the images we feed to the photogrammetry to get poses, landmarks, etc
+        """
+        return self._sfmData.views
+
+    @property
+    def poses(self) -> Dict[int, SfmPose]:
+        """
+        Poses are all the viewpoints extracted by the photogrammetry process
+        """
+        return self._sfmData.poses
+
+    @property
+    def landmarks(self) -> List[SfmLandmark]:
+        """
+        Landmarks are the reconstructed points in the 3D environment
+        """
+        return self._sfmData.landmarks
+
+    @property
+    def poseId_to_viewId(self) -> Dict[int, SfmView]:
+        if getattr(self, "__poseId_to_viewId", None) is None:
+            poseKeys = self.poses.keys()
+            # Add poses that have views
+            self.__poseId_to_viewId = {view.poseId: view.viewId for view in self.views if view.poseId in poseKeys}
+            # Add poses with no views
+            for poseId in poseKeys:
+                if poseId not in self.__poseId_to_viewId.keys():
+                    self.__poseId_to_viewId[poseId] = None
+        return self.__poseId_to_viewId
+
+    @property
+    def viewId_to_poseId(self) -> Dict[int, SfmView]:
+        if getattr(self, "__viewId_to_poseId", None) is None:
+            self.__viewId_to_poseId = {view.viewId: view.poseId for view in self.views}
+            for viewId, poseId in self.__viewId_to_poseId.items():
+                if poseId not in self.poses:
+                    self.__viewId_to_poseId[viewId] = None
+        return self.__viewId_to_poseId
+
+    @property
+    def viewId_to_view(self) -> Dict[int, SfmView]:
+        if getattr(self, "__viewId_to_view", None) is None:
+            self.__viewId_to_view = {view.viewId: view for view in self.views}
+        return self.__viewId_to_view
+
+    @property
+    def name_to_image_id(self) -> Dict[str, int]:
+        if getattr(self, "__name_to_image_id", None) is None:
+            self.__name_to_image_id = {}
+            for view in self.views:
+                imagePath = Path(view.imagePath).stem
+                self.__name_to_image_id[imagePath] = view.frameId
+        return self.__name_to_image_id
+
+    @property
+    def intrinsics_dict(self) -> Dict[int, SfmIntrinsic]:
+        if getattr(self, "__intrinsics_dict", None) is None:
+            self.__intrinsics_dict = {}
+            for intrinsic in self.intrinsics:
+                self.__intrinsics_dict[intrinsic.intrinsicId] = intrinsic
+        return self.__intrinsics_dict
+    @property
+    def landmarkId_to_viewId(self):
+        if getattr(self, "__landmarkId_to_viewId", None) is None:
+            self.__landmarkId_to_viewId = {}
+            for landmark in self.landmarks:
+                observation_ids = landmark.observations.keys()
+                # observation_ids = [obs.viewId for obs in landmark.observations.values()]
+                self.__landmarkId_to_viewId[landmark.landmarkId] = observation_ids
+        return self.__landmarkId_to_viewId
+
+
+class Parser:
+    def __init__(self,
+                 sfmFile: str,
+                 normalize: Optional[bool] = False,
+                 masksFolder: Optional[str] = None,
+                 mesh: Optional[str] = None,
+                 metadataFolder: Optional[str] = None,
+                 image_alpha: bool = False,
+                 maskedViewIDs: list = [],
+                 ):
+        self.sfmFile = sfmFile
+        # TODO : not convenient to use different poses when we have normalization that depend on dataset
+        self.normalize = False  # normalize
+        self.image_alpha = image_alpha
+
+        manager = SfmSceneManager(self.sfmFile)
+
+        self.masks_exist = masksFolder and os.path.isdir(masksFolder)
+
+        # Extract extrinsic matrices in world-to-camera format.
+        w2c_mats = []
+        camera_ids = []
+        Ks_dict = dict()
+        imsize_dict = dict()  # width, height
+        missing_poses = set()
+
+        for k, view in enumerate(manager.views):
+            pose = manager.poses.get(view.poseId, None)
+            if pose is None or view.viewId in maskedViewIDs:
+                missing_poses.add(view.poseId)
+                continue
+            # Cam matrix (extrinsic)
+            w2c = pose.get_w2c()
+            w2c_mats.append(w2c)
+            # Intrinsic
+            camera_id = view.intrinsicId
+            imsize_dict[camera_id] = (int(view.W), int(view.H))
+            camera_ids.append(camera_id)
+            intrinsic = manager.intrinsics_dict[camera_id]
+            K = intrinsic.get_K()
+            Ks_dict[camera_id] = K
+
+        logging.info(f"[Parser] {len(manager.views)-len(missing_poses)}/{len(manager.views)} views, taken by {len(set(camera_ids))} camera(s).")
+        if len(manager.views)-len(missing_poses) <= 0:
+            raise ValueError("No usable view !")
+
+        w2c_mats = np.stack(w2c_mats, axis=0)
+
+        # Convert extrinsics to camera-to-world.
+        camtoworlds = np.linalg.inv(w2c_mats)
+
+        # Image names
+        image_names = [v.imageName for v in manager.views if v.poseId not in missing_poses]
+        image_paths = [v.imagePath for v in manager.views if v.poseId not in missing_poses]
+        # Reorder lists to sort by order of image
+        inds = np.argsort(image_names)
+        image_names = [image_names[i] for i in inds]
+        image_paths = [image_paths[i] for i in inds]
+        camtoworlds = camtoworlds[inds]
+        camera_ids = [camera_ids[i] for i in inds]
+
+        # Load external configuration (self.extconf) and bounds (self.bounds that is used in the trainer)
+        self.extconf = {
+            "spiral_radius_scale": 1.0,
+            "no_factor_suffix": False,
+        }
+        self.bounds = np.array([0.01, 1.0])
+        if metadataFolder:
+            self.load_extconf(metadataFolder)
+
+        # 3D points and {image_name -> [point_idx]}
+        points = np.array([p.position for p in manager.landmarks])
+        points_rgb = np.array([p.color for p in manager.landmarks])
+
+        point_indices = {}
+        for point_id, viewIds in manager.landmarkId_to_viewId.items():
+            for viewId in viewIds:
+                view = manager.viewId_to_view.get(viewId, None)
+                if view is None:
+                    continue
+                point_indices.setdefault(view.imageName, []).append(point_id)
+        point_indices = {
+            k: np.array(v).astype(np.int32) for k, v in point_indices.items()
+        }
+
+        # Normalize the world space.
+        self.T2 = None
+        if self.normalize:
+            # T1
+            self.T1 = similarity_from_cameras(camtoworlds)
+            camtoworlds = transform_cameras(self.T1, camtoworlds)
+            points = transform_points(self.T1, points)
+            # T2
+            self.T2 = align_principle_axes(points)
+            camtoworlds = transform_cameras(self.T2, camtoworlds)
+            points = transform_points(self.T2, points)
+            # Transformation matrix
+            transform = self.T2 @ self.T1
+        else:
+            transform = np.eye(4)
+
+        self.image_names = image_names  # List[str], (num_images,)
+        self.image_paths = image_paths  # List[str], (num_images,)
+        self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
+        self.camera_ids = camera_ids  # List[int], (num_images,)
+        self.Ks_dict = Ks_dict  # Dict of camera_id -> K
+        self.imsize_dict = imsize_dict  # Dict of camera_id -> (width, height)
+        self.points = points  # np.ndarray, (num_points, 3)
+        self.points_rgb = points_rgb  # np.ndarray, (num_points, 3)
+        self.point_indices = point_indices  # Dict[str, np.ndarray], image_name -> [M,]
+        self.transform = transform  # np.ndarray, (4, 4)
+
+        self.mesh = Mesh(mesh)
+
+        self.apply_scale()
+
+        # size of the scene measured by cameras
+        camera_locations = camtoworlds[:, :3, 3]
+        scene_center = np.mean(camera_locations, axis=0)
+        dists = np.linalg.norm(camera_locations - scene_center, axis=1)
+        self.scene_scale = np.max(dists)
+
+    def save_cameras(self, path):
+        to_write = ""
+        # Intrinsics
+        to_write += "# == INTRINSICS ==\n"
+        for cam_id, Ks in self.Ks_dict.items():
+            params = []
+            to_write += f"{cam_id} : K=[" + " ".join(list(map(str, Ks.flatten()))) + "] -> params=[" + " ".join(list(map(str, params))) + "]\n"
+        # Poses
+        to_write += "\n"
+        to_write += "# == POSES ==\n"
+        for imName, cam_id, c2w in zip(self.image_names, self.camera_ids, self.camtoworlds):
+            to_write += f"# [Image {imName}] Cam={cam_id} -> c2w=[" + " ".join(list(map(str, c2w.flatten()))) + "]\n"
+        with open(path, "w") as fo:
+            fo.write(to_write)
+
+    def load_extconf(self, metadataFolder):
+        """
+        TODO : we don't provide such files atm
+        """
+        # Load extended metadata. Used by Bilarf dataset.
+        extconf_file = os.path.join(metadataFolder, "ext_metadata.json")
+        if os.path.exists(extconf_file):
+            with open(extconf_file) as f:
+                self.extconf.update(json.load(f))
+        # Load bounds if possible (only used in forward facing scenes).
+        posefile = os.path.join(metadataFolder, "poses_bounds.npy")
+        if os.path.exists(posefile):
+            self.bounds = np.load(posefile)[:, -2:]
+
+    def apply_scale(self, s_height=1, s_width=1):
+        """ Sometimes the intrinsics corresponds to 2x upsampled images so we need to use this
+
+        s_height = actual_height / colmap_height
+        s_width  = actual_width  / colmap_width
+        """
+        if s_height==1 and s_width==1:
+            return
+        for camera_id, K in self.Ks_dict.items():
+            K[1, :] *= s_height
+            K[0, :] *= s_width
+            self.Ks_dict[camera_id] = K
+            width, height = self.imsize_dict[camera_id]
+            self.imsize_dict[camera_id] = (int(width * s_width), int(height * s_height))
+        # TODO : apply scale to mesh ?
+
+
+class PoseParser(Parser):
+    def __init__(self,
+                 sfmFile: str,
+                 normalize: bool = False,
+                 masksFolder: str = None,
+                 metadataFolder: str = None):
+        self.sfmFile = sfmFile
+        # TODO : not convenient to use different poses when we have normalization that depend on dataset
+        self.normalize = False  # normalize
+
+        manager = SfmSceneManager(self.sfmFile)
+
+        self.masks_exist = masksFolder and os.path.isdir(masksFolder)
+
+        # Extract extrinsic matrices in world-to-camera format.
+        pose_ids = []
+        w2c_mats = []
+        camera_ids = []
+        imsize_dict = dict()  # width, height
+        intrinsicsDict = dict()
+
+        for poseId, pose in manager.poses.items():
+            # Cam matrix (extrinsic)
+            pose_ids.append(poseId)
+            w2c = pose.get_w2c()
+            w2c_mats.append(w2c)
+            viewId = manager.poseId_to_viewId.get(poseId, None)
+            if viewId is None:
+                camera_ids.append(None)
+                continue
+            view = manager.viewId_to_view[viewId]
+            camera_ids.append(view.intrinsicId)
+
+        for camera_id, intrinsic in manager.intrinsics_dict.items():
+            imsize_dict[camera_id] = (int(intrinsic.W), int(intrinsic.H))
+            K = intrinsic.get_K()
+            intrinsicsDict[camera_id] = K
+
+        logging.info(f"[BaseParser] {len(w2c_mats)} poses, taken by {len(set(camera_ids))} camera(s).")
+        if len(w2c_mats) <= 0:
+            raise ValueError("No usable pose !")
+
+        w2c_mats = np.stack(w2c_mats, axis=0)
+        # Convert extrinsics to camera-to-world.
+        camtoworlds = np.linalg.inv(w2c_mats)
+
+        # Create order from pose ID
+        inds = np.argsort(pose_ids)
+        # Reorder lists
+        pose_ids = [pose_ids[i] for i in inds]
+        camtoworlds = camtoworlds[inds]
+        camera_ids = [camera_ids[i] for i in inds]
+
+        # Find images linked to poses if they exist
+        image_names = []
+        image_paths = []
+        for poseId in pose_ids:
+            viewId = manager.poseId_to_viewId.get(poseId, None)
+            if viewId:
+                view = manager.viewId_to_view[viewId]
+                image_names.append(view.imageName)
+                image_paths.append(view.imagePath)
+            else:
+                image_names.append(None)
+                image_paths.append(None)
+
+        # Load external configuration (self.extconf) and bounds (self.bounds that is used in the trainer)
+        self.extconf = {
+            "spiral_radius_scale": 1.0,
+            "no_factor_suffix": False,
+        }
+        self.bounds = np.array([0.01, 1.0])
+        if metadataFolder:
+            self.load_extconf(metadataFolder)
+
+        self.pose_ids = pose_ids  # List[str], (num_poses,)
+        self.image_names = image_names  # List[str], (num_poses,)
+        self.image_paths = image_paths  # List[str], (num_poses,)
+        self.camtoworlds = camtoworlds  # np.ndarray, (num_poses, 4, 4)
+        self.camera_ids = camera_ids  # List[int], (num_images,)
+        self.Ks_dict = intrinsicsDict  # Dict of camera_id -> K
+        self.imsize_dict = imsize_dict  # Dict of camera_id -> (width, height)
+
+        self.apply_scale()
+
+
+class Dataset:
+    def __init__(
+        self,
+        parser: Parser,
+        patch_size: Optional[int] = None,
+        load_depths: bool = False,
+        pre_load_images: bool = False,
+    ):
+        self.parser = parser
+        self.patch_size = patch_size
+        self.load_depths = load_depths
+        self.indices = np.arange(len(self.parser.image_names))
+        # Load images
+        self.images = {}
+        # Pre-load images
+        if pre_load_images:
+            for index in self.indices:
+                self.get_image(index)
+        # Masks
+        if parser.masks_exist:
+            raise ValueError("Parser mask is not supported. We use alpha to store masks")
+            # self.masks = {}
+            # self.mask_paths = {index: mask_path(self.parser.image_paths[index]) for index in self.indices}
+            # # Pre-load masks
+            # if pre_load_images:
+            #     for index in self.indices:
+            #         self.get_mask(index)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def get_image(self, index) -> AvImage:
+        return AvImage(self.parser.image_paths[index], alpha=self.parser.image_alpha, open=True)
+
+    def __getitem__(self, item: int) -> Dict[str, Any]:
+        index = self.indices[item]
+
+        image = self.get_image(index)
+        pixels = image.pixels
+        camera_id = self.parser.camera_ids[index]
+        K = self.parser.Ks_dict[camera_id].copy()
+        camtoworlds = self.parser.camtoworlds[index]
+
+        if image.hasAlpha:
+            mask = image.get_alpha_mask()
+
+        image_name = self.parser.image_names[index]
+
+        if self.patch_size is not None:
+            # Random crop.
+            h, w = pixels.shape[:2]
+            x = np.random.randint(0, max(w - self.patch_size, 1))
+            y = np.random.randint(0, max(h - self.patch_size, 1))
+            pixels = pixels[y : y + self.patch_size, x : x + self.patch_size]
+            if mask is not None:
+                mask = mask[y : y + self.patch_size, x : x + self.patch_size]
+            K[0, 2] -= x
+            K[1, 2] -= y
+
+        data = {
+            "K": torch.from_numpy(K).float(),
+            "camtoworld": torch.from_numpy(camtoworlds).float(),
+            "image": torch.from_numpy(pixels).float(),
+            "image_id": item,  # the index of the image in the dataset
+            "image_name": image_name,
+        }
+        if mask is not None:
+            # Rounding up to avoid compression issues (frequent with JPG format)
+            mask = np.round(mask).astype(np.uint8)
+            data["mask"] = torch.from_numpy(mask).bool()
+
+        if self.load_depths:
+            # projected points to image plane to get depths
+            worldtocams = np.linalg.inv(camtoworlds)
+            image_name = self.parser.image_names[index]
+            point_indices = self.parser.point_indices[image_name]
+            points_world = self.parser.points[point_indices]
+            points_cam = (worldtocams[:3, :3] @ points_world.T + worldtocams[:3, 3:4]).T
+            points_proj = (K @ points_cam.T).T
+            points = points_proj[:, :2] / points_proj[:, 2:3]  # (M, 2)
+            depths = points_cam[:, 2]  # (M,)
+            # filter out points outside the image
+            selector = (
+                (points[:, 0] >= 0)
+                & (points[:, 0] < pixels.shape[1])
+                & (points[:, 1] >= 0)
+                & (points[:, 1] < pixels.shape[0])
+                & (depths > 0)
+            )
+            points = points[selector]
+            depths = depths[selector]
+            data["points"] = torch.from_numpy(points).float()
+            data["depths"] = torch.from_numpy(depths).float()
+
+        return data
+```
+
+### gsplatInterface/datasets/sfm/types.py
+```
+# -*- coding: utf-8 -*-
+
+from typing import Annotated, Literal
+import numpy as np
+import numpy.typing as npt
+
+
+# Define types for ndarray of specific shape
+# Could use np.generic instead of np.float32
+NDArray4x4 = Annotated[npt.NDArray[np.dtype[np.float32]], Literal[4, 4]]
+NDArray3x3 = Annotated[npt.NDArray[np.dtype[np.float32]], Literal[4, 4]]
+```
+
+### gsplatInterface/datasets/sfm/utils.py
+```
+# -*- coding: utf-8 -*-
+
+import numpy as np
+from numpy.linalg import inv as invert
+from scipy.spatial.transform import Rotation as R
+
+
+# HACK : need these two import statements for using pose3ToNp
+from pyalicevision import sfmData
+from pyalicevision import geometry as geo
+
+
+# No need here because the sfm file was created with CV convention
+CONVERT_FROM_CG_TO_CV = False
+
+
+class Quaternion:
+    def __init__(self, x, y, z, w):
+        self.x = x
+        self.y = y
+        self.z = z
+        self.w = w
+
+    @classmethod
+    def from_matrix(cls, matrix):
+        r = R.from_matrix(matrix)
+        # return cls(*r.as_quat(scalar_first=True))
+        return cls(*r.as_quat())
+
+
+def pose3ToNp(p):
+    return {
+        "rotation": p.rotation(),
+        "translation": p.translation(),
+        "center": p.center(),
+    }
+
+
+def poseDictToNp(p: dict):
+    transform = p.get("pose", {}).get("transform", {})
+    rotation = transform.get("rotation")
+    center = np.zeros((3, 1))
+    for i, el in enumerate(transform.get("center")):
+        center[i] = float(el)
+    
+    T = np.identity(4)
+    for i in range(4):
+        for j in range(4):
+            if i < 3 and j < 3:
+                T[i][j] = rotation[j + 3*i]
+            elif j==3 and i<3:
+                T[i][j] = center[i]
+    
+    # convert from computer graphics convention (opengl-like) to computer vision
+    if CONVERT_FROM_CG_TO_CV:
+        M = np.identity(4)
+        M[1][1] = -1.0
+        M[2][2] = -1.0
+        T2 = invert(np.matmul(np.matmul(M, T), M))
+    else:
+        T2 = invert(T)
+    
+    rotate = np.zeros((3, 3))
+    translate = np.zeros((3, 1))
+    for row_i in range(3):
+        # Rotation
+        for col_i in range(3):
+            rotate[row_i][col_i] = T2[row_i][col_i]
+        # Translation
+        translate[row_i] = T2[row_i][3]
+    
+    # r = R.from_matrix(rotate)
+    # qx, qy, qz, qw = r.as_quat()
+    
+    return {
+        "rotation": rotate,
+        "translation": translate,
+        "center": center
+    }
+```
+
+### gsplatInterface/datasets/sfm/views.py
+```
+# -*- coding: utf-8 -*-
+
+import os
+from typing import Tuple
+
+from gsplatInterface.avImage import AvImage
+from pyalicevision.sfmData import View
+
+
+class SfmView:
+    KEYS = ["intrinsicId", "poseId", "frameId", "path", "width", "height"]
+    
+    def __init__(self, viewId: int, viewDict: dict):
+        self.viewId = int(viewId)
+        assert all([key in viewDict.keys() for key in self.KEYS]), f"missing keys in dict : {viewDict}"
+        self.__view = viewDict
+        self.__image = None
+    
+    @classmethod
+    def from_pyalicevision(cls, view: Tuple[int, View]):
+        # Assert we have the correct type
+        typeErrMsg = f"Expected type Tuple[int, View], found {type(view)} : {view}"
+        assert isinstance(view, tuple), typeErrMsg
+        typeErrMsg = f"Expected type Tuple[int, View], found {type(view)}(size={len(view)}): {view}"
+        assert len(view)==2, typeErrMsg
+        viewId, view = view
+        typeErrMsg = f"Expected type Tuple[int, View], element 2 has type {type(view)}: {view}"
+        assert isinstance(view, View), typeErrMsg
+        # Get view infos
+        imageInfo = view.getImageInfo()
+        meta = {}  # TODO : read from image, seems difficult from the API -> use pyalicevision.image.readImageMetadata
+        viewDict = {
+            "intrinsicId": view.getIntrinsicId(),
+            "poseId": view.getPoseId(),
+            "frameId": view.getFrameId(),
+            "path": imageInfo.getImagePath(),
+            "width": imageInfo.getWidth(),
+            "height": imageInfo.getHeight(),
+            "metadata": meta
+        }
+        return cls(viewId, viewDict)
+    
+    def __repr__(self):
+        return f"<View {self.viewId}>"
+    
+    @property
+    def imageInfo(self):
+        return self.__view
+    
+    @property
+    def imagePath(self):
+        return self.__view.get("path")
+    
+    @property
+    def imageName(self):
+        return os.path.basename(self.__view.get("path"))
+    
+    @property
+    def intrinsicId(self):
+        return int(self.__view.get("intrinsicId"))
+    
+    @property
+    def poseId(self):
+        return int(self.__view.get("poseId"))
+    
+    @property
+    def frameId(self):
+        return int(self.__view.get("frameId"))
+    
+    @property
+    def W(self):
+        return float(self.__view.get("width"))
+    
+    @property
+    def H(self):
+        return float(self.__view.get("height"))
+    
+    @property
+    def colorSpace(self):
+        meta = self.__view.get("metadata", {})
+        colorspace = meta.get("oiio:ColorSpace", None)
+        return colorspace
+    
+    def close_image(self):
+        del self.__image.pixels  # Is it necessary to free memory ?
+        self.__image = None
+    
+    def open_image(self):
+        if self.__image is None:
+            self.__image = AvImage(self.imagePath, open=True)
+        return self.__image.pixels
+```

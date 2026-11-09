@@ -3,147 +3,160 @@
 Also called: Color Clamping, Exposure and Gamma Correction, Final image processing, Gamma Correction & PPM Output, PPM Writer, Tone Mapping, tonemap
 
 ## Overview
-Tonemapping and Gamma Correction is a screen-space post-processing stage that converts high-dynamic-range (HDR) linear radiance values into a displayable low-dynamic-range (LDR) image. It solves the problem of HDR data exceeding the luminance range of standard displays by compressing the dynamic range via exposure and tonemapping, correcting shadow artifacts via black-point offsets, and encoding the result into a gamma-corrected color space (typically sRGB) for correct rendering on non-linear displays. It differs from its sibling [ACES Filmic Tone Mapping](4228-aces-filmic-tone-mapping.md) by using a simpler exponential compression function and explicit channel-wise black-point correction rather than a perceptual curve.
+Tonemapping and Gamma Correction converts high-dynamic-range (HDR) radiance values into low-dynamic-range (LDR) pixel values suitable for display on standard monitors [S1, S3][S4, unofficial]. It solves the problem of HDR data exceeding the [0, 1] or [0, 255] range of output devices by compressing luminance while preserving perceptual contrast [S1]. Unlike the ACES Filmic Tone Mapping sibling, which uses a complex cinematic curve, this method typically employs a simple Reinhard operator combined with exposure scaling and gamma encoding [S1][S4, unofficial].
 
 ## How it works
-The method processes a linear HDR color buffer through a sequence of exposure, tonemapping, black-point correction, chroma preservation, and gamma encoding.
+The method processes the HDR fragment color $I_F$ (or $E$) through exposure adjustment, non-linear compression, and gamma encoding. Some implementations include additional post-processing steps for chroma preservation and black-point correction to address artifacts introduced by gamma lifting and exponential compression [S4, S6, unofficial].
 
-**Inputs and Outputs:**
-- Input: A texture containing linear RGB radiance values $C_{in}$, typically in `GL_RGBA32F` format.
-- Output: A texture containing sRGB-encoded RGB values, typically in `GL_RGBA8` or similar LDR format.
+### Inputs and Outputs
+*   **Input:** HDR pixel color $C_{in}$ (typically `vec3` in [0, $\infty$)), exposure value $EV$ (scalar), and optionally samples per pixel $S$ [S1][S2, unofficial].
+*   **Output:** LDR pixel color $C_{out}$ (typically `vec3` in [0, 1] or [0, 255]) [S1][S2, unofficial].
 
-**Data Structures:**
-- `color`: A 2D texture bound to image unit 0 with `GL_READ_WRITE` access.
-- Uniforms:
-  - `resolution`: `vec2` containing the width and height of the texture.
-  - `exposure`: `float` controlling the intensity of the tonemapping compression.
-  - `gamma`: `float` controlling the gamma correction exponent (typically 2.2).
+### Data Structures
+*   **HDR Color:** Floating-point vector (e.g., `vec3` or `float3`). Format is often `GL_RGBA32F` in GPU implementations [S5, unofficial].
+*   **Exposure Value:** Scalar float. Represents the exposure time $\Delta t = 2^{EV}$ [S1].
 
-**Parameters:**
-- Exposure constant $E$: Typically 1.35 [S3, unofficial].
-- Black point offset vector $B$: $\vec{b} = (0.0175, 0.0160, 0.0060)$ for (R, G, B) channels [S5, unofficial]. Note: Another variant uses $(0.006, 0.008, 0.007)$ [S3, unofficial].
-- Chroma mix factor $\alpha$: 1.32 [S3, unofficial].
-- Luminance weights: $\vec{w} = (0.2126, 0.7152, 0.0722)$ [S3, unofficial].
-- Gamma exponent $\gamma$: 2.2 [S1, S3, S5, unofficial].
-- Sample count $S$: Used for variance reduction in some implementations [S1, unofficial].
+### Steps
 
-**Steps:**
-1. **Exposure and Tonemapping:** Apply an exponential tonemapping operator to compress the HDR range. The formula is:
-   $$ C_{tonemapped} = 1 - \exp(-E \cdot C_{in}) $$
-   where $E$ is the exposure constant [S2][S3, unofficial].
-   
-2. **Black Point Correction (Channel-wise):** Subtract a channel-specific black point to prevent gamma lifting from revealing haze in deep shadows. This is critical because gamma correction $x^{1/\gamma}$ lifts near-black values significantly [S5, unofficial].
-   $$ C_{black} = \max(C_{tonemapped} - B, \vec{0}) $$
-   Using $B = (0.0175, 0.0160, 0.0060)$ [S5, unofficial]. Alternatively, $B = (0.006, 0.008, 0.007)$ [S3, unofficial].
+1.  **Exposure Scaling:** Scale the HDR pixel value $E$ by $2^{EV}$ to simulate camera exposure [S1].
+    $$ E' = 2^{EV} E $$
+    *Note: Some implementations use a fixed exposure constant instead of $EV$. For example, [S4, unofficial] uses `col = 1 - exp(-col * 1.35)`.*
 
-3. **Chroma Preservation (Desaturation Correction):** Exponential tonemapping desaturates bright colors by compressing the dominant channel hardest. Restore saturation by mixing the original color with a luminance-only version.
-   - Calculate luminance: $L = \text{dot}(C_{black}, \vec{w})$.
-   - Mix: $C_{chroma} = \text{clamp}(\text{mix}(\vec{L}, C_{black}, \alpha), \vec{0}, \vec{1})$, where $\vec{L} = (L, L, L)$ and $\alpha = 1.32$ [S3, unofficial].
+2.  **Tone Mapping (Reinhard):** Apply the Reinhard operator to compress the dynamic range [S1].
+    $$ C_{tm} = \frac{E'}{E' + 1} $$
+    *Alternative: [S3] uses $I_F = 1 - \exp(-E \cdot I_F)$.*
 
-4. **Gamma Correction:** Convert linear values to gamma-corrected space for display.
-   $$ C_{out} = C_{chroma}^{1/\gamma} $$
-   where $\gamma = 2.2$ [S1, S3, S5, unofficial].
+3.  **Gamma Correction:** Raise the tone-mapped result to the power of $1/\gamma$, where $\gamma = 2.2$ is standard for sRGB [S1][S4, unofficial].
+    $$ C_{gamma} = C_{tm}^{\frac{1}{2.2}} $$
+    *Note: Gamma lifting near-black values can cause visible haze in shadows [S6, unofficial].*
 
-5. **Clamping and Scaling (Optional/Variant):** In some implementations (e.g., PPM output), the result is clamped to $[0, 0.999]$, scaled by 255, and cast to integer [S1, unofficial].
+4.  **Optional: Black Point Correction:** Subtract channel-specific black points to restore deep shadows and correct color purity [S6, unofficial].
+    $$ C_{bp} = \max(C_{gamma} - \mathbf{b}, \mathbf{0}) $$
+    Where $\mathbf{b} = (0.0175, 0.0160, 0.0060)$ for Red, Green, Blue respectively [S6, unofficial].
 
-**Pseudocode:**
+5.  **Optional: Chroma Preservation:** Mix the original color with a luminance-only version to restore saturation lost during exponential tonemapping [S4, unofficial].
+    $$ L = \text{dot}(C_{gamma}, (0.2126, 0.7152, 0.0722)) $$
+    $$ C_{final} = \text{clamp}(\text{mix}((L, L, L), C_{gamma}, 1.32), 0.0, 1.0) $$
+
+6.  **Optional: Explicit Tone Mapping (Learnable):** If using a differentiable module, apply white balance and a parameterized Camera Response Function (CRF) [S8].
+    *   Apply white balance: $I_w = C_{in} \odot \theta_w$, where $\theta_w = [w_r, w_g, w_b]^T$ [S8].
+    *   Apply CRF $g$: Interpolate using 256 control points in [0, 1] with leaky thresholding for saturation regions [S8].
+
+### Pseudocode
+The following pseudocode implements the standard Reinhard tone mapping with exposure and gamma correction, including optional black point and chroma preservation steps found in [S4, S6, unofficial].
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Input: color_texture (2D array of vec3, linear HDR)
-# Uniforms: exposure (float), gamma (float)
-# Constants: black_point (vec3), chroma_mix (float), lum_weights (vec3)
+import math
 
-def tonemap_and_gamma(color_texture, exposure, gamma, black_point, chroma_mix, lum_weights):
-    width, height = color_texture.shape[:2]
-    output = np.zeros_like(color_texture)
+def tonemap_and_gamma(hdr_color, exposure_ev=0.0, apply_black_point=False, apply_chroma_preservation=False):
+    """
+    Converts HDR color to LDR using Reinhard tone mapping and gamma correction.
     
-    for y in range(height):
-        for x in range(width):
-            c_in = color_texture[y, x]
-            
-            # 1. Exposure and Tonemapping
-            # Formula: 1 - exp(-E * C_in)
-            c_tone = 1.0 - np.exp(-exposure * c_in)
-            
-            # 2. Black Point Correction
-            # Formula: max(C - B, 0)
-            c_black = np.maximum(c_tone - black_point, 0.0)
-            
-            # 3. Chroma Preservation
-            # Calculate luminance
-            lum = np.dot(c_black, lum_weights)
-            # Mix original with luminance-only version
-            # mix(vec3(lum), c_black, alpha) -> c_black * alpha + vec3(lum) * (1 - alpha) ?
-            # Note: GLSL mix(a, b, t) is a*(1-t) + b*t. 
-            # The source code says: mix(vec3(lum), col, 1.32). 
-            # This implies: vec3(lum) * (1 - 1.32) + col * 1.32.
-            # Since 1-1.32 is negative, this boosts the original color relative to the luminance.
-            c_chroma = np.clip(
-                c_black * chroma_mix + np.array([lum, lum, lum]) * (1.0 - chroma_mix),
-                0.0, 1.0
-            )
-            
-            # 4. Gamma Correction
-            # Formula: C ^ (1/gamma)
-            c_out = np.power(c_chroma, 1.0 / gamma)
-            
-            output[y, x] = c_out
-            
-    return output
+    Args:
+        hdr_color: tuple or list of 3 floats (R, G, B) in HDR range [0, inf).
+        exposure_ev: float, exposure value EV. Exposure time delta_t = 2^EV.
+        apply_black_point: bool, whether to apply channel-wise black point correction.
+        apply_chroma_preservation: bool, whether to apply chroma preservation mix.
+        
+    Returns:
+        tuple of 3 floats (R, G, B) in range [0, 1].
+    """
+    # 1. Exposure Scaling
+    # delta_t = 2^EV
+    exposure_factor = math.pow(2, exposure_ev)
+    r, g, b = hdr_color
+    r_scaled = r * exposure_factor
+    g_scaled = g * exposure_factor
+    b_scaled = b * exposure_factor
+    
+    # 2. Reinhard Tone Mapping
+    # C_tm = E' / (E' + 1)
+    r_tm = r_scaled / (r_scaled + 1.0)
+    g_tm = g_scaled / (g_scaled + 1.0)
+    b_tm = b_scaled / (b_scaled + 1.0)
+    
+    # 3. Gamma Correction
+    # C_gamma = C_tm ^ (1/2.2)
+    gamma = 1.0 / 2.2
+    r_gamma = math.pow(r_tm, gamma)
+    g_gamma = math.pow(g_tm, gamma)
+    b_gamma = math.pow(b_tm, gamma)
+    
+    # 4. Optional: Black Point Correction
+    # Subtract vec3(0.0175, 0.0160, 0.0060) and clamp to 0
+    if apply_black_point:
+        r_bp = max(r_gamma - 0.0175, 0.0)
+        g_bp = max(g_gamma - 0.0160, 0.0)
+        b_bp = max(b_gamma - 0.0060, 0.0)
+        r_gamma, g_gamma, b_gamma = r_bp, g_bp, b_bp
+        
+    # 5. Optional: Chroma Preservation
+    # Mix with luminance version weighted by 1.32
+    if apply_chroma_preservation:
+        # Luminance weights from [S4, unofficial]
+        lum = 0.2126 * r_gamma + 0.7152 * g_gamma + 0.0722 * b_gamma
+        mix_factor = 1.32
+        r_final = min(max(lum * (1.0 - mix_factor) + r_gamma * mix_factor, 0.0), 1.0)
+        g_final = min(max(lum * (1.0 - mix_factor) + g_gamma * mix_factor, 0.0), 1.0)
+        b_final = min(max(lum * (1.0 - mix_factor) + b_gamma * mix_factor, 0.0), 1.0)
+        return (r_final, g_final, b_final)
+    
+    # 6. Clamp to [0, 1]
+    r_final = min(max(r_gamma, 0.0), 1.0)
+    g_final = min(max(g_gamma, 0.0), 1.0)
+    b_final = min(max(b_gamma, 0.0), 1.0)
+    
+    return (r_final, g_final, b_final)
 ```
 
-**Edge Cases and Pitfalls:**
-- **Gamma Lifting Haze:** Without black point correction, linear values near zero (e.g., 0.001) are lifted to visible levels (e.g., ~0.05) by the $x^{1/2.2}$ curve, causing "haze" in shadows [S5, unofficial].
-- **Desaturation:** Bright colors lose saturation after exponential tonemapping. The chroma preservation step is essential to maintain vividness [S3, unofficial].
-- **Precision:** Use floating-point textures (`GL_RGBA32F`) for intermediate steps to avoid banding and precision loss before final quantization [S4, unofficial].
-- **Black Point Selection:** The black point vector must be tuned to the specific scene's shadow depth. Incorrect values can crush shadows or leave them too bright [S5, unofficial].
+### Parameters
+*   **Exposure Value ($EV$):** Scalar controlling exposure level. $\Delta t = 2^{EV}$ [S1]. Typical values depend on scene brightness; for synthetic scenes, values around 0-2 are common [S1].
+*   **Gamma ($\gamma$):** Typically 2.2 for sRGB [S1][S4, unofficial].
+*   **Black Point Vector:** $\mathbf{b} = (0.0175, 0.0160, 0.0060)$ for RGB [S6, unofficial].
+*   **Chroma Mix Factor:** 1.32 [S4, unofficial].
+*   **White Balance Parameters ($\theta_w$):** $[w_r, w_g, w_b]^T \in \mathbb{R}^3$, regularized to be positive [S8].
+*   **CRF Control Points:** 256 points for piece-wise linear approximation [S8].
+
+### Edge Cases and Pitfalls
+*   **Gamma Lifting:** Raising near-zero values to $1/2.2$ lifts them significantly, causing visible haze in shadows [S6, unofficial]. Black point correction is required to mitigate this [S6, unofficial].
+*   **Desaturation:** Exponential tonemapping desaturates bright colors, particularly the dominant channel [S4, unofficial]. Chroma preservation is needed to restore vividness [S4, unofficial].
+*   **Clamping:** Values must be clamped to [0, 1] after tone mapping and gamma correction to prevent overflow in LDR displays [S2, S4, unofficial].
+*   **Saturation in Training:** In differentiable rendering, saturation regions (values > 1 or < 0) can act as outliers. Leaky thresholding is used to propagate gradients through saturation regions [S8].
 
 ## Subtopics
 
 ### Channel-wise Black Point Correction
-A post-processing step to correct color purity in shadows. Gamma lifting ($pow(col, 1/2.2)$) lifts near-black values, causing visible haze. This step subtracts a channel-specific black point to restore deep shadows.
-- **Parameter:** Black point subtraction vector: `vec3(0.0175, 0.0160, 0.0060)` for Red, Green, Blue channels respectively [S5, unofficial].
-- **Code:** `col = max(col - vec3(0.0175, 0.0160, 0.0060), vec3(0.0));` [S5, unofficial].
-- **Comparison:** Without this, the render carries roughly three times too much green compared to the reference, resulting in washed-out teal instead of deep blue-violet water [S5, unofficial].
+A post-processing step to correct color purity in shadows by subtracting a channel-specific black point vector (R: 0.0175, G: 0.0160, B: 0.0060) [S6, unofficial]. It addresses the issue where gamma lifting causes near-black values to appear as visible haze, resulting in washed-out colors (e.g., teal instead of deep blue-violet) [S6, unofficial].
 
 ### Chroma-Preserving Tonemapping
-A post-processing step applied after tonemapping to restore saturation to bright colors that were desaturated by exponential tonemapping. It mixes the original color with a luminance-only version, weighted to preserve chroma.
-- **Parameter:** Chroma mix factor: The weight applied to the original color `col` in the mix function. Value: 1.32 [S3, unofficial].
-- **Code:** 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```glsl
-float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
-col = clamp(mix(vec3(lum), col, 1.32), 0.0, 1.0);
-```
-[S3, unofficial].
+A post-processing step applied after tonemapping to restore saturation to bright colors desaturated by exponential compression [S4, unofficial]. It mixes the original color with a luminance-only version using a weight of 1.32 [S4, unofficial].
 
 ### Final Fabric Enhancement
-A postprocessing step that scales the red and green color channels by the original color intensities to create a more fabric-like impression, avoiding the misunderstanding of rotating ribbons.
-- **Step:** 1. Apply postprocessing filters (contrast enhancement, sharpening). 2. Apply image-space bump mapping. 3. Apply the final fabric enhancement equations (Eq 15) to the Red and Green channels using the bump-mapped lighting intensity $\mathcal{B}_{x,y}$ [S6, book].
-- **Formula:** 
-  $$ R(x,y) = \mathcal{B}_{x,y}(R(x,y)G(x,y) + R^2(x,y)) + e_{x,y} + \text{light}(\mathcal{L}_{x,y}) $$
-  $$ G(x,y) = \mathcal{B}_{x,y}(R(x,y)G(x,y) + G^2(x,y)) + e_{x,y} + \text{light}(\mathcal{L}_{x,y}) $$
-  Here $\mathcal{B}_{x,y}$ is the bump-mapped Phong intensity [S6, book].
+A post-processing step for vector field visualization that scales Red and Green channels by original intensities to create a fabric-like impression [S7, book]. It uses bump-mapped Phong intensity $\mathcal{B}_{x,y}$ and equations: $R(x,y) = \mathcal{B}_{x,y}(R(x,y)G(x,y) + R^2(x,y)) + e_{x,y} + \text{light}(\mathcal{L}_{x,y})$ and similarly for Green [S7, book].
+
+### Explicit Tone Mapping
+A differentiable module converting HDR to LDR using white balance and a parameterized Camera Response Function (CRF) [S8]. It uses 256 control points for the CRF and leaky thresholding for saturation regions to enable gradient propagation during training [S8].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of pixels in the output image. The operations are per-pixel and independent, allowing for efficient parallelization on GPUs via compute shaders or fragment shaders [S4, unofficial].
-- **Memory Complexity:** $O(N)$ for the input and output textures. Intermediate calculations are done in registers or local memory.
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Linearly scalable with resolution. The compute shader dispatch size is directly tied to `resolution.x` and `resolution.y` [S4, unofficial].
-- **Strengths:** Simple to implement; effective at preventing shadow haze and color desaturation; computationally inexpensive.
-- **Limitations:** The exponential tonemapping is less perceptually accurate than filmic curves (like ACES) for very high dynamic ranges [S2][S3, unofficial]. The black point correction requires manual tuning for different scenes [S5, unofficial].
-- **When to use:** When a simple, fast tonemapping solution is sufficient, and shadow clarity/color purity are priorities. Suitable for real-time applications or when the HDR range is moderate.
-- **When not to use:** When high-fidelity cinematic color grading is required, in which case [ACES Filmic Tone Mapping](4228-aces-filmic-tone-mapping.md) is preferred.
+*   **Time Complexity:** $O(1)$ per pixel for standard Reinhard tone mapping [S1]. The explicit tone mapping with 256 control points involves interpolation, which is also effectively $O(1)$ per pixel but with a higher constant factor [S8].
+*   **Memory Complexity:** $O(1)$ per pixel for standard methods. Explicit tone mapping requires storing 256 control points per channel if learned [S8].
+*   **Performance:** The standard Reinhard method is extremely fast and suitable for real-time rendering [S1]. GPU implementations use compute shaders dispatched at resolution size [S5, unofficial].
+*   **Strengths:** Simple, fast, and effective for converting HDR to LDR [S1]. Exposure control allows for flexible scene brightness adjustment [S1].
+*   **Limitations:** Can cause shadow haze without black point correction [S6, unofficial]. Can desaturate bright colors without chroma preservation [S4, unofficial]. The Reinhard operator may not preserve perceptual contrast as well as more complex curves like ACES [S1].
+*   **When to use:** When a simple, fast tone mapping is sufficient for visualization or evaluation [S1]. When working with HDR-NeRF or similar radiance fields [S1, S8].
+*   **When not to use:** When high-fidelity cinematic color grading is required (use ACES Filmic instead) [S1]. When shadow detail is critical and gamma lifting artifacts are unacceptable without additional processing [S6, unofficial].
 
 ## Background
-The method originates from practical implementations in real-time volume rendering and visualization. The exponential tonemapping formula $1 - \exp(-E \cdot I_F)$ is attributed to [S2] for handling high dynamic range in natural participating media. The specific combination of exposure, black point correction, and chroma preservation was detailed in unofficial implementations for Manim GLSL shaders [S3, S5, unofficial]. The fabric enhancement variant comes from a book chapter on tensor field visualization [S6, book]. The implementation details regarding OpenGL compute shaders and texture binding are from an unofficial OpenGL-based volume renderer [S4, unofficial].
+The method originates from classical tone mapping techniques, specifically the Reinhard operator [S1][S4, unofficial]. It is widely used in neural radiance field (NeRF) research to generate LDR ground truth views from HDR renders for evaluation [S1]. The explicit tone mapping variant was introduced in HDR-Plenoxels to enable differentiable tone mapping for radiance field optimization [S8]. The chroma preservation and black point correction steps were developed in the context of Manim-based visualizations to correct artifacts from gamma lifting and exponential compression [S4, S6, unofficial].
 
 ## Sources
-[S1] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)
-[S2] Real-time spectral scattering in large-scale natural participating media, https://doi.org/10.1145/1925059.1925074, fetched 2026-10-28
-[S3] el-bakkali/manim-glsl-butterflies, https://github.com/el-bakkali/manim-glsl-butterflies, fetched 2026-10-26 (unofficial)
-[S4] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)
-[S5] el-bakkali/manim-glsl-jellyfish, https://github.com/el-bakkali/manim-glsl-jellyfish, fetched 2026-10-26 (unofficial)
-[S6] Fabric-Like Visualization of Tensor Field Data on Arbitrary Surfaces in Image Space, https://doi.org/10.1007/978-3-642-27343-8_4, fetched 2026-10-27 (book)
+[S1] HDR-NeRF: High Dynamic Range Neural Radiance Fields, https://xhuangcv.github.io/hdr-nerf/, fetched 2026-10-27
+[S2] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)
+[S3] Real-time spectral scattering in large-scale natural participating media, https://doi.org/10.1145/1925059.1925074, fetched 2026-10-28
+[S4] el-bakkali/manim-glsl-butterflies, https://github.com/el-bakkali/manim-glsl-butterflies, fetched 2026-10-26 (unofficial)
+[S5] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)
+[S6] el-bakkali/manim-glsl-jellyfish, https://github.com/el-bakkali/manim-glsl-jellyfish, fetched 2026-10-26 (unofficial)
+[S7] Fabric-Like Visualization of Tensor Field Data on Arbitrary Surfaces in Image Space, https://doi.org/10.1007/978-3-642-27343-8_4, fetched 2026-10-27 (book)
+[S8] HDR-Plenoxels: Self-Calibrating High Dynamic Range Radiance Fields, https://doi.org/10.1007/978-3-031-19824-3_23, fetched 2026-10-26

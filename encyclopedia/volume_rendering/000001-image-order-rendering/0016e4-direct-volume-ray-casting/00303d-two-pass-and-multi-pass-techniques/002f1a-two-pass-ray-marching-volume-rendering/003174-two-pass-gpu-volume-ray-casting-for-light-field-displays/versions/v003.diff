@@ -1,0 +1,97 @@
+--- v002.md
++++ v003.md
+@@ -18,14 +18,14 @@
+ 
+ ### Data Structures
+-*   **3D Texture:** Stores the entire volumetric dataset. Trilinear texture filtering is used for resampling during ray-casting [S1].
++*   **3D Texture:** Stores the entire volumetric dataset [S1]. Trilinear texture filtering is used for resampling during ray-casting [S1].
+ *   **Frame Buffer Object (FBO):** Used to render per-projector views off-screen during Pass 1 [S1, S2].
+-*   **Lookup Tables (LUTs):** Precomputed textures stored in GPU memory. These contain per-pixel data used to warp geometry and modify colors in Pass 2 [S1, S2].
+-*   **Octree (Optional):** For very large datasets, the volume is decomposed into small cubical bricks organized into an octree structure maintained out-of-core. Leaves contain original data; inner nodes store filtered representations, value ranges, and optionally precomputed gradients [S2].
++*   **Lookup Tables (LUTs):** Precomputed textures stored in GPU memory [S1, S2]. These contain per-pixel data used to warp geometry and modify colors in Pass 2 [S1, S2].
++*   **Octree (Optional):** For very large datasets, the volume is decomposed into small cubical bricks organized into an octree structure maintained out-of-core [S2]. Leaves contain original data; inner nodes store filtered representations, value ranges, and optionally precomputed gradients [S2].
+ 
+ ### Steps
+ 
+-**Pass 1: Per-Projector Volume Ray Casting**
++**Pass 1: Per-Projector Volume Ray Casting** [S1, S2]
+ 1.  **Initialize:** For each projector in the light field display array:
+-    a. Allocate and bind an FBO texture matching the projector's resolution.
++    a. Allocate and bind an FBO texture matching the projector's resolution [S1, S2].
+     b. Set the view and projection matrices based on the idealized light field geometry model for this projector [S1, S2].
+ 2.  **Render Proxy Geometry:** Render a proxy geometry (typically the volume’s bounding box) whose projection on the image plane covers all pixels emitting rays passing through the volume [S1].
+@@ -38,7 +38,7 @@
+ 4.  **Store Result:** Write the final composited color and opacity to the FBO texture for this projector [S1, S2].
+ 
+-**Pass 2: 2D Warping and Distortion Correction**
++**Pass 2: 2D Warping and Distortion Correction** [S1, S2]
+ 1.  **Initialize:** For each projector view:
+-    a. Bind the FBO texture generated in Pass 1 as a source texture.
++    a. Bind the FBO texture generated in Pass 1 as a source texture [S1, S2].
+     b. Set up a full-screen quad or equivalent geometry to cover the output display area [S1, S2].
+ 2.  **Warping Fragment Shader:** For each output pixel:
+@@ -73,12 +73,10 @@
+ 
+ # Fragment shader logic for Pass 1 (executed per pixel)
+-def fragment_shader_pass1(pixel_coord, ray_origin, ray_direction, volume_texture):
++def fragment_shader_pass1(ray_origin, ray_direction, volume_texture):
+     accumulated_color = vec3(0.0)
+     accumulated_opacity = 0.0
+     t = 0.0
+-    max_steps = 1000  # Not given in the sources [G]
+-    for _ in range(max_steps):
+-        if accumulated_opacity >= 1.0:
+-            break
++    step = compute_step_size(ray_direction, volume_texture)  # Standard step calculation [G]
++    while t < volume_texture.max_extent and accumulated_opacity < 1.0:
+         sample_pos = ray_origin + t * ray_direction
+         sample_value = texture_trilinear(volume_texture, sample_pos)
+@@ -87,13 +85,13 @@
+         accumulated_color += color * alpha
+         accumulated_opacity += alpha
+-        t += compute_step_size(volume_texture, ray_direction)
++        t += step
+     return accumulated_color
+ 
+ # Fragment shader logic for Pass 2 (executed per output pixel)
+ def fragment_shader_pass2(output_pixel_coord, source_texture, lut_texture):
+-    source_uv = lookup_table_sample(lut_texture, output_pixel_coord, "warp")
+-    color_correction = lookup_table_sample(lut_texture, output_pixel_coord, "color")
++    source_uv = lookup_table_sample(lut_texture, output_pixel_coord, channel="warp")
++    color_correction = lookup_table_sample(lut_texture, output_pixel_coord, channel="color")
+     raw_color = texture_bilinear(source_texture, source_uv)
+-    corrected_color = apply_color_correction(raw_color, color_correction)
++    corrected_color = raw_color * color_correction
+     return corrected_color
+ 
+@@ -108,8 +106,7 @@
+ def texture_trilinear(tex, pos): return tex.sample(pos, filter="trilinear")  # Resamples volume
+ def apply_transfer_function(val): return val.color, val.opacity  # Applies optical model [G]
+-def compute_step_size(tex, dir): return tex.resolution / max(abs(dir))  # Standard step calculation [G]
++def compute_step_size(dir, tex): return tex.resolution / max(abs(dir))  # Standard step calculation [G]
+ def lookup_table_sample(lut, uv, channel): return lut.sample(uv, channel=channel)  # Reads LUT data
+ def texture_bilinear(tex, uv): return tex.sample(uv, filter="bilinear")  # Samples Pass 1 result
+-def apply_color_correction(raw, correction): return raw * correction  # Applies color LUT
+ ```
+ 
+@@ -120,14 +117,14 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Large Datasets:** Standard 3D textures may not fit in GPU memory. The method supports an adaptive technique using an octree decomposition into cubical bricks maintained out-of-core [S2].
++*   **Large Datasets:** Standard 3D textures may not fit in GPU memory [S2]. The method supports an adaptive technique using an octree decomposition into cubical bricks maintained out-of-core [S2].
+ *   **Non-linear Distortions:** Small non-linear view and color distortions are common in multi-projector setups and must be corrected in Pass 2 [S1, S2].
+ *   **Full Opacity:** The ray marching loop terminates early if full opacity is reached, which is a standard optimization but must be handled correctly to avoid artifacts [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources. Additional memory for FBOs and LUTs is proportional to the display resolution. For large datasets, the octree structure adds overhead but allows out-of-core processing [S2].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Strengths:** Enables real-time volume rendering on light field displays [S1]; separates 3D ray-casting from 2D distortion correction [S1, S2]; handles large datasets via octree decomposition [S2].
+-*   **Limitations:** Requires precomputed LUTs for distortion correction; assumes idealized light field geometry in Pass 1; non-linear distortions must be small enough to be corrected by 2D warping [S1, S2].
++*   **Time Complexity:** Not given in the sources [S1, S2].
++*   **Memory Complexity:** Not given in the sources [S1, S2]. Additional memory for FBOs and LUTs is proportional to the display resolution [G]. For large datasets, the octree structure adds overhead but allows out-of-core processing [S2].
++*   **Measured Performance:** Not given in the sources [S1, S2].
++*   **Strengths:** Enables real-time volume rendering on light field displays [S1]. Separates 3D ray-casting from 2D distortion correction [S1, S2]. Handles large datasets via octree decomposition [S2].
++*   **Limitations:** Requires precomputed LUTs for distortion correction. Assumes idealized light field geometry in Pass 1. Non-linear distortions must be small enough to be corrected by 2D warping [S1, S2].
+ *   **When to Use:** When rendering volumetric data on multi-projector light field displays with multiple viewers [G].
+ *   **When Not to Use:** When high-precision geometric alignment is not required or when the display is not a light field type [G].

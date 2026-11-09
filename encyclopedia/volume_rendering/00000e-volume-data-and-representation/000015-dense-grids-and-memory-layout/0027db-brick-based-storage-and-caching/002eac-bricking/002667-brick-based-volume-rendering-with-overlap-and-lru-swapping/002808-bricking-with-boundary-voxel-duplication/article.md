@@ -3,49 +3,42 @@
 Also called: Boundary layer correction, Clipping with pre-integrated volume rendering, Texture Bricking, Volume Boundary Replication
 
 ## Overview
-Bricking with Boundary Voxel Duplication is a technique used in brick-based volume rendering to prevent interpolation artifacts and data loss at the boundaries between adjacent 3D texture bricks. It solves the problem where standard texture sampling fails to correctly interpolate values across shared brick edges, resulting in visual discontinuities or "black strips" in the composited image. Unlike sibling methods that may rely on complex multi-level interpolation logic or 2D texture tiling, this method ensures geometric consistency by explicitly duplicating a plane of voxels at each brick boundary, allowing hardware texture units to perform correct trilinear interpolation across the shared plane.
+Bricking with Boundary Voxel Duplication is a technique used in brick-based volume rendering to prevent interpolation artifacts and data loss at the boundaries between adjacent 3D texture bricks [S1, S2, unofficial]. It solves the problem where standard texture sampling fails to correctly interpolate values across shared brick edges, resulting in visual discontinuities or "black strips" in the composited image [S1, S2, unofficial]. Unlike sibling methods that may rely on complex multi-level interpolation logic or 2D texture tiling, this method ensures geometric consistency by explicitly duplicating a plane of voxels at each brick boundary, allowing hardware texture units to perform correct trilinear interpolation across the shared plane [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A dense 3D scalar field (volume data) and a partitioning scheme dividing the volume into $N$ subvolumes (bricks).
-*   **Output:** A set of 3D texture objects, one for each brick, ready for GPU upload.
+*   **Input:** A dense 3D scalar field (volume data) partitioned into subvolumes (bricks) [S1, S2, unofficial].
+*   **Output:** A set of 3D texture objects, one per brick, with duplicated boundary planes [S1, S2, unofficial].
 
 **Data Structures:**
-Each brick is stored as a 3D texture array or a 3D texture object. The layout differs from the original volume grid to accommodate overlap.
-*   Let the original volume have dimensions $W \times H \times D$.
-*   Let the bricks be partitioned along one or more axes. Consider a partition along the $z$-axis for simplicity.
-*   Original layers: $0$ to $D-1$.
-*   Partition point: Layer $k$ is the boundary between Brick $i$ and Brick $i+1$.
-*   **Brick $i$ Layout:** Contains layers $0$ to $k$. The size is $W \times H \times (k+1)$.
-*   **Brick $i+1$ Layout:** Contains layers $k$ to $D-1$. Crucially, layer $k$ is **duplicated**. The size is $W \times H \times (D-k+1)$.
-*   The voxel at index $k$ in Brick $i$ and the voxel at index $0$ (relative to the brick's start) in Brick $i+1$ hold identical data.
+*   Neighboring bricks share a common plane of voxels at their boundary to enable consistent trilinear interpolation [S1, unofficial].
+*   Consider a partition along one axis (e.g., $z$-axis) for simplicity [S2, unofficial].
+*   If the original volume spans layers $1$ to $n$, and a cut occurs at layer $k$, Subvolume $1$ includes layers $1$ to $k$, and Subvolume $2$ includes layers $k$ to $n$ [S2, unofficial].
+*   Layer $k$ is explicitly replicated in Subvolume $2$ [S2, unofficial].
+*   The voxel at the boundary index in one brick and the corresponding index in the adjacent brick hold identical data [S1, unofficial].
 
 **Numbered Steps:**
-1.  **Partition the Volume:** Divide the input volume grid into subvolumes (bricks) according to the memory management strategy (e.g., LRU swapping). Identify the boundary planes where bricks meet.
-2.  **Identify Boundary Voxels:** For each brick, determine which faces are internal (shared with another brick) and which are external (volume boundary).
-3.  **Duplicate Boundary Voxels:**
-    *   For every internal boundary plane shared between two adjacent bricks, replicate the plane of voxels into both neighboring bricks.
-    *   Specifically, if Brick A ends at layer $k$ and Brick B starts at layer $k$, Brick A includes layer $k$, and Brick B also includes a copy of layer $k$ as its first layer.
-    *   This ensures that the texture coordinate $1.0$ (or $0.0$ depending on normalization) on one brick maps to the same physical location as $0.0$ (or $1.0$) on the neighbor.
-4.  **Construct Textures:** Upload the modified brick data to GPU memory as 3D textures.
-5.  **Render:** During ray casting, when a ray crosses a brick boundary, the texture unit samples the new brick. Because the boundary voxel is duplicated, trilinear interpolation across the brick edge yields the same result as if the entire volume were a single continuous texture.
+1.  **Partition the Volume:** Divide the input volume grid into subvolumes (bricks) according to the memory management strategy (e.g., LRU swapping) [S2, unofficial].
+2.  **Identify Boundary Planes:** Determine the cut planes where adjacent bricks meet [S2, unofficial].
+3.  **Duplicate Boundary Voxels:** Replicate one layer of the boundary grid at each subvolume cut [S2, unofficial]. Specifically, if Brick $A$ ends at layer $k$ and Brick $B$ starts at layer $k$, both bricks store a copy of layer $k$ [S2, unofficial].
+4.  **Construct Textures:** Upload the modified brick data to GPU memory as 3D textures [G].
+5.  **Render:** During ray casting, when a ray crosses a brick boundary, the texture unit samples the new brick. Because the boundary voxel is duplicated, trilinear interpolation across the brick edge yields consistent results [S1, unofficial].
 
 **Formulas:**
-Let $V(x, y, z)$ be the original volume.
-Let $B_i$ be the texture data for brick $i$.
-If brick $i$ covers $z \in [z_{start}, z_{end}]$ and brick $j$ covers $z \in [z_{end}, z_{end}']$, then:
-$$ B_i(x, y, z_{end}) = V(x, y, z_{end}) $$
-$$ B_j(x, y, z_{start}) = V(x, y, z_{end}) $$
-Where $z_{start}$ of brick $j$ is the duplicated layer.
+Let $V(x, y, z)$ be the original volume data.
+Let $B_i$ and $B_{i+1}$ be the texture data for adjacent bricks partitioned along the $z$-axis at boundary layer $k$.
+$$ B_i(x, y, k) = V(x, y, k) $$
+$$ B_{i+1}(x, y, 0) = V(x, y, k) $$
+Where $B_{i+1}$ uses local index $0$ for the duplicated boundary layer [S2, unofficial].
 
 **Parameters:**
-*   **Overlap Depth:** Typically 1 voxel plane. [S1, S2, unofficial]
-*   **Interpolation Mode:** Trilinear interpolation must be enabled on the GPU texture sampler. [S1, unofficial]
+*   **Overlap Depth:** Exactly one voxel plane per boundary [S1, S2, unofficial].
+*   **Interpolation:** Hardware trilinear interpolation is used to sample across the shared plane [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Black Strips:** If boundary replication is not used and the view vector is parallel to the cut plane, a black strip will appear at each cut boundary in the composited image because ray samples in the cut boundary region are lost. [S2, unofficial]
-*   **Interpolation Artifacts:** Without duplication, the texture unit lacks information to consistently interpolate across texture boundaries, leading to incorrect values at the seam. [S1, unofficial]
-*   **Memory Overhead:** Duplicating boundary planes increases the memory footprint of each brick. For large datasets, this overhead, combined with the inefficiency of 3D-texture based approaches, can significantly lower frame rates compared to 2D-texture solutions. [S1, unofficial]
+*   **Black Strips:** If the view vector is parallel to the cut plane and boundary replication is not used, a black strip will appear at each cut boundary in the composited image because ray samples in the cut boundary region are lost [S2, unofficial].
+*   **Interpolation Artifacts:** At the boundary between texture tiles, interpolation is incorrect because the texture unit does not have enough information to consistently interpolate across texture boundaries [S1, unofficial].
+*   **Memory and Performance Overhead:** Duplicating boundary planes increases memory usage. For large volume data sets, the 3D-texture based approach is extremely inefficient, resulting in significantly lower frame rates compared to 2D-texture solutions [S1, unofficial].
 
 ## Subtopics
 
@@ -53,14 +46,14 @@ Where $z_{start}$ of brick $j$ is the duplicated layer.
 Handles LOD transitions where adjacent bricks have different resolutions. It restricts LOD differences to at most one level to ensure valid texture sampling without complex multi-level interpolation.
 
 ## Operating characteristics
-*   **Time Complexity:** No additional computational cost per ray sample compared to standard volume rendering, as the duplication is a preprocessing step. [S1, unofficial]
-*   **Memory Complexity:** Increases memory usage by approximately $2 \times$ the area of the boundary planes per brick. For large volume datasets, this contributes to the inefficiency of the 3D-texture based approach. [S1, unofficial]
-*   **Performance:** While superior in image quality to 2D-texture based solutions by removing significant drawbacks, the 3D-texture based approach (including bricking) is extremely inefficient for large volume data sets, resulting in significantly lower frame rates. [S1, unofficial]
-*   **Strengths:** Eliminates visual artifacts (black strips, seams) at brick boundaries; enables correct hardware trilinear interpolation across brick edges. [S1, S2, unofficial]
-*   **Limitations:** Increased memory usage; lower frame rates for large datasets compared to 2D alternatives. [S1, unofficial]
+*   **Time Complexity:** No additional computational cost per ray sample compared to standard volume rendering, as the duplication is a preprocessing step [G].
+*   **Memory Complexity:** Increases memory usage by the area of the duplicated boundary planes per brick [S1, S2, unofficial].
+*   **Performance:** While superior in image quality to 2D-texture based solutions by removing significant drawbacks, the 3D-texture based approach (including bricking) is extremely inefficient for large volume data sets, resulting in significantly lower frame rates [S1, unofficial].
+*   **Strengths:** Eliminates visual artifacts (black strips, seams) at brick boundaries; enables correct hardware trilinear interpolation across brick edges [S1, S2, unofficial].
+*   **Limitations:** Increased memory usage; lower frame rates for large datasets compared to 2D alternatives [S1, unofficial].
 
 ## Background
-The technique originated in the context of parallel ray-traced volume rendering and brick-based rendering on general-purpose graphics hardware. It was developed to address the limitations of simple texture tiling, where hardware interpolation fails at tile boundaries. The method is discussed in early works on data-distributed parallel algorithms for volume rendering and later in dissertations on general-purpose graphics hardware techniques. [S1, S2, unofficial]
+The technique was introduced in the context of data-distributed parallel algorithms for ray-traced volume rendering and later adapted for general-purpose graphics hardware using 3D textures [S1, S2, unofficial]. It was developed to address the limitations of simple texture tiling, where hardware interpolation fails at tile boundaries [S1, unofficial].
 
 ## Sources
 [S1] Volume rendering techniques for general purpose graphics hardware, https://opus4.kobv.de/opus4-fau/files/9/Dissertation.pdf, fetched 2026-10-26 (unofficial)

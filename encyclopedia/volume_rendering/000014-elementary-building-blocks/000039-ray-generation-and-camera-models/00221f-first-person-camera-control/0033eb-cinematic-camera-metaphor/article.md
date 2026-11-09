@@ -1,0 +1,164 @@
+# Cinematic Camera Metaphor
+
+Also called: Eyeball-in-Hand Metaphor, Flying Vehicle Metaphor, StyleCam, Unicam, cinematic camera
+
+## Overview
+The Cinematic Camera Metaphor is a navigation technique where the user manipulates the position and orientation of a virtual camera to control their viewpoint of a 3D scene, typically using a mouse and modifier keys [S1, unofficial]. It allows for tumbling, tracking, and dollying the viewpoint to inspect volumetric data [S1, unofficial]. It is distinguished from direct manipulation metaphors (like Scene-in-Hand) by maintaining a fixed mental model of the scene while the camera moves, though it differs from standard first-person controls by often relying on modifier-key gestures rather than continuous velocity mapping [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Mouse movement (2D screen coordinates), mouse buttons, modifier keys (e.g., Alt, Shift, Ctrl), and potentially scroll wheels. In 6DoF implementations, a spatial input device provides position and orientation data [S1, unofficial].
+*   **Output:** Updated camera position $(P_c)$ and orientation (yaw, pitch, roll) in the 3D scene coordinate system [S1, unofficial].
+
+**Data Structures:**
+*   **Camera State:** A structure containing the camera's world position $\mathbf{p} \in \mathbb{R}^3$ and orientation quaternion or rotation matrix $\mathbf{R} \in SO(3)$ [G].
+*   **Input Buffer:** A queue or immediate state of mouse deltas $(\Delta x, \Delta y)$, button states, and modifier key states [G].
+
+**Steps:**
+1.  **Initialize Camera:** Set initial camera position and orientation based on the scene bounding box or previous state [G].
+2.  **Read Input:** Acquire current mouse deltas, button states, and modifier keys [G].
+3.  **Determine Mode:** Check if modifier keys are active.
+    *   If no modifiers (or standard navigation keys): Enter **Tumble/Track/Dolly** mode [S1, unofficial].
+    *   If specific modifier (e.g., Alt) is held: Enter **Painting/Depth** mode (if applicable to the specific implementation like StyleCam) [S2, unofficial].
+4.  **Update Camera (Standard Mode):**
+    *   **Tumble (Rotation):** Map mouse $\Delta x$ to yaw change $\Delta \theta_y$ and $\Delta y$ to pitch change $\Delta \theta_p$. Update orientation: $\mathbf{R}_{new} = \mathbf{R}_{old} \cdot \text{RotY}(\Delta \theta_y) \cdot \text{RotX}(\Delta \theta_p)$ [G].
+    *   **Track (Pan):** Map mouse movement to translation perpendicular to the view direction. $\Delta \mathbf{p}_{pan} = \Delta x \cdot \mathbf{right} + \Delta y \cdot \mathbf{up}$ [G].
+    *   **Dolly (Zoom):** Map scroll wheel or specific key combination to translation along the view direction. $\Delta \mathbf{p}_{dolly} = \Delta z \cdot \mathbf{forward}$ [G].
+5.  **Update Camera (6DoF/Relative Mode):**
+    *   If using absolute mapping: Map input device position directly to camera position $\mathbf{p}_c = f(\mathbf{p}_{device})$ [S1, unofficial].
+    *   If using relative mapping: Update camera position only when a button is depressed, using device deltas as ratcheting steps [S1, unofficial].
+6.  **Update Camera (Flying Vehicle Mode):**
+    *   Map input device spatial velocity to camera spatial velocity $\mathbf{v}_c$ and angular velocity $\boldsymbol{\omega}_c$ [S1, unofficial].
+    *   Integrate: $\mathbf{p}_{c, new} = \mathbf{p}_{c, old} + \mathbf{v}_c \Delta t$, $\mathbf{R}_{c, new} = \mathbf{R}_{c, old} \cdot \text{Exp}(\boldsymbol{\omega}_c \Delta t)$ [G].
+7.  **Handle Painting Mode (StyleCam/3D Painting):**
+    *   Define a **Painting Plane** parallel to the screen plane at the current brush tip depth $d$ [S2, unofficial].
+    *   Project mouse screen position $(u, v)$ onto the Painting Plane to get 3D brush tip position $\mathbf{p}_{brush}$ [S2, unofficial].
+    *   Adjust depth $d$ using scroll wheel while holding Alt [S2, unofficial].
+    *   Highlight volume data within the brush tip radius at $\mathbf{p}_{brush}$ [S2, unofficial].
+
+**Parameters:**
+*   **Sensitivity:** Scaling factor for mouse deltas to rotation/translation. Typical values depend on resolution and user preference [G].
+*   **Default Depth:** In painting modes, the initial brush tip depth is set to make it visible, often calculated using the dimensions of the volumetric object’s axis-aligned Bounding Box (AABB) to place it floating in front of the object [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Relative Mapping Confusion:** Using relative mapping for the eyeball position (where viewpoint only changes when a button is depressed) destroys the user's mental model of a fixed invisible scene, causing confusion [S1, unofficial].
+*   **Gimbal Lock:** When using Euler angles for pitch/yaw, care must be taken to avoid gimbal lock, especially in tumbling modes [G].
+*   **Boundary Clamping:** Camera position should be clamped to prevent entering invalid regions of the volume or causing numerical instability in ray generation [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_cinematic_camera(camera, input_state, dt):
+    """
+    Updates the camera state based on cinematic metaphor inputs.
+    
+    Args:
+        camera: Object with attributes .position (vec3), .orientation (quat), .forward (vec3), .right (vec3), .up (vec3)
+        input_state: Object with attributes .mouse_delta (vec2), .buttons (set), .modifiers (set), .scroll (float)
+        dt: Time step
+        
+    Returns:
+        Updated camera object
+    """
+    # Standard navigation mode (no special modifiers like Alt for painting)
+    if 'Alt' not in input_state.modifiers:
+        # Tumble: Rotate around camera center or local axes
+        yaw_speed = 2.0  # radians per unit mouse delta
+        pitch_speed = 2.0
+        
+        delta_yaw = input_state.mouse_delta.x * yaw_speed
+        delta_pitch = input_state.mouse_delta.y * pitch_speed
+        
+        # Apply rotation (simplified Euler update, assuming camera looks along -Z)
+        # Note: In production, use quaternion multiplication to avoid gimbal lock
+        camera.orientation = rotate_y(camera.orientation, delta_yaw)
+        camera.orientation = rotate_x(camera.orientation, delta_pitch)
+        
+        # Recalculate basis vectors
+        camera.forward = camera.orientation * vec3(0, 0, -1)
+        camera.right = camera.orientation * vec3(1, 0, 0)
+        camera.up = camera.orientation * vec3(0, 1, 0)
+        
+        # Track: Pan perpendicular to view
+        if 'Shift' in input_state.buttons:
+            pan_speed = 0.1
+            pan_delta = (input_state.mouse_delta.x * camera.right + 
+                         input_state.mouse_delta.y * camera.up) * pan_speed
+            camera.position += pan_delta
+            
+        # Dolly: Move along view direction
+        if 'Ctrl' in input_state.buttons:
+            dolly_speed = 0.5
+            dolly_delta = camera.forward * input_state.scroll * dolly_speed
+            camera.position += dolly_delta
+
+    # 6DoF Eyeball-in-Hand Mode (if device provides absolute/relative pos)
+    elif 'Device6DoF' in input_state.modifiers:
+        if input_state.buttons: # Button depressed for relative mode
+            # Relative mapping (ratcheting)
+            device_delta = input_state.device_position_delta
+            camera.position += device_delta * 0.1
+            camera.orientation = rotate_quat(camera.orientation, device_delta * 0.05)
+        else:
+            # Absolute mapping
+            camera.position = input_state.device_position
+            camera.orientation = input_state.device_orientation
+
+    # Flying Vehicle Mode
+    elif 'Vehicle' in input_state.modifiers:
+        # Map input to velocity
+        spatial_velocity = input_state.device_velocity * 1.0
+        angular_velocity = input_state.device_angular_velocity * 0.5
+        
+        # Integrate
+        camera.position += spatial_velocity * dt
+        camera.orientation = integrate_orientation(camera.orientation, angular_velocity, dt)
+
+    # Painting Mode (StyleCam specific)
+    elif 'Alt' in input_state.modifiers:
+        # Define painting plane at current depth
+        # Depth is managed by scroll wheel in this mode
+        depth = camera.position.z # Simplified: assuming camera at origin looking down Z
+        depth += input_state.scroll * 0.1 # Adjust depth based on scroll
+        camera.brush_depth = depth
+        
+        # Project mouse to painting plane
+        # This requires inverse projection matrix or ray-plane intersection
+        ray = camera.screen_to_ray(input_state.mouse_position)
+        intersection = ray_intersect_plane(ray, camera.position, camera.forward, depth)
+        camera.brush_tip_position = intersection
+        
+        # Highlight volume at brush_tip_position (handled by renderer)
+
+    return camera
+```
+
+## Subtopics
+
+### Scene-in-Hand Metaphor
+A navigation technique where the three-dimensional world moves in correspondence with a 6DoF input device, rather than the camera [S1, unofficial]. If the device is rotated clockwise, the scene rotates clockwise [S1, unofficial]. It is useful for changing viewpoints in hierarchical scenes and allows ratcheting large movements using a button as a clutch [S1, unofficial]. An extension, **World-in-Miniature**, involves manipulating a hand-held miniature copy of the virtual environment [S1, unofficial].
+
+### Flying Vehicle Metaphor
+A technique where the scene is perceived from the position and orientation of a virtual vehicle [S1, unofficial]. The input device controls the spatial and angular velocity of the vehicle, allowing movement throughout the scene [S1, unofficial]. This is commonly used in 3D games where the "player position" is the vehicle [S1, unofficial]. It can be enhanced for rapid and controlled movement [S1, unofficial].
+
+### Unicam
+An implementation of the cinematic camera metaphor that allows users to manipulate the 3D camera position using a mouse and only a single button, coupled with different gestures for invoking camera functionality [S1, unofficial].
+
+### StyleCam
+An implementation that allows authors to significantly tailor the best possible camera positions and paths to be used by a viewer [S1, unofficial]. It includes specific 3D painting modes where a virtual painting plane is defined at the brush tip depth, parallel to the screen, with depth controlled by the scroll wheel while holding Alt [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per frame for camera update, assuming fixed number of input axes and simple rotation/translation [G].
+*   **Memory Complexity:** $O(1)$ for camera state storage [G].
+*   **Strengths:** Intuitive for users familiar with standard 3D modeling software; allows precise control over viewpoint; modifier keys enable multiple modes (tumble, track, dolly, paint) without complex UI [S1, unofficial][S2, unofficial].
+*   **Limitations:** Relative mapping can break mental models [S1, unofficial]; requires learning modifier key combinations; less immersive than head-tracked or 6DoF direct manipulation [S1, unofficial].
+*   **When to use:** Non-immersive 3D environments, 3D graphics and animation programs, volume visualization tools requiring precise inspection [S1, unofficial].
+*   **When not to use:** Immersive VR environments where head tracking is preferred; scenes requiring hierarchical navigation where Scene-in-Hand might be more intuitive [S1, unofficial].
+
+## Background
+The Cinematic Camera Metaphor originated in non-immersive 3D environments such as 3D graphics and animation programs [S1, unofficial]. It is generally termed "cinematic" because it allows users to tumble, track, and dolly a viewpoint, similar to a film camera [S1, unofficial]. Ware and Osborne explored various metaphors for viewpoint motion using 6DoF input devices, including Eyeball-in-Hand, Scene-in-Hand, and Flying Vehicle [S1, unofficial]. Unicam was implemented by Zeleznik and Forsberg (1999) using mouse and single button gestures [S1, unofficial]. StyleCam was developed by Burtnyk et al. (2002) to tailor camera positions and paths [S1, unofficial]. The Eyeball-in-Hand metaphor was explored by Ware and Osborne (1990), with examples like the Chameleon display by Fitzmaurice (1993) [S1, unofficial]. The Scene-in-Hand metaphor was extended by Stoakley et al. (1995) with World-in-Miniature [S1, unofficial]. The Flying Vehicle metaphor was enhanced by Mackinlay et al. (1990) for rapid movement [S1, unofficial].
+
+## Sources
+[S1] Interaction with volumetric displays, http://hdl.handle.net/1807/16733, fetched 2026-10-26 (unofficial)
+[S2] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,458 @@
+--- v003.md
++++ v004.md
+@@ -4,219 +4,253 @@
+ 
+ ## Overview
+-NeRFPlayer is a dynamic scene representation method that extends the static spatial partitioning principles of [Scene Representation and Partitioning](9444-scene-representation-and-partitioning.md) by decomposing the scene volume into stationary, deforming, and new (dynamic) areas [S1]. It solves the problem of efficiently rendering and streaming dynamic scenes by using a decomposition field to route points to specialized local models, enabling high-fidelity reconstruction of moving objects while maintaining low latency and bandwidth [S1]. Unlike [MegaNeRF](8580-meganerf.md) which focuses on large-scale static scenes, or [BlockNeRF](8581-blocknerf.md) which handles static large-scale environments, NeRFPlayer explicitly models temporal dynamics through deformation fields and streaming channels, achieving significantly faster rendering times than [DyNeRF](8580-meganerf.md) and higher PSNR than [HyperNeRF](8580-meganerf.md) [S1].
++NeRFPlayer is a dynamic scene representation method that decomposes the spatiotemporal volume into stationary, deforming, and new (temporal) components to enable efficient streaming and rendering of dynamic scenes [S1]. It addresses the challenge of reconstructing dynamic environments from multi-view or single-view video data by separating static background geometry from moving foreground elements, allowing for high-fidelity temporal interpolation and reduced bandwidth requirements compared to monolithic dynamic NeRF approaches [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A sequence of RGB images of a dynamic scene from varying camera poses. No optical flow or depth priors are required [S1].
+-*   **Outputs:** A rendered RGB image for a given camera pose and time, and a compressed representation suitable for streaming [S1].
+-
+-**Data Structures:**
+-The representation consists of four main components, built upon a spatial partitioning backbone (either InstantNGP or TensoRF) [S1]:
+-
+-1.  **Decomposition Field ($f$):**
+-    *   **Structure:** Explicitly cached features ($V_f$) and a small MLP decoder ($D_f$) [S1].
+-    *   **Function:** For a point $\mathbf{x}$, it outputs probabilities $P_{static}, P_{deforming}, P_{new}$ indicating the likelihood of the point belonging to each category [S1].
+-2.  **Deformation Field ($d$):**
+-    *   **Structure:** A 4-layer MLP with width 256 [S1].
+-    *   **Function:** Predicts a velocity vector $\mathbf{v}$ for deforming points [S1].
+-3.  **Stationary Field ($s$):**
+-    *   **Structure:** A 2-layer MLP with width 64 [S1].
+-    *   **Function:** Predicts density $\sigma$ and color $\mathbf{c}$ for static points [S1].
+-4.  **Radiance Field ($r$):**
+-    *   **Structure:** A 4-layer MLP with width 64, matching the decoder structure of the chosen backbone [S1].
+-    *   **Function:** Predicts density $\sigma$ and color $\mathbf{c}$ for deforming and new points [S1].
+-5.  **Backbone:**
+-    *   **InstantNGP variant:** 8 levels, 4 feature dimensions per entry [S1].
+-    *   **TensoRF variant:** Follows original TensoRF settings for LLFF datasets [S1].
+-    *   **Streaming Channels ($k$):** Set to 1 for both backbones [S1].
+-
+-**Parameters:**
+-*   Threshold $\tau$: 0.001. If probability $P^* < \tau$, the field is skipped [S1].
+-*   Loss balancing $\lambda$: 0.1 [S1].
+-*   Deformation penalty $\alpha$: 0.01 (default), with recommended annealing from larger values (e.g., 1) to smaller values [S1].
+-
+-**Numbered Steps:**
+-
+-1.  **Ray Sampling:** Sample points $\mathbf{x}_i$ along the ray $\mathbf{r}$, as per standard volume rendering [S3].
+-2.  **Decomposition Query:** For each point $\mathbf{x}_i$, query the decomposition field $f(\mathbf{x}_i)$ to obtain probabilities $P_{static}, P_{deforming}, P_{new}$ [S1].
+-3.  **Field Selection and Deformation:**
+-    *   If $P_{deforming} > \tau$:
+-        *   Query the deformation field $d(\mathbf{x}_i)$ to get velocity $\mathbf{v}_i$ [S1].
+-        *   Apply deformation to the point position (implementation detail: typically $\mathbf{x}' = \mathbf{x} + \mathbf{v} \cdot \Delta t$, though exact temporal integration is not specified in the source, the velocity is used to model motion) [S1].
+-        *   Query the radiance field $r(\mathbf{x}_i)$ for density and color [S1].
+-    *   If $P_{static} > \tau$:
+-        *   Set velocity $\mathbf{v}_i = \mathbf{0}$ [S1].
+-        *   Query the stationary field $s(\mathbf{x}_i)$ for density and color [S1].
+-    *   If $P_{new} > \tau$:
+-        *   Set velocity $\mathbf{v}_i = \mathbf{0}$ [S1].
+-        *   Query the radiance field $r(\mathbf{x}_i)$ for density and color [S1].
+-    *   **Optimization:** If the maximum probability $P^* < \tau$, set $\mathbf{v}_i = \mathbf{0}$ and skip the field forwarding entirely [S1].
+-4.  **Rendering:** Compute the color $C(\mathbf{r})$ using the standard volume rendering integral, aggregating contributions from the selected fields [S3].
+-5.  **Training:** Minimize the loss function:
+-    $$
+-    \mathcal{L} = \mathcal{L}_{rec} + \lambda \mathcal{L}_{reg}
+-    $$
+-    where $\mathcal{L}_{rec}$ is the reconstruction loss and $\mathcal{L}_{reg}$ is a regularization term involving $\alpha$ to penalize deforming areas [S1].
+-
+-**Pseudocode:**
++NeRFPlayer extends the static scene representation principles of [Scene Representation and Partitioning](9444-scene-representation-and-partitioning.md) by introducing a temporal decomposition field. While the parent method partitions space, NeRFPlayer partitions the *nature* of the content within the volume into three categories: stationary, deforming, and new.
++
++### Inputs and Outputs
++*   **Inputs:** A sequence of RGB images (multi-view or single-view) capturing a dynamic scene. Camera poses and timestamps are required for multi-view; for single-view, camera trajectory is estimated or provided.
++*   **Outputs:** A set of neural fields (Decomposition, Deformation, Stationary, Radiance) and explicit feature grids (if using InstantNGP or TensoRF backbones) that allow rendering of novel views at arbitrary timestamps.
++
++### Data Structures and Layouts
++The representation consists of four main components [S1]:
++
++1.  **Decomposition Field ($f$):** Determines the type of content at any spatial location $\mathbf{x}$.
++    *   **Layout:** Composed of explicitly cached features ($V_f$) and a small MLP decoder ($D_f$).
++    *   **Output:** A probability distribution over three classes: stationary, deforming, and new.
++2.  **Deformation Field ($d$):** An MLP that predicts the displacement vector $\mathbf{v}$ for points classified as "deforming."
++    *   **Layout:** 4-layer MLP, width 256 [S1].
++3.  **Stationary Field ($s$):** An MLP that predicts density and color for points classified as "stationary."
++    *   **Layout:** 2-layer MLP, width 64 [S1].
++4.  **Radiance Field ($r$):** An MLP that predicts color (and potentially density, depending on backbone integration) for points.
++    *   **Layout:** 4-layer MLP, width 64. It shares the same structure as the decoder in the chosen backbone (InstantNGP or TensoRF) [S1].
++
++**Backbone Configurations:**
++The method is implemented with two backbones, which provide the base density/color prediction and spatial hashing/grid structures [S1]:
++*   **InstantNGP:** 8 levels, 4 feature dimensions per entry [S1].
++*   **TensoRF:** Follows settings from original TensoRF experiments on LLFF datasets [S1].
++*   **Streaming Channels ($k$):** Set to 1 for both backbones to control bitrate [S1].
++
++### Numbered Steps
++
++1.  **Sampling:** For a given ray $\mathbf{r}$ and time $t$, sample points $\mathbf{x}_i$ along the ray.
++2.  **Decomposition Query:** Forward each sampled point $\mathbf{x}_i$ through the decomposition field $f$ to obtain probabilities $P_{static}, P_{deform}, P_{new}$ [S1].
++3.  **Field Selection and Optimization:**
++    *   If $P_{deform} < \tau$ (threshold $\tau = 0.001$), set the deformation velocity $\mathbf{v}_i = \mathbf{0}$ and skip the deformation field forward pass for efficiency [S1].
++    *   Otherwise, query the deformation field $d$ to get $\mathbf{v}_i$.
++    *   Query the stationary field $s$ if the point is classified as stationary.
++    *   Query the radiance field $r$ for color prediction.
++4.  **Rendering:** Compute the final color $C(\mathbf{r})$ using volume rendering integration, combining contributions from all points weighted by their transmittance and the probabilities from the decomposition field [S1].
++5.  **Streaming Update (Optional):** For dynamic streaming, update the "new" channels in the backbone features to reflect temporal changes, controlled by the streaming channel count $k$ [S1].
++
++### Formulas
++
++**Training Loss:**
++The total loss is a combination of reconstruction loss and regularization [S1]:
++$$
++\mathcal{L} = \mathcal{L}_{rec} + \lambda \mathcal{L}_{reg}
++$$
++where $\lambda = 0.1$ is the balancing hyper-parameter [S1].
++
++**Decomposition Probability Thresholding:**
++To optimize efficiency, if the probability of a point being deforming $P^*$ is below a threshold $\tau$, the deformation is skipped [S1]:
++$$
++\text{if } P^* < \tau \text{ then } \mathbf{v}^* = \mathbf{0}
++$$
++Default $\tau = 0.001$ [S1].
++
++**Deformation Suppression Parameter ($\alpha$):**
++The parameter $\alpha$ controls the penalty on deforming areas during training. It is recommended to start with a large $\alpha$ and gradually decrease it [S1].
++*   Large $\alpha$ (e.g., 1): Over-suppresses deforming areas, leading to blurry moving objects [S1].
++*   Small $\alpha$ (e.g., 0.005): Under-suppresses deforming areas, leading to a noisy scene [S1].
++*   Default $\alpha = 0.01$ [S1].
++
++### Pseudocode
+ 
+ ```python
+-import math
+-
+-def query_decomposition_field(x, V_f, D_f):
+-    """
+-    Queries the decomposition field to get probabilities for static, deforming, and new areas.
+-    V_f: Explicitly cached features for point x.
+-    D_f: Small MLP decoder.
+-    Returns: (p_static, p_deforming, p_new)
+-    """
+-    # Implementation detail: Features are looked up from V_f based on x's spatial location.
+-    # D_f takes these features and outputs 3 probabilities.
+-    # This is a placeholder for the specific feature lookup and MLP forward pass.
+-    features = lookup_features(V_f, x)
+-    probs = D_f(features)
+-    return probs
+-
+-def query_deformation_field(x, d_mlp):
+-    """
+-    Queries the deformation MLP to get velocity.
+-    d_mlp: 4-layer MLP, width 256.
+-    Returns: velocity vector v
+-    """
+-    return d_mlp(x)
+-
+-def query_stationary_field(x, s_mlp):
+-    """
+-    Queries the stationary MLP.
+-    s_mlp: 2-layer MLP, width 64.
+-    Returns: (sigma, color)
+-    """
+-    return s_mlp(x)
+-
+-def query_radiance_field(x, r_mlp):
+-    """
+-    Queries the radiance MLP.
+-    r_mlp: 4-layer MLP, width 64.
+-    Returns: (sigma, color)
+-    """
+-    return r_mlp(x)
+-
+-def render_ray(r, t_near, t_far, num_samples, tau=0.001, lambda_reg=0.1, alpha=0.01):
+-    """
+-    Renders a single ray using NeRFPlayer's decomposed representation.
+-    r: Ray origin and direction.
+-    t_near, t_far: Near and far clipping planes.
+-    num_samples: Number of points to sample along the ray.
+-    """
+-    # Sample points along the ray
+-    t_vals = torch.linspace(t_near, t_far, num_samples)
+-    x_vals = r.origin + t_vals.unsqueeze(1) * r.direction
+-    
+-    sigma_accum = 0.0
+-    color_accum = torch.zeros(3)
+-    T = 1.0  # Transmittance
+-    
+-    for i in range(num_samples):
+-        x = x_vals[i]
+-        
+-        # 1. Query Decomposition Field
+-        p_static, p_deforming, p_new = query_decomposition_field(x, V_f, D_f)
+-        
+-        sigma = 0.0
+-        color = torch.zeros(3)
+-        v = torch.zeros(3)
+-        
+-        # 2. Field Selection
+-        max_prob = max(p_static, p_deforming, p_new)
+-        
+-        if max_prob < tau:
+-            # Skip field forwarding for efficiency
+-            v = torch.zeros(3)
+-            # Default to stationary or radiance? Source implies skipping.
+-            # Assuming we still need density/color. 
+-            # If skipped, we might default to a background or use the last known state.
+-            # However, source says "skip the field". 
+-            # Let's assume we query the radiance field as a fallback or it's handled by the backbone's implicit density.
+-            # For strict adherence: if skipped, we don't query d, s, or r.
+-            # We need a default sigma/color. Let's assume 0 density (transparent) if not specified.
+-            sigma = 0.0
+-            color = torch.zeros(3)
++def render_ray_neRFPlayer(ray_origin, ray_direction, time_t, 
++                          decomposition_field, deformation_field, 
++                          stationary_field, radiance_field, 
++                          backbone_features, tau=0.001, alpha=0.01):
++    """
++    Renders a single ray using the NeRFPlayer decomposition strategy.
++    
++    Args:
++        ray_origin: 3D vector, origin of the ray.
++        ray_direction: 3D vector, direction of the ray.
++        time_t: float, timestamp for the dynamic scene.
++        decomposition_field: Function/Model to query decomposition probabilities.
++        deformation_field: 4-layer MLP (width 256) for deformation vectors.
++        stationary_field: 2-layer MLP (width 64) for stationary properties.
++        radiance_field: 4-layer MLP (width 64) for color.
++        backbone_features: Explicit features (e.g., InstantNGP grids or TensoRF tensors).
++        tau: float, threshold to skip deformation field (default 0.001).
++        alpha: float, regularization weight for deformation (default 0.01).
++        
++    Returns:
++        color: 3D vector, rendered color.
++        depth: float, accumulated depth.
++    """
++    
++    # 1. Sample points along the ray
++    # Standard volume rendering sampling strategy (e.g., uniform + importance sampling)
++    points = sample_points_along_ray(ray_origin, ray_direction, num_samples=256)
++    
++    accumulated_transmittance = 1.0
++    accumulated_color = [0.0, 0.0, 0.0]
++    accumulated_depth = 0.0
++    
++    for point in points:
++        # 2. Query Decomposition Field
++        # Returns probabilities for stationary, deforming, new
++        probs = decomposition_field(point, time_t)
++        p_static, p_deform, p_new = probs
++        
++        # 3. Determine Deformation
++        # Optimization: Skip deformation field if probability is low
++        if p_deform < tau:
++            deformation_vector = [0.0, 0.0, 0.0]
+         else:
+-            if p_deforming > tau:
+-                # Deforming area
+-                v = query_deformation_field(x, d_mlp)
+-                # Apply deformation to x for querying r? 
+-                # Source says "forward sampled points... skip forwarding... set v=0".
+-                # It implies v is used for motion modeling, but the query to r/s uses the point.
+-                # In dynamic NeRFs, deformation usually warps the point.
+-                # We assume x_deformed = x + v * dt. dt is not specified.
+-                # We will use x as is for the query, but v is computed.
+-                sigma, color = query_radiance_field(x, r_mlp)
+-            elif p_static > tau:
+-                # Static area
+-                v = torch.zeros(3)
+-                sigma, color = query_stationary_field(x, s_mlp)
+-            else:
+-                # New area
+-                v = torch.zeros(3)
+-                sigma, color = query_radiance_field(x, r_mlp)
+-        
+-        # 3. Volume Rendering Step
+-        # delta_t is the distance between samples
+-        delta_t = t_vals[i+1] - t_vals[i] if i < num_samples - 1 else t_far - t_vals[i]
+-        
+-        # Alpha from density
+-        alpha_val = 1.0 - math.exp(-sigma * delta_t)
+-        
+-        # Weight
+-        weight = T * alpha_val
+-        
+-        # Accumulate
+-        color_accum += weight * color
+-        sigma_accum += weight * sigma
+-        
+-        # Update transmittance
+-        T *= (1.0 - alpha_val)
+-        
+-        if T < 1e-4:
++            deformation_vector = deformation_field(point, time_t)
++            
++        # Apply deformation to get the deformed point position
++        # Note: In NeRFPlayer, deformation is typically applied to the 
++        # canonical coordinate or used to warp the query.
++        # Assuming deformation_field outputs velocity/displacement v
++        deformed_point = point + deformation_vector
++        
++        # 4. Query Radiance and Density
++        # The specific integration of backbone features (InstantNGP/TensoRF) 
++        # happens here. The radiance field MLP typically takes the 
++        # backbone features + deformed point coordinates.
++        
++        # Get backbone features at the point (or deformed point)
++        backbone_feat = query_backbone(backbone_features, deformed_point)
++        
++        # Query Radiance Field for color
++        # The stationary field might be used if p_static is dominant, 
++        # but NeRFPlayer typically uses a unified radiance field conditioned 
++        # on the decomposition type or uses the decomposition to blend.
++        # Based on [S1], the radiance field r is an MLP with width 64.
++        # It likely takes the backbone features and potentially the 
++        # decomposition type or deformation info as input.
++        
++        # Simplified assumption based on "Radiance field r is a 4-layer MLP... 
++        # same structure as decoder in backbone":
++        color = radiance_field(backbone_feat, deformed_point)
++        
++        # Density is typically derived from the backbone or a separate density head.
++        # For InstantNGP/TensoRF, density is often a function of the 
++        # accumulated features.
++        density = compute_density(backbone_feat, deformed_point)
++        
++        # 5. Volume Rendering Step
++        # Calculate transmittance for this segment
++        # delta is the distance to the next point
++        delta = distance_to_next_point(point)
++        
++        exp_term = exp(-density * delta)
++        transmittance_segment = accumulated_transmittance * (1 - exp_term)
++        
++        # Weighted color contribution
++        # Note: NeRFPlayer uses decomposition probabilities to guide training,
++        # but rendering typically integrates all contributions. 
++        # However, if "new" areas are treated as temporal updates, 
++        # the backbone features themselves are updated.
++        
++        accumulated_color += transmittance_segment * color
++        accumulated_transmittance *= exp_term
++        accumulated_depth += transmittance_segment * point.depth
++        
++        # Early termination if transmittance is negligible
++        if accumulated_transmittance < 1e-4:
+             break
+             
+-    return color_accum
++    return accumulated_color, accumulated_depth
++
++def train_step_neRFPlayer(batch_images, batch_cameras, batch_times, 
++                          decomposition_field, deformation_field, 
++                          stationary_field, radiance_field, 
++                          backbone_features, lambda_reg=0.1, alpha=0.01):
++    """
++    Performs one training step.
++    """
++    # Forward pass
++    rendered_colors = []
++    for img, cam, t in zip(batch_images, batch_cameras, batch_times):
++        # Cast rays for each pixel in the image
++        rays = generate_rays(cam)
++        # Render each ray
++        colors = [render_ray_neRFPlayer(r.origin, r.direction, t, 
++                                        decomposition_field, deformation_field, 
++                                        stationary_field, radiance_field, 
++                                        backbone_features) for r in rays]
++        rendered_colors.append(colors)
++        
++    # Compute Reconstruction Loss
++    loss_rec = mean_squared_error(rendered_colors, batch_images)
++    
++    # Compute Regularization Loss
++    # This likely involves penalties on deformation magnitude or 
++    # consistency, weighted by alpha.
++    # Specific formula for L_reg is not detailed in [S1] beyond lambda and alpha usage.
++    # [G] Assuming a standard L2 regularization on deformation vectors or 
++    # decomposition entropy as is common in such decompositions.
++    loss_reg = compute_deformation_regularization(deformation_field, alpha)
++    
++    total_loss = loss_rec + lambda_reg * loss_reg
++    
++    # Backward pass and optimization
++    update_parameters(decomposition_field, deformation_field, 
++                      stationary_field, radiance_field, backbone_features, 
++                      total_loss)
++                      
++    return total_loss
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **High FPS Multi-Camera:** Deformation is not used by default for efficiency because modeling every dynamic area as "new" areas yields good temporal interpolation performance [S1].
+-*   **Alpha Sensitivity:** Large $\alpha$ (e.g., 1) over-suppresses deforming areas, leading to blurry moving objects. Small $\alpha$ (e.g., 0.005) under-suppresses deforming areas, leading to a noisy scene [S1]. Recommended practice is to start with a large $\alpha$ and gradually decrease it [S1].
+-*   **Streaming Bitrate:** The number of streaming channels $k$ affects bitrate. TensoRF-CP achieves low bitrate, while TensoRF-VM has higher cost but better performance [S1].
+-
+-## Subtopics
+-
+-### InstantNGP Backbone
+-Uses 8 levels and 4 feature dimensions per entry. Offers faster rendering (5.5 s/img on Plenoptic Video) compared to TensoRF-VM (6 s/img) [S1].
+-
+-### TensoRF Backbone
+-Follows original TensoRF settings. Offers better performance on fast-moving objects and lower bitrate for streaming (TensoRF-CP) [S1].
++### Parameters and Typical Values
++*   **Threshold $\tau$:** 0.001. Used to skip the deformation field forward pass if the probability of deformation is low [S1].
++*   **Deformation Network:** 4-layer MLP, width 256 [S1].
++*   **Stationary Field:** 2-layer MLP, width 64 [S1].
++*   **Radiance Field:** 4-layer MLP, width 64 [S1].
++*   **InstantNGP Backbone:** 8 levels, 4 feature dimensions per entry [S1].
++*   **TensoRF Backbone:** Follows original TensoRF LLFF settings [S1].
++*   **Streaming Channels $k$:** 1 [S1].
++*   **Loss Hyper-parameters:** $\lambda = 0.1$, $\alpha = 0.01$ [S1].
++*   **Training Schedule:** Follows default optimization schedules of the static backbones (InstantNGP/TensoRF) [S1].
++
++### Edge Cases and Pitfalls
++*   **High FPS Multi-Camera Datasets:** Deformation is not used by default for efficiency. Modeling every dynamic area as "new" areas leads to good temporal interpolation performance in these scenarios [S1].
++*   **Parameter $\alpha$ Sensitivity:**
++    *   Large $\alpha$ (e.g., 1) over-suppresses deforming areas, causing blurry moving objects [S1].
++    *   Small $\alpha$ (e.g., 0.005) under-suppresses deforming areas, causing a noisy scene [S1].
++    *   **Recommendation:** Start with a relatively large $\alpha$ to penalize deforming areas, then gradually decrease $\alpha$ to allow areas to deform [S1].
++*   **Bitrate vs. Performance:** TensoRF-CP achieves low bitrate but reasonable performance; TensoRF-VM has higher cost but obvious performance gain [S1]. The first frame requires 96 channels for TensoRF-CP and 4 for TensoRF-VM [S1].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Training Time:** On Plenoptic Video, NeRFPlayer-InstantNGP takes 22.797 GPU hours, and NeRFPlayer-TensoRF-VM takes 23.238 GPU hours. This is faster than Neural Volumes (28.448 h), NeRF-T (29.580 h), and DyNeRF (30.293 h) [S1].
+-*   **Rendering Time:** On Plenoptic Video, NeRFPlayer-InstantNGP takes 5.5 s/img, and NeRFPlayer-TensoRF-VM takes 6 s/img. This is significantly faster than Neural Volumes (10.8 s/img), NeRF-T (22.1 s/img), and DyNeRF (30.692 s/img) [S1]. NeRFPlayer-InstantNGP renders in 12% of the time required by DyNeRF [S1].
+-
+-**Measured Performance:**
+-*   **PSNR (HyperNeRF-vrig Mean):** NeRFPlayer-InstantNGP achieves 22.4, comparable to HyperNeRF (22.4) and better than Nerfies (22.2), NSFF (26.3 is higher but NSFF requires priors), NV (16.9), and NeRF (20.1) [S1].
+-*   **SSIM (HyperNeRF-vrig Mean):** NeRFPlayer-InstantNGP achieves 0.814, slightly lower than HyperNeRF (0.814 is equal, source says "slightly lower" in text but table shows equal? Text says "slightly worse than HyperNeRF on SSIM", Table 3 shows 0.814 for Ours and 0.814 for HyperNeRF. Wait, Table 3 shows HyperNeRF 0.814, Ours 0.814. Text says "slightly worse". Let's cite the text claim of slightly worse SSIM but higher PSNR) [S1].
+-*   **Ablation:** Removing deforming areas reduces PSNR from 29.2 to 28.2 on HyperNeRF-interp. Removing new areas reduces PSNR from 29.2 to 28.2. Removing static areas reduces PSNR from 27.4 to 27.0 on Immersive Video (Horse) [S1].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** High rendering speed, low training time, no need for optical flow/depth priors, good temporal interpolation for high FPS data [S1].
+-*   **Limitations:** Slightly lower SSIM compared to HyperNeRF, generating more accurate but less sharp images. Misalignment issues in HyperNeRF are avoided, but sharpness is traded [S1].
+-
+-**When to Use:**
+-*   Use for dynamic scene reconstruction and rendering where efficiency and streaming bandwidth are critical.
+-*   Use when high FPS multi-camera data is available (deformation can be disabled).
+-*   Do not use if maximum sharpness (SSIM) is the primary metric and deformation modeling errors in other methods are acceptable.
++*   **Training Time (Plenoptic Video):**
++    *   Ours-InstantNGP: 22.797 GPU hours [S1].
++    *   Ours-TensoRF-VM: 23.238 GPU hours [S1].
++    *   Neural Volumes: 28.448 GPU hours [S1].
++    *   NeRF-T: 29.580 GPU hours [S1].
++    *   DyNeRF: 30.293 GPU hours [S1] [S1].
++*   **Rendering Time (Plenoptic Video):**
++    *   Ours-InstantNGP: 5.5 s/img [S1].
++    *   Ours-TensoRF-VM: 6 s/img [S1].
++    *   Neural Volumes: 10.8 s/img [S1].
++    *   NeRF-T: 22.1 s/img [S1].
++    *   DyNeRF: 30.692 s/img [S1] [S1].
++*   **Quality (HyperNeRF-vrig Mean):**
++    *   PSNR: Ours-InstantNGP 22.4, HyperNeRF 22.4, Nerfies 22.2, NSFF 26.3, NV 16.9, NeRF 20.1 [S1].
++    *   SSIM: Ours-InstantNGP 0.814, HyperNeRF 0.814, Nerfies 0.803, NSFF 0.916, NV 0.571, NeRF 0.745 [S1].
++*   **Comparison with HyperNeRF:** NeRFPlayer achieves higher PSNR but slightly lower SSIM, generating more accurate but less sharp images. HyperNeRF suffers from misalignment of moving objects due to incorrect deformation modeling [S1].
++*   **Comparison with DyNeRF:** NeRFPlayer with InstantNGP renders images in 12% of the time while being comparable in quality. NeRFPlayer with TensoRF-VM achieves better performance on fast-moving objects [S1].
++*   **Ablation Studies:**
++    *   HyperNeRF-interp: Full decomposition PSNR 29.2, w/o deforming PSNR 28.2, w/o new PSNR 28.2 [S1].
++    *   Immersive Video (Horse): w/o static PSNR 27.0, w/ static PSNR 27.4 [S1].
++    *   Immersive Video (Welder, every 8 frames): w/o deforming PSNR 26.1, w/ deforming PSNR 25.2 [S1].
+ 
+ ## Background
+-NeRFPlayer was introduced in the paper "NeRFPlayer: A Streamable Dynamic Scene Representation with Decomposed Neural Radiance Fields" [S1]. It builds on the principles of spatial partitioning and hybrid representations (InstantNGP, TensoRF) to handle dynamic scenes. It addresses the limitations of previous dynamic NeRF methods like DyNeRF and HyperNeRF, which suffer from high computational costs or misalignment of moving objects [S1].
++NeRFPlayer was introduced in the paper "NeRFPlayer: A Streamable Dynamic Scene Representation with Decomposed Neural Radiance Fields" [S1]. It builds upon the principles of spatial partitioning and hybrid representations (InstantNGP, TensoRF) to handle dynamic scenes. The method was developed to address the limitations of existing dynamic NeRF methods in terms of training time, rendering speed, and streaming efficiency. It is particularly relevant for applications requiring real-time or near-real-time rendering of dynamic scenes, such as immersive video and multi-camera setups [S1].
+ 
+ ## Sources

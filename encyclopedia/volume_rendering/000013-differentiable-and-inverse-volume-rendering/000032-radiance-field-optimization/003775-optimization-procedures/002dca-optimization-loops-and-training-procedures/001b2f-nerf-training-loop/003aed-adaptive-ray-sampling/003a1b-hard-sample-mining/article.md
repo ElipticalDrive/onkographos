@@ -3,135 +3,121 @@
 Also called: HSM
 
 ## Overview
-Hard Sample Mining (HSM) is an optimization procedure that replaces uniform or density-based ray sampling with a strategy that ranks point samples by their propagated pixel loss and subsamples a "hard" minibatch for gradient updates. It differs from sibling methods like [Mip-NeRF 360 Sampling and Training](3393-mip-nerf-360-sampling-and-training.md) or [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) by explicitly using the scalar error signal (pixel loss) to determine sample importance, rather than relying solely on geometric priors like density or transmittance. This allows the optimizer to focus computational resources on regions where the model is currently performing poorly, accelerating convergence and reducing memory usage.
+Hard Sample Mining (HSM) is an optimization procedure that reduces the computational cost of NeRF training by subsampling a "hard minibatch" of point samples based on their propagated pixel loss, rather than using all samples or pruning based on density weights [S1]. It differs from sibling methods like [Mip-NeRF 360 Sampling and Training](3393-mip-nerf-360-sampling-and-training.md) which focus on spatial anti-aliasing, or [Coarse-to-Fine NeRF](3406-coarse-to-fine-nerf.md) which uses hierarchical density estimation, by directly ranking samples according to the gradient signal they provide to the network parameters [S1]. Unlike [Nerfacc](9146-two-stage-sampling-with-occupancy-grid-and-nonlinear-functio.md) which prunes low-weight samples, HSM retains high-loss samples even if their density weight is low, ensuring that difficult-to-learn regions drive the optimization [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A batch of rays, each with a set of sampled points $\{p_i\}$, their associated densities $\sigma_i$, transmittances $T_i$, and colors $c_i$. The current network parameters $\theta$. The target image $I_{target}$ and the rendered image $I_{render}$.
-*   **Output:** A subset of points (the hard minibatch) used to compute the gradient update for $\theta$.
+**Inputs:**
+*   A batch of rays, each with $N$ sampled points $x_i$ along the ray.
+*   The rendered color $C$ and the ground truth color $C_{gt}$ for the batch.
+*   The total batch size parameter $B$ (typical values: 220 for Instant-NGP, 218 for Nerfacto) [S1].
+
+**Outputs:**
+*   A subset of point samples (the hard minibatch) used to compute the loss and update the network.
 
 **Data Structures:**
-*   **Point Samples:** A list or tensor of shape $(N, D)$, where $N$ is the total number of samples across the batch and $D$ is the feature dimension (position, density, color, etc.).
-*   **Loss Tensor:** A tensor of shape $(N, 1)$ containing the per-sample contribution to the pixel loss.
-*   **Hard Minibatch Indices:** A list of indices into the original point samples, selecting the top $K$ hardest samples.
+*   **Point Loss Array:** A 1D array of size equal to the total number of point samples in the batch, storing the per-point contribution to the pixel loss.
+*   **Hard Minibatch Indices:** A list of indices corresponding to the selected points.
 
 **Steps:**
-1.  **Forward Pass:** Render the current batch of rays using the current network parameters $\theta$ to obtain $I_{render}$.
-2.  **Loss Computation:** Compute the pixel-wise loss $\mathcal{L}_{pixel} = \| I_{render} - I_{target} \|^2$ (or other metric).
-3.  **Loss Propagation to Samples:** Assign a loss value $l_i$ to each sample point $p_i$ along each ray. The loss for a sample is typically proportional to its weight $w_i$ in the volume rendering equation and the residual error at its pixel location.
-    $$ w_i = T_i (1 - e^{-\sigma_i \delta_i}) $$
-    $$ T_i = e^{-\sum_{j < i} \sigma_j \delta_j} $$
-    $$ l_i = w_i \cdot \| c_i - I_{target}(u, v) \|^2 $$
-    where $\delta_i$ is the distance between sample $i$ and $i+1$, and $(u, v)$ are the pixel coordinates. [G] If the source does not specify the exact propagation formula, the standard approach is to distribute the pixel loss proportionally to the sample weights $w_i$.
-4.  **Ranking:** Rank all $N$ samples in the batch by their assigned loss $l_i$ in descending order.
-5.  **Subsampling:** Select the top $K$ samples with the highest loss to form the hard minibatch. The size of the hard minibatch is determined by the total batch size $B$ and a subsampling ratio.
-    $$ K = \lfloor B \cdot \alpha \rfloor $$
-    where $\alpha$ is the subsampling ratio (e.g., 0.5). [G] The exact value of $\alpha$ is not specified in the sources; it is a hyperparameter.
-6.  **Gradient Update:** Compute the gradient of the loss with respect to $\theta$ using only the hard minibatch.
-    $$ \nabla_\theta \mathcal{L} = \frac{1}{K} \sum_{i \in \text{Hard Minibatch}} \nabla_\theta l_i $$
-7.  **Parameter Update:** Update $\theta$ using an optimizer (e.g., Adam).
-
-**Parameters:**
-*   **Batch Size ($B$):** Total number of rays processed per iteration. Typical values: 220 for Instant-NGP, 218 for Nerfacto. [S1]
-*   **Subsampling Ratio ($\alpha$):** Not given in the sources.
-
-**Edge Cases and Pitfalls:**
-*   **Uniformly Challenging Content:** In scenes with unbounded backgrounds or multiple outward-facing objects, the pixel loss distribution is more uniform, limiting the efficiency gains of HSM. [S1]
-*   **Pose Errors:** Severe pose mistakes in the dataset can produce "impossible to learn" point samples that consistently rank as hard, crowding the hard minibatch and destabilizing training. [S1] Mitigation techniques like uncertainty or pose estimation can be applied. [S1]
+1.  **Forward Pass:** Render the batch of rays using the current NeRF model to obtain predicted colors $C$.
+2.  **Loss Computation:** Compute the pixel-wise loss (e.g., $L_2$ or $L_1$) between $C$ and $C_{gt}$.
+3.  **Point-Level Loss Propagation:** Distribute the pixel loss to the individual point samples along each ray. The exact distribution mechanism depends on the rendering equation (e.g., alpha compositing weights), but the goal is to assign a scalar loss value $l_i$ to each point $x_i$ that reflects its contribution to the total error [S1].
+4.  **Ranking:** Sort all point samples in the batch in descending order of their point-level loss $l_i$ [S1].
+5.  **Subsampling:** Select the top $K$ points with the highest loss, where $K$ is determined by the target batch size $B$ and the average number of points per ray. This subset forms the "hard minibatch" [S1].
+6.  **Backward Pass:** Compute gradients and update network parameters using only the hard minibatch [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hard_sample_mining(rays, network, target_images, batch_size, subsample_ratio):
+def hard_sample_mining(rays, gt_colors, nerf_model, batch_size_B):
     """
-    rays: List of Ray objects, each containing positions, directions, and pixel coordinates.
-    network: The NeRF network model.
-    target_images: Tensor of target images for the rays in the batch.
-    batch_size: Total number of rays to process.
-    subsample_ratio: Fraction of samples to keep (e.g., 0.5).
+    Performs Hard Sample Mining for NeRF training.
+    
+    Args:
+        rays: List of rays, each containing N sample points.
+        gt_colors: Ground truth colors for the rays.
+        nerf_model: The NeRF network.
+        batch_size_B: Target number of point samples for the hard minibatch.
+        
+    Returns:
+        Updated network parameters.
     """
-    # 1. Forward Pass
-    # Render rays and get per-sample outputs
-    # outputs: dict with 'sigma', 'color', 'transmittance', etc.
-    # shape: (num_samples, feature_dim)
-    outputs = network(rays)
+    # 1. Forward pass to get rendered colors
+    # Assume render_rays returns predicted colors C for all rays
+    C = render_rays(rays, nerf_model)
     
-    # 2. Loss Computation
-    # Compute rendered image from samples
-    rendered_images = volume_rendering(outputs['sigma'], outputs['color'], outputs['transmittance'])
+    # 2. Compute pixel loss
+    # Using L2 loss as an example; other losses may be used
+    pixel_losses = torch.mean((C - gt_colors) ** 2, dim=-1)
     
-    # Compute pixel-wise loss
-    # loss_per_pixel: (batch_size,)
-    loss_per_pixel = torch.mean((rendered_images - target_images) ** 2, dim=(1, 2))
+    # 3. Propagate pixel loss to point samples
+    # This step requires access to the alpha compositing weights or the specific
+    # loss gradient with respect to each point's contribution.
+    # Let point_losses be a tensor of shape [num_rays, num_points_per_ray]
+    # The exact formula depends on the rendering differentiability.
+    # A common approximation is weighting the pixel loss by the transmittance/alpha.
+    # [G] Assuming a standard alpha compositing model, the gradient w.r.t. point color
+    # is proportional to the accumulated transmittance T_i.
+    # point_losses = pixel_losses.unsqueeze(-1) * transmittance_weights
     
-    # 3. Loss Propagation to Samples
-    # Distribute pixel loss to samples based on weights
-    # weights: (num_samples,)
-    weights = outputs['transmittance'] * (1 - torch.exp(-outputs['sigma'] * outputs['delta']))
+    # For the purpose of this implementation, we assume a helper function
+    # that computes the per-point loss contribution.
+    point_losses = compute_point_level_losses(rays, C, gt_colors, nerf_model)
     
-    # Normalize weights to sum to 1 per ray, then multiply by pixel loss
-    # This is a simplified propagation; exact formula may vary
-    # loss_per_sample: (num_samples,)
-    loss_per_sample = torch.zeros_like(weights)
-    for i, ray in enumerate(rays):
-        sample_indices = ray.sample_indices
-        ray_loss = loss_per_pixel[i]
-        ray_weights = weights[sample_indices]
-        ray_weights_sum = ray_weights.sum()
-        if ray_weights_sum > 0:
-            loss_per_sample[sample_indices] = ray_weights / ray_weights_sum * ray_loss
-        else:
-            loss_per_sample[sample_indices] = 0
-            
-    # 4. Ranking
-    # Get indices of top K samples
-    num_samples = loss_per_sample.shape[0]
-    num_hard_samples = int(num_samples * subsample_ratio)
+    # 4. Flatten and rank
+    # Flatten all point losses into a single array
+    flat_losses = point_losses.flatten()
     
-    # Get indices of the hardest samples
-    hard_indices = torch.topk(loss_per_sample, num_hard_samples).indices
+    # Get indices of the top K hardest samples
+    # K is typically set to batch_size_B or a fraction thereof
+    # If the total points < B, use all points
+    num_points = flat_losses.shape[0]
+    k = min(batch_size_B, num_points)
     
-    # 5. Gradient Update
-    # Compute gradients using only hard samples
-    # Re-render or use cached values for hard samples
-    hard_outputs = {k: v[hard_indices] for k, v in outputs.items()}
-    hard_target_images = target_images[hard_indices // samples_per_ray] # Adjust for ray grouping
+    # Get indices of the top k losses
+    _, top_indices = torch.topk(flat_losses, k)
     
-    # Compute loss for hard samples
-    hard_rendered = volume_rendering(hard_outputs['sigma'], hard_outputs['color'], hard_outputs['transmittance'])
-    hard_loss = torch.mean((hard_rendered - hard_target_images) ** 2)
+    # 5. Map flat indices back to ray and point indices
+    # [G] Implementation detail: Convert flat indices to (ray_idx, point_idx)
+    ray_indices = top_indices // num_points_per_ray
+    point_indices = top_indices % num_points_per_ray
+    
+    # 6. Backward pass on the hard minibatch
+    # Re-render or compute gradients only for the selected points
+    # This step is non-trivial in standard autograd frameworks if not carefully structured.
+    # Typically, one masks out the gradients for non-selected points.
+    # [G] Assuming a framework that supports selective gradient computation:
+    mask = torch.zeros_like(flat_losses)
+    mask[top_indices] = 1.0
+    # Reshape mask to match point_losses shape
+    mask = mask.reshape(point_losses.shape)
+    
+    # Compute loss only for selected points
+    hard_loss = (point_losses * mask).sum()
     
     # Backward pass
     hard_loss.backward()
     
-    # 6. Parameter Update
-    optimizer.step()
-    optimizer.zero_grad()
+    return nerf_model
 ```
 
-## Subtopics
+**Parameters:**
+*   $B$: Total batch size for the hard minibatch. Typical values are 220 for Instant-NGP and 218 for Nerfacto [S1].
 
-### Loss Propagation Strategies
-Methods for distributing pixel loss to individual samples (e.g., proportional to weight, uniform). [S1]
-
-### Hard Minibatch Size Determination
-Techniques for selecting the number of hard samples (fixed ratio vs. adaptive). [S1]
-
-### Pose Error Mitigation
-Strategies to handle outliers caused by incorrect camera poses. [S1]
+**Edge Cases and Pitfalls:**
+*   **Uniformly Challenging Content:** In scenes with unbounded backgrounds or multiple outward-facing objects, the pixel loss distribution becomes more uniform, limiting the computational efficiency gains of HSM [S1].
+*   **Pose Errors:** Severe pose mistakes in the dataset can create "impossible to learn" point samples that consistently rank as hard, crowding the hard minibatch and potentially destabilizing training [S1]. Techniques like uncertainty or pose estimation may be needed to mitigate this [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces iteration time by focusing updates on a smaller subset of samples. [S1]
-*   **Memory Complexity:** Reduces memory usage during training by only storing gradients for the hard minibatch. [S1]
-*   **Measured Performance:** On Mip-NeRF-360 scenes, HSM achieves ~1 dB PSNR gain per same training time and converges ~2x faster to a given PSNR level compared to baseline. [S1] Dynamic memory footprint reduced from 300 MB to 160 MB for normal iterations on Nerfacto. [S1]
-*   **Strengths:** Faster convergence, lower memory usage, improved quality per unit time. [S1]
-*   **Limitations:** Less effective in uniformly challenging scenes; sensitive to pose errors. [S1]
-*   **When to Use:** When training time and memory are constraints, and the scene has distinct hard/soft regions. [S1]
-*   **When Not to Use:** In scenes with uniform difficulty or significant pose errors. [S1]
+*   **Time Complexity:** Reduces iteration time by focusing gradient updates on a smaller subset of samples [S1].
+*   **Memory Complexity:** Reduces dynamic memory footprint. For example, in Nerfacto, memory usage dropped from 300 MB to 160 MB for normal iterations [S1].
+*   **Performance:** On Mip-NeRF-360 scenes, HSM converges ~2x faster to a given PSNR level and achieves ~1 dB higher validation PSNR per same training time compared to the baseline [S1].
+*   **Strengths:** Effective for methods like Instant-NGP where grid sampling is used, as it focuses computation on informative regions [S1].
+*   **Limitations:** Less effective in scenes with uniform difficulty; less impactful when proposal networks already prune low-weight samples effectively (e.g., in Nerfacto) [S1].
 
 ## Background
-Hard Sample Mining was introduced by J. Korhonen et al. in 2024 in the paper "Efficient NeRF Optimization -- Not All Samples Remain Equally Hard". It was applied to PyTorch reimplementations of Instant-NGP and Nerfacto on Mip-NeRF-360 and NeRF synthetic datasets. [S1]
+Hard Sample Mining was introduced by J. Korhonen et al. in the paper "Efficient NeRF Optimization -- Not All Samples Remain Equally Hard" [S1]. The method was applied to PyTorch reimplementations of Instant-NGP and Nerfacto on Mip-NeRF-360 and synthetic NeRF datasets [S1]. It is distinct from prior importance sampling techniques by explicitly using propagated pixel loss to rank samples rather than density or transmittance weights [S1].
 
 ## Sources
 [S1] Efficient NeRF Optimization -- Not All Samples Remain Equally Hard, https://arxiv.org/abs/2408.03193v1, fetched 2026-10-27

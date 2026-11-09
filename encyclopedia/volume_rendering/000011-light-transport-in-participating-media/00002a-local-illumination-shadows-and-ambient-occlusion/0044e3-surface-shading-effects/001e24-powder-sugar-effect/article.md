@@ -1,0 +1,70 @@
+# Powder Sugar Effect
+Also called: Powder Decay, Powder Function
+## Overview
+The Powder Sugar Effect approximates the physical reality that cloud fringes contain less scattered light than dense cores by attenuating the scattered light contribution based on local density [S1, unofficial]. It solves the visual artifact of overly bright, "puffy" cloud edges that lack the natural darkening seen in real volumetric media. It sets itself apart from sibling methods like Shadow Density Scale by directly modulating the scattering term rather than faking multiple scattering penetration [S2].
+## How it works
+**Inputs and Outputs:**
+*   Input: Local density $\rho$ at the shading point, step size $\Delta s$ used for integration, and a decay parameter $k$ (powder_decay).
+*   Output: A scalar attenuation factor $P \in [0, 1]$ applied to the scattered light increment.
+
+**Data Structures:**
+*   `powder_decay`: A uniform float parameter controlling the rate of attenuation. Typical values are not specified in the sources, but it must be positive [S1, unofficial].
+
+**Steps:**
+1.  Calculate the optical thickness for the current step: $d = \rho \cdot \Delta s$.
+2.  Evaluate the powder function:
+    $$ P(d) = 1 - e^{-k \cdot d} $$
+3.  Multiply the computed scattered light increment by $P(d)$ before accumulating it into the final color [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def powder_sugar_effect(density: float, step_size: float, powder_decay: float) -> float:
+    """
+    Calculates the attenuation factor for scattered light based on local density.
+    
+    Args:
+        density: The local density value at the shading point.
+        step_size: The integration step size used for this sample.
+        powder_decay: The decay constant k.
+        
+    Returns:
+        An attenuation factor between 0 and 1.
+    """
+    # Calculate optical thickness for the step
+    d = density * step_size
+    
+    # Apply the powder function
+    # P = 1 - exp(-k * d)
+    attenuation = 1.0 - math.exp(-powder_decay * d)
+    
+    return attenuation
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zero Density:** If density is 0, the factor is 0. This correctly removes scattering from empty space but requires careful handling if the light increment is already zero to avoid unnecessary computation.
+*   **High Density:** As $d \to \infty$, $P \to 1$. The effect saturates, allowing full scattering in dense cores.
+*   **Precision:** For very small $d$, $1 - e^{-x}$ can suffer from catastrophic cancellation if not implemented carefully. However, for typical cloud densities and step sizes, standard float precision is usually sufficient [S1, unofficial].
+*   **Parameter Tuning:** The value of `powder_decay` significantly impacts the visual result. Too low, and the effect is negligible; too high, and the cloud appears unnaturally dark and thin [S1, unofficial].
+
+## Subtopics
+
+### Shadow Density Scale
+A cheat that lets light penetrate deeper into the volume without changing its silhouette, faking the brightening effect of multiple scattering at a fraction of the cost [S2]. It is chosen when computational resources are limited and anisotropic scattering evaluation is too expensive, serving as a cheaper alternative to brute-forcing trace depth [S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per sample. The calculation involves a single exponential and multiplication.
+*   **Memory Complexity:** $O(1)$. Only the `powder_decay` parameter needs to be stored.
+*   **Performance:** Extremely cheap to evaluate. It does not require additional ray casts or texture lookups [S1, unofficial].
+*   **Strengths:** Simple to implement, visually effective for cloud fringes, reduces the "puffy" look of low-density areas [S1, unofficial].
+*   **Limitations:** It is an approximation and does not physically model multiple scattering or complex light transport. It may not be sufficient for highly detailed or physically accurate simulations [S2].
+*   **When to use:** Ideal for real-time volumetric clouds or scenes where performance is critical and the primary visual goal is to darken cloud edges [S1, unofficial].
+*   **When not to use:** When physical accuracy of multiple scattering is required, or when the volume has complex internal structures that require accurate light penetration modeling [S2].
+
+## Background
+The Powder Sugar Effect was introduced by Jan Wedekind in his work on procedural volumetric clouds [S1, unofficial]. It is a technique commonly used in real-time rendering and procedural cloud generation to enhance visual quality without significant performance overhead. The related concept of Shadow Density Scale is discussed in the context of volumetric rendering workflows in Cinema 4D [S2].
+
+## Sources
+[S1] Procedural Volumetric Clouds · Jan Wedekind, https://www.wedesoft.de/software/2023/05/03/volumetric-clouds/, fetched 2026-10-28 (unofficial)
+[S2] Introduction to Volumetric Rendering, https://help.maxon.net/c4d/2027/en-us/Content/html/What_is_Volumetric_Rendering.html, fetched 2026-10-29

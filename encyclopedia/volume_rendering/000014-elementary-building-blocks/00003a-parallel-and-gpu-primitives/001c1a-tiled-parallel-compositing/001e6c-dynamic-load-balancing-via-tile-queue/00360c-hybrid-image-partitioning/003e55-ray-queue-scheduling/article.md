@@ -1,0 +1,105 @@
+# Ray Queue Scheduling
+
+Also called: Cell-Based Ray Queue, Dynamic Ray-Task Scheduling
+
+## Overview
+Ray Queue Scheduling is a dynamic load balancing method for distributed volume rendering that manages ray processing at the granularity of spatial cells (flex-blocks) rather than static image tiles or bricks. It solves the problem of uneven computational load in distributed ray tracing by maintaining a queue of pending rays for each cell and processing cells one at a time based on availability. It sets itself apart from static partitioning by dynamically assigning work to idle processors and from pure tile-based approaches by focusing on spatial coherence and cell-level traversal, building on [Hybrid Image Partitioning](7675-hybrid-image-partitioning.md).
+
+## How it works
+**Inputs:**
+- Distributed volumetric data partitioned into flex-blocks (cells) [S1, unofficial].
+- A set of active rays (primary and spawned) [S1, unofficial].
+- A list of available render nodes [S1, unofficial].
+
+**Outputs:**
+- Final composited image [S1, unofficial].
+- Updated ray queues reflecting processed and pending work [S1, unofficial].
+
+**Data Structures:**
+1.  **Ray Queue:** A data structure holding pending rays for a specific cell. The exact layout is not specified, but it must support insertion of spawned rays and retrieval for processing [S1, unofficial].
+2.  **Cell State:** Tracks whether a cell is in main memory and available for processing [S1, unofficial].
+3.  **Work Queue (Greedy Max-Work):** A global or local structure used to select the next cell to process. The sources specify a "greedy max-work approach" is used to choose the next cell, though the exact metric (e.g., queue size, estimated cost) is not defined [S1, unofficial].
+
+**Steps:**
+1.  **Initialization:** Distribute the volumetric data using a flex-block partition. Initialize ray queues for each cell. Initially, populate queues with primary rays intersecting their respective cells [S1, unofficial].
+2.  **Cell Selection:** When a render node is idle, select the next cell to process using the greedy max-work approach. This typically involves choosing a cell with pending rays in its queue [S1, unofficial].
+3.  **Cell Processing:**
+    a.  Check if the selected cell is in main memory. If not, skip or wait (implementation detail not specified) [S1, unofficial].
+    b.  For each ray in the cell's ray queue:
+        i.  Trace the ray through the cell. Space skipping is automated using the data extents of the flex-block [S1, unofficial].
+        ii. If the ray exits the current cell, determine the next cell it intersects.
+        iii. Place the ray on the ray queue of the next intersecting cell [S1, unofficial].
+        iv. If the ray spawns secondary rays (e.g., shadows, reflections), place those on the appropriate cell queues [S1, unofficial].
+4.  **Queue Management:** When the queue for the current cell is emptied, return to Step 2 to select another cell.
+5.  **Termination:** Repeat until all ray queues are empty and no rays remain in transit [S1, unofficial].
+
+**Pitfalls:**
+-   **Revisiting Cells:** The same cell may be revisited by a ray and its descendants any number of times. This can lead to redundant processing if not managed carefully [S1, unofficial].
+-   **Delayed Generation:** Descendants may not be generated until the cell has been processed within another cell, complicating optimization and load prediction [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Global state
+ray_queues = {cell_id: Queue() for cell_id in all_cells}
+# Initialize with primary rays
+for ray in primary_rays:
+    cell_id = ray.intersecting_cell()
+    ray_queues[cell_id].push(ray)
+
+def process_cell(cell_id):
+    """Process all rays in a cell's queue."""
+    if not is_in_memory(cell_id):
+        return # Not given in sources how to handle non-memory cells
+    
+    while not ray_queues[cell_id].empty():
+        ray = ray_queues[cell_id].pop()
+        
+        # Trace ray through the cell
+        # Space skipping is automated using flex-block extents
+        exit_point, spawned_rays = trace_ray_through_cell(ray, cell_id)
+        
+        if exit_point:
+            # Ray exited the cell
+            next_cell_id = get_next_intersecting_cell(ray, exit_point)
+            ray_queues[next_cell_id].push(ray)
+        
+        # Handle spawned rays (e.g., shadows)
+        for spawned_ray in spawned_rays:
+            spawn_cell_id = get_intersecting_cell(spawned_ray)
+            ray_queues[spawn_cell_id].push(spawned_ray)
+
+def scheduler():
+    """Main scheduling loop."""
+    while not all_queues_empty(ray_queues):
+        # Greedy max-work approach to choose next cell
+        # Exact metric not specified in sources
+        next_cell_id = select_next_cell_greedy_max_work(ray_queues)
+        
+        if next_cell_id is not None:
+            process_cell(next_cell_id)
+        else:
+            # No work available, wait or yield
+            pass
+```
+
+## Subtopics
+
+### Pyramid Clipping Scheduling
+A technique by Reinhard et al. that combines pyramid clipping scheduling with demand-driven scheduling of shadow ray tracing. Each processor handles both task types, but data parallel tasks are given higher priority. A pyramid is constructed around a bundle of rays and intersected with an octree subdivision of the volume. Clusters of rays are gathered to improve coherency [S1, unofficial].
+
+## Operating characteristics
+-   **Time Complexity:** Not explicitly given. The dynamic nature suggests overhead for queue management and cell selection, but potentially better load balance than static methods.
+-   **Memory Complexity:** Depends on the number of rays and cells. Ray queues can grow large if rays are spawned frequently or if cells are revisited often [S1, unofficial].
+-   **Performance:** Effective for distributed rendering with uneven load distribution. The use of flex-blocks allows for space skipping, improving traversal efficiency [S1, unofficial].
+-   **Strengths:** Dynamic load balancing, spatial coherence through cell-based processing, automated space skipping.
+-   **Limitations:** Difficulty in optimizing ray traversal due to cell revisiting and delayed descendant generation. Overhead of managing multiple queues and cell states [S1, unofficial].
+-   **When to Use:** Distributed volume rendering with significant load imbalance and where spatial coherence is beneficial.
+-   **When Not to Use:** When memory bandwidth is a severe bottleneck due to large ray queues, or when the overhead of dynamic scheduling outweighs the benefits of load balancing.
+
+## Background
+Originated in the context of distributed volume visualization and ray tracing, specifically in work by Sobierajski and Kaufman and others at MIT. It was developed to handle massive datasets like the Visible Korean data set, where traditional static subdivisions led to poor load balance. The method is part of a broader framework for volumetric ray tracing that includes global illumination effects [S1, unofficial].
+
+## Sources
+[S1] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)

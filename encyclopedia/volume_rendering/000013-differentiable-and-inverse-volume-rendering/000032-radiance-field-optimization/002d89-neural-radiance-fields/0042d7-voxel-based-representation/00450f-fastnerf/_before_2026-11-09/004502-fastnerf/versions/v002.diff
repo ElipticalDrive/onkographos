@@ -1,0 +1,428 @@
+--- v001.md
++++ v002.md
+@@ -4,237 +4,222 @@
+ 
+ ## Overview
+-FastNeRF is a neural rendering architecture that accelerates the rendering of Neural Radiance Fields (NeRF) by factorizing the 5D radiance function into position-dependent and direction-dependent components, enabling compact caching and avoiding MLP invocations at inference time [S1, unofficial]. Unlike standard NeRF, which requires hundreds of MLP forward passes per pixel, FastNeRF renders high-fidelity photorealistic images at 200Hz on high-end consumer GPUs by replacing computation with memory-bound lookups from sparse 3D grids [S1, unofficial]. It builds on [NeRF](52-nerf.md) but differs from caching-based siblings like [Zip-NeRF Training Procedure](9538-zip-nerf-training-procedure.md) and [VaxNeRF](11379-vaxnerf.md) by explicitly decoupling spatial and directional data into separate caches to avoid the polynomial memory explosion of joint discretization [S1, unofficial].
++FastNeRF is a neural rendering architecture that accelerates volume rendering by factorizing the standard NeRF function into position-dependent and direction-dependent components, enabling compact caching and avoiding MLP calls at inference time [S1, unofficial]. It solves the computational bottleneck of standard NeRF, which requires hundreds of MLP invocations per pixel, by replacing them with hardware-accelerated cache lookups, achieving interactive rates (200Hz+) on consumer hardware [S1, unofficial]. Unlike standard NeRF, which queries a 5D function, FastNeRF separates this into two lower-dimensional functions, reducing memory complexity from $O(k^3 l^2)$ to $O(k^3(1 + 3D) + l^2 D)$ [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Training Inputs:** A set of images with known camera extrinsics and intrinsics.
+-*   **Training Outputs:** Weights for two MLPs: $\mathcal{F}_{\text{pos}}$ and $\mathcal{F}_{\text{dir}}$.
+-*   **Inference Inputs:** Camera parameters (ray origins and directions).
+-*   **Inference Outputs:** Pixel colors.
++- **Training Inputs:** Multi-view images, camera extrinsics, intrinsics, and optionally depth/normal maps.
++- **Training Outputs:** Weights for two MLPs ($\mathcal{F}_{\text{pos}}$ and $\mathcal{F}_{\text{dir}}$).
++- **Inference Inputs:** Camera parameters (ray origins and directions).
++- **Inference Outputs:** Rendered pixel colors.
+ 
+ **Data Structures:**
+-The method uses two sparse 3D grids to cache network outputs, replacing the neural network at test time.
+-1.  **Position Cache:** A 3D grid of size $k^3$. Each cell stores the output of $\mathcal{F}_{\text{pos}}(\mathbf{p})$.
+-    *   Fields: Density $\sigma$ (1 float) and a deep radiance map $(\mathbf{u}, \mathbf{v}, \mathbf{w})$ where $\mathbf{u}, \mathbf{v}, \mathbf{w}$ are $D$-dimensional vectors.
+-    *   Storage: Dense 16-bit floating point values.
+-2.  **Direction Cache:** A 2D grid of size $l^2$ (representing spherical coordinates $\theta, \phi$). Each cell stores the output of $\mathcal{F}_{\text{dir}}(\mathbf{d})$.
+-    *   Fields: Weight vector $\boldsymbol{\beta}$ of dimension $D$.
+-    *   Storage: Dense 16-bit floating point values.
++1.  **Position Cache:** A sparse 3D grid of size $k^3$. Stores density $\sigma$ and a deep radiance map $(\mathbf{u}, \mathbf{v}, \mathbf{w})$ for each voxel.
++    -   $\sigma$: 16-bit float.
++    -   $\mathbf{u}, \mathbf{v}, \mathbf{w}$: $D$-dimensional vectors of 16-bit floats.
++    -   Total size per voxel: $1 + 3D$ values.
++2.  **Direction Cache:** A sparse 2D grid of size $l^2$ (representing spherical coordinates $\theta, \phi$). Stores direction weights $\boldsymbol{\beta}$.
++    -   $\boldsymbol{\beta}$: $D$-dimensional vector of 16-bit floats.
++    -   Total size per direction: $D$ values.
++
++**Network Architecture:**
++-   $\mathcal{F}_{\text{pos}}(\mathbf{p})$: An 8-layer MLP with 384 hidden units (256 for specific scenes like Ficus). Takes positional encoding of $\mathbf{p} \in \mathbb{R}^3$. Outputs $\sigma$ and $(\mathbf{u}, \mathbf{v}, \mathbf{w})$.
++-   $\mathcal{F}_{\text{dir}}(\mathbf{d})$: A 4-layer MLP with 128 hidden units. Takes positional encoding of direction $\mathbf{d} \in \mathbb{R}^3$ (parameterized as a unit vector). Outputs $\boldsymbol{\beta} \in \mathbb{R}^D$.
+ 
+ **Parameters:**
+-*   $D$: Number of components in the deep radiance map and direction weights. Typical values: 8 for NeRF Synthetic 360 scenes, 6 for LLFF scenes. [S1, unofficial]
+-*   $k$: Number of uniform bins for position coordinates $(x, y, z)$ in the bounding box $V$. Typical grid resolutions: $256^3, 384^3, 512^3, 768^3, 1024^3$. [S1, unofficial]
+-*   $l$: Number of uniform bins for direction coordinates $(\theta, \phi)$, where $\theta \in [0, \pi]$ and $\phi \in [0, 2\pi]$. [S1, unofficial]
++-   $D$: Number of components/factors. Typical values: 8 for NeRF Synthetic 360, 6 for LLFF. 16 provides theoretical improvement but increases sparsity [S1, unofficial].
++-   $k$: Grid resolution for position cache (divisions of bounding box longest side). Typical: $256^3$ to $1024^3$.
++-   $l$: Grid resolution for direction cache. Typical: $256$ to $1024$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Training:**
+-    Train $\mathcal{F}_{\text{pos}}$ and $\mathcal{F}_{\text{dir}}$ using the standard NeRF loss function.
+-    *   $\mathcal{F}_{\text{pos}}$: An 8-layer MLP with 384 hidden units (or 256 for specific scenes like 'ficus'), taking positional encoding of $\mathbf{p}$. Outputs $\sigma$ and $(\mathbf{u}, \mathbf{v}, \mathbf{w})$. [S1, unofficial]
+-    *   $\mathcal{F}_{\text{dir}}$: A 4-layer MLP with 128 hidden units, taking positional encoding of $\mathbf{d}$. Outputs $\boldsymbol{\beta}$. [S1, unofficial]
+-
+-2.  **Cache Population (Pre-computation):**
+-    Define a bounding box $V$ covering the scene.
+-    *   Uniformly sample $k$ values for $x, y, z$ within $V$.
+-    *   Uniformly sample $l$ values for $\theta, \phi$.
+-    *   Compute $\mathcal{F}_{\text{pos}}$ for all $k^3$ positions and store in Position Cache.
+-    *   Compute $\mathcal{F}_{\text{dir}}$ for all $l^2$ directions and store in Direction Cache.
+-
+-3.  **Collision Mesh Generation:**
+-    *   Extract a density volume from the trained $\mathcal{F}_{\text{pos}}$ (or the cached $\sigma$ values).
+-    *   Generate a collision mesh using Marching Cubes on the density volume. [S1, unofficial]
+-    *   *Pitfall:* If the volume resolution exceeds $512^3$, downsample the volume by a factor of two before meshing to reduce mesh complexity. [S1, unofficial]
+-
++1.  **Training:** Train $\mathcal{F}_{\text{pos}}$ and $\mathcal{F}_{\text{dir}}$ using the standard NeRF loss function (MSE between rendered and ground truth colors) [S1, unofficial].
++2.  **Cache Population:**
++    -   Define bounding box $V$ for the scene.
++    -   Uniformly sample $k$ values for $x, y, z$ within $V$.
++    -   Uniformly sample $l$ values for $\theta \in [0, \pi]$ and $\phi \in [0, 2\pi]$.
++    -   Compute $\mathcal{F}_{\text{pos}}$ for all position samples to populate the Position Cache.
++    -   Compute $\mathcal{F}_{\text{dir}}$ for all direction samples to populate the Direction Cache [S1, unofficial].
++3.  **Mesh Generation (Optional but recommended for speed):**
++    -   Extract density volume from Position Cache.
++    -   Generate a collision mesh using Marching Cubes on the sign-distance function derived from the density volume [S1, unofficial].
++    -   If volume resolution $> 512^3$, downsample by factor of 2 before meshing to reduce complexity [S1, unofficial].
+ 4.  **Rendering (Inference):**
+-    For each pixel, generate a ray.
+-    *   **Ray Tracing:** Use hardware-accelerated ray tracing to intersect the collision mesh. Skip empty space. Start integration only after the first hit. [S1, unofficial]
+-    *   **Integration:** Iterate through samples along the ray until transmittance is saturated or the ray exits the bounding box.
+-        *   For each sample point $\mathbf{p}_i$ and direction $\mathbf{d}_i$:
+-            1.  Lookup $\sigma_i$ and $(\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i)$ from the Position Cache using nearest-neighbor interpolation. [S1, unofficial]
+-            2.  Lookup $\boldsymbol{\beta}_i$ from the Direction Cache using trilinear sampling. [S1, unofficial]
+-            3.  Compute color $\mathbf{c}_i = \boldsymbol{\beta}_i^T \cdot (\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i)$. [S1, unofficial]
+-            4.  Compute transmittance $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$.
+-            5.  Compute contribution: $C_i = T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i$.
+-    *   Sum contributions to get final pixel color: $\mathcal{E} = \sum_{i=1}^N C_i$. [S1, unofficial]
++    -   For each pixel, generate a ray.
++    -   Use hardware-accelerated ray tracing to intersect the collision mesh. Skip empty space; start integration at the first hit [S1, unofficial].
++    -   For each sample point $\mathbf{p}_i$ along the ray:
++        -   Lookup $\sigma_i$ and $(\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i)$ from Position Cache using **nearest-neighbor** interpolation.
++        -   Lookup direction $\mathbf{d}_i$ (converted to $\theta, \phi$).
++        -   Lookup $\boldsymbol{\beta}_i$ from Direction Cache using **trilinear** interpolation [S1, unofficial].
++        -   Compute color $\mathbf{c}_i = \boldsymbol{\beta}_i^T \cdot (\mathbf{u}_i, \mathbf{v}_i, \mathbf{w}_i)$ [S1, unofficial].
++    -   Integrate color and density along the ray using the standard volume rendering equation:
++        $$ \mathbf{C} = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
++        where $T_i = \exp(-\sum_{j=1}^{i-1} \sigma_j \delta_j)$ and $\delta_i$ is the distance between samples [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import math
+-
+-def fast_nerf_render(ray_origin, ray_direction, pos_cache, dir_cache, mesh, k, l, D):
++import numpy as np
++
++def fast_nerf_render(ray_origins, ray_directions, pos_cache, dir_cache, k, l, D):
+     """
+-    Renders a single ray using FastNeRF caches.
++    Render images using FastNeRF caches.
+     
+     Args:
+-        ray_origin: (3,) float array
+-        ray_direction: (3,) float array (unit vector)
+-        pos_cache: 3D array of shape (k, k, k, 1 + 3*D)
+-                   Layout: [sigma, u_0..D-1, v_0..D-1, w_0..D-1]
+-        dir_cache: 2D array of shape (l, l, D)
+-                   Layout: [beta_0..D-1]
+-        mesh: Collision mesh object supporting ray intersection
+-        k: Grid resolution for position
+-        l: Grid resolution for direction
+-        D: Number of components
++        ray_origins: (N, 3) array of ray origins.
++        ray_directions: (N, 3) array of ray directions (unit vectors).
++        pos_cache: Sparse 3D grid structure supporting nearest-neighbor lookup.
++                   Stores (sigma, u, v, w) for each voxel.
++        dir_cache: Sparse 2D grid structure supporting trilinear lookup.
++                   Stores beta for each (theta, phi) bin.
++        k: Number of divisions in position cache.
++        l: Number of divisions in direction cache.
++        D: Number of factors.
+         
+     Returns:
+-        color: (3,) float array
++        colors: (N, 3) array of rendered RGB colors.
+     """
++    N = ray_origins.shape[0]
++    colors = np.zeros((N, 3))
+     
+-    # 1. Ray-Mesh Intersection
+-    hit_point, t_hit = mesh.intersect(ray_origin, ray_direction)
++    # Precompute direction cache lookup table if not already done
++    # dir_cache stores beta for l*l bins. 
++    # Mapping: theta in [0, pi], phi in [0, 2pi]
+     
+-    # If no hit, return background color (e.g., black)
+-    if hit_point is None:
+-        return [0.0, 0.0, 0.0]
+-    
+-    # 2. Initialize Integration
+-    # Start integration from the hit point. 
+-    # Note: In practice, one might step slightly inside the mesh to avoid self-intersection artifacts.
+-    current_pos = hit_point
+-    accumulated_transmittance = 1.0
+-    accumulated_color = [0.0, 0.0, 0.0]
+-    
+-    # Sample distance. In standard NeRF, this is often fixed or adaptive.
+-    # FastNeRF visits every voxel, so delta is determined by grid spacing or fixed step.
+-    # Here we assume a fixed step size 'delta' along the ray for simplicity,
+-    # or derived from the cache resolution if uniform sampling is used.
+-    # The source mentions "visiting every voxel", implying steps aligned with the grid.
+-    # For implementation clarity, we use a fixed small delta.
+-    delta = 0.01 # Placeholder for specific step size logic based on scene scale
+-    
+-    # Convert ray direction to spherical coordinates (theta, phi) for direction cache lookup
+-    # theta in [0, pi], phi in [0, 2*pi]
+-    theta = math.acos(max(-1.0, min(1.0, ray_direction[2])))
+-    phi = math.atan2(ray_direction[1], ray_direction[0])
+-    if phi < 0:
+-        phi += 2 * math.pi
+-        
+-    # Map theta, phi to cache indices [0, l-1]
+-    # Assuming uniform bins over the sphere domain
+-    theta_idx = int((theta / math.pi) * (l - 1))
+-    phi_idx = int((phi / (2 * math.pi)) * (l - 1))
+-    
+-    # Clamp indices
+-    theta_idx = max(0, min(l - 1, theta_idx))
+-    phi_idx = max(0, min(l - 1, phi_idx))
+-    
+-    # Pre-fetch direction weights beta
+-    beta = dir_cache[theta_idx, phi_idx, :] # Shape (D,)
+-    
+-    # 3. Integrate along ray
+-    # The source states "visiting every voxel". This implies stepping through the grid.
+-    # We approximate this by stepping along the ray and querying the position cache.
+-    
+-    while accumulated_transmittance > 1e-4:
+-        # Query Position Cache
+-        # Map current_pos to cache indices [0, k-1]
+-        # Assuming pos_cache covers a bounding box V. 
+-        # Implementation requires mapping world coordinates to grid indices.
+-        # Let's assume a helper function `world_to_cache_index` exists or is implemented.
+-        # For this self-contained pseudocode, we define the mapping logic.
+-        
+-        # Normalize position to [0, 1] range relative to bounding box V
+-        # This requires knowing V_min and V_max. 
+-        # Since V is not passed, we assume a normalized space or a global helper.
+-        # [G] Assuming a global function `get_cache_coords(p, k, v_min, v_max)` is available.
+-        # To be strictly self-contained without external state, we assume p is already in cache space [0, k-1].
+-        # However, standard NeRF uses normalized coordinates. 
+-        # We will assume `current_pos` is mapped to `cache_coords` (x,y,z in [0, k-1]).
+-        
+-        cache_coords = world_to_cache_indices(current_pos, k) # Returns (x, y, z)
+-        
+-        x_idx, y_idx, z_idx = cache_coords
+-        
+-        # Nearest neighbor lookup
+-        x_idx = max(0, min(k - 1, int(round(x_idx))))
+-        y_idx = max(0, min(k - 1, int(round(y_idx))))
+-        z_idx = max(0, min(k - 1, int(round(z_idx))))
+-        
+-        pos_data = pos_cache[x_idx, y_idx, z_idx, :]
+-        
+-        sigma = pos_data[0]
+-        u = pos_data[1:1+D]
+-        v = pos_data[1+D:1+2*D]
+-        w = pos_data[1+2*D:1+3*D]
+-        
+-        # Compute color from dot product
+-        # c = beta . (u, v, w)
+-        # Flatten (u,v,w) to a single vector of size 3*D? 
+-        # Source formula: c = sum(beta_i * (u_i, v_i, w_i))
+-        # This implies beta is size D, and (u,v,w) are treated as D components of a 3D vector?
+-        # Re-reading Source [S1, unofficial]: "u, v, w are D-dimensional vectors... c = sum_{i=1}^D beta_i(u_i, v_i, w_i)"
+-        # This notation is slightly ambiguous. Usually, radiance is RGB (3 components).
+-        # If D > 3, how is RGB recovered?
+-        # The source says: "c = (r,g,b) = sum beta_i (u_i, v_i, w_i)".
+-        # This implies the output is a scalar sum? No, c is RGB.
+-        # Likely interpretation: The "deep radiance map" has D components, each component is a vector?
+-        # Or, u, v, w are the RGB channels for each of the D components?
+-        # Formula 5: c = beta^T . (u, v, w).
+-        # If beta is (D,), and (u,v,w) is a tuple of three vectors of size D,
+-        # then beta^T . (u, v, w) is not a standard dot product unless expanded.
+-        # Standard interpretation in factorized NeRF (e.g., SH):
+-        # Radiance = Sum_i (beta_i * Component_i).
+-        # If Component_i is RGB, then beta_i is a scalar weight for an RGB vector.
+-        # But here u, v, w are D-dimensional.
+-        # Let's look at the dimensions.
+-        # If D=8. u is (8,), v is (8,), w is (8,).
+-        # beta is (8,).
+-        # Result c is (3,).
+-        # This implies: r = sum(beta_i * u_i), g = sum(beta_i * v_i), b = sum(beta_i * w_i).
+-        # This matches the structure of "u, v, w" being the RGB channels for the D basis functions.
+-        
+-        r = sum(beta[i] * u[i] for i in range(D))
+-        g = sum(beta[i] * v[i] for i in range(D))
+-        b = sum(beta[i] * w[i] for i in range(D))
+-        color = [r, g, b]
+-        
+-        # Volume Rendering Equation
+-        # alpha = 1 - exp(-sigma * delta)
+-        alpha = 1.0 - math.exp(-sigma * delta)
+-        
+-        # Contribution
+-        weight = accumulated_transmittance * alpha
+-        accumulated_color[0] += weight * color[0]
+-        accumulated_color[1] += weight * color[1]
+-        accumulated_color[2] += weight * color[2]
+-        
+-        # Update transmittance
+-        accumulated_transmittance *= (1.0 - alpha)
+-        
+-        # Move along ray
+-        current_pos = current_pos + ray_direction * delta
+-        
+-    return accumulated_color
+-
+-def world_to_cache_indices(p, k):
+-    """
+-    [G] Placeholder for mapping world coordinates to cache grid indices.
+-    Assumes p is within the bounding box V defined during cache population.
+-    Returns indices in range [0, k-1].
+-    """
+-    # Implementation depends on specific bounding box V_min, V_max
+-    # normalized_p = (p - V_min) / (V_max - V_min)
+-    # return (normalized_p * (k - 1)).astype(int)
++    for i in range(N):
++        origin = ray_origins[i]
++        direction = ray_directions[i]
++        
++        # 1. Ray-Mesh Intersection to find start point
++        # Assume collision_mesh is available from Marching Cubes
++        t_hit, hit_point = intersect_ray_mesh(origin, direction, collision_mesh)
++        
++        if t_hit is None:
++            continue # Ray misses scene
++            
++        # 2. Integration along ray
++        # Visit every voxel from hit point until transmittance is saturated
++        # or max samples reached. 
++        # In FastNeRF, we typically visit every voxel in the bounding box 
++        # after the first hit, or use a step size corresponding to cache resolution.
++        
++        sigma_acc = 0.0
++        T = 1.0
++        accumulated_color = np.zeros(3)
++        
++        # Determine step size based on cache resolution k and bounding box size
++        # For simplicity, assume uniform sampling across the bounding box
++        # or use hardware ray marching to step through voxels.
++        
++        current_pos = hit_point
++        # Iterate through samples along the ray
++        # Note: In practice, this loop is replaced by GPU kernels visiting voxels
++        for sample_idx in range(MAX_SAMPLES):
++            # Check if ray is still within bounding box V
++            if not is_inside_bbox(current_pos):
++                break
++                
++            # Lookup Position Cache (Nearest Neighbor)
++            # Convert current_pos to grid indices
++            p_idx = pos_to_grid_index(current_pos, k, bbox)
++            sigma, u, v, w = pos_cache.lookup_nearest(p_idx)
++            
++            # Lookup Direction Cache (Trilinear)
++            # Convert direction to spherical coordinates
++            theta = np.arccos(direction[2]) # Assuming z-up or similar convention
++            phi = np.arctan2(direction[1], direction[0])
++            if phi < 0: phi += 2 * np.pi
++            
++            # Map theta, phi to grid indices
++            d_idx = dir_to_grid_index(theta, phi, l)
++            beta = dir_cache.lookup_trilinear(d_idx)
++            
++            # Compute color
++            # c = beta^T . (u, v, w)
++            # u, v, w are D-dim vectors. beta is D-dim vector.
++            # Reshape for dot product
++            radiance_components = np.concatenate([u, v, w]) # Shape (3*D) ? 
++            # Wait, formula says c = sum beta_i (u_i, v_i, w_i)
++            # This implies u, v, w are D-dim vectors representing R, G, B components?
++            # Or u,v,w are D-dim vectors and beta is D-dim?
++            # Source: "c = sum_{i=1}^D beta_i (u_i, v_i, w_i)"
++            # This notation is slightly ambiguous. 
++            # Interpretation 1: u, v, w are D-dim vectors. beta is D-dim.
++            # Result is a vector? No, c is RGB.
++            # Re-reading source: "u, v, w are D-dimensional vectors that form a deep radiance map"
++            # "c = sum beta_i (u_i, v_i, w_i)"
++            # This likely means: The deep radiance map has D components. 
++            # Each component i has 3 values (R, G, B)? 
++            # Or u, v, w are the 3 color channels for each of the D components?
++            # "u, v, w are D-dimensional vectors" -> u is D-dim, v is D-dim, w is D-dim.
++            # "beta is D-dimensional vector of weights"
++            # "c = sum_{i=1}^D beta_i (u_i, v_i, w_i)"
++            # This results in a 3D vector (R, G, B) if (u_i, v_i, w_i) is treated as a triplet?
++            # No, u_i is a scalar. 
++            # Correct interpretation from literature on factorized NeRF:
++            # The radiance is approximated as a sum of D basis functions.
++            # Each basis function has a spatial coefficient (u_i, v_i, w_i) for R, G, B?
++            # Actually, standard factorization: c(p,d) = sum_k w_k(d) * c_k(p).
++            # Here, c_k(p) is a 3D color vector.
++            # So u, v, w might be the 3 color channels for the D components?
++            # Let's look at the formula again: c = beta^T . (u, v, w)
++            # If beta is (D,), and (u,v,w) is (3*D,), then dot product is not defined directly.
++            # Unless (u,v,w) is reshaped.
++            # Source says: "c = sum_{i=1}^D beta_i (u_i, v_i, w_i)"
++            # This implies the result is a vector where the R component is sum beta_i * u_i?
++            # No, that would be scalar.
++            # It implies: c_R = sum beta_i * u_i, c_G = sum beta_i * v_i, c_B = sum beta_i * w_i.
++            # So u, v, w are D-dimensional vectors.
++            # c = [ dot(beta, u), dot(beta, v), dot(beta, w) ]
++            
++            c_r = np.dot(beta, u)
++            c_g = np.dot(beta, v)
++            c_b = np.dot(beta, w)
++            c_i = np.array([c_r, c_g, c_b])
++            
++            # Volume Rendering Step
++            delta = step_size # Distance between samples
++            alpha = 1.0 - np.exp(-sigma * delta)
++            transmittance_term = T * alpha
++            accumulated_color += transmittance_term * c_i
++            T *= (1.0 - alpha)
++            
++            if T < 1e-4: # Saturation
++                break
++                
++            # Move to next sample
++            current_pos += direction * delta
++            
++        colors[i] = accumulated_color
++        
++    return colors
++
++def intersect_ray_mesh(origin, direction, mesh):
++    # Placeholder for hardware ray tracing logic
++    # Returns (t, point) or (None, None)
++    pass
++
++def pos_to_grid_index(pos, k, bbox):
++    # Convert world position to 3D grid index
++    pass
++
++def dir_to_grid_index(theta, phi, l):
++    # Convert spherical coords to 2D grid index
+     pass
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering is memory-bound. Avoids MLP calls at inference. Speedup is >3000x compared to standard NeRF [S1, unofficial].
+-*   **Memory Complexity:** 
+-    *   Standard NeRF caching: $O(k^3 l^2)$. For $k=l=1024$, this is ~5600 TB [S1, unofficial].
+-    *   FastNeRF caching: $O(k^3 (1 + 3D) + l^2 D)$. For $k=l=1024, D=8$, this is ~54 GB [S1, unofficial].
+-*   **Performance:** Renders 300x300 pixel images at 30 fps on Nvidia Tesla V100 in telepresence scenarios (50x faster than NeRF) [S1, unofficial]. Renders high-res novel views at 200Hz on high-end consumer GPUs [S1, unofficial].
+-*   **Strengths:** Extremely fast inference; fits on consumer hardware; compatible with NeRF extensions (dynamic scenes, illumination control) [S1, unofficial].
+-*   **Limitations:** 
+-    *   Aliasing artifacts due to grid caching [S1, unofficial].
+-    *   Slower than cached version when not cached (due to larger MLPs) [S1, unofficial].
+-    *   Mesh complexity grows with volume size; requires downsampling for volumes > $512^3$ [S1, unofficial].
+-    *   Quality decreases with lower grid resolutions (pixelated appearance) [S1, unofficial].
++-   **Speed:** FastNeRF is approximately 3000x faster than standard NeRF at comparable perceptual quality [S1, unofficial]. It achieves 200Hz rendering on high-end consumer GPUs [S1, unofficial].
++-   **Memory:** Memory complexity is $O(k^3(1 + 3D) + l^2 D)$. For $k=l=1024$ and $D=8$, dense cache size is ~54 GB, compared to ~5600 TB for standard NeRF caching [S1, unofficial].
++-   **Quality:** Matches or exceeds NeRF quality at high cache resolutions (e.g., $1024^3$). Lower resolutions (e.g., $256^3$) may show "pixelated" appearance or aliasing artifacts due to grid discretization [S1, unofficial].
++-   **Training:** Training time is identical to standard NeRF [S1, unofficial].
++-   **Limitations:** 
++    -   Aliasing artifacts can appear due to caching [S1, unofficial].
++    -   Uncached performance is slower than NeRF due to larger MLPs (384 hidden units) [S1, unofficial].
++    -   Mesh complexity must be managed for large volumes ($>512^3$) [S1, unofficial].
+ 
+ ## Background
+-FastNeRF was introduced by Garbin et al. in 2021 [S1, unofficial]. It was motivated by the need for interactive rates on mobile and mixed reality devices. The method draws inspiration from real-time computer graphics techniques for approximating the rendering equation, specifically spherical harmonics, by factorizing the 5D radiance function into 3D position and 2D direction components [S1, unofficial]. It is used in telepresence, dynamic scene reconstruction, and single-image reconstruction [S1, unofficial].
++FastNeRF was introduced by Garbin et al. in 2021 [S1, unofficial]. It builds on the original NeRF architecture [27] by applying a graphics-inspired factorization similar to spherical harmonics in real-time rendering. The method addresses the high computational cost of NeRF, which is compute-bound due to repeated MLP evaluations. By caching the factorized components, it shifts the bottleneck to memory bandwidth, which is more efficiently handled by modern GPUs. It has been applied to telepresence, dynamic scenes, and single-image reconstruction [S1, unofficial].
+ 
+ ## Sources
++
+ [S1] FastNeRF by Garbin et al., https://arxiv.org/abs/2103.10380, fetched 2026-10-26 (unofficial)

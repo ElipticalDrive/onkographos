@@ -1,0 +1,229 @@
+# Elliptical Camera Path Generation
+
+Also called: elliptical camera trajectory
+
+## Overview
+Generates a smooth, closed-loop elliptical camera trajectory in 3D space, typically centered on a scene's focal point, by interpolating between computed bounds derived from input camera poses. It differs from [Orbit Camera Path Generation](7811-orbit-camera-path-generation.md) by allowing non-circular, axis-aligned elliptical shapes and variable Z-height oscillations, and from [Spiral Camera Path Generation](1635-spiral-camera-path-generation.md) by maintaining a constant radius (or bounded ellipse) rather than expanding/contracting depth. It solves the problem of creating continuous, smooth novel views for training neural radiance fields or rendering smooth fly-throughs when only sparse or irregular input poses are available.
+
+## How it works
+**Inputs:**
+- `poses`: A list or array of $N$ camera poses, where each pose is a $4 \times 4$ transformation matrix (or $3 \times 4$ extrinsics) representing the camera's position and orientation in world coordinates.
+- `n_frames`: The desired number of output frames (integer).
+- `variation`: A scalar controlling the amplitude of the Z-axis oscillation (float, typically $0.0$ to $1.0$).
+- `phase`: A scalar offset for the Z-axis oscillation (float, typically $0.0$ to $1.0$).
+
+**Outputs:**
+- `view_matrices`: A list or array of $N_{out} = n\_frames$ $4 \times 4$ view matrices (camera-to-world or world-to-camera depending on convention, here constructed as view matrices looking at the center).
+
+**Data Structures:**
+- `poses`: Array of shape $(N, 4, 4)$ or $(N, 3, 4)$.
+- `positions`: Array of shape $(n\_frames, 3)$ containing the camera eye positions.
+- `up_vector`: Array of shape $(3)$ containing the normalized up vector.
+
+**Steps:**
+
+1.  **Compute Center:** Calculate the focal point (center) of the input poses using a `focus_point_fn`. This is typically the mean of the camera positions or the median. Let $\mathbf{c} = \text{focus\_point\_fn}(\text{poses})$. [S1, S2, unofficial]
+
+2.  **Define Offset and Bounds:**
+    *   Set an offset vector $\mathbf{o}$. The sources show two variations:
+        *   Variation A (X-Y plane, Z variation): $\mathbf{o} = [c_x, c_y, h]$, where $h$ is a base height (often $0$ or the mean Z). [S1, unofficial]
+        *   Variation B (X-Z plane, Y variation): $\mathbf{o} = [c_x, h, c_z]$. [S1, unofficial]
+        *   Variation C (Generic): $\mathbf{o} = [c_x, c_y, 0]$. [S2, unofficial]
+    *   Compute scaling factors $\mathbf{sc}$ using the 90th percentile of the absolute distances of the camera positions from the offset:
+        $$ \mathbf{sc} = \text{percentile}(|\mathbf{p}_i - \mathbf{o}|, 90, \text{axis}=0) $$
+        where $\mathbf{p}_i$ are the camera positions extracted from `poses`. [S1, S2, unofficial]
+    *   Compute the bounding box limits:
+        $$ \mathbf{low} = -\mathbf{sc} + \mathbf{o} $$
+        $$ \mathbf{high} = \mathbf{sc} + \mathbf{o} $$ [S1, S2, unofficial]
+
+3.  **Compute Height Bounds (for oscillation):**
+    *   Extract the Z-coordinates (or Y-coordinates for Variation B) of the input poses.
+    *   Compute the lower and upper bounds for the oscillation using the 10th and 90th percentiles:
+        $$ z_{low} = \text{percentile}(p_{i,z}, 10) $$
+        $$ z_{high} = \text{percentile}(p_{i,z}, 90) $$ [S1, S2, unofficial]
+
+4.  **Define Position Function:**
+    Define a function $\mathbf{p}(\theta)$ that maps an angle $\theta \in [0, 2\pi]$ to a 3D position.
+    *   For Variation A (X-Y ellipse, Z oscillation):
+        $$
+        \begin{aligned}
+        x(\theta) &= low_x + (high_x - low_x) \left( \frac{\cos(\theta)}{2} + \frac{1}{2} \right) \\
+        y(\theta) &= low_y + (high_y - low_y) \left( \frac{\sin(\theta)}{2} + \frac{1}{2} \right) \\
+        z(\theta) &= h + \text{variation} \left( z_{low} + (z_{high} - z_{low}) \left( \frac{\cos(\theta + 2\pi \cdot \text{phase})}{2} + \frac{1}{2} \right) \right)
+        \end{aligned}
+        $$ [S1, unofficial]
+    *   For Variation B (X-Z ellipse, Y oscillation):
+        $$
+        \begin{aligned}
+        x(\theta) &= low_x + (high_x - low_x) \left( \frac{\cos(\theta)}{2} + \frac{1}{2} \right) \\
+        y(\theta) &= h + \text{variation} \left( y_{low} + (y_{high} - y_{low}) \left( \frac{\cos(\theta + 2\pi \cdot \text{phase})}{2} + \frac{1}{2} \right) \right) \\
+        z(\theta) &= low_z + (high_z - low_z) \left( \frac{\sin(\theta)}{2} + \frac{1}{2} \right)
+        \end{aligned}
+        $$ [S1, unofficial]
+
+5.  **Generate Positions:**
+    *   Create an array of angles $\theta$ from $0$ to $2\pi$ with $n\_frames + 1$ steps.
+    *   Compute $\mathbf{p}(\theta)$ for each angle.
+    *   Remove the last position (which is identical to the first, closing the loop). [S1, S2, unofficial]
+
+6.  **Determine Up Vector:**
+    *   Extract the "up" vectors from the input poses (typically the second column of the rotation matrix, index `[:, :3, 1]`).
+    *   Compute the average up vector: $\mathbf{u}_{avg} = \text{mean}(\text{poses}[:, :3, 1], \text{axis}=0)$.
+    *   Normalize $\mathbf{u}_{avg}$.
+    *   Find the index $i$ of the component with the largest absolute value in $\mathbf{u}_{avg}$.
+    *   Set the final up vector $\mathbf{u}$ to the basis vector $\mathbf{e}_i$ scaled by the sign of the corresponding component in $\mathbf{u}_{avg}$:
+        $$ \mathbf{u} = \text{sign}(u_{avg}[i]) \cdot \mathbf{e}_i $$
+        This ensures the up vector is axis-aligned and consistent with the dominant orientation of the input poses. [S1, S2, unofficial]
+
+7.  **Construct View Matrices:**
+    *   For each generated position $\mathbf{p}_j$, construct a view matrix.
+    *   The sources show two conventions for the look-at vector:
+        *   Convention A: Look from $\mathbf{p}_j$ to $\mathbf{c}$: $\text{viewmatrix}(\mathbf{c} - \mathbf{p}_j, \mathbf{u}, \mathbf{p}_j)$. [S1, unofficial]
+        *   Convention B: Look from $\mathbf{c}$ to $\mathbf{p}_j$? No, `viewmatrix(p - center, up, p)` suggests the camera is at `p`, looking at `center`? Actually, standard `lookAt` takes `eye`, `center`, `up`. The notation `viewmatrix(p - center, up, p)` is ambiguous. However, `viewmatrix(center - p, up, p)` in S1 clearly implies eye=`p`, target=`center`. S2's `viewmatrix(p - center, up, p)` might be a typo or a different convention (e.g., direction vector). Given S1 is more explicit, we assume the camera is at $\mathbf{p}_j$ looking at $\mathbf{c}$. [S1, S2, unofficial]
+    *   Return the stack of view matrices.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def focus_point_fn(poses):
+    """
+    Computes the center of the camera poses.
+    Implementation detail: [G] Typically the mean of the translation components.
+    """
+    positions = poses[:, :3, 3]
+    return np.mean(positions, axis=0)
+
+def generate_ellipse_path(poses, n_frames, variation=0.0, phase=0.0):
+    """
+    Generates an elliptical camera path.
+    
+    Args:
+        poses: (N, 4, 4) array of camera poses.
+        n_frames: int, number of output frames.
+        variation: float, amplitude of Z oscillation (0-1).
+        phase: float, phase shift for Z oscillation (0-1).
+        
+    Returns:
+        view_matrices: (n_frames, 4, 4) array of view matrices.
+    """
+    # 1. Compute Center
+    center = focus_point_fn(poses)
+    
+    # 2. Define Offset and Bounds (Variation A: X-Y plane, Z variation)
+    # Extract positions
+    positions = poses[:, :3, 3]
+    
+    # Offset: [center_x, center_y, height]
+    # [G] height is often 0 or mean_z. We use 0 as per S2's generic offset example, 
+    # but S1 uses a specific height. We'll use center_z as a reasonable default for 'height' if not specified,
+    # but S1 explicitly sets offset[2] = height. Let's assume height=0 for simplicity unless specified.
+    # Actually, S1 says "Set offset = [center[0], center[1], height]". 
+    # S2 says "Set the path height offset to z=0: offset = np.array([center[0], center[1], 0])".
+    # We will use 0 for height to match S2's explicit instruction for the generic case.
+    height = 0.0
+    offset = np.array([center[0], center[1], height])
+    
+    # Compute scaling factors using 90th percentile
+    abs_diffs = np.abs(positions - offset)
+    sc = np.percentile(abs_diffs, 90, axis=0)
+    
+    # Compute bounds
+    low = -sc + offset
+    high = sc + offset
+    
+    # 3. Compute Height Bounds (Z-axis)
+    z_coords = positions[:, 2]
+    z_low = np.percentile(z_coords, 10)
+    z_high = np.percentile(z_coords, 90)
+    
+    # 4. Define Position Function
+    def get_positions(theta):
+        # X: cos(theta)
+        x = low[0] + (high[0] - low[0]) * (np.cos(theta) * 0.5 + 0.5)
+        # Y: sin(theta)
+        y = low[1] + (high[1] - low[1]) * (np.sin(theta) * 0.5 + 0.5)
+        # Z: oscillation
+        z = height + variation * (z_low + (z_high - z_low) * (np.cos(theta + 2 * np.pi * phase) * 0.5 + 0.5))
+        return np.array([x, y, z])
+    
+    # 5. Generate Positions
+    thetas = np.linspace(0, 2 * np.pi, n_frames + 1)
+    positions_path = np.array([get_positions(t) for t in thetas])
+    
+    # Remove last duplicate point
+    positions_path = positions_path[:-1]
+    
+    # 6. Determine Up Vector
+    # Extract up vectors (column 1 of rotation matrix)
+    up_vectors = poses[:, :3, 1]
+    avg_up = np.mean(up_vectors, axis=0)
+    avg_up = avg_up / np.linalg.norm(avg_up)
+    
+    # Find index of max absolute component
+    ind_up = np.argmax(np.abs(avg_up))
+    
+    # Set up vector
+    up = np.eye(3)[ind_up] * np.sign(avg_up[ind_up])
+    
+    # 7. Construct View Matrices
+    # Convention: Camera at p, looking at center, up vector u
+    # viewmatrix(center - p, up, p) implies:
+    # forward = normalize(center - p)
+    # right = normalize(cross(forward, up)) -> wait, standard lookAt uses cross(up, forward) or similar
+    # We will implement a standard lookAt matrix construction.
+    
+    view_matrices = []
+    for p in positions_path:
+        # Forward vector (from camera to target)
+        forward = center - p
+        forward = forward / np.linalg.norm(forward)
+        
+        # Right vector
+        right = np.cross(forward, up)
+        right = right / np.linalg.norm(right)
+        
+        # New Up vector
+        new_up = np.cross(right, forward)
+        
+        # Construct View Matrix (Camera to World inverse)
+        # V = [ R^T  -R^T * t ]
+        #     [ 0      1      ]
+        # Where R is [right, new_up, -forward] (columns)
+        # Note: Standard OpenGL lookAt uses -forward for Z axis in view space.
+        
+        R = np.column_stack((right, new_up, -forward))
+        t = -R @ p
+        
+        view_matrix = np.eye(4)
+        view_matrix[:3, :3] = R
+        view_matrix[:3, 3] = t
+        
+        view_matrices.append(view_matrix)
+        
+    return np.array(view_matrices)
+```
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Poses:** If all input poses are collinear or identical, `sc` will be zero or very small, leading to numerical instability. [G] Add a minimum bound to `sc`.
+- **Up Vector Ambiguity:** If the average up vector is near zero (e.g., poses are evenly distributed in all directions), the axis selection may be arbitrary. [G] Fallback to a fixed up vector (e.g., [0, 1, 0]).
+- **Precision:** Using `np.percentile` with small $N$ can be noisy. Ensure $N$ is sufficient.
+- **Boundary Conditions:** The loop generates $n\_frames + 1$ points to close the ellipse, then removes the last. Ensure $n\_frames \ge 1$.
+
+## Operating characteristics
+- **Time Complexity:** $O(N + n\_frames)$, where $N$ is the number of input poses. The percentile calculations and up vector averaging are $O(N)$, and position generation is $O(n\_frames)$.
+- **Memory Complexity:** $O(N + n\_frames)$ to store input poses and output positions/matrices.
+- **Strengths:** Smooth, continuous path; easy to control bounds via input poses; handles non-circular scenes better than simple orbits.
+- **Limitations:** Assumes the scene is roughly centered at the focal point; may not follow complex 3D structures well if the input poses are sparse in certain directions.
+- **When to use:** When a smooth, closed-loop camera path is needed for novel view synthesis or rendering, and the scene is compact.
+- **When not to use:** For scenes with large depth variations or elongated structures (use [Elongated Structure Camera Trajectory Generation](4666-elongated-structure-camera-trajectory-generation.md) instead).
+
+## Background
+Originated in the context of neural radiance field (NeRF) training and novel view synthesis, where smooth camera trajectories are required to generate training data or render animations. The method is implemented in libraries like `mrGSplat` and `VolSplat` to automate camera path generation from sparse input images. [S1, S2, unofficial]
+
+## Sources
+[S1] meshroomHub/mrGSplat, https://github.com/meshroomHub/mrGSplat, fetched 2026-10-27 (unofficial)
+[S2] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)

@@ -3,10 +3,10 @@
 Also called: Light field display aware volume rendering, Light field rendering pipeline, Multi-projector display rendering, Two-Pass GPU Volume Ray Casting, Two-Pass Light Field Rendering, Two-pass rendering for light field displays
 
 ## Overview
-This method provides a specialized rendering pipeline for light field displays, enabling multiple freely moving naked-eye viewers to perceive virtual volumetric objects floating at fixed physical locations in the display workspace [S1, S2]. It addresses the challenge of rendering volumetric data across multiple projectors with precise geometric alignment and color consistency. It sets itself apart from standard volume rendering by decoupling the 3D ray-casting computation from the 2D post-processing required to correct non-linear optical distortions inherent in multi-projector setups [S1, S2]. It builds on [Two-Pass Ray Marching Volume Rendering](5965-two-pass-ray-marching-volume-rendering.md) by extending the two-pass paradigm to handle multi-view light field geometry and per-projector distortion correction.
+This method provides a specialized rendering pipeline for light field displays, enabling multiple freely moving naked-eye viewers to perceive virtual volumetric objects floating at fixed physical locations in the display workspace [S1, S2]. It sets itself apart from standard volume rendering by decoupling the 3D ray-casting computation from the 2D post-processing required to correct non-linear optical distortions inherent in multi-projector setups [S1, S2]. It builds on [Two-Pass Ray Marching Volume Rendering](5965-two-pass-ray-marching-volume-rendering.md) by extending the two-pass paradigm to handle multi-view light field geometry and per-projector distortion correction [G].
 
 ## How it works
-The method consists of two distinct passes: a 3D rendering pass that generates per-projector views, and a 2D warping pass that corrects geometric and color distortions.
+The method consists of two distinct passes: a 3D rendering pass that generates per-projector views, and a 2D warping pass that corrects geometric and color distortions [S1, S2].
 
 ### Inputs and Outputs
 *   **Inputs:**
@@ -26,9 +26,9 @@ The method consists of two distinct passes: a 3D rendering pass that generates p
 
 **Pass 1: Per-Projector Volume Ray Casting**
 1.  **Initialize:** For each projector in the light field display array:
-    a. Bind the FBO corresponding to the current projector's resolution.
-    b. Set up the projection matrix based on the idealized light field geometry model for this projector [S1, S2].
-2.  **Render Proxy Geometry:** Render a proxy geometry (e.g., the volume’s bounding box) whose projection on the image plane covers all pixels emitting rays passing through the volume [S1].
+    a. Allocate and bind an FBO texture matching the projector's resolution.
+    b. Set the view and projection matrices based on the idealized light field geometry model for this projector [S1, S2].
+2.  **Render Proxy Geometry:** Render a proxy geometry (typically the volume’s bounding box) whose projection on the image plane covers all pixels emitting rays passing through the volume [S1].
 3.  **Ray Casting Fragment Shader:** For each pixel covered by the proxy geometry:
     a. **Ray Generation:** Compute the ray origin and direction based on the projector's view and the pixel's position [S1].
     b. **Ray Marching:** Step from sample location to sample location along the ray [S1].
@@ -45,77 +45,74 @@ The method consists of two distinct passes: a 3D rendering pass that generates p
     a. **Lookup:** Retrieve the per-pixel lookup table data corresponding to the output pixel's position [S1, S2].
     b. **Geometry Warping:** Use the LUT to determine the source pixel coordinates in the Pass 1 texture, effectively warping the geometry to correct non-linear view distortions [S1, S2].
     c. **Color Correction:** Modify the color values using the LUT data to correct color distortions [S1, S2].
-    d. **Sampling:** Sample the Pass 1 texture at the warped coordinates [S1, S2].
 3.  **Display:** Output the corrected image to the projector [S1, S2].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 # Pass 1: Per-Projector Ray Casting
 def pass1_volume_raycasting(projector_views, volume_texture, light_field_geometry):
     for view in projector_views:
-        # Bind FBO for this projector
-        fbo = create_fbo(view.resolution)
-        bind_fbo(fbo)
-        
-        # Set up projection based on light field geometry
-        projection_matrix = light_field_geometry.get_projection_matrix(view)
-        set_projection(projection_matrix)
-        
-        # Render proxy geometry (e.g., bounding box) to activate fragment shader
-        render_proxy_geometry()
-        
-        # Fragment shader logic (executed per pixel)
-        # ray_origin, ray_direction computed from view and pixel coordinates
-        accumulated_color = vec3(0.0)
-        accumulated_opacity = 0.0
-        
-        # Ray marching loop
-        t = 0.0
-        while t < max_distance and accumulated_opacity < 1.0:
-            sample_position = ray_origin + t * ray_direction
-            sample_value = texture_trilinear(volume_texture, sample_position)
-            
-            # Optical model: compute color and opacity from sample_value
-            color, opacity = transfer_function(sample_value)
-            
-            # Front-to-back compositing
-            alpha = opacity * (1.0 - accumulated_opacity)
-            accumulated_color += color * alpha
-            accumulated_opacity += alpha
-            
-            t += step_size # Step size determined by volume resolution and view distance
-            
-        write_to_fbo(fbo, accumulated_color)
-        unbind_fbo()
+        # Allocate and bind FBO for this projector
+        fbo_texture = allocate_texture(view.resolution)
+        bind_framebuffer(fbo_texture)
+        set_view_projection(light_field_geometry.get_matrix(view))
+        # Render proxy geometry (bounding box) to trigger fragment shader
+        draw_bounding_box()
+        unbind_framebuffer()
+        # Store result
+        view.pass1_result = fbo_texture
 
 # Pass 2: 2D Warping and Distortion Correction
-def pass2_distortion_correction(projector_views, pass1_textures, distortion_luts):
+def pass2_distortion_correction(projector_views, distortion_luts):
     for view in projector_views:
-        # Bind output display target
-        bind_display_target(view.display_area)
-        
-        # Bind Pass 1 texture and corresponding LUT
-        source_texture = pass1_textures[view.id]
+        source_texture = view.pass1_result
         lut_texture = distortion_luts[view.id]
-        
-        # Render full-screen quad to activate warping shader
-        render_fullscreen_quad()
-        
-        # Fragment shader logic (executed per output pixel)
-        # output_pixel_coord is the current pixel in the display area
-        source_uv = lookup_warp(lut_texture, output_pixel_coord)
-        color_correction = lookup_color(lut_texture, output_pixel_coord)
-        
-        # Sample from Pass 1 result
-        raw_color = texture(source_texture, source_uv)
-        
-        # Apply color correction
-        final_color = apply_color_correction(raw_color, color_correction)
-        
-        write_to_display(final_color)
+        bind_display_target(view.display_area)
+        draw_fullscreen_quad()
+        unbind_display_target()
+
+# Fragment shader logic for Pass 1 (executed per pixel)
+def fragment_shader_pass1(pixel_coord, ray_origin, ray_direction, volume_texture):
+    accumulated_color = vec3(0.0)
+    accumulated_opacity = 0.0
+    t = 0.0
+    max_steps = 1000  # Not given in the sources [G]
+    for _ in range(max_steps):
+        if accumulated_opacity >= 1.0:
+            break
+        sample_pos = ray_origin + t * ray_direction
+        sample_value = texture_trilinear(volume_texture, sample_pos)
+        color, opacity = apply_transfer_function(sample_value)
+        alpha = opacity * (1.0 - accumulated_opacity)
+        accumulated_color += color * alpha
+        accumulated_opacity += alpha
+        t += compute_step_size(volume_texture, ray_direction)
+    return accumulated_color
+
+# Fragment shader logic for Pass 2 (executed per output pixel)
+def fragment_shader_pass2(output_pixel_coord, source_texture, lut_texture):
+    source_uv = lookup_table_sample(lut_texture, output_pixel_coord, "warp")
+    color_correction = lookup_table_sample(lut_texture, output_pixel_coord, "color")
+    raw_color = texture_bilinear(source_texture, source_uv)
+    corrected_color = apply_color_correction(raw_color, color_correction)
+    return corrected_color
+
+# Helper definitions (standard operations)
+def allocate_texture(resolution): return {}  # Allocates GPU texture memory
+def bind_framebuffer(tex): pass  # Sets active render target
+def set_view_projection(mat): pass  # Updates GPU projection matrix
+def draw_bounding_box(): pass  # Triggers fragment shader for volume pixels
+def unbind_framebuffer(): pass  # Resets render target
+def bind_display_target(area): pass  # Sets output display surface
+def draw_fullscreen_quad(): pass  # Triggers warping shader for output pixels
+def texture_trilinear(tex, pos): return tex.sample(pos, filter="trilinear")  # Resamples volume
+def apply_transfer_function(val): return val.color, val.opacity  # Applies optical model [G]
+def compute_step_size(tex, dir): return tex.resolution / max(abs(dir))  # Standard step calculation [G]
+def lookup_table_sample(lut, uv, channel): return lut.sample(uv, channel=channel)  # Reads LUT data
+def texture_bilinear(tex, uv): return tex.sample(uv, filter="bilinear")  # Samples Pass 1 result
+def apply_color_correction(raw, correction): return raw * correction  # Applies color LUT
 ```
 
 ### Parameters
@@ -129,13 +126,13 @@ def pass2_distortion_correction(projector_views, pass1_textures, distortion_luts
 *   **Full Opacity:** The ray marching loop terminates early if full opacity is reached, which is a standard optimization but must be handled correctly to avoid artifacts [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Pass 1 is $O(N \cdot R)$, where $N$ is the number of pixels across all projectors and $R$ is the average number of ray steps. Pass 2 is $O(M)$, where $M$ is the total number of output pixels.
-*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels. Additional memory for FBOs and LUTs is proportional to the display resolution. For large datasets, the octree structure adds overhead but allows out-of-core processing [S2].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources. Additional memory for FBOs and LUTs is proportional to the display resolution. For large datasets, the octree structure adds overhead but allows out-of-core processing [S2].
 *   **Measured Performance:** Not given in the sources.
-*   **Strengths:** Enables real-time volume rendering on light field displays; separates complex 3D computation from 2D correction; handles large datasets via octree decomposition [S1, S2].
+*   **Strengths:** Enables real-time volume rendering on light field displays [S1]; separates 3D ray-casting from 2D distortion correction [S1, S2]; handles large datasets via octree decomposition [S2].
 *   **Limitations:** Requires precomputed LUTs for distortion correction; assumes idealized light field geometry in Pass 1; non-linear distortions must be small enough to be corrected by 2D warping [S1, S2].
-*   **When to Use:** When rendering volumetric data on multi-projector light field displays with multiple viewers.
-*   **When Not to Use:** When high-precision geometric alignment is not required or when the display is not a light field type.
+*   **When to Use:** When rendering volumetric data on multi-projector light field displays with multiple viewers [G].
+*   **When Not to Use:** When high-precision geometric alignment is not required or when the display is not a light field type [G].
 
 ## Background
 The method was developed by Agus et al. in 2008 for the Eurographics conference [S1]. It follows the two-pass approach typical of contemporary multi-projector displays [BMY05] [S1, S2]. The technique was designed to provide multiple freely moving naked-eye viewers with the illusion of presence of virtual volumetric objects floating at fixed physical locations in the display workspace [S1, S2]. It is based on GPU ray-casting, which emerged as a flexible and efficient framework for real-time volume rendering [S1]. An adaptive technique based on octree decomposition was also designed to handle very large datasets [S2].

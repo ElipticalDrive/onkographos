@@ -1,0 +1,190 @@
+# Object Aligned Planes Volume Rendering
+
+Also called: Slice-based Volume Rendering, Texture 2D Volume Rendering
+
+## Overview
+Object Aligned Planes Volume Rendering represents a 3D scalar field as a set of 2D textures aligned with the object's axes (X, Y, Z) and renders them by projecting these slices onto the screen based on the camera's viewing direction, using transparency blending to composite the slices [S1, unofficial]. It differs from parent [Slice Polygon Computation (3D Texture)](5680-slice-polygon-computation-3d-texture.md) by avoiding 3D texture lookups and instead using pre-extracted 2D textures for each axis, and from sibling [Polygon-based Volumetric Rendering with Depth Peeling](8389-polygon-based-volumetric-rendering-with-depth-peeling.md) by relying on alpha blending rather than depth peeling for occlusion handling [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A raw binary volume file named `Name_XxYxZ.raw` located in `files/Modelos`, where X, Y, Z are dimensions [S1, unofficial].
+- Output: A composited 2D image on the screen.
+
+**Data Structures:**
+The volume data is stored in a structure `vol` (or `volumen`) with the following fields:
+- `XDIM`, `YDIM`, `ZDIM`: `int`, the dimensions of the volume along each axis.
+- `BITS`: `int`, 8 or 16, indicating the bit depth of the voxel data.
+- `texX`, `texY`, `texZ`: `GLuint*` arrays of size `XDIM`, `YDIM`, and `ZDIM` respectively, storing the 2D OpenGL textures for slices along each axis [S1, unofficial].
+- `distX`, `distY`, `distZ`: `float`, spacing constants calculated as `2.0f / (float)Dimension` for each axis [S1, unofficial].
+
+**Numbered Steps:**
+
+1. **Parse Filename:**
+   - Extract X, Y, Z dimensions from the filename `Name_XxYxZ.raw`.
+   - Iterate backwards from the end of the string, identifying 'x' separators and the '.' extension to extract substrings for each dimension using `atoi` [S1, unofficial].
+   - If any dimension remains -1 after parsing, return failure (malformed filename) [S1, unofficial].
+
+2. **Load Raw Volume Data:**
+   - Read the file size.
+   - Calculate `size = XDIM * YDIM * ZDIM`.
+   - If file size matches `size`, set `BITS = 8` and load data as `GLubyte` (8-bit).
+   - If file size matches `size * 2`, set `BITS = 16` and load data as `GLushort` (16-bit).
+   - If size matches neither, print 'dimensiones erroneas' and return failure [S1, unofficial].
+
+3. **Create 2D Textures for Z-Slices:**
+   - Allocate `texZ` array of size `ZDIM`.
+   - For each slice `i` from 0 to `ZDIM-1`:
+     - Bind `texZ[i]`.
+     - Set wrap/filter parameters to `GL_CLAMP` / `GL_LINEAR`.
+     - Extract the slice plane (constant Z) from the 3D volume array into a 2D buffer.
+     - Upload using `glTexImage2D` with internal format `1`, width `XDIM`, height `YDIM`, format `GL_LUMINANCE`, type `GL_UNSIGNED_BYTE` (if 8-bit) or `GL_UNSIGNED_SHORT` (if 16-bit) [S1, unofficial].
+
+4. **Create 2D Textures for X-Slices:**
+   - Allocate `texX` array of size `XDIM`.
+   - For each slice `i` from 0 to `XDIM-1`:
+     - Bind `texX[i]`.
+     - Extract slice plane (constant X) from volume.
+     - Memory indexing: `volumen8[i*XDIM + j*XDIM*YDIM + k]` where `j` iterates Z and `k` iterates Y [S1, unofficial].
+     - Upload with width `YDIM`, height `ZDIM` [S1, unofficial].
+
+5. **Create 2D Textures for Y-Slices:**
+   - Allocate `texY` array of size `YDIM`.
+   - For each slice `i` from 0 to `YDIM-1`:
+     - Bind `texY[i]`.
+     - Extract slice plane (constant Y) from volume.
+     - Memory indexing: `volumen8[i + j*XDIM*YDIM + k*XDIM]` where `j` iterates Z and `k` iterates X [S1, unofficial].
+     - Upload with width `XDIM`, height `ZDIM` [S1, unofficial].
+
+6. **Determine Viewing Direction:**
+   - Unproject the center of the viewport `(viewport[2]/2.0f, viewport[3]/2.0f, 0.0f)` using ModelView and Projection matrices to get world coordinates `(wx, wy, wz)` [S1, unofficial].
+   - Calculate absolute values `abswx = |wx|`, `abswy = |wy|`, `abswz = |wz|` [S1, unofficial].
+
+7. **Render Slices:**
+   - Enable `GL_BLEND`.
+   - If `shader` flag is true, use `glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)`. Else, use `glBlendFunc(GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR)` [S1, unofficial].
+
+   - **If `abswz` is maximum:**
+     - Render Z-aligned slices.
+     - If `wz >= 0` (front):
+       - Iterate `i` from `ZDIM-1` down to 0.
+       - Set `dist = -1.0f` initially, increment by `distZ` each iteration.
+       - Render quad at `z=dist` with texture `texZ[i]` [S1, unofficial].
+     - If `wz < 0` (back):
+       - Iterate `i` from 0 to `ZDIM-1`.
+       - Set `dist = 1.0f` initially, decrement by `distZ`.
+       - Call `glFrontFace(GL_CW)` before rendering [S1, unofficial].
+
+   - **If `abswx` is maximum:**
+     - Render X-aligned slices.
+     - If `wx >= 0` (right):
+       - Iterate `i` from 0 to `XDIM-1`.
+       - Set `dist = -1.0f` initially.
+       - Render quad at `x=dist` with texture `texX[i]` [S1, unofficial].
+     - (Logic for other directions and Y-axis is implied to be similar, iterating in appropriate order and adjusting `dist` and `glFrontFace` as needed) [S1, unofficial].
+
+   - **If `abswy` is maximum:**
+     - Render Y-aligned slices.
+     - Similar logic to X and Z, using `texY` and `distY` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_object_aligned_planes(vol, modelview, projection, viewport):
+    # Step 6: Determine viewing direction
+    # Unproject viewport center (simplified)
+    wx, wy, wz = unproject(viewport[2]/2.0, viewport[3]/2.0, 0.0, modelview, projection)
+    abswx = abs(wx)
+    abswy = abs(wy)
+    abswz = abs(wz)
+
+    # Step 7: Render Slices
+    glEnable(GL_BLEND)
+    if vol.shader:
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    else:
+        glBlendFunc(GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR)
+
+    if abswz >= abswx and abswz >= abswy:
+        # Render Z-aligned slices
+        if wz >= 0:
+            dist = -1.0
+            for i in range(vol.ZDIM - 1, -1, -1):
+                render_quad(vol.texZ[i], z=dist)
+                dist += vol.distZ
+        else:
+            glFrontFace(GL_CW)
+            dist = 1.0
+            for i in range(vol.ZDIM):
+                render_quad(vol.texZ[i], z=dist)
+                dist -= vol.distZ
+            glFrontFace(GL_CCW) # Restore default
+    elif abswx >= abswy:
+        # Render X-aligned slices
+        if wx >= 0:
+            dist = -1.0
+            for i in range(vol.XDIM):
+                render_quad(vol.texX[i], x=dist)
+                dist += vol.distX
+        else:
+            glFrontFace(GL_CW)
+            dist = 1.0
+            for i in range(vol.XDIM - 1, -1, -1):
+                render_quad(vol.texX[i], x=dist)
+                dist -= vol.distX
+            glFrontFace(GL_CCW)
+    else:
+        # Render Y-aligned slices
+        if wy >= 0:
+            dist = -1.0
+            for i in range(vol.YDIM):
+                render_quad(vol.texY[i], y=dist)
+                dist += vol.distY
+        else:
+            glFrontFace(GL_CW)
+            dist = 1.0
+            for i in range(vol.YDIM - 1, -1, -1):
+                render_quad(vol.texY[i], y=dist)
+                dist -= vol.distY
+            glFrontFace(GL_CCW)
+
+def render_quad(texture, x=None, y=None, z=None):
+    # Render a quad at the specified coordinate aligned with the axis
+    # The quad's orientation and texture coordinates depend on the axis
+    # This is a placeholder for the specific OpenGL quad rendering logic
+    # which involves setting up the modelview matrix or vertex positions
+    # to place the quad at the correct slice location.
+    pass
+```
+
+**Parameters:**
+- Input file format: `.raw` binary file in `files/Modelos`. Filename encodes dimensions as `Name_XxYxZ.raw` (e.g., `Bonsai512x512x182.raw`) [S1, unofficial].
+- Typical values: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- Dimension parsing failure: If `XDIM`, `YDIM`, or `ZDIM` remain -1 after parsing, the function returns false [S1, unofficial].
+- Data size mismatch: If the file size is neither `size` nor `size*2`, the function prints 'dimensiones erroneas' and returns false [S1, unofficial].
+- Precision: Not given in the sources.
+- Boundaries: Not given in the sources.
+- Degenerate input: Not given in the sources.
+
+## Subtopics
+
+## Operating characteristics
+- Time complexity: Not given in the sources.
+- Memory complexity: Not given in the sources.
+- Measured performance: Not given in the sources.
+- Scaling: Not given in the sources.
+- Strengths: Simple implementation using standard 2D textures; supports transparency function to hide/show slices [S1, unofficial].
+- Limitations: Relies on alpha blending which can be order-dependent and may not handle complex occlusions as well as depth peeling; limited to object-aligned planes which may not be optimal for all viewing angles [S1, unofficial].
+- When to use: When simplicity and ease of implementation are prioritized, and the volume data is small enough to fit in 2D textures [S1, unofficial].
+- When not: When high-quality occlusion handling is required, or for large volumes that do not fit in texture memory [S1, unofficial].
+
+## Background
+- Origin: This technique was presented in a project by Alejandro Sans and Víctor Felipe for a Computer Graphics course at Universidad Central de Venezuela [S1, unofficial].
+- History: The project demonstrates volume rendering using Texture 2D (Object Aligned Planes) [S1, unofficial].
+- Usage: Used in educational contexts and simple volume rendering applications [S1, unofficial].
+
+## Sources
+[S1] Volume Rendering using Texture 2D (Object Aligned Planes), https://github.com/ragmar/VolumeRender, fetched 2026-10-27 (unofficial)

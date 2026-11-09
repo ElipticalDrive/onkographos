@@ -1,0 +1,474 @@
+# VOXURF: VOXEL-BASED EFFICIENT AND ACCURATE NEURAL SURFACE RECONSTRUCTION
+
+Tong Wu2 , Jiaqi Wang1B, Xingang Pan3 , Xudong Xu2 , Christian Theobalt3 , Ziwei Liu4 , Dahua Lin1,2,5B 1Shanghai AI Laboratory, 2The Chinese University of Hong Kong, 3Max Planck Institute for Informatics, 4S-Lab, Nanyang Technological University, 5Centre of Perceptual and Interactive Intelligence {wt020, xx018, dhlin}@ie.cuhk.edu.hk, wangjiaqi@pjlab.org.cn, {xpan,theobalt}@mpi-inf.mpg.de, ziwei.liu@ntu.edu.sg
+
+## ABSTRACT
+
+Neural surface reconstruction aims to reconstruct accurate 3D surfaces based on multi-view images. Previous methods based on neural volume rendering mostly train a fully implicit model with MLPs, which typically require hours of training for a single scene. Recent efforts explore the explicit volumetric representation to accelerate the optimization via memorizing significant information with learnable voxel grids. However, existing voxel-based methods often struggle in reconstructing fine-grained geometry, even when combined with an SDF-based volume rendering scheme. We reveal that this is because 1) the voxel grids tend to break the color-geometry dependency that facilitates fine-geometry learning, and 2) the under-constrained voxel grids lack spatial coherence and are vulnerable to local minima. In this work, we present Voxurf, a voxel-based surface reconstruction approach that is both efficient and accurate. Voxurf addresses the aforementioned issues via several key designs, including 1) a two-stage training procedure that attains a coherent coarse shape and recovers fine details successively, 2) a dual color network that maintains color-geometry dependency, and 3) a hierarchical geometry feature to encourage information propagation across voxels. Extensive experiments show that Voxurf achieves high efficiency and high quality at the same time. On the DTU benchmark, Voxurf achieves higher reconstruction quality with a 20x training speedup compared to previous fully implicit methods.
+
+## 1 INTRODUCTION
+
+Neural surface reconstruction based on multi-view images has recently seen dramatic progress. Inspired by the success of Neural Radiance Fields (NeRF) \(Mildenhall et al., 2020\) on Novel View Synthesis (NVS), recent works follow the neural volume rendering scheme to represent the 3D geometry with a signed distance function (SDF) or occupancy field via a fully implicit model \(Oechsle et al., 2021; Yariv et al., 2021; Wang et al., 2021\). These approaches train a deep multilayer perceptron (MLP), which takes in hundreds of sampled points on each camera ray and outputs the corresponding color and geometry information. Pixel-wise supervision is then applied by measuring the difference between the accumulated color on each ray and the ground truth. Struggling with learning all the geometric and color details with a pure MLP-based framework, these methods require hours of training for a single scene, which substantially limits their real-world applications.
+
+Recent advances in NeRF accelerate the training process with the aid of an explicit volumetric representation \(Sun et al., 2022a; Yu et al., 2022a; Chen et al., 2022\). These works directly store and optimize the geometry and color information via explicit voxel grids. For example, the density of a queried point can be readily interpolated from the eight neighboring points, and the view-dependent color is either represented with spherical harmonic coefficients \(Yu et al., 2022a\) or predicted by shallow MLPs that take learnable grid features as auxiliary inputs \(Sun et al., 2022a\). These approaches achieve competitive rendering performance at a much lower training cost (< 20 minutes). However, their 3D surface reconstruction results cannot faithfully represent the exact geometry, suffering from conspicuous noise and holes (Fig. 1 (a)). It is due to the inherent ambiguity of the
+
+BCorresponding authors. Our code is available at .
+
+
+
+Ground Truth (a) DVGO at 4 mins. (b) NeuS at 5.5 hours. (c) DVGO+NeuS at 12 mins. (d) Ours at 15 mins. Figure 1: Comparisons among different methods for surface reconstruction and novel view synthesis. (a) DVGO (v2) \(Sun et al., 2022a;b\) benefits from the fastest convergence but suffers from a poor surface; (b) NeuS \(Wang et al., 2021\) produces decent surfaces after a long training time, while high-frequency details are lost in both the geometry and the image; (c) the straightforward combination of DVGO and NeuS produces continuous but noisy surfaces; (d) our method achieves around 20x speedup than NeuS and recovers highquality surfaces and images with fine details. All the training times are tested on a single Nvidia A100 GPU. density-based volume rendering scheme, and the explicit volumetric representation introduces addi-
+
+tional challenges.
+
+In this work, we aim to take advantage of the explicit volumetric representation for efficient training and propose customized designs to harvest high-quality surface reconstruction. A straightforward idea for this purpose is to embed the SDF-based volume rendering scheme \(Wang et al., 2021; Yariv et al., 2021\) into explicit volumetric representation frameworks \(Sun et al., 2022a\). However, we find this na¨ıve baseline model not working well by losing most of the geometry details and producing undesired noise (Fig. 1 (c)). We reveal several critical issues for this framework as follows. First, in fully implicit models, the color network takes surface normals as inputs, effectively building colorgeometry dependency that facilitates fine-geometry learning. However, in the baseline model, the color network tends to depend more on the additional under-constrained voxel feature grid input, thus breaking color-geometry dependency. Second, due to a high degree of freedom in optimizing a voxel grid, it is hard to maintain a globally coherent shape without additional constraints. Individual optimization for each voxel point hinders the information sharing across the voxel grid, which hurts the surface smoothness and introduces local minima. We'll unveil these effects and introduce the insight for our architecture design via an empirical study in Sec. 4
+
+To tackle the challenges, we introduce Voxurf, an efficient pipeline for accurate Voxel-based surface reconstruction: 1) We leverage a two-stage training process that attains a coherent coarse shape and recovers fine details successively. 2) We design a dual color network that is capable of representing a complex color field via a voxel grid and preserving the color-geometry dependency with two subnetworks that work in synergy. 3) We also propose a hierarchical geometry feature based on the SDF voxel grid to encourage information sharing in a larger region for stable optimization. 4) We introduce several effective regularization terms to boost smoothness and reduce noise.
+
+We conduct experiments on the DTU \(Jensen et al., 2014\) and BlendedMVS \(Yao et al., 2020\) datasets for quantitative and qualitative evaluations. Experimental results demonstrate that Voxurf achieves lower Chamfer Distance on the DTU \(Jensen et al., 2014\) benchmark than a competitive fully implicit method NeuS \(Wang et al., 2021\) with around 20x speedup. It also achieves remarkable results on the auxiliary task of NVS. As illustrated in Fig. 1, our method is shown to be superior in preserving high-frequency details in both geometry reconstruction and image rendering compared to the previous approaches. In summary, our contributions are highlighted below:
+
+- 1. Our approach enables around 20x speedup for training compared to the SOTA methods, reducing the training time from over 5 hours to 15 minutes on a single Nvidia A100 GPU.
+- 2. Our approach achieves higher surface reconstruction fidelity and novel view synthesis quality, which is superior in representing fine details for both surface recovery and image rendering compared to previous methods.
+
+- 3. Our study provides insightful observations and analysis of the architecture design of the explicit volumetric representation framework for surface reconstruction.
+
+#### 2 RELATED WORKS
+
+Multi-view 3D reconstruction Recently, implicit representations that encode the geometry and appearance of a 3D scene by neural networks have gained attention \(Park et al., 2019; Chen & Zhang, 2019; Lombardi et al., 2019; Mescheder et al., 2019; Sitzmann et al., 2019b; Saito et al., 2019; Atzmon et al., 2019; Jiang et al., 2020; Zhang et al., 2021; Toussaint et al., 2022\). Among them, a plethora of papers have explored neural surface reconstruction from multi-view images. Methods based on surface rendering \(Niemeyer et al., 2020; Yariv et al., 2020; Liu et al., 2020b; Kellnhofer et al., 2021\) regard the color of an intersection point of the ray and the surface as the final rendered color, while requiring accurate object masks and careful weight initialization. Recent approaches \(Wang et al., 2021; Yariv et al., 2021; Oechsle et al., 2021; Darmon et al., 2022; Zhang et al., 2022; Liu et al., 2020a; Sitzmann et al., 2019a\) based on volume rendering \(Max, 1995\) formulate the radiance fields and implicit surface representations in a unified model, thereby achieving the merits of both techniques. However, encoding the whole scene in pure MLP networks requires a long training time. In a departure from these works, we leverage learnable voxel grids and shallow color networks for quick convergence, as well as pursue fine details in surfaces and rendered images.
+
+Explicit volumetric representation Despite the success of implicit neural representations in 3D modeling, recent advances have integrated explicit 3D representations, e.g., point clouds, voxels, and MPIs \(Mildenhall et al., 2019\), and received growing attention \(Wizadwongsa et al., 2021; Xu et al., 2022; Lombardi et al., 2019; Wang et al., 2022; Fang et al., 2022\). Instant-ngp \(Muller et al., 2022\) ¨ uses multi-resolution hashing for efficient encoding and implements fully-fused CUDA kernels. Plenoxels \(Yu et al., 2022a\) represent a scene as a sparse 3D grid with spherical harmonics and are optimized two orders of magnitude faster than NeRF \(Mildenhall et al., 2020\). TensoRF \(Chen et al., 2022\) considers the full volume field as a 4D tensor and factorizes it into multiple compact low-rank tensor components for efficiency. The method most related to ours is DVGO \(Sun et al., 2022a\), which adopts a hybrid architecture design including voxel grids and a shallow MLP. Despite their remarkable results on novel view synthesis, none of them is designed to faithfully reconstruct the geometry of the scene. In contrast, we target at not only rendering photo-realistic images from novel viewpoints but also reconstructing high-quality surfaces with fine details.
+
+#### 3 PRELIMINARIES
+
+Volume rendering with SDF representation. NeuS \(Wang et al., 2021\) represents a scene as an implicit SDF field parameterized by an MLP. The ray emitting from the camera center o through an image pixel in the viewing direction v can be expressed as {p(t) = o + tv|t ≥ 0}. The rendered color for the image pixel is integrated along the ray with volume rendering \(Max, 1995\), which is approximated by N discrete sampled points {pi = o + tiv|i = 1, ..., N, ti < ti+1} on the ray:
+
+
+
+| $\hat{C}(r) = \sum_{i=1}^N T_i \alpha_i c_i, \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j),$ | (1) |
+|---------------------------------------------------------------------------------------------|-----|
+|                                                                                             |     |
+
+where αi is the opacity value, and Ti is the accumulated transmittance. The key difference between NeuS and NeRF is the formula of αi . In NeuS, αi is formulated as:
+
+
+$$\alpha_i = \max \left( \frac{\Phi_s(f(p(t_i))) - \Phi_s(f(p(t_{i+1})))}{\Phi_s(f(p(t_i)))}, 0 \right). \quad (2)$$
+
+Here, f(x) is the SDF function, and Φs(x) = (1 + e −sx) −1 is the Sigmoid function, where the s value is learned or manually updated during training.
+
+Explicit volumetric representation. DVGO \(Sun et al., 2022a\) represents the geometry with explicit density voxel grids V (density) ∈ R 1×Nx×Ny×Nz . It applies a hybrid architecture for color prediction that comprises a shallow MLP parameterized by Θ and a feature voxel grid V (f eat) ∈ R C×Nx×Ny×Nz . Given a 3D position p and the viewing direction v, the volume density σ and color c are estimated with:
+
+$$\sigma = \text{interp}(p, V^{(density)}), \quad (3)$$
+
+
+
+Figure 2: Reconstruction results from different architecture designs. The surface normal n and learnable feature f are both optional inputs to the color network. We show results of two cases under four settings on the left, and we zoom in to analyze the surfaces, normal fields, and feature fields on the right. Case (1) (a, c) and (b, d) show that the feature f helps maintain a coherent shape, while case (2) (b, d) reveal that it discourages the reconstruction of geometry details since it disturbs the color-geometry dependency built by the normal n.
+
+
+
+| $c = \text{MLP}_\Theta(\text{interp}(p, V^{(feat)}), p, v),$ | (4) |
+|--------------------------------------------------------------|-----|
+|--------------------------------------------------------------|-----|
+
+where 'interp' denotes the trilinear interpolation. Following NeRF \(Mildenhall et al., 2020; Tancik et al., 2020\), the positional encoding for both p and v is applied in Eqn. 4.
+
+Na¨ıve Combination. A straightforward combination of the two techniques is to replace the volume rendering in DVGO with the SDF-based volume rendering scheme as in Eqn. 1 and Eqn. 2. It serves as the na¨ıve baseline in this work, which can hardly produce satisfactory results, as shown in Fig. 1 (c). We will cast light on this phenomenon via an empirical study in the next section.
+
+#### 4 STUDY ON ARCHITECTURE DESIGN FOR GEOMETRY LEARNING
+
+In this section, we carry out some prior experiments with variants of the baseline model, aiming to figure out the key factors for architecture design in this task. Specifically, we employ an SDF voxel grid V (sdf) and apply Eqn. 2 for α calculation with a manually defined schedule for s. We start with a shallow MLP as the color network, where 1) the local feature f interpolated from V (f eat) and 2) the normal vector n calculated by V (sdf) are both optional inputs. A decent surface reconstruction is expected to possess a coherent coarse structure, accurate fine details, and a smooth surface. We will next focus on these factors and analyze the effects of different architecture designs.
+
+The key to maintaining a coherent coarse shape. Intuitively, the capacity of a shallow MLP is limited, and it can hardly represent a complex scene with different materials, high-frequency textures, and view-dependent lighting information. When the ground truth image encounters a rapid color-shifting, the volume rendering integration over an under-fitted color field results in a corrupted geometry, as shown in Fig. 2 case (1) (a) and (b). Incorporating the local feature f enables fast color learning and increases the representation ability of the network, and the problem is noticeably alleviated, as shown in Fig. 2 case (1), the differences between (a) and (c), (b) and (d).
+
+The key to reconstructing accurate geometry details. We then introduce another case in Fig. 2 case (2). Its texture changes moderately, and the color is largely correlated with the surface normal due to diffuse reflection. Although the geometry still collapses given neither normal n or feature f as input in Fig. 2 case (2) (a), we can observe a reasonable reconstruction even with some geometry details in Fig. 2 case (2) (b) with only n as the input. Incorporating the feature f does not further reduce the Chamfer Distance (CD); instead, geometry details are missing since the learnable feature f disturbs the geometry-color dependency, i.e., the relationship built between the color and the surface normal, as shown in Fig. 2 case (2), the differences between (b) and (d). Considering the cons and pros of the learnable local feature, it is valuable to design a framework that leverages it for coherent shape and keeps color-geometry dependency for fine details.
+
+
+
+
+
+Figure 3: Overview of key components in our model. We adopt an explicit volumetric representation with an SDF voxel grid  $V^{(sdf)}$  and a feature voxel grid  $V^{(feat)}$ . In the middle, we show the design for our dual color network, where  $f_i^{feat}$  is the interpolated feature from  $V^{(feat)}$  at point  $p_i$ , and  $f_i^{geo}$  denotes the hierarchical feature constructed on the right. Here we show the multi-level sampling scheme and the region of grids that is affected by one point during optimization with different settings of levels.
+
+The reason for noisy surfaces. For all the cases above, the results suffer from obvious noise on the surface. Compared with learning an implicit representation globally, the under-constrained voxel grids lack spatial coherence and are vulnerable to local minima, which hurts the continuity and smoothness of the surface. An intuitive idea is leveraging geometry cues from a region rather than a local point, which can be introduced in model inputs, network components, and loss functions.
+
+
+
+## 5 METHODOLOGY
+
+Inspired by the insight revealed in Sec. 4, we propose several key designs: 1) we adopt a two-stage training procedure that attains a coherent coarse shape (Sec. 5.1) and recovers fine details (Sec. 5.2) successively; 2) we propose a dual color network to maintain color-geometry dependency and recover precise surfaces and novel-view images; 3) we design a hierarchical geometry feature to encourage information propagation across voxels for stable optimization; 4) we also introduce smoothness priors, including a gradient smoothness loss for better visual quality (Sec. 5.3).
+
+
+
+### 5.1 COARSE SHAPE INITIALIZATION
+
+We initialize our SDF voxel grid  $V^{(sdf)}$  with an ellipsoid-like zero level set inside a prepared region for reconstruction as in (Sun et al., 2022a). We then perform coarse shape optimization with the aid of  $V^{(feat)}$  as introduced in Sec. 4. Specifically, we train a shallow MLP with both normal vector  $n$  and local feature  $f$  as inputs, along with the embedded position  $p$  and viewing direction  $v$ . To encourage a stable training process and smooth surface, we propose to conduct the interpolation on a smoothed voxel grid rather than the raw data of  $V^{(sdf)}$ . In particular, we denote  $\mathcal{G}(V, k_g, \sigma_g)$  as applying 3D convolution on the voxel grid  $V$  with a Gaussian kernel, whose weight matrix follows a Gaussian distribution:  $K_{i,j,k} = 1/Z \times \exp(-((i - |k_g/2|)^2 + (j - |k_g/2|)^2 + (k - |k_g/2|)^2)/2\sigma_g^2)$ ,  $i, j, k \in \{0, 1, \dots, k_g - 1\}$ , where  $Z$  denotes a normalization term,  $k_g$  denotes the kernel size, and  $\sigma_g$  denotes the standard deviation. Querying a smoothed SDF value  $d'$  of an arbitrary point  $p$  thus becomes:
+
+$$d' = \text{interp}(p, \mathcal{G}(V^{(sdf)}, k_g, \sigma_g)). \quad (5)$$
+
+We use  $d'$  for the ray marching integration following Eqn. 1 and Eqn. 2 and calculate the reconstruction loss. We also apply several smoothness priors as to be introduced in Sec. 5.3
+
+
+
+### 5.2 FINE GEOMETRY OPTIMIZATION
+
+At this stage, we aim to recover accurate geometry details based on the coarse initialization. We note that the challenges are two-fold: 1) The study in Sec. 4 reveals a trade-off introduced by the feature voxel grid, i.e., the representation capacity of the color field is improved at the sacrifice of color-geometry dependency. 2) The optimization of the SDF voxel grid is based on trilinear interpolation
+
+to query a 3D point. The operation brings in fast convergence, while it also limits information sharing across different locations, which may lead to local minima with degenerate solutions and a sub-optimal smoothness. We propose a dual color network and a hierarchical geometry feature to address these two issues, respectively.
+
+Dual color network. The observation in Sec. 4 encourages us to design a dual color network that takes advantage of the local feature f f eat i interpolated from the learnable feature voxel grid V (f eat) without losing the color-geometry dependency. As shown in Fig. 3, we train two shallow MLPs with different additional inputs besides the embedded position and view direction. The first MLP ggeo takes the hierarchical geometry feature f geo i , which will be introduced later, to build the colorgeometry dependency; the second one gf eat takes both a simple geometry feature (i.e., the surface normal ni) and the local feature f f eat i as inputs to enable a faster and more precise color learning, which will in turn benefit the geometry optimization. The two networks are combined in a residual manner with detaching operations: the output of ggeo, denoted by c0, is detached before input to gf eat, and the output is added back to a detached copy of c0 to get the final color prediction c.
+
+Outputs of both ggeo and gf eat are supervised by a reconstruction loss between the ground truth image and the integrated color along the ray. Specifically, the rendered colors from them are denoted as C 0 (r) and C(r), and the overall reconstruction loss is formulated as:
+
+$$\mathcal{L}_{recon} = \frac{1}{\mathcal{R}} \sum_{r \in \mathcal{R}} \left( \|C(r) - \hat{C}(r)\|_2^2 + \lambda_0 \|C_0(r) - \hat{C}(r)\|_2^2 \right), \quad (6)$$
+
+where Cˆ(r) denotes the ground truth color, and λ0 denotes a loss weight. V (f eat) and the MLP gf eat fit the scene field rapidly, while the MLP ggeo fits the scene at a relatively slower pace. The detaching operations promote a stable optimization of ggeo guided by the reconstruction loss of itself, which helps preserve color-geometry dependency.
+
+Hierarchical geometry feature. Using the surface normal n as the geometry feature for the color networks is a straightforward choice, while it takes in information only from adjacent grids of V (SDF ) . In order to enlarge the perception area and encourage information propagation across voxels, we propose to look at a larger region of the SDF field and take the corresponding SDF values and gradients as an auxiliary condition to the color networks. Specifically, for a given 3D position p = (x, y, z), we take half of the voxel size vs as the step size and define its neighbours along the X, Y, Z axis on both sides. Taking the X axis as an example, the neighbouring coordinates are defined as p l− x = (x l−, y, z) and p l+ x = (x l+, y, z), where x l− = max(x − l ∗ vs, 0), x l+ = min(x + l ∗ vs, vm x ), l ∈ [0.5, 1.0, 1.5, ...] denotes the 'level' of neighbour area, and v m x denotes the maximum of the voxel grid on x axis. We then extend the definition to a hierarchical manner by concatenating the neighbours from different levels together as formulated below:
+
+$$d_k = [d_k^{l-}, d_k^{l+}] = [\text{interp}(p_k^{l-}, V^{(\text{sdf})}), \text{interp}(p_k^{l+}, V^{(\text{sdf})})], k \in \{x, y, z\}, \\ f_p^{\text{sdf}}(l) = [d^0, d_x^{0,5}, d_y^{0,5}, d_z^{0,5}, \dots, d_x^l, d_y^l, d_z^l]^T, \quad (7)$$
+
+where d l x denotes the SDF values queried from V (sdf) at locations p l− x and p l+ x . When l = 0, f sdf p (0) = d 0 , which is exactly the SDF value at the location p itself. Then, we also incorporate the gradient information into the geometry feature. Specifically, we can obtain the gradient vector δ l x = (d l+ x − d l− x )/(2 ∗ l ∗ vs). We normalize the [δ l x , δl y , δl z ] to a L2-norm of 1, denoted as n l ∈ R 3 . The hierarchical version of the normal is formulated as:
+
+$$f_p^{normal}(l) = [n^{0.5}, \dots, n^l]. \quad (8)$$
+
+Finally, the hierarchical geometry feature at point p for a predefined level l ∈ [0.5, 1.0, 1.5, ...] is to combine the information above by:
+
+$$f_p^{geo}(l) = [f_p^{sdf}(l), f_p^{normal}(l)]. \quad (9)$$
+
+As shown in Fig. 3, f geo p (l) is input to the MLP ggeo to assist geometry learning.
+
+### 5.3 SMOOTHNESS PRIORS
+
+We incorporate two effective regularization terms to facilitate surface smoothness during training. (1) First, we adopt a total variation (TV) regularization \(Rudin & Osher, 1994\):
+
+$$\mathcal{L}_{TV}(V) = \sum_{d \in [D]} \sqrt{\Delta_x^2(V, d) + \Delta_y^2(V, d) + \Delta_z^2(V, d)}, \quad (10)$$
+
+Table 1: Quantitative evaluation on DTU dataset.
+
+| Scan                           | 24   | 37   | 40   | 55   | 63   | 65   | 69    | 83   | 97   | 105  | 106  | 110  | 114  | 118  | 122  | mean |
+|--------------------------------|------|------|------|------|------|------|-------|------|------|------|------|------|------|------|------|------|
+| NeRF (Mildenhall et al., 2020) | 1.83 | 2.39 | 1.79 | 0.66 | 1.79 | 1.44 | 1.50  | 1.20 | 1.96 | 1.27 | 1.44 | 2.61 | 1.04 | 1.13 | 0.99 | 1.54 |
+| IDR (Yariv et al., 2020)       | 1.63 | 1.87 | 0.63 | 0.48 | 1.04 | 0.79 | 0.77  | 1.33 | 1.16 | 0.76 | 0.67 | 0.90 | 0.42 | 0.51 | 0.53 | 0.90 |
+| DVGO (Sun et al., 2022a)       | 1.83 | 1.74 | 1.70 | 1.53 | 1.91 | 1.91 | 1.77  | 2.60 | 2.08 | 1.79 | 1.76 | 2.12 | 1.60 | 1.80 | 1.58 | 1.85 |
+| PointNeRF (Xu et al., 2022)    | 0.87 | 2.06 | 1.20 | 1.01 | 1.01 | 1.39 | 0.80  | 1.04 | 0.92 | 0.74 | 0.97 | 0.76 | 0.56 | 0.90 | 1.05 | 1.02 |
+| NeuS (Wang et al., 2021)       | 0.83 | 0.98 | 0.56 | 0.37 | 1.13 | 0.59 | 0.60  | 1.45 | 0.95 | 0.78 | 0.52 | 1.43 | 0.36 | 0.45 | 0.45 | 0.77 |
+| DVGO + NeuS                    | 1.24 | 0.87 | 0.74 | 0.48 | 1.20 | 1.41 | 1.113 | 1.96 | 1.44 | 0.98 | 1.13 | 1.99 | 1.62 | 0.77 | 0.62 | 1.13 |
+| Ours                           | 0.65 | 0.74 | 0.39 | 0.35 | 0.96 | 0.64 | 0.85  | 1.58 | 1.01 | 0.68 | 0.60 | 1.11 | 0.37 | 0.45 | 0.47 | 0.72 |
+
+Table 2: An overall comparison on surface reconstruction, novel view synthesis, and training time on DTU.
+
+
+
+|                          | PSNR ↑       | SSIM ↑       | PLIPS ↓      | LCD ↓       | Time (Nvidia A10) |
+|--------------------------|--------------|--------------|--------------|-------------|-------------------|
+| DVGO (Sun et al., 2022a) | 31.64        | 0.916        | 0.159        | 0.75        | 4 mins            |
+| NeuS (Wang et al., 2021) | 29.63        | 0.892        | 0.199        | 0.77        | 5.5 hours         |
+| Ours                     | 32.16 | 0.929 | 0.144 | 0.72 | 15 mins           |
+
+where ∆2 x (V, d) denotes the squared difference between the value of dth channel in voxel v := (i; j; k) and the dth value in voxel (i + 1; j; k), which can be analogously extended to ∆2 y (V, d) and ∆2 z (V, d). We apply the TV term above to the SDF voxel grid, denoted by LT V (V (sdf) ), which encourages a continuous and compact geometry.
+
+(2) We also assume the surface to be smooth in a local area, and we follow the definition of the Gaussian convolution in Sec. 5.1 and introduce a smoothness regularization formulated as:
+
+$$\mathcal{L}_{smooth}(V) = \|\mathcal{G}(V, k_g, \sigma_g) - V\|_2^2, \quad (11)$$
+
+We apply the smoothness term above to the gradient of SDF voxel grid for a gradient smoothness loss, denoted by Lsmooth(∇V (sdf) ). It encourages a smooth surface and alleviates the issue of noisy points in the free space. Notice that we can also naturally conduct post-processing on the SDF field after training, thanks to its explicit representation. For example, applying the Gaussian kernel above before extracting the geometry can further boost surface smoothness for better visualization.
+
+Finally, the overall training loss is formulated as:
+
+$$\mathcal{L} = \mathcal{L}_{recon} + \lambda_{tv} \mathcal{L}_{TV}(V^{(sdf)}) + \lambda_s \mathcal{L}_{smooth}(\nabla V^{(sdf)}), \quad (12)$$
+
+where λtv and λs denote the weights for the corresponding loss terms.
+
+### 6 EXPERIMENTS
+
+Experimental setup. We use the DTU \(Jensen et al., 2014\) dataset for quantitative and qualitative comparisons and show qualitative results on several challenging scenes from the BlendedMVS \(Yao et al., 2020\) dataset. We include several baselines for comparisons: 1) IDR \(Yariv et al., 2020\), 2) NeuS \(Wang et al., 2021\), 3) NeRF \(Mildenhall et al., 2020\), 4) DVGO \(Sun et al., 2022a\), 5) Point-NeRF \(Xu et al., 2022\). The results of 1), 2), and 3) are taken from the original papers \(Yariv et al., 2020; Wang et al., 2021\); for 5), we use the neural point for evaluation. We provide a clean background for all the methods for a fair comparison. Experimental results with non-empty backgrounds and comparisons with more methods \(Schonberger et al., 2016; Oechsle et al., 2021; Yariv ¨ et al., 2021\) are included in the supplementary materials. Please also refer to the supplementary materials for further descriptions of the datasets, baseline methods, and implementation details.
+
+#### 6.1 COMPARISONS
+
+The quantitative results for surface reconstruction on DTU are reported in Table 1. Quantitative experimental results show that we achieve lower Chamfer Distances than previous methods under the same setting. We conduct qualitative comparisons on both DTU and BlendedMVS in Fig. 4 and Fig. 5, respectively. DVGO shows poor reconstruction quality with noise and holes since it is designed for novel view synthesis rather than surface reconstruction. NeuS and ours show accurate and continuous surface recovery in a variety of cases. In comparison, NeuS, as a fully implicit model, naturally benefits from the intrinsic continuity and encourages smoothness in local areas,
+
+
+
+Figure 4: Qualitative comparisons on the DTU dataset. See more scenes in supplementary materials.
+
+
+
+Figure 5: Qualitative comparisons on the BlendedMVS dataset. See more scenes in supplementary materials.
+
+while it sometimes fails to recover very thin geometry details due to over-smoothing. In contrast, our method is superior in recovering fine geometry details thanks to our designs in Sec. 5.
+
+We further perform a more extensive evaluation of our method on surface reconstruction, novel view synthesis, and training time in Table 2. Our method outperforms DVGO and NeuS on both surface reconstruction and novel view synthesis by a clear margin on all the metrics. Notably, our method achieves around 20x speedup compared to NeuS for producing high-quality surface reconstruction.
+
+#### 6.2 ANALYSIS
+
+In this section, we carry out a series of ablation studies to evaluate each technical component.
+
+The effect of the dual color network and a hierarchical geometry feature. As shown in Table 3, both techniques individually work well on the baseline model, and a combination of them produces the best result. 1) The effect of dual color network can be directly sensed in the improvement of image rendering quality, as can be seen from the comparison of roof textures in Fig. 6. An accurate color field and the color-geometry dependency will promote geometry learning, as can be observed from the comparison of roof geometries (viewed in normal images) in Fig. 6. Experimental results in Table 4 also validate the effectiveness of the design introduced in Sec. 5.2, including the residual color and detachment. 2) Hierarchical geometry feature directly promotes an accurate
+
+
+
+
+
+Figure 6: The dual color network learns the color field for complex scenes well and preserves color-geometry dependency, which facilitates geometry learning (see the roofs); the hierarchical geometry feature promotes accurate surface reconstruction (see the windows).
+
+Table 3: Ablation over the effect of dual color network and hierarchical geometry feature.
+
+| CD           | 0.91 | 0.79 | 0.77 | 0.72 |
+|--------------|------|------|------|------|
+| Dual         |      | ✓    |      | ✓    |
+| Hierarchical |      |      | ✓    | ✓    |
+
+Table 4: Ablation over the Residual and Detach designs of the dual color network (Sec. 5.2\).
+
+
+
+| CD       | 0.77 | 0.75 | 0.75 | 0.72 |
+|----------|------|------|------|------|
+| Residual |      | ✓    |      | ✓    |
+| Detach   |      |      | ✓    | ✓    |
+
+surface reconstruction, as demonstrated by results in Table 3 and the difference between normal images of Fig. 6. We also explore different design details, including the level selection and the effects of gradient and SDF value in supplementary materials.
+
+Ablation over smoothness priors. We make efforts to encourage the continuity and smoothness of the reconstructed surface at different stages. As shown in Fig. 7 (a), during the coarse shape initialization stage, the naive solution produces holes and noises. Applying the Gaussian convolution substantially alleviates the problem and leads to a more compact geometry. Regularization terms including the TV and our gradient smoothness loss would further encourage a clean and smooth surface to provide a good initialization for the next stage. Fig. 7 (b) shows that during the fine geometry optimization stage, the regularization terms also help maintain surface smoothness. Finally, as shown in Fig. 7 (c), post processing on a trained model can promote surface smoothness for a better visualization quality and maintain an accurate structure at the same time. An ablation study on the effects of the SDF TV term and our gradient smoothness loss is in the supplementary materials.
+
+
+
+Figure 7: Studies on technical components that encourage surface smoothness during the (a) coarse shape initialization, (b) fine geometry optimization, and (c) post-processing stage.
+
+## 7 CONCLUSION
+
+This paper proposes Voxurf, a voxel-based approach for efficient and accurate neural surface reconstruction. It includes several key designs: the two-stage framework attains a coherent coarse shape and recovers fine details successively; the dual color network helps maintain color-geometry dependency, and the hierarchical geometry feature encourages information propagation across voxels; effective smoothness priors including a gradient smoothness loss further improve the visual quality. Extensive experiments show that Voxurf achieves high efficiency and high quality at the same time.
+
+### 8 ACKNOWLEDGEMENT
+
+This work is supported by Shanghai AI Laboratory, NTU NAP, MOE AcRF Tier 2 (MOE-T2EP20221-0012), ERC Consolidator Grant 4DRepLy (770784), and under the RIE2020 Industry Alignment Fund – Industry Collaboration Projects (IAF-ICP) Funding Initiative
+
+#### A EXPERIMENTAL DETAILS
+
+#### A.1 DATASETS.
+
+The DTU \(Jensen et al., 2014\) dataset contains different static scenes with 49 or 64 posed multiview images for each scene. It covers a variety of objects with different materials, geometry, and texture. We evaluate our approach on DTU with the same 15 scenes following IDR \(Yariv et al., 2020\) and quantitatively compare it with previous work on Chamfer Distance, given the ground truth point clouds. The BlendedMVS \(Yao et al., 2020\) dataset contains 113 scenes that cover a variety of real-world environments, providing 31 to 143 posed multi-view images for each. We select 7 challenging scenes following NeuS \(Wang et al., 2021\) and present qualitative comparisons with previous works.
+
+#### A.2 IMPLEMENTATION DETAILS
+
+We set the expected number of voxels to be 963 at the coarse stage and 2563 at the fine stage, including an up-scaling step. We use a batch size of 8,192 rays with the point sampling step size on a ray to be half of the voxel size. We train our coarse initialization stage for 10k iterations and the fine geometry optimization stage for 20k iterations with an Adam optimizer. The initial learning rate is set as 1 −3 for all the MLPs and 0.1 for voxels in the coarse stage, while the SDF voxel starts by 5 −3 in the fine stage.
+
+We use the same hyper-parameters for all scenes. We use a 3-layer MLP for the coarse training stage and two 4-layer MLPs for the dual color network in the fine training stage. We choose level 2.0 for the hierarchical geometry feature and set the dimension of the learnable feature voxel grid as 6.
+
+For the coarse stage, we set λtv = 10−4 and λs = 2×10−4 for the regularization terms and introduce an additional TV term for V (f eat) with a weight of 10−2 . The Gaussian kernel is 5 3 in size with σg = 0.8. For the fine stage, we set λ0 = 0.5 for the reconstruction loss; we set λtv = 10−3 and λs = 5 × 10−4 for the regularization terms. The fine SDF grid starts with a resolution of 1603 , which is then up-scaled by trilinear interpolation to 2563 after 15000 iterations.
+
+For the s value in Φs in Eqn. 2, we design a function based on the iteration, s = 1/(i/r + 1/sstart), where sstart controls the beginning value of s, i denotes the iteration number, and r basically controls the decaying speed of s along with the increasing iterations. We set sstart = 0.2, r = 50 for the coarse stage and sstart = 0.05, r = 50 for the fine stage.
+
+For all the experimental results on the DTU \(Jensen et al., 2014\) dataset, our method is trained on the training set with around 90% images for each scene, following \(Wang et al., 2021\) for the splitting scheme, and the 10% images are used for evaluation of the novel view synthesis task. We notice that the CD performance is only slightly influenced compared to training on the full dataset. For experiments on the BlendedMVS \(Yao et al., 2020\) dataset, we use all the images for training.
+
+#### A.3 DETAILS FOR BASELINE METHODS
+
+We include the following baseline methods for comparison: IDR \(Yariv et al., 2020\) reconstructs high-quality surfaces with implicit representation based on foreground object masks and the corresponding mask loss. NeuS \(Wang et al., 2021\) is a state-of-the-art approach that develops a volume rendering method for surface reconstruction, where the mask supervision is optional. Reconstruction results for NeuS are implemented with its official code 1 and the pre-trained models, and the novel view rendering results are provided by the authors. NeRF \(Mildenhall et al., 2020\) first proposes to use the neural radiance field for novel view synthesis. Though not specifically designed for surface
+
+1 https://github.com/Totoro97/NeuS
+
+Table R1: Quantitative evaluation on the DTU dataset for novel view synthesis. Our method outperforms the baselines on all the three metrics.
+
+| Metric Scan | NeRF  | DVGO  | PSNR ↑ NeuS | Ours  | NeRF  | DVGO  | SSIM ↑ NeuS | Ours  | NeRF  | DVGO  | LPIPS ↓ NeuS | Ours  |
+|-------------|-------|-------|-------------|-------|-------|-------|-------------|-------|-------|-------|--------------|-------|
+| 24          | 26.97 | 27.77 | 26.13       | 27.89 | 0.772 | 0.830 | 0.764       | 0.857 | 0.331 | 0.277 | 0.348        | 0.239 |
+| 37          | 25.99 | 25.96 | 24.08       | 26.90 | 0.811 | 0.833 | 0.798       | 0.870 | 0.206 | 0.184 | 0.222        | 0.160 |
+| 40          | 27.68 | 27.75 | 26.73       | 28.81 | 0.786 | 0.791 | 0.747       | 0.841 | 0.304 | 0.303 | 0.352        | 0.274 |
+| 55          | 29.39 | 30.42 | 28.06       | 31.02 | 0.917 | 0.939 | 0.887       | 0.950 | 0.143 | 0.116 | 0.177        | 0.108 |
+| 63          | 33.07 | 34.35 | 28.69       | 34.38 | 0.936 | 0.953 | 0.937       | 0.957 | 0.128 | 0.095 | 0.129        | 0.083 |
+| 65          | 30.87 | 31.18 | 31.41       | 31.48 | 0.954 | 0.956 | 0.958       | 0.960 | 0.114 | 0.103 | 0.112        | 0.094 |
+| 69          | 27.90 | 29.52 | 28.96       | 30.13 | 0.844 | 0.921 | 0.909       | 0.928 | 0.308 | 0.190 | 0.223        | 0.181 |
+| 83          | 33.49 | 36.94 | 31.56       | 37.43 | 0.948 | 0.969 | 0.950       | 0.968 | 0.125 | 0.084 | 0.120        | 0.084 |
+| 97          | 27.43 | 27.67 | 25.51       | 28.35 | 0.900 | 0.914 | 0.901       | 0.923 | 0.200 | 0.168 | 0.192        | 0.155 |
+| 105         | 31.68 | 32.85 | 29.18       | 32.94 | 0.910 | 0.928 | 0.896       | 0.932 | 0.186 | 0.154 | 0.218        | 0.148 |
+| 106         | 30.73 | 33.75 | 32.60       | 34.17 | 0.879 | 0.933 | 0.914       | 0.947 | 0.244 | 0.167 | 0.201        | 0.138 |
+| 110         | 29.61 | 33.10 | 30.83       | 32.70 | 0.872 | 0.941 | 0.917       | 0.937 | 0.241 | 0.153 | 0.200        | 0.153 |
+| 114         | 29.37 | 30.18 | 29.32       | 30.97 | 0.901 | 0.914 | 0.897       | 0.926 | 0.193 | 0.174 | 0.216        | 0.159 |
+| 118         | 33.44 | 36.11 | 35.91       | 37.24 | 0.915 | 0.957 | 0.948       | 0.964 | 0.199 | 0.123 | 0.156        | 0.110 |
+| 122         | 33.41 | 36.99 | 35.49       | 37.97 | 0.935 | 0.967 | 0.957       | 0.972 | 0.142 | 0.088 | 0.114        | 0.076 |
+| mean        | 30.07 | 31.64 | 29.63       | 32.16 | 0.885 | 0.916 | 0.892       | 0.929 | 0.204 | 0.159 | 0.199        | 0.144 |
+
+Table R2: Quantitative evaluation on DTU dataset (without mask).
+
+| Scan                                | 24   | 37   | 40   | 55   | 63   | 65   | 69   | 83   | 97   | 105  | 106  | 110  | 114  | 118  | 122  | mean |
+|-------------------------------------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|------|
+| Colmap (Schonberger et al., 2016) ¨ | 0.81 | 2.05 | 0.73 | 1.22 | 1.79 | 1.58 | 1.02 | 3.05 | 1.40 | 2.05 | 1.00 | 1.32 | 0.49 | 0.78 | 1.17 | 1.36 |
+| NeRF (Mildenhall et al., 2020)      | 1.90 | 1.60 | 1.85 | 0.58 | 2.28 | 1.27 | 1.47 | 1.67 | 2.05 | 1.07 | 0.88 | 2.53 | 1.06 | 1.15 | 0.96 | 1.49 |
+| UNISURF (Oechsle et al., 2021)      | 1.32 | 1.36 | 1.72 | 0.44 | 1.35 | 0.79 | 0.80 | 1.49 | 1.37 | 0.89 | 0.59 | 1.47 | 0.46 | 0.59 | 0.62 | 1.02 |
+| VolSDF Yariv et al. (2021)          | 1.14 | 1.26 | 0.81 | 0.49 | 1.25 | 0.70 | 0.72 | 1.29 | 1.18 | 0.70 | 0.66 | 1.08 | 0.42 | 0.61 | 0.55 | 0.86 |
+| NeuS (Wang et al., 2021)            | 1.00 | 1.37 | 0.93 | 0.43 | 1.10 | 0.65 | 0.57 | 1.48 | 1.09 | 0.83 | 0.52 | 1.20 | 0.35 | 0.49 | 0.54 | 0.84 |
+| Ours                                | 0.72 | 0.75 | 0.47 | 0.39 | 1.47 | 0.76 | 0.81 | 1.02 | 1.04 | 0.92 | 0.52 | 1.13 | 0.40 | 0.53 | 0.53 | 0.76 |
+
+reconstruction, we can extract a noise geometry from a trained NeRF model with a selected threshold. In this paper, the reconstruction evaluation results for NeRF are directly taken from \(Wang et al., 2021\) for a fair comparison, while we also implement NeRF with nerf-pytorch 2 for novel view synthesis. DVGO \(Sun et al., 2022a\) accelerates NeRF with a hybrid representation. We use the official code 3 and implement DVGO-v2 \(Sun et al., 2022b\) for comparison, which is 2-3 times faster than the DVGO-v1. Similarly, we select a threshold to extract the geometry from the density voxel grid, as to be introduced below. Results for these methods with the aid of foreground object masks are presented in Table 1 of the main text.
+
+We also include several baselines that do not rely on foreground object masks: Colmap \(Schonberger et al., 2016\) is a widely-used classical Multi-view stereo method. ¨ UNISURF \(Oechsle et al., 2021\) uses the occupancy field to represent the geometry and improves reconstruction quality by shrinking the sample region of volume rendering during training. VolSDF \(Yariv et al., 2021\) defines the volume density function as Laplace's cumulative distribution function (CDF) applied to a SDF representation for surface reconstruction. We also compare with NeRF \(Mildenhall et al., 2020\) and NeuS \(Wang et al., 2021\) under the without-mask setting. All the results above are directly adopted from the original papers. Their comparisons to our method under this setting are shown in Table R2.
+
+## B ADDITIONAL EXPERIMENTAL RESULTS
+
+#### B.1 NOVEL VIEW SYNTHESIS.
+
+We report the results for novel view synthesis on the DTU dataset in Table R1. Our method outperforms the baselines in all three metrics, including PSNR, SSIM \(Wang et al., 2004\), and
+
+https://github.com/yenchenlin/nerf-pytorch
+
+3 https://github.com/sunset1995/DirectVoxGO
+
+Table R3: Ablation over the level selection for hierarchical geometry feature. The performance first increases together with the level and then converges after level 2.0.
+
+| Level | 0    | 0.5  | 1    | 2    | 3    |
+|-------|------|------|------|------|------|
+| CD    | 0.98 | 0.75 | 0.74 | 0.74 | 0.73 |
+
+Table R4: Ablation over the geometry feature design. It indicates that a combination of both Gradient and SDF produces the best result.
+
+| CD (mean) | 0.79 | 0.76 | 0.74 | 0.72 |
+|-----------|------|------|------|------|
+| Gradient  |      | ✓    |      | ✓    |
+| SDF       |      |      | ✓    | ✓    |
+
+Table R5: Ablation over different smoothness priors. Our gradient smoothness loss is proved effective by this quantitative evaluation.
+
+| CD (mean)                | 1.18 | 0.79 | 0.74 | 0.72 |
+|--------------------------|------|------|------|------|
+| SDF TV                   |      | ✓    |      | ✓    |
+| Gradient smoothness loss |      |      | ✓    | ✓    |
+
+LPIPS \(Zhang et al., 2018\) (VGG). Examples of rendered images at testing views are shown in Fig. S8 and Fig. S9 in Sec. I.
+
+#### B.2 COMPARISONS FOR THE W/O MASK SETTING.
+
+Our method can also work on cases where the background is not clean. Following NeRF++ \(Zhang et al., 2020\) and MipNeRF-360 \(Barron et al., 2022\), we invert the background points outside the unit sphere into the unit sphere by x ′ = x/r2 , y′ = y/r2 , z′ = z/r2 , where r = p x 2 + y 2 + z 2. We then represent the background with another density voxel grid, together with a feature grid and a shallow MLP. We report our results and comparisons to previous approaches in Table R2.
+
+#### B.3 ADDITIONAL ABLATION STUDIES AND ANALYSIS
+
+Ablation over the hierarchical geometry feature. For hierarchical geometry feature design, we explore different design details, including the level selection and the effect of gradient and SDF value, as shown in Table R3 and Table R4, respectively.
+
+Ablation over smoothness priors. (1) We introduce two regularization terms as smoothness priors during training, i.e. the TV on the SDF voxel grid and a gradient smoothness prior. We carry out an ablation study on them during the fine training stage in Table R5, where we reveal the effectiveness of our gradient smoothness loss via quantitative comparisons. (2) Furthermore, we also evaluate the effectiveness of 3D convolution with a Gaussian kernel during coarse training and post-process. Experimental results show that the CD error increases from 0.72 to 0.74 if we remove Gaussian kernel during coarse training. And the it will be slightly reduced from 0.720 to 0.715 if we remove Gaussian kernel for post-process. The post-processing stage improves the visualization quality with a minor sacrifice of the quantitative performance.
+
+Ablation over the voxel grid resolution. The voxel grid resolution denotes the number of voxels contained in V (sdf) of the fine training stage. We study the effect of voxel grid resolution by keeping all the other settings to be the same, as shown in Table R6. Increasing the voxel grid resolution from 1283 to 1923 and from 1923 to 2563 consistently results in lower Chamfer Distance (CD) with longer training time. However, the case with 3203 achieves a similar CD with 2563 , and requires a higher training cost. Thus, we take the number of voxels to be 2563 as the default setting in the other experiments.
+
+Two-stage training process. Our method adopts a two-stage training pipeline. We show the curve of Chamfer Distance and the visualization result by the end of each stage in Fig. S1. We show that 1) we can obtain a coherent shape by the end of the Stage-1 (coarse training stage), while the performance is limited by the low resolution that the details are hard to be reconstructed; 2) the fine details are recovered by the end of Stage-2 (fine training stage) and the overall structure is consistent with the coarse shape of Stage-1.
+
+Threshold selection. To extract the surface from a trained DVGO \(Sun et al., 2022a\) model, we can first obtain the alpha value for any point in the 3D space by density interpolation and activation.
+
+Table R6: The effect of voxel grid resolution on reconstruction performance and training time. All the cases below are trained with the same settings except for the voxel grid resolution.
+
+
+
+| Resolution | 128 3    | 192 3   | 256 3   | 320 3   |
+|------------|----------|---------|---------|---------|
+| CD (mean)  | 0.79     | 0.75    | 0.72    | 0.73    |
+| Train time | 11 mines | 12 mins | 15 mins | 17 mins |
+
+
+
+Figure S1: The two-stage training process of Voxurf. The number in the vertical axis is calculated by log10(10x) for better visualization.
+
+And then, we show how we select a proper alpha threshold when we extract the surface in Fig. S2. A small threshold like 0.001 and 0.01 usually results in noise areas floating above the surface, while a large one like 0.5 and 0.8 would lead to an incomplete surface with large holes. We thus select 0.1 as the alpha threshold that is adopted in this paper.
+
+### C DVGO+NEUS W/ SMOOTHNESS
+
+Our method introduces several designs to boost the smoothness of the reconstruction results, including the 3D convolution with a Gaussian kernel G(V, kg, σg) for coarse stage training (not adopted in fine stage) (Sec. 5.1), the gradient smoothness loss Lsmooth(∇V (sdf) ) (Sec. 5.3), a 3D convolution with a Gaussian kernel G(V, kg, σg) for post-processing during inference (Sec. 5.3), and the SDF total variation loss LT V (V (sdf) ) (Sec. 5.3).
+
+Since we observe the combination of DVGO and NeuS (DVGO + NeuS) produces continuous but noisy surfaces, it is interesting to apply these smoothness designs to the baseline. In this way, we can more clearly verify the effectiveness of other technical contributions in Voxurf. Specifically, the SDF total variation loss (SDF TV) has already been adopted to DVGO + NeuS for better results in Fig. 1 and Table. 1. We further evaluate the Gaussian kernel for training, gradient smoothness loss, and Gaussian kernel for post-processing on DVGO + NeuS. The most simple approach to make surfaces smooth is adopting the Gaussian kernel for post-processing. As shown in Fig. S3, the surfaces clearly become smooth, but the chamfer distance (CD) becomes worse as in Table R7. As either the Gradient smooth loss or Gaussian kernel for training is leveraged, both the chamfer distance (CD) and surfaces become better. Notably, the Gaussian kernel for post-processing will not harm the performance here with these smooth priors (i.e., Gradient smoothness loss, Gaussian kernel for training) adopted. Finally, via combining all of these designs, we achieve smooth surfaces and lower CD. However, both the quantitative comparison and visualization show that Voxurf is significantly
+
+
+
+Figure S2: Comparisons of Alpha threshold selection for surface extraction from a trained DVGO \(Sun et al., 2022a\) model. A large threshold leads to holes and the incomplete surface, while a small one leads to floating noises above the surface.
+
+
+
+Figure S3: Qualitative comparisons of the DVGO+SDF baseline enhanced with different combinations of smoothness priors. A huge performance gap still exists when the strongest smoothness strategies are applied.
+
+Table R7: The experimental results of applying Gaussian kernel for post-processing, gradient smoothness loss, and Gaussian kernel for training on DVGO + NeuS. Notably, SDF TV has already been adopted as a default setting, thus it is not discussed here.
+
+
+
+| CD (mean)                    | 1.13 | 1.22 | 0.99 | 1.00 | 1.00 | 1.00 0.98 |
+|------------------------------|------|------|------|------|------|-----------|
+| Post-processing              |      | ✓    |      | ✓    |      | ✓ ✓       |
+| Gradient smoothness loss     |      |      | ✓    | ✓    |      | ✓         |
+| Gaussian kernel for training |      |      |      |      | ✓    | ✓ ✓       |
+| Voxurf                       |      |      |      | 0.72 |      |           |
+
+better than DVGO + NeuS w/ smoothness. Moreover, after adopting all these designs, the training time of DVGO + NeuS w/ smoothness increases from 12min to 15min which is slightly longer than Voxurf (14min), singe Voxurf does not need the Gaussian kernel for training in the second stage thanks to the other designs.
+
+## D DISCUSSIONS ON THE ASSUMPTION OF COLOR-GEOMETRY DEPENDENCY
+
+The assumption of color-geometry dependency is based on the idea of shape-from-shading, which has been proven effective in surface reconstruction by previous approaches \(Yariv et al., 2020; 2021\). This technique generally does more good than harm, while side effects do exist in some cases where the surface texture is not correlated with the geometry/normal. We carry out several experiments with an example in Fig. S4, where we can observe obvious relief-like structures on a plane surface caused by the texture.
+
+This is a common problem shared by most of the recent neural surface reconstruction methods \(Oechsle et al., 2021; Yariv et al., 2020; 2021; Wang et al., 2021\). Nevertheless, this problem can be largely alleviated via multi-view consistency when the geometry and color fields are well-trained with enough input views. In Fig. S4, we observe that our method is better at overcoming the problem than previous state-of-the-art methods, being least affected by the textures. Fully addressing this side effect is out of the scope of this work and would be investigated in the future.
+
+
+
+
+
+Figure S4: An example where the surface color is not correlated with geometry. The assumption of the colorgeometry dependency leads to relief-like structures in VolSDF \(Yariv et al., 2021\), NeuS \(Wang et al., 2021\), and Voxurf, where our method is least affected by the side effect. It reveals that this problem can be mostly alleviated by multi-view consistency in an accurate reconstruction.
+
+
+
+
+
+Figure S5: Qualitative comparisons on the Synthetic-NeRF and Synthetic-NSVF dataset.
+
+## E EVALUATIONS ON NEW DATASETS
+
+We further evaluate our method on other datasets, namely Synthetic-NeRF \(Mildenhall et al., 2020\) and Synthetic-NSVF \(Liu et al., 2020a\), and a qualitative comparison can be found in Fig. S7. Compared with the baseline methods, our method shows superior performance, which does not suffer from the heavy noise as DVGO \(Sun et al., 2022a\) while producing far more accurate thin structures than NeuS \(Wang et al., 2021\).
+
+These datasets rarely appear in previous benchmarks of surface reconstruction, because they do NOT have publicly available 3D ground truth for evaluation. The average PSNRs of our method on Synthetic-NeRF and Synthetic-NSVF are 32.38 and 35.18, where DVGO achieves 31.95 and 35.08, respectively. Considering the time limitation, we will provide a full comparison of both geometry and novel view synthesis on multiple methods in the final version. Results for more datasets (e.g.,
+
+
+
+Figure S6: Qualitative results on large scenes, e.g., the ScanNet dataset.
+
+
+
+Figure S7: A comparison with Point-NeRF \(Xu et al., 2022\) in surface reconstruction. We use the Open3D Libarary \(Zhou et al., 2018\) to perform Poisson surface reconstruction from the point cloud.
+
+deepvoxels \(Sitzmann et al., 2019a\) and Tanks-and-Temples \(Knapitsch et al., 2017\)) will also be included in the final version.
+
+## F QUALITATIVE RESULTS ON LARGE SCENES
+
+We further evaluate Voxurf on large scenes, i.e., Scannet dataset \(Dai et al., 2017\). Following MonoSDF \(Yu et al., 2022b\), we adopt depth and normal estimated by MiDaS \(Ranftl et al., 2022\) as extra supervision. In Fig. S6, we show the qualitative results on scene 0050, 0580, and 0616 of Scannet. The results show that Voxurf can basically model the scene with an accurate layout and some details. However, it still performs unsatisfactory in reconstructing planes, e.g., floor and wall. We conjecture that the under-constrained voxel grids are not suitable to reconstruct from sparse-view observations like ScanNet videos. It is an import topic for future works.
+
+## G COMPARISONS WITH MORE METHODS
+
+We further include Point-NeRF \(Xu et al., 2022\) for a comparison, which is an impressive work on NeRF acceleration based on an innovative neural point representation. This approach is proposed for the NVS task, and we manage to obtain the neural points after the finetuning stage and use Poisson surface reconstruction \(Kazhdan et al., 2006\) to extract a surface from the points. The DTU performance on NVS task of Point-NeRF and our method are not directly comparable since they use different scenes and splits for training and testing. Therefore, we currently compare surface reconstruction results on the only one shared scene as shown in Fig. S7. It can be seen that the neural points after fine-tuning can roughly represent the surface of the scene, while the CD error (0.56) is obviously higher than ours (0.37). When we use Poisson surface reconstruction \(Kazhdan et al., 2006\), a widely used method to mesh a point cloud, to recover a water-tight surface with the neural points, the CD error substantially increases to 1.77. We will try to adopt Point-NeRF in the benchmark and perform a comprehensive evaluation on both surface reconstruction and rendering in the final version.
+
+(1) Current neural surface reconstruction approaches \(Oechsle et al., 2021; Yariv et al., 2020; 2021; Wang et al., 2021\), including our Voxurf, are built upon color-geometry dependence. Although the assumption does more good than harm, it sometimes causes side effects, e.g., a plane with printed textures will lead to relief-like structures. As discussed in Sec. D and Fig. S4, Voxurf is relatively less affected by such cases due to the accurate surface reconstruction enhanced by multiview consistency, but the undesirable artifacts still exist. It is valuable to explore how to tackle this problem in the future.
+
+(2) Voxurf follows the NeRF-based techniques that represent 3D objects with view-conditioned emitted radiance. This design is insufficient to reconstruct an accurate surface with less texture, strong reflection, and transparency due to strong ambiguity. This is another problem we can explore with Voxurf.
+
+## I ADDITIONAL QUALITATIVE COMPARISONS
+
+Finally, we show the qualitative comparisons for novel view synthesis in Fig. S8 and Fig. S9, and we show additional surface reconstruction results in Fig S10, Fig S11, and Fig S12.
+
+
+
+Figure S8: Qualitative comparisons on DTU for novel view synthesis. (Part 1/2)
+
+
+
+
+
+Figure S9: Qualitative comparisons on DTU for novel view synthesis. (Part 2/2)
+
+
+
+Figure S10: Additional surface reconstruction comparisons on DTU. (Part 1/2)
+
+
+
+Figure S11: Additional surface reconstruction comparisons on DTU. (Part 2/2)
+
+
+
+
+
+Figure S12: Additional surface reconstruction comparisons on BlendedMVS.
+
+## REFERENCES
+
+Matan Atzmon, Niv Haim, Lior Yariv, Ofer Israelov, Haggai Maron, and Yaron Lipman. Controlling neural level sets. Advances in Neural Information Processing Systems, 32, 2019. Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P. Srinivasan, and Peter Hedman. Mip-nerf 360: Unbounded anti-aliased neural radiance fields. CVPR, 2022. Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su. Tensorf: Tensorial radiance fields. In European Conference on Computer Vision, 2022. Zhiqin Chen and Hao Zhang. Learning implicit fields for generative shape modeling. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 5939–5948, 2019. Angela Dai, Angel X. Chang, Manolis Savva, Maciej Halber, Thomas Funkhouser, and Matthias Nießner. Scannet: Richly-annotated 3d reconstructions of indoor scenes. In Proc. Computer Vision and Pattern Recognition (CVPR), IEEE, 2017. Franc¸ois Darmon, Ben´ edicte Bascle, Jean-Cl ´ ement Devaux, Pascal Monasse, and Mathieu Aubry. ´ Improving neural implicit surfaces geometry with patch warping. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 2022. Jiemin Fang, Taoran Yi, Xinggang Wang, Lingxi Xie, Xiaopeng Zhang, Wenyu Liu, Matthias Nießner, and Qi Tian. Fast dynamic radiance fields with time-aware neural voxels. arxiv:2205.15285, 2022. Rasmus Jensen, Anders Dahl, George Vogiatzis, Engin Tola, and Henrik Aanæs. Large scale multiview stereopsis evaluation. In Proceedings of the IEEE conference on computer vision and pattern recognition (CVPR), pp. 406–413, 2014. Yue Jiang, Dantong Ji, Zhizhong Han, and Matthias Zwicker. Sdfdiff: Differentiable rendering of signed distance fields for 3d shape optimization. In The IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June 2020. Michael Kazhdan, Matthew Bolitho, and Hugues Hoppe. Poisson surface reconstruction. In Proceedings of the fourth Eurographics symposium on Geometry processing, volume 7, 2006. Petr Kellnhofer, Lars C Jebe, Andrew Jones, Ryan Spicer, Kari Pulli, and Gordon Wetzstein. Neural lumigraph rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 4287–4297, 2021. Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics, 36(4), 2017. Lingjie Liu, Jiatao Gu, Kyaw Zaw Lin, Tat-Seng Chua, and Christian Theobalt. Neural sparse voxel fields. Advances in Neural Information Processing Systems (NeurIPS), 2020a. Shaohui Liu, Yinda Zhang, Songyou Peng, Boxin Shi, Marc Pollefeys, and Zhaopeng Cui. Dist: Rendering deep implicit signed distance function with differentiable sphere tracing. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 2019–2028, 2020b. Stephen Lombardi, Tomas Simon, Jason Saragih, Gabriel Schwartz, Andreas Lehrmann, and Yaser Sheikh. Neural volumes: Learning dynamic renderable volumes from images. ACM Transactions on Graphics (TOG), 2019. Nelson Max. Optical models for direct volume rendering. IEEE Transactions on Visualization and Computer Graphics, 1(2):99–108, 1995. Lars Mescheder, Michael Oechsle, Michael Niemeyer, Sebastian Nowozin, and Andreas Geiger. Occupancy networks: Learning 3d reconstruction in function space. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 4460–4470, 2019.
+
+- Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon, Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and Abhishek Kar. Local light field fusion: Practical view synthesis with prescriptive sampling guidelines. ACM Transactions on Graphics (TOG), 2019. Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik, Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In European conference on computer vision, pp. 405–421. Springer, 2020. Thomas Muller, Alex Evans, Christoph Schied, and Alexander Keller. Instant neural graphics prim- ¨ itives with a multiresolution hash encoding. ACM Trans. Graph., 2022. Michael Niemeyer, Lars Mescheder, Michael Oechsle, and Andreas Geiger. Differentiable volumetric rendering: Learning implicit 3d representations without 3d supervision. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 3504–3515, 2020. Michael Oechsle, Songyou Peng, and Andreas Geiger. Unisurf: Unifying neural implicit surfaces and radiance fields for multi-view reconstruction. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pp. 5589–5599, 2021. Jeong Joon Park, Peter Florence, Julian Straub, Richard Newcombe, and Steven Lovegrove. Deepsdf: Learning continuous signed distance functions for shape representation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 165–174, 2019. Rene Ranftl, Katrin Lasinger, David Hafner, Konrad Schindler, and Vladlen Koltun. Towards ro- ´ bust monocular depth estimation: Mixing datasets for zero-shot cross-dataset transfer. IEEE Transactions on Pattern Analysis and Machine Intelligence, 44(3), 2022. Leonid I Rudin and Stanley Osher. Total variation based image restoration with free local constraints. In Proceedings of 1st international conference on image processing, volume 1, pp. 31–35. IEEE, 1994. Shunsuke Saito, Zeng Huang, Ryota Natsume, Shigeo Morishima, Angjoo Kanazawa, and Hao
+- Li. Pifu: Pixel-aligned implicit function for high-resolution clothed human digitization. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pp. 2304–2314, 2019. Johannes L Schonberger, Enliang Zheng, Jan-Michael Frahm, and Marc Pollefeys. Pixelwise view ¨ selection for unstructured multi-view stereo. In European Conference on Computer Vision, pp. 501–518. Springer, 2016. Vincent Sitzmann, Justus Thies, Felix Heide, Matthias Nießner, Gordon Wetzstein, and Michael Zollhofer. Deepvoxels: Learning persistent 3d feature embeddings. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 2437–2446, 2019a. Vincent Sitzmann, Michael Zollhofer, and Gordon Wetzstein. Scene representation networks: Con- ¨ tinuous 3d-structure-aware neural scene representations. In Advances in Neural Information Processing Systems, 2019b. Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct voxel grid optimization: Super-fast convergence for radiance fields reconstruction. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 2022a. Cheng Sun, Min Sun, and Hwann-Tzong Chen. Improved direct voxel grid optimization for radiance fields reconstruction, 2022b. Matthew Tancik, Pratul Srinivasan, Ben Mildenhall, Sara Fridovich-Keil, Nithin Raghavan, Utkarsh Singhal, Ravi Ramamoorthi, Jonathan Barron, and Ren Ng. Fourier features let networks learn high frequency functions in low dimensional domains. Advances in Neural Information Processing Systems, 33:7537–7547, 2020. Briac Toussaint, Maxime Genisson, and Jean-Sebastien Franco. Fast Gradient Descent for Surface ´ Capture Via Differentiable Rendering. In 3DV 2022 - International Conference on 3D Vision, pp. 1–10, September 2022.
+
+Jingwen Wang, Tymoteusz Bleja, and Lourdes Agapito. Go-surf: Neural feature grid optimization for fast, high-fidelity rgb-d surface reconstruction. In 2022 International Conference on 3D Vision (3DV). IEEE, 2022. Peng Wang, Lingjie Liu, Yuan Liu, Christian Theobalt, Taku Komura, and Wenping Wang. Neus: Learning neural implicit surfaces by volume rendering for multi-view reconstruction. Advances in Neural Information Processing Systems (NeurIPS), 2021. Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Simoncelli. Image quality assessment: from error visibility to structural similarity. IEEE transactions on image processing, 13(4):600– 612, 2004. Suttisak Wizadwongsa, Pakkapon Phongthawee, Jiraphon Yenphraphai, and Supasorn Suwajanakorn. Nex: Real-time view synthesis with neural basis expansion. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 8534–8543, 2021. Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich Neumann. Point-nerf: Point-based neural radiance fields. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognitio, 2022. Yao Yao, Zixin Luo, Shiwei Li, Jingyang Zhang, Yufan Ren, Lei Zhou, Tian Fang, and Long Quan. Blendedmvs: A large-scale dataset for generalized multi-view stereo networks. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 1790–1799, 2020. Lior Yariv, Yoni Kasten, Dror Moran, Meirav Galun, Matan Atzmon, Basri Ronen, and Yaron Lipman. Multiview neural surface reconstruction by disentangling geometry and appearance. Advances in Neural Information Processing Systems (NeurIPS), 33, 2020. Lior Yariv, Jiatao Gu, Yoni Kasten, and Yaron Lipman. Volume rendering of neural implicit surfaces. In Thirty-Fifth Conference on Neural Information Processing Systems, 2021. Alex Yu, Sara Fridovich-Keil, Matthew Tancik, Qinhong Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels: Radiance fields without neural networks. In Proceedings of the IEEE/CVF International Conference on Computer Vision, 2022a. Zehao Yu, Songyou Peng, Michael Niemeyer, Torsten Sattler, and Andreas Geiger. Monosdf: Exploring monocular geometric cues for neural implicit surface reconstruction. Advances in Neural Information Processing Systems (NeurIPS), 2022b. Jingyang Zhang, Yao Yao, and Long Quan. Learning signed distance field for multi-view surface reconstruction. International Conference on Computer Vision (ICCV), 2021. Kai Zhang, Gernot Riegler, Noah Snavely, and Vladlen Koltun. Nerf++: Analyzing and improving neural radiance fields. arXiv preprint arXiv:2010.07492, 2020. Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of deep features as a perceptual metric. In Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 586–595, 2018. Xiaoshuai Zhang, Sai Bi, Kalyan Sunkavalli, Hao Su, and Zexiang Xu. Nerfusion: Fusing radiance fields for large-scale scene reconstruction. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2022. Qian-Yi Zhou, Jaesik Park, and Vladlen Koltun. Open3D: A modern library for 3D data processing. arXiv:1801.09847, 2018.

@@ -1,0 +1,284 @@
+--- v002.md
++++ v003.md
+@@ -4,182 +4,149 @@
+ 
+ ## Overview
+-The Zip-NeRF Training Procedure is a two-stage optimization method for inverse rendering that jointly trains a physically-based scene model, environment map, and radiance caches (Zip-NeRF and Fast Cache) to estimate incoming radiance. It solves the bias introduced by approximating incoming radiance using neural caches by employing a control variate strategy and a specific gradient trick for the photometric loss. It sets itself apart from standard NeRF training by decoupling the cache initialization from the joint optimization of the physical model and by using an occlusion-aware importance sampler to reduce variance in the radiance estimation [S1].
++The Zip-NeRF Training Procedure is a two-stage optimization method for inverse rendering that jointly trains a physically-based material model, an environment map, and a hybrid radiance cache system (comprising a "fast cache" and a "NeRF-cache") to estimate incoming radiance. It solves the bottleneck of evaluating high-fidelity neural radiance fields for every importance sampling direction by using a lightweight approximation as a control variate. It sets itself apart from standard NeRF-based caches by using a fixed, small number of samples and direct distance prediction in the fast cache, while maintaining accuracy by serving as a control variate to correct the bias of the NeRF cache [S1].
+ 
+ ## How it works
+-The method consists of two sequential stages: Cache Training and Joint Training.
++The method optimizes the parameters $\Phi$ of the physically-based model, environment map, fast cache, NeRF-cache, and occlusion-aware importance sampler. It proceeds in two distinct stages.
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-- Training images (photometric data).
+-- Camera poses and intrinsics.
+-- Scene geometry (optional, depending on the physically-based model).
+-- Initial Zip-NeRF radiance cache structure.
+-- Fast Cache structure (low-resolution hash grid + small MLP).
+-
+-**Outputs:**
+-- Optimized physically-based scene parameters ($\Phi$).
+-- Optimized environment map.
+-- Optimized Zip-NeRF radiance cache.
+-- Optimized Fast Cache.
+-- Optimized occlusion-aware importance sampler parameters.
++*   **Inputs:** Ground truth images $I(\mathbf{o}, \boldsymbol{\omega}_o)$, camera poses, and scene geometry (implicit in the Zip-NeRF structure).
++*   **Outputs:** Optimized parameters $\Phi$ for the material model, environment map, and both cache structures.
+ 
+ ### Data Structures
+-1. **Zip-NeRF Radiance Cache:** Stores incident radiance $L_i$ at specific spatial locations and directions. Accessed via importance sampling [S1].
+-2. **Fast Cache:** A lightweight approximation of incoming radiance. Uses a fixed number of samples (8) and direct distance prediction. It serves as a control variate to correct bias [S1, S9552].
+-3. **Physically-Based Model:** Predicts outgoing radiance $L_i(o, \omega_o; \Phi)$ given ray origin $o$ and direction $\omega_o$.
++The method relies on the structures defined in [Acceleration and Sparse Structures](11405-acceleration-and-sparse-structures.md). Specifically:
++1.  **Fast Cache:** A lightweight, low-resolution hash grid and small MLP predicting incident radiance.
++2.  **NeRF-cache:** A Zip-NeRF-based radiance cache storing high-frequency details.
++3.  **Physically-based Model:** Defines surface reflectance properties.
+ 
+ ### Numbered Steps
+ 
+-#### Stage 1: Cache Training
+-1. **Initialize:** Set up the Zip-NeRF radiance cache.
+-2. **Sample Rays:** Draw a batch of 16,384 rays from the training views.
+-3. **Forward Pass:** For each ray, estimate the incoming radiance using the current Zip-NeRF cache.
+-4. **Compute Loss:** Calculate the Charbonnier loss between the predicted cache radiance and the ground truth incoming radiance (derived from training images and geometry) [S1].
+-   $$ \mathcal{L}_{\text{cache}} = \sum \| L_{\text{pred}} - L_{\text{gt}} \|_\delta $$
+-   where $\| \cdot \|_\delta$ denotes the Charbonnier norm.
+-5. **Optimize:** Update the Zip-NeRF cache parameters using the learning rate schedule:
+-   - Iterations 0–10,000: Linear warmup from 0 to 0.01.
+-   - Iterations 10,001–100,000: Linear decay from 0.01 to 0.001.
+-6. **Repeat:** Perform 100,000 iterations.
++**Stage 1: Cache Training**
++1.  **Initialize:** Set up the Zip-NeRF-based radiance cache.
++2.  **Sample Rays:** Draw a batch of 16,384 rays.
++3.  **Compute Loss:** Calculate the Charbonnier loss between the cache prediction and ground truth incoming radiance.
++4.  **Optimize:** Update cache parameters using the learning rate schedule defined below.
++5.  **Iterate:** Repeat for 100,000 iterations.
+ 
+-#### Stage 2: Joint Training
+-1. **Initialize:** Load the optimized Zip-NeRF cache from Stage 1. Initialize the physically-based model, environment map, Fast Cache, and occlusion-aware importance sampler.
+-2. **Sample Rays:** Draw a batch of 1,024 rays.
+-3. **Importance Sampling:**
+-   - Use the occlusion-aware importance sampler to select directions for estimating incoming radiance.
+-   - For the **Fast Cache**: Use 64 secondary rays to estimate $\hat{L}_{\text{fast}}$ [S1].
+-   - For the **NeRF Cache**: Use 16 rays to estimate the correction term $\Delta \hat{L}_o$ [S1].
+-4. **Estimate Incoming Radiance:** Combine the Fast Cache and NeRF Cache estimates to approximate the true incoming radiance. The Fast Cache acts as a control variate to reduce bias [S1, S9552].
+-5. **Compute Photometric Loss:**
+-   - The goal is to minimize the difference between the predicted outgoing radiance $\hat{L}_i(o, \omega_o; \Phi)$ and the ground truth image $I(o, \omega_o)$.
+-   - Direct minimization of $\mathbb{E}[\hat{L}_i]$ is intractable due to the lack of an analytic expression for the expected value of the radiance estimator [S1].
+-   - Apply the **gradient trick** (from RawNeRF) to obtain correct gradients in expectation [S1]:
+-     $$ \mathcal{L}_{\text{photometric}} = \frac{2 \left( I(o, \omega_o) - \hat{L}_i(o, \omega_o; \Phi) \right) \operatorname{stopgrad}\left( I(o, \omega_o) - \hat{L}_i(o, \omega_o; \Phi) \right)}{\operatorname{stopgrad}\left( \hat{L}_i^{\text{cache}}(o, \omega_o; \Phi) \right)} $$
+-     where $\hat{L}_i^{\text{cache}}$ is the radiance estimate from the cache (used as a denominator to stabilize gradients) and $\operatorname{stopgrad}$ denotes the stop-gradient operation [S1].
+-6. **Optimize:**
+-   - Update all parameters (physically-based model, environment map, Fast Cache, NeRF Cache, importance sampler).
+-   - **Learning Rates:**
+-     - Fast Cache and Occlusion-Aware Importance Sampler: $1.5625 \times 10^{-4}$.
+-     - All other parameters: $3.125 \times 10^{-5}$.
+-7. **Repeat:**
+-   - For TensoIR-synthetic dataset: 40,000 iterations.
+-   - For Open Illumination dataset: 100,000 iterations.
++**Stage 2: Joint Training**
++1.  **Initialize:** Load the optimized cache from Stage 1. Initialize the physically-based model, environment map, fast cache, and occlusion-aware importance sampler.
++2.  **Sample Rays:** Draw a batch of 1,024 rays.
++3.  **Estimate Incoming Radiance:**
++    *   For each ray, estimate incoming radiance $\hat{L}_i$ using the hybrid cache.
++    *   Use 64 secondary rays to estimate $\hat{L}_{fast}$ from the fast cache.
++    *   Use 16 secondary rays to estimate $\Delta \hat{L}_o$ (the correction term) using the NeRF-cache.
++    *   The total estimated radiance is a combination of these terms, where the fast cache serves as a control variate.
++4.  **Compute Photometric Loss:**
++    *   The target is the expected value $\mathbb{E}[\hat{L}_i]$. Since this lacks an analytic expression, the "gradient trick" is applied [S1].
++    *   The loss function is:
++        $$ \mathcal{L}_{\text{photometric}} = \frac{2 \left( I(\mathbf{o}, \boldsymbol{\omega}_o) - \hat{L}_i(\mathbf{o}, \boldsymbol{\omega}_o; \Phi) \right) \operatorname{stopgrad}\left( I(\mathbf{o}, \boldsymbol{\omega}_o) - \hat{L}_i(\mathbf{o}, \boldsymbol{\omega}_o; \Phi) \right)}{\operatorname{stopgrad}\left( \hat{L}_i^{\text{cache}}(\mathbf{o}, \boldsymbol{\omega}_o; \Phi) \right)} $$
++    *   Here, $\operatorname{stopgrad}(\cdot)$ denotes the stop-gradient operation, ensuring gradients only flow through the physically-based model parameters $\Phi$ and not through the cache estimators during this stage.
++5.  **Optimize:** Update all parameters ($\Phi$) using the specified learning rates.
++6.  **Iterate:** Repeat for 40,000 iterations (TensoIR-synthetic) or 100,000 iterations (Open Illumination).
+ 
+ ### Pseudocode
+ 
+ ```python
+-def train_zip_nerf(training_data, camera_poses, geometry):
++def train_zip_nerf_stage1(cache, ground_truth_images, iterations=100000, batch_size=16384):
+     """
+-    Two-stage training procedure for Zip-NeRF based inverse rendering.
++    Stage 1: Optimize the Zip-NeRF-based radiance cache.
+     """
++    lr_schedule = LinearWarmupDecay(start_lr=0.0, peak_lr=0.01, warmup_steps=10000, end_lr=0.001, total_steps=iterations)
+     
+-    # --- Stage 1: Cache Training ---
+-    cache = ZipNeRF()
+-    lr_schedule = LinearWarmupDecay(start_lr=0.0, end_lr=0.01, warmup_steps=10000, final_lr=0.001, total_steps=100000)
+-    
+-    for step in range(100000):
+-        rays = sample_rays(training_data, camera_poses, batch_size=16384)
++    for step in range(iterations):
++        lr = lr_schedule.get_lr(step)
++        optimizer = Optimizer(cache.parameters(), lr=lr)
+         
+-        # Estimate incoming radiance using Zip-NeRF cache
+-        L_pred = cache.evaluate(rays)
++        # Sample batch of rays
++        rays = sample_rays(ground_truth_images, batch_size)
+         
+-        # Ground truth incoming radiance derived from training images and geometry
+-        L_gt = compute_ground_truth_incoming_radiance(rays, geometry)
++        # Predict incoming radiance using cache
++        L_pred = cache.predict(rays)
++        L_gt = rays.ground_truth_radiance
+         
+         # Charbonnier Loss
+         loss = charbonnier_loss(L_pred, L_gt)
+         
+-        # Update cache parameters
+-        lr = lr_schedule.get_lr(step)
+-        cache.update(loss, lr)
+-        
+-    # --- Stage 2: Joint Training ---
+-    phys_model = PhysicallyBasedModel()
+-    env_map = EnvironmentMap()
+-    fast_cache = FastCache()
+-    nerf_cache = NeRFCache(cache) # Initialize with Stage 1 results
+-    sampler = OcclusionAwareSampler()
+-    
+-    # Learning rates
++        # Backpropagate
++        optimizer.zero_grad()
++        loss.backward()
++        optimizer.step()
++
++def train_zip_nerf_stage2(model, env_map, fast_cache, nerf_cache, importance_sampler, 
++                          ground_truth_images, iterations, batch_size=1024, 
++                          fast_samples=64, nerf_samples=16):
++    """
++    Stage 2: Joint training of physically-based model, environment map, and caches.
++    """
+     lr_fast = 1.5625e-4
+     lr_other = 3.125e-5
+     
+-    # Determine total iterations based on dataset
+-    if dataset == "TensoIR-synthetic":
+-        total_steps = 40000
+-    else:
+-        total_steps = 100000
++    optimizer_fast = Optimizer([fast_cache.parameters(), importance_sampler.parameters()], lr=lr_fast)
++    optimizer_other = Optimizer([model.parameters(), env_map.parameters(), nerf_cache.parameters()], lr=lr_other)
++    
++    for step in range(iterations):
++        rays = sample_rays(ground_truth_images, batch_size)
+         
+-    for step in range(total_steps):
+-        rays = sample_rays(training_data, camera_poses, batch_size=1024)
++        # 1. Estimate Fast Cache Radiance (Control Variate)
++        # Uses 64 secondary rays
++        L_fast = fast_cache.predict(rays, num_samples=fast_samples)
+         
+-        # 1. Importance Sampling
+-        # Fast Cache uses 64 secondary rays
+-        L_fast = fast_cache.evaluate(rays, num_samples=64)
++        # 2. Estimate NeRF Cache Correction
++        # Uses 16 secondary rays
++        L_nerf_correction = nerf_cache.predict_correction(rays, num_samples=nerf_samples)
+         
+-        # NeRF Cache uses 16 rays for correction term Delta L_o
+-        L_nerf = nerf_cache.evaluate(rays, num_samples=16)
++        # 3. Combine to get total estimated incoming radiance
++        # L_i = L_fast + L_nerf_correction (conceptual combination based on control variate principle)
++        L_i = combine_radiance(L_fast, L_nerf_correction)
+         
+-        # Combine caches (Fast Cache as control variate)
+-        # Note: Exact combination formula depends on control variate implementation
+-        L_cache_estimate = combine_caches(L_fast, L_nerf)
++        # 4. Compute Photometric Loss with Gradient Trick
++        # Stop gradients through the cache estimators to ensure correct gradient expectation
++        L_i_stopped = stop_gradient(L_i)
++        I_gt = rays.ground_truth_image
+         
+-        # 2. Physically-Based Model Prediction
+-        L_pred_out = phys_model.predict(rays)
++        # Numerator: 2 * (I - L_i) * stopgrad(I - L_i)
++        # Denominator: stopgrad(L_i_cache) - Note: In the formula, the denominator is 
++        # stopgrad(L_i_cache) which acts as a normalization or variance reduction term 
++        # in the specific RawNeRF variant used.
++        numerator = 2.0 * (I_gt - L_i_stopped) * stop_gradient(I_gt - L_i_stopped)
++        denominator = stop_gradient(L_i) # Using L_i as the cache estimator reference
+         
+-        # 3. Photometric Loss with Gradient Trick
+-        # Stop gradient on cache estimate and prediction for the numerator terms
+-        # Denominator uses stop gradient on cache estimate
+-        diff = rays.image - L_pred_out
+-        stop_grad_diff = stop_gradient(diff)
+-        stop_grad_cache = stop_gradient(L_cache_estimate)
++        loss = numerator / denominator
+         
+-        loss = 2.0 * diff * stop_grad_diff / stop_grad_cache
++        # 5. Backpropagate
++        optimizer_fast.zero_grad()
++        optimizer_other.zero_grad()
+         
+-        # 4. Update Parameters
+-        # Update Fast Cache and Sampler with higher LR
+-        fast_cache.update(loss, lr_fast)
+-        sampler.update(loss, lr_fast)
++        loss.backward()
+         
+-        # Update other parameters with lower LR
+-        phys_model.update(loss, lr_other)
+-        env_map.update(loss, lr_other)
+-        nerf_cache.update(loss, lr_other)
+-        
+-    return phys_model, env_map, fast_cache, nerf_cache, sampler
++        optimizer_fast.step()
++        optimizer_other.step()
+ ```
+ 
+ ### Parameters
+-- **Batch Size (Stage 1):** 16,384 rays [S1].
+-- **Batch Size (Stage 2):** 1,024 rays [S1].
+-- **Iterations (Stage 1):** 100,000 [S1].
+-- **Iterations (Stage 2):** 40,000 (TensoIR-synthetic) or 100,000 (Open Illumination) [S1].
+-- **Learning Rate (Stage 1):** Warmup 0 to 0.01 (10k iters), then linear decay to 0.001 (90k iters) [S1].
+-- **Learning Rate (Stage 2):**
+-  - Fast Cache & Occlusion-Aware Importance Sampler: $1.5625 \times 10^{-4}$ [S1].
+-  - All other parameters: $3.125 \times 10^{-5}$ [S1].
+-- **Secondary Rays:**
+-  - Fast Cache: 64 samples [S1].
+-  - NeRF Cache: 16 samples [S1].
++*   **Stage 1 Learning Rate:** Warms up from 0 to 0.01 over the first 10,000 iterations, then linearly decreases to 0.001 for the remaining 90,000 iterations [S1].
++*   **Stage 2 Learning Rate:**
++    *   Fast cache and occlusion-aware importance sampler: $1.5625 \times 10^{-4}$ [S1].
++    *   Physically-based model, environment map, and NeRF-cache: $3.125 \times 10^{-5}$ [S1].
++*   **Batch Size:** 16,384 rays for Stage 1; 1,024 rays for Stage 2 [S1].
++*   **Secondary Rays:** 64 for the fast cache; 16 for the NeRF-cache [S1].
++*   **Iterations:** 100,000 for Stage 1; 40,000 (TensoIR-synthetic) or 100,000 (Open Illumination) for Stage 2 [S1].
+ 
+ ### Edge Cases and Pitfalls
+-- **Gradient Estimation:** The expected value of the radiance estimator lacks an analytic expression, so the loss cannot be minimized directly. The gradient trick must be used to obtain correct gradients in expectation [S1].
+-- **Bias:** Using only the NeRF cache introduces bias. The Fast Cache acts as a control variate to correct this bias [S1, S9552].
+-- **Hardware:** Training times are measured on a single NVIDIA A100 GPU. Stage 1 takes 5.5 hours for 100,000 iterations. Stage 2 takes 6.5 hours for 100,000 iterations [S1].
++*   **Gradient Estimation:** The loss cannot be minimized directly because the expected value of the radiance estimator lacks an analytic expression. The gradient trick (stop-gradient on the estimator) is required to obtain correct gradients in expectation [S1].
++*   **Precision:** The use of stop-gradient operations requires careful implementation to ensure that gradients flow only to the intended parameters (physically-based model) and not to the cache structures during joint training [S1].
+ 
+ ## Subtopics
+ 
+-### [Fast Cache (Control Variate Radiance Cache)](9552-fast-cache-control-variate-radiance-cache.md)
+-A computationally efficient approximation of incoming radiance using a lightweight hash grid and small MLP. It serves as a control variate to correct the bias of the NeRF cache, using a fixed 8 samples and direct distance prediction.
+-
+ ## Operating characteristics
+-- **Time Complexity:** Stage 1 requires 100,000 iterations (5.5 hours on A100). Stage 2 requires 40,000–100,000 iterations (6.5 hours on A100 for 100k iters) [S1].
+-- **Memory Complexity:** Depends on the Zip-NeRF hash grid size and the Fast Cache resolution. The Fast Cache is designed to be lightweight [S1, S9552].
+-- **Performance:** The method reduces bias in radiance cache-based inverse rendering by combining a high-fidelity NeRF cache with a low-bias Fast Cache [S1, S9552].
+-- **Strengths:** Accurate radiance estimation; reduced bias compared to using only NeRF cache; efficient inference via Fast Cache.
+-- **Limitations:** Requires two-stage training; computationally expensive during training (hours per scene); relies on accurate camera poses and geometry.
++*   **Time Complexity:** Stage 1 takes 5.5 hours on a single A100 for 100,000 iterations. Stage 2 takes 6.5 hours on a single A100 for 100,000 iterations [S1].
++*   **Memory Complexity:** Not given in the sources.
++*   **Scaling:** The method uses a fixed number of secondary rays (64 for fast cache, 16 for NeRF-cache) per primary ray, which keeps the per-ray cost constant regardless of scene complexity, relying on the sparsity of the underlying Zip-NeRF structure [S1].
++*   **Strengths:** Reduces bias in radiance caching by using a fast, low-resolution cache as a control variate for a high-fidelity NeRF cache. Efficient inference due to sparse sampling.
++*   **Limitations:** Requires two-stage training. The accuracy of the control variate depends on the quality of the fast cache.
++*   **When to use:** Inverse rendering tasks where high-fidelity material estimation is required, and computational efficiency is critical.
++*   **When not to use:** Real-time rendering where pre-training is not feasible, or scenes with extremely high dynamic range where the fast cache approximation may be insufficient.
+ 
+ ## Background
+-The Zip-NeRF Training Procedure was introduced in "Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering" (2024) [S1]. It builds upon Zip-NeRF [Parent] and integrates concepts from RawNeRF [S1] for the photometric loss. The method addresses the bias inherent in neural radiance field-based radiance caching by introducing a Fast Cache as a control variate.
++The Zip-NeRF Training Procedure is described in "Flash Cache: Reducing Bias in Radiance Cache Based Inverse Rendering" [S1]. It builds on the principles of Zip-NeRF [Acceleration and Sparse Structures](11405-acceleration-and-sparse-structures.md) and the RawNeRF loss formulation [S1]. The method was developed to address the bias introduced by approximating incoming radiance in inverse rendering pipelines.
+ 
+ ## Sources

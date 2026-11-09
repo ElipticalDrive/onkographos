@@ -1,0 +1,305 @@
+--- v003.md
++++ v004.md
+@@ -3,239 +3,83 @@
+ 
+ ## Overview
+-Drone-NeRF is a specialized volume rendering method for reconstructing large-scale 3D scenes from aerial drone imagery, addressing the challenges of unbounded space representation and varying camera exposure [S1]. It distinguishes itself from standard NeRF training by integrating view frustum sampling for anti-aliasing, a pose optimizer for joint pose refinement, and appearance embeddings to handle exposure discrepancies, while employing a spatial contraction function to map unbounded scenes into a bounded domain for efficient rendering [S1]. It builds on [Specific Model Architectures and Extensions](10278-specific-model-architectures-and-extensions.md) by configuring the MLP with appearance embeddings and optimizing camera poses via back-propagation [S1].
++Drone-NeRF is a specialized radiance-field optimization method for reconstructing large-scale 3D scenes from aerial drone imagery, addressing challenges such as unbounded space representation, varying camera exposure, and shadow artifacts inherent in overhead views [S1]. It distinguishes itself from standard NeRF variants by employing a block-parallel training strategy with spatial contraction, appearance embeddings for exposure balancing, and a post-training merging process that explicitly mitigates shadow occlusions from vertical bounding box faces [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** A set of drone-captured images with known or estimated camera poses (position and orientation), intrinsics, and exposure parameters. The scene is divided into sub-bounding boxes.
+-*   **Outputs:** Rendered RGB images, depth maps, and optimized camera poses for the entire scene.
++*   **Inputs:** A set of drone-captured RGB images with known or estimated camera poses, intrinsics, and extrinsics.
++*   **Outputs:** A merged radiance field model capable of rendering novel views (RGB and depth) of the large-scale scene, free from vertical-face shadow artifacts.
+ 
+-**Data Structures:**
+-*   **MLP:** A fully connected network with ReLU activations.
+-    *   Architecture: 8 hidden layers with 256 units each, followed by 2 output layers with 128 channels [S1].
+-    *   Input: Concatenation of positional encoding (PE), direction encoding (DE), and appearance embeddings [S1].
+-    *   Output: RGB color values (and optionally density, though the source emphasizes RGB generation via the final layers) [S1].
+-*   **Position Encoding:** Sine/cosine positional encoding with a highest frequency of 64 [S1].
+-*   **Direction Encoding:** Sine/cosine positional encoding with a highest frequency of 4 [S1].
+-*   **Appearance Embeddings:** Learnable vectors associated with each image to resolve exposure discrepancies [S1].
+-*   **Sub-bounding Boxes:** Spatial partitions of the scene. An "expanded" sub-bounding box is used during merging to mitigate shadow artifacts [S1].
++**Data Structures and Layout:**
++The core representation is a Multi-Layer Perceptron (MLP) mapping 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$.
++*   **Position Encoding:** Raw coordinates $\mathbf{x}$ are encoded using sinusoidal positional encoding with a highest frequency of 64 [S1].
++*   **Direction Encoding:** Viewing directions $\mathbf{d}$ are encoded using sinusoidal positional encoding with a highest frequency of 4 [S1].
++*   **Appearance Embeddings:** A learnable embedding vector is concatenated to the input to handle exposure discrepancies between images [S1].
++*   **MLP Architecture:** The network consists of fully connected ReLU layers. The main body has 8 hidden layers with 256 hidden units each. The final output head consists of 2 layers with 128 channels [S1].
++*   **Initial Stage Optimization:** For rapid query scenarios during early training, a hash coding structure is used in conjunction with a small fusion MLP [S1].
++
++**Numbered Steps:**
++
++1.  **Scene Subdivision:** The large-scale scene is divided into multiple sub-bounding boxes (sub-blocks) [S1].
++2.  **Block Parallel Training:** Each sub-block is trained independently [S1].
++    *   **Sampling:** Hierarchical sampling is used with 128 coarse samples and 256 fine samples per ray [S1].
++    *   **Batching:** 1024 rays are sampled per batch [S1].
++    *   **Optimization:** The Adam optimizer is used with an initial learning rate of 0.005 [S1].
++    *   **Pose Optimization:** Camera poses are optimized by back-propagating the loss gradient into the input pose computation, using a specific camera-optimized learning rate of 0.0005 [S1].
++    *   **Iteration:** Each block is trained for either 5,000 or 30,000 iterations to prevent over-fitting [S1].
++3.  **Shadow Mitigation via Expansion:** To address shadows cast by the vertical faces of the sub-bounding boxes during rendering:
++    *   An expanded sub-bounding box is created, larger than the original sub-bounding box [S1].
++    *   RGB values are captured from the projection areas generated by ray irradiation on the vertical faces of the smaller box, using the model from the expanded box [S1].
++    *   These captured RGB values replace the shadow occlusion regions in the original rendering [S1].
++4.  **Merging Essential Blocks:**
++    *   The number of sub-bounding boxes required for merging is determined by calculating intersections between the rays of the rendering area and the sub-bounding boxes [S1].
++    *   Only essential sub-bounding boxes are used for rendering to reduce computation [S1].
++    *   The rendering is constrained by a bounding box of identical size to the previously divided one [S1].
++5.  **Color and Depth Uniformization:**
++    *   **Color:** In overlapping areas of the enlarged sub-bounding boxes, the scene color is uniformized [S1].
++    *   **Depth:** For depth rendering, depths falling within the scope of the previous larger sub-bounding box are employed [S1].
++    *   **Depth Adjustment:** In overlapping regions, depths from each sub-bounding box are averaged. The overall depth of each sub-bounding box is adjusted by comparing these depth value averages to ensure smoother continuity [S1].
++
++**Formulas:**
++*   **Volumetric Rendering:** The pixel color $C(\mathbf{r})$ for a ray $\mathbf{r}$ is computed as:
++    $$
++    C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i
++    $$
++    where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ is the opacity, $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ is the transmittance, $\sigma_i$ is the density, $\mathbf{c}_i$ is the color, and $\delta_i$ is the distance between samples [S1, S3, unofficial].
++*   **Pose Optimization:** Camera poses are updated by back-propagating the loss gradient $\nabla L$ into the pose parameters $P$:
++    $$
++    P \leftarrow P - \eta_{pose} \nabla_P L
++    $$
++    where $\eta_{pose} = 0.0005$ is the camera-optimized learning rate [S1].
+ 
+ **Parameters:**
+-*   **Hierarchical Sampling:** 128 coarse samples and 256 fine samples per ray [S1].
++*   **MLP Hidden Layers:** 8 layers of 256 units [S1].
++*   **Output Layers:** 2 layers of 128 channels [S1].
++*   **Position Encoding Max Frequency:** 64 [S1].
++*   **Direction Encoding Max Frequency:** 4 [S1].
++*   **Coarse Samples:** 128 per ray [S1].
++*   **Fine Samples:** 256 per ray [S1].
+ *   **Batch Size:** 1024 rays [S1].
+-*   **Learning Rates:**
+-    *   Adam Optimizer (MLP): 0.005 [S1].
+-    *   Camera Pose Optimization: 0.0005 [S1].
+-*   **Training Iterations:** 5,000 and 30,000 iterations per block [S1].
+-*   **Initial Stage Optimization:** Uses hash coding with a small fusion MLP for rapid query scenarios [S1].
++*   **Adam Learning Rate:** 0.005 [S1].
++*   **Camera Pose Learning Rate:** 0.0005 [S1].
++*   **Training Iterations:** 5,000 and 30,000 per block [S1].
+ 
+-**Algorithm Steps:**
+-
+-1.  **Scene Partitioning:** Divide the large-scale scene into sub-bounding boxes [S1].
+-2.  **Block Parallel Training:** Train each sub-block independently using the MLP described above [S1].
+-    *   For each ray, sample 128 coarse points and 256 fine points using hierarchical sampling [S1].
+-    *   Compute positional and direction encodings for each sample point and view direction [S1].
+-    *   Retrieve the appearance embedding corresponding to the current image [S1].
+-    *   Concatenate PE, DE, and appearance embedding.
+-    *   Pass the concatenated vector through the MLP (8x256 ReLU layers, then 2x128 layers) to predict RGB color [S1].
+-    *   Compute the loss between predicted RGB and ground truth image RGB [S1].
+-    *   Back-propagate the loss gradient into the input pose computation to optimize camera poses [S1]. Update camera poses with a learning rate of 0.0005 [S1].
+-    *   Update MLP weights using the Adam optimizer with a learning rate of 0.005 [S1].
+-    *   Repeat for 5,000 or 30,000 iterations [S1].
+-3.  **Shadow Mitigation and Merging Preparation:**
+-    *   Determine the number of sub-bounding boxes required for merging by calculating intersections between the rays of the rendering area and the sub-bounding boxes [S1].
+-    *   Use only essential sub-bounding boxes for rendering to reduce computation [S1].
+-    *   Create an expanded sub-bounding box larger than the original sub-bounding box to mitigate shadow influence from vertical faces [S1].
+-    *   Capture RGB values corresponding to projection areas generated by vertical surface ray irradiation from the smaller bounding box using the enlarged sub-bounding box [S1].
+-    *   Replace shadow occlusion regions in the original rendering with the captured RGB values from the projection areas to eliminate shadow influence [S1].
+-    *   Uniformize scene color in overlapping areas of the enlarged sub-bounding boxes [S1].
+-4.  **Depth Merging:**
+-    *   For depth rendering, employ depths falling within the scope of the previous larger sub-bounding box for merging [S1].
+-    *   Average depths pertaining to each sub-bounding box within overlapping regions [S1].
+-    *   Compare depth value averages to adjust overall depth for smoother continuity [S1].
+-5.  **Final Rendering:** Render the overhead view of the drone, free from occlusion and shadow artifacts, using the merged sub-scenes [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-import numpy as np
+-
+-def positional_encoding(x, max_freq_log2=64):
+-    """
+-    Standard positional encoding.
+-    x: (N, D) coordinates.
+-    Returns: (N, D * 2 * max_freq_log2) encoded vector.
+-    """
+-    # Implementation details of PE are standard; max_freq_log2 controls the highest frequency
+-    freq_bands = 2.0 ** np.linspace(0, max_freq_log2, max_freq_log2)
+-    encoded = []
+-    for freq in freq_bands:
+-        encoded.append(np.sin(x * freq))
+-        encoded.append(np.cos(x * freq))
+-    return np.concatenate(encoded, axis=-1)
+-
+-def direction_encoding(d, max_freq_log2=4):
+-    """
+-    Direction encoding.
+-    d: (N, 3) view directions.
+-    Returns: (N, 3 * 2 * max_freq_log2) encoded vector.
+-    """
+-    freq_bands = 2.0 ** np.linspace(0, max_freq_log2, max_freq_log2)
+-    encoded = []
+-    for freq in freq_bands:
+-        encoded.append(np.sin(d * freq))
+-        encoded.append(np.cos(d * freq))
+-    return np.concatenate(encoded, axis=-1)
+-
+-def mlp_forward(x, weights, biases):
+-    """
+-    Forward pass through the MLP.
+-    x: (N, input_dim)
+-    weights: List of weight matrices.
+-    biases: List of bias vectors.
+-    Returns: (N, output_dim)
+-    """
+-    h = x
+-    for i in range(len(weights) - 1):
+-        h = np.maximum(0, h @ weights[i] + biases[i]) # ReLU
+-    # Final layers (128 channels)
+-    h = h @ weights[-1] + biases[-1]
+-    return h
+-
+-def train_block(block_data, appearance_embeddings, camera_poses, intrinsics):
+-    """
+-    Train a single sub-block.
+-    block_data: Dictionary containing ground truth images and rays for this block.
+-    appearance_embeddings: Array of shape (num_images, embed_dim).
+-    camera_poses: Array of shape (num_images, 4, 4) or similar pose representation.
+-    intrinsics: Camera intrinsic parameters.
+-    """
+-    # Initialize MLP weights and biases
+-    # Architecture: 8 layers of 256, then 2 layers of 128
+-    # Input dim = PE_dim + DE_dim + Embed_dim
+-    # Output dim = 3 (RGB)
+-    weights, biases = initialize_mlp()
+-    
+-    # Optimizer state for Adam
+-    adam_state = initialize_adam()
+-    # Optimizer state for Camera Poses
+-    camera_adam_state = initialize_adam()
+-    
+-    lr_mlp = 0.005
+-    lr_camera = 0.0005
+-    
+-    for iteration in range(30000): # Or 5000
+-        # Sample rays
+-        rays = sample_rays(block_data, batch_size=1024)
+-        
+-        # Hierarchical sampling: 128 coarse, 256 fine
+-        coarse_samples = hierarchical_sample(rays, num_samples=128)
+-        fine_samples = hierarchical_sample(rays, num_samples=256, density_field=coarse_samples)
+-        
+-        # Combine samples for final rendering
+-        all_samples = np.concatenate([coarse_samples, fine_samples], axis=0)
+-        
+-        # Compute encodings
+-        # pos: (N, 3), dir: (N, 3)
+-        pos = all_samples[:, :3]
+-        dir = all_samples[:, 3:6]
+-        
+-        pe = positional_encoding(pos, max_freq_log2=64)
+-        de = direction_encoding(dir, max_freq_log2=4)
+-        
+-        # Get appearance embedding for the current image index of the ray
+-        img_idx = rays['image_index']
+-        app_emb = appearance_embeddings[img_idx]
+-        
+-        # Concatenate inputs
+-        input_vec = np.concatenate([pe, de, app_emb], axis=-1)
+-        
+-        # Forward pass
+-        rgb_pred = mlp_forward(input_vec, weights, biases)
+-        
+-        # Volume rendering to get final color (standard NeRF integration)
+-        # This step is implied by "culminating in the generation of high-quality renderings"
+-        # and "density field is utilized twice".
+-        # For brevity, assuming a standard volume rendering function exists
+-        color_pred = volume_render(rgb_pred, all_samples, rays)
+-        
+-        # Compute Loss
+-        gt_color = rays['gt_color']
+-        loss = np.mean((color_pred - gt_color) ** 2)
+-        
+-        # Backpropagation
+-        # 1. Update MLP
+-        grad_mlp = compute_gradients(loss, weights, biases, input_vec)
+-        weights, biases = adam_update(weights, biases, grad_mlp, adam_state, lr_mlp)
+-        
+-        # 2. Update Camera Poses
+-        # Back-propagate loss gradient into input pose computation
+-        grad_pose = compute_pose_gradient(loss, camera_poses, rays)
+-        camera_poses = adam_update(camera_poses, grad_pose, camera_adam_state, lr_camera)
+-        
+-    return weights, biases, camera_poses, appearance_embeddings
+-
+-def merge_blocks(block_results, scene_bounds):
+-    """
+-    Merge rendered sub-blocks, handling shadows and depth continuity.
+-    block_results: List of rendered images and depth maps for each sub-block.
+-    scene_bounds: Bounding boxes for each sub-block.
+-    """
+-    merged_rgb = np.zeros_like(block_results[0]['rgb'])
+-    merged_depth = np.zeros_like(block_results[0]['depth'])
+-    
+-    # Determine essential sub-bounding boxes based on ray intersections
+-    essential_boxes = determine_essential_boxes(scene_bounds)
+-    
+-    for box in essential_boxes:
+-        # Create expanded sub-bounding box
+-        expanded_box = expand_box(box, margin=shadow_mitigation_margin)
+-        
+-        # Capture RGB from expanded box for shadow replacement
+-        shadow_rgb = render_box(expanded_box)
+-        
+-        # Replace shadow occlusion regions in original box rendering
+-        original_rgb = block_results[box]['rgb']
+-        shadow_mask = detect_shadow_regions(original_rgb, box)
+-        original_rgb[shadow_mask] = shadow_rgb[shadow_mask]
+-        
+-        # Uniformize color in overlapping areas
+-        # This is a simplified representation of the uniformization process
+-        original_rgb = uniformize_overlap(original_rgb, merged_rgb)
+-        
+-        # Depth merging
+-        original_depth = block_results[box]['depth']
+-        expanded_depth = render_box_depth(expanded_box)
+-        
+-        # Average depths in overlapping regions
+-        overlap_mask = get_overlap_mask(box, merged_depth)
+-        merged_depth[overlap_mask] = (merged_depth[overlap_mask] + original_depth[overlap_mask]) / 2
+-        
+-        # Adjust overall depth for continuity
+-        merged_depth = adjust_depth_continuity(merged_depth, original_depth)
+-        
+-        # Update merged RGB
+-        merged_rgb = update_merged_rgb(merged_rgb, original_rgb, box)
+-        
+-    return merged_rgb, merged_depth
+-```
++**Edge Cases and Pitfalls:**
++*   **Over-fitting:** High iteration counts can lead to over-fitting; therefore, training is limited to 5,000 or 30,000 iterations [S1].
++*   **Shadow Artifacts:** Vertical faces of sub-bounding boxes create shadows that must be explicitly handled via the expansion and replacement step [S1].
++*   **Noise Above Camera:** Excessive noise above the camera's shooting position can interfere with scene construction; the method mitigates this by using bounding boxes to constrain rendering [S1].
+ 
+ ## Subtopics
+ 
+ ### [Drone-NeRF Training](8976-drone-nerf-training.md)
+-Drone-NeRF Training is a specialized optimization procedure for reconstructing large-scale 3D scenes from aerial imagery, addressing the challenges of unbounded space representation and varying camera exposure in drone-captured data. It distinguishes itself from standard NeRF training by integrating view frustum sampling for anti-aliasing, a pose optimizer for joint pose refinement, and appearance embeddings to handle exposure discrepancies, while employing a spatial contraction function to map unbounded scenes into a bounded domain for efficient rendering.
++A specialized optimization procedure for Drone-NeRF that integrates view frustum sampling, pose optimization, and appearance embeddings to handle exposure discrepancies and unbounded space representation in aerial imagery.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training is performed in a block parallel manner, with each sub-block trained independently [S1]. This allows for parallelization across sub-scenes. The use of hash coding in the initial stage facilitates rapid query scenarios [S1].
+-*   **Memory Complexity:** The MLP architecture (8x256 + 2x128) requires moderate memory. The use of only essential sub-bounding boxes for rendering reduces computation and memory requirements during the merging phase [S1].
+-*   **Measured Performance:** Evaluated on the Mill 19 dataset (Building and Rubble scenes) using Ubuntu 20.04, Nvidia 4070ti GPU (12GB VRAM), Intel i5-13600KF CPU, 32GB RAM [S1].
+-    *   Building Scene (5,000 iterations): Average PSNR of 17.401 for Drone-NeRF, compared to 16.637 for MipNeRF and 17.179 for Instant-NGP [S1].
+-    *   Drone-NeRF outperforms MipNeRF and Instant-NGP in PSNR, SSIM, and LPIPS metrics for both 5,000 and 30,000 iterations on the Building Scene [S1].
+-*   **Strengths:** Handles large-scale scenes via block parallel training; mitigates shadow artifacts from vertical faces; improves visual fidelity in overhead drone views; handles exposure discrepancies via appearance embeddings.
+-*   **Limitations:** Requires careful selection of sub-bounding boxes and expansion margins; potential for over-fitting if iterations are too high [S1].
+-*   **When to use:** Large-scale 3D reconstruction from drone imagery where shadow artifacts and exposure variations are significant issues.
+-*   **When not to use:** Small-scale scenes where block parallelism adds unnecessary complexity; scenes without significant vertical surfaces causing shadows.
++*   **Performance:** On the Building Scene (Mill 19 dataset), Drone-NeRF achieves an average PSNR of 17.401 after 5,000 iterations, outperforming MipNeRF (16.637) and Instant-NGP (17.179) [S1]. It also outperforms these baselines in SSIM and LPIPS metrics [S1].
++*   **Hardware:** Evaluated on Ubuntu 20.04, Nvidia 4070ti GPU (12GB VRAM), Intel i5-13600KF CPU, 32GB RAM [S1].
++*   **Efficiency:** The use of hash coding in the initial stage and the selection of only essential sub-bounding boxes for merging reduce computation requirements [S1].
++*   **Limitations:** The method requires a post-training merging step to handle large-scale scenes and explicitly addresses shadow artifacts which are common in drone-captured data [S1].
+ 
+ ## Background
+-Drone-NeRF was introduced to address the specific challenges of 3D scene reconstruction from aerial drone surveys, such as unbounded space representation and varying camera exposure [S1]. It builds on the principles of NeRF but adapts them for large-scale, outdoor environments captured by drones [S1]. The method was evaluated on the Mill 19 dataset, demonstrating superior performance compared to MipNeRF and Instant-NGP [S1].
++Drone-NeRF was introduced to address the specific challenges of 3D scene reconstruction from large-scale drone surveys, such as the Mill 19 dataset [S1]. It builds upon the NeRF framework but adapts it for aerial imagery by incorporating exposure balancing, pose optimization, and shadow mitigation techniques [S1].
+ 
+ ## Sources

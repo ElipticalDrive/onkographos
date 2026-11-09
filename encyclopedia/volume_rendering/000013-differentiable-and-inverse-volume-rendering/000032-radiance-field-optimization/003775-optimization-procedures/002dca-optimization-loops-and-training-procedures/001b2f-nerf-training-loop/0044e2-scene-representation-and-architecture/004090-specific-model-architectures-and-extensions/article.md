@@ -3,48 +3,53 @@
 Also called: NSVF Model Architectures
 
 ## Overview
-This family defines specific configurations for the density and texture networks in Neural Scene Vector Fields (NSVF) and related architectures, primarily focusing on input concatenation strategies for position, direction, and appearance embeddings [S1, unofficial]. It also encompasses extensions that handle unbounded scenes via contract mapping and anti-aliasing (Mip-NeRF 360), defocus blur via focus frustums (NeRF-FF), and large-scale drone imagery via spatial partitioning and pose optimization (Drone-NeRF). These methods set themselves apart from the base NeRF architecture by modifying the input representation, scene parameterization, or training pipeline to address specific limitations such as infinite space, optical blur, or scale [S1, S2, unofficial].
+This family defines specific architectural configurations for the density and color networks within a Neural Scene Volume Field (NSVF), primarily through the NSVF framework [S1, unofficial]. It addresses the problem of configuring input embeddings and network topology to balance reconstruction quality and training efficiency. It sets itself apart from the parent [Scene Representation and Architecture](11368-scene-representation-and-architecture.md) by providing concrete, parameterized variants (e.g., `nsvf_emb0`, `nsvf_xyzn_old`) that dictate exactly which features (position, normal, sigma, ray direction) are concatenated into the texture and density networks [S1, unofficial].
 
 ## Shared principles
-The canonical representation maps a 3D position $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$ to a volume density $\sigma \in \mathbb{R}$ and an RGB color $\mathbf{c} \in \mathbb{R}^3$ using two coupled MLPs: a density network $F_\sigma$ and a color network $F_c$.
+The family operates on the canonical NSVF structure where two coupled MLPs map 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$ [S1, unofficial]. The specific variations are defined by the `inputs_to_density` and `inputs_to_texture` configuration strings, which specify the source, index, and dimension of features concatenated into the network inputs [S1, unofficial].
 
-**Positional Encoding:**
-Raw coordinates are mapped to higher dimensions using positional encoding $\gamma(\mathbf{x})$. For a coordinate $\mathbf{x}$, the encoding includes the original value and sinusoidal functions at increasing frequencies:
-$$
-\gamma(\mathbf{x}) = (\sin(2^0 \pi \mathbf{x}), \cos(2^0 \pi \mathbf{x}), \dots, \sin(2^{L-1} \pi \mathbf{x}), \cos(2^{L-1} \pi \mathbf{x}))
-$$
-where $L$ is the number of frequency bands. This allows the MLP to learn high-frequency details [S1, S3, unofficial].
+Common feature sources include:
+*   `feat`: Intermediate feature vector from the density network's hidden layers.
+*   `pos`: Raw or encoded 3D position.
+*   `normal`: Surface normal vector.
+*   `sigma`: Volume density prediction.
+*   `ray`: Viewing direction.
+*   `emb`: Voxel or positional embeddings.
 
-**Network Topology:**
-The density network $F_\sigma$ takes the encoded position $\gamma(\mathbf{x})$ as input. It typically consists of $L$ hidden layers with ReLU activations and skip connections from the input to every 4th layer to preserve low-frequency information [S1, S3, unofficial]. The output is the density $\sigma$.
-
-The color network $F_c$ takes the encoded position $\gamma(\mathbf{x})$, the raw viewing direction $\mathbf{d}$, and the intermediate feature vector from the density network (usually the output of the last hidden layer before the density head) as input. It predicts the color $\mathbf{c}$ using a final ReLU or sigmoid activation [S1, S3, unofficial].
-
-**Rendering Integration:**
-During training, rays are sampled at points $\mathbf{x}_i$ along the ray. The MLPs predict $\sigma_i$ and $\mathbf{c}_i$. The pixel color $C(\mathbf{r})$ is computed via volumetric rendering:
-$$
-C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \text{where } \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
-$$
-and $\delta_i$ is the distance between samples [S1, S3, unofficial].
+The syntax `source:layer:dim` indicates the feature source, the layer index from which to extract it, and the dimensionality [S1, unofficial].
 
 ## Subtopics
 
 ### [Mip-NeRF 360](3306-mip-nerf-360.md)
-Mip-NeRF 360 extends the quality of neural radiance fields to unbounded scenes where the camera may rotate 360 degrees and content exists at arbitrary distances. It sets itself apart from its parent [NeRF Training Loop](970-nerf-training-loop.md) and sibling [Mip-NeRF](link-to-mip-nerf) by combining a non-linear scene parameterization (contract mapping) to handle infinite space, anti-aliasing via cone-casting to resolve multi-scale details, and online distillation using a proposal network to maintain training efficiency despite increased model capacity.
+Mip-NeRF 360 extends the quality of neural radiance fields to unbounded scenes where the camera may rotate 360 degrees and content exists at arbitrary distances. It sets itself apart from its parent [NeRF Training Loop](970-nerf-training-loop.md) and sibling [Mip-NeRF](8585-specific-model-architectures.md) by combining a non-linear scene parameterization (contract mapping) to handle infinite space, anti-aliasing via cone-casting to resolve multi-scale details, and online distillation using a proposal network to maintain training efficiency despite increased model capacity.
 
 ### [NeRF-FF](8669-nerf-ff.md)
-NeRF-FF is a plug-in strategy that mitigates the degradation of Neural Radiance Field (NeRF) reconstruction quality caused by out-of-focus (defocus blurred) regions in input images. It operates by estimating binary image masks that identify in-focus regions using "Focus Frustums"—volumes in scene space corresponding to the depth of field for each camera view. Unlike methods that employ dynamic ray generation or explicit blur kernel modeling, NeRF-FF generates static masks compatible with runtime-optimized NeRF variants like Instant-NGP, nerfacto, and splatfacto. This allows the subsequent NeRF model to omit out-of-focus pixels during training, achieving state-of-the-art visual quality with training times reduced by two orders of magnitude.
+NeRF-FF is a plug-in strategy that mitigates the degradation of Neural Radiance Field (NeRF) reconstruction quality caused by out-of-focus (defocus blurred) regions in input images. It estimates binary image masks based on "Focus Frustums"—the visible volume in scene space that is in-focus—and uses these masks to omit out-of-focus pixels during the training of a subsequent NeRF model. Unlike methods that employ dynamic ray generation or explicit blur kernels, NeRF-FF relies on static ray assumptions, making it compatible with high-performance, runtime-optimized NeRF variants such as Instant-NGP, nerfacto, and splatfacto.
 
 ### [Drone-NeRF](8972-drone-nerf.md)
-Drone-NeRF is a specialized volume rendering method for reconstructing large-scale 3D scenes from aerial drone imagery, addressing the challenges of unbounded space representation and varying camera exposure. It distinguishes itself from standard NeRF training by integrating view frustum sampling for anti-aliasing, a pose optimizer for joint pose refinement, and appearance embeddings to handle exposure discrepancies, while employing a spatial contraction function to map unbounded scenes into a bounded domain for efficient rendering. It builds on [Specific Model Architectures and Extensions](10278-specific-model-architectures-and-extensions.md) by configuring the MLP with appearance embeddings and optimizing camera poses via back-propagation.
+Drone-NeRF is a specialized radiance-field optimization method for reconstructing large-scale 3D scenes from aerial drone imagery, addressing challenges such as unbounded space representation, varying camera exposure, and shadow artifacts inherent in overhead views. It distinguishes itself from standard NeRF variants by employing a block-parallel training strategy with spatial contraction, appearance embeddings for exposure balancing, and a post-training merging process that explicitly mitigates shadow occlusions from vertical bounding box faces.
+
+### nsvf_xyzn_old
+A baseline NSVF configuration where the texture network input concatenates features from layer 0 of the density network (256 dims), surface normal (3 dims), density sigma (1 dim), and ray direction (4 dims) [S1, unofficial]. The density network uses 6 hidden layers with skip connections every 3 layers, and Layer Normalization is disabled [S1, unofficial].
+
+### nsvf_xyzn_nope
+A variant that removes the positional encoding from the texture network input. The texture network input concatenates features from layer 0 of the density network (256 dims), raw position (3 dims), surface normal (3 dims), density sigma (1 dim), and ray direction (4 dims) [S1, unofficial]. This contrasts with `nsvf_xyzn_old` which uses encoded position implicitly via the feature vector or explicit encoding not listed in the texture input string.
+
+### nsvf_xyzn_noz
+A configuration that excludes the density sigma from the texture network input. The texture network input concatenates encoded position (10 dims), surface normal (4 dims), and ray direction (4 dims) [S1, unofficial]. This reduces the dimensionality of the color prediction network's input compared to variants including sigma.
+
+### nsvf_embn
+A configuration utilizing voxel embeddings for the density network. The density network input concatenates embeddings from layer 6 (32 dims). The texture network input concatenates features from layer 0 of the density network (256 dims), surface normal (4 dims), and ray direction (4 dims) [S1, unofficial]. This leverages explicit spatial hashing or voxel features to accelerate training.
+
+### nsvf_emb0
+A configuration using voxel embeddings at the input layer. The voxel embedding dimension is set to 384. The density network input concatenates embeddings from layer 0 (384 dims). The texture network input concatenates features from layer 0 of the density network (256 dims) and ray direction (4 dims) [S1, unofficial]. This variant emphasizes high-dimensional voxel features for the initial density prediction.
 
 ### ReconFusion
-ReconFusion uses a Diffusion Prior to constrain unobserved views, enabling 3D reconstruction from limited input data [S2, unofficial].
+A minor variant that employs a Diffusion Prior to constrain unobserved views during reconstruction [S2, unofficial]. This approach uses generative priors to fill in missing geometry and texture information in areas not covered by input images, improving completeness in single-image or sparse-view settings.
 
 ## Background
-The NSVF model architectures were introduced by Facebook Research as a family of configurations for neural scene vector fields, registering variants under the 'nsvf' namespace [S1, unofficial]. These variants primarily differ in how they concatenate inputs (position, normal, sigma, ray, embeddings) to the density and texture networks. Mip-NeRF 360 was developed to address the limitations of NeRF in unbounded, 360-degree scenes [S2, unofficial]. NeRF-FF was proposed to handle defocus blur in photogrammetry datasets [S1, unofficial]. Drone-NeRF targets the specific challenges of aerial drone imagery, such as scale and exposure variation [S1, unofficial]. ReconFusion applies diffusion priors to 3D reconstruction [S2, unofficial].
+The NSVF (Neural Scene Volume Field) architectures were introduced by Facebook Research as a flexible framework for configuring Neural Radiance Field components [S1, unofficial]. The specific variants (`nsvf_*`) were developed to benchmark different input feature combinations and network topologies for optimizing reconstruction quality and training speed. The family also encompasses extensions like Mip-NeRF 360 for unbounded scenes, NeRF-FF for defocus handling, and Drone-NeRF for aerial imagery, addressing specific limitations of the canonical NeRF representation.
 
 ## Sources
 [S1] facebookresearch/NSVF, https://github.com/facebookresearch/NSVF, fetched 2026-10-27 (unofficial)
 [S2] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
-[S3] Mildenhall, B., et al. "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis." ECCV 2020.

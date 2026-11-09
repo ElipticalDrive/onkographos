@@ -1,0 +1,231 @@
+# CameraMover
+
+Also called: Incremental Camera Transformation Class
+
+## Overview
+CameraMover is a utility class for constructing and incrementally updating a 4x4 extrinsic camera transformation matrix ($M_{ext}$) using sequential translations and rotations [S1, unofficial]. It solves the problem of maintaining a consistent camera pose in world space by applying incremental changes to position and orientation, which are then used to generate world-space ray directions for volume rendering [S1, unofficial]. It differs from sibling methods like [RotateY](1720-rotatey.md) or [Translation Transformation](2281-translation-transformation.md) by encapsulating the entire state management and matrix composition logic into a single class that supports both axis-aligned incremental moves and aiming at specific world positions [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Initial camera position ($cam\_pos$), look-at direction ($cam\_lookat$), and up vector ($cam\_up$).
+- Incremental translation sizes ($size$) for X, Y, Z axes.
+- Rotation angles ($angle$) for X, Y, Z axes.
+- Target aim position ($aim\_pos$) and current camera position ($cam\_pos$) for aiming operations.
+
+**Outputs:**
+- A 4x4 transformation matrix $M_{ext}$ representing the camera's extrinsic parameters (world-to-camera transformation).
+
+**Data Structures:**
+- $M_{ext}$: A 4x4 matrix of type `float`. Initialized as an identity matrix.
+  $$
+  M_{ext} = \begin{bmatrix}
+  1 & 0 & 0 & 0 \\
+  0 & 1 & 0 & 0 \\
+  0 & 0 & 1 & 0 \\
+  0 & 0 & 0 & 1
+  \end{bmatrix}
+  $$
+
+**Steps:**
+
+1. **Initialization**: Set $M_{ext}$ to the 4x4 identity matrix [S1, unofficial].
+
+2. **Incremental Translation**:
+   - To move along the X axis by $size$:
+     $$ M_{ext}[0, 3] \leftarrow M_{ext}[0, 3] - size $$
+   - To move along the Y axis by $size$:
+     $$ M_{ext}[1, 3] \leftarrow M_{ext}[1, 3] - size $$
+   - To move along the Z axis by $size$:
+     $$ M_{ext}[2, 3] \leftarrow M_{ext}[2, 3] - size $$
+   Note: The source code subtracts the size, implying a specific convention for direction relative to the camera's local frame or world frame update logic [S1, unofficial].
+
+3. **Incremental Rotation**:
+   - Convert $angle$ from degrees to radians.
+   - Construct rotation matrices $R_x, R_y, R_z$.
+   - Update $M_{ext}$ by pre-multiplying with the rotation matrix:
+     $$ M_{ext} \leftarrow R_{axis} @ M_{ext} $$
+   - **Convention for Y-axis rotation**: The source specifies a convention where the Z axis goes right and the X axis goes bottom [S1, unofficial]. This implies a specific handedness or axis mapping for the rotation matrix $R_y$.
+
+4. **Aiming at a World Position (`rotate_aim_pos_world`)**:
+   - Compute the forward vector $z_{raw}$:
+     $$ z_{raw} = aim\_pos - cam\_pos $$
+   - **Pitfall**: The source scales $z_{raw}[2]$ by $cam\_lookat[2]$ before normalization:
+     $$ z_{scaled}[2] = z_{raw}[2] \times cam\_lookat[2] $$
+     This modifies the direction based on the lookat vector's Z component, which is non-standard and potentially erroneous [S1, unofficial].
+   - Normalize the vector:
+     $$ z_{axis} = \frac{z_{scaled}}{\|z_{scaled}\|} $$
+   - Compute the right vector $x_{axis}$:
+     $$ y_{temp} = (0, 1, 0) $$
+     $$ x_{axis} = \frac{y_{temp} \times z_{axis}}{\|y_{temp} \times z_{axis}\|} $$
+   - Recompute the up vector $y_{axis}$:
+     $$ y_{axis} = \frac{z_{axis} \times x_{axis}}{\|z_{axis} \times x_{axis}\|} $$
+   - Construct the rotation part $R$ of the view matrix using rows $x_{axis}, y_{axis}, z_{axis}$:
+     $$ R = \begin{bmatrix} x_{axis}^T \\ y_{axis}^T \\ z_{axis}^T \end{bmatrix} $$
+   - **Pitfall**: The source constructs a view matrix $R_{view}$ where the last row is $[0, 0, 0, 0]$ instead of $[0, 0, 0, 1]$, breaking affine transformation properties [S1, unofficial].
+   - Compute the translation part $t$:
+     $$ t = -R \times cam\_pos $$
+   - Update $M_{ext}$:
+     $$ M_{ext} = \begin{bmatrix} R & t \\ 0 & 1 \end{bmatrix} @ M_{ext} $$
+     (Note: The source code shows `M_ext = R_ @ M_ext`, where $R_$ is the constructed matrix. If $R_$ is 4x4 with the last row zeroed, this operation is degenerate [S1, unofficial]).
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def normalize(v):
+    return v / np.linalg.norm(v)
+
+def rotation_matrix_x(angle_rad):
+    c, s = np.cos(angle_rad), np.sin(angle_rad)
+    return np.array([
+        [1, 0, 0, 0],
+        [0, c, -s, 0],
+        [0, s, c, 0],
+        [0, 0, 0, 1]
+    ])
+
+def rotation_matrix_y(angle_rad):
+    c, s = np.cos(angle_rad), np.sin(angle_rad)
+    # Convention: Z axis goes right, X axis goes bottom [S1, unofficial]
+    # Standard Y-rotation:
+    return np.array([
+        [c, 0, s, 0],
+        [0, 1, 0, 0],
+        [-s, 0, c, 0],
+        [0, 0, 0, 1]
+    ])
+
+def rotation_matrix_z(angle_rad):
+    c, s = np.cos(angle_rad), np.sin(angle_rad)
+    return np.array([
+        [c, -s, 0, 0],
+        [s, c, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ])
+
+class CameraMover:
+    def __init__(self, cam_pos, cam_lookat, cam_up):
+        self.cam_pos = np.array(cam_pos, dtype=float)
+        self.cam_lookat = np.array(cam_lookat, dtype=float)
+        self.cam_up = np.array(cam_up, dtype=float)
+        self.M_ext = np.eye(4, dtype=float)
+
+    def translate_x(self, size):
+        self.M_ext[0, 3] -= size
+
+    def translate_y(self, size):
+        self.M_ext[1, 3] -= size
+
+    def translate_z(self, size):
+        self.M_ext[2, 3] -= size
+
+    def rotate_x(self, angle_deg):
+        angle_rad = np.radians(angle_deg)
+        R = rotation_matrix_x(angle_rad)
+        self.M_ext = R @ self.M_ext
+
+    def rotate_y(self, angle_deg):
+        angle_rad = np.radians(angle_deg)
+        R = rotation_matrix_y(angle_rad)
+        self.M_ext = R @ self.M_ext
+
+    def rotate_z(self, angle_deg):
+        angle_rad = np.radians(angle_deg)
+        R = rotation_matrix_z(angle_rad)
+        self.M_ext = R @ self.M_ext
+
+    def rotate_aim_pos_world(self, aim_pos, cam_pos):
+        # Compute forward vector
+        z_raw = np.array(aim_pos) - np.array(cam_pos)
+        
+        # Pitfall: Scaling z component by lookat[2] [S1, unofficial]
+        z_scaled = z_raw.copy()
+        z_scaled[2] *= self.cam_lookat[2]
+        
+        # Normalize
+        z_axis = normalize(z_scaled)
+        
+        # Compute right vector
+        y_temp = np.array([0.0, 1.0, 0.0])
+        x_axis = normalize(np.cross(y_temp, z_axis))
+        
+        # Recompute up vector
+        y_axis = normalize(np.cross(z_axis, x_axis))
+        
+        # Build rotation matrix R
+        R = np.eye(4)
+        R[0, :3] = x_axis
+        R[1, :3] = y_axis
+        R[2, :3] = z_axis
+        
+        # Pitfall: Last row is [0,0,0,0] in source [S1, unofficial]
+        # Standard affine would be [0,0,0,1]
+        # We follow the source's construction for fidelity, but note the defect.
+        # However, for a valid 4x4 matrix multiplication, the last row must be [0,0,0,1]
+        # to preserve the translation in subsequent multiplications if M_ext is used as a transform.
+        # The source code snippet implies R_ is used directly.
+        # Let's construct the matrix as described:
+        R_view = np.zeros((4, 4))
+        R_view[:3, :3] = R[:3, :3]
+        R_view[3, 3] = 1.0 # Correcting to affine for usability, or 0.0 if strictly following bug
+        
+        # Compute translation
+        t = -R_view[:3, :3] @ np.array(cam_pos)
+        R_view[:3, 3] = t
+        
+        # Update M_ext
+        self.M_ext = R_view @ self.M_ext
+```
+
+**Parameters:**
+- `size`: Incremental translation magnitude. Typical values depend on scene scale [S1, unofficial].
+- `angle_deg`: Rotation angle in degrees. Converted to radians internally [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The `rotate_aim_pos_world` method in the source has a last row of $[0, 0, 0, 0]$ in the constructed view matrix, which breaks affine transformation properties [S1, unofficial].
+- The forward vector $z_{axis}$ is scaled by $cam\_lookat[2]$ before normalization, which modifies the direction based on the lookat vector's Z component [S1, unofficial].
+- The Y-axis rotation convention (Z right, X bottom) is non-standard and must be adhered to for consistency with the source implementation [S1, unofficial].
+
+## Subtopics
+
+### [RotateY](1720-rotatey.md)
+Handles Y-axis rotation specifically. Choose when only Y-rotation is needed.
+
+### [Pose Recentering](1786-pose-recentering.md)
+Recenters the camera pose. Choose when resetting the camera origin is required.
+
+### [Rotation Transformation](2279-rotation-transformation.md)
+General rotation matrix computation. Choose for standalone rotation operations.
+
+### [Rotation Matrix Computation](2280-rotation-matrix-computation.md)
+Computes rotation matrices from angles. Choose for low-level matrix generation.
+
+### [Translation Transformation](2281-translation-transformation.md)
+Handles translation vectors. Choose for standalone translation operations.
+
+### [C-Arm to Camera Parameters Conversion](2589-c-arm-to-camera-parameters-conversion.md)
+Converts C-arm parameters to camera matrices. Choose for medical imaging contexts.
+
+### [Camera Matrix Decomposition](3164-camera-matrix-decomposition.md)
+Decomposes camera matrices. Choose when extracting parameters from an existing matrix.
+
+### [Camera Coordinate Homogenization and Rigid Transformation](4005-camera-coordinate-homogenization-and-rigid-transformation.md)
+Handles homogenization and rigid transforms. Choose for complex coordinate system conversions.
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ for each incremental update (translation or rotation) as it involves fixed-size matrix operations [S1, unofficial].
+- **Memory Complexity**: $O(1)$, storing a single 4x4 matrix and a few vectors [S1, unofficial].
+- **Strengths**: Simple incremental updates; encapsulates camera state management [S1, unofficial].
+- **Limitations**: Contains bugs in the `rotate_aim_pos_world` method (last row zeroing, Z-scaling) that must be corrected for correct affine transformations [S1, unofficial].
+- **When to use**: When incremental camera updates are needed in a volume rendering pipeline and the specific conventions of the source code are acceptable or can be corrected [S1, unofficial].
+- **When not to use**: When standard affine transformation properties are required without modification, or when non-standard rotation conventions are undesirable [S1, unofficial].
+
+## Background
+CameraMover is part of the `volume_rendering_plot` project by Rintarooo [S1, unofficial]. It is used in the context of volume rendering ray generation, specifically for managing camera poses to generate ray directions for visualization [S1, unofficial]. The class is implemented in Python and relies on NumPy for matrix operations [S1, unofficial].
+
+## Sources
+[S1] Rintarooo/volume_rendering_plot, https://github.com/Rintarooo/volume_rendering_plot, fetched 2026-10-26 (unofficial)

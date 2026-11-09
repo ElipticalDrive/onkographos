@@ -3,72 +3,175 @@
 Also called: Cell-based NeRF, Spatial Data Parallelism
 
 ## Overview
-Mega-NeRF Spatial Partitioning decomposes a large-scale scene into spatial cells, each managed by a separate, lightweight MLP submodule, to enable parallel training and reduce memory overhead [S1]. Unlike global NeRF models or single-voxel approaches, it assigns query points to the nearest centroid’s model, allowing independent optimization of scene regions [S1]. This method is specifically designed for large-scale virtual fly-throughs where global models become intractable [S1].
+Mega-NeRF decomposes a large-scale 3D scene into spatial cells, each managed by a separate MLP submodule, to enable parallel training and reduce memory consumption for virtual fly-throughs [S1]. Unlike monolithic NeRFs or other sparse representations that may use hash grids or octrees, Mega-NeRF relies on a fixed top-down 2D grid of centroids with associated appearance embeddings to handle lighting variations across images [S1].
 
 ## How it works
-**Inputs:** A set of calibrated training images with poses; a scene bounding volume.
-**Outputs:** A set of MLP weight vectors $\{f^n\}$ for each cell $n \in \mathcal{N}$, and their corresponding centroid positions $\mathcal{N} = \{n_1, n_2, \dots\}$.
+**Inputs and Outputs:**
+*   **Inputs:** A set of calibrated camera poses (position and orientation), a set of input images, and a scene bounding volume.
+*   **Outputs:** A set of centroids $\mathcal{N}$, a set of MLP weight submodules $\{f^n\}_{n \in \mathcal{N}}$, and appearance embeddings $\{l^{(a)}\}$ for each image $a$.
 
 **Data Structures:**
-1.  **Centroids ($\mathcal{N}$):** A list of 3D coordinates $(n_x, n_y, n_z)$. In the standard implementation, these are arranged in a top-down 2D grid with a fixed height $n_z$.
-2.  **Submodule Weights ($f^n$):** For each centroid $n$, a set of weights representing a multi-layer perceptron (MLP). The architecture mirrors the original NeRF: fully connected layers with positional encoding inputs.
-3.  **Appearance Embeddings ($l^{(a)}$):** A vector associated with each input image $a$, used to account for lighting variations.
-4.  **Cell Trainsets ($T_n$):** A subset of training pixels/rays assigned to cell $n$.
+1.  **Centroids ($\mathcal{N}$):** A set of 3D points $\mathbf{n} = (n_x, n_y, n_z)$. In the standard implementation, these are arranged in a top-down 2D grid. The height $n_z$ is fixed to a single value for all centroids [S1].
+2.  **Submodules ($f^n$):** Each centroid $n$ has an associated MLP $f^n$. The architecture mirrors the standard NeRF density network: fully connected layers with ReLU activations and skip connections from the input to every 4th layer [S1].
+3.  **Appearance Embeddings ($l^{(a)}$):** A learnable vector associated with each input image $a$ to model lighting differences [S1].
+4.  **Trainsets:** Each submodule $f^n$ maintains a subset of training pixels. A pixel is assigned to a cell if the ray passing through that pixel intersects the cell's spatial volume [S1].
 
 **Algorithm Steps:**
 
 1.  **Centroid Initialization:**
-    Tessellate the scene into a top-down 2D grid. Fix the $z$-coordinate (height) of all centroids to a single value, justified by the small variance in altitude relative to latitude/longitude differences in the target scenes [S1]. Let $\mathcal{N}$ be the set of resulting centroids.
+    Tessellate the scene into a top-down 2D grid to determine centroid positions. Fix the $z$-coordinate (height) of all centroids to a single value, justified by the small variance in altitude relative to latitude/longitude differences in the dataset [S1].
 
-2.  **Model Initialization:**
-    Initialize a distinct MLP submodule $f^n$ for each centroid $n \in \mathcal{N}$. Initialize appearance embeddings $l^{(a)}$ for each training image $a$ [S1].
+2.  **Submodule Initialization:**
+    Initialize a separate MLP $f^n$ for each centroid $n \in \mathcal{N}$. Initialize appearance embeddings $l^{(a)}$ for each input image $a$ [S1].
 
 3.  **Visibility Partitioning (Data Assignment):**
     For each training image $a$:
-    a. Sample camera rays through the image.
-    b. For each ray, determine which spatial cells it intersects.
-    c. Assign the ray/pixel to the trainset $T_n$ only for those intersecting cells $n$.
-    d. Apply an overlap factor (e.g., 15%) between adjacent cells to minimize boundary artifacts [S1].
-    
-    *Note:* This step reduces the initial aggregate trainset size by approximately 10x per submodule [S1].
+    *   Sample points along the camera rays corresponding to each pixel.
+    *   Identify which spatial cells (defined by their centroids and extent) these rays intersect.
+    *   Assign the pixel to the trainset of only those intersecting cells.
+    *   Apply an overlap factor (e.g., 15%) to the cell boundaries to minimize visual artifacts at boundaries [S1].
 
-4.  **Spatial Data Pruning (Optional, Post-Coarse Training):**
-    After an initial coarse training phase where the NeRFs gain a rough understanding of geometry:
-    a. Identify occluders (e.g., walls) inferred by specific cells.
-    b. Prune pixels/rays from other cells that are occluded by these inferred geometries.
-    c. This further reduces trainset sizes by an additional factor of 2x [S1].
+4.  **Spatial Data Pruning (Optional):**
+    After a coarse training phase:
+    *   Infer scene geometry from the current state of the MLPs.
+    *   Identify occlusions (e.g., a wall in cell $F$).
+    *   Prune pixels from cells that are occluded by geometry inferred by other cells (e.g., remove pixels from cells $A$ and $B$ if they are behind the wall in $F$) [S1].
 
-5.  **Parallel Optimization:**
-    Train each submodule $f^n$ independently using its assigned trainset $T_n$ and the appearance embeddings $l^{(a)}$ of the source images. The loss is computed per pixel based on the predicted color and opacity.
+5.  **Rendering Query:**
+    Given a query point $\mathbf{x}$, viewing direction $\mathbf{d}$, and image index $a$:
+    *   Find the closest centroid $\mathbf{n}^*$:
+        $$ \mathbf{n}^* = \arg\min_{n \in \mathcal{N}} \|\mathbf{n} - \mathbf{x}\|^2 $$
+    *   Compute opacity $\sigma$ and color $\mathbf{c}$ using the submodule associated with $\mathbf{n}^*$:
+        $$ \sigma = f^{\mathbf{n}^*}(\mathbf{x}) $$
+        $$ \mathbf{c} = f^{\mathbf{n}^*}(\mathbf{x}, \mathbf{d}, l^{(a)}) $$
+    *   Note: The input to the color network includes the raw viewing direction $\mathbf{d}$ and the appearance embedding $l^{(a)}$ [S1].
 
-**Query Function:**
-At inference time, for a query point $\mathbf{x}$, direction $\mathbf{d}$, and image $a$:
-1.  Find the closest centroid:
-    $$ \mathbf{n} = \arg\min_{n \in \mathcal{N}} \|\mathbf{n} - \mathbf{x}\|^2 $$
-2.  Compute opacity $\sigma$ and color $\mathbf{c}$ using the weights of the closest submodule:
-    $$ \sigma = f^{\mathbf{n}}(\mathbf{x}) $$
-    $$ \mathbf{c} = f^{\mathbf{n}}(\mathbf{x}, \mathbf{d}, l^{(a)}) $$
-    where $\mathbf{n}$ is the index of the closest centroid [S1].
+6.  **Optimization:**
+    Train each submodule $f^n$ using the pixels assigned to it. The loss is computed against the ground truth colors of the assigned pixels. The appearance embeddings $l^{(a)}$ are also optimized [S1].
 
-**Parameters:**
-*   **Overlap Factor:** 15% (used to reduce visual artifacts at cell boundaries) [S1].
-*   **Centroid Height:** Fixed to a single value for all cells in the grid [S1].
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+class MegaNeRF:
+    def __init__(self, scene_bounds, grid_resolution, overlap_factor=0.15):
+        """
+        Initialize Mega-NeRF.
+        :param scene_bounds: (min_x, min_y, max_x, max_y, min_z, max_z)
+        :param grid_resolution: Number of cells in x and y dimensions
+        :param overlap_factor: Fractional overlap between cells
+        """
+        self.scene_bounds = scene_bounds
+        self.grid_resolution = grid_resolution
+        self.overlap_factor = overlap_factor
+        
+        # 1. Centroid Initialization
+        # Fix height to a single value (e.g., average camera height or ground level)
+        self.centroid_z = (scene_bounds[4] + scene_bounds[5]) / 2.0
+        
+        # Create 2D grid of centroids
+        x_coords = np.linspace(scene_bounds[0], scene_bounds[3], grid_resolution)
+        y_coords = np.linspace(scene_bounds[1], scene_bounds[2], grid_resolution)
+        self.centroids = []
+        for x in x_coords:
+            for y in y_coords:
+                self.centroids.append(np.array([x, y, self.centroid_z]))
+        
+        self.num_cells = len(self.centroids)
+        
+        # 2. Submodule Initialization
+        # Each submodule is a simple MLP (placeholder for actual network definition)
+        self.submodules = [self._init_mlp() for _ in range(self.num_cells)]
+        
+        # 3. Appearance Embeddings
+        # Initialized randomly or zeros
+        self.appearance_embeddings = None 
+
+    def _init_mlp(self):
+        # Placeholder for NeRF-like MLP: FC layers, ReLU, skip connections
+        # Returns a function f(x) -> sigma, f(x, d, l) -> c
+        pass
+
+    def assign_pixels_to_cells(self, rays, pixels, images):
+        """
+        Assign pixels to cells based on ray intersection.
+        :param rays: List of ray origins and directions for each pixel
+        :param pixels: List of pixel indices
+        :param images: List of image indices
+        """
+        self.cell_trainsets = [[] for _ in range(self.num_cells)]
+        
+        for i, (ray_origin, ray_dir) in enumerate(rays):
+            # Determine which cells the ray intersects
+            # This requires defining cell boundaries based on centroids and overlap
+            intersecting_cell_indices = self._get_intersecting_cells(ray_origin, ray_dir)
+            
+            for cell_idx in intersecting_cell_indices:
+                self.cell_trainsets[cell_idx].append({
+                    'pixel_index': i,
+                    'image_index': images[i],
+                    'ray_origin': ray_origin,
+                    'ray_dir': ray_dir
+                })
+
+    def _get_intersecting_cells(self, origin, direction):
+        """
+        Determine which grid cells a ray intersects.
+        Uses AABB intersection test for each cell.
+        """
+        # Calculate cell boundaries from centroids and overlap factor
+        # ... implementation details omitted for brevity ...
+        # Return list of cell indices
+        return []
+
+    def query(self, x, d, image_index):
+        """
+        Query the scene at point x with direction d for image image_index.
+        """
+        # Find closest centroid
+        distances = np.linalg.norm(np.array(self.centroids) - x, axis=1)
+        closest_idx = np.argmin(distances)
+        
+        # Get submodule and appearance embedding
+        submodule = self.submodules[closest_idx]
+        appearance_emb = self.appearance_embeddings[image_index]
+        
+        # Compute sigma and c
+        sigma = submodule(x)
+        c = submodule(x, d, appearance_emb)
+        
+        return sigma, c
+
+    def train_step(self, batch):
+        """
+        Perform one training step.
+        :param batch: Dictionary containing rays, ground truth colors, etc.
+        """
+        # For each cell in the batch, compute loss and update weights
+        for cell_idx, train_data in batch['cell_data'].items():
+            submodule = self.submodules[cell_idx]
+            # ... compute loss against ground truth ...
+            # ... update submodule weights and appearance embeddings ...
+            pass
+```
 
 **Edge Cases and Pitfalls:**
-*   **Boundary Artifacts:** Without the overlap factor, discontinuities may appear between cells. [S1]
-*   **Occlusion Pruning:** Pruning relies on coarse geometry estimates. If the coarse model is inaccurate, valid rays may be incorrectly pruned. [S1]
-*   **Altitude Variance:** The fixed-height centroid assumption works only when altitude variance is small relative to horizontal scale. [S1]
+*   **Boundary Artifacts:** Without an overlap factor, visual discontinuities may appear at cell boundaries. The sources specify a 15% overlap factor to mitigate this [S1].
+*   **Occlusion Pruning:** Pruning relies on a "coarse understanding" of geometry. Pruning too early may remove valid data; pruning too late reduces efficiency gains. The sources note a 2x further reduction in trainset size after this step [S1].
+*   **Altitude Variance:** The method assumes small altitude variance relative to horizontal differences. If the scene has significant vertical variation (e.g., multi-story buildings with distinct floors), fixing the centroid height may degrade performance [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Training is parallelized across cells. The total training time is dominated by the slowest cell, but overall efficiency improves due to reduced data per cell (10x reduction initially, up to 20x with pruning) [S1].
-*   **Memory Complexity:** Memory usage scales with the number of cells and the size of each local MLP, rather than a single global model. This allows training on scenes that exceed the memory capacity of a single global NeRF [S1].
-*   **Strengths:** Scalability to large-scale scenes (e.g., city blocks); parallelizable training; reduced memory footprint per GPU [S1].
-*   **Limitations:** Potential visual artifacts at cell boundaries if overlap is insufficient; dependency on coarse geometry for effective pruning; fixed-height assumption limits applicability to scenes with significant vertical variation [S1].
-*   **When to use:** Large-scale outdoor scenes requiring virtual fly-throughs where global NeRF training is infeasible [S1].
-*   **When not to use:** Small-scale scenes where global NeRF is efficient; scenes with large vertical extent relative to horizontal scale (due to fixed-height centroid assumption) [S1].
+*   **Memory Complexity:** Linear with the number of cells $|\mathcal{N}|$. Each cell stores its own MLP weights. This is significantly more memory-efficient than a single large MLP for very large scenes, as only relevant submodules are loaded/updated [S1].
+*   **Training Time:** Parallelizable across cells. The visibility partitioning reduces the trainset size per submodule by 10x compared to the aggregate trainset. Additional spatial data pruning provides a further 2x reduction [S1].
+*   **Inference Speed:** Fast lookup of the closest centroid ($O(|\mathcal{N}|)$ or $O(\log |\mathcal{N}|)$ with spatial indexing) followed by a single MLP evaluation.
+*   **Strengths:** Scalable to large outdoor scenes (e.g., city blocks). Handles lighting variations via appearance embeddings. Simple implementation via 2D grid tessellation [S1].
+*   **Limitations:** Fixed grid may waste memory in empty regions (though less so than dense grids). Less flexible than octree-based methods for highly non-uniform scene complexity. Assumes relatively flat terrain for centroid height fixation [S1].
 
 ## Background
-Mega-NeRF was introduced in 2022 by [S1] to address the scalability limits of NeRF for large-scale environments. It builds on the principle of spatial data parallelism, decomposing the scene to allow independent training of local models. The method draws inspiration from NeRF++ for foreground/background decomposition and uses a grid-based centroid selection for simplicity and efficiency [S1].
+Mega-NeRF was introduced in 2022 by [S1] to address the scalability issues of NeRF for large-scale virtual fly-throughs. It builds on the principles of NeRF [S1] and NeRF in the Wild [S1], extending them with spatial partitioning and appearance embeddings. The method was designed to handle scenes where a single NeRF model would be too large to train or render efficiently.
 
 ## Sources
 [S1] Mega-NeRF: Scalable Construction of Large-Scale NeRFs for Virtual Fly-Throughs, https://doi.org/10.1109/cvpr52688.2022.01258, fetched 2026-10-26

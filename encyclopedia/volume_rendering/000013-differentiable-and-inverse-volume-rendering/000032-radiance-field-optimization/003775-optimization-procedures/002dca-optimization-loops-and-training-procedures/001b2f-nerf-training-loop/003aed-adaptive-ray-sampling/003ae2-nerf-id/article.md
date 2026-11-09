@@ -1,235 +1,344 @@
 # NeRF-ID
-
 Also called: NeRF in detail
 
 ## Overview
-NeRF-ID (NeRF in detail) is a differentiable ray sampling method that replaces the heuristic coarse-to-fine sampling of vanilla NeRF with a learnable "proposer" module [S1, unofficial]. It solves the problem of suboptimal sample placement by enabling end-to-end training of the coarse network, proposer, and fine network jointly, allowing the system to learn where to concentrate samples for maximum rendering quality [S1, unofficial]. Unlike sibling methods that rely on handcrafted probability density functions derived from coarse densities, NeRF-ID uses a neural network to directly predict fine sample locations from coarse features [S1, unofficial].
+NeRF-ID replaces the heuristic, non-differentiable coarse-to-fine sampling procedure of vanilla NeRF with a learnable, differentiable "proposer" module, enabling end-to-end training of the entire system (coarse network, proposer, and fine network) to improve view synthesis quality [S1, unofficial]. Unlike NeRF, which uses a handcrafted piece-wise constant probability density function based on coarse densities to determine fine sample locations, NeRF-ID uses a neural network to directly predict fine sample positions from coarse features, allowing the sampling strategy to be optimized for the specific task [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A ray defined by near and far planes. The coarse network outputs $N_c$ feature vectors and their corresponding normalized positions $t \in [0, 1]$ for equally spaced samples.
-*   **Output:** A set of $N_f$ new normalized positions $t \in [0, 1]$ for the fine network, and the final rendered ray color $\hat{\mathbf{C}}$.
+*   **Inputs:** A ray defined by near and far planes; a coarse network $N_c$; a proposer module $P$; a fine network $N_f$.
+*   **Outputs:** A rendered color $\hat{\mathbf{C}}$ for the ray.
 
 **Data Structures:**
-*   **Coarse Features:** A tensor of shape $(N_c, D)$, where $D$ is the feature dimension (last activations before the density projection).
-*   **Coarse Positions:** A tensor of shape $(N_c, 1)$, values normalized to $[0, 1]$.
-*   **Proposer Output:** A tensor of shape $(N_f, 1)$, values normalized to $[0, 1]$.
+*   **Coarse Samples:** A set of $N_c$ positions $t_i$ equally spaced in $[t_n, t_f]$.
+*   **Coarse Features:** For each coarse sample $i$, the feature vector $\mathbf{f}_i$ is the output of the coarse network's last activation layer before the projection that produces density $\sigma_i$. The size of $\mathbf{f}_i$ is determined by the coarse network's hidden dimension.
+*   **Proposer Input:** A sequence of pairs $(\mathbf{f}_i, \tau_i)$ for $i=1 \dots N_c$, where $\tau_i \in [0, 1]$ is the normalized position of the $i$-th sample along the ray.
+*   **Proposer Output:** A set of $N_f$ normalized positions $\tau'_j \in [0, 1]$ for $j=1 \dots N_f$.
 
-**Rendering Equation:**
-The final color is computed using the standard volume rendering equation [S1, unofficial]:
-$$
-\hat{\mathbf{C}} = \sum_{i=1}^N w_i \mathbf{c}_i
-$$
-where $N = N_c + N_f$, $\mathbf{c}_i$ is the color, and $w_i$ is the weight:
-$$
-w_i = T_i \left( 1 - \exp(-\sigma_i(t_{i+1} - t_i)) \right)
-$$
-$$
-T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j(t_{i+1} - t_i)\right)
-$$
-Here, $\sigma_i$ is the density, $t_i$ is the location along the ray, and $T_i$ is the transmittance [S1, unofficial].
+**Numbered Steps:**
+1.  **Coarse Sampling:** Query the coarse network $N_c$ on $N_c$ equally spaced samples along the ray to obtain densities $\sigma_i$ and features $\mathbf{f}_i$.
+2.  **Proposal Generation:** Pass the coarse features $\mathbf{f}_i$ and their normalized positions $\tau_i$ through the proposer module $P$ to generate $N_f$ new normalized positions $\tau'_j$.
+3.  **Fine Sampling:** Map the normalized positions $\tau'_j$ back to the ray interval $[t_n, t_f]$ to get absolute positions $t'_j$. Query the fine network $N_f$ on the union of the original $N_c$ samples and the proposed $N_f$ samples (total $N_c + N_f$ points).
+4.  **Rendering:** Compute the final ray color using the standard volume rendering equation with the densities and colors from all $N_c + N_f$ samples.
 
-**Proposer Architectures:**
-The proposer takes the coarse features and positions as input and outputs $N_f$ positions. Three architectures are described [S1, unofficial]:
-1.  **Transformer:** A transformer encoder processes the input features. A transformer decoder produces the proposals via cross-attention with $N_f$ learned queries.
-2.  **Pool:** Each point feature is summed with the positional encoding of its location. This sum is passed through a fully connected (FC) layer followed by ReLU. The processed features are averaged to form a single ray representation vector, which is passed through an FC layer with output dimension $N_f$.
-3.  **MLPMix:** A single MLPMix block is applied to the stacked point features (sorted by position), followed by average pooling to get the ray representation, then decoded via an FC [S1, unofficial].
+**Formulas:**
+The rendering equation for ray color $\hat{\mathbf{C}}$ is:
+$$ \hat{\mathbf{C}} = \sum_{i=1}^N w_i \mathbf{c}_i $$
+where $N = N_c + N_f$, $\mathbf{c}_i$ is the color at the $i$-th sample, and the weight $w_i$ and transmittance $T_i$ are:
+$$ w_i = T_i \left( 1 - \exp(-\sigma_i(t_{i+1} - t_i)) \right) $$
+$$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j(t_{j+1} - t_j)\right) $$
+Here, $\sigma_i$ is the density, $\mathbf{c}_i$ is the color, and $t_i$ is the absolute location along the ray for the $i$-th sample [S1, unofficial].
 
-**Training Strategy:**
-Training from scratch is unstable due to weak supervision (only final color loss). A two-stage strategy is used [S1, unofficial]:
-1.  **Pre-training:** Train the coarse and fine networks to mimic vanilla NeRF (heuristic sampling).
-2.  **Fine-tuning:** Jointly train the coarse network, proposer, and fine network end-to-end [S1, unofficial].
+The proposer outputs normalized positions $\tau'_j \in [0, 1]$. These are converted to absolute positions $t'_j$ via:
+$$ t'_j = t_n + \tau'_j (t_f - t_n) $$
+
+**Parameters:**
+*   $N_c$: Number of equally spaced samples queried from the coarse network. Typical values are not explicitly given in the notes, but standard NeRF uses small integers (e.g., 64).
+*   $N_f$: Number of additional samples proposed by the proposer for the fine network. Typical values are not explicitly given in the notes, but standard NeRF uses larger integers (e.g., 128).
 
 **Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-class NeRFID:
-    def __init__(self, coarse_net, fine_net, proposer, N_c=64, N_f=48):
-        """
-        Initialize NeRF-ID components.
-        :param coarse_net: Network returning (density, color, features) for coarse samples.
-        :param fine_net: Network returning (density, color) for fine samples.
-        :param proposer: Neural network taking coarse features/positions, outputting N_f positions.
-        :param N_c: Number of coarse samples.
-        :param N_f: Number of fine samples.
-        """
-        self.coarse_net = coarse_net
-        self.fine_net = fine_net
-        self.proposer = proposer
-        self.N_c = N_c
+def render_ray(ray_origin, ray_direction, near, far, coarse_net, proposer, fine_net, N_c, N_f):
+    """
+    Renders a single ray using NeRF-ID.
+    
+    Args:
+        ray_origin: (3,) Tensor, origin of the ray.
+        ray_direction: (3,) Tensor, direction of the ray.
+        near: float, near plane distance.
+        far: float, far plane distance.
+        coarse_net: nn.Module, the coarse MLP.
+        proposer: nn.Module, the proposer network (Transformer, Pool, or MLPMix).
+        fine_net: nn.Module, the fine MLP.
+        N_c: int, number of coarse samples.
+        N_f: int, number of fine samples.
+        
+    Returns:
+        color: (3,) Tensor, rendered color.
+    """
+    # Step 1: Coarse Sampling
+    # Generate N_c equally spaced samples in [near, far]
+    t_coarse = torch.linspace(near, far, N_c)
+    # Expand to (N_c, 3) for batched query
+    pts_coarse = ray_origin.unsqueeze(0) + t_coarse.unsqueeze(1).unsqueeze(2) * ray_direction.unsqueeze(0).unsqueeze(1)
+    
+    # Query coarse network
+    # Assume coarse_net returns (sigma, color, features)
+    # Note: The proposer needs features before the density projection.
+    # We assume coarse_net has a method or attribute to get intermediate features.
+    # If not, we might need to modify the network or assume the last hidden layer.
+    # For this pseudocode, we assume coarse_net returns (sigma, color, features)
+    # where features are the activations before the final linear layer for sigma.
+    sigma_coarse, color_coarse, features_coarse = coarse_net(pts_coarse)
+    
+    # Normalize positions to [0, 1] for proposer input
+    tau_coarse = (t_coarse - near) / (far - near)
+    
+    # Step 2: Proposal Generation
+    # Proposer input: features (N_c, D) and positions (N_c,)
+    # Proposer output: N_f normalized positions
+    tau_fine = proposer(features_coarse, tau_coarse)
+    
+    # Map normalized positions back to [near, far]
+    t_fine = tau_fine * (far - near) + near
+    
+    # Step 3: Fine Sampling
+    # Combine coarse and fine samples
+    t_all = torch.cat([t_coarse, t_fine])
+    pts_all = ray_origin.unsqueeze(0) + t_all.unsqueeze(1).unsqueeze(2) * ray_direction.unsqueeze(0).unsqueeze(1)
+    
+    # Query fine network
+    sigma_fine, color_fine, _ = fine_net(pts_all)
+    
+    # Step 4: Rendering
+    # Compute weights and transmittance
+    # Sort samples by t_all to ensure correct transmittance calculation
+    sorted_indices = torch.argsort(t_all)
+    t_sorted = t_all[sorted_indices]
+    sigma_sorted = sigma_fine[sorted_indices].squeeze(1)
+    color_sorted = color_fine[sorted_indices].squeeze(1)
+    
+    # Compute intervals
+    dt = t_sorted[1:] - t_sorted[:-1]
+    # Pad dt to match N samples (last interval doesn't matter for weight but needed for T)
+    dt = torch.cat([dt, dt[-1:]])
+    
+    # Compute transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j * dt_j)
+    # alpha_i = 1 - exp(-sigma_i * dt_i)
+    alpha = 1.0 - torch.exp(-sigma_sorted * dt)
+    
+    # T_1 = 1
+    # T_i = T_{i-1} * (1 - alpha_{i-1})
+    T = torch.ones_like(alpha)
+    T[1:] = torch.cumprod(1.0 - alpha[:-1], dim=0)
+    
+    # Weights w_i = T_i * alpha_i
+    weights = T * alpha
+    
+    # Rendered color
+    color = torch.sum(weights.unsqueeze(1) * color_sorted, dim=0)
+    
+    return color
+
+class TransformerProposer(nn.Module):
+    """
+    Transformer-based proposer architecture.
+    """
+    def __init__(self, feature_dim, N_f, hidden_dim=256, num_heads=4, num_layers=2):
+        super().__init__()
         self.N_f = N_f
+        # Learnable queries for the decoder
+        self.queries = nn.Parameter(torch.randn(1, N_f, hidden_dim))
+        
+        # Encoder: processes input features
+        encoder_layer = nn.TransformerEncoderLayer(d_model=hidden_dim, nhead=num_heads, batch_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # Decoder: cross-attention with queries and encoder output
+        decoder_layer = nn.TransformerDecoderLayer(d_model=hidden_dim, nhead=num_heads, batch_first=True)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        
+        # Linear layer to map decoder output to normalized positions [0, 1]
+        self.output_layer = nn.Linear(hidden_dim, 1)
+        
+        # Positional encoding for input features (optional, but mentioned in Pool/MLPMix)
+        # Transformer encoder usually handles positional info internally or via input embedding
+        self.input_embedding = nn.Linear(feature_dim, hidden_dim)
+        
+    def forward(self, features, positions):
+        """
+        Args:
+            features: (N_c, feature_dim)
+            positions: (N_c,) normalized positions in [0, 1]
+        Returns:
+            tau_fine: (N_f,) normalized positions in [0, 1]
+        """
+        # Add positional encoding to features? 
+        # The paper says "A transformer encoder processes the input features".
+        # It doesn't explicitly say how positional info is added to the encoder input.
+        # However, the Pool architecture explicitly sums features with positional encoding.
+        # For Transformer, we might add a learned positional embedding or use the positions as a separate input.
+        # Given the description, we assume the encoder takes the features directly.
+        # To incorporate position, we might add a positional encoding to the features.
+        # Let's assume we add a sinusoidal positional encoding to the features.
+        
+        # Create positional encoding (N_c, hidden_dim)
+        # Standard sinusoidal PE
+        pe = self._get_positional_encoding(positions, hidden_dim)
+        
+        # Add PE to features
+        x = self.input_embedding(features) + pe
+        
+        # Encode
+        x = self.encoder(x)  # (N_c, hidden_dim)
+        
+        # Decode
+        # Queries: (1, N_f, hidden_dim)
+        # Key/Value: x (N_c, hidden_dim)
+        output = self.decoder(self.queries, x)  # (1, N_f, hidden_dim)
+        
+        # Output layer
+        tau_fine = self.output_layer(output).squeeze(0).squeeze(1)  # (N_f,)
+        
+        # Sigmoid to ensure [0, 1]
+        tau_fine = torch.sigmoid(tau_fine)
+        
+        return tau_fine
+    
+    def _get_positional_encoding(self, positions, dim):
+        # Simple sinusoidal PE
+        half_dim = dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim) * -emb)
+        emb = positions.unsqueeze(1) * emb.unsqueeze(0)
+        emb = torch.cat((torch.sin(emb), torch.cos(emb)), dim=1)
+        return emb
 
-    def sample_ray(self, ray_origin, ray_direction, near, far):
+class PoolProposer(nn.Module):
+    """
+    Pool-based proposer architecture.
+    """
+    def __init__(self, feature_dim, N_f, hidden_dim=256):
+        super().__init__()
+        self.fc1 = nn.Linear(feature_dim + 1, hidden_dim) # +1 for positional encoding
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_dim, N_f)
+        
+    def forward(self, features, positions):
         """
-        Perform NeRF-ID sampling and rendering for a single ray.
+        Args:
+            features: (N_c, feature_dim)
+            positions: (N_c,) normalized positions in [0, 1]
+        Returns:
+            tau_fine: (N_f,) normalized positions in [0, 1]
         """
-        # 1. Coarse Sampling
-        # Generate N_c equally spaced samples in [0, 1]
-        t_coarse = torch.linspace(0, 1, self.N_c, device=ray_origin.device)
-        # Map to world coordinates: p = origin + t * direction * (far - near) + near * direction
-        # Note: Standard NeRF parameterization often uses t in [0,1] mapped to [near, far]
-        # Assuming t is normalized such that t=0 is near, t=1 is far.
-        # p = ray_origin + (near + t * (far - near)) * ray_direction
-        t_world_coarse = near + t_coarse * (far - near)
-        points_coarse = ray_origin.unsqueeze(0) + t_world_coarse.unsqueeze(1).unsqueeze(0) * ray_direction.unsqueeze(0)
+        # Sum features with positional encoding
+        # Positional encoding: sin/cos of position? Or just the position itself?
+        # The paper says "positional encoding of its location along the ray".
+        # It doesn't specify the type of PE. Let's assume a simple sin/cos PE like in Transformers.
+        pe = self._get_positional_encoding(positions, features.shape[1])
         
-        # Query coarse network
-        # coarse_net returns sigma, color, features
-        sigma_c, color_c, features_c = self.coarse_net(points_coarse)
+        # Concatenate features and PE
+        x = torch.cat([features, pe], dim=1)
         
-        # 2. Proposer: Generate Fine Samples
-        # Input to proposer: features_c (N_c, D) and t_coarse (N_c, 1) normalized [0,1]
-        # Proposer outputs N_f positions in [0,1]
-        t_fine_norm = self.proposer(features_c, t_coarse) # Shape: (N_f, 1)
+        # FC + ReLU
+        x = self.relu(self.fc1(x))
         
-        # Map fine positions to world coordinates
-        t_world_fine = near + t_fine_norm.squeeze(1) * (far - near)
-        points_fine = ray_origin.unsqueeze(0) + t_world_fine.unsqueeze(1) * ray_direction.unsqueeze(0)
+        # Average pooling
+        ray_repr = torch.mean(x, dim=0)
         
-        # Query fine network
-        sigma_f, color_f = self.fine_net(points_fine)
+        # FC to produce proposals
+        tau_fine = self.fc2(ray_repr)
         
-        # 3. Combine Samples
-        # Union of coarse and fine samples
-        t_all = torch.cat([t_coarse, t_fine_norm.squeeze(1)], dim=0)
-        sigma_all = torch.cat([sigma_c.squeeze(1), sigma_f.squeeze(1)], dim=0)
-        color_all = torch.cat([color_c.squeeze(1), color_f.squeeze(1)], dim=0)
+        # Sigmoid
+        tau_fine = torch.sigmoid(tau_fine)
         
-        # Sort samples by depth to ensure correct transmittance calculation
-        indices = torch.argsort(t_all)
-        t_all = t_all[indices]
-        sigma_all = sigma_all[indices]
-        color_all = color_all[indices]
-        
-        # 4. Volume Rendering
-        # Compute weights
-        # dt = t[i+1] - t[i]
-        dt = torch.diff(t_all, dim=0)
-        # Append 0 for the last interval or handle boundary carefully
-        # Standard NeRF uses t[i+1] - t[i] for the interval containing sample i
-        # If t_all has N points, there are N-1 intervals. 
-        # The formula w_i = T_i * (1 - exp(-sigma_i * dt_i))
-        # T_i = exp(-sum_{j=1}^{i-1} sigma_j * dt_j)
-        
-        # Calculate alpha for each interval
-        # sigma is density. dt is interval length.
-        # alpha_i = 1 - exp(-sigma_i * dt_i)
-        alpha = 1.0 - torch.exp(-sigma_all * dt)
-        
-        # Calculate transmittance T_i
-        # T_1 = 1
-        # T_i = T_{i-1} * (1 - alpha_{i-1})
-        # We need T for each sample i. 
-        # T_i = exp(-sum_{j=1}^{i-1} sigma_j * dt_j)
-        # Let's compute cumulative sum of sigma * dt
-        sigma_dt = sigma_all * dt
-        # Cumulative sum excluding current element
-        # T_i = exp(-cumsum(sigma_dt)[i-1]) if i>1 else 1
-        cumsum_sigma_dt = torch.cumsum(sigma_dt, dim=0)
-        # Shift for T_i: T_i corresponds to sum before i
-        # T = [1, exp(-s1), exp(-(s1+s2)), ...]
-        T = torch.cat([torch.tensor([1.0], device=t_all.device), torch.exp(-cumsum_sigma_dt[:-1])], dim=0)
-        
-        # Weights
-        w = T * alpha
-        
-        # Rendered color
-        C_hat = torch.sum(w * color_all, dim=0)
-        
-        return C_hat
+        return tau_fine
+    
+    def _get_positional_encoding(self, positions, dim):
+        # Sinusoidal PE
+        half_dim = dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim) * -emb)
+        emb = positions.unsqueeze(1) * emb.unsqueeze(0)
+        emb = torch.cat((torch.sin(emb), torch.cos(emb)), dim=1)
+        return emb
 
-    def train_step(self, ray_origins, ray_directions, gt_colors):
+class MLPMixProposer(nn.Module):
+    """
+    MLPMix-based proposer architecture.
+    """
+    def __init__(self, feature_dim, N_f, hidden_dim=256):
+        super().__init__()
+        # MLPMix block
+        # Assuming MLPMix is a custom layer that mixes features
+        # For pseudocode, we'll approximate it with a simple MLP if MLPMix is not defined
+        # The paper says "Apply a single MLPMix block to the stacked point features sorted by their position"
+        # Then average pooling, then FC.
+        self.mix_block = MLPMixBlock(feature_dim, hidden_dim) # Placeholder for MLPMix
+        self.fc = nn.Linear(hidden_dim, N_f)
+        
+    def forward(self, features, positions):
         """
-        Single training step.
+        Args:
+            features: (N_c, feature_dim)
+            positions: (N_c,) normalized positions in [0, 1]
+        Returns:
+            tau_fine: (N_f,) normalized positions in [0, 1]
         """
-        # Forward pass
-        preds = []
-        for i in range(ray_origins.shape[0]):
-            # Assuming batch processing or loop over rays
-            # For simplicity, assuming single ray or vectorized implementation
-            pass
+        # Sort features by position
+        sorted_indices = torch.argsort(positions)
+        sorted_features = features[sorted_indices]
         
-        # Vectorized implementation for batch of rays
-        # ray_origins: (B, 3), ray_directions: (B, 3), gt_colors: (B, 3)
-        # This requires expanding dimensions for the network calls
+        # Apply MLPMix block
+        ray_repr = self.mix_block(sorted_features)
         
-        # 1. Coarse
-        t_coarse = torch.linspace(0, 1, self.N_c, device=ray_origins.device)
-        t_world_coarse = ray_origins[..., None, 0] + t_coarse[None, None, :] * (ray_directions[..., None, 0] * (1.0)) # Simplified mapping, assuming normalized direction and near=0, far=1 for t
-        # Correct mapping: p = o + (near + t*(far-near)) * d
-        # Let's assume near=0, far=1 for t in [0,1] for simplicity of notation, 
-        # but physically t_world = o + (near + t*(far-near)) * d
-        # We need near/far per ray. Assuming constant near/far for simplicity or passed in.
-        # Let's assume near=0, far=1 for the t parameterization in the proposer.
-        # World points:
-        t_world_coarse = ray_origins + (t_coarse.unsqueeze(0).unsqueeze(-1) * ray_directions) # Assuming near=0, far=1
+        # Average pooling (MLPMix might output a single vector if it's a global mixer)
+        # If MLPMix outputs (N_c, hidden_dim), we need to pool.
+        # The paper says "followed by average pooling to get the ray representation"
+        # So MLPMix likely outputs (N_c, hidden_dim)
+        ray_repr = torch.mean(ray_repr, dim=0)
         
-        sigma_c, color_c, features_c = self.coarse_net(t_world_coarse) # (B, N_c, 3), (B, N_c, 3), (B, N_c, D)
+        # FC to produce proposals
+        tau_fine = self.fc(ray_repr)
         
-        # 2. Proposer
-        # t_coarse is (N_c,), needs to be broadcast to (B, N_c, 1)
-        t_coarse_expanded = t_coarse.unsqueeze(0).unsqueeze(-1).expand_as(features_c[..., :1])
-        t_fine_norm = self.proposer(features_c, t_coarse_expanded) # (B, N_f, 1)
+        # Sigmoid
+        tau_fine = torch.sigmoid(tau_fine)
         
-        # 3. Fine
-        t_world_fine = ray_origins + (t_fine_norm.squeeze(-1).unsqueeze(1) * ray_directions) # (B, N_f, 3)
-        sigma_f, color_f = self.fine_net(t_world_fine) # (B, N_f, 3), (B, N_f, 3)
+        return tau_fine
+
+class MLPMixBlock(nn.Module):
+    """
+    Placeholder for MLPMix block.
+    MLPMix is a specific architecture for mixing features.
+    For the purpose of this pseudocode, we assume it's a simple MLP that processes each point.
+    """
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, input_dim)
+        self.relu = nn.ReLU()
         
-        # 4. Combine and Render
-        t_all = torch.cat([t_coarse, t_fine_norm.squeeze(-1)], dim=-1) # (B, N_c + N_f)
-        sigma_all = torch.cat([sigma_c, sigma_f], dim=-2) # (B, N_c + N_f, 3)
-        color_all = torch.cat([color_c, color_f], dim=-2) # (B, N_c + N_f, 3)
-        
-        # Sort
-        t_all_sorted, indices = torch.sort(t_all, dim=-1)
-        sigma_all = torch.gather(sigma_all, -2, indices.unsqueeze(-1).expand_as(sigma_all))
-        color_all = torch.gather(color_all, -2, indices.unsqueeze(-1).expand_as(color_all))
-        
-        dt = torch.diff(t_all_sorted, dim=-1) # (B, N-1)
-        # Handle last sample? Usually N samples define N-1 intervals.
-        # The formula uses t_{i+1} - t_i.
-        # We have N points. We compute weights for N-1 intervals? 
-        # Or we assume the last point is far plane?
-        # Standard NeRF: N samples, N-1 intervals.
-        # Let's stick to the formula: sum_{i=1}^N w_i c_i.
-        # If we have N points, we have N-1 intervals.
-        # The last sample doesn't have a forward interval in the sum if we strictly follow indices 1..N-1.
-        # However, often the last sample is at the far plane, so dt=0 or it's ignored.
-        # Let's assume we render using the N-1 intervals defined by the sorted points.
-        
-        alpha = 1.0 - torch.exp(-sigma_all[..., :-1, :] * dt.unsqueeze(-1)) # (B, N-1, 3)
-        
-        # Transmittance
-        sigma_dt = sigma_all[..., :-1, :] * dt.unsqueeze(-1)
-        cumsum = torch.cumsum(sigma_dt, dim=-2)
-        T = torch.cat([torch.ones_like(sigma_dt[..., :1, :]), torch.exp(-cumsum[..., :-1, :])], dim=-2) # (B, N-1, 3)
-        
-        w = T * alpha # (B, N-1, 3)
-        
-        # Colors for the intervals
-        color_intervals = color_all[..., :-1, :] # (B, N-1, 3)
-        
-        C_hat = torch.sum(w * color_intervals, dim=-2) # (B, 3)
-        
-        # Loss
-        loss = F.mse_loss(C_hat, gt_colors)
-        return loss
-```
+    def forward(self, x):
+        # x: (N_c, input_dim)
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+**Two-Stage Training Strategy:**
+1.  **Pre-training:** Train the coarse and fine networks to mimic vanilla NeRF (using heuristic sampling) to stabilize training [S1, unofficial].
+2.  **Fine-tuning:** Enable the proposer module and train the entire system (coarse, proposer, fine) end-to-end to learn better sampling strategies [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Training Instability:** Training the proposer from scratch can be unstable due to weak supervision (only final color loss). The two-stage training strategy mitigates this [S1, unofficial].
+*   **Precision:** Normalized positions must be carefully mapped to absolute positions to avoid precision issues, especially for rays with large near-far ranges.
+*   **Degenerate Input:** If the coarse network produces very low densities everywhere, the proposer might struggle to learn meaningful proposals. The pre-training stage helps initialize the proposer with useful features.
+
+## Subtopics
+
+### Transformer Proposer
+Uses a transformer encoder-decoder architecture with learned queries. It is suitable when the relationship between coarse features and fine sample locations is complex and non-local. [Link to Transformer Proposer](transformer-proposer.md)
+
+### Pool Proposer
+Uses a simple MLP with positional encoding and average pooling. It is computationally efficient and suitable for simpler scenes or when computational resources are limited. [Link to Pool Proposer](pool-proposer.md)
+
+### MLPMix Proposer
+Uses an MLPMix block for feature mixing. It offers a balance between the complexity of the Transformer and the simplicity of the Pool proposer. [Link to MLPMix Proposer](mlpmix-proposer.md)
 
 ## Operating characteristics
-*   **Time Complexity:** The proposer adds negligible computational overhead compared to the coarse and fine networks, as it is designed to be small [S1, unofficial]. The total cost is dominated by the two network queries per ray.
-*   **Memory Complexity:** Requires storing features from the coarse network to pass to the proposer, increasing memory usage slightly compared to vanilla NeRF which only stores densities [S1, unofficial].
-*   **Performance:** Achieves superior view synthesis quality on synthetic Blender benchmarks and on par or better performance on real LLFF-NeRF scenes compared to vanilla NeRF and other state-of-the-art methods [S1, unofficial].
-*   **Strengths:** End-to-end differentiability allows the system to learn optimal sampling strategies. The predicted sample importance can be used to filter out less promising samples, achieving up to 25% computation savings without significant quality loss [S1, unofficial].
-*   **Limitations:** Training from scratch is unstable; requires a two-stage training strategy (pre-training to mimic vanilla NeRF, then fine-tuning) [S1, unofficial].
+*   **Time Complexity:** The proposer adds a small computational overhead compared to vanilla NeRF, as it is designed to be small relative to the coarse and fine networks. The total number of MLP evaluations is $N_c + N_f$, same as vanilla NeRF, but the sampling is more efficient, potentially allowing for a reduction in $N_f$ for the same quality.
+*   **Memory Complexity:** The proposer adds a small number of parameters. The memory usage is dominated by the coarse and fine networks.
+*   **Measured Performance:** NeRF-ID achieves superior view synthesis quality over NeRF and state-of-the-art methods on synthetic Blender benchmarks and performs on par or better on real LLFF-NeRF scenes [S1, unofficial]. It can achieve a 25% saving in computation without significantly sacrificing rendering quality by filtering out least promising samples [S1, unofficial].
+*   **Strengths:** End-to-end differentiability, improved quality, potential for computational savings.
+*   **Limitations:** Requires two-stage training, which adds complexity to the training pipeline. The proposer architecture choice can impact performance.
+*   **When to use:** When high-quality view synthesis is required and computational resources allow for the additional training complexity.
+*   **When not to use:** When computational resources are extremely limited and the overhead of the proposer is prohibitive, or when the two-stage training strategy is not feasible.
 
 ## Background
-NeRF-ID was introduced in the paper "NeRF in detail: Learning to sample for view synthesis" [S1, unofficial]. It addresses the limitation of the original NeRF's coarse-to-fine approach, which relied on a heuristic, non-trainable procedure to define a piece-wise constant PDF from coarse densities [S1, unofficial]. The method was developed to improve view synthesis quality by making the sampling process learnable and differentiable.
+NeRF-ID was introduced in the paper "NeRF in detail: Learning to sample for view synthesis" [S1, unofficial]. It addresses the limitation of the vanilla NeRF coarse-to-fine approach, which relies on a heuristic and is not trained end-to-end. The method was developed to improve view synthesis quality by learning a differentiable sampling strategy.
 
 ## Sources
 [S1] NeRF in detail: Learning to sample for view synthesis, https://doi.org/10.48550/arxiv.2106.05264, fetched 2026-10-27 (unofficial)

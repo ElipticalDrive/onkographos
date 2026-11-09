@@ -1,0 +1,119 @@
+# Dynamic Programming Multipass Partitioning
+Also called: DPMPP
+
+## Overview
+Dynamic Programming Multipass Partitioning (DPMPP) is a dynamic programming solution to the Multipass Partitioning (MPP) problem, determining a globally optimal schedule for GPU shader execution by observing the principle of optimality [S1, unofficial]. It sets itself apart from greedy alternatives like the MIO algorithm by guaranteeing global optimality rather than local optimality, at the cost of potentially higher theoretical complexity [S1, unofficial].
+
+## How it works
+**Inputs:** A dependency graph (DAG) of shader operations, hardware resource constraints, and operation costs.
+**Outputs:** A partitioned schedule of multiple passes that minimizes total runtime while respecting precedence and resource limits.
+
+**Data Structures:**
+The algorithm operates on a set of transitions $T$. Each transition $t$ is a tuple with four fields:
+1.  `t.precondition`: The machine state before the operation.
+2.  `t.postcondition`: The machine state after applying `t.operation` to `t.precondition`.
+3.  `t.operation`: The specific shader operation or group of operations.
+4.  `t.cost`: The computational cost of the operation.
+
+**Algorithm Steps:**
+1.  **Initialization:** Initialize the set $T$ of transitions for the last stage of the dependency graph.
+2.  **Backward Iteration:** Proceed backwards from the last stage to the first stage.
+3.  **Optimal Substructure Evaluation:** For each stage, use the principle of optimal substructure to determine which transitions in $T$ may be optimal. A transition is considered optimal if it leads to the minimum cost for the current state given the optimal solutions of subsequent stages.
+4.  **Pruning and Propagation:** Filter $T$ to keep only the determined optimal transitions. Use this pruned set as the input for the next subsequent (earlier) stage.
+5.  **Termination:** When the first stage is reached, the remaining transition(s) in $T$ constitute the globally optimal schedule.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def DPMPP(dependency_graph, resource_constraints):
+    # dependency_graph is a list of stages, where each stage is a list of operations
+    # resource_constraints defines the limits for each pass
+    
+    # Initialize T with transitions from the final stage
+    # A transition t = (pre_state, post_state, operation, cost)
+    T = []
+    final_stage = dependency_graph[-1]
+    
+    for op in final_stage:
+        pre_state = get_initial_state_for_stage(len(dependency_graph) - 1)
+        post_state = apply_operation(pre_state, op)
+        cost = op.compute_cost(resource_constraints)
+        T.append({
+            'precondition': pre_state,
+            'postcondition': post_state,
+            'operation': op,
+            'cost': cost
+        })
+        
+    # Iterate backwards from the second-to-last stage to the first
+    for stage_idx in range(len(dependency_graph) - 2, -1, -1):
+        current_stage_ops = dependency_graph[stage_idx]
+        next_stage_T = T
+        new_T = []
+        
+        for op in current_stage_ops:
+            # Generate potential transitions from this operation
+            # Note: In a full DAG, multiple predecessors might lead to this op
+            # Here we assume a linear stage structure for simplicity based on source description
+            # In general, we iterate over all valid predecessor states in next_stage_T
+            
+            for prev_transition in next_stage_T:
+                # Check if op can precede prev_transition.operation
+                # This depends on the DAG structure and resource constraints
+                if is_valid_predecessor(op, prev_transition, resource_constraints):
+                    pre_state = get_state_before(op, prev_transition.precondition)
+                    post_state = apply_operation(pre_state, op)
+                    cost = op.compute_cost(resource_constraints) + prev_transition.cost
+                    
+                    new_T.append({
+                        'precondition': pre_state,
+                        'postcondition': post_state,
+                        'operation': op,
+                        'cost': cost
+                    })
+        
+        # Apply principle of optimal substructure: keep only optimal transitions
+        # Group by precondition to find the minimum cost path for each state
+        T = prune_optimal_transitions(new_T)
+        
+    return T[0] # The single optimal transition at the start
+
+def prune_optimal_transitions(transitions):
+    # Group transitions by precondition
+    # For each precondition, keep only the transition with the minimum cost
+    # This implements the principle of optimality
+    optimal = {}
+    for t in transitions:
+        pre = t['precondition']
+        if pre not in optimal or t['cost'] < optimal[pre]['cost']:
+            optimal[pre] = t
+    return list(optimal.values())
+```
+
+**Parameters:**
+*   **Stage Count:** Determined by the depth of the dependency graph.
+*   **Resource Constraints:** Memory and compute limits per pass. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Intractability:** The theoretical time complexity can be intractable for large graphs [S1, unofficial].
+*   **Precision:** Floating-point precision in cost accumulation may affect optimality if costs are very small or very large. Not given in the sources.
+
+## Subtopics
+
+### Brick grouping DP
+A dynamic programming solution to the Load-Balanced Network Distribution (LBND) problem that starts with a directed acyclic graph of segmented and cropped bricks [S1, unofficial]. It is based on the DPMPP algorithm introduced by Heirich [S1, unofficial]. It differs from standard MPP by targeting distributed cluster rendering rather than single-GPU shader partitioning. It is chosen when rendering large volumetric datasets on a cluster where network transfer and node memory constraints are critical. The depth of the search tree is limited to prevent intractability, which restricts the size of data bricks relative to the whole dataset [S1, unofficial]. The partition is optimized with respect to a single viewpoint [S1, unofficial]. Inputs include the scene, volumetric data, and distributed system configuration (number of render-nodes, rendering/local composition costs, network transfer costs, memory capacity) [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Theoretically intractable in the worst case, but experimentally achieves an average time complexity of $O(n^{1.14966})$ [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Provides a globally optimal schedule, unlike greedy algorithms such as MIO which are only locally optimal [S1, unofficial].
+*   **Limitations:** Potential intractability for very large dependency graphs; requires careful pruning or depth limiting (as seen in Brick grouping DP) to remain feasible [S1, unofficial].
+*   **When to Use:** When global optimality is required and the dependency graph size is manageable or can be effectively pruned.
+*   **When Not to Use:** When real-time performance is critical and the graph is too large for the DP approach, or when approximate solutions are acceptable.
+
+## Background
+DPMPP was introduced by Heirich [S1, unofficial] as a solution to the Multipass Partitioning (MPP) problem, which arises when GPU shader computations exceed resource constraints. It is based on the principle of optimality, ensuring that the optimal solution for the current stage is independent of the policies or conditions that led to that stage [S1, unofficial]. It has been adapted for distributed volume visualization, such as in the Brick grouping DP algorithm for LBND [S1, unofficial].
+
+## Sources
+[S1] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)

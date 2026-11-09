@@ -1,0 +1,180 @@
+# Restricted Region Growing
+
+Also called: Region growing with noise distribution restriction
+
+## Overview
+Restricted Region Growing is a segmentation technique that defines rough locations for each material part in a volumetric model by growing regions from seed voxels, restricted by noise distribution to prevent leaking through weak boundaries [S1]. It serves as a fast pre-processing step to classify the main bodies of materials, thereby reducing the graph size for subsequent Graph-cut operations [S1]. Unlike general region growing, which is prone to leaking through weak spots in object boundaries, this method ensures that selected initial seeds have neighborhoods with similar CT values and low gradients, preventing selection in boundary areas [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A volumetric model $P$ containing voxels with CT values, the number of materials $n$, and the average CT value $m_i$ for each material $i \in \{0, \dots, n-1\}$.
+*   **Output:** A set of segments $\{R_i\}$ representing the main bodies of each material $i$, and a set of doubt voxels $X$ (unclassified voxels, mostly at boundaries).
+
+**Data Structures**
+*   $P$: Set of all voxels in the volumetric model.
+*   $N$: Set of all unordered pairs $(p, q)$ of neighboring voxels in $P$.
+*   Neighborhood: Defined by an 18-neighborhood system [S1].
+*   $D_i$: Set of initial seed voxels for material $i$.
+*   $R_i$: Set of voxels classified as material $i$ after growing.
+*   $X$: Set of doubt voxels ($P \setminus \bigcup R_i$).
+*   $C_i$: Set of closure voxels for region $R_i$, defined as $\{p \in R_i \mid \exists (p, q) \in N, q \in X\}$ [S1].
+
+**Formulas**
+1.  **Isosurface Threshold:** The threshold value to extract the isosurface between materials $x$ and $y$ is approximated by:
+    $$ \text{iso}(x, y) = \frac{m_x + m_y}{2} $$
+    where $m_x, m_y$ are the average CT values of materials $x$ and $y$ [S1].
+
+2.  **Lower and Upper Bounds for Material $i$:**
+    $$ L_i = \max_{j=0,1,\dots,n-1} \{ \text{iso}(i, j) : \text{iso}(i, j) < m_i \} $$
+    $$ U_i = \min_{j=0,1,\dots,n-1} \{ \text{iso}(i, j) : \text{iso}(i, j) > m_i \} $$
+    [S1]
+
+3.  **Seed Selection Condition:** A voxel $p$ is a seed for material $i$ if:
+    $$ D_i = \{ p \in P \mid L_i < I_p < U_i \land \forall (p, q) \in N, |I_p - I_q| < \alpha \} $$
+    where $I_p$ is the CT value of voxel $p$, and $\alpha$ is a variable representing the distribution of noise among neighboring voxels [S1].
+
+**Parameters**
+*   $n$: Number of materials in the volumetric model [S1].
+*   $m_i$: Average CT value of material $i$, obtained by averaging the CT values of a region filled with material $i$ [S1].
+*   $\alpha$: Variable representing the distribution of noise among neighboring voxels in the CT data [S1].
+*   $P$: Set of voxels of the whole volumetric model including objects and the background [S1].
+*   $N$: Set of all unordered pairs $(p, q)$ of neighboring voxels of $P$ [S1].
+
+**Algorithm Steps**
+1.  **Calculate Thresholds:** For all pairs of different materials $(x, y)$, compute $\text{iso}(x, y) = (m_x + m_y)/2$ [S1].
+2.  **Compute Bounds:** For each material $i$, compute $L_i$ and $U_i$ using the formulas above [S1].
+3.  **Select Seeds:** Identify initial seed voxels $D_i$ for each material $i$ by checking if $p \in P$ satisfies $L_i < I_p < U_i$ and all neighbors $q$ satisfy $|I_p - I_q| < \alpha$ [S1].
+4.  **Grow Regions:** Grow regions from the seeds. Newly added voxels must be in the neighborhood of the initial seeds and must not be in high-gradient regions (i.e., satisfy the same gradient condition as seed selection) [S1].
+5.  **Identify Doubt Voxels:** Classify voxels not included in any $R_i$ as doubt voxels $X$ [S1].
+6.  **Identify Closure Voxels:** For each region $R_i$, identify closure voxels $C_i = \{p \in R_i \mid \exists (p, q) \in N, q \in X\}$ [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def restricted_region_growing(P, n, m, alpha):
+    """
+    P: list of voxels, each with attribute 'ct_value'
+    n: number of materials
+    m: list of average CT values for each material [m0, m1, ..., mn-1]
+    alpha: noise distribution threshold
+    Returns:
+        R: dict mapping material index to set of voxels
+        X: set of doubt voxels
+        C: dict mapping material index to set of closure voxels
+    """
+    # Step 1: Calculate isosurface thresholds
+    iso = {}
+    for x in range(n):
+        for y in range(x + 1, n):
+            iso[(x, y)] = (m[x] + m[y]) / 2
+
+    # Step 2: Compute L_i and U_i for each material
+    L = {}
+    U = {}
+    for i in range(n):
+        lower_candidates = [v for k, v in iso.items() if v < m[i]]
+        upper_candidates = [v for k, v in iso.items() if v > m[i]]
+        
+        if lower_candidates:
+            L[i] = max(lower_candidates)
+        else:
+            L[i] = -float('inf') # Not given in sources, assumed safe lower bound
+            
+        if upper_candidates:
+            U[i] = min(upper_candidates)
+        else:
+            U[i] = float('inf') # Not given in sources, assumed safe upper bound
+
+    # Step 3: Select seeds D_i
+    # Note: P needs neighbor information. Assuming P has 'neighbors' attribute.
+    D = {}
+    for i in range(n):
+        seeds = set()
+        for p in P:
+            if L[i] < p.ct_value < U[i]:
+                is_low_gradient = True
+                for q in p.neighbors:
+                    if abs(p.ct_value - q.ct_value) >= alpha:
+                        is_low_gradient = False
+                        break
+                if is_low_gradient:
+                    seeds.add(p)
+        D[i] = seeds
+
+    # Step 4: Grow regions
+    # Initialize R_i with seeds
+    R = {i: set(D[i]) for i in range(n)}
+    
+    # Simple queue-based growth from seeds
+    # Note: The source describes growth conditions similar to seed selection.
+    # It implies checking neighbors of newly added voxels against the same criteria.
+    # However, standard region growing adds neighbors if they fit the region's criteria.
+    # The source says: "newly added voxels should be in the neighborhood of the initial seeds 
+    # and are not in high-gradient regions." This phrasing is slightly ambiguous. 
+    # Standard interpretation: Grow from seeds, adding neighbors that satisfy the material's 
+    # intensity bounds and local gradient consistency.
+    
+    for i in range(n):
+        queue = list(D[i])
+        visited = set(D[i])
+        while queue:
+            current = queue.pop(0)
+            for neighbor in current.neighbors:
+                if neighbor not in visited:
+                    # Check if neighbor fits material i's criteria
+                    if L[i] < neighbor.ct_value < U[i]:
+                        # Check gradient consistency with current (or generally low gradient)
+                        # Source says "not in high-gradient regions". 
+                        # We check if the edge (current, neighbor) is low gradient.
+                        if abs(current.ct_value - neighbor.ct_value) < alpha:
+                            visited.add(neighbor)
+                            R[i].add(neighbor)
+                            queue.append(neighbor)
+
+    # Step 5: Identify doubt voxels X
+    classified_voxels = set()
+    for i in range(n):
+        classified_voxels.update(R[i])
+    
+    X = set(P) - classified_voxels
+
+    # Step 6: Identify closure voxels C_i
+    C = {}
+    for i in range(n):
+        closure = set()
+        for p in R[i]:
+            for q in p.neighbors:
+                if q in X:
+                    closure.add(p)
+                    break
+        C[i] = closure
+
+    return R, X, C
+```
+
+**Edge Cases and Pitfalls**
+*   **Boundary Selection:** Seeds must not be selected in boundary areas. The gradient check $|I_p - I_q| < \alpha$ prevents this [S1].
+*   **Disconnected Regions:** Each $R_i$ can be disconnected [S1].
+*   **Doubt Voxels:** Voxels at boundaries between different materials are mostly unclassified and form $X$ [S1].
+
+## Subtopics
+
+### [Valley Cell Construction](9747-valley-cell-construction.md)
+A method for constructing valley cells in isosurface extraction.
+
+### [Graph-based Isosurface Segmentation (Min-Cut)](9748-graph-based-isosurface-segmentation-min-cut.md)
+A global segmentation method using graph cuts, often used after Restricted Region Growing to classify doubt voxels.
+
+## Operating characteristics
+*   **Complexity:** The operation has $O(s \cdot n)$ complexity, where $s$ is the number of voxels in the volumetric data and $n$ is the number of materials [S1].
+*   **Performance:** The method is very fast [S1].
+*   **Strengths:** It drastically reduces the size of the graph for subsequent Graph-cut operations by classifying the main bodies of materials [S1]. It ensures the correct geometrical shape of segmented parts because closure voxels are hard-constrained to terminal nodes in the graph, forcing the cut to pass only through doubt voxels [S1].
+*   **Limitations:** It only classifies the main bodies; boundary voxels remain unclassified (doubt voxels) and require further processing (e.g., Graph-cut) [S1].
+*   **When to use:** As a pre-processing step for expensive Graph-cut operations in multi-material volumetric data [S1].
+
+## Background
+Restricted Region Growing was proposed in the context of extracting isosurfaces from multi-material CT volumetric data of mechanical parts [S1]. It addresses the problem of "leaking" in simple region growing methods by restricting growth based on noise distribution [S1]. The method is designed to work in conjunction with Graph-cut segmentation, where it provides hard constraints for the graph construction [S1].
+
+## Sources
+[S1] Extraction of isosurfaces from multi-material CT volumetric data of mechanical parts, https://doi.org/10.1145/1364901.1364931, fetched 2026-11-01

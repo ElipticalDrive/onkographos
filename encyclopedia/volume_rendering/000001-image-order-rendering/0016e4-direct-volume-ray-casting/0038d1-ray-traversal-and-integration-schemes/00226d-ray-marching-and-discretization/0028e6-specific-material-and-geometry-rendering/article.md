@@ -1,14 +1,12 @@
 # Specific Material and Geometry Rendering
-
-
 ## Overview
-Specific Material and Geometry Rendering defines how volumetric data is mapped to visual appearance and how specific projection requirements are handled during ray marching. It solves the problem of decoupling physical density or scattering data from the final pixel color computation, allowing distinct rendering modes and material parameterization to be applied per sample point. It differs from general ray marching by explicitly exposing material interfaces and rendering modes that alter the fragment shader's output logic, rather than relying solely on the integration of the radiative transfer equation.
+Specific Material and Geometry Rendering defines how volumetric data is mapped to visual appearance and handles specific projection requirements during ray marching [G]. It decouples physical density or scattering data from the final pixel color computation, allowing distinct rendering modes and material parameterization to be applied per sample point [G]. It differs from [Ray Marching and Discretization](2788-ray-marching-and-discretization.md) by explicitly exposing material interfaces and rendering modes that alter the fragment shader's output logic, rather than relying solely on the integration of the radiative transfer equation [G].
 
 ## Shared principles
 The family shares the mechanism of decoupling physical volume data from visual appearance rules through:
-- **Material Parameterization:** Defining optical properties (e.g., reflection coefficients, shininess) that are applied to voxels based on their geometric orientation relative to the viewer.
-- **Rendering Mode Selection:** Using a uniform variable to switch the fragment shader's computation between different output definitions (e.g., Phong shading vs. attenuation-only vs. maximum intensity).
-- **Gradient-Based Classification:** Determining surface properties (exterior vs. interior) based on the sign of the volume gradient vector at the sample point.
+- **Material Parameterization:** Defining optical properties (e.g., reflection coefficients, shininess) that are applied to voxels based on their geometric orientation relative to the viewer [G].
+- **Rendering Mode Selection:** Using a uniform variable to switch the fragment shader's computation between different output definitions (e.g., Phong shading vs. attenuation-only vs. maximum intensity) [S1, unofficial].
+- **Gradient-Based Classification:** Determining surface properties (exterior vs. interior) based on the sign of the volume gradient vector at the sample point [G].
 
 ## Subtopics
 
@@ -25,11 +23,8 @@ Ray-marched volumetric fog simulates light absorption, scattering, soft shadows,
 Material Parameter Setting defines the optical properties (albedo, metalness, roughness, reflectivity) and texture mappings applied to volume voxels during ray casting. It solves the problem of decoupling physical density data from visual appearance rules by allowing surface properties to be determined based on geometric orientation (gradient direction) relative to the viewer. It differs from sibling methods by providing a structured object layout for physically-based rendering (PBR) parameters alongside a legacy API for classical Phong-style shading coefficients.
 
 ### Surface and DRR Rendering Modes
-Rendering modes define how the final color $C(s)$ is computed for a sample point $s$ along the ray [S1, unofficial].
-- **Surface Rendering:** $C(s)$ is computed according to the Phong equation using the volume gradient [S1, unofficial].
-- **Digitally Reconstructed Radiographs (DRRs):** $C(s) = (0,0,0)$, and only the backlight is attenuated by the accumulated transmittance $t$ [S1, unofficial].
-- **Maximum Intensity Projections (MIPs):** The output is the opacity $\alpha$ of the maximum-opacity interval along the ray [S1, unofficial].
-A uniform variable tells the fragment shader which mode to use [S1, unofficial].
+**Definition:** Surface rendering mode computes $C(s)$ according to the Phong equation using the volume gradient [S1, unofficial]. Digitally Reconstructed Radiographs (DRRs) mode sets $C(s) = (0,0,0)$, attenuating only the backlight by accumulated transmittance $t$ [S1, unofficial]. Maximum Intensity Projections (MIPs) mode outputs the opacity $\alpha$ of the maximum-opacity interval along the ray [S1, unofficial].
+**Parameter:** A uniform variable tells the fragment shader which rendering mode to use [S1, unofficial].
 
 ## Background
 Not given in the sources.

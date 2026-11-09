@@ -2,46 +2,59 @@
 
 
 ## Overview
-Truncated Depth-Based Sampling (TDBS) is a ray sampling strategy for Neural Radiance Fields (NeRF) that utilizes monocular depth priors to concentrate samples near estimated surface locations, thereby improving convergence speed and pose estimation accuracy in joint optimization scenarios [S1]. Unlike sibling methods that may use depth for supervision or coarse-to-fine alternation, TDBS relies exclusively on truncated normal distributions centered on depth priors for sampling throughout the training process [S1, Subtopics].
+Truncated Depth-Based Sampling (TDBS) is a ray sampling strategy that utilizes monocular depth priors to optimize the distribution of sampling points along camera rays, thereby improving convergence speed and pose estimation accuracy in joint NeRF and camera pose optimization [S1]. It sets itself apart from siblings like [NoPe-NeRF](8867-nerf-id.md) by explicitly modeling the probability of surface locations using a truncated normal distribution centered on the depth prior, rather than relying on global depth distortion metrics [S1]. This method addresses the problem of inefficient uniform sampling in unknown-pose scenarios by biasing samples toward geometrically plausible regions indicated by coarse depth estimates [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A sequence of input images with unknown camera poses; a pre-trained monocular depth network (DPT) [S1].
-*   **Outputs:** Rendered RGB and depth images; optimized NeRF parameters $\theta$ and camera poses $P$ [S1].
+*   **Inputs:** A sequence of images with unknown camera poses; a pre-trained monocular depth estimation network (DPT) [S1].
+*   **Outputs:** Sampled 3D points along rays, which are fed into a radiance field MLP to estimate color $c$ and density $\sigma$ [S1].
 
 **Data Structures:**
-*   **Ray:** Defined as $r(t) = o + td$, where $o$ is the origin and $d$ is the direction [S1].
-*   **Sampling Points:** A set of 128 points sampled along each ray [S1].
-*   **Depth Prior:** A coarse depth map $D$ estimated per pixel [S1].
+*   **Depth Map:** A coarse 2D array of depth values estimated by DPT for each input image [S1].
+*   **Ray Parameters:** For each pixel, a ray is defined as $r(t) = o + td$, where $o$ is the camera origin and $d$ is the viewing direction [S1].
+*   **Sampling Distribution:** Defined by mean $\bar{\mu}$ (depth value), variance $\bar{\sigma}$, and truncation interval $[a, b]$ [S1].
+
+**Numbered Steps:**
+1.  **Depth Prior Estimation:** Use a pre-trained monocular depth network (DPT) to estimate a coarse depth map for each input image [S1].
+2.  **Ray Casting:** For each pixel in the image, cast a camera ray $r(t) = o + td$ into the scene [S1].
+3.  **Sampling Point Generation:** Sample points along the ray using inverse distribution sampling from a truncated normal distribution $\psi(\bar{\mu}, \bar{\sigma}, a, b; x)$ [S1]. The mean $\bar{\mu}$ is the depth value from the prior map, and the distribution assumes the real surface is near this estimated depth [S1].
+4.  **Radiance Field Evaluation:** Feed the sampled 3D points into the MLP $F_\theta$ to estimate color $c$ and volume density $\sigma$ [S1].
+5.  **Volume Rendering:** Render RGB and depth images by integrating color $c$ and density $\sigma$ along the ray using standard volume rendering equations [S1].
+6.  **Optimization:** Optimize the radiance field parameters $\theta$ and camera poses by supervising the rendered RGB and depth against target values [S1].
+
+**Formulas:**
+The probability density function (PDF) for the truncated normal distribution is defined as [S1]:
+
+$$
+\psi(\bar{\mu}, \bar{\sigma}, a, b; x) = 
+\begin{cases} 
+0 & x \le a \\
+\frac{\phi(\bar{\mu}, \bar{\sigma}^2; x)}{\Phi(\bar{\mu}, \bar{\sigma}^2; b) - \Phi(\bar{\mu}, \bar{\sigma}^2; a)} & a < x < b \\
+0 & b \le x
+\end{cases}
+$$
+
+Where:
+*   $\phi(\cdot)$ is the probability density function of the normal distribution.
+*   $\Phi(\cdot)$ is the cumulative distribution function of the normal distribution.
+*   $\bar{\mu}$ is the mean (depth value).
+*   $\bar{\sigma}$ is the standard deviation (variance parameter).
+*   $[a, b]$ is the truncation interval [S1].
+
+Sampling points are obtained via inverse distribution sampling from this PDF [S1].
 
 **Parameters:**
-*   **Truncation Interval:** $[a, b] = [0.001, 1.0]$ [S1].
-*   **Variance:** $\bar{\sigma} = 0.1$ [S1].
-*   **Samples per Ray:** 128 [S1].
+*   **Number of sampling points per ray:** 128 [S1].
+*   **Truncation interval $[a, b]$:** $[0.001, 1.0]$ [S1].
+*   **Variance $\bar{\sigma}$:** 0.1 [S1].
+*   **Depth Network:** DPT (Depth Anything/Transformer-based) [S1].
 
-**Method Steps:**
-1.  **Depth Prior Estimation:** Use a pre-trained monocular depth network (DPT) to estimate a coarse depth map for each input image [S1]. Let $\bar{\mu}$ be the depth value for a specific pixel [S1].
-2.  **Ray Casting:** For each pixel, cast a camera ray $r(t) = o + td$ into the scene [S1].
-3.  **Sampling Distribution Definition:** Define a truncated normal distribution $\psi(\bar{\mu}, \bar{\sigma}, a, b; x)$ centered on the depth prior $\bar{\mu}$ with variance $\bar{\sigma}$, truncated within the interval $[a, b]$ [S1]. The probability density function (PDF) is:
-    $$
-    \psi(\bar{\mu}, \bar{\sigma}, a, b; x) = 
-    \begin{cases} 
-    0 & x \le a \\
-    \frac{\phi(\bar{\mu}, \bar{\sigma}^2; x)}{\Phi(\bar{\mu}, \bar{\sigma}^2; b) - \Phi(\bar{\mu}, \bar{\sigma}^2; a)} & a < x < b \\
-    0 & b \le x
-    \end{cases}
-    $$
-    where $\phi(\cdot)$ and $\Phi(\cdot)$ denote the probability density and distribution functions of the normal distribution, respectively [S1].
-4.  **Inverse Transform Sampling:** Use inverse distribution sampling to obtain 128 sampling points along the ray from the defined truncated normal distribution [S1]. This assumes the real surface is near the estimated depth $\bar{\mu}$ [S1].
-5.  **NeRF Evaluation:** Feed the sampled points into the MLP $F_\theta$ to estimate color $c$ and volume density $\sigma$ [S1].
-6.  **Volume Rendering:** Integrate color $c$ and density $\sigma$ via volume rendering to obtain the final color $C(r)$ and depth $D_{inert}(r)$ [S1]. The color integration is:
-    $$
-    C(r) = \int_{t_n}^{t_f} T(t)\sigma(r(t))c(r(t), d)dt
-    $$
-    where $T(t) = \exp\left(-\int_{t_n}^{t} \sigma(r(s))ds\right)$ [S1].
-7.  **Optimization:** Optimize the radiance field parameters $\theta$ and camera poses $P$ by supervising the rendered RGB and depth against targets (e.g., photometric error and depth constraints) [S1].
+**Pitfalls and Edge Cases:**
+*   **Depth Inaccuracy:** Coarse depth maps from pre-trained networks like DPT fail to capture fine details and may be inaccurate or incorrect in specific regions [S1]. Using TDBS directly in a full-stage manner with such errors can degrade rendering quality [S1].
+*   **Local Minima:** Relying solely on potentially erroneous depth priors can cause the optimization to fall into local minima [S1]. This is mitigated by the [Coarse-to-Fine Training Strategy](10617-coarse-to-fine-training-strategy.md), which alternates between depth-guided and uniform sampling [S1].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -56,93 +69,104 @@ def truncated_normal_pdf(x, mu, sigma, a, b):
     z_a = (a - mu) / sigma
     z_b = (b - mu) / sigma
     
-    # CDF difference for normalization
-    cdf_diff = norm.cdf(z_b) - norm.cdf(z_a)
-    
-    # PDF values
-    pdf_vals = norm.pdf(x, mu, sigma)
-    
-    # Truncate and normalize
-    result = np.where((x > a) & (x < b), pdf_vals / cdf_diff, 0.0)
-    return result
-
-def inverse_transform_sampling_truncated_normal(mu, sigma, a, b, num_samples):
-    """
-    Sample points from a truncated normal distribution using inverse transform sampling.
-    """
-    # Standardize bounds
-    z_a = (a - mu) / sigma
-    z_b = (b - mu) / sigma
-    
-    # CDF values at bounds
+    # CDF values
     cdf_a = norm.cdf(z_a)
     cdf_b = norm.cdf(z_b)
     
-    # Generate uniform random numbers in [cdf_a, cdf_b]
+    # PDF normalization factor
+    norm_factor = cdf_b - cdf_a
+    
+    # PDF values
+    pdf_unnormalized = norm.pdf((x - mu) / sigma) / sigma
+    
+    # Apply truncation
+    pdf = np.where((x > a) & (x < b), pdf_unnormalized / norm_factor, 0.0)
+    return pdf
+
+def inverse_transform_sampling(mu, sigma, a, b, num_samples):
+    """
+    Sample points from a truncated normal distribution using inverse transform sampling.
+    """
+    # CDF values at boundaries
+    z_a = (a - mu) / sigma
+    z_b = (b - mu) / sigma
+    
+    cdf_a = norm.cdf(z_a)
+    cdf_b = norm.cdf(z_b)
+    
+    # Generate uniform random numbers in the range [CDF(a), CDF(b)]
     u = np.random.uniform(cdf_a, cdf_b, num_samples)
     
     # Inverse CDF (PPF)
-    z_samples = norm.ppf(u)
+    # We need to scale u back to the full range [0,1] for the standard normal PPF?
+    # No, the truncated distribution's CDF maps [a,b] to [cdf_a, cdf_b].
+    # The inverse CDF of the truncated distribution is:
+    # x = mu + sigma * norm.ppf(u)
+    # However, u is already in [cdf_a, cdf_b].
+    # The standard normal PPF expects inputs in [0,1].
+    # The CDF of the truncated distribution F_t(x) = (Phi((x-mu)/sigma) - Phi(z_a)) / (Phi(z_b) - Phi(z_a))
+    # So, u = F_t(x) => Phi((x-mu)/sigma) = u * (Phi(z_b) - Phi(z_a)) + Phi(z_a)
     
-    # Transform back to original scale
-    x_samples = z_samples * sigma + mu
+    scaled_u = u * (cdf_b - cdf_a) + cdf_a
+    z_samples = norm.ppf(scaled_u)
+    x_samples = mu + sigma * z_samples
     
     return x_samples
 
-def tdbs_sampling(ray_origin, ray_direction, depth_prior, num_samples=128, a=0.001, b=1.0, sigma=0.1):
+def sample_rays_with_tdb(depth_map, camera_poses, num_samples=128, sigma=0.1, a=0.001, b=1.0):
     """
-    Perform Truncated Depth-Based Sampling for a single ray.
+    Sample points along rays using Truncated Depth-Based Sampling.
     
     Args:
-        ray_origin: Origin of the ray.
-        ray_direction: Direction of the ray.
-        depth_prior: Estimated depth value (mu) from monocular depth network.
-        num_samples: Number of points to sample.
-        a: Lower bound of truncation.
-        b: Upper bound of truncation.
-        sigma: Variance parameter.
+        depth_map: 2D array of depth values from DPT.
+        camera_poses: List of camera poses (origin o, direction d) for each pixel.
+        num_samples: Number of points to sample per ray.
+        sigma: Variance parameter for the truncated normal distribution.
+        a, b: Truncation interval.
         
     Returns:
-        sampled_points: Array of 3D points along the ray.
+        sampled_points: Array of 3D points along the rays.
     """
-    # Sample distances t along the ray from the truncated normal distribution
-    # centered at depth_prior
-    t_samples = inverse_transform_sampling_truncated_normal(
-        mu=depth_prior, 
-        sigma=sigma, 
-        a=a, 
-        b=b, 
-        num_samples=num_samples
-    )
+    sampled_points = []
     
-    # Calculate 3D points: r(t) = o + t*d
-    sampled_points = ray_origin + t_samples[:, np.newaxis] * ray_direction
-    
-    return sampled_points
+    for pixel_idx, (o, d) in enumerate(camera_poses):
+        # Get depth prior for this pixel
+        depth_prior = depth_map[pixel_idx]
+        
+        # The depth prior is the mean of the truncated normal distribution
+        mu = depth_prior
+        
+        # Sample points along the ray direction
+        # Note: The depth value is typically the distance along the ray or Z-depth.
+        # Assuming depth_prior is the distance t along the ray r(t) = o + t*d
+        # We sample t values from the truncated normal distribution
+        
+        t_samples = inverse_transform_sampling(mu, sigma, a, b, num_samples)
+        
+        # Convert t samples to 3D points
+        points = o + t_samples[:, np.newaxis] * d[np.newaxis, :]
+        
+        sampled_points.append(points)
+        
+    return np.array(sampled_points)
 ```
-
-**Edge Cases and Pitfalls:**
-*   **Coarse Depth Inaccuracy:** Pre-trained monocular depth networks (e.g., DPT) produce coarse maps that fail to capture fine details and may be inaccurate or incorrect in many details [S1]. Using full-stage TDBS with these erroneous values can degrade rendering quality [S1].
-*   **Precision:** The truncation interval $[a, b]$ must be carefully chosen to avoid sampling in empty space or clipping valid geometry. The default $[0.001, 1.0]$ is used in the source [S1].
 
 ## Subtopics
 
 ### [Coarse-to-Fine Training Strategy](10617-coarse-to-fine-training-strategy.md)
-A training strategy that alternates between depth-prior-guided sampling and uniform sampling to circumvent local minima and refine depth geometry. It sets itself apart from TDBS by not relying solely on truncated normal distributions throughout training, which accelerates convergence and enhances pose estimation accuracy.
+A strategy that alternates between depth-prior-guided sampling (TDBS) and uniform sampling to circumvent local minima and refine depth geometry. It sets itself apart from TDBS by not relying solely on truncated normal distributions throughout training, accelerating convergence and enhancing pose estimation accuracy.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** The method is evaluated on three datasets, demonstrating superior performance in joint optimization of camera pose and NeRF compared to prior works, generating more accurate depth geometry [S1].
-*   **Strengths:** Improves convergence speed and accuracy of pose estimation by explicitly exploiting monocular depth priors through truncated normal distributions [S1]. It is more robust than methods like NoPe-NeRF which consider overall depth distortion but do not fully exploit depth map potential [S1].
-*   **Limitations:** Relies on the quality of the pre-trained monocular depth network; coarse depth errors can degrade rendering if used in a full-stage manner without a coarse-to-fine strategy [S1].
-*   **When to Use:** When training NeRF from unknown camera poses and monocular depth priors are available to guide sampling [S1].
-*   **When Not to Use:** When high-precision depth priors are not available or when the scene contains fine details that coarse depth maps cannot capture, unless combined with a coarse-to-fine strategy [S1].
+*   **Time Complexity:** Depends on the number of sampling points (128 per ray) and the cost of the DPT inference for depth priors [S1].
+*   **Memory Complexity:** Requires storing the coarse depth maps for all input images and the radiance field parameters [S1].
+*   **Performance:** Improves convergence speed and accuracy of pose estimation compared to uniform sampling or methods like NoPe-NeRF that do not fully exploit depth priors [S1].
+*   **Strengths:** Explicitly utilizes monocular depth priors to guide sampling, reducing the search space for the radiance field [S1].
+*   **Limitations:** Relies on the accuracy of the coarse depth map; errors in the depth prior can degrade rendering quality if not handled by a coarse-to-fine strategy [S1].
+*   **When to use:** Joint optimization of NeRF and camera poses from unknown poses, especially when monocular depth priors are available [S1].
+*   **When not to use:** When high-precision depth priors are not available and the scene contains fine details that coarse priors cannot capture, without employing the coarse-to-fine strategy [S1].
 
 ## Background
-*   **Origin:** Proposed in TD-NeRF by authors of [S1] in 2024 [S1].
-*   **History:** TD-NeRF addresses the challenge of jointly optimizing neural radiance fields and camera poses without given camera poses in indoor and outdoor scenes [S1]. It builds upon previous works like NoPe-NeRF [S1] by introducing a novel depth-based ray sampling strategy based on the truncated normal distribution [S1].
-*   **Usage:** Used in joint camera pose and neural radiance field optimization tasks [S1].
+Truncated Depth-Based Sampling (TDBS) was introduced in the TD-NeRF paper, which addresses the challenge of jointly optimizing neural radiance fields and camera poses from unknown poses in indoor and outdoor scenes [S1]. The method was proposed to overcome the limitations of previous approaches like NoPe-NeRF, which considered overall depth distortion but did not fully exploit the potential of monocular depth maps [S1]. TDBS explicitly uses a truncated normal distribution to sample points based on coarse depth priors obtained from a pre-trained DPT network [S1].
 
 ## Sources
 [S1] TD-NeRF: Novel Truncated Depth Prior for Joint Camera Pose and Neural Radiance Field Optimization, https://doi.org/10.1109/iros58592.2024.10802634, fetched 2026-10-26

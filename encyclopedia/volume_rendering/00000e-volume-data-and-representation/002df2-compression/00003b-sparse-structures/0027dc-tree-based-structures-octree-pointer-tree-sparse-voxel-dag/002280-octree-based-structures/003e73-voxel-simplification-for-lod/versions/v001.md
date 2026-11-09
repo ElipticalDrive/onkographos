@@ -1,0 +1,41 @@
+# Voxel Simplification for LOD
+
+Also called: Proposed Voxel Simplification Method
+
+## Overview
+A method to approximate a triangular model to varying levels of detail using an incremental simplification of function values based on voxel grids [S1, unofficial]. It decomposes function values hierarchically as a multi-resolution function, minimizing simplification error in the surface itself [S1, unofficial]. Unlike methods requiring different model versions for LOD, this method determines LOD by viewer distance, representing surface with necessary details without computational overhead of loading different models [S1, unofficial].
+
+## How it works
+**Inputs:** A triangular mesh model.
+**Outputs:** A sparse voxel octree structure storing a $C^0$-continuous signed distance field (SDF) with multiple levels of detail, and a stitching algorithm to combine them into a watertight model [S1, unofficial].
+
+**Data Structures:**
+*   **Voxel Grid:** Represented as an octree (recursive uniform subdivision of cubes into eight smaller cubes) [S1, unofficial].
+*   **Implicit Representation:** Stores function values (SDF) on different depths based on error in the implicit representation [S1, unofficial].
+*   **Error Metric:** A novel metric measuring how much a coarse voxel differs from the original fine voxels [S1, unofficial].
+
+**Steps:**
+1.  **Conversion:** Convert the input triangle mesh into an implicit representation, specifically a $C^0$-continuous signed distance field [S1, unofficial].
+2.  **Initial Grid Setup:** Define the domain as a voxel grid represented as an octree. Start with an initial guess for the depth of the subdivision [S1, unofficial].
+3.  **Hierarchical Simplification:** Use the novel error metric to simplify a group of voxels to their parent. The simplification minimizes this metric, which measures the difference between the coarse voxel and the original fine voxels [S1, unofficial]. This creates a multi-resolution function where higher levels of the hierarchy contain a sparser representation as close as possible to the details with regard to the error metric [S1, unofficial].
+4.  **Stitching:** Combine multiple levels of detail together using a stitching algorithm to achieve a watertight model [S1, unofficial].
+
+**Parameters:**
+*   **Initial Subdivision Depth:** An initial guess for the octree depth [S1, unofficial]. Not given in the sources.
+*   **Error Metric Threshold:** The threshold for simplification is not explicitly defined in the provided notes, only that the simplification is designed to minimize the metric [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Watertightness:** The stitching algorithm is required to ensure the final model is watertight when combining LODs [S1, unofficial].
+*   **Continuity:** The implicit representation is $C^0$-continuous, which may affect rendering smoothness compared to higher continuity fields [S1, unofficial].
+
+## Operating characteristics
+*   **Memory Efficiency:** The method provides a memory-efficient voxel structure capable of representing very detailed models [S1, unofficial].
+*   **Performance:** No specific computational performance metrics (FPS, memory usage) are provided in the sources [S1, unofficial].
+*   **Strengths:** Does not require different versions of a model for different LODs; LOD is determined by viewer distance; allows for interpolation and filtering [S1, unofficial].
+*   **Limitations:** The specific complexity of the error metric calculation and stitching algorithm is not detailed [S1, unofficial].
+
+## Background
+This method was proposed in a thesis from Utrecht University [S1, unofficial]. It addresses the problem of voxel-based rendering taking up most of the memory while contributing little to the geometric structure, requiring a storage method that balances structure based on accuracy of the surface representation [S1, unofficial].
+
+## Sources
+[S1] Level-of-Detail Independent Voxel-Based Surface ..., https://studenttheses.uu.nl/items/a8b8233a-d142-43f1-8f6d-c0b0fe43a767, fetched 2026-10-27 (unofficial)

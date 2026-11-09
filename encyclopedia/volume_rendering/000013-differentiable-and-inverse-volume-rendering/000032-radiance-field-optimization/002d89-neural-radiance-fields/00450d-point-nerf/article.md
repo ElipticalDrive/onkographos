@@ -1,0 +1,205 @@
+# Point-NeRF
+
+Also called: Point-NeRF shading, Point-based Neural Radiance Fields
+
+## Overview
+Point-NeRF is a rendering method that synthesizes novel views by aggregating features from $K$ neighboring neural points in a 3D point cloud to compute view-dependent radiance and volume density at shading locations along rays, avoiding empty space sampling [S1][S2, unofficial]. It differs from its parent [Neural Radiance Fields](4972-neural-radiance-fields.md) by replacing the continuous volumetric function with a discrete set of neural points, allowing it to naturally adapt to scene surfaces and significantly accelerate training [S1][S2, unofficial].
+
+## How it works
+**Inputs:** A set of training images with known camera poses, an initial 3D point cloud (typically from Structure-from-Motion or Multi-View Stereo), and a set of learnable parameters for each point.
+**Outputs:** Rendered RGB images and optionally depth maps for novel camera viewpoints.
+
+**Data Structures:**
+The core representation is a **Neural Point Cloud**. Each point $i$ in the cloud is defined by:
+1.  **Spatial Location ($\mathbf{p}_i$):** The 3D coordinates of the point.
+2.  **Latent Feature Vector ($\mathbf{f}_i$):** A high-dimensional embedding vector associated with the point. The dimension is controlled by the `embedding_size` parameter [S2, unofficial].
+3.  **Confidence ($\gamma_i$):** A scalar value indicating the reliability or contribution weight of the point to the volume density [S1].
+
+The rendering pipeline uses a ray marching approach. For each pixel, a ray $\mathbf{r}$ is cast. Shading locations $\mathbf{x}$ are sampled along the ray. Unlike standard NeRF, sampling is concentrated near the neural point cloud to avoid empty space [S1].
+
+**Parameters:**
+*   `embedding_size`: Number of dimensions for the latent code embedding. Default: -1 (implementation dependent) [S2, unofficial].
+*   `loss_embedding_l2_weight`: Weight for the embedding L2 loss. Default: -1 [S2, unofficial].
+*   `loss_kld_weight`: Weight for the VAE KLD loss. Default: -1 [S2, unofficial].
+*   `compute_depth`: Boolean flag (0 or 1) indicating whether to compute depth. If false, depth is computed only when required by losses. Default: 0 [S2, unofficial].
+*   `raydist_mode_unit`: Boolean flag (0 or 1). If set, ray distance max is set as one voxel. Default: 0 [S2, unofficial].
+*   `save_point_freq`: Frequency of showing training results on console. Default: 100000 [S2, unofficial].
+*   `alter_step`: Step interval for alteration (pruning/growing). 0 means no alteration. Default: 0 [S2, unofficial].
+*   `prob`: Flag for probabilistic training. Set to 0 for normal training and 1 for probabilistic training. Default: 0 [S2, unofficial].
+*   `wcoord_query`: Configuration flag to replace pycuda with pytorch cuda functions when using world coordinates to group neural points. Set to -1 to use pytorch implementation if original setting is 1. Default: 1 (implies pycuda) [S2, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Initialize the neural point cloud. This is typically done via direct inference of a pre-trained deep network (e.g., MVSNet) to generate an initial point-based field [S1][S2, unofficial].
+    *   *Pitfall:* When using MVSNet on the NeRF-Synthetic dataset, the point fusion after depth estimation uses alpha channel information because MVSNet handles background poorly. To improve fairness, background color filtering should be applied [S2, unofficial]. This issue does not affect Colmap results or other datasets [S2, unofficial].
+
+2.  **Ray Marching & Neighbor Query:** For each shading location $\mathbf{x}$ along a ray $\mathbf{r}$:
+    *   Identify the $K$ nearest neighboring neural points $\{\mathbf{p}_i\}$ from the point cloud [S1].
+    *   Compute the distance $d_i = \|\mathbf{p}_i - \mathbf{x}\|$ [S1].
+
+3.  **Feature Aggregation & Density/Radiance Computation:**
+    *   Compute weights $w_i$ based on inverse distance:
+        $$ w_i = \frac{1}{\|\mathbf{p}_i - \mathbf{x}\|} $$
+        [S1]
+    *   Compute the aggregated volume density $\sigma$ at $\mathbf{x}$:
+        $$ \sigma = \sum_i \sigma_i \gamma_i \frac{w_i}{\sum_j w_j} $$
+        where $\sigma_i = T(\mathbf{f}_{i,x})$ is the density contribution from point $i$, derived from its feature vector $\mathbf{f}_i$ (and potentially position $\mathbf{x}$) via a small network $T$, and $\gamma_i$ is the point's confidence [S1].
+    *   Compute the aggregated color $\mathbf{c}$ at $\mathbf{x}$ by aggregating the view-dependent colors from the neighbors' features [S1].
+
+4.  **Volume Rendering:**
+    *   Accumulate the color $\hat{C}(\mathbf{r})$ using the standard emission-absorption model [S1][S5]:
+        $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+        where $\sigma_i$ and $\mathbf{c}_i$ are the aggregated density and color at the $i$-th shading location, $\delta_i$ is the step size, and $T_i$ is the transmittance [S1][S5].
+
+5.  **Optimization:**
+    *   The neural point cloud parameters (locations, features, confidence) are optimized end-to-end using gradient descent [S1].
+    *   The optimizer separates neural point parameters from other network parameters, using separate Adam optimizers [S2, unofficial].
+    *   **Pruning and Growing:** Point-NeRF employs a novel pruning and growing mechanism to handle errors and outliers from the initial reconstruction method [S2, unofficial]. Points with low confidence or high error are pruned; new points are grown in areas of high error or sparsity [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_ray(ray_origin, ray_direction, neural_points, K, embedding_size):
+    """
+    Renders a single ray using Point-NeRF.
+    
+    Args:
+        ray_origin: (3,) float, origin of the ray.
+        ray_direction: (3,) float, normalized direction of the ray.
+        neural_points: List of dicts, each containing 'pos' (3,), 'feat' (D,), 'conf' (1,).
+        K: int, number of neighbors to aggregate.
+        embedding_size: int, dimension of the feature vector.
+        
+    Returns:
+        color: (3,) float, rendered color.
+        depth: (1,) float, rendered depth (if compute_depth is True).
+    """
+    # 1. Sample shading locations along the ray
+    # In Point-NeRF, sampling is focused near the point cloud.
+    # For implementation, we sample N points along the ray segment.
+    t_min, t_max = get_ray_bounds(ray_origin, ray_direction, neural_points)
+    t_vals = linspace(t_min, t_max, N_samples)
+    shading_locations = ray_origin + t_vals[:, None] * ray_direction  # (N, 3)
+    
+    # 2. Aggregate features for each shading location
+    colors = []
+    densities = []
+    
+    for x in shading_locations:
+        # Find K nearest neighbors
+        dists = [norm(x - p['pos']) for p in neural_points]
+        neighbor_indices = argsort(dists)[:K]
+        neighbors = [neural_points[i] for i in neighbor_indices]
+        
+        # Compute weights
+        ws = [1.0 / (dist + 1e-8) for dist in dists[:K]]
+        w_sum = sum(ws)
+        
+        # Aggregate density and color
+        # Note: The exact network T(f, x) is implementation specific.
+        # We assume a small MLP takes the feature and relative position.
+        agg_sigma = 0.0
+        agg_color = zeros(3)
+        
+        for i, neighbor in enumerate(neighbors):
+            w = ws[i] / w_sum
+            # Compute point-specific density and color
+            # sigma_i = T(f_i, x)
+            # c_i = C(f_i, x, ray_direction)
+            sigma_i, c_i = compute_point_radiance(neighbor['feat'], neighbor['pos'], x, ray_direction, embedding_size)
+            
+            # Weighted sum with confidence
+            agg_sigma += sigma_i * neighbor['conf'] * w
+            agg_color += c_i * w
+            
+        densities.append(agg_sigma)
+        colors.append(agg_color)
+        
+    densities = tensor(densities)
+    colors = tensor(colors)
+    
+    # 3. Volume Rendering
+    # Standard DVR accumulation
+    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+    # C = sum_{i=1}^N T_i * (1 - exp(-sigma_i * delta_i)) * c_i
+    
+    deltas = t_vals[1:] - t_vals[:-1]
+    # Add a small epsilon to avoid division by zero or log(0)
+    deltas = concatenate([deltas, tensor([1e-10])])
+    
+    alphas = 1.0 - exp(-densities * deltas)
+    transmittance = exp(-cumsum(densities * deltas, axis=0))
+    transmittance = concatenate([tensor([1.0]), transmittance[:-1]])
+    
+    contributions = transmittance[:, None] * alphas[:, None] * colors
+    final_color = sum(contributions, axis=0)
+    
+    # Compute depth if required
+    depth = 0.0
+    if compute_depth:
+        depth = sum(transmittance * alphas * t_vals, axis=0)
+        
+    return final_color, depth
+
+def compute_point_radiance(feat, p_pos, x, ray_dir, embedding_size):
+    """
+    Computes density and color for a single neural point at shading location x.
+    This is a placeholder for the specific MLP architecture used in Point-NeRF.
+    """
+    # Relative position
+    rel_pos = x - p_pos
+    
+    # Concatenate feature and relative position
+    input_vec = concatenate([feat, rel_pos])
+    
+    # Pass through a small network (e.g., 2-layer MLP)
+    # This network outputs density (scalar) and color (3-vector)
+    # The exact architecture is not detailed in the sources, but it is differentiable.
+    # [G] Assuming a standard MLP:
+    h = relu(linear(input_vec, W1, b1))
+    out = linear(h, W2, b2)
+    
+    sigma = softplus(out[0]) # Ensure positive density
+    color = sigmoid(out[1:]) # Ensure color in [0,1]
+    
+    return sigma, color
+```
+
+## Subtopics
+
+### Neural Points
+Neural Points are a differentiable point representation that augments each point with a high-dimensional feature vector projected and rasterized into screen space [S4]. They serve as the direct foundation for breakthroughs in primitive-based splatting [S4].
+
+### PointNeRF++
+PointNeRF++ is a multi-scale, point-based Neural Radiance Field representation that aggregates point clouds at multiple scale levels using sparse voxel grids to handle sparse or incomplete point clouds [S3]. It differs from Point-NeRF by unifying classical and point-based NeRF formulations, allowing it to naturally deal with point cloud sparsity without the need for failure-prone heuristics such as 'pruning' and 'growing' [S3]. It aggregates features across multiple scale levels rather than just locally [S3].
+
+### [VF-based Point Cloud Initialization](7464-vf-based-point-cloud-initialization.md)
+VF-based Point Cloud Initialization converts a Neural Radiance Field (NeRF) representation into a sparse 3D point cloud using Viewshed Fields (VF) to guide sampling, then employs standard global point cloud registration algorithms (specifically FPFH descriptors with RANSAC) to compute an initial rigid transformation between two scenes. It differs from photometric initialization methods by avoiding iterative gradient-based alignment of camera poses directly; instead, it leverages the robustness of geometric point cloud registration to provide a coarse alignment that serves as a starting point for subsequent optimization.
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Point-NeRF achieves approximately 30X faster training time compared to standard NeRF [S2, unofficial]. This speedup is attributed to the discrete nature of the point cloud, which avoids sampling empty space and allows for more efficient neighbor queries and aggregation [S1][S2, unofficial]. Memory usage is lower than standard NeRF as it does not require storing a dense voxel grid or a large MLP for every sample point, but rather a set of point features [S1].
+
+**Measured Performance:**
+On the NeRF-Synthetic dataset, Point-NeRF achieves competitive PSNR, SSIM, and LPIPS scores (e.g., Avg PSNR 33.25, Avg SSIM 0.978, Avg LPIPSVgg 0.050) when initialized with MVSNet and background color filtering [S2, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Fast training, efficient rendering by focusing on surfaces, easy integration with other 3D reconstruction methods (e.g., MVSNet, Colmap) [S2, unofficial].
+*   **Limitations:** Performance depends heavily on the quality of the initial point cloud. MVSNet-based initialization can suffer from background handling issues on synthetic datasets [S2, unofficial]. Sparse point clouds can lead to artifacts if not handled by multi-scale representations like PointNeRF++ [S3].
+
+**When to use:**
+Use Point-NeRF when fast training and rendering are priorities, and a good initial point cloud is available. It is suitable for scenes with well-defined surfaces.
+
+**When not to use:**
+Avoid Point-NeRF if the scene has large empty spaces or if the initial reconstruction method produces a very sparse or noisy point cloud without multi-scale extensions [S3].
+
+## Background
+Point-NeRF was introduced in the CVPR 2022 Oral paper "Point-NeRF: Point-based Neural Radiance Fields" by Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu, Kalyan Sunkavalli, and Ulrich Neumann [S2, unofficial]. It builds on the principles of Neural Radiance Fields but replaces the continuous volumetric representation with a discrete neural point cloud [S1][S2, unofficial]. The method was developed to address the computational cost of standard NeRF and to leverage the efficiency of point-based representations in computer vision [S2, unofficial]. It has been used on datasets such as NeRF-Synthetic, Tanks&Temples, ScanNet, and DTU [S2, unofficial].
+
+## Sources
+[S1] Point-NeRF: Point-based Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00536, fetched 2026-10-26
+[S2] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)
+[S3] PointNeRF++: A Multi-scale, Point-Based Neural Radiance Field, https://doi.org/10.1007/978-3-031-72920-1_13, fetched 2026-10-27
+[S4] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

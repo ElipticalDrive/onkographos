@@ -1,0 +1,166 @@
+# Backpropagation with Per-Splat Parallelization
+
+Also called: Per-splat backward, Per-splat parallelization, Recursive Per-Splat Parallelization for Backward Propagation, Splat-parallel backprop, Warp-level gradient accumulation
+
+## Overview
+This method is a GPU kernel optimization for the backward pass of 3D Gaussian Splatting that eliminates atomic contention by parallelizing over 2D splats rather than pixels [S1][S2, unofficial]. It solves the bottleneck where multiple threads contend for the same memory locations when atomically adding gradients to Gaussian attributes [S2, unofficial]. Unlike the original 3DGS approach which maps threads to pixels and requires strict depth-sorted traversal, this method allows threads to maintain per-splat state and exchange smaller per-pixel states (transmittance and color) via intra-warp shuffling, enabling order-independent processing and avoiding redundant computations [S1][S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A tile of pixels (typically 256 pixels), a set of 3D Gaussians projected to 2D splats covering the tile, and stored intermediate per-pixel states from the forward pass [S1][S2, unofficial].
+- **Output:** Accumulated gradients for all Gaussian parameters (position, scale, rotation, opacity, spherical harmonics coefficients) within the tile [S1].
+
+**Data Structures:**
+- **Per-Pixel State:** A tuple $(T_j, C_j)$ for each pixel $j$, where $T_j$ is the accumulated transmittance and $C_j$ is the accumulated color [S1].
+- **Per-Splat State:** Maintained by the thread processing the splat, including current gradient accumulators for the splat's attributes [S1].
+- **Autodiff Context (Forward Pass):** Stores one per-pixel state every $N$ splats (where $N$ is the bucket size, typically 32) for each pixel in the tile [S1].
+
+**Parameters:**
+- **Bucket Size ($N$):** 32. Matches the CUDA warp size [S1].
+- **Tile Size:** 256 pixels. Partitioned into 8 groups of 32 pixels [S2, unofficial].
+
+**Numbered Steps:**
+
+1. **Forward Pass Storage:** During the forward rasterization, for each pixel $j$ in the tile, store the per-pixel state $(T_j, C_j)$ after every $N$-th splat (where $N=32$) into the autodiff context [S1]. This provides starting states $(0, j), (N, j), \dots$ for all pixels $j$ [S1].
+
+2. **Backward Pass Initialization:** For each tile, partition the 256 pixels into 8 groups of 32 pixels, matching the warp size [S2, unofficial]. Each thread in the warp (lane $l \in [0, 31]$) is responsible for one pixel in the group [S2, unofficial]. Each thread generates the initial pixel state $(i, j)$ for the current backward bucket from the stored starting states [S1].
+
+3. **Warp-Level State Fetching:** Within a warp, every lane $l$ fetches the per-pixel state for its corresponding pixel $j_l$ from global memory or shared memory [S2, unofficial]. Crucially, each group of 32 pixels is fetched only once per warp [S2, unofficial].
+
+4. **Recursive State Circulation (Inner Loop):**
+    For each bucket of $N=32$ splats:
+    a. **State Exchange:** Threads exchange per-pixel states via fast intra-warp shuffling (e.g., `__shfl_sync`) [S1][S2, unofficial]. Each thread sends its current pixel state to other lanes and receives states for other pixels in the group [S1][S2, unofficial].
+    b. **Gradient Accumulation:** For each splat $s$ in the bucket:
+        i. Thread $i$ (associated with splat $i$) receives the per-pixel state $(T_j, C_j)$ for pixel $j$ from the previous splat in the blending order (or from the stored state if $i=0$) [S1].
+        ii. Thread $i$ applies the alpha blending logic to compute the contribution of splat $s$ to pixel $j$ [S1]. The new state $(T'_j, C'_j)$ is computed as:
+        $$ T'_j = T_j \cdot (1 - \alpha_s) $$
+        $$ C'_j = C_j + \alpha_s \cdot c_s \cdot T_j $$
+        where $\alpha_s$ is the opacity of splat $s$ at pixel $j$, and $c_s$ is the color of splat $s$ [G].
+        iii. Thread $i$ computes the gradient of the loss with respect to the splat's parameters using the chain rule, incorporating the change in transmittance and color [S1].
+        iv. Thread $i$ updates the per-pixel state for the next splat: $(T_j, C_j) \leftarrow (T'_j, C'_j)$ [S1].
+        v. Thread $i$ atomically adds the computed gradients to the global Gaussian attribute buffers [S1][S2, unofficial]. *Note: In this per-splat parallelization, each thread handles one splat, so atomic contention is reduced to one thread per splat, avoiding the many-to-one contention of the pixel-parallel approach* [S1][S2, unofficial].
+    c. **Shuffle:** After processing the splat, threads shuffle the updated per-pixel states to prepare for the next splat in the bucket [S1].
+
+5. **Repeat:** Repeat step 4 for all 8 groups of pixels (since 256 pixels / 32 pixels per group = 8 groups) [S2, unofficial]. This completes the tile-internal gradient computation [S2, unofficial].
+
+6. **Optimization: Last Contributor Tracking:** Track the last contributing splat for each pixel during the forward pass [S1]. In the backward pass, skip entire groups of splat-tile pairings where the splat is fully occluded (i.e., transmittance $T_j \approx 0$) [S1].
+
+7. **Optimization: Tighter Culling:** Apply tighter culling strategies (e.g., as proposed by Radl et al. [2024]) to minimize redundant splats in both forward and backward passes [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assumptions:
+# - Warp size W = 32
+# - Tile has P = 256 pixels, partitioned into G = 8 groups of W pixels
+# - Splats are sorted by depth (front-to-back)
+# - bucket_size = 32
+# - stored_states[pixel_idx][bucket_idx] = (T, C) from forward pass
+# - lane_id is the implicit thread index within the warp (0..31)
+
+def backward_per_splat_parallelization(tile_splats, stored_states, loss_gradients, bucket_size=32):
+    # tile_splats: list of splats covering the tile, sorted front-to-back
+    # stored_states: dict mapping (pixel_idx, bucket_idx) -> (T, C)
+    # loss_gradients: dict mapping pixel_idx -> gradient vector w.r.t output color
+    
+    num_splats = len(tile_splats)
+    num_buckets = (num_splats + bucket_size - 1) // bucket_size
+    tile_pixels = 256
+    groups = tile_pixels // bucket_size  # 8 groups
+    
+    # Initialize gradient accumulators for splats in this tile
+    splat_grads = {splat.id: [0.0] * len(splat.params) for splat in tile_splats}
+    
+    for bucket_idx in range(num_buckets):
+        bucket_start = bucket_idx * bucket_size
+        bucket_end = min(bucket_start + bucket_size, num_splats)
+        current_bucket_splats = tile_splats[bucket_start:bucket_end]
+        
+        for g in range(groups):
+            group_start = g * bucket_size
+            lane_pixel = group_start + lane_id
+            
+            # Fetch initial state for this pixel at this bucket
+            if (lane_pixel, bucket_idx) in stored_states:
+                T, C = stored_states[(lane_pixel, bucket_idx)]
+            else:
+                T, C = 1.0, (0.0, 0.0, 0.0)  # Default: fully transparent, zero color
+            
+            # Process each splat in the bucket
+            for s_idx, splat in enumerate(current_bucket_splats):
+                # Compute splat properties at this pixel
+                alpha = compute_splat_alpha(splat, lane_pixel)
+                color = compute_splat_color(splat, lane_pixel)
+                
+                # Apply alpha blending to update pixel state
+                new_T = T * (1.0 - alpha)
+                new_C = C + alpha * color * T
+                
+                # Compute gradient contribution for this splat at this pixel
+                # dL/dParams = dL/dC * dC/dParams + dL/dT * dT/dParams
+                grad_vec = compute_gradient_contribution(loss_gradients[lane_pixel], alpha, color, T, C)
+                
+                # Accumulate gradient for the splat (thread-local accumulation, no contention)
+                for k in range(len(splat.params)):
+                    splat_grads[splat.id][k] += grad_vec[k]
+                
+                # Update local state for next splat
+                T, C = new_T, new_C
+                
+                # Circulate states: shuffle updated states to all lanes so next splat iteration
+                # has access to all pixel states
+                T_all, C_all = shuffle_broadcast(T, C)
+                
+                # Update local state with broadcasted values for consistency
+                T, C = T_all, C_all
+                
+    return splat_grads
+
+def compute_splat_alpha(splat, pixel_idx):
+    # Standard Gaussian projection opacity calculation
+    return splat.opacity * splat.alpha_at_pixel(pixel_idx)
+
+def compute_splat_color(splat, pixel_idx):
+    # Standard Gaussian color evaluation at pixel
+    return splat.color_at_pixel(pixel_idx)
+
+def compute_gradient_contribution(loss_grad, alpha, color, T, C):
+    # Chain rule for alpha compositing: dL/dParams
+    # dC/dParams = alpha * dColor/dParams
+    # dT/dParams = (1 - alpha) * dT_prev/dParams - T * dAlpha/dParams
+    # Simplified gradient vector for demonstration
+    return [loss_grad[i] * alpha for i in range(len(loss_grad))]
+
+def shuffle_broadcast(value):
+    # Simulates CUDA __shfl_sync broadcast: returns value to all lanes
+    return value
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating-point precision issues may arise when transmittance $T$ becomes very small [G]. Use epsilon guards if necessary [G].
+- **Boundaries:** Handle splats that partially cover the tile [S1]. The culling optimization must correctly identify splats that contribute to no pixels in the tile [S1].
+- **Degenerate Input:** If a splat has zero opacity or is completely outside the tile, it should be skipped in both forward and backward passes [S1].
+
+## Subtopics
+
+### [CUDA Backward Pass Optimization](5429-cuda-backward-pass-optimization.md)
+Applies low-level GPU kernel optimizations to reduce memory access overhead and improve cache utilization. Reduces training time independently of Gaussian count.
+
+## Operating characteristics
+- **Time Complexity:** $O(N_{splats} \cdot N_{pixels})$ per tile, but with reduced constant factors due to avoided atomic contention and redundant computations [S1][S2, unofficial].
+- **Memory Complexity:** $O(N_{pixels})$ for storing per-pixel states in shared memory/warp registers [S1]. Forward pass storage is $O(N_{splats} \cdot N_{pixels} / N)$ for checkpointing [S1].
+- **Measured Performance:** Significantly faster than original 3DGS backward pass, especially for high-resolution scenes with many Gaussians [S1]. Avoids the serialization caused by atomic operations [S1][S2, unofficial].
+- **Scaling:** Scales well with the number of Gaussians and pixels [S1]. The per-splat parallelization ensures that each thread does useful work without waiting for atomic locks [S1].
+- **Strengths:** Eliminates atomic contention, avoids redundant computations from strict depth-order traversal, leverages warp-level shuffling for efficient state exchange [S1][S2, unofficial].
+- **Limitations:** Requires storing intermediate states during the forward pass, increasing memory usage [S1]. May be complex to implement correctly due to warp-level synchronization [S1][S2, unofficial].
+- **When to Use:** When training 3D Gaussian Splatting models and backward pass time is a bottleneck [S1]. When atomic contention is observed in profiling [S1][S2, unofficial].
+- **When Not to Use:** When memory is extremely constrained and cannot afford the checkpointing overhead [G]. When the scene is very small and the overhead of the complex kernel outweighs the benefits [G].
+
+## Background
+Originated from the need to accelerate the training of 3D Gaussian Splatting [S1]. The original 3DGS backward pass suffered from severe atomic contention [S1]. Taming 3DGS [S1] introduced per-splat parallelization to mitigate this. SparseOIT [S2, unofficial] further refined the approach with recursive per-splat parallelization and order-independent transparency, eliminating the need for strict depth-order traversal and redundant computations [S2, unofficial].
+
+## Sources
+[S1] Taming 3DGS: High-Quality Radiance Fields with Limited Resources, https://doi.org/10.1145/3680528.3687694, fetched 2026-10-30
+[S2] SparseOIT: Improving Order-Independent Transparency 3DGS via Active Set Method, https://doi.org/10.48550/arXiv.2605.13855, fetched 2026-10-29 (unofficial)

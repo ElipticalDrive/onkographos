@@ -3,19 +3,19 @@
 Also called: Gaussian Splat Rendering Pipeline, RenderGaussianSplats, Splatv Render Program, VideoRenderProgram, WebGL Instanced Gaussian Splat Rendering
 
 ## Overview
-This method renders 3D Gaussian splats as screen-space quads using a pre-sorted order buffer and view-space projection data, handling transparency via alpha blending and discarding fragments behind the camera or with negligible alpha [S2, S3, unofficial]. It projects voxels as 2D quids identical in geometry generation to Circle Splat, used for Gaussian Splat visualization [S1, unofficial]. Unlike its parent [3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)](2058-3d-gaussian-splatting-rendering-cpu-sorted-instanced.md), which relies on generic instanced drawing, this method explicitly constructs screen-space deltas in the vertex shader to ensure correct perspective projection of the elliptical splat shapes [S2, S3, unofficial]. It differs from sibling [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) by using a global depth-sorted list rather than tile-based sorting [S3, unofficial].
+This method renders 3D Gaussian splats as screen-space quads using a pre-sorted order buffer and view-space projection data, handling transparency via alpha blending and discarding fragments behind the camera or with negligible alpha [S2, S3, unofficial]. It projects voxels as 2D quads identical in geometry generation to Circle Splat, used for Gaussian Splat visualization [S1, unofficial]. Unlike its parent [3D Gaussian Splatting Rendering (CPU-Sorted, Instanced)](2058-3d-gaussian-splatting-rendering-cpu-sorted-instanced.md), which relies on generic instanced drawing, this method explicitly constructs screen-space deltas in the vertex shader to ensure correct perspective projection of the elliptical splat shapes [S2, S3, unofficial]. It differs from sibling [Tiled 2D Gaussian Splatting Rasterization](2061-tiled-2d-gaussian-splatting-rasterization.md) by using a global depth-sorted list rather than tile-based sorting [S3, unofficial].
 
 ## How it works
 **Inputs:**
-*   `SplatViewData`: An array of per-splat view-space data, including position, orientation (axis vectors), color (half-floats or SH coefficients), and opacity.
-*   `_OrderBuffer`: A pre-sorted array of splat indices, ordered by camera-space depth (front-to-back or back-to-front depending on blending setup).
+*   `SplatViewData`: Per-splat view-space data (position, orientation, color, opacity) [S2, unofficial].
+*   `_OrderBuffer`: Pre-sorted array of splat indices [S2, S3, unofficial].
 *   `MV`: Model-View matrix.
 *   `P`: Projection matrix.
 *   `_ScreenParams`: Screen resolution in pixels ($x, y$) [S2, S3, unofficial].
 *   `splatSize`, `scale`, `gridLength`: Parameters defining the physical size of the splat in world space [S1, unofficial].
 
 **Outputs:**
-*   Framebuffer with composited image using pre-multiplied alpha blending.
+*   Framebuffer with composited image using pre-multiplied alpha blending [G].
 
 **Data Structures:**
 *   **Vertex Buffer:** Contains 8 floats representing a unit quad: `[-2, -2, 2, -2, 2, 2, -2, 2]` [S3, unofficial].
@@ -49,8 +49,23 @@ This method renders 3D Gaussian splats as screen-space quads using a pre-sorted 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Vertex Shader Logic (Simplified)
-def vertex_shader(instance_id, quad_vertex_index):
+# Helper definitions
+def saturate(x: float) -> float:
+    return max(0.0, min(1.0, x))
+
+def mix(a: vec3, b: vec3, t: float) -> vec3:
+    return a + t * (b - a)
+
+# Inputs (uniforms/buffers)
+order_buffer: array of uint
+splat_view_data: array of SplatViewData
+projection_matrix: mat4
+screen_params: vec2
+splat_bits_valid: bool
+splat_selected_bits: array of uint
+selected_color: vec3 = vec3(1.0, 0.0, 1.0) # Magenta
+
+def vertex_shader(instance_id: uint, quad_vertex_index: uint) -> tuple:
     # 1. Map instance ID to splat index
     splat_index = order_buffer[instance_id]
     
@@ -60,10 +75,9 @@ def vertex_shader(instance_id, quad_vertex_index):
     # 3. Check if behind camera
     center_clip_pos = projection_matrix * view.view_position
     if center_clip_pos.w <= 0:
-        return NaN_VERTEX # Discard primitive
+        return None # Discard primitive
     
     # 4. Calculate quad position in clip space
-    # quad_vertex_index is 0, 1, 2, 3 for the quad vertices
     idx = quad_vertex_index
     quad_pos_x = (idx & 1) * 2.0 - 1.0
     quad_pos_y = ((idx >> 1) & 1) * 2.0 - 1.0
@@ -71,10 +85,9 @@ def vertex_shader(instance_id, quad_vertex_index):
     quad_pos_y *= 2.0
     
     # 5. Calculate screen delta
-    # view.axis1 and view.axis2 are the projected orientation vectors
     delta_screen_x = (quad_pos_x * view.axis1.x + quad_pos_y * view.axis2.x) * 2.0 / screen_params.x
     delta_screen_y = (quad_pos_x * view.axis1.y + quad_pos_y * view.axis2.y) * 2.0 / screen_params.y
-    delta_screen_pos = (delta_screen_x, delta_screen_y)
+    delta_screen_pos = vec2(delta_screen_x, delta_screen_y)
     
     # 6. Final vertex position
     final_vertex = center_clip_pos.xy + delta_screen_pos * center_clip_pos.w
@@ -90,8 +103,7 @@ def vertex_shader(instance_id, quad_vertex_index):
             
     return final_vertex, view.color.rgb, color_a
 
-# Fragment Shader Logic
-def fragment_shader(pos, color_rgb, color_a):
+def fragment_shader(pos: vec2, color_rgb: vec3, color_a: float) -> tuple:
     # 1. Gaussian falloff
     power = -dot(pos, pos)
     alpha = exp(power)
@@ -104,14 +116,14 @@ def fragment_shader(pos, color_rgb, color_a):
         if alpha > 7.0 / 255.0:
             if alpha < 10.0 / 255.0:
                 alpha = 1.0
-                color_rgb = selected_color # Magenta
+                color_rgb = selected_color
             else:
                 alpha = saturate(alpha + 0.3)
-                color_rgb = lerp(color_rgb, selected_color, 0.5)
+                color_rgb = mix(color_rgb, selected_color, 0.5)
                 
     # 3. Discard
     if alpha < 1.0 / 255.0:
-        discard()
+        return None # discard()
         
     # 4. Output
     return color_rgb * alpha, alpha
@@ -132,7 +144,7 @@ def fragment_shader(pos, color_rgb, color_a):
 ## Subtopics
 
 ### [WebGL Gaussian Splatting](2084-webgl-gaussian-splatting.md)
-WebGL Gaussian Splatting is a real-time rendering technique for 3D Gaussian Splatting (3DGS) scenes in web browsers, typically implemented using WebGL 1.0 and libraries like Three.js. It solves the problem of displaying large-scale, photorealistic radiance field reconstructions on standard client hardware without requiring neural network inference or heavy server-side processing. Unlike parent method [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md), which relies on a pre-sorted order buffer and view-space projection data, this method performs depth sorting in a JavaScript Web Worker and projects 3D Gaussians into screen-space quads using custom vertex and fragment shaders. It sets itself apart from sibling [Gaussian Splat Fragment Shader](3258-gaussian-splat-fragment-shader.md) by providing the complete pipeline, including data parsing, instance matrix construction, and CPU-side sorting, rather than just the shading logic.
+WebGL Gaussian Splatting is a real-time rendering technique for 3D Gaussian Splatting (3DGS) scenes in web browsers, typically implemented using WebGL 1.0 and libraries like Three.js. It solves the problem of displaying large-scale, photorealistic radiance field reconstructions on standard client hardware without requiring neural network inference or heavy server-side processing. Unlike parent method [Gaussian Splat Rendering (Screen-Space Quad)](2075-gaussian-splat-rendering-screen-space-quad.md), which relies on a pre-sorted order buffer and view-space projection data, this method performs depth sorting in a JavaScript Web Worker and projects 3D Gaussians into screen-space quads using custom vertex and fragment shaders. It sets itself apart from sibling [Gaussian Splat Fragment Shader](3258-gaussian-splat-fragment-fragment-shader.md) by providing the complete pipeline, including data parsing, instance matrix construction, and CPU-side sorting, rather than just the shading logic.
 
 ### [Gaussian Splat Fragment Shader](3258-gaussian-splat-fragment-shader.md)
 The Gaussian Splat Fragment Shader evaluates the 2D Gaussian alpha value at each fragment to determine splat coverage and modulates the fragment color accordingly. It composites the new splat over the existing framebuffer color using pre-multiplied alpha blending. It is distinguished from its parent method by handling the per-pixel transparency logic, alpha cutoffs, and framebuffer packing directly in the fragment stage, rather than relying on CPU-side sorting or generic quad rasterization [G].
@@ -150,10 +162,10 @@ Renders small quads at the center of each splat for debugging, optionally displa
 *   **Layout:** Input: `float _SplatSize; bool _DisplayIndex; int _SplatCount` [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Sorting is $O(N \log N)$ on the CPU (or in a Web Worker) [S3, unofficial]. Rendering is $O(N)$ for vertex processing and $O(P)$ for fragment processing, where $N$ is the number of splats and $P$ is the number of pixels.
+*   **Time Complexity:** Sorting is $O(N \log N)$ on the CPU (or in a Web Worker) [S3, S4, unofficial]. Rendering is $O(N)$ for vertex processing and $O(P)$ for fragment processing, where $N$ is the number of splats and $P$ is the number of pixels [G].
 *   **Memory Complexity:** $O(N)$ for storing splat data and order buffer [S3, unofficial].
 *   **Measured Performance:** Real-time performance is achievable on WebGL 1.0 hardware with optimized sorting [S3, unofficial].
-*   **Strengths:** Simple implementation, compatible with standard graphics APIs, efficient for static scenes [S3, unofficial].
+*   **Strengths:** Compatible with standard graphics APIs via WebGL instanced drawing [S3, unofficial].
 *   **Limitations:** Sorting on CPU/Worker can be a bottleneck for very large scenes; not suitable for dynamic scenes with frequent splat updates without careful optimization [S3, unofficial].
 *   **When to Use:** Static or slowly changing 3DGS scenes, web-based viewers [S3, unofficial].
 *   **When Not to Use:** Highly dynamic scenes with frequent splat additions/removals, or scenes requiring real-time sorting on the GPU [S3, unofficial].
@@ -165,3 +177,4 @@ Originated from the need to render 3D Gaussian Splatting scenes in web browsers 
 [S1] mmalesadev/svo_renderer, https://github.com/mmalesadev/svo_renderer, fetched 2026-10-26 (unofficial)
 [S2] aras-p/UnityGaussianSplatting, https://github.com/aras-p/UnityGaussianSplatting, fetched 2026-10-26 (unofficial)
 [S3] huggingface/gsplat.js, https://github.com/huggingface/gsplat.js, fetched 2026-10-27 (unofficial)
+[S4] Explore: Gaussian splatting, OpenUSD, AI world generation, volumetric video — study, https://github.com/sceneview/sceneview/issues/4023, fetched 2026-10-27 (unofficial)
