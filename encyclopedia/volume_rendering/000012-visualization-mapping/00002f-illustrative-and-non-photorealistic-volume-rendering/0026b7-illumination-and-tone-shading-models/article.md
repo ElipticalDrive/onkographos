@@ -1,31 +1,60 @@
 # Illumination and Tone Shading Models
 
+Also called: Illustrative Lighting, NPR Illumination
 
 ## Overview
-Illumination and Tone Shading Models provide non-photorealistic lighting cues to enhance the visual clarity and artistic style of volume renderings [G]. Unlike photometric models that simulate physical light transport, these methods map geometric or scalar properties to pre-defined color variations, prioritizing interpretability and aesthetic control over physical accuracy [G]. They are distinct from [Geometric Buffers](781-geometric-buffers-g-buffers.md) by focusing on color modulation rather than depth/normal encoding, and from [Base Gaseous Illumination Renderer](794-base-gaseous-illumination-renderer.md) by incorporating directed shading components [G].
+Illumination and Tone Shading Models are non-photorealistic rendering techniques that enhance volume visualization by decoupling lighting from physical light transport, using mathematical functions of view direction, light direction, and scalar field properties to modulate color [S4, unofficial]. They solve the problem of missing depth cues and feature abstraction in translucent volume rendering by simulating artistic lighting styles, such as painterly effects, cel-shading, or warm-to-cool gradients, rather than calculating realistic radiance [S1, S2, unofficial]. Unlike photometric models, these methods map normal vectors or scalar values directly to pre-computed artistic colors or discrete tone bands, providing view-dependent or orientation-dependent shading that rotates with the camera or adapts to local data structure [S1, S2, unofficial].
 
 ## Shared principles
-See [Illustrative and non-photorealistic volume rendering](40-illustrative-and-non-photorealistic-volume-rendering.md) for the family's shared principles.
+The family shares the goal of enhancing volume visualization through stylized lighting and feature abstraction [G]. All methods operate on fragment-level data, typically utilizing the volume sample gradient as a proxy for surface normal orientation [G]. They decouple illumination from the physical light transport equation, instead using mathematical functions of the view direction, light direction, and scalar field properties to modulate color [S4, unofficial]. Common inputs include the normalized gradient $\nabla f_n$, light vectors $L$, and base colors derived from transfer functions [G]. The output is a final color $c$ that combines ambient/gaseous components with directed illumination effects [G].
+
+The framework utilizes four types of properties for enhancement:
+1. Volume sample location and value [S4, unofficial].
+2. Local volumetric properties, such as gradient and minimal change direction [S4, unofficial].
+3. View direction [S4, unofficial].
+4. Light information [S4, unofficial].
+
+Volumetric illustration differs from surface-based NPR in several important ways [S2, S4, unofficial]. In surface NPR, surfaces (features) are well-defined, whereas with volumes, feature areas within the volume must be determined through analysis of local volumetric properties because volumetric features vary continuously throughout three-dimensional space [S2, S4, unofficial].
 
 ## Subtopics
 
-[Lit Sphere Shading](785-lit-sphere-shading.md) uses an image of a sphere as a lookup table for view-dependent lighting, mapping eye-space normals directly to pre-computed artistic styles while ignoring front/back face ambiguity [S1, unofficial]. Choose this for stylized, view-dependent lighting that rotates with the camera.
+### [Lit Sphere Shading](785-lit-sphere-shading.md)
+Maps eye-space normal vectors to a pre-computed sphere texture to capture artistic lighting styles. It provides view-dependent lighting that rotates with the camera, ignoring front/back face ambiguity.
 
-[Volume Illustration Tone Shading](805-volume-illustration-tone-shading.md) combines gaseous illumination with directed shading based on the signed dot product between the gradient and light vector, using continuous warm/cool color interpolation [S1, unofficial]. Choose this for realistic yet stylized volume rendering with clear directional cues.
+### [Orientation-Based Color Modification](798-orientation-based-color-modification.md)
+Adjusts HSV color components based on the angle between the gradient and view direction. It simulates painterly effects where facing surfaces are desaturated/bright and receding surfaces are darkened/saturated.
 
-[Vignette Shading](1830-vignette-shading.md) applies a cubic vignette effect based on the alignment between ray direction and the z-axis [S1, unofficial]. Choose this for adding depth and focus to the volume.
+### [Volume Illustration Tone Shading](805-volume-illustration-tone-shading.md)
+Maps gradient orientation relative to a light source to a warm-to-cool color gradient. It uses a positive dot product threshold to ensure zero contribution at orthogonal orientations, matching diffuse illumination models.
 
-[Blinn-Phong Toon Shading](4708-blinn-phong-toon-shading.md) is a toon-shaded variant of Blinn-Phong that posterizes diffuse lighting and harshly cuts specular reflections [S1, unofficial]. Choose this for discrete, cartoon-like lighting effects.
+### [Vignette Shading](1830-vignette-shading.md)
+A post-processing effect that darkens image corners based on the cubic alignment between ray direction and pixel frame normal, simulating projection falloff.
 
-[Volumetric Toon Shading](5276-volumetric-toon-shading.md) simulates toon shading using a 3D normal map and hardware texture combiners [S1, unofficial]. Choose this for efficient, hardware-accelerated cel shading without explicit surface vertices.
+### [Blinn-Phong Toon Shading](4708-blinn-phong-toon-shading.md)
+Applies Blinn-Phong lighting followed by aggressive quantization (posterization) of diffuse bands and binary thresholding of specular highlights.
 
-[Lighting Transfer Function with Gradient Aligned Sampling](7966-lighting-transfer-function-with-gradient-aligned-sampling.md) enhances material boundaries by using two scalar samples taken along the normalized gradient direction as inputs to a 2D lighting transfer function, while the center sample is used for color/opacity [S1, unofficial]. Choose this when precise boundary highlighting is required.
+### [Volumetric Toon Shading](5276-volumetric-toon-shading.md)
+Applies cel-shading to volumetric data using a pre-computed 3D normal map and hardware texture combiners, operating directly on the voxel gradient field without mesh extraction.
+
+### [Lighting Transfer Function with Gradient Aligned Sampling](7966-lighting-transfer-function-with-gradient-aligned-sampling.md)
+Enhances material boundaries by using two scalar samples along the gradient direction as inputs to a 2D lighting transfer function, dynamically adjusting lighting coefficients based on local data structure.
 
 ### Banks Illumination Model for Curves
-Uses the illumination model for curves of Banks [12] in the rendering to provide a better sense of curvature [S1, unofficial]. Line bundles can be more opaque in this variant [S1, unofficial].
+Uses the illumination model for curves of Banks to provide a better sense of curvature in line bundle rendering. Line bundles can be more opaque in this variant. [S1, unofficial]
+
+### Tone Rendering
+A non-photorealistic rendering method used to visualize important information in an abstract but coherent way. [S2, unofficial]
+
+### Banks Illumination Model for Curves
+- **Step**: Use the illumination model for curves of Banks [12] in the rendering to provide a better sense of curvature [S1, unofficial].
+- **Parameter**: Line bundles can be more opaque in this variant [S1, unofficial].
+
+### Tone Rendering
+- **Definition**: A non-photorealistic rendering method used to visualize important information in an abstract but coherent way [S2, unofficial].
 
 ## Background
-The concept of non-photorealistic volume rendering emerged to address the ambiguity of standard volume rendering, where internal structures can be hard to distinguish [G]. Early work focused on enhancing edge detection and silhouette rendering [G]. The specific illumination models in this family, such as Lit Sphere Shading and Volume Illustration Tone Shading, were developed to provide intuitive lighting cues that help viewers perceive shape and depth in volumetric data without the computational cost of full global illumination [G]. These techniques are widely used in medical visualization, scientific data exploration, and artistic volume rendering [G].
+The concept of Tone Rendering as a non-photorealistic method for abstract visualization was introduced in the context of volume visualization methods, contrasting with Phong Illumination which guarantees higher realistic images [S2, unofficial]. The Banks illumination model for curves was applied in flow visualization techniques to enhance the perception of curvature in vector fields [S1, unofficial]. These methods emerged as part of the broader field of Illustrative and Non-Photorealistic Volume Rendering, aiming to improve feature perception and artistic style over physical accuracy.
 
 ## Sources
 [S1] Flow Visualization Techniques for CDF using Volume Rendering, https://www.osti.gov/servlets/purl/790542, fetched 2026-10-26 (unofficial)
+[S2] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)

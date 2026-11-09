@@ -3,15 +3,15 @@
 Also called: Möller-Trumbore, MT Algorithm, Ray-Triangle Intersection (Möller-Trumbore)
 
 ## Overview
-The Möller-Trumbore algorithm computes the intersection of a ray with a triangle by solving for the parametric distance $t$ and barycentric coordinates $(u, v)$ directly, avoiding the explicit calculation or storage of the triangle's plane equation [S7, unofficial]. It builds on [General Ray-Triangle Intersection (Plücker Coordinates)](909-general-ray-triangle-intersection-pl-cker-coordinates.md) by using a change of basis to decouple the intersection test from plane geometry, offering significant memory savings for meshes without precomputed planes [S7, unofficial]. Unlike [Axis-Aligned Ray-Triangle Intersection (Plücker Coordinates)](911-axis-aligned-ray-triangle-intersection-pl-cker-coordinates.md), it handles arbitrary ray directions without axis-specific optimizations.
+The Möller-Trumbore algorithm computes the intersection of a ray with a triangle by solving for the parametric distance $t$ and barycentric coordinates $(u, v)$ directly, avoiding the explicit calculation or storage of the triangle's plane equation [S7, unofficial]. It builds on [General Ray-Triangle Intersection (Plücker Coordinates)](909-general-ray-triangle-intersection-pl-cker-coordinates.md) by using a change of basis to decouple the intersection test from plane geometry, offering significant memory savings for meshes without precomputed planes [S7, unofficial].
 
 ## How it works
-**Inputs:** Ray origin $\mathbf{O}$, ray direction $\mathbf{D}$ (assumed normalized, though not strictly required for correctness, only for $t$ interpretation), and triangle vertices $\mathbf{V}_1, \mathbf{V}_2, \mathbf{V}_3$.
-**Outputs:** Boolean indicating intersection, and if true, the parametric distance $t$ along the ray and barycentric coordinates $u, v$.
+**Inputs:** Ray origin $\mathbf{O}$, ray direction $\mathbf{D}$, and triangle vertices $\mathbf{V}_1, \mathbf{V}_2, \mathbf{V}_3$ [S1, S5, unofficial].
+**Outputs:** Boolean indicating intersection, and if true, the parametric distance $t$ along the ray and barycentric coordinates $u, v$ [S2, unofficial].
 
 **Data Structures:**
-*   Vectors $\mathbf{O}, \mathbf{D}, \mathbf{V}_1, \mathbf{V}_2, \mathbf{V}_3$: 3D floating-point vectors.
-*   Scalars $t, u, v, \text{det}, \text{inv\_det}$: 32-bit or 64-bit floats.
+*   Vectors $\mathbf{O}, \mathbf{D}, \mathbf{V}_1, \mathbf{V}_2, \mathbf{V}_3$: 3D floating-point vectors (typically `double` or `float`) [S2, S5, unofficial].
+*   Scalars $t, u, v, \text{det}, \text{inv\_det}$: 32-bit or 64-bit floats [S2, S5, unofficial].
 
 **Steps:**
 1.  Compute edge vectors:
@@ -23,21 +23,21 @@ The Möller-Trumbore algorithm computes the intersection of a ray with a triangl
     $$ \mathbf{pvec} = \mathbf{D} \times \mathbf{e}_2 $$
 4.  Compute the determinant of the system:
     $$ \text{det} = \mathbf{e}_1 \cdot \mathbf{pvec} $$
-5.  Check for parallelism. If $|\text{det}| < \epsilon$, the ray is parallel to the triangle plane and does not intersect (or lies in it). Return false.
-    *   Typical $\epsilon$: $10^{-7}$ to $10^{-6}$ [S1, S2, S5, S6, unofficial].
+5.  Check for parallelism. If $|\text{det}| < \epsilon$, the ray is parallel to the triangle plane and does not intersect (or lies in it) [S6, unofficial].
+    *   Typical $\epsilon$: $10^{-6}$ in [S1, S2, S5, unofficial] and $10^{-7}$ in [S6, unofficial] (some implementations use $10^{-8}$ [S3, unofficial]).
 6.  Compute the inverse determinant:
     $$ \text{inv\_det} = 1.0 / \text{det} $$
 7.  Compute the first barycentric coordinate $u$:
     $$ u = (\mathbf{T} \cdot \mathbf{pvec}) \times \text{inv\_det} $$
-    If $u < 0.0$ or $u > 1.0$, the intersection point is outside the triangle edge. Return false.
+    If $u < 0.0$ or $u > 1.0$, the intersection point is outside the triangle edge [S1, unofficial]. Return false.
 8.  Compute the cross product of $\mathbf{T}$ and the first edge:
     $$ \mathbf{qvec} = \mathbf{T} \times \mathbf{e}_1 $$
 9.  Compute the second barycentric coordinate $v$:
     $$ v = (\mathbf{D} \cdot \mathbf{qvec}) \times \text{inv\_det} $$
-    If $v < 0.0$ or $u + v > 1.0$, the intersection point is outside the triangle. Return false.
+    If $v < 0.0$ or $u + v > 1.0$, the intersection point is outside the triangle [S1, unofficial]. Return false.
 10. Compute the parametric distance $t$:
     $$ t = (\mathbf{e}_2 \cdot \mathbf{qvec}) \times \text{inv\_det} $$
-    If $t < 0.0$, the intersection is behind the ray origin. Return false.
+    If $t < 0.0$, the intersection is behind the ray origin [G]. Return false.
 11. Return true with $t, u, v$.
 
 **Pseudocode:**
@@ -90,19 +90,19 @@ def muller_trumbore(O, D, V1, V2, V3, epsilon=1e-7):
 
 **Edge Cases and Pitfalls:**
 *   **Parallel Rays:** If $\text{det}$ is near zero, division by zero occurs. The epsilon check prevents this [S1, S2, S5, S6, unofficial].
-*   **Degenerate Triangles:** If vertices are collinear, $\mathbf{e}_1$ and $\mathbf{e}_2$ are parallel, making $\text{det}$ zero. The algorithm correctly rejects these as parallel/non-intersecting.
+*   **Degenerate Triangles:** If vertices are collinear, $\mathbf{e}_1$ and $\mathbf{e}_2$ are parallel, making $\text{det}$ zero. The algorithm correctly rejects these as parallel/non-intersecting [S1, S6, unofficial].
 *   **Back-Facing:** The algorithm returns intersections for both front and back faces. The caller must check the dot product of the triangle normal and ray direction to cull back-faces if desired [S6, unofficial].
-*   **Precision:** Using a fixed epsilon is standard, but for very large or very small scenes, relative epsilon based on triangle size may be more robust [G].
+*   **Precision:** Using a fixed epsilon is standard, but for very large or very small scenes, relative epsilon based on triangle size may be more robust [G]. Precision issues can arise with extremely thin triangles or rays nearly parallel to the plane if epsilon is not chosen carefully [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per triangle. It involves a constant number of vector operations (subtractions, cross products, dot products) and one division.
-*   **Memory Complexity:** $O(1)$ auxiliary space. No plane equation needs to be precomputed or stored, saving memory compared to plane-based methods [S7, unofficial].
+*   **Time Complexity:** $O(1)$ per triangle [G]. It involves a constant number of vector operations (subtractions, cross products, dot products) and one division [G].
+*   **Memory Complexity:** $O(1)$ auxiliary space [G]. No plane equation needs to be precomputed or stored, saving memory compared to plane-based methods [S7, unofficial].
 *   **Performance:** It is widely considered the fastest general-purpose ray-triangle intersection routine for meshes without precomputed plane equations [S7, unofficial].
 *   **Strengths:** Minimal storage, fast execution, numerically stable with epsilon checks.
-*   **Limitations:** Does not handle back-face culling internally; requires caller to check normal if needed. Precision issues can arise with extremely thin triangles or rays nearly parallel to the plane if epsilon is not chosen carefully.
+*   **Limitations:** Does not handle back-face culling internally; requires caller to check normal if needed. Precision issues can arise with extremely thin triangles or rays nearly parallel to the plane if epsilon is not chosen carefully [S2, unofficial].
 
 ## Background
-The algorithm was presented by Tomas Möller and Ben Trumbore in the 1997 paper "Fast, Minimum Storage Ray/Triangle Intersection" [S7, unofficial]. It was developed to provide a clean, efficient alternative to methods requiring plane equation computation, leveraging a change of basis to solve for barycentric coordinates directly. It is a fundamental building block in ray tracing and volume rendering for determining ray-primitive intersections [S1, S4, S5, unofficial].
+The algorithm was presented by Tomas Möller and Ben Trumbore in the paper "Fast, Minimum Storage Ray/Triangle Intersection" (cited as 1997 in implementation notes [S1, unofficial], published in 2005 [S7, unofficial]). It was developed to provide a clean, efficient alternative to methods requiring plane equation computation, leveraging a change of basis to solve for barycentric coordinates directly [S7, unofficial]. It is a fundamental building block in ray tracing and volume rendering for determining ray-primitive intersections [S1, S4, S5, unofficial].
 
 ## Sources
 [S1] idealab-isu/GPView, https://github.com/idealab-isu/GPView, fetched 2026-10-26 (unofficial)

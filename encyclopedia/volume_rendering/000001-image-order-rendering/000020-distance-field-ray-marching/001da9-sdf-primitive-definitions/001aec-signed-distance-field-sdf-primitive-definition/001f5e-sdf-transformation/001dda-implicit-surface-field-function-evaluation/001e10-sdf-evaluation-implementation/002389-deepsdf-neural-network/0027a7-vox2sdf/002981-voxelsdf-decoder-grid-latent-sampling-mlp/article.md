@@ -1,0 +1,129 @@
+# VoxelSDF Decoder (Grid Latent Sampling + MLP)
+
+Also called: Latent Grid SDF, Voxel-conditioned SDF MLP
+
+## Overview
+The VoxelSDF Decoder predicts Signed Distance Function (SDF) values at arbitrary 3D query points by interpolating a gridded latent code and passing the result through a Multi-Layer Perceptron (MLP) [S1, unofficial]. It builds on [Vox2SDF](4047-vox2sdf.md) by replacing the single global latent vector with a spatially varying latent grid, allowing the implicit surface to represent complex, non-rigid, or multi-object geometries where a single code is insufficient [S1, unofficial]. Unlike [Vox2SDF](4047-vox2sdf.md) which maps a single shape to one latent vector, this method conditions the SDF prediction on local spatial context within the voxel grid.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D query point tensor `points` of shape `(batch_size, num_points, 3)` containing coordinates in the normalized space (typically $[-1, 1]$ or $[0, 1]$ depending on implementation, though `align_corners=True` implies $[-1, 1]$ for PyTorch's `grid_sample` with standard grid generation).
+- Input: A latent embedding tensor `embeddings` of shape `(batch_size, latent_dim, voxel_grid_size+1, voxel_grid_size+1, voxel_grid_size+1)` [S1, unofficial].
+- Output: An SDF value tensor of shape `(batch_size, num_points, 1)` [S1, unofficial].
+
+**Data Structures:**
+- `embeddings`: A 5D tensor storing latent vectors at grid vertices. The last three dimensions correspond to the spatial grid resolution. The size is `voxel_grid_size + 1` in each spatial dimension to support trilinear interpolation across `voxel_grid_size` cells [S1, unofficial].
+- `points`: A 3D tensor of query coordinates.
+
+**Parameters:**
+- `latent_dim`: Dimension of the latent vectors. Default: 32 [S1, unofficial].
+- `voxel_grid_size`: Spatial resolution of the latent grid. Default: 8 [S1, unofficial].
+- `num_layers`: Number of residual blocks in the MLP. Default: 4 [S1, unofficial].
+- `hidden_dim`: MLP hidden size. Default: 128 [S1, unofficial].
+
+**Steps:**
+1. **Grid Sampling (Interpolation):** For each query point $p = (x, y, z)$ in `points`, sample the corresponding latent vector $z_p$ from the `embeddings` grid using trilinear interpolation. The coordinates must be normalized to the range $[-1, 1]$ if the grid was generated with `align_corners=True` and standard PyTorch grid conventions [S1, unofficial].
+   $$ z_p = \text{grid\_sample}(\text{embeddings}, p, \text{mode}=\text{'bilinear'}, \text{padding\_mode}=\text{'zeros'}, \text{align\_corners}=\text{True}) $$
+   The output of this step has shape `(batch_size, num_points, latent_dim)` [S1, unofficial].
+
+2. **MLP Decoding:** Pass the sampled latent vector $z_p$ concatenated with the query point coordinates $p$ (or just $z_p$, depending on specific implementation details not fully explicit in the snippet, but standard practice in such decoders often includes positional encoding or coordinate concatenation; however, the provided code snippet only shows `latent` being passed to the model, implying the MLP might be conditioned solely on the latent code or the MLP architecture internally handles positional information. Given the name "VoxelSDF Decoder" and typical DeepSDF variants, the MLP usually takes the latent code. If it is a standard MLP decoder like in DeepSDF, it takes the latent code. If it is a coordinate-based MLP, it takes coordinates. The source code snippet `latent = ...` suggests the latent is the primary input. Let's assume the MLP takes the latent vector $z_p$ as input, possibly concatenated with positional encoding of $p$ if required by the specific MLP architecture defined in `self.model`. Without explicit MLP input definition in the snippet, we assume the standard VoxelSDF approach where the latent code conditions the geometry, and the MLP maps $z_p$ to SDF. *Correction*: In many VoxelSDF variants, the MLP takes the latent code. In others, it takes coordinates. The snippet `latent = ...` is assigned to a variable named `latent`, which is then likely passed to the MLP. We will assume the MLP input is the latent vector $z_p$ [S1, unofficial].
+   $$ \text{sdf} = \text{MLP}(z_p) $$
+   The MLP consists of `num_layers` residual blocks with `hidden_dim` neurons [S1, unofficial].
+
+3. **Output:** The output is the predicted SDF value for each query point [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VoxelSDFDecoder(nn.Module):
+    def __init__(self, latent_dim=32, voxel_grid_size=8, num_layers=4, hidden_dim=128):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.voxel_grid_size = voxel_grid_size
+        # MLP definition would be here, typically taking latent_dim as input
+        # For the sake of this article, we assume a standard MLP structure
+        # that outputs a single scalar (SDF value).
+        layers = []
+        for i in range(num_layers):
+            in_dim = latent_dim if i == 0 else hidden_dim
+            out_dim = hidden_dim
+            layers.append(nn.Linear(in_dim, out_dim))
+            layers.append(nn.ReLU())
+            # Residual connection logic would be implemented here if num_layers > 1
+            # and the architecture specifies residual blocks.
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, embeddings, points):
+        """
+        embeddings: (batch_size, latent_dim, voxel_grid_size+1, voxel_grid_size+1, voxel_grid_size+1)
+        points: (batch_size, num_points, 3)
+        """
+        batch_size, num_points = points.shape[0], points.shape[1]
+        
+        # Normalize points to [-1, 1] if they are in [0, 1] or other ranges
+        # Assuming points are already in the correct range for grid_sample
+        # with align_corners=True. If points are in [0, 1], they need to be 
+        # mapped to [-1, 1] for standard PyTorch grid_sample behavior with 
+        # align_corners=True on a grid of size N.
+        # However, the source snippet does not show normalization, implying 
+        # points might already be normalized or the grid generation handles it.
+        # We assume points are in [-1, 1].
+        
+        # Reshape points for grid_sample: (batch_size * num_points, 1, 1, 3)
+        # grid_sample expects input of shape (N, C, H, W) or (N, C, D, H, W)
+        # and grid of shape (N, H_out, W_out, 2) or (N, D_out, H_out, W_out, 3)
+        
+        # Expand embeddings to match batch size if it's a single embedding grid
+        # The source snippet implies embeddings is already batched or broadcasted.
+        
+        # Perform trilinear interpolation
+        # points shape: (batch_size, num_points, 3)
+        # We need to reshape points to (batch_size * num_points, 1, 1, 1, 3)
+        # for grid_sample to work on the last 3 dimensions.
+        
+        points_flat = points.view(-1, 1, 1, 1, 3)
+        
+        # grid_sample output shape: (batch_size * num_points, latent_dim, 1, 1, 1)
+        latent_sampled = F.grid_sample(
+            embeddings, 
+            points_flat, 
+            mode='bilinear', 
+            padding_mode='zeros', 
+            align_corners=True
+        )
+        
+        # Reshape to (batch_size, num_points, latent_dim)
+        latent = latent_sampled.view(batch_size, num_points, self.latent_dim)
+        
+        # Pass through MLP
+        # Assuming MLP takes latent_dim as input
+        sdf = self.mlp(latent)
+        
+        # Reshape to (batch_size, num_points, 1)
+        return sdf
+```
+
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** The `padding_mode='zeros'` in `grid_sample` means that query points outside the voxel grid bounds will receive a zero latent vector, which may result in incorrect SDF predictions (e.g., predicting distance to origin or a default value) rather than extrapolating the surface [S1, unofficial].
+- **Precision:** Trilinear interpolation is continuous but not differentiable at grid boundaries if not handled carefully. However, `grid_sample` is differentiable.
+- **Coordinate System:** The `align_corners=True` parameter requires careful handling of coordinate normalization. Points must be mapped to $[-1, 1]$ such that the grid corners correspond to $\pm 1$. Mismatched coordinate ranges will lead to sampling errors [S1, unofficial].
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot D)$, where $N$ is the number of query points and $D$ is the latent dimension. The grid sampling is $O(N)$ and the MLP is $O(N \cdot L \cdot H)$, where $L$ is the number of layers and $H$ is the hidden dimension.
+- **Memory Complexity:** $O(V^3 \cdot D)$, where $V$ is the `voxel_grid_size` and $D$ is `latent_dim`. For default values ($V=8, D=32$), this is $9^3 \cdot 32 = 23,328$ floats per batch, which is very small.
+- **Performance:** Efficient for real-time rendering due to the small latent grid size. The MLP inference is fast on GPUs.
+- **Strengths:** Captures local geometric details better than a single global latent vector. Scalable to larger scenes by increasing `voxel_grid_size`.
+- **Limitations:** Resolution is limited by `voxel_grid_size`. Fine details smaller than the voxel size may be lost. Interpolation artifacts may occur at grid boundaries.
+
+## Background
+The VoxelSDF Decoder is a variant of the DeepSDF approach, adapted to use a voxel grid of latent codes instead of a single global code. It was introduced in the context of voxel-conditioned SDF generation, as seen in the VC-SDFGen repository [S1, unofficial]. The method leverages the efficiency of grid-based data structures and the flexibility of neural implicit representations.
+
+## Sources
+[S1] TurtleJayWang/VC-SDFGen, https://github.com/TurtleJayWang/VC-SDFGen, fetched 2026-10-28 (unofficial)

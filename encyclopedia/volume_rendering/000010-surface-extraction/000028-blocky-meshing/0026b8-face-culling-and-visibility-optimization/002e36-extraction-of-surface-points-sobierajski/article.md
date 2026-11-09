@@ -1,125 +1,99 @@
 # Extraction of Surface Points (Sobierajski)
+
 Also called: Sobierajski's method, Visible boundary voxel extraction
 
 ## Overview
-A fast display method for direct rendering of boundary surfaces by extracting only visible boundary voxels from volume data [S1, unofficial]. It differs from sibling methods like [Face Culling](8735-face-culling.md) which operate on mesh primitives after assembly; Sobierajski's method operates on the voxel grid directly, projecting voxels to the image plane to avoid holes and using viewing-direction-based culling to reduce the list size before rendering [S1, unofficial].
+A fast display method for direct rendering of boundary surfaces by extracting only visible boundary voxels from volume data [S1, unofficial]. It sets itself apart from sibling methods like [Face Culling and Visibility Optimization](3861-face-culling-and-visibility-optimization.md) by operating on a per-voxel basis using global viewing directions rather than local neighbor checks, and from [Face Coverage Mask Culling](3397-face-coverage-mask-culling.md) by relying on 2D boundary tracing rather than coverage masks.
 
 ## How it works
-**Inputs:** Volume data (density values), viewing directions (typically six orthographic views along coordinate axes), lighting conditions, optional cutting planes.
-**Outputs:** A list of visible boundary voxels with attributes (coordinates, normal vectors) passed to a rendering engine.
+**Inputs:** 3D volume data grid; set of viewing directions (typically six orthographic views along coordinate axes) [S1, unofficial].
+**Outputs:** List of visible boundary voxels with attributes (coordinates, normal vectors) [S1, unofficial].
 
 **Data Structures:**
-*   `BoundaryVoxelList`: A list of objects. Each object contains:
-    *   `coords`: $(x, y, z)$ integer indices of the voxel.
-    *   `normal`: $(n_x, n_y, n_z)$ surface normal vector.
-    *   `density`: Original density value (for cutting plane rendering).
+*   `VolumeGrid`: 3D array of density/occupancy values.
+*   `BoundaryList`: List of objects, each containing `position` (x, y, z) and `normal` (nx, ny, nz).
 
 **Steps:**
-1.  **Visibility Determination via 2D Boundary Tracing:**
-    For each of the chosen viewing directions (e.g., $\pm x, \pm y, \pm z$):
-    a.  Iterate through slices perpendicular to the current axis.
-    b.  Perform a 2D boundary tracing algorithm on each slice to identify boundary voxels visible from that direction [S1, unofficial].
-    c.  A voxel is considered visible if it is on the boundary and not occluded by other voxels in that specific viewing direction.
-
-2.  **List Assembly and Deduplication:**
-    a.  Collect all identified boundary voxels from all viewing directions.
-    b.  Remove duplicate elements from the list. Each voxel in the final list stores its coordinates and normal vector [S1, unofficial].
-
-3.  **Voxel Culling (Backface Culling):**
-    For each voxel in the list, for the current viewing direction $\mathbf{v}$:
-    a.  Calculate the dot product $d = \mathbf{n} \cdot \mathbf{v}$, where $\mathbf{n}$ is the voxel's surface normal.
-    b.  If $d > 0$, the voxel is a back face relative to the viewing direction. Cull it (do not render) [S1, unofficial].
-    c.  If $d \le 0$, keep the voxel for rendering.
-
-4.  **Projection and Rendering:**
-    a.  Project each remaining voxel onto the image plane.
-    b.  To avoid holes caused by adjacent voxels mapping to non-adjacent pixels, project each voxel onto several pixels depending on the viewing direction [S1, unofficial].
-    c.  Shade the projected boundary surface points according to lighting conditions.
-    d.  If cutting planes are defined, render voxels intersected by the cutting planes by projecting their original density values onto the image plane [S1, unofficial].
+1.  **Visibility Determination:** For each of the $N$ viewing directions $\vec{v}_i$, determine which boundary voxels are potentially visible. For the standard six orthographic views, this is performed efficiently using a 2D boundary tracing algorithm on slices perpendicular to each coordinate axis [S1, unofficial].
+2.  **Extraction and Deduplication:** Collect all voxels identified as visible in any direction. Remove duplicate entries from the list [S1, unofficial].
+3.  **Attribute Storage:** For each unique boundary voxel, compute and store necessary rendering attributes, specifically its 3D coordinates and surface normal vector [S1, unofficial].
+4.  **Back-face Culling:** For a specific viewing direction $\vec{v}$, reduce the voxel list size. If the dot product of the surface normal $\vec{n}$ and the viewing direction $\vec{v}$ is positive, the voxel is a back face and is not rendered:
+    $$ \vec{n} \cdot \vec{v} > 0 \implies \text{discard voxel} $$
+    [S1, unofficial].
+5.  **Projection:** Project each remaining voxel onto the image plane. To avoid holes caused by adjacent voxels mapping to non-adjacent pixels, project each voxel onto several pixels depending on the viewing direction [S1, unofficial].
+6.  **Rendering:** Pass the set of surface points to the rendering engine. Shade the projected boundary surface points according to lighting conditions [S1, unofficial]. If cutting planes are used, voxels intersected by the plane are rendered by projecting their original density values onto the image plane [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def extract_visible_boundary_voxels(volume, viewing_directions):
+def extract_visible_boundary_voxels(volume_grid, viewing_directions):
     """
     Extracts visible boundary voxels using Sobierajski's method.
-    volume: 3D array of density values.
-    viewing_directions: List of 3D vectors (e.g., unit vectors along axes).
-    Returns: List of visible BoundaryVoxel objects.
-    """
-    visible_voxels = set() # Use set to handle duplicates automatically
-
-    # Step 1 & 2: Visibility Determination and List Assembly
-    for view_dir in viewing_directions:
-        # Determine visibility using 2D boundary tracing on slices perpendicular to view_dir
-        # This is a placeholder for the specific 2D tracing algorithm details
-        # which are not fully specified in the source but implied to be efficient
-        # for orthographic views along axes.
-        boundary_voxels = perform_2d_boundary_tracing(volume, view_dir)
-        
-        for voxel in boundary_voxels:
-            # Store attributes necessary for rendering
-            visible_voxels.add(voxel)
-
-    # Convert set to list for processing
-    voxel_list = list(visible_voxels)
     
-    # Step 3: Voxel Culling (Backface Culling)
-    rendered_voxels = []
-    for voxel in voxel_list:
-        # Calculate dot product of surface normal and viewing direction
-        # Note: The source implies culling is done per viewing direction context
-        # or globally if normals are consistent. Here we assume a global check
-        # or per-view check depending on implementation. 
-        # The source says: "for a specific viewing direction... dot product... is positive... not rendered"
-        # We assume the rendering engine handles the view direction context.
-        # For the extraction phase, we keep all potentially visible ones, 
-        # and culling happens at render time or as a pre-filter.
-        # However, the text says "number of voxels to be projected can be reduced by voxel culling".
-        # This implies we filter the list before projection.
+    Args:
+        volume_grid: 3D array of density values.
+        viewing_directions: List of 3D vectors representing camera/view directions.
         
-        # Assuming we are rendering for a specific view_dir at this stage:
-        if dot_product(voxel.normal, view_dir) <= 0:
-            rendered_voxels.append(voxel)
-            
-    return rendered_voxels
+    Returns:
+        visible_voxels: List of dicts with 'pos' and 'normal'.
+    """
+    all_boundary_voxels = []
+    
+    # Step 1 & 2: Determine visibility and extract
+    # For each viewing direction, perform 2D boundary tracing on slices
+    for view_dir in viewing_directions:
+        # Note: The specific 2D boundary tracing algorithm on slices 
+        # perpendicular to coordinate axes is implied by the source [S1, unofficial].
+        # Implementation detail: Iterate through slices, find boundary edges,
+        # map back to 3D voxels.
+        voxels_in_view = trace_boundary_slices(volume_grid, view_dir)
+        all_boundary_voxels.extend(voxels_in_view)
+        
+    # Remove duplicates
+    unique_voxels = remove_duplicates(all_boundary_voxels)
+    
+    # Step 3: Compute attributes
+    visible_voxels = []
+    for voxel in unique_voxels:
+        pos = voxel.position
+        normal = compute_surface_normal(volume_grid, pos)
+        visible_voxels.append({'pos': pos, 'normal': normal})
+        
+    return visible_voxels
 
-def render_boundary_voxels(voxels, view_dir, lighting, cutting_planes):
+def render_sobierajski(visible_voxels, view_dir, image_plane):
     """
-    Renders the extracted voxels.
+    Renders the extracted voxels with back-face culling and projection.
     """
-    for voxel in voxels:
-        # Project voxel onto several pixels to avoid holes
-        pixels = project_onto_pixels(voxel, view_dir)
-        
-        # Shade according to lighting
-        color = apply_lighting(voxel, lighting)
-        
-        # Render pixels
-        for pixel in pixels:
-            draw_pixel(pixel, color)
+    for voxel in visible_voxels:
+        # Step 4: Back-face culling
+        if dot(voxel['normal'], view_dir) > 0:
+            continue # Discard back face
             
-        # Handle cutting planes
-        if intersects_cutting_plane(voxel, cutting_planes):
-            render_density_projection(voxel, cutting_planes)
+        # Step 5: Project onto several pixels to avoid holes
+        projected_pixels = project_onto_pixels(voxel['pos'], view_dir, image_plane)
+        
+        # Step 6: Shade and render
+        for pixel in projected_pixels:
+            shade = apply_lighting(voxel['normal'], view_dir)
+            image_plane.set_pixel(pixel.x, pixel.y, shade)
 ```
 
 ## Subtopics
 
 ### Saito's Fast Previewing Algorithm
-A previewing algorithm based on extracting a subset of boundary voxels according to a uniform distribution to increase rendering speed [S1, unofficial]. It extracts a subset of boundary voxels, converts them to geometrical primitives (like crosslines perpendicular to the surface normal), and projects these primitives onto the image plane [S1, unofficial]. This method is chosen when rendering speed is prioritized over geometric completeness, trading detail for speed by sampling the boundary surface sparsely [S1, unofficial].
+A previewing algorithm based on extracting a subset of boundary voxels according to a uniform distribution to increase rendering speed [S1, unofficial]. It extracts a subset of boundary voxels uniformly, converts them to geometrical primitives (e.g., crosslines perpendicular to the surface normal), and projects these primitives onto the image plane [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the 2D boundary tracing algorithm and the number of viewing directions. Using six orthographic views allows for efficient slice-based processing [S1, unofficial].
-*   **Memory Complexity:** Requires storing a list of boundary voxels. The size is reduced by backface culling [S1, unofficial].
-*   **Strengths:** Fast direct rendering; avoids holes by projecting voxels to multiple pixels; supports cutting planes easily; backface culling reduces rendering load [S1, unofficial].
-*   **Limitations:** Approximate visibility (six views may miss some surfaces); holes can still appear if projection is insufficient; requires careful handling of voxel-to-pixel mapping [S1, unofficial].
-*   **When to use:** Medical imaging systems requiring fast display of boundary surfaces and cutting planes [S1, unofficial].
-*   **When not to use:** When exact geometric completeness is required without approximation, or when lighting effects are complex and require ray-marching rather than direct projection.
+*   **Time Complexity:** Depends on the number of viewing directions and the cost of 2D boundary tracing. The source notes that rendering speed is directly related to the length of the voxel list [S1, unofficial].
+*   **Memory Complexity:** Proportional to the number of visible boundary voxels stored in the list.
+*   **Strengths:** Fast display method; supports flexible manipulation of extracted voxels (e.g., cutting planes) [S1, unofficial].
+*   **Limitations:** Holes can appear if adjacent voxels map to non-adjacent pixels; requires multiple viewing directions for complete visibility coverage [S1, unofficial].
+*   **When to use:** When fast previewing or direct rendering of boundary surfaces is required, and the volume data is suitable for orthographic projection [S1, unofficial].
 
 ## Background
-Proposed by Sobierajski [116] as a fast display method for direct rendering of boundary surfaces [S1, unofficial]. It is used in medical imaging systems where cutting operations (rendering shaded isosurfaces and arbitrary cross-sectional slices simultaneously) are important [S1, unofficial]. The method is a hybrid approach, combining voxel extraction with direct projection, similar in spirit to shear-warp factorization but focused on boundary surfaces [S1, unofficial].
+Proposed by Sobierajski [116] as a fast display method for direct rendering of boundary surfaces [S1, unofficial]. It is cited in the context of medical imaging systems where cutting operations and shaded isosurfaces are important [S1, unofficial].
 
 ## Sources
 [S1] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)

@@ -1,9 +1,9 @@
 # Ambient Occlusion via Geometry/Neighbors
 
-Also called: Local Ambient Occlusion, Voxel AO, SDF-based AO
+Also called: Local Geometry-Based Ambient Occlusion, Voxel Neighbor Occlusion
 
 ## Overview
-This family of methods estimates local ambient occlusion (AO) by querying geometric representations—such as Signed Distance Fields (SDFs), structured voxel grids, or local density distributions—to approximate visibility without explicit ray tracing against triangle meshes or screen-space depth buffers [S1, S2, S3, S4, unofficial]. It sets itself apart from [Direct Illumination with Shadow Rays](2011-direct-illumination-with-shadow-rays.md) and [Shadow Ray Casting](2796-shadow-ray-casting.md) by replacing expensive global visibility tests with lightweight, local geometric queries that simulate the dimming of indirect light based on immediate neighborhood density or distance [G].
+This family of methods estimates local ambient occlusion by querying the immediate geometric neighborhood of a point—typically via Signed Distance Fields (SDF), voxel occupancy grids, or vertex neighborhoods—to approximate visibility without explicit ray tracing against triangle meshes or screen-space depth buffers [S1, S2, S3, S4, unofficial]. It sets itself apart from [JAOCC Shading](3634-jaocc-shading.md) and [Local Ambient Occlusion](4977-local-ambient-occlusion.md) by directly evaluating geometric distance or discrete neighbor occupancy to determine occlusion factors, rather than relying on stochastic sampling or precomputed global buffers [G].
 
 ## Shared principles
 All methods in this family share the core mechanism of evaluating visibility or illumination at a specific point $\mathbf{p}$ within or on the boundary of a volume, based on a light source direction $\mathbf{l}$ or environment [G].
@@ -26,19 +26,19 @@ All methods in this family share the core mechanism of evaluating visibility or 
 This method estimates local ambient occlusion by querying a geometric representation, typically a Signed Distance Field (SDF) or structured voxel grid, to approximate visibility without explicit ray tracing against triangle meshes or screen-space depth buffers. It sets itself apart from [JAOCC Shading](3634-jaocc-shading.md) and [Local Ambient Occlusion](4977-local-ambient-occlusion.md) by directly evaluating geometric distance to determine occlusion factors [G].
 
 ### [JAOCC Shading](3634-jaocc-shading.md)
-JAOCC Shading is a voxel-based ambient occlusion technique that computes a depth-weighted dimming factor by counting non-empty neighbors in a cubic neighborhood. It addresses the problem of hard, physically implausible lighting transitions at voxel boundaries (AABB edges) by replacing fixed geometric normals with a dynamic occlusion factor derived from local density. Unlike methods that rely on signed distance fields or explicit surface normals, JAOCC operates directly on the occupancy grid, making it suitable for volumetric data where surface extraction is not performed.
+JAOCC Shading is a voxel-based ambient occlusion technique that computes a depth-weighted dimming factor by counting non-empty neighbors in a cubic neighborhood. It addresses hard, physically implausible lighting transitions at voxel boundaries by dynamically computing the normal of the cut voxel face from the local neighborhood geometry instead of using fixed AABB edge normals.
 
 ### [Local Ambient Occlusion](4977-local-ambient-occlusion.md)
 Local Ambient Occlusion (LAO) methods estimate the blocking of indirect light in volume rendering by analyzing the local density distribution or sampling stochastic rays around a point, rather than relying on global geometry or hard shadow maps. Unlike siblings that use Signed Distance Fields (SDF) [2527-ambient-occlusion-via-sdf-geometry.md] or precomputed voxel buffers [6646-voxel-ambient-occlusion.md], LAO methods typically compute occlusion on-the-fly or via lightweight precomputation tailored to the volume's statistical properties or stochastic sampling, providing softer, more volumetric shadow appearances [4502-local-ambient-occlusion-lao.md].
 
 ### [Vertex Ambient Occlusion Approximation](6623-vertex-ambient-occlusion-approximation.md)
-Not given in the sources.
+Vertex Ambient Occlusion Approximation is a lightweight, post-processing shading technique that darkens vertices based on the local density of solid voxels in their immediate neighborhood, simulating shadowing in crevices and concavities. It differs from [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md) by operating on discrete vertex data rather than continuous volume integration, and from [Gradient-based Occlusion Information Computation](9554-gradient-based-occlusion-information-computation.md) by relying on explicit neighbor sampling rather than analytical gradient estimation.
 
 ### [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md)
-Not given in the sources.
+Voxel Ambient Occlusion (Voxel AO) estimates ambient occlusion for a surface point by sampling the solidity of surrounding voxels in a grid relative to the surface normal, simulating light blockage from adjacent geometry. It differs from [Ambient Occlusion via SDF/Geometry](2527-ambient-occlusion-via-sdf-geometry.md) by operating on discrete voxel occupancy grids rather than continuous Signed Distance Fields, and from [JAOCC Shading](3634-jaocc-shading.md) by using explicit neighbor queries instead of precomputed cache structures. It builds on [Ambient Occlusion via Geometry/Neighbors](5936-ambient-occlusion-via-geometry-neighbors.md) by providing a specific implementation for voxelized data.
 
 ### [Gradient-based Occlusion Information Computation](9554-gradient-based-occlusion-information-computation.md)
-A method to compute occlusion information $m_x$ for a voxel $x$ that preserves boundaries by modulating a spherical neighborhood mean with a gradient-based weight $g_x$, avoiding the isotropic blurring of simple ambient occlusion.
+This method computes a view-independent occlusion metric for volume data that preserves sharp boundaries between structures, addressing the isotropic blurring inherent in simple spherical mean ambient occlusion. It differs from sibling methods like [Voxel Ambient Occlusion](6646-voxel-ambient-occlusion.md) by modulating the neighborhood mean with a gradient-based weight derived from Perona-Malik diffusion principles, ensuring that edges are not smoothed out during the occlusion calculation.
 
 ### Standard Deviation of Ambient Occlusion
 #### definition
@@ -51,7 +51,7 @@ A method to compute occlusion information $m_x$ for a voxel $x$ that preserves b
 - [S1] In simple cases with few objects (e.g., two objects with same intensity/size), using the second derivative field $f''(x)$ as input to $O_{std}$ fails because boundaries are highlighted while interiors become near-zero, causing identical $O_{std}$ values for distinct objects. In these cases, use the original scalar field $f(x)$ as input instead.
 
 ## Background
-Origin: The concept of using local geometric queries for ambient occlusion in volumes has evolved alongside voxel-based rendering techniques. JAOCC shading was introduced to address artifacts in voxel-based lighting [S3, unofficial]. The use of standard deviation of ambient occlusion for volume classification was proposed to distinguish objects with similar scalar values but different local structures [S1].
+The concept of using local geometric neighborhood queries to approximate ambient occlusion in voxel-based or grid-based volumes has been developed to provide efficient, view-independent shading that captures crevice darkening without the cost of full ray tracing. Techniques such as JAOCC [S3] and Voxel AO [S1] emerged from the need to shade voxel data (e.g., in medical imaging or voxel games) efficiently. The gradient-based approach [S1] was introduced to address the isotropic blurring of standard spherical mean occlusion, preserving sharp boundaries in volume classification. The standard deviation metric [S1] extends this by quantifying directional variation to distinguish objects with identical scalar values but different local structures.
 
 ## Sources
 [S1] Boundary-structure-aware transfer functions for volume classification, https://doi.org/10.1145/3139295.3139306, fetched 2026-10-31

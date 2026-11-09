@@ -1,0 +1,155 @@
+# Overall Training Loss
+
+Also called: Composite Training Loss, Multi-term Loss Function
+
+## Overview
+The Overall Training Loss defines the objective function for optimizing radiance field parameters, typically in two distinct stages: an initial reconstruction phase and a recurrent refinement phase. It aggregates multiple error metrics—such as photometric reconstruction, depth consistency, and geometric constraints—to guide gradient-based optimization. It differs from single-term losses by balancing competing objectives (e.g., image fidelity vs. geometric smoothness) through weighted summation, and from simple photometric losses by incorporating explicit depth or point-cloud regularization.
+
+## How it works
+The method is implemented via two sequential training stages, each with a specific loss formulation.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Ground-truth images $\mathbf{I}_v$ for target views $v \in \{1, \dots, V\}$.
+    *   Ground-truth images $\mathbf{I}_i$ for input views $i \in \{1, \dots, N\}$.
+    *   Predicted rendered images $\hat{\mathbf{I}}$.
+    *   Predicted depth maps $\hat{\mathbf{D}}$.
+    *   Camera parameters and projection matrices.
+    *   Hyperparameters: $\lambda_1, \lambda_2, \lambda_3$ (from [S1]), $\alpha, \lambda, \gamma$ (from [S2]).
+*   **Outputs:**
+    *   Scalar loss value $L$ (or $L_{1st}, L_{2nd}$) used for backpropagation.
+
+### Data Structures
+*   **Images:** 3D tensors (Height $\times$ Width $\times$ Channels).
+*   **Depth Maps:** 2D tensors (Height $\times$ Width).
+*   **Point Clouds:** Sets of 3D coordinates $(x, y, z)$.
+
+### Formulas and Parameters
+
+#### Stage 1: Initial Reconstruction Loss ($L_{1st}$)
+Used to train the initial Gaussian reconstruction model [S2].
+
+$$ L_{1st} = \sum_{v=1}^V \ell_{\text{render}}(\hat{\mathbf{I}}_v, \mathbf{I}_v) + \alpha \cdot \sum_{i=1}^N \ell_{\text{smooth}}(\mathbf{I}_i, \hat{\mathbf{D}}_i) \quad \text{[S2]} $$
+
+Where:
+1.  **Rendering Loss ($\ell_{\text{render}}$):**
+    $$ \ell_{\text{render}}(\hat{\mathbf{I}}, \mathbf{I}) = \ell_1(\hat{\mathbf{I}}, \mathbf{I}) + \lambda \cdot \ell_{\text{percept}}(\hat{\mathbf{I}}, \mathbf{I}) \quad \text{[S2]} $$
+    *   $\ell_1$: L1 distance between predicted and ground-truth RGB pixels.
+    *   $\ell_{\text{percept}}$: Perceptual loss computed in VGG feature space [S2].
+    *   $\lambda$: Weight for perceptual loss. Typical value: $0.5$ [S2].
+
+2.  **Depth Smoothness Loss ($\ell_{\text{smooth}}$):**
+    $$ \ell_{\text{smooth}}(\mathbf{I}, \hat{\mathbf{D}}) = |\partial_x \hat{\mathbf{D}}| e^{-|\partial_x \mathbf{I}|} + |\partial_y \hat{\mathbf{D}}| e^{-|\partial_y \mathbf{I}|} \quad \text{[S2]} $$
+    *   $\partial_x, \partial_y$: Spatial gradients (finite differences or Sobel filters).
+    *   This term regularizes depth by encouraging depth gradients to align with image edges (high image gradient magnitude suppresses depth gradient penalty) [S2].
+    *   $\alpha$: Weight for depth smoothness. Typical value: $0.01$ [S2].
+
+#### Stage 2: Recurrent Training Loss ($L_{2nd}$)
+Used to train the recurrent model end-to-end while freezing the initial reconstruction model [S2].
+
+$$ L_{2nd} = \sum_{t=0}^{T-1} \gamma^{T-1-t} \sum_{v=1}^V \ell_{\text{render}}(\hat{\mathbf{I}}_v^t, \mathbf{I}_v) \quad \text{[S2]} $$
+
+*   $t$: Recurrent iteration step ($0$ to $T-1$).
+*   $\hat{\mathbf{I}}_v^t$: Rendered image at step $t$.
+*   $\gamma$: Exponential weight decay factor. Typical value: $0.9$ [S2].
+*   This formulation applies increasing weights to earlier iterations, supervising all intermediate Gaussian predictions [S2].
+
+#### Alternative Formulation (Joint Pose and Field Optimization)
+Some implementations assemble the loss as [S1]:
+
+$$ L = L_{\text{rgb}} + \lambda_1 L_{\text{self-depth}} + \lambda_2 L_{\text{GPC}} + \lambda_3 L_{\text{reproj}} \quad \text{[S1]} $$
+
+*   $L_{\text{rgb}}$: Photometric RGB reconstruction loss.
+*   $L_{\text{self-depth}}$: Self-supervised depth consistency loss.
+*   $L_{\text{GPC}}$: Gaussian Point Constraint loss (based on Gaussian kernel distance between point clouds, not Chamfer distance) [S1].
+*   $L_{\text{reproj}}$: Reprojection loss.
+*   **Parameters:** $\lambda_1 = 0.04$, $\lambda_2 = 1.0$, $\lambda_3 = 1.0$ [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_stage_1_loss(rendered_images, gt_images, predicted_depths, gt_images_input, alpha=0.01, lambda_percept=0.5):
+    """
+    Computes L_1st for initial reconstruction.
+    """
+    loss_render = 0.0
+    for v in range(len(rendered_images)):
+        img_pred = rendered_images[v]
+        img_gt = gt_images[v]
+        # L1 Loss
+        l1 = torch.mean(torch.abs(img_pred - img_gt))
+        # Perceptual Loss (requires VGG feature extraction)
+        l_percept = perceptual_loss(img_pred, img_gt)
+        loss_render += l1 + lambda_percept * l_percept
+
+    loss_smooth = 0.0
+    for i in range(len(predicted_depths)):
+        depth_pred = predicted_depths[i]
+        img_input = gt_images_input[i]
+        
+        # Compute gradients
+        depth_grad_x = compute_gradient_x(depth_pred)
+        depth_grad_y = compute_gradient_y(depth_pred)
+        img_grad_x = compute_gradient_x(img_input)
+        img_grad_y = compute_gradient_y(img_input)
+        
+        # Smoothness term: |grad_D| * exp(-|grad_I|)
+        smooth_term_x = torch.abs(depth_grad_x) * torch.exp(-torch.abs(img_grad_x))
+        smooth_term_y = torch.abs(depth_grad_y) * torch.exp(-torch.abs(img_grad_y))
+        
+        loss_smooth += torch.mean(smooth_term_x + smooth_term_y)
+
+    return loss_render + alpha * loss_smooth
+
+def compute_stage_2_loss(rendered_images_sequence, gt_images, gamma=0.9):
+    """
+    Computes L_2nd for recurrent training.
+    rendered_images_sequence: List of T tensors [V x H x W x C]
+    """
+    T = len(rendered_images_sequence)
+    total_loss = 0.0
+    
+    for t in range(T):
+        # Weight: gamma^(T-1-t)
+        weight = gamma ** (T - 1 - t)
+        
+        stage_loss = 0.0
+        for v in range(len(rendered_images_sequence[t])):
+            img_pred = rendered_images_sequence[t][v]
+            img_gt = gt_images[v]
+            
+            # Reuse rendering loss definition
+            l1 = torch.mean(torch.abs(img_pred - img_gt))
+            l_percept = perceptual_loss(img_pred, img_gt)
+            stage_loss += l1 + 0.5 * l_percept # lambda=0.5 from S2
+            
+        total_loss += weight * stage_loss
+        
+    return total_loss
+
+def compute_joint_loss(rgb_loss, self_depth_loss, gpc_loss, reproj_loss, l1=0.04, l2=1.0, l3=1.0):
+    """
+    Computes L from [S1] for joint pose/field optimization.
+    """
+    return rgb_loss + l1 * self_depth_loss + l2 * gpc_loss + l3 * reproj_loss
+```
+
+### Edge Cases and Pitfalls
+*   **Depth Gradient Noise:** The depth smoothness loss relies on image gradients to weight depth penalties. In textureless regions (low image gradient), the exponential term $e^{-|\nabla I|}$ approaches 1, applying full penalty to depth gradients. This may over-smooth depth in uniform areas [S2].
+*   **Perceptual Loss Stability:** $\ell_{\text{percept}}$ requires a pre-trained VGG network. Ensure feature maps are normalized consistently with the VGG training distribution [S2].
+*   **GPC Sensitivity:** The Gaussian Point Constraint (GPC) is less sensitive to noise than Chamfer distance but requires careful tuning of the kernel bandwidth $\sigma_{pc}$ [S1].
+
+## Operating characteristics
+*   **Complexity:** Linear in the number of views $V$ and recurrent steps $T$. The perceptual loss adds overhead proportional to the VGG network inference cost.
+*   **Memory:** Requires storing intermediate rendered images for all $T$ steps if using the recurrent loss formulation, or recomputing them if memory is constrained [S2].
+*   **Strengths:** Two-stage training stabilizes convergence; multi-term loss handles both photometric accuracy and geometric consistency.
+*   **Limitations:** Requires careful tuning of multiple hyperparameters ($\alpha, \lambda, \gamma, \lambda_i$). The depth smoothness loss is only applicable when depth is explicitly predicted.
+
+## Background
+The concept of composite training losses in differentiable volume rendering and Gaussian Splatting emerged with the need to balance photometric fidelity with geometric plausibility. The two-stage approach (initialization followed by recurrent refinement) is specific to methods like ReSplat [S2]. The joint optimization of pose and field with constraints like GPC is detailed in TD-NeRF [S1].
+
+## Sources
+[S1] TD-NeRF: Novel Truncated Depth Prior for Joint Camera Pose and Neural Radiance Field Optimization, https://doi.org/10.1109/iros58592.2024.10802634, fetched 2026-10-26
+[S2] ReSplat: Learning Recurrent Gaussian Splatting, https://arxiv.org/abs/2510.08575v4, fetched 2026-10-26

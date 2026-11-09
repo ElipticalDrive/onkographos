@@ -1,0 +1,211 @@
+# Stochastic Tomography Sample Acceptance and Residual Splatting
+
+Also called: Residual Splatting, Sample Acceptance
+
+## Overview
+This method defines the acceptance criterion and state update mechanism for the Stochastic Tomography solver [8886-stochastic-tomography.md]. It determines whether a candidate sample improves the reconstruction by evaluating the change in squared residuals across all projections, and if accepted, updates the residual images using bilinear splatting. It distinguishes itself by allowing both positive and negative emissivity deposition to enable "rough-in" and refinement phases, and by rejecting samples outside the visual hull to avoid wasted computation.
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Candidate sample position $\mathbf{x}_k$.
+    *   Current residual images $\mathbf{r}_j$ for each projection $j$.
+    *   Projection operator $\text{proj}_j(\cdot)$ mapping 3D space to 2D image coordinates.
+    *   Deposition emissivity magnitude $e_d$.
+    *   Total observed emissivity $e_{tot}$ (average sum of measurements $o_i$ over all cameras).
+    *   Chain length $N$ (mutations per chain).
+    *   Scale factor $\alpha$ (typically 10–40).
+*   **Outputs**:
+    *   Updated residual images $\mathbf{r}_j$.
+    *   Boolean acceptance flag for $\mathbf{x}_k$.
+    *   (Implicitly) The sample $\mathbf{x}_k$ is added to the volume representation if accepted.
+
+### Data Structures
+*   **Residual Images**: A set of 2D arrays $\mathbf{r}_j$, one per camera/projection $j$. Values represent the difference between measured and projected emissivity.
+*   **Sample List**: A collection of accepted 3D points $\{\mathbf{x}_k\}$ with associated emissivity signs.
+
+### Parameters
+*   $e_d$: Quantized emissivity per sample. Controls quantization level. [S1]
+*   $N$: Chain length. Typical values: 1000 to 20000. [S1]
+*   $\Gamma$: Total number of sampling chains. Determined by $\Gamma = \alpha \frac{e_{tot}}{N e_d}$. [S1]
+*   $\alpha$: Scale factor for acceptance rate. Typical values: 10–40. [S1]
+
+### Algorithm Steps
+
+1.  **Visual Hull Check**: If $\mathbf{x}_k$ falls outside the visual hull for any image $j$ (i.e., the measured value in at least one camera is zero), reject $\mathbf{x}_k$ immediately. [S1]
+2.  **Project Candidate**: Compute the 2D projection coordinates for all views: $\mathbf{p}_{k,j} = \text{proj}_j(\mathbf{x}_k)$.
+3.  **Evaluate Positive Change**: Calculate the change in squared residuals if positive emissivity $+e_d$ is deposited.
+    *   Compute tentative residual: $\tilde{\mathbf{r}}_j^+ = \mathbf{r}_j - \text{splat}(\mathbf{0}, \mathbf{p}_{k,j}, +e_d)$.
+    *   Compute squared residual difference: $\Delta^+ F(\mathbf{x}_k) = \sum_j \left( \|\mathbf{r}_j\|^2 - \|\tilde{\mathbf{r}}_j^+\|^2 \right)$.
+    *   *Note*: The source defines the change as the reduction in squared error. A positive $\Delta^+ F$ indicates a decrease in error. [S1]
+4.  **Evaluate Negative Change**: Calculate the change in squared residuals if negative emissivity $-e_d$ is deposited.
+    *   Compute tentative residual: $\tilde{\mathbf{r}}_j^- = \mathbf{r}_j - \text{splat}(\mathbf{0}, \mathbf{p}_{k,j}, -e_d)$.
+    *   Compute squared residual difference: $\Delta^- F(\mathbf}_k) = \sum_j \left( \|\mathbf{r}_j\|^2 - \|\tilde{\mathbf{r}}_j^-\|^2 \right)$. [S1]
+5.  **Select Sign**: Determine the best sign $s \in \{+1, -1\}$ that maximizes the residual reduction.
+    $$ s = \arg\max_{s' \in \{+1, -1\}} \Delta^{s'} F(\mathbf{x}_k) $$
+    $$ \Delta F(\mathbf{x}_k) = \max(\Delta^+ F(\mathbf{x}_k), \Delta^- F(\mathbf{x}_k)) $$ [S1]
+6.  **Acceptance Test**: If $\Delta F(\mathbf{x}_k) > 0$ (i.e., the residual decreases), accept the sample. Otherwise, reject it. [S1]
+7.  **Residual Splatting**: If accepted, update the residual images by splatting the chosen emissivity $s \cdot e_d$ at the projected points $\mathbf{p}_{k,j}$ using bilinear weights.
+    $$ \mathbf{r}_j \leftarrow \text{splat}(\mathbf{r}_j, \mathbf{p}_{k,j}, s \cdot e_d) \quad \forall j $$ [S1]
+    *   The `splat` operation adds the value to the 2D image grid at the projected location, distributing the value to neighboring pixels based on bilinear interpolation weights.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def accept_and_splat(x_k, r_j_list, proj_func, e_d, alpha, e_tot, N):
+    """
+    Accepts a sample candidate and updates residuals if it reduces error.
+    
+    Args:
+        x_k: 3D position of candidate sample.
+        r_j_list: List of residual images (2D arrays) for each projection j.
+        proj_func: Function that projects 3D point to 2D coordinates for a given view index.
+        e_d: Deposition emissivity magnitude.
+        alpha: Scale factor for chain count (not used in acceptance, but part of context).
+        e_tot: Total observed emissivity.
+        N: Chain length.
+        
+    Returns:
+        updated_r_j_list: Updated residual images.
+        accepted: Boolean indicating if sample was accepted.
+    """
+    # Step 1: Visual Hull Check
+    # Check if x_k is outside the visual hull for any image.
+    # This requires access to the visual hull mask or measured values.
+    # Assuming we have a function is_in_hull(x, j) or check measured value == 0.
+    for j, r_j in enumerate(r_j_list):
+        # Placeholder for visual hull check logic [G]
+        # In practice, this checks if the ray from camera j to x_k passes through 
+        # empty space or if the measured value at the projection is zero.
+        if not is_in_visual_hull(x_k, j):
+            return r_j_list, False
+
+    # Step 2: Project Candidate
+    projected_points = []
+    for j in range(len(r_j_list)):
+        p_kj = proj_func(x_k, j)
+        projected_points.append(p_kj)
+
+    # Helper to compute squared residual reduction for a given sign
+    def compute_delta_residual(sign):
+        total_reduction = 0.0
+        current_norm_sq = 0.0
+        tentative_norm_sq = 0.0
+        
+        for j, r_j in enumerate(r_j_list):
+            p_kj = projected_points[j]
+            
+            # Current squared norm of residual image j
+            current_norm_sq = sum_pixel_values_squared(r_j)
+            
+            # Compute tentative residual by subtracting the splat of sign*e_d
+            # splat(r, p, val) returns r - splat(0, p, val) effectively for norm calculation
+            # But we need the norm of (r - splat(p, sign*e_d))
+            # Since splat is linear, r_tentative = r - splat(p, sign*e_d)
+            # ||r_tentative||^2 = ||r||^2 - 2*<r, splat> + ||splat||^2
+            # However, the source defines delta as sum of (r^2 - tilde_r^2).
+            # We compute tilde_r^2 directly.
+            
+            # Create a temporary copy or compute analytically
+            # Analytic approach:
+            # Let w be the bilinear weights at p_kj for the 4 surrounding pixels.
+            # Let pixels be the 4 pixel values.
+            # New pixel values = old - sign*e_d * w
+            # Sum of squares = sum((old - sign*e_d*w)^2)
+            
+            tentative_norm_sq = 0.0
+            # Get 4 nearest pixels and weights for p_kj in image j
+            pixels, weights = get_bilinear_neighbors(r_j, p_kj)
+            
+            for val, w in zip(pixels, weights):
+                new_val = val - sign * e_d * w
+                tentative_norm_sq += new_val * new_val
+            
+            reduction = current_norm_sq - tentative_norm_sq
+            total_reduction += reduction
+            
+        return total_reduction
+
+    # Step 3 & 4: Evaluate Positive and Negative Changes
+    delta_plus = compute_delta_residual(1)
+    delta_minus = compute_delta_residual(-1)
+
+    # Step 5: Select Sign
+    if delta_plus >= delta_minus:
+        best_sign = 1
+        delta_f = delta_plus
+    else:
+        best_sign = -1
+        delta_f = delta_minus
+
+    # Step 6: Acceptance Test
+    if delta_f <= 0:
+        return r_j_list, False
+
+    # Step 7: Residual Splatting
+    updated_r_j_list = []
+    for j, r_j in enumerate(r_j_list):
+        p_kj = projected_points[j]
+        # Splat best_sign * e_d into r_j
+        new_r_j = splat_bilinear(r_j, p_kj, best_sign * e_d)
+        updated_r_j_list.append(new_r_j)
+
+    return updated_r_j_list, True
+
+def is_in_visual_hull(x, j):
+    """
+    [G] Placeholder for visual hull check.
+    Returns False if x projects to a pixel with zero measured value in view j.
+    """
+    # Implementation depends on specific visual hull data structure
+    pass
+
+def get_bilinear_neighbors(image, point):
+    """
+    [G] Returns pixel values and weights for bilinear interpolation.
+    """
+    pass
+
+def splat_bilinear(image, point, value):
+    """
+    [G] Returns a new image with value distributed to neighbors.
+    """
+    pass
+
+def sum_pixel_values_squared(image):
+    """
+    [G] Computes sum of squares of all pixels in image.
+    """
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Visual Hull Rejection**: Samples outside the visual hull are automatically rejected. This prevents placing samples that cannot contribute to the reconstruction and avoids the need to "undo" them later. [S1]
+*   **Negative Emissivity**: The method explicitly allows negative emissivity deposition. This is crucial for "roughing in" areas and refining them later, and is necessary for regularizers to function properly. [S1]
+*   **Parameter Sensitivity**: The method is relatively insensitive to the chain length $N$ (1000–20000 works well). The total number of chains $\Gamma$ is determined by $e_{tot}$, $N$, $e_d$, and $\alpha$. [S1]
+
+## Operating characteristics
+
+*   **Time Complexity**: Per sample evaluation, the cost is proportional to the number of projections $J$ and the cost of bilinear splatting (constant time per projection). The total time is proportional to $\Gamma \times N \times J$.
+*   **Memory Complexity**: Requires storing the residual images $\mathbf{r}_j$ for all projections and the list of accepted samples. The residual images are typically sparse or dense 2D arrays.
+*   **Strengths**:
+    *   Allows both positive and negative emissivity, improving convergence and enabling refinement. [S1]
+    *   Visual hull rejection avoids wasted computation on invalid samples. [S1]
+    *   Insensitive to chain length $N$. [S1]
+*   **Limitations**:
+    *   Requires visual hull information.
+    *   Parameter $\alpha$ is data-dependent (10–40). [S1]
+    *   Bilinear splatting introduces smoothing, which may affect high-frequency details.
+
+## Background
+
+*   **Origin**: This method is part of the Stochastic Tomography framework introduced by [S1].
+*   **History**: Developed for 3D imaging of mixing fluids, addressing the challenges of tomographic reconstruction using a matrix-free stochastic solver.
+*   **Usage**: Applied in 3D imaging of mixing fluids, where it minimizes a convex objective function by representing the volume estimate as a set of discrete samples.
+
+## Sources
+
+[S1] Stochastic tomography and its applications in 3D imaging of mixing fluids, https://doi.org/10.1145/2185520.2185548, fetched 2026-11-03

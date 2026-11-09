@@ -3,195 +3,157 @@
 Also called: 3D Isosurface Generation (Marching Cubes), Marching Cubes with Decimation
 
 ## Overview
-This method generates an isosurface from 3D scalar field data by applying a modified Marching Cubes algorithm that resolves topological ambiguities, followed by a triangle decimation step to reduce mesh complexity and improve visual quality [S1, unofficial]. It differs from standard Marching Cubes by explicitly handling ambiguous cases to ensure a unique surface representation and by post-processing the output mesh to collapse degenerate triangles, thereby reducing storage requirements and smoothing the geometry [S1, unofficial].
+This method generates an isosurface from a 3D scalar field by applying a modified Marching Cubes algorithm to resolve topological ambiguities, followed by a triangle decimation step to reduce mesh complexity. It is distinguished from standard Marching Cubes by its explicit handling of ambiguous cases and its post-processing decimation, which collapses triangles with large aspect ratios to improve visual quality and reduce storage requirements [S1, unofficial].
 
 ## How it works
-**Inputs:** A 3D scalar field defined on a structured grid (e.g., FDS grid), an isovalue threshold $L$, and the grid dimensions.
-**Outputs:** A triangle mesh representing the isosurface, where each vertex is associated with an averaged normal vector.
+**Inputs:** A 3D scalar field $F$ defined on a structured grid (e.g., FDS grid), and an isovalue threshold $L$.
+**Outputs:** A triangle mesh (vertices, indices) and associated vertex normals.
 
-**Data Structures:**
-*   **Grid:** A 3D array of scalar values $T(x,y,z)$.
-*   **Cube:** A unit cell aligned with the grid, defined by 8 corners indexed 0 to 7.
-*   **Case Index:** An 8-bit integer (0–255) derived from the binary state of the cube corners relative to $L$.
-*   **Mesh:** A list of triangles, each defined by 3 vertices. Each vertex stores 3D coordinates and a normal vector.
+### Data Structures
+*   **Grid:** Structured 3D array of scalar values.
+*   **Cube:** A voxel defined by 8 corners. Corners are indexed 0 to 7. The specific numbering scheme is referenced as "Fig. 3.8" in the source [S1, unofficial].
+*   **Case Index:** An 8-bit integer (0–255) derived from the binary state of the cube corners.
+*   **Triangle List:** List of triangles, each defined by 3 vertex indices.
+*   **Vertex Data:** Position $(x, y, z)$ and normal vector $(n_x, n_y, n_z)$.
 
-**Numbered Steps:**
+### Algorithm Steps
 
-1.  **Grid Partitioning:** Split the region to be contoured into cubes, each aligned with the underlying grid cells [S1, unofficial].
-2.  **Cube Evaluation:** For each cube:
-    a.  Number the cube corners from 0 to 7 [S1, unofficial].
-    b.  For each corner $i$ (starting from 0), assign a bit value $b_i = 1$ if the scalar value $T_i$ exceeds the isovalue $L$, and $b_i = 0$ otherwise [S1, unofficial].
-    c.  Compute the case index $C = \sum_{i=0}^{7} b_i 2^i$. This results in an integer between 0 and 255 [S1, unofficial].
-    d.  Use $C$ to look up the triangulation configuration. Triangulate the cube surface, storing vertex locations and edge indices according to the determined case [S1, unofficial].
-3.  **Triangle Decimation:** Iterate through the generated triangles to eliminate small or degenerate ones [S1, unofficial]:
-    a.  Identify triangles where two or more vertices are closest to the same grid node [S1, unofficial].
+1.  **Grid Partitioning:** Split the region to be contoured into cubes, each aligned with the underlying grid [S1, unofficial].
+2.  **Cube Classification:** For each cube:
+    a.  Number corners 0 to 7.
+    b.  For each corner $i$, assign bit $b_i = 1$ if $F(\text{corner}_i) > L$, else $b_i = 0$.
+    c.  Compute case index $C = \sum_{i=0}^{7} b_i 2^i$.
+    d.  **Ambiguity Resolution:** The source states the algorithm is "modified to remove ambiguities" [S1, unofficial]. It references a base-3 number system mapping (0–80) to determine the case number, with specific mappings provided for certain rows (e.g., first row: 0, 40, 1, 2, 3; second row: 5, 8, 10, 11, 13; last row: 14, 16, 20) [S1, unofficial]. *Note: The exact lookup table or logic for the base-3 conversion is not fully detailed in the text, but the modification is essential for correct topology.*
+    e.  Triangulate the cube surface based on the resolved case, storing vertex locations and edge numbers.
+3.  **Triangle Decimation:**
+    a.  Identify "small" triangles: any triangle where two or more vertices are closest to the same grid node.
     b.  Remove these triangles.
-    c.  Calculate a new vertex position $V_{new}$ as the arithmetic average of the coordinates of the removed vertices:
-        $$ V_{new} = \frac{1}{k} \sum_{j=1}^{k} V_j $$
-        where $k$ is the number of removed vertices (typically 3) and $V_j$ are their coordinates [S1, unofficial].
-    d.  Re-triangulate the local region using $V_{new}$ to fill the gap left by the removed triangles [S1, unofficial].
-4.  **Normal Estimation:** For each vertex in the final mesh, estimate the normal direction [S1, unofficial]:
-    a.  Identify all triangles sharing the vertex [S1, unofficial].
-    b.  For each triangle $n$, compute its unit normal vector $U_n$ and area $A_n$ [S1, unofficial].
-    c.  Compute the vertex normal $V_i$ as a harmonic weighted average of the triangle normals, where weights are inversely proportional to the triangle area [S1, unofficial].
+    c.  Create a new vertex at the average coordinates of the three removed vertices.
+    d.  Re-triangulate the local geometry using this new vertex [S1, unofficial].
+4.  **Normal Estimation:** For each vertex in the resulting mesh:
+    a.  Identify all triangles sharing the vertex.
+    b.  Compute the unit normal for each triangle.
+    c.  Compute a harmonic weighted average of these normals, where weights are inversely proportional to triangle area.
+    d.  Store the resulting normal with the vertex data [S1, unofficial].
 
-**Formulas:**
+### Formulas
 
-The uncertainty in the isosurface location $\Delta x$ between two data points $(x_1, T_1)$ and $(x_2, T_2)$ is bounded by [S1, unofficial]:
+**Uncertainty Bound:**
+The uncertainty $\Delta x$ in the isosurface location between two node data pairs $(x_1, T_1)$ and $(x_2, T_2)$ is bounded by:
+$$
+\left| \frac{\Delta x}{x_2 - x_1} \right| \leq \frac{\max(|\Delta T_1|, |\Delta T_2|)}{|T_2 - T_1|}
+$$
+where $\Delta T_1$ and $\Delta T_2$ are the uncertainties in $T_1$ and $T_2$ respectively [S1, unofficial].
 
-$$ \left| \frac{\Delta x}{x_2 - x_1} \right| \leq \frac{\max(|\Delta T_1|, |\Delta T_2|)}{|T_2 - T_1|} $$
+**Vertex Normal:**
+The averaged normal vector $V_i$ for vertex $i$ is:
+$$
+V_i = \frac{\sum_n \frac{U_n}{A_n}}{\sum_n \frac{1}{A_n}} = \frac{\sum_n \frac{u_n \times v_n}{\|u_n \times v_n\|^2}}{\sum_n \frac{1}{\|u_n \times v_n\|}}
+$$
+where for the $n$-th triangle, $u_n$ and $v_n$ are two side vectors, $A_n = \|u_n \times v_n\|$ is the triangle area, and $U_n = \frac{u_n \times v_n}{A_n}$ is the unit normal [S1, unofficial].
 
-where $\Delta T_1$ and $\Delta T_2$ are the uncertainties in the data values $T_1$ and $T_2$ at positions $x_1$ and $x_2$ respectively [S1, unofficial].
-
-The vertex normal $V_i$ for vertex $i$ is calculated as [S1, unofficial]:
-
-$$ V_i = \frac{\sum_n \frac{U_n}{A_n}}{\sum_n \frac{1}{A_n}} = \frac{\sum_n \frac{u_n \times v_n}{\|u_n \times v_n\|^2}}{\sum_n \frac{1}{\|u_n \times v_n\|}} $$
-
-where for the $n$-th triangle, $u_n$ and $v_n$ are two edge vectors defining the triangle, $A_n = \|u_n \times v_n\|$ is the triangle area, and $U_n = \frac{u_n \times v_n}{A_n}$ is the unit normal vector to the triangle [S1, unofficial].
-
-**Pseudocode:**
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def modified_marching_cubes_with_decimation(grid, isovalue):
-    """
-    Generates an isosurface from a 3D grid using modified marching cubes
-    and triangle decimation.
-    
-    Args:
-        grid: 3D array of scalar values.
-        isovalue: The threshold L for isosurface extraction.
-        
-    Returns:
-        vertices: List of vertex positions.
-        normals: List of vertex normal vectors.
-        triangles: List of triangle indices (triplets of vertex indices).
-    """
+def modified_marching_cubes_decimation(grid, isovalue):
     vertices = []
-    normals = []
     triangles = []
     
-    # Step 1 & 2: Cube Evaluation and Triangulation
-    # Iterate over all cubes in the grid
-    for cube in get_cubes(grid):
-        # 2a: Number corners 0-7
-        corner_values = [grid[cube.corners[i]] for i in range(8)]
+    # Step 1 & 2: Marching Cubes with Ambiguity Resolution
+    for each cube in grid:
+        # Number corners 0-7 (specific layout per Fig 3.8 in source)
+        corner_values = [grid[c] for c in cube_corners]
         
-        # 2b: Assign bits
-        case_index = 0
-        for i in range(8):
-            if corner_values[i] > isovalue:
-                case_index |= (1 << i)
+        # Determine binary state
+        case_bits = []
+        for val in corner_values:
+            case_bits.append(1 if val > isovalue else 0)
         
-        # 2c & 2d: Triangulate based on case
-        # Note: The specific triangulation table for the "modified" version
-        # that removes ambiguities is not detailed in the source.
-        # Standard Marching Cubes tables are used as a base, 
-        # but the source implies a specific modification to handle ambiguities.
-        # [G] Assuming a standard lookup table `mc_table` exists for case_index.
-        cube_triangles = mc_table[case_index]
+        case_index = sum(b << i for i, b in enumerate(case_bits))
         
-        for tri in cube_triangles:
-            # Generate vertices for this triangle
-            tri_verts = []
-            for edge_idx in tri:
-                # Interpolate vertex position on the edge
-                # [G] Standard linear interpolation between corner values
-                v_pos = interpolate_edge(cube, edge_idx, isovalue)
-                tri_verts.append(v_pos)
-            
-            # Store triangle
-            # [G] In a real implementation, vertices would be merged/unique.
-            # Here we assume immediate mode generation for clarity of the algorithm steps.
-            triangles.append(tri_verts)
-
+        # Resolve ambiguity using modified lookup (base-3 mapping details omitted as per source limitation)
+        resolved_case = resolve_ambiguity(case_index, corner_values)
+        
+        # Triangulate
+        cube_triangles = triangulate_cube(resolved_case, cube_corners, corner_values)
+        triangles.extend(cube_triangles)
+        
     # Step 3: Triangle Decimation
-    # Identify triangles to remove: those with two or more vertices 
-    # closest to the same grid node.
-    triangles_to_remove = []
-    new_vertices = []
-    
-    # [G] Helper to find closest grid node for a vertex
-    def get_closest_node(v):
-        return grid.closest_node(v)
-
-    for i, tri in enumerate(triangles):
-        nodes = [get_closest_node(v) for v in tri]
-        # Check if two or more vertices share the same closest node
-        if len(set(nodes)) < 3:
-            triangles_to_remove.append(i)
-            # Calculate average vertex
-            avg_v = sum(tri) / len(tri)
-            new_vertices.append(avg_v)
+    # Identify triangles where 2+ vertices are closest to the same grid node
+    # This requires a spatial index or grid lookup to determine "closest node"
+    small_triangles = []
+    for tri in triangles:
+        if is_small_triangle(tri, grid_nodes):
+            small_triangles.append(tri)
             
-    # Remove triangles and add new vertices
-    # [G] This is a simplified representation. In practice, 
-    # re-triangulation requires identifying the local topology 
-    # around the removed triangles to fill the hole.
-    # The source states: "Re-triangulate using this new vertex."
-    # [G] Placeholder for the specific re-triangulation logic 
-    # which depends on the connectivity of the removed triangles.
-    # For implementation, one would typically:
-    # 1. Mark removed triangles.
-    # 2. Identify the boundary edges of the removed region.
-    # 3. Connect the new average vertex to the boundary vertices.
+    # Remove small triangles and replace with averaged vertex
+    new_vertices = []
+    for tri in small_triangles:
+        avg_pos = average(tri.vertices)
+        new_v = add_vertex(avg_pos)
+        new_vertices.append(new_v)
+        
+    # Re-triangulate locally (specific connectivity logic not detailed in source)
+    # [G] Implementation note: The source mentions "Re-triangulate using this new vertex"
+    # but does not specify the exact connectivity algorithm. A standard approach would be
+    # to create new triangles connecting the new vertex to the remaining boundary edges
+    # of the removed region.
     
     # Step 4: Normal Estimation
-    # Build a map of vertex to adjacent triangles
-    vertex_triangles = build_vertex_triangle_map(vertices, triangles)
-    
-    for v_idx, v_pos in enumerate(vertices):
-        adj_tris = vertex_triangles[v_idx]
-        if not adj_tris:
-            normals.append([0, 0, 0])
+    vertex_normals = {}
+    for v in all_vertices:
+        connected_tris = get_triangles_sharing_vertex(v)
+        if not connected_tris:
+            vertex_normals[v] = (0, 0, 0)
             continue
             
-        sum_weighted_normal = [0, 0, 0]
-        sum_inverse_area = 0
+        numerator = (0, 0, 0)
+        denominator = 0.0
         
-        for tri in adj_tris:
-            # Calculate triangle area and normal
-            # [G] Assuming tri is defined by 3 vertices
-            u = tri.v1 - tri.v0
-            v = tri.v2 - tri.v0
-            cross = cross_product(u, v)
+        for tri in connected_tris:
+            # Calculate area and normal
+            u = tri.v2.pos - tri.v1.pos
+            v_vec = tri.v3.pos - tri.v1.pos
+            cross = cross_product(u, v_vec)
             area = length(cross)
             
             if area > 0:
                 unit_normal = cross / area
-                # Weight is 1/Area
                 weight = 1.0 / area
-                sum_weighted_normal += unit_normal * weight
-                sum_inverse_area += weight
-        
-        if sum_inverse_area > 0:
-            normal = sum_weighted_normal / sum_inverse_area
-            # Normalize the final normal
-            normals.append(normal / length(normal))
+                
+                numerator += unit_normal * weight
+                denominator += weight
+                
+        if denominator > 0:
+            vertex_normals[v] = normalize(numerator / denominator)
         else:
-            normals.append([0, 0, 0])
+            vertex_normals[v] = (0, 0, 0)
+            
+    return vertices, triangles, vertex_normals
 
-    return vertices, normals, triangles
+def is_small_triangle(tri, grid_nodes):
+    # Check if two or more vertices are closest to the same grid node
+    closest_nodes = [find_closest_grid_node(v.pos) for v in tri.vertices]
+    return len(set(closest_nodes)) < 3
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Ambiguities:** The "modified" aspect specifically addresses ambiguous cases in the standard Marching Cubes algorithm (e.g., saddle points within a cube) to ensure a unique surface topology [S1, unofficial]. The exact modification rules are not detailed in the source, but the intent is to remove these ambiguities [S1, unofficial].
-*   **Decimation Criteria:** The criterion "two or more vertices closest to the same node" can be sensitive to grid alignment and vertex precision. If vertices are not snapped to grid nodes, this check may fail or produce inconsistent results [S1, unofficial].
-*   **Re-triangulation:** The source mentions re-triangulating after removing triangles but does not specify the algorithm for filling the resulting hole. This is a critical implementation detail not provided in the source [S1, unofficial].
-*   **Normal Estimation:** The harmonic weighting (inverse area) can be unstable for very small triangles, potentially leading to large normal vectors. The source justifies this with a 2D example but does not provide a lower bound for triangle area [S1, unofficial].
+### Parameters and Edge Cases
+*   **Isovalue $L$:** Must be within the range of the scalar field.
+*   **Ambiguity Resolution:** The specific base-3 mapping is critical. Failure to resolve ambiguities correctly leads to topological errors (e.g., non-manifold edges).
+*   **Decimation Criteria:** The definition of "closest to the same node" depends on the grid resolution. If the grid is coarse, decimation may remove significant geometric detail.
+*   **Precision:** The uncertainty formula suggests that high gradients ($|T_2 - T_1|$ large) reduce relative uncertainty, while high data noise ($\Delta T$) increases it.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Not given in the sources.
-*   **Strengths:** Reduces storage requirements by decreasing the number of triangles; improves visual quality by removing degenerate geometry; provides smooth vertex normals [S1, unofficial].
-*   **Limitations:** The decimation step may alter the exact geometric position of the isosurface; the re-triangulation logic is not specified, making implementation non-trivial; the method is designed for structured grids (FDS) [S1, unofficial].
-*   **When to use:** When visual quality and storage efficiency are prioritized over strict geometric fidelity, and the input data is on a structured grid [S1, unofficial].
-*   **When not to use:** When exact isosurface location is critical without post-processing artifacts, or when the input data is unstructured [S1, unofficial].
+*   **Time Complexity:** $O(N)$ for the marching cubes step, where $N$ is the number of voxels. Decimation requires spatial queries to identify "small" triangles, potentially $O(N \log N)$ or $O(N)$ with a grid hash. Normal estimation is proportional to the number of triangles.
+*   **Memory Complexity:** Proportional to the number of triangles in the output mesh. Decimation reduces this compared to standard Marching Cubes.
+*   **Strengths:** Reduces storage requirements and improves visual quality by removing high-aspect-ratio triangles. Handles topological ambiguities.
+*   **Limitations:** The decimation step may alter the exact isosurface location, though the uncertainty is bounded. The specific ambiguity resolution logic is not fully detailed in the source, making implementation dependent on the specific base-3 mapping.
+*   **When to use:** When visual fidelity and storage efficiency are prioritized over exact geometric precision, particularly in fire dynamics simulation visualization (Smokeview) [S1, unofficial].
 
 ## Background
-The method originates from the Smokeview visualization tool for Fire Dynamics Simulation (FDS) data. It was developed to provide efficient and visually clear isosurface representations of fire simulation results, such as temperature or gas concentration fields [S1, unofficial]. The modification to Marching Cubes and the addition of triangle decimation were introduced to handle the specific characteristics of FDS data, which often contains ambiguities and high-frequency noise that result in complex, noisy meshes [S1, unofficial].
+The method originates from the Smokeview tool for visualizing Fire Dynamics Simulation (FDS) data. It was developed to provide efficient and visually accurate isosurface rendering for fire simulation results. The modification to Marching Cubes addresses topological ambiguities inherent in the standard algorithm, while the decimation step optimizes the resulting mesh for real-time rendering and storage [S1, unofficial].
 
 ## Sources
 [S1] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)

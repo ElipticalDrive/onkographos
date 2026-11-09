@@ -40,12 +40,12 @@ The method transforms arbitrary parallel projection rays into a format suitable 
 ### Steps
 
 1.  **Retrieve Projection Ray Plane (PRP):** Identify the set of projection rays belonging to the same scan line of the projected 2D frame buffer. These rays form a slanted plane (PRP) within the CFB [S1].
-2.  **Fetch Beams:** Retrieve the PRP from the CFB as $n$ beams parallel to a primary axis. This takes $O(n)$ cycles [S2, book].
+2.  **Fetch Beams:** Retrieve the PRP from the CFB as $n$ beams parallel to a primary axis [S1].
 3.  **Store in 2DSB:** Store the slanted PRP into the 2DSB one beam at a time, from closest to furthest [S1].
-4.  **De-skew (Shear):** Shift each beam left or right within the 2DSB to align all viewing rays vertically (parallel to a 2D axis). This is performed using a barrel shifter (Conveyor) [S1]. The 2DSB width ($2n-1$) accommodates the shear [S1].
+4.  **De-skew (Shear):** Shift each beam left or right within the 2DSB to align all viewing rays vertically (parallel to a 2D axis) using a barrel shifter (Conveyor) [S1].
 5.  **Retrieve Rays:** Retrieve vertical viewing rays from the 2DSB in parallel [S1].
-6.  **Transfer to RPT:** Transfer rays to the RPT. Shift rays during transfer to ensure the closest voxel appears at the desired position in the tree [S1].
-7.  **Process Rays:** Process rays in parallel through the RPT [S1]. Each VCU combines two voxels in 7 time units. The tree processes $\log n$ rays simultaneously in a pipeline fashion after initialization [S1]. For algorithms requiring a 27-voxel neighborhood (central voxel + 26 neighbors), use multiple parallel 2DSBs. Extract the 27-voxel cube and transfer it to the RPT in parallel [S1].
+6.  **Transfer to RPT:** Transfer rays to the RPT, shifting them during transfer to ensure the closest voxel appears at the desired position [S1].
+7.  **Process Rays:** Process rays in parallel through the RPT. Each VCU combines two voxels in 7 time units [S1]. For algorithms requiring a 27-voxel neighborhood (central voxel + 26 neighbors), use multiple parallel 2DSBs to extract and transfer the cube in parallel [S1].
 8.  **Pipeline:** Use a fourth plane in the 2DSB to load the next slanted PRP while three planes are used for extracting the 27-voxel cube for concurrent projection [S1].
 
 ### Pseudocode
@@ -53,74 +53,56 @@ The method transforms arbitrary parallel projection rays into a format suitable 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def extended_cube_projection(volume, view_dir, n):
-    """
-    Perform arbitrary parallel projection using Extended Cube Architecture.
-    volume: 3D list of voxels [z][y][x]
-    view_dir: (dx, dy, dz) normalized vector defining parallel projection rays
-    n: Dataset dimension size
-    """
-    pixel_values = []  # Initialize to prevent UnboundLocalError
+def extended_cube_pipeline(volume, view_dir, n):
     dsb_width = 2 * n - 1
-    dsb_height = n
-    num_planes = 4
-    dsb = [[[None for _ in range(dsb_width)] for _ in range(dsb_height)] for _ in range(num_planes)]
-
-    # Process each scan line (Projection Ray Plane)
+    dsb = [[[None] * dsb_width for _ in range(n)] for _ in range(4)]
+    
     for scan_y in range(n):
-        current_plane = scan_y % num_planes
+        plane = scan_y % 4
         
-        # 1. Fetch PRP as n beams parallel to primary axis (Z)
+        # 1 & 2. Fetch PRP as n beams parallel to primary axis from CFB
         beams = []
         for beam_x in range(n):
             beam = []
             for z in range(n):
                 x = beam_x + int(view_dir[0] * z)
                 y = scan_y + int(view_dir[1] * z)
-                if 0 <= x < n and 0 <= y < n:
-                    beam.append(volume[z][y][x])
-                else:
-                    beam.append(0)
+                beam.append(volume[z][y][x] if 0 <= x < n and 0 <= y < n else 0)
             beams.append(beam)
-
-        # 2. Store and De-skew in 2DSB
-        for beam_idx, beam in enumerate(beams):
-            shift = int(beam_idx * view_dir[0])
+            
+        # 3. Store slanted PRP into 2DSB one beam at a time (closest to furthest)
+        for i, beam in enumerate(beams):
+            shift = int(i * view_dir[0])
             col_start = (dsb_width // 2) + shift
             for z, val in enumerate(beam):
                 col = col_start + z
                 if 0 <= col < dsb_width:
-                    dsb[current_plane][z][col] = val
-
-        # 3. Retrieve vertical viewing rays from 2DSB
-        rays = []
+                    dsb[plane][z][col] = val
+                    
+        # 4. De-skew using barrel shifter (Conveyor) to align rays vertically
+        # (Hardware conveyor shifts beams to align viewing rays parallel to a 2D axis)
+        
+        # 5 & 6. Retrieve vertical rays and transfer to RPT with shift
         for col in range(dsb_width):
-            ray = []
-            for z in range(n):
-                val = dsb[current_plane][z][col]
-                if val is not None:
-                    ray.append(val)
-            rays.append(ray)
-
-        # 4. Transfer to RPT and Process
-        for ray in rays:
+            ray = [dsb[plane][z][col] for z in range(n)]
             # Shift ray during transfer to ensure closest voxel is at index 0
-            # (Handled by hardware conveyor during transfer)
+            ray = [v for v in ray if v is not None]
             
-            # Process through RPT (VCU tree)
-            current_level = ray[:]
-            while len(current_level) > 1:
+            # 7. Process through RPT (VCU tree)
+            current = ray[:]
+            while len(current) > 1:
                 next_level = []
-                for i in range(0, len(current_level), 2):
-                    v1 = current_level[i]
-                    v2 = current_level[i+1] if i+1 < len(current_level) else 0
-                    # VCU combines two voxels in 7 time units
+                for i in range(0, len(current), 2):
+                    v1 = current[i]
+                    v2 = current[i+1] if i+1 < len(current) else 0
                     combined = v1 * 0.5 + v2 * 0.5  # Standard compositing [G]
                     next_level.append(combined)
-                current_level = next_level
-            pixel_values.append(current_level[0])
-
-    return pixel_values
+                current = next_level
+            output_pixel(current[0], scan_y)
+            
+        # 8. Pipeline: 4th plane loads next PRP while others process
+        if plane == 0:
+            load_next_prp(dsb[3], volume, view_dir, n)
 ```
 
 ### Parameters and Typical Values

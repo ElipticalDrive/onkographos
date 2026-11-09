@@ -1,0 +1,389 @@
+# Hierarchical Density-based Clustering
+
+Also called: Linsen et al. clustering, density-based hierarchical clustering
+
+## Overview
+Hierarchical Density-based Clustering is a technique for multi-dimensional feature space that generates a hierarchy of nested clusters based on density estimates, allowing for interactive exploration in cluster space rather than high-dimensional feature space [S1, unofficial]. It sets itself apart from parallel coordinates-based approaches by building on clustering to scale better to high dimensionality, and from non-visual clustering methods by providing an explicit cluster tree visualization that serves as an intuitive interaction widget [S1, unofficial].
+
+## How it works
+**Inputs:** A set of $N$ points in an $n$-dimensional feature space. Each point represents a voxel's multi-variate data values.
+**Outputs:** A hierarchical cluster tree and an assignment of a unique cluster ID and density value to each input point.
+
+**Data Structures:**
+1.  **Histogram:** An $n$-dimensional grid of cells. Each cell stores a count of points falling within its bounds.
+2.  **Cluster Tree:** A tree structure where nodes represent clusters. Each node contains a list of point indices belonging to that cluster (excluding those in child clusters).
+3.  **Point Attributes:** Each point stores its assigned `cluster_id` and `density`.
+
+**Parameters:**
+*   $n$: The number of dimensions in the feature space.
+*   Cell Size: The pre-defined size for the $n$-dimensional histogram bins. This parameter determines the resolution of the density estimation.
+
+**Algorithm Steps:**
+
+1.  **Compute Densities:**
+    Build an $n$-dimensional histogram with the specified cell size. For each point $p$ in the input set, determine which histogram cell $c$ it falls into. Increment the count for cell $c$. The density estimate for any point in cell $c$ is equal to the count of points in that cell. Let $D(c)$ be the density of cell $c$.
+
+2.  **Initialize Hierarchy:**
+    Create a root cluster $C_{root}$ with density 0. Initialize $C_{root}$ to contain all $N$ input points.
+
+3.  **Generate First Clusters (Density 1):**
+    Identify all connected components in the histogram where cells have density $\ge 1$. Two cells are connected if they share a face, edge, or vertex (i.e., they are 26-connected in 3D, or generally $3^n-1$ connected in $n$-dimensions). Each connected component forms a cluster of density 1. Add these clusters as children of the root.
+
+4.  **Iterative Refinement:**
+    Let $D_{max}$ be the maximum density value present in the histogram.
+    Iterate through density levels $d$ from 1 to $D_{max} - 1$:
+    a.  Identify all cells with density exactly equal to $d$.
+    b.  Remove these cells from the active histogram (conceptually, they are no longer part of the connected components for higher densities).
+    c.  Check the connected components formed by cells with density $> d$.
+    d.  If a previously existing cluster (connected component at density $d$) splits into $k > 1$ new connected components due to the removal of cells at density $d$, create $k$ new child clusters for the parent cluster. These new clusters correspond to the new connected components.
+    e.  Assign a unique cluster ID to each new cluster.
+
+5.  **Finalize Hierarchy:**
+    The process stops when the maximum density $D_{max}$ is reached. Clusters at the highest density level are leaf nodes.
+
+6.  **Assign Cluster IDs to Points:**
+    Traverse the cluster tree. For each cluster, assign its unique ID to all points contained within it. However, points contained in any child cluster overwrite the ID assigned by the parent. Consequently, each inner node contains all points of the cluster that are *not* contained in any sub-cluster. The root node contains all points not part of any other cluster.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hierarchical_density_clustering(points, cell_size):
+    """
+    points: List of n-dimensional vectors.
+    cell_size: Scalar size for each dimension of the histogram bin.
+    Returns: cluster_tree, point_cluster_ids, point_densities
+    """
+    n = len(points[0])
+    
+    # Step 1: Build Histogram
+    # Determine bounds to create a fixed-size grid or use a hash map for sparse cells
+    # For implementation simplicity, assume we can map points to integer grid coordinates
+    histogram = {} # Map from tuple of cell indices to count
+    
+    point_cell_map = {} # Map from point index to cell index tuple
+    
+    for idx, p in enumerate(points):
+        # Quantize point to cell index
+        cell_idx = tuple(int(val / cell_size) for val in p)
+        point_cell_map[idx] = cell_idx
+        
+        if cell_idx not in histogram:
+            histogram[cell_idx] = 0
+        histogram[cell_idx] += 1
+        
+    # Map cell index to density
+    cell_densities = {cell: count for cell, count in histogram.items()}
+    
+    # Step 2: Initialize Root
+    root_cluster = Cluster(id=0, density=0, points=set(range(len(points))))
+    cluster_tree = [root_cluster]
+    cluster_map = {0: root_cluster} # ID to Cluster object
+    
+    # Helper to find connected components in histogram for a given min_density
+    def get_connected_components(min_density):
+        # Filter cells with density >= min_density
+        active_cells = {cell for cell, d in cell_densities.items() if d >= min_density}
+        
+        if not active_cells:
+            return []
+            
+        # Build adjacency graph for active cells
+        # Two cells are connected if they are neighbors in n-dim space
+        visited = set()
+        components = []
+        
+        # Use a queue for BFS
+        for start_cell in active_cells:
+            if start_cell in visited:
+                continue
+            
+            component_cells = set()
+            queue = [start_cell]
+            visited.add(start_cell)
+            
+            while queue:
+                current_cell = queue.pop(0)
+                component_cells.add(current_cell)
+                
+                # Find neighbors
+                # Neighbors differ by -1, 0, or +1 in each dimension, excluding (0,0,...,0)
+                # Generate all combinations
+                neighbors = []
+                for dims in product([-1, 0, 1], repeat=n):
+                    if all(d == 0 for d in dims):
+                        continue
+                    neighbor = tuple(c + d for c, d in zip(current_cell, dims))
+                    if neighbor in active_cells and neighbor not in visited:
+                        visited.add(neighbor)
+                        queue.append(neighbor)
+            
+            components.append(component_cells)
+            
+        return components
+
+    # Step 3: Generate clusters for density 1
+    # We process densities in increasing order. 
+    # The "clusters" at density d are the connected components of cells with density >= d.
+    # However, the algorithm describes splitting when lower density cells are removed.
+    # This implies we track components as we decrease the threshold from max to 1?
+    # No, the text says: "iteratively remove cells with the lowest remaining density".
+    # This is equivalent to growing components from max density down to 1?
+    # Let's re-read carefully: "generate first clusters (of density one)... iteratively remove cells with lowest remaining density".
+    # This phrasing is slightly ambiguous. Standard hierarchical density clustering (like Linsen's) usually grows from high density.
+    # But the text says: "root (density 0)... first clusters (density 1)... iteratively remove cells with lowest remaining density".
+    # If we remove lowest density, we are effectively peeling away the periphery.
+    # Let's follow the text literally:
+    # 1. Start with all points.
+    # 2. Identify components at density >= 1. These are children of root.
+    # 3. Remove cells with density 1.
+    # 4. Identify components at density >= 2. These are children of the clusters from step 2.
+    # 5. Remove cells with density 2.
+    # ...
+    
+    # To implement "remove lowest", we can iterate d from 1 to max_density.
+    # At each step d, we consider the structure formed by cells with density >= d.
+    # The components at level d are sub-clusters of components at level d-1.
+    
+    max_density = max(cell_densities.values()) if cell_densities else 0
+    
+    # Store components at each density level
+    # components_at[d] = list of sets of cells
+    components_at = {}
+    
+    for d in range(1, max_density + 1):
+        # Get components for cells with density >= d
+        # Note: We must only consider cells that have NOT been "removed" by lower densities?
+        # No, the connectivity is defined by the histogram structure.
+        # When we say "remove cells with lowest density", we mean they are no longer part of the core.
+        # So for density d, we look at cells with density >= d.
+        comps = get_connected_components(d)
+        components_at[d] = comps
+        
+    # Now build the tree based on inclusion
+    # A component at level d is a child of a component at level d-1 if it is a subset of it.
+    
+    # Map cell to its cluster at each level
+    # cell_cluster[d][cell] = cluster_id
+    
+    # Initialize root
+    # Root contains all points.
+    
+    # We need to assign cluster IDs.
+    # Let's create a list of all clusters.
+    all_clusters = []
+    next_cluster_id = 1
+    
+    # Root is already created
+    all_clusters.append(root_cluster)
+    
+    # Process densities 1 to max_density
+    for d in range(1, max_density + 1):
+        comps = components_at[d]
+        prev_comps = components_at[d-1] if d > 1 else [set(histogram.keys())] # All cells at d=0? No, root is all points.
+        
+        # Actually, the text says "first clusters (of density one) from connected components in the histogram".
+        # This implies at d=1, we find components of cells with density >= 1.
+        # These are children of the root.
+        
+        # For d > 1, we find components of cells with density >= d.
+        # These are children of the components at d-1.
+        
+        # Let's map parent components to children components
+        # A child component at d is a subset of a parent component at d-1.
+        
+        # Create a mapping from cell to parent cluster ID at level d-1
+        # But we need to know which cluster ID corresponds to which component at d-1.
+        
+        # Let's rebuild the tree structure explicitly.
+        
+        # Level 0: Root
+        # Level 1: Components of cells with density >= 1
+        # Level 2: Components of cells with density >= 2, which are subsets of Level 1 components
+        
+        # We can iterate through components at level d and find their parent at level d-1.
+        
+        # To do this efficiently, we can map each cell to its parent component ID at d-1.
+        
+        # Let's store the cluster ID for each component at each level.
+        # cluster_id_map[d][component_index] = cluster_id
+        
+        # For d=1:
+        for comp in comps:
+            cluster = Cluster(id=next_cluster_id, density=d, points=set())
+            next_cluster_id += 1
+            all_clusters.append(cluster)
+            cluster_map[cluster.id] = cluster
+            root_cluster.children.append(cluster)
+            
+            # Assign points to this cluster
+            # Points are those in cells in comp
+            for cell in comp:
+                # Find all points in this cell
+                for idx, p_cell in point_cell_map.items():
+                    if p_cell == cell:
+                        cluster.points.add(idx)
+                        
+        # For d > 1:
+        if d > 1:
+            prev_comps = components_at[d-1]
+            # Map each cell to the component index in prev_comps that contains it
+            cell_to_parent_comp_idx = {}
+            for p_idx, p_comp in enumerate(prev_comps):
+                for cell in p_comp:
+                    cell_to_parent_comp_idx[cell] = p_idx
+            
+            # Now process current components
+            for comp in comps:
+                # Determine parent component
+                # All cells in comp must belong to the same parent component at d-1
+                # because connectivity is preserved.
+                parent_comp_idx = None
+                for cell in comp:
+                    if cell in cell_to_parent_comp_idx:
+                        parent_comp_idx = cell_to_parent_comp_idx[cell]
+                        break
+                    else:
+                        # This cell was not in d-1? Impossible if d > 1 and we filtered correctly.
+                        pass
+                        
+                if parent_comp_idx is None:
+                    continue # Should not happen
+                    
+                parent_comp = prev_comps[parent_comp_idx]
+                parent_cluster_id = None
+                
+                # Find the cluster ID for the parent component at d-1
+                # We need to store which cluster ID corresponds to which component at d-1.
+                # Let's assume we stored this in a list `cluster_ids_at[d-1]`
+                pass
+                
+    # The above logic is getting complex. Let's simplify based on the text's "overwrite" rule.
+    
+    # Alternative Implementation Strategy:
+    # 1. Compute densities.
+    # 2. Create a list of all clusters.
+    # 3. For each density level d from 1 to max:
+    #    a. Find connected components of cells with density >= d.
+    #    b. For each component, create a cluster.
+    #    c. Link it to the parent cluster (component at d-1 that contains it).
+    # 4. Assign points.
+    
+    # Let's restart the tree building with this clearer logic.
+    
+    cluster_tree = [] # List of all clusters
+    cluster_map = {} # id -> cluster
+    next_id = 1
+    
+    # Root
+    root = Cluster(id=0, density=0, points=set(range(len(points))))
+    cluster_tree.append(root)
+    cluster_map[0] = root
+    
+    # We need to track which component at d-1 corresponds to which cluster ID
+    # Let's store a list of cluster IDs for each density level
+    cluster_ids_at_level = {0: [0]} # Level 0 has root ID 0
+    
+    for d in range(1, max_density + 1):
+        comps = components_at[d]
+        prev_comps = components_at[d-1]
+        
+        # Map cells to parent component index
+        cell_to_parent_idx = {}
+        for p_idx, p_comp in enumerate(prev_comps):
+            for cell in p_comp:
+                cell_to_parent_idx[cell] = p_idx
+                
+        # Map parent component index to parent cluster ID
+        # The parent cluster ID is cluster_ids_at_level[d-1][p_idx]
+        
+        current_level_cluster_ids = []
+        
+        for comp in comps:
+            # Find parent component index
+            # All cells in comp should map to the same parent index
+            parent_idx = None
+            for cell in comp:
+                if cell in cell_to_parent_idx:
+                    parent_idx = cell_to_parent_idx[cell]
+                    break
+            
+            if parent_idx is None:
+                continue
+                
+            parent_id = cluster_ids_at_level[d-1][parent_idx]
+            parent_cluster = cluster_map[parent_id]
+            
+            new_cluster = Cluster(id=next_id, density=d, points=set())
+            next_id += 1
+            cluster_tree.append(new_cluster)
+            cluster_map[new_cluster.id] = new_cluster
+            
+            parent_cluster.children.append(new_cluster)
+            current_level_cluster_ids.append(new_cluster.id)
+            
+            # Add points
+            for cell in comp:
+                for idx, p_cell in point_cell_map.items():
+                    if p_cell == cell:
+                        new_cluster.points.add(idx)
+                        
+        cluster_ids_at_level[d] = current_level_cluster_ids
+        
+    # Step 6: Assign final IDs to points
+    # Points in children overwrite parents.
+    # We can do this by iterating from leaves up, or simply by checking all clusters.
+    # Since each point belongs to exactly one leaf cluster (or a cluster that doesn't split further),
+    # we can just assign the ID of the deepest cluster containing the point.
+    
+    point_cluster_ids = {}
+    point_densities = {}
+    
+    for idx in range(len(points)):
+        # Find the cluster with the highest density that contains this point
+        best_cluster = None
+        best_density = -1
+        
+        for cluster in cluster_tree:
+            if idx in cluster.points:
+                if cluster.density > best_density:
+                    best_density = cluster.density
+                    best_cluster = cluster
+                    
+        if best_cluster:
+            point_cluster_ids[idx] = best_cluster.id
+            point_densities[idx] = best_cluster.density
+        else:
+            point_cluster_ids[idx] = 0 # Root
+            point_densities[idx] = 0
+            
+    return cluster_tree, point_cluster_ids, point_densities
+
+class Cluster:
+    def __init__(self, id, density, points):
+        self.id = id
+        self.density = density
+        self.points = points
+        self.children = []
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The cell size parameter is critical. If too large, distinct clusters merge. If too small, noise creates spurious clusters.
+*   **Boundaries:** Points on the boundary of the feature space may have artificially low densities if the histogram is not padded or handled correctly.
+*   **Degenerate Input:** If all points have the same density, only one cluster (the root) or a single level of clusters will exist.
+*   **Connectivity Definition:** The definition of "connected" (face, edge, vertex) must be consistent with the dimensionality $n$. In high dimensions, the number of neighbors grows exponentially ($3^n - 1$).
+
+## Operating characteristics
+*   **Time Complexity:** Building the histogram is $O(N)$. Finding connected components depends on the number of cells and their connectivity. In the worst case, it can be expensive in high dimensions due to the exponential growth of neighbors. The iterative refinement adds another layer of complexity.
+*   **Memory Complexity:** Proportional to the number of points and the size of the histogram. The histogram can be sparse, so a hash map is often used.
+*   **Strengths:** Parameter-free (no need to specify number of clusters). Handles arbitrary cluster shapes. Scales better to high dimensionality than parallel coordinates.
+*   **Limitations:** Sensitive to the cell size parameter. Computationally expensive in high dimensions.
+*   **When to use:** When exploring multi-variate volume data and needing an intuitive, interactive cluster hierarchy.
+*   **When not to use:** When real-time performance is critical in very high dimensions, or when the data is uniformly distributed (leading to a single large cluster).
+
+## Background
+The method is based on the work by Linsen et al. [LLRR08, LLR09, LL09]. It was introduced as part of a cluster hierarchy-based user interface for interactive visual exploration of multi-variate volume data [S1, unofficial]. It combines advantages of previous approaches by Akiba et al. [AM07, AMCH07] (intuitive UI), Tzeng and Ma [TM04] (interaction with clustering results), and Linsen et al. (cluster tree visualization) [S1, unofficial].
+
+## Sources
+[S1] A Cluster Hierarchy-based Volume Rendering Approach for Interactive Visual Exploration of Multi-variate Volume Data, https://doi.org/10.2312/pe/vmv/vmv11/137-144, fetched 2026-10-26 (unofficial)

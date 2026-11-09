@@ -3,87 +3,92 @@
 Also called: Equiangular sampling (mentioned as alternative), Single-scattering volumetric path tracing
 
 ## Overview
-A rendering algorithm that samples the distance to the next scattering event or surface intersection using the transmittance distribution, handling both volume scattering and surface emission [S1]. It differs from [Volumetric Path Tracing](1863-volumetric-path-tracing.md) by explicitly sampling the interaction distance from the exponential distribution rather than using delta tracking, and it handles surface intersections by accounting for surface emission [S1].
+Volumetric Path Tracing with Transmittance Sampling is a unidirectional path tracing method that computes single-scattering radiance in participating media by sampling the distance to the next interaction event directly from the transmittance distribution [S1]. It differs from its parent, [Volumetric Path Tracing](1863-volumetric-path-tracing.md), by explicitly handling surface intersections and light emission rather than relying solely on delta tracking for volume scattering [S1]. Unlike [Multiple Scattering Volume Path Tracing with Phase Function Sampling](1043-multiple-scattering-volume-path-tracing-with-phase-function-.md), this method does not handle multiple scattering events within the volume [S1].
 
 ## How it works
-**Inputs:** Camera ray origin and direction, scene geometry (for intersection), volume extinction coefficient $\sigma_t$ (assumed constant/homogeneous), random number generator (RNG).
-**Outputs:** Radiance estimate $L$ for the pixel.
+**Inputs:**
+- `screen_pos`: 2D screen coordinates for the pixel.
+- `rng`: Random number generator state.
+- `camera`: Camera object providing `sample_primary` and ray construction.
+- `scene`: Scene object providing `intersect` and surface properties (emission `Le`, light status).
+- `sigma_t`: Extinction coefficient of the homogeneous volume.
+- `sigma_s`: Scattering coefficient of the homogeneous volume.
+
+**Outputs:**
+- `L`: Estimated radiance returning from the pixel.
 
 **Data Structures:**
-*   `Intersection`: Contains `t_hit` (distance to nearest surface), `is_light` (boolean), `Le` (emission, if light).
-*   `Ray`: Contains `org` (origin), `dir` (direction).
+- `Ray`: Struct with `org` (origin, `vec3`), `dir` (direction, `vec3`), `t_hit` (distance to nearest surface intersection, `float`).
+- `Intersection`: Struct with `t_hit` (distance, `float`), `is_light` (boolean), `Le` (emission, `float` or `vec3`).
 
 **Steps:**
-1.  Sample a primary camera ray from the screen position using the camera and RNG [S1].
-2.  Intersect the scene with the camera ray to find the hit distance $t_{\text{hit}}$ [S1].
-3.  Generate a uniform random number $u \in [0, 1]$ [S1].
-4.  Compute the sampled distance $t$ using the inverse CDF of the transmittance distribution:
-    $$t = \frac{\log(1-u)}{-\sigma_t}$$
+1.  **Sample Primary Ray:** Generate a camera ray from `screen_pos` using the camera model and `rng`.
+2.  **Intersect Scene:** Find the distance to the nearest surface intersection, `t_hit`. If no intersection exists, `t_hit` is infinity [S1].
+3.  **Sample Interaction Distance:** Generate a uniform random number $u \in [0, 1]$ from `rng`. Compute the sampled distance $t$ to the next scattering event using the inverse CDF of the exponential transmittance distribution:
+    $$ t = \frac{\log(1-u)}{-\sigma_t} $$
     [S1]
-5.  If $t < t_{\text{hit}}$, the ray scatters within the volume:
-    *   Calculate the transmittance PDF:
-        $$p(t) = \sigma_t \exp(-\sigma_t t)$$
-        [S1]
-    *   Calculate the transmittance:
-        $$T(t) = \exp(-\sigma_t t)$$
-        [S1]
-    *   Compute the scattering point $p = \text{ray.org} + t \cdot \text{ray.dir}$ [S1].
-    *   Estimate scattered radiance $L_{s1}$ by sampling a point on the light source and evaluating the phase function and geometry term (Equation 7 in [S1]) [S1]. Let this estimate be $L_{s1\_estimate}$ with PDF $L_{s1\_pdf}$ [S1].
-    *   Return the radiance estimate weighted by the ratio of transmittance to trans_pdf and the scattering coefficient $\sigma_s$:
-        $$L = \frac{T(t)}{p(t)} \cdot \sigma_s \cdot \frac{L_{s1\_estimate}}{L_{s1\_pdf}}$$
-        [S1]
-6.  If $t \geq t_{\text{hit}}$, the ray hits a surface:
-    *   Calculate the transmittance PDF for hitting the surface:
-        $$P(t \geq t_{\text{hit}}) = \exp(-\sigma_t \cdot t_{\text{hit}})$$
-        [S1]
-        Note: The PDF value used in the ratio is this probability mass [S1].
-    *   Calculate the transmittance to the hit point:
-        $$T(t_{\text{hit}}) = \exp(-\sigma_t \cdot t_{\text{hit}})$$
-        [S1]
-    *   If the hit surface is a light source, retrieve its emission $L_e$; otherwise $L_e = 0$ [S1].
-    *   Return the surface emission weighted by the ratio of transmittance to trans_pdf:
-        $$L = \frac{T(t_{\text{hit}})}{P(t \geq t_{\text{hit}})} \cdot L_e$$
-        [S1]
+4.  **Determine Event Type:** Compare $t$ with `isect.t_hit`.
+    -   **Case A: Volume Scattering ($t < \text{isect}.t_{\text{hit}}$):**
+        1.  Calculate the transmittance from the camera to the scattering point:
+            $$ T = \exp(-\sigma_t \cdot t) $$
+            [S1]
+        2.  Calculate the probability density function (PDF) of the sampled distance:
+            $$ p(t) = \sigma_t \exp(-\sigma_t \cdot t) $$
+            [S1]
+        3.  Compute the scattering point position:
+            $$ p = \text{camera\_ray.org} + t \cdot \text{camera\_ray.dir} $$
+            [S1]
+        4.  Estimate the scattered radiance $L_{s1}$ by sampling a point on a light source. This involves evaluating the phase function $\rho$ and the geometry term (Equation 7 in [S1]). Let $L_{s1\_estimate}$ be the radiance contribution and $L_{s1\_pdf}$ be the PDF of the light sampling [S1].
+        5.  Return the radiance estimate weighted by the ratio of transmittance to the sampling PDF and the scattering coefficient:
+            $$ L = \frac{T}{p(t)} \cdot \sigma_s \cdot \frac{L_{s1\_estimate}}{L_{s1\_pdf}} $$
+            [S1]
+    -   **Case B: Surface Intersection ($t \geq \text{isect}.t_{\text{hit}}$):**
+        1.  The ray hits a surface before the sampled scattering event. Calculate the transmittance to the hit point:
+            $$ T = \exp(-\sigma_t \cdot \text{isect}.t_{\text{hit}}) $$
+            [S1]
+        2.  Calculate the PDF for hitting the surface (probability that the next scattering event is beyond the surface):
+            $$ P(t \geq \text{isect}.t_{\text{hit}}) = \exp(-\sigma_t \cdot \text{isect}.t_{\text{hit}}) $$
+            [S1]
+        3.  Retrieve the surface emission $L_e$. If the hit surface is a light source, $L_e = \text{isect}.Le$; otherwise, $L_e = 0$ [S1].
+        4.  Return the surface emission weighted by the ratio of transmittance to the PDF:
+            $$ L = \frac{T}{P(t \geq \text{isect}.t_{\text{hit}})} \cdot L_e $$
+            [S1]
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def L(screen_pos, rng, sigma_t, sigma_s, camera, scene, phase_function):
+def vol_path_tracing_transmittance_sampling(screen_pos, rng, camera, scene, sigma_t, sigma_s):
     # 1. Sample primary camera ray
     camera_ray = sample_primary(camera, screen_pos, rng)
     
     # 2. Intersect scene
     isect = intersect(scene, camera_ray)
+    t_hit = isect.t_hit
     
-    # 3. Generate uniform random number
-    u = next(rng)
-    
-    # 4. Compute sampled distance t
-    # t = log(1-u) / -sigma_t
-    # Note: log(1-u) is equivalent to log(u) if u is uniform [0,1], 
-    # but we follow the source formula exactly.
+    # 3. Sample distance to next scattering event
+    u = next(rng) # u in [0, 1]
     t = -log(1 - u) / sigma_t
     
-    if t < isect.t_hit:
-        # 5. Volume scattering
-        trans_pdf = sigma_t * exp(-sigma_t * t)
+    # 4. Determine if scattering or surface hit
+    if t < t_hit:
+        # Volume scattering
         transmittance = exp(-sigma_t * t)
+        trans_pdf = sigma_t * exp(-sigma_t * t)
         
         # Compute scattering point
         p = camera_ray.org + t * camera_ray.dir
         
-        # Estimate scattered radiance L_s1
-        # Sample a point on the light source
-        light_sample = sample_point_on_light(rng)
-        L_s1_estimate, L_s1_pdf = evaluate_light_interaction(p, light_sample, phase_function)
+        # Estimate scattered radiance from light source
+        # L_s1_estimate is the radiance contribution, L_s1_pdf is the PDF of the light sample
+        L_s1_estimate, L_s1_pdf = sample_light_and_eval_phase(p, rng, scene)
         
-        # Return weighted radiance
+        # Return weighted estimate
         return (transmittance / trans_pdf) * sigma_s * (L_s1_estimate / L_s1_pdf)
     else:
-        # 6. Surface intersection
-        trans_pdf = exp(-sigma_t * isect.t_hit)
-        transmittance = exp(-sigma_t * isect.t_hit)
+        # Surface intersection
+        transmittance = exp(-sigma_t * t_hit)
+        trans_pdf = exp(-sigma_t * t_hit)
         
         Le = 0
         if is_light(isect):
@@ -93,37 +98,30 @@ def L(screen_pos, rng, sigma_t, sigma_s, camera, scene, phase_function):
 ```
 
 **Parameters:**
-*   $\sigma_t$: The extinction coefficient of the volume, assumed constant (homogeneous) [S1].
-*   $u$: A uniform random number in $[0, 1]$ generated by the RNG [S1].
+- `sigma_t`: Extinction coefficient. Assumed constant (homogeneous volume) [S1].
+- `sigma_s`: Scattering coefficient. Assumed constant (homogeneous volume) [S1].
+- `u`: Uniform random number in $[0, 1]$ [S1].
 
 **Edge Cases and Pitfalls:**
-*   The sampling can generate $t > t_{\text{hit}}$, meaning the ray hits a surface before the sampled scattering event. This case must be handled by accounting for surface emission and the probability of hitting the surface [S1].
-*   The method is noisy because it does not importance sample the geometry term $|\omega \cdot n_{p0}| / \|t - p_0\|^2$ along $t$ [S1].
+- The sampling can generate $t > t_{\text{hit}}$, meaning the ray hits a surface before the sampled scattering event. This case must be handled by accounting for surface emission and the probability of hitting the surface [S1].
+- The method is noisy because it does not importance sample the geometry term $\frac{|\omega \cdot n_{p_0}|}{\|p(t) - p_0\|^2}$ along $t$ [S1].
 
 ## Subtopics
 
 ### [Volumetric Path Tracing with Transmittance Sampling and Multiple Scattering](6629-volumetric-path-tracing-with-transmittance-sampling-and-mult.md)
-A path tracer handling multiple scattering events within multiple homogeneous volumes, using only phase function sampling for direction selection, with no next event estimation or surface reflection (only emission). Choose this when multiple scattering is required.
-
-### [Volumetric Path Tracing with Spectral Integration](2188-volumetric-path-tracing-with-spectral-integration.md)
-Handles spectral variation of volume properties. Choose this when color accuracy across the spectrum is needed.
-
-### [Volumetric Path Tracing Estimator Derivation](3830-volumetric-path-tracing-estimator-derivation.md)
-Derives the mathematical estimator for volumetric path tracing. Use this for theoretical understanding.
+Extends this method to handle multiple scattering events within homogeneous media and index-matched surfaces. Choose this when multiple bounces are required.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** The rendered image will be a bit noisy even at high sampling counts [S1].
-*   **Strengths:** Handles both volume scattering and surface emission in a unified framework [S1].
-*   **Limitations:** Noisy due to lack of importance sampling for the geometry term [S1].
-*   **When to use:** When a simple volumetric path tracer is needed that handles surface intersections [S1].
-*   **When not to use:** When low noise is required; consider equiangular sampling [S1].
+- **Time Complexity:** $O(1)$ per pixel for single scattering, assuming constant time for light sampling and intersection.
+- **Memory Complexity:** $O(1)$ auxiliary memory.
+- **Performance:** The method produces noisy images even at high sampling counts because it does not importance sample the geometry term [S1].
+- **Strengths:** Simple implementation; handles both volume scattering and surface emission in a unified framework.
+- **Limitations:** High variance due to lack of geometry term importance sampling; limited to single scattering in homogeneous media [S1].
+- **When to use:** Debugging ground-truth results or simple single-scattering scenarios [S1].
+- **When not to use:** Scenes requiring multiple scattering or efficient single-scattering with low variance (use Equiangular sampling instead) [S1].
 
 ## Background
-Origin: [S1] Volumetric Path Tracing, https://cseweb.ucsd.edu/~tzli/cse272/wi2022/homework2.pdf, fetched 2026-10-30.
-History and development: This method is part of a homework assignment for CSE 272 at UCSD [S1].
-Where it is used: Used for computing ground-truth results when debugging more sophisticated algorithms, as implied by its parent [1863-volumetric-path-tracing.md].
+This method is described in the homework assignment "Volumetric Path Tracing" from UCSD CSE 272 (Winter 2022) [S1]. It is presented as a step towards more sophisticated volumetric path tracers, specifically contrasting with delta tracking and equiangular sampling [S1].
 
 ## Sources
 [S1] Volumetric Path Tracing, https://cseweb.ucsd.edu/~tzli/cse272/wi2022/homework2.pdf, fetched 2026-10-30

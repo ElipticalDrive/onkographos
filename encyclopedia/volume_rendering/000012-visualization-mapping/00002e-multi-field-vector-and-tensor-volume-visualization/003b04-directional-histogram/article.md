@@ -1,0 +1,59 @@
+# Directional Histogram
+
+Also called: Spherical histogram
+
+## Overview
+The Directional Histogram is a visualization method for analyzing the distribution of principal directions (such as eigenvectors or shear directions) within a tensor field by projecting them onto a unit sphere [S1, book]. It differs from sibling methods like [Domain Colouring](1833-domain-colouring.md) or [Glyph-based Vector/Tensor Visualization](10535-glyph-based-vector-tensor-visualization.md) by aggregating directional data into statistical bins on a sphere rather than mapping values directly to color at spatial locations or rendering geometric primitives [S1, book]. This allows for the identification of dominant orientations and anisotropy in the field [S1, book].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of direction vectors $\mathbf{v}_i$ derived from the tensor field at sample points.
+*   **Output:** A histogram representing the frequency distribution of these directions on a hemisphere, visualized via color mapping or discrete binning.
+
+**Data Structures:**
+*   **Sphere Representation:** A triangulation of the unit sphere. The surface is divided into discrete patches (triangles) or continuous regions (Voronoi cells).
+*   **Histogram Storage:** An array or map storing counts for each patch, normalized by patch surface area.
+
+**Steps:**
+1.  **Projection:** Project each input direction vector $\mathbf{v}_i$ onto the surface of a unit sphere [S1, book].
+2.  **Orientation Handling:** Because symmetric tensor directions are non-oriented (i.e., $\mathbf{v}$ and $-\mathbf{v}$ represent the same axis), flip all vectors to the positive half-space defined by a user-selected viewing axis (x, y, or z) [S1, book]. This restricts the analysis to a hemisphere [S1, book].
+3.  **Binning:** Perform region-dependent binning by counting the number of vectors that intersect with each surface patch on the sphere [S1, book].
+    *   *Discrete Approach:* Bin by triangle. Each triangle is colored uniformly based on the count [S1, book].
+    *   *Continuous Approach:* Bin by the Voronoi cell of each vertex, allowing interpolation of frequencies [S1, book].
+4.  **Normalization:** Normalize the counted frequencies by the respective surface area of each patch to account for variations in patch size, ensuring accurate density representation [S1, book].
+5.  **Visualization:** Map the normalized frequencies to visual attributes (e.g., color in a Mohr diagram context) [S1, book].
+
+**Formulas:**
+Let $N_p$ be the number of vectors falling into patch $p$, and $A_p$ be the surface area of patch $p$. The normalized frequency $F_p$ is:
+$$ F_p = \frac{N_p}{A_p} $$
+
+**Parameters:**
+*   **Viewing Axis:** User-selected axis (x, y, or z) for flipping vectors [S1, book].
+*   **Triangulation Resolution:** Determines the granularity of the binning. Uniform subdivision is crucial for accuracy [S1, book].
+
+**Edge Cases and Pitfalls:**
+*   **Isotropic Tensors:** In simulations, isotropic tensors may exhibit numeric instabilities, leading to increased noise ratios [S1, book]. The Directional Histogram aggregates these, potentially obscuring noise if not handled, though the related [Directional Scatterplot](#directional-scatterplot) variant explicitly addresses this via transparency mapping.
+*   **Boundary Conditions:** Vectors lying exactly on the equator of the selected hemisphere may require consistent handling during the flip operation to avoid double-counting or exclusion [S1, book].
+
+## Subtopics
+
+### Directional Scatterplot
+A variant of the directional histogram where each vector is represented as an individual point on the unit sphere rather than being aggregated into bins [S1, book].
+*   **Definition:** A scatterplot on a unit sphere allowing direct mapping of tensor properties to visual attributes of individual points [S1, book].
+*   **Steps:** Map shear stress to transparency: low transparency for low shear stresses (isotropic tensors) and high opacity for high shear stresses [S1, book].
+*   **Pitfalls:** Isotropic tensors exhibit increased noise ratio due to numeric instabilities in simulations [S1, book]. Transparency mapping is required to reduce noise and emphasize pronounced directions [S1, book].
+*   **When to choose:** Use when individual vector details and local noise characteristics are more important than global statistical distribution [S1, book].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of input vectors $N$, $O(N)$, for projection and binning, assuming constant-time patch lookup.
+*   **Memory Complexity:** Proportional to the number of bins (triangles or vertices) in the sphere triangulation.
+*   **Strengths:** Provides a clear statistical overview of directional anisotropy; handles the non-oriented nature of symmetric tensors effectively [S1, book].
+*   **Limitations:** Loses spatial context (it is a global or region-dependent statistic, not a spatial map); resolution is limited by the triangulation density [S1, book].
+*   **When to use:** Analyzing the overall distribution of principal directions in a tensor field [S1, book].
+*   **When not:** When spatial localization of directions is required (use [Glyph-based Vector/Tensor Visualization](10535-glyph-based-vector-tensor-visualization.md) instead) [S1, book].
+
+## Background
+The Directional Histogram originates from the analysis of stress tensor fields, specifically for inspecting the distribution of principal shear directions or eigenvectors [S1, book]. It was developed as part of a visual approach to analyzing stress tensor fields, utilizing spherical diagrams to project directions onto a hemisphere [S1, book]. The method accounts for the non-oriented nature of symmetric tensors by flipping vectors to a positive half-space [S1, book].
+
+## Sources
+[S1] A Visual Approach to Analysis of Stress Tensor Fields, https://doi.org/10.4230/dfu.vol2.sciviz.2011.188, fetched 2026-10-26 (book)

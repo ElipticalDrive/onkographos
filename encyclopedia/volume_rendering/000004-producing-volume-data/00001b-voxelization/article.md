@@ -1,129 +1,151 @@
 # Voxelization
 
-Also called: 3D scan-conversion, grid discretization
+Also called: Discretization, Grid Mapping, Digitization
 
 ## Overview
-Voxelization is the process of converting continuous geometric representations, such as triangle meshes, into a discrete 3D occupancy grid or scalar field (voxel array) [S1]. It solves the problem of representing complex surface geometry or volumetric data in a format suitable for volume rendering, ray marching, collision detection, and spatial queries [G]. This family is distinguished from [Procedural and implicit volumes](13-procedural-and-implicit-volumes.md) by producing an explicit, sampled grid rather than an analytic function, and from [Acquisition](14-acquisition.md) by being a computational conversion step rather than a physical sensing process [G].
+Voxelization is the process of mapping a continuous conceptual or physical source (such as a triangle mesh, point cloud, or implicit function) into a discrete volumetric representation suitable for rendering or simulation [G]. It solves the problem of bridging continuous geometry with grid-based processing pipelines by establishing a spatial domain and assigning values to grid cells based on the source method [G]. It differs from [Procedural and implicit volumes](13-procedural-and-implicit-volumes.md) by explicitly generating a discrete grid structure rather than evaluating functions on-the-fly, and from [Acquisition](14-acquisition.md) by being a deterministic conversion of existing data rather than a capture of physical reality.
 
 ## Shared principles
-All methods in this family map continuous world-space coordinates to discrete integer grid indices $(i, j, k)$ [G]. The core mechanism involves:
-1.  **Coordinate Mapping**: Defining a grid resolution (number of cells per axis) and a bounding box (origin and extent) [G]. A world coordinate $x$ is mapped to a grid index $idx$ via:
-    $$ idx = \lfloor \frac{x - origin}{voxel\_size} \rfloor $$
-    where $voxel\_size$ is the physical dimension of a voxel [S1][S3, unofficial].
-2.  **Occupancy Determination**: Evaluating whether a specific voxel cell intersects with, contains, or is influenced by the input primitive [G]. This evaluation varies by method, such as subdivision, ray casting, or binvox algorithms [S1].
-3.  **Attribute Assignment**: Storing data in the voxel [G]. This may include occupancy flags, density, or color/normal attributes derived from the source geometry or simulation [S12].
+All methods in this family map a conceptual or physical source into a discrete or analytic volumetric representation suitable for rendering [G]. The core mechanism involves:
+1. **Domain Definition**: Establishing a spatial domain, typically a 3D grid with resolution $(N_x, N_y, N_z)$ and bounding box, or an infinite analytic space [G].
+2. **Value Assignment**: Determining the value (density, distance, color) for each point in the domain based on the source method (geometric intersection, function evaluation, or physical state) [G].
+3. **Storage/Access**: Either storing the result in a discrete array (voxelization, simulation) or providing an interface to compute it on-the-fly (procedural) [G].
 
 ## Subtopics
 
 ### [Rasterization-based Voxelization](908-rasterization-based-voxelization.md)
-Projects mesh geometry onto a 2D plane and uses hardware/software rasterization to determine voxel coverage. Efficient for surface-only ("shell") voxelization, but may miss voxels intersecting triangle edges without conservative rasterization.
+Converts a continuous triangle mesh into a discrete volumetric representation by projecting the geometry onto a 3D grid using rasterization principles. It solves the problem of generating a voxelized mesh (either a sparse occupancy grid or an explicit mesh of cubes) from polygonal input without performing complex surface reconstruction. It differs from [Voxel Carving](1213-voxel-carving.md) and [Voxel Occupancy Test](1281-voxel-occupancy-test.md) by actively rasterizing triangle surfaces to determine occupancy rather than ray-casting or boolean operations, and from [Implicit Surface Voxelization](2379-implicit-surface-voxelization.md) by operating on explicit triangle primitives.
 
 ### [Point Cloud Voxelization](1000-point-cloud-voxelization.md)
-Maps 3D points directly to grid cells based on coordinate projection, aggregating data within occupied cells. Suitable for unstructured point data where geometric intersection tests are not applicable.
+Converts an unstructured set of 3D points into a structured discrete voxel grid by mapping each point to a grid cell based on its spatial coordinates. It solves the problem of bridging continuous, irregular point data with grid-based processing pipelines used in volume rendering, 3D object detection, and neural fields. Unlike [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) which projects geometry through a camera, or [Voxel Carving](1213-voxel-carving.md) which infers volume from silhouettes, this method directly bins points into cells, often aggregating features (e.g., color, normals) via averaging or other segment functions.
 
 ### [VoxelGrid from Mesh (Fill Method)](1013-voxelgrid-from-mesh-fill-method.md)
-Fills holes in a surface voxel representation using morphological operations. Chosen when watertight interiors are required from a surface mesh.
+The Fill Method generates a solid voxel grid from a mesh by computing surface occupancy and then applying binary morphological hole filling. It builds on [Voxelization](12-voxelization.md) by using a two-step surface-then-fill approach rather than direct volume rasterization or geometric intersection tests.
 
 ### [Voxel Grid Data Generation Pipeline](1208-voxel-grid-data-generation-pipeline.md)
-Generates labeled voxel grids from sequential scan data, handling occlusions and temporal consistency by maintaining prior and past grid states. Chosen for dynamic, scan-based environments.
+This method generates labeled 3D voxel grids from sequential scan data, specifically designed to handle occlusions and temporal consistency between prior and current observations. It differs from standard voxelization by maintaining two distinct grid states (prior and past) and explicitly updating occlusion masks based on camera pose transformations, ensuring that newly observed geometry correctly occludes previous estimates. It builds on [Voxelization](12-voxelization.md) by adding a temporal, scan-based processing loop [G].
 
 ### [Voxel Carving](1213-voxel-carving.md)
-Produces a dense, filled voxel grid by intersecting geometric constraints from multiple camera views (silhouettes/depth maps). Explicitly rejects space outside observed bounds, unlike surface-only methods.
-
-### [Coordinate Grid Generation](1273-coordinate-grid-generation.md)
-Generates structured spatial coordinates (e.g., in NDC space) aligned with the discrete sampling grid, solving the mapping from indices to continuous space for neural fields or ray casting.
+Voxel carving is a technique to reconstruct a dense, filled 3D voxel grid from a set of 2D depth maps or silhouettes captured from multiple viewpoints. Unlike surface-only voxelization methods that populate only the boundary voxels, voxel carving fills the interior volume consistent with the input projections. It is distinguished from sibling methods like [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by its reliance on volumetric consistency across multiple views rather than direct geometric projection of primitives, and from [Voxel Coloring](4418-voxel-coloring.md) by its primary focus on occupancy/geometry reconstruction rather than photometric attribute assignment, though both share the underlying space-carving principle.
 
 ### [Voxel Occupancy Test](1281-voxel-occupancy-test.md)
-Queries an existing voxel grid to determine if query points lie within occupied voxels. Does not generate the grid but performs containment checks.
-
-### [3D Scan-conversion](1895-3d-scan-conversion.md)
-Converts geometric primitives into a volumetric dataset, combining them with existing volume data using matting operators and rendering via ray casting. Maps directly to 3D volume grid coordinates rather than screen space.
+The Voxel Occupancy Test determines whether a given set of continuous world-space points lies within any occupied voxel of a pre-computed voxel grid. It solves the problem of spatial querying for point-in-volume containment, serving as a fundamental primitive for collision detection, point cloud filtering, and visibility culling. Unlike [Voxel Visibility Culling](8235-voxel-visibility-culling.md), which filters voxels based on scalar field thresholds to find surface-adjacent cells, this method performs a direct binary containment check against the discrete occupancy mask. It differs from [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) by operating on discrete point queries rather than continuous bounding box intersections.
 
 ### [Virtual Voxel](1987-virtual-voxel.md)
-A rasterization-based renderer for large-scale voxel scenes using virtual textures and geometry, streaming LODs into GPU memory for real-time editing.
+Virtual Voxel is a rasterization-based voxel renderer designed for the real-time visualization and modification of large-scale voxel scenes (e.g., $4^{12}$ resolution) by combining virtual texture and virtual geometry concepts. It streams appropriate levels of detail into GPU memory using a two-level data structure, storing data linearly to enable efficient real-time editing (Union/Subtraction). Unlike previous graph-based voxel visualization methods, it employs a rasterization rendering pipeline, resulting in highly efficient modification of large scenes.
+
+### [Implicit Surface Voxelization](2379-implicit-surface-voxelization.md)
+Implicit Surface Voxelization converts a mathematical implicit surface definition into a discrete voxel representation by rasterizing 2D rectangles within a Region of Interest (ROI) and evaluating the implicit function in a pixel shader. It differs from triangle-based rasterization methods (e.g., [Rasterization-based Voxelization](908-rasterization-based-voxelization.md)) by operating directly on analytical functions rather than polygonal approximations, allowing it to handle complex, non-polygonal geometry.
 
 ### [Voxelization of Lines and Planes](2472-voxelization-of-lines-and-planes.md)
-An analytic slab method that guarantees N-separability (no holes) and N-minimality for lines and planes by defining thickness based on normals and resolution.
+Voxelization of Lines and Planes is a method for generating discrete, topologically correct representations of 2D lines and 3D planes within a voxel grid. It solves the problem of ensuring that the resulting voxel set is both **N-separating** (preventing N-connected ray paths from penetrating the surface) and **N-minimal** (containing no redundant voxels). Unlike general mesh voxelization methods that may produce artifacts at edges or require heavy computation, this method uses a geometric slab defined by the surface normal and grid resolution to deterministically include or exclude voxels based on their center's signed distance to the plane. It is distinct from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by relying on analytic distance criteria rather than projection, and from [Point Cloud Voxelization](1000-point-cloud-voxelization.md) by explicitly handling continuous surface geometry.
 
-### [Relaxed Connectivity Voxelization](2481-relaxed-connectivity-voxelization.md)
-Ensures topological continuity (6-connected or 26-connected paths) for 1D/2D primitives by intersecting with specific 2D targets within voxels.
-
-### [Mesh-to-Voxel Geometry Shader](2800-mesh-to-voxel-geometry-shader.md)
-A real-time DirectX technique emitting cube geometry for grid cells intersecting triangles, allowing immediate lighting calculations.
-
-### [Grid Resolution Calculation](2908-grid-resolution-calculation.md)
-Calculates 3D grid resolution based on target voxel count and aspect ratio. Chosen when preserving geometric aspect ratios is critical.
-
-### [Conservative Voxelization](3247-conservative-voxelization.md)
-Hardware-accelerated algorithm guaranteeing that every voxel intersecting the model is recognized by computing exact depth ranges per fragment. Chosen for robust collision detection.
+### [Textured Mesh to Volumetric Attribute Voxelization](2760-textured-mesh-to-volumetric-attribute-voxelization.md)
+This method samples texture maps and material properties from a textured 3D mesh into a discrete voxel grid to produce volumetric attributes such as base color, metallic, and roughness. It maps continuous surface appearance data to a volumetric representation by computing mesh-voxel intersections and sorting the resulting indices to align attribute tensors.
 
 ### [View-Adaptive Voxelization](3313-view-adaptive-voxelization.md)
-Adapts voxel resolution to the viewport for particle simulations, exceeding GPU memory limits via span-based representation.
+View-Adaptive Voxelization is a GPU-friendly, real-time technique for rendering homogeneous media defined by particles (e.g., SPH fluids) by computing view-adaptive binary voxelizations with on-the-fly compression. It solves the problem of high-resolution volumetric data exceeding available GPU memory by splitting the screen into tiles, voxelizing each tile into a perspective grid, and immediately compressing the result into a span-based surface representation. Unlike methods requiring preprocessing like scalar field conversion or mesh generation, it directly processes unsorted particle data to achieve resolutions (e.g., 1920×1080×16000) that would otherwise be impossible to store in memory.
 
 ### [Mesh to Voxel Generation via AABB-Triangle Intersection](3775-mesh-to-voxel-generation-via-aabb-triangle-intersection.md)
-Uses SAT-based AABB vs Triangle intersection to determine occupied voxels. Chosen for explicit world-space geometric intersection without screen projection.
+This method converts a triangle mesh into a solid 3D voxel grid by first identifying surface voxels through Axis-Aligned Bounding Box (AABB) vs. Triangle intersection tests, and then filling the interior volume using a scanline fill algorithm. It differs from [Fake Voxelization via Triangle-Cube Intersection](6951-fake-voxelization-via-triangle-cube-intersection.md) by producing a solid, watertight volume rather than a hollow surface shell, and from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by operating in world space using geometric intersection tests rather than projecting geometry onto screen-space tiles.
 
 ### [Voxel Grid Optimization](4131-voxel-grid-optimization.md)
-Post-processing techniques (smoothing, compression, structural simplification) to improve rendering performance and memory efficiency.
+Voxel Grid Optimization encompasses a family of techniques applied to discrete voxel grids to improve computational efficiency, memory footprint, and visual quality for volume rendering and geometric processing. Unlike [Voxelization](12-voxelization.md), which focuses on the initial mapping of continuous geometry to discrete cells, this family addresses post-generation or pipeline-level refinements. It distinguishes itself from sibling methods by targeting specific bottlenecks: [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) reduces aliasing, [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) compresses storage, and [Bounding Volume Optimization](3583-bounding-volume-optimization.md) accelerates traversal by culling empty space.
 
 ### [Voronoi-like Segmentation Volume Generation](4218-voronoi-like-segmentation-volume-generation.md)
-Generates segmentation volumes by assigning voxels to the nearest neighbor in a Poisson-like point set. Chosen for spatially coherent labeling without input geometry.
+Voronoi-like Segmentation Volume Generation creates a 3D volume where each voxel is assigned a label corresponding to the index of its nearest neighbor in a synthetic, Poisson-distributed point set. It solves the problem of generating structured, spatially coherent segmentation labels for volume data without relying on input geometry, effectively creating a "Voronoi-like" partitioning of space. Unlike [Soft Voronoi Decomposition](7634-soft-voronoi-decomposition.md), which produces differentiable, soft boundaries for gradient-based optimization, this method produces hard, discrete segmentations suitable for texture synthesis or parameter initialization.
+
+### [Porous Voxelization](4361-porous-voxelization.md)
+Porous Voxelization is a voxelization technique that generates porous or sponge-like meshes by randomly discarding voxels during the voxelization process based on a spatial hash of their coordinates. Unlike standard voxelization methods which retain all computed voxels, this technique selectively removes voxels using a deterministic pseudo-random hash, maintaining spatial distribution properties while reducing voxel count. It is distinct from probabilistic sampling methods by using a fixed threshold parameter `p` where a voxel is kept if its hash value is greater than or equal to `p`.
 
 ### [Sparse and Hierarchical Structures](4391-sparse-and-hierarchical-structures.md)
-Uses sparse data structures (e.g., octrees) to represent voxel grids efficiently. Chosen for large-scale scenes or high-resolution data exceeding main memory.
+This family addresses the memory and computational inefficiency of dense, uniform voxel grids by storing only occupied regions using hierarchical data structures (typically octrees) or sparse hash maps. It solves the problem of rendering or processing large-scale 3D scenes or high-resolution volumetric data that exceed available main memory or require adaptive resolution. It sets itself apart from sibling methods like [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) and [Point Cloud Voxelization](1000-point-cloud-voxelization.md) by focusing on the *storage and traversal* of the voxelized data in a hierarchical manner, rather than just the initial conversion from primitives to voxels.
 
 ### [Voxel Coloring](4418-voxel-coloring.md)
-Uses color consistency across multiple views to distinguish object surface voxels from background. Chosen for 3D shape recovery from multi-view images.
+Voxel Coloring is a volumetric reconstruction technique that computes photo-realistic 3D models from multiple color images by assigning colors (radiances) to voxels in a 3D volume, guaranteeing consistency with the input images. It distinguishes itself from sibling methods like [Voxel Carving](1213-voxel-carving.md) by using a "coloring" approach: it starts with an opaque volume and carves away voxels that fail a color consistency test, rather than starting with an empty volume and filling it. Unlike [Generalized Voxel Coloring](5526-generalized-voxel-coloring.md), standard Voxel Coloring relies on an ordinal visibility constraint to simplify visibility checks, allowing for a single-scan reconstruction.
 
 ### [Crosshairs Intersection Target Method](4608-crosshairs-intersection-target-method.md)
-Uses crosshair targets within voxels to determine intersection for connectivity. Chosen for ensuring topological correctness in path generation.
-
-### [Parametric Surface Voxelization](6032-parametric-surface-voxelization.md)
-Voxelize parametric surfaces by building a point boodle and processing in the vertex shader. Chosen for handling complex implicit or free-form surfaces directly.
 
 ### [Volumetric Attribute and Density Formation](6304-volumetric-attribute-and-density-formation.md)
-Forms density and attribute fields during voxelization. Chosen when semantic content or statistical aggregation is required beyond binary occupancy.
+Volumetric Attribute and Density Formation is the family of methods that map continuous geometric primitives or simulation data into discrete voxel grids by assigning specific physical or visual attributes (such as density, velocity, color, or occupancy) to each cell. It solves the problem of converting raw input data into a structured volume representation suitable for subsequent rendering or simulation steps. It differs from its siblings [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) and [Point Cloud Voxelization](1000-point-cloud-voxelization.md) by focusing on the semantic assignment of attribute values (e.g., density stretching, velocity interpolation, or coverage factors) rather than just binary occupancy or rasterization coverage.
+
+### [Voxel Volume Rendering](6488-voxel-volume-rendering.md)
+Voxel Volume Rendering is a technique for visualizing 3D scalar fields by ray marching through a discrete voxel grid stored in a 3D texture. It solves the problem of rendering interpolated spatial data (such as geological assay values) by mapping continuous scalar attributes to a `Data3DTexture` and compositing them along view rays. It is distinguished from its siblings by its reliance on a uniform 3D hash grid for interpolation and its support for two distinct rendering modes: "block mode" (snapping rays to voxel centers for a crisp, discrete appearance) and "smooth compositing" (standard front-to-back ray marching).
 
 ### [Mesh Voxelization](6514-mesh-voxelization.md)
-Converts a continuous triangular surface mesh into a discrete 3D voxel grid by determining occupancy via ray-mesh intersection tests. Foundational for solid or surface-only representations.
+Mesh Voxelization converts a continuous triangular surface mesh (e.g., STL, OBJ) into a discrete 3D voxel grid by determining the occupancy of each grid cell via ray-mesh intersection tests. Unlike [Rasterization-based Voxelization](908-rasterization-based-voxelization.md), which projects geometry onto a 2D plane and extrudes coverage, this method evaluates the topological relationship (inside/outside) of the voxel center relative to the closed surface using the ray casting parity rule. It serves as the foundational technique for generating solid or surface-only voxel representations from polygonal models, distinct from [Point Cloud Voxelization](1000-point-cloud-voxelization.md) which operates on discrete samples rather than continuous geometry.
 
 ### [GPU and Parallel Acceleration Voxelization](6878-gpu-and-parallel-acceleration-voxelization.md)
-Accelerates conversion of continuous primitives into discrete voxel grids by leveraging GPU parallelism. Chosen for high-performance, real-time applications.
-
-### [Voxel Format Generation](6914-voxel-format-generation.md)
-Converts 3D Gaussian Splats into a sparse voxel octree for collision detection, outputting metadata and binary data.
-
-### [3D Gaussian Voxelization](7020-3d-gaussian-voxelization.md)
-Converts a set of 3D Gaussians into a set of unique voxels and their associated features for efficient processing by a 3D network.
+This family encompasses methods that accelerate the conversion of continuous geometry (meshes, points, or primitives) into discrete voxel grids by leveraging parallel processing units, primarily GPUs via CUDA or OpenGL/Vulkan, and multi-core CPUs. It solves the computational bottleneck of naive CPU-based scan-conversion, enabling real-time or near-real-time voxelization for dynamic scenes, large-scale environments, and complex volumetric effects like voxel cone tracing. It sets itself apart from its siblings by explicitly offloading the rasterization, intersection testing, or occupancy computation to parallel hardware architectures, often utilizing specialized hardware features like atomics, MSAA, or dedicated geometry shaders, rather than relying on single-threaded CPU loops or purely analytical CPU-based methods.
 
 ### [Specific Data Formats and Primitives](7148-specific-data-formats-and-primitives.md)
-Handles conversion of specific data formats and primitives into voxel grids.
+This family encompasses specific data structures, storage formats, and primitive representations used to store and process voxelized volume data. It addresses the problem of efficiently storing, retrieving, and rendering volumetric information by defining how continuous geometry or scalar fields are mapped into discrete voxel grids and how those grids are organized in memory or on disk. It is distinguished from general voxelization algorithms by its focus on the resulting data representation (e.g., out-of-core files, CSG worksheets, or attribute-rich buffers) rather than the geometric conversion process itself.
 
 ### [Solid Volume Accumulation via Sphere-Box Intersection](7681-solid-volume-accumulation-via-sphere-box-intersection.md)
-Iterates over points and their bounding voxels, accumulating the sphere-box intersection volume into a dense array.
+This method voxelizes a set of spheres by accumulating the exact geometric volume of the intersection between each sphere and the voxels it overlaps. It solves the problem of converting point-cloud data with radii into a dense or sparse volumetric representation where voxel values represent the filled volume of the underlying primitives. It differs from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by using analytical/numerical integration rather than sampling, and from [Point Cloud Voxelization](1000-point-cloud-voxelization.md) by explicitly handling sphere geometry rather than simple point occupancy.
 
 ### [Analytic and Algebraic Methods](7913-analytic-and-algebraic-methods.md)
-Converts continuous geometric primitives into discrete volumetric grids by evaluating exact geometric intersections or integrals against voxel cells. Chosen for high-fidelity, differentiable representations without rasterization aliasing.
+Analytic and Algebraic Methods convert continuous geometric primitives (meshes, points, or parametric surfaces) into discrete volumetric grids by evaluating exact geometric intersections or integrals against voxel cells, rather than relying on screen-space rasterization or stochastic sampling. This family solves the problem of aliasing and discretization errors inherent in projection-based methods, providing high-fidelity, often differentiable, volumetric representations. It sets itself apart from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by avoiding projection artifacts and from [Monte Carlo 2D Voxelization](1734-monte-carlo-voxelization.md) by using deterministic geometric evaluation.
 
 ### [Template-based Voxelization](7964-template-based-voxelization.md)
-Computes the digitization of a triangle or mesh by determining if a voxel belongs to the digitization based on whether a template centered at the voxel intersects the triangle.
+Template-based Voxelization computes the digitization of a triangle or a mesh by determining if a voxel belongs to the digitization based on whether a template centered at the voxel intersects the triangle. It is a CPU straightforward implementation of reference [79] (or [78] in earlier versions). This method is distinct from rasterization-based approaches by using geometric intersection tests with predefined connectivity templates rather than projecting primitives onto a screen or grid.
 
 ### [Mesh Topology and Robust Digitization](8496-mesh-topology-and-robust-digitization.md)
-Focuses on maintaining topological correctness and robustness during the digitization of mesh surfaces into voxels.
+This family addresses the fundamental challenge of converting continuous polygonal meshes into discrete volumetric data while preserving topological integrity and handling non-ideal input geometry. Unlike rasterization-based methods that rely on screen-space projections or point-cloud methods that sample sparse data, these techniques operate directly on the mesh's topological structure (vertices, edges, faces) to ensure watertightness and connectivity. They are distinguished by their ability to robustly handle low-quality, non-watertight, or topologically open meshes that cause standard scan-conversion algorithms to fail, often by employing geometric bounding volumes or intermediate tetrahedral representations.
+
+### [Analytic Voxelization](10493-analytic-voxelization.md)
+Converting parametrically defined continuous geometric objects into digital object representations (voxels).
+
+### [Scanline and Geometric Primitives](10941-scanline-and-geometric-primitives.md)
+
+### [Voxel Generation with Diffusion Models](10976-voxel-generation-with-diffusion-models.md)
+Uses a Denoising Diffusion Probabilistic Model (DDPM) to generate voxelized shapes. The goal is to learn a parameterized Markov chain that generates novel samples after finite time steps.
+
+### Nearest Neighbor Splatting
+A splatting method where a value at a continuous position is written to the single nearest voxel by rounding coordinates to integers [S6, unofficial]. Implementation uses `contToDisc` to map continuous coordinates to discrete indices, adding the value to the buffer if within bounds [S6, unofficial]. This method suffers from obvious aliasing problems [S6, unofficial].
+
+### Recursive Voxelization with Interval Arithmetic
+Rendering of recursively voxelized object space with interval arithmetic [S7, unofficial].
+
+### Instanced Voxelization
+A technique to draw all voxelization slices in a single draw call using instancing [S8, unofficial]. The instance ID is used to specify the target slice [S8, unofficial].
+
+### Distance-based Voxelization
+A method to voxelize objects directly without polygon conversion by including voxels where the distance to the surface $S$ is smaller than a threshold $t$ [S9]. It scans a subset of the voxel space in the vicinity of the surface $S$, efficiently measures the distance to surface $S$ for each voxel, and generates a 6- or 26-separating representation [S9]. For general surfaces, it uses the Lagrangian Method to find the point on the surface minimizing the distance to a random 3D point [S9]. The distance minimization problem is defined by minimizing the squared Euclidean distance function: $p(x, y, z) = (x - x_0)^2 + (y - y_0)^2 + (z - z_0)^2$, where $(x_0, y_0, z_0)$ is a point on the surface and $(x, y, z)$ is the voxel center [S9]. Solutions via the Lagrangian Method may require solving high-order polynomial equations without analytical solutions; numerical methods must be used for high accuracy [S9]. For regular shapes like spheres and cylinders, distance measurement is straightforward; for general surfaces, the Lagrangian Method is required [S9].
+
+### Asynchronous Voxel Update
+Updating the voxel world at a lower frequency than the render frame rate to leverage temporal coherency of static or slow-moving light sources and dynamic models [S10, unofficial]. The voxelization can be performed at a lower frequency, such as every 5 frames [S10, unofficial]. Lower update frequency causes the voxel model to lag behind the triangle mesh, resulting in visual artifacts [S10, unofficial].
+
+### Local Voxelization
+Voxelize a mesh in the region of a cube around a specific point, rather than globally. Useful to reduce memory cost for small values of pitch as opposed to global voxelization [S2]. When `fill=True`, uses `proximity.contains` to fill the resulting voxels, which may be meaningless for non-watertight meshes [S2].
+
+### Fine-tuning with Differentiable Quantization
+An optimization step to mitigate quality loss from quantization (texture seams, aliasing) by fine-tuning extracted assets using pseudo ground truth and differentiable quantization [S11]. It fixes mesh geometry and uses rendered normal and texture images from the mesh optimization stage as pseudo ground truth references [S11]. It optimizes using pixel-wise MSE loss and VGG perceptual loss [S11]. It uses a differentiable quantization module that gives quantized values in the forward pass and keeps gradients untouched in the backward pass [S11]. It stores mesh as Draco-compressed .obj file; other assets (normal map, texture maps, volume data in hash table, offset table) as PNG files [S11]. The Occupancy Image stores occupancy of the $N^3$ grid as an image where each voxel's occupancy status corresponds to a single bit [S11].
+
+### 6-Separating Plane Voxelization
+An overlap test criterion to create 6-separating voxelization, adapted from Huang et al. [1998], using specific offsets for plane tests [S12]. It optimizes computations by taking the dominant axis of the triangle's normal into account [S12]. It adapts the determination of the considered voxel range in a voxel column to the modified plane overlap test by projecting a voxel column's center (in the xy plane) along the z axis onto the triangle's plane and taking the according voxel(s) [S12]. The formula is $d_1 = \langle \mathbf{n}, \frac{1}{2} \Delta \mathbf{p} - \mathbf{v}_0 \rangle + \frac{1}{2} \Delta \mathbf{p}_{\perp} |\mathbf{n}_{\perp}|$ with $\diamond = \arg \max_{|\mathbf{n}_{\perp}| = \square, x, y, z}$ and $d_2 = \langle \mathbf{n}, \frac{1}{2} \Delta \mathbf{p} - \mathbf{v}_0 \rangle - \frac{1}{2} \Delta \mathbf{p}_{\perp} |\mathbf{n}_{\perp}|$ [S12]. If the projection touches two voxels, more than one voxel needs to be considered [S12]. In contrast to conservative voxelization, 1D and 2D bounding boxes additionally require plane overlap testing, so specializations for them are omitted [S12].
+
+### Voxelization for Boolean Operations
+A technique to voxelize surface meshes for volume rendering and boolean operations to create occlusion-free multi-field visualizations [S13, unofficial]. Used to perform binary operations on sets of single-field features in multi-field visualization [S13, unofficial].
+
+### Surface Voxel Texture Update
+If `surface_voxels` is None, call `sbs.create_surface_voxel_structure(volume_data)` to generate them [S14, unofficial]. If `surface_voxel_texture` does not exist, generate it and set min/mag filter to `GL_LINEAR`, wrap S/T to `GL_CLAMP_TO_EDGE` [S14, unofficial]. Convert `surface_voxels` list to numpy array of shape (N, 7) where each row is (x, y, z, nx, ny, nz, ?) cast to float32. Extract first 6 components (x,y,z,nx,ny,nz) for texture data [S14, unofficial]. Limit texture width to min(`surface_data.shape[0]`, `GL_MAX_TEXTURE_SIZE`). Upload as 2D texture with width=limit, height=1, internal format `GL_RGBA32F`, format `GL_RGBA`, type `GL_FLOAT` [S14, unofficial].
 
 ## Background
-Voxelization originated as a method for 3D scan-conversion, converting geometric models into volume buffers for visualization and rendering [G]. Early work focused on binary voxelization for volume graphics, where models were scan-converted into voxels with pre-computed attributes [G]. The field has expanded to include GPU-accelerated techniques for real-time global illumination (Voxel Cone Tracing) [S2, unofficial], obstacle voxelization for real-time fluid simulation [S6, unofficial], and analytic methods for topological correctness [S7]. Modern applications include coordinate grid generation for neural fields [S2, S4, S5, unofficial] and sparse voxel octrees for large-scale scene representation [S4, unofficial].
+Voxelization is a fundamental technique in computer graphics and scientific visualization, serving as the bridge between continuous geometric representations and discrete volumetric data structures. Early implementations focused on simple rasterization of triangles into 3D grids, often for use in voxel cone tracing for global illumination [S3, unofficial]. The advent of 3D Gaussian Splatting popularized efficient voxelization of Gaussian distributions for fast volume rendering and compression [S1]. Libraries like `trimesh` have standardized voxelization APIs for mesh processing, supporting multiple methods such as subdivision, ray casting, and binvox [S2]. Parallel acceleration via GPUs has enabled real-time voxelization for dynamic scenes and large-scale environments [S5, unofficial][S8, unofficial]. Topological correctness and separability (6- or 26-connectivity) have been major research focuses to ensure watertight and artifact-free voxel representations [S9][S12]. Modern applications extend to differentiable rendering, where voxelization is integrated into optimization pipelines for asset extraction and fine-tuning [S11].
 
 ## Sources
-[S1] trimesh.voxel.creation - trimesh 5.1.1 documentation, https://trimesh.org/trimesh.voxel.creation.html, fetched 2026-10-26
-[S2] Friduric/voxel-cone-tracing, https://github.com/Friduric/voxel-cone-tracing, fetched 2026-10-26 (unofficial)
-[S3] ZJU-Robotics-Lab/Voxelization_API, https://github.com/ZJU-Robotics-Lab/Voxelization_API, fetched 2026-10-27 (unofficial)
-[S4] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)
-[S5] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)
-[S6] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
-[S7] An Accurate Method for Voxelizing Polygon Meshes, https://web.eecs.utk.edu/~huangj/papers/polygon.pdf, fetched 2026-10-29
-[S8] an1pse/voxel-traversal, https://github.com/an1pse/voxel-traversal, fetched 2026-10-27 (unofficial)
-[S9] Point-Tessellated Voxelization, http://www.cs.columbia.edu/cg/raymond/gi12/paper100.pdf, fetched 2026-10-26 (unofficial)
+[S1] FaCT-GS: Fast and Scalable CT Reconstruction with Gaussian Splatting, https://doi.org/10.1007/978-3-032-37464-6_13, fetched 2026-10-26
+[S2] trimesh.voxel.creation - trimesh 5.1.1 documentation, https://trimesh.org/trimesh.voxel.creation.html, fetched 2026-10-26
+[S3] Friduric/voxel-cone-tracing, https://github.com/Friduric/voxel-cone-tracing, fetched 2026-10-26 (unofficial)
+[S4] Mike-Leo-Smith/SolidVoxelization, https://github.com/Mike-Leo-Smith/SolidVoxelization, fetched 2026-10-27 (unofficial)
+[S5] ZJU-Robotics-Lab/Voxelization_API, https://github.com/ZJU-Robotics-Lab/Voxelization_API, fetched 2026-10-27 (unofficial)
+[S6] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)
+[S7] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S8] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+[S9] An Accurate Method for Voxelizing Polygon Meshes, https://web.eecs.utk.edu/~huangj/papers/polygon.pdf, fetched 2026-10-29
 [S10] #AltDevBlog » Implementing Voxel Cone Tracing, https://jahej.com/alt/2013_01_31_implementing-voxel-cone-tracing.html, fetched 2026-10-28 (unofficial)
-[S11] (PDF) Real-time Voxelization for Complex Models, https://www.researchgate.net/publication/252533918_Real-time_Voxelization_for_Complex_Models, fetched 2026-11-03 (unofficial)
-[S12] Volume visualization, https://dl.acm.org/doi/pdf/10.1145/234313.234383, fetched 2026-11-01
+[S11] VMesh: Hybrid Volume-Mesh Representation for Efficient View Synthesis, https://core.ac.uk/download/560406650.pdf, fetched 2026-10-27
+[S12] Fast parallel surface and solid voxelization on GPUs, https://doi.org/10.1145/1882261.1866201, fetched 2026-11-03
+[S13] Multi-Field Visualization, https://kluedo.ub.rptu.de/files/2291/_diss.pdf, fetched 2026-10-27 (unofficial)
+[S14] GitHub - priscilla100/medical_volume_renderer, https://github.com/priscilla100/medical_volume_renderer/, fetched 2026-10-29 (unofficial)

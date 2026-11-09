@@ -1,0 +1,132 @@
+# Histogram-based Voxel Ambient Occlusion
+
+Also called: Dynamic Ambient Occlusion, Histogram-based AO
+
+## Overview
+Histogram-based Voxel Ambient Occlusion is a local illumination technique for volume rendering that approximates ambient occlusion, color bleeding, and basic scattering effects by modulating precomputed intensity distributions (local histograms) with the transfer function during rendering [S1]. Unlike ray-based approaches such as Local AO, it uses vector quantization clustering to store these distributions in a 2D texture table, allowing real-time updates via GPU texture blending with only two additional texture lookups compared to standard gradient-based shading [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Scalar volume data set, transfer function (mapping intensity to transparency $\tau_\alpha$ and emissive color $\tau_{rgb}$), and precomputed clustering data.
+*   **Output:** Final pixel color incorporating ambient occlusion, environmental color (color bleeding), and glow effects.
+
+**Data Structures**
+1.  **Cluster ID Volume:** A scalar volume data set where each voxel stores an integer ID. This ID associates the voxel with a specific row in the 2D texture table [S1].
+2.  **2D Texture Table:** Stores representative local histograms for clusters of similar voxels. The texture is indexed by the cluster ID. Each entry represents a normalized local histogram $LH$ [S1].
+
+**Parameters**
+*   $\Omega_R$: Radius of the region for which local histograms $LH$ have been precomputed [S1].
+*   $b$: Data bit depth. The number of bins in the local histogram is $2^b$ [S1].
+*   $\tau_\alpha(j)$: Transparency assigned to intensity bin $j$ [S1].
+*   $\tau_{rgb}(j)$: Emissive color of voxels having intensity $j$ [S1].
+
+**Algorithm Steps**
+1.  **Precomputation (Offline):**
+    1.  For each voxel in the volume, compute a local histogram of intensities within the neighborhood defined by radius $\Omega_R$ [S1].
+    2.  Normalize these histograms [S1].
+    3.  Perform similarity-based clustering (vector quantization) on the histograms to group similar neighborhoods [S1].
+    4.  Store the representative histogram for each cluster in a 2D texture table [S1].
+    5.  Generate the Cluster ID Volume, assigning each voxel the ID of its corresponding cluster [S1].
+    *   *Note:* This stage is computationally expensive. Interactive clipping is not supported because changing the clipping plane would alter the density distribution in the voxel neighborhoods, invalidating the precomputed histograms [S1].
+
+2.  **Rendering (Per Voxel/Sample):**
+    1.  Retrieve the cluster ID for the current voxel $\tilde{x}$ from the Cluster ID Volume [S1].
+    2.  Look up the representative local histogram $LH_{\tilde{x}}$ from the 2D Texture Table using the cluster ID [S1].
+    3.  Modulate the histogram bins based on the transfer function transparency $\tau_\alpha(j)$ for each bin $j$ [S1].
+    4.  Compute the local occlusion factor $O_{env}$ using the modulated histogram:
+        $$ O_{env}(\tilde{x}, \nabla\tau(f(\tilde{x}))) = \frac{2}{3} \cdot \frac{1}{\pi \Omega_R^3} \sum_{0 \le j < 2^b} \tau_\alpha(j) \cdot LH_j(\tilde{x}) $$
+        where $LH_j(\tilde{x})$ is the value of the histogram bin $j$ for the voxel's cluster [S1].
+    5.  Compute the environmental color $E_{env}$ (for color bleeding) by modulating the histogram with the transfer function color $\tau_{rgb}(j)$:
+        $$ E_{env}(\tilde{x}, \nabla\tau(f(\tilde{x}))) = \frac{2}{3} \cdot \frac{1}{\pi \Omega_R^3} \sum_{0 \le j < 2^b} \tau_\alpha(j) \cdot \tau_{rgb}(j) \cdot LH_j(\tilde{x}) $$
+        [S1].
+    6.  **For Isosurface Rendering:** Compute the ambient intensity $L_{amb}$ using the ambient light coefficient $k_a$:
+        $$ L_{amb}(\tilde{x}) = 1.0 - O_{env}(\tilde{x}, \nabla\tau(f(\tilde{x}))) \cdot k_a $$
+        [S1].
+    7.  **For Direct Volume Rendering:** Compute the diffuse color coefficient $k_d$ by blending the transfer function color $\tau_{rgb}$ and the environmental color $E_{env}$ using $O_{env}$ as the blend factor. This simulates color bleeding, where the voxel's color is affected by its environment [S1].
+    8.  **Glow Effect:** An additional mapping function can be used to modulate the local histograms to produce a simple glow effect, highlighting specific regions [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Precomputation (Offline)
+def precompute(volume_data, radius_Omega_R, bit_depth_b):
+    # 1. Compute local histograms for all voxels
+    raw_histograms = []
+    for voxel in volume_data:
+        neighborhood = get_neighborhood(voxel, radius_Omega_R)
+        hist = compute_histogram(neighborhood, bit_depth_b)
+        raw_histograms.append(normalize(hist))
+    
+    # 2. Cluster histograms using vector quantization
+    clusters = vector_quantization(raw_histograms)
+    
+    # 3. Build 2D texture table and cluster ID volume
+    texture_table = build_2d_texture(clusters.representatives)
+    cluster_id_volume = build_cluster_id_volume(clusters.assignments)
+    
+    return texture_table, cluster_id_volume
+
+# Rendering (Per Voxel)
+def render_voxel(voxel_pos, texture_table, cluster_id_volume, transfer_function):
+    # 1. Lookup cluster ID and histogram
+    cluster_id = cluster_id_volume[voxel_pos]
+    histogram = texture_table[cluster_id] # LH_j(x)
+    
+    # 2. Get transfer function values for all bins
+    # tau_alpha and tau_rgb are arrays of size 2^b
+    tau_alpha = transfer_function.get_transparency()
+    tau_rgb = transfer_function.get_color()
+    
+    # 3. Compute Occlusion Factor O_env
+    # Sum over all bins j from 0 to 2^b - 1
+    sum_occlusion = 0.0
+    sum_env_color = Vector3(0, 0, 0)
+    
+    num_bins = 2 ** bit_depth_b
+    normalization_factor = (2.0 / 3.0) / (math.pi * (Omega_R ** 3))
+    
+    for j in range(num_bins):
+        h_j = histogram[j]
+        t_a = tau_alpha[j]
+        t_c = tau_rgb[j]
+        
+        # Modulate histogram by transparency
+        modulated_h = t_a * h_j
+        
+        sum_occlusion += modulated_h
+        sum_env_color += modulated_h * t_c
+        
+    O_env = normalization_factor * sum_occlusion
+    E_env = normalization_factor * sum_env_color
+    
+    # 4. Compute Final Color
+    # Example for Direct Volume Rendering:
+    # k_d is blended between tau_rgb (current voxel color) and E_env
+    # using O_env as blend factor.
+    # Note: Exact blending formula for k_d is described as "blending between 
+    # transfer function color and E_env with using the occlusion factor O_env as blend factor"
+    # Standard linear blend: k_d = mix(tau_rgb, E_env, O_env)
+    # However, O_env is an occlusion factor (0 to 1), where 1 is fully occluded.
+    # Usually, color bleeding is stronger when less occluded.
+    # The source states: "kd is obtained by blending between ... tau_rgb and E_env 
+    # with using the occlusion factor O_env as blend factor."
+    # We implement exactly as stated:
+    current_voxel_color = tau_rgb[get_intensity_bin(voxel_pos)]
+    k_d = mix(current_voxel_color, E_env, O_env)
+    
+    return k_d
+```
+
+## Operating characteristics
+*   **Performance:** Interactive rendering performance is achieved. It requires only two additional texture lookups compared to standard gradient-based shading [S1].
+*   **Update Speed:** Illumination update time is very low because histogram modulation is performed through GPU texture blending [S1].
+*   **Precomputation Cost:** The precomputation stage (computing local histograms and performing clustering) is expensive. However, CUDA-based optimizations can reduce precomputation times by a factor of up to 10 [S1].
+*   **Limitations:** Interactive clipping is not supported because it would affect the density distribution in the voxel neighborhoods used for histogram precomputation [S1]. Only local shadows with a soft appearance are supported [S1].
+*   **Strengths:** Allows real-time updates of occlusion information and supports ambient occlusion, color bleeding, basic scattering, and glow effects in a unified framework [S1].
+
+## Background
+The method was introduced by Ropinski et al. in 2008 as "Dynamic Ambient Occlusion" [S1, RMSD* 08]. It was originally presented in the context of volume ray-casting [S1]. The approach was later discussed in the context of interactive volume rendering with volumetric illumination [S1]. A follow-up CUDA-based approach by Mess and Ropinski (2010) improved precomputation performance [S1, MR10].
+
+## Sources
+[S1] Interactive Volume Rendering with Volumetric Illumination, https://doi.org/10.2312/conf/eg2012/stars/053-074, fetched 2026-10-26

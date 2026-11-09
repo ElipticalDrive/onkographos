@@ -3,35 +3,35 @@
 Also called: Gsplat scaling, rotation, translation, recoloring, TransformGsplat
 
 ## Overview
-The Gsplat Transformation method applies affine and photometric modifications to a packed `Gsplat` data structure, which represents a 3D Gaussian primitive in Gaussian Splatting [Parent](946-gaussian-splatting.md). It solves the problem of efficiently updating Gaussian attributes (position, scale, orientation, color) during optimization or editing without full serialization overhead. It differs from raw memory copying by providing semantic field access and partial update capabilities, building on [Gsplat Transformation](7308-gsplat-transformation.md) [S1, unofficial].
+The Gsplat Transformation method applies affine and color modifications to a set of Gaussian splats, typically as part of a training or editing pipeline. It operates on a packed `Gsplat` structure, conditionally updating position, scale, orientation, and color attributes based on provided transformation vectors. Unlike general-purpose matrix multiplication which might require full serialization, this method provides semantic field access for specific attribute updates, building on [Splatting](23-splatting.md).
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A `Gsplat` structure containing fields `center` (vec3), `scales` (vec3), `quaternion` (vec4), `rgba` (vec4), and `flags` (uint).
-- Input: Optional transformation parameters: `scale` (vec3), `rotate` (vec4 quaternion), `translate` (vec3), `recolor` (vec4).
+- Input: A `Gsplat` structure containing position (`center`), scale (`scales`), rotation (`quaternion`), color (`rgba`), and an active flag (`flags`).
+- Input: Optional transformation parameters: `scale` (scalar or vector), `rotate` (quaternion), `translate` (vector), `recolor` (vector).
 - Output: A modified `Gsplat` structure.
 
 **Data Structures:**
-The `Gsplat` structure is packed. Key fields:
-- `center`: 3D position vector.
-- `scales`: 3D scale vector.
-- `quaternion`: 4D rotation quaternion.
-- `rgba`: 4D color/opacity vector.
-- `flags`: Status flags, including `isGsplatActive`.
+The `Gsplat` structure is assumed to be packed for efficient memory access. Key fields include:
+- `flags`: Boolean or integer indicating if the splat is active.
+- `center`: 3D vector $(x, y, z)$ representing the Gaussian center.
+- `scales`: 3D vector $(s_x, s_y, s_z)$ representing the Gaussian extents.
+- `quaternion`: 4D vector $(w, x, y, z)$ representing orientation.
+- `rgba`: 4D vector $(r, g, b, a)$ representing color and opacity.
 
 **Steps:**
-1. Copy the input `gsplat` to the output `gsplat_out`.
-2. Check if `isGsplatActive(gsplat.flags)` is true. If false, return `gsplat_out`.
-3. If `scale` is provided:
-   - Multiply `gsplat_out.center` by `scale`.
-   - Multiply `gsplat_out.scales` by `scale`.
-4. If `rotate` (quaternion) is provided:
-   - Rotate `gsplat_out.center` using `quatVec(rotate, gsplat_out.center)`.
-   - Update `gsplat_out.quaternion` using `quatQuat(rotate, gsplat_out.quaternion)`.
-5. If `translate` is provided:
-   - Add `translate` to `gsplat_out.center`.
-6. If `recolor` is provided:
-   - Multiply `gsplat_out.rgba` by `recolor`.
+1. **Copy:** Create a copy of the input `Gsplat` to the output structure to preserve original data if needed or to ensure atomic updates.
+2. **Check Activity:** If `isGsplatActive(gsplat.flags)` is false, skip further transformations and return the copy.
+3. **Scale:** If a `scale` parameter is provided:
+   - Multiply `gsplat.center` by `scale`.
+   - Multiply `gsplat.scales` by `scale`.
+4. **Rotate:** If a `rotate` quaternion is provided:
+   - Rotate `gsplat.center` using the quaternion: `center = quatVec(rotate, center)`.
+   - Update `gsplat.quaternion` by composing the rotation: `quaternion = quatQuat(rotate, quaternion)`.
+5. **Translate:** If a `translate` vector is provided:
+   - Add `translate` to `gsplat.center`: `center = center + translate`.
+6. **Recolor:** If a `recolor` vector is provided:
+   - Multiply `gsplat.rgba` by `recolor`: `rgba = rgba * recolor`.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -39,60 +39,58 @@ The `Gsplat` structure is packed. Key fields:
 ```python
 def transform_gsplat(gsplat, scale=None, rotate=None, translate=None, recolor=None):
     # Step 1: Copy input to output
-    gsplat_out = copy(gsplat)
+    out = copy(gsplat)
     
-    # Step 2: Check activity flag
-    if not is_gsplat_active(gsplat.flags):
-        return gsplat_out
+    # Step 2: Check if active
+    if not is_gsplat_active(out.flags):
+        return out
     
-    # Step 3: Apply scale
+    # Step 3: Scale
     if scale is not None:
-        gsplat_out.center = gsplat_out.center * scale
-        gsplat_out.scales = gsplat_out.scales * scale
-    
-    # Step 4: Apply rotation
+        out.center = out.center * scale
+        out.scales = out.scales * scale
+        
+    # Step 4: Rotate
     if rotate is not None:
-        gsplat_out.center = quat_vec(rotate, gsplat_out.center)
-        gsplat_out.quaternion = quat_quat(rotate, gsplat_out.quaternion)
-    
-    # Step 5: Apply translation
+        out.center = quat_vec_mul(rotate, out.center)
+        out.quaternion = quat_quat_mul(rotate, out.quaternion)
+        
+    # Step 5: Translate
     if translate is not None:
-        gsplat_out.center = gsplat_out.center + translate
-    
-    # Step 6: Apply recoloring
+        out.center = out.center + translate
+        
+    # Step 6: Recolor
     if recolor is not None:
-        gsplat_out.rgba = gsplat_out.rgba * recolor
-    
-    return gsplat_out
+        out.rgba = out.rgba * recolor
+        
+    return out
 ```
 
 **Parameters:**
-- `scale`: Default None. If provided, must be a vec3.
-- `rotate`: Default None. If provided, must be a vec4 quaternion.
-- `translate`: Default None. If provided, must be a vec3.
-- `recolor`: Default None. If provided, must be a vec4.
+- `scale`: Scalar or 3D vector. Typical value: 1.0 (no change) or values derived from gradient descent.
+- `rotate`: 4D quaternion. Must be normalized.
+- `translate`: 3D vector. Typical values depend on scene scale.
+- `recolor`: 4D vector. Values typically in $[0, 1]$.
 
-**Edge Cases and Pitfalls:**
-- If `isGsplatActive` is false, no transformations are applied [S1, unofficial].
-- Precision issues may arise from repeated quaternion multiplications.
-- Boundary conditions for scale (e.g., zero or negative values) are not explicitly defined in the sources [G].
+**Edge Cases:**
+- **Inactive Splats:** The method checks `flags` to avoid processing inactive splats, saving computation.
+- **Quaternion Normalization:** The `quatQuat` operation assumes normalized quaternions. If `rotate` is not normalized, the result may be invalid. [G] Ensure input quaternions are normalized before calling.
+- **Zero Scale:** Multiplying by zero scale collapses the Gaussian to a point. This may cause numerical instability in subsequent rendering steps.
 
 ## Subtopics
 
 ### [Gsplat Split and Combine](8494-gsplat-split-and-combine.md)
-Decomposes a packed `Gsplat` into individual fields for manipulation or reconstructs it from partial updates. Enables fine-grained editing without full serialization overhead. Choose when fine-grained attribute editing is needed.
+Decomposes or reconstructs `Gsplat` structures for fine-grained editing, building on [Gsplat Transformation](7308-gsplat-transformation.md).
 
 ## Operating characteristics
-- Time Complexity: O(1) per Gsplat, as it involves a fixed number of vector operations.
-- Memory Complexity: O(1) additional memory for the output copy.
-- Performance: Efficient for batch processing due to packed structure.
-- Strengths: Semantic field access, partial updates, no full serialization.
-- Limitations: Limited to predefined transformations; not suitable for complex non-affine edits.
-- Use when: Updating Gaussian attributes during optimization or editing.
-- Do not use when: Complex non-affine transformations are required.
+- **Time Complexity:** $O(1)$ per splat, as the number of operations is fixed and small.
+- **Memory Complexity:** $O(1)$ additional memory for the copy.
+- **Performance:** Highly efficient due to packed data structures and conditional execution. Suitable for real-time updates during training.
+- **Strengths:** Semantic field access, conditional processing, low overhead.
+- **Limitations:** Limited to specific transformation types; not a general-purpose matrix transform.
 
 ## Background
-The Gsplat Transformation method is part of the Gaussian Splatting ecosystem, specifically within the Gsplat library. It was introduced to facilitate efficient updates to Gaussian primitives during training and rendering. The method is documented in the Gsplat source code [S1, unofficial].
+The Gsplat Transformation method is part of the Gaussian Splatting ecosystem, specifically designed for efficient attribute updates. It originates from implementations that optimize the training loop by avoiding full serialization of Gaussian attributes. The method is commonly used in differentiable rendering pipelines where gradients are propagated to position, scale, rotation, and color.
 
 ## Sources
 [S1] sparkjsdev/spark, https://github.com/sparkjsdev/spark, fetched 2026-10-27 (unofficial)

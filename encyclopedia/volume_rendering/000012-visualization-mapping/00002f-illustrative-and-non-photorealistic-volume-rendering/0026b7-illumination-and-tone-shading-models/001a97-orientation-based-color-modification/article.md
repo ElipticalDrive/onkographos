@@ -3,160 +3,118 @@
 Also called: HSV Color Orientation, HSV color modification, oriented fading
 
 ## Overview
-Orientation-Based Color Modification adjusts the color, saturation, value, and transparency of volume samples based on the orientation of the volumetric gradient relative to the viewer [S1, S2, unofficial]. It solves the problem of missing depth cues in translucent volume rendering by simulating illustrative techniques where facing surfaces are desaturated and receding surfaces are darkened and saturated [S1, S2, unofficial]. It sets itself apart from general illumination models by operating directly in the HSV color space to decouple brightness from hue and saturation, allowing for painterly effects where facing surfaces remain bright and edge-on surfaces fade [S1, S2, unofficial].
+Orientation-Based Color Modification is a non-photorealistic volume rendering technique that modulates the color, saturation, value, and transparency of volume samples based on the orientation of the local volumetric gradient relative to the viewer [S1, S2, unofficial]. It solves the problem of lacking depth cues in translucent volumes by simulating illustrative "oriented fading," where structures facing the viewer are desaturated or brightened, and receding structures are darkened or saturated [S1, S2, unofficial]. It sets itself apart from general illumination models by operating directly in the HSV color space to decouple brightness from hue and saturation, allowing for painterly effects that mimic traditional medical illustration techniques [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   Volume sample color $C_{rgb}$ (RGB triplet).
-*   Volumetric gradient vector $\mathbf{g}$ at the sample location.
-*   View direction vector $\mathbf{v}$ (pointing from the sample to the camera).
+*   Volume sample color $C_{rgb}$ (from transfer function).
+*   Normalized volumetric gradient $\nabla f_n$ (proxy for surface normal).
+*   View direction $V$ (normalized vector from sample to camera).
+*   Optional: Light direction $L$ (though the core method focuses on view orientation).
 
 **Outputs:**
-*   Modified color $C'_{rgb}$ (RGB triplet).
-*   Modified opacity $\alpha'$ (scalar).
+*   Modified color $C'_{rgb}$ and potentially modified opacity $\alpha'$.
 
 **Data Structures:**
-*   HSV color space representation: $H \in [0, 360)$, $S \in [0, 1]$, $V \in [0, 1]$.
-*   Vectors $\mathbf{g}$ and $\mathbf{v}$ are normalized.
+*   The method operates on per-fragment (or per-sample) data. No persistent global data structures are required beyond the volume grid and transfer function.
+*   Intermediate state uses HSV color space components: Hue ($H$), Saturation ($S$), Value ($V$).
 
 **Steps:**
-1.  **Convert to HSV:** Convert the input RGB color $C_{rgb}$ to HSV space, obtaining $H, S, V$.
-2.  **Calculate Orientation Angle:** Compute the angle $\theta$ between the gradient $\mathbf{g}$ and the view direction $\mathbf{v}$.
-    $$ \theta = \arccos(\mathbf{g} \cdot \mathbf{v}) $$
-    where $\mathbf{g} \cdot \mathbf{v}$ is the dot product of the normalized vectors.
-3.  **Modify Value (V):** Decrease the Value component $V$ as the angle $\theta$ increases. This simulates "oriented fading," where surfaces facing the viewer (small $\theta$) remain bright, and surfaces oriented away (large $\theta$) become darker.
-    $$ V' = f(V, \theta) $$
-    The exact function $f$ is not specified in the sources, but the trend is monotonic decrease with $\theta$ [S1, S2, unofficial].
-4.  **Modify Saturation (S) (Optional):**
-    *   Desaturate facing surfaces (small $\theta$).
-    *   Darken and saturate receding surfaces (large $\theta$) [S1, S2, unofficial].
-    $$ S' = g(S, \theta) $$
-    The exact function $g$ is not specified in the sources [G].
-5.  **Modify Transparency (Optional):** The opacity can also be modified based on orientation, though specific formulas are not provided [S1, S2, unofficial].
-6.  **Convert to RGB:** Convert the modified HSV values $(H, S', V')$ back to RGB space to obtain $C'_{rgb}$.
+1.  **Compute Orientation:** Calculate the angle $\theta$ between the normalized gradient $\nabla f_n$ and the view direction $V$. This is typically done via the dot product:
+    $$ \cos \theta = \nabla f_n \cdot V $$
+    The angle $\theta$ ranges from $0$ (gradient aligned with view, facing viewer) to $\pi$ (gradient opposed to view, receding). Note: In some implementations, the "facing" condition is defined by the gradient pointing *towards* the viewer, while in others, it is the surface normal. The sources describe "gradient orientation to the viewer" [S1, unofficial]. If $\nabla f_n$ points in the direction of increasing scalar value, a positive dot product with $V$ (view vector) usually implies the gradient points towards the camera. However, standard surface normals point outwards. The text states "angle between the gradient and the viewer" [S1, unofficial]. We assume $\theta$ is the angle between the two vectors.
+    
+2.  **Convert to HSV:** Convert the input RGB color $C_{rgb}$ to HSV space $(H, S, V)$ [S2, unofficial].
+
+3.  **Modulate Value (Brightness):** Decrease the Value component $V$ as the angle $\theta$ increases (i.e., as the surface becomes more edge-on or recedes) [S1, S2, unofficial]. This simulates "oriented fading." A common mapping is linear or exponential decay of $V$ with $\theta$. For example:
+    $$ V' = V \cdot f(\theta) $$
+    where $f(\theta)$ is a decreasing function, such as $f(\theta) = \cos(\theta)$ or a step function. The sources specify that $V$ is decreased as the angle increases [S1, unofficial].
+
+4.  **Modulate Saturation (Optional):** 
+    *   Desaturate surfaces oriented toward the viewer (small $\theta$) [S1, S2, unofficial].
+    *   Darken and saturate surfaces oriented away from the viewer (large $\theta$) [S1, S2, unofficial].
+    *   This can be achieved by scaling $S$ based on $\theta$. For instance, $S' = S \cdot g(\theta)$ where $g(\theta)$ increases with $\theta$.
+
+5.  **Modulate Transparency (Optional):** The opacity $\alpha$ can also be modified based on orientation to enhance depth cues, though the primary focus is on color [S1, unofficial].
+
+6.  **Convert to RGB:** Convert the modified HSV values $(H, S', V')$ back to RGB space to obtain $C'_{rgb}$ [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def orientation_based_color_modification(rgb_color, gradient, view_direction):
+def orientation_based_color_modification(rgb_color, gradient_normalized, view_direction):
     """
     Modifies color based on gradient orientation relative to viewer.
     
     Args:
-        rgb_color: tuple (R, G, B) in [0, 1]
-        gradient: tuple (gx, gy, gz)
-        view_direction: tuple (vx, vy, vz)
+        rgb_color: Tuple (R, G, B) in [0, 1].
+        gradient_normalized: Tuple (gx, gy, gz), normalized.
+        view_direction: Tuple (vx, vy, vz), normalized vector from sample to camera.
         
     Returns:
-        tuple (R', G', B') in [0, 1]
+        Tuple (R', G', B') in [0, 1].
     """
-    # 1. Convert RGB to HSV
-    # Implementation of RGB to HSV conversion is assumed standard
-    h, s, v = rgb_to_hsv(rgb_color)
+    # 1. Calculate angle between gradient and view direction
+    # Dot product gives cos(theta)
+    cos_theta = gradient_normalized[0]*view_direction[0] + \
+                gradient_normalized[1]*view_direction[1] + \
+                gradient_normalized[2]*view_direction[2]
     
-    # 2. Normalize vectors
-    grad_norm = math.sqrt(gradient[0]**2 + gradient[1]**2 + gradient[2]**2)
-    view_norm = math.sqrt(view_direction[0]**2 + view_direction[1]**2 + view_direction[2]**2)
+    # Clamp to [-1, 1] to handle floating point errors
+    cos_theta = max(-1.0, min(1.0, cos_theta))
     
-    if grad_norm == 0 or view_norm == 0:
-        # Degenerate case: no gradient or no view direction
-        return rgb_color
-        
-    g_hat = (gradient[0]/grad_norm, gradient[1]/grad_norm, gradient[2]/grad_norm)
-    v_hat = (view_direction[0]/view_norm, view_direction[1]/view_norm, view_direction[2]/view_norm)
+    # 2. Convert RGB to HSV
+    hsv = rgb_to_hsv(rgb_color)
+    h, s, v = hsv
     
-    # 3. Calculate angle between gradient and viewer
-    dot_product = g_hat[0]*v_hat[0] + g_hat[1]*v_hat[1] + g_hat[2]*v_hat[2]
-    # Clamp to [-1, 1] to avoid numerical errors in acos
-    dot_product = max(-1.0, min(1.0, dot_product))
-    theta = math.acos(dot_product)
+    # 3. Modulate Value (V)
+    # Decrease V as angle increases (cos_theta decreases)
+    # Using cos_theta directly as a multiplier for V creates a fade from facing (1.0) to edge-on (-1.0 or 0.0 depending on definition)
+    # The text says "decreased as the angle ... increases". 
+    # If angle is 0 (aligned), cos_theta = 1. If angle is 90, cos_theta = 0.
+    # A simple model: V' = V * cos_theta. If cos_theta < 0, V' becomes negative, which is invalid.
+    # Typically, orientation effects are symmetric or use absolute value, or the gradient is defined as normal.
+    # Assuming the standard interpretation where "facing" means high visibility:
+    # Let's use a factor that is 1 when aligned and 0 when perpendicular.
+    # Factor = max(0, cos_theta)
+    orientation_factor = max(0.0, cos_theta)
     
-    # 4. Modify Value (V)
-    # Decrease V as theta increases. Specific function not given in sources.
-    # [G] A simple linear falloff from V=1 at theta=0 to V=0 at theta=pi is a common implementation choice.
-    v_prime = v * (1.0 - theta / math.pi)
+    v_modified = v * orientation_factor
     
-    # 5. Modify Saturation (S) (Optional)
-    # Desaturate facing, saturate receding. Specific function not given.
-    # [G] A simple linear increase in saturation with theta.
-    s_prime = s + (1.0 - s) * (theta / math.pi)
+    # 4. Modulate Saturation (S)
+    # Desaturate facing, saturate receding.
+    # If orientation_factor is high (facing), reduce S. If low (receding), keep or increase S.
+    # Simple inverse relationship:
+    s_modified = s * (1.0 - orientation_factor * 0.5) # Example: 50% desaturation at max facing
     
-    # 6. Convert back to RGB
-    rgb_prime = hsv_to_rgb(h, s_prime, v_prime)
+    # 5. Convert back to RGB
+    rgb_modified = hsv_to_rgb(h, s_modified, v_modified)
     
-    return rgb_prime
-
-def rgb_to_hsv(rgb):
-    # Standard RGB to HSV conversion
-    r, g, b = rgb
-    max_c = max(r, g, b)
-    min_c = min(r, g, b)
-    diff = max_c - min_c
-    
-    if diff == 0:
-        h = 0
-        s = 0
-    else:
-        s = diff / max_c
-        if max_c == r:
-            h = 60 * (((g - b) / diff) % 6)
-        elif max_c == g:
-            h = 60 * (((b - r) / diff) + 2)
-        else:
-            h = 60 * (((r - g) / diff) + 4)
-    
-    if h < 0:
-        h += 360
-        
-    v = max_c
-    return (h, s, v)
-
-def hsv_to_rgb(h, s, v):
-    # Standard HSV to RGB conversion
-    c = v * s
-    x = c * (1 - abs((h / 60) % 2 - 1))
-    m = v - c
-    
-    if h < 60:
-        r, g, b = c, x, 0
-    elif h < 120:
-        r, g, b = x, c, 0
-    elif h < 180:
-        r, g, b = 0, c, x
-    elif h < 240:
-        r, g, b = 0, x, c
-    elif h < 300:
-        r, g, b = x, 0, c
-    else:
-        r, g, b = c, 0, x
-        
-    return (r + m, g + m, b + m)
+    return rgb_modified
 ```
-
-**Edge Cases and Pitfalls:**
-*   **Zero Gradient:** If the gradient magnitude is zero (e.g., in homogeneous regions), the orientation is undefined. The pseudocode handles this by returning the original color [G].
-*   **Numerical Stability:** The dot product for `acos` must be clamped to $[-1, 1]$ to avoid domain errors [G].
-*   **Parameter Selection:** The specific functions for modifying $V$ and $S$ are not defined in the sources. Implementers must choose appropriate falloff curves [S1, S2, unofficial].
+*[G] The exact functional form of the modulation (linear, exponential, threshold) is not specified in the sources. The pseudocode uses a linear scaling of Value by the dot product and a linear inverse scaling for Saturation as a representative implementation of the described behavior.*
 
 ## Subtopics
 
 ### [Oriented Color Modification](6181-oriented-color-modification.md)
-A specific technique that adjusts color value (brightness) based on gradient orientation relative to the viewer, simulating "oriented fading". It sets itself apart by operating directly in HSV space to decouple brightness from hue/saturation, allowing facing surfaces to remain bright and edge-on surfaces to fade.
+Oriented Color Modification is a technique that adjusts the color value (brightness) of volume samples based on the orientation of the surface gradient relative to the viewer, simulating illustrative "oriented fading". It sets itself apart from general illumination models by operating directly in the HSV color space to decouple brightness from hue and saturation, allowing for painterly effects where facing surfaces remain bright and edge-on surfaces fade. Choose this when aiming for medical illustration styles where depth is conveyed through color intensity changes rather than shadows. Link: [Oriented Color Modification](6181-oriented-color-modification.md).
+
+### Semi-transparent hue preservation
+A method to avoid false color effects in volume rendering where semi-transparency causes hue changes during color mixing, by adjusting saturation and blending weights [S3]. It reduces the global or local (in the overlap region only) saturation and blending weight of the background object in the mixture to control hue [S3]. Choose this when blending semi-transparent volumes to maintain harmonic color scales and avoid non-harmonic hue shifts caused by color mixing [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample, as it involves a constant number of vector operations and color space conversions.
+*   **Time Complexity:** $O(1)$ per sample/fragment, as it involves a dot product, HSV conversion, and simple arithmetic.
 *   **Memory Complexity:** $O(1)$ auxiliary memory per sample.
-*   **Strengths:** Provides strong depth cues through color and saturation changes, enhancing the perception of volume structure. It is intuitive for illustrative styles [S1, S2, unofficial].
-*   **Limitations:** The specific parameters for color modification are not standardized, requiring user tuning. It does not account for lighting or shadows directly [S1, S2, unofficial].
-*   **When to Use:** When an illustrative, painterly look is desired, particularly in medical visualization where orientation-based desaturation is a common convention [S1, S2, unofficial].
-*   **When Not to Use:** When photorealistic rendering is required, as the color modifications are non-physical [S1, S2, unofficial].
+*   **Strengths:** Provides strong depth cues in translucent volumes where traditional shadows are absent; computationally inexpensive; intuitive control via HSV space [S1, S2, unofficial].
+*   **Limitations:** Relies on the quality of the gradient estimation; may not work well for volumes with low contrast or noisy gradients; the effect is stylized and not physically based [S1, S2, unofficial].
+*   **When to use:** Medical visualization, scientific illustration, and any scenario requiring enhanced depth perception in translucent data without photorealism [S1, S2, unofficial].
+*   **When not to use:** When physical accuracy is required, or when the volume data lacks clear gradient features [S1, unofficial].
 
 ## Background
-The technique originates from the work of Ebert et al. in "Non-Photorealistic Rendering of Volume Models" (2000) [S1, S2, unofficial]. It is inspired by medical illustration techniques where anatomical structures oriented toward the viewer are desaturated and those oriented away are darkened and saturated [S1, S2, unofficial]. The use of HSV color space allows for intuitive manipulation of color attributes similar to traditional painting techniques [S1, S2, unofficial].
+The method originates from non-photorealistic rendering (NPR) techniques for volume visualization, specifically drawing inspiration from medical illustration practices where anatomical structures oriented toward the viewer are desaturated and those oriented away are darkened and saturated [S1, S2, unofficial]. It was formalized in the context of "Non-Photorealistic Rendering of Volume Models" presented at IEEE Visualization '00 [S1, S2, unofficial]. The approach leverages the HSV color space to provide an intuitive framework for applying these illustrative rules [S1, unofficial].
 
 ## Sources
 [S1] Non-Photorealistic Rendering of Volume Models, https://www.cs.umbc.edu/~rheingan/pubs/volillus00.pdf, fetched 2026-10-27 (unofficial)
 [S2] Non-Photorealistic Rendering of Volume Models, https://userpages.cs.umbc.edu/ebert/npr/volillus.pdf, fetched 2026-10-27 (unofficial)
+[S3] Harmonic Colormaps for Volume Visualization, https://doi.org/10.2312/vg/vg-pbg08/033-039, fetched 2026-10-26

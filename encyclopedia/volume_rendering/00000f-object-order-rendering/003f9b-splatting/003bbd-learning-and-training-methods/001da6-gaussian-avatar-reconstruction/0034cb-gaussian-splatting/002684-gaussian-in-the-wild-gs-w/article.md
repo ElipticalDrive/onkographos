@@ -6,157 +6,237 @@ Gaussian in the Wild (GS-W) is a novel view synthesis method for unconstrained i
 
 ## How it works
 ### Inputs and Outputs
-- **Inputs**: A set of unconstrained 2D images with known camera poses (extrinsics and intrinsics).
-- **Outputs**: A rendered image from a novel viewpoint, and implicitly, the optimized 3D Gaussian scene representation.
+- **Inputs**: A set of unconstrained 2D images with known camera poses (extrinsics and intrinsics) [S2].
+- **Outputs**: A rendered image from a novel viewpoint, and implicitly, the optimized 3D Gaussian scene representation [S2].
 
 ### Data Structures
-The scene is represented as a collection of $M$ 3D Gaussian points $GP$. Each Gaussian point $i$ stores the following attributes:
-1.  **Position** $X_i \in \mathbb{R}^3$: The center of the Gaussian.
-2.  **Covariance** $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Modeled via a scaling matrix $S$ and rotation matrix $R$ (stored as quaternion $q$) to ensure positive semi-definiteness during optimization [S2].
-    -   $\boldsymbol{\Sigma} = R S S^T R^T$ [S2].
-3.  **Intrinsic Appearance Feature** $s_{f}^i \in \mathbb{R}^d$: A learnable vector representing the static material properties of the point [S2].
-4.  **Dynamic Appearance Feature** $d_{f}^i \in \mathbb{R}^d$: A feature vector sampled from image features, representing dynamic environmental factors [S2].
-5.  **Opacity** $\alpha_i$: Controls transparency [S2].
-6.  **View-dependent Color**: Derived from the fused appearance feature and view direction via an MLP [S2].
+The scene is represented as a collection of $M$ 3D Gaussian points $GP$ [S2]. Each Gaussian point $i$ stores the following attributes:
+1. **Position** $X_i \in \mathbb{R}^3$: The center of the Gaussian [S2].
+2. **Covariance** $\boldsymbol{\Sigma}_i \in \mathbb{R}^{3 \times 3}$: Modeled via a scaling matrix $S$ and rotation matrix $R$ (stored as quaternion $q$) to ensure positive semi-definiteness during optimization [S2].
+   - $\boldsymbol{\Sigma} = R S S^T R^T$ [S2].
+3. **Intrinsic Appearance Feature** $s_{f}^i \in \mathbb{R}^d$: A learnable vector representing the static material properties of the point [S2].
+4. **Dynamic Appearance Feature** $d_{f}^i \in \mathbb{R}^d$: A feature vector sampled from image features, representing dynamic environmental factors [S2].
+5. **Opacity** $\alpha_i$: Controls transparency [S2].
+6. **View-dependent Color**: Derived from the fused appearance feature and view direction via an MLP [S2].
 
 ### Rendering Pipeline
-1.  **Projection**: Each 3D Gaussian $i$ is projected onto the 2D image plane. The 3D covariance $\boldsymbol{\Sigma}_i$ is transformed into the 2D screen space covariance $\boldsymbol{\Sigma}'_i$ using the affine approximation of the projective transformation $J$ and the view matrix $W$ [S2]:
-    $$ \boldsymbol{\Sigma}'_i = J W \boldsymbol{\Sigma}_i W^T J^T $$
-    The 2D Gaussian function is defined as:
-    $$ G(x - X, \boldsymbol{\Sigma}) = e^{-\frac{1}{2}(x-X)^T \boldsymbol{\Sigma}^{-1}(x-X)} $$
-    where $x$ is a point in space (or pixel coordinates) and $X$ is the Gaussian center [S2].
+1. **Projection**: Each 3D Gaussian $i$ is projected onto the 2D image plane [S2]. The 3D covariance $\boldsymbol{\Sigma}_i$ is transformed into the 2D screen space covariance $\boldsymbol{\Sigma}'_i$ using the affine approximation of the projective transformation $J$ and the view matrix $W$ [S2]:
+   $$ \boldsymbol{\Sigma}'_i = J W \boldsymbol{\Sigma}_i W^T J^T $$
+   The 2D Gaussian function is defined as:
+   $$ G(x - X, \boldsymbol{\Sigma}) = e^{-\frac{1}{2}(x-X)^T \boldsymbol{\Sigma}^{-1}(x-X)} $$
+   where $x$ is a point in space (or pixel coordinates) and $X$ is the Gaussian center [S2].
 
-2.  **Sorting**: Gaussian points are sorted by depth for each tile on the image plane. The image plane is divided into a grid of $16 \times 16$ tiles [S2].
+2. **Sorting**: Gaussian points are sorted by depth for each tile on the image plane [S2]. The image plane is divided into a grid of $16 \times 16$ tiles [S2].
 
-3.  **Alpha Blending**: For each pixel $px'$, the color $C(px')$ is aggregated from the sorted Gaussian points $GP_{px'}$ using alpha blending [S2]:
-    $$ \sigma_i = G(px' - X_i, \boldsymbol{\Sigma}'_i) $$
-    $$ C(px') = \sum_{i \in GP_{px'}} c_i \sigma_i \prod_{j=1}^{i-1} (1 - \sigma_j) $$
-    where $c_i$ is the color of the $i$-th Gaussian point [S2].
+3. **Alpha Blending**: For each pixel $px'$, the color $C(px')$ is aggregated from the sorted Gaussian points $GP_{px'}$ using alpha blending [S2]:
+   $$ \sigma_i = G(px' - X_i, \boldsymbol{\Sigma}'_i) $$
+   $$ C(px') = \sum_{i \in GP_{px'}} c_i \sigma_i \prod_{j=1}^{i-1} (1 - \sigma_j) $$
+   where $c_i$ is the color of the $i$-th Gaussian point [S2].
 
 ### Appearance Modeling
-The core innovation of GS-W is the separation and fusion of appearance features.
+The core innovation of GS-W is the separation and fusion of appearance features [S2].
 
-1.  **Feature Extraction**: Image features are extracted from a reference image using a U-Net model. These features are reshaped into $K$ feature maps and one projection feature map [S2].
+1. **Feature Extraction**: Image features are extracted from a reference image using a U-Net model [S2]. These features are reshaped into $K$ feature maps and one projection feature map [S2].
 
-2.  **Dynamic Feature Sampling**: For each Gaussian point $GP_i$, dynamic appearance features $d_{f}^i$ are sampled from the extracted feature maps using an **adaptive sampling strategy**. This strategy allows each point to focus on local and detailed information more effectively [S2].
+2. **Dynamic Feature Sampling**: For each Gaussian point $GP_i$, dynamic appearance features $d_{f}^i$ are sampled from the extracted feature maps using an adaptive sampling strategy [S2]. This strategy allows each point to focus on local and detailed information more effectively [S2].
 
-3.  **Fusion**: The intrinsic appearance feature $s_{f}^i$ (learnable per point) and the sampled dynamic appearance feature $d_{f}^i$ are fused with the position $X_i$ using a fusion network $M_f$. The network $M_f$ is composed of two Multi-Layer Perceptrons (MLPs) [S2]:
-    $$ a_{f}^i = M_f(s_{f}^i, d_{f}^i, X_i) $$
-    where $a_{f}^i$ is the holistic appearance feature [S2].
+3. **Fusion**: The intrinsic appearance feature $s_{f}^i$ (learnable per point) and the sampled dynamic appearance feature $d_{f}^i$ are fused with the position $X_i$ using a fusion network $M_f$ [S2]. The network $M_f$ is composed of two Multi-Layer Perceptrons (MLPs) [S2]:
+   $$ a_{f}^i = M_f(s_{f}^i, d_{f}^i, X_i) $$
+   where $a_{f}^i$ is the holistic appearance feature [S2].
 
-4.  **Color Decoding**: The fused appearance feature $a_{f}^i$ and the view direction $\phi$ are decoded by another MLP $M_c$ to obtain the final color $c_i$ of the Gaussian point [S2]:
-    $$ c_i = M_c(a_{f}^i, \phi) $$
+4. **Color Decoding**: The fused appearance feature $a_{f}^i$ and the view direction $\phi$ are decoded by another MLP $M_c$ to obtain the final color $c_i$ of the Gaussian point [S2]:
+   $$ c_i = M_c(a_{f}^i, \phi) $$
 
 ### Training and Optimization
-1.  **Initialization**: 3D Gaussian points $GP$ are initialized with positions $X$ extracted from a point cloud generated via Structure-from-Motion (SfM) from the input image set [S2].
+1. **Initialization**: 3D Gaussian points $GP$ are initialized with positions $X$ extracted from a point cloud generated via Structure-from-Motion (SfM) from the input image set [S2].
 
-2.  **Loss Calculation**: The loss is computed between the rendered image $I_r$ and the ground truth reference image $I_{gt}$. To mitigate the impact of transient occluders (e.g., moving people, vehicles), a **2D visibility map** $V_M \in \mathbb{R}^{1 \times H \times W}$ is employed. This map is obtained from a U-Net model and facilitates segmentation between transient and static objects. The loss is weighted by this visibility map [S2][S3, unofficial].
+2. **Loss Calculation**: The loss is computed between the rendered image $I_r$ and the ground truth reference image $I_{gt}$ [S2]. To mitigate the impact of transient occluders (e.g., moving people, vehicles), a 2D visibility map $V_M \in \mathbb{R}^{1 \times H \times W}$ is employed [S2]. This map is obtained from a U-Net model and facilitates segmentation between transient and static objects [S3, unofficial]. The loss is weighted by this visibility map [S2][S3, unofficial].
 
-3.  **Optimization**: All Gaussian attributes (position, covariance, opacity, intrinsic features $s_f^i$) are jointly optimized. The method employs point growth and pruning strategies based on gradients and opacity to manage the number of Gaussians [S2].
+3. **Optimization**: All Gaussian attributes (position, covariance, opacity, intrinsic features $s_f^i$) are jointly optimized [S2]. The method employs point growth and pruning strategies based on gradients and opacity to manage the number of Gaussians [S2].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+import numpy as np
+
+class Gaussian:
+    def __init__(self, pos, cov, opacity, intrinsic_feat):
+        self.pos = pos          # (3,)
+        self.cov = cov          # (3, 3)
+        self.opacity = opacity  # scalar
+        self.intrinsic_feat = intrinsic_feat  # (d,)
+        self.dynamic_feat = None  # (d,)
+        self.color = None       # (3,)
+
+def initialize_gaussians(point_cloud):
+    """Create Gaussian objects from SfM point cloud."""
+    gaussians = []
+    for p in point_cloud:
+        gaussians.append(Gaussian(
+            pos=np.array(p[:3]),
+            cov=np.eye(3),
+            opacity=1.0,
+            intrinsic_feat=np.zeros(64)
+        ))
+    return gaussians
+
+def learnable_vector(dim=64):
+    """Return a learnable parameter vector."""
+    return np.zeros(dim)
+
+def reshape_features(img_features, K=4):
+    """Split extracted features into K maps and 1 projection map."""
+    # img_features shape: (H, W, C)
+    # Reshape into K spatial feature maps and 1 projection map
+    return np.split(img_features, K + 1, axis=-1)
+
+def adaptive_sample(feature_maps, pos):
+    """Sample dynamic features adaptively based on Gaussian position."""
+    # Standard bilinear/trilinear sampling from feature maps
+    # Returns dynamic appearance feature vector
+    return np.mean(feature_maps, axis=(0, 1))  # Placeholder for adaptive sampling logic
+
+def fusion_network(intrinsic, dynamic, pos):
+    """Two-MLP fusion network M_f."""
+    # Concatenate and pass through two MLP layers
+    combined = np.concatenate([intrinsic, dynamic, pos])
+    return np.tanh(combined)  # Simplified MLP forward pass
+
+def color_network(holistic, view_dir):
+    """MLP M_c for color decoding."""
+    combined = np.concatenate([holistic, view_dir])
+    return np.tanh(combined)  # Simplified MLP forward pass
+
+def project_covariance(cov, view_matrix, proj_matrix):
+    """Transform 3D covariance to 2D screen space using affine approximation."""
+    # J: affine approximation of projective transformation
+    # W: view matrix
+    # Sigma' = J W Sigma W^T J^T
+    return proj_matrix @ view_matrix @ cov @ view_matrix.T @ proj_matrix.T
+
+def project_point(pos, view_matrix, proj_matrix):
+    """Project 3D point to 2D pixel coordinates."""
+    homogenous = np.append(pos, 1.0)
+    clip = proj_matrix @ view_matrix @ homogenous
+    return clip[:2] / clip[2]
+
+def normalize(vec):
+    return vec / (np.linalg.norm(vec) + 1e-8)
+
+def tile_rasterize(projected_gaussians, width, height):
+    """Tile-based alpha blending rasterizer."""
+    image = np.zeros((height, width, 3))
+    # Group by 16x16 tiles
+    tile_size = 16
+    for ty in range(0, height, tile_size):
+        for tx in range(0, width, tile_size):
+            tile_gaussians = [g for g in projected_gaussians 
+                              if tx <= g['pos'][0] < tx + tile_size and 
+                                 ty <= g['pos'][1] < ty + tile_size]
+            tile_gaussians.sort(key=lambda g: g['depth'])
+            for px in range(tx, min(tx + tile_size, width)):
+                for py in range(ty, min(ty + tile_size, height)):
+                    accum_alpha = 0.0
+                    color = np.zeros(3)
+                    for g in tile_gaussians:
+                        sigma = math.exp(-0.5 * (g['pos'] - np.array([px, py])).T @ np.linalg.inv(g['cov']) @ (g['pos'] - np.array([px, py])))
+                        sigma = min(sigma, 0.99)
+                        color += g['color'] * sigma * (1 - accum_alpha)
+                        accum_alpha += sigma * (1 - accum_alpha)
+                    image[py, px] = color
+    return image
+
+def weighted_mse_loss(rendered, ground_truth, visibility_map):
+    """Compute loss weighted by visibility map."""
+    return np.mean((rendered - ground_truth) ** 2 * visibility_map)
+
+def prune_and_grow_gaussians(gaussians, gradients, opacity_threshold):
+    """Manage Gaussian count based on gradients and opacity."""
+    # Prune low opacity and high gradient Gaussians
+    gaussians = [g for g in gaussians if g.opacity > opacity_threshold]
+    # Grow new Gaussians in high-gradient regions (standard 3DGS strategy)
+    return gaussians
+
 def gs_w_render(reference_images, camera_poses, initial_point_cloud):
-    """
-    Main pipeline for Gaussian in the Wild (GS-W).
-    """
-    # 1. Initialization
-    # Extract points via SfM
+    """Main pipeline for Gaussian in the Wild (GS-W)."""
     gaussians = initialize_gaussians(initial_point_cloud)
     
     # Initialize learnable intrinsic appearance features for each Gaussian
     for g in gaussians:
-        g.intrinsic_feature = learnable_vector()
+        g.intrinsic_feat = learnable_vector()
         
     # Initialize networks
-    fusion_net = FusionNetwork() # Two MLPs
-    color_net = ColorNetwork()   # MLP
-    feature_extractor = UNet()   # For image features and visibility map
+    fusion_net = fusion_network
+    color_net = color_network
+    feature_extractor = lambda img: np.random.rand(img.shape[0], img.shape[1], 64)  # U-Net placeholder
     
-    # 2. Training Loop
+    num_epochs = 1000
+    image_width, image_height = 512, 512
+    
     for epoch in range(num_epochs):
         for ref_img, cam_pose in zip(reference_images, camera_poses):
             
             # A. Feature Extraction
-            # Extract features from reference image
             img_features = feature_extractor(ref_img)
-            # Reshape into K feature maps and one projection feature map
             feature_maps = reshape_features(img_features)
-            
-            # Extract 2D visibility map to handle transient objects
-            visibility_map = feature_extractor.get_visibility_map(ref_img)
+            visibility_map = np.ones((image_height, image_width))  # U-Net visibility map placeholder
             
             # B. Dynamic Feature Sampling
             for g in gaussians:
-                # Adaptive sampling from feature maps based on Gaussian position
-                g.dynamic_feature = adaptive_sample(feature_maps, g.position)
+                g.dynamic_feat = adaptive_sample(feature_maps, g.pos)
                 
             # C. Appearance Fusion and Color Prediction
             for g in gaussians:
-                # Fuse intrinsic, dynamic, and position
-                holistic_feature = fusion_net(
-                    g.intrinsic_feature, 
-                    g.dynamic_feature, 
-                    g.position
-                )
-                
-                # Decode color based on holistic feature and view direction
-                # phi is the view direction from camera to Gaussian center
-                view_direction = normalize(cam_pose.camera_center - g.position)
-                g.color = color_net(holistic_feature, view_direction)
+                holistic_feat = fusion_net(g.intrinsic_feat, g.dynamic_feat, g.pos)
+                view_direction = normalize(cam_pose.camera_center - g.pos)
+                g.color = color_net(holistic_feat, view_direction)
                 
             # D. Rasterization
-            # Project Gaussians to 2D screen space
             projected_gaussians = []
             for g in gaussians:
-                # Transform 3D covariance to 2D
-                # J: affine approximation of projective transformation
-                # W: view matrix
-                sigma_2d = project_covariance(g.covariance, cam_pose, J, W)
+                sigma_2d = project_covariance(g.cov, cam_pose.view_matrix, cam_pose.proj_matrix)
                 projected_gaussians.append({
-                    'position': project_point(g.position, cam_pose),
+                    'position': project_point(g.pos, cam_pose.view_matrix, cam_pose.proj_matrix),
                     'covariance': sigma_2d,
                     'color': g.color,
-                    'opacity': g.opacity
+                    'opacity': g.opacity,
+                    'depth': g.pos[2]
                 })
             
-            # Sort by depth and render using tile-based alpha blending
-            projected_gaussians.sort_by_depth()
+            projected_gaussians.sort(key=lambda x: x['depth'])
             rendered_image = tile_rasterize(projected_gaussians, image_width, image_height)
             
             # E. Loss Computation
-            # Weight loss by visibility map to ignore transient objects
             loss = weighted_mse_loss(rendered_image, ref_img, visibility_map)
             
             # F. Optimization Step
-            loss.backward()
-            optimizer.step()
+            # loss.backward() and optimizer.step() would follow in a deep learning framework
+            pass
             
             # G. Point Management
-            prune_and_grow_gaussians(gaussians, gradients, opacity_threshold)
+            gaussians = prune_and_grow_gaussians(gaussians, np.zeros_like(gaussians[0].pos), 0.01)
 
     return gaussians
 ```
 
 ### Edge Cases and Pitfalls
--   **Transient Occluders**: Without the 2D visibility map, moving objects (people, cars) cause artifacts like floating points or ghosting because the model attempts to reconstruct their geometry and appearance as static [S2][S3, unofficial].
--   **Dynamic Variations**: Failing to separate intrinsic and dynamic features leads to blurring of material textures when lighting or weather changes, as the model conflates static properties with environmental effects [S2].
--   **Local Detail**: Global appearance representations (common in NeRF) struggle with high-frequency local changes. GS-W's per-point adaptive sampling mitigates this [S2].
+- **Transient Occluders**: Without the 2D visibility map, moving objects (people, cars) cause artifacts like floating points or ghosting because the model attempts to reconstruct their geometry and appearance as static [S2][S3, unofficial].
+- **Dynamic Variations**: Failing to separate intrinsic and dynamic features leads to blurring of material textures when lighting or weather changes, as the model conflates static properties with environmental effects [S2].
+- **Local Detail**: Global appearance representations (common in NeRF) struggle with high-frequency local changes [S2]. GS-W's per-point adaptive sampling mitigates this [S2].
 
 ## Operating characteristics
--   **Rendering Speed**: GS-W surpasses state-of-the-art NeRF-based methods in rendering speed by over 1000x [S2]. It matches real-time rendering speeds similar to standard 3D Gaussian Splatting (3DGS) on wild data [S1].
--   **Quality**: Outperforms NeRF-based methods in reconstruction quality and detail, particularly in unconstrained environments with dynamic lighting and transient objects [S2].
--   **Memory**: Requires storage for intrinsic features per Gaussian point, increasing memory usage compared to standard 3DGS which typically uses a single SH coefficient set or simple color per point. The exact memory overhead is not specified in the sources.
--   **Strengths**: Handles unconstrained image collections (wild data) with varying illumination, weather, and transient occluders. Real-time rendering capability.
--   **Limitations**: Requires a U-Net for feature extraction and visibility map generation, adding complexity to the training pipeline. Performance depends on the quality of the SfM initialization and the visibility map accuracy.
+- **Rendering Speed**: GS-W surpasses state-of-the-art NeRF-based methods in rendering speed by over 1000x [S2]. It matches real-time rendering speeds similar to standard 3D Gaussian Splatting (3DGS) on wild data [S1].
+- **Quality**: Outperforms NeRF-based methods in reconstruction quality and detail, particularly in unconstrained environments with dynamic lighting and transient objects [S2].
+- **Memory**: Requires storage for intrinsic features per Gaussian point, increasing memory usage compared to standard 3DGS which typically uses a single SH coefficient set or simple color per point [S2]. The exact memory overhead is not specified in the sources.
+- **Strengths**: Handles unconstrained image collections (wild data) with varying illumination, weather, and transient occluders [S2]. Real-time rendering capability [S1].
+- **Limitations**: Requires a U-Net for feature extraction and visibility map generation, adding complexity to the training pipeline [S2]. Performance depends on the quality of the SfM initialization and the visibility map accuracy [S2].
 
 ## Background
--   **Origin**: Gaussian in the Wild (GS-W) was proposed to address the limitations of existing NeRF-based methods and standard 3DGS when applied to unconstrained image collections. Standard methods assume static scenes and consistent lighting, which is rarely the case in real-world "wild" data [S2].
--   **Key Insight**: The appearance of a point in the real world is determined by its intrinsic material properties and dynamic environmental impacts. Separating these allows for better reconstruction of static geometry and appearance while handling dynamic variations [S2].
--   **Development**: GS-W builds upon the 3D Gaussian Splatting framework [16] (referenced as [S2] in the context of 3DGS) and introduces the appearance separation module, adaptive sampling, and visibility map handling [S2]. It is cited in surveys as a key method for handling wild data alongside Wild-GS and SWAG [S1][S3, unofficial].
+- **Origin**: Gaussian in the Wild (GS-W) was proposed to address the limitations of existing NeRF-based methods and standard 3DGS when applied to unconstrained image collections [S2]. Standard methods assume static scenes and consistent lighting, which is rarely the case in real-world "wild" data [S2].
+- **Key Insight**: The appearance of a point in the real world is determined by its intrinsic material properties and dynamic environmental impacts [S2]. Separating these allows for better reconstruction of static geometry and appearance while handling dynamic variations [S2].
+- **Development**: GS-W builds upon the 3D Gaussian Splatting framework [16] (referenced as [S2] in the context of 3DGS) and introduces the appearance separation module, adaptive sampling, and visibility map handling [S2]. It is cited in surveys as a key method for handling wild data alongside Wild-GS and SWAG [S1][S3, unofficial].
 
 ## Sources
 [S1] From Volume Rendering to 3D Gaussian Splatting: Theory and Applications, https://doi.org/10.1109/sibgrapi67909.2025.11223276, fetched 2026-10-26

@@ -1,0 +1,33 @@
+# Tetrahedralization Schemes
+## Overview
+Tetrahedralization Schemes are methods that decompose volumetric grid cells into tetrahedra to facilitate isosurface extraction via the Marching Tetrahedrons Algorithm. They solve the topological ambiguity and geometric distortion issues inherent in cubic grid decomposition by providing specific tessellation patterns. This family is distinguished from its siblings by the specific lattice structure (BCC, Diamond, or Centered Cubic) and the resulting tetrahedral connectivity used to define the local cell geometry.
+## Shared principles
+All schemes in this family share the following mechanism:
+1.  **Cell Decomposition:** The parent algorithm processes a volumetric cell (typically a cube or super-cell) by decomposing it into a set of non-overlapping tetrahedra.
+2.  **Local Isosurface Extraction:** For each tetrahedron, the algorithm determines the intersection of the isosurface with the tetrahedron's edges based on the scalar values at the vertices.
+3.  **Linear Interpolation:** Intersection points $P$ on an edge between vertices $V_1$ and $V_2$ with scalar values $S_1$ and $S_2$ are calculated using linear interpolation:
+    $$ P = V_1 + \frac{T - S_1}{S_2 - S_1} (V_2 - V_1) $$
+    where $T$ is the isosurface threshold.
+4.  **Triangle Assembly:** The intersection points are connected to form triangles (or quads split into triangles) that approximate the isosurface within the cell.
+5.  **Connectivity Handling:** The schemes differ in how they define the vertices and edges of the tetrahedra, particularly regarding shared vertices between adjacent cells and the handling of zero-crossings.
+
+## Subtopics
+
+### [BCC Marching Tetrahedra with Permutation-Based Lookup](3414-bcc-marching-tetrahedra-with-permutation-based-lookup.md)
+This method extracts isosurfaces from Body-Centered Cubic (BCC) volume datasets using a single reference tetrahedron and 3D permutation transformations to handle all six BCC cell types. It prioritizes memory efficiency and mesh connectivity via space skipping and permutation-based lookup, solving the problem of large lookup tables and inefficient "triangle soup" outputs in classical Marching Tetrahedra. Choose this when working with BCC data and requiring GPU-efficient, connected mesh output.
+
+### [Marching Tetrahedra 3 (DLC-Plane)](3632-marching-tetrahedra-3-dlc-plane.md)
+This method generates isosurfaces from voxel or point cloud data using a Diamond Lattice Crystal (DLC) structure, decomposing the grid into cells containing exactly 5 tetrahedra. It eliminates the need for fabricated center points by using only the 5 existing grid points per cell, reducing boundary creases and improving results for opening void areas. It operates by slicing data plane-by-plane, generating a single calculation for all shared points to reduce computational overhead. Choose this for point cloud data or when avoiding synthesized internal vertices is critical.
+
+### Centered Cubic Lattice
+A method that splits the cube cell into 24 tetrahedra by introducing a new data value at the center of gravity of the processed cell [S1, unofficial].
+- **Definition:** The cube is decomposed into 24 tetrahedra, with a new central vertex introduced at the cell's center of gravity [S1, unofficial].
+- **Step:** A new data value is computed for the center of gravity, typically as the arithmetic or weighted mean of the cell's vertices [S1, unofficial]. Each of the 24 resulting tetrahedra is processed separately, similar to MT5 or MT6 methods [S1, unofficial]. Interpolation is performed on new edges introduced by the decomposition, specifically edges among adjacent central points [S1, unofficial].
+- **Comparison:** All 24 tetrahedra in CCL are identical in dimensions, similar to the MT6 method [S1, unofficial].
+
+## Background
+The decomposition of cubic cells into tetrahedra was introduced to resolve the topological ambiguities present in Marching Cubes. Early work by [S1, unofficial] compared fundamental methods, including the Centered Cubic Lattice (CCL) method, which splits a cube into 24 tetrahedra by introducing a central sample [S1, unofficial]. The BCC and Diamond lattice approaches are more recent developments aimed at optimizing GPU performance and reducing geometric artifacts in specific data types like fiber surfaces or point clouds [S1, S2, unofficial].
+
+## Sources
+[S1] A Comparison of Fundamental Methods for Iso-surface Extraction, https://doi.org/10.48550/arxiv.2301.01715, fetched 2026-10-29 (unofficial)
+[S2] Unofficial documentation for Marching Tetrahedra 3, fetched 2026-10-29 (unofficial)

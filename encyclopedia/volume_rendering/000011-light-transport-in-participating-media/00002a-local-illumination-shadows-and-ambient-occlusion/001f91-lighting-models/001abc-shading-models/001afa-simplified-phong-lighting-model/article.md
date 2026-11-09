@@ -3,116 +3,125 @@
 Also called: Phong Illumination, Phong Illumination Model, Phong Reflection Model, Simplified Phong Shading
 
 ## Overview
-The Simplified Phong Lighting Model is a local illumination technique used in volume rendering to enhance the perception of 3D shape and surface detail in scalar fields [S2, S3, S5, S11, unofficial]. It solves the problem of flat, ambiguous volumetric data by computing diffuse and specular lighting contributions based on estimated surface normals derived from volume gradients [S2, S5, unofficial]. Unlike [Frequency Domain Directional Shading](852-frequency-domain-directional-shading.md), which operates in the Fourier domain, or [Gradient-based Shading with Phase Functions](1020-gradient-based-shading-with-phase-functions.md), which models light scattering within the medium, this method treats the volume as a collection of pseudo-surfaces for local shading purposes [S2, S5, S11, unofficial]. It differs from [Lambert Shading with Shadow Rays](1133-lambert-shading-with-shadow-rays.md) by typically omitting shadow calculations to maintain performance, and from the [Volume Shading Model](2991-volume-shading-model.md) by focusing on surface-like reflection properties rather than participating media absorption and emission [S1, S11, unofficial].
+The Simplified Phong Lighting Model is a local illumination technique used in volume rendering to enhance the perception of 3D shape and surface detail by modulating the color of volumetric samples with diffuse and specular lighting components [S2, S3, S5, S12, unofficial]. It solves the problem of flat, unstructured appearance in ray-cast volumes by treating the gradient of the scalar field at the first significant surface intersection as a pseudo-surface normal [S2, S5, S14, unofficial]. Unlike [Frequency Domain Directional Shading](852-frequency-domain-directional-shading.md), which operates in the Fourier domain, or [Gradient-based Shading with Phase Functions](1020-gradient-based-shading-with-phase-functions.md), which models complex light scattering, this method applies a standard local reflection model directly to the volume data [S1, S2, S5, unofficial]. It differs from [Lambert Shading with Shadow Rays](1133-lambert-shading-with-shadow-rays.md) by typically omitting shadow calculations to maintain performance, and from the [Volume Shading Model](2991-volume-shading-model.md) by focusing on surface-like highlights rather than participating media absorption [S1, S5, unofficial].
 
 ## How it works
-The method estimates a normal vector at a sample point along the ray, usually from the gradient of the scalar field or a Signed Distance Function (SDF), and applies the Phong reflection model to compute ambient, diffuse, and specular components [S2, S5, S11, unofficial].
+The method calculates the color of a sample point by summing ambient, diffuse, and specular contributions. It requires a scalar volume dataset and a camera/lighting configuration. The core innovation for volume data is the estimation of the surface normal from the volume gradient at the point of interest, usually the first voxel where the value exceeds a threshold or the raymarched intersection point [S2, S5, S14, unofficial].
 
-**Inputs and Outputs:**
-*   **Inputs:**
-    *   `p`: 3D position of the sample point (vec3).
-    *   `eye`: 3D position of the camera/eye (vec3).
-    *   `lightPos`: 3D position of the light source (vec3).
-    *   `lightIntensity`: Color/intensity of the light (vec3).
-    *   `material`: Material coefficients ($k_a, k_d, k_s$) and shininess ($\alpha$ or $n$).
-    *   `ambientLight`: Ambient light color/intensity (vec3).
-*   **Outputs:**
-    *   `color`: Final RGB color contribution from the light source (vec3).
+### Inputs and Outputs
+*   **Inputs**:
+    *   `volume`: A 3D scalar field (e.g., medical image data or SDF).
+    *   `point` ($p$): The 3D position in world space being shaded.
+    *   `eye` ($e$): The camera position.
+    *   `lightPos` ($l$): The position of the light source.
+    *   `lightColor` ($C_L$): The color/intensity of the light.
+    *   `ambientLight` ($C_A$): The ambient light color/intensity.
+    *   `material`: Coefficients for ambient ($k_a$), diffuse ($k_d$), specular ($k_s$), and shininess ($n$ or $\alpha$) [S5, S11, unofficial].
+*   **Outputs**:
+    *   `color`: The final RGB color of the sample point.
 
-**Data Structures:**
-*   **Material Coefficients:**
-    *   $k_a$: Ambient reflection coefficient (vec3). Typical value: $(0.2, 0.2, 0.2)$ [S11, unofficial].
-    *   $k_d$: Diffuse reflection coefficient (vec3). Typical value: $(0.7, 0.2, 0.2)$ [S11, unofficial].
-    *   $k_s$: Specular reflection coefficient (vec3). Typical value: $(1.0, 1.0, 1.0)$ [S11, unofficial].
-    *   $\alpha$ (or $n$): Shininess exponent. Sources specify $10.0$ [S11, unofficial] or $60.0$ [S8, unofficial].
-*   **Light Parameters:**
-    *   `lightIntensity`: Typical value: $(0.2, 0.4, 0.4)$ [S7, unofficial] or $(0.4, 0.4, 0.4)$ [S11, unofficial].
-    *   `ambientLight`: Typical value: $0.5 \times (1.0, 1.0, 1.0)$ [S11, unofficial] or $0.025 \times (0.8, 0.8, 0.8)$ [S7, unofficial].
+### Data Structures
+*   **Normal Vector ($N$)**: A 3D vector $(N_x, N_y, N_z)$, normalized to unit length.
+*   **Light Vector ($L$)**: A 3D vector from the point to the light, normalized.
+*   **View Vector ($V$)**: A 3D vector from the point to the eye, normalized.
+*   **Reflection Vector ($R$)**: A 3D vector, calculated from $L$ and $N$.
+*   **Half Vector ($H$)**: (Optional, for Blinn-Phong variant) A 3D vector, calculated from $L$ and $V$.
 
-**Steps:**
-1.  **Estimate Normal:** Compute the surface normal $\mathbf{N}$ at point $\mathbf{p}$ [S7, S11, unofficial]. In volume rendering, this is typically done by estimating the gradient of the scalar field $f$ or SDF using central finite differences with a small epsilon $\epsilon$ [S7, S11, unofficial]:
-    $$ \mathbf{N} = \text{normalize}\left( \begin{bmatrix} f(\mathbf{p} + \epsilon \hat{x}) - f(\mathbf{p} - \epsilon \hat{x}) \\ f(\mathbf{p} + \epsilon \hat{y}) - f(\mathbf{p} - \epsilon \hat{y}) \\ f(\mathbf{p} + \epsilon \hat{z}) - f(\mathbf{p} - \epsilon \hat{z}) \end{bmatrix} \right) $$
-    In some implementations, the gradient is taken directly from an annotation gradient volume if available [S2, unofficial].
-2.  **Compute Vectors:**
-    *   Light direction: $\mathbf{L} = \text{normalize}(\text{lightPos} - \mathbf{p})$ [S11, unofficial].
-    *   View direction: $\mathbf{V} = \text{normalize}(\text{eye} - \mathbf{p})$ [S11, unofficial].
-    *   Reflection vector: $\mathbf{R} = \text{reflect}(-\mathbf{L}, \mathbf{N})$, then normalized [S5, S11, unofficial]. Note: Some implementations use the half-vector $\mathbf{H} = \text{normalize}(\mathbf{V} + \mathbf{L})$ for specular calculation (Blinn-Phong variant) [S8, unofficial].
-3.  **Calculate Dot Products:**
-    *   $dotLN = \mathbf{L} \cdot \mathbf{N}$ [S11, unofficial].
-    *   $dotRV = \mathbf{R} \cdot \mathbf{V}$ [S11, unofficial]. If using half-vector, $dotHV = \mathbf{H} \cdot \mathbf{N}$ [S8, unofficial].
-4.  **Compute Components:**
-    *   **Ambient:** $C_{ambient} = k_a \times \text{ambientLight}$ [S11, unofficial].
-    *   **Diffuse:** If $dotLN < 0$, diffuse contribution is 0. Otherwise, $C_{diffuse} = k_d \times \text{lightIntensity} \times dotLN$ [S11, unofficial].
-    *   **Specular:** If $dotRV < 0$ (or $dotHV < 0$), specular contribution is 0. Otherwise, $C_{specular} = \text{lightIntensity} \times k_s \times \max(dotRV, 0)^{\alpha}$ [S11, unofficial].
-5.  **Combine:**
-    $$ \text{color} = C_{ambient} + C_{diffuse} + C_{specular} $$
-    [S11, unofficial].
+### Steps
+1.  **Estimate Normal**: Compute the surface normal $N$ at point $p$.
+    *   For volume data, this is typically done using finite differences of the scalar field values or an annotation gradient volume [S2, S14, unofficial].
+    *   Central difference formula for opacity $op(x,y,z)$:
+        $$ N = \frac{1}{2} \begin{pmatrix} op(x + 1, y, z) - op(x - 1, y, z) \\ op(x, y + 1, z) - op(x, y - 1, z) \\ op(x, y, z + 1) - op(x, y, z - 1) \end{pmatrix} $$
+        Then normalize $N$ [S14, unofficial].
+    *   Alternatively, if using an SDF, estimate normal via small epsilon perturbations:
+        $$ N = \text{normalize}(\text{SDF}(p + \epsilon) - \text{SDF}(p - \epsilon)) $$
+        where $\epsilon$ is a small vector along each axis [S11, unofficial].
+2.  **Compute Vectors**:
+    *   Light direction: $L = \text{normalize}(lightPos - p)$ [S11, unofficial].
+    *   View direction: $V = \text{normalize}(eye - p)$ [S11, unofficial].
+    *   Reflection vector: $R = \text{reflect}(-L, N) = 2(N \cdot L)N - L$ [S11, unofficial].
+    *   (Blinn-Phong variant only) Half vector: $H = \text{normalize}(L + V)$ [S15, unofficial].
+3.  **Calculate Dot Products**:
+    *   $dotLN = \text{clamp}(N \cdot L, 0.0, 1.0)$ [S11, unofficial].
+    *   $dotRV = \text{clamp}(R \cdot V, 0.0, 1.0)$ [S11, unofficial].
+    *   (Blinn-Phong variant only) $dotHV = \text{clamp}(H \cdot N, 0.0, 1.0)$ [S15, unofficial].
+4.  **Compute Components**:
+    *   **Ambient**: $C_{amb} = k_a \times C_A$ [S11, unofficial].
+    *   **Diffuse**: $C_{diff} = k_d \times C_L \times dotLN$ [S11, unofficial].
+    *   **Specular (Phong)**: $C_{spec} = k_s \times C_L \times dotRV^n$ [S11, unofficial].
+    *   **Specular (Blinn-Phong)**: $C_{spec} = k_s \times C_L \times dotHV^n$ [S15, unofficial].
+5.  **Combine**:
+    *   $Color = C_{amb} + C_{diff} + C_{spec}$ [S11, unofficial].
+6.  **Gamma Correction**:
+    *   Apply gamma correction to the final color: $Color_{final} = Color^{(1/2.2)}$ [S8, S11, unofficial].
 
-**Pseudocode:**
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def simplified_phong_lighting(p, eye, light_pos, light_intensity, k_a, k_d, k_s, shininess, ambient_light, estimate_normal_func):
+def simplified_phong_lighting(p, eye, light_pos, light_color, ambient_color, 
+                              k_a, k_d, k_s, shininess, volume_func):
     """
-    Computes the simplified Phong lighting contribution for a single light source.
-    
-    Args:
-        p (vec3): Position of the sample point.
-        eye (vec3): Position of the camera.
-        light_pos (vec3): Position of the light source.
-        light_intensity (vec3): Color/intensity of the light.
-        k_a (vec3): Ambient reflection coefficient.
-        k_d (vec3): Diffuse reflection coefficient.
-        k_s (vec3): Specular reflection coefficient.
-        shininess (float): Shininess exponent (alpha or n).
-        ambient_light (vec3): Ambient light color/intensity.
-        estimate_normal_func (function): Function that returns the normal vector at a given point.
-        
-    Returns:
-        vec3: The final RGB color contribution.
+    p: point in world space (vec3)
+    eye: camera position (vec3)
+    light_pos: light position (vec3)
+    light_color: light intensity/color (vec3)
+    ambient_color: ambient light color (vec3)
+    k_a: ambient coefficient (vec3)
+    k_d: diffuse coefficient (vec3)
+    k_s: specular coefficient (vec3)
+    shininess: specular exponent (float)
+    volume_func: function that returns scalar value at a point (float)
     """
-    # Step 1: Estimate Normal
-    N = estimate_normal_func(p)
     
-    # Step 2: Compute Vectors
+    # 1. Estimate Normal
+    epsilon = 0.0001
+    nx = volume_func(p + vec3(epsilon, 0, 0)) - volume_func(p - vec3(epsilon, 0, 0))
+    ny = volume_func(p + vec3(0, epsilon, 0)) - volume_func(p - vec3(0, epsilon, 0))
+    nz = volume_func(p + vec3(0, 0, epsilon)) - volume_func(p - vec3(0, 0, epsilon))
+    N = normalize(vec3(nx, ny, nz))
+    
+    # 2. Compute Vectors
     L = normalize(light_pos - p)
     V = normalize(eye - p)
+    R = reflect(-L, N)
     
-    # Calculate reflection vector R = reflect(-L, N)
-    dot_LN = dot(L, N)
-    R = normalize(2.0 * dot_LN * N - L)
+    # 3. Dot Products
+    dotLN = max(dot(N, L), 0.0)
+    dotRV = max(dot(R, V), 0.0)
     
-    # Step 3: Calculate Dot Products
-    dot_RV = dot(R, V)
-    
-    # Step 4: Compute Components
-    # Ambient
-    ambient_color = k_a * ambient_light
+    # 4. Components
+    ambient = k_a * ambient_color
     
     # Diffuse
-    if dot_LN < 0.0:
-        diffuse_color = vec3(0.0)
-    else:
-        diffuse_color = k_d * light_intensity * dot_LN
-        
+    diffuse = k_d * light_color * dotLN
+    
     # Specular
-    if dot_RV < 0.0:
-        specular_color = vec3(0.0)
-    else:
-        specular_color = k_s * light_intensity * pow(dot_RV, shininess)
-        
-    # Step 5: Combine
-    color = ambient_color + diffuse_color + specular_color
+    specular = k_s * light_color * pow(dotRV, shininess)
+    
+    # 5. Combine
+    color = ambient + diffuse + specular
+    
+    # 6. Gamma Correction
+    color = pow(color, vec3(1.0 / 2.2))
     
     return color
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Normal Estimation:** The gradient estimation is sensitive to the step size $\epsilon$ [S7, S11, unofficial].
-*   **Facing Away:** If $dotLN < 0$, the point faces away from the light; return zero contribution [S9, S11, unofficial].
-*   **Specular Facing Away:** If $dotRV < 0$, the reflection vector points away from the viewer; return only diffuse or zero specular [S11, unofficial].
-*   **Shadows:** Standard Simplified Phong in volume rendering often ignores shadows to save performance, as volume self-shadowing is expensive [S1, unofficial]. If included, they require additional ray marching [S8, unofficial].
-*   **Ambient Term:** Some implementations use a normalized color difference for the ambient term, deviating from standard Phong [S5, unofficial].
+### Parameters and Typical Values
+*   **Shininess ($n$ or $\alpha$)**: Controls the sharpness of the specular highlight. Typical values range from 10 to 60 [S8, S11, unofficial]. Higher values produce smaller, sharper highlights.
+*   **Ambient Coefficient ($k_a$)**: Typically 0.2 [S11, unofficial].
+*   **Diffuse Coefficient ($k_d$)**: Typically 0.7 [S11, unofficial].
+*   **Specular Coefficient ($k_s$)**: Typically 1.0 [S11, unofficial].
+*   **Ambient Light**: Often set to 0.5 * white or a soft gray [S11, unofficial].
+*   **Light Intensity**: Often set to 0.2-0.8 depending on scene brightness [S11, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Normal Estimation Noise**: Finite difference normal estimation can be noisy in low-resolution volumes or near discontinuities [S2, S14, unofficial]. Smoothing or using higher-order differences may be required [G].
+*   **Facing Away**: If $dotLN < 0$, the point is facing away from the light. The diffuse and specular contributions should be zeroed out [S11, unofficial].
+*   **Reflection Vector Facing Away**: If $dotRV < 0$, the reflection vector points away from the viewer. In standard Phong, specular is zero. Some implementations return only diffuse in this case [S7, S11, unofficial].
+*   **Shadowing**: Standard Simplified Phong does not include shadow rays. Self-shadowing is ignored, which can lead to unrealistic lighting in complex geometries [S1, unofficial].
+*   **Ambient Term Deviation**: Some implementations use a normalized color difference for the ambient term instead of a constant scalar, which deviates from the standard model [S5, unofficial].
 
 ## Subtopics
 
@@ -126,7 +135,7 @@ The Phong Shading Model for Volume Data applies local illumination calculations 
 Phong Shading is a local illumination model that approximates direct lighting by summing ambient, diffuse, and specular components. It solves the problem of rendering smooth, shiny surfaces by evaluating the lighting equation per fragment. It differs from its siblings by computing specular highlights based on the angle between the view direction and the reflection vector, whereas [Blinn-Phong Shading Model](2239-blinn-phong-shading-model.md) uses the half-vector for computational efficiency, and [Phong Shading Model for Volume Data](1353-phong-shading-model-for-volume-data.md) adapts this to volumetric gradient-based shading.
 
 ### [Blinn-Phong Shading Model](2239-blinn-phong-shading-model.md)
-The Blinn-Phong shading model is a local illumination model that approximates the reflected light intensity from a surface to modulate color, typically derived from a transfer function in volume rendering. It computes specular highlights using a cosine-power lobe based on the half-vector between the light and view directions. Unlike global illumination methods, it ignores indirect light, shadows, and other global effects, relying solely on local surface properties and light source parameters.
+The Blinn-Phong Shading Model is a local illumination model used in volume visualization to calculate the emitted color of a sample voxel as the sum of ambient, diffuse, and specular components. It improves the perception of surface shape and fine details by modulating color from the transfer function with lighting intensity derived from the local surface normal, light direction, and view direction. It sets itself apart from its parent, the [Simplified Phong Lighting Model](885-simplified-phong-lighting-model.md), by using the half-vector (the normalized sum of the light and view directions) for specular calculation instead of the reflected light vector, which is computationally cheaper and produces smoother highlights.
 
 ### [Blinn-Phong Lighting with Depth Cueing](2448-blinn-phong-lighting-with-depth-cueing.md)
 This method computes per-voxel illumination using the Blinn-Phong shading model and applies depth cueing to enhance the perception of volume density and depth. It differs from pure [Blinn-Phong Shading Model](2239-blinn-phong-shading-model.md) by integrating lighting directly into the volume compositing loop with depth-based color modulation.
@@ -134,17 +143,28 @@ This method computes per-voxel illumination using the Blinn-Phong shading model 
 ### [Non-Lambertian Rendering of Spherical Harmonics](4373-non-lambertian-rendering-of-spherical-harmonics.md)
 This method renders non-Lambertian surfaces by approximating the Phong shading model using Spherical Harmonic (SH) lighting representations. It computes specular reflections in complex lighting environments by projecting the lighting into SH coefficients and applying approximated specular basis functions. It distinguishes itself from its parent, the Simplified Phong Lighting Model, by replacing explicit light source summation with SH domain operations, and from its sibling [Specular Reflections via Polynomial Expansion](1172-specular-reflections-via-polynomial-expansion.md) by utilizing the specific SH approximation for the specular term rather than polynomial expansions of the reflection vector.
 
+### Final Illumination and Texture Mapping
+This variant integrates Phong shading with texture mapping and reflection/refraction effects. It utilizes built-in trilinear texture interpolation to reconstruct normal vectors from attribute maps, which are then used for Phong shading [S13, unofficial]. It also implements reflection and refraction using cube mapping, leveraging the continuous per-fragment correct normals [S13, unofficial]. The final fragment color is set by summing contributions from lighting, texture mapping, reflectance mapping, and refraction mapping [S13, unofficial].
+
+### Phong Lighting Model
+In the context of medical imagery, this model provides a more convincing volumetric appearance. It estimates normals using central differences of opacity values $op(x, y, z)$ [S14, unofficial]. The normal is calculated as:
+$$ n(x, y, z) = \frac{1}{2} \begin{pmatrix} op(x + 1, y, z) - op(x - 1, y, z) \\ op(x, y + 1, z) - op(x, y - 1, z) \\ op(x, y, z + 1) - op(x, y, z - 1) \end{pmatrix} $$
+This normal is then used in the standard Phong illumination equation [S14, unofficial].
+
+### Blinn-Phong Specular Highlight for Volumes
+This variant applies the Blinn-Phong model at the first surface intersection found during raymarching. It calculates the light direction $L$, view direction $V$, and halfway vector $H = \text{normalize}(L + V)$ [S15, unofficial]. The specular intensity is computed as $\text{clamp}(H \cdot N, 0, 1)^{\text{shininess}}$, with a hardcoded shininess of 9.0 in some implementations [S15, unofficial].
+
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample point for lighting calculation, assuming normal estimation is $O(1)$ (e.g., via finite differences on a grid or SDF evaluation) [G]. The overall complexity depends on the number of samples per ray, which is $O(N)$ where $N$ is the number of steps in the ray marcher [G].
-*   **Memory Complexity:** $O(1)$ additional memory per sample point for storing vectors and coefficients [G]. The volume data itself requires $O(V)$ memory where $V$ is the number of voxels [G].
-*   **Performance:** Fast and efficient for real-time rendering, as it avoids global illumination calculations and shadow rays [S1, unofficial]. Performance can be impacted by the cost of normal estimation, especially if it requires multiple texture lookups or SDF evaluations [S7, S11, unofficial].
-*   **Strengths:** Provides strong shape cues and visual appeal for volumetric data [S2, S5, unofficial]. Simple to implement and computationally inexpensive [S1, S11, unofficial].
-*   **Limitations:** Does not account for light scattering within the medium (participating media effects) [S5, unofficial]. Shadows are typically ignored, which can lead to unrealistic lighting in complex scenes [S1, unofficial].
-*   **When to Use:** When real-time performance is critical and shape cues are more important than physical accuracy of light transport [S1, S11, unofficial]. Suitable for visualizing scalar fields where surface-like appearance is desired [S2, S5, unofficial].
-*   **When Not to Use:** When physically accurate light transport, including scattering and shadows, is required [S1, unofficial].
+*   **Time Complexity**: $O(1)$ per sample point for lighting calculation, assuming normal estimation is $O(1)$ (finite differences). Total complexity depends on the number of samples per ray and rays per pixel.
+*   **Memory Complexity**: $O(1)$ additional memory for lighting vectors and coefficients. The volume data itself dominates memory usage.
+*   **Performance**: Very fast due to the lack of shadow rays and recursive reflections. Suitable for real-time or interactive volume rendering [S1, S2, unofficial].
+*   **Strengths**: Simple to implement, computationally inexpensive, enhances shape perception significantly compared to unshaded volume rendering [S2, S5, unofficial].
+*   **Limitations**: Does not account for self-shadowing or inter-reflections, which can lead to unrealistic lighting in complex scenes [S1, unofficial]. Normal estimation can be noisy [S2, unofficial].
+*   **When to Use**: When performance is critical and the primary goal is to enhance shape perception of a single object or simple scene [S1, S2, unofficial].
+*   **When Not to Use**: When realistic global illumination, shadows, or complex light transport effects are required [S1, unofficial].
 
 ## Background
-The Phong reflection model was introduced by Bui Tuong Phong in 1973 [S2, S3, S7, S11, unofficial]. It has been widely adopted in computer graphics for shading polygonal meshes [S3, S11, unofficial]. In the context of volume rendering, it has been adapted to work with scalar fields by estimating normals from volume gradients or SDFs [S2, S5, S11, unofficial]. This adaptation allows for the application of surface-like shading techniques to volumetric data, enhancing the perception of 3D structure [S2, S5, unofficial]. The simplified version often omits shadows and complex light transport to maintain performance [S1, S11, unofficial].
+The Phong reflection model was originally developed by Bui Tuong Phong for polygonal meshes [S2, S11, unofficial]. Its adaptation to volume rendering leverages the gradient of the scalar field as a proxy for surface normals, allowing the same local illumination equations to be applied to volumetric data [S2, S5, S14, unofficial]. This approach became popular in medical imaging and scientific visualization for its ability to provide intuitive 3D cues without the computational cost of full ray tracing [S14, S15, unofficial]. The "Simplified" variant often refers to the omission of shadow calculations and the use of a single light source or simple ambient lighting [S1, S11, unofficial].
 
 ## Sources
 [S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
@@ -160,3 +180,5 @@ The Phong reflection model was introduced by Bui Tuong Phong in 1973 [S2, S3, S7
 [S11] markpmlim/RaymarchingAndSDF, https://github.com/markpmlim/RaymarchingAndSDF, fetched 2026-10-27 (unofficial)
 [S12] GPU Ray Marching of Distance Fields, https://www2.compute.dtu.dk/pubdb/edoc/imm6392.pdf, fetched 2026-10-27 (unofficial)
 [S13] Single-Pass High-Quality Splatting, http://nbn-resolving.de/urn:nbn:de:bsz:352-opus-22395, fetched 2026-10-26 (unofficial)
+[S14] GPU-Based Volume Rendering for Medical Imagery, https://scholarly.org/pdf/display/gpu-based-volume-rendering-for-medical-imagery, fetched 2026-10-28 (unofficial)
+[S15] rbaravalle/webgl-volumetric, https://github.com/rbaravalle/webgl-volumetric, fetched 2026-10-27 (unofficial)

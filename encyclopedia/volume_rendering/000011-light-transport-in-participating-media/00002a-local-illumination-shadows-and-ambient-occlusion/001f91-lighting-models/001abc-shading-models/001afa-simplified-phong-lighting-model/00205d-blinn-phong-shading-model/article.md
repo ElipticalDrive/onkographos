@@ -1,203 +1,145 @@
 # Blinn-Phong Shading Model
 
-Also called: Blinn-Phong Approximation, Blinn-Phong Material Model, Blinn-Phong Shading, Blinn-Phong Specular, Blinn-Phong Specular Lighting, Phong reflection model
+Also called: Blinn-Phong Approximation, Blinn-Phong Material Model, Blinn-Phong Reflection Model, Blinn-Phong Shading, Blinn-Phong Specular, Blinn-Phong Specular Lighting, Blinn-Phong illumination model, Phong reflection model, local illumination
 
 ## Overview
-
-The Blinn-Phong shading model is a local illumination model that approximates the reflected light intensity from a surface to modulate color, typically derived from a transfer function in volume rendering [S1, book][S8]. It computes specular highlights using a cosine-power lobe based on the half-vector between the light and view directions [S3, S4, S6, S7, unofficial]. Unlike global illumination methods, it ignores indirect light, shadows, and other global effects, relying solely on local surface properties and light source parameters [S1, book][S8].
+The Blinn-Phong Shading Model is a local illumination model used in volume visualization to calculate the emitted color of a sample voxel as the sum of ambient, diffuse, and specular components [S1][S5, S8, unofficial]. It improves the perception of surface shape and fine details by modulating color from the transfer function with lighting intensity derived from the local surface normal, light direction, and view direction [S2, book][S9, unofficial]. It sets itself apart from its parent, the [Simplified Phong Lighting Model](885-simplified-phong-lighting-model.md), by using the half-vector (the normalized sum of the light and view directions) for specular calculation instead of the reflected light vector, which is computationally cheaper and produces smoother highlights [S4, S7, unofficial].
 
 ## How it works
-
-### Inputs and Outputs
+**Inputs and Outputs:**
 *   **Inputs:**
-    *   Surface position $\mathbf{p}$ [S2, S5, S6, unofficial].
-    *   Surface normal $\mathbf{n}$ [S1, book][S2, S5, unofficial][S8]. In volume rendering, this is typically the normalized gradient vector of the scalar field at $\mathbf{p}$ [S1, book][S8].
-    *   Light direction $\mathbf{l}$ [S5, S6, unofficial].
-    *   View direction $\mathbf{v}$ [S2, S5, S6, unofficial].
-    *   Light intensity/color $\mathbf{I}_L$ [S1, book][S5, unofficial].
-    *   Ambient light intensity/color $\mathbf{I}_a$ [S4, unofficial][S8].
-    *   Material coefficients: ambient $k_a$, diffuse $k_d$, specular $k_s$, and shininess exponent $n$ [S1, book][S5, unofficial][S8].
-    *   Base color/albedo $\mathbf{C}_{base}$ from the transfer function [S1, book] or material [S4, S7, unofficial].
-    *   Optional: Light attenuation factors ($k_c, k_l, k_q$) and spot light angles ($\theta_{inner}, \theta_{outer}$) [S5, unofficial].
+    *   Voxel position $p$ (or sample point).
+    *   Light position $l_{pos}$ (for point lights) or light direction $l$ (for directional lights).
+    *   View direction $v$ (from camera to sample, or sample to camera depending on convention; here defined as ray origin to sample for eye direction, or sample to camera for view vector).
+    *   Surface normal $n$ (derived from the volume gradient).
+    *   Material coefficients: ambient $k_a$, diffuse $k_d$, specular $k_s$, shininess $\beta$ (or $n$).
+    *   Light colors/intensities: ambient $I_a$, diffuse $I_d$, specular $I_s$.
+    *   Transfer function color $c_v$ (voxel color).
 *   **Outputs:**
-    *   Final color $\mathbf{C}_{final}$, representing the modulated color at the surface point [S1, book][S4, unofficial].
+    *   Emitted color $c'$ to the camera.
 
-### Data Structures
-No specific complex data structures are required beyond standard vector and scalar types. [G] The implementation relies on:
-*   3D vectors ($\mathbf{p}, \mathbf{n}, \mathbf{l}, \mathbf{v}, \mathbf{h}$) for positions, normals, and directions. [G]
-*   Scalars ($k_a, k_d, k_s, n, \text{shininess}$) for material properties. [S1, book][S5, unofficial][S8]
-*   3D vectors ($\mathbf{I}_L, \mathbf{I}_a, \mathbf{C}_{base}$) for light and color values. [G]
+**Data Structures:**
+*   **Normal Vector:** In volume rendering, the normal $n$ is not geometric but is computed as the normalized gradient of the scalar field at the sample position [S1][S2, book][S8, unofficial].
+    *   Gradient $\nabla I$ is typically estimated using central differences between neighboring voxels [S8, S9, unofficial].
+    *   $n = \frac{\nabla I}{\|\nabla I\|}$
+*   **Half Vector:** $h = \frac{l + v}{\|l + v\|}$, where $l$ is the normalized light direction vector (from surface to light) and $v$ is the normalized view direction vector (from surface to camera) [S1][S5, S7, unofficial].
 
-### Steps
-
+**Numbered Steps:**
 1.  **Compute Directions:**
-    Calculate the normalized light direction $\mathbf{l}$ and view direction $\mathbf{v}$ relative to the surface point $\mathbf{p}$ [S2, S5, S6, unofficial].
-    $$ \mathbf{l} = \text{normalize}(\mathbf{light.position} - \mathbf{p}) $$
-    $$ \mathbf{v} = \text{normalize}(\mathbf{eyeOrigin} - \mathbf{p}) $$
-    [S5, unofficial]
+    *   Calculate light direction $l = \text{normalize}(l_{pos} - p)$ for point lights, or use the given directional light vector [S3, S6, unofficial].
+    *   Calculate view direction $v = \text{normalize}(p - \text{rayOrigin})$ or $\text{normalize}(\text{cameraPos} - p)$ [S3, S7, unofficial].
+    *   Calculate half vector $h = \text{normalize}(l + v)$ [S5, S7, unofficial].
+2.  **Compute Ambient Term:**
+    *   $c_a = k_a I_a$ [S1][S5, unofficial].
+    *   Note: In some implementations (e.g., NVIDIA IndeX plugin), $I_a$ is assigned the voxel color $c_v$ [S1].
+3.  **Compute Diffuse Term:**
+    *   Calculate diffuse factor: $diff = \max(0, n \cdot l)$ [S5, S6, S7, unofficial].
+    *   $c_d = k_d I_d \cdot diff$ [S1][S5, unofficial].
+    *   Note: In NVIDIA IndeX, $I_d$ is assigned the voxel color $c_v$ [S1].
+4.  **Compute Specular Term:**
+    *   Calculate specular factor: $spec = \max(0, n \cdot h)^\beta$ [S1][S5, S7, unofficial].
+    *   $c_s = k_s I_s \cdot spec$ [S1][S5, unofficial].
+    *   Note: In NVIDIA IndeX, $I_s$ is assigned white color [S1].
+    *   Alternative normalization: Some sources use $f_r = (h \cdot n)^\beta \frac{\beta + 2}{2\pi}$ for reflectance [S4, unofficial].
+5.  **Combine and Modulate:**
+    *   $c' = c_a + c_d + c_s$ [S1][S5, unofficial].
+    *   The resulting intensity modulates the color from the transfer function [S2, book].
 
-2.  **Compute Half Vector:**
-    Calculate the normalized half-vector $\mathbf{h}$, which lies between the light and view directions [S3, S4, S6, unofficial].
-    $$ \mathbf{h} = \text{normalize}(\mathbf{l} + \mathbf{v}) $$
-    [S3, S4, S6, unofficial]
+**Formulas:**
+*   **Ambient:** $c_a = k_a I_a$ [S1]
+*   **Diffuse:** $c_d = k_d I_d |n \cdot l|$ [S1]
+*   **Specular:** $c_s = \begin{cases} k_s I_s |n \cdot h|^\beta & \text{if } |n \cdot l| > 0 \\ 0 & \text{otherwise} \end{cases}$ [S1]
+*   **Half Vector:** $h = \frac{v+l}{\|v+l\|}$ [S1]
+*   **Total Color:** $c' = c_a + c_d + c_s$ [S1]
 
-3.  **Compute Diffuse Component:**
-    Calculate the diffuse reflectance using the dot product of the normal and light direction, clamped to $[0, 1]$ [S4, S5, S6, S7, unofficial].
-    $$ \text{diffuse\_factor} = \max(0, \mathbf{n} \cdot \mathbf{l}) $$
-    [S4, S5, S6, unofficial]
-    The diffuse intensity contribution is:
-    $$ \mathbf{I}_{diffuse} = k_d \cdot \mathbf{I}_L \cdot \text{diffuse\_factor} $$
-    [S4, unofficial][S8]
-    Some implementations blend the base color with diffuse lighting directly:
-    $$ \mathbf{C}_{diffuse} = \mathbf{C}_{base} \cdot (0.1 + 0.9 \cdot \text{diffuse\_factor}) $$
-    [S7, unofficial]
+**Parameters with Typical Values:**
+*   **Shininess ($\beta$):** Controls specular lobe width. Typical values range from 10 to 100. Example: 32.0 [S10, unofficial], 100.0 [S5, unofficial], 0.5 (used as exponent in specific GLSL module context, likely a typo or specific normalization) [S3, unofficial].
+*   **Ambient Coefficient ($k_a$):** Often 0.1 to 0.3. Example: 0.1 [S10, unofficial].
+*   **Diffuse Coefficient ($k_d$):** Often 0.9 to 1.0. Example: 0.9 [S10, unofficial].
+*   **Specular Coefficient ($k_s$):** Often 0.4 to 1.0. Example: 0.4 [S10, unofficial].
+*   **Light Intensity:** $I_a, I_d, I_s$ are often set to the voxel color $c_v$ for ambient and diffuse, and white for specular in specific plugins [S1].
 
-4.  **Compute Specular Component:**
-    Calculate the specular reflectance using the dot product of the normal and half vector, raised to the shininess power [S3, S4, S5, S6, S7, unofficial].
-    $$ \text{specular\_factor} = \max(0, \mathbf{n} \cdot \mathbf{h})^n $$
-    [S4, S5, S6, S7, unofficial]
-    The specular intensity contribution is:
-    $$ \mathbf{I}_{specular} = k_s \cdot \mathbf{I}_L \cdot \text{specular\_factor} $$
-    [S4, unofficial][S8]
-    Some implementations use a normalized lobe for physically based approximation:
-    $$ f_r = \frac{(\mathbf{h} \cdot \mathbf{n})^n (n + 2)}{2\pi} $$
-    [S3, unofficial]
+**Edge Cases and Pitfalls:**
+*   **Homogeneous Regions:** The gradient is not well-defined in homogeneous regions of the volume, leading to undefined normals [S2, book][S11].
+    *   *Mitigation:* Modify the model to shade only regions with high gradient magnitudes [S2, book][S11]. The gradient magnitude can be used to modulate opacity or interpolate between unshaded and shaded color [S9, unofficial].
+*   **Voxel Normals:** Voxels do not inherently have a normal vector [S8, unofficial]. It must be computed on-the-fly (requiring 6 texture fetches for central differences) or precalculated and stored (requiring 4x texture memory) [S8, unofficial].
+*   **Local Illumination Limitations:** The model ignores indirect light, shadows, and global effects [S2, book][S11].
 
-5.  **Apply Attenuation (Optional):**
-    For point or spot lights, apply distance attenuation [S5, unofficial].
-    $$ d = \|\mathbf{light.position} - \mathbf{p}\| $$
-    $$ \text{attenuation} = \frac{1}{k_c + k_l \cdot d + k_q \cdot d^2} $$
-    [S5, unofficial]
-    For spot lights, apply cone intensity [S5, unofficial].
-    $$ \theta = \text{abs}(\mathbf{l} \cdot \text{normalize}(-\mathbf{light.direction})) $$
-    $$ \epsilon = \theta_{inner} - \theta_{outer} $$
-    $$ \text{spot\_intensity} = \text{clamp}\left(\frac{\theta - \theta_{outer}}{\epsilon}, 0.0, 1.0\right) $$
-    [S5, unofficial]
-    Total light intensity factor:
-    $$ \mathbf{I}_{light\_effective} = \mathbf{I}_L \cdot \text{attenuation} \cdot \text{spot\_intensity} $$
-    [S5, unofficial]
-
-6.  **Combine Components:**
-    Sum the ambient, diffuse, and specular components [S4, S5, S6, S7, unofficial].
-    $$ \mathbf{C}_{final} = k_a \mathbf{I}_a + \mathbf{I}_{diffuse} + \mathbf{I}_{specular} $$
-    [S4, unofficial][S8]
-    Or using the blended form:
-    $$ \mathbf{C}_{final} = \mathbf{C}_{base} \cdot (0.1 + 0.9 \cdot \text{diffuse\_factor}) + k_s \cdot \mathbf{I}_L \cdot \text{specular\_factor} $$
-    [S7, unofficial]
-    In volume rendering, this intensity modulates the color from the transfer function [S1, book][S8].
-
-### Pseudocode
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def blinn_phong_shading(p, n, light_pos, eye_origin, light_color, ambient_color, 
-                        k_a, k_d, k_s, shininess, light_type='directional', 
-                        light_direction=None, attenuation_factors=None, spot_angles=None):
+def blinn_phong_shading(p, l_pos, ray_origin, n, k_a, k_d, k_s, beta, I_a, I_d, I_s):
     """
-    Computes Blinn-Phong shading for a surface point.
-    
-    Args:
-        p: vec3, surface position.
-        n: vec3, surface normal (normalized).
-        light_pos: vec3, light position. For directional lights, this can be ignored or used as a reference.
-        eye_origin: vec3, camera/eye position.
-        light_color: vec3, intensity/color of the light source.
-        ambient_color: vec3, ambient light color.
-        k_a: float, ambient coefficient.
-        k_d: float, diffuse coefficient.
-        k_s: float, specular coefficient.
-        shininess: float, specular exponent n.
-        light_type: str, 'directional', 'point', or 'spot'.
-        light_direction: vec3, direction the light is pointing (for spot lights).
-        attenuation_factors: tuple (kc, kl, kq), attenuation constants.
-        spot_angles: tuple (theta_inner, theta_outer), spot light cone angles.
-        
-    Returns:
-        vec3, final color.
+    p: sample position (vec3)
+    l_pos: light position (vec3)
+    ray_origin: camera/ray origin (vec3)
+    n: normalized surface normal (vec3)
+    k_a, k_d, k_s: ambient, diffuse, specular coefficients (float)
+    beta: shininess exponent (float)
+    I_a, I_d, I_s: ambient, diffuse, specular light colors/intensities (vec3)
     """
-    # 1. Compute Directions
-    if light_type == 'directional':
-        l = normalize(-light_direction) if light_direction is not None else normalize(vec3(1,1,1))
-    else:
-        l = normalize(light_pos - p)
-        
-    v = normalize(eye_origin - p)
-    
-    # 2. Compute Half Vector
+    # 1. Compute directions
+    l = normalize(l_pos - p)
+    v = normalize(p - ray_origin)
     h = normalize(l + v)
     
-    # 3. Compute Diffuse Component
+    # 2. Ambient term
+    c_a = k_a * I_a
+    
+    # 3. Diffuse term
     diff = max(dot(n, l), 0.0)
+    c_d = k_d * I_d * diff
     
-    # 4. Compute Specular Component
-    spec = pow(max(dot(n, h), 0.0), shininess)
-    
-    # 5. Apply Attenuation and Spot Light Intensity
-    intensity_factor = 1.0
-    if light_type in ['point', 'spot']:
-        distance = length(light_pos - p)
-        if attenuation_factors is not None:
-            kc, kl, kq = attenuation_factors
-            intensity_factor *= 1.0 / (kc + kl * distance + kq * (distance * distance))
+    # 4. Specular term
+    # Only compute specular if the surface is lit by the light
+    if diff > 0.0:
+        spec = pow(max(dot(n, h), 0.0), beta)
+        c_s = k_s * I_s * spec
+    else:
+        c_s = vec3(0.0, 0.0, 0.0)
         
-        if light_type == 'spot' and spot_angles is not None:
-            theta_inner, theta_outer = spot_angles
-            light_dir_normalized = normalize(-light_direction) if light_direction is not None else vec3(0,0,-1)
-            theta = abs(dot(l, light_dir_normalized))
-            epsilon = theta_inner - theta_outer
-            if epsilon > 0:
-                spot_intensity = clamp((theta - theta_outer) / epsilon, 0.0, 1.0)
-            else:
-                spot_intensity = 1.0
-            intensity_factor *= spot_intensity
-            
-    effective_light_color = light_color * intensity_factor
+    # 5. Combine
+    c_prime = c_a + c_d + c_s
     
-    # 6. Combine Components
-    ambient_term = k_a * ambient_color
-    diffuse_term = k_d * effective_light_color * diff
-    specular_term = k_s * effective_light_color * spec
-    
-    return ambient_term + diffuse_term + specular_term
+    return c_prime
 ```
 
-### Parameters with Typical Values
-*   **Shininess ($n$):** Controls the sharpness of the specular highlight. Higher values produce smaller, sharper highlights. [S3, S5, unofficial] Typical values range from 10 to 1000. In some implementations, a default of 32.0 or 100.0 is used [S4, S7, unofficial].
-*   **Ambient Coefficient ($k_a$):** Typically small, e.g., 0.1 to 0.3, to provide base illumination [S4, S7, unofficial].
-*   **Diffuse Coefficient ($k_d$):** Typical implementations vary; for example, S7 uses a base ambient of 0.1 and scales the diffuse factor by 0.9. [S7, unofficial]
-*   **Specular Coefficient ($k_s$):** Typically 0.1 to 0.5, representing the specular reflectivity [S4, S7, unofficial].
-*   **Attenuation Factors ($k_c, k_l, k_q$):** Constant, linear, and quadratic factors. [S5, unofficial]
-*   **Spot Light Angles ($\theta_{inner}, \theta_{outer}$):** Define the cone of the spot light. $\theta_{inner} < \theta_{outer}$ [S5, unofficial].
+## Subtopics
 
-### Edge Cases and Pitfalls
-*   **Homogeneous Regions:** The gradient vector, often used as the surface normal in volume rendering, is not well-defined in homogeneous regions where the gradient magnitude is near zero. [S1, book][S8] This can lead to undefined normals and incorrect shading. [G] A common modification is to shade only regions with high gradient magnitudes [S1, book][S8].
-*   **Local Illumination Limitations:** The model ignores indirect light, shadows, and global effects, which can result in unrealistic lighting in complex scenes [S1, book][S8].
-*   **Numerical Precision:** In homogeneous regions, floating-point cancellation can occur when computing the gradient. [G] Using a threshold to ignore low-magnitude gradients is recommended [S1, book][S8].
-*   **Half-Vector Calculation:** If $\mathbf{l}$ and $\mathbf{v}$ are nearly opposite, $\mathbf{h}$ may become unstable. [G]
+### [Local Illumination Enhancement](8447-local-illumination-enhancement.md)
+Local Illumination Enhancement combines global illumination with a local point light placed in front of the object to provide local detail information. It builds on the Blinn-Phong Shading Model by adding a specific local shading term to enhance the perception of surface shape and fine details that global illumination alone may miss.
+
+### Blinn-Phong with Wrap Lighting
+A modification of the Blinn-Phong model that adds a wrap lighting term to approximate scattering, reducing contrast and ambient/diffuse lighting requirements [S12]. It computes per-pixel normal information using central differencing and transforms the ray direction into texture space [S12]. The wrap lighting term (Contrast slider) modifies the diffuse function so that lighting wraps around the object beyond the point where it would normally become dark [S12]. This reduces the contrast of the diffuse lighting, decreasing the amount of ambient and diffuse lighting required [S12].
+
+### Relighting via Blinn-Phong
+A rendering technique that applies predicted point normals to mesh scenes using the Blinn-Phong illumination model to support relighting [S13, unofficial]. It adjusts various lighting parameters, including ambient, diffuse, and specular components, to render realistic lighting effects compared to ground truth [S13, unofficial].
 
 ## Operating characteristics
-
-*   **Time Complexity:** $O(1)$ per surface point/sample. [G] The computation involves a few vector operations (dot products, normalization, power function) and is independent of the number of lights or scene complexity, assuming a fixed number of lights. [G]
-*   **Memory Complexity:** $O(1)$ additional memory per sample, storing only temporary vectors and scalars. [G]
-*   **Measured Performance:** Very fast, suitable for real-time rendering. [G] The simplicity of the calculation allows it to be executed efficiently in fragment shaders [S1, book][S7, unofficial].
-*   **Scaling:** Performance does not degrade with scene complexity, but adding more lights increases the number of Blinn-Phong evaluations linearly. [G]
-*   **Strengths:** Simple to implement, computationally inexpensive, provides visually pleasing specular highlights, widely supported. [G]
-*   **Limitations:** Not physically based, ignores shadows and indirect lighting, normal estimation in volumes can be problematic in homogeneous areas. [G]
-*   **When to Use:** Real-time applications, simple lighting requirements, when performance is critical, or as a base for more complex lighting models. [G]
-*   **When Not to Use:** When physically accurate lighting is required, in scenes with complex shadowing or global illumination effects, or when high-quality volume rendering with accurate surface normals is needed without modification. [G]
+*   **Time Complexity:** $O(1)$ per sample/voxel, assuming precomputed normals or efficient gradient estimation. Gradient estimation requires constant number of texture fetches (e.g., 6 for central differences) [S8, unofficial].
+*   **Memory Complexity:** $O(1)$ additional memory per sample if normals are computed on-the-fly. If precomputed, $O(N)$ for the volume where $N$ is the number of voxels, storing gradient components [S8, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales linearly with the number of samples along the ray. Performance is limited by the cost of gradient estimation and texture fetches [S8, unofficial].
+*   **Strengths:** Computationally efficient, provides strong visual cues for surface orientation and shape, widely supported and understood [S1][S9, unofficial].
+*   **Limitations:** Local illumination only, ignores shadows and global effects, normals are approximate and undefined in homogeneous regions [S2, book][S11].
+*   **When to use:** Real-time volume visualization, educational tools, scenes where surface shape perception is critical and global illumination is not required [S1, S12].
+*   **When not to use:** Scenes requiring accurate shadows, global illumination, or physically based rendering where local approximations are insufficient [S2, book][S11].
 
 ## Background
-
-The Blinn-Phong shading model was introduced by James F. Blinn as an approximation to the Phong reflection model. [G] It has become one of the most common local illumination models in computer graphics, particularly in real-time rendering and volume visualization [S1, book][S8]. In volume rendering, it is frequently modified to handle the unique challenge of estimating surface normals from scalar fields, often by restricting shading to regions with high gradient magnitudes [S1, book][S8]. The model is implemented in various graphics libraries and shaders, such as the `glsl-specular-blinn-phong` module [S2, unofficial].
+The Blinn-Phong reflection model is one of the most widely used lighting models for generating Volume Visualization (VolVis) scenes [S1]. It was introduced by Jim Blinn as an improvement to the Phong shading model, offering a more efficient way to calculate specular highlights [S4, unofficial]. In volume rendering, it is frequently modified to handle the lack of explicit geometry by using the normalized gradient vector as the surface normal [S2, book][S11]. The NVIDIA IndeX plugin supports this model, assigning voxel colors to ambient and diffuse terms and white to specular [S1]. It is commonly used in tools like ParaView and VolumeVisual for educational and scientific visualization [S1, S12].
 
 ## Sources
-
-[S1] Chapter 39. Volume Rendering Techniques | NVIDIA Developer, https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques, fetched 2026-10-26 (book)
-[S2] Show HN: Iridescent crystal with raymarching and signed distance fields, https://varun.ca/ray-march-sdf/, fetched 2026-10-26 (unofficial)
-[S3] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)
-[S4] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
-[S5] nithinp7/MRI-Imaging, https://github.com/nithinp7/MRI-Imaging, fetched 2026-10-26 (unofficial)
-[S6] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
-[S7] Ray Marching and Signed Distance Functions — GLSL in the..., https://www.mysimulator.uk/content/articles/ray-marching-sdf.html, fetched 2026-10-29 (unofficial)
-[S8] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29
+[S1] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26
+[S2] Chapter 39. Volume Rendering Techniques | NVIDIA Developer, https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques, fetched 2026-10-26 (book)
+[S3] Show HN: Iridescent crystal with raymarching and signed distance fields, https://varun.ca/ray-march-sdf/, fetched 2026-10-26 (unofficial)
+[S4] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)
+[S5] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
+[S6] nithinp7/MRI-Imaging, https://github.com/nithinp7/MRI-Imaging, fetched 2026-10-26 (unofficial)
+[S7] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S8] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
+[S9] PDF Volume Rendering - Isenberg, https://tobias.isenberg.cc/graphics/uploads/Class/07-volume-rendering.pdf, fetched 2026-10-28 (unofficial)
+[S10] Ray Marching and Signed Distance Functions — GLSL in the..., https://www.mysimulator.uk/content/articles/ray-marching-sdf.html, fetched 2026-10-29 (unofficial)
+[S11] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29
+[S12] VolumeVisual: Design and Evaluation of an Educational Software Tool for Teaching and Learning Volume Visualization, https://doi.org/10.18260/1-2--38034, fetched 2026-10-26
+[S13] NeRFifyMesh: Optimizing Neural Radiance Fields from Textured Meshes for Robotics Scene Building, https://doi.org/10.48550/arxiv.2610.10387, fetched 2026-10-26 (unofficial)

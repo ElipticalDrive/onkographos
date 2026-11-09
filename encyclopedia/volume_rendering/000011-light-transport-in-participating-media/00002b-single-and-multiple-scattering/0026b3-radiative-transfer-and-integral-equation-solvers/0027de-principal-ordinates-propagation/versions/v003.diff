@@ -1,0 +1,197 @@
+--- v002.md
++++ v003.md
+@@ -7,12 +7,12 @@
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:** Scene geometry (implicit or explicit for grid bounds), medium properties ($\sigma_a, \sigma_s$), light sources (directional or point), observer position $\mathbf{c}$, and parameters: number of principal ordinates $N_{ord}$, grid resolution $N_{grid}$, and propagation iterations $M$.
+-*   **Outputs:** Final accumulated radiance $L_{acc}$ at the observer position, computed via ray-marching through the merged grid data.
++*   **Inputs:** Medium properties ($\sigma_a, \sigma_s$), light sources (directional or point), observer position $\mathbf{c}$, and parameters: number of principal ordinates $N_{ord}$, grid resolution $N_{grid}$, and propagation iterations $M$ [S1].
++*   **Outputs:** Final accumulated radiance $L_{acc}$ at the observer position, computed via ray-marching through the merged grid data [S1].
+ 
+ **Data Structures**
+-The core data structure is the **Propagation Grid**. For each principal ordinate, a separate grid is maintained.
++The core data structure is the **Propagation Grid** [S1]. For each principal ordinate, a separate grid is maintained [S1].
+ *   **Grid Layout:** Uniform rectilinear grid for directional lights; spherical grid for point lights [S1].
+ *   **Cell Data:** Each cell stores:
+-    *   $L$: Radiance magnitude (scalar).
++    *   $L$: Radiance magnitude (scalar) [S1].
+     *   $a$: Henyey-Greenstein (HG) anisotropy parameter for the directional distribution (scalar, range $[-1, 1]$) [S1].
+     *   $\sigma_s$: Scattering coefficient (scalar, $m^{-1}$) [S1].
+@@ -22,12 +22,9 @@
+ 
+ **Formulas**
+-*   **Henyey-Greenstein Phase Function:**
+-    $$ P_{HG}(a) = \frac{1 - g^2}{(1 + g^2 - 2ga)^{\frac{3}{2}}} $$
+-    where $g \in [0, 1]$ is the phase function scattering anisotropy and $a = \cos(\theta)$ [S1].
+ *   **HG Cumulative Distribution Function (CDF):** Used to integrate radiance over the solid angle subtended by the destination cell [S1]:
+-    $$ F_{hg}(\mu, g) = \frac{1-g}{4\pi g} \left( \frac{1}{1 + g - 2g\mu} - \frac{1}{1+g} \right) $$
+-    where $\mu$ is the cosine of the angle between the direction and the principal ordinate [S1].
+-*   **Transmittance:** Computed using the Beer-Lambert-Bouguer law with averaged extinction coefficients and distance $t$ [S1]:
+-    $$ T_{src \to dst} = e^{-\bar{\sigma}_t t} $$
++    $$ F_{hg}(\mu, a) = \frac{1-a}{4\pi a} \left( \frac{1}{1 + a - 2a\mu} - \frac{1}{1+a} \right) $$
++    where $\mu$ is the cosine of the angle between the direction and the principal ordinate, and $a$ is the anisotropy parameter [S1].
++*   **Transmittance:** Computed using the Beer-Lambert-Bouguer law with averaged absorption coefficient and distance $t$ [S1]:
++    $$ T_{src \to dst} = e^{-\bar{\sigma}_a t} $$
+ *   **Solid Angle Parametrization:** Approximate parametrization $(\theta_1, \theta_2, |\phi_1 - \phi_2|)$ for the solid angle $\Omega_{src \to dst}$ subtended by the destination cell relative to the source cell [S1]:
+     $$
+@@ -46,5 +43,5 @@
+ 
+ **Algorithm Steps**
+-1.  **Determine Principal Ordinates:** Identify $N_{ord}$ principal directions. For distant lights, these are the light directions. For local lights, directions are sampled from the source [S1]. Importance sampling may be used to prioritize significant directions [S1].
++1.  **Determine Principal Ordinates:** Identify $N_{ord}$ principal directions [S1]. For distant lights, these are the light directions; for local lights, directions are sampled from the source [S1]. Importance sampling may be used to prioritize significant directions [S1].
+ 2.  **Initialize Grids:** For each principal ordinate:
+     *   Create a grid (rectilinear for directional, spherical for point) [S1].
+@@ -53,9 +50,9 @@
+     *   Initialize $L_{acc}$ to zero [S1].
+ 3.  **Propagation Loop:** Repeat $M$ times (typical values: 10 or 30) [S1]:
+-    *   Create a temporary grid $L_{m+1}$ initialized to zero.
++    *   Create a temporary grid $L_{m+1}$ initialized to zero [S1].
+     *   For each cell $dst$ in the grid:
+-        *   Initialize $L_{dst} = 0$ and $a_{dst} = 0$.
++        *   Initialize $L_{dst} = 0$ and $a_{dst} = 0$ [S1].
+         *   For each of the 6 neighbors $src$:
+-            *   Compute transmittance $T_{src \to dst}$ using averaged $\sigma_a, \sigma_s$ and distance [S1].
++            *   Compute transmittance $T_{src \to dst}$ using averaged $\sigma_a$ and distance [S1].
+             *   Determine solid angle parameters $(\theta_1, \theta_2, |\phi_1 - \phi_2|)$ based on relative position [S1].
+             *   Compute $\Delta L_{src \to dst}$ using the formula above [S1].
+@@ -66,5 +63,5 @@
+     *   Swap $L_m$ and $L_{m+1}$ [S1].
+     *   Update Accumulation: $L_{acc, i}^{m+1} = L_{acc, i}^m + L_{m+1}(x_i, c - x_i)$, where $c$ is the observer position and the term represents the radiance towards the observer [S1].
+-4.  **Residuum Propagation (Optional):** If the medium is optically thick, switch to isotropic propagation for remaining energy to save computation [S1]. This involves merging directional grids into a single global isotropic grid [S1].
++4.  **Residuum Propagation (Optional):** If the medium is optically thick, switch to the cheaper isotropic propagation mode earlier to save computation [S1]. This uses lower-resolution propagation domains for the remaining energy [S1].
+ 5.  **Rendering:** Ray-march from the observer position through the merged $L_{acc}$ grid to compute final pixel colors [S1].
+ 
+@@ -72,72 +69,83 @@
+ ```python
+ def principal_ordinates_propagation(light_sources, medium, observer, n_ordinates, grid_res, iterations):
+-    # 1. Determine principal ordinates
+-    ordinates = determine_principal_ordinates(light_sources, n_ordinates)
+-    
+-    # 2. Initialize grids for each ordinate
++    # Determine principal ordinates based on light directions and importance [S1].
++    ordinates = [] # List of direction vectors
++    # Implementation details for ordinate selection are not provided in the sources [S1].
++
++    # Initialize grids for each ordinate
+     grids = []
+-    for ord in ordinates:
+-        grid = create_grid(grid_res, ord.direction) # Rectilinear or Spherical
+-        initialize_grid(grid, light_sources, ord.direction, medium)
++    for direction in ordinates:
++        # Create rectilinear grid for directional lights, spherical for point lights [S1].
++        grid = Grid(grid_res, direction)
++        # Initialize radiance by ray-marching from light source with attenuation [S1].
++        # Initialize anisotropy a = 1 for all cells [S1].
++        initialize_grid(grid, light_sources, direction, medium)
+         grids.append(grid)
+-        
+-    # 3. Propagation Loop
++
++    # Propagation Loop
+     for m in range(iterations):
+         new_grids = []
+         for grid in grids:
+-            new_grid = create_empty_grid_like(grid)
++            new_grid = Grid(grid_res, grid.direction)
+             for dst_cell in grid.cells:
+                 l_dst = 0.0
+                 a_dst = 0.0
+-                
++
+                 for src_cell in dst_cell.neighbors:
+-                    # Compute transmittance
+-                    t_src_dst = exp(-avg_extinction(src_cell, dst_cell) * distance(src_cell, dst_cell))
+-                    
+-                    # Solid angle parameters
++                    # Compute transmittance using averaged sigma_a and distance [S1].
++                    sigma_a_avg = (grid.sigma_a[src_cell] + grid.sigma_a[dst_cell]) / 2.0
++                    dist = distance(src_cell.position, dst_cell.position)
++                    t_src_dst = exp(-sigma_a_avg * dist)
++
++                    # Solid angle parameters based on relative position [S1].
+                     theta1, theta2, phi_diff = get_solid_angle_params(src_cell, dst_cell)
+-                    
+-                    # Compute radiance contribution
+-                    # F_hg is the HG CDF
++
++                    # Compute radiance contribution [S1].
+                     fhg1 = hg_cdf(cos(theta1), grid.anisotropy[src_cell])
+                     fhg2 = hg_cdf(cos(theta2), grid.anisotropy[src_cell])
+-                    
+                     delta_l = grid.radiance[src_cell] * t_src_dst * abs(phi_diff) * (fhg1 - fhg2)
+-                    
++
+                     l_dst += delta_l
+                     a_dst += delta_l * grid.anisotropy[src_cell]
+-                
+-                # Normalize anisotropy
++
++                # Normalize anisotropy [S1].
+                 if l_dst > 0:
+                     a_dst /= l_dst
+-                    # Clamp to valid range
+                     a_dst = max(-1.0, min(1.0, a_dst))
+-                
++
+                 new_grid.radiance[dst_cell] = l_dst
+                 new_grid.anisotropy[dst_cell] = a_dst
+             new_grids.append(new_grid)
+-        
+-        # Update accumulation
++
++        # Update accumulation [S1].
+         for grid, new_grid in zip(grids, new_grids):
+             for cell in grid.cells:
+-                # Compute radiance towards observer
+                 view_dir = observer - cell.position
+-                mu = dot(view_dir, grid.direction)
++                mu = dot(normalize(view_dir), grid.direction)
+                 fhg_obs = hg_cdf(mu, new_grid.anisotropy[cell])
+-                l_acc = new_grid.radiance[cell] * fhg_obs
+-                grid.accumulated[cell] += l_acc
+-        
++                grid.accumulated[cell] += new_grid.radiance[cell] * fhg_obs
++
+         grids = new_grids
+-        
+-    # 4. Residuum Propagation (if needed)
+-    # Merge grids into isotropic grid and propagate
+-    
+-    # 5. Render
+-    return ray_march_through_grids(grids, observer, medium)
+ 
+-def hg_cdf(mu, g):
+-    if g == 0:
+-        return 0.5 # Isotropic case approximation or handle separately
+-    return (1 - g) / (4 * pi * g) * (1 / (1 + g - 2 * g * mu) - 1 / (1 + g))
++    # Residuum propagation: switch to cheaper isotropic propagation mode for optically thick media [S1].
++    # Implementation details for residuum propagation are not provided in the sources [S1].
++
++    # Render: Ray-march from observer through merged accumulated grid [S1].
++    return render_from_accumulated(grids, observer, medium)
++
++def hg_cdf(mu, a):
++    # Henyey-Greenstein CDF for anisotropy parameter a [S1].
++    if a == 0:
++        return 0.5
++    return (1 - a) / (4 * pi * a) * (1 / (1 + a - 2 * a * mu) - 1 / (1 + a))
++
++def get_solid_angle_params(src, dst):
++    # Returns (theta1, theta2, phi_diff) based on relative position [S1].
++    if dst.is_in_front_of(src):
++        return (0, pi/4, 2*pi)
++    elif dst.is_next_to(src):
++        return (pi/4, 3*pi/4, 2)
++    else:
++        return (3*pi/4, pi, 2*pi)
+ ```
+ 
+@@ -148,6 +156,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of grid cells, number of principal ordinates, and number of iterations. $O(N_{ord} \cdot N_{grid}^3 \cdot M)$ [S1].
+-*   **Memory Complexity:** $O(N_{ord} \cdot N_{grid}^3)$ to store the grids [S1].
++*   **Time Complexity:** Linear with respect to the number of grid cells, number of principal ordinates, and number of iterations [G].
++*   **Memory Complexity:** Linear with respect to the number of grid cells and principal ordinates [G].
+ *   **Performance:** Renders dense smoke with strong multiple anisotropic scattering at 25 Hz on an NVidia GeForce GTX 770 without precomputations [S1]. Rendering speed for clouds with $g=0.96$ is 35 Hz using 64 ordinates and $20^3$ grid resolution for each cloud, with 15 propagation iterations [S1].
+ *   **Typical Frame Breakdown:** 5 ms importance propagation, 2 ms determining ordinates, 2 ms grid initialization, 12 ms propagation, 2 ms residuum propagation, 4 ms grid merging and upsampling, 5 ms ray-marching [S1].

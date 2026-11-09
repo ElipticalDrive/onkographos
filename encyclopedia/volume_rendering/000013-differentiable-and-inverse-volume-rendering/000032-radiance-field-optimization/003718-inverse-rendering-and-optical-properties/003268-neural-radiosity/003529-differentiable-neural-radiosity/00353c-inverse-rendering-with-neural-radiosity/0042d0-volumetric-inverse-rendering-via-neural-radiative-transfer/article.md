@@ -1,0 +1,363 @@
+# Volumetric Inverse Rendering via Neural Radiative Transfer
+
+Also called: Neural RTE Inverse Rendering, Ours
+
+## Overview
+This method performs volumetric inverse rendering by jointly optimizing a neural medium field and a neural light field to reconstruct scene geometry, optical properties, and illumination from multi-view observations [S1]. It distinguishes itself from differentiable path tracing methods like Differential Ratio Tracking (DRT) by amortizing global light transport resolution through a learned light field representation, avoiding the need for independent light transport simulations per scene instance [S1]. Unlike purely local supervision methods, it employs a Volumetric Radiance Error (VRE) loss to integrate radiance along primary viewing rays, counteracting the oversmoothing induced by local constraints [S1].
+
+## How it works
+The method solves for the volumetric scene properties and illumination by minimizing a composite objective function. It operates in two stages: an initialization stage and a joint optimization stage [S1].
+
+### Inputs and Outputs
+*   **Inputs:** A set of posed observations $\{I_{l,k}\}$, where $l$ indexes scenes and $k$ indexes images within each scene [S1]. For reconstruction, a single scene is assumed; for generation, multiple scenes are used [S1].
+*   **Outputs:** Neural medium field $M_\phi$ (encoding scattering $\sigma_s$, absorption $\sigma_a$, and phase function parameter $g$) and neural light field $L_\theta$ (encoding outgoing radiance) [S1].
+
+### Data Structures
+1.  **Neural Hash Grid ($F_\xi$):** Initialized in Stage 1. Uses a neural hash grid architecture [MESK22] to store emission-absorption features. The color output is discarded as non-physical [S1].
+2.  **Neural Medium Field ($M_\phi$):** Parameterized by a SIREN network [SMB*20]. Inputs are spatial coordinates $x$. Outputs modulate the density from $F_\xi$ [S1].
+3.  **Neural Light Field ($L_\theta$):** Parameterized by a SIREN network [SMB*20]. Inputs are spatial coordinates $x$ and direction $\omega$. Outputs radiance $L_\theta(x, \omega)$ [S1].
+4.  **Optimization State:** Adam optimizer state [KB15].
+
+### Numbered Steps
+
+**Stage 1: Initialization**
+1.  Train the emission-absorption reconstruction model $F_\xi$ using the neural hash grid architecture [MESK22] on the input observations [S1].
+2.  Discard the color output of $F_\xi$ [S1].
+
+**Stage 2: Joint Optimization**
+1.  Initialize $M_\phi$ and $L_\theta$ using SIREN networks [SMB*20] [S1].
+2.  For each optimization iteration:
+    a.  **Sample Collocation Points:** Draw 10,000 random points $x_t$ from the volumetric domain [S1].
+    b.  **Compute Medium Properties:**
+        i.  Query $F_\xi(x_t)$ to get base density $\rho_{base}$ [S1].
+        ii. Query $M_\phi(x_t)$ to get modulation factors [S1].
+        iii. Compute scattering coefficient $\sigma_s(x_t) = \exp(M_\phi(x_t)_{\sigma_s}) \cdot \rho_{base}$ [S1].
+        iv. Compute absorption coefficient $\sigma_a(x_t) = \exp(M_\phi(x_t)_{\sigma_a}) \cdot \rho_{base}$ [S1].
+        v. Compute total coefficient $\sigma_t(x_t) = \sigma_s(x_t) + \sigma_a(x_t)$ [S1].
+        vi. Compute phase function parameter $g(x_t) = \tanh(M_\phi(x_t)_g)$ [S1].
+    c.  **Evaluate RTE Residual ($L_{RTE}$):**
+        i.  For each collocation point $x_t$, approximate the in-scattering integral using 32 directional samples $\omega'$ drawn randomly from the angular domain $S^2$ [S1].
+        ii. Query $L_\theta(x_t, \omega')$ for incoming radiance [S1].
+        iii. Compute the Radiative Transfer Equation (RTE) residual [S1].
+    d.  **Evaluate Boundary Conditions ($L_{BC}$):**
+        i.  Draw 10,000 random points on the scene boundary [S1].
+        ii. Evaluate boundary conditions (Eq. 5 in [S1]) [S1].
+    e.  **Evaluate Observation Loss ($L_{obs}$):**
+        i.  Render candidate images using the current $M_\phi$ and $L_\theta$ [S1].
+        ii. Compute distance between candidate and reference images [S1].
+    f.  **Evaluate Volumetric Radiance Error ($L_{VRE}$):**
+        i.  For each viewing ray defined by origin $o_k$ and direction $\omega_k(q)$:
+            1. Draw 100 samples along the ray using jittered stratified sampling [S1].
+            2. For each sample point $x_t$ on the ray, compute the in-scattering radiance by querying $L_\theta(x_t, -\omega_k(q))$ [S1].
+            3. Approximate the in-scattering integral using 32 directional samples $\omega'$ drawn randomly from $S^2$ [S1].
+            4. **Crucial:** Draw independent samples for the forward and backward passes of the in-scattering direction integration to avoid optimization gradient bias [S1].
+            5. Compute the VRE loss term:
+               $$ L_{VRE}(\theta,\phi) = \mathbb{E}_{k,q} \left[ \int_0^{t_b} \sigma_s(x_t) \left( I_k(q) - \int_0^t \exp\left(-\int_0^s \sigma_t(x_s) ds\right) \int_{S^2} f_p(x_t, -\omega_k(q), \omega') L_\theta(x_t, \omega') d\omega' ds \right)^2 dt \right] $$
+               where $I_k(q)$ is the observed radiance, $f_p$ is the phase function, and $x_\tau$ lies on the primary viewing ray $o_k + \tau \omega_k(q)$ [S1].
+    g.  **Update Parameters:** Minimize the total objective using the Adam optimizer with default settings [S1].
+
+### Formulas
+*   **Total Objective:**
+    $$ L(\theta, \phi) = L_{RTE}(\theta, \phi) + \lambda_{BC} L_{BC}(\theta) + \lambda_{obs} L_{obs}(\theta) + \lambda_{VRE} L_{VRE}(\theta, \phi) $$
+    [S1]
+
+*   **VRE Loss:**
+    $$ L_{VRE}(\theta,\phi) = \mathbb{E}_{k,q} \left[ \int_0^{t_b} \sigma_s(x_t) \left( I_k(q) - \int_0^t \exp\left(-\int_0^s \sigma_t(x_s) ds\right) \int_{S^2} f_p(x_t, -\omega_k(q), \omega') L_\theta(x_t, \omega') d\omega' ds \right)^2 dt \right] $$
+    [S1]
+
+### Parameters
+*   $\lambda_{BC} = 1$: Weight for boundary condition loss [S1].
+*   $\lambda_{obs} = 1$: Weight for observation loss [S1].
+*   $\lambda_{VRE} = 70$: Weight for volumetric radiance error loss [S1].
+
+### Edge Cases and Pitfalls
+*   **Gradient Bias:** Stochastic sampling of in-scattering directions can introduce optimization gradient bias. This is mitigated by drawing independent samples for the forward and backward passes of the in-scattering direction integration [S1].
+*   **Initialization:** Scene initialization is crucial for high-quality solutions. The two-stage procedure (hash grid initialization followed by SIREN optimization) is necessary to avoid poor local minima [S1].
+*   **Positivity Constraints:** $\sigma_s$ and $\sigma_a$ must be positive. This is enforced via exponential mapping of the network outputs [S1].
+*   **Phase Function Bounds:** The anisotropy parameter $g$ is bounded using a hyperbolic tangent [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+
+# Assuming standard PyTorch setup
+# F_xi: Neural Hash Grid (Stage 1 trained)
+# M_phi: SIREN Network (Medium Field)
+# L_theta: SIREN Network (Light Field)
+# optimizer: Adam optimizer for M_phi and L_theta
+
+def compute_medium_properties(x, F_xi, M_phi):
+    """
+    Computes optical properties from coordinates x.
+    x: Tensor of shape [N, 3]
+    Returns: sigma_s, sigma_a, sigma_t, g
+    """
+    # Stage 1 output: base density
+    # Note: F_xi typically returns features or emission; here we assume 
+    # it provides a density-like scalar or we extract it. 
+    # Based on [S1], F_xi color is discarded, but density is used.
+    # Assuming F_xi returns a density value or we query a specific channel.
+    # For implementation clarity, we assume F_xi(x) returns a tensor 
+    # from which we extract density. If F_xi is a hash grid, we might 
+    # need a small MLP decoder. The paper says "density output of F_xi".
+    # Let's assume F_xi has a method .density(x) or similar.
+    # If not, we assume the hash grid features are decoded to density.
+    # [G] Assuming F_xi provides a density scalar per point.
+    rho_base = F_xi(x) 
+    
+    # Stage 2: Medium Field
+    # M_phi outputs [N, 3] corresponding to log(sigma_s), log(sigma_a), g_raw
+    medium_out = M_phi(x)
+    
+    # Enforce positivity via exponential mapping
+    log_sigma_s = medium_out[:, 0]
+    log_sigma_a = medium_out[:, 1]
+    
+    sigma_s = torch.exp(log_sigma_s) * rho_base
+    sigma_a = torch.exp(log_sigma_a) * rho_base
+    sigma_t = sigma_s + sigma_a
+    
+    # Bound g using hyperbolic tangent
+    g_raw = medium_out[:, 2]
+    g = torch.tanh(g_raw)
+    
+    return sigma_s, sigma_a, sigma_t, g
+
+def sample_directions(N, device):
+    """
+    Samples N directions uniformly from the unit sphere S^2.
+    """
+    # [G] Standard uniform sampling on sphere
+    u = torch.rand(N, 1, device=device)
+    v = torch.rand(N, 1, device=device)
+    theta = 2 * np.pi * u
+    phi = torch.acos(1 - 2 * v)
+    x = torch.sin(phi) * torch.cos(theta)
+    y = torch.sin(phi) * torch.sin(theta)
+    z = torch.cos(phi)
+    return torch.stack([x, y, z], dim=1)
+
+def compute_in_scattering(x, direction_in, L_theta, sigma_s, sigma_t, num_samples=32):
+    """
+    Computes the in-scattering term for a point x and incoming direction.
+    Uses Monte Carlo sampling over the angular domain.
+    """
+    # Sample directions for integration
+    omega_prime = sample_directions(num_samples, x.device)
+    
+    # Query light field for outgoing radiance in sampled directions
+    # L_theta(x, omega_prime)
+    # [G] Assuming L_theta takes (x, omega) and returns radiance
+    L_out = L_theta(x, omega_prime)
+    
+    # Phase function f_p(x, direction_in, omega_prime)
+    # [G] Assuming Henyey-Greenstein or similar. 
+    # The paper uses f_p(x_t, -omega_k(q), omega'). 
+    # Here direction_in is the view direction (incoming to surface).
+    # We need the phase function value.
+    # [G] Placeholder for phase function evaluation. 
+    # Typically: f_p = (1-g^2) / (4*pi * (1 + g^2 - 2*g*cos_theta)^1.5)
+    # cos_theta = dot(direction_in, omega_prime)
+    cos_theta = torch.sum(direction_in * omega_prime, dim=1)
+    # [G] Assuming g is available from context or passed. 
+    # For simplicity, we assume a generic phase function call.
+    f_p = evaluate_phase_function(cos_theta, g=x) # g passed implicitly or via closure
+    
+    # Integral approximation: (1/N) * sum( f_p * L_out )
+    integrand = f_p * L_out
+    in_scattering = torch.mean(integrand)
+    
+    return in_scattering
+
+def compute_vre_loss(viewing_rays, observations, F_xi, M_phi, L_theta, lambda_vre=70):
+    """
+    Computes the Volumetric Radiance Error loss.
+    viewing_rays: List of (origin, direction) tuples or tensors [N_rays, 3]
+    observations: Tensor of observed radiance [N_rays]
+    """
+    loss = 0.0
+    num_rays = len(viewing_rays)
+    
+    for k, (origin, direction) in enumerate(viewing_rays):
+        # Sample points along the ray
+        # [G] Assuming 100 samples per ray as per [S1]
+        t_samples = torch.linspace(0, t_max, 100, device=origin.device) # t_max is scene bound
+        x_t = origin + direction.unsqueeze(0) * t_samples.unsqueeze(1) # [100, 3]
+        
+        # Compute optical depth and transmittance
+        # [G] Need sigma_t at x_t
+        sigma_s_t, sigma_a_t, sigma_t_t, g_t = compute_medium_properties(x_t, F_xi, M_phi)
+        
+        # Transmittance T(t) = exp(-int_0^t sigma_t(s) ds)
+        # Approximate integral using trapezoidal rule or simple sum
+        dt = t_samples[1] - t_samples[0]
+        optical_depth = torch.cumsum(sigma_t_t * dt, dim=0)
+        transmittance = torch.exp(-optical_depth)
+        
+        # In-scattering radiance at each point
+        # We need to integrate in-scattering along the ray
+        # L_in_scatter(t) = int_0^t T(t)/T(s) * sigma_s(s) * in_scattering(s) ds
+        # [G] This is a nested integral. The paper approximates the inner integral 
+        # (angular) and then integrates along the ray.
+        
+        in_scattering_vals = []
+        for i, x_point in enumerate(x_t):
+            # Independent samples for forward/backward to avoid bias
+            # [G] We just compute the value here. The bias avoidance is in 
+            # the gradient computation (backward pass uses different samples).
+            # In PyTorch, if we use the same tensor, gradients are shared.
+            # To ensure independence, we might need to detach or use separate 
+            # random states. However, the paper says "draw independent samples".
+            # In practice, this often means using different random seeds or 
+            # re-sampling in the backward pass if using a custom autograd function.
+            # For this pseudocode, we assume the sampling is done such that 
+            # gradients flow correctly without bias.
+            
+            # Direction into the surface is -direction
+            dir_in = -direction
+            in_scat = compute_in_scattering(x_point, dir_in, L_theta, sigma_s_t[i], sigma_t_t[i])
+            in_scattering_vals.append(in_scat)
+            
+        in_scattering_tensor = torch.stack(in_scattering_vals)
+        
+        # Integrate along the ray: int_0^t_b sigma_s(t) * T(t) * L_in_scatter(t) dt
+        # [G] The VRE formula in [S1] is:
+        # int_0^t_b sigma_s(x_t) * ( I_k(q) - int_0^t ... )^2 dt
+        # This is a bit complex. Let's break it down.
+        # The term inside the square is the error in radiance at point t?
+        # No, it's the error in the integrated radiance?
+        # Re-reading [S1]: "integrating radiance along primary viewing rays"
+        # Eq 7: int_0^t_b sigma_s(x_t) * ( I_k(q) - [Integral Term] )^2 dt
+        # The Integral Term is the in-scattering contribution up to t?
+        # Actually, the integral term in Eq 7 is:
+        # int_0^t exp(-int_0^s sigma_t) * int_{S^2} f_p L_theta domega' ds
+        # This is the in-scattering radiance arriving at point t from previous points s < t.
+        
+        # Let's compute the cumulative in-scattering radiance at each t
+        # L_in(t) = int_0^t T(t)/T(s) * sigma_s(s) * in_scattering(s) ds
+        # T(t)/T(s) = exp(-int_s^t sigma_t)
+        
+        # Compute transmittance from s to t
+        # T_st = transmittance[t] / transmittance[s]
+        # This requires a double loop or matrix op.
+        
+        # [G] Simplified approximation for pseudocode:
+        # We compute the rendered radiance at the end of the ray and compare?
+        # No, VRE is an integral along the ray.
+        
+        # Let's implement the integral term:
+        # Integral_term(t) = int_0^t exp(-int_s^t sigma_t) * sigma_s(s) * in_scattering(s) ds
+        # Note: The paper's Eq 7 has exp(-int_0^s sigma_t) which is T(s).
+        # And the outer integral is ds.
+        # So it's int_0^t T(s) * sigma_s(s) * in_scattering(s) ds?
+        # Wait, the transmittance in the integral is exp(-int_0^s sigma_t).
+        # This is T(s).
+        # So the term is int_0^t T(s) * sigma_s(s) * in_scattering(s) ds.
+        # This represents the radiance contributed by in-scattering from 0 to t,
+        # attenuated by the path from 0 to s? No, that doesn't make sense physically.
+        # Usually, radiance at t is int_0^t T(t)/T(s) * sigma_s(s) * in_scattering(s) ds.
+        # T(t)/T(s) = exp(-int_s^t sigma_t).
+        # The paper's Eq 7: exp(-int_0^s sigma_t) = T(s).
+        # This seems to imply the integral is of T(s) * ...
+        # Let's stick to the formula provided in [S1].
+        
+        # Term = int_0^t T(s) * sigma_s(s) * in_scattering(s) ds
+        # We approximate this integral using the samples.
+        
+        # Compute T(s) * sigma_s(s) * in_scattering(s)
+        weights = transmittance * sigma_s_t * in_scattering_tensor
+        
+        # Cumulative sum for the integral
+        cumulative_integral = torch.cumsum(weights * dt, dim=0)
+        
+        # VRE integrand: sigma_s(t) * (I_k(q) - cumulative_integral(t))^2
+        # Note: I_k(q) is constant for the ray.
+        error = observations[k] - cumulative_integral
+        vre_integrand = sigma_s_t * error**2
+        
+        # Integrate over t
+        ray_vre = torch.sum(vre_integrand * dt)
+        loss += ray_vre
+        
+    return lambda_vre * loss
+
+def optimize(F_xi, M_phi, L_theta, viewing_rays, observations, num_iterations=10000):
+    optimizer = optim.Adam(list(M_phi.parameters()) + list(L_theta.parameters()), lr=0.001)
+    
+    for i in range(num_iterations):
+        optimizer.zero_grad()
+        
+        # Stage 2: Joint Optimization
+        # 1. Sample collocation points for RTE
+        x_colloc = torch.rand(10000, 3) * scene_bounds # [G] Assuming scene_bounds defined
+        sigma_s_c, sigma_a_c, sigma_t_c, g_c = compute_medium_properties(x_colloc, F_xi, M_phi)
+        
+        # 2. Compute RTE Residual (L_RTE)
+        # [G] Simplified RTE residual computation
+        # L_RTE = mean( (RTE equation)^2 )
+        # RTE: sigma_t * L = sigma_s * in_scattering + sigma_a * emission
+        # [G] Assuming emission is 0 or handled separately.
+        # We need L_theta at collocation points for various directions.
+        # This is expensive. The paper uses 32 samples for in-scattering.
+        
+        # For each collocation point, compute in-scattering
+        in_scattering_rte = []
+        for x in x_colloc:
+            # Sample 32 directions
+            omega_prime = sample_directions(32, x.device)
+            L_out = L_theta(x, omega_prime)
+            # Phase function
+            # [G] Placeholder
+            f_p = evaluate_phase_function(...) 
+            in_sc = torch.mean(f_p * L_out)
+            in_scattering_rte.append(in_sc)
+            
+        in_scattering_rte = torch.stack(in_scattering_rte)
+        
+        # RTE Residual
+        # [G] Assuming L_theta is also queried for the outgoing direction at x
+        # This is complex. We assume a helper function exists.
+        l_rte = compute_rte_residual(x_colloc, sigma_s_c, sigma_a_c, sigma_t_c, L_theta, M_phi)
+        
+        # 3. Compute Boundary Condition Loss (L_BC)
+        x_boundary = sample_boundary_points(10000)
+        l_bc = compute_boundary_loss(x_boundary, L_theta)
+        
+        # 4. Compute Observation Loss (L_obs)
+        # [G] Render images and compare
+        l_obs = compute_observation_loss(viewing_rays, observations, F_xi, M_phi, L_theta)
+        
+        # 5. Compute VRE Loss (L_VRE)
+        l_vre = compute_vre_loss(viewing_rays, observations, F_xi, M_phi, L_theta)
+        
+        # Total Loss
+        lambda_bc = 1
+        lambda_obs = 1
+        lambda_vre = 70
+        
+        total_loss = l_rte + lambda_bc * l_bc + lambda_obs * l_obs + lambda_vre * l_vre
+        
+        total_loss.backward()
+        optimizer.step()
+```
+
+## Operating characteristics
+*   **Time Complexity:** The runtime is dominated by the evaluation of the four objective terms. On an A100 GPU, $L_{RTE}$ takes 38%, $L_{VRE}$ takes 53%, $L_{obs}$ takes 2%, and $L_{BC}$ takes 7% [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Quantitative evaluation on anisotropic scenes shows MSE (x10^-2) for $\sigma_a$ is 1.99, $\sigma_s$ is 2.37, $\sigma_t$ is 1.33, and $g$ is 1.21 [S1].
+*   **Strengths:** Amortizes global light transport resolution through the learned light field, making it more efficient than methods requiring independent light transport simulations per instance (like DRT) [S1]. The VRE loss counteracts oversmoothing [S1].
+*   **Limitations:** Requires careful initialization (two-stage optimization) to avoid poor local minima [S1]. Relies on stochastic sampling which can introduce gradient bias if not handled (mitigated by independent sampling) [S1].
+
+## Background
+*   **Origin:** The method was introduced in "Volumetric Inverse Rendering via Neural Radiative Transfer" [S1].
+*   **History:** It builds on prior work in differentiable inverse rendering and neural radiative transfer. It extends the concept of neural radiosity to volumetric scenes [S1].
+*   **Usage:** Used for volumetric scene reconstruction and generation [S1].
+
+## Sources
+[S1] Volumetric Inverse Rendering via Neural Radiative Transfer, https://arxiv.org/abs/2607.13695, fetched 2026-10-29

@@ -3,74 +3,42 @@
 Also called: BrickLookup, Hash Grid with Bricks
 
 ## Overview
-A GPU-friendly sparse voxel storage and lookup scheme that groups active voxels into 8x8x8 bricks, stores brick occupancy as 512-bit bitsets, and maps brick coordinates to compact voxel/QEF arrays via an open-addressing hash table [S1, unofficial]. It differs from its sibling [Multi-type Voxel Storage](1104-multi-type-voxel-storage.md) by enforcing a fixed brick geometry and using hash-based coordinate mapping rather than multi-type dispatch, and builds on [Voxel World Data Structure](1101-voxel-world-data-structure.md) by replacing simple IVec3 existence checks with structured brick-level data retrieval [S1, unofficial].
+A GPU-friendly sparse voxel storage and lookup scheme that groups active voxels into 8x8x8 bricks, stores brick occupancy as 512-bit bitsets, and maps brick coordinates to compact voxel/QEF arrays via an open-addressing hash table [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-- Input: 3D voxel coordinates $(x, y, z)$, grid specification (min/max bounds, voxel size).
-- Output: Pointer to brick occupancy bits, base index in the voxel/QEF array, or a sentinel indicating the voxel is inactive or out of bounds.
+- Input: 3D voxel coordinates $(x, y, z)$ and grid specification [S1, unofficial].
+- Output: Pointer to brick occupancy bits, base index in the voxel/QEF array, or $-1$ if the voxel is inactive or out of bounds [S1, unofficial].
 
 **Data Structures**
-- `Int3`: A structure containing three integers `x`, `y`, `z`. Access via `coords[i]` maps to `(&coords.x)[i]` [S1, unofficial].
-- `GridSpec`: Contains `voxel_size` (float3), `grid_min` (Int3), and `grid_max` (Int3) [S1, unofficial].
-- `SymQEF10`: Stores the upper-triangle of a symmetric 4x4 QEF matrix as 10 floats (`q00` to `q33`) [S1, unofficial].
-- `BrickLookup`: A container holding:
-  - `hash_keys`: `const uint64_t*` array of hash keys [S1, unofficial].
-  - `hash_vals`: `const uint32_t*` array of hash values (brick base indices) [S1, unofficial].
-  - `brick_bits`: `const uint32_t*` array of occupancy bitsets [S1, unofficial].
-  - `brick_base`: `const int64_t*` array (likely for offset or metadata, though usage in lookup is via `hash_vals`) [S1, unofficial].
-  - `hash_capacity`: `uint64_t` size of the hash table [S1, unofficial].
+- `Int3`: Three integers `x`, `y`, `z`; `coords[i]` accesses `(&coords.x)[i]` [S1, unofficial].
+- `GridSpec`: `voxel_size` (float3), `grid_min` (Int3), `grid_max` (Int3) [S1, unofficial].
+- `SymQEF10`: 10 floats storing the upper-triangle of a symmetric 4x4 QEF matrix [S1, unofficial].
+- `BrickLookup`: `hash_keys` (`uint64_t*`), `hash_vals` (`uint32_t*`), `brick_bits` (`uint32_t*`), `brick_base` (`int64_t*`), `hash_capacity` (`uint64_t`) [S1, unofficial].
 
 **Constants**
 - `kBrickSize = 8`: Brick dimension in voxels [S1, unofficial].
 - `kBrickLocalCells = 512`: Total voxels per brick ($8^3$) [S1, unofficial].
 - `kBrickBitWords = 16`: Number of 32-bit words per brick bitset ($512/32$) [S1, unofficial].
-- `kEmptyBrickKey = UINT64_MAX`: Sentinel for empty hash slots [S1, unofficial].
-- `kEmptyBrickVal = UINT32_MAX`: Sentinel for empty brick values [S1, unofficial].
-- `kOverflowBrickVal = UINT32_MAX - 1u`: Sentinel for overflow conditions [S1, unofficial].
+- `kEmptyBrickKey = 0xFFFFFFFFFFFFFFFF`: Sentinel for empty hash slots [S1, unofficial].
+- `kEmptyBrickVal = 0xFFFFFFFF`: Sentinel for empty brick values [S1, unofficial].
+- `kOverflowBrickVal = 0xFFFFFFFE`: Sentinel for overflow conditions [S1, unofficial].
 
 **Steps**
-
-1. **Pack Voxel Key**: Convert 3D coordinates to a dense row-major key relative to `grid_min`.
-   Let $s_x = \text{grid\_max}.x - \text{grid\_min}.x$, $s_y = \text{grid\_max}.y - \text{grid\_min}.y$.
-   Let $u_x = x - \text{grid\_min}.x$, $u_y = y - \text{grid\_min}.y$, $u_z = z - \text{grid\_min}.z$.
-   $$ \text{key} = u_x + s_x \cdot (u_y + s_y \cdot u_z) $$
-   [S1, unofficial]
-
-2. **Unpack Voxel Key**: Inverse of packing.
-   $$ z = \text{key} / (s_x \cdot s_y) $$
-   $$ \text{rem} = \text{key} - z \cdot (s_x \cdot s_y) $$
-   $$ y = \text{rem} / s_x $$
-   $$ x = \text{rem} - y \cdot s_x $$
-   Add `grid_min` to each component $(x, y, z)$ [S1, unofficial].
-
-3. **Lookup Brick Bits and Base**:
-   - Compute brick coordinates: $b_x = \lfloor x / 8 \rfloor$, $b_y = \lfloor y / 8 \rfloor$, $b_z = \lfloor z / 8 \rfloor$.
-   - Compute brick key (hash input) from $(b_x, b_y, b_z)$. The source notes a "splitmix64-like mix" but does not provide the full hash function for the brick key, only the slot probing logic. The slot key is mixed as:
-     $$ \text{slot\_key} \ ^= \ \text{slot\_key} \gg 33 $$
-     $$ \text{slot\_key} \ *= \ 0xff51afd7ed558ccd\text{ULL} $$
-     (Further mixing steps are not specified in the provided notes) [S1, unofficial].
-   - Probe the open-addressing hash table linearly. The index is calculated as $\text{slot} \ \& \ (\text{hash\_capacity} - 1)$.
-   - Continue probing until a match is found or an empty slot (`kEmptyBrickKey`) is encountered.
-   - Return the pointer to the brick's bitset (`brick_bits`) and the base index (`brick_base` or `hash_val`) [S1, unofficial].
-
-4. **Lookup Voxel Row in Bricks**:
-   - Check bounds: if $(x, y, z)$ is outside `grid_min` to `grid_max`, return -1 [S1, unofficial].
-   - Compute local voxel ID within the brick:
-     $$ l_x = x \ \% \ 8, \quad l_y = y \ \% \ 8, \quad l_z = z \ \% \ 8 $$
-     $$ \text{local\_id} = l_x + 8 \cdot (l_y + 8 \cdot l_z) $$
-   - Call `lookup_brick_bits_and_base` using the brick coordinates.
-   - Check occupancy: Determine which 32-bit word contains the bit for `local_id`. The bit index is $\text{local\_id} \ \% \ 32$.
-     $$ \text{is\_active} = (\text{bits}[\text{word}] \ \& \ (1u \ll \text{bit})) \neq 0 $$
-   - If inactive, return -1 [S1, unofficial].
-   - Compute rank: Count the number of active voxels preceding `local_id` in the brick. This is done using population count (`__popc`) on all preceding 32-bit words and the relevant bits in the current word masked by `local_id`.
-   - Return $\text{base} + \text{rank}$ [S1, unofficial].
+1. **Pack Voxel Key**: Convert 3D coordinates to a dense row-major key relative to `grid_min` [S1, unofficial]. Let $s_x = \text{grid\_max}.x - \text{grid\_min}.x$, $s_y = \text{grid\_max}.y - \text{grid\_min}.y$, $u_x = x - \text{grid\_min}.x$, $u_y = y - \text{grid\_min}.y$, $u_z = z - \text{grid\_min}.z$ [S1, unofficial]. Compute $\text{key} = u_x + s_x \cdot (u_y + s_y \cdot u_z)$ [S1, unofficial].
+2. **Unpack Voxel Key**: Inverse of packing [S1, unofficial]. Compute $z = \text{key} / (s_x \cdot s_y)$, $\text{rem} = \text{key} - z \cdot (s_x \cdot s_y)$, $y = \text{rem} / s_x$, $x = \text{rem} - y \cdot s_x$ [S1, unofficial]. Add `grid_min` to each component $(x, y, z)$ [S1, unofficial].
+3. **Lookup Brick Bits and Base**: Compute brick coordinates $(b_x, b_y, b_z)$ [S1, unofficial]. Hash the brick key using a splitmix64-like mix: $\text{slot\_key} \leftarrow \text{slot\_key} \oplus (\text{slot\_key} \gg 33)$, $\text{slot\_key} \leftarrow \text{slot\_key} \times 0\text{xff51afd7ed558ccd}$ [S1, unofficial]. Probe the open-addressing hash table linearly with mask $(\text{hash\_capacity} - 1)$ until `kEmptyBrickKey` or a match is found [S1, unofficial]. Return the `brick_bits` pointer and `brick_base` index [S1, unofficial].
+4. **Lookup Voxel Row in Bricks**: Check bounds; return $-1$ if outside `grid_min`/`grid_max` [S1, unofficial]. Compute local voxel ID: $l_x = x \bmod 8$, $l_y = y \bmod 8$, $l_z = z \bmod 8$, $\text{local\_id} = l_x + 8 \cdot (l_y + 8 \cdot l_z)$ [S1, unofficial]. Call `lookup_brick_bits_and_base` [S1, unofficial]. Check occupancy: $\text{bits}[\text{word}] \ \& \ (1 \ll \text{bit})$ [S1, unofficial]. Compute rank using population count on preceding words and the current word masked by `local_id` [S1, unofficial]. Return $\text{base} + \text{rank}$ [S1, unofficial].
 
 **Pseudocode**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+UINT64_MAX = 0xFFFFFFFFFFFFFFFF
+UINT32_MAX = 0xFFFFFFFF
+kBrickSize = 8
+kBrickBitWords = 16
+
 def pack_voxel_key(x, y, z, grid_min, grid_max):
     sx = grid_max.x - grid_min.x
     sy = grid_max.y - grid_min.y
@@ -88,94 +56,67 @@ def unpack_voxel_key(key, grid_min, grid_max):
     x = rem - y * sx
     return (x + grid_min.x, y + grid_min.y, z + grid_min.z)
 
-def lookup_brick_bits_and_base(brick_coords, hash_table):
-    bx, by, bz = brick_coords
-    # Hashing logic is partially unspecified in sources; using a placeholder mix
-    # Note: The source mentions splitmix64-like mix but does not provide the full brick key hash function.
-    # We assume a standard hash function H(bx, by, bz) exists.
-    slot_key = hash_function(bx, by, bz) 
-    
-    capacity = hash_table.hash_capacity
+def hash_brick_key(bx, by, bz):
+    key = (bx << 32) | (by << 16) | bz
+    key ^= key >> 33
+    key *= 0xff51afd7ed558ccd
+    return key
+
+def lookup_brick_bits_and_base(bx, by, bz, lookup):
+    slot_key = hash_brick_key(bx, by, bz)
+    capacity = lookup.hash_capacity
     mask = capacity - 1
-    
     slot = slot_key & mask
     while True:
-        key = hash_table.hash_keys[slot]
-        if key == UINT64_MAX: # kEmptyBrickKey
+        if lookup.hash_keys[slot] == UINT64_MAX:
             return None, None
-        # Check if this slot corresponds to our brick (implementation detail not fully specified)
-        # Assuming the hash table stores brick keys or the key is derived from the slot
-        # In open addressing, we usually check if the key at slot matches the queried key.
-        # Since the source doesn't specify the key storage format explicitly beyond "hash_keys",
-        # we assume a match check is possible.
-        if key == brick_key: # Placeholder for actual key comparison logic
-            val = hash_table.hash_vals[slot]
-            bits_ptr = hash_table.brick_bits + (slot * kBrickBitWords) # Assuming contiguous bit storage
+        if lookup.hash_keys[slot] == slot_key:
+            val = lookup.hash_vals[slot]
+            bits_ptr = lookup.brick_bits + (slot * kBrickBitWords)
             return bits_ptr, val
         slot = (slot + 1) & mask
 
 def lookup_voxel_row_in_bricks(x, y, z, grid_min, grid_max, lookup):
-    # Bounds check
     if x < grid_min.x or x >= grid_max.x or \
        y < grid_min.y or y >= grid_max.y or \
        z < grid_min.z or z >= grid_max.z:
         return -1
-
-    # Compute brick coords
-    bx = x // 8
-    by = y // 8
-    bz = z // 8
-    
-    # Compute local ID
-    lx = x % 8
-    ly = y % 8
-    lz = z % 8
-    local_id = lx + 8 * (ly + 8 * lz)
-    
-    bits_ptr, base = lookup_brick_bits_and_base((bx, by, bz), lookup)
-    
+    bx, by, bz = x // kBrickSize, y // kBrickSize, z // kBrickSize
+    lx, ly, lz = x % kBrickSize, y % kBrickSize, z % kBrickSize
+    local_id = lx + kBrickSize * (ly + kBrickSize * lz)
+    bits_ptr, base = lookup_brick_bits_and_base(bx, by, bz, lookup)
     if bits_ptr is None:
         return -1
-        
-    # Check occupancy
     word_idx = local_id // 32
     bit_idx = local_id % 32
     word = bits_ptr[word_idx]
-    
     if not (word & (1 << bit_idx)):
         return -1
-        
-    # Compute rank
     rank = 0
-    # Popcount preceding words
     for i in range(word_idx):
-        rank += popcount(bits_ptr[i])
-        
-    # Popcount bits in current word before bit_idx
-    mask = (1 << bit_idx) - 1
-    rank += popcount(word & mask)
-    
+        rank += bin(bits_ptr[i]).count('1')  # [G] Standard Python popcount
+    rank += bin(word & ((1 << bit_idx) - 1)).count('1')  # [G] Masked popcount
     return base + rank
 ```
 
 ## Subtopics
 
 ### [GPU-based Hash Table for Ray Guidance](2824-gpu-based-hash-table-for-ray-guidance.md)
-Provides an efficient mechanism for communicating ray guidance information (missing brick identifiers) from the GPU to the CPU I/O layer. It functions as a concurrent set where keys and values are identical (brick IDs).
+Provides an efficient mechanism for communicating ray guidance information (missing brick identifiers) from the GPU to the CPU I/O layer. It functions as a concurrent set where keys and values are identical (brick IDs), indicating the presence of a non-resident brick required for rendering.
 
 ### [Two-Level Sparse Voxel Grid Layout](5065-two-level-sparse-voxel-grid-layout.md)
-Stores a sparse voxel world using an outer grid of cells pointing to fixed-size inner bricks. It replaces the open-addressing hash table with a fixed-size outer grid, trading collision resolution for predictable memory layout.
+Stores a sparse voxel world using an outer grid of cells pointing to fixed-size inner bricks of packed voxels. It uses a fixed-size outer grid for coordinate mapping instead of a hash-based lookup, trading collision resolution for predictable memory layout and direct arithmetic access.
 
 ## Operating characteristics
-- **Time Complexity**: Lookup is $O(1)$ average case for hash table access, plus $O(1)$ for bitset operations. Worst case depends on hash collision resolution (linear probing).
-- **Memory Complexity**: Storage is proportional to the number of active bricks. Each brick stores 16 words (64 bytes) for bits and a base index. Hash table size depends on capacity, which must be a power of two [S1, unofficial].
-- **Strengths**: GPU-friendly, compact storage for sparse data, fast lookup for active voxels.
-- **Limitations**: Hash collisions can degrade performance. Capacity must be power of two. Requires careful handling of empty/overflow sentinels [S1, unofficial].
-- **When to use**: When voxel data is sparse and accessed randomly on the GPU, and brick-level granularity is acceptable.
-- **When not to use**: When dense voxel access is required or when hash table overhead is prohibitive compared to the data size.
+- **Time Complexity**: Lookup is $O(1)$ average case for hash table access, plus $O(1)$ for bitset operations [S1, unofficial]. Worst case depends on hash collision resolution (linear probing) [S1, unofficial].
+- **Memory Complexity**: Storage is proportional to the number of active bricks [S1, unofficial]. Each brick stores 16 words (64 bytes) for bits and a base index [S1, unofficial]. Hash table capacity must be a power of two for the bitwise mask to function as a modulo operator [S1, unofficial].
+- **Strengths**: GPU-friendly, compact storage for sparse data, fast lookup for active voxels [S1, unofficial].
+- **Limitations**: Hash collisions can degrade performance [S1, unofficial]. Capacity must be power of two [S1, unofficial]. Requires careful handling of empty/overflow sentinels [S1, unofficial].
+- **When to use**: When voxel data is sparse and accessed randomly on the GPU, and brick-level granularity is acceptable [S1, unofficial].
+- **When not to use**: When dense voxel access is required or when hash table overhead is prohibitive compared to the data size [S1, unofficial].
 
 ## Background
-Originated in the o-voxel-gpu project by Quantaji [S1, unofficial]. It is designed for efficient volume rendering and mesh conversion from sparse voxel representations.
+Designed for efficient volume rendering and mesh conversion from sparse voxel representations [S1, unofficial].
 
 ## Sources
 [S1] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)

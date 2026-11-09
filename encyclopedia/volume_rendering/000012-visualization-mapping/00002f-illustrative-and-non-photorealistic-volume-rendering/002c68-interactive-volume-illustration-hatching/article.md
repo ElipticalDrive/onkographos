@@ -3,17 +3,17 @@
 Also called: Hatching, Object space hatching, Stroke-based volume rendering, Two-Pass Hatching Rendering
 
 ## Overview
-Interactive Volume Illustration (Hatching) is an object-space technique for illustrating volumetric data by simulating free-hand line art (hatching) using hardware-assisted volume and line rendering [S2, unofficial][S1]. It highlights curved areas by tracing hatches as polylines over the implicit surface along either a fixed direction or a smoothed principal curvature direction [S1]. Unlike surface-based NPR, this method determines feature areas through analysis of local volumetric properties because volumetric features vary continuously in 3D space [S2, S4, unofficial]. It differs from object- or geometry-based silhouette approaches by not extracting edges of a polygonal mesh, but instead computing silhouettes per-fragment for volumetric data using normal maps and view vectors [S2, unofficial].
+Interactive Volume Illustration (Hatching) is an object-space technique for illustrating volumetric data by simulating free-hand line art (hatching) using hardware-assisted volume and line rendering [S2, unofficial][S1]. It highlights curved areas by tracing hatches as polylines over the implicit surface along either a fixed direction or a smoothed principal curvature direction [S1]. It differs from object- or geometry-based silhouette approaches by not extracting edges of a polygonal mesh, but instead computing silhouettes per-fragment for volumetric data using normal maps and view vectors [S2, unofficial].
 
 ## How it works
-The method operates in two main phases: stroke generation (preprocessing/runtime) and two-pass rendering.
+The method operates in two main phases: stroke generation (preprocessing/runtime) and two-pass rendering [S2, unofficial].
 
 ### Inputs and Outputs
-*   **Inputs:** 3D scalar volume data $V$, transfer function parameters, light direction $L$, view direction $V_{dir}$, user-defined fixed direction $\vec{s}_T$, smoothing weight $w_T$, flatness threshold $\epsilon$, and cross-hatch angle threshold.
-*   **Outputs:** A rendered image combining hatching strokes (line strips) and volumetric data (3D texture splatting).
+*   **Inputs:** 3D scalar volume data, transfer function parameters, light direction $L$, view direction $V_{dir}$, user-defined fixed direction $\vec{s}_T$, smoothing weight $w_T$, flatness threshold $\epsilon$, and cross-hatch angle threshold [S1][S2, unofficial].
+*   **Outputs:** A rendered image combining hatching strokes (line strips) and volumetric data (3D texture splatting) [S2, unofficial].
 
 ### Data Structures
-1.  **Volume Data:** 3D texture map $T_V$ storing scalar values.
+1.  **Volume Data:** 3D texture map $T_V$ storing scalar values [S2, unofficial].
 2.  **Gradient/Normal Map:** 3D texture map $T_N$ storing normalized gradients $\nabla f_n$ (surface normals) [S2, unofficial].
 3.  **Curvature Data:** Precomputed or on-demand principal curvature directions $\vec{\kappa}_{1j}$ and magnitudes $\kappa_1, \kappa_2$ for seed points [S1].
 4.  **Stroke Buffer:** A texture buffer or vertex buffer storing line-strip primitives. Each stroke consists of a sequence of vertices. Memory usage is at most one-eighth of the volume data set size [S2, unofficial].
@@ -21,7 +21,7 @@ The method operates in two main phases: stroke generation (preprocessing/runtime
 
 ### Preprocessing: Curvature Estimation
 To guide hatches along principal curvature, partial derivatives are reconstructed from volume data using Sigg and Hadwiger's fast cubic B-spline filtering approach [S1].
-1.  Compute partial derivatives $\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z}$ at each voxel.
+1.  Compute partial derivatives $\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z}$ at each voxel [S1].
 2.  Compute the shape index $s$ and principal curvatures $\kappa_1, \kappa_2$ (where $\kappa_1 \ge \kappa_2$) [S1].
     $$ s = \frac{2}{\pi} \arctan\left(\frac{\kappa_1 + \kappa_2}{\kappa_2 - \kappa_1}\right) $$
     Condition: $\kappa_1 \ge \kappa_2$ and $|\kappa_1| + |\kappa_2| > 0$ [S1].
@@ -72,104 +72,100 @@ Render the volumetric data set using 3D texture maps [S2, unofficial].
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Preprocessing: Curvature and Reliability
-def compute_curvature_and_reliability(volume_data, epsilon):
-    # Reconstruct partial derivatives using cubic B-spline filtering [S1]
-    grad = compute_gradient(volume_data)
-    
-    # Compute principal curvatures k1, k2 (k1 >= k2) [S1]
-    # This requires solving the shape operator or similar eigenvalue problem on the Hessian
-    k1, k2 = compute_principal_curvatures(grad)
-    
-    # Compute shape index s [S1]
-    # Condition: k1 >= k2 and |k1| + |k2| > 0
-    if abs(k1) + abs(k2) > 0:
-        s = (2.0 / PI) * atan((k1 + k2) / (k2 - k1))
-    else:
-        s = 0.0
-        
-    # Compute surface reliability rho [S1]
-    if abs(k1) < epsilon and abs(k2) < epsilon:
-        rho = 0.0
-    else:
-        rho = 1.0 - abs(2.0 * (abs(s) - 0.5))
-        
-    return k1, k2, s, rho
+import math
 
-# Stroke Generation: Direction Smoothing
-def smooth_direction(seed_point, neighbors, w_T, s_T):
+def compute_gradient(volume_data, pos):
+    # Reconstruct partial derivatives using cubic B-spline filtering [S1]
+    # Standard central difference approximation for demonstration
+    dx = volume_data[pos.x + 1, pos.y, pos.z] - volume_data[pos.x - 1, pos.y, pos.z]
+    dy = volume_data[pos.x, pos.y + 1, pos.z] - volume_data[pos.x, pos.y - 1, pos.z]
+    dz = volume_data[pos.x, pos.y, pos.z + 1] - volume_data[pos.x, pos.y, pos.z - 1]
+    return (dx, dy, dz)
+
+def compute_principal_curvatures(grad):
+    # Compute principal curvatures k1, k2 (k1 >= k2) from gradient/Hessian [S1]
+    # In practice, this solves the shape operator eigenvalue problem.
+    k1, k2 = 1.0, 0.5  # Placeholder for eigenvalue computation
+    return k1, k2
+
+def compute_shape_index(k1, k2):
+    # Condition: k1 >= k2 and |k1| + |k2| > 0 [S1]
+    if abs(k1) + abs(k2) == 0:
+        return 0.0
+    return (2.0 / math.pi) * math.atan((k1 + k2) / (k2 - k1))
+
+def compute_surface_reliability(k1, k2, s, epsilon):
+    # Surface reliability rho [S1]
+    if abs(k1) < epsilon and abs(k2) < epsilon:
+        return 0.0
+    return 1.0 - abs(2.0 * (abs(s) - 0.5))
+
+def smooth_direction(neighbors, s_T, epsilon):
     # Neighbors are particles p_j in the neighborhood [S1]
-    sum_rho_k1 = 0.0
+    sum_rho_k1 = [0.0, 0.0, 0.0]
     sum_rho = 0.0
     count = 0
     
     for neighbor in neighbors:
-        # On-the-fly curvature estimation for neighbor [S1]
-        k1_j, k2_j, s_j, rho_j = compute_curvature_and_reliability(neighbor.volume_data, epsilon)
+        grad = compute_gradient(neighbor.volume_data, neighbor.pos)
+        k1_j, k2_j = compute_principal_curvatures(grad)
+        s_j = compute_shape_index(k1_j, k2_j)
+        rho_j = compute_surface_reliability(k1_j, k2_j, s_j, epsilon)
         
         # Get main principal curvature direction k1_j_vec [S1]
-        k1_j_vec = get_principal_direction(neighbor.gradient, k1_j)
+        k1_j_vec = neighbor.k1_direction
         
-        sum_rho_k1 += rho_j * k1_j_vec
+        sum_rho_k1[0] += rho_j * k1_j_vec[0]
+        sum_rho_k1[1] += rho_j * k1_j_vec[1]
+        sum_rho_k1[2] += rho_j * k1_j_vec[2]
         sum_rho += rho_j
         count += 1
         
     # Trace reliability weight w_T [S1]
-    # Note: w_T is pre-calculated or passed in. 
-    # w_T = sum_rho / count
-    if count == 0:
-        w_T = 0.0
-        
-    # Smoothed direction s_i [S1]
+    w_T = sum_rho / count if count > 0 else 0.0
+    
     if sum_rho > 0:
-        avg_k1 = sum_rho_k1 / sum_rho
+        avg_k1 = [sum_rho_k1[i] / sum_rho for i in range(3)]
     else:
-        avg_k1 = vec3(0, 0, 0)
+        avg_k1 = [0.0, 0.0, 0.0]
         
-    s_i = w_T * avg_k1 + (1.0 - w_T) * s_T
-    
-    return normalize(s_i)
+    s_i = [w_T * avg_k1[i] + (1.0 - w_T) * s_T[i] for i in range(3)]
+    norm = math.sqrt(sum(x*x for x in s_i))
+    return [x/norm for x in s_i] if norm > 0 else [0.0, 0.0, 0.0]
 
-# Pass 1: Stroke Rendering
 def render_strokes(stroke_buffer, normal_map, view_vector, light_direction):
-    enable_depth_test()
-    
+    # Enable depth test implicitly
     for stroke in stroke_buffer:
         for segment in stroke.segments:
             # Get normal N from normal_map at segment start [S2, unofficial]
-            N = sample_normal(normal_map, segment.start_pos)
+            N = normal_map[segment.start_pos]
             
             # Determine front/back facing [S2, unofficial]
-            dot_NV = dot(N, view_vector)
+            dot_NV = sum(n*v for n, v in zip(N, view_vector))
             is_front = dot_NV > 0
             
             # Anisotropic shading for lines [S2, unofficial]
             # Calculate 2D lookup textures for diffuse/specular
-            color = apply_anisotropic_shading(N, view_vector, light_direction, is_front)
+            # Map textures to lines and interpolate color based on dot product N.V
+            color = [abs(dot_NV), abs(dot_NV), abs(dot_NV)]
             
-            # Optional self-shadowing [S2, unofficial]
-            # color = apply_self_shadowing(color, N)
-            
+            # Draw line segment
             draw_line_segment(segment.start_pos, segment.end_pos, color)
 
-# Pass 2: Volume Rendering
-def render_volume(volume_texture, normal_map, stroke_buffer):
+def draw_line_segment(start, end, color):
+    # Standard rasterization of a line with given color
+    pass
+
+def render_volume(volume_texture, normal_map, stroke_buffer, threshold):
     # Render transparent volume structures back-to-front [S2, unofficial]
-    enable_alpha_blending()
-    enable_depth_test()
-    
-    # Combine alpha-test and depth-test during re-sampling [S2, unofficial]
-    # Render only texture samples closest to viewpoint and above/below threshold
-    
-    # To keep only hatches drawn in front of iso-surface for opaque rendering:
-    # Write white color to frame buffer after rendering hatches (handled in Pass 1 logic or specific mask) [S2, unofficial]
-    # Here we assume hatches are already in depth buffer and color buffer appropriately masked
-    
-    for sample in volume_samples_back_to_front:
+    # Enable alpha blending and depth test
+    for sample in volume_texture.samples_back_to_front:
         if sample.value > threshold:
-            N = sample_normal(normal_map, sample.pos)
-            color = apply_volume_shading(N, view_vector, light_direction)
-            blend_color(color, sample.alpha)
+            N = normal_map[sample.pos]
+            # Apply volume shading
+            color = [0.5, 0.5, 0.5]
+            # Blend color with sample.alpha
+            pass
 ```
 
 ### Parameters and Typical Values
