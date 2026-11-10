@@ -1,0 +1,188 @@
+--- v002.md
++++ v003.md
+@@ -10,5 +10,5 @@
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Observed image $I^*$.
++    *   Observed image $I^*$ [S1, unofficial].
+     *   Scene geometry $G = (X, N, C)$, where $X$ is the surface point, $N$ is the normal, and $C$ is the camera position [S1, unofficial].
+     *   Material parameters $M = (k_d, k_s, \alpha)$, representing diffuse reflectance, specular reflectance, and shininess [S1, unofficial].
+@@ -20,5 +20,5 @@
+ The method operates on standard image and vector data structures [S1, unofficial]. No specific custom data structures (like VDB or BVH) are required beyond standard arrays for the image $I$, geometry maps (depth/normal), and the parameter vector $L$ [S1, unofficial].
+ *   $L$: A vector containing the parameters for all light sources. For a single point light, this includes position coordinates and intensity [S1, unofficial].
+-*   $I$: A 2D array representing the rendered image.
++*   $I$: A 2D array representing the rendered image [S1, unofficial].
+ *   $S_i$: A scalar shadow term (1 if lit, 0 if shadowed) for each light $i$ at each pixel [S1, unofficial].
+ 
+@@ -31,13 +31,13 @@
+ 
+ Where:
+-*   $L_a$ is ambient illumination.
+-*   $k_d$ is diffuse reflectance.
++*   $L_a$ is ambient illumination [S1, unofficial].
++*   $k_d$ is diffuse reflectance [S1, unofficial].
+ *   $S_i$ is the shadow term for light $i$ (1 if the point is lit, 0 otherwise) [S1, unofficial].
+ *   $I_{L,i}$ is the intensity of light $i$ [S1, unofficial].
+-*   $L_i$ is the position of light $i$.
+-*   $X$ is the surface point.
+-*   $N$ is the surface normal.
+-*   $k_s$ is specular reflectance.
+-*   $\alpha$ is the shininess exponent.
++*   $L_i$ is the position of light $i$ [S1, unofficial].
++*   $X$ is the surface point [S1, unofficial].
++*   $N$ is the surface normal [S1, unofficial].
++*   $k_s$ is specular reflectance [S1, unofficial].
++*   $\alpha$ is the shininess exponent [S1, unofficial].
+ *   $H$ is the halfway vector between the viewer direction $(C - X)$ and the light source vector $(L_i - X)$ [S1, unofficial].
+ 
+@@ -80,5 +80,5 @@
+     *   The terms $\frac{\partial I_d}{\partial L}$ and $\frac{\partial I_s}{\partial L}$ are computed via automatic differentiation (e.g., PyTorch) using the chain rule on the differentiable parts of the Blinn-Phong model [S1, unofficial].
+     *   The shadow Jacobian $\frac{\partial S}{\partial L}$ is approximated using finite differences [S1, unofficial]. This involves rendering six shadow maps around the current light source position estimation to numerically approximate the derivative [S1, unofficial].
+-5.  **Optimization:** Update $L$ using gradient descent with the computed gradient $\frac{\partial E}{\partial L}$. Repeat until convergence [S1, unofficial].
++5.  **Optimization:** Update $L$ using gradient descent with the computed gradient $\frac{\partial E}{\partial L}$ [S1, unofficial]. Repeat until convergence [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -90,12 +90,11 @@
+     """
+     Compute binary shadow term S for each point.
+-    X: (B, 3) Surface points
+-    L_pos: (B, 3) Light positions
+-    shadow_depth_buffer: (B,) Depth values from light's perspective (pre-rendered)
++    X: (N, 3) Surface points
++    L_pos: (3,) Light position
++    shadow_depth_buffer: (N,) Depth values from light's perspective (pre-rendered)
+     bias: float Shadow acne bias
+-    Returns: S: (B,) Shadow term (1.0 if lit, 0.0 if shadowed)
++    Returns: S: (N,) Shadow term (1.0 if lit, 0.0 if shadowed)
+     """
+     dist_to_light = torch.norm(X - L_pos, dim=1, keepdim=True)
+-    # Z-buffer comparison: point is lit if its distance to light is less than stored depth + bias
+     S = (dist_to_light < shadow_depth_buffer + bias).float()
+     return S
+@@ -112,36 +111,25 @@
+         L_int = L[3]
+ 
+-        # Vector from surface to light and camera
+         L_vec = L_pos - X
+         C_vec = C - X
+-
+-        # Halfway vector
+         H = torch.normalize(L_vec + C_vec)
+ 
+-        # Diffuse term
+         diff_dot = torch.sum(N * L_vec, dim=1, keepdim=True)
+         I_d = kd * diff_dot * L_int
+ 
+-        # Specular term
+         spec_dot = torch.sum(N * H, dim=1, keepdim=True)
+         spec_pow = torch.pow(torch.clamp(spec_dot, min=0.0), alpha)
+         I_s = ks * spec_pow * L_int
+ 
+-        # Shadow term (binary, non-differentiable)
+         S = compute_shadow_term(X, L_pos, shadow_depth_buffer)
+ 
+-        # Rendered image
+         I = kd * La + S * (I_d + I_s)
+-
+-        # Photometric error
+         E = torch.sum((I - I_star)**2)
+ 
+-        # Check stopping condition
+         if prev_E is not None and abs(E - prev_E) / prev_E < tol:
+             break
+         prev_E = E
+ 
+-        # Gradient computation
+-        # 1. Differentiable parts (Id, Is) via autograd (S treated as constant)
++        # Differentiable part gradient (Id, Is) via autograd (S treated as constant)
+         L.requires_grad_(True)
+         I_diff = kd * La + S.detach() * (I_d + I_s)
+@@ -149,7 +137,7 @@
+         grad_diff = torch.autograd.grad(E_diff, L, retain_graph=True)[0]
+ 
+-        # 2. Shadow Jacobian via finite differences (6 shadow maps)
++        # Shadow Jacobian via finite differences (6 shadow maps)
+         eps = 1e-3
+-        dS_dL = torch.zeros(3, dtype=torch.float32)
++        dS_dL = torch.zeros_like(X, dtype=torch.float32) # (N, 3)
+         for j in range(3):
+             L_pos_plus = L_pos.clone()
+@@ -161,18 +149,14 @@
+             S_minus = compute_shadow_term(X, L_pos_minus, shadow_depth_buffer)
+ 
+-            dS_dL[j] = torch.mean(S_plus - S_minus) / (2 * eps)
+-
+-        # 3. Combine Jacobian approximation: dI/dL = dId/dL + dIs/dL + (Id + Is) * dS/dL
++            dS_dL[:, j] = (S_plus - S_minus) / (2 * eps)
++
++        # Combine Jacobian approximation: dI/dL = dId/dL + dIs/dL + (Id + Is) * dS/dL
+         # Gradient of E w.r.t L: dE/dL = 2 * (I - I*) * dI/dL
+-        # The autograd already computed grad_diff = dE/dL for the differentiable part.
+-        # We add the shadow contribution: 2 * (I - I*) * (I_d + I_s) * dS/dL
+-        shadow_grad = 2.0 * (I - I_star) * (I_d + I_s) * dS_dL.unsqueeze(0).expand_as(I)
+-        grad_shadow = torch.sum(shadow_grad, dim=1)
+-
+-        # Total gradient
++        # grad_diff already contains 2*(I-I*)*(dId/dL + dIs/dL)
++        shadow_contrib = 2.0 * (I - I_star) * (I_d + I_s) * dS_dL
++        grad_shadow = torch.sum(shadow_contrib, dim=0) # Sum over pixels to get gradient for L
++
+         grad = grad_diff + grad_shadow
+-
+-        # Optimization step
+-        L = L - lr * grad.detach()
++        L.data -= lr * grad.detach()
+ 
+     return L
+@@ -180,7 +164,7 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Shadow Differentiability:** Shadow mapping is inherently non-differentiable due to the binary Z-buffer comparison. Approximating it with a smooth activation function (e.g., $\arctan(a.|z-d+b|)$) leads to degenerated gradients if the slope is too steep, or smooth shadows if too shallow. The authors were unable to find a working threshold for this approach [S1, unofficial].
+-*   **Shadow Map Quality:** Using coarse point-based rendering or incomplete depth maps for shadow maps results in incomplete or aliased shadows. This can disadvantage the method if the Phong model already fits the data well, as imperfect shadows may not provide useful gradients. However, imperfect shadows have proven effective for robustness in noisy scenarios [S1, unofficial].
+-*   **Lighting Models:** Spherical Harmonics (SH) and Haar wavelets are unsuitable for point light sources. SH recovers only low-frequency components, and Haar wavelets model only distant lighting (2D directions), failing to capture the localized angular nature or parallax of point lights [S1, unofficial].
++*   **Shadow Differentiability:** Shadow mapping is inherently non-differentiable due to the binary Z-buffer comparison [S1, unofficial]. Approximating it with a smooth activation function (e.g., $\arctan(a.|z-d+b|)$) leads to degenerated gradients if the slope is too steep, or smooth shadows if too shallow [S1, unofficial]. The authors were unable to find a working threshold for this approach [S1, unofficial].
++*   **Shadow Map Quality:** Using coarse point-based rendering or incomplete depth maps for shadow maps results in incomplete or aliased shadows [S1, unofficial]. This can disadvantage the method if the Phong model already fits the data well, as imperfect shadows may not provide useful gradients [S1, unofficial]. However, imperfect shadows have proven effective for robustness in noisy scenarios [S1, unofficial].
++*   **Lighting Models:** Spherical Harmonics (SH) and Haar wavelets are unsuitable for point light sources [S1, unofficial]. SH recovers only low-frequency components, and Haar wavelets model only distant lighting (2D directions), failing to capture the localized angular nature or parallax of point lights [S1, unofficial].
+ 
+ ## Operating characteristics
+@@ -188,5 +172,5 @@
+ ### Time and Memory Complexity
+ *   **Time:** Convergence is achieved in an average of one minute across 54 experiments (9 scenes, 6 light positions) [S1, unofficial]. Each iteration requires rendering the image and, for the shadow Jacobian approximation, rendering six additional shadow maps [S1, unofficial].
+-*   **Memory:** Memory usage is dominated by the storage of the image, geometry maps, and the shadow maps required for finite difference approximation.
++*   **Memory:** Memory usage is dominated by the storage of the image, geometry maps, and the shadow maps required for finite difference approximation [S1, unofficial].
+ 
+ ### Measured Performance
+@@ -196,14 +180,14 @@
+ 
+ ### Strengths and Limitations
+-*   **Strengths:** Robust to noisy reflectance estimation; handles 3D point light sources and parallax; uses standard differentiable rendering pipelines (PyTorch).
+-*   **Limitations:** Relies on accurate geometry and material parameters; shadow approximation is computationally expensive (6 shadow maps per iteration); sensitive to shadow map quality (aliasing/incompleteness).
++*   **Strengths:** Robust to noisy reflectance estimation; handles 3D point light sources and parallax; uses standard differentiable rendering pipelines (PyTorch) [S1, unofficial].
++*   **Limitations:** Relies on accurate geometry and material parameters; shadow approximation is computationally expensive (6 shadow maps per iteration); sensitive to shadow map quality (aliasing/incompleteness) [S1, unofficial].
+ 
+ ### When to Use
+-*   Use when estimating point light sources in scenes with known geometry and materials, especially when reflectance parameters may be noisy or imperfect.
+-*   Use when parallax effects from non-distant lights are significant.
++*   Use when estimating point light sources in scenes with known geometry and materials, especially when reflectance parameters may be noisy or imperfect [S1, unofficial].
++*   Use when parallax effects from non-distant lights are significant [S1, unofficial].
+ 
+ ### When Not to Use
+-*   Do not use if only distant lighting is present (consider SH or Haar wavelets).
+-*   Do not use if high-quality, complete depth maps and shadow maps are unavailable, as aliasing may degrade performance.
++*   Do not use if only distant lighting is present (consider SH or Haar wavelets) [S1, unofficial].
++*   Do not use if high-quality, complete depth maps and shadow maps are unavailable, as aliasing may degrade performance [S1, unofficial].
+ 
+ ## Background
+@@ -213,9 +197,9 @@
+ 
+ ### History and Development
+-The approach leverages automatic differentiation libraries (PyTorch) to create a differentiable rendering pipeline. It addresses the limitations of previous methods that struggled with noisy reflectance or could not model point light sources effectively. The authors explored various illumination models, including Spherical Harmonics and Haar wavelets, but found them unsuitable for point lights due to frequency and directional limitations [S1, unofficial].
++The approach leverages automatic differentiation libraries (PyTorch) to create a differentiable rendering pipeline [S1, unofficial]. It addresses the limitations of previous methods that struggled with noisy reflectance or could not model point light sources effectively [S1, unofficial]. The authors explored various illumination models, including Spherical Harmonics and Haar wavelets, but found them unsuitable for point lights due to frequency and directional limitations [S1, unofficial].
+ 
+ ### Applications
+-*   Light source estimation in computer vision and graphics.
+-*   Robust lighting estimation in the presence of noisy material parameters.
++*   Light source estimation in computer vision and graphics [S1, unofficial].
++*   Robust lighting estimation in the presence of noisy material parameters [S1, unofficial].
+ 
+ ## Sources

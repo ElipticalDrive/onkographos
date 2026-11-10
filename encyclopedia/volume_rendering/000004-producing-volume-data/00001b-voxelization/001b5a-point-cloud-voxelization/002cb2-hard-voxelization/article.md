@@ -1,10 +1,11 @@
 # Hard Voxelization
 ## Overview
-Hard Voxelization discretizes a continuous 3D point cloud into a fixed-size 3D grid of cubic voxels by binning points based on their spatial coordinates and aggregating associated attribute values within each voxel [S3, unofficial]. It solves the problem of converting unstructured point data into a structured tensor format suitable for 3D convolutional neural networks [S2, unofficial]. It differs from its siblings by enforcing a strict grid structure with fixed voxel sizes, whereas [Gaussian Voxelization](8884-gaussian-voxelization.md) uses soft assignments and [Octree Construction for Point Clouds](1070-octree-construction-for-point-clouds.md) uses hierarchical variable-resolution structures.
+Hard Voxelization discretizes a continuous 3D point cloud into a fixed-size 3D grid of cubic voxels by binning points based on their spatial coordinates and aggregating associated attribute values within each voxel [S3, unofficial]. It solves the problem of converting unstructured point data into a regular grid structure suitable for convolutional neural networks or efficient spatial queries. It differs from its siblings by enforcing a strict grid topology where points are assigned to specific voxels based on deterministic coordinate mapping, unlike probabilistic or sparse variants.
 ## Shared principles
-The core mechanism maps continuous point coordinates $(x, y, z)$ to discrete integer voxel indices $(i, j, k)$ using floor division relative to a bounding box origin and voxel dimensions [S1, S2, S3, unofficial].
+The core mechanism maps continuous point coordinates $(x, y, z)$ to discrete integer voxel indices $(i, j, k)$ using floor division relative to a bounding box origin and voxel dimensions [S1, unofficial].
 
-For a point $p$ with coordinates $(x, y, z)$, a voxel size $v = [v_x, v_y, v_z]$, and a bounding box range $R = [x_{min}, y_{min}, z_{min}, x_{max}, y_{max}, z_{max}]$, the voxel coordinates are computed as:
+**Coordinate Mapping:**
+For a point $p$ with coordinates $(x, y, z)$, a voxel size $v = [v_x, v_y, v_z]$, and a bounding box range $R = [x_{min}, y_{min}, z_{min}, x_{max}, y_{max}, z_{max}]$, the voxel coordinates are calculated as:
 $$
 i = \left\lfloor \frac{x - x_{min}}{v_x} \right\rfloor, \quad
 j = \left\lfloor \frac{y - y_{min}}{v_y} \right\rfloor, \quad
@@ -12,15 +13,25 @@ k = \left\lfloor \frac{z - z_{min}}{v_z} \right\rfloor
 $$
 [S1, S2, S3, unofficial]
 
-Points with coordinates outside the range $R$ are mapped to invalid indices (e.g., $-1$) and are typically discarded or filtered out [S1, S2, unofficial]. The grid dimensions are calculated as:
+**Grid Dimensions:**
+The grid dimensions are derived from the range and voxel size. While some implementations use ceiling division to ensure full coverage, others use rounding:
 $$
-\text{dim}_x = \max(1, \lceil \frac{x_{max} - x_{min}}{v_x} \rceil), \quad
-\text{dim}_y = \max(1, \lceil \frac{y_{max} - y_{min}}{v_y} \rceil), \quad
-\text{dim}_z = \max(1, \lceil \frac{z_{max} - z_{min}}{v_z} \rceil)
+\text{dim}_x = \max(1, \lceil \frac{x_{max} - x_{min}}{v_x} \rceil) \quad \text{or} \quad \text{round}\left(\frac{x_{max} - x_{min}}{v_x}\right)
 $$
 [S1, unofficial]
 
-The output consists of three tensors: `voxels` containing point features grouped by voxel, `coors` containing the integer voxel indices, and `num_points_per_voxel` storing the count of points in each voxel [S2, unofficial].
+**Boundary Handling:**
+Points with coordinates outside the range $R$ are mapped to invalid indices (e.g., $-1$) and are typically discarded or filtered out before aggregation [S1, S2, unofficial].
+
+**Aggregation:**
+Points falling into the same voxel are aggregated. Common strategies include storing all points up to a limit, averaging attributes, or computing a centroid. The output typically consists of:
+1.  `voxels`: Tensor of point features grouped by voxel.
+2.  `coors`: Tensor of voxel coordinates.
+3.  `num_points_per_voxel`: Count of points per voxel.
+
+**Determinism:**
+Standard hard voxelization may rely on atomic operations which are non-deterministic. Deterministic variants use explicit sorting or unique-coordinate identification to ensure reproducible output order [S3, unofficial].
+
 ## Subtopics
 
 ### [Multiscale Hard Voxelization](3319-multiscale-hard-voxelization.md)
@@ -32,13 +43,20 @@ Hard Voxelization (Deterministic) discretizes a continuous 3D point cloud into a
 ### [Point Cloud Voxelization Visualization](5628-point-cloud-voxelization-visualization.md)
 Point Cloud Voxelization Visualization is a rendering pipeline that visualizes the occupancy of a point cloud after it has been downsampled into a 3D voxel grid using the Point Cloud Library (PCL). It solves the problem of visually verifying voxelization parameters and bounding box constraints by offering three distinct rendering modes: raw point cloud coloring, solid voxel cubes, and wireframe voxel cubes. It differs from its siblings by focusing specifically on the *visualization* of the filtered output rather than just the aggregation logic, and it relies on PCL's `VoxelGrid` filter for the downsampling step.
 
+### [Point Cloud Simplification via Voxel-based Probabilistic Sub-sampling](12115-point-cloud-simplification-via-voxel-based-probabilistic-sub.md)
+This method reduces point cloud density by grouping points into a 3D grid and probabilistically selecting a fixed number of points per voxel. It addresses the computational bottleneck of processing large-scale point clouds in volume rendering pipelines by ensuring uniform spatial distribution while preserving local density characteristics. Unlike deterministic hard voxelization which may arbitrarily discard points or retain all, this approach guarantees a controlled output size per voxel through random sampling weighted by the inverse of the local point count.
+
 ### Dynamic Voxelization (Coordinate Only)
-- **Definition**: Computes only the voxel coordinates for each point, without assigning points to a fixed voxel grid structure or handling duplicates/max points. Used when `max_points=-1` [S1, unofficial].
-- **Steps**: Calculate grid dimensions: `grid_x = round((coors_x_max - coors_x_min) / voxel_x)`, etc. Launch `dynamic_voxelize_kernel` to compute voxel coordinates for each point and store them in the `coors` tensor [S1, unofficial].
-- **Parameters**: `NDim`: Number of dimensions for coordinates, default 3 [S1, unofficial].
+#### definition
+- [S1, unofficial] Computes only the voxel coordinates for each point, without assigning points to a fixed voxel grid structure or handling duplicates/max points. Used when max_points=-1.
+#### step
+- [S1, unofficial] Calculate grid dimensions: grid_x = round((coors_x_max - coors_x_min) / voxel_x), etc.
+- [S1, unofficial] Launch dynamic_voxelize_kernel to compute voxel coordinates for each point and store them in the coors tensor.
+#### parameter
+- [S1, unofficial] NDim: Number of dimensions for coordinates, default 3.
 
 ## Background
-Hard voxelization is a fundamental preprocessing step in 3D deep learning, particularly for autonomous driving perception tasks using LiDAR data [S2, unofficial]. The deterministic variant and multiscale extensions are heavily utilized in frameworks like MMDetection3D and OpenPCDet, which rely on CUDA implementations for efficient GPU processing [S1, unofficial]. The technique originated from the need to convert sparse, unstructured point clouds into dense, structured grids compatible with 3D Convolutional Neural Networks (3D CNNs) [S2, unofficial].
+Hard voxelization is a fundamental preprocessing step in 3D computer vision, particularly for LiDAR-based object detection and autonomous driving perception systems. It was popularized by frameworks like MMDetection3D and PointPillars, which require regular grid inputs for 3D CNNs or 2D projection networks. The method originated from the need to efficiently process sparse point clouds by converting them into dense voxel grids, allowing the use of standard convolutional operations. Early implementations focused on CPU-based binning, while modern variants leverage GPU acceleration for real-time performance [S1, unofficial].
 
 ## Sources
 [S1] Susie0909/Multiscale_Voxelization_CUDA, https://github.com/Susie0909/Multiscale_Voxelization_CUDA, fetched 2026-10-27 (unofficial)

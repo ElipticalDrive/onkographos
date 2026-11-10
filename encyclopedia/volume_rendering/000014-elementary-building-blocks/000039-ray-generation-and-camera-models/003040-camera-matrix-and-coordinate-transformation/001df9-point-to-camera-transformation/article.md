@@ -52,6 +52,7 @@ def point_to_camera(P_world: vec3, c2w_matrix: mat4x4) -> vec3:
     # Compute vector from camera to point
     relative_vec = P_world - cam_origin
     # Extract rotation matrix columns (top-left 3x3 of c2w)
+    # Assuming column-major storage where c2w_matrix[i] is the i-th column
     R_col0 = c2w_matrix[0][:3]
     R_col1 = c2w_matrix[1][:3]
     R_col2 = c2w_matrix[2][:3]
@@ -61,6 +62,7 @@ def point_to_camera(P_world: vec3, c2w_matrix: mat4x4) -> vec3:
     P_cam_z = dot(R_col2, relative_vec)
     return vec3(P_cam_x, P_cam_y, P_cam_z)
 ```
+*Note: `vec3`, `mat4x4`, and `dot` are standard vector and math operations.*
 
 **Parameters:**
 - Not given in the sources.
@@ -88,7 +90,7 @@ Converts a world position to camera clip space coordinates (2D), used for sampli
    \end{aligned}
    $$
    [S2, unofficial]
-3. **Perspective Projection:** Apply perspective division factors. Let $\text{scale} = \tan(\text{radians}(\text{fov}) / 2.0)$.
+3. **Perspective Projection:** Apply perspective division factors. Let $\text{scale} = \tan(\text{radians}(\text{fov}) / 2.0)$ [S2, unofficial].
    $$
    \begin{aligned}
    \text{clipX} &= \frac{\text{viewX}}{\text{viewZ} \cdot \text{scale} \cdot \text{aspectRatio}} \\
@@ -96,7 +98,7 @@ Converts a world position to camera clip space coordinates (2D), used for sampli
    \end{aligned}
    $$
    [S2, unofficial]
-4. **Offset and Scale:** Adjust for pixel coordinates.
+4. **Offset and Scale:** Adjust for pixel coordinates [S2, unofficial].
    $$
    \begin{aligned}
    \text{clipX} &= \text{clipX} \cdot \left(1 - \frac{1.0}{\text{screenWidth}}\right) \\

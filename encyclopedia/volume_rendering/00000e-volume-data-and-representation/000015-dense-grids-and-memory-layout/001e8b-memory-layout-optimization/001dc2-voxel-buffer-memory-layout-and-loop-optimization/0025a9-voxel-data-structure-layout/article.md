@@ -3,57 +3,62 @@
 Also called: Array2, Array2<T>, Structure Field Alignment, Voxel Field Ordering
 
 ## Overview
-Voxel Data Structure Layout defines the memory organization of per-voxel attributes within a dense 3D grid, addressing bandwidth and capacity constraints by optimizing field ordering and alignment [S2]. It differs from sibling structures like [Voxel Data Layout](4076-voxel-data-layout.md) by offering variants that trade attribute richness for size, such as bit-packed formats or specific floating-point density fields [S1, unofficial][S2][S3, unofficial].
+Voxel Data Structure Layout defines the memory organization of per-voxel attributes within a dense 3D grid, addressing bandwidth and capacity constraints in volume rendering and voxel engines [S1, unofficial][S2]. It differs from sibling structures like [Voxel Data Layout](4076-voxel-data-layout.md) by offering variants that trade attribute richness for size, such as bit-packed formats or floating-point density fields [S1, unofficial][S2][S3, unofficial]. While [Voxel Data Layout](4076-voxel-data-layout.md) handles the mapping of 3D coordinates to linear memory, this method focuses on the internal composition of the voxel element itself and its alignment within the buffer [G].
 
 ## How it works
-The method organizes voxel data into compact structures where field placement determines memory efficiency and cache performance.
-
 **Inputs and Outputs:**
 - Input: A set of voxel attributes (e.g., scalar, normal, gradient) and their data types.
-- Output: A contiguous memory layout (struct or array) optimized for rendering or classification access patterns.
+- Output: A contiguous memory block where each voxel occupies a fixed-size slot, optimized for cache performance and alignment.
 
 **Data Structures:**
-The core container is a 2D array abstraction `Array2<T>` which manages the underlying storage [S1, unofficial].
-- **Layout:** `struct Array2<T, ArrayT=std::vector<T>>` contains fields:
+The core container is a 2D array abstraction `Array2<T>` which wraps a 1D contiguous array.
+- **Structure `Array2<T, ArrayT=std::vector<T>>`**:
   - `int ni`: Width (number of columns).
   - `int nj`: Height (number of rows).
-  - `ArrayT a`: The underlying contiguous array (default `std::vector<T>`).
-- **Indexing:** A 2D element at `(i, j)` maps to the 1D index `i + ni * j` in the underlying array `a` [S1, unofficial].
+  - `ArrayT a`: The underlying contiguous storage (e.g., `std::vector<T>`).
+- **Voxel Structure Example** (from VolPack):
+  - `typedef unsigned char Scalar;` (8-bit)
+  - `typedef unsigned short Normal;` (16-bit)
+  - `typedef unsigned char Gradient;` (8-bit)
+  - `struct Voxel { Normal normal; Scalar scalar; Gradient gradient; };`
 
-**Voxel Structure Definition:**
-Voxels are defined as structs containing multiple fields. An example layout for a voxel includes:
-- `Normal normal`: 16-bit unsigned short, used for shading.
-- `Scalar scalar`: 8-bit unsigned char, the primary density/value.
-- `Gradient gradient`: 8-bit unsigned char, precomputed gradient magnitude for classification [S2].
+**Indexing Formula:**
+A 2D element at coordinates $(i, j)$ maps to a 1D index in the underlying array `a` using row-major ordering:
+$$ \text{index} = i + ni \times j $$
+where $0 \le i < ni$ and $0 \le j < nj$ [S1, unofficial].
 
-**Numbered Steps:**
-1. **Define Voxel Fields:** Select the attributes required for the rendering pipeline (e.g., shading) and classification (e.g., boundary detection) [S2].
-2. **Order Fields for Alignment:** Arrange fields in the struct to satisfy machine alignment restrictions. For example, place 16-bit quantities on 2-byte boundaries to avoid compiler-inserted padding [S2].
-3. **Order Fields for Access Pattern:** Place fields required for the fast rendering algorithm (shading) first, followed by fields used only for classification. This allows the renderer to access only the necessary subset of data, improving cache performance [S2].
-4. **Verify Size:** Use `sizeof()` to ensure the total size of the voxel struct matches expectations and contains no unexpected padding [S2].
-5. **Initialize Buffer:** Create the `Array2<T>` instance with dimensions `ni` and `nj` (representing the 2D slice or flattened 3D grid dimensions) [S1, unofficial].
-6. **Access Elements:** Retrieve or modify voxel data using the index formula `idx = i + ni * j` with bounds checking [S1, unofficial].
+**Field Ordering and Alignment:**
+1.  **Shading First**: Fields required for shading (e.g., normals) must be placed before fields used only for classification (e.g., gradients) [S2]. This allows creating a "fast rendering" subset of the data containing only shading fields, saving memory and improving cache performance [S2].
+2.  **Alignment**: Fields must be ordered to satisfy machine alignment restrictions. For example, 16-bit quantities must be aligned to 2-byte boundaries, and 32-bit to 4-byte boundaries [S2]. Incorrect ordering causes the compiler to insert padding, increasing the voxel size [S2].
+3.  **Verification**: Use `sizeof()` to verify the total size of the voxel structure matches the expected sum of its fields [S2].
 
 **Pseudocode:**
+The following Python-like pseudocode demonstrates the `Array2` logic and voxel layout considerations.
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
 
 class Array2:
-    def __init__(self, ni: int, nj: int, data=None):
-        """Initialize Array2 with dimensions ni, nj and optional data."""
+    def __init__(self, ni, nj, data=None):
+        """
+        Initialize Array2 with dimensions ni (width) and nj (height).
+        If data is provided, it must have length ni * nj.
+        """
         if ni < 0 or nj < 0:
             raise ValueError("Dimensions must be non-negative")
         self.ni = ni
         self.nj = nj
         if data is not None:
+            if len(data) != ni * nj:
+                raise ValueError("Data length must match ni * nj")
             self.a = list(data)
         else:
             self.a = [0] * (ni * nj)
 
-    def resize(self, ni: int, nj: int):
-        """Update ni, nj and resize the underlying array a to ni*nj."""
+    def resize(self, ni, nj):
+        """Update ni, nj and resize the underlying array a."""
         if ni < 0 or nj < 0:
             raise ValueError("Dimensions must be non-negative")
         self.ni = ni
@@ -66,46 +71,70 @@ class Array2:
         self.ni = 0
         self.nj = 0
 
-    def swap(self, other: 'Array2'):
+    def swap(self, other):
         """Exchange ni, nj, and a with another Array2 instance."""
         self.ni, other.ni = other.ni, self.ni
         self.nj, other.nj = other.nj, self.nj
         self.a, other.a = other.a, self.a
 
-    def get(self, i: int, j: int):
-        """Get element at (i, j) with bounds checking."""
-        if not (0 <= i < self.ni and 0 <= j < self.nj):
-            raise IndexError(f"Index ({i}, {j}) out of bounds for size ({self.ni}, {self.nj})")
-        return self.a[i + self.ni * j]
+    def __getitem__(self, i, j):
+        """
+        Access element at (i, j) with bounds checking.
+        Maps 2D index to 1D: index = i + ni * j
+        """
+        if not (0 <= i < self.ni):
+            raise IndexError(f"Index i={i} out of bounds [0, {self.ni})")
+        if not (0 <= j < self.nj):
+            raise IndexError(f"Index j={j} out of bounds [0, {self.nj})")
+        index = i + self.ni * j
+        return self.a[index]
 
-    def set(self, i: int, j: int, value):
+    def __setitem__(self, i, j, value):
         """Set element at (i, j) with bounds checking."""
-        if not (0 <= i < self.ni and 0 <= j < self.nj):
-            raise IndexError(f"Index ({i}, {j}) out of bounds for size ({self.ni}, {self.nj})")
-        self.a[i + self.ni * j] = value
+        if not (0 <= i < self.ni):
+            raise IndexError(f"Index i={i} out of bounds [0, {self.ni})")
+        if not (0 <= j < self.nj):
+            raise IndexError(f"Index j={j} out of bounds [0, {self.nj})")
+        index = i + self.ni * j
+        self.a[index] = value
 
-    def swap_with(self, other: 'Array2'):
-        """Swap contents with another Array2."""
-        self.swap(other)
+    def swap_rows(self, i, j):
+        """Swap two rows i and j."""
+        if not (0 <= i < self.nj) or not (0 <= j < self.nj):
+            raise IndexError("Row indices out of bounds")
+        for k in range(self.ni):
+            self.swap(k, i, k, j)
 
-# Example Voxel Struct Logic (Conceptual)
-# In C++, this would be:
+    def swap_cols(self, i, j):
+        """Swap two columns i and j."""
+        if not (0 <= i < self.ni) or not (0 <= j < self.ni):
+            raise IndexError("Column indices out of bounds")
+        for k in range(self.nj):
+            self.swap(i, k, j, k)
+
+    def swap(self, i1, j1, i2, j2):
+        """Swap elements at (i1, j1) and (i2, j2)."""
+        idx1 = i1 + self.ni * j1
+        idx2 = i2 + self.ni * j2
+        self.a[idx1], self.a[idx2] = self.a[idx2], self.a[idx1]
+
+# Voxel Layout Example
+# To optimize cache performance for shading:
+# 1. Place shading fields (e.g., Normal) first.
+# 2. Place classification fields (e.g., Gradient) last.
+# 3. Ensure alignment by checking sizeof(Voxel).
+# Example Voxel struct in C++:
 # struct Voxel {
-#     unsigned short normal; // 2 bytes
+#     unsigned short normal; // 2 bytes, aligned to 2
 #     unsigned char scalar;  // 1 byte
 #     unsigned char gradient;// 1 byte
-# }; // Total 4 bytes, aligned properly
+# }; // Total 4 bytes, no padding needed if packed or aligned properly
 ```
 
-**Parameters:**
-- `ni`: Width of the 2D grid. Must be $\ge 0$ [S1, unofficial].
-- `nj`: Height of the 2D grid. Must be $\ge 0$ [S1, unofficial].
-- `T`: Data type of the elements (e.g., `float`, `unsigned char`) [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-- **Bounds Checking:** Accessing `i` or `j` outside `[0, ni)` or `[0, nj)` triggers an assertion failure or index error [S1, unofficial].
-- **Alignment Padding:** Incorrect field ordering can cause the compiler to insert wasted space to satisfy alignment restrictions (e.g., 2-byte quantities aligned to 2-byte boundaries). This increases memory usage and reduces cache efficiency [S2].
-- **Size Verification:** Failure to verify `sizeof(Voxel)` may lead to incorrect memory strides if padding is present [S2].
+- **Bounds Checking**: Accessing `i` or `j` outside $[0, ni)$ or $[0, nj)$ triggers an assertion failure or index error [S1, unofficial].
+- **Alignment Padding**: If fields are not ordered correctly, the compiler inserts padding bytes to satisfy alignment requirements (e.g., aligning a 16-bit field to a 2-byte boundary), increasing memory usage [S2]. Use `sizeof()` to verify the layout [S2].
+- **Empty State**: `clear()` sets `ni` and `nj` to 0 and empties the array [S1, unofficial].
 
 ## Subtopics
 
@@ -118,28 +147,30 @@ Voxel Data Layout refers to the fundamental memory organization of voxel data in
 ### [Voxel Data Planar De-interleaving](6794-voxel-data-planar-de-interleaving.md)
 Voxel Data Planar De-interleaving converts an Array of Structures (AoS) of voxel data into a Structure of Arrays (SoA) planar format to optimize memory access patterns and enable data reduction techniques such as slice reuse. It serves as the inverse operation of planar re-interleaving, restoring the AoS layout from planar buffers when required by rendering or simulation pipelines.
 
+### [Paged Block Array](12102-paged-block-array.md)
+The Paged Block Array is a dynamic array implementation that stores elements in fixed-size blocks (pages) to optimize memory allocation and cache locality, avoiding the need for contiguous reallocation of the entire array. It differs from standard dynamic arrays by using fixed-size blocks instead of contiguous reallocation, reducing allocation overhead and fragmentation at the cost of slightly higher pointer indirection and fixed block sizes.
+
 ### SerializedArray Binary Layout
-The binary layout for SerializedArray structures, including name, dtype, shape, and data [S3, unofficial].
-- **Layout:**
-  - 8 bytes: `uint64` name_size
-  - N bytes: `char` name (N = name_size)
-  - 4 bytes: `uint32` dtype
-  - 8 bytes: `uint64` shape_dim_count
-  - M*8 bytes: `uint64` shape dimensions (M = shape_dim_count)
-  - 8 bytes: `uint64` data_byte_count
-  - K bytes: `uint8` data (K = data_byte_count) [S3, unofficial]
+The binary layout for SerializedArray structures includes name, dtype, shape, and data. The layout consists of: 8 bytes `uint64` for `name_size`, N bytes `char` for `name` (where N=`name_size`), 4 bytes `uint32` for `dtype`, 8 bytes `uint64` for `shape_dim_count`, M*8 bytes `uint64` for shape dimensions (where M=`shape_dim_count`), 8 bytes `uint64` for `data_byte_count`, and K bytes `uint8` for data (where K=`data_byte_count`) [S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Element access is $O(1)$ given the index [S1, unofficial].
-- **Memory Complexity:** $O(N \times M \times S)$ where $N, M$ are dimensions and $S$ is the size of the voxel struct [S1, unofficial][S2].
-- **Performance:** Ordering shading fields first improves cache performance for fast rendering algorithms by allowing the renderer to skip classification fields [S2].
-- **Strengths:** Simple implementation, predictable memory access, cache-friendly for dense data [S2].
-- **Limitations:** Memory inefficient for sparse scenes compared to hierarchical structures [G].
-- **When to Use:** Dense volume rendering where all voxels are accessed or where cache locality is critical [S2].
-- **When Not to Use:** Sparse scenes where most voxels are empty, or when extreme memory compression is required [G].
+**Time and Memory Complexity:**
+- Memory: $O(N \times M \times S)$, where $N$ and $M$ are the grid dimensions and $S$ is the size of the voxel structure in bytes [S1, unofficial][S2].
+- Access: $O(1)$ for direct indexing using the formula $i + ni \times j$ [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths**: Simple implementation, predictable memory usage, cache-friendly if fields are ordered correctly (shading fields first) [S2].
+- **Limitations**: Memory inefficient for sparse scenes as every voxel slot is allocated [G]. Alignment padding can increase size if not carefully managed [S2].
+
+**When to Use:**
+- Use for dense volumes where most voxels are occupied.
+- Use when shading performance is critical and field ordering can be optimized [S2].
+
+**When Not to Use:**
+- Use hierarchical structures (e.g., [Voxel Data Structure](3982-voxel-data-structure.md)) for sparse scenes to save memory [G].
 
 ## Background
-The concept of structuring voxel data for efficient access originates from early volume rendering systems like VolPack, which emphasized field ordering for shading and classification [S2]. The `Array2` abstraction is commonly used in modern implementations to manage 2D slices or flattened 3D grids, providing a simple interface for memory management [S1, unofficial]. The SerializedArray binary layout is used in sparse voxel contexts for serialization [S3, unofficial].
+The concept of voxel data structure layout is foundational in volume rendering, with early implementations like VolPack providing guidelines for field ordering and alignment [S2]. The `Array2` abstraction is commonly used in C++ implementations to manage 2D slices of 3D data, as seen in various open-source projects [S1, unofficial]. The SerializedArray binary layout is used in sparse voxel contexts for efficient serialization [S3, unofficial].
 
 ## Sources
 [S1] czq142857/NMC, https://github.com/czq142857/NMC, fetched 2026-10-26 (unofficial)

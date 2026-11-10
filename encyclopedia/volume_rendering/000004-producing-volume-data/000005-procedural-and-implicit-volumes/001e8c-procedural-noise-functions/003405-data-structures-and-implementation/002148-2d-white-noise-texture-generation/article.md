@@ -3,131 +3,142 @@
 Also called: 2D Random Noise Texture Generation, Noise Texture Generation, Viewport noise texture, White Noise Generation
 
 ## Overview
-2D White Noise Texture Generation creates a 2D texture filled with random values, typically used for noise-based effects such as SSAO variation or dithering in volumetric rendering [S1, S2, unofficial]. It differs from gradient-based or value noise by providing uncorrelated, high-frequency randomness without spatial coherence or smoothness [S1, S2, unofficial].
+This method generates a 2D texture filled with random values (unit vectors or scalar floats) to serve as a source for noise-based effects, such as SSAO variation, volumetric dithering, or fine detail perturbation [S1, unofficial][S2, unofficial]. It differs from procedural noise functions (like Perlin or Simplex noise) by providing uncorrelated, high-frequency random data rather than smooth, continuous fields [S1, unofficial][S2, unofficial]. It is typically generated on the CPU and uploaded to the GPU for sampling during rendering [S2, unofficial][S3, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: Texture resolution (width, height or `side`), random seed.
-- Output: A 2D texture object containing random data.
+The method involves generating random data in host memory, formatting it according to specific precision requirements, and uploading it as a 2D texture with defined filtering and wrapping parameters.
 
-**Data Structures:**
-- **Random Number Generator (RNG):** A pseudo-random number generator such as `std::mt19937` seeded with `std::random_device` [S1, unofficial] or `std::srand` seeded with `std::time(NULL)` [S3, unofficial].
-- **Noise Buffer:** An array of size $W \times H$ (or $side \times side$ for square textures) [S1, S3, unofficial]. The data type varies by implementation: a vector of three floats [S1, unofficial], a single-channel float array [S2, unofficial], or an `unsigned char` array [S3, unofficial].
-- **Texture Object:** An OpenGL `GL_TEXTURE_2D` object [S1, S3, unofficial] or a generic `Texture2D` object [S2, unofficial].
+### Inputs and Outputs
+- **Inputs**:
+  - `side`: Integer dimension for square textures (e.g., 64, 256) [S1, unofficial].
+  - `width`, `height`: Dimensions for rectangular textures, often derived from the viewport [S3, unofficial].
+  - `rng_seed`: Seed for the random number generator [S3, unofficial].
+- **Outputs**:
+  - A GPU 2D texture object containing the noise data [S1, unofficial][S2, unofficial][S3, unofficial].
 
-**Steps:**
-1. **Initialize RNG:** Seed the PRNG using a hardware random device or system time [S1, S3, unofficial].
-2. **Generate Noise Data:** Iterate through each pixel $(x, y)$ in the $W \times H$ grid:
-    - **Vector Noise:** Generate three independent uniform random values $u_x, u_y, u_z \in [-1.0, 1.0]$ [S1, unofficial]. Construct a vector $\vec{v} = (u_x, u_y, u_z)$ and normalize it: $\vec{v}_{norm} = \frac{\vec{v}}{\|\vec{v}\|}$ [S1, unofficial]. Store $\vec{v}_{norm}$ in the buffer.
-    - **Scalar/Byte Noise:** Generate a single random float for `R16` format [S2, unofficial], or a random byte in $[0, 255]$ for `GL_R8` format [S3, unofficial].
-3. **Create Texture:** Allocate a 2D texture object with dimensions $W \times H$ [S1, S2, S3, unofficial].
-4. **Set Format and Data:**
-    - **Format:** `GL_RGB32F` (32-bit float RGB) [S1, unofficial], `R16` (16-bit single channel) [S2, unofficial], or `GL_R8` (8-bit single channel) [S3, unofficial].
-    - **Data Type:** `GL_FLOAT` [S1, unofficial] or `GL_UNSIGNED_BYTE` [S3, unofficial].
-    - **Pixel Data:** Upload the generated noise buffer to the texture [S1, S2, S3, unofficial].
-5. **Set Filters and Wrap Modes:**
-    - **Filters:** `GL_LINEAR` for minification and magnification [S1, unofficial], or `GL_NEAREST` [S3, unofficial].
-    - **Wrap Modes:** `GL_REPEAT` [S3, unofficial] or `Mirror` [S2, unofficial].
+### Data Structures
+The implementation depends on the desired noise type (vector vs. scalar) and precision:
 
-**Pseudocode:**
+1.  **Vector Noise (GL_RGB32F)**:
+    -   **Host Memory**: Array of `vec3` (or equivalent struct) of size `side * side` [S1, unofficial].
+    -   **GPU Texture**: Internal format `GL_RGB32F`, dimensions `side x side`, data type `GL_FLOAT` [S1, unofficial].
+2.  **Scalar Noise (R16/R8)**:
+    -   **Host Memory**: Array of `Color` or `unsigned char` of size `width * height` [S2, unofficial][S3, unofficial].
+    -   **GPU Texture**: Internal format `R16` or `GL_R8`, dimensions `width x height`, pixel format `GL_LUMINANCE` or `R` [S2, unofficial][S3, unofficial].
+
+### Steps
+1.  **Initialize Random Number Generator (RNG)**:
+    -   Create a seeded RNG. Common implementations use `std::random_device` and `std::mt19937` for high-quality randomness [S1, unofficial], or `std::srand(std::time(NULL))` for simpler seeding [S3, unofficial].
+    -   Define a uniform distribution over the desired range. For vector noise, this is typically $[-1.0, 1.0]$ [S1, unofficial]. For scalar byte noise, this is $[0, 255]$ [S3, unofficial].
+
+2.  **Generate Noise Data**:
+    -   **Vector Variant**: Loop $i$ from $0$ to $side^2 - 1$:
+        -   Generate three independent uniform random values $x, y, z \in [-1.0, 1.0]$.
+        -   Construct a vector $\mathbf{v} = (x, y, z)$.
+        -   Normalize $\mathbf{v}$ to unit length: $\mathbf{v}_{norm} = \frac{\mathbf{v}}{\|\mathbf{v}\|}$.
+        -   Store $\mathbf{v}_{norm}$ in the array [S1, unofficial].
+    -   **Scalar Variant (Float)**: Loop $i$ from $0$ to $63 \times 63 - 1$ (for 64x64):
+        -   Generate a random float.
+        -   Assign to the `r` component of a `Color` structure; leave other components unspecified (likely 0) [S2, unofficial].
+    -   **Scalar Variant (Byte)**: Loop through the array:
+        -   Fill with random bytes in the range $[0, 255]$ [S3, unofficial].
+
+3.  **Create and Configure Texture**:
+    -   Generate a texture ID using `glGenTextures`.
+    -   Bind the texture using `glBindTexture(GL_TEXTURE_2D, id)`.
+    -   Set parameters:
+        -   **Wrapping**:
+            -   `GL_TEXTURE_WRAP_S` and `GL_TEXTURE_WRAP_T` set to `GL_REPEAT` [S3, unofficial] or `GL_MIRROR` [S2, unofficial].
+        -   **Filtering**:
+            -   `GL_TEXTURE_MIN_FILTER` and `GL_TEXTURE_MAG_FILTER` set to `GL_LINEAR` for smooth interpolation [S1, unofficial] or `GL_NEAREST` for sharp, pixelated noise [S3, unofficial].
+    -   **Upload Data**:
+        -   Use `glTexImage2D` with the appropriate internal format (e.g., `GL_RGB32F`, `GL_R16`, `GL_R8`), dimensions, and data pointer [S1, unofficial][S2, unofficial][S3, unofficial].
+
+4.  **Bind to Shader**:
+    -   Set the material or shader property (e.g., `_WhiteNoise`) to the generated texture unit [S2, unofficial].
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
 import random
+import math
 
-def generate_white_noise_texture(width, height, format_type="vector"):
+def generate_vector_noise_texture(side):
     """
-    Generates a 2D white noise texture.
-    
-    Args:
-        width (int): Texture width.
-        height (int): Texture height.
-        format_type (str): "vector" for normalized 3D vectors, "scalar" for single channel float, "byte" for single channel unsigned char.
-        
-    Returns:
-        list: A 2D list (height x width) of noise values.
+    Generates a 2D white noise texture with normalized 3D vectors.
+    Returns a list of (x, y, z) tuples.
     """
     noise_data = []
+    # Initialize RNG
+    rng = random.Random()
     
-    for y in range(height):
-        row = []
-        for x in range(width):
-            if format_type == "vector":
-                # Generate 3 uniform values in [-1.0, 1.0]
-                u = [random.uniform(-1.0, 1.0) for _ in range(3)]
-                # Normalize the vector
-                length = math.sqrt(sum(val**2 for val in u))
-                if length == 0:
-                    length = 1e-6 # Guard against zero vector [G]
-                normalized_u = [val / length for val in u]
-                row.append(normalized_u)
-            elif format_type == "scalar":
-                # Generate a single random float in [0.0, 1.0]
-                row.append(random.random())
-            elif format_type == "byte":
-                # Generate a random byte in [0, 255]
-                row.append(random.randint(0, 255))
-        noise_data.append(row)
+    for i in range(side * side):
+        # Generate three independent uniform values in [-1.0, 1.0]
+        x = rng.uniform(-1.0, 1.0)
+        y = rng.uniform(-1.0, 1.0)
+        z = rng.uniform(-1.0, 1.0)
+        
+        # Construct vector and normalize
+        length = math.sqrt(x*x + y*y + z*z)
+        if length == 0:
+            length = 1e-6 # Guard against zero vector
+        noise_data.append((x/length, y/length, z/length))
         
     return noise_data
 
-def upload_to_opengl(noise_data, width, height, format_type="vector"):
+def generate_scalar_byte_texture(width, height):
     """
-    Simulates uploading noise data to an OpenGL texture.
+    Generates a 2D white noise texture with unsigned byte values.
+    Returns a list of integers.
     """
-    # Determine internal format and type based on format_type
-    if format_type == "vector":
-        internal_format = "GL_RGB32F"
-        pixel_format = "GL_RGB"
-        data_type = "GL_FLOAT"
-        # Flatten the 2D list into a 1D array
-        flat_data = []
-        for row in noise_data:
-            for pixel in row:
-                flat_data.extend(pixel)
-    elif format_type == "scalar":
-        internal_format = "GL_R16"
-        pixel_format = "GL_RED"
-        data_type = "GL_FLOAT"
-        flat_data = [val for row in noise_data for val in row]
-    elif format_type == "byte":
-        internal_format = "GL_R8"
-        pixel_format = "GL_LUMINANCE"
-        data_type = "GL_UNSIGNED_BYTE"
-        flat_data = [val for row in noise_data for val in row]
+    noise_data = []
+    rng = random.Random()
+    
+    for i in range(width * height):
+        # Fill with random bytes in range [0, 255]
+        noise_data.append(rng.randint(0, 255))
         
-    # Simulate OpenGL calls
-    # glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, pixel_format, data_type, flat_data)
-    # glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR) # or GL_NEAREST
-    # glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR) # or GL_NEAREST
-    # glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT) # or GL_MIRRORED_REPEAT
-    # glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT) # or GL_MIRRORED_REPEAT
+    return noise_data
+
+# Example usage for OpenGL upload (conceptual)
+def upload_to_gl(texture_id, data, side, internal_format, wrap_mode, filter_mode):
+    """
+    Conceptual steps for uploading data to OpenGL.
+    """
+    # glBindTexture(GL_TEXTURE_2D, texture_id)
+    # glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode)
+    # glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode)
+    # glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter_mode)
+    # glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter_mode)
+    # glTexImage2D(GL_TEXTURE_2D, 0, internal_format, side, side, 0, GL_RGB, GL_FLOAT, data)
     pass
 ```
 
-**Parameters:**
-- `side` / `width` / `height`: Integer dimensions of the texture. Common sizes include $64 \times 64$ [S2, unofficial] or viewport dimensions [S3, unofficial].
-- `format_type`: Determines the data layout (vector vs. scalar) and precision (float vs. byte) [S1, S2, S3, unofficial].
-- `filter`: `GL_LINEAR` [S1, unofficial] or `GL_NEAREST` [S3, unofficial].
-- `wrap_mode`: `GL_REPEAT` [S3, unofficial] or `Mirror` [S2, unofficial].
+### Parameters
+-   **side**: Integer dimension of the square texture. Determines the resolution of the noise field [S1, unofficial].
+-   **width, height**: Dimensions for non-square textures, often matching the viewport [S3, unofficial].
+-   **internal_format**: `GL_RGB32F` for vector noise [S1, unofficial], `R16` or `GL_R8` for scalar noise [S2, unofficial][S3, unofficial].
+-   **wrap_mode**: `GL_REPEAT` [S3, unofficial] or `GL_MIRROR` [S2, unofficial].
+-   **filter_mode**: `GL_LINEAR` [S1, unofficial] or `GL_NEAREST` [S3, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Zero Vector:** When generating normalized vectors, there is a non-zero probability of generating a zero vector $(0,0,0)$, which causes division by zero during normalization. A guard value (e.g., $10^{-6}$) should be used [G].
-- **Precision:** Using `GL_R8` (8-bit) limits the noise to 256 distinct values, which may introduce banding artifacts in sensitive applications like dithering [S3, unofficial]. `GL_RGB32F` provides full precision but uses more memory [S1, unofficial].
-- **Boundary Conditions:** Wrap modes affect how noise is sampled at texture edges. `GL_REPEAT` creates discontinuities, while `Mirror` may create visible seams if not handled correctly [S2, S3, unofficial].
+### Edge Cases and Pitfalls
+-   **Zero Vector**: When generating normalized vectors, there is a non-zero probability of generating a $(0,0,0)$ vector. A guard clause (e.g., adding epsilon or regenerating) is required [G].
+-   **Filtering Choice**: Using `GL_LINEAR` on white noise smooths the randomness, reducing high-frequency detail. Use `GL_NEAREST` if sharp, uncorrelated noise is required [S3, unofficial].
+-   **Wrapping**: `GL_REPEAT` may cause visible seams if the noise is not periodic. `GL_MIRROR` or `GL_CLAMP_TO_EDGE` may be preferred depending on the application [S2, unofficial][S3, unofficial].
+-   **Precision**: `GL_RGB32F` provides high precision but increases memory usage. `GL_R8` is compact but limited to 256 levels [S1, unofficial][S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(W \times H)$ to generate the noise data [G]. Texture upload is also $O(W \times H)$ but depends on memory bandwidth [G].
-- **Memory Complexity:** $O(W \times H)$ to store the noise data [G]. For `GL_RGB32F`, this is $12$ bytes per pixel [G]. For `GL_R8`, it is $1$ byte per pixel [G].
-- **Performance:** Generation is fast on CPU for small textures (e.g., $64 \times 64$) [S2, unofficial]. For large textures, GPU-based generation (e.g., using a compute shader) may be more efficient [G].
-- **Strengths:** Simple to implement, provides high-frequency randomness, useful for dithering and variation [S1, S2, unofficial].
-- **Limitations:** No spatial coherence, which may look unnatural for some effects [S1, S2, unofficial].
-- **When to Use:** SSAO variation, dithering, fine detail in volumetric rendering [S1, S2, unofficial].
-- **When Not to Use:** When spatial coherence or smoothness is required (use Gradient-based Noise or Value Noise instead) [S1, S2, unofficial].
+-   **Time Complexity**: $O(N)$ where $N$ is the number of pixels ($side^2$ or $width \times height$) [S1, unofficial][S3, unofficial].
+-   **Memory Complexity**: $O(N)$ for storing the noise data on the CPU and GPU [S1, unofficial][S3, unofficial].
+-   **Performance**: Generation is fast on the CPU. Upload time depends on the bus bandwidth and texture size. Typical resolutions are 64x64 to 256x256 for dithering or variation maps [S2, unofficial].
+-   **Strengths**: Simple to implement; provides high-frequency random data for dithering or variation; low memory footprint for scalar variants.
+-   **Limitations**: No spatial coherence (unlike Perlin noise); filtering can blur the noise; wrapping artifacts may occur.
+-   **When to use**: SSAO variation, volumetric dithering, fine detail perturbation, random sampling offsets.
+-   **When not to use**: When smooth, continuous noise fields are required (use Perlin/Simplex instead).
 
 ## Background
-Not given in the sources.
+White noise textures are a fundamental tool in computer graphics for introducing randomness into rendering pipelines. They are commonly used in screen-space effects (SSAO, SSAO variation) and volumetric rendering for dithering to reduce banding artifacts [S1, unofficial][S2, unofficial]. The method is implementation-specific, often found in custom volume raycasting visualizers and volumetric smoke renderers [S2, unofficial][S3, unofficial].
 
 ## Sources
 [S1] ajaspe/ssvdag, https://github.com/ajaspe/ssvdag, fetched 2026-10-24 (unofficial)

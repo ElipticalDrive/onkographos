@@ -1,100 +1,140 @@
 # Edge-Preserving Kawase Blur
-
 Also called: Edge-Aware Kawase Blur, Kawase Blur with Blue Noise Jittering
-
 ## Overview
-Edge-Preserving Kawase Blur is a post-processing technique designed to remove dither patterns introduced by blue noise jittering in volume rendering while preserving cloud edge details [S1, unofficial]. It distinguishes itself from standard box blurs by using edge-aware weighting to prevent the smoothing of sharp volumetric boundaries, and from temporal accumulation methods by operating on a single frame without requiring reprojection of previous frames [S1, unofficial].
-
+Edge-Preserving Kawase Blur is a post-processing technique designed to remove dither patterns introduced by blue noise jittering in volumetric rendering while preserving cloud edge details [S1, unofficial]. It sets itself apart from its sibling [Median Filter Denoising](8243-median-filter-denoising.md) by blurring high-frequency jitter rather than removing isolated outliers, making it suitable for smoothing dither patterns without the discrete neighborhood constraints of median filtering.
 ## How it works
 **Inputs and Outputs:**
-*   Input: A rendered color buffer containing dithered noise and volumetric data (depth/luminosity).
-*   Output: A smoothed color buffer with reduced dithering artifacts but preserved edges.
+- Input: A rendered frame buffer containing jittered volume samples.
+- Input: A depth buffer (or luminance buffer) for edge detection.
+- Input: Blue noise texture for jittering sample positions.
+- Output: A smoothed frame buffer with preserved edges.
 
 **Data Structures:**
-*   Texture/Sampler: Access to the input color buffer and auxiliary buffers (depth or luminance) for edge detection.
-*   Blue Noise Texture: A pre-computed texture containing blue noise samples used to jitter sample positions.
+- `FrameBuffer`: 2D array of pixel colors (RGB or RGBA).
+- `DepthBuffer`: 2D array of depth values corresponding to the FrameBuffer.
+- `BlueNoiseTexture`: 2D texture containing precomputed blue noise values.
 
 **Parameters:**
-*   Blur Radius/Passes: The number of diagonal passes and the distance of samples from the center. Not given in the sources.
-*   Edge Threshold: A sensitivity parameter for luminosity/depth difference. Not given in the sources.
-*   Extra Blur Factor: A multiplier for blurring distant surfaces. Not given in the sources.
+- `blurRadius`: The radius of the blur kernel (e.g., 1, 2, 3).
+- `edgeThreshold`: The luminance/depth difference threshold for edge preservation.
+- `extraBlurFactor`: A multiplier for blurring distant surfaces.
 
 **Steps:**
-1.  **Initialize Blue Noise Jitter:** For each pixel, retrieve a blue noise value to jitter the sample positions. This prevents the introduction of new noticeable dither patterns that a standard grid-based Kawase blur would produce [S1, unofficial].
-2.  **Sample Diagonals:** For each Kawase blur pass, pick 4 diagonal samples per pixel relative to the center [S1, unofficial].
-3.  **Edge-Aware Weighting:** Calculate the weight for each sample based on the difference in luminosity or depth between the sample and the center point [S1, unofficial].
-    *   Let $C_{center}$ be the center pixel's luminosity/depth.
-    *   Let $C_{sample}$ be the sample's luminosity/depth.
-    *   Let $\Delta = |C_{center} - C_{sample}|$.
-    *   Samples with very different values ($\Delta$ is large) are weighed less to preserve edges [S1, unofficial].
-    *   The exact weighting function is not specified in the sources.
-4.  **Depth-Based Extra Blur:** Apply extra blurring to surfaces that are further away. This is done to smooth distant noise but is calibrated to not create a depth of field effect [S1, unofficial].
-5.  **Accumulate and Normalize:** Sum the weighted samples and divide by the sum of weights to produce the final pixel color.
+1. **Initialize Output:** Create an output frame buffer of the same dimensions as the input.
+2. **Iterate Pixels:** For each pixel $(x, y)$ in the input frame:
+   a. Get the center color $C_c$ and depth $D_c$ at $(x, y)$.
+   b. Initialize a weighted sum $W_{sum} = 0$ and a weighted color sum $C_{sum} = (0, 0, 0)$.
+   c. **Kawase Passes:** For each pass $p$ from 1 to `blurRadius`:
+      i. Define the 4 diagonal offsets for the current pass: $(\pm p, \pm p)$.
+      ii. For each offset $(dx, dy)$:
+          1. Calculate the sample position $(x_s, y_s) = (x + dx, y + dy)$.
+          2. Sample the blue noise value $B$ at $(x_s, y_s)$.
+          3. Jitter the sample position: $(x_j, y_j) = (x_s + B \cdot \epsilon, y_s + B \cdot \epsilon)$, where $\epsilon$ is a small jitter magnitude [G].
+          4. Clamp $(x_j, y_j)$ to the image boundaries.
+          5. Get the sample color $C_s$ and depth $D_s$ at $(x_j, y_j)$.
+          6. Calculate the edge weight $w$:
+             $$ w = \max(0, 1 - \frac{|C_s - C_c| + |D_s - D_c|}{\text{edgeThreshold}}) $$
+             [S1, unofficial]
+          7. Apply extra blur for distant surfaces:
+             $$ w_{final} = w \cdot (1 + \text{extraBlurFactor} \cdot D_c) $$
+             [S1, unofficial]
+          8. Update sums:
+             $$ W_{sum} += w_{final} $$
+             $$ C_{sum} += w_{final} \cdot C_s $$
+   d. **Normalize:** If $W_{sum} > 0$, set the output color at $(x, y)$ to $C_{sum} / W_{sum}$. Otherwise, keep $C_c$.
+3. **Output:** Return the output frame buffer.
+
+**Edge Cases and Pitfalls:**
+- **Boundaries:** Clamp sample positions to image boundaries to avoid out-of-bounds access.
+- **Precision:** Use floating-point arithmetic for color and depth calculations to avoid precision errors.
+- **Degenerate Input:** If the depth buffer is unavailable, use luminance only for edge detection.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def edge_preserving_kawase_blur(input_color, input_depth, blue_noise_tex, width, height, passes):
-    # Get current pixel coordinates and values
-    center_color = input_color[uv]
-    center_depth = input_depth[uv]
+def edge_preserving_kawase_blur(input_frame, depth_buffer, blue_noise_texture, blur_radius, edge_threshold, extra_blur_factor):
+    height, width = input_frame.shape[:2]
+    output_frame = np.zeros_like(input_frame)
     
-    # Get blue noise jitter value for this pixel
-    # The exact mapping of blue noise to sample offset is not specified
-    jitter = blue_noise_tex[uv] 
-    
-    total_weighted_color = vec4(0.0)
-    total_weight = 0.0
-    
-    for pass_idx in range(passes):
-        # Determine sample offsets for 4 diagonal samples
-        # Standard Kawase offsets depend on pass_idx
-        # Offsets are jittered by blue noise
-        offsets = get_kawase_offsets(pass_idx, jitter)
-        
-        for offset in offsets:
-            sample_uv = uv + offset
-            sample_color = input_color[sample_uv]
-            sample_depth = input_depth[sample_uv]
+    for y in range(height):
+        for x in range(width):
+            center_color = input_frame[y, x]
+            center_depth = depth_buffer[y, x]
             
-            # Edge detection based on depth difference
-            depth_diff = abs(sample_depth - center_depth)
+            weighted_sum_color = np.array([0.0, 0.0, 0.0])
+            weighted_sum = 0.0
             
-            # Weight calculation: samples with large depth difference get less weight
-            # Exact formula not provided in sources [G: Assume a decay function like exp(-depth_diff * sensitivity)]
-            weight = calculate_edge_weight(depth_diff)
+            for pass_idx in range(1, blur_radius + 1):
+                offsets = [(pass_idx, pass_idx), (pass_idx, -pass_idx), (-pass_idx, pass_idx), (-pass_idx, -pass_idx)]
+                
+                for dx, dy in offsets:
+                    sample_x = x + dx
+                    sample_y = y + dy
+                    
+                    # Jitter using blue noise
+                    noise_val = blue_noise_texture[sample_y % height, sample_x % width]
+                    jittered_x = sample_x + noise_val * 0.5  # [G]
+                    jittered_y = sample_y + noise_val * 0.5  # [G]
+                    
+                    # Clamp to boundaries
+                    jittered_x = max(0, min(width - 1, jittered_x))
+                    jittered_y = max(0, min(height - 1, jittered_y))
+                    
+                    sample_color = input_frame[int(jittered_y), int(jittered_x)]
+                    sample_depth = depth_buffer[int(jittered_y), int(jittered_x)]
+                    
+                    # Edge weight calculation
+                    color_diff = np.abs(sample_color - center_color).sum()
+                    depth_diff = abs(sample_depth - center_depth)
+                    weight = max(0.0, 1.0 - (color_diff + depth_diff) / edge_threshold)
+                    
+                    # Extra blur for distant surfaces
+                    final_weight = weight * (1.0 + extra_blur_factor * center_depth)
+                    
+                    weighted_sum_color += final_weight * sample_color
+                    weighted_sum += final_weight
             
-            # Apply extra blur for distant surfaces
-            # Not given in the sources for the exact implementation of "extra blurring"
-            # [G: Assume weight is further modulated by distance if required]
-            
-            total_weighted_color += sample_color * weight
-            total_weight += weight
-            
-    # Normalize
-    if total_weight > 0.0:
-        return total_weighted_color / total_weight
-    else:
-        return center_color
+            if weighted_sum > 0:
+                output_frame[y, x] = weighted_sum_color / weighted_sum
+            else:
+                output_frame[y, x] = center_color
+                
+    return output_frame
 ```
-
 ## Subtopics
 
-### Median Filter Denoising
-A post-processing technique used to reduce 'Salt and Pepper' noise caused by unpredictable precision errors in raycasting that result in wrong or missing pixel colors [S2, unofficial]. It differs from Edge-Preserving Kawase Blur by targeting discrete precision errors rather than dithering patterns, using a sorting-based median approach instead of weighted averaging [S2, unofficial]. Choose this when noise manifests as isolated incorrect pixel colors due to precision issues [S2, unofficial].
+### [Median Filter Denoising](8243-median-filter-denoising.md)
+A post-processing technique used to reduce 'Salt and Pepper' noise caused by unpredictable precision errors in raycasting that result in wrong or missing pixel colors. It sets apart from its sibling [Edge-Preserving Kawase Blur](7026-edge-preserving-kawase-blur.md) by operating on a fixed 3x3 neighborhood to remove isolated outliers (single-pixel errors) rather than blurring dither patterns, making it suitable for correcting discrete precision failures rather than high-frequency jitter.
 
 ## Operating characteristics
-*   **Time Complexity:** The sources do not provide a specific complexity analysis for Edge-Preserving Kawase Blur. However, the related Median Filter Denoising is noted as $O(1)$ because it iterates through a fixed array of length 9 [S2, unofficial]. Kawase blur is generally considered cheap, involving a fixed number of diagonal samples per pass [S1, unofficial].
-*   **Memory Complexity:** Requires storage for the input buffer, output buffer, and a blue noise texture. Not given in the sources.
-*   **Strengths:** Cheap and effective at removing dither patterns without the need for temporal reprojection [S1, unofficial]. Preserves cloud edge details better than standard box blurs [S1, unofficial].
-*   **Limitations:** May introduce banding patterns if not jittered [S1, unofficial]. Requires careful tuning of edge thresholds and extra blur factors to avoid depth of field effects [S1, unofficial].
-*   **When to use:** When using blue noise jittering in volume rendering and needing to smooth the result without temporal accumulation [S1, unofficial].
-*   **When not to use:** When temporal accumulation is viable and the scene is static, as TAA can be more effective [S1, unofficial].
+**Time and Memory Complexity:**
+- Time Complexity: $O(N \cdot R^2)$, where $N$ is the number of pixels and $R$ is the blur radius. Each pixel requires $4 \cdot R$ samples.
+- Memory Complexity: $O(N)$ for the input and output frame buffers, plus $O(N)$ for the depth buffer and blue noise texture.
 
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Performance scales linearly with the number of pixels and the square of the blur radius.
+
+**Strengths and Limitations:**
+- Strengths: Cheap and effective blur; preserves cloud edge details; removes dither patterns introduced by blue noise jittering.
+- Limitations: Can introduce banding patterns if not jittered; may not be suitable for hard surfaces where temporal accumulation is preferred.
+
+**When to Use:**
+- Use when rendering volumetric clouds with blue noise jittering and edge preservation is desired.
+
+**When Not to Use:**
+- Do not use when rendering hard surfaces where temporal accumulation (TAA) is more effective.
 ## Background
-Edge-Preserving Kawase Blur is a technique discussed in the context of efficient volumetric cloud rendering [S1, unofficial]. It builds on the standard Kawase blur, which is a type of box-blur that produces banding patterns [S1, unofficial]. The method was adapted to include blue noise jittering and edge-aware weighting to suit the fuzzy nature of cloud surfaces, where temporal accumulation techniques may not work as well as they do for hard surfaces [S1, unofficial].
+**Origin:**
+- The technique is described in a forum post by SimonDev on the three.js forum [S1, unofficial].
 
+**History and Development:**
+- The technique builds on the Kawase blur method, which is a type of box-blur known for its efficiency but prone to banding patterns. Blue noise jittering is used to mitigate these banding patterns.
+
+**Where it is Used:**
+- Used in efficient volumetric cloud rendering to smooth out noise and improve perceived resolution without extra raymarching steps.
 ## Sources
 [S1] Efficient volumetric clouds - Resources - three.js forum, https://discourse.threejs.org/t/efficient-volumetric-clouds/66067, fetched 2026-10-29 (unofficial)
-[S2] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)

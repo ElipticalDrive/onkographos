@@ -1,0 +1,152 @@
+--- v001.md
++++ v002.md
+@@ -8,9 +8,9 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** $P$ splats (primitives), $C$ total attribute channels, fixed primitive texture resolution $T$ (typically a power of 2), and GPU maximum atlas dimensions.
+-*   **Outputs:** One or more 2D atlas textures containing packed primitive textures, and an indirection buffer mapping primitive IDs to atlas coordinates.
++*   **Inputs:** $P$ splats (primitives), $C$ total attribute channels, fixed primitive texture resolution $T$ (typically a power of 2), and GPU maximum atlas dimensions [S1].
++*   **Outputs:** One or more 2D atlas textures containing packed primitive textures, and an indirection buffer mapping primitive IDs to atlas chart coordinates [S1].
+ 
+ **Data Structures:**
+-1.  **Atlas Texture(s):** Large 2D textures. If $C > 4$ (CUDA limit), split into multiple atlases (e.g., one for albedo/roughness, another for normals/metallic) [S1].
++1.  **Atlas Texture(s):** Large 2D textures. If $C > 4$, split attributes across multiple atlases (e.g., one for albedo/roughness, another for tangent normals/metallic) to respect CUDA texture object channel limits [S1].
+ 2.  **Indirection Buffer:** A buffer storing the top-left corner coordinates $(chart\_idx\_x, chart\_idx\_y)$ for each primitive's texture within the atlas [S1].
+ 
+@@ -21,5 +21,5 @@
+ 
+ 2.  **Pack Textures:**
+-    Organize the $P \times C \times T \times T$ texel data into the atlas. Each primitive's texture occupies a $T \times T$ block. The top-left corner of primitive $k$'s texture is stored in the indirection buffer at index $k$ [S1].
++    Organize the $P \times C \times T \times T$ texel data into one or more atlases. Each primitive's texture occupies a $T \times T$ block. The top-left corner of primitive $k$'s texture is stored in the indirection buffer at index $k$ [S1].
+ 
+ 3.  **Sampling (Per Primitive $k$ at pixel $(x,y)$):**
+@@ -27,15 +27,9 @@
+     b. Retrieve $(chart\_idx\_x, chart\_idx\_y)$ from the indirection buffer for primitive $k$ [S1].
+     c. Compute atlas coordinates $(s_{atlas}, t_{atlas})$ using the formula:
+-       $$
+-       s_{atlas} = \frac{chart\_idx\_x \cdot T + s \cdot T}{N_{chartsx} \cdot T}
+-       $$
+-       $$
+-       t_{atlas} = \frac{chart\_idx\_y \cdot T + t \cdot T}{N_{chartsy} \cdot T}
+-       $$
++       $$s_{atlas} = \frac{chart\_idx\_x \cdot T + s \cdot T}{N_{chartsx} \cdot T}$$
++       $$t_{atlas} = \frac{chart\_idx\_y \cdot T + t \cdot T}{N_{chartsy} \cdot T}$$
+        [S1]
+     d. Sample the atlas using hardware-accelerated bilinear filtering:
+-       $$
+-       a_k(x, y) = \text{BilinearFilter}(atlas, s_{atlas}, t_{atlas})
+-       $$
++       $$a_k(x, y) = \text{BilinearFilter}(atlas, s_{atlas}, t_{atlas})$$
+        [S1]
+ 
+@@ -45,55 +39,70 @@
+ def build_atlas(primitives, T, max_atlas_width, max_atlas_height):
+     """
+-    primitives: list of P objects, each having a T x T texture data array.
++    primitives: list of P objects, each having a T x T x 4 texture data array.
+     T: resolution of each primitive's texture (power of 2).
+     max_atlas_width, max_atlas_height: GPU limits in texels.
+-    Returns: atlas_texture, indirection_buffer
++    Returns: list of atlas textures, list of indirection buffers
+     """
+-    # Calculate how many T x T charts fit in the atlas
+     charts_per_row = max_atlas_width // T
+     charts_per_col = max_atlas_height // T
+     total_charts_per_atlas = charts_per_row * charts_per_col
++    num_atlases = (len(primitives) + total_charts_per_atlas - 1) // total_charts_per_atlas
+     
+-    # Determine number of atlases needed if P > total_charts_per_atlas
+-    # For simplicity, assume P fits in one atlas or handle multiple atlases
+-    # by splitting primitives. Here we assume single atlas for logic clarity.
+-    atlas_width = charts_per_row * T
+-    atlas_height = charts_per_col * T
++    atlases = []
++    indirection_buffers = []
+     
+-    atlas = create_2d_texture(atlas_width, atlas_height)
+-    indirection_buffer = []
+-    
+-    for k, prim in enumerate(primitives):
+-        if k >= total_charts_per_atlas:
+-            raise ValueError("Primitive count exceeds atlas capacity")
++    for a in range(num_atlases):
++        atlas_w = charts_per_row * T
++        atlas_h = charts_per_col * T
++        # Initialize atlas as 4-channel 2D array
++        atlas = [[[0.0] * atlas_w for _ in range(atlas_h)] for _ in range(4)]
++        ind_buf = []
+         
+-        chart_idx_x = k % charts_per_row
+-        chart_idx_y = k // charts_per_row
++        start = a * total_charts_per_atlas
++        end = min(start + total_charts_per_atlas, len(primitives))
+         
+-        # Store top-left chart coordinates
+-        indirection_buffer.append((chart_idx_x, chart_idx_y))
++        for k in range(start, end):
++            chart_x = (k - start) % charts_per_row
++            chart_y = (k - start) // charts_per_row
++            ind_buf.append((chart_x, chart_y))
++            
++            for u in range(T):
++                for v in range(T):
++                    ax = chart_x * T + u
++                    ay = chart_y * T + v
++                    for c in range(4):
++                        atlas[c][ay][ax] = primitives[k].texture[v][u][c]
+         
+-        # Copy primitive texture to atlas block
+-        for u in range(T):
+-            for v in range(T):
+-                # Map local (u,v) to atlas coordinates
+-                atlas_x = chart_idx_x * T + u
+-                atlas_y = chart_idx_y * T + v
+-                atlas.set_texel(atlas_x, atlas_y, prim.texture[u, v])
+-                
+-    return atlas, indirection_buffer
++        atlases.append(atlas)
++        indirection_buffers.append(ind_buf)
++        
++    return atlases, indirection_buffers
+ 
+-def sample_atlas(atlas, indirection_buffer, k, s, t, T, Nchartsx, Nchartsy):
++def sample_atlas(atlas, indirection_buffer, k, s, t, T, Nchartsx, Nchartsy, atlas_w, atlas_h):
+     """
+     Sample the texture for primitive k at normalized coordinates (s, t).
+     """
+-    chart_idx_x, chart_idx_y = indirection_buffer[k]
++    chart_x, chart_y = indirection_buffer[k]
+     
+     # Compute atlas coordinates
+-    s_atlas = (chart_idx_x * T + s * T) / (Nchartsx * T)
+-    t_atlas = (chart_idx_y * T + t * T) / (Nchartsy * T)
++    s_atlas = (chart_x * T + s * T) / (Nchartsx * T)
++    t_atlas = (chart_y * T + t * T) / (Nchartsy * T)
+     
+-    # Hardware bilinear filter
+-    return atlas.bilinear_filter(s_atlas, t_atlas)
++    # Bilinear interpolation (standard graphics step)
++    u0 = int(s_atlas * (atlas_w - 1))
++    v0 = int(t_atlas * (atlas_h - 1))
++    u1 = min(u0 + 1, atlas_w - 1)
++    v1 = min(v0 + 1, atlas_h - 1)
++    su = s_atlas * (atlas_w - 1) - u0
++    sv = t_atlas * (atlas_h - 1) - v0
++    
++    res = [0.0] * 4
++    for c in range(4):
++        c00 = atlas[c][v0][u0]
++        c10 = atlas[c][v0][u1]
++        c01 = atlas[c][v1][u0]
++        c11 = atlas[c][v1][u1]
++        res[c] = (c00 * (1 - su) + c10 * su) * (1 - sv) + (c01 * (1 - su) + c11 * su) * sv
++    return res
+ ```
+ 
+@@ -108,5 +117,5 @@
+ 
+ ### Hardware Accelerated Texture Sampling
+-This variant refers specifically to the sampling phase where hardware bilinear filtering is used via CUDA’s `tex2D()` intrinsic, as opposed to software interpolation. It relies on the indirection buffer to map primitive IDs to atlas chart coordinates and computes normalized atlas coordinates $(s_{atlas}, t_{atlas})$ for sampling. It is chosen when performance is critical and the GPU supports efficient texture filtering.
++This variant refers specifically to the sampling phase where hardware bilinear filtering is used via CUDA’s `tex2D()` intrinsic, as opposed to software interpolation [S1]. It relies on the indirection buffer to map primitive IDs to atlas chart coordinates and computes normalized atlas coordinates $(s_{atlas}, t_{atlas})$ for sampling [S1]. It is chosen when performance is critical and the GPU supports efficient texture filtering [S1].
+ 
+ ## Operating characteristics

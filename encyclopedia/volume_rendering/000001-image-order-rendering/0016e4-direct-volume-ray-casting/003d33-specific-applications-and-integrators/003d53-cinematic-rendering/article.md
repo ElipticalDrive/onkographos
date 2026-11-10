@@ -2,185 +2,196 @@
 
 
 ## Overview
-Cinematic Rendering (CR) is a physically based, real-time volume rendering technique that generates photo-realistic medical images by simulating the interaction of visible photons with volumetric data (CT or MRI) [S1, S3, S4, unofficial]. Unlike traditional Direct Volume Ray Casting, which traces a single straight ray per pixel and models scattering via local gradient shading, CR traces hundreds or thousands of photon paths per pixel to solve the multi-dimensional, non-continuous rendering equation [S1, S3, S4, unofficial]. This approach accounts for complex light-matter interactions, including multiple scattering, absorption, soft shadows, ambient occlusion, and color transmittance, resulting in enhanced depth and shape perception [S1, S3, S4, unofficial].
+Cinematic Rendering (CR) is a physically based, real-time volume rendering technique that generates photo-realistic 3D images of medical data (CT or MRI) by simulating the interaction of visible photons with the volume [S1, S3, S4, unofficial]. Unlike traditional Direct Volume Ray Casting, which traces a single straight ray per pixel and relies on local gradient shading for illumination, CR traces hundreds or thousands of photon paths per pixel using path tracing and Monte Carlo integration to solve the multi-dimensional, non-continuous rendering equation [S1, S3, S4, unofficial]. This approach accounts for complex light-matter interactions, including multiple scattering, absorption, soft shadows, ambient occlusion, and color transmittance, resulting in enhanced depth and shape perception [S1, S3, S4, unofficial].
 
 ## How it works
-CR replaces the standard single-ray integration loop of [Direct volume ray casting](19-direct-volume-ray-casting.md) with a path-tracing integrator that uses Monte Carlo simulations to approximate global illumination [S1, S3, S4, unofficial].
+**Inputs and Outputs**
+*   **Input:** Volumetric medical image data (CT or MRI), typically represented as a 3D grid of voxels with attenuation values (e.g., Hounsfield Units for CT) [S3, S4, unofficial].
+*   **Input:** High Dynamic Range (HDR) light maps, which are panoramic images capturing natural lighting from all directions [S1, S3, S4, unofficial].
+*   **Input:** Transfer functions mapping voxel attenuation values to color and opacity [S2][S3, S4, unofficial].
+*   **Input:** Camera parameters (aperture, focal length, exposure, shutter speed) [S3, S4, unofficial].
+*   **Output:** A 2D image where each pixel represents the accumulated radiance from simulated photon paths [S1, S3, S4, unofficial].
 
-### Inputs and Outputs
-*   **Inputs:**
-    *   Volumetric dataset (CT Hounsfield Units or MRI intensities) [S3, S4, unofficial].
-    *   Transfer Function: Maps voxel attenuation values to color ($C$) and opacity ($\alpha$) [S2][S3, S4, unofficial].
-    *   HDR Light Map: A panoramic high-dynamic-range image capturing environmental illumination from all directions [S3, S4, unofficial].
-    *   Camera Parameters: Aperture, focal length, exposure, and shutter speed [S3, S4, unofficial].
-*   **Outputs:**
-    *   A photo-realistic 2D image where each pixel represents the accumulated radiance from multiple light paths [S1, S3, S4, unofficial].
+**Data Structures**
+*   **Volume Data:** A 3D array of voxel values. For CT, these are Hounsfield Units (HU) [S3, unofficial].
+*   **Light Map:** A spherical or equirectangular HDR texture representing the environment illumination [S3, S4, unofficial].
+*   **Transfer Function:** A mapping (often a 1D or 2D lookup table) associating attenuation values with RGBA color and opacity [S3, S4, unofficial].
 
-### Data Structures
-*   **Volume Texture:** 3D texture storing voxel attenuation values.
-*   **Transfer Function:** 1D or 2D lookup table mapping attenuation to $(R, G, B, \alpha)$ [S2][S3, unofficial].
-*   **HDR Light Map:** 2D equirectangular or cubemap texture storing incident radiance from environmental directions [S3, S4, unofficial].
-*   **Sample Accumulator:** Framebuffer or buffer storing accumulated radiance and sample count for progressive rendering [S3, unofficial].
+**Algorithm Steps**
+1.  **Initialization:** Load the volumetric dataset and the HDR light map. Initialize the transfer function, which maps voxel attenuation values (e.g., HU) to color and opacity [S3, S4, unofficial].
+2.  **Ray/Path Definition:** For each pixel in the output image, define a primary ray from the camera eye through the pixel into the volume [S3, unofficial]. Unlike standard ray casting, this ray serves as the starting point for a path tracing process [S3, unofficial].
+3.  **Monte Carlo Path Tracing:**
+    *   Trace a large number of photon paths (hundreds to thousands) per pixel [S3, unofficial].
+    *   Use Monte Carlo integration to solve the rendering equation, generating a randomized subset of light paths with an adequate distribution [S1, S3, S4, unofficial].
+    *   Simulate the interaction of photons with the volume data. At each sample point along a path:
+        *   Determine the voxel's color and opacity using the transfer function based on its attenuation value [S3, S4, unofficial].
+        *   Simulate scattering, reflection, and absorption. Photons may change direction multiple times before reaching the eye [S3, unofficial].
+        *   Sample the HDR light map to determine incoming illumination from all directions, enabling natural lighting, soft shadows, and ambient occlusion [S1, S3, S4, unofficial].
+    *   Prioritize paths that reach the eye (importance sampling) to manage computational load [S3, unofficial].
+4.  **Accumulation:** Accumulate the radiance contributions from all sampled paths for each pixel [S1, S3, S4, unofficial].
+5.  **Progressive Rendering:** Iteratively average the Monte Carlo samples to progressively refine the image quality [S1, S3, S4, unofficial]. The renderer updates the image in the background while allowing real-time interaction (zoom, pan, rotate) in the foreground [S3, unofficial].
+6.  **Camera Effects:** Apply camera model parameters such as aperture (depth of field), exposure, and shutter speed (motion blur) to the accumulated radiance [S3, S4, unofficial].
 
-### Algorithm Steps
-The rendering process follows these steps:
-
-1.  **Initialization:** Load the volume data, transfer function, and HDR light map. Initialize the camera parameters (aperture, exposure, etc.) [S3, S4, unofficial].
-2.  **Ray Generation (Eye Rays):** For each pixel, generate a primary ray from the camera eye position through the pixel center into the volume [S3, unofficial].
-3.  **Path Tracing Loop:** For each pixel, trace $N$ samples (where $N$ is typically hundreds or thousands) to estimate the integral of the rendering equation [S1, S3, S4, unofficial]:
-    *   **Step 3.1: Volume Sampling:** Trace the primary ray through the volume. At each step, sample the voxel's attenuation value.
-    *   **Step 3.2: Classification:** Use the Transfer Function to determine the color $C$ and opacity $\alpha$ of the sampled voxel [S2][S3, S4, unofficial].
-    *   **Step 3.3: Interaction Simulation:** Simulate photon interaction. This involves:
-        *   **Absorption/Scattering:** Determine if the photon is absorbed or scattered based on the material properties derived from the volume data [S3, unofficial].
-        *   **Multiple Bounces:** If scattered, generate a new direction for the photon. This direction is sampled from the HDR Light Map (environmental lighting) or based on local surface normals/geometry if interacting with boundaries [S1, S3, S4, unofficial].
-        *   **Shadowing:** Check for occlusions between the current point and light sources (defined by the HDR map) to compute shadow factors [S1, S4, unofficial].
-    *   **Step 3.4: Radiance Accumulation:** Compute the radiance contribution of the path. This includes the color of the voxel, the illumination from the HDR map, and attenuation along the path [S1, S3, S4, unofficial].
-    *   **Step 3.5: Monte Carlo Integration:** Average the radiance contributions from all $N$ samples for the pixel [S1, S3, S4, unofficial].
-4.  **Progressive Rendering:** Since tracing all paths is computationally expensive, CR uses progressive rendering. The image is updated iteratively by adding new samples, refining the image quality over time [S3, S4, unofficial].
-5.  **Camera Effects:** Apply post-processing effects based on camera parameters, such as depth of field (blur based on aperture/focus) and motion blur (if applicable) [S3, S4, unofficial].
-
-### Pseudocode
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def cinematic_rendering(volume, transfer_function, hdr_light_map, camera, num_samples):
+def cinematic_rendering(volume_data, light_map, transfer_function, camera_params, num_samples_per_pixel):
     """
-    Renders a volume using Cinematic Rendering (Path Tracing).
+    Renders a volume using Cinematic Rendering principles.
     
     Args:
-        volume: 3D array of voxel attenuation values.
-        transfer_function: Function mapping attenuation -> (color, opacity).
-        hdr_light_map: 2D array representing environmental illumination.
-        camera: Object with position, orientation, aperture, exposure.
-        num_samples: Number of Monte Carlo samples per pixel.
+        volume_data: 3D array of voxel attenuation values (e.g., HU).
+        light_map: HDR environment map for illumination.
+        transfer_function: Function mapping attenuation to (color, opacity).
+        camera_params: Object containing aperture, focal_length, exposure, shutter_speed.
+        num_samples_per_pixel: Number of Monte Carlo paths to trace per pixel.
         
     Returns:
-        image: 2D array of rendered pixel colors.
+        rendered_image: 2D array of pixel colors.
     """
-    height, width = volume.shape[:2] # Assuming 2D slice or projection for simplicity
-    image = zeros((height, width, 3))
+    height, width = volume_data.shape[:2] # Assuming 2D slice or projection plane dimensions for simplicity
+    rendered_image = np.zeros((height, width, 3))
     
     for y in range(height):
         for x in range(width):
-            pixel_radiance = 0.0
+            pixel_radiance = np.zeros(3)
             
-            for s in range(num_samples):
-                # 1. Generate Eye Ray
-                # Ray from camera through pixel (x, y)
-                ray_origin = camera.position
-                ray_direction = compute_ray_direction(camera, x, y, s) # Includes jitter for DOF if aperture > 0
-                
-                # 2. Trace Path through Volume
-                # Simplified: Single pass or multi-bounce logic
-                # In CR, photons scatter multiple times. 
-                # Here we simulate the path of light reaching the eye.
-                
-                current_radiance = 0.0
-                current_ray = Ray(ray_origin, ray_direction)
-                throughput = 1.0
-                
-                # Path tracing loop (simplified for single bounce or limited bounces)
-                # Note: Full CR may involve multiple bounces within the volume or with environment
-                for bounce in range(max_bounces): # max_bounces is small or 1 for efficiency in real-time
-                    # Sample volume along ray
-                    hit_point, distance = trace_volume(current_ray, volume)
-                    
-                    if hit_point is None:
-                        break
-                        
-                    # Get material properties
-                    attenuation = volume[hit_point]
-                    color, opacity = transfer_function(attenuation)
-                    
-                    # Sample illumination from HDR Light Map
-                    # Direction depends on scattering model (e.g., diffuse, specular)
-                    # For CR, light comes from all directions in HDR map
-                    incident_light_direction = sample_hdr_direction(hdr_light_map, current_ray.direction)
-                    incident_radiance = sample_hdr_light_map(hdr_light_map, incident_light_direction)
-                    
-                    # Compute lighting contribution
-                    # Includes shadowing: check if path from hit_point to light source is occluded
-                    shadow_factor = compute_shadow(hit_point, incident_light_direction, volume)
-                    
-                    # Accumulate radiance
-                    # L = throughput * color * incident_radiance * shadow_factor * opacity
-                    # Note: Exact formula depends on the specific rendering equation implementation
-                    # S1, S3, S4 mention solving multi-dimensional rendering equation
-                    contribution = throughput * color * incident_radiance * shadow_factor * opacity
-                    current_radiance += contribution
-                    
-                    # Update throughput and ray for next bounce (if any)
-                    # Simplified: Assume diffuse scattering for next bounce direction
-                    throughput *= opacity # Simplified attenuation
-                    current_ray = Ray(hit_point, sample_scattering_direction(current_ray.direction))
-                    
-                # 3. Average samples
-                pixel_radiance += current_radiance / num_samples
-                
-            # 4. Apply Camera Exposure
-            image[y, x] = pixel_radiance * camera.exposure
+            # Define primary ray from camera through pixel
+            ray_origin, ray_direction = get_camera_ray(camera_params, x, y)
             
-    return image
+            for _ in range(num_samples_per_pixel):
+                # Trace a photon path using Monte Carlo integration
+                path_radiance = trace_photon_path(
+                    ray_origin, 
+                    ray_direction, 
+                    volume_data, 
+                    light_map, 
+                    transfer_function,
+                    max_bounces=10 # [G] Typical path tracing limit; sources mention "multiple bounces"
+                )
+                pixel_radiance += path_radiance
+            
+            # Average the samples
+            average_radiance = pixel_radiance / num_samples_per_pixel
+            
+            # Apply camera effects (exposure, tone mapping)
+            # [G] Standard exposure adjustment; sources mention exposure modeling
+            final_color = apply_exposure(average_radiance, camera_params.exposure)
+            
+            rendered_image[y, x] = final_color
+            
+    return rendered_image
 
-def trace_volume(ray, volume):
+def trace_photon_path(origin, direction, volume_data, light_map, transfer_function, max_bounces):
     """
-    Traces a ray through the volume, returning the first hit point and distance.
-    Uses ray marching.
+    Simulates a single photon path through the volume.
     """
-    # Implementation details for ray marching through 3D volume
-    # Return hit_point (3D coords) and distance
-    pass
+    current_position = origin
+    current_direction = direction
+    throughput = np.ones(3) # [G] Initial throughput
+    radiance = np.zeros(3)
+    
+    for bounce in range(max_bounces):
+        # Intersect ray with volume
+        hit_point, hit_normal, distance = ray_march_volume(current_position, current_direction, volume_data)
+        
+        if hit_point is None:
+            # Ray escaped volume; sample light map for environment contribution
+            # [G] Standard path tracing step; sources mention HDR light maps
+            env_radiance = sample_light_map(light_map, current_direction)
+            radiance += throughput * env_radiance
+            break
+        
+        # Get material properties from transfer function
+        attenuation_value = get_voxel_value(volume_data, hit_point)
+        color, opacity = transfer_function(attenuation_value)
+        
+        # [G] Simulate scattering/absorption
+        # Sources mention "interaction with matter", "scattering", "absorption"
+        # Simplified: accumulate color weighted by opacity and throughput
+        # In a full implementation, this would involve phase functions and multiple scattering
+        radiance += throughput * color * opacity
+        
+        # Update throughput for absorption
+        throughput *= (1.0 - opacity)
+        
+        if throughput < 0.01: # Russian Roulette or termination threshold [G]
+            break
+            
+        # Scatter photon to new direction
+        # [G] Importance sampling mentioned in sources; simplified to uniform or cosine-weighted
+        new_direction = scatter_direction(current_direction, hit_normal)
+        
+        current_position = hit_point + new_direction * epsilon
+        current_direction = new_direction
+        
+    return radiance
 
-def sample_hdr_direction(hdr_light_map, current_direction):
+def ray_march_volume(origin, direction, volume_data):
     """
-    Samples a direction for scattering based on the current ray direction and HDR map.
-    In CR, this often involves sampling the environment map for incoming light.
+    Simple ray marching to find the first opaque voxel.
     """
-    pass
+    # [G] Implementation detail for ray marching; sources assume volume intersection
+    step_size = 1.0
+    current_pos = origin
+    for _ in range(1000): # [G] Max steps
+        if not in_volume(current_pos, volume_data):
+            return None, None, None
+        val = get_voxel_value(volume_data, current_pos)
+        if val > threshold: # [G] Threshold for interaction
+            return current_pos, get_normal(volume_data, current_pos), step_size
+        current_pos += direction * step_size
+    return None, None, None
 
-def sample_hdr_light_map(hdr_light_map, direction):
-    """
-    Retrieves radiance from the HDR light map for a given direction.
-    """
-    pass
+def get_voxel_value(volume, pos):
+    # [G] Trilinear interpolation or nearest neighbor
+    return volume[int(pos.x), int(pos.y), int(pos.z)]
 
-def compute_shadow(point, light_direction, volume):
-    """
-    Computes shadow factor by tracing a ray from point towards light_direction.
-    Returns 0 if occluded, 1 if clear.
-    """
-    pass
+def get_normal(volume, pos):
+    # [G] Gradient-based normal estimation
+    return np.array([0, 0, 1]) # Placeholder
 
-def sample_scattering_direction(current_direction):
-    """
-    Samples a new direction for scattering.
-    """
-    pass
+def scatter_direction(incoming, normal):
+    # [G] Simplified scattering
+    return normalize(incoming + normal)
+
+def sample_light_map(light_map, direction):
+    # [G] Sample HDR environment map
+    return light_map.sample(direction)
+
+def apply_exposure(radiance, exposure):
+    # [G] Exposure adjustment
+    return radiance * (2.0 ** exposure)
 ```
 
-### Parameters
-*   **Number of Samples:** Hundreds to thousands per pixel. Higher numbers reduce noise but increase computation time [S3, S4, unofficial].
-*   **HDR Light Map:** Panoramic photos capturing light from any direction [S3, S4, unofficial].
-*   **Transfer Function:** Maps Hounsfield Units (HU) to color and opacity [S3, S4, unofficial].
+**Parameters**
+*   **Number of Samples:** Hundreds to thousands of photon paths per pixel [S3, unofficial].
+*   **Light Map:** HDR panoramic photos capturing light from any direction [S3, S4, unofficial].
+*   **Transfer Function:** Maps Hounsfield Units (HU) to color and opacity [S3, unofficial].
 *   **Camera Settings:** Aperture, focal length, exposure, shutter speed [S3, S4, unofficial].
+*   **Rendering Time:** 5 to 30 seconds for final image quality, depending on settings [S1, S4, unofficial].
 
-### Edge Cases and Pitfalls
-*   **Computational Cost:** Tracing infinite light paths is computationally expensive. CR uses Monte Carlo simulations to generate a randomized subset, but this still requires significant power [S1, S3, S4, unofficial].
-*   **Real-Time Interruption:** Real-time display of rotating CR images may be interrupted by repetitive recalculation processes due to high computational demand [S1, S4, unofficial].
-*   **Progressive Rendering:** Initial images may be noisy; quality improves over time. Users must wait for convergence for final quality [S3, S4, unofficial].
-*   **Masking Findings:** Like conventional VR, inappropriate transfer function settings can mask findings by adjacent structures [S1, S4, unofficial].
+**Edge Cases and Pitfalls**
+*   **Computational Cost:** Tracing infinite light paths is computationally expensive. Monte Carlo simulations are used to generate a randomized subset, but this still requires significant power [S1, S3, S4, unofficial].
+*   **Real-time Interaction:** Real-time display of rotating images may be interrupted by repetitive recalculation processes due to high computational demand [S1, S4, unofficial].
+*   **Progressive Rendering:** To maintain interactivity, images are rendered progressively in the background. Users may see lower-quality initial states until refinement completes [S3, unofficial].
+*   **Masking Findings:** Like conventional VR, inappropriate transfer function parameters can mask findings by adjacent structures [S1, S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(P \cdot S \cdot B)$, where $P$ is the number of pixels, $S$ is the number of samples per pixel, and $B$ is the number of bounces or steps per path. Significantly higher than ray casting due to $S$ and $B$ [S1, S3, S4, unofficial].
-*   **Memory Complexity:** Depends on volume size, HDR light map size, and accumulation buffers for progressive rendering [S3, unofficial].
-*   **Measured Performance:** Rendering time for final image ranges from 5 to 30 seconds depending on image quality and hardware [S1, S4, unofficial]. Requires modern desktop PC with off-the-shelf processor and graphics card [S3, unofficial].
-*   **Strengths:** Photo-realistic illumination, enhanced depth and shape perception, natural lighting via HDR maps, modeling of shadows, ambient occlusion, and multi-scattering [S1, S3, S4, unofficial].
-*   **Limitations:** High computational power demand, not suitable for real-time rotation without interruption, limited clinical approval (research tool only) [S1, S4, unofficial].
-*   **When to Use:** When photo-realistic visualization and depth perception are critical, such as in surgical planning or patient communication [S3, S4, unofficial].
-*   **When Not to Use:** When real-time interaction is required without latency, or when computational resources are limited [S1, S4, unofficial].
+*   **Time Complexity:** High. Requires significantly more computational power than conventional VR due to the complex lighting model and multiple scattering calculations [S1, S4, unofficial]. Rendering times range from 5 to 30 seconds per image [S1, S4, unofficial].
+*   **Memory Complexity:** Requires storage for the volume data, HDR light maps, and intermediate path tracing buffers [S3, S4, unofficial].
+*   **Performance:** Runs on modern desktop PCs with standard processors and graphics cards [S3, unofficial]. However, real-time rotation is not fully smooth due to recalculation overhead [S1, S4, unofficial].
+*   **Strengths:** Produces photo-realistic images with enhanced depth and shape perception, particularly for high-contrast structures like bones and vessels [S1, S4, unofficial]. Models natural lighting effects (shadows, ambient occlusion, subsurface scattering) [S1, S3, S4, unofficial].
+*   **Limitations:** High computational cost limits true real-time interaction. Limited clinical approval (research tool only) [S1, S4, unofficial]. Potential for masking findings similar to VR [S1, S4, unofficial].
+*   **When to Use:** When photo-realistic visualization and enhanced depth perception are prioritized over speed, particularly for complex anatomical structures (e.g., cardiovascular, trauma) [S3, S4, unofficial].
+*   **When Not to Use:** When rapid, interactive exploration of large datasets is required, or when computational resources are limited [S1, S4, unofficial].
 
 ## Background
-Cinematic Rendering was developed by Siemens Healthineers, inspired by the entertainment industry's computer animation techniques [S1, S4, unofficial]. It was introduced as a research tool in the syngo.via and syngo.via Frontier platforms [S3, S4, unofficial]. The technique aims to provide a more natural and physically accurate presentation of medical data compared to conventional VR [S1, S4, unofficial]. As of the document dates, it was available as a research tool with no clinical approval [S1, S4, unofficial].
+*   **Origin:** Developed by Siemens Healthineers, inspired by the entertainment industry's computer animation techniques [S1, S4, unofficial].
+*   **Key Papers:** Engel (2016) and Paladini et al. (2015) are cited as foundational references [S3, unofficial].
+*   **Implementation:** Available as a research tool in Siemens Healthineers' syngo.via and syngo.via Frontier platforms [S3, S4, unofficial]. It is not approved for clinical use as of the document dates [S1, S4, unofficial].
+*   **Usage:** Used in cardiovascular, trauma, and vascular imaging applications [S3, unofficial].
 
 ## Sources
 [S1] Cinematic rendering – an alternative to volume rendering for 3D CT (2016), https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5110476/#, fetched 2026-10-26 (unofficial)

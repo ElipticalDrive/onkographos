@@ -1,98 +1,120 @@
 # Hybrid Shear-Warp and Polygon Rendering
 
-Also called: Hybrid volume rendering, Shear-Warp Integration with Geometry, Shear-Warp Rendering Modes
+Also called: Hybrid shear-warp rendering, Hybrid volume rendering, Shear-Warp Integration with Geometry, Shear-Warp Rendering Modes
 
 ## Overview
-This method extends the Shear-warp algorithm to correctly intermix polygonal geometry with volume rendering in a single pass or tightly coupled pipeline. It solves the problem of visual artifacts when opaque polygons intersect or occlude volume data, ensuring correct depth ordering between the two media. It sets itself apart from pure volume renderers by integrating a standard polygon rasterization step and using an inversely warped Z-buffer to constrain the volume compositing rays.
+This method extends the Shear-warp algorithm to simultaneously render polygonal geometry and volumetric data in a single image [S1, unofficial]. It solves the problem of correct visual intermixing between opaque polygons and volume slices, which standard Shear-warp does not handle natively [S1, unofficial]. Unlike pure volume renderers, it integrates object-based polygon scan-conversion with the volume compositing pipeline using a specialized data structure [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Volume dataset (scalar field), polygonal geometry (vertices, indices, normals), view matrix $M_{view}$, projection matrix $M_{proj}$.
-- Output: Final image buffer with combined color and depth.
+*   **Inputs:** A 3D volumetric dataset (typically Run-Length Encoded for acceleration), a set of polygonal primitives (triangles, quads), and the viewing transformation matrix $M_{view}$ [S1, S2, unofficial].
+*   **Outputs:** A final 2D image buffer containing the composited result of polygons and volume, and a depth buffer reflecting the closest surface (polygon or volume) for each pixel [S1, S2, unofficial].
 
 **Data Structures:**
-1.  **Volume Data:** Stored in a format supporting acceleration structures (e.g., Run-Length Encoding or Octree) as per the parent Shear-warp method [S2].
-2.  **Polygon Buffer:** Standard triangle list.
-3.  **Z-Buffer:** Depth buffer for the final image resolution.
-4.  **Intermediate Image Buffer:** Color and alpha buffers for the shear-warp compositing stage.
+*   **zlist-buffer:** A multilayered z-buffer data structure used for object-based scan conversion of polygons [S1, unofficial]. Unlike a standard z-buffer which stores a single depth value per pixel, the zlist-buffer maintains a list of fragments for each pixel. Each fragment contains depth information and potentially other attributes, allowing multiple overlapping surfaces (polygons) to be tracked per pixel [S1, unofficial].
+*   **Volume Data:** Stored in a format compatible with Shear-warp, such as Run-Length Encoded (RLE) structures, to allow efficient slice extraction and compositing [S1, unofficial].
 
-**Steps:**
-1.  **Polygon Rasterization:** Render all opaque polygons into the final image buffer using standard rasterization. This establishes the depth values for geometry that occludes the volume [S1, unofficial].
-2.  **Inverse Warping of Z-Buffer:** Transform the Z-buffer values from screen space back into the intermediate shear-warp space. This creates a depth mask that represents the closest opaque geometry encountered so far [S1, unofficial].
-3.  **Shear-Warp Compositing with Clipping:**
-    -   Perform the standard Shear-warp steps: Shear, Resample, and Compositing [S2, S12].
-    -   During compositing, for each pixel, check the corresponding value in the inversely warped Z-buffer.
-    -   If the current ray's depth exceeds the depth stored in the Z-buffer, the ray is occluded by geometry. The volume contribution for that pixel is discarded or limited based on the clipping mode [S1, unofficial].
-    -   **Clipping Modes:**
-        -   *Transparent:* Volume data behind opaque geometry is hidden.
-        -   *MIP:* Maximum Intensity Projection is used, potentially allowing bright volume features to be visible even if geometry is present, depending on implementation specifics [S2].
-4.  **Warp:** Apply the 2D warp $M_{warp2D}$ to the intermediate image to produce the final view [S2, S12].
+**Algorithm Steps:**
+1.  **Polygon Scan-Conversion:** Render the polygonal geometry into the `zlist-buffer`. This involves standard polygon scan-conversion modified to populate the multilayered structure [S1, unofficial].
+    *   For each pixel covered by a polygon, add the fragment's depth and attributes to the list for that pixel [S1, unofficial].
+    *   This step establishes the occlusion relationships for opaque polygons [S2, unofficial].
+2.  **Volume Rendering (Shear-Warp):** Perform the standard Shear-warp volume rendering pipeline [S1, S2, unofficial]:
+    *   **Permutation:** Permute the volume data so the principal viewing axis aligns with the Z-axis [S2, S5, S8, unofficial].
+    *   **Shear:** Shear the volume slices to align viewing rays with the Z-axis [S2, S5, S8, unofficial].
+    *   **Resampling:** Resample the sheared slices into an intermediate 2D buffer using bilinear interpolation [S2, S12, unofficial].
+    *   **Compositing:** Composite the slices front-to-back using the Porter-Duff "over" operator [S2, S12, unofficial]:
+        $$ C_{new} = C_{slice} \cdot \alpha_{slice} + C_{accum} \cdot (1 - \alpha_{slice}) $$
+        $$ \alpha_{new} = \alpha_{slice} + \alpha_{accum} \cdot (1 - \alpha_{slice}) $$
+    *   **Ray Limiting:** Use the `zlist-buffer` to limit the viewing rays during the compositing step [S2, unofficial]. Specifically, an inversely warped Z-buffer derived from the polygon data is used to determine when volume rays should terminate or be occluded by polygons [S2, unofficial]. If a volume ray intersects a polygon fragment that is closer than the current volume sample, the volume contribution is masked or terminated [S2, unofficial].
+3.  **Warp:** Apply the 2D warp transformation $M_{warp2D}$ to the intermediate image to correct distortion and map to the final screen space [S2, S22, unofficial].
+4.  **Final Composition:** Combine the warped volume image with the polygon data. Since opaque polygons are rendered first, the volume rendering must respect their occlusion [S2, unofficial]. The final image is the result of the volume compositing constrained by the polygon depths [S2, unofficial].
 
 **Parameters:**
--   `clippingMode`: Enum ('transparent', 'mip'). Controls how geometry intersection affects volume visibility [S2].
--   `intermixIntersectingGeometry`: Boolean. Enables or disables the geometry intersection logic [S2].
--   `sampleDistance`: Auto-adjusted based on rendering speed to maintain interactivity [S2].
+*   **Clipping Mode:** Can be set to 'transparent' or 'mip' (Maximum Intensity Projection) [S3].
+*   **Intermix Intersecting Geometry:** A boolean flag to enable or disable the correct intermixing of polygonal geometry with volume rendering [S3].
+*   **Auto-adjustment:** Sample distances can be automatically adjusted based on rendering speed to maintain interactivity [S3].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_hybrid_shear_warp(volume, polygons, view_matrix, proj_matrix):
-    # 1. Render polygons to Z-buffer
-    z_buffer = rasterize_polygons(polygons, view_matrix, proj_matrix)
+def hybrid_shear_warp_render(volume_data, polygons, view_matrix, image_width, image_height):
+    # Initialize zlist-buffer: list of lists, one list per pixel
+    zlist_buffer = [[] for _ in range(image_width * image_height)]
     
-    # 2. Inverse warp Z-buffer to shear-warp space
-    # This requires the inverse of the warp matrix M_warp2D
-    inv_warp_matrix = inverse(warp_matrix)
-    z_buffer_shear_space = inverse_warp_depth(z_buffer, inv_warp_matrix)
+    # Step 1: Render polygons into zlist-buffer
+    for polygon in polygons:
+        # Standard polygon scan-conversion, modified to populate zlist_buffer
+        fragments = scan_convert_polygon(polygon, view_matrix, image_width, image_height)
+        for fragment in fragments:
+            pixel_index = fragment.x + fragment.y * image_width
+            zlist_buffer[pixel_index].append(fragment)
+            
+    # Step 2: Shear-Warp Volume Rendering
+    # Permute volume data based on view direction
+    permuted_volume = permute_volume(volume_data, view_matrix)
     
-    # 3. Shear-warp compositing
-    intermediate_color = zeros(image_width, image_height)
-    intermediate_alpha = zeros(image_width, image_height)
+    # Shear volume slices
+    sheared_slices = shear_volume(permuted_volume, view_matrix)
     
-    for slice in volume_slices:
-        # Shear and resample slice to intermediate space
-        resampled_slice = shear_and_resample(slice, shear_matrix)
+    # Initialize accumulators for volume compositing
+    accum_color = [0.0, 0.0, 0.0, 0.0]
+    final_image = [[0.0, 0.0, 0.0, 0.0] for _ in range(image_width * image_height)]
+    
+    # Process slices front-to-back
+    for slice in sheared_slices:
+        # Resample slice to intermediate buffer
+        intermediate_buffer = resample_slice(slice, view_matrix, image_width, image_height)
         
+        # Composite slice with accumulation, limited by polygon occlusion
         for y in range(image_height):
             for x in range(image_width):
-                # Get depth of closest geometry at this pixel in shear space
-                geometry_depth = z_buffer_shear_space[y, x]
+                pixel_index = x + y * image_height
+                fragment_list = zlist_buffer[pixel_index]
                 
-                # Current ray depth in shear space (approximated or tracked)
-                ray_depth = get_ray_depth(y, x, slice_index)
+                # Determine if this pixel is occluded by a polygon closer than current volume sample
+                # This requires inversely warping the polygon depths to the volume space or vice versa
+                # For simplicity, assume we have a function to check occlusion
+                is_occluded = check_polygon_occlusion(x, y, fragment_list, slice_depth)
                 
-                # Check occlusion
-                if ray_depth > geometry_depth:
-                    continue # Occluded by polygon
-                
-                # Standard Porter-Duff compositing
-                color_slice, alpha_slice = resampled_slice[y, x]
-                intermediate_color[y, x] = composite_color(
-                    intermediate_color[y, x], color_slice, alpha_slice
-                )
-                intermediate_alpha[y, x] = composite_alpha(
-                    intermediate_alpha[y, x], alpha_slice
-                )
-                
-                # Early ray termination
-                if intermediate_alpha[y, x] > 0.95:
-                    break
-    
-    # 4. Warp to final image
-    final_image = warp_image(intermediate_color, intermediate_alpha, warp_matrix)
+                if not is_occluded:
+                    # Standard front-to-back compositing
+                    color_slice, alpha_slice = intermediate_buffer[y][x]
+                    accum_color = composite(accum_color, color_slice, alpha_slice)
+                    
+        # Warp the accumulated volume image to final screen space
+        warped_volume = warp_image(accum_color, view_matrix, image_width, image_height)
+        
+        # Combine with polygon colors (if polygons are not fully opaque, or for transparency)
+        # Note: Opaque polygons are already in zlist-buffer; volume is masked by them
+        # Final image is primarily the warped volume, but polygons must be drawn on top
+        # or volume must be masked. The description implies volume is limited by polygons.
+        
     return final_image
+
+def composite(accum, color_slice, alpha_slice):
+    # Porter-Duff over operator
+    new_alpha = alpha_slice + accum[3] * (1 - alpha_slice)
+    new_color = [
+        color_slice[0] * alpha_slice + accum[0] * (1 - alpha_slice),
+        color_slice[1] * alpha_slice + accum[1] * (1 - alpha_slice),
+        color_slice[2] * alpha_slice + accum[2] * (1 - alpha_slice),
+        new_alpha
+    ]
+    return new_color
 ```
 
 ## Operating characteristics
--   **Complexity:** Dominated by the Shear-warp compositing step $O(N \cdot M)$ where $N$ is volume size and $M$ is image resolution, plus polygon rasterization $O(P)$ where $P$ is polygon count.
--   **Performance:** Interactive frame rates achievable with acceleration structures (RLE, Octree) [S2]. Auto-adjustment of sample distances helps maintain performance on varying hardware [S2].
--   **Strengths:** Correct visual integration of geometry and volume; leverages efficient Shear-warp optimizations.
--   **Limitations:** Requires careful handling of depth values in non-linear projection spaces; performance may degrade with complex geometry intersecting the volume.
+*   **Time Complexity:** Dominated by the Shear-warp volume rendering, which is generally $O(N)$ where $N$ is the number of volume samples, but accelerated by RLE and early ray termination. Polygon scan-conversion is $O(P)$ where $P$ is the number of polygons. The integration adds overhead for managing the `zlist-buffer` and occlusion checks [S1, S2, unofficial].
+*   **Memory Complexity:** Requires storage for the volume data, the `zlist-buffer` (which can be larger than a standard z-buffer if many fragments overlap per pixel), and intermediate buffers [S1, unofficial].
+*   **Strengths:** Enables real-time visualization of complex scenes containing both detailed volumetric data and precise polygonal geometry (e.g., UI elements, surfaces) [S1, unofficial].
+*   **Limitations:** The `zlist-buffer` can consume significant memory for scenes with high polygon density and overlap. Correctly handling transparent polygons and volume intermixing is complex [S1, S2, unofficial].
+*   **When to use:** When real-time interaction is required for scenes mixing volume and polygon data, and standard hardware rasterization of volumes is not available or too slow [S1, unofficial].
 
 ## Background
-The concept of integrating shear-warp with polygon rendering was proposed to address the limitations of pure volume rendering in virtual environments where geometric models are also present [S1, unofficial]. The specific implementation details, including clipping modes and intermixing properties, were realized in the VTK library's `vtkVolumeShearWarpMapper` class, which supports various rendering modes and acceleration structures [S2].
+The method was proposed to address the need for rendering mixed polygonal and volumetric data in scientific visualization applications [S1, unofficial]. It builds on the Shear-warp algorithm, which was developed to accelerate volume rendering by exploiting the coherence of viewing rays [S2, S5, S8, unofficial]. The integration with polygons was identified as an important development for concurrent display [S2, unofficial]. The approach has been implemented in visualization toolkits like VTK (Visualization Toolkit) as `vtkVolumeShearWarpMapper` [S3].
 
 ## Sources
-[S1] The Perspective Shear-Warp Algorithm in a Virtual Environment., https://www.researchgate.net/publication/220943822_The_Perspective_Shear-Warp_Algorithm_in_a_Virtual_Environment, fetched 2026-10-29 (unofficial)
-[S2] Shear Warp, https://www.cg.tuwien.ac.at/courses/Visualisierung/2002-2003/Beispiel2/2-BrucknerSt-SeemannR/index2.htm, fetched 2026-10-29
+[S1] Volume Rendering Methods for Computational Fluid Dynamics Visualization, https://www.researchgate.net/profile/David-Ebert-4/publication/220943451_Volume_Rendering_Methods_for_Computational_Fluid_Dynamics_Visualization/links/00b7d51a73e2892e23000000/Volume-Rendering-Methods-for-Computational-Fluid-Dynamics-Visualization.pdf, fetched 2026-10-27 (unofficial)
+[S2] The Perspective Shear-Warp Algorithm in a Virtual Environment., https://www.researchgate.net/publication/220943822_The_Perspective_Shear-Warp_Algorithm_in_a_Virtual_Environment, fetched 2026-10-29 (unofficial)
+[S3] Shear Warp, https://www.cg.tuwien.ac.at/courses/Visualisierung/2002-2003/Beispiel2/2-BrucknerSt-SeemannR/index2.htm, fetched 2026-10-29

@@ -11,22 +11,22 @@ Compact Octree Memory Layout is a memory layout for voxel octree nodes that pack
 - Output: A linear memory buffer containing `CNode` structures and optional far-pointer indirection entries [S1, unofficial].
 
 **Data Structures:**
-The core unit is the `CNode` structure. It contains the following fields [S1, unofficial]:
-1. **`valid_mask`**: An 8-bit bitmask where bit $i$ corresponds to child $i$. A value of 1 means the child exists (is not empty), and 0 otherwise.
-2. **`leaf_mask`**: An 8-bit bitmask where bit $i$ corresponds to child $i$. A value of 1 means the child is a leaf node (has no further children), and 0 otherwise.
-3. **`child_ptr`**: An array of eight 16-bit relative offsets, one per child. If bit 15 is set, it indicates a far pointer, and the remaining 15 bits (masked) serve as an index to a far entry. The far entry contains a 32-bit `far_ptr` with the actual offset.
-4. **`far_ptr`**: A 32-bit absolute or relative pointer stored in a separate `CNode` entry (or dedicated array) when `child_ptr` indicates a far reference.
+The core unit is the `CNode` structure [S1, unofficial]. It contains the following fields [S1, unofficial]:
+1. **`valid_mask`**: An 8-bit bitmask where bit $i$ corresponds to child $i$. A value of 1 means the child exists (is not empty), and 0 otherwise [S1, unofficial].
+2. **`leaf_mask`**: An 8-bit bitmask where bit $i$ corresponds to child $i$. A value of 1 means the child is a leaf node (has no further children), and 0 otherwise [S1, unofficial].
+3. **`child_ptr`**: An array of eight 16-bit relative offsets, one per child. If bit 15 is set, it indicates a far pointer, and the remaining 15 bits (masked) serve as an index to a far entry. The far entry contains a 32-bit `far_ptr` with the actual offset [S1, unofficial].
+4. **`far_ptr`**: A 32-bit absolute or relative pointer stored in a separate `CNode` entry (or dedicated array) when `child_ptr` indicates a far reference [S1, unofficial].
 
 **Parameters:**
 - `_shortPtrTop`: $2^{15}$ (32768). Threshold for `child_ptr` to indicate a far pointer [S1, unofficial].
 - `_longPtrTop`: $2^{32}$. Threshold for `far_ptr` size [S1, unofficial].
 
 **Algorithm for Traversal/Access:**
-To access the $i$-th child of a node:
-1. Check `valid_mask` bit $i$. If 0, the child does not exist.
-2. Read `child_ptr[i]`.
-3. If `child_ptr[i] < _shortPtrTop`: the child is located at `base_address + child_ptr[i]`.
-4. If `child_ptr[i] >= _shortPtrTop`: extract the index `idx = child_ptr[i] & (_shortPtrTop - 1)`, retrieve the `far_ptr` value from the indirection entry at `idx`, and locate the child at `base_address + far_ptr`.
+To access the $i$-th child of a node [S1, unofficial]:
+1. Check `valid_mask` bit $i$. If 0, the child does not exist [S1, unofficial].
+2. Read `child_ptr[i]` [S1, unofficial].
+3. If `child_ptr[i] < _shortPtrTop`: the child is located at `base_address + child_ptr[i]` [S1, unofficial].
+4. If `child_ptr[i] >= _shortPtrTop`: extract the index `idx = child_ptr[i] & (_shortPtrTop - 1)`, retrieve the `far_ptr` value from the indirection entry at `idx`, and locate the child at `base_address + far_ptr` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.

@@ -2,82 +2,76 @@
 Also called: dynamic brick generation, on-the-fly rebricking
 
 ## Overview
-Dynamic Rebricking is a data management scheme that decouples the physical storage size of volumetric bricks from their logical rendering size to optimize both disk I/O throughput and ray-casting efficiency. It solves the conflict where large bricks maximize disk transfer rates but hinder early ray termination, while small bricks enable efficient empty-space skipping but incur high I/O overhead. Unlike [Bricking](914-bricking.md), which uses a fixed brick size for both storage and rendering, or [Brick-based Volume Rendering with Overlap and LRU Swapping](3782-brick-based-volume-rendering-with-overlap-and-lru-swapping.md), which manages fixed-size bricks in memory, Dynamic Rebricking generates small logical bricks from large physical bricks on demand.
+Dynamic Rebricking is a data management scheme that decouples the physical storage size of volumetric bricks from their logical rendering size to optimize both disk I/O throughput and ray-casting efficiency [S1]. It solves the conflict where large bricks maximize disk transfer rates but hinder early ray termination, while small bricks enable efficient empty-space skipping but incur high I/O overhead [S1]. Unlike [Bricking](914-bricking.md), which uses a fixed brick size for both storage and rendering, or [Brick-based Volume Rendering with Overlap and LRU Swapping](3782-brick-based-volume-rendering-with-overlap-and-lru-swapping.md), which manages fixed-size bricks in memory, Dynamic Rebricking generates small logical bricks from large physical bricks on demand [S1].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A volumetric dataset stored on disk as large bricks (e.g., $256^3$).
-- Output: Small logical bricks (e.g., $32^3$) provided to the renderer.
+- Input: A volumetric dataset stored on disk as large bricks (e.g., $256^3$) [S1].
+- Output: Small logical bricks (e.g., $32^3$) provided to the renderer [S1].
 
 **Data Structures:**
-1.  **Disk Storage:** Large bricks of fixed physical dimensions $B_{disk} \times B_{disk} \times B_{disk}$ (e.g., 256).
-2.  **Host Memory Cache:** A cache storing large bricks. It uses a replacement policy (LRU or MRU) to manage entries.
-3.  **Renderer Interface:** Exposes small logical bricks of dimensions $B_{render} \times B_{render} \times B_{render}$ (e.g., 32).
+1. **Disk Storage:** Large bricks of fixed physical dimensions $B_{\text{disk}} \times B_{\text{disk}} \times B_{\text{disk}}$ (e.g., 256) [S1].
+2. **Host Memory Cache:** A cache storing large bricks, managed with a replacement policy (LRU or MRU) [S1].
+3. **Renderer Interface:** Exposes small logical bricks of dimensions $B_{\text{render}} \times B_{\text{render}} \times B_{\text{render}}$ (e.g., 32) [S1].
 
 **Steps:**
-1.  **Request:** The renderer requests a specific small logical brick defined by its grid coordinates.
-2.  **Cache Lookup:** The system checks the host memory cache for the corresponding large physical brick containing the requested logical brick.
-    -   If found (Cache Hit): The large brick is retrieved from memory.
-    -   If not found (Cache Miss): The large brick is read from disk into the host memory cache.
-3.  **Cache Management:**
-    -   If the cache is full, an entry is evicted based on the chosen strategy (LRU or MRU).
-    -   The retrieved large brick is stored in the cache.
-4.  **Rebricking (Sub-sampling):** The large brick is dynamically sliced or subsampled to extract the requested small logical brick. This involves mapping the logical coordinates to the appropriate subset of voxels within the large brick.
-5.  **Delivery:** The small logical brick is passed to the renderer.
+1. **Request:** The renderer requests a specific small logical brick defined by its grid coordinates $(i, j, k)$ [S1].
+2. **Cache Lookup:** The system checks the host memory cache for the corresponding large physical brick containing the requested logical brick [S1].
+    - If found (Cache Hit): The large brick is retrieved from memory [S1].
+    - If not found (Cache Miss): The large brick is read from disk into the host memory cache [S1].
+3. **Cache Management:** If the cache is full, an entry is evicted based on the chosen strategy (LRU or MRU) before storing the new brick [S1].
+4. **Rebricking (Sub-sampling):** The large brick is dynamically sliced to extract the requested small logical brick by mapping the logical coordinates to the appropriate voxel subset within the large brick [S1].
+5. **Delivery:** The small logical brick is passed to the renderer [S1].
 
 **Formulas:**
--   Let $B_{disk}$ be the physical brick size (e.g., 256).
--   Let $B_{render}$ be the logical brick size (e.g., 32).
--   The number of logical bricks per physical brick is $N = (B_{disk} / B_{render})^3$.
--   For a logical brick at index $(i, j, k)$, the corresponding physical brick index $(I, J, K)$ is:
-    $$ I = \lfloor i / (B_{disk}/B_{render}) \rfloor, \quad J = \lfloor j / (B_{disk}/B_{render}) \rfloor, \quad K = \lfloor k / (B_{disk}/B_{render}) \rfloor $$
--   The offset within the physical brick is:
-    $$ o_x = i \pmod{B_{render}}, \quad o_y = j \pmod{B_{render}}, \quad o_z = k \pmod{B_{render}} $$
+- Let $B_{\text{disk}}$ be the physical brick size (e.g., 256) [S1].
+- Let $B_{\text{render}}$ be the logical brick size (e.g., 32) [S1].
+- The number of logical bricks per physical brick is $N = (B_{\text{disk}} / B_{\text{render}})^3$ [S1].
+- For a logical brick at index $(i, j, k)$, the corresponding physical brick index $(I, J, K)$ is:
+  $$ I = \lfloor i / (B_{\text{disk}}/B_{\text{render}}) \rfloor, \quad J = \lfloor j / (B_{\text{disk}}/B_{\text{render}}) \rfloor, \quad K = \lfloor k / (B_{\text{disk}}/B_{\text{render}}) \rfloor $$
+- The starting offset within the physical brick is:
+  $$ o_x = (i \bmod (B_{\text{disk}}/B_{\text{render}})) \times B_{\text{render}}, \quad o_y = (j \bmod (B_{\text{disk}}/B_{\text{render}})) \times B_{\text{render}}, \quad o_z = (k \bmod (B_{\text{disk}}/B_{\text{render}})) \times B_{\text{render}} $$
 
 **Parameters:**
--   Disk brick size: $256^3$ (typical example) [S1].
--   Renderer brick size: $32^3$ (typical example) [S1].
+- Disk brick size: $256^3$ (typical example) [S1].
+- Renderer brick size: $32^3$ (typical example) [S1].
 
 **Pitfalls:**
--   **Working Set Size:** If the working set of large bricks exceeds host memory, LRU eviction may occur before rendering finishes, causing performance degradation [S1]. In such environments, an MRU strategy is recommended [S1].
--   **Preprocessing:** Pre-generating the brick hierarchy is a bottleneck for very large datasets (feasible up to ~4 TB) [S1]. Dynamic rebricking alleviates this by generating bricks at runtime [S1].
+- **Working Set Size:** If the working set of large bricks exceeds host memory, LRU eviction may occur before rendering finishes, causing performance degradation [S1]. In such environments, an MRU strategy is recommended [S1].
+- **Preprocessing:** Pre-generating the brick hierarchy is a bottleneck for very large datasets (feasible up to ~4 TB) [S1]. Dynamic rebricking alleviates this by generating bricks at runtime [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+from collections import OrderedDict
+
 class DynamicRebrickManager:
-    def __init__(self, disk_brick_size=256, render_brick_size=32, cache_size=100):
+    def __init__(self, disk_brick_size=256, render_brick_size=32, cache_capacity=100):
         self.disk_brick_size = disk_brick_size
         self.render_brick_size = render_brick_size
-        self.cache = {}  # Key: (I, J, K) physical brick ID, Value: brick data
-        self.cache_size = cache_size
-        self.use_mru = False  # Set to True if working set > memory
+        self.cache_capacity = cache_capacity
+        self.cache = OrderedDict()  # Key: physical brick ID, Value: brick data
+        self.use_mru = False
 
     def get_logical_brick(self, i, j, k):
-        # Calculate physical brick ID
         ratio = self.disk_brick_size // self.render_brick_size
         I = i // ratio
         J = j // ratio
         K = k // ratio
         physical_id = (I, J, K)
 
-        # Cache lookup
         if physical_id in self.cache:
             large_brick = self.cache[physical_id]
-            self._update_cache_access(physical_id)
+            self._touch(physical_id)
         else:
-            # Cache miss: load from disk
             large_brick = self._load_from_disk(physical_id)
             self._add_to_cache(physical_id, large_brick)
 
-        # Extract logical brick from large brick
-        offset_x = i % self.render_brick_size
-        offset_y = j % self.render_brick_size
-        offset_z = k % self.render_brick_size
+        offset_x = (i % ratio) * self.render_brick_size
+        offset_y = (j % ratio) * self.render_brick_size
+        offset_z = (k % ratio) * self.render_brick_size
 
-        # Slice the large brick to get the small brick
-        # Assuming large_brick is a 3D array of size (256, 256, 256)
         small_brick = large_brick[
             offset_x:offset_x + self.render_brick_size,
             offset_y:offset_y + self.render_brick_size,
@@ -85,30 +79,23 @@ class DynamicRebrickManager:
         ]
         return small_brick
 
+    def _touch(self, physical_id):
+        self.cache.move_to_end(physical_id)
+
     def _add_to_cache(self, physical_id, data):
-        if len(self.cache) >= self.cache_size:
+        if len(self.cache) >= self.cache_capacity:
             self._evict()
         self.cache[physical_id] = data
-
-    def _update_cache_access(self, physical_id):
-        # Implementation depends on LRU/MRU structure
-        # For LRU: move to end of list
-        # For MRU: move to front of list
-        pass
+        self._touch(physical_id)
 
     def _evict(self):
         if self.use_mru:
-            # Evict the most recently used entry
-            # Implementation detail: remove from front of MRU list
-            pass
+            self.cache.popitem(last=True)  # Evict most recently used
         else:
-            # Evict the least recently used entry
-            # Implementation detail: remove from end of LRU list
-            pass
+            self.cache.popitem(last=False) # Evict least recently used
 
     def _load_from_disk(self, physical_id):
-        # Read large brick from disk storage
-        # Returns 3D array of size (256, 256, 256)
+        # Sources do not specify the exact disk I/O mechanism; standard file read assumed [G].
         pass
 ```
 
@@ -118,14 +105,14 @@ class DynamicRebrickManager:
 Uses fixed-size bricks with overlap and LRU swapping in memory. Choose when dynamic generation overhead is unacceptable or when working sets fit comfortably in memory without eviction issues. Link: [Brick-based Volume Rendering with Overlap and LRU Swapping](3782-brick-based-volume-rendering-with-overlap-and-lru-swapping.md).
 
 ## Operating characteristics
--   **Time Complexity:** Disk I/O is reduced by fetching large bricks, but CPU/GPU overhead is added for slicing (rebricking) [S1]. Preprocessing time for hierarchy generation is high for small brick sizes but avoided with dynamic rebricking [S1].
--   **Memory Complexity:** Requires host memory to cache large bricks. Performance degrades if the working set exceeds host memory [S1].
--   **Performance:** Balances disk throughput (favored by large bricks) with early ray termination (favored by small bricks) [S1].
--   **Strengths:** Avoids expensive preprocessing for large datasets; optimizes both I/O and rendering efficiency [S1].
--   **Limitations:** Requires host memory for caching; LRU eviction can cause issues if working set is too large [S1].
+- **Time Complexity:** Disk I/O is reduced by fetching large bricks, but CPU/GPU overhead is added for slicing (rebricking) [S1]. Preprocessing time for hierarchy generation is high for small brick sizes but avoided with dynamic rebricking [S1].
+- **Memory Complexity:** Requires host memory to cache large bricks. Performance degrades if the working set exceeds host memory [S1].
+- **Performance:** Balances disk throughput (favored by large bricks) with early ray termination (favored by small bricks) [S1].
+- **Strengths:** Avoids expensive preprocessing for large datasets; optimizes both I/O and rendering efficiency [S1].
+- **Limitations:** Requires host memory for caching; LRU eviction can cause issues if working set is too large [S1].
 
 ## Background
-Dynamic Rebricking was introduced in the context of scalable GPU-based ray-guided volume rendering to address the bottleneck of brick hierarchy generation and the trade-off between disk I/O and rendering efficiency [S1]. It allows for the handling of very large datasets (up to several terabytes) by deferring brick organization to runtime [S1].
+Dynamic Rebricking was introduced in the context of scalable GPU-based ray-guided volume rendering to address the bottleneck of brick hierarchy generation and the trade-off between disk I/O and rendering efficiency [S1]. It allows for the handling of very large datasets (feasible up to a few tens of terabytes, with practical tolerance up to 4 terabytes) by deferring brick organization to runtime [S1].
 
 ## Sources
 [S1] An Analysis of Scalable GPU-Based Ray-Guided Volume Rendering, https://pmc.ncbi.nlm.nih.gov/articles/PMC4260263/, fetched 2026-10-26

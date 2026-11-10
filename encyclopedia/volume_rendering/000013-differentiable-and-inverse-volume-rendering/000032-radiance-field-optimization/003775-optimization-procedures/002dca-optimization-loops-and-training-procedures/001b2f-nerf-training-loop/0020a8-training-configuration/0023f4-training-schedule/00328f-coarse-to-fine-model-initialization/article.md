@@ -3,99 +3,96 @@
 Also called: Coarse-to-Fine Initialization, Progressive Scale Training
 
 ## Overview
-Coarse-to-Fine Model Initialization is a training strategy for dynamic radiance fields that stabilizes optimization by decoupling global structural coherence from high-frequency detail reconstruction. It sets itself apart from single-resolution approaches by ensuring the model converges to a valid global geometry before committing computational resources to fine-grained features [S1].
+Coarse-to-Fine Model Initialization accelerates the optimization of dynamic radiance fields by leveraging a pre-trained coarse model to bootstrap a high-resolution fine model. It solves the problem of slow convergence and instability in dynamic scenes by first establishing global geometry and deformation at low resolution, then refining appearance and high-frequency details at high resolution. It sets itself apart from single-resolution training by decoupling structural learning from detail recovery, building on [Training Schedule](3154-training-schedule.md).
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** A trained coarse model (deformation module weights, optimized feature grid) and a target fine voxel resolution.
-*   **Output:** An initialized fine model ready for continued optimization.
+**Inputs and Outputs:**
+*   **Input:** A trained coarse model consisting of a coarse deformation feature grid, a coarse deformation MLP, and associated weights.
+*   **Output:** An initialized fine model ready for high-resolution training.
 
-**Data Structures**
-*   **Deformation Feature Grid:** A 3D grid storing deformation features. In the coarse model, this has a lower resolution (e.g., $N \times N \times N$). In the fine model, it has a higher resolution (e.g., $2N \times 2N \times 2N$).
-*   **Deformation MLP:** A multi-layer perceptron mapping position, time, and feature vectors to deformation offsets. The architecture (layer count, width, activation) remains identical between coarse and fine models [S1].
+**Data Structures:**
+1.  **Coarse Deformation Feature Grid:** A 3D grid storing deformation features. The specific resolution is not given in the sources, but it is lower than the fine model.
+2.  **Coarse Deformation MLP:** A fully connected network. The architecture is defined as four layers with width 64. Input dimensions are 33 (position), 1 (time), and 44 (feature).
+3.  **Fine Deformation Feature Grid:** A 3D grid with higher resolution.
+4.  **Fine Deformation MLP:** Identical architecture to the coarse deformation MLP.
 
-**Steps**
-1.  **Train Coarse Model:** Optimize the coarse model until it captures the global structure and low-frequency dynamics.
-2.  **Initialize Deformation MLP:** Copy the trained weights from the coarse deformation module directly to the fine deformation module. This is possible because the MLP architecture is identical [S1].
-3.  **Initialize Feature Grid:** Interpolate the optimized feature grid from the coarse model into the fine model's higher-resolution grid. This provides a spatially accurate starting point for the fine-scale features [S1].
-4.  **Progressive Scale Training:** Begin training the fine model. After a fixed number of iterations, double the voxel resolution of the feature grid. Repeat this process to progressively increase resolution [S1].
+**Steps:**
+1.  **Initialize Deformation MLP Weights:** Copy the trained network weights from the coarse deformation module to the fine deformation module. This is possible because the MLP architecture is identical in both models [S1].
+2.  **Initialize Deformation Feature Grid:** Initialize the fine model's deformation feature grid using the optimized feature grid from the coarse model. This is achieved via interpolation [S1].
+3.  **Apply Progressive Scale Training:** During the training of the fine model, double the voxel resolution after a specified number of training iterations [S1].
 
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def initialize_fine_model(coarse_model, target_resolution):
+def initialize_fine_model(coarse_model):
     """
-    Initialize a fine dynamic radiance field model using a trained coarse model.
+    Initializes the fine model using the trained coarse model.
     
     Args:
-        coarse_model: Trained coarse model containing deformation_mlp and deformation_grid.
-        target_resolution: The final voxel resolution for the fine model.
-        
+        coarse_model: An object containing:
+            - coarse_deformation_mlp: The trained MLP weights.
+            - coarse_feature_grid: The optimized feature grid.
+            - coarse_voxel_resolution: The resolution of the coarse grid.
+            
     Returns:
-        fine_model: Initialized fine model.
+        fine_model: An initialized fine model.
     """
-    fine_model = create_fine_model(target_resolution)
+    # Step 1: Initialize Deformation MLP Weights
+    # The MLP architecture is identical, so we can directly copy weights.
+    fine_deformation_mlp = copy_weights(coarse_model.coarse_deformation_mlp)
     
-    # Step 2: Initialize Deformation MLP
-    # Copy weights from coarse to fine MLP as architectures are identical
-    fine_model.deformation_mlp.load_state_dict(coarse_model.deformation_mlp.state_dict())
+    # Step 2: Initialize Deformation Feature Grid
+    # Interpolate the coarse feature grid to the fine resolution.
+    # Note: The specific interpolation method (e.g., trilinear) is not specified in the sources.
+    # We assume a standard 3D interpolation function.
+    fine_feature_grid = interpolate_3d(
+        coarse_model.coarse_feature_grid,
+        target_resolution=get_fine_resolution(coarse_model.coarse_voxel_resolution)
+    )
     
-    # Step 3: Initialize Feature Grid via Interpolation
-    coarse_grid = coarse_model.deformation_grid
-    fine_grid = fine_model.deformation_grid
-    
-    # Interpolate coarse grid values to the finer grid structure
-    # Assuming trilinear interpolation for simplicity
-    fine_grid.data = interpolate_3d(coarse_grid.data, coarse_grid.resolution, fine_grid.resolution)
+    # Step 3: Construct Fine Model
+    fine_model = {
+        'deformation_mlp': fine_deformation_mlp,
+        'feature_grid': fine_feature_grid,
+        'voxel_resolution': get_fine_resolution(coarse_model.coarse_voxel_resolution)
+    }
     
     return fine_model
 
-def progressive_scale_training(fine_model, max_resolution, iterations_per_scale):
+def get_fine_resolution(coarse_resolution):
     """
-    Train the fine model with progressive resolution scaling.
-    
-    Args:
-        fine_model: The initialized fine model.
-        max_resolution: The maximum voxel resolution to reach.
-        iterations_per_scale: Number of training iterations before doubling resolution.
+    Returns the fine resolution, which is double the coarse resolution.
+    This is part of the progressive scale training strategy.
     """
-    current_resolution = fine_model.deformation_grid.resolution
-    
-    while current_resolution <= max_resolution:
-        # Train for a fixed number of iterations at current resolution
-        for _ in range(iterations_per_scale):
-            optimize_step(fine_model)
-            
-        # Double the resolution if not yet at max
-        if current_resolution < max_resolution:
-            fine_model.deformation_grid.resize(current_resolution * 2)
-            current_resolution *= 2
+    return coarse_resolution * 2
 ```
 
-**Parameters**
-*   **Interpolation Method:** Not specified in sources, but implied to be standard spatial interpolation (e.g., trilinear) [S1].
-*   **Iterations per Scale:** Not given in the sources.
-*   **Resolution Doubling Factor:** 2x [S1].
+**Parameters:**
+*   **Interpolation Method:** Not given in the sources.
+*   **Progressive Scale Step:** The number of iterations after which the voxel resolution is doubled is not given in the sources [S1].
 
-**Edge Cases and Pitfalls**
-*   **Filtering:** Points with alpha always below a threshold are filtered out during training. For the canonical module, only empty points at the canonical time are filtered [S1].
-*   **Precision:** Interpolation artifacts may occur if the coarse grid is too sparse relative to the fine grid.
+**Edge Cases and Pitfalls:**
+*   **Precision:** Interpolation from coarse to fine grid may introduce smoothing artifacts if the coarse grid is too low resolution.
+*   **Boundaries:** The sources do not specify how boundary conditions are handled during interpolation.
+*   **Degenerate Input:** If the coarse model is not sufficiently trained, the initialization may lead to poor convergence in the fine model.
 
 ## Subtopics
 
 ### [Progressive Coarse-to-Fine Training Strategy](8900-progressive-coarse-to-fine-training-strategy.md)
-A training protocol for dynamic radiance fields that combines temporal progression with spatial resolution scaling to stabilize optimization and improve geometry. It sets itself apart from single-resolution or static-temporal approaches by decoupling global structural coherence from high-frequency detail reconstruction, ensuring the model converges to a valid global geometry before committing computational resources to fine-grained features.
+This method accelerates radiance-field optimization by decoupling structural learning from high-frequency detail recovery. It solves the problem of slow convergence and instability in dynamic scenes by first establishing global geometry at low resolution, then refining appearance and directionality at high resolution. It sets itself apart from single-resolution training by progressively adding temporal data and switching feature representations, building on [Coarse-to-Fine Model Initialization](6793-coarse-to-fine-model-initialization.md).
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces total training time compared to training a fine model from scratch, as the coarse model provides a good initialization [S1].
-*   **Memory Complexity:** Requires storing both coarse and fine models during the transition, but the fine model's memory usage scales with voxel resolution.
-*   **Performance:** Results in higher performance and shorter training time [S1].
-*   **Strengths:** Stabilizes optimization for dynamic scenes; prevents local minima in high-frequency detail reconstruction.
-*   **Limitations:** Requires a well-trained coarse model; resolution doubling schedule must be tuned.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The sources state that this initialization can result in higher performance and shorten the training time [S1].
+*   **Strengths:** Accelerates convergence, improves final performance, reduces training time.
+*   **Limitations:** Requires a pre-trained coarse model, adds complexity to the training pipeline.
+*   **When to Use:** When optimizing dynamic radiance fields and computational resources are limited.
+*   **When Not to Use:** When the coarse model cannot be adequately trained or when the scene does not benefit from hierarchical optimization.
 
 ## Background
-Originated in the context of dynamic view synthesis using neural deformable voxel grids. The method was introduced by X. Guo et al. in "Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis" [S1]. It addresses the challenge of optimizing high-resolution dynamic radiance fields efficiently.
+This method is described in the paper "Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis" by X. Guo et al. [S1]. The paper proposes a neural deformable voxel grid approach for dynamic view synthesis, where the coarse-to-fine initialization is a key component of the optimization procedure.
 
 ## Sources
 [S1] Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis, https://doi.org/10.1007/978-3-031-26319-4_27, fetched 2026-10-26

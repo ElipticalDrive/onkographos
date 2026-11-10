@@ -7,13 +7,13 @@ This method enables reparameterized sampling in volume rendering by approximatin
 
 ## How it works
 **Inputs:**
-- Grid of $m+1$ points $t_0, t_1, \dots, t_m$ such that $t_n = t_0 < t_1 < \dots < t_m = t_f$ [S1, unofficial][S2, unofficial].
+- Grid of $m+1$ points $t_0, t_1, \dots, t_m$ such that $t_0 < t_1 < \dots < t_m = t_f$ [S1, unofficial][S2, unofficial].
 - A density query function $\sigma_r(t)$ that returns the scalar density at distance $t$ along the ray [S1, unofficial][S2, unofficial].
 - A target uniform random sample $u \in [0, 1)$ [S1, unofficial][S2, unofficial].
 - A scaling factor $y_f$ [S1, unofficial][S2, unofficial].
 
 **Outputs:**
-- A sample location $t \in [t_n, t_f]$ on the ray such that the cumulative opacity up to $t$ matches the target value derived from $u$ [S1, unofficial][S2, unofficial].
+- A sample location $t \in [t_0, t_f]$ on the ray such that the cumulative opacity up to $t$ matches the target value derived from $u$ [S1, unofficial][S2, unofficial].
 
 **Data Structures:**
 - **Grid:** An array of $m+1$ floats representing the bin boundaries $t_i$.
@@ -39,16 +39,16 @@ This method enables reparameterized sampling in volume rendering by approximatin
    If $u=1$, handle the edge case where $Y \to \infty$ by clamping $t$ to $t_f$ [G].
 
 3. **Find the Containing Bin:**
-   Compute the cumulative integral values at the grid boundaries to determine which bin contains the solution $t$.
+   Compute the cumulative integral values at the grid boundaries to determine which bin contains the solution $t$ [G].
 
    *For PWC:*
-   Compute $C_i = I_0(t_i)$ for $i=0, \dots, m$.
+   Compute $C_i = I_0(t_i)$ for $i=0, \dots, m$ [G]:
    $$ C_0 = 0 $$
    $$ C_i = \sum_{j=0}^{i-1} \hat{\sigma}_j (t_{j+1} - t_j) \quad \text{for } i > 0 $$
    Find index $k$ such that $C_k \le Y < C_{k+1}$ [S1, unofficial][S2, unofficial].
 
    *For PWL:*
-   Compute $C_i = I_1(t_i)$ for $i=0, \dots, m$.
+   Compute $C_i = I_1(t_i)$ for $i=0, \dots, m$ [G]:
    $$ C_0 = 0 $$
    $$ C_i = \sum_{j=0}^{i-1} \frac{\sigma_j + \sigma_{j+1}}{2} (t_{j+1} - t_j) \quad \text{for } i > 0 $$
    Find index $k$ such that $C_k \le Y < C_{k+1}$ [S1, unofficial][S2, unofficial].
@@ -63,17 +63,17 @@ This method enables reparameterized sampling in volume rendering by approximatin
 
    *For PWL (Quadratic Equation):*
    The density in bin $k$ is interpolated: $\bar{\sigma}_r(t) = \sigma_k \frac{t_{k+1}-t}{t_{k+1}-t_k} + \sigma_{k+1} \frac{t-t_k}{t_{k+1}-t_k}$ [S2, unofficial].
-   Let $\Delta t_k = t_{k+1} - t_k$ and $\tau = t - t_k$.
+   Let $\Delta t_k = t_{k+1} - t_k$ and $\tau = t - t_k$ [G].
    The integral from $t_k$ to $t$ is:
    $$ I_{bin}(\tau) = \int_{t_k}^t \bar{\sigma}_r(s) ds = \sigma_k \tau + \frac{\sigma_{k+1} - \sigma_k}{2 \Delta t_k} \tau^2 $$
-   We need to solve $C_k + I_{bin}(\tau) = Y$, or $I_{bin}(\tau) = Y - C_k$. Let $R = Y - C_k$.
+   We need to solve $C_k + I_{bin}(\tau) = Y$, or $I_{bin}(\tau) = Y - C_k$ [G]. Let $R = Y - C_k$.
    $$ \frac{\sigma_{k+1} - \sigma_k}{2 \Delta t_k} \tau^2 + \sigma_k \tau - R = 0 $$
-   This is a quadratic equation $A \tau^2 + B \tau + C = 0$ with:
-   $$ A = \frac{\sigma_{k+1} - \sigma_k}{2 \Delta t_k}, \quad B = \sigma_k, \quad C = -R $$
+   This is a quadratic equation $A \tau^2 + B \tau + C_{eq} = 0$ with:
+   $$ A = \frac{\sigma_{k+1} - \sigma_k}{2 \Delta t_k}, \quad B = \sigma_k, \quad C_{eq} = -R $$
    Solve for $\tau$:
    If $|A| < \epsilon$ (i.e., $\sigma_k \approx \sigma_{k+1}$), use linear solution: $\tau = R / B$ [G].
    Otherwise, use quadratic formula:
-   $$ \tau = \frac{-B + \sqrt{B^2 - 4AC}}{2A} $$
+   $$ \tau = \frac{-B + \sqrt{B^2 - 4AC_{eq}}}{2A} $$
    (Select the root that lies in $[0, \Delta t_k]$; since the integral is monotonic for non-negative density, exactly one root will satisfy the bounds) [S1, unofficial][S2, unofficial].
    $$ t = t_k + \tau $$
 
@@ -112,7 +112,7 @@ def piecewise_density_approximation_sample(
     m = len(t_grid) - 1
     
     # Precompute cumulative integrals at grid points
-    C = [0.0] * (m + 1)
+    C_cum = [0.0] * (m + 1)
     
     if approx_type == "PWC":
         # PWC: Precompute representative densities and cumulative sums
@@ -126,7 +126,7 @@ def piecewise_density_approximation_sample(
             
             delta_t = t_curr - t_prev
             current_C += sigma_rep * delta_t
-            C[i] = current_C
+            C_cum[i] = current_C
             
     elif approx_type == "PWL":
         # PWL: Precompute densities at grid points and cumulative sums
@@ -143,25 +143,25 @@ def piecewise_density_approximation_sample(
             # Trapezoidal area
             area = 0.5 * (sigma_prev + sigma_curr) * delta_t
             current_C += area
-            C[i] = current_C
+            C_cum[i] = current_C
     else:
         raise ValueError("Unknown approximation type")
         
-    # Find bin k such that C[k] <= Y < C[k+1]
+    # Find bin k such that C_cum[k] <= Y < C_cum[k+1]
     k = 0
     for i in range(m):
-        if Y < C[i+1]:
+        if Y < C_cum[i+1]:
             k = i
             break
     else:
-        # Y >= C[m], return far clip
+        # Y >= C_cum[m], return far clip
         return t_grid[-1]
         
     # Solve for t in bin k
     t_k = t_grid[k]
     t_k1 = t_grid[k+1]
     delta_t_k = t_k1 - t_k
-    R = Y - C[k]
+    R = Y - C_cum[k]
     
     if approx_type == "PWC":
         # Linear equation: R = sigma_rep * (t - t_k)
@@ -177,21 +177,21 @@ def piecewise_density_approximation_sample(
         return max(t_k, min(t_k1, t))
         
     elif approx_type == "PWL":
-        # Quadratic equation: A*tau^2 + B*tau + C = 0
+        # Quadratic equation: A*tau^2 + B*tau + C_eq = 0
         sigma_k = density_func(t_k)
         sigma_k1 = density_func(t_k1)
         
         A = (sigma_k1 - sigma_k) / (2.0 * delta_t_k)
         B = sigma_k
-        C_const = -R
+        C_eq = -R
         
         if abs(A) < 1e-9:
             # Linear case
             if abs(B) < 1e-9:
                 return t_k1
-            tau = -C_const / B
+            tau = -C_eq / B
         else:
-            discriminant = B*B - 4*A*C_const
+            discriminant = B*B - 4*A*C_eq
             if discriminant < 0:
                 # Numerical error, clamp
                 return t_k1
@@ -228,9 +228,9 @@ Uses SDFs and logistic CDF. Choose for surface-based rendering.
 Standard raycasting output. Choose for baseline comparison.
 
 ## Operating characteristics
-- **Time Complexity:** $O(m)$ to precompute cumulative integrals, where $m$ is the number of grid bins. Finding the bin is $O(m)$ with linear scan or $O(\log m)$ with binary search. Solving for $t$ is $O(1)$.
-- **Memory Complexity:** $O(m)$ to store grid points and cumulative integrals.
-- **Measured Performance:** Not given in the sources.
+- **Time Complexity:** $O(m)$ to precompute cumulative integrals, where $m$ is the number of grid bins [G]. Finding the bin is $O(m)$ with linear scan or $O(\log m)$ with binary search [G]. Solving for $t$ is $O(1)$ [G].
+- **Memory Complexity:** $O(m)$ to store grid points and cumulative integrals [G].
+- **Measured Performance:** Not given in the sources [G].
 - **Strengths:** Differentiable with respect to density field $\sigma_r$ [S1, unofficial]. Allows analytical computation of integrals [S1, unofficial][S2, unofficial].
 - **Limitations:** Requires precomputation of grid densities. Approximation error depends on grid resolution [S1, unofficial][S2, unofficial].
 - **When to use:** When differentiable sampling is required, or when analytical inversion of opacity is beneficial [S1, unofficial][S2, unofficial].

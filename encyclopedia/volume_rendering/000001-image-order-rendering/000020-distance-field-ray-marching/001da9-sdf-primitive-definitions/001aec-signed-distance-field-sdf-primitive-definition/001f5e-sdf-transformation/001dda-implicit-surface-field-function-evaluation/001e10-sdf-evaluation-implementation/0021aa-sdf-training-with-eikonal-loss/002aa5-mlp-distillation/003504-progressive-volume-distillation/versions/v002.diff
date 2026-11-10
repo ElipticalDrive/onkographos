@@ -1,0 +1,200 @@
+--- v001.md
++++ v002.md
+@@ -1,4 +1,4 @@
+ # Progressive Volume Distillation
+-
++Also called: PVD
+ 
+ ## Overview
+@@ -21,5 +21,5 @@
+ The total loss $L$ combines volume-aligned loss, density loss, color loss, RGB loss, and regularization [S1]:
+ $$ L = \omega_1 L_{v2} + \omega_2 L_{\sigma 2} + \omega_3 L_{c 2} + \omega_4 L_{rgb 2} + \omega_5 L_{reg} $$
+-where $\|\cdot\|^2$ denotes Mean Squared Error (MSE) [S1].
++where $\|\cdot\|^2$ denotes the squared L2 norm [S1].
+ 
+ 1.  **Volume-Aligned Loss ($L_{v2}$):** Aligns the intermediate feature outputs of the teacher and student [S1].
+@@ -43,5 +43,5 @@
+ 
+ **Parameters**
+-*   **Loss Weights:** $\omega_1 = 2 \times 10^{-3}$ (volume-aligned), $\omega_2 = 2 \times 10^{-3}$ (density), $\omega_3 = 2 \times 10^{-3}$ (color), $\omega_4 = 1$ (RGB) [S1]. $\omega_5$ is not explicitly given but implied to be active for regularization terms [S1].
++*   **Loss Weights:** $\omega_1 = 2 \times 10^{-3}$ (volume-aligned), $\omega_2 = 2 \times 10^{-3}$ (density), $\omega_3 = 2 \times 10^{-3}$ (color), $\omega_4 = 1$ (RGB) [S1]. $\omega_5$ is not explicitly given in the sources [S1].
+ *   **Density Range $[a, b]$:** Specific values for $a$ and $b$ are not given in the sources, but the clipping function $\min(\max(\sigma, a), b)$ is mandatory [S1].
+ *   **Optimization:** Adam Optimizer with initial learning rate 0.02 [S1].
+@@ -53,15 +53,15 @@
+ 
+ 1.  **Stage 1 (Steps 1–3,000):**
+-    *   Forward pass only through the student's first stage $\phi_{1s}^*$ to compute $L_{v2}$ and $L_{\sigma 2}$ (using teacher's $\phi_{1t}^*$ and $\sigma_t$).
++    *   Forward pass only through the student's first stage $\phi_{1s}^*$ to compute $L_{v2}$ and $L_{\sigma 2}$ (using teacher's $\phi_{1t}^*$ and $\sigma_t$) [S1].
+     *   Backpropagate gradients to update $\phi_{1s}^*$ [S1].
+     *   Note: The teacher's $\phi_{1t}^*$ is frozen and used as a reference [S1].
+ 
+ 2.  **Stage 2 (Steps 3,001–8,000):**
+-    *   Forward pass through student's $\phi_{1s}^*$ and $\phi_{2s}^*$ to compute intermediate outputs.
+-    *   Compute $L_{v2}$, $L_{\sigma 2}$, $L_{c 2}$, and $L_{reg}$ (if applicable).
++    *   Forward pass through student's $\phi_{1s}^*$ and $\phi_{2s}^*$ to compute intermediate outputs [S1].
++    *   Compute $L_{v2}$, $L_{\sigma 2}$, $L_{c 2}$, and $L_{reg}$ (if applicable) [S1].
+     *   Backpropagate gradients to update $\phi_{1s}^*$ and $\phi_{2s}^*$ [S1].
+ 
+ 3.  **Stage 3 (Steps 8,001–20,000):**
+-    *   Forward pass through the full student network $\phi_s^*$ to compute final rendered RGB.
++    *   Forward pass through the full student network $\phi_s^*$ to compute final rendered RGB [S1].
+     *   Compute full loss $L$ including $L_{rgb 2}$ [S1].
+     *   Backpropagate gradients to update all student parameters [S1].
+@@ -69,100 +69,64 @@
+ **Pseudocode**
+ ```python
+-def progressive_volume_distillation(teacher_model, student_model, num_steps=20000):
+-    """
+-    Distills a teacher NeRF model into a student model using PVD.
+-    
+-    Args:
+-        teacher_model: Trained teacher model with split stages phi_1_t, phi_2_t.
+-        student_model: Student model with split stages phi_1_s, phi_2_s.
+-        num_steps: Total training steps (default 20000).
+-    """
+-    # Hyperparameters
+-    omega_v2 = 2e-3
+-    omega_s2 = 2e-3
+-    omega_c2 = 2e-3
+-    omega_rgb2 = 1.0
+-    lr = 0.02
+-    batch_size = 4096
+-    
+-    # Density clipping range [a, b] - values not specified in sources [S1]
+-    # a = ...
+-    # b = ...
+-    
+-    optimizer = Adam(student_model.parameters(), lr=lr)
+-    
++def progressive_volume_distillation(teacher_model, student_model, num_steps=20000, batch_size=4096, lr=0.02, a=0.0, b=10.0):
++    # Loss weights from [S1]
++    w_v2, w_s2, w_c2, w_rgb = 2e-3, 2e-3, 2e-3, 1.0
++    w_reg = 1.0  # Not given in sources [S1]
++
++    optimizer = Optimizer(student_model.parameters(), lr=lr)
++
+     for step in range(1, num_steps + 1):
+-        # Sample rays (x, d)
+         rays = sample_rays(batch_size)
+-        
+-        # Forward pass through Teacher Stage 1 (Frozen)
++
++        # Teacher forward pass (frozen)
+         with torch.no_grad():
+-            teacher_feat = teacher_model.phi_1(rays.x, rays.d)
+-            teacher_sigma = teacher_model.compute_density(teacher_feat) # Or from teacher's output
+-            
+-        # Forward pass through Student Stage 1
+-        student_feat = student_model.phi_1(rays.x, rays.d)
+-        
+-        # Volume-Aligned Loss
+-        loss_v2 = mse(student_feat, teacher_feat)
+-        
+-        # Density Loss with Clipping
+-        # Note: Teacher sigma might need clipping too if it exceeds [a,b], 
+-        # but source implies clipping the comparison [S1]
+-        clipped_teacher_sigma = clip(teacher_sigma, a, b)
+-        clipped_student_sigma = clip(student_sigma_from_feat(student_feat), a, b)
+-        loss_s2 = mse(clipped_teacher_sigma, clipped_student_sigma)
+-        
++            t_feat = teacher_model.phi_1(rays.x, rays.d)
++            t_sigma = get_density(t_feat)
++            t_color = get_color(t_feat, rays.d)
++            t_rgb = render_ray(teacher_model, rays)
++
++        # Student forward pass Stage 1
++        s_feat = student_model.phi_1(rays.x, rays.d)
++        s_sigma = get_density(s_feat)
++        s_color = get_color(s_feat, rays.d)
++
++        # Losses
++        loss_v2 = mse(s_feat, t_feat)
++        loss_s2 = mse(clip(t_sigma, a, b), clip(s_sigma, a, b))
++        loss_c2 = mse(s_color, t_color)
++
+         if step <= 3000:
+-            # Stage 1: Only update phi_1_s
+-            loss = omega_v2 * loss_v2 + omega_s2 * loss_s2
++            loss = w_v2 * loss_v2 + w_s2 * loss_s2
+             optimizer.zero_grad()
+             loss.backward()
+             optimizer.step()
+-            
+         elif step <= 8000:
+-            # Stage 2: Update phi_1_s and phi_2_s
+-            # Compute intermediate color from student stage 2
+-            student_color = student_model.phi_2(student_feat, rays.d)
+-            
+-            # Color Loss
+-            loss_c2 = mse(student_color, teacher_color_from_feat(teacher_feat)) # Assuming teacher provides color or it's derived
+-            
+-            # Regularization (if applicable)
+-            loss_reg = 0
+-            if student_model.type in ['Plenoxels', 'VM']:
+-                loss_reg = l1_sparsity(student_model) + tv_regularization(student_model)
+-                
+-            loss = (omega_v2 * loss_v2 + 
+-                    omega_s2 * loss_s2 + 
+-                    omega_c2 * loss_c2 + 
+-                    omega_rgb2 * 0 + # RGB loss not used yet
+-                    omega_5 * loss_reg)
+-            
++            loss_reg = regularization_loss(student_model) if student_model.is_explicit else 0.0
++            loss = w_v2 * loss_v2 + w_s2 * loss_s2 + w_c2 * loss_c2 + w_reg * loss_reg
+             optimizer.zero_grad()
+             loss.backward()
+             optimizer.step()
+-            
+         else:
+-            # Stage 3: Full network, including RGB loss
+-            # Render final RGB
+-            student_rgb = render_student_ray(student_model, rays)
+-            teacher_rgb = render_teacher_ray(teacher_model, rays)
+-            
+-            # RGB Loss
+-            loss_rgb2 = mse(student_rgb, teacher_rgb)
+-            
+-            # Recompute other losses if needed for consistency, 
+-            # though source implies full loss combination [S1]
+-            # Note: Source lists L_rgb2 in the final sum, implying all terms are active
+-            loss = (omega_v2 * loss_v2 + 
+-                    omega_s2 * loss_s2 + 
+-                    omega_c2 * loss_c2 + 
+-                    omega_rgb2 * loss_rgb2 + 
+-                    omega_5 * loss_reg)
+-            
++            s_rgb = render_ray(student_model, rays)
++            loss_rgb = mse(s_rgb, t_rgb)
++            loss_reg = regularization_loss(student_model) if student_model.is_explicit else 0.0
++            loss = w_v2 * loss_v2 + w_s2 * loss_s2 + w_c2 * loss_c2 + w_rgb * loss_rgb + w_reg * loss_reg
+             optimizer.zero_grad()
+             loss.backward()
+             optimizer.step()
++
++# Helper definitions
++def mse(a, b): return sum((x - y)**2 for x, y in zip(a, b)) / len(a)
++def clip(x, lo, hi): return max(lo, min(hi, x))
++def sample_rays(n): return [(random_point(), random_direction()) for _ in range(n)]
++def get_density(feat): return feat  # Simplified for pseudocode [G]
++def get_color(feat, d): return feat  # Simplified for pseudocode [G]
++def render_ray(model, rays): return [integrate_ray(model, r) for r in rays]
++def regularization_loss(model): return l1_norm(model.weights) + tv_norm(model.weights)
++
++class Optimizer:
++    def __init__(self, params, lr): self.params = params; self.lr = lr
++    def zero_grad(self): [p.grad.zero_() for p in self.params]
++    def step(self): [p.data -= self.lr * p.grad for p in self.params]
+ ```
+ 
+@@ -178,8 +142,8 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Distillation is significantly faster than training from scratch. An MLP-based NeRF distilled from a hashtable-based Instant-NGP model takes 1.5 hours compared to 25 hours for training from scratch [S1].
++*   **Time Complexity:** Distillation is significantly faster than training from scratch [S1]. An MLP-based NeRF distilled from a hashtable-based Instant-NGP model takes 1.5 hours compared to 25 hours for training from scratch [S1].
+ *   **Speedup Factor:** 10x to 20x faster than training the original NeRF from scratch [S1].
+-*   **Memory Complexity:** Depends on the student architecture. The method itself does not add significant memory overhead beyond storing the teacher and student models [S1].
+-*   **Performance:** Maintains teacher performance levels. Conversions between Hash, VM, MLP, and Tensors show little difference in PSNR/SSIM compared to training from scratch or the teacher itself [S1].
++*   **Memory Complexity:** Depends on the student architecture [S1]. The method itself does not add significant memory overhead beyond storing the teacher and student models [S1].
++*   **Performance:** Maintains teacher performance levels. Conversions between Hash, VM, MLP, and Tensors maintain performance comparable to the teacher model and training from scratch [S1].
+ *   **Strengths:** Enables any-to-any conversion; accelerates training; improves synthesis quality via density clipping and volume-aligned loss [S1].
+ *   **Limitations:** Requires a trained teacher model; performance depends on the quality of the teacher [S1].

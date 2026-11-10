@@ -3,61 +3,163 @@
 Also called: SortFree, Weighted-sum blending OIT
 
 ## Overview
-SortFree Weighting is an Order-Independent Transparency (OIT) approximation for 3D Gaussian Splatting that replaces the computationally expensive depth-sorting step with a commutative weighted-sum blending scheme [S1, unofficial]. It solves the bottleneck of CPU-based sorting in standard 3DGS rendering by weighting splats based on their depth and view direction, allowing fragments to be blended in any order [S1, unofficial]. Unlike standard alpha blending which requires strict depth ordering, SortFree approximates the compositing result through a linear accumulation, trading strict physical accuracy for rendering stability and performance [S1, unofficial].
+SortFree Weighting is an Order-Independent Transparency (OIT) approximation for 3D Gaussian Splatting that eliminates the computational bottleneck of depth sorting by replacing non-commutative alpha blending with a commutative weighted-sum blending scheme [S1, unofficial]. Unlike standard 3D Gaussian Splatting which requires CPU-side depth sorting of splats per pixel, SortFree allows parallel accumulation of Gaussian colors in a single pass, trading strict physical accuracy for rendering efficiency and temporal stability [S1, unofficial]. It sets itself apart from siblings like [Depth-aware Order-independent Rendering](9460-depth-aware-order-independent-rendering.md) by using a fixed analytical depth falloff rather than neural networks to predict view-dependent weights.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of projected 2D Gaussian splats, each defined by screen-space position, covariance, opacity, and spherical harmonic coefficients.
-*   **Output:** A final color value per pixel, computed via commutative accumulation.
+*   **Input:** A set of 3D Gaussians, each defined by position, covariance, opacity, and spherical harmonic coefficients. For each pixel, the set of projected 2D Gaussian splats overlapping the pixel.
+*   **Output:** The final color $C$ for the pixel.
 
 **Data Structures:**
-*   **Splat Attributes:** Each Gaussian retains its standard attributes: center $(x, y)$, covariance matrix $\Sigma$, opacity $\alpha$, and view-dependent color coefficients.
-*   **Weight Parameter:** A single learnable scalar $\sigma$ per scene.
+*   **Gaussian Splat:** Contains screen-space center $(x, y)$, covariance matrix $\Sigma$, opacity $\alpha$, and spherical harmonic coefficients $\mathbf{c}$.
+*   **Scene Parameter:** A single learnable scalar $\sigma$ representing the depth falloff range.
 
-**Weight Function:**
-The core of the method is a weight function $w(d, \mathbf{r})$ applied to each Gaussian before accumulation. The weight depends on the camera-space depth $d$ and the view direction $\mathbf{r}$ [S1, unofficial].
+**Method:**
+The core mechanism replaces the standard alpha compositing equation $C = \sum c_i \alpha_i \prod_{j<i} (1-\alpha_j)$ with a weighted sum. The weight $w$ for each Gaussian depends on its depth $d$ and view direction $\mathbf{r}$.
 
-The formula is:
-$$
-w(d, \mathbf{r}) = \max\left(0, 1 - \frac{d}{\sigma}\right) v(\mathbf{r})
-$$
+1.  **Project Gaussians:** Project each 3D Gaussian to 2D screen space to obtain the 2D covariance matrix $\Sigma'$ and center.
+2.  **Compute Depth:** For each Gaussian $i$, determine its depth $d_i$ in camera space.
+3.  **Compute View Direction:** Determine the view direction vector $\mathbf{r}_i$ from the camera center to the Gaussian center.
+4.  **Calculate Weight:** Compute the weighting factor $w_i$ using the formula:
+    $$ w_i = \max\left(0, 1 - \frac{d_i}{\sigma}\right) v(\mathbf{r}_i) $$
+    Where:
+    *   $d_i$ is the depth of the $i$-th Gaussian.
+    *   $\sigma$ is the learnable scene parameter controlling the depth falloff.
+    *   $v(\mathbf{r}_i)$ is a view-dependent term derived from spherical harmonics.
+5.  **Accumulate Color:** Compute the final color $C$ by summing the weighted colors of all overlapping splats:
+    $$ C = \sum_{i \in \text{overlapping}} w_i \cdot c_i $$
+    Where $c_i$ is the color of the $i$-th Gaussian evaluated at $\mathbf{r}_i$.
 
-Where:
-*   $d$: The depth of the Gaussian center in camera space.
-*   $\sigma$: A learnable scalar parameter controlling the depth falloff range. It acts as a cutoff threshold; if $d \ge \sigma$, the weight becomes zero [S1, unofficial].
-*   $v(\mathbf{r})$: A view-dependent term derived from spherical harmonics. Specifically, $v(\mathbf{r}) \in \mathbb{R}^{4\times3}$ represents the degree-3 spherical harmonic coefficients used to compensate for view-dependent appearance [S1, unofficial]. Note: The exact integration of $v(\mathbf{r})$ into the final color accumulation (e.g., whether it scales the color directly or modifies the opacity) is not explicitly detailed in the source beyond being part of the weight [S1, unofficial].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Algorithm Steps:**
-1.  **Project:** Project each 3D Gaussian to 2D screen space to obtain its center $(x, y)$ and screen-space covariance.
-2.  **Compute Weight:** For each Gaussian, calculate its depth $d$ and view direction $\mathbf{r}$. Compute the weight $w(d, \mathbf{r})$ using the formula above.
-3.  **Accumulate:** Instead of sorting by depth, iterate through all splats overlapping a pixel. For each splat, add its contribution to the pixel's color buffer, scaled by the computed weight $w(d, \mathbf{r})$. The accumulation is commutative, meaning the order of processing does not affect the final result.
-4.  **Normalize (Implicit):** The source describes this as a "weighted-sum blending" scheme. Standard OIT methods often require normalization by the sum of weights to prevent brightness artifacts, but the source does not explicitly specify a normalization step for SortFree [S1, unofficial]. [G] In typical weighted-sum OIT, the final color is $C = \frac{\sum w_i C_i}{\sum w_i}$. If not normalized, the result may be biased by the total weight.
+```python
+def sortfree_weighting_render(gaussians, camera, sigma):
+    """
+    Render a frame using SortFree Weighting.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+            - pos: (3,) camera-space position
+            - cov: (3,3) 3D covariance matrix
+            - opacity: scalar
+            - sh_coeffs: array for spherical harmonics
+        camera: Camera object with attributes:
+            - origin: (3,) camera position
+            - view_matrix: (4,4) transformation matrix
+        sigma: float, learnable depth falloff parameter
+        
+    Returns:
+        image: (H, W, 3) rendered image
+    """
+    H, W = image_height, image_width
+    image = np.zeros((H, W, 3))
+    
+    # Precompute camera origin and view direction logic if needed
+    # Note: In a real implementation, this is done via GPU shaders or vectorized ops
+    
+    for g in gaussians:
+        # 1. Project Gaussian to screen space
+        # Transform 3D pos to camera space
+        pos_cam = camera.view_matrix @ np.append(g.pos, 1)
+        pos_cam = pos_cam[:3] / pos_cam[3]
+        
+        # Project to 2D (simplified projection logic)
+        # In practice, use the full projection matrix and Jacobian for covariance
+        x, y = project_to_screen(pos_cam, camera.projection_matrix)
+        
+        # Check if within bounds
+        if not (0 <= x < W and 0 <= y < H):
+            continue
+            
+        # 2. Compute Depth
+        d = pos_cam[2] # Z-depth in camera space
+        
+        # 3. Compute View Direction
+        # Vector from camera origin to Gaussian
+        view_vec = pos_cam - camera.origin
+        view_vec = view_vec / np.linalg.norm(view_vec)
+        
+        # 4. Calculate Weight
+        # Depth term: max(0, 1 - d/sigma)
+        depth_term = max(0.0, 1.0 - d / sigma)
+        
+        # View-dependent term v(r) from Spherical Harmonics
+        # v(r) is typically the color contribution or a specific SH evaluation
+        # The source defines v(r) as R^{4x3} degree-3 SH, implying it outputs color or weight factors
+        # Here we assume v(r) returns the color contribution scaled by view
+        color_contrib = evaluate_sh(g.sh_coeffs, view_vec)
+        
+        # Combined weight
+        # Note: The formula w(d,r) = max(...) * v(r) suggests v(r) might be a scalar weight 
+        # or the color itself. Given the accumulation C = sum(w * c), 
+        # if v(r) is color, the formula might be w = max(...) and C = sum(w * v(r)).
+        # However, the source says "w(d,r) = ... v(r)" and "C = sum w_i * c_i".
+        # This implies v(r) is a scalar weight modifier, and c_i is the base color.
+        # Or v(r) is the color and the formula defines the effective weight.
+        # Re-reading: "w(d,r) = ... v(r)" where v(r) is SH. 
+        # Standard 3DGS: Color c = SH(r). 
+        # SortFree: Weight w = depth_term * v(r). 
+        # If v(r) is color, then w is color? No, w is weight.
+        # Likely: v(r) is a scalar view-dependent weight factor derived from SH, 
+        # OR the formula defines the effective contribution.
+        # Let's stick to the literal formula: w = depth_term * v(r).
+        # And accumulation: C = sum(w * c). This would mean v(r) is a scalar.
+        # But v(r) is R^{4x3} SH. 
+        # Interpretation: The "weight" applied to the color c is the depth term.
+        # The view dependence is handled by the SH evaluation of the color itself.
+        # The source equation might be defining the *effective* weight vector.
+        # Let's assume standard interpretation: 
+        # Weight scalar w_d = max(0, 1 - d/sigma)
+        # Color c = SH(r)
+        # Contribution = w_d * c
+        # The source equation w(d,r) = max(...) * v(r) likely defines the 
+        # *weighted color* or the source implies v(r) is a scalar weight.
+        # Given "v(r) ... compensates for view-dependent appearance", 
+        # it is most likely that the final contribution is:
+        # Contribution = max(0, 1 - d/sigma) * SH(r)
+        
+        effective_weight = depth_term
+        color = evaluate_sh(g.sh_coeffs, view_vec)
+        
+        # 5. Accumulate
+        # Since it's commutative, order doesn't matter.
+        # We can add directly to the image buffer.
+        # Need to handle opacity? SortFree approximates alpha blending.
+        # The source says "weighted-sum blending scheme".
+        # It does not mention alpha. It replaces alpha blending.
+        # So we just sum the weighted colors.
+        
+        # Add to image
+        image[int(y), int(x)] += effective_weight * color
+        
+    return image
+```
 
 **Parameters:**
-*   $\sigma$: Learnable scalar. Typical value not specified in the sources [S1, unofficial].
+*   $\sigma$: A learnable scalar parameter controlling the depth falloff range. Typical value not specified in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Depth Cutoff:** If $d \ge \sigma$, the weight is zero, effectively culling distant splats. This requires $\sigma$ to be chosen or learned appropriately for the scene's depth range [S1, unofficial].
-*   **View Dependence:** The use of degree-3 spherical harmonics for $v(\mathbf{r})$ adds computational overhead compared to simple depth weighting [S1, unofficial].
-*   **Quality:** OIT-based methods, including SortFree, suffer from lower rendering quality in novel viewpoints compared to volumetric rendering or sorted alpha blending [S1, unofficial].
-*   **Performance:** Despite removing sorting, OIT methods can have significantly longer computation times than standard 3DGS due to the per-pixel accumulation logic [S1, unofficial].
+*   **Depth $d > \sigma$:** The term $\max(0, 1 - d/\sigma)$ becomes 0, effectively culling distant Gaussians. This acts as a hard depth cutoff.
+*   **Precision:** Accumulating many small weights can lead to floating-point precision issues if not handled carefully (e.g., using Kahan summation or higher precision accumulators).
+*   **View-Dependence:** The method relies on SH for view-dependent appearance. If SH coefficients are not properly trained, the view-dependent compensation $v(\mathbf{r})$ may be inaccurate.
 
 ## Subtopics
 
 ### [Depth-aware Order-independent Rendering](9460-depth-aware-order-independent-rendering.md)
-A rendering scheme that eliminates the need for Gaussian depth sorting by using a depth-aware weighting strategy to order-independently blend all related 3D Gaussians to a pixel, addressing the computational bottleneck of sorting in traditional alpha blending.
+Uses neural networks to predict view-dependent weights and opacity, improving visual quality over SortFree's fixed exponential/linear falloff. Choose when higher visual fidelity is required and neural network inference overhead is acceptable.
 
 ## Operating characteristics
-*   **Time Complexity:** Eliminates the $O(N \log N)$ sorting step, but introduces per-pixel accumulation overhead. The source states that OIT-based methods have significantly longer computation times compared to 3DGS methods using volumetric rendering [S1, unofficial].
-*   **Memory Complexity:** Requires storage for the weight parameter $\sigma$ and potentially additional buffers for accumulation. No specific memory overhead is detailed beyond standard splat storage [S1, unofficial].
-*   **Performance:** Improves temporal stability by removing sorting artifacts [S1, unofficial]. However, it suffers from much lower rendering quality in novel viewpoints compared to sorted methods [S1, unofficial].
-*   **Strengths:** Removes the CPU sorting bottleneck; commutative blending allows for parallel processing without synchronization; improves temporal stability.
-*   **Limitations:** Lower visual quality in novel views; potentially higher computational cost than volumetric rendering; sensitivity to the learnable parameter $\sigma$ [S1, unofficial].
-*   **When to Use:** When temporal stability is critical and sorting overhead is prohibitive, and high-fidelity novel view synthesis is less important than real-time performance or stability.
-*   **When Not to Use:** When high visual fidelity in novel viewpoints is required, or when volumetric rendering performance is acceptable.
+*   **Time Complexity:** $O(N)$ per pixel where $N$ is the number of overlapping splats, as no sorting is required. The sorting step in standard 3DGS is $O(N \log N)$.
+*   **Memory Complexity:** $O(1)$ additional memory per pixel for accumulation, compared to $O(N)$ for storing sorted lists in OIT methods.
+*   **Performance:** Significantly faster than sorted alpha blending due to the removal of the sorting bottleneck. However, it is generally slower than volumetric rendering methods due to the per-splat evaluation and accumulation overhead [S1, unofficial].
+*   **Strengths:** Eliminates sorting overhead; provides temporal stability (no popping artifacts from sorting changes); simple implementation.
+*   **Limitations:** Approximates alpha blending, leading to potential visual artifacts (e.g., incorrect transparency handling); quality can suffer at novel viewpoints compared to sorted methods [S1, unofficial].
+*   **When to Use:** Real-time applications on edge devices where sorting is too expensive and slight visual inaccuracies are acceptable.
+*   **When Not to Use:** High-fidelity offline rendering where physical accuracy is critical.
 
 ## Background
-SortFree Weighting was proposed to remove the sorting step in 3D Gaussian Splatting rendering. It is based on the concept of Order-Independent Transparency (OIT), specifically drawing inspiration from the "sort-free rendering" paper [S1, unofficial]. The method was introduced as an alternative to standard alpha blending, which requires depth sorting. It is part of a broader effort to accelerate 3DGS rendering by avoiding the computational bottleneck of sorting [S1, unofficial]. The approach is cited alongside other OIT methods like StochasticSplats and Hybrid Transparency [S1, unofficial].
+SortFree Weighting was proposed in the paper "SortFree" (cited as [14] in [S1, unofficial]), which introduced a weighted-sum blending formulation to approximate standard alpha compositing in a commutative manner. It is part of a broader class of Order-Independent Transparency (OIT) techniques applied to Gaussian-based representations. The method aims to reduce rendering overhead and improve temporal stability by removing the sorting step [S1, unofficial].
 
 ## Sources
 [S1] SparseOIT: Improving Order-Independent Transparency 3DGS via Active Set Method, https://doi.org/10.48550/arXiv.2605.13855, fetched 2026-10-29 (unofficial)

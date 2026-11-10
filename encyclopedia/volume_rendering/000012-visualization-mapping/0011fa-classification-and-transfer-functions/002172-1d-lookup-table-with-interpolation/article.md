@@ -3,141 +3,114 @@
 Also called: HU -> mu mapping, Piecewise Linear HU to Attenuation Transfer Function, Piecewise Linear Transfer Function
 
 ## Overview
-This method maps scalar voxel values (typically Hounsfield Units in medical imaging) to optical properties—specifically attenuation coefficients, color, and opacity—using a piecewise linear function defined by user-specified keypoints [S1, unofficial]. It solves the problem of visual clutter by allowing users to isolate regions of interest (e.g., bone, soft tissue) while rendering background data (e.g., air) transparent [S1, unofficial]. Unlike multi-dimensional transfer functions that incorporate gradient magnitude or other derivatives to highlight boundaries [S2, unofficial][S5, unofficial], the 1D lookup table relies solely on the scalar density/value, making it the simplest classification method but prone to ambiguity when different materials share similar scalar intensities [S8, unofficial][S12]. It builds on [Classification and transfer functions](38-classification-and-transfer-functions.md) by providing a computationally efficient, pre-computable mapping suitable for GPU texture sampling or shader evaluation.
+This method maps scalar voxel values (typically Hounsfield Units in medical imaging) to optical properties—specifically attenuation coefficients, color, and opacity—using a piecewise linear function defined by user-specified keypoints [S1, unofficial]. It solves the problem of visual clutter by allowing users to isolate regions of interest (e.g., bone, vessels) while rendering background data (e.g., air, soft tissue) transparent [S1, unofficial]. Unlike multi-dimensional transfer functions that incorporate gradient magnitude or other derivatives to highlight boundaries [S2, unofficial][S5, unofficial], this method relies solely on the scalar density/value, making it the simplest classification method but prone to ambiguity when different materials share similar scalar intensities [S8, unofficial][S12]. It builds on [Classification and transfer functions](38-classification-and-transfer-functions.md) by implementing the mapping via a lookup table (LUT) or direct interpolation, which is computationally efficient for GPU evaluation [S3, unofficial][S6, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume dataset $V$ where each voxel holds a scalar value $v$ (e.g., HU). A set of $K$ keypoints $P = \{(x_i, y_i)\}_{i=0}^{K-1}$, where $x_i$ is the input domain value (e.g., HU) and $y_i$ is the output property value (e.g., attenuation $\mu$, opacity $\alpha$, or color component).
-*   **Output:** A transformed volume $V'$ where each voxel value is mapped to the corresponding optical property. In the specific medical imaging context, the output is an attenuation map $\mu_{tf}$ [S1, unofficial].
+*   **Input:** A 3D volume dataset $V$ where each voxel $v \in V$ holds a scalar value (e.g., HU). A set of $K$ keypoints $P = \{p_0, p_1, \dots, p_{K-1}\}$, where each keypoint $p_i = (x_i, y_i)$ defines a point in the input-output space. $x_i$ is the input scalar value (e.g., HU), and $y_i$ is the output property value (e.g., attenuation $\mu$, opacity $\alpha$, or color component).
+*   **Output:** A transformed volume $V'$ where each voxel value is mapped to the corresponding optical property. For attenuation mapping, the output is an attenuation map $\mu_{tf}$ [S1, unofficial].
 
 **Data Structures:**
-*   **Keypoints Tensor:** A 2D tensor of shape $(K, 2)$, where $K$ is the number of keypoints. Column 0 stores the input domain values ($x$), and Column 1 stores the output range values ($y$) [S1, unofficial].
-*   **Lookup Table (LUT):** Alternatively, the piecewise linear function can be pre-computed into a 1D texture or array of size $N$ (where $N$ is the bit-depth of the input, e.g., 4096 for 12-bit data), storing the mapped RGBA values for direct indexing [S3, unofficial][S6, unofficial].
+*   **Keypoints Tensor:** A 2D tensor of shape $(K, 2)$, where $K$ is the number of keypoints. Column 0 stores input values ($x$), and Column 1 stores output values ($y$) [S1, unofficial].
+*   **Lookup Table (Optional):** If implemented as a LUT, a 1D array of size $N$ (where $N$ is the number of bins, typically 256 or 1024) storing pre-computed output values for each input bin. The LUT is indexed by the normalized or quantized input value [S3, unofficial][S6, unofficial].
 
 **Steps:**
-1.  **Define Keypoints:** Specify $K$ keypoints representing transitions between materials. For medical imaging, typical keypoints include air, lung/soft-tissue, soft tissue, cortical bone, and dense bone/metal [S1, unofficial].
-2.  **Normalize Input Domain:** Map the input domain values to a normalized range $[0, 1]$ to facilitate interpolation. For Hounsfield Units (HU), the normalization formula is:
-    $$ x_p = \frac{v + 3500}{7000} $$
-    where $v$ is the raw HU value, offset is 3500, and scale is 7000 [S1, unofficial]. This maps the range $[-3500, 3500]$ to $[0, 1]$. Note: The source example uses a max HU of 3071, but the normalization formula uses 3500 as the upper bound offset/scale reference [S1, unofficial].
-3.  **Extract Normalized Keypoints:** Create 1D tensors $x_p$ and $y_p$ of shape $(1, K)$ containing the normalized input values and the corresponding output values (attenuation, opacity, or color) for each keypoint [S1, unofficial].
-4.  **Interpolate:** Apply piecewise linear interpolation to the volume. For each voxel value $v$:
-    *   Normalize $v$ to $x_p(v)$.
-    *   Find the interval $[x_{p,i}, x_{p,i+1}]$ such that $x_{p,i} \le x_p(v) \le x_{p,i+1}$.
-    *   Compute the interpolated value $y$ using linear interpolation:
-        $$ y = y_i + \frac{(y_{i+1} - y_i)(x_p(v) - x_{p,i})}{x_{p,i+1} - x_{p,i}} $$
-    *   Assign $y$ to the output volume at the corresponding voxel location [S1, unofficial].
+1.  **Define Keypoints:** Create a list of $K$ keypoints $(x_i, y_i)$. The input values $x_i$ must be sorted in ascending order. The output values $y_i$ represent the desired property (e.g., opacity, color, attenuation) at those input values [S1, unofficial].
+2.  **Normalize Input (if required):** If the input domain is not $[0, 1]$, normalize the input values. For HU values, a common normalization is:
+    $$ x_p = \frac{x + 3500}{7000} $$
+    where $x$ is the HU value, offset is 3500, and scale is 7000, mapping the range $[-3500, 3500]$ to $[0, 1]$ [S1, unofficial]. Note: The source example uses 3071 as the upper bound, but the normalization formula uses 7000 as the denominator, implying a range of 7000 units [S1, unofficial].
+3.  **Extract Tensors:** Separate the keypoints into two 1D tensors: $x_p$ (normalized input values) and $y_p$ (output values), both of shape $(1, K)$ or $(K,)$ depending on implementation [S1, unofficial].
+4.  **Interpolate:** For each voxel value $v$ in the volume:
+    *   Find the interval $[x_i, x_{i+1}]$ such that $x_i \le v \le x_{i+1}$.
+    *   Compute the linear interpolation factor $t$:
+        $$ t = \frac{v - x_i}{x_{i+1} - x_i} $$
+    *   Compute the output value $y$:
+        $$ y = y_i + t \cdot (y_{i+1} - y_i) $$
+    *   If $v < x_0$, clamp to $y_0$. If $v > x_{K-1}$, clamp to $y_{K-1}$ [S1, unofficial][G].
+5.  **Apply to Volume:** Replace or combine the original voxel value with the computed output value. For attenuation mapping, the result is the attenuation coefficient $\mu$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
-
-def piecewise_linear_hu_to_mu(vol: torch.Tensor, keypoints: torch.Tensor) -> torch.Tensor:
+def piecewise_linear_interpolation(volume, keypoints):
     """
-    Maps Hounsfield Unit (HU) values in a volume to attenuation coefficients (mu)
-    using a piecewise linear function defined by keypoints.
+    Apply piecewise linear interpolation to a volume based on keypoints.
     
     Args:
-        vol: 3D tensor of shape (D, H, W) containing HU values.
-        keypoints: 2D tensor of shape (K, 2). 
-                   Column 0: HU values (x).
-                   Column 1: Attenuation values (y).
+        volume: 3D numpy array or tensor of scalar values (e.g., HU).
+        keypoints: List of tuples [(x0, y0), (x1, y1), ..., (xK-1, yK-1)].
+                   x values must be sorted ascending.
     
     Returns:
-        mu_tf: 3D tensor of shape (D, H, W) containing mapped attenuation values.
+        transformed_volume: 3D array with interpolated values.
     """
-    # 1. Normalize HU values to [0, 1]
-    # Formula: (HU + 3500) / 7000
-    # Clamp to [0, 1] to handle out-of-range values if necessary
-    vol_normalized = torch.clamp((vol + 3500.0) / 7000.0, 0.0, 1.0)
+    # Extract x and y values from keypoints
+    x_vals = np.array([k[0] for k in keypoints])
+    y_vals = np.array([k[1] for k in keypoints])
     
-    # 2. Extract normalized input (xp) and output (yp) values from keypoints
-    # keypoints shape: (K, 2)
-    xp = keypoints[:, 0]
-    yp = keypoints[:, 1]
+    # Ensure x_vals are sorted
+    if not np.all(np.diff(x_vals) >= 0):
+        raise ValueError("Keypoints x-values must be sorted in ascending order.")
     
-    # Normalize xp to [0, 1] as well for consistent interpolation
-    # Assuming xp is already in HU range, we apply the same normalization
-    # However, the source implies xp is the normalized version of the keypoint HU values
-    # If keypoints are given in raw HU, normalize them:
-    xp_normalized = torch.clamp((xp + 3500.0) / 7000.0, 0.0, 1.0)
-    
-    # 3. Perform piecewise linear interpolation
-    # Using torch.nn.functional.interpolate or manual implementation
-    # Here we use a manual approach for clarity and dependency-free implementation
-    
-    D, H, W = vol.shape
-    mu_tf = torch.zeros_like(vol)
-    
-    # Reshape for vectorized operation
-    vol_flat = vol_normalized.view(-1)
-    xp_flat = xp_normalized.view(-1)
-    yp_flat = yp.view(-1) # yp is already in the target range (e.g., mu)
-    
-    # Find indices where vol_flat falls between keypoints
-    # Add boundary conditions: values below min keypoint use min keypoint's y
-    # values above max keypoint use max keypoint's y
-    
-    # Create extended keypoints for boundary handling
-    # If vol_flat < xp_normalized[0], use yp[0]
-    # If vol_flat > xp_normalized[-1], use yp[-1]
-    
-    # Mask for values within range
-    mask_low = vol_flat < xp_normalized[0]
-    mask_high = vol_flat > xp_normalized[-1]
-    mask_mid = ~mask_low & ~mask_high
+    # Normalize if necessary (example for HU)
+    # offset = 3500
+    # scale = 7000
+    # x_vals_norm = (x_vals + offset) / scale
+    # volume_norm = (volume + offset) / scale
+    # But for general case, we assume keypoints are in the same domain as volume
+    x_vals_norm = x_vals
+    volume_norm = volume
     
     # Initialize output
-    mu_flat = torch.zeros_like(vol_flat)
+    transformed_volume = np.zeros_like(volume_norm)
     
-    # Handle low boundary
-    mu_flat[mask_low] = yp_flat[0]
+    # For each voxel, find the interval and interpolate
+    # Vectorized approach for efficiency
+    # Find indices where volume_norm falls between keypoints
+    # np.searchsorted returns indices where volume_norm should be inserted to maintain order
+    indices = np.searchsorted(x_vals_norm, volume_norm, side='right') - 1
     
-    # Handle high boundary
-    mu_flat[mask_high] = yp_flat[-1]
+    # Clamp indices to valid range [0, K-2]
+    indices = np.clip(indices, 0, len(x_vals_norm) - 2)
     
-    # Handle mid range
-    if mask_mid.any():
-        # Find the index i such that xp_normalized[i] <= vol_flat <= xp_normalized[i+1]
-        # searchsorted returns indices where vol_flat could be inserted while maintaining order
-        # We use 'right' side insertion to handle exact matches consistently
-        indices = torch.searchsorted(xp_normalized, vol_flat[mask_mid], side='right') - 1
-        
-        # Clamp indices to valid range [0, K-2]
-        indices = torch.clamp(indices, 0, len(xp_normalized) - 2)
-        
-        x0 = xp_normalized[indices]
-        x1 = xp_normalized[indices + 1]
-        y0 = yp_flat[indices]
-        y1 = yp_flat[indices + 1]
-        
-        x = vol_flat[mask_mid]
-        
-        # Linear interpolation formula
-        # y = y0 + (y1 - y0) * (x - x0) / (x1 - x0)
-        # Avoid division by zero if x0 == x1
-        denom = x1 - x0
-        denom = torch.where(denom == 0, 1.0, denom)
-        
-        mu_flat[mask_mid] = y0 + (y1 - y0) * (x - x0) / denom
-        
-    # Reshape back to 3D
-    mu_tf = mu_flat.view(D, H, W)
+    x_i = x_vals_norm[indices]
+    x_ip1 = x_vals_norm[indices + 1]
+    y_i = y_vals[indices]
+    y_ip1 = y_vals[indices + 1]
     
-    return mu_tf
+    v = volume_norm
+    
+    # Compute interpolation factor t
+    # Avoid division by zero if x_i == x_ip1 (duplicate keypoints)
+    denom = x_ip1 - x_i
+    denom = np.where(denom == 0, 1.0, denom) # Guard against division by zero [G]
+    t = (v - x_i) / denom
+    
+    # Compute output value
+    y = y_i + t * (y_ip1 - y_i)
+    
+    # Handle boundary conditions explicitly if searchsorted clamping is not sufficient
+    # If volume_norm < x_vals_norm[0], use y_vals[0]
+    mask_below = volume_norm < x_vals_norm[0]
+    y[mask_below] = y_vals[0]
+    
+    # If volume_norm > x_vals_norm[-1], use y_vals[-1]
+    mask_above = volume_norm > x_vals_norm[-1]
+    y[mask_above] = y_vals[-1]
+    
+    return y
 ```
 
 **Parameters:**
-*   **Keypoints ($K$):** The number of control points defining the transfer function. Typical values depend on the number of distinct materials to be visualized (e.g., 5 for air, lung, soft tissue, bone, metal) [S1, unofficial].
-*   **Normalization Offset/Scale:** For HU data, offset = 3500, scale = 7000 [S1, unofficial].
-*   **Max Opacity:** In general 1D TFs, a maximum opacity value $\alpha_{max} \in [0, 1]$ can be applied to scale the output opacity [S2, unofficial].
+*   **Keypoints:** User-defined pairs of (input, output) values. Typical values for medical imaging: Air (-1000 HU, $\alpha=0$), Lung (-700 HU, $\alpha=0.1$), Soft Tissue (0 HU, $\alpha=0.5$), Bone (1000 HU, $\alpha=1.0$) [S1, unofficial].
+*   **Normalization Offset/Scale:** If normalizing HU, offset=3500, scale=7000 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Out-of-Bounds Values:** Voxel values outside the range of the defined keypoints must be handled. The standard approach is clamping to the nearest endpoint value [S1, unofficial].
-*   **Identical RGB Triplets:** If used for color mapping, using identical RGB triplets for different target values causes surfaces to appear with the same color, leading to ambiguity [S2, unofficial].
-*   **Color Crossover:** RGB triplets must be distinct enough to prevent color crossover caused by surface highlighting variations [S2, unofficial].
-*   **Label Band-Crossing:** If labels are present, linear interpolation across label boundaries produces values that fall into incorrect anatomical classes. In such cases, nearest-neighbor interpolation should be used instead [S3, unofficial].
+*   **Unsorted Keypoints:** The algorithm assumes $x_i$ are sorted. Unsorted keypoints will produce incorrect interpolation [S1, unofficial].
+*   **Duplicate Keypoints:** If $x_i = x_{i+1}$, division by zero occurs in the interpolation factor calculation. A guard is needed to handle this [G].
+*   **Out-of-Bounds Values:** Values outside the range of keypoints must be clamped to the nearest endpoint value [S1, unofficial].
+*   **Precision:** Floating-point precision issues may arise when comparing voxel values to keypoint boundaries. Using `searchsorted` with appropriate side ('right' or 'left') helps mitigate this [G].
 
 ## Subtopics
 
@@ -163,7 +136,7 @@ This method applies color and opacity transfer functions to scalar volume data u
 Lookup Table Implementation refers to the family of procedures that prepare, validate, and upload transfer function data to the GPU for volume rendering. It solves the problem of efficiently mapping scalar voxel values to RGBA properties by ensuring the data is in a format suitable for hardware acceleration (textures or SSBOs) and shader access. It is distinguished from its siblings by focusing on the **infrastructure** of the transfer function (memory allocation, monotonicity checks, binding) rather than the **definition** of the function itself (e.g., [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md)) or its **application** during ray marching (e.g., [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md)).
 
 ### [2D Transfer Function with Gradient Magnitude](5491-2d-transfer-function-with-gradient-magnitude.md)
-This method extends the 1D lookup table by adding gradient magnitude as a second dimension, mapping a voxel's scalar value and its local gradient magnitude simultaneously to color and opacity. It solves the ambiguity of 1D transfer functions where different materials share similar intensity values but differ in boundary sharpness, allowing for finer control and sophisticated visualization of material boundaries. Unlike independent 1D functions that map scalar-to-color and scalar/gradient-to-opacity separately, this approach uses a single 2D domain to disambiguate regions that fall within similar ranges for both parameters simultaneously.
+The 2D Transfer Function with Gradient Magnitude extends the domain of volume classification from a single scalar value to a two-dimensional space comprising the scalar value and its gradient magnitude. This method solves the ambiguity inherent in 1D transfer functions, where distinct materials with similar intensity values but different boundary characteristics (e.g., sharp vs. soft edges) cannot be distinguished. Unlike its parent [1D Lookup Table with Interpolation](2528-1d-lookup-table-with-interpolation.md), which maps a single scalar to color and opacity independently, this method uses a single 2D mapping to simultaneously disambiguate regions based on both intensity and edge strength. It is distinguished from [3D Transfer Function](5777-3d-transfer-function.md) by restricting the second dimension to the L2-norm of the gradient, rather than incorporating additional derivatives or vector components.
 
 ### [3D Transfer Function](5777-3d-transfer-function.md)
 A 3D Transfer Function maps volume rendering samples to visual properties using three input dimensions, typically scalar data value, gradient magnitude, and a tertiary attribute such as the second directional derivative, occlusion, or statistical measures. It solves the problem of disambiguating complex boundary configurations where material boundaries overlap in two dimensions of the transfer function domain but differ in the third. Unlike 1D transfer functions which map only scalar value, or 2D transfer functions which map value and gradient magnitude, 3D TFs provide higher specificity for material boundaries, allowing the isolation of features that are indistinguishable in lower-dimensional projections.
@@ -172,22 +145,23 @@ A 3D Transfer Function maps volume rendering samples to visual properties using 
 This family defines a set of primitive image processing and geometric operators used to transform voxel data (density, gradient, or binary masks) before or during the classification and rendering pipeline. Unlike the parent [1D Lookup Table with Interpolation](2528-1d-lookup-table-with-interpolation.md) which maps scalar values to color/opacity, these operators modify the spatial structure or intensity values of the volume itself to enhance surface detection, reduce artifacts, or prepare data for specific rendering techniques. They are distinguished from siblings by operating on the scene geometry or raw voxel intensities rather than defining the final visual appearance mapping.
 
 ### Target Value Configuration
-User configuration of up to five target data values, their associated RGB colors, allowable value deviation windows, and maximum opacity [S2, unofficial]. The number of targets is limited to five [S2, unofficial]. RGB triplets are expressed as three real numbers ranging from 0.0 to 1.0 and must be distinct for each target to avoid color ambiguity and crossover [S2, unofficial]. Using identical RGB triplets for different target values causes surfaces to appear with the same color, leading to ambiguity [S2, unofficial]. RGB triplets must be distinct enough to prevent color crossover caused by surface highlighting variations [S2, unofficial].
+User configuration of up to five target data values, their associated RGB colors, allowable value deviation windows, and maximum opacity [S2, unofficial]. The number of targets is limited to five [S2, unofficial]. RGB triplets are expressed as three real numbers ranging from 0.0 to 1.0. Using identical RGB triplets for different target values causes surfaces to appear with the same color, leading to ambiguity [S2, unofficial]. RGB triplets must be distinct enough to prevent color crossover caused by surface highlighting variations [S2, unofficial].(Note: This is a variant of TF configuration, linked to the parent TF article as it is a specific configuration method)
 
 ### Label-aware Interpolation Switching
-Switches volume interpolation type to nearest-neighbor when labels are present to prevent band-crossing artifacts, otherwise uses linear interpolation [S3, unofficial]. The steps are: 1. Check if labels are present via `hasLabels()`. 2. If labels exist, call `volume.getProperty().setInterpolationTypeToNearest()`. 3. Otherwise, call `volume.getProperty().setInterpolationTypeToLinear()` [S3, unofficial]. Linear interpolation across label band boundaries produces values that fall into incorrect anatomical classes, breaking label-scoped transfer functions [S3, unofficial].
+Switches volume interpolation type to nearest-neighbor when labels are present to prevent band-crossing artifacts, otherwise uses linear interpolation [S3, unofficial]. Steps: 1. Check if labels are present via `hasLabels()`. 2. If labels exist, call `volume.getProperty().setInterpolationTypeToNearest()`. 3. Otherwise, call `volume.getProperty().setInterpolationTypeToLinear()` [S3, unofficial]. Linear interpolation across label band boundaries produces values that fall into incorrect anatomical classes, breaking label-scoped transfer functions [S3, unofficial].(Note: This is a variant of TF application, linked to the parent TF article)
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, assuming $K$ (number of keypoints) is small and constant. Interpolation per voxel is $O(1)$ if using a pre-computed LUT or binary search over keypoints.
-*   **Memory Complexity:** $O(K)$ for storing keypoints or $O(M)$ for storing a pre-computed LUT of size $M$ (e.g., 4096 entries) [S3, unofficial][S6, unofficial].
-*   **Performance:** Fast and suitable for real-time rendering on GPUs due to simple arithmetic operations and potential for texture-based lookup [S3, unofficial][S6, unofficial].
-*   **Strengths:** Simple to implement and edit; computationally efficient; intuitive for users to define material ranges [S1, unofficial][S5, unofficial][S6, unofficial].
-*   **Limitations:** Prone to ambiguity when different materials share similar scalar intensities; cannot distinguish materials based on boundary characteristics or other derived features [S8, unofficial][S12].
-*   **When to Use:** When the volume data has distinct scalar ranges for different materials and high-frequency boundary details are not critical for classification.
-*   **When Not to Use:** When materials have overlapping intensity ranges but different boundary sharpness (use 2D TF with gradient magnitude) or when smooth, derivative-continuous transitions are required (use Cubic Spline).
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, assuming $O(1)$ lookup or interpolation per voxel. With a LUT, the lookup is $O(1)$ per voxel. With direct interpolation, finding the interval is $O(\log K)$ using binary search, or $O(1)$ if the volume is processed in a single pass with pre-computed indices [S1, unofficial][S3, unofficial].
+*   **Memory Complexity:** $O(K)$ for storing keypoints, or $O(N_{LUT})$ for storing a pre-computed LUT, where $N_{LUT}$ is the number of bins in the LUT [S3, unofficial][S6, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales linearly with the number of voxels. Performance is largely independent of the number of keypoints $K$ if a LUT is used, or logarithmic if binary search is used [S1, unofficial][S3, unofficial].
+*   **Strengths:** Simple to implement and edit. Computationally efficient. Intuitive for users to define regions of interest [S1, unofficial][S5, unofficial][S6, unofficial].
+*   **Limitations:** Prone to ambiguity when different materials share similar scalar intensities [S8, unofficial][S12]. Cannot distinguish materials based on boundary characteristics (e.g., sharp vs. soft edges) [S3, unofficial][S4, unofficial].
+*   **When to use:** When the volume data has distinct scalar ranges for different materials, and boundary information is not critical for classification [S1, unofficial][S8, unofficial].
+*   **When not to use:** When different materials have overlapping scalar ranges but different boundary characteristics, or when complex material disambiguation is required [S3, unofficial][S4, unofficial].
 
 ## Background
-The method originates from early volume rendering techniques where simple piecewise linear functions were used to map scalar values to optical properties [S1, unofficial][S2, unofficial]. It is widely used in medical imaging (e.g., CT scans) to map Hounsfield Units to attenuation coefficients or opacity [S1, unofficial]. The approach is foundational in visualization toolkits like VTK, which provide built-in support for piecewise linear transfer functions [S1, unofficial].
+The method originates from the need to visualize scalar volume data, particularly in medical imaging where Hounsfield Units (HU) are a standard representation of tissue density [S1, unofficial]. The use of piecewise linear functions defined by keypoints allows for flexible and intuitive user interaction with the transfer function [S1, unofficial][S5, unofficial][S6, unofficial]. The implementation via lookup tables or direct interpolation has been widely adopted in volume rendering pipelines for its efficiency [S3, unofficial][S6, unofficial].
 
 ## Sources
 [S1] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)

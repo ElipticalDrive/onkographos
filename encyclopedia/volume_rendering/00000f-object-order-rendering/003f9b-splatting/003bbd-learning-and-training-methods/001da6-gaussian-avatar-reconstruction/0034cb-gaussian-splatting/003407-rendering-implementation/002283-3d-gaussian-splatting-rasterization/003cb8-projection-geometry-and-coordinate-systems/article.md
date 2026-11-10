@@ -1,45 +1,34 @@
 # Projection Geometry and Coordinate Systems
 
-Also called: Gaussian Splatting Projection Models, Camera Space Transformation for Gaussians
+Also called: 3D Gaussian Splatting Projection, Gaussian Splatting Coordinate Transformations
 
 ## Overview
-This article defines the coordinate transformations and projection mappings required to render 3D Gaussian primitives onto a 2D image plane within the 3D Gaussian Splatting framework. It solves the problem of accurately mapping 3D spatial covariance and position into 2D screen space for alpha blending or density integration. It differs from standard perspective projection by supporting alternative camera models (panoramic, equidistant) and specialized geometries (cone-beam X-ray) while maintaining the core affine approximation of the Gaussian covariance.
+This article defines the mathematical framework for transforming 3D Gaussian primitives from world space into the 2D image plane for rasterization in 3D Gaussian Splatting. It solves the problem of accurately projecting 3D ellipsoids onto a 2D sensor plane while preserving geometric fidelity and enabling differentiable rendering. It sets apart from standard perspective projection by supporting optimal tangent-plane projections [3293-optimal-gaussian-splatting.md] and specialized geometries such as cone-beam X-ray scanning [3458-3d-gaussian-splatting-rasterization-cone-beam-scanner-space.md].
 
 ## Shared principles
-All methods in this family operate on 3D Gaussian primitives defined by a mean position $\boldsymbol{\mu}$ (or $p$), a covariance matrix $\boldsymbol{\Sigma}$, and a scalar property (opacity $\alpha$ or density $\rho$). The rendering pipeline follows these shared steps:
-
-1.  **World-to-Camera/Scanner Transformation:** The 3D mean and covariance are transformed from world coordinates into a local coordinate system aligned with the camera or scanner. For standard pinhole cameras, this is the camera space; for X-ray, it is scanner space [S1].
-    $$ \boldsymbol{\mu}' = \mathbf{W} \boldsymbol{\mu} $$
-    where $\mathbf{W}$ is the extrinsic transformation matrix [S1]. The covariance transforms via the linear part of the extrinsics $\mathbf{R}$:
-    $$ \boldsymbol{\Sigma}' = \mathbf{R} \boldsymbol{\Sigma} \mathbf{R}^\top $$
-    [S1].
-
-2.  **Ray Construction:** A ray direction $\mathbf{d}$ is constructed for each pixel $(u, v)$ based on the camera intrinsics. For a pinhole model:
-    $$ \mathbf{d} = \begin{bmatrix} (u - c_x) / f_x \\ (v - c_y) / f_y \\ 1 \end{bmatrix} $$
-    [S1].
-
-3.  **Projection Mapping:** The 3D geometry is projected onto a 2D plane or sphere. This involves a projection function $\varphi_p$ and a Jacobian $\mathbf{J}_p$ to transform the 3D covariance $\boldsymbol{\Sigma}'$ into a 2D covariance $\boldsymbol{\Sigma}_{2D}$:
-    $$ \boldsymbol{\Sigma}_{2D} = \mathbf{J}_p \boldsymbol{\Sigma}' \mathbf{J}_p^\top $$
-    [S1]. The resulting 2D Gaussian is evaluated for blending or summation.
+All methods in this family share the core objective of mapping a 3D Gaussian primitive, defined by mean $\boldsymbol{\mu}$ and covariance $\boldsymbol{\Sigma}$, to a 2D Gaussian distribution suitable for alpha blending or density summation. The general pipeline involves:
+1.  **World-to-Camera/Scanner Transformation:** Transforming the primitive's mean and covariance into a local coordinate system where the viewing direction is aligned with a principal axis (typically the z-axis).
+2.  **Projection:** Mapping the 3D geometry to a 2D plane. This can be a standard perspective projection, an optimal tangent-plane projection, or a ray-space integration for non-standard geometries.
+3.  **Covariance Handling:** Computing the 2D covariance matrix $\boldsymbol{\Sigma}_{2D}$ from the 3D covariance $\boldsymbol{\Sigma}'$ in the local space. This often involves a Jacobian matrix $\mathbf{J}$ of the projection function: $\boldsymbol{\Sigma}_{2D} \approx \mathbf{J} \boldsymbol{\Sigma}' \mathbf{J}^\top$.
+4.  **Rasterization:** Evaluating the 2D Gaussian at pixel coordinates to determine opacity or density contribution.
 
 ## Subtopics
 
 ### [Optimal Gaussian Splatting](3293-optimal-gaussian-splatting.md)
-[Optimal Gaussian Splatting](3293-optimal-gaussian-splatting.md) reduces projection error by radially projecting each 3D Gaussian onto a unique tangent plane perpendicular to the line connecting the Gaussian mean to the camera center, rather than projecting all Gaussians onto a single plane $z=1$. Unlike the original 3D Gaussian Splatting rasterization which uses a fixed perspective plane, this method treats the projection as a radial mapping onto a unit sphere, ensuring the projection of the Gaussian mean coincides with the ray direction from the camera center. It differs from NeRF by avoiding extensive ray sampling, instead determining which tangent-plane Gaussians intersect the ray on the unit sphere.
+Reduces projection error by radially projecting each 3D Gaussian onto a unique tangent plane perpendicular to the line connecting the Gaussian mean to the camera center, rather than a single fixed plane $z=1$. Choose this when high-fidelity rendering of large or off-center Gaussians is required.
 
 ### [3D Gaussian Splatting Rasterization (Cone-Beam/Scanner Space)](3458-3d-gaussian-splatting-rasterization-cone-beam-scanner-space.md)
-[3D Gaussian Splatting Rasterization (Cone-Beam/Scanner Space)](3458-3d-gaussian-splatting-rasterization-cone-beam-scanner-space.md) renders X-ray projections from a 3D Gaussian representation by integrating the 3D Gaussian density along cone-beam ray paths, resulting in a sum of 2D Gaussians rather than the alpha-compositing used in standard visible-light rendering. It solves the problem of simulating X-ray CT projections from learned 3D Gaussian fields by adapting the rasterization pipeline to a pinhole camera model, enabling analytical integration of radiative density. Unlike standard 3D Gaussian Splatting which composites opacities, this method sums projected 2D densities, fundamentally addressing integration bias issues where learning integrated density in 2D leads to inconsistencies in 3D density retrieval.
+Renders X-ray projections by integrating 3D Gaussians along cone-beam ray paths, summing 2D Gaussians instead of alpha-compositing. Choose this for medical imaging or CT reconstruction tasks where integration bias must be avoided.
 
-#### Panorama Camera Adaptation
-- **Definition:** A method to adapt the rasterization projection for panoramic images by mapping pixel coordinates to the unit sphere [S1].
-- **Step:** For a pixel $(u, v)$ on the image, cast a ray and compute the 2D coordinate vector $\mathbf{x}_{2D}$ using the panoramic projection formula involving image height $H$ and width $W$ [S1].
-- **Formula:**
-  $$ \mathbf{x}_{2D} = \varphi_p \left( \begin{bmatrix} \sin \left( \frac{\pi(-W+2u)}{W} \right) \cos \left( \frac{\pi(-\frac{H}{2}+v)}{H} \right) \\ \sin \left( \frac{\pi(-\frac{H}{2}+v)}{H} \right) \\ \cos \left( \frac{\pi(-\frac{H}{2}+v)}{H} \right) \cos \left( \frac{\pi(-W+2u)}{W} \right) \end{bmatrix} \right) $$
-  [S1]
-- **Parameter:** $H$: height of the image. $W$: width of the image [S1].
+### Panorama Camera Adaptation
+Adapts the rasterization projection for panoramic images by mapping pixel coordinates to the unit sphere using equisolid angle or similar projection models.
+*   **Definition:** For a pixel $(u, v)$ on a panoramic image of height $H$ and width $W$, a ray is cast and mapped to the 2D coordinate vector $\mathbf{x}_{2D}$ [S1].
+*   **Formula:** The projection uses the following mapping to the unit sphere before applying the optimal projection function $\varphi_p$ [S1]:
+    $$ \mathbf{x}_{2D} = \varphi_p \left( \begin{bmatrix} \sin \left( \frac{\pi(-W+2u)}{W} \right) \cos \left( \frac{\pi(-\frac{H}{2}+v)}{H} \right) \\ \sin \left( \frac{\pi(-\frac{H}{2}+v)}{H} \right) \\ \cos \left( \frac{\pi(-\frac{H}{2}+v)}{H} \right) \cos \left( \frac{\pi(-W+2u)}{W} \right) \end{bmatrix} \right) $$
+*   **Parameters:** $H$ is the image height, $W$ is the image width [S1].
 
 ## Background
-The standard 3D Gaussian Splatting rasterization relies on a perspective projection onto a plane $z=1$ [S1]. However, this approximation introduces errors for large fields of view or non-standard camera models. The "Optimal Projection" strategy was introduced to analyze these errors and provide a radial projection model that maps Gaussians to a unit sphere tangent plane [S1]. This approach was extended to support panoramic cameras (equisolid angle, stereographic, etc.) and specialized hardware geometries like cone-beam X-ray scanners, which require integrating density rather than blending opacity [S1]. The method is cited in the context of error analysis and optimal projection strategies for 3D Gaussian Splatting [S1].
+The standard 3D Gaussian Splatting method [17] uses a fixed perspective projection plane. Subsequent research identified errors in this approximation, particularly for Gaussians far from the principal axis, leading to the development of optimal projection strategies [S1]. The cone-beam adaptation extends the method to non-standard imaging geometries like X-ray CT [S1].
 
 ## Sources
 [S1] On the Error Analysis of 3D Gaussian Splatting and an Optimal Projection Strategy, https://doi.org/10.1007/978-3-031-72643-9_15, fetched 2026-10-29

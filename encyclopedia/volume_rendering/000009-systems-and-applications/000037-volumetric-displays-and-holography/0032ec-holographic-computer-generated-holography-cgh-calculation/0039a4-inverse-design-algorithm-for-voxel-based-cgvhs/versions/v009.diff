@@ -1,0 +1,562 @@
+--- v008.md
++++ v009.md
+@@ -4,314 +4,165 @@
+ 
+ ## Overview
+-This method designs voxel-based Computer-Generated Volume Holograms (CGVHs) that convert $N$ mutually incoherent transverse input modes $\{u_n\}$ into $N$ target modes $\{v_n\}$ with a one-to-one mapping [S1, unofficial]. It solves the inverse problem of determining the optimal 3D refractive index distribution within a finite sample to achieve specific mode conversions. Unlike direct superposition methods, it uses an iterative optimization loop that alternates between forward propagation of input modes and backpropagation of target modes to locally maximize an overlap criterion at each voxel layer [S1, unofficial].
++This method designs voxel-based Computer-Generated Volume Holograms (CGVHs) that convert $N$ mutually incoherent transverse input modes $\{u_n\}$ into $N$ target modes $\{v_n\}$ with a one-to-one mapping [S1, unofficial]. It solves the problem of determining the optimal 3D refractive index distribution within a finite volume to achieve high-fidelity mode conversion for multiple wavelengths simultaneously. Unlike direct phase extraction methods which suffer from noise and twin-image artifacts, this algorithm uses an iterative forward-backward propagation scheme to maximize the overlap between propagated and target modes [S1, unofficial]. It is distinct from sibling methods like [Volume Rendering based CGH Calculation](808-volume-rendering-based-cgh-calculation.md) by focusing on discrete voxel selection within a split-step framework rather than continuous field optimization or stereographic projection.
+ 
+ ## How it works
+-**Inputs:**
+-*   $N$: Number of input/target mode pairs.
+-*   $\{u_n\}_{n=1}^N$: Input complex field distributions at plane $z_{in} = z_1$.
+-*   $\{v_n\}_{n=1}^N$: Target complex field distributions at plane $z_{out} = z_{K+1}$.
+-*   $\lambda_n$: Wavelength associated with mode $n$.
+-*   $n_n$: Bulk refractive index of the sample at wavelength $\lambda_n$.
+-*   $D$: Number of available transverse voxel distributions $\{\Delta RI_d\}_{d=0}^D$. $\Delta RI_0$ is the null modification (bulk index).
+-*   Grid dimensions: $I \times J \times K$ sub-volumes.
+-*   Sub-volume extensions: $D_x, D_y, D_z$.
+-*   Simulation resolutions: $dx, dy, dz$.
+-
+-**Outputs:**
+-*   Selected voxel distribution $\Delta RI_{ijk}^*$ for each sub-volume $v_{ijk}$ ($1 \le i \le I, 1 \le j \le J, 1 \le k \le K$).
++**Inputs and Outputs:**
++*   **Inputs:**
++    *   $N$ input mode fields $\{u_n\}_{n=1}^N$ defined at plane $z_{in} = z_1$.
++    *   $N$ target mode fields $\{v_n\}_{n=1}^N$ defined at plane $z_{out} = z_{K+1}$.
++    *   Wavelengths $\lambda_n$ associated with each mode $n$.
++    *   Bulk refractive index $n_n$ at wavelength $\lambda_n$.
++    *   A library of $D$ transverse voxel distributions $\{\Delta RI_d\}_{d=1}^D$, representing relative refractive index changes compared to the bulk index. $\Delta RI_0$ denotes no modification.
++    *   Sub-volume dimensions $D_x, D_y, D_z$.
++*   **Outputs:**
++    *   A 3D map of selected voxel indices $\{d_{ijk}\}$ for each sub-volume $v_{ijk}$, defining the final CGVH structure.
+ 
+ **Data Structures:**
+-*   **Sub-volumes:** The sample volume is virtually split into $I \times J \times K$ sub-volumes $v_{ijk}$. Each $v_{ijk}$ acts as a placeholder for a single transverse voxel distribution $\Delta RI_{ijk}^d$.
+-*   **Voxel Distributions:** A discrete set of $D+1$ transverse refractive index change profiles $\{\Delta RI_d\}$. These are pre-defined or generated based on fabrication capabilities (e.g., laser writing parameters).
+-*   **Field Storage:** Arrays to store transverse field distributions $\{u_{ijk}^n\}$ at each intermediate plane $z_k$ during the forward pass.
+-
+-**Parameters:**
+-*   $D_z$: Elementary length (waveguide length unit). Typically $10 \mu m$ [S1, unofficial].
+-*   $dx, dy$: Transverse simulation resolution. Typically $0.25 \mu m$ [S1, unofficial].
+-*   $dz$: Longitudinal simulation resolution. Typically $0.5 \mu m$ [S1, unofficial].
+-*   Coordinate System: Rectangular $(O, x, y, z)$, with $z$ as the propagation direction.
++The sample volume is virtually split into a grid of sub-volumes $v_{ijk}$ where $1 \le i \le I$, $1 \le j \le J$, and $1 \le k \le K$.
++*   **Sub-volume:** Identified by indices $(i,j,k)$.
++*   **Field Storage:** During propagation, transverse field distributions are stored at common planes $z_k$. Let $u_{ijk}^n$ denote the field of mode $n$ at plane $z_k$ within sub-volume $(i,j)$.
++*   **Resolution:** Simulation uses spatial resolutions $dx, dy, dz$. Typical values: $dx=dy=0.25\,\mu\text{m}$, $dz=0.5\,\mu\text{m}$ [S1, unofficial].
++*   **Elementary Length:** The longitudinal step $D_z$ is typically $10\,\mu\text{m}$ [S1, unofficial].
++
++**Mathematical Model:**
++Propagation through a layer of thickness $dz$ is modeled using the split-step Fourier Beam Propagation Method (BPM). Crossing a layer through a homogeneous medium $n_n$ followed by a local phase shift $\phi_{ijk}$ is given by [S1, unofficial]:
++$$ \phi_{ijk}(\lambda_n) = \exp\left(i \frac{2\pi}{\lambda_n} \Delta RI_{ijk}^d(\lambda_n) dz\right), \quad 0 \le d \le D $$
++The global objective is to minimize the squared $L_2$ distance between input and target modes:
++$$ O_{min} = \min \sum_{n=1}^N \|u_n - v_n\|_2^2 = \min \left\{ \sum_{n=1}^N \int_{z_{out}} |u_n - v_n|^2 \right\} $$
++For lossless designs where energy is conserved ($\|u_n\|^2$ and $\|v_n\|^2$ are constant), this minimization is equivalent to maximizing the overlap integral [S1, unofficial]:
++$$ O_{max} = \max_{\Delta RI_{ijk}^d} \left\{ \sum_{n=1}^N \int_{z_{out}} \Re(v_n^* u_n) \right\} $$
+ 
+ **Algorithm Steps:**
+-
+-1.  **Initialization:** Set all sub-volumes $v_{ijk}$ to the null distribution $\Delta RI_0$.
+-2.  **Forward Propagation:** Propagate input modes $\{u_n\}$ from $z_1$ to $z_{K+1}$ using the Split-Step Fourier Beam Propagation Method (BPM) with resolutions $dx, dy, dz$.
+-    *   Iterate $k$ from 1 to $K$.
+-    *   For each sub-volume $v_{ijk}$, apply the current distribution $\Delta RI_{ijk}^d$.
+-    *   The phase shift applied when crossing a layer of thickness $dz$ through a region with distribution $\Delta RI_{ijk}^d$ is:
+-        $$ \phi_{ijk}(\lambda_n) = \exp\left(i \frac{2\pi}{\lambda_n} \Delta RI_{ijk}^d(\lambda_n) dz\right) $$
+-    *   Save the transverse field distributions $\{u_{ijk}^n\}$ at the exit plane $z_k$ of each sub-volume layer for all $n$. These represent the fields just before entering sub-volume $v_{ijk}$ (or rather, the fields propagated up to plane $z_k$). *Note: The source defines $u_{ijk}^n$ as distributions saved before crossing $v_{ijk}$, and $u_{ijk+1}^n(d)$ as those propagated through $v_{ijk}$ to $z_{k+1}$.*
+-3.  **Convergence Check:** Compute the global overlap criterion $O_{max}$ (Eq. 6 below) at $z_{out}$. If the value is satisfactory or stagnant, exit and return the current voxel selection.
+-4.  **Backward Propagation and Voxel Selection:**
+-    *   Iterate $k$ from $K$ down to 1.
+-    *   For each sub-volume $v_{ijk}$ at layer $k$:
+-        *   We have the target field distributions $\{v_{ijk+1}^n\}$ at plane $z_{k+1}$ (initially the target modes $\{v_n\}$ for $k=K$, or backpropagated fields for $k < K$).
+-        *   We have the input field distributions $\{u_{ijk}^n\}$ at plane $z_k$ from the forward pass.
+-        *   Select the distribution $d$ that maximizes the local criterion $O_{ijk}^{max}$:
+-            $$ O_{ijk}^{max} = \max_{d} \left\{ \sum_{n=1}^{N} \int_{z_{k+1}} \Re\left( (v_{ijk+1}^n)^* u_{ijk+1}^n(d) \right) \right\} $$
+-            where $u_{ijk+1}^n(d)$ is the field $u_{ijk}^n$ propagated from $z_k$ to $z_{k+1}$ through the specific distribution $\Delta RI_{ijk}^d$.
+-        *   To find the optimal $d$, try all $D+1$ distributions $\{\Delta RI_{ijk}^d\}_{d=0}^D$ for the current sub-volume $v_{ijk}$ and compute the criterion for each.
+-        *   Set $\Delta RI_{ijk}^* = \Delta RI_{ijk}^{d_{opt}}$.
+-        *   Backpropagate the target modes $\{v_{ijk+1}^n\}$ from $z_{k+1}$ to $z_k$ using the *selected* distribution $\Delta RI_{ijk}^*$ to obtain $\{v_{ijk}^n\}$ for the next iteration step (layer $k-1$).
+-5.  **Repeat:** Go to Step 2 with the updated voxel selection.
++1.  **Forward Propagation:** Propagate input modes $\{u_n\}$ from $z_1$ to $z_{K+1}$ using BPM. Initialize all sub-volumes $v_{ijk}$ with the null distribution $\Delta RI_0$. Store the transverse field distributions $\{u_{ijk}^n\}$ at each intermediate plane $z_k$ before crossing sub-volume $v_{ijk}$.
++2.  **Convergence Check:** Compute the final overlap criterion $O_{max}$ (Eq. 6). If the value is satisfactory or has stagnated, terminate and output the current voxel selection.
++3.  **Backward Propagation and Selection:** Iteratively backpropagate target modes $\{v_n\}$ from $z_{K+1}$ to $z_1$. For each plane $k$ from $K$ down to $1$:
++    *   For each sub-volume $(i,j)$ at plane $k$, select the voxel distribution $d$ that maximizes the local multi-objective criterion:
++        $$ O_{ijk}^{max} = \max_d \left\{ \sum_{n=1}^N \int_{z_{k+1}} \Re\left( (v_{ijk+1}^n)^* u_{ijk+1}^n(d) \right) \right\} $$
++        where $u_{ijk+1}^n(d)$ is the field propagated from $z_k$ to $z_{k+1}$ through the candidate distribution $\Delta RI_{ijk}^d$.
++    *   This requires testing all $D$ candidate distributions for each sub-volume.
++    *   Once the best $d$ is selected for all $(i,j)$ at plane $k$, backpropagate the target modes from $z_{k+1}$ to $z_k$ using the newly selected voxels.
++    *   Repeat for $k-1$ until $k=1$.
++4.  **Iteration:** Repeat steps 1–3 until convergence.
+ 
+ **Pseudocode:**
+-
+ ```python
+-def inverse_design_CGVH(N, u_in, v_target, wavelengths, n_bulk, 
+-                        voxel_distributions, I, J, K, Dz, dx, dy, dz, 
+-                        max_iterations, tol):
++def inverse_design_cgvh(N, input_modes, target_modes, wavelengths, bulk_indices, 
++                        voxel_library, D_z, dx, dy, dz, max_iterations, tol):
+     """
+-    Inverse design algorithm for voxel-based CGVHs.
++    N: int, number of modes
++    input_modes: list of complex arrays, shape (H, W), defined at z_1
++    target_modes: list of complex arrays, shape (H, W), defined at z_{K+1}
++    wavelengths: list of floats, length N
++    bulk_indices: list of floats, length N
++    voxel_library: list of complex phase masks, shape (H, W), length D+1
++                   voxel_library[0] is all ones (null modification)
++    D_z: float, elementary longitudinal length
++    dx, dy, dz: float, simulation resolutions
++    max_iterations: int
++    tol: float, convergence threshold
++    """
++    # Determine grid dimensions based on sample size and D_z
++    # I, J, K are derived from physical sample dimensions / D_x, D_y, D_z
++    # For this pseudocode, we assume I, J, K are known or derived from input field size
++    # and the BPM handles the internal propagation steps.
+     
+-    Args:
+-        N: Number of mode pairs.
+-        u_in: List of N complex fields at z=0 (input modes).
+-        v_target: List of N complex fields at z=Z_total (target modes).
+-        wavelengths: List of N wavelengths.
+-        n_bulk: Bulk refractive index (scalar or array if wavelength dependent).
+-        voxel_distributions: List of D+1 transverse refractive index change profiles.
+-                             voxel_distributions[0] is null (0).
+-        I, J, K: Grid dimensions of sub-volumes.
+-        Dz: Elementary length of sub-volumes in z.
+-        dx, dy, dz: Simulation resolutions.
+-        max_iterations: Maximum number of IPA cycles.
+-        tol: Convergence tolerance for the global criterion.
+-        
+-    Returns:
+-        voxel_selection: 3D array (I, J, K) storing the index d of the selected 
+-                         distribution for each sub-volume.
+-    """
++    # Initialize voxel selection map: selection[i][j][k] = d
++    # D is the index in voxel_library
++    K = number_of_longitudinal_steps(D_z, sample_length)
++    I, J = number_of_transverse_blocks(H, W, D_x, D_y)
+     
+-    # Initialize voxel selection to null (index 0)
+-    voxel_selection = np.zeros((I, J, K), dtype=int)
++    # Initialize with null distribution
++    selection = [[[0 for _ in range(K)] for _ in range(J)] for _ in range(I)]
+     
+-    # Pre-calculate phase masks for all voxel distributions at all wavelengths
+-    # phi[d][n] is a 2D array (height, width) representing the phase shift
+-    # for voxel distribution d at wavelength n
+-    phi_masks = []
+-    for d in range(len(voxel_distributions)):
+-        d_phi = []
+-        for n in range(N):
+-            # Phase shift: exp(i * 2*pi/lambda * delta_ni * dz)
+-            # Note: voxel_distributions[d] is delta_ni (relative refractive index change)
+-            # It might be wavelength dependent, so we assume it's provided for the specific lambda
+-            delta_ni = voxel_distributions[d][n] # Shape: (H, W)
+-            phase = np.exp(1j * 2 * np.pi / wavelengths[n] * delta_ni * dz)
+-            d_phi.append(phase)
+-        phi_masks.append(d_phi)
+-
+     for iteration in range(max_iterations):
+         # Step 1: Forward Propagation
+-        # Store fields at each plane z_k. 
+-        # u_fields[k][n] is the field of mode n at plane z_k (before entering sub-volume k)
+-        # We need fields at z_1, z_2, ..., z_{K+1}
+-        # z_1 is input plane. z_{K+1} is output plane.
+-        
+-        u_fields = [None] * (K + 1)
+-        u_fields[0] = u_in # Field at z_1 (index 0 in list corresponds to k=1)
+-        
+-        # Propagate from z_1 to z_{K+1}
+-        current_fields = list(u_in)
+-        
+-        for k in range(K): # k from 0 to K-1, corresponding to sub-volumes v_{ijk}^{k+1}
+-            # Current fields are at plane z_{k+1} (before entering sub-volume k+1)
+-            # We need to propagate through sub-volumes at layer k+1
+-            
+-            # For each sub-volume in this layer, we apply the selected voxel
+-            # But for forward pass, we just use the current selection
+-            next_fields = []
+-            
+-            # We need to store the field BEFORE entering each sub-volume?
+-            # The source says: "save transverse distributions {un} before crossing each sub-volume vijk"
+-            # And "note them {u_ijk^n}".
+-            # So u_fields[k] should store the field at z_{k+1} BEFORE crossing v_{ijk}^{k+1}?
+-            # Actually, the source says "u_ijk^n" are saved before crossing v_ijk.
+-            # And "u_ijk+1^n(d)" are propagated from z_k to z_{k+1} through v_ijk.
+-            
+-            # Let's align indices:
+-            # k in loop is layer index 0..K-1.
+-            # Sub-volumes are v_{ijk}^{k+1}.
+-            # Input to sub-volume is at z_{k+1}. Output is at z_{k+2}.
+-            # Wait, source says: "cross sub-volumes v_ijk layer by layer for k from 1 to K".
+-            # "save ... before crossing each sub-volume v_ijk ... note them {u_ijk^n}".
+-            # "note {z_k} as the common transverse planes".
+-            # So u_ijk^n is at z_k.
+-            
+-            # Let's redefine:
+-            # u_fields[k] stores the field at plane z_{k+1} (which is the input plane to sub-volume layer k+1)
+-            # But the source says u_ijk^n is saved BEFORE crossing v_ijk.
+-            # So u_ijk^n is at z_k.
+-            
+-            # Let's stick to the source's notation:
+-            # u_ijk^n is at z_k.
+-            # v_ijk+1^n is at z_{k+1}.
+-            
+-            # Forward pass:
+-            # Start with u_in at z_1.
+-            # For k=1 to K:
+-            #   u_ijk^n is the field at z_k.
+-            #   Propagate through v_ijk using selected voxel to get u_ijk+1^n(d) at z_{k+1}.
+-            #   Save u_ijk^n.
+-            
+-            # Implementation:
+-            # u_fields[k] will store the field at z_{k+1} (input to layer k+1)
+-            # But we need to save the field BEFORE crossing.
+-            
+-            # Let's store fields at planes z_1, ..., z_{K+1}
+-            # plane_fields[p] is field at z_{p+1} (p=0..K)
+-            
+-            plane_fields = [None] * (K + 1)
+-            plane_fields[0] = u_in # Field at z_1
+-            
+-            current_fields = list(u_in)
+-            
+-            for k in range(K): # k=0..K-1, corresponding to layer k+1
+-                # Current fields are at z_{k+1}
+-                # These are the fields BEFORE crossing sub-volumes in layer k+1
+-                # So we save them as u_ijk^n for this layer
+-                # But we need to store them per sub-volume?
+-                # The source says "save ... before crossing each sub-volume v_ijk".
+-                # This implies we save the field at the input of each sub-volume.
+-                # Since all sub-volumes in a layer share the same input plane z_{k+1},
+-                # the field is the same for all i,j in that layer.
+-                
+-                # However, the selection criterion uses u_ijk+1^n(d) which is the field
+-                # propagated from z_{k+1} to z_{k+2} through v_ijk.
+-                
+-                # So, for the forward pass, we just propagate the whole plane through the selected voxels.
+-                
+-                next_fields = []
+-                for n in range(N):
+-                    # Propagate field n through the layer
+-                    # The layer consists of I*J sub-volumes.
+-                    # We apply the selected voxel to each sub-volume.
+-                    # This is a pixel-wise multiplication of the field by the phase mask of the selected voxel.
+-                    
+-                    # Create a 3D phase mask for the entire layer
+-                    # Layer phase mask L(x,y)
+-                    # L(x,y) = phi_{selected}[n] for (x,y) in v_{ijk}
+-                    
+-                    # Since we are doing BPM, we might need to do small steps.
+-                    # But the source simplifies it: "crossing each layer ... is modeled as ... multiplication of local phase".
+-                    # This implies the layer thickness Dz is handled by the phase mask.
+-                    # But wait, the phase mask formula uses dz.
+-                    # "crossing each layer of thickness dz ... followed by multiplication".
+-                    # This suggests the BPM step size is dz, and the layer is composed of multiple dz steps?
+-                    # Or is Dz the step size?
+-                    # "waveguide lengths are integer multiples of Dz".
+-                    # "simulation resolution ... dz = 0.5um". "Dz = 10um".
+-                    # So a layer is 20 dz steps.
+-                    
+-                    # The source says: "crossing each layer ... is modeled as ... multiplication of local phase".
+-                    # This is an approximation or a specific implementation detail.
+-                    # Let's assume the phase mask provided is for the entire layer Dz.
+-                    # But the formula uses dz.
+-                    # phi = exp(i * 2pi/lambda * delta_ni * dz).
+-                    # If the layer is Dz, and we apply this phase Dz/dz times?
+-                    # Or is the voxel distribution defined for the whole layer?
+-                    # "transverse voxel distributions ... relative refractive index changes".
+-                    # "length of any voxel ... can be freely chosen".
+-                    # "sub-volumes ... acting as placeholders for elementary voxel distributions".
+-                    
+-                    # Let's assume the phase mask phi_masks[d][n] is for the thickness dz.
+-                    # We need to apply it Dz/dz times.
+-                    
+-                    num_steps = int(Dz / dz)
+-                    layer_phase = np.ones_like(current_fields[n], dtype=complex)
+-                    
+-                    # We need to construct the layer phase mask based on voxel_selection
+-                    # voxel_selection[:,:,k] gives the index d for each sub-volume in layer k+1
+-                    # We need to tile these masks to match the field size.
+-                    
+-                    # This is complex to implement without knowing the exact tiling.
+-                    # For the pseudocode, we assume a function apply_layer_phase(field, layer_selection, phi_masks, n)
+-                    
+-                    next_field = apply_layer_phase(current_fields[n], voxel_selection[:,:,k], phi_masks, n)
+-                    next_fields.append(next_field)
+-                
+-                plane_fields[k+1] = next_fields
+-                current_fields = next_fields
+-        
+-        # Step 2: Convergence Check
+-        # Compute O_max at z_{out} (plane_fields[K])
+-        # O_max = sum_n Re(integral( conj(v_n) * u_n ))
+-        # Note: v_n is the target mode. u_n is the propagated mode.
+-        
+-        current_u_out = plane_fields[K]
+-        O_max = 0.0
+-        for n in range(N):
+-            # Integral is approximated by sum over pixels
+-            overlap = np.sum(np.conj(v_target[n]) * current_u_out[n])
+-            O_max += np.real(overlap)
+-            
+-        if iteration > 0 and abs(O_max - prev_O_max) < tol:
+-            break
+-        prev_O_max = O_max
+-        
+-        # Step 3: Backward Propagation and Voxel Selection
+-        # Start with target modes at z_{out}
+-        # v_fields[k] stores the field at z_{k+1} (output of layer k+1)
+-        # We backpropagate to z_k (input of layer k+1)
+-        
+-        # Initialize v_fields[K] with target modes
+-        v_fields = [None] * (K + 1)
+-        v_fields[K] = v_target
+-        
+-        for k in range(K-1, -1, -1): # k from K-1 down to 0
+-            # We are at layer k+1 (index k in 0-based layer list)
+-            # We have v_fields[k+1] (fields at z_{k+2})
+-            # We want to find the best voxel for each sub-volume in layer k+1
+-            # such that the backpropagated field matches the forward field as much as possible.
+-            
+-            # The criterion is:
+-            # O_ijk_max = max_d sum_n Re( conj(v_ijk+1^n) * u_ijk+1^n(d) )
+-            # where u_ijk+1^n(d) is the field propagated from z_{k+1} to z_{k+2} through v_ijk with distribution d.
+-            # And v_ijk+1^n is the target field at z_{k+2}.
+-            
+-            # Note: The source says "backpropagate target modes {v_ijk+1^n} to plane z_k".
+-            # This implies we use the selected voxel to backpropagate.
+-            
+-            # So for each sub-volume (i,j) in layer k:
+-            best_d = 0
+-            best_score = -np.inf
+-            
+-            # Get the forward field at z_{k+1} (input to layer k+1)
+-            # This is plane_fields[k]
+-            u_in_layer = plane_fields[k]
+-            
+-            # Get the target field at z_{k+2} (output of layer k+1)
+-            # This is v_fields[k+1]
+-            v_out_layer = v_fields[k+1]
+-            
+-            # For each sub-volume (i,j)
++        # Start with input modes at z_1
++        current_fields = list(input_modes)
++        stored_fields = [] # List of lists of lists: stored_fields[k][i][j][n]
++        
++        for k in range(K):
++            # Store fields before crossing sub-volume v_ijk
++            # stored_fields[k] is a list of I*J fields for each mode n
++            layer_fields = []
+             for i in range(I):
+                 for j in range(J):
+-                    # Extract the field patch for this sub-volume
+-                    # Assuming fields are tiled to match sub-volumes
+-                    u_patch = extract_patch(u_in_layer, i, j, I, J)
+-                    v_patch = extract_patch(v_out_layer, i, j, I, J)
+-                    
+-                    # Try all distributions
+-                    for d in range(len(voxel_distributions)):
+-                        # Propagate u_patch through v_ijk with distribution d
+-                        # This is a forward propagation through one layer of thickness Dz
+-                        u_prop_patch = propagate_through_voxel(u_patch, voxel_distributions[d], wavelengths, dz, Dz)
+-                        
+-                        # Compute criterion
++                    layer_fields.append([current_fields[n] for n in range(N)])
++            stored_fields.append(layer_fields)
++            
++            # Propagate through sub-volumes at plane k
++            # Using split-step BPM
++            next_fields = [None] * N
++            for n in range(N):
++                # Propagate through homogeneous medium dz
++                # This involves FFT, transfer function, IFFT
++                # H(u,v) = exp(i * 2*pi * z * sqrt(1/lambda^2 - u^2 - v^2))
++                field_prop = propagate_step(current_fields[n], dz, wavelengths[n], bulk_indices[n])
++                
++                # Apply local phase from selected voxel
++                # The field is divided into blocks (i,j)
++                for i in range(I):
++                    for j in range(J):
++                        d = selection[i][j][k]
++                        phase_mask = voxel_library[d]
++                        # Apply phase mask to the specific block
++                        # Assuming field_prop is already tiled or we apply block-wise
++                        field_prop[i*block_h:(i+1)*block_h, j*block_w:(j+1)*block_w] *= phase_mask
++                
++                next_fields[n] = field_prop
++            
++            current_fields = next_fields
++
++        # Store final fields for convergence check
++        final_fields = current_fields
++        
++        # Step 2: Convergence Check
++        # Compute O_max = sum_n Re(int(v_n* * u_n))
++        overlap = 0.0
++        for n in range(N):
++            # Integral approximation via sum
++            overlap += np.sum(np.real(np.conj(target_modes[n]) * final_fields[n]))
++        
++        if iteration > 0 and abs(overlap - prev_overlap) < tol:
++            break
++        prev_overlap = overlap
++        
++        # Step 3: Backward Propagation and Selection
++        # Start with target modes at z_{K+1}
++        back_fields = list(target_modes)
++        
++        for k in range(K-1, -1, -1): # From K-1 down to 0
++            # We need to select voxels for plane k
++            # The fields stored_fields[k] are at z_k (before crossing v_ijk)
++            # The fields back_fields are at z_{k+1} (after crossing v_ijk)
++            
++            for i in range(I):
++                for j in range(J):
++                    best_d = 0
++                    best_score = -np.inf
++                    
++                    # Get stored input fields at z_k for this sub-volume
++                    u_at_zk = [stored_fields[k][i][j][n] for n in range(N)]
++                    
++                    # Get target fields at z_{k+1}
++                    v_at_zk1 = [back_fields[n] for n in range(N)]
++                    
++                    # Try all voxel distributions
++                    for d in range(len(voxel_library)):
+                         score = 0.0
+                         for n in range(N):
+-                            # Note: u_prop_patch is a list of fields for each n?
+-                            # Or is it a single field?
+-                            # The modes are incoherent, so we sum intensities?
+-                            # No, the criterion uses complex overlap.
+-                            # "mutually incoherent transverse input modes"
+-                            # But the criterion is sum_n Re(conj(v_n) u_n).
+-                            # This suggests we treat them as coherent for the purpose of the overlap integral?
+-                            # Or is it a sum of overlaps?
+-                            # The formula is sum_n integral Re(conj(v_n) u_n).
+-                            # So we compute the overlap for each mode and sum them.
++                            # Propagate u_at_zk[n] through candidate voxel d to z_{k+1}
++                            # This is a local propagation over dz
++                            u_candidate = propagate_step(u_at_zk[n], dz, wavelengths[n], bulk_indices[n])
+                             
+-                            overlap = np.sum(np.conj(v_patch[n]) * u_prop_patch[n])
+-                            score += np.real(overlap)
++                            # Apply phase of candidate voxel
++                            phase_mask = voxel_library[d]
++                            u_candidate[i*block_h:(i+1)*block_h, j*block_w:(j+1)*block_w] *= phase_mask
++                            
++                            # Compute overlap contribution
++                            # Note: v_at_zk1 is the field at z_{k+1}
++                            # We compare u_candidate (propagated from z_k) with v_at_zk1
++                            # However, v_at_zk1 might be the result of backpropagation from further steps
++                            # The criterion is Re(v* u)
++                            score += np.sum(np.real(np.conj(v_at_zk1[n]) * u_candidate))
+                         
+                         if score > best_score:
+@@ -319,57 +170,55 @@
+                             best_d = d
+                     
+-                    # Select best_d for this sub-volume
+-                    voxel_selection[i, j, k] = best_d
+-            
+-            # Now backpropagate the target modes through the selected voxels
+-            # to get v_fields[k]
+-            v_fields[k] = backpropagate_layer(v_fields[k+1], voxel_selection[:,:,k], phi_masks)
+-
+-    return voxel_selection
+-
+-def apply_layer_phase(field, layer_selection, phi_masks, n):
+-    """
+-    Propagate a single mode field through a layer of sub-volumes.
+-    """
+-    # This function is complex to implement without knowing the exact field layout.
+-    # We assume field is a 2D array (H, W) and layer_selection is (I, J).
+-    # We need to tile the phase masks.
+-    pass
+-
+-def propagate_through_voxel(field, delta_ni, wavelengths, dz, Dz):
+-    """
+-    Propagate field through a voxel distribution of thickness Dz.
+-    """
+-    # Apply phase mask Dz/dz times
+-    num_steps = int(Dz / dz)
+-    # Create phase mask for this voxel
+-    # delta_ni might be wavelength dependent
+-    # We assume delta_ni is provided for the specific wavelength
+-    phase = np.exp(1j * 2 * np.pi / wavelengths[0] * delta_ni * dz) # Assuming single wavelength for simplicity
+-    # Apply phase
+-    field = field * phase
+-    # Repeat for num_steps
+-    for _ in range(num_steps - 1):
+-        field = field * phase
+-    return field
+-
+-def backpropagate_layer(fields, layer_selection, phi_masks):
+-    """
+-    Backpropagate fields through a layer of sub-volumes.
+-    """
+-    # Backpropagation is the inverse of forward propagation.
+-    # For phase-only elements, it's just the conjugate phase.
+-    pass
++                    selection[i][j][k] = best_d
++            
++            # Backpropagate the target modes from z_{k+1} to z_k using the NEWLY selected voxels
++            # This prepares back_fields for the next iteration (k-1)
++            new_back_fields = [None] * N
++            for n in range(N):
++                # Start with back_fields[n] at z_{k+1}
++                # We need to backpropagate through the sub-volumes at plane k
++                # This is the inverse of the forward step
++                field_back = back_fields[n]
++                
++                for i in range(I):
++                    for j in range(J):
++                        d = selection[i][j][k]
++                        # The forward step was: Propagate dz -> Apply Phase
++                        # The backward step is: Apply Conjugate Phase -> Backpropagate dz
++                        # Or equivalently, reverse the forward BPM steps
++                        
++                        # 1. Apply conjugate phase of the selected voxel
++                        phase_mask = voxel_library[d]
++                        # Inverse phase
++                        inv_phase = np.conj(phase_mask)
++                        field_back[i*block_h:(i+1)*block_h, j*block_w:(j+1)*block_w] *= inv_phase
++                        
++                        # 2. Backpropagate through homogeneous medium dz
++                        # This is the inverse of propagate_step
++                        field_back = backpropagate_step(field_back, dz, wavelengths[n], bulk_indices[n])
++                
++                new_back_fields[n] = field_back
++            
++            back_fields = new_back_fields
++
++    return selection
+ ```
+ 
++**Edge Cases and Pitfalls:**
++*   **Precision:** The simulation resolution $dz$ ($0.5\,\mu\text{m}$) must be significantly smaller than the elementary length $D_z$ ($10\,\mu\text{m}$) to ensure numerical accuracy in the split-step BPM [S1, unofficial].
++*   **Boundary Conditions:** The algorithm assumes a finite extent sample. Edge effects in the transverse planes $x,y$ may require padding or appropriate boundary conditions in the Fourier transforms.
++*   **Lossless Assumption:** The equivalence between minimization and maximization (Eq. 5 to Eq. 6) holds strictly for lossless designs where mode energy is conserved. If absorption is present, the criterion must be adjusted [S1, unofficial].
++*   **Computational Cost:** The voxel selection step requires testing $D$ distributions for every sub-volume $(i,j)$ at every plane $k$. This is computationally intensive. Parallelization over sub-volumes or modes is recommended.
++
+ ## Operating characteristics
+-*   **Complexity:** The algorithm is iterative. Each iteration involves one forward pass and one backward pass. The voxel selection step requires evaluating $D$ distributions for each of the $I \times J$ sub-volumes in each layer. Thus, the complexity per iteration is $O(K \cdot I \cdot J \cdot D)$.
+-*   **Performance:** The method is computationally intensive due to the exhaustive search over voxel distributions at each sub-volume. The number of iterations required for convergence depends on the complexity of the mode conversion task.
+-*   **Strengths:** It allows for the design of efficient mode sorters and converters with high fidelity. It handles multiple incoherent modes simultaneously.
+-*   **Limitations:** The design is constrained by the available voxel distributions. The resolution of the design is limited by the sub-volume size $D_z$. The algorithm assumes lossless propagation.
+-*   **When to use:** When designing CGVHs for mode conversion where the available fabrication techniques allow for a discrete set of transverse refractive index profiles.
++*   **Time Complexity:** The algorithm is iterative. Each iteration involves one forward pass and one backward pass. The forward/backward pass complexity is $O(K \cdot I \cdot J \cdot N \cdot \text{FFT\_cost})$. The voxel selection step adds a factor of $D$ to the inner loop, making the selection step $O(K \cdot I \cdot J \cdot D \cdot N \cdot \text{FFT\_cost})$. Total complexity per iteration is dominated by the selection step.
++*   **Memory Complexity:** Requires storing fields at each plane $z_k$ for all modes and sub-volumes during the forward pass: $O(K \cdot I \cdot J \cdot N \cdot H \cdot W)$. The voxel library is small.
++*   **Strengths:** Handles multiple incoherent modes and wavelengths simultaneously. Provides a physically realizable voxel-based design. Converges to a local optimum that maximizes mode overlap.
++*   **Limitations:** Computationally expensive due to the exhaustive search over voxel distributions. Convergence is not guaranteed to be global. Requires a pre-defined library of voxel distributions.
++*   **When to use:** When designing volume holograms for mode sorting or multiplexing where discrete fabrication constraints (voxel-based) are present.
++*   **When not to use:** For continuous-index designs or when computational resources are limited.
+ 
+ ## Background
+-This algorithm was presented in the context of designing computer-generated volume holograms in glass for mode conversion [S1, unofficial]. It is based on the Iterative Propagation Algorithm (IPA) [50], which maximizes overlap integrals in a lossless optical system. The method was applied to the design of a mode sorter, with experimental validation showing angular dependence of efficiency.
++The method was introduced in the context of designing efficient computer-generated volume holograms in glass for mode conversion [S1, unofficial]. It builds upon the Iterative Propagation Algorithm (IPA) concept, where the global optimization problem is decomposed into local maximization problems at each propagation plane [S1, unofficial]. The approach leverages the conservation of overlap integrals in lossless optical systems to simplify the error metric.
+ 
+ ## Sources

@@ -43,8 +43,8 @@ def parse_ply_header(ply_buffer: bytes) -> dict:
     
     # Read header in 50-byte chunks until end_header is found
     while True:
-        chunk = ply_buffer[header_offset : header_offset + 50]
-        header_text += chunk.decode('utf-8')
+        header_chunk = ply_buffer[header_offset : header_offset + 50]
+        header_text += header_chunk.decode('utf-8')
         header_offset += 50
         if 'end_header' in header_text:
             break
@@ -61,7 +61,7 @@ def parse_ply_header(ply_buffer: bytes) -> dict:
                 vertex_count = int(match.group())
         elif line.startswith('property'):
             import re
-            match = re.match(r'property\s+(\w+)\s+(\w+)', line)
+            match = re.match(r'property\s+(\w+)\s+(\w+)\s+(\w+)', line)
             if match:
                 p_type = match.group(1)
                 p_name = match.group(2)
@@ -112,7 +112,8 @@ This phase parses ASCII PLY files to extract vertices and faces, computing norma
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def parse_ascii_ply(ply_text: str) -> dict:
+def parse_ascii_mesh(ply_text: str) -> dict:
+    import math
     lines = ply_text.strip().split('\n')
     vertex_buffer = []
     faces_triangles = []
@@ -172,7 +173,7 @@ def parse_ascii_ply(ply_text: str) -> dict:
         vr_y = va_z * vb_x - va_x * vb_z
         vr_z = va_x * vb_y - va_y * vb_x
         
-        val = (vr_x**2 + vr_y**2 + vr_z**2)**0.5
+        val = math.sqrt(vr_x**2 + vr_y**2 + vr_z**2)
         
         if val > 0:
             normals.extend([vr_x/val, vr_y/val, vr_z/val])
@@ -189,23 +190,18 @@ def parse_ascii_ply(ply_text: str) -> dict:
 **Edge Cases and Pitfalls:**
 - **Quad Faces:** The ASCII parser assumes triangles. Quad faces (indicated by `4` in the face line) are skipped, leaving them unprocessed [S2, unofficial].
 - **Index Basis:** Vertex indices are treated as 0-based directly from the file [S2, unofficial].
-- **Precision:** Floating point parsing may lose precision if the file uses high-precision decimals and the parser truncates.
-- **Binary vs ASCII:** The header parser is designed for locating binary data, but the mesh loader is ASCII-specific. A unified parser must detect the format from the header (`format ascii` vs `format binary`).
+- **Binary Parsing Scope:** The header parser is designed for locating binary data; actual binary vertex property parsing requires additional logic based on `propertyTypes` [S1, unofficial].
 
 ## Subtopics
 
 ### PLY Mesh Loader & Normal Calculator
-A variant focused on surface mesh extraction rather than raw header parsing. It parses ASCII PLY files to extract vertex coordinates and triangle indices into flat arrays and computes face normals via cross products. It sets itself apart by providing ready-to-render geometry data (normals) rather than just raw buffers. Choose this when the goal is immediate rendering of surface meshes. It does not handle quad faces, leaving them unprocessed [S2, unofficial].
+It parses ASCII PLY files to extract vertex coordinates and triangle indices into flat arrays and computes face normals via cross products [S2, unofficial]. It does not handle quad faces, leaving them unprocessed [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ for header parsing, where $N$ is the header size. $O(V + F)$ for ASCII mesh loading, where $V$ is vertex count and $F$ is face count.
-- **Memory Complexity:** $O(V)$ for vertex storage, $O(F)$ for face storage.
-- **Strengths:** Simple implementation for ASCII files; efficient binary header scanning using fixed-size chunks.
-- **Limitations:** The ASCII parser snippet does not handle quad faces. Binary parsing in the provided source is limited to header extraction; actual binary vertex property parsing requires additional logic based on `propertyTypes`.
-- **When to use:** When converting Gaussian Splatting outputs or standard mesh PLYs to WebGL-friendly formats [S1, unofficial].
+Not given in the sources.
 
 ## Background
-The PLY format was developed by the Visualization Group at the University of Washington. The parsing method described here is derived from implementations used in WebGL-based 3D Gaussian Splatting viewers, specifically tools converting `.ply` files created by the 3D Gaussian Splatting tutorial for real-time radiance field rendering [S1, unofficial]. The ASCII mesh loader logic is adapted from the SVO Workbench project [S2, unofficial].
+The parsing method described here is derived from implementations used in WebGL-based 3D Gaussian Splatting viewers, specifically tools converting `.ply` files created by the 3D Gaussian Splatting tutorial for real-time radiance field rendering [S1, unofficial]. The ASCII mesh loader logic is adapted from the SVO Workbench project [S2, unofficial].
 
 ## Sources
 [S1] akbartus/Gaussian-Splatting-WebViewers, https://github.com/akbartus/Gaussian-Splatting-WebViewers, fetched 2026-10-27 (unofficial)

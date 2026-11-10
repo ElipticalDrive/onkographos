@@ -3,124 +3,95 @@
 Also called: R/MC, R/MC estimate, R/SMC estimate, Reparameterized Stratified Monte Carlo (R/SMC) Volume Rendering
 
 ## Overview
-Reparameterized Monte Carlo (R/MC) Volume Rendering is a differentiable rendering method that estimates expected radiance by sampling from the density-induced probability distribution using the reparameterization trick [S1, unofficial]. It solves the problem of computing gradients for volume rendering integrals where the sampling distribution depends on the parameters (e.g., neural network weights defining density), allowing end-to-end gradient-based optimization without auxiliary models [S1, unofficial]. It sets itself apart from standard Monte Carlo volume rendering by transforming the random samples to be independent of the density field, thereby enabling unbiased gradient estimation through the chain rule [S1, unofficial].
+Reparameterized Monte Carlo (R/MC) volume rendering is a differentiable rendering method that estimates expected radiance by sampling from the density-induced probability distribution using the reparameterization trick [S1, unofficial]. It solves the problem of computing gradients for volume rendering integrals where the sampling distribution depends on the scene parameters (density field), avoiding the complex boundary terms associated with the Reynolds Transport Theorem [S1, unofficial]. Unlike standard Monte Carlo volume rendering where samples are fixed in space, R/MC samples are generated in a normalized parameter space and mapped back to the ray, ensuring the sampling distribution is static with respect to the optimization variables [S1, unofficial]. It sets itself apart from [Reparameterized Volume Sampling](3309-reparameterized-volume-sampling.md) by explicitly defining the sampling strategy via inverse opacity mapping rather than general domain transformations, and from [Boundary Path Integral Formulation](3389-boundary-path-integral-formulation.md) by operating on the volumetric integral directly without path tracing [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- **Input:** Ray $r = o + td$ with near/far bounds $t_n, t_f$; density field $\sigma_r(t)$; radiance field $c_r(t)$; number of samples $k$.
-- **Output:** Estimated radiance $\hat{C}$ and its gradient with respect to model parameters.
+**Inputs:** Ray $r = o + td$ with near/far bounds $t_n, t_f$; density field $\sigma(x)$; radiance field $c(x)$; number of samples $k$.
+**Outputs:** Estimated radiance $\hat{C}$; gradient $\nabla_\theta \hat{C}$ with respect to parameters $\theta$ defining $\sigma$ and $c$.
 
 **Data Structures:**
-- **Ray:** Defined by origin $o$, direction $d$, and bounds $t_n, t_f$.
-- **Density/Radiance Fields:** Functions $\sigma_r(t)$ and $c_r(t)$ queried at arbitrary $t$. In practice, these are often neural networks or discrete grids requiring interpolation.
-- **Samples:** Array of $k$ random variables.
+*   **Ray:** Defined by origin $o$, direction $d$, $t_n$, $t_f$.
+*   **Density Field:** $\sigma_r(t) = \sigma(o + td)$.
+*   **Radiance Field:** $c_r(t) = c(o + td)$.
+*   **Opacity Function:** $F_r(t) = 1 - \exp\left(-\int_{t_n}^{t} \sigma_r(s) ds\right)$.
+*   **Total Opacity:** $y_f = F_r(t_f)$.
 
 **Steps:**
-1.  **Compute Total Opacity:** Calculate the total opacity $y_f$ along the ray segment $[t_n, t_f]$:
-    $$ y_f = F_r(t_f) = 1 - \exp\left(-\int_{t_n}^{t_f} \sigma_r(s) ds\right) $$
-    where $F_r(t)$ is the opacity function [S1, unofficial].
-2.  **Generate Samples:** Generate $k$ independent samples.
-    - For **R/MC**: Draw $u_i \sim U[0,1]$ for $i=1,\dots,k$.
-    - For **R/SMC**: Draw stratified samples $v_i \sim U\left[\frac{i-1}{k+1}, \frac{i}{k+1}\right]$ for $i=1,\dots,k$ [S1, unofficial].
-3.  **Map to Opacity Space:** Compute target cumulative opacity values $y_i$:
-    $$ y_i = y_f \cdot u_i \quad (\text{or } v_i) $$
-4.  **Inverse Opacity (Ray Distance):** Solve for the ray distance $t_i$ such that:
-    $$ F_r(t_i) = y_i $$
-    This requires computing the inverse opacity function $F_r^{-1}(y)$ [S1, unofficial].
-5.  **Query Radiance:** Evaluate the radiance at the sampled distances: $c_r(t_i)$.
-6.  **Estimate Radiance:** Compute the final estimate:
-    $$ \hat{C}_{MC}^R(r) := \frac{y_f}{k} \sum_{i=1}^k c_r(F_r^{-1}(y_f u_i)) $$
-    $$ \hat{C}_{SMC}^R(r) := \frac{y_f}{k} \sum_{i=1}^k c_r(F_r^{-1}(y_f v_i)) $$
-    [S1, unofficial].
+1.  Compute the total opacity $y_f = F_r(t_f)$ along the ray segment $[t_n, t_f]$ [S1, unofficial].
+2.  Generate $k$ independent samples.
+    *   For **R/MC**: Draw $u_i \sim U[0, 1]$ for $i=1, \dots, k$ [S1, unofficial].
+    *   For **R/SMC**: Draw stratified samples $v_i \sim U\left[\frac{i-1}{k+1}, \frac{i}{k+1}\right]$ for $i=1, \dots, k$ [S1, unofficial].
+3.  Compute the target cumulative opacity values: $y_i = y_f \cdot u_i$ (for R/MC) or $y_i = y_f \cdot v_i$ (for R/SMC) [S1, unofficial].
+4.  Solve for the ray distance $t_i$ such that $F_r(t_i) = y_i$. This requires computing the inverse opacity function $F_r^{-1}(y_i)$ [S1, unofficial].
+5.  Query the radiance at the sampled positions: $c_r(t_i)$ [S1, unofficial].
+6.  Compute the estimate:
+    $$
+    \hat{C} = \frac{y_f}{k} \sum_{i=1}^{k} c_r(F_r^{-1}(y_f u_i)) \quad \text{(R/MC)}
+    $$
+    $$
+    \hat{C} = \frac{y_f}{k} \sum_{i=1}^{k} c_r(F_r^{-1}(y_f v_i)) \quad \text{(R/SMC)}
+    $$
+    [S1, unofficial]
 
 **Approximations:**
-In practice, $F_r(t)$ cannot be computed analytically because $\sigma_r$ is queried at discrete points. Approximations are required:
-- **Piecewise Constant (PWC):** Approximate $\sigma_r(t)$ as constant between query points. $F_r(t)$ becomes a sum of exponentials.
-- **Piecewise Linear (PWL):** Approximate $\sigma_r(t)$ as linear between query points. $F_r(t)$ involves integrals of linear functions.
-- **Inverse Approximation:** $F_r^{-1}(y)$ is computed via numerical root-finding (e.g., binary search) or analytical inversion of the piecewise approximation [S1, unofficial].
+In practice, $F_r(t)$ cannot be computed analytically because $\sigma_r$ is queried at discrete points. $F_r$ and $F_r^{-1}$ must be approximated, typically using piecewise constant or piecewise linear density field approximations along the ray [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def reparameterized_volume_rendering(ray_o, ray_d, t_n, t_f, density_net, radiance_net, k, sampling_mode='mc'):
+def reparameterized_mc_volume_rendering(ray_o, ray_d, t_n, t_f, sigma_field, c_field, k):
     """
     ray_o: origin (3,)
     ray_d: direction (3,)
-    t_n, t_f: near/far bounds
-    density_net: function sigma(t) -> scalar
-    radiance_net: function c(t) -> (3,)
-    k: number of samples
-    sampling_mode: 'mc' or 'smc'
+    t_n: near bound (float)
+    t_f: far bound (float)
+    sigma_field: function sigma(t) -> density (float)
+    c_field: function c(t) -> radiance (3,)
+    k: number of samples (int)
     """
     # Step 1: Compute total opacity y_f
-    # In practice, this requires numerical integration of density_net along the ray
-    # Approximation: Use a fixed number of quadrature points or the same k points
-    # For simplicity, assume we have a function compute_opacity(t_n, t_f, density_net)
-    y_f = compute_opacity(t_n, t_f, density_net)
+    # Note: In practice, this requires numerical integration of sigma_field
+    # along the ray from t_n to t_f.
+    y_f = compute_total_opacity(ray_o, ray_d, t_n, t_f, sigma_field)
     
     # Step 2: Generate samples
-    if sampling_mode == 'mc':
-        u = random.uniform(0, 1, k)
-    elif sampling_mode == 'smc':
-        # Stratified sampling
-        u = random.uniform(0, 1, k)
-        # Sort and stratify? No, standard stratified is fixed bins
-        # v_i ~ U[(i-1)/(k+1), i/(k+1)]
-        u = array([(i-1)/(k+1) + random.uniform(0, 1)/(k+1) for i in range(1, k+1)])
-    else:
-        raise ValueError("Unknown sampling mode")
-        
-    # Step 3: Map to opacity space
-    y_targets = y_f * u
+    # For R/MC:
+    u_samples = random.uniform(0, 1, size=k)
     
-    # Step 4: Inverse opacity to get t_i
-    # This requires solving F_r(t) = y_target for each y_target
-    # F_r(t) = 1 - exp(-integral(t_n to t) sigma(s) ds)
-    # Let A(t) = integral(t_n to t) sigma(s) ds
-    # Then y = 1 - exp(-A(t)) => exp(-A(t)) = 1 - y => A(t) = -log(1-y)
-    # So we need to find t such that integral(t_n to t) sigma(s) ds = -log(1 - y_target)
+    # For R/SMC, replace u_samples with stratified samples:
+    # u_samples = random.uniform((i-1)/(k+1), i/(k+1)) for i in 1..k
     
-    t_samples = []
-    for y in y_targets:
-        if y >= 1.0: # Handle edge case where y_f is very close to 1 or numerical error
-            t_samples.append(t_f)
-            continue
-        target_integral = -log(1.0 - y)
-        # Solve for t: integral(t_n to t) sigma(s) ds = target_integral
-        # Use binary search or Newton's method
-        t = solve_inverse_opacity(t_n, t_f, density_net, target_integral)
-        t_samples.append(t)
-        
+    # Step 3: Compute target opacities
+    y_targets = y_f * u_samples
+    
+    # Step 4: Inverse opacity mapping
+    # Solve F_r(t_i) = y_target_i for t_i
+    # This requires an approximation of F_r and its inverse.
+    # Typically done via piecewise linear interpolation of the cumulative opacity.
+    t_samples = inverse_opacity_mapping(y_targets, ray_o, ray_d, t_n, t_f, sigma_field)
+    
     # Step 5: Query radiance
-    radiance_sum = zeros(3)
-    for t in t_samples:
-        radiance_sum += radiance_net(t)
-        
-    # Step 6: Estimate
-    C_hat = (y_f / k) * radiance_sum
+    radiance_samples = c_field(t_samples) # Shape (k, 3)
     
-    return C_hat
+    # Step 6: Compute estimate
+    estimate = (y_f / k) * np.sum(radiance_samples, axis=0)
+    
+    return estimate
 ```
 
-**Parameters:**
-- $k$: Number of samples. Typical values: 1-8 for real-time, higher for offline.
-- Sampling mode: 'mc' (uniform) or 'smc' (stratified).
-
-**Edge Cases:**
-- $y_f \approx 0$: The ray is transparent. The estimate is 0.
-- $y_f \approx 1$: The ray is opaque. $y_i$ may approach 1, leading to $t_i \approx t_f$. Numerical stability in $-log(1-y)$ must be handled.
-- Discrete Density: The approximation of $F_r$ and $F_r^{-1}$ introduces bias if not handled carefully. The sources note that $F_r$ cannot be computed analytically in practice [S1, unofficial].
+**Subtopics:**
+*   **R/SMC (Reparameterized Stratified Monte Carlo):** Uses stratified sampling to reduce variance compared to R/MC's uniform sampling, while maintaining the same differentiability properties [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(k \cdot Q)$, where $k$ is the number of samples and $Q$ is the cost of querying density/radiance and solving the inverse opacity. Solving the inverse opacity may require iterative methods, increasing the constant factor.
-- **Memory Complexity:** $O(1)$ per ray, assuming the density/radiance models are accessed on-demand.
-- **Performance:** R/SMC reduces variance compared to R/MC by using stratified sampling, while maintaining the same differentiability properties [S1, unofficial].
-- **Strengths:** Unbiased gradient estimation; end-to-end differentiability; efficient with few samples per ray.
-- **Limitations:** Requires numerical approximation of opacity and its inverse; sensitive to the accuracy of the density field approximation.
+*   **Time Complexity:** $O(k \cdot N)$, where $k$ is the number of samples and $N$ is the cost of evaluating the density/radiance fields and computing the opacity approximation per sample.
+*   **Memory Complexity:** $O(N)$ for storing the density field and intermediate opacity values along the ray.
+*   **Strengths:** Enables end-to-end gradient-based optimization of neural radiance fields with few radiance evaluations per ray [S1, unofficial]. Unbiased gradient estimates [S1, unofficial].
+*   **Limitations:** Requires approximation of $F_r$ and $F_r^{-1}$, which can introduce bias if not handled carefully [S1, unofficial]. R/SMC reduces variance but requires more complex sampling logic [S1, unofficial].
+*   **When to use:** When optimizing differentiable neural radiance fields and computational efficiency per ray is critical [S1, unofficial].
 
 ## Background
-Reparameterized Monte Carlo Volume Rendering was introduced in the paper "Differentiable Rendering With Reparameterized Volume Sampling" [S1, unofficial]. It builds on the reparameterization trick to enable gradient-based optimization of neural radiance fields. The method allows optimizing a neural radiance field with just a few radiance field evaluations per ray, alleviating costs associated with the color component [S1, unofficial].
+Reparameterized Monte Carlo volume rendering was introduced in the paper "Differentiable Rendering With Reparameterized Volume Sampling" [S1, unofficial]. It addresses the challenges of differentiable volume rendering by reparameterizing the sampling distribution to align with the density field, allowing for efficient gradient computation without auxiliary models [S1, unofficial].
 
 ## Sources
 [S1] Differentiable Rendering With Reparameterized Volume Sampling, https://openreview.net/pdf?id=zHSaBQtj-l, fetched 2026-10-29 (unofficial)

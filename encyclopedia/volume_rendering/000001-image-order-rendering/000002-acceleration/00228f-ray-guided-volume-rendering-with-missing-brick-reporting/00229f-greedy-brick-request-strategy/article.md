@@ -13,17 +13,17 @@ The Greedy Brick Request Strategy is a data-loading heuristic in ray-guided volu
 - **Level of Detail (LoD):** An integer index representing the resolution of the brick, where higher indices indicate finer resolution [S1].
 
 **Algorithm Steps:**
-1. Initialize the current LoD to the base resolution required for the current sample or the last known available resolution.
-2. Enter a loop that continues as long as a brick is missing.
-3. Increment the LoD index.
-4. Look up the brick corresponding to the current ray position and the new LoD.
-5. Check if the brick is missing (not resident in memory).
+1. Initialize the current LoD to the base resolution required for the current sample or the last known available resolution [G].
+2. Enter a loop that continues as long as a brick is missing [S1].
+3. Increment the LoD index [S1].
+4. Look up the brick corresponding to the current ray position and the new LoD [S1].
+5. Check if the brick is missing (not resident in memory) [S1].
 6. If the brick is missing:
-   - Report the missing brick to the hash table.
-   - Continue the loop to request the next higher resolution.
+   - Report the missing brick to the hash table [S1].
+   - Continue the loop to request the next higher resolution [S1].
 7. If the brick is found (not missing):
-   - Terminate the loop.
-   - Proceed with rendering using the found brick.
+   - Terminate the loop [S1].
+   - Proceed with rendering using the found brick [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -49,9 +49,9 @@ def greedy_brick_request(ray, current_lod, lookup_brick, is_missing, report_miss
 - **Convergence Behavior:** The strategy allows a ray to sample at its final resolution quickly, which can cause earlier ray termination and faster convergence in fewer frames [S1].
 
 **Edge Cases and Pitfalls:**
-- **Ray Termination:** If the ray exits the volume bounds before finding a resident brick, the loop must terminate to prevent infinite execution.
-- **Hash Table Contention:** Flooding the hash table with intermediate requests per ray may cause contention or overflow if the table size is not sufficiently large.
-- **Lookup Precision:** The lookup function must correctly map ray positions to brick indices at each LoD to avoid missing bricks or requesting invalid resolutions.
+- **Ray Termination:** If the ray exits the volume bounds before finding a resident brick, the loop must terminate to prevent infinite execution [G].
+- **Hash Table Contention:** Flooding the hash table with intermediate requests per ray may cause contention or overflow if the table size is not sufficiently large [S1].
+- **Lookup Precision:** The lookup function must correctly map ray positions to brick indices at each LoD to avoid missing bricks or requesting invalid resolutions [G].
 
 ## Subtopics
 

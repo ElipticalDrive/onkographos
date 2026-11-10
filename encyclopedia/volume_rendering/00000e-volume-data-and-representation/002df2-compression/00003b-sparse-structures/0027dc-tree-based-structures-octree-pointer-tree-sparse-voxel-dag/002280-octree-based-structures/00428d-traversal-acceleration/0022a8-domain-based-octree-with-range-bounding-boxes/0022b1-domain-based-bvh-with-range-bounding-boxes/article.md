@@ -7,134 +7,111 @@ The Domain-based BVH with Range Bounding Boxes is an acceleration structure for 
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A tetrahedral mesh defining the domain, the continuous scatter plot (CSP) function $f$, and a set of FSCP edges $e$ to query.
-*   **Output:** A subset of tetrahedra whose Range Bounding Boxes (RBBs) intersect the query edge $e$, used for fiber surface extraction.
+*   **Input:** A tetrahedral mesh defining the domain, the continuous scatter plot (CSP) function $f$, and a set of FSCP edges $e$ to query [S1].
+*   **Output:** A subset of tetrahedra whose Range Bounding Boxes (RBBs) intersect the query edge $e$, used for fiber surface extraction [S1].
 
 **Data Structures:**
 The structure is a tree where each node $N$ contains:
-1.  **RBB:** A 2-D bounding box in range space, defined by minimum and maximum values for the two range dimensions ($[min_x, max_x] \times [min_y, max_y]$).
-2.  **Tetrahedra List:** A list of tetrahedra whose RBBs are completely included in the node's RBB.
-3.  **Children:** A list of child nodes (up to $n_S$ children per node).
+1.  **RBB:** A 2-D bounding box in range space, defined by minimum and maximum values for the two range dimensions ($[min_x, max_x] \times [min_y, max_y]$) [S1].
+2.  **Tetrahedra List:** A list of tetrahedra whose RBBs are completely included in the node's RBB [S1].
+3.  **Children:** A list of child nodes (up to $n_S$ children per node) [S1].
 
 **Construction Algorithm (Off-line):**
 The BVH is constructed in a top-to-bottom fashion [S1].
-
-1.  **Initialize Root:** Start with the root node covering the entire range space.
+1.  **Initialize Root:** Start with the root node covering the entire range space [S1].
 2.  **Assign Tetrahedra:** Assign to the current node the list of tetrahedra whose RBB is completely included in the node's RBB [S1].
 3.  **Update RBB:** Update the node's RBB after transferring tetrahedra from the parent node and before creating children nodes [S1]. This yields less regular but more refined range subdivision patterns compared to a quad-tree [S1].
 4.  **Check Threshold:** If the number of tetrahedra assigned to the node is fewer than a threshold $n_T$, stop recursion for this branch [S1].
 5.  **Split:** Perform the split $n_S$ times for the current node, recursively splitting the RBB in the middle along horizontal and vertical axes [S1]. This yields an $n_S$-ary tree [S1].
-6.  **Recurse:** Create child nodes for each split region and repeat steps 2-5 for each child.
+6.  **Recurse:** Create child nodes for each split region and repeat steps 2-5 for each child [S1].
 
 **Query Algorithm (On-line):**
 Given an FSCP edge $e$:
-
-1.  **Start at Root:** Begin the query at the root node.
+1.  **Start at Root:** Begin the query at the root node [S1].
 2.  **Test Intersection:** Check if the node's RBB intersects or overlaps the edge $e$ in 2-D range space [S1].
 3.  **Visit Children:** If the RBB intersects $e$, recursively visit each child node [S1].
 4.  **Collect Results:** If the node is a leaf (or recursion stops), return the tetrahedra in the node's list [S1].
 5.  **Filter:** Only tetrahedra returned by the BVH are used for fiber surface extraction [S1]. Note that the BVH does not encode the precise polygonal projection of tetrahedra (only RBBs), so it can return tetrahedra not intersected by the fiber surface [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+def split_rbb(rbb_min, rbb_max, n_s):
+    """Splits a 2D RBB into n_s child RBBs using a grid partition."""
+    min_x, min_y = rbb_min
+    max_x, max_y = rbb_max
+    width = max_x - min_x
+    height = max_y - min_y
+    cols = int(round((n_s * width / height) ** 0.5))
+    rows = int(round(n_s / cols))
+    if cols * rows < n_s:
+        cols += 1
+    child_boxes = []
+    for r in range(rows):
+        for c in range(cols):
+            if len(child_boxes) >= n_s:
+                break
+            cx_min = min_x + c * (width / cols)
+            cy_min = min_y + r * (height / rows)
+            cx_max = min_x + (c + 1) * (width / cols)
+            cy_max = min_y + (r + 1) * (height / rows)
+            child_boxes.append(((cx_min, cy_min), (cx_max, cy_max)))
+    return child_boxes[:n_s]
+
+def is_rbb_included(inner_min, inner_max, outer_min, outer_max):
+    """Checks if inner RBB is completely inside outer RBB."""
+    return (inner_min[0] >= outer_min[0] and inner_max[0] <= outer_max[0] and
+            inner_min[1] >= outer_min[1] and inner_max[1] <= outer_max[1])
+
+def rbb_intersects_edge(rbb_min, rbb_max, edge):
+    """Checks if 2D RBB intersects or overlaps a 2D line segment (edge)."""
+    x1, y1 = edge[0]
+    x2, y2 = edge[1]
+    dx, dy = x2 - x1, y2 - y1
+    t_min, t_max = 0.0, 1.0
+    for p, q in [(-dx, rbb_min[0]), (dx, rbb_max[0]), (-dy, rbb_min[1]), (dy, rbb_max[1])]:
+        if p == 0:
+            if q < 0 or q > 0: return False
+        else:
+            t = q / p
+            if p < 0:
+                if t > t_max: return False
+                if t > t_min: t_min = t
+            else:
+                if t < t_min: return False
+                if t < t_max: t_max = t
+    return t_min <= t_max
+
 class BVHNode:
     def __init__(self, rbb_min, rbb_max):
-        self.rbb_min = rbb_min  # Tuple (min_x, min_y)
-        self.rbb_max = rbb_max  # Tuple (max_x, max_y)
-        self.tetrahedra = []    # List of tetrahedra indices
-        self.children = []      # List of BVHNode
-
-    def intersects_edge(self, edge):
-        # Check if 2D RBB intersects 2D line segment (edge)
-        # Returns True if intersection or overlap exists
-        pass
+        self.rbb_min = rbb_min
+        self.rbb_max = rbb_max
+        self.tetrahedra = []
+        self.children = []
 
 def build_bvh(tetrahedra, rbb_min, rbb_max, n_s, n_t):
     node = BVHNode(rbb_min, rbb_max)
-    
-    # Step 2: Assign tetrahedra whose RBB is completely included in node's RBB
     for tet in tetrahedra:
-        if is_rbb_included(tet.rbb, node.rbb_min, node.rbb_max):
+        if is_rbb_included(tet.rbb_min, tet.rbb_max, rbb_min, rbb_max):
             node.tetrahedra.append(tet)
-            
-    # Step 3: Update node's RBB (Note: Source implies RBB is updated after transfer 
-    # from parent and before creating children. In this top-down approach, 
-    # the RBB is already defined by the split. The source notes "updates its RBB 
-    # after its list of tetrahedra has been transferred... and before creating children".
-    # This likely refers to tightening the RBB to the actual contained tetrahedra 
-    # or ensuring consistency. For implementation, we assume the RBB passed in 
-    # defines the split region. If tightening is required, compute min/max of 
-    # node.tetrahedra here. [G] Assuming standard BVH construction where RBB 
-    # bounds the children regions, we proceed to split.)
-    
-    # Step 4: Check threshold
     if len(node.tetrahedra) < n_t:
         return node
-        
-    # Step 5: Split n_s times
-    # Recursively splitting the RBB in the middle along horizontal and vertical axes
-    # This yields an n_s-ary tree. 
-    # Note: "Splitting in the middle along horizontal and vertical axes" n_s times 
-    # is ambiguous. Standard BVH splits along one axis. The source says "recursively 
-    # splitting the RBB in the middle along horizontal and vertical axes. This is 
-    # performed n_s times for each node". 
-    # Interpretation: The node is divided into n_s sub-regions. 
-    # If n_s=8, it might be a 2x4 or 4x2 split, or a specific pattern. 
-    # Given "horizontal and vertical axes", it likely implies a quad-tree like 
-    # subdivision but with n_s branches. 
-    # For a generic implementation, we assume the RBB is partitioned into n_s 
-    # child bounding boxes. [G] We will assume a simple recursive split into 
-    # n_s children based on a partitioning strategy (e.g., median cut or fixed 
-    # grid). The source does not specify the exact partitioning geometry for n_s > 4.
-    
-    child_rbb_bounds = partition_rbb(node.rbb_min, node.rbb_max, n_s)
-    
-    for child_min, child_max in child_rbb_bounds:
-        # Filter tetrahedra for this child? 
-        # Source says: "each node... is given the list of tetrahedra whose RBB 
-        # is completely included in its own RBB". 
-        # This implies tetrahedra are assigned to the parent, and children 
-        # inherit or are filtered. 
-        # Standard BVH: Children contain subsets of parent's objects.
-        # Source: "Assign to each node the list of tetrahedra whose RBB is 
-        # completely included in its own RBB."
-        # This suggests a flat assignment logic, but for a tree, children must 
-        # have their own lists. 
-        # Likely: Children are built from the tetrahedra that fall into their 
-        # sub-RBB.
-        
-        child_tets = [t for t in node.tetrahedra if is_rbb_included(t.rbb, child_min, child_max)]
-        child_node = build_bvh(child_tets, child_min, child_max, n_s, n_t)
-        node.children.append(child_node)
-        
+    child_bounds = split_rbb(rbb_min, rbb_max, n_s)
+    for child_min, child_max in child_bounds:
+        child_tets = [t for t in node.tetrahedra if is_rbb_included(t.rbb_min, t.rbb_max, child_min, child_max)]
+        node.children.append(build_bvh(child_tets, child_min, child_max, n_s, n_t))
     return node
 
 def query_bvh(node, edge):
-    # Step 2: Test Intersection
-    if not node.intersects_edge(edge):
+    if not rbb_intersects_edge(node.rbb_min, node.rbb_max, edge):
         return []
-        
-    # Step 3: Visit Children
     results = []
     for child in node.children:
         results.extend(query_bvh(child, edge))
-        
-    # Step 4: Collect Results (Leaf or final node)
-    # If node has no children, return its tetrahedra
     if not node.children:
         return node.tetrahedra
-        
     return results
-
-def partition_rbb(min_pt, max_pt, n_s):
-    # [G] Implementation detail not specified in source for n_s != 4.
-    # Assuming a simple recursive binary split or fixed grid.
-    # For n_s=8, a 2x4 grid is a common interpretation of "horizontal and vertical".
-    # We return a list of (min, max) tuples for the children.
-    pass
 ```
 
 **Parameters:**

@@ -1,0 +1,150 @@
+--- v003.md
++++ v004.md
+@@ -4,82 +4,95 @@
+ 
+ ## Overview
+-CUDA-OpenGL Interop Surface Write writes directly to an OpenGL texture from a CUDA kernel using CUDA graphics interop, avoiding intermediate device buffers [S1, unofficial]. It sets itself apart from standard interop methods by allowing registration with `cudaGraphicsRegisterFlagsSurfaceLoadStore` for read/write access or `cudaGraphicsRegisterFlagsWriteDiscard` for write-only access [S1, unofficial].
++A technique to allow CUDA kernels to write directly to OpenGL 3D textures using CUDA surface objects [S1, unofficial]. It writes directly to an OpenGL texture from a CUDA kernel using CUDA graphics interop, avoiding intermediate device buffers [S2, unofficial]. This method is distinct from [CUDA-OpenGL Interop Texture Copy](1739-cuda-opengl-interop-texture-copy.md) which uses `cudaMemcpy3D` for bulk transfers rather than per-voxel kernel writes.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: An OpenGL texture ID (created as RGBA8), CUDA device memory containing scene data (camera, volume, transfer function), and image dimensions ($W, H$) [S1, unofficial].
+-- Output: The OpenGL texture updated with the rendered image pixels [S1, unofficial].
++**Inputs:** OpenGL texture ID, CUDA module containing the surface reference, voxel coordinates, and color/value data.
++**Outputs:** Updated OpenGL 3D texture contents.
+ 
+ **Data Structures:**
+-- `cudaGraphicsResource_t`: Handle to the registered OpenGL resource [G].
+-- `cudaArray_t`: Mapped array representation of the OpenGL texture in CUDA memory [G].
+-- `cudaSurfaceObject_t`: Surface object bound to the `cudaArray_t` for writing [G].
++*   **Host-side:**
++    *   `GLuint glTex`: OpenGL texture object.
++    *   `CUgraphicsResource cudaTex`: Registered CUDA graphics resource.
++    *   `CUarray cudaArray`: Mapped CUDA array representing the texture memory.
++    *   `CUsurfref cudaSurfRef`: Surface reference object linked to the array.
++*   **Device-side:**
++    *   `surface voxelGrid`: A device-scope surface object bound to the mapped array [S1, unofficial].
+ 
+ **Steps:**
+-1. **Create GL Texture:** Generate an OpenGL texture with format `GL_RGBA8` and dimensions $W \times H$ [S1, unofficial].
+-2. **Register Resource:** Register the GL texture with CUDA using `cudaGraphicsGLRegisterImage` [G]. The registration flags depend on the access mode: use `cudaGraphicsRegisterFlagsSurfaceLoadStore` if `useSurfaceWrite_` is true, else use `cudaGraphicsRegisterFlagsWriteDiscard` [S1, unofficial].
+-3. **Map Resource:** Before the kernel launch, map the CUDA resource to make it accessible to CUDA kernels using `cudaGraphicsMapResources` [G].
+-4. **Get Mapped Array:** Retrieve the `cudaArray_t` handle for the mapped resource using `cudaGraphicsSubResourceGetMappedArray` [G].
+-5. **Launch Kernel:** Launch the CUDA kernel passing the mapped array or surface object [S1, unofficial].
++1.  **Create OpenGL Texture:** Generate a texture using `glGenTextures` and bind it as `GL_TEXTURE_3D` [S1, unofficial]. Set minification and magnification filters to `GL_NEAREST` [S1, unofficial]. Allocate storage using `glTexImage3D` with internal format `GL_R8`, format `GL_RED`, and type `GL_FLOAT` [S1, unofficial]. Note: Source [S2, unofficial] describes creating an RGBA8 texture instead.
++2.  **Register with CUDA:** Call `cuGraphicsGLRegisterImage` passing the OpenGL texture ID, target `GL_TEXTURE_3D`, and flags `CU_GRAPHICS_REGISTER_FLAGS_SURFACE_LDST` [S1, unofficial]. Source [S2, unofficial] uses `cudaGraphicsRegisterFlagsSurfaceLoadStore` or `cudaGraphicsRegisterFlagsWriteDiscard` depending on usage.
++3.  **Map Resource:** Call `cuGraphicsMapResources` (or `cudaGraphicsMapResources`) with the registered resource [S1, unofficial]. Retrieve the mapped CUDA array using `cuGraphicsSubResourceGetMappedArray` (or `cudaGraphicsSubResourceGetMappedArray`) [S1, unofficial]. Unmap immediately if not needed by host code using `cuGraphicsUnmapResources` [S1, unofficial].
++4.  **Bind Surface:** Obtain the surface reference from the CUDA module using `cuModuleGetSurfRef` (or `cuSurfRefGetArray` equivalent) [S1, unofficial]. Set the mapped array to this reference using `cuSurfRefSetArray` [S1, unofficial].
++5.  **Launch Kernel:** Launch a CUDA kernel where the device surface `voxelGrid` is active. The kernel writes data directly to the texture coordinates.
+ 
+ **Pseudocode:**
++
+ ```python
+-def cuda_opengl_surface_write(gl_texture_id, width, height, use_surface_write):
+-    # 1. Create GL RGBA8 texture (assumed done externally)
+-    # 2. Register GL texture with CUDA
+-    flags = cudaGraphicsRegisterFlagsSurfaceLoadStore if use_surface_write else cudaGraphicsRegisterFlagsWriteDiscard
+-    cuda_resource = cudaGraphicsGLRegisterImage(gl_texture_id, GL_TEXTURE_2D, flags)
++# Host-side setup (C-style API calls represented as logical steps)
+ 
+-    # 3. Map CUDA resource to get cudaArray_t
+-    cudaGraphicsMapResources(1, &cuda_resource)
+-    dst_array = cudaGraphicsSubResourceGetMappedArray(cuda_resource, 0, 0)
++# 1. Create GL Texture
++glTex = glGenTextures(1)
++glBindTexture(GL_TEXTURE_3D, glTex)
++glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
++glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
++# Note: Source [S1, unofficial] specifies GL_R8 internal format with GL_RED format and GL_FLOAT type.
++# Source [S2, unofficial] specifies RGBA8.
++glTexImage3D(GL_TEXTURE_3D, 0, GL_R8, size, size, size, 0, GL_RED, GL_FLOAT, None)
+ 
+-    # 4. Launch kernel
+-    if use_surface_write:
+-        surf_desc = cudaResourceDesc()
+-        surf_desc.resType = cudaResourceTypeArray
+-        surf_desc.res.array.array = dst_array
+-        surface_obj = cudaCreateSurfaceObject(surf_desc)
+-        kernel_ray_hit(scene_data, surface_obj, width, height)
+-        cudaDestroySurfaceObject(surface_obj)
+-    else:
+-        kernel_ray_hit(scene_data, dst_array, width, height)
++# 2. Register with CUDA
++cudaTex = cuGraphicsGLRegisterImage(glTex, GL_TEXTURE_3D, CU_GRAPHICS_REGISTER_FLAGS_SURFACE_LDST)
+ 
+-    # 5. Unmap resource (standard interop cleanup)
+-    cudaGraphicsUnmapResources(1, &cuda_resource)
++# 3. Map and Get Array
++cuGraphicsMapResources(1, cudaTex, 0)
++cudaArray = cuGraphicsSubResourceGetMappedArray(cudaTex, 0, 0)
++cuGraphicsUnmapResources(1, cudaTex, 0)
++
++# 4. Link Surface
++cudaSurfRef = cuModuleGetSurfRef(module, "voxelGrid")
++cuSurfRefSetArray(cudaSurfRef, cudaArray, 0)
++
++# Device-side kernel code
++# __global__ void kernel() {
++#     int3 voxel = ...; // coordinates
++#     unsigned char color = ...; // value
++#     surf3Dwrite(color, voxelGrid, voxel.x, voxel.y, voxel.z);
++# }
+ ```
+ 
++**Formulas:**
++*   Surface Write Operation: $C_{x,y,z} = \text{surf3Dwrite}(color, \text{voxelGrid}, x, y, z)$ [S1, unofficial].
++
+ **Parameters:**
+-- `width`, `height`: Image dimensions [S1, unofficial].
+-- `cudaGraphicsRegisterFlags`: `SurfaceLoadStore` or `WriteDiscard` [S1, unofficial].
++*   Texture Format: `GL_R8` / `GL_RED` / `GL_FLOAT` [S1, unofficial].
++*   Flags: `CU_GRAPHICS_REGISTER_FLAGS_SURFACE_LDST` [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- The GL texture format must match the data type written by the kernel (e.g., `uchar4` for `GL_RGBA8`) [S1, unofficial].
+-- The GL texture must be bound and valid at the time of registration [G].
++*   Precision: The source code example uses `GL_FLOAT` type with `GL_R8` internal format, which is contradictory in standard OpenGL (R8 implies 8-bit integer) [S1, unofficial]. Implementers should verify driver behavior or use consistent formats like `GL_R32F` for float data.
++*   Resource State: The resource must be unmapped before the OpenGL context uses the texture for rendering, and unmapped before CUDA writes if mapped by another context, though the example unmaps immediately after getting the array [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### CUDA-OpenGL Interop Texture Copy
+-Copies a 3D volume of float data from device memory into a registered OpenGL 3D texture via CUDA interop, mapping the resource, performing a 3D memory copy, and unmapping [S2, unofficial].
+-- **Steps:**
+-  1. Map resource: Call `cudaGraphicsMapResources(1, &m_resource)` [S2, unofficial].
+-  2. Get mapped array: Call `cudaGraphicsSubResourceGetMappedArray(&array, m_resource, 0, 0)` [S2, unofficial].
+-  3. Configure copy parameters: Set `srcPtr` with `make_cudaPitchedPtr(sourcePointer, width*sizeof(float), width, height)`, `dstArray=array`, `extent=make_extent(width, height, depth)`, `kind=cudaMemcpyDeviceToDevice` [S2, unofficial].
+-  4. Execute copy: Call `cudaMemcpy3D(&copy)` [S2, unofficial].
+-  5. Unmap resource: Call `cudaGraphicsUnmapResources(1, &m_resource)` [S2, unofficial].
+-- **Pitfall:** Source pointer must not be null and resource must be registered; throws `std::logic_error` if either condition fails [S2, unofficial].
++Copies a 3D volume of float data from device memory into a registered OpenGL 3D texture via CUDA interop, mapping the resource, performing a 3D memory copy, and unmapping [S3, unofficial].
++*   **Steps:**
++    1.  Map resource: `cudaGraphicsMapResources(1, &m_resource)` [S3, unofficial].
++    2.  Get mapped array: `cudaGraphicsSubResourceGetMappedArray(&array, m_resource, 0, 0)` [S3, unofficial].
++    3.  Configure copy: `srcPtr` from `make_cudaPitchedPtr(sourcePointer, width*sizeof(float), width, width, height)`, `dstArray` from mapped array, `extent` from `make_extent(width, height, depth)`, `kind` = `cudaMemcpyDeviceToDevice` [S3, unofficial].
++    4.  Execute: `cudaMemcpy3D(&copy)` [S3, unofficial].
++    5.  Unmap: `cudaGraphicsUnmapResources(1, &m_resource)` [S3, unofficial].
++*   **Pitfalls:** Source pointer must not be null and resource must be registered; throws `std::logic_error` if either condition fails [S3, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources [S1, unofficial].
+-- **Memory Complexity:** Not given in the sources [S1, unofficial].
+-- **Strengths:** Eliminates the final CPU-GPU transfer bottleneck for the rendered image [S1, unofficial].
+-- **Limitations:** Not given in the sources [S1, unofficial].
+-- **When to use:** Not given in the sources [S1, unofficial].
+-- **When not to use:** Not given in the sources [S1, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels written, proportional to the kernel execution time.
++*   **Memory Complexity:** $O(1)$ additional host memory for resource handles; texture memory is allocated by OpenGL.
++*   **Strengths:** Avoids copying the final image to a temporary device buffer and then to OpenGL, reducing latency and memory bandwidth usage for direct rendering [S2, unofficial].
++*   **Limitations:** Requires CUDA and OpenGL interop support. Synchronization between CUDA writes and OpenGL reads must be managed carefully to avoid race conditions.
++*   **When to use:** When ray casting or voxelization results need to be displayed immediately in an OpenGL viewport without CPU intervention.
+ 
+ ## Background
+-Originated from the need to integrate CUDA compute capabilities with OpenGL rendering pipelines efficiently [S1, unofficial]. The technique is demonstrated in the cuVRender project, which implements a CUDA-accelerated volume rendering engine [S1, unofficial].
++Originated in CUDA 3.0+ which introduced graphics interop features allowing CUDA to access OpenGL resources [S1, unofficial]. Used in real-time volume rendering engines and scientific visualization tools where high-performance voxelization or ray casting is performed on the GPU and the result is displayed via OpenGL [S1, S2, unofficial].
+ 
+ ## Sources
+-[S1] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)
+-[S2] pvasbob/HZL-fluidEffectsStudio, https://github.com/pvasbob/HZL-fluidEffectsStudio, fetched 2026-10-27 (unofficial)+[S1] A Comparison of Optimal Scanline Voxelization Algorithms, https://liu.diva-portal.org/smash/get/diva2:1459330/FULLTEXT01.pdf, fetched 2026-10-25 (unofficial)
++[S2] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)
++[S3] pvasbob/HZL-fluidEffectsStudio, https://github.com/pvasbob/HZL-fluidEffectsStudio, fetched 2026-10-27 (unofficial)

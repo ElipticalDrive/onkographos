@@ -19,19 +19,20 @@ Coarse-to-Fine Optimization with Pruning is a hierarchical training strategy for
 2. **Optimize:** Train the grid parameters (opacities, spherical harmonic coefficients) using a loss function, typically Mean Squared Error (MSE) on rendered pixel colors plus Total Variation (TV) regularization [S1].
    $$ \mathcal{L} = \mathcal{L}_{recon} + \lambda_{TV} \mathcal{L}_{TV} $$
    where $\mathcal{L}_{recon}$ is the reconstruction loss and $\mathcal{L}_{TV}$ is the TV regularizer [S1].
-3. **Prune:** Remove voxels deemed unoccupied. This is done by calculating a metric for each voxel over all training rays. The metric is the maximum weight:
-   $$ w_i = T_i (1 - \exp(-\bar{\sigma}_i \bar{\delta}_i)) $$
-   where $T_i$ is the transmittance, $\bar{\sigma}_i$ is the average density, and $\bar{\delta}_i$ is the average step size for voxel $i$ [S1]. Alternatively, a threshold on the density value itself can be used [S1].
-   - **Pitfall & Solution:** Naive pruning can adversely impact color and density near surfaces because trilinear interpolation uses values from immediate exterior voxels. To solve this, perform a dilation operation: a voxel is only pruned if both itself and its neighbors are deemed unoccupied [S1].
+3. **Prune:** Remove voxels deemed unoccupied [S1]. This is done by calculating a metric for each voxel over all training rays [S1]. The metric is the maximum weight:
+   $$ w_i = T_i (1 - \exp(-\sigma_i \delta_i)) $$
+   where $T_i$ is the transmittance, $\sigma_i$ is the density, and $\delta_i$ is the step size for voxel $i$ [S1]. Alternatively, a threshold on the density value itself can be used [S1].
+   - **Pitfall & Solution:** Naive pruning can adversely impact color and density near surfaces because trilinear interpolation uses values from immediate exterior voxels [S1]. To solve this, perform a dilation operation: a voxel is only pruned if both itself and its neighbors are deemed unoccupied [S1].
 4. **Refine:** Subdivide each remaining voxel in half in each dimension (e.g., from $256^3$ to $512^3$) [S1].
 5. **Initialize New Values:** Use trilinear interpolation to initialize the grid values for the new, finer resolution based on the coarser grid [S1]. Trilinear interpolation at a lower resolution (e.g., $128^3$) can outperform nearest neighbor interpolation at a higher resolution (e.g., $256^3$) [S1].
-6. **Repeat:** Continue optimizing at the new resolution. This process can be repeated to reach arbitrary target resolutions [S1].
+6. **Repeat:** Continue optimizing at the new resolution [S1]. This process can be repeated to reach arbitrary target resolutions [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def coarse_to_fine_optimization(training_rays, initial_res=256, target_res=512, prune_threshold=0.01):
+    # Initialize dense grid at lower resolution [S1]
     grid = create_voxel_grid(resolution=initial_res)
     current_res = initial_res
 
@@ -45,20 +46,23 @@ def coarse_to_fine_optimization(training_rays, initial_res=256, target_res=512, 
         # Prune unoccupied voxels using max weight threshold or density threshold [S1]
         # Calculate max weight for each voxel over all training rays: w_i = T_i * (1 - exp(-sigma_i * delta_i))
         voxel_weights = compute_max_weight_over_rays(grid, training_rays)
-        voxels_to_prune = [w < prune_threshold for w in voxel_weights]
+        prune_mask = voxel_weights < prune_threshold
 
         # Dilation: voxel only pruned if itself and neighbors are unoccupied [S1]
         # Note: Dilation kernel size is not specified in sources [G]
-        voxels_to_prune = apply_dilation(voxels_to_prune)
+        prune_mask = apply_dilation(prune_mask)
 
-        grid.prune(voxels_to_prune)
+        # Remove pruned voxels from the grid [G]
+        grid = apply_mask(grid, prune_mask)
 
         # Refine: Subdivide each remaining voxel in half in each dimension [S1]
         new_res = min(current_res * 2, target_res)
-        grid.subdivide(new_res)
+        # Note: Subdivision logic is not specified in sources [G]
+        grid = subdivide_grid(grid, new_res)
 
         # Initialize new values using trilinear interpolation from coarser grid [S1]
-        grid.interpolate_from_coarser()
+        # Note: Interpolation implementation is not specified in sources [G]
+        grid = interpolate_from_coarser(grid, current_res)
 
         current_res = new_res
 
@@ -68,7 +72,7 @@ def coarse_to_fine_optimization(training_rays, initial_res=256, target_res=512, 
 **Parameters:**
 - `initial_res`: Starting resolution, typically $256^3$ [S1].
 - `target_res`: Final resolution, e.g., $512^3$ [S1].
-- `prune_threshold`: Threshold for voxel pruning, based on $T_i(1-\exp(-\bar{\sigma}_i \bar{\delta}_i))$ or density [S1].
+- `prune_threshold`: Threshold for voxel pruning, based on $T_i(1-\exp(-\sigma_i \delta_i))$ or density [S1].
 
 **Edge Cases and Pitfalls:**
 - **Surface Artifacts:** Naive pruning without dilation causes artifacts near surfaces due to trilinear interpolation pulling values from empty exterior voxels [S1].
@@ -84,10 +88,10 @@ Progressive Sparse Voxels Optimization is a coarse-to-fine training procedure fo
 
 **Steps:**
 1. **Freeze Coarse Grid:** The optimized coarse density grid $V^{(\text{density})(c)}$ is frozen [S2].
-2. **Define Known Free Space:** A query point is in known free space if the post-activated alpha value from $V^{(\text{density})(c)}$ is less than a threshold $\tau^{(c)}$. Otherwise, it is in unknown space [S2].
-3. **Fine Voxels Allocation:** Densely query $V^{(\text{density})(c)}$ to find a bounding box (BBox) tightly enclosing the unknown space. Derive voxel size $s^{(f)}$ and grid dimensions $N^{(f)}_x, N^{(f)}_y, N^{(f)}_z$ from the expected total number of voxels $M^{(f)}$ [S2].
-4. **Fine-stage Points Sampling:** Filter out rays not intersecting known free space. Adjust near/far bounds $t^{(\text{near})}$ and $t^{(\text{far})}$ to ray-box intersection endpoints. Do not adjust $t^{(\text{near})}$ if the ray origin $x_0$ is already inside the BBox [S2].
-5. **Progressive Scaling:** Start with half the expected voxels $\lfloor M^{(f)}/2 \rfloor$. At checkpoint steps, double the number of voxels until $M^{(f)}$ is reached. Resize voxel grids $V^{(\text{density})(f)}$ and $V^{(\text{feat})(f)}$ by trilinear interpolation at each checkpoint [S2].
+2. **Define Known Free Space:** A query point is in known free space if the post-activated alpha value from $V^{(\text{density})(c)}$ is less than a threshold $\tau^{(c)}$ [S2]. Otherwise, it is in unknown space [S2].
+3. **Fine Voxels Allocation:** Densely query $V^{(\text{density})(c)}$ to find a bounding box (BBox) tightly enclosing the unknown space [S2]. Derive voxel size $s^{(f)}$ and grid dimensions $N^{(f)}_x, N^{(f)}_y, N^{(f)}_z$ from the expected total number of voxels $M^{(f)}$ [S2].
+4. **Fine-stage Points Sampling:** Filter out rays not intersecting known free space [S2]. Adjust near/far bounds $t^{(\text{near})}$ and $t^{(\text{far})}$ to ray-box intersection endpoints [S2]. Do not adjust $t^{(\text{near})}$ if the ray origin $x_0$ is already inside the BBox [S2].
+5. **Progressive Scaling:** Start with half the expected voxels $\lfloor M^{(f)}/2 \rfloor$ [S2]. At checkpoint steps, double the number of voxels until $M^{(f)}$ is reached [S2]. Resize voxel grids $V^{(\text{density})(f)}$ and $V^{(\text{feat})(f)}$ by trilinear interpolation at each checkpoint [S2].
 6. **Free Space Skipping:** Skip sampled points in known free space by checking $V^{(\text{density})(c)}$ to improve efficiency [S2].
 
 **Data Structures:**
@@ -110,11 +114,11 @@ Progressive Sparse Voxels Optimization is a coarse-to-fine training procedure fo
 - **Performance:** Trilinear interpolation at lower resolutions can outperform nearest neighbor at higher resolutions, improving visual quality [S1]. The method achieves super-fast convergence for radiance field reconstruction [S2].
 - **Strengths:** Efficiently handles high-resolution scenes by focusing computation on relevant areas [S1]. Prevents overfitting in unobserved regions [S1].
 - **Limitations:** Requires careful tuning of pruning thresholds and dilation to avoid artifacts [S1].
-- **When to Use:** Suitable for high-quality novel view synthesis where computational resources are limited but high resolution is required [G].
-- **When Not to Use:** Not ideal for real-time applications requiring immediate high-resolution output without iterative refinement [G].
+- **When to Use:** Not given in the sources.
+- **When Not to Use:** Not given in the sources.
 
 ## Background
-Coarse-to-Fine Optimization with Pruning originates from the Plenoxels paper, which introduced radiance fields without neural networks using voxel grids [S1]. It builds on earlier work in hierarchical grid optimization and sparse voxel representations. The method has been further refined in Direct Voxel Grid Optimization, which adds fine detail reconstruction for surface details and view-dependent effects [S2].
+Coarse-to-Fine Optimization with Pruning originates from the Plenoxels paper, which introduced radiance fields without neural networks using voxel grids [S1]. It builds on earlier work in hierarchical grid optimization and sparse voxel representations [S1]. The method has been further refined in Direct Voxel Grid Optimization, which adds fine detail reconstruction for surface details and view-dependent effects [S2].
 
 ## Sources
 [S1] Plenoxels: Radiance Fields without Neural Networks, https://doi.org/10.1109/cvpr52688.2022.00542, fetched 2026-10-26

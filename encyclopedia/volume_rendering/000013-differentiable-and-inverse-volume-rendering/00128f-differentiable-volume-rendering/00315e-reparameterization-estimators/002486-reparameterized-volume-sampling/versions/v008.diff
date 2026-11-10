@@ -1,0 +1,383 @@
+--- v007.md
++++ v008.md
+@@ -4,238 +4,176 @@
+ 
+ ## Overview
+-Reparameterized Volume Sampling is a differentiable volume rendering technique that computes color estimates by sampling points on a ray using the inverse of the cumulative density function (CDF), allowing gradients to back-propagate through the sampling locations with respect to the density field [S1, unofficial]. Unlike NeRF's hierarchical sampling which uses an auxiliary coarse model trained separately, this method learns sampling points end-to-end without auxiliary networks [S1, unofficial]. Compared to standard importance sampling with uniform distribution, this stratified reparameterized sampling exhibits lower variance [S1, unofficial].
++Reparameterized Volume Sampling is a differentiable rendering technique that computes color estimates by sampling points on a ray using the inverse of the cumulative density function (CDF), allowing gradients to back-propagate through the sampling locations with respect to the density field [S1, unofficial]. Unlike NeRF's hierarchical sampling which uses an auxiliary coarse model trained separately, this method learns sampling points end-to-end without auxiliary networks [S1, unofficial]. Compared to standard importance sampling with uniform distribution, this stratified reparameterized sampling exhibits lower variance [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
+-*   Ray segment bounds $[t_{r_1}, t_{r_2}]$.
+-*   Density field $\sigma_{\mathbf{r}}(t)$ parameterized by neural network weights.
+-*   Radiance field $c_{\mathbf{r}}(t)$ parameterized by neural network weights.
+-*   Number of samples per ray $k$ (typically 32) [S1, unofficial].
+-*   Number of knots $m$ for piecewise linear density approximation (typically 256) [S1, unofficial].
++- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
++- Near and far clipping distances $t_n$ and $t_f$.
++- Neural density field $\sigma_{\mathbf{r}}(t)$ parameterized by $\theta$.
++- Number of samples per ray $k$ (typically 32) [S1, unofficial].
++- Number of knots $m$ for piecewise linear approximation (typically 256) [S1, unofficial].
+ 
+ **Outputs:**
+-*   Rendered color $C(\mathbf{r})$.
+-*   Gradients $\nabla_{\theta} C(\mathbf{r})$ with respect to network parameters $\theta$.
++- Estimated color $C(\mathbf{r})$ along the ray.
++- Gradients $\nabla_\theta C(\mathbf{r})$ with respect to the density field parameters.
+ 
+ **Data Structures:**
+-*   **Knots:** A set of $m+1$ depth values $t_0, t_1, \dots, t_m$ spanning the ray segment $[t_{r_1}, t_{r_2}]$. In the source, these are constructed by slightly perturbing a uniform ray grid [S1, unofficial].
+-*   **Density Approximation:** The density $\sigma_{\mathbf{r}}(t)$ is approximated as piecewise linear between knots. For $t \in [t_i, t_{i+1}]$:
+-    $$ \sigma_{\mathbf{r}}(t) \approx \sigma_{\mathbf{r}}(t_i) + \frac{\sigma_{\mathbf{r}}(t_{i+1}) - \sigma_{\mathbf{r}}(t_i)}{t_{i+1} - t_i} (t - t_i) $$
+-*   **CDF Approximation:** The cumulative distribution function $F_{\mathbf{r}}(t)$ is approximated as piecewise quadratic based on the piecewise linear density [S1, unofficial].
++- **Knots:** A set of $m+1$ points $t_0, t_1, \dots, t_m$ uniformly distributed in $[t_n, t_f]$, optionally perturbed to avoid aliasing [S1, unofficial].
++- **Density Values:** $\sigma_i = \sigma_{\mathbf{r}}(t_i)$ evaluated at each knot.
++- **CDF Approximation:** A piecewise quadratic function $F_r(t)$ constructed from the piecewise linear density approximation.
+ 
+-**Algorithm Steps:**
+-1.  **Evaluate Density at Knots:** Compute $\sigma_{\mathbf{r}}(t_i)$ for all $i \in \{0, \dots, m\}$ using the neural network. The network output activation must be Softplus with $\beta=10$ to avoid zero gradients [S1, unofficial].
+-2.  **Construct CDF:** Compute the cumulative opacity integral $I(t) = \int_{t_{r_1}}^t \sigma_{\mathbf{r}}(s) ds$ at each knot. Since $\sigma_{\mathbf{r}}$ is piecewise linear, $I(t)$ is piecewise quadratic. The CDF is $F_{\mathbf{r}}(t) = 1 - \exp(-I(t))$ [S1, unofficial].
+-3.  **Generate Random Samples:** For each sample $j \in \{1, \dots, k\}$, draw a uniform random variable $u_j \sim U[0, 1]$ [S1, unofficial].
+-4.  **Target Opacity:** Compute the target cumulative opacity value $y_j = F_{\mathbf{r}}(t_{r_2}) \cdot u_j$. Note: The source uses $y_f u$ where $y_f$ represents the total opacity of the segment [S1, unofficial].
+-5.  **Find Bin:** Identify the interval $[t_n, t_{n+1}]$ such that $F_{\mathbf{r}}(t_n) \le y_j < F_{\mathbf{r}}(t_{n+1})$. This is done by evaluating the CDF approximation at the knots [S1, unofficial].
+-6.  **Solve for $t$:** Solve the equation $-\log(1 - y_j) = \int_{t_n}^t \sigma_{\mathbf{r}}(s) ds$ for $t$ within the identified bin. Since $\sigma_{\mathbf{r}}$ is linear in the bin, the integral is quadratic in $t$. The source provides explicit formulas for solving this quadratic equation, ensuring numerical stability [S1, unofficial]. The solution $t_j$ is a differentiable function of the density field $\sigma_{\mathbf{r}}$ [S1, unofficial].
+-7.  **Evaluate Radiance:** Compute radiance $c_{\mathbf{r}}(t_j)$ at the sampled position $t_j$ [S1, unofficial].
+-8.  **Accumulate Color:** Compute the color estimate using the standard volume rendering integral approximation with the sampled points and their associated weights derived from the CDF differences [S1, unofficial].
++**Method:**
++1.  **Density Approximation:** Approximate the density field $\sigma_{\mathbf{r}}(t)$ along the ray as a piecewise linear function between knots $t_i$ and $t_{i+1}$:
++    $$
++    \sigma_{\mathbf{r}}(t) \approx \sigma_i + \frac{\sigma_{i+1} - \sigma_i}{t_{i+1} - t_i} (t - t_i) \quad \text{for } t \in [t_i, t_{i+1}]
++    $$
++    [S1, unofficial]
++
++2.  **CDF Construction:** The cumulative distribution function is defined as:
++    $$
++    F_r(t) = 1 - \exp\left(-\int_{t_n}^t \sigma_{\mathbf{r}}(s) ds\right)
++    $$
++    [S1, unofficial]
++    Using the piecewise linear density, the integral $\int_{t_n}^t \sigma_{\mathbf{r}}(s) ds$ becomes a piecewise quadratic function. Let $I(t) = \int_{t_n}^t \sigma_{\mathbf{r}}(s) ds$. Then $F_r(t) = 1 - e^{-I(t)}$.
++
++3.  **Inverse CDF Sampling:** To sample a point $t$, generate a random number $u \in [0, 1]$. The target cumulative opacity value is $y_f u$, where $y_f = F_r(t_f)$ is the total opacity of the ray segment [S1, unofficial]. Solve for $t$ in:
++    $$
++    y_f u = F_r(t) = 1 - \exp\left(-\int_{t_n}^t \sigma_{\mathbf{r}}(s) ds\right)
++    $$
++    [S1, unofficial]
++    Rewrite the equation to isolate the integral:
++    $$
++    -\log(1 - y_f u) = \int_{t_n}^t \sigma_{\mathbf{r}}(s) ds = I(t)
++    $$
++    [S1, unofficial]
++
++4.  **Bin Search:** Find the interval $[t_i, t_{i+1}]$ such that $I(t_i) \le -\log(1 - y_f u) < I(t_{i+1})$. This is done by evaluating the cumulative integral at the knots.
++
++5.  **Root Finding:** Within the identified bin, solve for $t$. Since $\sigma_{\mathbf{r}}(t)$ is linear in the bin, $I(t)$ is quadratic. Let $t = t_i + \delta$, where $\delta \in [0, t_{i+1} - t_i]$. The integral over this segment is:
++    $$
++    \int_{t_i}^{t_i+\delta} \left( \sigma_i + \frac{\sigma_{i+1} - \sigma_i}{t_{i+1} - t_i} \delta' \right) d\delta' = \sigma_i \delta + \frac{\sigma_{i+1} - \sigma_i}{2(t_{i+1} - t_i)} \delta^2
++    $$
++    Let $A = \sigma_i$ and $B = \frac{\sigma_{i+1} - \sigma_i}{2(t_{i+1} - t_i)}$. The equation to solve is:
++    $$
++    B \delta^2 + A \delta - \left( -\log(1 - y_f u) - I(t_i) \right) = 0
++    $$
++    [S1, unofficial]
++    Solve this quadratic equation for $\delta$ using the quadratic formula, selecting the positive root. Then $t = t_i + \delta$.
++
++6.  **Radiance Evaluation:** Evaluate the radiance $c_{\mathbf{r}}(t)$ at the computed sample position $t$.
++
++7.  **Accumulation:** Accumulate the color estimate using the standard volume rendering equation with the sampled points. For $k$ samples, the color is estimated as:
++    $$
++    \hat{C}(\mathbf{r}) = \sum_{j=1}^k c_{\mathbf{r}}(t_j) \alpha_j
++    $$
++    where $\alpha_j$ is the transmittance-weighted contribution derived from the CDF differences between samples.
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-import numpy as np
+-
+-def reparameterized_volume_sampling(ray_origin, ray_direction, t_near, t_far, 
+-                                    density_net, radiance_net, k=32, m=256):
+-    """
+-    Renders a ray using reparameterized volume sampling.
+-    
+-    Args:
+-        ray_origin: (3,) array
+-        ray_direction: (3,) array
+-        t_near: float
+-        t_far: float
+-        density_net: function mapping (N, 3) positions to (N,) densities
+-        radiance_net: function mapping (N, 3) positions to (N, 3) radiance
+-        k: int, number of samples
+-        m: int, number of knots for density approximation
+-        
+-    Returns:
+-        color: (3,) array
+-        gradients: dict of gradients w.r.t. network parameters
+-    """
+-    # 1. Create knots
+-    # Slightly perturb uniform grid for stability
+-    t_knots = np.linspace(t_near, t_far, m + 1)
+-    # Perturbation [G]: Add small random noise to avoid degenerate cases
+-    t_knots += np.random.uniform(-1e-6, 1e-6, size=t_knots.shape)
++def reparameterized_volume_sampling(ray_origin, ray_direction, t_near, t_far, density_field, k=32, m=256):
++    # 1. Define knots
++    knots = np.linspace(t_near, t_far, m + 1)
+     
+     # 2. Evaluate density at knots
+-    # Positions along the ray
+-    positions_knots = ray_origin + t_knots[:, None] * ray_direction
+-    sigma_knots = density_net(positions_knots)
+-    # Ensure non-negative density [G]: Softplus activation handles this, but clamp for safety
+-    sigma_knots = np.maximum(sigma_knots, 1e-6)
++    densities = density_field(knots)
+     
+-    # 3. Compute CDF at knots
+-    # Integral of piecewise linear density is piecewise quadratic
+-    # I(t) = integral from t_near to t of sigma(s) ds
+-    # For interval [t_i, t_{i+1}], sigma(s) = sigma_i + (sigma_{i+1}-sigma_i)/(t_{i+1}-t_i) * (s - t_i)
+-    # Integral from t_near to t_{i+1} can be computed cumulatively
+-    
+-    cum_integral = np.zeros(m + 1)
+-    for i in range(m):
+-        t_i = t_knots[i]
+-        t_ip1 = t_knots[i+1]
+-        sigma_i = sigma_knots[i]
+-        sigma_ip1 = sigma_knots[i+1]
++    # 3. Compute cumulative integral I(t) at knots
++    # I(t_i) = integral from t_near to t_i of sigma(s) ds
++    # Using piecewise linear approximation, I(t) is piecewise quadratic
++    integrals = np.zeros(m + 1)
++    for i in range(1, m + 1):
++        t_prev = knots[i-1]
++        t_curr = knots[i]
++        sigma_prev = densities[i-1]
++        sigma_curr = densities[i]
++        # Integral of linear function from t_prev to t_curr
++        # Area = (sigma_prev + sigma_curr) / 2 * (t_curr - t_prev)
++        integrals[i] = integrals[i-1] + (sigma_prev + sigma_curr) / 2 * (t_curr - t_prev)
+         
+-        # Area of trapezoid under linear density
+-        area = 0.5 * (sigma_i + sigma_ip1) * (t_ip1 - t_i)
+-        cum_integral[i+1] = cum_integral[i] + area
+-        
+-    # CDF F(t) = 1 - exp(-I(t))
+-    # Normalize CDF to [0, 1] relative to total opacity
+-    total_opacity = 1.0 - math.exp(-cum_integral[-1])
+-    if total_opacity < 1e-6:
+-        # Degenerate case: no density
+-        return np.zeros(3), {}
+-        
+-    cdf_knots = 1.0 - np.exp(-cum_integral)
+-    cdf_knots /= total_opacity # Normalize to [0, 1]
++    # Total opacity factor
++    total_opacity_factor = 1 - np.exp(-integrals[-1])
+     
+     # 4. Generate samples
+     u = np.random.uniform(0, 1, k)
+-    target_cdf = cdf_knots[-1] * u # y_f * u
++    samples = []
+     
+-    # 5. Find bins and solve for t
+-    t_samples = np.zeros(k)
+-    
+-    for j in range(k):
+-        y = target_cdf[j]
++    for u_val in u:
++        # Target integral value
++        target_integral = -np.log(1 - total_opacity_factor * u_val)
+         
+-        # Find bin index n such that cdf_knots[n] <= y < cdf_knots[n+1]
+-        # Use searchsorted for efficiency
+-        n = np.searchsorted(cdf_knots, y, side='right') - 1
+-        n = np.clip(n, 0, m - 1)
++        # Find bin
++        bin_idx = np.searchsorted(integrals, target_integral, side='right') - 1
++        bin_idx = np.clip(bin_idx, 0, m - 1)
+         
+-        t_n = t_knots[n]
+-        t_np1 = t_knots[n+1]
+-        cdf_n = cdf_knots[n]
+-        cdf_np1 = cdf_knots[n+1]
++        t_i = knots[bin_idx]
++        t_i1 = knots[bin_idx + 1]
++        sigma_i = densities[bin_idx]
++        sigma_i1 = densities[bin_idx + 1]
++        I_i = integrals[bin_idx]
+         
+-        sigma_n = sigma_knots[n]
+-        sigma_np1 = sigma_knots[n+1]
++        # Solve quadratic: B * delta^2 + A * delta - (target - I_i) = 0
++        A = sigma_i
++        B = (sigma_i1 - sigma_i) / (2 * (t_i1 - t_i))
++        C = -(target_integral - I_i)
+         
+-        # We need to solve: -log(1 - y * total_opacity) = integral from t_n to t of sigma(s) ds
+-        # Let target_integral = -log(1 - y * total_opacity)
+-        # Note: cdf_knots[n] = 1 - exp(-cum_integral[n]) / total_opacity
+-        # So 1 - cdf_knots[n] = exp(-cum_integral[n]) / total_opacity
+-        # -log(1 - cdf_knots[n]) = cum_integral[n] - log(total_opacity)
++        # Quadratic formula
++        discriminant = A**2 - 4 * B * C
++        if discriminant < 0:
++            # Fallback to linear if numerical issues occur
++            delta = C / A if A != 0 else 0
++        else:
++            delta = (-A + np.sqrt(discriminant)) / (2 * B) if B != 0 else C / A
++            
++        t_sample = t_i + delta
++        samples.append(t_sample)
+         
+-        # Target integral relative to t_n
+-        # Integral from t_near to t is cum_integral[t]
+-        # We want cum_integral[t] - cum_integral[t_n] = -log(1 - y * total_opacity)
+-        # Let target_val = -log(1 - y * total_opacity) + cum_integral[t_n]
++    # 5. Evaluate radiance and accumulate
++    # Radiance evaluation depends on the specific radiance field implementation
++    # Here we assume a function evaluate_radiance(t) exists
++    colors = []
++    for t in samples:
++        c = evaluate_radiance(t)
++        colors.append(c)
+         
+-        target_val = -math.log(1.0 - y * total_opacity) + cum_integral[n]
+-        
+-        # In bin [t_n, t_np1], sigma(s) is linear
+-        # Integral from t_n to t is:
+-        # sigma_n * (t - t_n) + 0.5 * (sigma_np1 - sigma_n)/(t_np1 - t_n) * (t - t_n)^2
+-        # Let dt = t - t_n
+-        # A * dt^2 + B * dt - target_val = 0
+-        # A = 0.5 * (sigma_np1 - sigma_n) / (t_np1 - t_n)
+-        # B = sigma_n
+-        
+-        dt = t_np1 - t_n
+-        if dt < 1e-8:
+-            t_samples[j] = t_n
+-            continue
+-            
+-        A = 0.5 * (sigma_np1 - sigma_n) / dt
+-        B = sigma_n
+-        
+-        # Solve A * dt^2 + B * dt - target_val = 0
+-        # dt = (-B + sqrt(B^2 + 4*A*target_val)) / (2*A) if A != 0
+-        # If A == 0, linear: dt = target_val / B
+-        
+-        if abs(A) < 1e-8:
+-            dt_sol = target_val / B
+-        else:
+-            discriminant = B*B + 4*A*target_val
+-            if discriminant < 0:
+-                # Numerical issue, fallback
+-                dt_sol = 0.0
+-            else:
+-                dt_sol = (-B + math.sqrt(discriminant)) / (2*A)
+-                
+-        t_samples[j] = t_n + dt_sol
+-        
+-    # 6. Evaluate radiance and accumulate
+-    positions_samples = ray_origin + t_samples[:, None] * ray_direction
+-    radiance_samples = radiance_net(positions_samples)
+-    
+-    # Compute weights based on CDF differences
+-    # Sort samples to compute intervals correctly
+-    sorted_indices = np.argsort(t_samples)
+-    t_sorted = t_samples[sorted_indices]
+-    radiance_sorted = radiance_samples[sorted_indices]
+-    
+-    # Add boundaries
+-    t_all = np.concatenate([[t_near], t_sorted, [t_far]])
+-    
+-    # Compute opacity for each segment
+-    # alpha_i = exp(-integral(t_i, t_{i+1})) * (1 - exp(-integral(t_i, t_{i+1})))
+-    # This is complex for arbitrary points. 
+-    # Standard volume rendering: C = sum T_i * alpha_i * c_i
+-    # T_i = exp(-integral(t_near, t_i))
+-    # alpha_i = 1 - exp(-integral(t_i, t_{i+1}))
+-    
+-    # Approximate integral using trapezoidal rule between sorted samples
+-    # This is an approximation. The source implies using the CDF directly for weights.
+-    # Weight w_i = F(t_{i+1}) - F(t_i)
+-    
+-    # Recompute CDF at sample points for accurate weights
+-    # This requires evaluating density at sample points and integrating
+-    # For simplicity and consistency with source's "sparse set of points" claim:
+-    # We use the CDF values at the sorted sample points.
+-    
+-    # Evaluate density at sample points
+-    sigma_samples = density_net(positions_samples)
+-    sigma_samples = np.maximum(sigma_samples, 1e-6)
+-    
+-    # Compute cumulative integral at sample points
+-    # Integrate from t_near to t_j
+-    cum_integral_samples = np.zeros(k)
+-    for j in range(k-1):
+-        t_j = t_sorted[j]
+-        t_jp1 = t_sorted[j+1]
+-        sigma_j = sigma_samples[sorted_indices[j]]
+-        sigma_jp1 = sigma_samples[sorted_indices[j+1]]
+-        dt = t_jp1 - t_j
+-        area = 0.5 * (sigma_j + sigma_jp1) * dt
+-        cum_integral_samples[j+1] = cum_integral_samples[j] + area
+-        
+-    # CDF at samples
+-    cdf_samples = 1.0 - np.exp(-cum_integral_samples)
+-    cdf_samples /= total_opacity
+-    
+-    # Weights
+-    weights = np.diff(cdf_samples)
+-    # Handle first and last segments if necessary, but source focuses on samples
+-    
+-    # Color accumulation
+-    # C = sum w_j * c_j
+-    color = np.sum(weights[:, None] * radiance_sorted, axis=0)
+-    
+-    return color, {} # Gradients handled by autograd framework
++    # Simple accumulation for demonstration; actual implementation uses alpha compositing
++    # based on the CDF differences between sorted samples
++    return np.mean(colors) # Placeholder for proper accumulation
+ ```
+ 
++**Parameters:**
++- $k=32$ samples per ray [S1, unofficial].
++- $m=256$ knots for piecewise linear density approximation [S1, unofficial].
++- Softplus activation with $\beta=10$ for the density field output [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- Using ReLU activation for the density field can result in zero gradients, hindering training [S1, unofficial].
++- Numerical stability in solving the quadratic equation must be handled, particularly when $B$ is close to zero [S1, unofficial].
++- The piecewise constant approximation was found to be faster but delivered worse rendering quality compared to piecewise linear [S1, unofficial].
++
++## Subtopics
++
++### [Reparameterization](11557-reparameterization.md)
++The foundational mathematical framework using the change of variables formula to eliminate boundary terms in differentiable rendering.
++
++### [Reparameterization Estimators](6499-reparameterization-estimators.md)
++The broader class of estimators that use differentiable transformations to enable gradient flow through stochastic sampling.
++
++### [Reparameterized Monte Carlo Volume Rendering](4798-reparameterized-monte-carlo-volume-rendering.md)
++A related method that applies reparameterization to Monte Carlo volume rendering, potentially with different sampling strategies.
++
++### [Boundary Path Integral Formulation](3389-boundary-path-integral-formulation.md)
++An alternative approach that handles boundary terms explicitly rather than eliminating them via reparameterization.
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(m + k \log m)$ or $O(m + k)$ depending on bin search implementation, where $m$ is the number of knots and $k$ is the number of samples. Evaluating density and radiance at knots and samples dominates.
+-*   **Memory Complexity:** $O(m + k)$ to store knot densities, CDF values, and sample positions.
+-*   **Measured Performance:** In the 'foggy' density field test, 32 samples matched the baseline performance of 128 samples [S1, unofficial]. In 'Glass and wall' and 'Wall' density fields, 4 samples matched the baseline performance [S1, unofficial].
+-*   **Strengths:** Lower variance compared to naive importance sampling with uniform distribution [S1, unofficial]. End-to-end differentiable without auxiliary networks [S1, unofficial].
+-*   **Limitations:** Requires piecewise linear approximation of density, which may introduce artifacts if $m$ is too small [S1, unofficial]. Piecewise constant approximation was faster but delivered worse rendering quality [S1, unofficial].
+-*   **When to use:** When differentiable sampling is required and variance reduction is important. Suitable for 3D scene reconstruction [S1, unofficial].
+-*   **When not to use:** When computational resources are extremely limited and $m$ cannot be kept large enough for accurate CDF approximation.
++- **Time Complexity:** The method requires evaluating the density field at $m$ knots to build the CDF approximation, and then solving a quadratic equation for each of the $k$ samples. The complexity is $O(m + k)$.
++- **Memory Complexity:** $O(m)$ to store the knot positions, density values, and cumulative integrals.
++- **Measured Performance:** In the 'foggy' density field test, 32 samples matched the baseline performance of 128 samples. In the 'Glass and wall' and 'Wall' density fields, 4 samples matched the baseline performance [S1, unofficial].
++- **Strengths:** Lower variance compared to naive importance sampling with uniform distribution [S1, unofficial]. End-to-end differentiable without auxiliary networks [S1, unofficial].
++- **Limitations:** Requires the density field to be differentiable. The piecewise linear approximation introduces some error compared to exact integration, though it was found to provide better quality than piecewise constant [S1, unofficial].
++- **When to use:** When differentiable sampling is required for optimization of the density field, and lower variance is desired compared to uniform sampling.
++- **When not to use:** When computational resources are extremely limited and the piecewise linear approximation overhead is prohibitive, or when the density field is not differentiable.
+ 
+ ## Background
+-Reparameterized Volume Sampling was introduced in the paper "Differentiable Rendering With Reparameterized Volume Sampling" [S1, unofficial]. It is part of the family of differentiable volume rendering methods that use the reparameterization trick to estimate gradients [S1, unofficial]. The method was applied to 3D scene reconstruction using synthetic data from NeRF [S1, unofficial].
++Reparameterized Volume Sampling was introduced in the paper "Differentiable Rendering With Reparameterized Volume Sampling" [S1, unofficial]. It builds on the principles of reparameterization estimators [S1, unofficial]. The method was applied to 3D scene reconstruction using synthetic data from NeRF [S1, unofficial]. It addresses the limitations of NeRF's hierarchical sampling by providing a differentiable alternative that does not require an auxiliary coarse model [S1, unofficial].
+ 
+ ## Sources

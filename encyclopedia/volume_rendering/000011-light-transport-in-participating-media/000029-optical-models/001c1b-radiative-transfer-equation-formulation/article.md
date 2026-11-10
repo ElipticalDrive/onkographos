@@ -1,145 +1,181 @@
 # Radiative Transfer Equation Formulation
 
-Also called: Equation of Transfer, Equation of Transfer for Light, Radiation Transport Equation, Radiative Transfer Equation, Time-dependent RTE, Transport Equation
+Also called: Radiative Transfer Equation, Radiative Transport Equation, Radiation Transport Equation, RTE, Time-dependent RTE, Equation of Transfer
 
 ## Overview
-The Radiative Transfer Equation (RTE) is an integro-differential equation that governs the behavior of light in participating media, describing the rate of change of radiance as it propagates through a medium that absorbs, emits, and scatters radiation [S1, unofficial][S5, S6, unofficial]. It serves as the fundamental physical model for light transport in volumes, accounting for extinction (absorption and out-scattering) and augmentation (in-scattering and emission) [S2, unofficial][S5, unofficial]. Unlike simplified models such as the [Absorption-only model](839-absorption-only-model.md) or [Emission-only Model](1016-emission-only-model.md), the RTE captures the full complexity of light-matter interaction, including the redistribution of energy from all directions into the viewing direction via scattering [S3][S6, unofficial]. It is the generalization of the [Standard volume rendering equation](1165-standard-volume-rendering-equation.md) and [Volume Rendering Equation](2098-volume-rendering-equation.md) to arbitrary media without surface boundaries [S6, unofficial].
+
+The Radiative Transfer Equation (RTE) is an integro-differential equation that governs the transport of radiance through a participating medium, accounting for absorption, emission, and scattering [S1, S2, unofficial][S3][S4, unofficial][S5][S6, S7, unofficial][S8, S9][S10, book]. It serves as the fundamental physical model for light transport in volumes such as gas, fire, and semitransparent materials, forming the basis for all volume rendering methods [S2, unofficial][S3][S4, unofficial][S8]. Unlike the Light Transport Equation (LTE), which is specialized for surface scattering, the RTE explicitly models the continuous interaction of light with matter in 3D space [S10, book][S14, unofficial]. It differs from its siblings [Standard volume rendering equation](1165-standard-volume-rendering-equation.md) and [Volume Rendering Equation](2098-volume-rendering-equation.md) by providing the differential formulation of radiance change, which can be transformed into the integral forms used for discrete numerical quadrature [S10, book][S14, unofficial].
 
 ## How it works
-The RTE defines the differential change in radiance $L$ at a position $\mathbf{p}$ along a direction $\boldsymbol{\omega}$ as the sum of loss terms (extinction) and gain terms (source) [S7].
 
 ### Inputs and Outputs
-*   **Input**: Radiance field $L(\mathbf{p}, \boldsymbol{\omega})$, medium properties (extinction $\sigma_t$, scattering $\sigma_s$, absorption $\sigma_a$), phase function $f_p$, emitted radiance $L_e$ [S1, unofficial][S7].
-*   **Output**: The derivative of radiance with respect to path length, $\frac{dL}{ds}$, or the equilibrium radiance distribution when solved [S7].
+
+*   **Input:** The radiance field $L(\mathbf{x}, \boldsymbol{\omega})$ at position $\mathbf{x}$ and direction $\boldsymbol{\omega}$, along with medium properties: extinction coefficient $\sigma_t(\mathbf{x})$, scattering coefficient $\sigma_s(\mathbf{x})$, phase function $f_p(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}')$, and emission coefficient $L_e(\mathbf{x}, \boldsymbol{\omega})$ [S1, S4, unofficial][S5][S7, unofficial][S8][S14, unofficial].
+*   **Output:** The directional derivative of radiance $\frac{dL}{ds}$ or $(\boldsymbol{\omega} \cdot \nabla)L(\mathbf{x}, \boldsymbol{\omega})$, representing the rate of change of radiance as it propagates through the medium [S1, S4, unofficial][S5][S7, unofficial][S8][S14, unofficial].
 
 ### Data Structures
-The equation operates on scalar fields defined over 6-dimensional phase space (position: 2 dimensions/angles, direction: 3 dimensions, frequency: 1 dimension) [S2, unofficial][S5, unofficial]. In discrete implementations, this is represented as:
-*   **Grid**: 3D voxel grid storing $\sigma_t(\mathbf{p})$, $\sigma_s(\mathbf{p})$, $L_e(\mathbf{p})$ [S1, unofficial].
-*   **Phase Function**: A function $f_p(\boldsymbol{\omega}, \boldsymbol{\omega}')$ mapping incident direction to outgoing direction, often parameterized by the scattering angle $\theta$ where $\cos \theta = \boldsymbol{\omega} \cdot \boldsymbol{\omega}'$ [S7].
 
-### Formula
-The differential form of the RTE is:
+The RTE operates on scalar and vector fields defined over a 3D spatial domain $\Omega$ and the unit sphere $\mathbb{S}^2$ of directions.
 
-$$
-\boldsymbol{\omega} \cdot \nabla_{\mathbf{p}} L(\mathbf{p}, \boldsymbol{\omega}) = -\sigma_t(\mathbf{p}) L(\mathbf{p}, \boldsymbol{\omega}) + L_s(\mathbf{p}, \boldsymbol{\omega})
-$$
+*   **Radiance $L(\mathbf{x}, \boldsymbol{\omega})$:** A 6-dimensional function (3 for position, 2 for direction, 1 for frequency/time, though frequency is often integrated out for grayscale rendering) [S2, S6, unofficial].
+*   **Coefficients:**
+    *   $\sigma_t(\mathbf{x})$: Total extinction coefficient ($m^{-1}$) [S1, unofficial][S5][S7, S14, unofficial].
+    *   $\sigma_s(\mathbf{x})$: Scattering coefficient ($m^{-1}$) [S1, unofficial][S5][S7, S14, unofficial].
+    *   $\sigma_a(\mathbf{x})$: Absorption coefficient ($m^{-1}$), where $\sigma_t = \sigma_a + \sigma_s$ [S1, unofficial][S5][S7, S12, S14, unofficial].
+    *   $L_e(\mathbf{x}, \boldsymbol{\omega})$: Emissive term (radiance emitted per unit length) [S1, S7, S14, unofficial].
+*   **Phase Function $f_p(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}')$:** A probability density function describing the likelihood of scattering from incoming direction $\boldsymbol{\omega}'$ to outgoing direction $\boldsymbol{\omega}$ [S1, unofficial][S5][S7, unofficial][S8][S14, unofficial]. It is normalized such that $\int_{\mathbb{S}^2} f_p(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}') d\boldsymbol{\omega}' = 1$ [S14, unofficial].
 
-Where:
-*   $\boldsymbol{\omega} \cdot \nabla_{\mathbf{p}}$ is the directional derivative along the ray [S5, unofficial][S8].
-*   $\sigma_t(\mathbf{p}) = \sigma_a(\mathbf{p}) + \sigma_s(\mathbf{p})$ is the total extinction coefficient [S3][S5, unofficial][S7].
-*   $L_s(\mathbf{p}, \boldsymbol{\omega})$ is the source term (augmentation) [S5, unofficial].
+### Formulas
 
-The source term $L_s$ combines emission and in-scattering:
+The general steady-state RTE in differential form is given by [S1, S4, unofficial][S5][S7, unofficial][S8][S14, unofficial]:
 
 $$
-L_s(\mathbf{p}, \boldsymbol{\omega}) = \sigma_a(\mathbf{p}) L_e(\mathbf{p}, \boldsymbol{\omega}) + \sigma_s(\mathbf{p}) \int_{\mathbb{S}^2} f_p(\mathbf{p}, \boldsymbol{\omega}, \boldsymbol{\omega}') L(\mathbf{p}, \boldsymbol{\omega}') d\boldsymbol{\omega}'
+(\boldsymbol{\omega} \cdot \nabla) L(\mathbf{x}, \boldsymbol{\omega}) = -\sigma_t(\mathbf{x}) L(\mathbf{x}, \boldsymbol{\omega}) + \sigma_s(\mathbf{x}) \int_{\mathbb{S}^2} f_p(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}') L(\mathbf{x}, \boldsymbol{\omega}') d\boldsymbol{\omega}' + L_e(\mathbf{x}, \boldsymbol{\omega})
 $$
 
 Where:
-*   $\sigma_a(\mathbf{p}) L_e(\mathbf{p}, \boldsymbol{\omega})$ is the emitted radiance [S5, unofficial][S6, unofficial].
-*   $\sigma_s(\mathbf{p}) \int_{\mathbb{S}^2} f_p(\mathbf{p}, \boldsymbol{\omega}, \boldsymbol{\omega}') L(\mathbf{p}, \boldsymbol{\omega}') d\boldsymbol{\omega}'$ is the in-scattering term [S1, unofficial][S5, unofficial].
-*   $f_p(\mathbf{p}, \boldsymbol{\omega}, \boldsymbol{\omega}')$ is the phase function, normalized such that $\int_{\mathbb{S}^2} f_p(\boldsymbol{\omega}, \boldsymbol{\omega}') d\boldsymbol{\omega}' = 1$ [S7].
-*   $L(\mathbf{p}, \boldsymbol{\omega}')$ is the incident radiance from direction $\boldsymbol{\omega}'$ [S5, unofficial].
+*   $(\boldsymbol{\omega} \cdot \nabla) L(\mathbf{x}, \boldsymbol{\omega})$ is the directional derivative of radiance along the ray direction $\boldsymbol{\omega}$ [S1, S4, unofficial][S5, S8][S14, unofficial].
+*   $-\sigma_t(\mathbf{x}) L(\mathbf{x}, \boldsymbol{\omega})$ represents the loss of radiance due to extinction (absorption and out-scattering) [S1, S4, unofficial][S5][S7, unofficial][S8][S14, unofficial].
+*   $\sigma_s(\mathbf{x}) \int_{\mathbb{S}^2} f_p(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}') L(\mathbf{x}, \boldsymbol{\omega}') d\boldsymbol{\omega}'$ represents the gain in radiance due to in-scattering from all other directions $\boldsymbol{\omega}'$ [S1, S4, unofficial][S5][S7, unofficial][S8][S14, unofficial].
+*   $L_e(\mathbf{x}, \boldsymbol{\omega})$ is the emission term [S7, S14, unofficial].
 
-Alternatively, using the source function $L_s^*$ (where $L_s^* = \frac{\sigma_a}{\sigma_t} L_e + \frac{\sigma_s}{\sigma_t} \int f_p L d\boldsymbol{\omega}'$):
+Alternatively, using the source term $L_s(\mathbf{x}, \boldsymbol{\omega}) = L_e(\mathbf{x}, \boldsymbol{\omega}) + \sigma_s(\mathbf{x}) \int_{\mathbb{S}^2} f_p(\mathbf{x}, \boldsymbol{\omega}, \boldsymbol{\omega}') L(\mathbf{x}, \boldsymbol{\omega}') d\boldsymbol{\omega}'$, the equation simplifies to [S1, unofficial][S8][S10, book]:
 
 $$
-\frac{\partial L(\mathbf{p}, \boldsymbol{\omega})}{\partial t} = -\sigma_t(\mathbf{p}, \boldsymbol{\omega}) L_i(\mathbf{p}, -\boldsymbol{\omega}) + \sigma_t(\mathbf{p}, \boldsymbol{\omega}) L_s^*(\mathbf{p}, \boldsymbol{\omega})
+(\boldsymbol{\omega} \cdot \nabla) L(\mathbf{x}, \boldsymbol{\omega}) = -\sigma_t(\mathbf{x}) L(\mathbf{x}, \boldsymbol{\omega}) + L_s(\mathbf{x}, \boldsymbol{\omega})
 $$
 
-This form is used in integral equation derivations [S8].
+The integral form of the RTE, derived via the method of variation of parameters, expresses the outgoing radiance $L_o(\mathbf{x}, \boldsymbol{\omega})$ at position $\mathbf{x}$ along a ray originating from a surface intersection $\mathbf{x}_S$ [S14, unofficial]:
+
+$$
+L_o(\mathbf{x}, \boldsymbol{\omega}) = T(\mathbf{x}_S, \mathbf{x}) L_o(\mathbf{x}_S, \boldsymbol{\omega}) + \int_0^{\|\mathbf{x}_S - \mathbf{x}\|} T(\mathbf{x}', \mathbf{x}) \left[ L_e^V(\mathbf{x}', \boldsymbol{\omega}) + \sigma_s(\mathbf{x}') \int_{\mathbb{S}^2} f_p(\mathbf{x}', -\boldsymbol{\omega}', \boldsymbol{\omega}) L_i(\mathbf{x}', \boldsymbol{\omega}') d\boldsymbol{\omega}' \right] ds
+$$
+
+Where:
+*   $T(\mathbf{a}, \mathbf{b}) = \exp \left( -\int_0^{\|\mathbf{a} - \mathbf{b}\|} \sigma_e(\mathbf{b} - t\boldsymbol{\omega}_{\mathbf{a}\mathbf{b}}) dt \right)$ is the transmittance from point $\mathbf{a}$ to $\mathbf{b}$ [S14, unofficial].
+*   $\mathbf{x}_S = \text{raycast}(\mathbf{x}, -\boldsymbol{\omega})$ is the intersection point with the opaque surface [S14, unofficial].
+*   $L_e^V$ is the volume emittance function [S14, unofficial].
 
 ### Parameters
-*   **Radiance $L$**: Units of $\text{W}/(\text{sr} \cdot \text{m}^2)$ [S2, unofficial].
-*   **Extinction Coefficient $\sigma_t$**: Units of $\text{m}^{-1}$ [S3].
-*   **Albedo**: Ratio $\sigma_s / \sigma_t$. An albedo of 1 implies no true absorption [S3].
-*   **Phase Function $f_p$**: Depends only on the phase angle $\cos \theta = \boldsymbol{\omega} \cdot \boldsymbol{\omega}'$ [S7].
+
+*   **$\sigma_t$ (Extinction Coefficient):** Sum of absorption and scattering coefficients ($\sigma_t = \sigma_a + \sigma_s$) [S1, unofficial][S5][S7, S12, S14, unofficial]. Units: $m^{-1}$ [S1, S2, S6, unofficial].
+*   **$\Lambda$ (Scattering Albedo):** Ratio of scattering to extinction, $\Lambda = \frac{\sigma_s}{\sigma_t}$ [S14, unofficial]. An albedo of 1 implies perfect scattering with no true absorption [S2, S6, unofficial].
+*   **Phase Function $f_p$:** Often assumed to be a 1D function of the dot product $\boldsymbol{\omega} \cdot \boldsymbol{\omega}'$ [S5]. Common approximations include the Henyey-Greenstein phase function [S11][S12, unofficial].
+*   **Frequency:** The full RTE is 6-dimensional (position, direction, frequency) [S2, S6, unofficial]. In practice, it is often solved for grayscale (integrated over frequency) or a few discrete bands [S4, unofficial].
+
+### Edge Cases and Pitfalls
+
+*   **No Analytical Solution:** The RTE is an integro-differential equation with no general analytical solution [S8]. Numerical approximations are required [S8].
+*   **Neglected Effects:** The model operates on a macroscopic scale based on geometrical optics, neglecting diffraction, interference, wave-character, and polarization [S2, S6, unofficial].
+*   **Homogeneous Medium:** If there is no internal source ($Q=0$) and no scattering ($\sigma_s=0$), the equation reduces to the Beer-Lambert law for transmittance [S5][S14, unofficial].
+*   **Boundary Conditions:** The integral form requires boundary conditions, typically the radiance entering the volume from surface intersections or infinity [S14, unofficial].
 
 ### Pseudocode
-The following pseudocode computes the local derivative of radiance for a given point and direction, representing one step of solving the differential equation [G].
+
+The following pseudocode computes the directional derivative of radiance at a point $\mathbf{x}$ in direction $\boldsymbol{\omega}$ given the current radiance field and medium properties. This represents the right-hand side of the differential RTE.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-import random
-
-def sample_uniform_sphere(n_samples):
-    """Generates n_samples uniformly distributed unit vectors on the sphere."""
-    samples = []
-    for _ in range(n_samples):
-        phi = 2.0 * math.pi * random.random()
-        cos_theta = 2.0 * random.random() - 1.0
-        sin_theta = math.sqrt(1.0 - cos_theta**2)
-        x = sin_theta * math.cos(phi)
-        y = sin_theta * math.sin(phi)
-        z = cos_theta
-        samples.append((x, y, z))
-    return samples
-
-def compute_rte_derivative(p, omega, sigma_t, sigma_s, sigma_a, L_e, phase_function, incident_radiance_field, n_samples=100):
+def compute_rte_derivative(x, omega, L_field, sigma_t, sigma_s, phase_function, L_emission):
     """
-    Computes the RHS of the RTE: omega . grad_p L(p, omega).
-    Approximates the in-scattering integral via uniform Monte Carlo quadrature [G].
+    Computes the RHS of the RTE: (omega . nabla) L = -sigma_t * L + L_source
+    
+    Args:
+        x: Position vector (3D)
+        omega: Direction vector (unit 3D)
+        L_field: Function L(x, omega) returning radiance at position x and direction omega
+        sigma_t: Function sigma_t(x) returning extinction coefficient
+        sigma_s: Function sigma_s(x) returning scattering coefficient
+        phase_function: Function f_p(x, omega, omega_prime) returning phase function value
+        L_emission: Function L_e(x, omega) returning emitted radiance
+        
+    Returns:
+        float: The rate of change of radiance along the ray
     """
-    # 1. Extinction term (loss)
-    extinction = -sigma_t * incident_radiance_field(p, omega)
+    # 1. Get current radiance at this position and direction
+    L_current = L_field(x, omega)
     
-    # 2. Emission term (gain)
-    emission = sigma_a * L_e
+    # 2. Get medium coefficients at this position
+    st = sigma_t(x)
+    ss = sigma_s(x)
     
-    # 3. In-scattering term (gain)
-    # Integral over the unit sphere S^2: sigma_s * integral(f_p * L domega')
-    in_scattering = 0.0
-    sphere_samples = sample_uniform_sphere(n_samples)
-    for omega_prime in sphere_samples:
-        L_incident = incident_radiance_field(p, omega_prime)
-        f_p = phase_function(omega, omega_prime)
-        in_scattering += sigma_s * f_p * L_incident
-    in_scattering /= n_samples  # Monte Carlo average
+    # 3. Compute extinction term (loss)
+    extinction_term = -st * L_current
     
-    # Total source term
-    source = emission + in_scattering
+    # 4. Compute in-scattering term (gain)
+    # Integrate over the unit sphere S^2
+    # In practice, this is approximated by sampling N directions
+    in_scattering_integral = 0.0
+    N_samples = 100 # Placeholder for numerical integration method
+    for i in range(N_samples):
+        # Sample direction omega_prime on the unit sphere
+        omega_prime = sample_sphere_direction(i, N_samples)
+        
+        # Get incident radiance from that direction
+        L_incident = L_field(x, omega_prime)
+        
+        # Get phase function value
+        fp = phase_function(x, omega, omega_prime)
+        
+        # Accumulate contribution
+        # Note: The integral is over solid angle domega_prime
+        # Approximation: sum / N_samples * 4*pi is a crude Monte Carlo estimate
+        # A proper implementation would use importance sampling and quadrature weights
+        in_scattering_integral += ss * fp * L_incident
+        
+    # Normalize integral approximation (assuming uniform sampling over sphere area 4*pi)
+    # This is a simplified placeholder; real implementations use specific quadrature
+    in_scattering_term = in_scattering_integral * (4.0 * 3.14159265 / N_samples)
     
-    # Net change
-    derivative = extinction + source
+    # 5. Get emission term
+    emission_term = L_emission(x, omega)
+    
+    # 6. Combine terms
+    derivative = extinction_term + in_scattering_term + emission_term
     
     return derivative
 ```
 
-### Edge Cases and Pitfalls
-*   **No Analytical Solution**: The RTE is an integro-differential equation with no general analytical solution [S7]. Approximations like N-flux theory (discretizing directions) or diffusion approximation (isotropic scattering) are required [S7].
-*   **Low Albedo Approximation**: Approximations are required to display smoke and fire at interactive frame rates; the primary approximation exploits low albedo to simplify or eliminate scattering terms [S4, unofficial].
-*   **Phase Function Normalization**: The phase function must satisfy $\int_{\mathbb{S}^2} f_p d\boldsymbol{\omega}' = 1$ to conserve energy [S7].
-*   **Boundary Conditions**: For finite rays, the incident radiance $L_i$ includes surface contributions attenuated by transmittance [S11, unofficial].
-
 ## Subtopics
 
+### [Standard volume rendering equation](1165-standard-volume-rendering-equation.md)
+The standard volume rendering equation (VRE) computes the final pixel color by integrating emitted and scattered radiance along a camera ray, weighted by the transmittance (probability of survival) through the participating medium. It differs from its sibling [Volume Rendering Equation](2098-volume-rendering-equation.md) by explicitly defining the discrete numerical quadrature used in modern neural rendering (e.g., NeRF) and standard ray-marching, where opacity is derived from density and step size via Beer's Law, rather than treating opacity as an independent, ray-independent absolute value as in variants like Neural Volumes. It solves the problem of compositing volumetric data into a 2D image by accounting for absorption, emission, and occlusion in a single differentiable integral.
+
+### [Volume Rendering Equation](2098-volume-rendering-equation.md)
+The Volume Rendering Equation computes the outgoing radiance at a camera pixel by integrating the emission and scattering of light along a ray passing through a participating medium, attenuated by the accumulated transmittance. It solves the problem of visualizing continuous density fields (such as gas, fog, or clouds) by avoiding the "dots with glow" artifact of discrete particle rendering, instead producing a diffuse, physically plausible gas cloud appearance. Unlike the Standard volume rendering equation which often assumes pre-computed scalar fields and simple compositing, this method explicitly formulates the radiative transfer differential equation, allowing for the construction of emission and absorption fields directly from particle distributions (e.g., SPH) or volume grids.
+
+### [Similarity Theory / High-Order Similarity Relations](10236-similarity-theory-high-order-similarity-relations.md)
+A theoretical framework identifying equivalence classes in the RTE parameter space where different scattering parameters produce identical solution radiance fields, assuming the radiance is band-limited. It allows for the simplification of complex scattering problems by mapping them to equivalent, easier-to-solve problems.
+
 ### Green's Propagator for Participating Media
-The Green's propagator $G$ is the solution to the homogeneous RTE (source term $Q=0$) with an initial condition defined by a Dirac delta function representing a point source at $\mathbf{x}'$ and direction $\boldsymbol{\omega}'$ [S9]. It allows the solution of the RTE to be expressed as a convolution of the initial radiance with $G$ [S9].
-*   **Formula**: $G(s=0, \mathbf{x}, \boldsymbol{\omega}, \mathbf{x}', \boldsymbol{\omega}') = \delta(\mathbf{x} - \mathbf{x}')\delta(\boldsymbol{\omega} - \boldsymbol{\omega}')$ [S9].
-*   **No-Scatter Case**: If scattering is absent ($b=0$), the propagator simplifies to straight-line travel with exponential attenuation: $G(\mathbf{x}, \boldsymbol{\omega}, \mathbf{x}', \boldsymbol{\omega}') = \delta(\mathbf{x} - \boldsymbol{\omega}s - \mathbf{x}')\delta(\boldsymbol{\omega} - \boldsymbol{\omega}') \exp\left(-\int_0^s c(\mathbf{x} - \boldsymbol{\omega}(s-s')) ds'\right)$ [S9]. This is equivalent to simple raytracing with fog attenuation [S9].
+The Green's propagator $G$ is the solution to the homogeneous version of the radiative transfer equation (source term set to zero) with an initial condition defined by a Dirac delta function representing a point source at position $\mathbf{x}'$ and direction $\boldsymbol{\omega}'$ [S11]. In the absence of scattering ($b=0$), the propagator $G$ is calculated as the no-scatter propagator $G_{\text{noscatter}}$, which models light traveling in a straight line and attenuated by the absorption coefficient $c(\mathbf{x})$ [S11]. The no-scatter propagator formulation is equivalent to simple raytracing with fog attenuation, a model popular in computer graphics and part of APIs like OpenGL [S11].
 
 ## Operating characteristics
-*   **Complexity**: The RTE is computationally expensive due to the integral over the sphere ($\mathbb{S}^2$) for in-scattering, requiring significant memory and computation [S4, unofficial].
-*   **Scaling**: Performance scales with the number of scattering events and the complexity of the phase function. Approximations like simplifying scattering terms for low-albedo media are used to achieve interactive frame rates [S4, unofficial].
-*   **Strengths**: Physically accurate; handles arbitrary media, multiple scattering, and complex lighting [S2, unofficial].
-*   **Limitations**: No general analytical solution; requires numerical approximation (N-flux, diffusion, Monte Carlo) [S7]. High computational cost for multiple scattering [S4, unofficial].
-*   **When to use**: When physical accuracy is required for participating media like smoke, fog, or subsurface scattering [S2, unofficial][S3].
-*   **When not to use**: For vacuum or non-participating media (use standard rendering equation) [S2, unofficial].
+
+*   **Complexity:** The RTE is an integro-differential equation with no general analytical solution [S8]. Solving it requires numerical methods such as N-flux theory (approximating the integral as a summation along N directions) or the diffusion approximation (assuming isotropic scattering) [S8].
+*   **Performance:** The primary approximation for interactive visualization is to take advantage of the low albedo character of smoke, allowing one to simplify or eliminate scattering terms in the RTE [S4, unofficial].
+*   **Memory:** The solution of the RTE for visualization requires significant computation and memory resources, especially when solving for the full radiation field rather than just the observer's viewpoint [S4, unofficial].
+*   **Strengths:** It provides a physically accurate model for light transport in participating media, accounting for absorption, emission, and scattering [S2, unofficial][S3][S4, unofficial][S8].
+*   **Limitations:** It neglects wave effects (diffraction, interference, polarization) [S2, S6, unofficial]. It is computationally expensive to solve exactly [S4, unofficial][S8].
 
 ## Background
-The RTE was defined in its modern form by Subrahmanyan Chandrasekhar in the book *Radiative Transfer* (1950) [S1, unofficial][S5, unofficial]. It was introduced to computer graphics by Kajiya in 1986 [S5, unofficial]. The model is based on energy conservation on a microscopic level (not on photon and electron level) while describing light-matter interactions at the macroscopic scale [S2, unofficial]. It is widely used in fire dynamics simulation (e.g., Smokeview, FDS) and scientific visualization [S4, unofficial].
+
+The Radiative Transfer Equation was defined in its modern form by Subrahmanyan Chandrasekhar in the book *Radiative Transfer*, published in 1950 [S1, S7, unofficial][S8][S10, book]. The equation of transfer for light was introduced to computer graphics by Kajiya in 1986 [S2, S6, unofficial][S8]. Other early models include the emission-absorption model by Hege (1993) and the density-emitter model by Sabella (1988) [S2, S6, unofficial]. It is used in various fields including atmospheric physics, astrophysics, and computer graphics for rendering participating media [S1, S2, unofficial][S3][S4, unofficial][S8].
 
 ## Sources
+
 [S1] From the Radiative Transfer Equation to the Volume Rendering Equation, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-summary-equations.html, fetched 2026-10-25 (unofficial)
 [S2] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
 [S3] Physics-based differentiable rendering, https://doi.org/10.1145/3388769.3407454, fetched 2026-10-29
 [S4] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)
-[S5] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
-[S6] [Graphics] Volume Rendering - GitHub Pages, https://leeyngdo.github.io/blog/computer-graphics/2024-03-28-volume-rendering/, fetched 2026-10-27 (unofficial)
-[S7] 14 Rendering Volume and Subsurface Scattering - Foundations of Visual ..., https://learnvisualcomputing.github.io/rendering-rte.html, fetched 2026-10-27
-[S8] Light Transport II: Volume Rendering / The Equation of Transfer, https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/The_Equation_of_Transfer.html, fetched 2026-10-27
-[S9] PDF Practical Rendering of Multiple Scattering Effects in Participating Media, https://cseweb.ucsd.edu/~ravir/HRPIEG.pdf, fetched 2026-10-28
-[S10] A Null-Scattering Path Integral Formulation of Light Transport, https://www.scribd.com/document/1067625811/A-Null-scattering-Path-Integral-Formulation-of-Light-Transport, fetched 2026-10-29 (unofficial)
-[S11] ボリュームレンダリング方程式 (Volume Rendering Equation) 1, https://rayspace.xyz/CG/contents/VLTE1/, fetched 2026-10-30 (unofficial)
+[S5] High-order similarity relations in radiative transfer, https://doi.org/10.1145/2601097.2601104, fetched 2026-10-26
+[S6] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
+[S7] [Graphics] Volume Rendering - GitHub Pages, https://leeyngdo.github.io/blog/computer-graphics/2024-03-28-volume-rendering/, fetched 2026-10-27 (unofficial)
+[S8] 14 Rendering Volume and Subsurface Scattering - Foundations of Visual ..., https://learnvisualcomputing.github.io/rendering-rte.html, fetched 2026-10-27
+[S9] Light Transport II: Volume Rendering / The Equation of Transfer, https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/The_Equation_of_Transfer.html, fetched 2026-10-27
+[S10] Light Transport II: Volume Rendering / The Equation of Transfer, https://www.pbr-book.org/3ed-2018/Light_Transport_II_Volume_Rendering/The_Equation_of_Transfer.html, fetched 2026-10-27 (book)
+[S11] PDF Practical Rendering of Multiple Scattering Effects in Participating Media, https://cseweb.ucsd.edu/~ravir/HRPIEG.pdf, fetched 2026-10-28
+[S12] PDF Real-Time Light Transport in Analytically Integrable Participating Media, https://cgg.mff.cuni.cz/~tomas/publications/pub-thesis-real-time-scattering/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S13] A Null-Scattering Path Integral Formulation of Light Transport, https://www.scribd.com/document/1067625811/A-Null-scattering-Path-Integral-Formulation-of-Light-Transport, fetched 2026-10-29 (unofficial)
+[S14] ボリュームレンダリング方程式 (Volume Rendering Equation) 1, https://rayspace.xyz/CG/contents/VLTE1/, fetched 2026-10-30 (unofficial)

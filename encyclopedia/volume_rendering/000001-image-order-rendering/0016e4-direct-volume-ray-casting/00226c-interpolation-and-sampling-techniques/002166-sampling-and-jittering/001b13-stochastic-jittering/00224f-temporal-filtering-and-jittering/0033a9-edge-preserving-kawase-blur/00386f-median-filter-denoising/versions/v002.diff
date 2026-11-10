@@ -1,0 +1,220 @@
+--- v001.md
++++ v002.md
+@@ -4,122 +4,124 @@
+ 
+ ## Overview
+-A post-processing technique used to reduce 'Salt and Pepper' noise caused by unpredictable precision errors in raycasting that result in wrong or missing pixel colors [S1, unofficial]. It sets apart from its sibling [Edge-Preserving Kawase Blur](7026-edge-preserving-kawase-blur.md) by operating on a fixed 3x3 neighborhood to remove isolated outliers (single-pixel errors) rather than blurring dither patterns, making it suitable for correcting discrete precision failures rather than high-frequency jitter [S1, unofficial].
++A post-processing technique used to reduce 'Salt and Pepper' noise caused by unpredictable precision errors in raycasting that result in wrong or missing pixel colors [S1, unofficial]. It sets itself apart from its sibling [Edge-Preserving Kawase Blur](7026-edge-preserving-kawase-blur.md) by operating on a fixed 3x3 neighborhood to remove extreme outliers (single-pixel noise) rather than applying a weighted blur to remove dither patterns [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: The rendered image buffer (float4 colors) from the raycasting step.
+-- Output: A denoised image buffer where isolated noisy pixels are replaced by the median of their neighbors.
++*   Input: The rendered image buffer (texture) from the raycasting step.
++*   Output: A denoised image buffer.
+ 
+ **Data Structures:**
+-- `colorStack`: An array of 9 `float4` values, representing the current pixel and its 8 immediate neighbors.
+-- `GRAY_SCALE_FACTORS`: A constant vector (typically `[0.299, 0.587, 0.114]` for standard luminance, though the source does not specify the exact values, only its existence) used to convert `float4` colors to a scalar grayscale value for comparison [S1, unofficial].
++*   `colorStack`: An array of 9 `float4` color values.
++*   `lookups`: An array of 9 `float2` offset vectors representing the relative coordinates of the 3x3 neighborhood.
++*   `GRAY_SCALE_FACTORS`: A constant vector (typically `[0.299, 0.587, 0.114, 0.0]` or similar luminance weights) used to convert `float4` colors to a scalar for comparison [S1, unofficial].
+ 
+ **Steps:**
+-1. For each pixel $p_{i,j}$ in the output image:
+-2. Calculate texture lookup offsets:
+-   - $dx = 1.0 / \text{width}$
+-   - $dy = 1.0 / \text{height}$
+-3. Define the 9 relative offsets for the 3x3 neighborhood:
+-   - $(-dx, -dy), (0, -dy), (dx, -dy)$
+-   - $(-dx, 0), (0, 0), (dx, 0)$
+-   - $(-dx, dy), (0, dy), (dx, dy)$
+-4. Initialize an empty `colorStack` of size 9 and `currentIndex = 0`.
+-5. For each of the 9 offsets:
+-   - Sample the color $C$ from the input texture at $p_{i,j} + \text{offset}$.
+-   - Insert $C$ into `colorStack` at `currentIndex`.
+-   - Perform insertion sort on `colorStack` up to `currentIndex` to maintain sorted order.
+-   - Increment `currentIndex`.
+-6. The median is the element at index 4 (the 5th element) of the sorted `colorStack` [S1, unofficial].
+-   - Note: Arrays are zero-based; the 5th element is at index 4, not 5 [S1, unofficial].
+-7. Set the output pixel color to this median value.
++1.  Calculate the texture coordinate step sizes: $dx = 1.0 / \text{width}$ and $dy = 1.0 / \text{height}$ [S1, unofficial].
++2.  Define the 3x3 neighborhood offsets relative to the current pixel $(0,0)$:
++    $$
++    \begin{aligned}
++    &(-dx, -dy), (0, -dy), (dx, -dy), \\
++    &(-dx, 0), (0, 0), (dx, 0), \\
++    &(-dx, dy), (0, dy), (dx, dy)
++    \end{aligned}
++    $$
++    [S1, unofficial].
++3.  For each pixel $p_{i,j}$:
++    a. Retrieve the 8 surrounding pixels and the center pixel using the offsets defined in step 2.
++    b. Store these 9 colors in `colorStack`.
++    c. Sort `colorStack` based on the grayscale luminance of the colors. The comparison function $C(a, b)$ is defined as:
++       $$ C(a, b) = \text{dot}(\text{GRAY\_SCALE\_FACTORS}, a) > \text{dot}(\text{GRAY\_SCALE\_FACTORS}, b) $$
++       [S1, unofficial].
++    d. The median of 9 elements ($n=9, m=4$) is the element at index 4 (the 5th element) because arrays are zero-based [S1, unofficial].
++    e. Set the output pixel color to `colorStack[4]`.
+ 
+ **Formula:**
+-For an odd number of elements $n = 2m + 1$, the median is the element at index $m$. For even $n = 2m$, it is the average of elements at $m$ and $m+1$. In this 3x3 case ($n=9, m=4$), the median is the 5th element ($x_5$) [S1, unofficial].
++For an odd number of elements $n = 2m + 1$, the median is the element at index $m$. For even $n = 2m$, it is the average of elements at $m$ and $m+1$. In this 3x3 case ($n=9, m=4$), the median is $x_5$ (stored at index 4) [S1, unofficial].
+ 
+-**Comparison Function:**
+-Colors are compared based on their grayscale value using the dot product with `GRAY_SCALE_FACTORS`:
+-$$ \text{compare}(a, b) = (\text{GRAY\_SCALE\_FACTORS} \cdot a) > (\text{GRAY\_SCALE\_FACTORS} \cdot b) $$
+-[S1, unofficial]
++**Parameters:**
++*   `GRAY_SCALE_FACTORS`: Luminance weights for color comparison. Not given in the sources. [G: Standard NTSC weights are often used, but the source does not specify the exact vector values].
++
++**Pitfalls:**
++*   **Indexing Error:** Arrays are zero-based. The 5th element (median of 9) is at index 4, not index 5 [S1, unofficial].
++*   **Boundary Conditions:** The source does not specify how to handle pixels at the image boundary (e.g., clamping, wrapping, or skipping). [G: Standard practice is to clamp coordinates to the image bounds or skip boundary pixels, but this is not defined in the source].
+ 
+ **Pseudocode:**
+ ```python
+-def median_filter_denoise(input_texture, width, height):
+-    # Constants
+-    GRAY_SCALE_FACTORS = [0.299, 0.587, 0.114] # [G] Standard luminance weights; source does not specify exact values
++# Constants
++# GRAY_SCALE_FACTORS is assumed to be a vec4 [r, g, b, 0]
++# width, height are image dimensions
++
++def luminance(color: vec4) -> float:
++    return dot(color, GRAY_SCALE_FACTORS)
++
++def compare_colors(a: vec4, b: vec4) -> bool:
++    return luminance(a) > luminance(b)
++
++def insertion_sort_stack(stack: list[vec4], size: int):
++    # Sort the first 'size' elements of stack in ascending order of luminance
++    for i in range(1, size):
++        key = stack[i]
++        j = i - 1
++        while j >= 0 and compare_colors(stack[j], key):
++            stack[j + 1] = stack[j]
++            j -= 1
++        stack[j + 1] = key
++
++def median_filter_pixel(center_uv: vec2, dx: float, dy: float) -> vec4:
++    # Offsets for 3x3 neighborhood
++    offsets = [
++        vec2(-dx, -dy), vec2(0, -dy), vec2(dx, -dy),
++        vec2(-dx, 0),   vec2(0, 0),   vec2(dx, 0),
++        vec2(-dx, dy),  vec2(0, dy),  vec2(dx, dy)
++    ]
+     
+-    # Precompute offsets
++    color_stack = [vec4(0.0)] * 9
++    
++    # Fetch colors and perform insertion sort on the fly
++    for k in range(9):
++        current_color = texture_lookup(center_uv + offsets[k])
++        
++        # Insert current_color into the sorted portion of color_stack [0...k-1]
++        # Using insertion sort logic directly into the stack
++        idx = k
++        while idx > 0 and compare_colors(color_stack[idx - 1], current_color):
++            color_stack[idx] = color_stack[idx - 1]
++            idx -= 1
++        color_stack[idx] = current_color
++        
++    # Median of 9 elements is at index 4 (0-based)
++    return color_stack[4]
++
++def postprocessing_shader(input_uv: vec2) -> vec4:
+     dx = 1.0 / width
+     dy = 1.0 / height
+-    offsets = [
+-        (-dx, -dy), (0, -dy), (dx, -dy),
+-        (-dx, 0),   (0, 0),   (dx, 0),
+-        (-dx, dy),  (0, dy),  (dx, dy)
+-    ]
+-    
+-    output_image = empty_image_of_size(width, height)
+-    
+-    for y in range(height):
+-        for x in range(width):
+-            color_stack = []
+-            
+-            # Sample and insert-sort neighbors
+-            for i in range(9):
+-                offset_x, offset_y = offsets[i]
+-                sample_x = x + offset_x
+-                sample_y = y + offset_y
+-                
+-                # Clamp coordinates if necessary [G]
+-                sample_x = clamp(sample_x, 0, width - 1)
+-                sample_y = clamp(sample_y, 0, height - 1)
+-                
+-                current_color = input_texture.sample(sample_x, sample_y)
+-                
+-                # Insert into sorted stack
+-                # Find position to insert
+-                insert_pos = len(color_stack)
+-                for j in range(len(color_stack)):
+-                    if compare(current_color, color_stack[j]):
+-                        insert_pos = j
+-                        break
+-                
+-                # Insert
+-                color_stack.insert(insert_pos, current_color)
+-            
+-            # Median is the 5th element (index 4)
+-            median_color = color_stack[4]
+-            output_image.set_pixel(x, y, median_color)
+-            
+-    return output_image
+-
+-def compare(color_a, color_b):
+-    # Compare based on grayscale value
+-    val_a = dot(GRAY_SCALE_FACTORS, color_a)
+-    val_b = dot(GRAY_SCALE_FACTORS, color_b)
+-    return val_a > val_b
++    return median_filter_pixel(input_uv, dx, dy)
+ ```
+-
+-**Parameters:**
+-- `GRAY_SCALE_FACTORS`: A constant vector used in the dot product to convert float4 colors to a scalar grayscale value for comparison [S1, unofficial]. Not given in the sources.
+-
+-**Edge Cases and Pitfalls:**
+-- **Zero-based indexing:** Arrays are zero-based, so the 5th element (median of 9) is at index 4, not index 5 [S1, unofficial].
+-- **Boundary conditions:** The source does not specify how to handle pixels at the image boundary (e.g., clamping, wrapping, or ignoring). [G] Clamping is assumed.
+-- **Precision errors:** The filter specifically targets "Salt and Pepper" noise caused by unpredictable precision errors in raycasting [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Forgetful Selection Median Filter](12105-forgetful-selection-median-filter.md)
+-A GPU-optimized median filter algorithm used to de-noise volumetric images, chosen because classic histogram-based approaches require too many registers per thread on CUDA hardware.
++The Forgetful Selection Median Filter is a GPU-optimized algorithm for computing the median of a data set, specifically designed to overcome register pressure limitations on CUDA hardware. It solves the problem of high memory usage in classic histogram-based median filters, which require excessive registers per thread, thereby limiting parallelism on GPUs with limited low-latency memory (up to compute capability 3.5). It sets itself apart from histogram-based siblings by maintaining a small, fixed-size subset of values in registers rather than a full frequency distribution, allowing sorting operations to occur entirely within registers.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** O(1) because the loop always iterates through a fixed array of length 9, regardless of image size [S1, unofficial].
+-- **Memory Complexity:** O(1) per pixel, requiring storage for 9 colors in a stack [S1, unofficial].
+-- **Strengths:** Effective at removing isolated "Salt and Pepper" noise caused by precision errors in raycasting [S1, unofficial]. Simple to implement as a post-processing shader [S1, unofficial].
+-- **Limitations:** Only operates on a 3x3 neighborhood, so it may not remove larger noise clusters. It blurs edges slightly, though less than a standard box blur [S1, unofficial].
+-- **When to use:** When raycasting produces isolated incorrect or missing pixel colors due to precision errors [S1, unofficial].
+-- **When not to use:** When the noise is structured or high-frequency dithering (use [Edge-Preserving Kawase Blur](7026-edge-preserving-kawase-blur.md) instead) [S1, unofficial].
++**Time and Memory Complexity:**
++*   Time Complexity: $O(1)$ because the loop always iterates through a fixed array of length 9, regardless of image size [S1, unofficial].
++*   Memory Complexity: $O(1)$ per pixel, requiring storage for 9 colors and a few scalar variables [S1, unofficial].
++
++**Measured Performance:**
++*   Not given in the sources.
++
++**Strengths and Limitations:**
++*   **Strengths:** Effective at removing "Salt and Pepper" noise caused by precision errors in raycasting [S1, unofficial]. Simple to implement as a post-processing shader [S1, unofficial].
++*   **Limitations:** Only considers a 3x3 neighborhood, which may not be sufficient for larger noise patterns. Blurs edges slightly compared to more complex edge-preserving filters, though it preserves edges better than simple box blurs [S1, unofficial].
++
++**When to use it:**
++*   Use when the primary noise source is single-pixel outliers (salt and pepper noise) resulting from raycasting precision issues [S1, unofficial].
++
++**When not to use it:**
++*   Not suitable for removing dither patterns or high-frequency noise that requires a larger kernel or weighted averaging, for which [Edge-Preserving Kawase Blur](7026-edge-preserving-kawase-blur.md) is more appropriate [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of raycasting-based voxel rendering, specifically as a post-processing step to handle noise from precision errors [S1, unofficial]. The method is described in a thesis by Enes Hergül (2022) [S1, unofficial].
++Origin: Developed as part of a raycasting-based voxel rendering system to handle noise from precision errors [S1, unofficial]. The technique is described in a thesis/report by Enes Hergül (2022) [S1, unofficial].
+ 
+ ## Sources
