@@ -3,23 +3,23 @@
 Also called: GPU Marching Cubes with Indirect Rendering, Indirect Marching Cubes, Keijiro's GPU Marching Cubes (modified), Marching Cubes/MeshBuilderIndirect, TerrainMeshBuilderIndirect
 
 ## Overview
-This method extracts an implicit terrain surface from voxel data on the GPU using Marching Cubes, managing multiple Level of Detail (LOD) levels and rendering the generated triangles via indirect draw calls [S1, unofficial]. It builds on [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) by replacing CPU-GPU synchronization stalls with GPU-generated draw arguments, allowing the GPU to render the mesh directly without readback [S1, unofficial]. Unlike [GPU Marching Cubes with Atomic Counter Emission](4082-gpu-marching-cubes-with-atomic-counter-emission.md) which may require CPU-side buffer management or synchronization, this approach keeps the RenderThread time low (~1.5ms) by keeping all draw argument generation on the GPU [S1, unofficial].
+This method extracts an implicit terrain surface from voxel data on the GPU using Marching Cubes, manages multiple Level of Detail (LOD) levels, and renders the generated triangles via indirect draw calls [S1, unofficial]. It builds on [GPU and Shader-Based Extraction](9036-gpu-and-shader-based-extraction.md) by replacing CPU-GPU synchronization stalls with GPU-generated draw arguments, allowing the GPU to render the mesh directly without readback [S1, unofficial]. Unlike [GPU Marching Cubes with Atomic Counter Emission](4082-gpu-marching-cubes-with-atomic-counter-emission.md) which may require CPU-side buffer management or synchronization, this approach keeps the RenderThread time low (~1.5ms) by keeping all draw argument generation on the GPU [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Voxel data buffer (scalar field), precomputed `triangleTable` (256 `ulong` entries), voxel resolution (`int3`), voxel size (`float`), isovalue (`float`, typically 0.0), chunk center in world space (`float3`), and LOD configuration (`TerrainLod` list).
-*   **Outputs:** Triangle meshes rendered via indirect draw calls. The output is managed in per-LOD `AppendStructuredBuffer`s for vertices and `ComputeBuffer`s for indirect arguments.
+*   **Inputs:** Voxel data buffer (scalar field), precomputed `triangleTable` (256 `ulong` entries), voxel resolution (`int3`), voxel size (`float`), isovalue (`float`, typically 0.0), chunk center in world space (`float3`), and LOD configuration (`TerrainLod` list) [S1, unofficial].
+*   **Outputs:** Triangle meshes rendered via indirect draw calls. The output is managed in per-LOD `AppendStructuredBuffer`s for vertices and `ComputeBuffer`s for indirect arguments [S1, unofficial].
 
 **Data Structures:**
-1.  **`Triangle` Struct:** Contains three `VertexGPU` structs (`v0`, `v1`, `v2`).
-    *   `VertexGPU` contains: `float3 posWS` (world position), `float3 nrmWS` (world normal), `float2 uv`.
+1.  **`Triangle` Struct:** Contains three `VertexGPU` structs (`v0`, `v1`, `v2`) [S1, unofficial].
+    *   `VertexGPU` contains: `float3 posWS` (world position), `float3 nrmWS` (world normal), `float2 uv` [S1, unofficial].
     *   Total size: 96 bytes per triangle (32 bytes per vertex) [S1, unofficial].
 2.  **`TerrainLod` Struct:**
     *   `LOD`: int (1-based index).
     *   `VoxelResolution`: `int3`.
     *   `chunkRadius`: int.
     *   LODs must be ordered highest-to-lowest resolution [S1, unofficial].
-3.  **`IndirectArgBuffers`:** 5 `uint` values per LOD.
+3.  **`IndirectArgBuffers`:** 5 `uint` values per LOD [S1, unofficial].
     *   Index 0: Total vertex count (updated dynamically).
     *   Index 1: Instance count (number of triangles).
     *   Index 2: Start vertex (0).
@@ -30,15 +30,15 @@ This method extracts an implicit terrain surface from voxel data on the GPU usin
 **Algorithm Steps:**
 
 1.  **Buffer Allocation:**
-    For each LOD level $i$, calculate the active chunk count using a flood-fill or spatial query (`ManhattanFloodFillCount3D`).
-    *   For LOD 0, use the full active chunk count.
-    *   For $i > 0$, subtract the active chunk count of the previous LOD level.
+    For each LOD level $i$, calculate the active chunk count using a spatial query (`ManhattanFloodFillCount3D`) [S1, unofficial].
+    *   For LOD 0, use the full active chunk count [S1, unofficial].
+    *   For $i > 0$, subtract the active chunk count of the previous LOD level [S1, unofficial].
     *   Allocate `VertexBuffers` as `AppendStructuredBuffer` sized to:
         $$ \text{Size} = \text{voxelRes}_x \times \text{voxelRes}_y \times \text{voxelRes}_z \times \text{activeChunks} $$
     *   Allocate `IndirectArgBuffers` as 5 `uint` values [S1, unofficial].
 
 2.  **Initialize Indirect Arguments:**
-    Set the initial values in `IndirectArgBuffers` to `{3, 1, 0, 0, 0}`:
+    Set the initial values in `IndirectArgBuffers` to `{3, 1, 0, 0, 0}` [S1, unofficial]:
     *   `vertexCountPerInstance` = 3 (vertices per triangle).
     *   `instanceCount` = 1 (placeholder, updated later).
     *   `startVertex` = 0.
@@ -46,11 +46,11 @@ This method extracts an implicit terrain surface from voxel data on the GPU usin
     *   `unused` = 0 [S1, unofficial].
 
 3.  **Dispatch Marching Cubes Compute Kernel:**
-    *   Bind `Voxels` buffer, `TriangleTable` buffer, and `g_Tris` (the `VertexBuffer` for the current LOD) to the compute shader.
+    *   Bind `Voxels` buffer, `TriangleTable` buffer, and `g_Tris` (the `VertexBuffer` for the current LOD) to the compute shader [S1, unofficial].
     *   Set parameters:
         *   `Dims`: Voxel resolution $(N_x, N_y, N_z)$.
         *   `Scale`: Voxel size.
-        *   `Isovalue`: 0.0.
+        *   `Isovalue`: 0.0 [S1, unofficial].
         *   `HalfVoxelOffset`: $\text{Scale} \times -0.5$ (applied to all axes to center the grid) [S1, unofficial].
         *   `chunkCenter`: Chunk center in world space.
     *   Dispatch the kernel with group counts $\lceil N_x/4 \rceil \times \lceil N_y/4 \rceil \times \lceil N_z/4 \rceil$, implying a $4 \times 4 \times 4$ thread group [S1, unofficial].
@@ -61,11 +61,11 @@ This method extracts an implicit terrain surface from voxel data on the GPU usin
         4.  For each active edge, compute intersection point $\mathbf{p}$ via linear interpolation:
             $$ \mathbf{p} = \mathbf{p}_1 + \frac{\tau - V_1}{V_2 - V_1} (\mathbf{p}_2 - \mathbf{p}_1) $$
             where $V_1, V_2$ are corner values and $\mathbf{p}_1, \mathbf{p}_2$ are corner positions [S1, Parent, unofficial].
-        5.  Compute normals via gradient interpolation or finite differences [S1, Parent, unofficial].
-        6.  Emit triangles to the `AppendStructuredBuffer` `g_Tris` using atomic operations or hardware append buffer support [S1, Parent, unofficial].
+        5.  The vertex shader fetches the normal vector `nrmWS` directly from the `VertexGPU` struct; the sources do not specify how these normals are computed [S1, unofficial].
+        6.  Emit triangles to the `AppendStructuredBuffer` `g_Tris` using hardware append buffer support [S1, Parent, unofficial].
 
 4.  **Update Indirect Arguments:**
-    *   Copy the triangle append counter from the `VertexBuffer` to the `IndirectArgBuffer` at byte offset 0.
+    *   Copy the triangle append counter from the `VertexBuffer` to the `IndirectArgBuffer` at byte offset 0 [S1, unofficial].
     *   Dispatch a helper compute shader (`indirectArgumentSetter`) to update the arguments:
         *   `args[0]` (vertex count) = `triangleCount` $\times 3$.
         *   `args[1]` (instance count) = `triangleCount` $\times 1$.
@@ -77,19 +77,19 @@ This method extracts an implicit terrain surface from voxel data on the GPU usin
         *   `args`: The `IndirectArgBuffer`.
         *   `material`: Terrain material.
         *   `trs`: Identity transform matrix (or chunk-specific transform if applied in shader) [S1, unofficial].
-    *   Register the entry with `GpuIndirectDrawRegistry.Add()`.
+    *   Register the entry with `GpuIndirectDrawRegistry.Add()` [S1, unofficial].
 
 6.  **Reset Append Counter:**
     *   Call `vertexBuffer.SetCounterValue(0)` to clear the triangle append buffer for the next frame [S1, unofficial].
 
 **Vertex Shader:**
-*   Fetches the corner vertex from the input buffer: if corner index is 0, return `t.v0`; if 1, return `t.v1`; else return `t.v2`.
+*   Fetches the corner vertex from the input buffer: if corner index is 0, return `t.v0`; if 1, return `t.v1`; else return `t.v2` [S1, unofficial].
 *   Transforms world-space position to clip space: `TransformWorldToHClip(o.posWS)` [S1, unofficial].
 
 **Fragment Shader:**
-*   Normalizes normal vector `N`.
-*   If $\mathbf{N} \cdot \mathbf{V} < 0$ (where $\mathbf{V}$ is view direction), flip `N` to ensure it points towards the camera.
-*   Calculates Lambertian lighting using a fixed light direction `float3(1,1,0)`.
+*   Normalizes normal vector `N` [S1, unofficial].
+*   If $\mathbf{N} \cdot \mathbf{V} < 0$ (where $\mathbf{V}$ is view direction), flip `N` to ensure it points towards the camera [S1, unofficial].
+*   Calculates Lambertian lighting using a fixed light direction `float3(1,1,0)` [S1, unofficial].
 *   Returns a value interpolated between 0.25 and 1.0 based on the dot product [S1, unofficial].
 
 **Pseudocode:**
@@ -97,7 +97,56 @@ This method extracts an implicit terrain surface from voxel data on the GPU usin
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for the GPU Pipeline Management (CPU-side setup, GPU-side execution)
+import math
+
+# Minimal self-contained definitions to satisfy Python validity
+class VertexGPU:
+    def __init__(self, posWS, nrmWS, uv):
+        self.posWS = posWS
+        self.nrmWS = nrmWS
+        self.uv = uv
+
+class Triangle:
+    def __init__(self, v0, v1, v2):
+        self.v0 = v0
+        self.v1 = v1
+        self.v2 = v2
+
+class AppendStructuredBuffer:
+    def __init__(self, size_bytes):
+        self.size = size_bytes
+        self.counter = 0
+    def set_counter_value(self, val):
+        self.counter = val
+    def append(self, tri):
+        self.counter += 1
+
+class ComputeBuffer:
+    def __init__(self, size, dtype):
+        self.data = [0] * size
+    def set_data(self, vals):
+        self.data = vals
+
+class GpuIndirectDrawRegistry:
+    _entries = []
+    @staticmethod
+    def Add(entry):
+        GpuIndirectDrawRegistry._entries.append(entry)
+
+class Shader:
+    def __init__(self):
+        self.buffers = {}
+        self.params = {}
+    def set_buffer(self, kernel_id, name, buf):
+        self.buffers[(kernel_id, name)] = buf
+    def set_ints(self, name, val):
+        self.params[name] = val
+    def set_float(self, name, val):
+        self.params[name] = val
+    def set_floats(self, name, *vals):
+        self.params[name] = vals
+    def dispatch(self, kernel_id, num_groups_x, num_groups_y, num_groups_z):
+        pass # GPU execution stub
 
 class TerrainMeshBuilderIndirect:
     def __init__(self, voxel_volume_size, marching_cubes_shader, indirect_arg_adjuster_shader, terrain_material, lods):
@@ -105,43 +154,27 @@ class TerrainMeshBuilderIndirect:
         self.terrain_material = terrain_material
         self.marching_cubes_shader = marching_cubes_shader
         self.indirect_arg_adjuster_shader = indirect_arg_adjuster_shader
+        self.triangle_table_buffer = ComputeBuffer(256, 'ulong') # Preloaded with PrecalculatedData.TriangleTable
         
-        # Allocate per-LOD buffers
         self.vertex_buffers = []
         self.indirect_arg_buffers = []
         
         for lod in self.lods:
-            # Calculate active chunks for this LOD
-            # Note: ManhattanFloodFillCount3D is a hypothetical helper to count active chunks
-            active_chunks = ManhattanFloodFillCount3D(lod.voxel_resolution)
+            # Active chunk count calculation (implementation not provided in sources)
+            active_chunks = 1 
             
-            # For LOD > 0, subtract previous LOD's count (simplified logic)
-            if lod.lod > 0:
-                # In practice, this requires tracking active chunks per LOD level
-                pass 
-            
-            # Buffer size: voxel volume * active chunks
-            buffer_size = lod.voxel_resolution.x * lod.voxel_resolution.y * lod.voxel_resolution.z * active_chunks
-            
-            # VertexBuffer: AppendStructuredBuffer for triangles
-            # Each triangle is 96 bytes (3 vertices * 32 bytes)
-            vb = CreateAppendStructuredBuffer(buffer_size * 96)
+            buffer_size = lod.voxel_resolution[0] * lod.voxel_resolution[1] * lod.voxel_resolution[2] * active_chunks
+            vb = AppendStructuredBuffer(buffer_size * 96)
             self.vertex_buffers.append(vb)
             
-            # IndirectArgBuffer: 5 uints
-            # Initial: {3, 1, 0, 0, 0}
-            iab = CreateComputeBuffer(5, uint)
+            iab = ComputeBuffer(5, 'uint')
             iab.set_data([3, 1, 0, 0, 0])
             self.indirect_arg_buffers.append(iab)
 
     def calculate_mesh(self, chunk_index, voxel_buffer, voxel_size, voxel_resolution, chunk_center_ws, lod):
-        # Get buffers for this LOD
         vertex_buffer = self.vertex_buffers[lod.lod - 1]
-        
-        # Reset append counter for this frame
         vertex_buffer.set_counter_value(0)
         
-        # Dispatch Marching Cubes Compute Shader
         self.marching_cubes_shader.set_buffer(0, "g_Tris", vertex_buffer)
         self.marching_cubes_shader.set_buffer(0, "Voxels", voxel_buffer)
         self.marching_cubes_shader.set_buffer(0, "TriangleTable", self.triangle_table_buffer)
@@ -152,88 +185,81 @@ class TerrainMeshBuilderIndirect:
         
         half_voxel_offset = voxel_size * -0.5
         self.marching_cubes_shader.set_floats("HalfVoxelOffset", half_voxel_offset, half_voxel_offset, half_voxel_offset)
-        self.marching_cubes_shader.set_floats("chunkCenter", chunk_center_ws.x, chunk_center_ws.y, chunk_center_ws.z)
+        self.marching_cubes_shader.set_floats("chunkCenter", chunk_center_ws[0], chunk_center_ws[1], chunk_center_ws[2])
         
-        # Dispatch with 4x4x4 thread groups
-        group_count_x = ceil(voxel_resolution.x / 4)
-        group_count_y = ceil(voxel_resolution.y / 4)
-        group_count_z = ceil(voxel_resolution.z / 4)
+        group_count_x = math.ceil(voxel_resolution[0] / 4)
+        group_count_y = math.ceil(voxel_resolution[1] / 4)
+        group_count_z = math.ceil(voxel_resolution[2] / 4)
         
         self.marching_cubes_shader.dispatch(0, group_count_x, group_count_y, group_count_z)
         
-        # Update Indirect Arguments
         indirect_arg_buffer = self.indirect_arg_buffers[lod.lod - 1]
         
         # Copy triangle count from vertex buffer to indirect args
-        # This requires a copy operation or a compute shader to read the append counter
-        self.indirect_arg_adjuster_shader.set_buffer(0, "IndirectArgs", indirect_arg_buffer)
-        self.indirect_arg_adjuster_shader.set_buffer(0, "TriangleCount", vertex_buffer.counter_buffer)
+        triangle_count = vertex_buffer.counter
+        indirect_arg_buffer.data[0] = triangle_count * 3
+        indirect_arg_buffer.data[1] = triangle_count * 1
         
-        # Dispatch helper to update args[0] = count * 3, args[1] = count * 1
+        self.indirect_arg_adjuster_shader.set_buffer(0, "IndirectArgs", indirect_arg_buffer)
+        self.indirect_arg_adjuster_shader.set_buffer(0, "TriangleCount", vertex_buffer)
         self.indirect_arg_adjuster_shader.dispatch(0, 1, 1, 1)
         
-        # Enqueue Indirect Draw Call
         indirect_draw_call = {
             "tris": vertex_buffer,
             "args": indirect_arg_buffer,
             "material": self.terrain_material,
-            "trs": IdentityMatrix()
+            "trs": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
         }
         
-        GpuIndirectDrawRegistry.add(indirect_draw_call)
+        GpuIndirectDrawRegistry.Add(indirect_draw_call)
         
-        # Reset counter for next frame
         vertex_buffer.set_counter_value(0)
 
 # Vertex Shader Pseudocode (HLSL-like)
-struct VertexInput {
-    uint vertex_id;
-};
+class VertexInput:
+    def __init__(self, vertex_id):
+        self.vertex_id = vertex_id
 
-struct VertexOutput {
-    float4 posHClip : SV_POSITION;
-    float3 posWS : TEXCOORD0;
-    float3 nrmWS : TEXCOORD1;
-    float2 uv : TEXCOORD2;
-};
+class VertexOutput:
+    def __init__(self):
+        self.posHClip = [0,0,0,0]
+        self.posWS = [0,0,0]
+        self.nrmWS = [0,0,0]
+        self.uv = [0,0]
 
-VertexOutput VS(VertexInput input) {
-    // Fetch triangle from AppendStructuredBuffer
-    Triangle t = g_Tris[input.vertex_id / 3];
-    uint corner_index = input.vertex_id % 3;
+def VS(input):
+    t = g_Tris[input.vertex_id // 3]
+    corner_index = input.vertex_id % 3
     
-    VertexGPU v;
-    if (corner_index == 0) v = t.v0;
-    else if (corner_index == 1) v = t.v1;
-    else v = t.v2;
-    
-    VertexOutput output;
-    output.posHClip = TransformWorldToHClip(v.posWS);
-    output.posWS = v.posWS;
-    output.nrmWS = v.nrmWS;
-    output.uv = v.uv;
-    
-    return output;
-}
+    if corner_index == 0:
+        v = t.v0
+    elif corner_index == 1:
+        v = t.v1
+    else:
+        v = t.v2
+        
+    output = VertexOutput()
+    output.posHClip = TransformWorldToHClip(v.posWS)
+    output.posWS = v.posWS
+    output.nrmWS = v.nrmWS
+    output.uv = v.uv
+    return output
 
-// Fragment Shader Pseudocode
-float4 PS(VertexOutput input) : SV_TARGET {
-    float3 N = normalize(input.nrmWS);
-    float3 V = normalize(CameraPosition - input.posWS);
+# Fragment Shader Pseudocode
+def PS(input):
+    N = normalize(input.nrmWS)
+    V = normalize([0,0,0] - input.posWS) # CameraPosition placeholder
     
-    // Flip normal if pointing away from camera
-    if (dot(N, V) < 0.0) {
-        N = -N;
-    }
-    
-    float3 L = normalize(float3(1, 1, 0));
-    float diff = max(dot(N, L), 0.0);
-    
-    // Interpolate between 0.25 and 1.0
-    float lighting = lerp(0.25, 1.0, diff);
-    
-    return float4(lighting, lighting, lighting, 1.0);
-}
+    if dot(N, V) < 0.0:
+        N = [-x for x in N]
+        
+    L = normalize([1, 1, 0])
+    diff = dot(N, L)
+    if diff < 0.0:
+        diff = 0.0
+        
+    lighting = lerp(0.25, 1.0, diff)
+    return [lighting, lighting, lighting, 1.0]
 ```
 
 ## Subtopics
@@ -242,13 +268,13 @@ float4 PS(VertexOutput input) : SV_TARGET {
 This method is a procedural terrain generation pipeline that divides a 3D volume into overlapping chunks, populates them with noise-derived node values, and prepares chunk meshes for Marching Cubes surface extraction. It builds on [GPU Marching Cubes Terrain Pipeline with Indirect Rendering](3803-gpu-marching-cubes-terrain-pipeline-with-indirect-rendering.md) by handling the CPU-side data preparation and chunk management required for the GPU-accelerated extraction. Unlike single-volume extraction, this approach manages spatial locality and boundary continuity through overlapping node grids, ensuring seamless transitions between adjacent chunks.
 
 ## Operating characteristics
-*   **Time Complexity:** The compute kernel runs in $O(V)$ where $V$ is the number of voxels in the chunk. The indirect argument update and draw call enqueue are $O(1)$ per LOD level.
+*   **Time Complexity:** The compute kernel runs in $O(V)$ where $V$ is the number of voxels in the chunk. The indirect argument update and draw call enqueue are $O(1)$ per LOD level [S1, unofficial].
 *   **Memory Complexity:** Memory scales linearly with voxel volume and active chunks per LOD: $O(\text{VoxelResolution}_x \times \text{VoxelResolution}_y \times \text{VoxelResolution}_z \times \text{activeChunks})$. Each triangle consumes 96 bytes in the append buffer [S1, unofficial].
 *   **Performance:** Keeps RenderThread time low (~1.5ms) by avoiding CPU-GPU synchronization stalls associated with readback [S1, unofficial].
-*   **Strengths:** No CPU mesh copy required; efficient handling of multiple LOD levels; minimal CPU overhead.
+*   **Strengths:** No CPU mesh copy required; efficient handling of multiple LOD levels; minimal CPU overhead [S1, unofficial].
 *   **Limitations:** Requires custom physics/collision solutions since the mesh is not available on the CPU [S1, unofficial]. Voxel resolution must be odd; even resolutions trigger a validation error [S1, unofficial]. Chunk dimensions must be cube-like ($x == y == z$); non-cubic chunks trigger a validation error [S1, unofficial].
-*   **When to use:** Real-time terrain rendering in Unity or similar engines where CPU-GPU synchronization is a bottleneck and physics can be handled via voxel-based collision or other GPU-friendly methods.
-*   **When not to use:** When CPU-side mesh access is required for physics or collision detection.
+*   **When to use:** Real-time terrain rendering in Unity or similar engines where CPU-GPU synchronization is a bottleneck and physics can be handled via voxel-based collision or other GPU-friendly methods [S1, unofficial].
+*   **When not to use:** When CPU-side mesh access is required for physics or collision detection [S1, unofficial].
 
 ## Background
 This method is implemented in Unity terrain rendering pipelines using ComputeShader for surface extraction and `GpuIndirectDrawRegistry` for batched rendering [S1, unofficial]. It is a modification of Keijiro's GPU Marching Cubes, adapted to use indirect rendering to avoid CPU readback [S1, unofficial]. The shader target version is 4.5 [S1, unofficial].

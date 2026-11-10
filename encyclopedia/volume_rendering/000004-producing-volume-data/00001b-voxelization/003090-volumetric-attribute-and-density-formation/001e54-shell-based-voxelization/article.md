@@ -3,112 +3,138 @@
 Also called: AABB Expansion Voxelization, Mark Boundary Voxels
 
 ## Overview
-Shell-based Voxelization identifies and marks all voxels in a grid that lie within a specified shell radius of any primitive (triangle or polygon) in a mesh [S1, unofficial]. It serves to determine the spatial support for subsequent voxelization operations [S1, unofficial].
+Shell-based Voxelization identifies and marks all voxels in a discrete grid that lie within a specified `shell_radius` of any geometric primitive (such as triangles or polygons) in a source mesh [S1, unofficial]. It serves as a spatial support determination step for subsequent voxelization operations, ensuring that only voxels near the surface are processed or stored [S1, unofficial]. Unlike [Interior Voxelize](995-interior-voxelize.md), which determines occupancy based on ray casting or point-in-polyhedron tests, this method relies on geometric proximity via bounding box expansion [S1, unofficial]. It differs from [Coverage Factor Voxelization](9079-coverage-factor-voxelization.md) by producing a binary mask of potential surface influence rather than a continuous density or coverage value [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `vertices`: Array of vertex positions, layout `Float[N]` per vertex, size `num_vertices * N` [S1, unofficial].
-- `simplices`: Array of vertex indices, layout `uint32_t[N]` per primitive, size `num_simplices * N` [S1, unofficial].
-- `num_simplices`: Number of primitives [S1, unofficial].
-- `grid`: Grid extent `Extent<N>`, storing dimensions `width`, `height`, `depth` (for N=3) or `width`, `height` (for N=2) [S1, unofficial].
-- `voxel_size`: Size of a single voxel, layout `Vector<Float, N>` [S1, unofficial].
-- `shell_radius`: Distance from the primitive to expand the bounding box [S1, unofficial].
-- `mask`: A bitset to store the resulting voxel indices [S1, unofficial].
+- `vertices`: Array of vertex positions, layout `Float[N]` per vertex, size `num_vertices * N`.
+- `simplices`: Array of vertex indices, layout `uint32_t[N]` per primitive, size `num_simplices * N`.
+- `num_simplices`: Count of primitives.
+- `grid`: Grid extent `Extent<N>`, storing dimensions `[width, height, depth]` (for $N=3$) or `[width, height]` (for $N=2$).
+- `voxel_size`: Vector `Vector<Float, N>` defining the physical size of a single voxel.
+- `shell_radius`: Scalar `Float` defining the expansion distance around each primitive.
+- `mask`: A bitset or boolean array of size equal to the total number of voxels in the grid, initialized to false.
 
 **Outputs:**
-- `mask`: Bitset with bits set for all voxels within the shell radius of any primitive [S1, unofficial].
+- `mask`: Updated such that `mask[i]` is true if voxel `i` intersects the expanded bounding box of any primitive, false otherwise.
 
 **Data Structures:**
-- `Extent<N>`: Struct with `uint32_t extents[N]` storing width at index 0, height at index 1, and depth at index 2 [S1, unofficial].
-- `AABB<Float, N>`: Axis-Aligned Bounding Box with `min` and `max` vectors of type `Vector<Float, N>` [S1, unofficial].
-- `Bitset`: A dynamic array of bits supporting `set(index)` operations [S1, unofficial].
+- `Extent<N>`: Struct containing `uint32_t extents[N]`. Index 0 is width, 1 is height, 2 is depth.
+- `Bitset`: A dynamic array of bits or integers supporting `set(index)` operations.
+- `AABB`: Axis-Aligned Bounding Box defined by `min` and `max` vectors of type `Vector<Float, N>`.
 
-**Formulas:**
-- Grid coordinate conversion: $grid\_coord = \frac{x - (-1)}{voxel\_size} + 0$, where $x$ is the world coordinate and the grid origin is at -1 [S1, unofficial].
-- Voxel size calculation (for a grid spanning [-1, 1] with extent $E$): $voxel\_size = \frac{2}{E}$ [S1, unofficial].
+**Grid Coordinate Conversion:**
+The grid spans a world space defined by the voxel size and origin. The conversion from world coordinate $x$ to grid coordinate is given by [S1, unofficial]:
+$$ grid\_coord = \frac{x - (-1)}{voxel\_size} + 0 $$
+Assuming the grid spans $[-1, 1]$ in world space, the voxel size for a grid extent $E$ (where $E$ is the dimension length in voxels) is calculated as [S1, unofficial]:
+$$ voxel\_size = \frac{2}{E} $$
 
-**Steps:**
-1. Iterate over each primitive index $i$ from $0$ to $num\_simplices - 1$ [S1, unofficial].
-2. Construct an AABB for the current primitive by iterating over its $N$ vertices and extending the AABB to include each vertex position [S1, unofficial].
-3. Expand the AABB by subtracting `shell_radius` from the minimum coordinates and adding `shell_radius` to the maximum coordinates in all $N$ dimensions [S1, unofficial].
-4. Convert the expanded AABB boundaries to grid coordinates using the conversion formula, then floor the results to get integer `min_coord` and `max_coord` arrays [S1, unofficial].
-5. Iterate over the voxel grid indices within the bounding box range `[min_coord, max_coord]`, clamping to the grid boundaries `[0, grid.extent[d])` for each dimension $d$ [S1, unofficial].
-6. Compute the linear index for each voxel and set the corresponding bit in the mask [S1, unofficial].
+**Algorithm Steps:**
+1. Initialize `mask` with all bits set to 0.
+2. For each primitive index $p$ from $0$ to $num\_simplices - 1$:
+    a. Extract the vertex indices for primitive $p$ from `simplices`.
+    b. Initialize an empty `AABB` for dimension $N$.
+    c. For each vertex index $v\_idx$ in the primitive:
+        i. Retrieve the vertex position $V_i$ from `vertices`.
+        ii. Expand `AABB` to include $V_i$ (update `min` and `max` components).
+    d. Expand the `AABB` by `shell_radius`:
+        $$ AABB.min_i = AABB.min_i - shell\_radius $$
+        $$ AABB.max_i = AABB.max_i + shell\_radius $$
+        for all dimensions $i \in [0, N-1]$.
+    e. Convert the expanded `AABB.min` and `AABB.max` to grid coordinates using the formula above.
+    f. Compute integer bounds for iteration:
+        $$ min\_coord_i = \lfloor grid\_coord(AABB.min_i) \rfloor $$
+        $$ max\_coord_i = \lfloor grid\_coord(AABB.max_i) \rfloor $$
+    g. Iterate over all voxel indices $(x, y, z)$ (or $(x, y)$ for $N=2$) within the range $[min\_coord, max\_coord]$:
+        i. Clamp indices to the grid boundaries $[0, grid.extent_i - 1]$.
+        ii. Convert the clamped grid coordinates to a linear index $L$.
+        iii. Set `mask[L]` to 1.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def mark_boundary_voxels(vertices, simplices, num_simplices, grid_extents, voxel_size, shell_radius):
+def shell_based_voxelization(vertices, simplices, num_simplices, grid_extent, voxel_size, shell_radius):
     """
-    Marks all voxels within shell_radius of any primitive.
+    Marks voxels within shell_radius of any simplex.
     vertices: list of [x, y, z] floats
     simplices: list of [v0, v1, v2] uint32 indices
-    grid_extents: list of [width, height, depth] integers
+    grid_extent: tuple (width, height, depth)
     voxel_size: float
     shell_radius: float
-    Returns: set of linear voxel indices
     """
-    mask = set()
-    N = len(grid_extents)
+    width, height, depth = grid_extent
+    total_voxels = width * height * depth
+    mask = [0] * total_voxels
     
-    for i in range(num_simplices):
-        # 1. Construct AABB
-        aabb_min = [float('inf')] * N
-        aabb_max = [float('-inf')] * N
-        for v_idx in simplices[i]:
-            v = vertices[v_idx]
-            for d in range(N):
-                if v[d] < aabb_min[d]:
-                    aabb_min[d] = v[d]
-                if v[d] > aabb_max[d]:
-                    aabb_max[d] = v[d]
+    # Helper to convert world coord to grid index
+    def world_to_grid(world_coord):
+        # Formula from [S1, unofficial]: (x - (-1)) / voxel_size + 0
+        return (world_coord + 1.0) / voxel_size
 
-        # 2. Expand AABB
-        for d in range(N):
+    for p in range(num_simplices):
+        # 1. Construct AABB for primitive
+        indices = simplices[p]
+        # Initialize AABB min/max to infinity/minus infinity
+        aabb_min = [float('inf')] * 3
+        aabb_max = [float('-inf')] * 3
+        
+        for v_idx in indices:
+            v_pos = vertices[v_idx]
+            for d in range(3):
+                if v_pos[d] < aabb_min[d]:
+                    aabb_min[d] = v_pos[d]
+                if v_pos[d] > aabb_max[d]:
+                    aabb_max[d] = v_pos[d]
+        
+        # 2. Expand AABB by shell_radius
+        for d in range(3):
             aabb_min[d] -= shell_radius
             aabb_max[d] += shell_radius
-
-        # 3. Convert to grid coordinates & floor
-        min_int = [math.floor((aabb_min[d] + 1) / voxel_size) for d in range(N)]
-        max_int = [math.floor((aabb_max[d] + 1) / voxel_size) for d in range(N)]
-
+            
+        # 3. Convert to grid coordinates and floor
+        min_grid = [int(world_to_grid(aabb_min[d])) for d in range(3)]
+        max_grid = [int(world_to_grid(aabb_max[d])) for d in range(3)]
+        
         # 4. Iterate and mark
-        # Note: The source implementation uses hardcoded loops for N=2 and N=3 [S1, unofficial]
-        if N == 3:
-            for x in range(max(0, min_int[0]), min(grid_extents[0], max_int[0] + 1)):
-                for y in range(max(0, min_int[1]), min(grid_extents[1], max_int[1] + 1)):
-                    for z in range(max(0, min_int[2]), min(grid_extents[2], max_int[2] + 1)):
-                        idx = x + y * grid_extents[0] + z * grid_extents[0] * grid_extents[1]
-                        mask.add(idx)
-        elif N == 2:
-            for x in range(max(0, min_int[0]), min(grid_extents[0], max_int[0] + 1)):
-                for y in range(max(0, min_int[1]), min(grid_extents[1], max_int[1] + 1)):
-                    idx = x + y * grid_extents[0]
-                    mask.add(idx)
+        # Clamp to grid boundaries
+        start_x = max(0, min_grid[0])
+        end_x = min(width - 1, max_grid[0])
+        start_y = max(0, min_grid[1])
+        end_y = min(height - 1, max_grid[1])
+        start_z = max(0, min_grid[2])
+        end_z = min(depth - 1, max_grid[2])
+        
+        for z in range(start_z, end_z + 1):
+            for y in range(start_y, end_y + 1):
+                for x in range(start_x, end_x + 1):
+                    linear_index = x + y * width + z * width * height
+                    mask[linear_index] = 1
+                    
     return mask
 ```
 
-**Parameters:**
-- `shell_radius`: Determines the thickness of the boundary shell. Typical values are not given in the sources [S1, unofficial].
-
 **Edge Cases and Pitfalls:**
-- The implementation uses hardcoded loops for N=2 and N=3, limiting scalability to higher dimensions [S1, unofficial].
-- Clamping iteration bounds to `[0, grid.extent[d])` prevents out-of-bounds access [S1, unofficial].
-- Precision issues may arise if `voxel_size` is very small or `shell_radius` is very large relative to the grid extent [G].
+- **Precision:** Floating point errors in `world_to_grid` may cause off-by-one errors at boundaries. Using `floor` as specified in [S1, unofficial] is critical.
+- **Empty Primitives:** If `num_simplices` is 0, the mask remains all zeros.
+- **Dimensionality:** The source implementation uses hardcoded loops for $N=2$ and $N=3$ and lacks a generic grid iterator, limiting scalability to higher dimensions [S1, unofficial].
+- **Shell Radius Zero:** If `shell_radius` is 0, only voxels strictly intersecting the primitive's AABB are marked.
+
+## Subtopics
+
+### Shell-based Voxelization with Boundary Likelihood
+A variant that creates a scene representing boundary likelihood rather than a binary mask [S2]. It defines a shell $V_1$ around a boundary of interest, finds an optimal boundary within $V_1$, and assigns the boundary likelihood value to voxels in $V_1$ while assigning 0 to voxels outside $V_1$ [S2]. This is useful when the exact boundary location within the shell needs to be preserved as a continuous value [S2].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources [S1, unofficial].
-- **Memory Complexity:** Not given in the sources [S1, unofficial].
-- **Strengths:** Not given in the sources [S1, unofficial].
-- **Limitations:** Not given in the sources [S1, unofficial].
-- **When to use:** Not given in the sources [S1, unofficial].
-- **When not to use:** Not given in the sources [S1, unofficial].
+- **Time Complexity:** $O(P \cdot V_{avg})$, where $P$ is the number of primitives and $V_{avg}$ is the average number of voxels in the expanded AABB. In the worst case (large shell radius), this approaches $O(P \cdot N_{total})$.
+- **Memory Complexity:** $O(N_{total})$ for the mask, where $N_{total}$ is the total number of voxels in the grid.
+- **Performance:** Highly dependent on the ratio of shell radius to voxel size and the density of primitives. Large shells cause significant over-marking, increasing memory usage and subsequent processing time.
+- **Strengths:** Simple to implement; robust against geometric gaps in meshes; provides a clear spatial support for further operations.
+- **Limitations:** Does not provide density or coverage information; binary output may be insufficient for smooth rendering without further processing; inefficient for sparse grids if the shell is large relative to the object size.
 
 ## Background
-Shell-based Voxelization originates from the Differentiable Voxelization of Surface Representations framework [S1, unofficial]. It is implemented in the `dvx` namespace of the corresponding repository [S1, unofficial].
+The method originates from work on differentiable voxelization and imaging transforms for visualizing surfaces and volumes [S1, unofficial][S2]. It was developed to facilitate the creation of volumetric representations from surface meshes by defining a spatial support region [S1, unofficial]. The concept of using a shell around a boundary for likelihood assignment was explored in the context of imaging transforms [S2].
 
 ## Sources
 [S1] Differentiable Voxelization of Surface Representations, https://github.com/mworchel/differentiable-voxelization, fetched 2026-10-29 (unofficial)
+[S2] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29

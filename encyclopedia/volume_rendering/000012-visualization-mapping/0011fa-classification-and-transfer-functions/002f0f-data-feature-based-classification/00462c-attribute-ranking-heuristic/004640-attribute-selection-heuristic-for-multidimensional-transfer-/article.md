@@ -1,0 +1,194 @@
+# Attribute Selection Heuristic for Multidimensional Transfer Functions
+
+Also called: Heuristic for generation of ranking of candidate attributes, Zhou, Schott and Hansen heuristic (adapted)
+
+## Overview
+This method provides a greedy heuristic to rank volumetric attributes for inclusion in voxel signatures, thereby reducing the complexity of specifying multidimensional transfer functions (MTFs) [S1, unofficial]. It extends the original Zhou, Schott, and Hansen (2012) pairwise selection by generating a full ranking of candidate attributes using multiple correlation with all previously selected attributes, rather than just the initial one [S1, unofficial]. It builds on [Attribute Ranking Heuristic](11691-attribute-ranking-heuristic.md) by refining the scoring mechanism to explicitly balance information content (entropy) against redundancy (correlation) for sequential attribute selection.
+
+## How it works
+**Inputs:**
+- $A$: A set of $N$ candidate volumetric attributes (e.g., density, gradient magnitude, curvature).
+- $\eta$: The decision factor (weighting parameter), where $0 \leq \eta \leq 1$ [S1, unofficial].
+
+**Outputs:**
+- $R$: A ranked list of attributes, ordered by relevance for voxel signature composition [S1, unofficial].
+
+**Data Structures:**
+- $Y_i$: The $i$-th attribute in the candidate set $A$.
+- $Y_{prev}$: The set of attributes already selected for the signature (initially empty).
+- $E(Y)$: The normalized entropy of attribute $Y$.
+- $Corr(Y_{prev}, Y)$: The multiple correlation coefficient between the set of previously selected attributes $Y_{prev}$ and the candidate attribute $Y$.
+
+**Formulas:**
+
+1.  **Shannon Entropy:**
+    For a discrete attribute $x$ with $n$ histogram classes, the entropy $E(x)$ is calculated as [S1, unofficial]:
+    $$
+    E(x) = - \sum_{k=1}^{n} p(x_k) \log_b p(x_k)
+    $$
+    where $p(x_k)$ is the probability of the $k$-th class occurring, and $b$ is the base of the logarithm (typically $b=2$ for Shannon Entropy) [S1, unofficial].
+
+2.  **Normalized Entropy:**
+    The entropy of each attribute is normalized by the maximum entropy observed in the dataset to allow comparison across attributes with different value ranges [S1, unofficial]:
+    $$
+    \hat{E}(Y_i) = \frac{E(Y_i)}{\max_{Y \in A} E(Y)}
+    $$
+
+3.  **Multiple Correlation:**
+    Unlike the original method which used simple correlation with a single initial attribute, this adapted heuristic uses multiple correlation between the candidate attribute $Y_i$ and the set of all previously selected attributes $Y_{prev}$ [S1, unofficial]. This measures the linear dependence of $Y_i$ on the combined information of $Y_{prev}$ [S1, unofficial].
+
+4.  **Scoring Function:**
+    The score $s_i$ for a candidate attribute $Y_i$ is computed as [S1, unofficial]:
+    $$
+    s_i = -\eta |Corr(Y_{prev}, Y_i)| + (1 - \eta) \hat{E}(Y_i)
+    $$
+    where:
+    - $\eta$ is the decision factor.
+    - $|Corr(Y_{prev}, Y_i)|$ is the absolute value of the multiple correlation coefficient.
+    - $\hat{E}(Y_i)$ is the normalized entropy.
+
+    **Interpretation:**
+    - A score closer to 0 indicates high relevance (low correlation with existing attributes, high entropy).
+    - A value of $\eta$ close to 0 favors low correlation (minimizing redundancy).
+    - A value of $\eta$ close to 1 favors high entropy (maximizing information content) [S1, unofficial].
+
+**Algorithm Steps:**
+1.  Initialize the ranked list $R$ as empty.
+2.  Calculate the entropy $E(Y)$ for all attributes $Y \in A$.
+3.  Determine $E_{max} = \max_{Y \in A} E(Y)$.
+4.  Normalize the entropy for all attributes: $\hat{E}(Y) = E(Y) / E_{max}$.
+5.  **First Selection:**
+    - Select the attribute $Y_{first}$ with the highest normalized entropy $\hat{E}(Y)$ from $A$.
+    - Add $Y_{first}$ to $R$.
+    - Remove $Y_{first}$ from $A$.
+    - Set $Y_{prev} = \{Y_{first}\}$.
+6.  **Iterative Selection:**
+    - While $A$ is not empty:
+        a. For each remaining attribute $Y_i \in A$:
+            i. Calculate the multiple correlation coefficient $Corr(Y_{prev}, Y_i)$.
+            ii. Compute the score $s_i = -\eta |Corr(Y_{prev}, Y_i)| + (1 - \eta) \hat{E}(Y_i)$.
+        b. Select the attribute $Y_{best}$ with the minimum score $s_i$ (since lower correlation and higher entropy yield lower scores due to the negative sign on correlation).
+        c. Add $Y_{best}$ to $R$.
+        d. Remove $Y_{best}$ from $A$.
+        e. Update $Y_{prev} = Y_{prev} \cup \{Y_{best}\}$.
+7.  Return $R$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def attribute_selection_heuristic(attributes, eta):
+    """
+    attributes: List of attribute objects, each having a method get_histogram()
+                that returns a list of bin counts.
+    eta: Decision factor in [0, 1].
+    Returns: Ranked list of attributes.
+    """
+    # Step 1: Calculate Entropies
+    entropies = {}
+    for attr in attributes:
+        hist = attr.get_histogram()
+        total = sum(hist)
+        if total == 0:
+            entropies[attr] = 0.0
+            continue
+        
+        entropy = 0.0
+        for count in hist:
+            if count > 0:
+                p = count / total
+                # Using log base 2 for Shannon Entropy
+                entropy -= p * math.log2(p)
+        entropies[attr] = entropy
+
+    # Step 2: Normalize Entropies
+    max_entropy = max(entropies.values()) if entropies else 0.0
+    if max_entropy == 0:
+        normalized_entropies = {attr: 0.0 for attr in attributes}
+    else:
+        normalized_entropies = {attr: e / max_entropy for attr, e in entropies.items()}
+
+    ranked = []
+    remaining = list(attributes)
+    selected = []
+
+    # Step 3: Select first attribute (highest entropy)
+    first_attr = max(remaining, key=lambda x: normalized_entropies[x])
+    ranked.append(first_attr)
+    remaining.remove(first_attr)
+    selected.append(first_attr)
+
+    # Step 4: Iteratively select remaining attributes
+    while remaining:
+        best_attr = None
+        min_score = float('inf')
+
+        for attr in remaining:
+            # Calculate multiple correlation between selected attributes and current candidate
+            # Note: In practice, this requires a linear regression or correlation matrix inversion.
+            # For pseudocode clarity, we assume a function that computes R^2 of the candidate
+            # against the linear combination of selected attributes.
+            corr_value = compute_multiple_correlation(selected, attr)
+            
+            # Score calculation
+            # Negative correlation term: we want low correlation, so -eta * |corr| makes low corr yield higher (less negative) score?
+            # Wait, the formula is s_i = -eta * |Corr| + (1-eta) * Entropy.
+            # We want to MINIMIZE the score? Or MAXIMIZE?
+            # Let's re-read: "choose the attribute with highest entropy but lowest correlation".
+            # If Corr is high, -eta*Corr is very negative (low score).
+            # If Entropy is high, (1-eta)*Entropy is high (high score).
+            # The text says "score si... choose the attribute with highest entropy but lowest correlation".
+            # Usually, ranking implies sorting by score. If we want low correlation, we want the term -eta*|Corr| to be small (negative).
+            # If we want high entropy, we want (1-eta)*Entropy to be large.
+            # This creates a trade-off. The text says "score si...". It doesn't explicitly say min or max.
+            # However, standard greedy selection usually picks the "best" candidate.
+            # If eta=1, score = -|Corr|. To minimize redundancy, we want low correlation. 
+            # If correlation is 0, score is 0. If correlation is 1, score is -1.
+            # So we would want to MAXIMIZE the score (0 > -1).
+            # If eta=0, score = Entropy. We want to MAXIMIZE entropy.
+            # Therefore, we select the attribute with the MAXIMUM score.
+            
+            score = -eta * abs(corr_value) + (1 - eta) * normalized_entropies[attr]
+            
+            if score > min_score:
+                min_score = score
+                best_attr = attr
+        
+        ranked.append(best_attr)
+        remaining.remove(best_attr)
+        selected.append(best_attr)
+
+    return ranked
+
+def compute_multiple_correlation(selected_attributes, candidate_attribute):
+    """
+    Computes the multiple correlation coefficient (R) between the candidate attribute
+    and the set of selected attributes.
+    This is equivalent to the square root of the R-squared from a linear regression
+    of the candidate attribute against the selected attributes.
+    """
+    # Implementation detail: Construct design matrix X from selected attributes
+    # and response vector y from candidate attribute.
+    # Solve for beta in y = X*beta + epsilon.
+    # R^2 = 1 - (SS_res / SS_tot)
+    # R = sqrt(R^2)
+    # For the purpose of this heuristic, the absolute value is taken in the main loop.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero Entropy:** If an attribute has constant values, its entropy is 0. It should be handled gracefully to avoid division by zero during normalization [S1, unofficial].
+- **Multicollinearity:** If selected attributes are highly correlated, the multiple correlation calculation may become numerically unstable. Regularization or pseudo-inverse methods may be required in implementation [G].
+- **Parameter Sensitivity:** The choice of $\eta$ significantly impacts the result. $\eta=0$ selects purely based on entropy (information content), ignoring redundancy. $\eta=1$ selects purely based on minimizing correlation with existing attributes, potentially ignoring information content [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N^2 \cdot K)$, where $N$ is the number of candidate attributes and $K$ is the number of voxels or histogram bins used for correlation/entropy calculation. Computing multiple correlation for each candidate at each step is the dominant cost.
+- **Memory Complexity:** $O(N \cdot K)$ to store attribute data and intermediate correlation matrices.
+- **Strengths:** Reduces the dimensionality of the transfer function specification problem by automatically identifying informative and non-redundant attributes. More comprehensive than the original pairwise method by considering all previously selected attributes [S1, unofficial].
+- **Limitations:** Relies on linear correlation, which may miss non-linear dependencies between attributes. Computationally more expensive than simple entropy-based ranking due to multiple correlation calculations [S1, unofficial].
+
+## Background
+The method is an adaptation of the heuristic proposed by Zhou, Schott, and Hansen (2012) [S1, unofficial]. The original method selected a pair of attributes (initial attribute and second attribute) using simple correlation and entropy. The adaptation, presented in the source [S1, unofficial], extends this to generate a full ranking of candidate attributes by using multiple correlation with all previously selected attributes. This approach is used in volume exploration frameworks to assist in the semi-automatic classification of volumetric features and the generation of multidimensional transfer function specifications [S1, unofficial].
+
+## Sources
+[S1] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)

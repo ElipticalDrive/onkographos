@@ -1,0 +1,183 @@
+# Automatic Differentiation (Reverse/Adjoint Mode)
+
+Also called: Adjoint mode, Backward mode, Reverse-Mode AD, Adjoint Differentiation, Reverse-mode derivative, Reverse mode differentiation, Backward-Mode Differentiation, Reverse-Mode Automatic Differentiation, Backward-mode Automatic Differentiation
+
+## Overview
+Reverse-mode Automatic Differentiation (AD) computes the gradient of a scalar loss with respect to a large number of input parameters by backpropagating sensitivities through the recorded computational graph [S1][S2, unofficial]. It solves the problem of efficient gradient computation in differentiable volume rendering, where the scene description contains millions of unknowns (e.g., density fields, transfer functions) but the output is a low-dimensional image [S1]. Unlike forward-mode AD, which scales linearly with the number of inputs, reverse-mode AD scales with the number of outputs, making it the standard choice for optimizing high-dimensional parameters in inverse rendering [S1][S2, unofficial].
+
+## How it works
+**Inputs:**
+*   A primal computational graph representing the volume rendering equation $\hat{C}(\mathbf{r})$ [S1].
+*   A scalar loss function $L$ derived from the rendered output [S3].
+*   Input variables $\theta$ (e.g., density $\sigma$, color $\mathbf{c}$) requiring gradients [S3].
+
+**Outputs:**
+*   Gradients $\frac{\partial L}{\partial \theta}$ for all input variables [S3].
+
+**Data Structures:**
+1.  **Forward-Backward Map (`fwd_bwds_map`):** A map from forward variables to a list of backward gradient variables. Key: `Variable` (representing a tensor or scalar in the forward pass); Value: `Variables` (list of gradient contributions) [S3].
+2.  **Function Queue (`func_queue`):** A priority queue or stack storing `Function` objects (nodes in the computational graph) to be processed in reverse topological order [S3].
+3.  **Seen Set:** A set of processed functions to avoid redundant computation [S3].
+
+**Algorithm Steps:**
+1.  **Initialization:**
+    *   Initialize `fwd_bwds_map` as empty.
+    *   Initialize `func_queue` as empty.
+    *   Set the gradient of the loss variable to 1.0: `fwd_bwds_map[loss_var] = {1.0}` [S3].
+    *   Push the creator function of the loss variable to `func_queue`: `func_queue.push(loss_var.getCreator())` [S3].
+
+2.  **Traversal Loop:**
+    *   While `func_queue` is not empty:
+        *   Pop the top function `func` from `func_queue` [S3].
+        *   If `func` is in the `Seen Set`, continue to the next iteration [S3].
+        *   Mark `func` as seen [S3].
+        *   Retrieve the output variable `y` of `func`: `y = func.getOutputVar()` [S3].
+        *   Retrieve the list of incoming gradients for `y` from `fwd_bwds_map`: `gys = fwd_bwds_map.at(y)` [S3].
+        *   Sum the gradients pixel-wise (or element-wise) to get the total gradient `gy`: `gy = SumPixelWise(gys)` [S3].
+        *   Remove `y` from `fwd_bwds_map` to free memory: `fwd_bwds_map.erase(y)` [S3].
+        *   Retrieve the input variables of `func`: `xs = func.getInputVars()` [S3].
+        *   For each input variable `x` at index `x_idx` in `xs`:
+            *   If `x` does not require gradients (`!x.getRequiresGrad()`), continue [S3].
+            *   Compute the gradient contribution for `x` using the function's backward pass: `gx = func.buildBwd(gy, x_idx)` [S3].
+            *   If `gy` is zero or undefined, skip (no gradient to propagate) [S3].
+            *   Append `gx` to the gradient list for `x` in `fwd_bwds_map`: `fwd_bwds_map[x].push_back(gx)` [S3].
+            *   Retrieve the creator function of `x`: `x_creator = x.getCreator()` [S3].
+            *   If `x_creator` exists, push it to `func_queue` [S3].
+
+3.  **Collection:**
+    *   Initialize `input_vars` and `input_grad_vars` lists [S3].
+    *   For each variable `x` and its gradient list `gxs` in `fwd_bwds_map`:
+        *   Add `x` to `input_vars` [S3].
+        *   Sum the gradients `gxs` to get the final gradient for `x`: `final_gx = SumPixelWise(gxs)` [S3].
+        *   Add `final_gx` to `input_grad_vars` [S3].
+    *   Return `input_vars` and `input_grad_vars` [S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reverse_mode_ad(loss_var, graph_functions):
+    """
+    Computes gradients for all input variables in the computational graph
+    using reverse-mode automatic differentiation.
+    
+    Args:
+        loss_var: The final scalar output variable (loss).
+        graph_functions: A registry or list of all Function objects in the graph.
+        
+    Returns:
+        input_vars: List of input variables requiring gradients.
+        input_grad_vars: List of corresponding gradient values.
+    """
+    # Data structures
+    fwd_bwds_map = {}  # Map: Variable -> List[Variable] (gradients)
+    func_queue = []    # Stack/Queue of Function objects
+    seen_funcs = set() # Set of processed Function objects
+    
+    # Initialization
+    fwd_bwds_map[loss_var] = [1.0]  # Seed gradient
+    loss_creator = loss_var.get_creator()
+    if loss_creator:
+        func_queue.append(loss_creator)
+    
+    # Traversal
+    while func_queue:
+        func = func_queue.pop()  # Pop from end (LIFO)
+        
+        if func in seen_funcs:
+            continue
+        seen_funcs.add(func)
+        
+        # Get output variable and its accumulated gradients
+        y = func.get_output_var()
+        if y not in fwd_bwds_map:
+            continue
+            
+        gys = fwd_bwds_map[y]
+        # Sum gradients from all paths reaching this output
+        gy = sum(gys)  # Element-wise or pixel-wise sum
+        
+        # Remove from map to free memory
+        del fwd_bwds_map[y]
+        
+        # Propagate to inputs
+        xs = func.get_input_vars()
+        for x_idx, x in enumerate(xs):
+            if not x.requires_grad:
+                continue
+                
+            # Compute gradient w.r.t input x
+            # func.build_bwd returns the gradient contribution
+            gx = func.build_bwd(gy, x_idx)
+            
+            if gx is None or is_zero(gx):
+                continue
+                
+            # Accumulate gradient for x
+            if x not in fwd_bwds_map:
+                fwd_bwds_map[x] = []
+            fwd_bwds_map[x].append(gx)
+            
+            # Push creator to queue if it exists
+            x_creator = x.get_creator()
+            if x_creator:
+                func_queue.append(x_creator)
+                
+    # Collect results
+    input_vars = []
+    input_grad_vars = []
+    
+    for x, gxs in fwd_bwds_map.items():
+        input_vars.append(x)
+        final_gx = sum(gxs)
+        input_grad_vars.append(final_gx)
+        
+    return input_vars, input_grad_vars
+```
+
+**Parameters:**
+*   **Checkpointing Interval:** Not given in the sources. The sources mention that exhaustive storage does not scale and recommend storing state at sparse checkpoints [S1].
+*   **Loss Variable:** The scalar output from which differentiation starts [S3].
+
+**Edge Cases and Pitfalls:**
+*   **Memory Usage:** Exhaustive storage of intermediate states is inefficient and does not scale for modern processors generating terabytes of state per second [S1].
+*   **Remedy:** Use checkpointing with reevaluation. Store state at sparse checkpoints and recover intermediate values by reevaluating the forward pass from the nearest checkpoint [S1].
+*   **Complexity Reduction:** Automatic recursive usage of checkpointing reduces storage and runtime overheads to $O(\log t)$ for a program with $t$ operations [S1].
+*   **Zero Gradients:** If the gradient `gy` is zero, the backward pass can be skipped for that branch [S3].
+
+## Subtopics
+
+### [Adjoint Method](789-adjoint-method.md)
+Propagates adjoint variables backward through the rendering algorithm. Preferred for optimizing high-dimensional parameters like transfer functions due to constant complexity relative to parameter count, but requires storing intermediate states.
+
+### [Forward-Mode Automatic Differentiation](853-forward-mode-automatic-differentiation.md)
+Propagates input perturbations forward. Efficient for few inputs, but scales linearly with the number of parameters, making it less suitable for high-dimensional volume rendering.
+
+### [Neural Field Derivatives via Autograd](1266-neural-field-derivatives-via-autograd.md)
+Uses reverse-mode AD to compute spatial derivatives (gradient, Laplacian) of neural fields. Focuses on differential operators on field values rather than optimizing scene parameters.
+
+### [Differentiable Rendering via Gradient-Based Optimization](1989-differentiable-rendering-via-gradient-based-optimization.md)
+Iterative inverse rendering using AD frameworks. Often relies on standard reverse-mode AD, which may incur higher memory overhead compared to custom adjoint methods.
+
+### [Automatic Differentiation for Rendering](6806-automatic-differentiation-for-rendering.md)
+Applies reverse-mode AD to complex rendering code as a program transformation. Differs from manual adjoint derivation but may be inefficient for unstructured rendering graphs.
+
+### [Custom Adjoint Interface](11534-custom-adjoint-interface.md)
+Allows explicit definition of forward/reverse derivatives for complex operations. Solves issues with global state or implicit variables that standard AD misses.
+
+## Operating characteristics
+*   **Time Complexity:** $O(t)$ where $t$ is the number of operations in the forward pass, assuming exhaustive storage [S1]. With checkpointing, it can be reduced, but reevaluation adds overhead [S1].
+*   **Memory Complexity:** $O(t)$ with exhaustive storage, which is prohibitive for large scenes [S1]. With recursive checkpointing, storage is reduced to $O(\log t)$ [S1].
+*   **Scaling:** Computational complexity is largely constant with respect to the number of input parameters, making it efficient for optimizing millions of unknowns (e.g., density fields) [S1].
+*   **Strengths:** Efficient for functions with few outputs and many inputs (typical in rendering) [S1]. Automates gradient computation, reducing manual derivation errors [S1].
+*   **Limitations:** High memory consumption without checkpointing [S1]. Requires storing the computational graph or intermediate states [S1].
+*   **When to Use:** Optimizing high-dimensional parameters (density, transfer functions) in differentiable volume rendering [S1].
+*   **When Not to Use:** When the number of inputs is small and outputs are large (use Forward-Mode AD) [S1]. When memory is extremely constrained and checkpointing is not feasible [S1].
+
+## Background
+Reverse-mode automatic differentiation was described in the Dr.Jit documentation "Forward- and reverse-mode automatic differentiation" [S2, unofficial]. It is a core concept in differentiable rendering, enabling the computation of gradients for complex rendering equations [S1]. The method inverts the data dependencies of the original program, referencing intermediate steps of the primal calculation [S1]. The use of checkpointing to manage memory was proposed by Volin and Ostrovskii (1985) and optimized by Siskind and Pearlmutter (2018) [S1].
+
+## Sources
+[S1] DR.JIT, https://doi.org/10.1145/3528223.3530099, fetched 2026-10-26
+[S2] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)
+[S3] Dressi: A Hardware‐Agnostic Differentiable Renderer with Reactive Shader Packing and Soft Rasterization, https://doi.org/10.1111/cgf.14455, fetched 2026-10-29

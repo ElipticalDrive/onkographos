@@ -1,5 +1,4 @@
 # GPU Data Layout
-
 ## Overview
 GPU Data Layout defines the host-side memory structures and OpenGL resource IDs required to manage volumetric rendering state on the GPU [S1, unofficial]. It organizes heterogeneous resources—3D scalar textures, 1D transfer function tables, and offscreen framebuffers—into a unified configuration object for raycasting mappers [S1, unofficial].
 
@@ -14,11 +13,11 @@ The layout organizes rendering state into specific arrays and integer IDs [S1, u
 The core layout is defined by the following fields [S1, unofficial]:
 
 1.  **TextureObjects**: An array of 5 `unsigned int` values storing OpenGL texture IDs [S1, unofficial].
-    -   Index 0: 3D scalar texture (volume data)
-    -   Index 1: 1D color table (transfer function)
-    -   Index 2: 1D opacity table (transfer function)
-    -   Index 3: 2D grabbed depth buffer
-    -   Index 4: 2D color buffer
+    -   Index 0: 3D scalar texture (volume data) [S1, unofficial].
+    -   Index 1: 1D color table (transfer function) [S1, unofficial].
+    -   Index 2: 1D opacity table (transfer function) [S1, unofficial].
+    -   Index 3: 2D grabbed depth buffer [S1, unofficial].
+    -   Index 4: 2D color buffer [S1, unofficial].
 2.  **MaxValueFrameBuffer** and **MaxValueFrameBuffer2**: Two `unsigned int` framebuffer IDs used for ping-pong accumulation in MIP (Maximum Intensity Projection) mode [S1, unofficial].
 3.  **BoundingBox**: A `double` array of size $8 \times 3$ storing the world coordinates of the 8 corners of the dataset bounding box [S1, unofficial].
 4.  **FrameBufferObject**: An `unsigned int` ID for the primary offscreen framebuffer object [S1, unofficial].
@@ -35,22 +34,23 @@ The mapper validates input data against the following constraints before proceed
 -   Additive blend mode is only supported with single-component scalars [S1, unofficial].
 
 **Pseudocode**
-The following pseudocode demonstrates the initialization and validation of the GPU data layout structure.
+The following pseudocode demonstrates the initialization and validation of the GPU data layout structure [G].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Mapper-specific constants (exact values not specified in sources)
+# Mapper-specific constants (exact values not specified in sources) [S1, unofficial]
 VTK_UNSIGNED_CHAR = 0
 ADDITIVE_BLEND = 1
-MAX_NUMBER_OF_ADDITIONAL_VOLUMES = 10
+# MAX_NUMBER_OF_ADDITIONAL_VOLUMES value not given in sources [S1, unofficial]
+MAX_NUMBER_OF_ADDITIONAL_VOLUMES = 10 
 
 def initialize_gpu_data_layout(volume_data, blend_mode):
     """
     Initialize the GPU data layout structure for volume rendering.
     
     Args:
-        volume_data: Object containing GetNumberOfComponents() and GetDataType().
+        volume_data: Mock object providing GetNumberOfComponents() and GetDataType().
         blend_mode: Integer constant for the blend mode.
         
     Returns:
@@ -114,16 +114,16 @@ def initialize_gpu_data_layout(volume_data, blend_mode):
 ## Subtopics
 
 ### [GPU Texture Loading](2473-gpu-texture-loading.md)
-Transfers volumetric scalar data from host memory or binary files into GPU-accessible 3D textures for raycasting. It differs from [Tiled 2D Texture Storage for 3D Fields](2740-tiled-2d-texture-storage-for-3d-fields.md) by using native 3D texture objects rather than packing 3D data into 2D tile arrays, and from [CUDA-accelerated Vector Field Reading with Magnitude](2581-cuda-accelerated-vector-field-reading-with-magnitude.md) by focusing on scalar fields rather than vector fields with magnitude pre-computation. Choose it when efficient dense grid transfer to the GPU is required without redundant copies [G].
+Transfers volumetric scalar data from host memory or binary files into GPU-accessible 3D textures for raycasting. It solves the problem of efficiently moving dense grid data to the GPU while managing memory constraints and avoiding redundant transfers [G]. It differs from [Tiled 2D Texture Storage for 3D Fields](2740-tiled-2d-texture-storage-for-3d-fields.md) by using native 3D texture objects rather than packing 3D data into 2D tile arrays, and from [CUDA-accelerated Vector Field Reading with Magnitude](2581-cuda-accelerated-vector-field-reading-with-magnitude.md) by focusing on scalar fields rather than vector fields with magnitude pre-computation.
 
 ### [Tiled 2D Texture Storage for 3D Fields](2740-tiled-2d-texture-storage-for-3d-fields.md)
-Stores a 3D scalar field in a 2D texture by tiling the 3D volume into 2D slices, allowing efficient GPU access via texture lookups. It maps 3D coordinates to 2D texture coordinates using a tiling scheme where the Z-coordinate determines the tile position, enabling standard 2D texture sampling hardware to access volumetric data. Choose it when hardware lacks native 3D texture support or when optimizing for 2D texture cache coherence.
+A technique to store a 3D scalar field in a 2D texture by tiling the 3D volume into 2D slices, allowing efficient GPU access via texture lookups. It maps 3D coordinates to 2D texture coordinates using a tiling scheme where the Z-coordinate determines the tile position, enabling standard 2D texture sampling hardware to access volumetric data.
 
 ## Operating characteristics
 -   **Memory Complexity**: The layout itself is lightweight, storing only IDs and small metadata arrays [G]. The actual memory consumption is determined by the textures referenced by `TextureObjects` and `NoiseTexture` [G].
 -   **Performance**: Accessing the layout is $O(1)$ [G]. The performance impact comes from the GPU operations referenced by the IDs (texture sampling, framebuffer blitting) [G].
 -   **Strengths**: Centralizes resource management, simplifying the shader interface by using a single array of texture IDs [G].
--   **Limitations**: Tightly coupled to OpenGL (uses `unsigned int` IDs) [G]. Measured performance with specific hardware, resolution, and scene data is Not given in the sources.
+-   **Limitations**: Tightly coupled to OpenGL (uses `unsigned int` IDs) [G]. Measured performance with specific hardware, resolution, and scene data is Not given in the sources [S1, unofficial].
 
 ## Background
 This layout structure originates from the VTK (Visualization Toolkit) Multi Volume Ray Caster implementation, specifically within the `vtkGPUMultiVolumeRayCastMapper` and related classes [S1, unofficial]. It was developed to support multi-volume rendering and MIP accumulation on the GPU [S1, unofficial].

@@ -3,168 +3,193 @@
 Also called: CRIO Process, Classification, Reflection, Illumination, Opacity, Rendering Stages, Shading and Classification Pipeline, VolumeRenderer forward method
 
 ## Overview
-The Volume Rendering Pipeline is a standard implementation structure for direct volume rendering, decomposing the image formation process into a sequence of discrete stages: data traversal, interpolation, gradient computation, classification, shading, and compositing [S1, unofficial]. It solves the problem of projecting a 3D scalar field onto a 2D image plane without fitting geometric primitives, treating each sample as a semi-transparent, reflective, and light-emitting cloud [S2, unofficial][S4, unofficial]. It is distinct from fragment list-based or deferred pipelines by performing shading and classification directly on the sample values along the ray before compositing, ensuring that shading calculations are independent of classification operators to preserve 3D shape visualization [S2, unofficial].
+The Volume Rendering Pipeline is a standard implementation structure for direct volume rendering that decomposes the image formation process into a sequence of distinct logical stages: data traversal, interpolation, gradient computation, classification, shading, and compositing [S1, unofficial][S3, unofficial]. It solves the problem of projecting a 3D scalar field onto a 2D image plane without fitting geometric primitives, treating each sample as a semi-transparent, reflective, and light-emitting cloud [S2, unofficial][S4, unofficial]. It sets itself apart from implicit surface extraction methods (like Marching Cubes) by shading every sample directly, and from fragment-list-based pipelines by typically operating on a per-ray basis where shading and classification are decoupled before compositing [S2, unofficial][S3, unofficial].
 
 ## How it works
-The pipeline processes volume data through a series of transformations. While some implementations perform shading and classification in parallel or in different orders, the canonical structure described in foundational literature proceeds as follows [S1, unofficial][S3, unofficial].
+The pipeline processes volume data to produce a 2D image. While variations exist (e.g., pre-classification vs. post-classification), the canonical pipeline described in foundational literature [S2, unofficial][S3, unofficial] follows this sequence.
 
 ### Inputs and Outputs
-*   **Input:** A 3D scalar field (voxel database) with acquired values $f_0(x_i)$ at voxel locations $x_i = (x_i, y_j, z_k)$ [S3, unofficial].
-*   **Output:** A 2D image where each pixel $(u,v)$ has a final color $C_\lambda(u,v)$ and opacity $\alpha(u,v)$ [S3, unofficial].
+*   **Input:** A 3D scalar field (voxel database) with acquired values $f_0(x_i)$ at voxel locations $x_i = (x_i, y_j, z_k)$ [S3, unofficial]. Camera parameters (eyepoint, viewing direction) defining rays [S2, unofficial].
+*   **Output:** A 2D image where each pixel $(u,v)$ has a final color $C(u,v)$ and opacity $\alpha(u,v)$ [S2, unofficial][S3, unofficial].
 
 ### Data Structures
-1.  **Voxel Database:** A 3D array storing scalar values.
-2.  **Prepared Values Array ($f_1$):** An array of the same dimensions as the input, storing corrected/enhanced scalar values [S3, unofficial].
-3.  **Voxel Colors Array ($c_\lambda$):** A 3D array storing RGB colors for each voxel, derived from the shading model [S3, unofficial].
-4.  **Voxel Opacities Array ($\alpha$):** A 3D array storing opacity values for each voxel, derived from the classification procedure [S3, unofficial].
-5.  **Sample Arrays ($c_\lambda(\tilde{x}_i)$, $\alpha(\tilde{x}_i)$):** Temporary arrays storing interpolated colors and opacities for $K$ sample locations along a single ray [S3, unofficial].
+1.  **Voxel Database:** A 3D array storing scalar values $f_0$.
+2.  **Prepared Values Array ($f_1$):** An array of the same dimensions as the voxel database, storing processed scalar values after data preparation (e.g., motion correction, contrast enhancement) [S3, unofficial].
+3.  **Color Array ($c_\lambda$):** A 3D array storing RGB colors for each voxel, derived from the shading model [S3, unofficial].
+4.  **Opacity Array ($\alpha$):** A 3D array storing opacity values for each voxel, derived from the classification procedure [S3, unofficial].
+5.  **Gradient Array ($\nabla f$):** (Optional but common) A 3D array storing gradient vectors at sample positions for shading [S1, unofficial].
 
-### Steps
+### Numbered Steps
 
-1.  **Data Traversal and Preparation**
-    The pipeline begins by traversing the 3D scalar field. This step may include corrections for non-orthogonal sampling grids, patient motion, or contrast enhancement, and interpolation of additional samples to produce an array of prepared values $f_1(x_i)$ [S3, unofficial].
+1.  **Data Traversal:**
+    The system determines which parts of the volume are visible. This depends on the underlying topology (regular grid, tetrahedra, etc.) [S1, unofficial]. For ray casting, rays are cast from the observer eyepoint through each pixel [S2, unofficial][S3, unofficial].
 
-2.  **Shading (Color Computation)**
-    The prepared values $f_1(x_i)$ are input into a shading model to yield an array of voxel colors $c_\lambda(x_i)$, where $\lambda \in \{r, g, b\}$ [S3, unofficial]. In some formulations, shading uses local gradient vectors as surface normals [S2, unofficial].
+2.  **Data Preparation (Optional/Pre-computation):**
+    The acquired values $f_0(x_i)$ are processed to produce prepared values $f_1(x_i)$. This may include correction for non-orthogonal sampling grids, patient motion, or contrast enhancement [S3, unofficial].
 
-3.  **Classification (Opacity Computation)**
-    In a separate step, the prepared values $f_1(x_i)$ are input into a classification procedure to yield an array of voxel opacities $\alpha(x_i)$ [S3, unofficial]. Classification maps scalar properties to optical properties such as emitted color, reflected color, and opacity [S4, unofficial].
+3.  **Interpolation:**
+    Since sampling positions along a ray usually do not coincide with voxel centers, values must be interpolated. Tri-linear interpolation is commonly used, sampling the eight voxels closest to the sample location [S2, unofficial][S3, unofficial].
 
-4.  **Ray Casting and Resampling**
-    Rays are cast from the observer eyepoint. For each ray, a vector of sample colors $c_\lambda(\tilde{x}_i)$ and opacities $\alpha(\tilde{x}_i)$ is computed by resampling the voxel database at $K$ evenly spaced locations $\tilde{x}_i = (x_0 + j \frac{d}{K})$ along the ray [S3, unofficial]. The values are obtained by tri-linearly interpolating from the colors and opacities in the eight voxels closest to each sample location $\tilde{x}_i$ [S3, unofficial].
+4.  **Gradient Computation:**
+    The gradient of the scalar field is computed at sample positions to provide visual cues for shading. This is typically approximated using central differences [S1, unofficial]. The gradient vector serves as the surface normal for lighting calculations [S2, unofficial].
 
-5.  **Compositing**
-    A fully opaque background of color $c_{bkg,\lambda}$ is draped behind the dataset [S3, unofficial]. The resampled colors and opacities are merged with each other and with the background in back-to-front order. The color $C_{out,\lambda}(\tilde{u}_i)$ of the ray as it leaves each sample location is related to the color $C_{in,\lambda}(\tilde{u}_i)$ as it enters and the sample's color $c_\lambda(\tilde{x}_i)$ and opacity $\alpha(\tilde{x}_i)$ by the transparency formula:
-    $$
-    C_{out,\lambda}(\tilde{u}_i) = C_{in,\lambda}(\tilde{u}_i)(1 - \alpha(\tilde{x}_i)) + c_\lambda(\tilde{x}_i)\alpha(\tilde{x}_i)
-    $$
-    The final pixel color $C_\lambda(\tilde{u}_i)$ is the result of this iterative compositing [S3, unofficial].
+5.  **Classification:**
+    The prepared scalar values (or interpolated values) are mapped to optical properties using a transfer function. This yields an opacity $\alpha(x_i)$ for each voxel. Classification can detect isovalue contours or region boundaries [S2, unofficial][S3, unofficial].
+
+6.  **Shading (Illumination):**
+    The prepared values (or interpolated values) are input to a shading model to yield a color $c_\lambda(x_i)$ for each voxel ($\lambda = r,g,b$) [S3, unofficial]. Shading uses the gradient as a normal and applies an illumination model (e.g., Phong shading) [S1, unofficial][S2, unofficial].
+
+    *Note on Order:* In the "Shading and Classification Pipeline" [S2, unofficial][S3, unofficial], shading and classification are often performed as separate, independent steps on the scalar data before ray casting. In other variants (like Post-classification Shading), shading occurs after classification during the ray traversal [S1, unofficial].
+
+7.  **Ray Casting and Resampling:**
+    For each ray, the system computes a vector of sample colors and opacities. This is done by resampling the pre-computed Color Array ($c_\lambda$) and Opacity Array ($\alpha$) at $K$ evenly spaced locations $x_j$ along the ray [S2, unofficial][S3, unofficial].
+    $$ x_j = x_0 + j \frac{d}{K} $$
+    where $x_0$ is the entry point, $d$ is the ray segment length within the volume, and $K$ is the number of samples [S2, unofficial]. Tri-linear interpolation is applied to fetch $c_\lambda(x_j)$ and $\alpha(x_j)$ from the arrays [S2, unofficial][S3, unofficial].
+
+8.  **Compositing:**
+    The samples are composited from back to front to form the final pixel color. A fully opaque background of color $c_{bkg,\lambda}$ is draped behind the dataset [S3, unofficial]. The transparency formula is applied iteratively:
+    $$ C_{out,\lambda} = C_{in,\lambda}(1 - \alpha(x_j)) + c_\lambda(x_j)\alpha(x_j) $$
+    where $C_{in,\lambda}$ is the accumulated color from previous (farther) samples, and $C_{out,\lambda}$ is the new accumulated color [S3, unofficial]. The final pixel color $C(u,v)$ is the $C_{out}$ of the last sample [S2, unofficial].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def volume_rendering_pipeline(voxel_database, camera, image_width, image_height, num_samples_per_ray):
+def volume_rendering_pipeline(voxel_data, camera, image_width, image_height, num_samples_per_ray):
     """
-    Implements the canonical Volume Rendering Pipeline.
+    Implements the canonical Volume Rendering Pipeline [S2, unofficial][S3, unofficial].
     
     Args:
-        voxel_database: 3D array of scalar values f0(xi).
-        camera: Camera object providing ray origins and directions.
+        voxel_data: 3D array of scalar values f0(xi).
+        camera: Object containing eyepoint, view direction, and projection parameters.
         image_width: Width of the output image.
         image_height: Height of the output image.
         num_samples_per_ray: K, the number of evenly spaced sample locations along a ray.
         
     Returns:
-        final_image: 2D array of RGB colors.
-        final_opacity: 2D array of opacity values.
+        image_color: 2D array of RGB colors.
+        image_opacity: 2D array of opacities.
     """
     
-    # Step 1: Data Preparation
-    # Corrects for grid issues, motion, etc.
-    prepared_values = data_preparation(voxel_database)
+    # Step 1 & 2: Data Preparation (Pre-computation)
+    # f1 is the prepared scalar values. 
+    # In many implementations, this is just f0 if no correction is needed.
+    prepared_values = voxel_data 
     
-    # Step 2: Shading
-    # Computes voxel colors from prepared values
-    voxel_colors = compute_shading(prepared_values)
+    # Step 5: Classification (Pre-computation)
+    # Map scalar values to opacity alpha(xi)
+    opacity_volume = classify(prepared_values)
     
-    # Step 3: Classification
-    # Computes voxel opacities from prepared values
-    voxel_opacities = compute_classification(prepared_values)
+    # Step 6: Shading (Pre-computation)
+    # Compute gradients for normals
+    gradients = compute_gradients(prepared_values)
+    # Map scalar values (and optionally gradients) to color c_lambda(xi)
+    color_volume = shade(prepared_values, gradients)
     
     # Initialize output buffers
-    final_image = np.zeros((image_height, image_width, 3))
-    final_opacity = np.zeros((image_height, image_width))
+    image_color = zeros((image_height, image_width, 3))
+    image_opacity = zeros((image_height, image_width))
     
-    # Background color (fully opaque)
-    background_color = np.array([0.0, 0.0, 0.0]) # Or specific background color
-    background_opacity = 1.0
-    
-    # Step 4 & 5: Ray Casting, Resampling, and Compositing
-    for y in range(image_height):
-        for x in range(image_width):
-            # Cast ray from eyepoint through pixel (x, y)
-            ray_origin, ray_direction = camera.get_ray(x, y)
+    # Step 1 & 7: Ray Casting and Compositing
+    for v in range(image_height):
+        for u in range(image_width):
+            # Generate ray for pixel (u,v)
+            ray = camera.generate_ray(u, v)
             
-            # Initialize compositing state
-            current_color = background_color
-            current_opacity = background_opacity
+            # Determine intersection with volume bounds
+            t_start, t_end = ray.intersect_volume()
             
-            # Resample along the ray
+            if t_start >= t_end:
+                continue
+                
+            # Background color (fully opaque)
+            c_in = camera.background_color
+            alpha_in = 1.0 # Background is opaque
+            
+            # Step 7: Resampling along ray
+            # K evenly spaced locations
             for k in range(num_samples_per_ray):
-                # Calculate sample position along the ray
-                # Assuming ray length covers the volume or is clipped
-                t = k * (ray_length / num_samples_per_ray)
-                sample_pos = ray_origin + t * ray_direction
+                # Calculate sample position
+                t = t_start + (k + 0.5) * (t_end - t_start) / num_samples_per_ray
+                sample_pos = ray.origin + ray.direction * t
                 
-                # Tri-linear interpolation from voxel_colors and voxel_opacities
-                # at sample_pos
-                sample_color = tri_linear_interpolate(voxel_colors, sample_pos)
-                sample_alpha = tri_linear_interpolate(voxel_opacities, sample_pos)
+                # Check if sample is inside volume bounds
+                if not volume_bounds.contains(sample_pos):
+                    break
                 
-                # Apply transparency formula
-                # Cout = Cin * (1 - alpha) + c * alpha
-                new_color = current_color * (1 - sample_alpha) + sample_color * sample_alpha
-                new_opacity = current_opacity * (1 - sample_alpha) + sample_alpha
+                # Tri-linear interpolation from pre-computed volumes
+                # Note: In a real implementation, bounds checking and clamping are required
+                c_sample = tri_linear_interpolate(color_volume, sample_pos)
+                alpha_sample = tri_linear_interpolate(opacity_volume, sample_pos)
                 
-                current_color = new_color
-                current_opacity = new_opacity
+                # Step 8: Compositing (Back-to-Front)
+                # C_out = C_in * (1 - alpha) + c_sample * alpha
+                # We accumulate from back to front, so 'in' is the farther color
                 
-                # Early ray termination optimization (optional, not in basic pipeline definition)
-                if current_opacity > 0.99:
+                # Contribution of current sample
+                contribution = c_sample * alpha_sample
+                
+                # Transmittance of current sample
+                transmittance = 1.0 - alpha_sample
+                
+                # Update accumulated color and opacity
+                # The formula from [S3, unofficial]: Cout = Cin * (1 - alpha) + c * alpha
+                c_in = c_in * transmittance + contribution
+                alpha_in = alpha_in * transmittance # Accumulated opacity
+                
+                # Early ray termination optimization [G]
+                if alpha_in < 0.01:
                     break
             
-            final_image[y, x] = current_color
-            final_opacity[y, x] = current_opacity
+            image_color[v, u] = c_in
+            image_opacity[v, u] = 1.0 - alpha_in # Final opacity is 1 - transmittance
             
-    return final_image, final_opacity
+    return image_color, image_opacity
 
-def data_preparation(voxel_database):
+def classify(scalar_volume):
     """
-    Applies corrections and enhancements to the raw scalar field.
+    Applies a transfer function to map scalar values to opacity.
     """
-    # Implementation details depend on specific data issues (e.g., non-orthogonal grids)
-    # [G] Placeholder for specific correction algorithms
-    return voxel_database
+    # Example: Simple threshold or linear mapping
+    # In practice, this is a user-defined transfer function
+    opacity = scalar_volume # Placeholder for actual TF application
+    return opacity
 
-def compute_shading(prepared_values):
+def shade(scalar_volume, gradients):
     """
-    Maps scalar values to RGB colors using a shading model.
+    Applies a shading model (e.g., Phong) to map scalar values and normals to color.
     """
-    # [G] Typically involves transfer functions or gradient-based shading
-    # For this basic pipeline, we assume a direct mapping or simple shading
-    # Since the source says "yielding an array of voxel colors", we return a 3D array
-    # of the same shape as prepared_values.
-    # [G] Assuming identity mapping for color if no specific shading model is provided in the basic pipeline description
-    # In practice, this might use gradients for Phong shading [S1, unofficial]
-    return np.stack([prepared_values] * 3, axis=-1)
+    # Example: Diffuse shading based on gradient magnitude and direction
+    # c = ambient + diffuse * max(0, dot(normal, light_dir))
+    colors = zeros_like(scalar_volume)
+    # Placeholder for actual shading calculation
+    return colors
 
-def compute_classification(prepared_values):
+def compute_gradients(scalar_volume):
     """
-    Maps scalar values to opacity using a classification procedure.
+    Computes gradients using central differences.
     """
-    # [G] Typically involves transfer functions
-    # Returns a 3D array of opacity values
-    return np.ones_like(prepared_values) * 0.5 # Placeholder opacity
+    # Placeholder for gradient computation
+    return zeros_like(scalar_volume)
 
-def tri_linear_interpolate(volume_data, point):
+def tri_linear_interpolate(volume, point):
     """
     Performs tri-linear interpolation on a 3D volume at a given point.
     """
-    # [G] Standard tri-linear interpolation implementation
-    # Returns a scalar or vector depending on volume_data
-    pass
+    # Placeholder for interpolation logic
+    return zeros(3)
 ```
 
 ### Parameters
-*   **K:** Number of evenly spaced sample locations along a viewing ray [S2, unofficial].
-*   **Primary Properties:** Emitted color, reflected color, and opacity [S4, unofficial].
+*   **K:** Number of evenly spaced sample locations along a viewing ray [S2, unofficial]. Higher K increases accuracy but costs more.
+*   **Transfer Function:** Maps scalar values to opacity and color. Not given in the sources as a specific formula, but implied as a user-defined operator [S2, unofficial][S3, unofficial].
+*   **Illumination Model:** Ranges from simple identity to directional models like Phong shading [S4, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Precision:** The compositing formula involves repeated multiplication by $(1 - \alpha)$. If $\alpha$ is very small, precision issues may arise.
-*   **Boundaries:** Ray traversal must handle cases where rays miss the volume entirely.
-*   **Degenerate Input:** Non-orthogonal sampling grids require specific corrections during data preparation [S3, unofficial].
+*   **Precision:** Tri-linear interpolation assumes linear variation between voxels, which may blur sharp features [S1, unofficial].
+*   **Boundaries:** Rays may exit the volume; proper handling of entry/exit points is required [S2, unofficial].
+*   **Partial Voluming:** The pipeline handles partial voluming by treating samples as semi-transparent clouds [S4, unofficial]. However, post-classification shading can be susceptible to blurring at high resolutions [S1, unofficial].
 
 ## Subtopics
 
@@ -172,15 +197,16 @@ def tri_linear_interpolate(volume_data, point):
 The Post-classification Shading Pipeline (also known as Post-DVRI) is a volume rendering method where the original density volume is interpolated, sample values are classified via transfer functions to yield material, opacity, and color, and shading follows immediately after classification. It is distinct from the Pre-classification Shading Pipeline primarily in its handling of partial voluming and its susceptibility to blurring at high image resolutions.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of pixels and the number of samples per ray ($O(W \cdot H \cdot K)$).
-*   **Memory Complexity:** Linear with respect to the volume size ($O(N)$) for storing voxel data and intermediate arrays.
-*   **Strengths:** Direct shading of samples preserves 3D shape visualization; independence of shading and classification allows for flexible transfer functions [S2, unofficial].
-*   **Limitations:** Computationally expensive due to per-sample shading and classification; susceptible to blurring at high resolutions in post-classification variants [S1, unofficial][S2, unofficial].
-*   **When to use:** When direct volume rendering with accurate shading and classification is required, and computational resources allow for per-sample processing.
-*   **When not to use:** When real-time performance is critical and the volume is very large, or when geometric primitives are more appropriate.
+*   **Time Complexity:** $O(P \cdot K)$, where $P$ is the number of pixels and $K$ is the number of samples per ray [S2, unofficial].
+*   **Memory Complexity:** $O(V + V_{color} + V_{alpha})$, where $V$ is the volume size, and $V_{color}, V_{alpha}$ are the pre-computed color and opacity volumes [S2, unofficial][S3, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Decouples shading and classification, allowing independent optimization [S2, unofficial]. Handles partial voluming naturally [S4, unofficial].
+*   **Limitations:** Computationally expensive for high-resolution volumes due to per-ray processing [S1, unofficial]. Pre-computing color and opacity volumes can be memory-intensive [S2, unofficial].
+*   **When to use:** When high-quality shading and accurate opacity mapping are required, and hardware resources allow for per-ray processing [S2, unofficial].
+*   **When not to use:** For real-time applications with very large volumes where performance is critical [S1, unofficial].
 
 ## Background
-The volume rendering pipeline was first reported in June 1987 and presented at the SPIE Medical Imaging II conference in January 1988 [S3, unofficial]. It was developed to visualize surfaces from volume data without fitting geometric primitives, using local gradient vectors as surface normals for shading and separate classification operators for opacity [S2, unofficial]. The concept of treating samples as reflective, light-emitting, semi-transparent clouds (CRIO) was also explored in the context of feed-forward volume rendering algorithms [S4, unofficial].
+The Volume Rendering Pipeline was formalized in the late 1980s. The concept was presented at the SPIE Medical Imaging II conference in January 1988 [S3, unofficial]. It was developed to display surfaces from sampled scalar functions of three spatial dimensions without fitting geometric primitives [S2, unofficial]. The pipeline structure, consisting of data traversal, interpolation, gradient computation, classification, shading, and compositing, is described in [S1, unofficial]. The term "CRIO" (Classification, Reflection, Illumination, Opacity) was used to describe the conceptual framework where a sample is treated as a reflective, light-emitting, semi-transparent cloud [S4, unofficial].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

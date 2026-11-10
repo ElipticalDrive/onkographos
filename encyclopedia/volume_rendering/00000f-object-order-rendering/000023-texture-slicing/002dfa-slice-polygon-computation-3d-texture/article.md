@@ -1,108 +1,148 @@
 # Slice Polygon Computation (3D Texture)
 
+
 ## Overview
-Slice Polygon Computation generates proxy geometry (polygons) that intersect a 3D volume texture along planes perpendicular to the viewing direction, enabling hardware-accelerated volume rendering via rasterization and alpha blending. It differs from 2D texture-based slicing by storing the entire volume in a single 3D texture object rather than replicating data into three 2D texture stacks, thereby reducing memory overhead at the cost of potentially lower sampling rates relative to volume resolution [S1].
+Slice Polygon Computation (3D Texture) is a texture-based volume rendering method that intersects a 3D scalar field with a series of parallel planes to generate proxy geometry for rasterization. It solves the problem of visualizing volumetric data by converting 3D intersections into 2D textured polygons that are composited using hardware alpha blending. It is distinguished from sibling methods by its reliance on a single 3D texture object for sampling, whereas alternatives like [Object Aligned Planes Volume Rendering](11411-object-aligned-planes-volume-rendering.md) use pre-extracted 2D textures, and [Polygon-based Volumetric Rendering with Depth Peeling](8389-polygon-based-volumetric-rendering-with-depth-peeling.md) constructs explicit 3D meshes rather than simple slice polygons.
 
 ## How it works
 **Inputs:**
-- A 3D texture object containing the scalar volume data.
-- The volume bounding box (axis-aligned or otherwise defined).
-- The viewing direction (defining the orientation of the slicing planes).
+- A 3D scalar field stored as a 3D texture object.
+- A viewing direction defining the orientation of the slicing planes.
+- A spacing parameter determining the distance between adjacent slicing planes.
 
 **Outputs:**
-- A sequence of polygon primitives (typically triangles or quads) representing the intersection of slicing planes with the volume.
-- Vertex attributes including 3D texture coordinates corresponding to the volume data space.
+- A sequence of textured polygons (typically triangles or triangle strips) representing the cross-sections of the volume.
 
 **Data Structures:**
-- **Vertex Array:** Stores vertices of the slice polygons. Each vertex contains position (in object or screen space) and 3D texture coordinates $(u, v, w)$.
-- **Index Buffer:** Defines the connectivity of vertices into polygons.
+- **3D Texture:** Stores the volumetric data. Coordinates are normalized to $[0, 1]$ or mapped to the physical dimensions of the volume.
+- **Vertex Array:** Stores the 3D positions of the polygon vertices and their corresponding 3D texture coordinates.
 
 **Steps:**
-1.  **Plane Definition:** Define a series of parallel slicing planes perpendicular to the current viewing direction. The spacing between planes determines the sampling density.
-2.  **Intersection:** Intersect each slicing plane with the edges of the volume bounding box to find the intersection points [S1].
-3.  **Sorting:** Sort the resulting intersection vertices in a clockwise or counterclockwise direction around their geometric center to form a valid convex polygon [S1].
-4.  **Texture Coordinate Calculation:** Calculate the corresponding 3D texture coordinate for each vertex. This maps the spatial position of the vertex to the $(u, v, w)$ coordinates within the 3D texture [S1]. This can be performed on the CPU, in a vertex program, or via automatic texture-coordinate generation [S1].
-5.  **Rendering:** Pass the vertex arrays and indices to the graphics library. Rasterize the polygons. During rasterization, fragment shaders sample the 3D texture using the interpolated texture coordinates.
-6.  **Compositing:** Fragments are composited into the frame buffer using hardware alpha blending, processing slices in back-to-front order to ensure correct transparency [S3, book].
+1.  **Define Slicing Planes:** Determine the orientation and spacing of the parallel planes based on the viewing direction. The planes are perpendicular to the viewing direction.
+2.  **Intersect with Bounding Box:** For each slicing plane, compute the intersection points with the edges of the volume's bounding box [S1]. This involves solving line-plane intersection equations for the box edges [S1].
+3.  **Sort Vertices:** Collect the intersection points for a single slice. Sort these vertices in a clockwise or counterclockwise direction around their center to ensure correct polygon winding [S1].
+4.  **Compute Texture Coordinates:** Calculate the 3D texture coordinate for each vertex. This maps the 3D position of the vertex to the corresponding location in the 3D texture [S1]. This can be done on the CPU, in a vertex program, or via automatic texture-coordinate generation [S1].
+5.  **Render:** Pass the sorted vertices and texture coordinates to the graphics library. The resulting polygons are textured using the 3D texture and composited into the frame buffer using hardware alpha blending [S1, S3, book].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_slice_polygons(volume_bbox, slicing_planes, texture_dimensions):
+def compute_slice_polygons(volume_texture, view_direction, plane_spacing, bounding_box):
     """
-    Computes slice polygons for a 3D texture volume.
+    Generates slice polygons for a 3D volume texture.
     
     Args:
-        volume_bbox: Object defining the volume boundaries (min/max corners).
-        slicing_planes: List of plane equations or offsets perpendicular to view direction.
-        texture_dimensions: (W, H, D) dimensions of the 3D texture.
+        volume_texture: The 3D texture object containing the scalar field.
+        view_direction: Normalized vector defining the slicing plane normal.
+        plane_spacing: Distance between consecutive slicing planes.
+        bounding_box: Object defining the min and max extents of the volume.
         
     Returns:
-        List of polygons, where each polygon is a list of vertices.
-        Each vertex is a tuple: (position, texture_coords).
+        A list of polygons, where each polygon is a list of vertices.
+        Each vertex is a tuple (position_3d, texture_coord_3d).
     """
     polygons = []
     
-    for plane in slicing_planes:
-        # Step 2: Intersect plane with volume bounding box edges
-        intersection_points = []
-        for edge in volume_bbox.edges:
-            point = intersect_plane_with_edge(plane, edge)
-            if point is not None:
-                intersection_points.append(point)
+    # Determine the range of planes to generate
+    # Project bounding box onto view direction to find min/max depth
+    min_depth, max_depth = get_depth_range(bounding_box, view_direction)
+    
+    # Generate planes from back to front for correct alpha blending
+    current_depth = max_depth
+    while current_depth >= min_depth:
+        # Define the slicing plane
+        plane = Plane(normal=view_direction, distance=current_depth)
         
-        # Step 3: Sort vertices around center
-        center = compute_centroid(intersection_points)
-        sorted_points = sort_clockwise_around_center(intersection_points, center)
+        # Intersect plane with bounding box edges
+        intersection_points = intersect_plane_with_box(plane, bounding_box)
         
-        # Step 4: Calculate 3D texture coordinates
-        vertices = []
-        for point in sorted_points:
-            # Map spatial point to 3D texture coordinate [0,1]^3
-            tex_coords = spatial_to_texture_coords(point, volume_bbox, texture_dimensions)
-            vertices.append((point, tex_coords))
+        if len(intersection_points) < 3:
+            current_depth -= plane_spacing
+            continue
             
-        # Convert polygon to triangles if necessary
-        triangles = triangulate_polygon(vertices)
-        polygons.extend(triangles)
+        # Sort vertices around the center of the polygon
+        center = sum(intersection_points) / len(intersection_points)
+        sorted_points = sort_vertices_around_center(intersection_points, center, view_direction)
+        
+        # Create polygon with texture coordinates
+        polygon = []
+        for point in sorted_points:
+            # Calculate 3D texture coordinate
+            # Assuming volume texture is normalized to [0,1] or mapped to box
+            tex_coord = map_to_texture_coord(point, volume_texture, bounding_box)
+            polygon.append((point, tex_coord))
+            
+        polygons.append(polygon)
+        
+        current_depth -= plane_spacing
         
     return polygons
 
-def spatial_to_texture_coords(point, bbox, tex_dims):
+def intersect_plane_with_box(plane, bounding_box):
     """
-    Maps a 3D spatial point to normalized 3D texture coordinates.
+    Intersects a plane with the edges of an axis-aligned bounding box.
+    Returns a list of intersection points.
     """
-    # Normalize point to [0, 1] range based on bbox
-    u = (point.x - bbox.min.x) / (bbox.max.x - bbox.min.x)
-    v = (point.y - bbox.min.y) / (bbox.max.y - bbox.min.y)
-    w = (point.z - bbox.min.z) / (bbox.max.z - bbox.min.z)
-    return (u, v, w)
+    points = []
+    edges = get_box_edges(bounding_box)
+    
+    for edge in edges:
+        # Solve line-plane intersection
+        # Line: P = A + t(B - A)
+        # Plane: N . (P - P0) = 0
+        # t = (N . (P0 - A)) / (N . (B - A))
+        t = plane.intersect_line(edge.start, edge.end)
+        if t is not None and 0 <= t <= 1:
+            point = edge.start + t * (edge.end - edge.start)
+            points.append(point)
+            
+    return points
+
+def sort_vertices_around_center(points, center, view_direction):
+    """
+    Sorts points in a clockwise or counterclockwise order around the center.
+    Uses the view direction to determine the sorting plane normal.
+    """
+    # Project points onto a 2D plane perpendicular to view_direction
+    # Compute pseudo-angle to avoid trigonometric functions
+    # ... implementation details omitted for brevity [G] ...
+    pass
+
+def map_to_texture_coord(point, volume_texture, bounding_box):
+    """
+    Maps a 3D point to a 3D texture coordinate.
+    """
+    # Normalize point relative to bounding box
+    # tex_x = (point.x - box_min.x) / (box_max.x - box_min.x)
+    # ... similar for y and z ...
+    pass
 ```
 
 **Parameters:**
-- **Slicing Plane Spacing:** Determines the number of slices. Too coarse leads to aliasing; too fine increases fill rate burden. Not given in the sources.
-- **Texture Coordinate Generation Method:** CPU, vertex program, or automatic generation. CPU is simplest but may bottleneck geometry generation. Vertex program allows dynamic adjustment. Automatic generation is hardware-dependent [S1].
+- **Plane Spacing:** Determines the density of slices. Smaller spacing increases accuracy but increases rendering cost. Typical values depend on the volume resolution and desired visual quality. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Precision Issues:** Generating texture coordinates for clipped triangles (in brute-force approaches) can introduce numeric imprecision and artifacts. The sorting-based approach avoids clipping, reducing this risk [S2].
-- **Degenerate Input:** If a slicing plane does not intersect the volume, no vertices are generated. The algorithm must handle empty intersections gracefully.
-- **Boundary Conditions:** Texture coordinates must be clamped or wrapped correctly to avoid sampling outside the volume bounds.
+- **Precision Issues:** Generating texture coordinates for clipped triangles can suffer from numeric imprecision, leading to artifacts. The direct computation method described here avoids clipping, reducing such errors [S2].
+- **Degenerate Input:** If a slicing plane does not intersect the volume, no polygon is generated for that plane.
+- **Boundary Conditions:** Intersection calculations must handle cases where the plane passes exactly through box edges or vertices.
 
 ## Subtopics
 
 ### Graph-Based Oblique Slice Generation
-A method to efficiently generate a stack of oblique slices orthogonal to the viewing direction by treating each slice as a 2D 'scanplane' and exploiting scanplane coherence, avoiding polygon clipping [S2]. It differs from the brute-force approach (which calculates plane equations, generates large triangles, clips them, and then generates texture coordinates) by generating slices directly with no clipping, thus avoiding precision problems and artifacts from numeric imprecision in clipping [S2]. Choose this method when rendering oblique slices where precision and efficiency are critical, particularly for perspective viewing or virtual reality applications [S2].
+A method to efficiently generate a stack of oblique slices orthogonal to the viewing direction by treating each slice as a 2D 'scanplane' and exploiting scanplane coherence, avoiding polygon clipping [S2]. It differs from the brute-force approach (which calculates plane equations, generates large triangles, and clips them to the data set) by generating slices directly with no clipping, thus avoiding precision problems and artifacts from numeric imprecision in clipping [S2]. It is chosen when oblique slicing is required and efficiency is critical.
 
 ## Operating characteristics
-- **Time Complexity:** Dominated by geometry generation (intersection and sorting) and rasterization. The graph-based variant reduces complexity by avoiding clipping [S2].
-- **Memory Complexity:** Requires storage for the 3D texture and vertex buffers for the slice polygons. Significantly less memory than 2D texture-based slicing, which requires replicating data along three axes [S1].
-- **Performance:** Performance depends on the number of slices and the resolution of the 3D texture. Sampling rate is tied to volume resolution, which can be a limitation compared to methods that allow intermediate slabs or adaptive sampling [S1].
-- **Strengths:** Memory efficient compared to 2D texture stacks; leverages hardware 3D texture sampling and alpha blending.
-- **Limitations:** Sampling rate is fixed by volume resolution; may suffer from aliasing if slices are too sparse. Not given in the sources for specific hardware performance metrics.
+- **Time Complexity:** Linear with respect to the number of slices and the complexity of the bounding box intersection. Sorting vertices adds a logarithmic factor per slice.
+- **Memory Complexity:** Linear with respect to the number of slices generated. The 3D texture storage is fixed.
+- **Measured Performance:** Performance depends on the hardware's ability to handle texture mapping and alpha blending. Using a 3D texture avoids the memory overhead of replicating data for multiple axes, unlike 2D texture slice approaches [S1].
+- **Strengths:** Simple implementation; leverages hardware texture mapping and alpha blending; avoids memory duplication of volume data.
+- **Limitations:** Sampling rate is tied to volume resolution; perspective viewing requires more complex coordinate generation; may suffer from aliasing if slice spacing is too large.
+- **When to use:** Suitable for real-time visualization of volumetric data where hardware acceleration is available and the volume is stored as a 3D texture.
+- **When not to use:** When high-quality anti-aliasing is required without increasing slice density, or when the volume data is better suited for ray casting methods.
 
 ## Background
-Originated in the context of GPU-accelerated volume rendering using 3D texture mapping. The method is described in *GPU Gems* Chapter 39, which details volume rendering techniques on GPUs [S1]. The graph-based oblique slice generation variant was proposed by Olaf Kreylos in his PhD studies (Winter 2000) to address inefficiencies and precision issues in earlier brute-force approaches [S2].
+This method is described in *GPU Gems* Chapter 39, "Volume Rendering Techniques" [S1]. It builds on the general principles of texture slicing, where proxy geometry is used to represent volume cross-sections. The approach is particularly relevant for early GPU architectures that supported 3D textures and hardware alpha blending.
 
 ## Sources
 [S1] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29

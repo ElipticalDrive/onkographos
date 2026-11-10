@@ -3,287 +3,250 @@
 Also called: Layer-based volumetric ray marching, Plane-sweep volume rendering
 
 ## Overview
-Layered Volume Rendering with Light Propagation is a compute-shader-based technique that renders volumetric data by processing a stack of parallel planes (layers) rather than individual pixels or rays [S1, unofficial]. It propagates light and view rays across these layers, accumulating color, alpha, and material properties while applying refraction gradients and transfer functions [S1, unofficial]. It sets itself apart from standard direct volume ray casting by decoupling the light transport calculation from the view ray accumulation into a separate propagation pass, allowing for efficient screen-space approximation of light scattering and refraction effects across the volume layers [S1, unofficial].
+Layered Volume Rendering with Light Propagation is a compute-shader-based technique that renders volumetric data by processing a stack of parallel planes (layers) rather than individual rays [S1, unofficial]. It propagates light and view rays across these layers, accumulating color, alpha, and material properties while applying refraction gradients and transfer functions [S1, unofficial]. It sets itself apart from standard direct volume ray casting by decoupling the light transport calculation (propagating light direction and irradiance across layers) from the view ray accumulation, allowing for efficient screen-space approximation of lighting effects like refraction and specular highlights without full path tracing [S1, unofficial].
 
 ## How it works
-The method operates in a compute shader, processing a stack of $N$ parallel planes. It maintains state buffers for light propagation and view ray accumulation, updating them layer by layer from front to back.
+The method operates on a stack of $N$ parallel planes spaced by a constant distance. It uses two main passes per layer: a **Light Propagation** pass to update light direction and irradiance, and a **Ray Propagation** pass to accumulate color and alpha for the final image.
 
 ### Inputs and Outputs
 **Inputs:**
-*   `ubo`: Uniform buffer object containing rendering parameters:
-    *   `plane_pixel_size`: Pixel size of the rendering planes in world units [S1, unofficial].
+*   `ubo`: Uniform buffer object containing:
+    *   `plane_pixel_size`: Pixel size of rendering planes in world units [S1, unofficial].
     *   `distance_between_planes`: Constant Z-distance between consecutive layers [S1, unofficial].
     *   `lightVSPos`: View-space position of the light source [S1, unofficial].
     *   `light_color`: View-space color/intensity of the light source [S1, unofficial].
     *   `plane_count`: Total number of layers [S1, unofficial].
-*   `volume_density`: 3D texture or stack of 2D textures representing scalar volume density [S1, unofficial].
-*   `volume_transfer`: 2D texture mapping `vec2(density_in, density_prev)` to `vec4(alpha_out)` [S1, unofficial].
-*   `medium_transfer`: 2D texture mapping `vec2(density_in, density_prev)` to `vec4(tint_out)` [S1, unofficial].
-*   Input buffers (from previous layer or initialization):
-    *   `ldb_in`: Light direction buffer [S1, unofficial].
-    *   `lb_in`: Light color/intensity buffer [S1, unofficial].
-    *   `vpb_in`: View position buffer [S1, unofficial].
-    *   `vdb_in`: View direction buffer [S1, unofficial].
-    *   `cb_in`: Accumulated color buffer [S1, unofficial].
-    *   `mb_in`: Accumulated material buffer [S1, unofficial].
+    *   `middle_of_front_plane_vs.z`: Z-coordinate of the front plane in view space [S1, unofficial].
+*   **Input Buffers** (sampled via `imageLoad`):
+    *   `ldb_in`: Light direction buffer (vec3) [S1, unofficial].
+    *   `lb_in`: Light color/irradiance buffer (vec3) [S1, unofficial].
+    *   `vpb_in`: View position buffer (vec3) [S1, unofficial].
+    *   `vdb_in`: View direction buffer (vec3) [S1, unofficial].
+    *   `cb_in`: Color buffer (vec3) [S1, unofficial].
+    *   `mb_in`: Material buffer (vec4) [S1, unofficial].
+*   **Textures**:
+    *   `volume_transfer`: Maps `vec2(volume_density, volume_density_prev)` to `vec4(alpha_out)` [S1, unofficial].
+    *   `medium_transfer`: Maps `vec2(volume_density, volume_density_prev)` to `vec4(tint_out)` [S1, unofficial].
+    *   Volume density data (accessed via world position conversion) [S1, unofficial].
 
 **Outputs:**
 *   `lb_out`: Updated light color buffer [S1, unofficial].
 *   `ldb_out`: Updated light direction buffer [S1, unofficial].
-*   `cb_out`: Final accumulated color and alpha buffer [S1, unofficial].
-*   `mb_out`: Final accumulated material buffer [S1, unofficial].
-*   `vpb_out`: Next view position for the subsequent layer [S1, unofficial].
-*   `vdb_out`: Next view direction for the subsequent layer [S1, unofficial].
+*   `cb_out`: Final color and alpha buffer (vec4, where RGB is color, A is alpha) [S1, unofficial].
+*   `mb_out`: Updated material buffer [S1, unofficial].
+*   `vpb_out`: Next view position buffer [S1, unofficial].
+*   `vdb_out`: Next view direction buffer [S1, unofficial].
 
-### Data Structures and Layout
-All buffers are accessed via `imageLoad` and `imageStore` using `ivec2` pixel coordinates corresponding to the screen resolution [S1, unofficial].
-*   `lb_in/out`: `vec3` (light intensity/color) [S1, unofficial].
-*   `ldb_in/out`: `vec3` (light direction) [S1, unofficial].
-*   `vpb_in/out`: `vec2` or `vec3` (view position, likely 2D UV or 3D world position projected) [S1, unofficial].
-*   `vdb_in/out`: `vec3` (view direction) [S1, unofficial].
-*   `cb_in/out`: `vec4` (color + alpha) [S1, unofficial].
-*   `mb_in/out`: `vec4` (material properties) [S1, unofficial].
+### Data Structures
+*   **Pixel Coordinates**: Derived from `gl_GlobalInvocationID` [S1, unofficial].
+*   **World Position Conversion**: UV coordinates are converted to world positions at the current layer's Z-depth using `plane_pixel_size` [S1, unofficial].
 
 ### Steps
 
-1.  **Initialization**:
-    *   Compute UV coordinates and pixel coordinates from `gl_GlobalInvocationID` [S1, unofficial].
-    *   Calculate the current layer's Z-coordinate:
+1.  **Layer Initialization**:
+    *   Calculate current layer Z in view space:
         $$ z_{current} = z_{front} - \text{layer\_index} \times \text{distance\_between\_planes} $$
-        where $z_{front}$ is the Z-coordinate of the front-most plane (`ubo.middle_of_front_plane_vs.z`) [S1, unofficial].
+        where $z_{front}$ is `ubo.middle_of_front_plane_vs.z` [S1, unofficial].
 
 2.  **Light Propagation Pass**:
-    This pass updates the light state as it propagates through the volume layers.
-    *   **Intersection**: Sample the current light direction $\mathbf{L}_{dir}$ from `ldb_in` at the current UV. Intersect a ray starting at $(0.5, 0.5, z_{current} + \text{distance})$ with direction $-\mathbf{L}_{dir}$ to find the hit point $\mathbf{P}_{prev}$ on the previous plane (closer to the light) [S1, unofficial].
+    *   **Intersection**: Intersect a ray starting at $(0.5, 0.5, z_{current} + \text{distance})$ with direction $-\mathbf{L}_{current}$ (sampled from `ldb_in` at current UV) to find the hit point $\mathbf{p}_{prev}$ on the previous plane [S1, unofficial].
     *   **Sampling & Averaging**:
-        *   Sample light intensity $I_{prev}$ from `lb_in` at $\mathbf{P}_{prev}.xy$ [S1, unofficial].
-        *   Sample light direction $\mathbf{L}_{prev}$ from `ldb_in` at $\mathbf{P}_{prev}.xy$.
-        *   Apply 4-tap averaging to $\mathbf{L}_{prev}$: center weight 0.5, four neighbors weight 0.125 each [S1, unofficial].
-        *   Normalize $\mathbf{L}_{prev}$. If $\|\mathbf{L}_{prev}\| < 10^{-6}$, set $\mathbf{L}_{prev} = (0, 0, 1)$ to prevent NaN propagation [S1, unofficial].
+        *   Sample light color $\mathbf{L}_{prev}$ from `lb_in` at $\mathbf{p}_{prev}.xy$ [S1, unofficial].
+        *   Sample light direction $\mathbf{L}_{prev\_dir}$ from `ldb_in` at $\mathbf{p}_{prev}.xy$.
+        *   Apply 4-tap averaging to $\mathbf{L}_{prev\_dir}$: center weight 0.5, four neighbors weight 0.125 each [S1, unofficial].
+        *   Normalize $\mathbf{L}_{prev\_dir}$. If length $< 10^{-6}$, set to $(0,0,1)$ [S1, unofficial].
     *   **Irradiance Scaling**:
-        *   Compute screen-space area factors: $S_{current} = |\frac{\partial u}{\partial x}| \cdot |\frac{\partial v}{\partial y}|$ and $S_{prev} = |\frac{\partial u_{prev}}{\partial x}| \cdot |\frac{\partial v_{prev}}{\partial y}|$ using `dFdx` and `dFdy` [S1, unofficial].
-        *   Compute irradiance scaling factor $I_{scale}$:
-            $$ I_{scale} = \begin{cases} S_{prev} / S_{current} & \text{if } S_{current} > 10^{-8} \\ 1.0 & \text{otherwise} \end{cases} $$
-            This prevents division by zero [S1, unofficial].
-    *   **Transfer Function Application**:
-        *   Convert current UV and $\mathbf{P}_{prev}.xy$ to world positions at $z_{current}$ and $z_{current} + \text{distance}$, denoted $\mathbf{P}_{ws}$ and $\mathbf{P}_{prev\_ws}$ [S1, unofficial].
-        *   Sample volume density $D_{current}$ at $\mathbf{P}_{ws}$ and $D_{prev}$ at $\mathbf{P}_{prev\_ws}$ [S1, unofficial].
-        *   Sample `volume_transfer` with `vec2(D_current, D_prev)` to get opacity $\alpha$ [S1, unofficial].
-        *   Sample `medium_transfer` with `vec2(D_current, D_prev)` to get tint color $\mathbf{T}$ via `mix(vec3(1.0), m_data.rgb, m_data.a)` [S1, unofficial].
-        *   Compute updated light intensity:
-            $$ \mathbf{L}_{out} = \mathbf{L}_{prev} \times I_{scale} \times (1.0 - \alpha) \times \mathbf{T} $$
-        *   Clamp $\mathbf{L}_{out}$ to a minimum value of `vec3(20.0)` [S1, unofficial].
-        *   Store $\mathbf{L}_{out}$ to `lb_out` [S1, unofficial].
-    *   **Light Refraction Update**:
-        *   Compute midpoint $\mathbf{M}_{ws} = (\mathbf{P}_{ws} + \mathbf{P}_{prev\_ws}) \times 0.5$ [S1, unofficial].
-        *   Get refraction gradient $\nabla \mathbf{L}$ at $\mathbf{M}_{ws}$ (derived from volume density gradients) [S1, unofficial].
+        *   Compute screen-space area factors:
+            $$ S_{current} = | \frac{\partial u}{\partial x} | \cdot | \frac{\partial v}{\partial y} | $$
+            $$ S_{prev} = | \frac{\partial u_{prev}}{\partial x} | \cdot | \frac{\partial v_{prev}}{\partial y} | $$
+            where $u,v$ are current UV and $u_{prev},v_{prev}$ are $\mathbf{p}_{prev}.xy$ [S1, unofficial].
+        *   Compute irradiance scaling factor:
+            $$ I = \begin{cases} S_{prev} / S_{current} & \text{if } S_{current} > 10^{-8} \\ 1.0 & \text{otherwise} \end{cases} $$
+            [S1, unofficial].
+    *   **Transfer Function & Attenuation**:
+        *   Convert current UV and $\mathbf{p}_{prev}.xy$ to world positions $\mathbf{p}_{current}$ and $\mathbf{p}_{prev\_ws}$ at $z_{current}$ and $z_{current} + \text{distance}$ [S1, unofficial].
+        *   Sample volume densities $V_{current}$ and $V_{prev}$ at these positions [S1, unofficial].
+        *   Sample `volume_transfer` with $(V_{current}, V_{prev})$ to get opacity $\alpha$ [S1, unofficial].
+        *   Sample `medium_transfer` with $(V_{current}, V_{prev})$ to get tint $\mathbf{T}$:
+            $$ \mathbf{T} = \text{mix}((1,1,1), \mathbf{m}_{data}.rgb, \mathbf{m}_{data}.a) $$
+            where $\mathbf{m}_{data}$ is the sample from `medium_transfer` [S1, unofficial].
+        *   Update light color:
+            $$ \mathbf{L}_{out} = \mathbf{L}_{prev} \times I \times (1 - \alpha) \times \mathbf{T} $$
+            Clamp $\mathbf{L}_{out}$ to minimum value 20.0 [S1, unofficial].
+    *   **Refraction Update**:
+        *   Compute midpoint $\mathbf{m}_{ws} = (\mathbf{p}_{current\_ws} + \mathbf{p}_{prev\_ws}) \times 0.5$ [S1, unofficial].
+        *   Get refraction gradient $\nabla_{ref}$ at $\mathbf{m}_{ws}$ [S1, unofficial].
         *   Update light direction:
-            $$ \mathbf{L}_{next} = \mathbf{L}_{prev} + \nabla \mathbf{L} \times \text{distance\_between\_planes} $$
-        *   Normalize $\mathbf{L}_{next}$ and store to `ldb_out` [S1, unofficial].
+            $$ \mathbf{L}_{next} = \mathbf{L}_{prev\_dir} + \nabla_{ref} \times \text{distance\_between\_planes} $$
+            Normalize $\mathbf{L}_{next}$ and store to `ldb_out` [S1, unofficial].
 
 3.  **Ray Propagation Pass**:
-    This pass accumulates the view ray through the volume, using the pre-computed light state.
     *   **Setup**:
-        *   Sample view position $\mathbf{V}_{pos}$ from `vpb_in` and view direction $\mathbf{V}_{dir}$ from `vdb_in` [S1, unofficial].
-        *   Convert $\mathbf{V}_{pos}$ to world space [S1, unofficial].
-        *   Sample previous accumulated color $\mathbf{C}_{prev}$ and alpha $A_{prev}$ from `cb_in` [S1, unofficial].
+        *   Sample view position $\mathbf{v}_{current}$ from `vpb_in` and direction $\mathbf{v}_{current\_dir}$ from `vdb_in` [S1, unofficial].
+        *   Convert $\mathbf{v}_{current}$ to world space [S1, unofficial].
+        *   Sample previous color $\mathbf{C}_{prev}$ and alpha $A_{prev}$ from `cb_in` [S1, unofficial].
         *   Sample previous material $\mathbf{M}_{prev}$ from `mb_in` [S1, unofficial].
-        *   Sample light intensity $\mathbf{L}_{id}$ from `lb_in` (using current UV or propagated coordinates) [S1, unofficial].
+        *   Sample light intensity $\mathbf{I}_{light}$ from `lb_in` (using current UV or relevant buffer) [S1, unofficial].
     *   **Intersection**:
-        *   Intersect a ray from $\mathbf{V}_{pos}$ with direction $-\mathbf{V}_{dir}$ to the plane at $z_{current} + \text{distance}$ to get the previous view position $\mathbf{V}_{prev}$ [S1, unofficial].
-        *   Convert $\mathbf{V}_{prev}$ to world space $\mathbf{V}_{prev\_ws}$ [S1, unofficial].
+        *   Intersect ray from $\mathbf{v}_{current}$ with direction $-\mathbf{v}_{current\_dir}$ to the plane at $z_{current} + \text{distance}$ to get $\mathbf{v}_{prev}$ [S1, unofficial].
+        *   Convert $\mathbf{v}_{prev}$ to world space $\mathbf{v}_{prev\_ws}$ [S1, unofficial].
     *   **Shading**:
-        *   Compute volume gradient $\mathbf{N}$ at $\mathbf{V}_{ws} + 0.5$ [S1, unofficial].
-        *   Define view vector $\mathbf{V} = \text{normalize}(-\mathbf{V}_{dir})$ [S1, unofficial].
-        *   Define light vector $\mathbf{L}_{dir} = \text{normalize}(\text{ubo.lightVSPos} - \mathbf{V}_{pos})$ [S1, unofficial].
-        *   Compute half-vector $\mathbf{H} = \text{normalize}(\mathbf{L}_{dir} + \mathbf{V})$ [S1, unofficial].
-        *   Compute specular term: $\text{spec} = \max(\mathbf{N} \cdot \mathbf{H}, 0.0)^{128.0}$ [S1, unofficial].
-        *   Compute specular intensity: $\mathbf{I}_s = \text{ubo.light\_color} \times \text{spec} \times 0.05$ [S1, unofficial].
-        *   Compute material mask: $\mathbf{M}_{mask} = \text{smoothstep}(0.0, 0.05, D_{current})$ [S1, unofficial].
+        *   Compute volume gradient $\mathbf{N}$ at $\mathbf{v}_{ws} + 0.5$ [S1, unofficial].
+        *   View vector $\mathbf{V} = \text{normalize}(-\mathbf{v}_{current\_dir})$ [S1, unofficial].
+        *   Light direction $\mathbf{L}_{dir} = \text{normalize}(\text{ubo.lightVSPos} - \mathbf{v}_{current})$ [S1, unofficial].
+        *   Half vector $\mathbf{H} = \text{normalize}(\mathbf{L}_{dir} + \mathbf{V})$ [S1, unofficial].
+        *   Specular:
+            $$ \text{spec} = \max(\mathbf{N} \cdot \mathbf{H}, 0.0)^{128} $$
+            [S1, unofficial].
+        *   Specular intensity:
+            $$ \mathbf{i}_s = \text{ubo.light\_color} \times \text{spec} \times 0.05 $$
+            [S1, unofficial].
+        *   Material mask:
+            $$ \text{material\_mask} = \text{smoothstep}(0.0, 0.05, V_{current}) $$
+            [S1, unofficial].
     *   **Accumulation**:
-        *   The opacity $\alpha$ and tint $\mathbf{T}$ are obtained from the Light Propagation step (using the same density samples) [S1, unofficial].
-        *   Update accumulated color:
-            $$ \mathbf{C}_{current} = \mathbf{C}_{prev} + (1.0 - A_{prev}) \times \mathbf{M}_{prev} \times (\alpha \times \mathbf{T} \times \mathbf{L}_{id} + \mathbf{I}_s \times \mathbf{M}_{mask}) $$
+        *   Update color:
+            $$ \mathbf{C}_{current} = \mathbf{C}_{prev} + (1 - A_{prev}) \times \mathbf{M}_{prev} \times (\alpha \cdot \mathbf{I}_{light} + \mathbf{i}_s \times \text{material\_mask}) $$
             [S1, unofficial].
-        *   Update accumulated alpha:
-            $$ A_{current} = A_{prev} + (1.0 - A_{prev}) \times \alpha $$
+        *   Update alpha:
+            $$ A_{current} = A_{prev} + (1 - A_{prev}) \times \alpha $$
             [S1, unofficial].
-        *   Update accumulated material:
-            $$ \mathbf{M}_{current} = \mathbf{M}_{prev} \times (1.0 - \mathbf{M}_{prev}.w) + \mathbf{M}_{prev} \times \mathbf{M}_{prev}.xyz \times \mathbf{M}_{prev}.w $$
-            [S1, unofficial].
+        *   Update material:
+            $$ \mathbf{M}_{current} = \mathbf{M}_{prev} \times (1 - m_w) + \mathbf{M}_{prev} \times \mathbf{m}_{xyz} \times m_w $$
+            where $\mathbf{m}_{xyz}$ and $m_w$ are components of the material sample $\mathbf{m}$ from `mb_in` [S1, unofficial].
     *   **Refraction & Next Step**:
-        *   Compute midpoint $\mathbf{M}_{vp} = (\mathbf{V}_{ws} + \mathbf{V}_{prev\_ws}) \times 0.5 + 0.5$ [S1, unofficial].
-        *   Get refraction gradient $\nabla \mathbf{V}$ at $\mathbf{M}_{vp}$ [S1, unofficial].
+        *   Compute midpoint $\mathbf{m}_{ws} = (\mathbf{v}_{ws} + \mathbf{v}_{prev\_ws}) \times 0.5 + 0.5$ [S1, unofficial].
+        *   Get refraction gradient $\nabla_{vd}$ at $\mathbf{m}_{ws}$ [S1, unofficial].
         *   Update view direction:
-            $$ \mathbf{V}_{next} = \mathbf{V}_{dir} + \nabla \mathbf{V} \times \text{distance\_between\_planes} $$
-        *   Normalize $\mathbf{V}_{next}$ [S1, unofficial].
-        *   Intersect a ray from $\mathbf{V}_{pos}$ with $\mathbf{V}_{next}$ to the plane at $z_{current} - \text{distance}$ to get $\mathbf{V}_{next\_pos}$ [S1, unofficial].
+            $$ \mathbf{v}_{next} = \mathbf{v}_{current\_dir} + \nabla_{vd} \times \text{distance\_between\_planes} $$
+            Normalize $\mathbf{v}_{next}$ [S1, unofficial].
+        *   Intersect ray from $\mathbf{v}_{current}$ with $\mathbf{v}_{next}$ to plane at $z_{current} - \text{distance}$ to get $\mathbf{v}_{next\_pos}$ [S1, unofficial].
     *   **Background Replacement (Last Layer)**:
         *   If $\text{layer\_index} == \text{plane\_count} - 1$:
             *   Generate checkerboard background:
                 $$ \text{scale} = 16 $$
-                $$ \text{check\_uv} = \mathbf{V}_{next\_pos}.xy \times \text{scale} $$
-                $$ f = \text{mod}(\lfloor \text{check\_uv}.x \rfloor + \lfloor \text{check\_uv}.y \rfloor, 2.0) $$
-                $$ \mathbf{C}_{bg} = \text{mix}(\text{vec3}(0.2), \text{vec3}(0.5), f) $$
+                $$ \text{check\_uv} = \mathbf{v}_{next\_pos}.xy \times \text{scale} $$
+                $$ f = \text{mod}(\lfloor \text{check\_uv}.x \rfloor + \lfloor \text{check\_uv}.y \rfloor, 2) $$
+                $$ \mathbf{bg} = \text{mix}((0.2, 0.2, 0.2), (0.5, 0.5, 0.5), f) $$
                 [S1, unofficial].
-            *   Blend background with accumulated color:
-                $$ \mathbf{C}_{final} = \text{mix}(\mathbf{C}_{current}, \mathbf{C}_{bg}, 1.0 - A_{current}) $$
+            *   Blend background:
+                $$ \mathbf{C}_{current} = \text{mix}(\mathbf{C}_{current}, \mathbf{bg}, 1 - A_{current}) $$
+                $$ A_{current} = 1.0 $$
                 [S1, unofficial].
-            *   Set $A_{current} = 1.0$ [S1, unofficial].
-    *   **Output Storage**:
-        *   Store $\mathbf{C}_{final}$ and $A_{current}$ to `cb_out` [S1, unofficial].
+    *   **Output**:
+        *   Store $\mathbf{C}_{current}$ and $A_{current}$ to `cb_out` [S1, unofficial].
         *   Store $\mathbf{M}_{current}$ to `mb_out` [S1, unofficial].
-        *   Store $\mathbf{V}_{next\_pos}$ to `vpb_out` [S1, unofficial].
-        *   Store $\mathbf{V}_{next}$ to `vdb_out` [S1, unofficial].
+        *   Store $\mathbf{v}_{next\_pos}$ to `vpb_out` [S1, unofficial].
+        *   Store $\mathbf{v}_{next}$ to `vdb_out` [S1, unofficial].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for Layered Volume Rendering with Light Propagation
-# Assumes compute shader invocation context
+# Pseudocode for a single compute shader invocation per pixel per layer
+# Assumes access to global buffers and textures via imageLoad/imageStore
 
-def process_layer(layer_index, plane_count, distance_between_planes, front_plane_z, 
-                  plane_pixel_size, light_vs_pos, light_color,
-                  volume_density, volume_transfer, medium_transfer,
-                  ldb_in, lb_in, vpb_in, vdb_in, cb_in, mb_in):
-    
-    # 1. Initialization
-    uv = compute_uv_from_global_id()
-    pixel_coords = compute_pixel_coords_from_global_id()
-    current_z = front_plane_z - layer_index * distance_between_planes
+def process_layer(layer_index, uv):
+    # 1. Layer Initialization
+    z_front = ubo.middle_of_front_plane_vs.z
+    z_current = z_front - layer_index * ubo.distance_between_planes
     
     # 2. Light Propagation
     # Sample current light direction
-    ld_current = image_load(ldb_in, pixel_coords)
+    ld_current = imageLoad(ldb_in, ivec2(uv)).xyz
     
-    # Intersect ray from (0.5, 0.5, current_z + distance) with -ld_current
-    # to find hit point on previous plane
-    lp_prev = intersect_ray(vec3(0.5, 0.5, current_z + distance_between_planes), -ld_current, current_z + distance_between_planes)
+    # Intersect ray from (0.5, 0.5, z_current + dist) with -ld_current to find hit on prev plane
+    # Note: Exact intersection math depends on plane geometry, assumed to yield lp_prev.xy
+    lp_prev_xy = intersect_ray_plane(vec3(0.5, 0.5, z_current + ubo.distance_between_planes), -ld_current, z_current + ubo.distance_between_planes)
     
-    # Sample and average light direction from previous plane
-    ld_prev = image_load(ldb_in, lp_prev.xy)
-    ld_prev = average_4_tap(ld_prev, lp_prev.xy) # Center 0.5, neighbors 0.125
+    # Sample L_prev and average direction
+    L_prev = imageLoad(lb_in, ivec2(lp_prev_xy)).xyz
+    ld_prev_raw = imageLoad(ldb_in, ivec2(lp_prev_xy)).xyz
+    # 4-tap averaging: center 0.5, neighbors 0.125
+    ld_prev_avg = ld_prev_raw * 0.5
+    for neighbor in get_neighbors(ivec2(lp_prev_xy)):
+        ld_prev_avg += imageLoad(ldb_in, neighbor).xyz * 0.125
+    ld_prev = normalize(ld_prev_avg)
     if length(ld_prev) < 1e-6:
         ld_prev = vec3(0, 0, 1)
-    
-    # Irradiance scaling
-    s_current = abs(dFdx(uv.x)) * abs(dFdy(uv.y))
-    s_prev = abs(dFdx(lp_prev.x)) * abs(dFdy(lp_prev.y))
-    if s_current > 1e-8:
-        irradiance_scale = s_prev / s_current
-    else:
-        irradiance_scale = 1.0
         
-    # Transfer function application
-    lp_ws = uv_to_world(uv, current_z)
-    lp_prev_ws = uv_to_world(lp_prev.xy, current_z + distance_between_planes)
+    # Irradiance scaling
+    S_current = abs(dFdx(uv.x)) * abs(dFdy(uv.y))
+    S_prev = abs(dFdx(lp_prev_xy.x)) * abs(dFdy(lp_prev_xy.y))
+    I = S_prev / S_current if S_current > 1e-8 else 1.0
     
-    density_current = sample_volume(volume_density, lp_ws)
-    density_prev = sample_volume(volume_density, lp_prev_ws)
+    # Transfer function
+    p_current_ws = uv_to_world(uv, z_current)
+    p_prev_ws = uv_to_world(lp_prev_xy, z_current + ubo.distance_between_planes)
+    V_current = sample_volume_density(p_current_ws)
+    V_prev = sample_volume_density(p_prev_ws)
     
-    tf_input = vec2(density_current, density_prev)
-    alpha = sample_texture(volume_transfer, tf_input).a # Or specific component
-    tint = sample_texture(medium_transfer, tf_input)
-    tint = mix(vec3(1.0), tint.rgb, tint.a)
+    alpha_sample = imageLoad(volume_transfer, ivec2(V_Current, V_prev)).x # Assuming alpha is first component
+    tint_sample = imageLoad(medium_transfer, ivec2(V_Current, V_prev))
+    tint = mix(vec3(1.0), tint_sample.rgb, tint_sample.a)
     
-    # Light intensity update
-    l_prev_intensity = image_load(lb_in, lp_prev.xy)
-    l_out = l_prev_intensity * irradiance_scale * (1.0 - alpha) * tint
-    l_out = max(l_out, vec3(20.0))
+    L_out = L_prev * I * (1.0 - alpha_sample) * tint
+    L_out = max(L_out, vec3(20.0))
     
-    # Light refraction update
-    mid_lp_ws = (lp_ws + lp_prev_ws) * 0.5
-    ref_grad_lp = compute_refraction_gradient(volume_density, mid_lp_ws)
-    ld_next = normalize(ld_prev + ref_grad_lp * distance_between_planes)
+    # Refraction update for light
+    mid_ws = (p_current_ws + p_prev_ws) * 0.5
+    ref_grad = get_refraction_gradient(mid_ws)
+    ld_next = normalize(ld_prev + ref_grad * ubo.distance_between_planes)
     
     # Store light outputs
-    image_store(lb_out, pixel_coords, l_out)
-    image_store(ldb_out, pixel_coords, ld_next)
+    imageStore(lb_out, ivec2(uv), L_out)
+    imageStore(ldb_out, ivec2(uv), ld_next)
     
     # 3. Ray Propagation
-    # Setup
-    vp_current = image_load(vpb_in, pixel_coords)
-    vd_current = image_load(vdb_in, pixel_coords)
-    vp_ws = uv_to_world(vp_current, current_z) # Assuming vp_current is UV-like
+    vp_current = imageLoad(vpb_in, ivec2(uv)).xyz
+    vd_current = imageLoad(vdb_in, ivec2(uv)).xyz
+    vp_current_ws = uv_to_world(uv, z_current) # Or from buffer
     
-    c_prev = image_load(cb_in, pixel_coords).rgb
-    a_prev = image_load(cb_in, pixel_coords).a
-    m_prev = image_load(mb_in, pixel_coords)
-    l_id = image_load(lb_in, pixel_coords) # Light intensity at current layer
+    C_prev = imageLoad(cb_in, ivec2(uv)).xyz
+    A_prev = imageLoad(cb_in, ivec2(uv)).w
+    M_prev = imageLoad(mb_in, ivec2(uv)).xyzw
     
-    # Intersection
-    vp_prev = intersect_ray(vp_ws, -vd_current, current_z + distance_between_planes)
-    vp_prev_ws = uv_to_world(vp_prev, current_z + distance_between_planes)
+    # Intersect view ray
+    vp_prev_xy = intersect_ray_plane(vp_current, -vd_current, z_current + ubo.distance_between_planes)
+    vp_prev_ws = uv_to_world(vp_prev_xy, z_current + ubo.distance_between_planes)
     
     # Shading
-    n = compute_volume_gradient(volume_density, vp_ws + 0.5)
-    v = normalize(-vd_current)
-    l_dir = normalize(light_vs_pos - vp_ws) # Light direction from surface to light
-    h = normalize(l_dir + v)
-    spec = pow(max(dot(n, h), 0.0), 128.0)
-    ispec = light_color * spec * 0.05
-    material_mask = smoothstep(0.0, 0.05, density_current)
+    N = get_volume_gradient(vp_current_ws + 0.5)
+    V_dir = normalize(-vd_current)
+    L_dir = normalize(ubo.lightVSPos - vp_current)
+    H = normalize(L_dir + V_dir)
+    spec = pow(max(dot(N, H), 0.0), 128.0)
+    is_val = ubo.light_color * spec * 0.05
+    material_mask = smoothstep(0.0, 0.05, V_Current)
     
     # Accumulation
-    # Note: alpha and tint are from Light Propagation step, re-sampled or passed
-    c_current = c_prev + (1.0 - a_prev) * m_prev * (alpha * tint * l_id + ispec * material_mask)
-    a_current = a_prev + (1.0 - a_prev) * alpha
-    m_current = m_prev * (1.0 - m_prev.w) + m_prev * m_prev.xyz * m_prev.w
+    # Note: id is light intensity, assumed to be L_out from previous step or sampled from lb_in
+    id = L_out # Using computed light intensity
+    C_current = C_prev + (1.0 - A_prev) * M_prev * (alpha_sample * id + is_val * material_mask)
+    A_current = A_prev + (1.0 - A_prev) * alpha_sample
+    M_current = M_prev * (1.0 - M_prev.w) + M_prev * M_prev.xyz * M_prev.w
     
     # Refraction & Next Step
-    mid_vp_ws = (vp_ws + vp_prev_ws) * 0.5 + 0.5
-    ref_grad_vp = compute_refraction_gradient(volume_density, mid_vp_ws)
-    vd_next = normalize(vd_current + ref_grad_vp * distance_between_planes)
-    vp_next = intersect_ray(vp_ws, vd_next, current_z - distance_between_planes)
+    mid_ws_ray = (vp_current_ws + vp_prev_ws) * 0.5 + 0.5
+    vd_grad = get_refraction_gradient(mid_ws_ray)
+    vd_next = normalize(vd_current + vd_grad * ubo.distance_between_planes)
+    vp_next_xy = intersect_ray_plane(vp_current, vd_next, z_current - ubo.distance_between_planes)
     
-    # Background Replacement (Last Layer)
-    if layer_index == plane_count - 1:
+    # Background Replacement
+    if layer_index == ubo.plane_count - 1:
         scale = 16
-        check_uv = vp_next.xy * scale
+        check_uv = vp_next_xy * scale
         f = mod(floor(check_uv.x) + floor(check_uv.y), 2.0)
         bg = mix(vec3(0.2), vec3(0.5), f)
-        c_final = mix(c_current, bg, 1.0 - a_current)
-        a_current = 1.0
-    else:
-        c_final = c_current
+        C_current = mix(C_current, bg, 1.0 - A_current)
+        A_current = 1.0
         
-    # Output Storage
-    image_store(cb_out, pixel_coords, vec4(c_final, a_current))
-    image_store(mb_out, pixel_coords, m_current)
-    image_store(vpb_out, pixel_coords, vp_next)
-    image_store(vdb_out, pixel_coords, vd_next)
-
-def average_4_tap(vec, uv):
-    # Center
-    val = vec * 0.5
-    # Neighbors (assuming standard 4-tap in UV space)
-    # Note: Exact neighbor offsets depend on implementation details not fully specified
-    # This is a placeholder for the averaging logic described
-    val += sample_neighbor(uv, offset=(1,0)) * 0.125
-    val += sample_neighbor(uv, offset=(-1,0)) * 0.125
-    val += sample_neighbor(uv, offset=(0,1)) * 0.125
-    val += sample_neighbor(uv, offset=(0,-1)) * 0.125
-    return val
-
-def intersect_ray(origin, direction, plane_z):
-    # Ray: P = origin + t * direction
-    # Plane: P.z = plane_z
-    # t = (plane_z - origin.z) / direction.z
-    t = (plane_z - origin.z) / direction.z
-    return origin + t * direction
-
-def uv_to_world(uv, z):
-    # Convert UV (0-1) to world coordinates at height z
-    # Assuming standard camera frustum mapping or similar
-    # This is a placeholder; exact mapping depends on camera setup
-    return vec3(uv * plane_pixel_size * resolution, z)
-
-def compute_refraction_gradient(volume_density, point):
-    # Compute gradient of volume density at point
-    # Using central differences or Sobel
-    return gradient(volume_density, point)
+    # Output
+    imageStore(cb_out, ivec2(uv), vec4(C_current, A_current))
+    imageStore(mb_out, ivec2(uv), M_current)
+    imageStore(vpb_out, ivec2(uv), vp_next_xy) # Or world pos depending on buffer definition
+    imageStore(vdb_out, ivec2(uv), vd_next)
 ```
 
 ### Parameters
@@ -294,20 +257,22 @@ def compute_refraction_gradient(volume_density, point):
 *   `ubo.plane_count`: Total number of layers [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Zero-length light direction**: If the normalized light direction $\mathbf{L}_{prev}$ has length $< 10^{-6}$ after averaging, it is replaced with `vec3(0,0,1)` to prevent NaN propagation or division by zero in subsequent shading [S1, unofficial].
-*   **Division by zero in irradiance scaling**: If the screen-space area factor $S_{current} < 10^{-8}$, the irradiance scaling factor $I_{scale}$ is clamped to 1.0 to avoid NaN or infinite values [S1, unofficial].
-*   **Layer boundary handling**: On the last layer (`layer_index == plane_count - 1`), the accumulated alpha is forced to 1.0 and a checkerboard background is blended in to prevent transparent edges or missing geometry [S1, unofficial].
+*   **Zero-length light direction**: If the normalized light direction after averaging has length $< 10^{-6}$, it is replaced with $(0,0,1)$ to prevent NaN propagation or division by zero [S1, unofficial].
+*   **Division by zero in irradiance scaling**: If $S_{current} < 10^{-8}$, the irradiance scaling factor $I$ is clamped to 1.0 to avoid NaN or infinite values [S1, unofficial].
+*   **Layer boundary handling**: On the last layer, the accumulated alpha is forced to 1.0 and a checkerboard background is blended in to prevent transparent edges or missing geometry [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: The method processes each layer once, with constant-time operations per pixel per layer. Total time is $O(N \cdot W \cdot H)$, where $N$ is the number of layers, and $W, H$ are image dimensions [S1, unofficial].
-*   **Memory Complexity**: Requires storage for multiple buffers (light direction, light color, view position, view direction, color, material) for each layer or ping-pong buffers for two layers [S1, unofficial].
-*   **Strengths**: Efficient screen-space approximation of light scattering and refraction; suitable for real-time rendering on GPUs via compute shaders [S1, unofficial].
-*   **Limitations**: Approximates light transport within the layer stack; may suffer from artifacts at layer boundaries or with large inter-layer distances; requires careful tuning of refraction gradients [S1, unofficial].
-*   **When to use**: Real-time volumetric rendering where approximate light transport effects are desired and full path tracing is too expensive [S1, unofficial].
-*   **When not to use**: When physically accurate light transport is required, or when the volume has complex internal structures that are not well-approximated by planar layers [S1, unofficial].
+*   **Time Complexity**: $O(N \cdot P)$ where $N$ is the number of pixels and $P$ is the number of layers [S1, unofficial]. Each pixel is processed once per layer in a compute shader.
+*   **Memory Complexity**: $O(N \cdot P)$ for input/output buffers if ping-ponging is not used, or $O(N)$ if ping-ponging buffers are used [S1, unofficial]. The method requires storing light direction, light color, view position, view direction, color, and material buffers for each layer or ping-pong stage.
+*   **Measured Performance**: Not given in the sources.
+*   **Scaling**: Scales linearly with the number of layers and pixels. Performance is dependent on the cost of texture sampling and refraction gradient calculation [S1, unofficial].
+*   **Strengths**: Efficient approximation of lighting and refraction in volumes without full path tracing; suitable for real-time rendering via compute shaders [S1, unofficial].
+*   **Limitations**: Approximation errors due to discrete layer spacing; potential for artifacts at layer boundaries if not handled carefully (e.g., background replacement) [S1, unofficial].
+*   **When to use**: Real-time volumetric rendering where approximate lighting and refraction are desired [S1, unofficial].
+*   **When not to use**: When physically accurate light transport is required, or when the volume has very fine details that require more than a few layers to resolve [S1, unofficial].
 
 ## Background
-The method is described in the context of a Vulkan-based volume rendering implementation, specifically in the `vis-magnus-2018` repository [S1, unofficial]. It represents a compute-shader-based approach to layered volume rendering, focusing on propagating light and view rays across parallel planes [S1, unofficial].
+The method is described in the context of a Vulkan-based volume rendering implementation, specifically in the `vis-magnus-2018` repository [S1, unofficial]. It is an unofficial implementation, likely based on academic or industry techniques for layered volume rendering with light propagation [S1, unofficial].
 
 ## Sources
 [S1] GitThirteen/vis-magnus-2018, https://github.com/GitThirteen/vis-magnus-2018, fetched 2026-10-26 (unofficial)

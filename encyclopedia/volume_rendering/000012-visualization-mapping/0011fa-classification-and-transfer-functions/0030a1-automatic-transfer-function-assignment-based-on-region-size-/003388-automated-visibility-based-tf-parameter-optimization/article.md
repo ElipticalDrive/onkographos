@@ -1,0 +1,102 @@
+# Automated Visibility-Based TF Parameter Optimization
+
+Also called: visibility-driven TF tuning
+
+## Overview
+Automated Visibility-Based TF Parameter Optimization is a method that automatically adjusts transfer function (TF) parameters to ensure that specific Structures of Interest (SOIs) achieve a user-defined level of prominence in the resulting Direct Volume Rendering (DVR) [S1, unofficial]. It solves the problem of manual fine-tuning required when retrieved TFs from knowledge databases are not optimal for specific input volumes [S1, unofficial]. It differs from its parent method, Automatic Transfer Function Assignment based on Region Size and Occlusion, by explicitly enforcing quantitative visibility thresholds for prioritized structures rather than relying solely on geometric size and occlusion heuristics [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   A set of identified SOIs (e.g., bones, lungs) [S1, unofficial].
+*   A visibility threshold (VT) value for each SOI, representing the desired prominence [S1, unofficial].
+*   A base TF structure, typically composed of individual tent-shape components representing each SOI [S1, unofficial].
+
+**Outputs:**
+*   An optimized TF where the specified SOIs are prioritized in the DVR [S1, unofficial].
+
+**Data Structures:**
+*   **SOI List:** A collection of identified anatomical or structural regions.
+*   **Visibility Thresholds (VT):** A mapping from SOI ID to a scalar float value.
+*   **TF Components:** Tent-shaped functions associated with each SOI.
+
+**Steps:**
+1.  **Assign Visibility Thresholds:** The user assigns a VT to each identified SOI based on clinical or analytical priority [S1, unofficial].
+    *   Example: Bones VT = 0.7, Lungs VT = 0.3 [S1, unofficial].
+2.  **Optimize TF Parameters:** The system automatically adjusts the parameters of the TF components (e.g., opacity scaling, position) to enforce the specified visibility priorities during DVR generation [S1, unofficial].
+    *   The optimization ensures that SOIs with higher VT values are more visible than those with lower VT values [S1, unofficial].
+    *   If false-positive SOIs are retrieved, the user must manually eliminate their TF components [S1, unofficial].
+    *   If false-negative SOIs (missing structures) are present, the user can add new SOIs to the existing TF, which is easier than designing from scratch [S1, unofficial].
+
+**Parameters:**
+*   **VT (Visibility Threshold):** Controls SOI prominence. Typical values range from 0.0 to 1.0.
+    *   High priority (e.g., bones): 0.7 [S1, unofficial].
+    *   Low priority (e.g., lungs): 0.3 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **False Positives:** Retrieved SOIs that are not present in the volume. The user must manually remove their TF components [S1, unofficial].
+*   **False Negatives:** Missing structures. The user must manually add new SOIs to the TF [S1, unofficial].
+*   **Non-Optimal Initial TFs:** The method is designed to handle cases where database-retrieved TFs are not optimal, but it does not fully automate the correction of false positives/negatives [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_visibility_based_tf(sois, visibility_thresholds, base_tf_components):
+    """
+    Optimizes TF parameters to enforce visibility priorities.
+    
+    Args:
+        sois: List of SOI identifiers.
+        visibility_thresholds: Dict mapping SOI ID to VT (float).
+        base_tf_components: Dict mapping SOI ID to tent-shaped TF component.
+        
+    Returns:
+        optimized_tf: Optimized TF components.
+    """
+    optimized_tf = {}
+    
+    # Step 1: Assign visibility thresholds (already provided in input)
+    # Step 2: Optimize TF parameters
+    for soi in sois:
+        vt = visibility_thresholds.get(soi, 0.0)
+        component = base_tf_components.get(soi)
+        
+        if component is None:
+            # Handle false negative: User must add new SOI manually
+            # [G] Placeholder for user interaction or default empty component
+            optimized_tf[soi] = None
+            continue
+            
+        # [G] The specific optimization algorithm is not detailed in the source.
+        # It adjusts parameters (e.g., opacity, position) to enforce VT.
+        # A simplified representation of the adjustment:
+        # adjusted_component = adjust_component(component, vt)
+        
+        # For implementation purposes, we assume a scaling of opacity based on VT
+        # This is a [G] placeholder for the actual optimization logic
+        adjusted_component = scale_opacity(component, vt)
+        
+        optimized_tf[soi] = adjusted_component
+        
+    return optimized_tf
+```
+
+## Subtopics
+
+### Visibility Histogram Refinement
+A technique that combines visibility histograms with a non-assisted approach to refine FT specifications to reveal hidden regions from the observer's position [S2, unofficial]. The user performs a preliminary FT specification, which is then refined to make visible regions and structures hidden from the observer's position [S2, unofficial]. This method was demonstrated on human head and foot datasets, where initial visibility might only show skin, but refinement reveals underlying bone structures [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Reduces manual TF fine-tuning; allows intuitive inspection of hidden information; easier to add new SOIs to an existing TF than to design from scratch [S1, unofficial].
+*   **Limitations:** Requires manual intervention for false positives and false negatives; does not fully automate the correction of retrieval errors [S1, unofficial].
+*   **When to use:** When using a knowledge database-based TF approach and specific SOIs need prioritized visibility [S1, unofficial].
+*   **When not to use:** When false positives/negatives are frequent and manual correction is not feasible [S1, unofficial].
+
+## Background
+The method was proposed in the context of a Case-Based Reasoning (CBR) TF approach [S1, unofficial]. It aims to enable users to obtain more detailed visualizations of specific SOIs intuitively and automatically [S1, unofficial]. The approach was illustrated with examples involving bone and lung visibility in medical imaging [S1, unofficial].
+
+## Sources
+[S1] A Transfer Function Design Using A Knowledge Database based on Deep Image and Primitive Intensity Profile Features Retrieval, https://arxiv.org/abs/2209.06421v1, fetched 2026-10-26 (unofficial)
+[S2] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)

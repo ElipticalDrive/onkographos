@@ -3,70 +3,70 @@
 Also called: Spreadsheet-like Interface
 
 ## Overview
-This family provides interaction mechanisms for creating, modifying, and optimizing transfer functions through direct manipulation, graphical rule specification, or automated statistical feedback [S1, unofficial][S2][S3, S4, unofficial]. It solves the usability problem of manually defining high-dimensional classification parameters, which is often counter-intuitive for domain experts [S1, unofficial][S2]. Unlike sibling methods that define specific transfer function shapes or evaluation techniques, these interfaces focus on the mechanism of user input to generate or refine the classification function [S1, unofficial][S2][S3, S4, unofficial].
+Interaction and Editing Interfaces provide the user-facing mechanisms for defining, modifying, and exploring transfer functions (TFs) in volume rendering. They solve the problem of mapping abstract data properties to visual attributes (color, opacity) by offering intuitive controls that bridge the gap between raw data and visual perception. This family is distinguished from its siblings by focusing on the *interaction paradigm* (e.g., sketching, widgets, spreadsheets) rather than the mathematical definition of the transfer function itself. Unlike [Automatic and Data-Driven Generation](7609-automatic-and-data-driven-generation.md) which automates the process, these interfaces require explicit or semi-explicit user input.
 
 ## Shared principles
+All methods in this family share the core mechanism of evaluating a classification function $C(\mathbf{x})$ for each sample point $\mathbf{x}$ in the volume to produce optical properties [G].
+
+**Input Domain:**
+The input to the classification function is typically a scalar value $v = f(\mathbf{x})$ representing the voxel intensity or density at position $\mathbf{x}$ [S1, unofficial][S2][S3, unofficial][S4, unofficial]. Advanced methods extend this domain to include derived features such as gradient magnitude $\|\nabla f(\mathbf{x})\|$, curvature, or texture metrics [S2][S5, unofficial].
+
+**Output Range:**
+The output is a set of optical properties, most commonly:
+*   **Opacity ($\alpha$):** A value in $[0, 1]$ representing the probability of absorption or the inverse of transparency. $\alpha=0$ is fully transparent; $\alpha=1$ is fully opaque [S5, unofficial].
+*   **Color ($C$):** A vector $(r, g, b)$ representing the emitted or reflected light color [S2][S4, unofficial].
+*   **Weight:** In some emission-only models, a weight $w$ is assigned to modulate the contribution of samples during accumulation [S6, unofficial].
+
+**Classification Types:**
+1.  **Binary Classification:** Uses hard thresholds to include or exclude data [6229-binary-and-soft-classification.md]. Values below a threshold are assigned $\alpha=0$, and values above are assigned $\alpha=1$ (or a constant high value) [G].
+2.  **Soft Classification:** Uses smooth transitions (e.g., piecewise linear ramps, Gaussian bumps, or power functions) to assign intermediate opacity values [S3, unofficial][S8, unofficial].
+
+**Evaluation Order:**
+The timing of classification relative to sampling interpolation defines two main approaches [S2][S5, unofficial]:
+*   **Pre-classification:** The transfer function is applied to scalar values at the grid points (voxels) before sampling. Colors and opacities are interpolated during ray casting. Pre-classification produces blurred images when the image resolution is higher than the volume resolution, but prevents color bleeding if color interpolation is done with opacity-weighted colors [S2].
+*   **Post-classification:** Scalar values are interpolated from the volume texture during ray casting, and the transfer function is applied to these continuous sample values. Post-classification produces images with defined edges but is prone to aliasing because high-frequency details may be missed [S2].
+
+**Implementation Structures:**
+Transfer functions are commonly implemented as piecewise linear functions defined by user-specified keypoints [S3, unofficial], lookup tables (LUTs) stored as 1D, 2D, or 3D textures for fast GPU sampling [S3, unofficial][S6, unofficial], or shader functions evaluated dynamically during ray casting [S5, unofficial].
 
 ## Subtopics
 
 ### [Position-dependent Transfer Function Customization](5287-position-dependent-transfer-function-customization.md)
-Enables interactive, position-dependent modification of classification parameters by defining seed points and interpolating effects across the volume. It solves spatial heterogeneity where a single global transfer function fails. Choose when data exhibits varying properties (e.g., scanner artifacts) requiring localized overrides without discarding data.
+A method for the interactive, position-dependent customization of arbitrary transfer function classification parameters in volume rendering, allowing local adaptations of visualization parameters based on voxel position without preprocessing. It solves the problem of spatial inhomogeneities in volume data (e.g., scanner artifacts) or the need to highlight specific regions of interest (ROI) by overriding or blending base transfer function parameters locally. Unlike [Automated Classification Widget Placement](5645-automated-classification-widget-placement.md) which focuses on widget placement, or [Sketch-based Transfer Function Editing](5943-sketch-based-transfer-function-editing.md) which operates in 2D TF space, this method operates directly in the 3D spatial domain using geometric primitives to define a "customization volume" that modulates the classification step. It differs from simple clipping by lowering opacity outside an ROI while modifying colors inside, preserving spatial context.
 
 ### [Automated Classification Widget Placement](5645-automated-classification-widget-placement.md)
-Automatically positions and sizes classification widgets in the transfer-function domain based on probe feedback and reprojected voxel distributions. It solves the difficulty of manually configuring higher-dimensional transfer functions by tying widget geometry to data characteristics. Choose when reducing user effort for multi-dimensional transfer function design is prioritized.
+Automated Classification Widget Placement is an interaction technique for multi-dimensional transfer functions that automatically positions and sizes classification widgets based on data probe feedback and the statistical distribution of reprojected voxels. It solves the difficulty of manually configuring effective higher-dimensional transfer functions by tying widget geometry directly to the local data distribution queried by the user. Unlike manual editing interfaces, it reduces the cognitive load of widget placement by deriving location and scale from probe state and voxel variance.
 
 ### [2D Transfer Function Widget](5735-2d-transfer-function-widget.md)
-Maps a spatial query in the volume to the transfer function domain, displaying local data characteristics alongside current classification settings. It solves the disconnect between spatial location and material appearance by providing immediate feedback on how volume features map to transfer function variables. Choose when users need to adjust classification parameters based on local geometric context.
+The 2D Transfer Function Widget is an interactive visualization component that presents a 2D slice of the 3D transfer function (TF) domain, allowing users to manually set and alter the transfer function while receiving immediate feedback from volume queries. It distinguishes itself from standard piecewise linear editors by integrating "re-projected voxel" visualization, which maps spatial voxel structures directly into the TF domain to help users interpret local volume characteristics like gradient and curvature. This method bridges the gap between data space and TF space, enabling users to see how specific spatial features (e.g., boundaries vs. homogeneous regions) map to TF variables.
 
 ### [Sketch-based Transfer Function Editing](5943-sketch-based-transfer-function-editing.md)
-Allows users to define or refine classification functions by drawing strokes directly on spatial volume views or dedicated sketching surfaces. It solves cognitive load and precision issues of traditional widget-based editing by leveraging spatial intuition. Choose when direct manipulation of rendered images or free-form sketching is preferred over structured geometric widgets.
+Sketch-based Transfer Function Editing allows users to define volume rendering appearance by directly drawing strokes on spatial domain views (volume slices or rendered images) or via direct manipulation interfaces, which are then interpreted to generate or refine transfer functions (TFs). It solves the disconnect between abstract 1D/2D TF widgets and the visual features in the volume, enabling intuitive assignment of color and transparency based on spatial context. It sets itself apart from [2D Transfer Function Widget](5735-2d-transfer-function-widget.md) by operating on spatial sketches rather than abstract TF graphs, and from [Image-based TF Design](7807-image-based-tf-design.md) by often employing neural networks or explicit stroke-to-TF mapping algorithms to interpret the sketches.
 
 ### [Image-based TF Design](7807-image-based-tf-design.md)
-A user-guided classification method where users draw scribbles on image slices to indicate Regions of Interest, which are then classified using Random Forest on INR features to generate probabilistic volume rendering. Choose when rapid, example-based region selection is needed without manual parameter tuning.
+Image-based TF Design is a user-guided classification method where users draw scribbles on image slices to indicate Regions of Interest (ROIs), which are then classified using Random Forest on Implicit Neural Representation (INR) features to generate probabilistic volume rendering. It solves the problem of manual transfer function tuning by allowing sparse user supervision to automatically classify volumetric data. Unlike its parent [Interaction and Editing Interfaces](6592-interaction-and-editing-interfaces.md), which provides general tools for editing, this method specifically automates the classification step via machine learning. It differs from [Sketch-based Transfer Function Editing](5943-sketch-based-transfer-function-editing.md) by operating on volumetric voxels via slice projections rather than editing 2D transfer function curves directly, and from [Position-dependent Transfer Function Customization](5287-position-dependent-transfer-function-customization.md) by deriving classification from image content features rather than spatial coordinates alone.
 
 ### Graphical Rule Specification
-#### definition
-- [S2] A GUI-based method for constructing illustration rules using semantic properties, visual attributes, and logical operators, represented as interactive expression trees.
-#### step
-- [S2] Rule Creation: Drag a connection between two semantic-property widgets to specify a rule based on the two properties.
-- [S2] Operator Selection: Use a design gallery rendering result images for different logical combinations (AND, OR, NOT) of the properties to select the desired operator.
-- [S2] Rule Extension: Draw a connection from a semantic-property widget to an expression-tree widget to include the semantic property as an additional operand.
-- [S2] Rule Combination: Draw a connection between two root nodes of different expression trees to combine them into a single rule.
-#### layout
-- [S2] UI Widgets: Three types: 1) Semantic data property widgets (top row) containing semantic-property and membership-function images. 2) Expression tree nodes (bottom part) where leaf nodes represent semantic properties and interior nodes represent rules/sub-rules with result images. 3) Visual attribute widget (left).
+A GUI-based method for constructing illustration rules using semantic properties, visual attributes, and logical operators, represented as interactive expression trees [S2]. Rule creation involves dragging a connection between two semantic-property widgets to specify a rule based on the two properties [S2]. Operator selection uses a design gallery rendering result images for different logical combinations (AND, OR, NOT) of the properties to select the desired operator [S2]. Rule extension is performed by drawing a connection from a semantic-property widget to an expression-tree widget to include the semantic property as an additional operand [S2]. Rule combination is achieved by drawing a connection between two root nodes of different expression trees to combine them into a single rule [S2]. The UI consists of three widget types: semantic data property widgets (top row) containing semantic-property and membership-function images; expression tree nodes (bottom part) where leaf nodes represent semantic properties and interior nodes represent rules/sub-rules with result images; and a visual attribute widget (left) [S2].
 
 ### Case-Based Reasoning Transfer Function Design
-#### definition
-- [S3, unofficial] A transfer function design workflow where users select SOIs directly in visualization space (2D cross-sections or 3D DVR) instead of indirect TF widgets.
-#### step
-- [S3, unofficial] User draws a line (ray) in 2D cross-sectional views or clicks a point in 3D DVR to select target SOIs.
-- [S3, unofficial] System retrieves matching SOIs via the two-stage CBR method.
-- [S3, unofficial] TFs are constructed by combining individual tent-shape components, each representing a retrieved SOI.
-- [S3, unofficial] User manually eliminates TF components for false-positive SOIs if retrieval errors occur.
-#### pitfall
-- [S3, unofficial] False-negative SOIs (missing structures) require manual addition, but starting from scratch is avoided.
+A transfer function design workflow where users select Sources of Interest (SOIs) directly in visualization space (2D cross-sections or 3D DVR) instead of indirect TF widgets [S3, unofficial]. The user draws a line (ray) in 2D cross-sectional views or clicks a point in 3D DVR to select target SOIs [S3, unofficial]. The system retrieves matching SOIs via a two-stage Case-Based Reasoning (CBR) method [S3, unofficial]. TFs are constructed by combining individual tent-shape components, each representing a retrieved SOI [S3, unofficial]. If false-positive SOIs are retrieved, the user manually eliminates the corresponding TF components [S3, unofficial]. A pitfall is that false-negative SOIs (missing structures) require manual addition, although starting from scratch is avoided [S3, unofficial].
 
 ### Multi-level Interface for Volume Illustration
-#### definition
-- [S4, unofficial] An interface design that abstracts complex rendering parameters into levels of expertise (Novice, Expert) and levels of representation (Schematic, Complex, Realistic) to manage the large number of parameters in volume illustration.
-#### step
-- [S4, unofficial] Novice Level: Present high-level parameters and motifs. Users focus on attentive focus and unconscious orientation of structures without being overwhelmed by data complexity.
-- [S4, unofficial] Expert Level: Present transfer functions (low level) and rendering parameters. Experts can quickly focus on specific portions of data and relevant structures.
-- [S4, unofficial] Representation Levels: Define motifs with feedback from professional medical illustrators to create schematic/simplistic, complex, or realistic representations.
-#### parameter
-- [S4, unofficial] Interface Levels: The interface is structured into High level (Motifs), Middle level (Parameters), and Low level (Transfer functions/Rendering parameters).
+An interface design that abstracts complex rendering parameters into levels of expertise (Novice, Expert) and levels of representation (Schematic, Complex, Realistic) to manage the large number of parameters in volume illustration [S4, unofficial]. At the Novice Level, high-level parameters and motifs are presented, allowing users to focus on attentive focus and unconscious orientation of structures without being overwhelmed by data complexity [S4, unofficial]. At the Expert Level, transfer functions (low level) and rendering parameters are presented, allowing experts to quickly focus on specific portions of data and relevant structures [S4, unofficial]. Representation Levels define motifs with feedback from professional medical illustrators to create schematic/simplistic, complex, or realistic representations [S4, unofficial]. The interface is structured into High level (Motifs), Middle level (Parameters), and Low level (Transfer functions/Rendering parameters) [S4, unofficial].
 
 ### Parallel Coordinates Style Interface
-#### definition
-- [S1, unofficial] A parallel coordinates style interface that provides an overview of rendering options and transfer function settings, allowing the user to easily explore different parameters and backtrack the visualization history.
-#### step
-- [S1, unofficial] Tory et al. propose a parallel coordinates style interface that provides an overview of rendering options and transfer function settings. The user can easily explore different parameters and backtrack the visualization history using the proposed interface.
+A parallel coordinates style interface that provides an overview of rendering options and transfer function settings, allowing the user to easily explore different parameters and backtrack the visualization history [S1, unofficial]. Tory et al. [89] propose this interface where the user can easily explore different parameters and backtrack the visualization history using the proposed interface [S1, unofficial].
+
+### WYSIWYG Semantic Representation
+An adaptation of the WYSIWYG (What You See Is What You Get) concept to volumetric exploration, implementing a high-level semantic representation with drawing tools [S5, unofficial]. Guo, Mao and Yuan (2011) adapted this concept to volumetric exploration, implementing a high-level semantic representation that provides drawing tools to the user [S5, unofficial].
 
 ## Background
-The need for intuitive interaction interfaces in volume rendering stems from the complexity of defining transfer functions in high-dimensional spaces, which is often counter-intuitive for domain experts [S1, unofficial][S2]. Early work investigated image-centric interaction, where users select regions of interest directly in visualization space rather than abstract widget spaces, receiving positive feedback from clinicians [S3, unofficial]. Subsequent developments introduced case-based reasoning to automate transfer function generation by retrieving similar structures from knowledge databases [S3, unofficial], and graphical rule specifications to allow users to construct complex illustration rules using semantic properties and logical operators via interactive expression trees [S2]. Spreadsheet-like and parallel coordinates interfaces were proposed to enable side-by-side parameter exploration and visualization history backtracking [S1, unofficial]. Multi-level interfaces abstract parameters into expertise and representation levels to manage complexity [S4, unofficial]. These methods aim to bridge the gap between domain knowledge and visualization parameters, reducing the cognitive load required for effective volume visualization [S1, unofficial][S2][S3, S4, unofficial].
+The concept of spreadsheet-like interfaces for transfer function design was proposed by Jankun-Kelly and Ma [51], allowing users to explore a range of parameter combinations side-by-side [S1, unofficial]. Parallel coordinates interfaces were proposed by Tory et al. [89] to provide an overview of rendering options [S1, unofficial]. Sketch-based editing was pioneered by Ropinski et al. (2008) using contour-based specification [S5, unofficial]. The WYSIWYG concept was adapted to volume exploration by Guo, Mao and Yuan (2011) [S5, unofficial]. Graphical rule specification was developed to facilitate direct and flexible construction of illustration rules using semantic properties [S2]. Case-Based Reasoning for TF design was investigated to allow clinicians to select SOIs directly in visualization space [S3, unofficial]. Multi-level interfaces were designed to address the overwhelm novices feel with complex data parameters [S4, unofficial].
 
 ## Sources
 [S1] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)
 [S2] Semantics by analogy for illustrative volume visualization, https://doi.org/10.1016/j.cag.2011.10.006, fetched 2026-10-26
 [S3] A Transfer Function Design Using A Knowledge Database based on Deep Image and Primitive Intensity Profile Features Retrieval, https://arxiv.org/abs/2209.06421v1, fetched 2026-10-26 (unofficial)
 [S4] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)
+[S5] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)

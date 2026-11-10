@@ -3,7 +3,7 @@
 Also called: GPU Raycasting, Single-Pass Raycasting, Hardware-Accelerated Ray Tracing
 
 ## Overview
-This family encompasses volume rendering techniques that compute pixel colors by tracing rays from the camera through the volume data, leveraging GPU hardware acceleration for performance. Unlike splatting methods that rasterize primitives, ray-centric methods sample the volume along the view direction, offering higher fidelity for complex lighting and transparency [S2]. It distinguishes itself from sibling methods like [Slice-by-Slice Splatting](2110-slice-by-slice-sheet-buffer-splatting.md) by processing rays individually or in batches rather than projecting sheets, and from [Batched Ray Rendering](1547-batched-ray-rendering.md) by focusing on the general hardware-accelerated execution model rather than just memory management [S2].
+Ray-centric rendering computes the color of each pixel by tracing a ray from the camera through the volume, sampling the density field, and compositing the result along the ray path. It solves the problem of accurate volumetric visualization by avoiding the sorting and blending artifacts inherent in splatting methods, while leveraging GPU hardware acceleration for real-time performance. It differs from its siblings, such as [Splatting](1411-rendering-pipelines-and-passes.md) which projects primitives to the screen, by processing data along the view direction (ray-order) rather than the screen direction (object-order) [S2].
 
 ## Shared principles
 The family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [S1, S3, S4, unofficial].
@@ -21,21 +21,21 @@ The family shares the fundamental mechanism of treating volumetric data as a set
 ## Subtopics
 
 ### [Batched Ray Rendering](1547-batched-ray-rendering.md)
-A memory-management pipeline that splits large ray batches into fixed-size chunks to prevent GPU Out-Of-Memory (OOM) errors. It orchestrates sequential coarse and fine network passes per chunk. Choose this when rendering large volumes with neural networks where memory is constrained.
+A memory-management strategy that processes large batches of rays in smaller chunks to prevent Out-Of-Memory errors. Choose this when generating full-resolution images on GPUs with limited VRAM during inference.
 
 ### [GPU Implementation Pipeline](2385-gpu-implementation-pipeline.md)
-A technique that traces rays from the camera through each pixel into a 3D volume to compute color and opacity, implemented in a single pass using fragment shaders. It solves real-time visualization by leveraging hardware rasterization for ray-box intersection and texture sampling, avoiding intermediate scratch buffers. Choose this for standard real-time volume visualization without neural network overhead.
+A direct single-pass raycasting technique implemented in fragment shaders. Choose this for real-time visualization where hardware rasterization is preferred over complex sorting.
 
 ### OptiX Volume Rendering Pipeline
-- **Definition:** A volume rendering method implemented using NVIDIA OptiX that uses a Ray Generation shader, Miss shaders for radiance and shadow, and Hit/Any-Hit/Intersection shaders for volume traversal and shading [S1, unofficial].
+- **Definition:** A volume rendering method implemented using NVIDIA OptiX that utilizes a Ray Generation shader, Miss shaders for radiance and shadow, and Hit/Any-Hit/Intersection shaders for volume traversal and shading [S1, unofficial].
 - **Steps:** Initialize shaders by setting `shader_raygen` to `__raygen__default` and adding miss shaders `__miss__radiance` and `__miss__shadow`. Configure the volume object group with `group.type = VOLUME_STRUCTURED_REGULAR`. Assign hit group shaders: Closest Hit `__closesthit__volume_radiance` and `__closesthit__volume_shadow`, Any Hit `__anyhit__volume_radiance` and `__anyhit__volume_shadow`, and Intersection `__intersection__volume` [S1, unofficial].
 
 ### Hybrid Splatting/Tracing Rendering
 - **Definition:** A rendering pipeline that rasterizes primary rays for speed and traces secondary rays for lighting effects (reflections/refractions) within the same 3D representation [S2].
-- **Steps:** Compute all primary ray intersections with the scene. Render these primary rays using rasterization (splatting). Discard Gaussian hits that fall behind a ray's closest intersection. Compute and trace secondary rays using 3DGRT [S2].
+- **Steps:** Compute all primary ray intersections with the scene. Render these primary rays using rasterization and discard Gaussian hits that fall behind a ray's closest intersection. Compute and trace the secondary rays using 3DGRT [S2].
 
 ## Background
-The concept of hardware-accelerated ray casting for volume rendering emerged in the early 2000s as GPU capabilities grew. Early implementations utilized fragment shaders to perform ray-box intersection and marching loops directly on the GPU, enabling real-time frame rates for large datasets [S2]. The development of specialized APIs like NVIDIA OptiX provided a structured pipeline for ray tracing, allowing for more complex shading and shadowing calculations [S1, unofficial]. More recently, hybrid approaches have combined the speed of rasterization for primary rays with the accuracy of ray tracing for secondary effects, leveraging modern Gaussian Splatting techniques [S2].
+The method originates from the need to visualize volumetric data efficiently on GPUs. Early implementations relied on CPU-based ray marching, but the advent of programmable shaders allowed for single-pass GPU implementations [S2]. The use of OptiX represents a later development leveraging hardware-accelerated ray tracing cores [S1, unofficial]. It is widely used in medical imaging, scientific visualization, and real-time rendering engines [S1, unofficial][S2].
 
 ## Sources
 [S1] GitHub - VIDILabs/open-volume-renderer: Open source modular multi ..., https://github.com/VIDILabs/open-volume-renderer, fetched 2026-10-29 (unofficial)

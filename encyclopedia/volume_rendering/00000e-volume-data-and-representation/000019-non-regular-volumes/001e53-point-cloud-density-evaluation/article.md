@@ -1,44 +1,42 @@
 # Point Cloud Density Evaluation
+
+
 ## Overview
-Point Cloud Density Evaluation updates the intensity values of a set of 3D points based on a volumetric field, effectively sampling the volume at the point locations [S1, unofficial]. It solves the problem of transferring scalar field data from a regular grid representation to a non-regular point cloud representation, which is often required for density-based regularization or supervision in neural rendering pipelines [S1, unofficial]. It differs from its siblings by focusing on the direct interpolation and optional footprint pooling of intensities rather than structural mesh generation or adaptive subdivision [S1, unofficial].
+Point Cloud Density Evaluation is a method for sampling scalar field values from a volumetric representation onto a set of 3D points, typically used to supervise or evaluate point-based volume representations (such as 3D Gaussians) against a ground-truth or auxiliary volume. It solves the problem of transferring continuous volumetric information to discrete point locations, enabling density-aware supervision and error calculation. It differs from sibling methods like [Chamfer Distance](2446-chamfer-distance.md) by operating on intensity fields rather than geometric proximity, and from [BrickDensityRegion Point Splatting](3956-brickdensityregion-point-splatting.md) by sampling existing volumes rather than constructing new density fields from points.
 
 ## How it works
-The method takes a volumetric tensor and a set of 3D points, interpolates the volume values at the point coordinates, and optionally aggregates values from neighboring voxels (footprint pooling) before normalizing the result [S1, unofficial].
-
 **Inputs:**
-- `volume`: A 5D tensor of shape `[1, C, D, H, W]` representing the volume, where `C` is channels, `D` is depth, `H` is height, and `W` is width [S1, unofficial].
-- `points`: A tensor of point coordinates with shape `[N, 3]`. Coordinates are in normalized space `[0, 1]` [S1, unofficial].
-- `scale`: Optional tensor of scale parameters for each point, shape `[N, 3]` or `[N]` [S1, unofficial].
-- `min_val`: Optional scalar for the minimum volume value. If `None`, computed from `volume` [S1, unofficial].
-- `max_val`: Optional scalar for the maximum volume value. If `None`, computed from `volume` [S1, unofficial].
-- `normalize`: Boolean flag. If `True`, intensities are normalized to `[0, 1]` (default `False`) [S1, unofficial].
-- `enable_footprint_pooling`: Boolean flag. If `True`, aggregates values from a local voxel neighborhood around each point (default `False`) [S1, unofficial].
-- `padding_mode`: String specifying padding behavior for grid sampling (default `"zeros"`) [G].
+- `points`: Tensor of point coordinates, shape $[N, 3]$, in normalized $[0, 1]$ space [S1, unofficial].
+- `volume`: 3D or 5D tensor representing the scalar field (e.g., density or intensity) [S1, unofficial].
+- `scale`: Optional scale parameters for each point, shape $[N, 3]$ or $[N]$ [S1, unofficial].
+- `min_val`, `max_val`: Optional bounds for normalization; if `None`, computed from the volume data [S1, unofficial].
+- `normalize`: Boolean flag to normalize output intensities to $[0, 1]$ (default `False`) [S1, unofficial].
+- `enable_footprint_pooling`: Boolean flag to enable spatial aggregation around points (default `False` in base call) [S1, unofficial].
 
 **Outputs:**
-- `intensities`: Tensor of shape `[N]` containing the sampled and processed intensity values [S1, unofficial].
-- `volume_min`: The minimum value used for normalization [S1, unofficial].
-- `volume_max`: The maximum value used for normalization [S1, unofficial].
+- `intensities`: Tensor of sampled intensity values, shape $[N]$ [S1, unofficial].
+- `volume_min`: Minimum value in the volume (for normalization reference) [S1, unofficial].
+- `volume_max`: Maximum value in the volume (for normalization reference) [S1, unofficial].
 
 **Data Structures:**
-- `volume_f`: The volume tensor cast to `work_dtype` (float32) [S1, unofficial].
-- `grid_large`: A grid of coordinates for `F.grid_sample`, derived from `points` [S1, unofficial].
+- The volume is treated as a grid. When `enable_footprint_pooling` is active, voxel coordinates are computed.
+- Voxel extent is calculated as `extent_xyz = scale_cov / voxel_size_xyz.unsqueeze(0)`, reordered to `extent_zyx` [S1, unofficial].
+- Bounding box indices in voxel space are computed using `floor` and `ceil` on the voxel coordinates, clamped to volume dimensions [S1, unofficial].
 
 **Steps:**
-1. **Empty Check:** If `points.numel() == 0`, return an empty tensor for intensities, and `volume.min()`, `volume.max()` as min/max values [S1, unofficial].
-2. **Type Conversion:** Convert `volume` and `points` to `work_dtype` (float32) [S1, unofficial].
-3. **Volume Bounds:** Determine `volume_min` and `volume_max`. If `min_val`/`max_val` are provided, use them; otherwise, compute `volume_f.min()` and `volume_f.max()` [S1, unofficial].
-4. **Base Sampling:** Call `sample_intensities_from_volume` with `enable_footprint_pooling=False` to obtain `base_samples` (raw interpolated values) [S1, unofficial]. This uses bilinear interpolation via `F.grid_sample` with `align_corners=True` [S1, unofficial]. The grid coordinates are derived from the points, and the output is reshaped to `[idx.shape[0], -1]` [S1, unofficial].
-5. **Footprint Pooling (Conditional):** If `enable_footprint_pooling` is `True` and `scale` is valid:
+1. **Empty Check:** If `points.numel() == 0`, return an empty tensor for intensities, and the volume's min/max values [S1, unofficial].
+2. **Type Conversion:** Convert `volume` and `points` to `work_dtype` (typically `torch.float32`) [S1, unofficial].
+3. **Determine Bounds:** Set `volume_min` and `volume_max`. If `min_val`/`max_val` are provided, use them; otherwise, compute `volume_f.min()` and `volume_f.max()` [S1, unofficial].
+4. **Base Sampling:** Call `sample_intensities_from_volume` with `enable_footprint_pooling=False` to obtain `base_samples` (raw interpolated values) [S1, unofficial]. This typically involves bilinear/trilinear interpolation via `F.grid_sample` with `align_corners=True` [S1, unofficial].
+5. **Footprint Pooling (Optional):** If `enable_footprint_pooling` is `True` and `scale` is valid:
    - Compute coverage mask indices.
-   - Convert points to voxel coordinates.
-   - Compute voxel extent: $\text{extent\_xyz} = \frac{\text{scale\_cov}}{\text{voxel\_size\_xyz}.unsqueeze(0)}$, then reorder to `extent_zyx` [S1, unofficial].
-   - Compute bounding box indices in voxel space: $\text{min\_idx} = \lfloor \text{point\_voxel} - \text{extent} \rfloor$, $\text{max\_idx} = \lceil \text{point\_voxel} + \text{extent} \rceil$ [S1, unofficial]. Clamp `min_idx` and `max_idx` to volume dimensions `[0, D-1]`, `[0, H-1]`, `[0, W-1]` [S1, unofficial].
-   - Iterate over each point: extract voxel region `[z0:z1+1, y0:y1+1, x0:x1+1]`, compute the mean, and update the sample value [S1, unofficial].
-6. **Normalization (Conditional):** If `normalize` is `True`:
-   - Compute denominator: $\text{denominator} = \max(\text{volume\_max} - \text{volume\_min}, 10^{-8})$ [S1, unofficial].
-   - Normalize intensities: $\text{intensities} = \frac{\text{intensities} - \text{volume\_min}}{\text{denominator}}$ [S1, unofficial].
-   - Clamp `intensities` to `[0, 1]` [S1, unofficial].
+   - Convert points to voxel coordinates using the scale and voxel size [S1, unofficial].
+   - Determine the voxel bounding box `[z0:z1+1, y0:y1+1, x0:x1+1]` for each point [S1, unofficial].
+   - Iterate over each point, extract the voxel region, compute the mean of the values in that region, and update the sample value [S1, unofficial].
+6. **Normalization (Optional):** If `normalize` is `True`:
+   - Compute denominator: `denominator = max(volume_max - volume_min, 1e-8)` [S1, unofficial].
+   - Compute intensities: `intensities = (intensities - volume_min) / denominator` [S1, unofficial].
+   - Clamp values to $[0, 1]$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -47,137 +45,165 @@ The method takes a volumetric tensor and a set of 3D points, interpolates the vo
 import torch
 import torch.nn.functional as F
 
-def point_cloud_density_evaluation(volume, points, scale=None, min_val=None, max_val=None, normalize=False, enable_footprint_pooling=False, padding_mode="zeros"):
-    # 1. Empty Check
+def point_cloud_density_evaluation(points, volume, scale=None, min_val=None, max_val=None, normalize=False, enable_footprint_pooling=False):
+    """
+    Samples intensity values from a volume for a set of points.
+    
+    Args:
+        points: Tensor of shape [N, 3], normalized [0, 1].
+        volume: Tensor representing the volume.
+        scale: Optional tensor of shape [N, 3] or [N].
+        min_val, max_val: Optional bounds.
+        normalize: Whether to normalize output to [0, 1].
+        enable_footprint_pooling: Whether to aggregate neighbors.
+        
+    Returns:
+        intensities: Tensor of shape [N].
+        volume_min: Scalar.
+        volume_max: Scalar.
+    """
+    # Step 1: Handle empty points
     if points.numel() == 0:
         return torch.empty(0), volume.min(), volume.max()
 
-    # 2. Type Conversion
-    volume_f = volume.to(torch.float32)
-    points_f = points.to(torch.float32)
-
-    # 3. Volume Bounds
-    if min_val is None:
-        volume_min = volume_f.min()
-    else:
+    # Step 2: Convert to work dtype
+    work_dtype = torch.float32
+    volume_f = volume.to(work_dtype)
+    points_f = points.to(work_dtype)
+    
+    # Step 3: Determine volume bounds
+    if min_val is not None:
         volume_min = min_val
-    if max_val is None:
-        volume_max = volume_f.max()
     else:
+        volume_min = volume_f.min()
+        
+    if max_val is not None:
         volume_max = max_val
+    else:
+        volume_max = volume_f.max()
 
-    # 4. Base Sampling
-    # Construct grid for 3D grid_sample: shape [1, N, 1, 1, 3]
-    # points_f are in [0, 1], align_corners=True expects coordinates in [0, 1]
-    grid_large = points_f.unsqueeze(0).unsqueeze(2).unsqueeze(3)
-    samples_large = F.grid_sample(
-        volume_f,
-        grid_large,
-        mode="bilinear",
-        padding_mode=padding_mode,
-        align_corners=True
-    ).view(points_f.shape[0], -1)
-    intensities = samples_large[:, 0]  # Assume single channel intensity
+    # Step 4: Base sampling (simplified grid_sample logic)
+    # Note: In practice, this requires mapping points [0,1] to grid coordinates [-1, 1]
+    # and reshaping for F.grid_sample.
+    # Assuming a helper `sample_intensities_from_volume` exists as per source logic.
+    base_samples = sample_intensities_from_volume(points_f, volume_f, enable_footprint_pooling=False)
+    
+    intensities = base_samples
 
-    # 5. Footprint Pooling
+    # Step 5: Footprint pooling (if enabled)
     if enable_footprint_pooling and scale is not None:
-        D, H, W = volume_f.shape[2], volume_f.shape[3], volume_f.shape[4]
-        # Convert points to voxel coordinates (x->W, y->H, z->D)
-        voxel_coords = points_f * torch.tensor([W, H, D], device=points_f.device).float()
+        # Compute voxel coordinates
+        # voxel_size_xyz is assumed to be derived from volume shape
+        # extent_xyz = scale_cov / voxel_size_xyz.unsqueeze(0)
+        # extent_zyx = extent_xyz[:, [2, 1, 0]]
         
-        # Compute scale_cov
-        if scale.dim() == 1:
-            scale_cov = scale.unsqueeze(1)
-        else:
-            scale_cov = scale
-            
-        voxel_size_xyz = torch.tensor([1.0, 1.0, 1.0], device=points_f.device)
-        extent_xyz = scale_cov / voxel_size_xyz.unsqueeze(0)
-        # Reorder to zyx
-        extent_zyx = extent_xyz[:, [2, 1, 0]]
+        # Convert points to voxel indices
+        # voxel_coords = points_f / voxel_size_xyz
+        # min_idx = floor(voxel_coords - extent_zyx)
+        # max_idx = ceil(voxel_coords + extent_zyx)
+        # Clamp min_idx and max_idx to volume dimensions
         
-        # Compute min_idx and max_idx
-        min_idx = torch.floor(voxel_coords - extent_zyx).long()
-        max_idx = torch.ceil(voxel_coords + extent_zyx).long()
-        
-        # Clamp to volume dimensions
-        dim_limits = torch.tensor([D - 1, H - 1, W - 1], device=points_f.device)
-        min_idx = torch.clamp(min_idx, 0, dim_limits)
-        max_idx = torch.clamp(max_idx, 0, dim_limits)
-        
-        # Iterate and compute mean
-        new_intensities = torch.zeros_like(intensities)
-        for i in range(len(points_f)):
-            z0, y0, x0 = min_idx[i]
-            z1, y1, x1 = max_idx[i]
-            region = volume_f[0, 0, z0:z1+1, y0:y1+1, x0:x1+1]
-            if region.numel() > 0:
-                new_intensities[i] = region.mean()
-            else:
-                new_intensities[i] = intensities[i]
-        intensities = new_intensities
+        # Iterate and aggregate
+        # for i in range(N):
+        #     region = volume_f[min_idx[i]:max_idx[i]+1]
+        #     intensities[i] = region.mean()
+        pass # Implementation detail omitted as source describes iteration logic without full grid indexing code
 
-    # 6. Normalization
+    # Step 6: Normalization
     if normalize:
         denominator = max(volume_max - volume_min, 1e-8)
         intensities = (intensities - volume_min) / denominator
         intensities = torch.clamp(intensities, 0.0, 1.0)
 
     return intensities, volume_min, volume_max
+
+def sample_intensities_from_volume(points, volume, enable_footprint_pooling):
+    """
+    Helper to perform bilinear interpolation.
+    """
+    # Map points from [0, 1] to [-1, 1] for grid_sample
+    grid_coords = 2.0 * points - 1.0
+    grid_coords = grid_coords.unsqueeze(0).unsqueeze(0) # Shape [1, 1, N, 3]
+    
+    # volume should be [1, C, D, H, W] for F.grid_sample
+    # Assuming volume is [D, H, W] or [1, 1, D, H, W]
+    if volume.dim() == 3:
+        volume_5d = volume.unsqueeze(0).unsqueeze(0)
+    elif volume.dim() == 4:
+        volume_5d = volume.unsqueeze(0)
+    else:
+        volume_5d = volume
+        
+    samples = F.grid_sample(
+        volume_5d,
+        grid_coords,
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True
+    )
+    return samples.view(points.shape[0])
 ```
 
 **Parameters:**
-- `points`: Point coordinates in normalized `[0, 1]` space, shape `[N, 3]` [S1, unofficial].
-- `scale`: Optional scale parameters for each point, shape `[N, 3]` or `[N]` [S1, unofficial].
-- `normalize`: Whether to normalize intensities to `[0, 1]` range (default `False`) [S1, unofficial].
+- `points`: Shape $[N, 3]$, normalized $[0, 1]$ [S1, unofficial].
+- `scale`: Optional, shape $[N, 3]$ or $[N]$ [S1, unofficial].
+- `normalize`: Default `False` [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Empty Points:** If the input point cloud is empty, the function returns an empty tensor and the volume's min/max [S1, unofficial].
-- **Precision:** Use `float32` for volume conversion to avoid precision issues during interpolation [S1, unofficial].
-- **Boundaries:** Voxel indices must be clamped to `[0, D-1]`, `[0, H-1]`, `[0, W-1]` to prevent out-of-bounds access [S1, unofficial].
-- **Denominator Zero:** The normalization denominator uses `max(..., 1e-8)` to prevent division by zero if `volume_min == volume_max` [S1, unofficial].
+- **Empty Input:** If `points` is empty, the function returns immediately with empty tensors [S1, unofficial].
+- **Precision:** Use `float32` for work dtype to ensure stability during interpolation [S1, unofficial].
+- **Normalization Denominator:** Use `max(volume_max - volume_min, 1e-8)` to avoid division by zero [S1, unofficial].
 
 ## Subtopics
 
 ### [Chamfer Distance](2446-chamfer-distance.md)
-Chamfer Distance (CD) calculates a symmetric distance between two point clouds by averaging the nearest-neighbor distances in both directions. It is primarily used to evaluate the geometric accuracy of reconstructed meshes or point clouds against ground-truth data. Unlike sibling metrics such as Neighbor Counting or Probabilistic Occupancy Policy which assess density or occupancy, CD directly measures surface fidelity [Parent](9-non-regular-volumes.md).
+Chamfer Distance (CD) is a symmetric metric that evaluates the geometric fidelity between two point clouds by computing the average nearest-neighbor distance in both directions. It solves the problem of quantifying reconstruction accuracy for 3D surfaces and point sets, serving as a primary loss function in differentiable rendering and mesh reconstruction. Unlike sibling metrics such as [Neighbor Counting](2905-neighbor-counting.md) which assesses local density, or [BrickDensityRegion Point Splatting](3956-brickdensityregion-point-splatting.md) which evaluates volumetric occupancy, CD measures global surface alignment. It differs from [Mesh/Point Cloud Evaluation Metrics](4797-mesh-point-cloud-evaluation-metrics.md) by providing a continuous differentiable loss rather than a binary pass/fail threshold, and from [Probabilistic Occupancy Policy](5043-probabilistic-occupancy-policy.md) by operating on deterministic point coordinates rather than probability distributions.
 
 ### [Neighbor Counting](2905-neighbor-counting.md)
-Neighbor Counting estimates local point cloud density by counting the number of input points within a specified radius of each query point. It serves as a fundamental primitive for density evaluation in non-regular volumes, providing the scalar field data required by higher-level techniques like [BrickDensityRegion Point Splatting](3956-brickdensityregion-point-splatting.md) or clustering algorithms. It differs from [Chamfer Distance](2446-chamfer-distance.md) by measuring local neighborhood cardinality rather than pairwise distance errors, and from [Probabilistic Occupancy Policy](5043-probabilistic-occupancy-policy.md) by providing a deterministic count rather than a probabilistic occupancy estimate.
+Neighbor Counting is a fundamental technique in Point Cloud Density Evaluation that estimates the local density of points by counting the number of neighbors within a specified radius for each point in a dataset. It serves as a core primitive for assessing spatial distribution, identifying outliers, and initializing density-based clustering or rendering parameters. Unlike global metrics, it provides a per-point local density estimate, distinguishing it from sibling methods like Chamfer Distance which measure set-to-set error, or BrickDensityRegion Point Splatting which aggregates density into voxel bricks [3956-brickdensityregion-point-splatting.md].
 
 ### [BrickDensityRegion Point Splatting](3956-brickdensityregion-point-splatting.md)
 BrickDensityRegion Point Splatting is a method for converting sparse point cloud data into a dense volumetric density representation within a hierarchical "brick" structure. It solves the problem of efficiently populating voxel grids with density values derived from point attributes (specifically O2 concentration) by projecting points onto the grid using a distance-weighted kernel. It differs from sibling methods like [Chamfer Distance](2446-chamfer-distance.md) or [Neighbor Counting](2905-neighbor-counting.md) by explicitly generating a continuous density field suitable for volume rendering, rather than computing discrete metrics or occupancy counts.
 
 ### [Mesh/Point Cloud Evaluation Metrics](4797-mesh-point-cloud-evaluation-metrics.md)
-This method computes a comprehensive suite of geometric quality metrics to evaluate the fidelity of a predicted mesh or point cloud against a ground truth representation. It calculates Chamfer Distance (CD), Normal Consistency (NC), F1 score, Edge Chamfer Distance (ECD), Edge F1 (EF1), aspect ratio, radius ratio, angle regularity, and self-intersection percentage. It distinguishes itself from simpler metrics like Chamfer Distance by incorporating edge-aware evaluations and mesh-specific topological checks, providing a more holistic assessment of surface reconstruction quality.
+This method computes a comprehensive suite of geometric fidelity metrics to evaluate the quality of reconstructed 3D meshes or point clouds against ground truth data. It addresses the problem of quantifying both surface proximity and geometric regularity, providing scalar scores for Chamfer Distance (CD), Normal Consistency (NC), F1 score, Edge Chamfer Distance (ECD), and mesh shape quality indicators. It differs from standard mesh evaluation by explicitly calculating edge-specific metrics (ECD/EF1) and shape regularity (aspect ratio, angle regularity) alongside standard distance-based metrics, offering a more granular assessment of mesh topology and triangle quality.
 
 ### [Probabilistic Occupancy Policy](5043-probabilistic-occupancy-policy.md)
 The Probabilistic Occupancy Policy determines the occupancy status of a point cloud point based on its intensity field value, using a probabilistic interpretation where values near 0.0 indicate free space and values near 1.0 indicate occupied space. It sets itself apart from the Signed Intensity Occupancy Policy by using a symmetric tolerance range around both 0 and 1, rather than a single threshold near zero.
 
 ### [Bhattacharyya Distance Coefficient](6998-bhattacharyya-distance-coefficient.md)
-Computes the Bhattacharyya distance between histograms of voxel values inside and outside the target object to measure distribution overlap.
+The Bhattacharyya Distance Coefficient measures the overlap between two discrete probability distributions, specifically the histograms of voxel values inside and outside a target object in non-regular volumes. It serves as a density evaluation metric that quantifies how well the internal and external intensity distributions align, distinguishing itself from sibling methods like [Chamfer Distance](2446-chamfer-distance.md) by focusing on distributional similarity rather than geometric point-to-point proximity.
 
 ### Poisson Distribution Lookup for Feature Points
-Given a uniformly distributed random number, returns the number of feature points in a given cube based on Poisson distribution thresholds [S2, unofficial]. If the value is less than 0.0915781944272058, return 1 [S2, unofficial]. If less than 0.238103305510735, return 2 [S2, unofficial]. If less than 0.433470120288774, return 3 [S2, unofficial]. If less than 0.628836935299644, return 4 [S2, unofficial]. If less than 0.785130387122075, return 5 [S2, unofficial]. If less than 0.889326021747972, return 6 [S2, unofficial]. If less than 0.948866384324819, return 7 [S2, unofficial]. If less than 0.978636565613243, return 8 [S2, unofficial].
+Given a uniformly distributed random number, returns the number of feature points in a given cube based on Poisson distribution thresholds [S2, unofficial]. The thresholds are: if value < 0.0915781944272058, return 1; if value < 0.238103305510735, return 2; if value < 0.433470120288774, return 3; if value < 0.628836935299644, return 4; if value < 0.785130387122075, return 5; if value < 0.889326021747972, return 6; if value < 0.948866384324819, return 7; if value < 0.978636565613243, return 8 [S2, unofficial].
 
 ### Point Cloud Size Ablation
-An evaluation of the trade-off between point cloud density and performance metrics (training time, rendering speed, model size, and PSNR) [S3]. The chosen number of points for experiments is 45k, balancing quality and performance [S3]. For 15k points: Train time 16 min, Render 35 fps, Model size 37 MB, PSNR 32.2 dB [S3]. For 30k points: Train time 20 min, Render 32 fps, Model size 73 MB, PSNR 33.6 dB [S3]. For 45k points: Train time 30 min, Render 25 fps, Model size 110 MB, PSNR 34.6 dB [S3]. For 60k points: Train time 41 min, Render 16 fps, Model size 146 MB, PSNR 34.8 dB [S3]. For 100k points: Train time 76 min, Render 10 fps, Model size 244 MB, PSNR 34.2 dB [S3].
+An evaluation of the trade-off between point cloud density and performance metrics (training time, rendering speed, model size, and PSNR) [S3]. The chosen number of points for experiments is 45k, balancing quality and performance [S3]. Performance metrics are:
+- 15k points: Train time 16 min, Render 35 fps, Model size 37 MB, PSNR 32.2 dB.
+- 30k points: Train time 20 min, Render 32 fps, Model size 73 MB, PSNR 33.6 dB.
+- 45k points: Train time 30 min, Render 25 fps, Model size 110 MB, PSNR 34.6 dB.
+- 60k points: Train time 41 min, Render 16 fps, Model size 146 MB, PSNR 34.8 dB.
+- 100k points: Train time 76 min, Render 10 fps, Model size 244 MB, PSNR 34.2 dB [S3].
 
 ### Plane Standard Deviation (Pσ) Calculation
-Extract the filtered LiDAR point cloud and the corresponding NeRF point cloud for a semantic group representing a single plane [S4]. Split both point clouds into patches of size 3 × 3 square meters [S4]. Calculate the standard deviation of the NeRF patch points along the estimated normal direction [S4].
+To evaluate plane reconstruction, the standard deviation of NeRF predicted points along the estimated normals from the LiDAR point cloud is calculated [S4]. For a given semantic group representing a single plane, the filtered LiDAR point cloud and the corresponding NeRF point cloud are extracted [S4]. Both point clouds are split into patches of size $3 \times 3$ square meters [S4]. For each pair of LiDAR and NeRF patches, the RANSAC algorithm is used to estimate the normal of the LiDAR patch, and the standard deviation of the patch along this estimated normal is calculated [S4].
+
+### Stretched Uniform Distributions
+A technique to generate weighted point densities in 2D by generating a uniform point density and pulling points radially into the center based on a reconstruction function [S5, unofficial]. Let $h(r)$ be the point density. The expected number of points in an infinitesimal ring at radius $r$ with width $dr$ is $h(r) 2\pi r dr$. For a uniform distribution with density $k$ in 'flat land' with radius $p$, the expected number is $k 2\pi p dp$. Equating densities: $k 2\pi p dp = h(r) 2\pi r dr$ [S5, unofficial]. Integrating both sides yields $\int_0^p k p dp = \int_0^r h(r) r dr$, leading to $k \frac{p^2}{2} = \int_0^r h(r) r dr$. Solving for $p$ leads to the mapping function, and the inverse of this function is needed to map from $p$ to $r$ [S5, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ for base sampling, where $N$ is the number of points [S1, unofficial]. Footprint pooling adds complexity proportional to the number of points times the volume of the footprint region [S1, unofficial].
-- **Memory Complexity:** $O(N)$ for storing intensities [S1, unofficial].
-- **Performance:** The method is efficient for dense point clouds due to vectorized grid sampling [S1, unofficial]. Footprint pooling can be slower if not optimized [S1, unofficial].
-- **Strengths:** Direct interpolation, flexible footprint pooling, easy integration with PyTorch [S1, unofficial].
-- **Limitations:** Requires regular volume grid [S1, unofficial]. Footprint pooling implementation in pseudocode is naive (loop-based) [S1, unofficial].
+- **Time Complexity:** Dominated by the interpolation step, which is $O(N)$ for $N$ points, assuming constant-time grid lookup. Footprint pooling adds a factor proportional to the number of voxels in the footprint region.
+- **Memory Complexity:** $O(N)$ for storing point coordinates and sampled intensities. The volume itself is $O(D \times H \times W)$.
+- **Measured Performance:** Based on [S3], increasing point cloud size from 15k to 100k increases training time from 16 min to 76 min and model size from 37 MB to 244 MB, while rendering FPS drops from 35 to 10. PSNR improves from 32.2 dB to a peak of 34.8 dB at 60k points, then slightly decreases to 34.2 dB at 100k.
+- **Strengths:** Efficiently transfers volumetric information to points; supports normalization and footprint pooling for robust supervision.
+- **Limitations:** Performance degrades with very high point counts; relies on the underlying volume resolution for accuracy.
 
 ## Background
-This method is part of the 3D Gaussian Splatting acceleration workflow, specifically for volume-based supervision [S1, unofficial]. It builds on the original 3D Gaussian Splatting work by Kerbl et al. [S1, unofficial].
+The method is part of the 3D Gaussian Splatting ecosystem, building on the original work by Kerbl et al. [S1, unofficial]. It is used in repositories such as `ValentinKraft/vgs` for volume-only training and evaluation [S1, unofficial]. The specific ablation studies on point cloud size are from "Differentiable Point-Based Radiance Fields for Efficient View Synthesis" [S3].
 
 ## Sources
 [S1] ValentinKraft/vgs, https://github.com/ValentinKraft/vgs, fetched 2026-10-27 (unofficial)
 [S2] Scrawk/Marching-Cubes, https://github.com/Scrawk/Marching-Cubes, fetched 2026-10-26 (unofficial)
 [S3] Differentiable Point-Based Radiance Fields for Efficient View Synthesis, https://doi.org/10.1145/3550469.3555413, fetched 2026-10-26
 [S4] PlaNeRF: SVD Unsupervised 3D Plane Regularization for NeRF Large-Scale Urban Scene Reconstruction, https://doi.org/10.1109/3dv62453.2024.00114, fetched 2026-11-04
+[S5] Multivariate volume rendering, https://www.osti.gov/biblio/495676, fetched 2026-10-26 (unofficial)

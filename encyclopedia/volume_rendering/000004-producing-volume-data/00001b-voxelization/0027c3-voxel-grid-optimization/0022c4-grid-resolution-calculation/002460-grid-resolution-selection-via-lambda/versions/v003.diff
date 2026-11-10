@@ -1,0 +1,192 @@
+--- v002.md
++++ v003.md
+@@ -4,84 +4,96 @@
+ 
+ ## Overview
+-This method determines the number of cells in each dimension of a uniform 3D grid based on the scene's bounding box volume, the number of primitives, and a scaling factor $\lambda$ [S1][S2, unofficial]. It solves the problem of selecting an appropriate grid resolution that balances build time and traversal efficiency by approximating cubically shaped cells, which minimize the expected ray tracing cost due to their optimal surface-area-to-volume ratio [S1].
++This method determines the number of cells in each dimension of a uniform or hierarchical voxel grid based on the scene's bounding box volume and the number of geometric primitives (triangles or particles) [S1][S3, unofficial]. It solves the problem of balancing grid granularity against memory overhead and traversal cost by ensuring the cell count scales with scene complexity [S1]. It is distinguished from adaptive methods like [Adaptive Voxelization](link) by its fixed, uniform cell size, and from [Grid Resolution Calculation](2908-grid-resolution-calculation.md) by its explicit dependence on the primitive count $N$ and the scaling factor $\lambda$, rather than solely on aspect ratios and a target Y-axis resolution.
+ 
+ ## How it works
+ **Inputs:**
+-*   $N$: Number of primitives (triangles) in the scene.
+-*   $V$: Volume of the scene's bounding box.
+-*   $d_x, d_y, d_z$: Extents (diagonal lengths or bounding box dimensions) of the scene's bounding box in each dimension.
+-*   $\lambda$: User-defined scaling factor (grid density).
++- $N$: Number of primitives (triangles or particles) in the scene.
++- $V$: Volume of the scene's bounding box.
++- $d_x, d_y, d_z$: Extents (diagonal lengths or box dimensions) of the bounding box along the X, Y, and Z axes.
++- $\lambda$: User-defined scaling factor (grid density).
+ 
+ **Outputs:**
+-*   $N_x, N_y, N_z$: Number of cells in the grid along the x, y, and z axes, respectively.
++- $N_x, N_y, N_z$ (or $R_x, R_y, R_z$): The number of grid cells in each dimension.
+ 
+ **Data Structures:**
+-No complex data structures are required for the calculation itself [G]. The output integers define the dimensions of the uniform grid array to be allocated [G].
++The method computes scalar integers for grid dimensions. No complex data structures are required for the calculation itself, though the resulting dimensions are used to allocate a 3D array of lists or linked lists for object storage [S1].
+ 
+ **Steps:**
+-1.  Compute the scaling term: $T = \frac{\lambda N}{V}$ [G].
+-2.  Calculate the number of cells for each dimension by scaling the cube root of $T$ with the respective bounding box extent:
+-    $$N_x = d_x \sqrt[3]{T}$$
+-    $$N_y = d_y \sqrt[3]{T}$$
+-    $$N_z = d_z \sqrt[3]{T}$$ [S1][S2, unofficial]
+-3.  Round $N_x, N_y, N_z$ to the nearest integers [G]. Standard rounding or ceiling is typically used to ensure sufficient coverage, though the sources do not specify the rounding mode explicitly [G].
++1. Calculate the volume $V$ of the scene bounding box: $V = d_x \cdot d_y \cdot d_z$.
++2. Compute the term $T = \frac{\lambda N}{V}$.
++3. Determine the grid resolution for each axis using the chosen formula variant (see Formulas below).
++4. Round the resulting floating-point values to the nearest integer to obtain the final cell counts $N_x, N_y, N_z$.
++
++**Formulas:**
++There are two primary variants found in the literature for calculating the resolution. The sources do not explicitly reconcile the difference between the square root and cube root formulations, though the cube root is theoretically motivated by volume scaling [S1][S3, unofficial].
++
++*Variant A (Cube Root, cited by Cleary et al. and Wald et al.):*
++$$N_x = d_x \sqrt[3]{\frac{\lambda N}{V}}, \quad N_y = d_y \sqrt[3]{\frac{\lambda N}{V}}, \quad N_z = d_z \sqrt[3]{\frac{\lambda N}{V}}$$
++Where $d_x, d_y, d_z$ are the diagonal lengths or extents of the grid in each dimension [S1][S3, unofficial].
++
++*Variant B (Square Root, cited by Ize et al.):*
++$$R_x = d_x \sqrt{\frac{\lambda N}{V}}, \quad R_y = d_y \sqrt{\frac{\lambda N}{V}}, \quad R_z = d_z \sqrt{\frac{\lambda N}{V}}$$
++Where $d_x, d_y, d_z$ are the extents of the box in all dimensions [S2, unofficial].
+ 
+ **Parameters:**
+-*   $\lambda$: The scaling factor. The typical and recommended value is 5 [S1]. Experiments show that most scenes are insensitive to this parameter and achieve optimum performance around $\lambda \approx 5$ for both static and dynamic scenes [S1].
++- $\lambda$ (Lambda): A scaling factor relating the number of cells to the number of primitives.
++    - For triangle-based ray tracing (CGT): The typical value is $\lambda \approx 5$. Most scenes are insensitive to this parameter and achieve best performance around $\lambda = 5$ [S1].
++    - For particle-based simulation data: Performance varies widely with $\lambda$. The optimal value is found to be $\lambda = 1$ [S5].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Zero Volume:** If $V$ is zero (degenerate bounding box), the formula is undefined. A guard clause should handle this, likely by falling back to a default resolution or skipping grid construction [G].
+-*   **Primitive Count:** If $N$ is zero, the resolution becomes zero. This should be handled by ensuring a minimum grid size (e.g., $1 \times 1 \times 1$) if the scene is empty but needs to be traversed [G].
+-*   **Precision:** The cube root operation should be performed with sufficient floating-point precision to avoid significant quantization errors in the final integer cell counts, especially for very large or small scenes [G].
++**Pitfalls:**
++- **Hardware Assumptions:** Optimal grid densities derived for CPU ray tracing (e.g., by Ize et al.) may be sub-optimal for GPU ray tracing. This is because CPU analyses often assume fast atomic operations and compute-limited traversal, which may not hold for specific GPU architectures [S2, unofficial].
++- **Primitive Approximation:** Treating geometric primitives as points for the purpose of grid density calculation can severely limit quality for other acceleration structures like BVHs [S2, unofficial].
++- **Precision:** The result of the root calculation must be rounded to an integer. Using floor or ceil arbitrarily can lead to sub-optimal grid densities.
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+-def calculate_grid_resolution(N, V, d_x, d_y, d_z, lambda_factor=5.0):
++def calculate_grid_resolution(num_primitives, bbox_extents, lambda_factor, use_square_root=False):
+     """
+-    Calculate the number of cells in a uniform 3D grid.
++    Calculate grid resolution using the Lambda heuristic.
+     
+     Args:
+-        N (int): Number of primitives (triangles).
+-        V (float): Volume of the scene bounding box.
+-        d_x (float): Extent of the bounding box in x-dimension.
+-        d_y (float): Extent of the bounding box in y-dimension.
+-        d_z (float): Extent of the bounding box in z-dimension.
+-        lambda_factor (float): Scaling factor (default 5.0).
+-        
++        num_primitives (int): N, the number of triangles or particles.
++        bbox_extents (tuple): (dx, dy, dz), the extents of the bounding box.
++        lambda_factor (float): Lambda, the scaling factor.
++        use_square_root (bool): If True, use the square root formula (Variant B); 
++                                otherwise use the cube root formula (Variant A).
++    
+     Returns:
+-        tuple: (N_x, N_y, N_z) number of cells in each dimension.
++        tuple: (Nx, Ny, Nz), the number of cells in each dimension.
+     """
+-    # Guard for degenerate bounding box [G]
+-    if V == 0:
+-        return (1, 1, 1)
++    dx, dy, dz = bbox_extents
+     
+-    # Guard for empty scene [G]
+-    if N == 0:
++    # Calculate volume
++    volume = dx * dy * dz
++    
++    if volume == 0:
++        # Edge case: Zero volume bounding box
+         return (1, 1, 1)
+         
+-    # Calculate the term inside the cube root [G]
+-    term = (lambda_factor * N) / V
++    # Calculate the scaling term
++    term = (lambda_factor * num_primitives) / volume
+     
+-    # Calculate cube root
+-    cube_root_term = term ** (1.0 / 3.0)
++    if use_square_root:
++        # Variant B: Square root formula
++        scale_x = math.sqrt(term)
++        scale_y = math.sqrt(term)
++        scale_z = math.sqrt(term)
++    else:
++        # Variant A: Cube root formula (Standard)
++        scale_x = math.pow(term, 1.0/3.0)
++        scale_y = math.pow(term, 1.0/3.0)
++        scale_z = math.pow(term, 1.0/3.0)
++        
++    # Calculate resolutions
++    Nx = round(dx * scale_x)
++    Ny = round(dy * scale_y)
++    Nz = round(dz * scale_z)
+     
+-    # Calculate number of cells for each dimension
+-    N_x = d_x * cube_root_term
+-    N_y = d_y * cube_root_term
+-    N_z = d_z * cube_root_term
++    # Ensure minimum resolution of 1
++    Nx = max(1, Nx)
++    Ny = max(1, Ny)
++    Nz = max(1, Nz)
+     
+-    # Round to nearest integer [G]
+-    N_x = round(N_x)
+-    N_y = round(N_y)
+-    N_z = round(N_z)
+-    
+-    # Ensure minimum resolution of 1 [G]
+-    N_x = max(1, N_x)
+-    N_y = max(1, N_y)
+-    N_z = max(1, N_z)
+-    
+-    return (N_x, N_y, N_z)
++    return (Nx, Ny, Nz)
+ ```
+ 
+@@ -92,5 +104,5 @@
+ 
+ ### [Hierarchical Grid Organization with Macrocells](5025-hierarchical-grid-organization-with-macrocells.md)
+-This method organizes particle data into a hierarchical grid structure to accelerate ray tracing and volume rendering by enabling efficient spatial culling. It differs from flat grid approaches by introducing a coarser macrocell level that stores parameter ranges, allowing for run-time parameter range culling rather than simple empty/non-empty checks. It builds on [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) for determining grid dimensions.
++This method organizes volumetric primitives (such as particles or spheres) into a two-level hierarchical grid structure to accelerate ray traversal and culling. It builds on [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) to determine the finest grid resolution, then imposes a coarser macrocell level on top. It differs from [Uniform Grid Construction](4876-uniform-grid-construction.md) by adding hierarchical culling and from [Coarse Grid for Large Models](5481-coarse-grid-for-large-models.md) by using a specific two-level macrocell structure with parameter-range culling rather than just a static coarse grid.
+ 
+ ### [Coarse Grid for Large Models](5481-coarse-grid-for-large-models.md)
+@@ -98,15 +110,25 @@
+ 
+ ### Voxel Size Calculation (Optical/Diffraction-based)
+-This variant assumes the size of an emission dot (voxel) is equal to the size of the laser focal point, which is an oval with two diameters [S3]. The diameter perpendicular to the laser beam is the diffraction limit, determined by the original beam width $a$, focal length $r$, and wavelength $\lambda$ as $w_f = \frac{2\lambda r}{a}$ [S3]. The diameter along the laser beam is geometrically obtained from the relationship $a : w_f = r : w_d/2$, yielding $w_d = 4\lambda \left(\frac{r}{a}\right)^2$ [S3].
++This variant applies the lambda concept to optical diffraction limits rather than geometric acceleration structures. It assumes the size of an emission dot (voxel) is equal to the size of the laser focal point, which is an oval with two diameters [S4].
++- **Perpendicular Diameter ($w_f$):** Determined by the diffraction limit: $w_f = \frac{2\lambda r}{a}$, where $\lambda$ is the wavelength, $r$ is the focal length, and $a$ is the original beam width [S4].
++- **Parallel Diameter ($w_d$):** Derived from the geometric relationship $a : w_f = r : w_d/2$: $w_d = 4\lambda \left(\frac{r}{a}\right)^2$ [S4].
++
++### Grid Resolution Parameter Tuning
++In modified coherent grid traversal algorithms for particle-based simulation data, the parameter $\lambda$ behaves differently than in the original CGT algorithm. While the original CGT was largely insensitive to $\lambda$, the modified algorithm's performance varies widely with different values of $\lambda$ due to the extremely large number of particles in test datasets. The optimal value for these specific datasets is $\lambda = 1$ [S5].
+ 
+ ## Operating characteristics
+-*   **Performance:** Optimum performance is reached at $\lambda \approx 5$ for nearly all tested scenes, both static and dynamic [S1]. The method is robust and insensitive to small variations in $\lambda$ [S1].
+-*   **Strengths:** Simple to implement; adapts to scene complexity; minimizes expected ray tracing cost by promoting cubic cells [S1].
++- **Time Complexity:** The calculation itself is $O(1)$ arithmetic operations. However, the choice of $\lambda$ directly impacts the cost of grid construction ($O(N)$ to insert primitives) and ray traversal ($O(\text{cells visited})$).
++- **Memory Complexity:** The grid memory usage is proportional to the product $N_x \cdot N_y \cdot N_z$. Since $N_x, N_y, N_z \propto \sqrt[3]{\lambda N}$, the total cell count scales linearly with $N$ and $\lambda$.
++- **Performance:** For triangle-based ray tracing, optimum performance is reached at approximately $\lambda \approx 5$ for nearly all tested scenes, both static and dynamic [S1]. Cubically shaped cells are chosen because they have the smallest surface area in relation to volume, minimizing a grid's expected ray tracing cost [S1].
++- **Strengths:** Simple to implement; robust for a wide range of scenes; provides a good baseline for uniform grids.
++- **Limitations:** Insensitive tuning in some contexts ($\lambda \approx 5$) can be a double-edged sword if the scene distribution is highly non-uniform; GPU-specific optimizations may require different $\lambda$ values than CPU-based analyses suggest [S2, unofficial].
+ 
+ ## Background
+-The method originates from the work of Cleary et al. (1983) [S1], who proposed choosing the number of cells to be a multiple, $\lambda$, of the number of triangles. The heuristic is based on the principle that cubically shaped cells have the smallest surface area in relation to volume, thereby minimizing the expected ray tracing cost [S1].
++The heuristic was introduced by Cleary et al. [CWVB83] and has been widely adopted in ray tracing literature, including by Wald et al. [WIK∗ 06] for coherent grid traversal [S2, unofficial]. It remains a standard method for initializing uniform grid acceleration structures in both CPU and GPU ray tracers [S1][S2, unofficial].
+ 
+ ## Sources
+-[S1] Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~thiago/papers/grid.pdf, fetched 2026-10-25
+-[S2] Two-Level Grids for Ray Tracing on GPUs, https://www.readkong.com/page/two-level-grids-for-ray-tracing-on-gpus-8829848, fetched 2026-10-25 (unofficial)
+-[S3] Fairy Lights in Femtoseconds: Aerial and Volumetric Graphics Rendered by Focused Femtosecond Laser Combined with Computational Holographic Fields, https://arxiv.org/abs/1506.06668v1, fetched 2026-10-26+[S1] PDF Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~thiago/papers/grid.pdf, fetched 2026-10-25
++[S2] PDF Two-Level Grids for Ray Tracing on GPUs - UVic.ca, https://webhome.cs.uvic.ca/~blob/downloads/tyler/paper1227_final.pdf, fetched 2026-10-25 (unofficial)
++[S3] Two-Level Grids for Ray Tracing on GPUs - ReadkonG.com, https://www.readkong.com/page/two-level-grids-for-ray-tracing-on-gpus-8829848, fetched 2026-10-25 (unofficial)
++[S4] Fairy Lights in Femtoseconds: Aerial and Volumetric Graphics Rendered by Focused Femtosecond Laser Combined with Computational Holographic Fields, https://arxiv.org/abs/1506.06668v1, fetched 2026-10-26
++[S5] A coherent grid traversal approach to visualizing particle-based simulation data, https://ieeexplore.ieee.org/abstract/document/4293019/, fetched 2026-10-25

@@ -3,60 +3,120 @@
 Also called: DSVM Volume Rendering
 
 ## Overview
-Distributed Shared Virtual Memory (DSVM) Volume Rendering is a method for rendering tera-scale volumes on GPU clusters by mapping the entire volume into a single shared 3D virtual memory space accessible by all nodes [S2]. It solves the problem of managing massive datasets that exceed the physical memory of individual GPUs by using on-demand paging of small voxel blocks, allowing multiple nodes to render disjoint parts of the volume simultaneously without explicit data partitioning or load balancing [S1, unofficial][S2]. It differs from sibling methods like Distributed Volume Ray Tracing with Global Kd-Tree by relying on a flat virtual memory address space with hardware-assisted page fault handling rather than a distributed spatial index, and by targeting small GPU clusters where implicit load balancing via interleaved distribution units suffices [S2].
+Distributed Shared Virtual Memory (DSVM) Volume Rendering is a method for rendering tera-scale volumes on GPU clusters by mapping the entire volume into a single shared 3D virtual memory space accessible by all nodes [S2]. It solves the problem of managing massive datasets that exceed the physical memory of individual GPUs by using on-demand paging of small voxel blocks, allowing multiple nodes to render disjoint parts of the volume simultaneously without explicit data partitioning or load balancing [S1, unofficial][S2]. It differs from sibling methods like [Distributed Volume Ray Tracing with Global Kd-Tree](1774-distributed-volume-ray-tracing-with-global-kd-tree.md) by relying on a flat virtual memory address space with hardware-assisted page fault handling rather than a distributed spatial index, and by targeting small GPU clusters where implicit load balancing via interleaved distribution units suffices [S2].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A large 3D volume dataset (e.g., 955 GB EM data) stored on disk or a file server; current camera view parameters (position, orientation, zoom); cluster configuration (number of GPU nodes).
-- Output: A composited 2D image rendered on the client.
+- Input: A large 3D volume dataset stored on disk or a file server; current camera view parameters (position, orientation, zoom); cluster configuration (number of GPU nodes) [S2].
+- Output: A composited 2D image transmitted to the client [S2].
 
 **Data Structures:**
-1.  **Virtual Octree:** A multi-resolution hierarchy representing the volume. Each node in the octree corresponds to a block of $32^3$ voxels [S2]. The octree is not stored as a traditional tree in memory but is mapped to a large shared virtual memory address space [S2].
-2.  **Virtual Distribution Unit (VDU):** A large cubical region of voxels (e.g., $1024^3$) assigned to a specific GPU node [S2]. VDUs are arranged in an interleaved, repeating spatial layout across the global volume [S2].
-3.  **Page Tables:** A two-level hierarchy managing the mapping between virtual memory addresses (VDU blocks) and physical memory addresses (GPU block cache) [S2].
-4.  **GPU Block Cache:** A cache on each GPU holding resident $32^3$ voxel blocks [S2].
-5.  **CPU Block Cache:** A larger cache on the CPU side, acting as an intermediate layer between disk and GPU [S2].
+1. **Virtual Octree:** A multi-resolution hierarchy representing the volume. Each octree node comprises solely the block of $32^3$ voxels it represents [S2]. The octree is mapped to a large shared virtual memory address space rather than stored as a traditional in-memory tree [S2].
+2. **Virtual Distribution Unit (VDU):** A large cubical region of voxels (typically $1024^3$) assigned to a specific GPU node [S2]. VDUs are arranged in an interleaved, repeating spatial layout across the global volume [S2].
+3. **Page Tables:** A two-level hierarchy managing the mapping between virtual memory addresses (VDU blocks) and physical memory addresses (GPU block cache) [S2]. Not given in the sources.
+4. **GPU Block Cache:** A cache on each GPU holding resident $32^3$ voxel blocks [S2].
+5. **CPU Block Cache:** A larger cache on the CPU side, acting as an intermediate layer between disk and GPU [S2].
 
 **Algorithm Steps:**
 
-1.  **Initialization and Assignment:**
-    - Assign responsibility for different cubical regions (VDUs) in the global virtual memory space to each GPU node [S2].
-    - Arrange VDUs in an interleaved, repeating spatial layout [S2].
-    - Initialize the two-level page table hierarchy for each node [S2].
+1. **Initialization and Assignment:**
+   - Assign responsibility for different cubical regions (VDUs) in the global virtual memory space to each GPU node [S2].
+   - Arrange VDUs in an interleaved, repeating spatial layout [S2].
+   - Initialize the two-level page table hierarchy for each node [S2].
 
-2.  **Frame Preparation (Per Frame):**
-    - **VDU Culling:** Each node culls the list of VDUs assigned to it based on their geometric position relative to the current view frustum [S2].
-    - **Sorting:** Sort the active VDUs into a front-to-back order [S2].
-    - **Synchronization (Zoom Change):** If the view zoom factor changes, switch the size of VDUs (e.g., from $1024^3$ to $512^3$) [S2].
-        - Prefetch volume data corresponding to the new VDU size [S2].
-        - Use a synchronization flag to signal when prefetching is complete, then all nodes switch in sync [S2].
+2. **Frame Preparation (Per Frame):**
+   - **VDU Culling:** Each node culls the list of VDUs assigned to it based on their geometric position relative to the current view frustum [S2].
+   - **Sorting:** Sort the active VDUs into a front-to-back order [S2].
+   - **Synchronization (Zoom Change):** If the view zoom factor changes, switch the size of VDUs (e.g., from $1024^3$ to $512^3$) [S2].
+     - Prefetch volume data corresponding to the new VDU size [S2].
+     - Use a synchronization flag to signal when prefetching is complete, then all nodes switch in sync [S2].
 
-3.  **Ray-Casting and Memory Management (Per Node, Per VDU):**
-    - For each active VDU in sorted order:
-        - **Ray-Casting:** Traverse the volume in virtual memory [S2].
-        - **LOD Calculation:** For each sample along the ray, compute a level-of-detail (LOD) value individually, determining the octree level and thus the resolution to be sampled [S2].
-        - **Address Translation:** Perform on-the-fly address translation from virtual to physical memory addresses for each sample [S2].
-        - **Cache Check:** Detect cache misses for virtual octree nodes (blocks of $32^3$ voxels) [S2].
-            - If the block is not in the GPU block cache:
-                - Check if it is in the CPU block cache.
-                - If not in CPU cache, read the physical data of matching resolution from disk in the background [S2].
-                - Rendering proceeds at interactive rates in the foreground while data is fetched [S2].
-        - **Rendering:** Render the VDU using the resident data.
+3. **Ray-Casting and Memory Management (Per Node, Per VDU):**
+   - For each active VDU in sorted order:
+     - **Ray-Casting:** Traverse the volume in virtual memory [S2].
+     - **LOD Calculation:** For each sample along the ray, compute a level-of-detail (LOD) value individually, determining the octree level and thus the resolution to be sampled [S2].
+     - **Address Translation:** Perform on-the-fly address translation from virtual to physical memory addresses for each sample [S2].
+     - **Cache Check:** Detect cache misses for virtual octree nodes (blocks of $32^3$ voxels) [S2].
+       - If the block is not in the GPU block cache:
+         - Check if it is in the CPU block cache.
+         - If not in CPU cache, read the physical data of matching resolution from disk in the background [S2].
+         - Rendering proceeds at interactive rates in the foreground while data is fetched [S2].
+     - **Rendering:** Render the VDU using the resident data [S2].
 
-4.  **Compositing and Communication:**
-    - **Occlusion Culling:** Use the alpha image of the rendered VDU to employ occlusion culling for remaining VDUs [S2].
-        - Send a low-resolution occlusion map of the rendered VDU to all other nodes [S2].
-        - Other nodes blend this map with their local occlusion information [S2].
-        - Skip rendering VDUs that are occluded [S2].
-    - **Image Transmission:** Read back the rendered image for the VDU and directly send it out for parallel compositing [S2].
-    - **Asynchronous Communication:** Use asynchronous MPI messages for communication between render nodes [S2]. Decouple sending image tiles/occlusion maps from receiving images/occlusion maps to avoid stalling [S2].
-    - **Final Compositing:** Composite the images from all nodes.
-    - **Client Transmission:** Transmit the final composited image to the client using TCP sockets, supporting different image compression schemes [S2].
+4. **Compositing and Communication:**
+   - **Occlusion Culling:** Use the alpha image of the rendered VDU to employ occlusion culling for remaining VDUs [S2].
+     - Send a low-resolution occlusion map of the rendered VDU to all other nodes [S2].
+     - Other nodes blend this map with their local occlusion information [S2].
+     - Skip rendering VDUs that are occluded [S2].
+   - **Image Transmission:** Read back the rendered image for the VDU and directly send it out for parallel compositing [S2].
+   - **Asynchronous Communication:** Use asynchronous MPI messages for communication between render nodes [S2]. Decouple sending image tiles/occlusion maps from receiving images/occlusion maps to avoid stalling [S2].
+   - **Final Compositing:** Composite the images from all nodes [S2].
+   - **Client Transmission:** Transmit the final composited image to the client using TCP sockets, supporting different image compression schemes [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def init_cluster(volume_data, num_nodes):
+    # Assign responsibility for different cubical regions (VDUs) to each GPU node
+    # Arrange VDUs in an interleaved, repeating spatial layout
+    # Initialize two-level page table hierarchy for each node
+    pass
+
+def render_frame(camera_params, node_vdus, page_tables, gpu_cache, cpu_cache):
+    # Cull VDUs intersecting the view frustum
+    active_vdus = [vdu for vdu in node_vdus if intersects_frustum(vdu, camera_params)]
+    # Sort active VDUs front-to-back
+    active_vdus.sort(key=lambda vdu: distance_to_camera(vdu, camera_params))
+
+    # Handle zoom change synchronization
+    if view_zoom_changed():
+        new_vdu_size = compute_vdu_size(camera_params)
+        for node in cluster_nodes:
+            node.prefetch_data(new_vdu_size)
+        sync_flag.wait()
+        for node in cluster_nodes:
+            node.switch_vdu_size(new_vdu_size)
+
+    # Render each active VDU
+    for vdu in active_vdus:
+        # Ray-cast through virtual memory
+        image = raycast_vdu(vdu, camera_params, page_tables, gpu_cache, cpu_cache)
+        # Occlusion culling: send alpha map, blend, skip if occluded
+        send_async_mpi(vdu.alpha_map)
+        if is_occluded(vdu):
+            continue
+        # Send image for parallel compositing
+        send_async_mpi(image)
+
+    # Composite images from all nodes
+    final_image = composite_all_images()
+    # Transmit to client via TCP
+    transmit_to_client(final_image)
+
+def raycast_vdu(vdu, camera, page_tables, gpu_cache, cpu_cache):
+    for sample in ray_samples(vdu, camera):
+        # Compute LOD value individually
+        lod = compute_lod(sample)
+        # On-the-fly address translation
+        virt_addr = get_virt_addr(sample, lod)
+        phys_addr = translate_address(virt_addr, page_tables)
+        
+        # Cache miss detection
+        if not in_gpu_cache(phys_addr):
+            if not in_cpu_cache(phys_addr):
+                # Read physical data of matching resolution from disk in background
+                read_disk_background(phys_addr, lod)
+            load_from_cpu_cache(phys_addr)
+        # Accumulate sample value
+        accumulate(fetch_voxel(phys_addr))
+    return render_image()
+```
 
 **Parameters:**
-- **Block Size:** $32^3$ voxels. Used for efficient culling, streaming, and memory management [S2].
-- **VDU Size:** Typically $1024^3$ voxels. Chosen to balance data load fitting into GPU memory and avoiding excessive compositing overhead [S2].
-- **Hardware:** NVIDIA Quadro 5000 (2.5 GB memory) [S2].
+- **Block Size:** $32^3$ voxels. Used for efficient culling, streaming, and memory management with fine granularity [S2].
+- **VDU Size:** Typically $1024^3$ voxels. Chosen small enough to ensure data load balancing and fit into GPU memory, but large enough to avoid too many parts for compositing [S2].
+- **Hardware:** NVIDIA Quadro 5000 with 2.5 GB memory [S2].
 
 **Edge Cases and Pitfalls:**
 - **Zoom Level:** Large VDUs lead to low GPU utilization if only a single VDU is in view; small VDUs increase compositing overhead. Dynamic switching is required [S2].

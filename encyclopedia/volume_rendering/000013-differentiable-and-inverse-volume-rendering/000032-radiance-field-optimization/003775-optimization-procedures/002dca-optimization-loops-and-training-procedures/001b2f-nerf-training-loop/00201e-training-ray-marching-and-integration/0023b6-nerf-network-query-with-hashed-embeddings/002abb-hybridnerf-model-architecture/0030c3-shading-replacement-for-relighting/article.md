@@ -7,15 +7,15 @@ Shading Replacement for Relighting is a technique for object insertion that avoi
 
 ## How it works
 **Inputs and Outputs:**
-*   Object points $O$: List of tuples $(\mathbf{p}_o, \mathbf{n}_o, S_o)$ representing positions, normals, and initial shading values [S1].
-*   Scene points $V$: List of tuples $(\mathbf{p}_v, \mathbf{n}_v, S_v)$ representing positions, normals, and shading values from the scene NeRF [S1].
+*   Object points $O$: List of tuples $(\mathbf{p}_o, \mathbf{n}_o, S_o)$ representing positions, normals, and initial shading values [G].
+*   Scene points $V$: List of tuples $(\mathbf{p}_v, \mathbf{n}_v, S_v)$ representing positions, normals, and shading values from the scene NeRF [G].
 *   Parameters: $p$ (integer count of top-ranked pairs to select), $\beta_{avg,r}$ (average brightness of scene reflectance), $\beta_{o,avg,r}$ (average brightness of object reflectance) [S1].
 *   Output: Updated shading values $S_{updated}$ for each object point [S1].
 
 **Data Structures:**
-*   Scene points $V$: List of tuples $(\mathbf{p}_v, \mathbf{n}_v, S_v)$.
-*   Object points $O$: List of tuples $(\mathbf{p}_o, \mathbf{n}_o, S_o)$.
-*   Candidate pairs: List of tuples containing a scene point and a scalar score.
+*   Scene points $V$: List of tuples $(\mathbf{p}_v, \mathbf{n}_v, S_v)$ [G].
+*   Object points $O$: List of tuples $(\mathbf{p}_o, \mathbf{n}_o, S_o)$ [G].
+*   Candidate pairs: List of tuples containing a scene point and a scalar score [G].
 
 **Steps:**
 1. **Pair Formation:** For each object point $o \in O$, find all scene points $v \in V$ that share similar normal vectors to form candidate pairs $(o, v)$ [S1].
@@ -29,6 +29,18 @@ Shading Replacement for Relighting is a technique for object insertion that avoi
 The updated shading $S_{updated}$ is calculated as:
 $$ S_{updated} = S_{mean} \frac{\beta_{avg,r}}{\beta_{o,avg,r}} $$
 where $S_{mean}$ is the average shading of the top $p$ selected scene points, $\beta_{avg,r}$ is the average brightness of the scene reflectance, and $\beta_{o,avg,r}$ is the average brightness of the object reflectance [S1].
+
+**Parameters:**
+*   $p$: Integer count of top-ranked pairs to select. Typical value not given in the sources [S1].
+*   $\beta_{avg,r}$: Average brightness of scene reflectance [S1].
+*   $\beta_{o,avg,r}$: Average brightness of object reflectance [S1].
+
+**Edge Cases and Pitfalls:**
+*   Normal similarity only results in global shading, which is too broad and noisy [S1].
+*   Distance only fails to align with physical interpretations of lighting [S1].
+*   Maximum shading generates implausible results [S1].
+*   Naive composition without lighting consistency leads to unrealistic results due to varying illumination [S1].
+*   Direct composition can lead to missing areas of the object in rendered images [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -51,13 +63,17 @@ def shading_replacement(object_points, scene_points, p, beta_avg_r, beta_o_avg_r
     for obj in object_points:
         candidates = []
         for scene in scene_points:
-            # Normal similarity: dot product of normalized normals
+            # Normalize normals
             n_obj = [x / math.sqrt(sum(x**2 for x in obj['normal'])) for x in obj['normal']]
             n_scene = [x / math.sqrt(sum(x**2 for x in scene['normal'])) for x in scene['normal']]
+            
+            # Normal similarity (dot product)
             normal_sim = sum(a * b for a, b in zip(n_obj, n_scene))
 
-            # Distance score: inverse distance to favor closer points
+            # Euclidean distance
             dist = math.sqrt(sum((a - b)**2 for a, b in zip(obj['pos'], scene['pos'])))
+            
+            # Distance score (inverse distance)
             distance_score = 1.0 / (dist + epsilon)
 
             # Score is the product of normal similarity and distance score
@@ -84,28 +100,16 @@ def shading_replacement(object_points, scene_points, p, beta_avg_r, beta_o_avg_r
     return updated_shadings
 ```
 
-**Parameters:**
-*   $p$: Integer count of top-ranked pairs to select. Typical value not given in the sources [S1].
-*   $\beta_{avg,r}$: Average brightness of scene reflectance [S1].
-*   $\beta_{o,avg,r}$: Average brightness of object reflectance [S1].
-
-**Edge Cases and Pitfalls:**
-*   Normal similarity only results in global shading, which is too broad and noisy [S1].
-*   Distance only fails to align with physical interpretations of lighting [S1].
-*   Maximum shading generates implausible results [S1].
-*   Naive composition without lighting consistency leads to unrealistic results due to varying illumination [S1].
-*   Direct composition can lead to missing areas of the object in rendered images [S1].
-
 ## Operating characteristics
-*   **Time Complexity:** Not explicitly given in the sources. Depends on the number of object points, scene points, and the efficiency of finding similar normals and distances [S1].
-*   **Memory Complexity:** Not explicitly given in the sources. Requires storing scene points and their shading values [S1].
+*   **Time Complexity:** Not given in the sources. Depends on the number of object points, scene points, and the efficiency of finding similar normals and distances.
+*   **Memory Complexity:** Not given in the sources. Requires storing scene points and their shading values.
 *   **Strengths:** Avoids inferring scene illumination; handles lighting variations between object and scene; produces plausible shading by averaging; works well for Lambertian scenes [S1].
 *   **Limitations:** Relies on the assumption that points with similar normals have similar shading (Lambertian assumption); requires scene points to be available; performance depends on the density of scene points [S1].
 *   **When to use:** When inserting objects into NeRF scenes and lighting consistency is crucial, but explicit light estimation is difficult or unavailable [S1].
 *   **When not to use:** For non-Lambertian scenes where normal-shading correlation is weak; when high-frequency lighting details are critical and scene point density is low [S1].
 
 ## Background
-Originated in the paper "Relighting Scenes With Object Insertions in Neural Radiance Fields" [S1]. The method addresses the challenge of integrating objects into neural radiance field scenes with consistent lighting. It builds on the observation that for Lambertian scenes, surface normals are correlated with shading. The method is part of a larger pipeline that includes hybrid parametric lighting models (Spherical Harmonics and Spherical Gaussians) for scene representation [S1].
+Originated in the paper "Relighting Scenes With Object Insertions in Neural Radiance Fields" [S1]. The method addresses the challenge of integrating objects into neural radiance field scenes with consistent lighting [S1]. It builds on the observation that for Lambertian scenes, surface normals are correlated with shading [S1]. The method is part of a larger pipeline that includes hybrid parametric lighting models (Spherical Harmonics and Spherical Gaussians) for scene representation [S1].
 
 ## Sources
 [S1] Relighting Scenes With Object Insertions in Neural Radiance Fields, https://doi.org/10.1109/TCSVT.2025.3535599, fetched 2026-10-29

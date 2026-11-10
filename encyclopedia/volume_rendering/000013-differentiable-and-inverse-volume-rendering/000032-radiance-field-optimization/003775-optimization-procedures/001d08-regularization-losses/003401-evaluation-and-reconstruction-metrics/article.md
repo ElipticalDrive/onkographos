@@ -2,7 +2,7 @@
 
 
 ## Overview
-This family comprises metrics used to quantitatively evaluate the quality of volume rendering reconstructions, focusing on temporal stability, geometric consistency across views, and fidelity to reference data. Unlike standard image quality metrics (e.g., PSNR, SSIM) that evaluate individual frames in isolation, these metrics specifically target artifacts inherent to inverse volume rendering, such as temporal flickering, view-direction inconsistency, and geometric leakage. They set themselves apart by operating on error fields, warped view pairs, or specific geometric regions (e.g., near-plane foregrounds) rather than raw pixel intensities alone.
+This family comprises metrics used to evaluate the quality of volume rendering and radiance field reconstructions, distinguishing between perceptual fidelity, geometric accuracy, and temporal stability. Unlike sibling regularization losses which guide optimization, these metrics assess the final output or intermediate states against ground truth or consistency constraints. The Temporal Instability (TI) metric [1921-temporal-instability-metric.md] quantifies frame-to-frame error variance to detect flickering; the Inverse Mean Residual Color (IMRC) metric [10556-inverse-mean-residual-color-imrc-metric.md] evaluates geometric quality via transmittance-weighted color residuals without requiring ground-truth geometry; and the Across View-direction Inconsistency (AVI) metric [11106-across-view-direction-inconsistency-avi-metric.md] measures spatial coherence by comparing adjacent views warped via optical flow.
 
 ## Shared principles
 All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps [44-radiance-field-optimization.md]. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses) [44-radiance-field-optimization.md].
@@ -25,74 +25,33 @@ Differentiation strategies fall into three main categories [44-radiance-field-op
 ### [Temporal Instability Metric](1921-temporal-instability-metric.md)
 The Temporal Instability (TI) metric quantifies the temporal coherence of a volume rendering or novel view synthesis method by measuring the frame-to-frame variation in reconstruction error. It serves as a diagnostic for visual flickering artifacts, which are often imperceptible in static per-frame metrics like RMSE or PSNR. Unlike the feature-space Flicker metric, which compares temporal changes in feature representations, the TI metric operates directly in the froxel (voxel) space, measuring the variance of the error signal over time. It is distinct from structural similarity metrics as it focuses on signal stability rather than perceptual similarity.
 
+### [Inverse Mean Residual Color (IMRC) Metric](10556-inverse-mean-residual-color-imrc-metric.md)
+The Inverse Mean Residual Color (IMRC) metric evaluates the geometric quality of a radiance field without requiring ground-truth geometry, by measuring the transmittance-density-weighted residual color in decibels. Unlike PSNR, which assesses overall image quality, or Chamfer Distance (CD), which requires ground-truth point clouds and suffers from information loss by considering only a single iso-surface, IMRC evaluates the entire density field and is more consistent with human user rankings for geometry.
+
 ### [Across View-direction Inconsistency (AVI) Metric](11106-across-view-direction-inconsistency-avi-metric.md)
 The Across View-direction Inconsistency (AVI) metric quantifies the degree of geometrical inconsistency between every pair of test frames corresponding to adjacent viewing directions in a rendered sequence. It is designed to evaluate the temporal and spatial coherence of volume rendering methods, particularly in the context of super-resolution, by measuring how well adjacent views align when warped to one another. Unlike standard image quality metrics such as PSNR or SSIM which evaluate individual frames in isolation, AVI explicitly penalizes artifacts like ghosting and jitter that arise from inconsistent geometry across the view space.
 
 ### Leak Metric
-**Definition:** Measures the fraction of a method's near-plane foreground energy that incorrectly falls on the culled side where the reference is background. It combines proxy reconstruction error, renderer mismatch, soft tails, and overshooting culls [S1, unofficial].
-
-**Step:**
-1. Compute method foreground mask $F(R)$ using $\theta_{fg} = 0.04$.
-2. Define near-plane region $N$ as pixels in $F(R)$ with $|s| \leq 60$.
-3. Define leak region $L$ as pixels in $N$ with $s > 2$ that are not in reference foreground $F(G)$.
-4. Sum $\max_c R_c(\mathbf{x})$ over $L$ and $N$ across all grazing views, then take ratio [S1, unofficial].
-
-**Formula:**
-$N = F(R) \cap \{|s| \leq 60\}$, $L = N \cap \{s > 2\} \setminus F(G)$.
-$$
-\text{Leak} = \frac{\sum_{\mathbf{x} \in \mathcal{L}} \max_{\mathbf{x}} R_c(\mathbf{x})}{\sum_{\mathbf{x} \in \mathcal{N}} \max_{\mathbf{x}} R_c(\mathbf{x})}
-$$
-[S1, unofficial]
-
-**Parameter:**
-Foreground threshold $\theta_{fg} = 0.04$. Cut-edge margin $\delta = 2$ (for $s > 2$). Near-plane half-width $w = 60$ (for $|s| \leq 60$) [S1, unofficial].
-
-**Pitfall:**
-Averaging per-view ratios on thin grazing bands causes numerical instability. Pooling sums across all views before taking the ratio stabilizes the metric [S1, unofficial].
+- **Definition:** Measures the fraction of a method's near-plane foreground energy that incorrectly falls on the culled side where the reference is background. Combines proxy reconstruction error, renderer mismatch, soft tails, and overshooting culls [S1, unofficial].
+- **Steps:** 1. Compute method foreground mask $F(R)$ using $\theta_{fg} = 0.04$. 2. Define near-plane region $N$ as pixels in $F(R)$ with $|s| \leq 60$. 3. Define leak region $L$ as pixels in $N$ with $s > 2$ that are not in reference foreground $F(G)$. 4. Sum $\max_c R_c(\mathbf{x})$ over $L$ and $N$ across all grazing views, then take ratio [S1, unofficial].
+- **Formula:** $N = F(R) \cap \{|s| \leq 60\}$, $L = N \cap \{s > 2\} \setminus F(G)$. $\text{Leak} = \frac{\sum_{\mathbf{x} \in \mathcal{L}} \max_{\mathbf{x}} R_c(\mathbf{x})}{\sum_{\mathbf{x} \in \mathcal{N}} \max_{\mathbf{x}} R_c(\mathbf{x})}$ [S1, unofficial].
+- **Parameters:** Foreground threshold $\theta_{fg} = 0.04$. Cut-edge margin $\delta = 2$ (for $s > 2$). Near-plane half-width $w = 60$ (for $|s| \leq 60$) [S1, unofficial].
+- **Pitfalls:** Averaging per-view ratios on thin grazing bands causes numerical instability. Pooling sums across all views before taking the ratio stabilizes the metric [S1, unofficial].
 
 ### Band Fidelity Metric (Sb)
-**Definition:** A fidelity metric measuring the structural similarity between a method's render and a reference render over the exposed cut face (reference foreground) [S1, unofficial].
-
-**Step:**
-1. Compute scalar luminance $Y(x) = \frac{1}{3} \sum_c I_c(x) \in [0, 1]$ at each pixel $x$.
-2. Compute foreground mask $F(I) = \{x : \max_c I_c(x) > \theta_{fg}\}$ with $\theta_{fg} = 0.04$.
-3. Compute SSIM between method render and reference restricted to $F(G)$.
-4. Average the SSIM values across all perpendicular views of all planes in the evaluated set [S1, unofficial].
-
-**Parameter:**
-Foreground threshold $\theta_{fg} = 0.04$. Band $\mathcal{B}$ for $S_b$ is the reference foreground $F(G)$ [S1, unofficial].
-
-**Pitfall:**
-Band PSNR is omitted from main tables because operator differences are only hundredths of a decibel and leakage can offset small brightness bias [S1, unofficial].
+- **Definition:** A fidelity metric measuring the structural similarity between a method's render and a reference render over the exposed cut face (reference foreground) [S1, unofficial].
+- **Steps:** Compute scalar luminance $Y(x) = \frac{1}{3} \sum_c I_c(x) \in [0, 1]$ at each pixel $x$. Compute foreground mask $F(I) = \{x : \max_c I_c(x) > \theta_{fg}\}$ with $\theta_{fg} = 0.04$. Compute SSIM between method render and reference restricted to $F(G)$. Average the SSIM values across all perpendicular views of all planes in the evaluated set [S1, unofficial].
+- **Parameters:** Foreground threshold $\theta_{fg} = 0.04$. Band $\mathcal{B}$ for $S_b$ is the reference foreground $F(G)$ [S1, unofficial].
+- **Pitfalls:** Band PSNR is omitted from main tables because operator differences are only hundredths of a decibel and leakage can offset small brightness bias [S1, unofficial].
 
 ### Model Validation using RMSE and EMD
-**Definition:** A validation procedure assessing model generalization on a hold-out set of 2,000 volume-rendered images not used for training [S2]. EMD (Earth Mover’s Distance) is used to measure higher-level similarity between color histograms, mitigating misalignment in histogram space [S2].
-
-**Parameter:**
-RMSE (Root Mean Squared Error) is used as the primary evaluation metric for image similarity [S2]. EMD Cost Normalization: The cost between histogram bins is normalized such that the maximum cost is 1 [S2].
-
-**Number:**
-Training Time: 16.5 hours. Rendering Time: 0.007 seconds per image. TF Exploration Time: 0.06 seconds. TF Sensitivity Time: 0.49 seconds [S2].
-
-### Inverse Mean Residual Color (IMRC) Metric
-**Definition:** A metric to evaluate geometry quality by measuring the transmittance-density-weighted residual color in dB. Higher IMRC indicates better geometry [S3].
-
-**Formula:**
-$$
-IMRC = -10 \log_{10} \frac{\sum_{v \in V} \sum_k T_{v,k} (1 - \exp(-F_v \cdot \delta_v)) L^2_{\tilde{c}_{v,k}}}{\sum_{v \in V} \sum_k T_{v,k} (1 - \exp(-F_v \cdot \delta_v))}
-$$
-where $L_{\tilde{c}_{v,k}}$ is the residual color from Eq. (10) and $\delta_v$ is the half-width of a voxel [S3].
-
-**Parameter:**
-$\delta_v$: Half-width of a voxel, used as the step size in the density integration [S3].
-
-**Comparison:**
-IMRC vs PSNR: PSNR measures image quality; IMRC measures geometry quality by evaluating how well the geometry recovers the color field [S3].
+- **Definition:** A validation procedure assessing model generalization on a hold-out set of 2,000 volume-rendered images not used for training [S2]. EMD (Earth Mover’s Distance) is used to measure higher-level similarity between color histograms, mitigating misalignment in histogram space [S2].
+- **Parameters:** RMSE (Root Mean Squared Error) is used as the primary evaluation metric for image similarity [S2]. EMD Cost Normalization: The cost between histogram bins is normalized such that the maximum cost is 1 [S2].
+- **Numbers:** Training Time: 16.5 hours. Rendering Time: 0.007 seconds per image. TF Exploration Time: 0.06 seconds. TF Sensitivity Time: 0.49 seconds [S2].
 
 ## Background
-The evaluation of volume rendering has evolved from simple pixel-wise error metrics to more sophisticated measures that account for temporal coherence, geometric consistency, and specific artifacts like leakage and flickering. The Temporal Instability and AVI metrics were introduced to address the limitations of static metrics in dynamic or multi-view scenarios [S1, unofficial]. The Leak and Band Fidelity metrics were developed to evaluate the precision of half-space clipping methods in medical volume Gaussian Splatting, focusing on the fidelity of cut faces and the absence of artifacts near clipping planes [S1, unofficial]. The use of RMSE and EMD for model validation in generative volume rendering models highlights the need for both pixel-level and histogram-level similarity assessments [S2]. The IMRC metric was proposed to decouple geometry quality from radiance estimation, providing a direct measure of how well a reconstructed geometry supports the observed color field [S3].
+The evaluation of volume rendering has evolved from simple pixel-wise error metrics to more sophisticated measures that account for geometric consistency, temporal stability, and perceptual fidelity. Early works focused on RMSE and PSNR [S2]. More recent approaches, particularly in the context of Gaussian Splatting and differentiable rendering, have introduced metrics like TI [1921-temporal-instability-metric.md], IMRC [10556-inverse-mean-residual-color-imrc-metric.md], and AVI [11106-across-view-direction-inconsistency-avi-metric.md] to address specific artifacts like flickering and view-inconsistency [S1, unofficial]. The Leak and Band Fidelity metrics [S1, unofficial] were developed to evaluate half-space clipping methods in medical volume rendering, focusing on cut-face accuracy.
 
 ## Sources
 [S1] XClipGS: Exact Half-Space Clipping for Medical Volume Gaussian Splatting, https://doi.org/10.48550/arxiv.2608.07760, fetched 2026-10-26 (unofficial)
 [S2] A Generative Model for Volume Rendering, https://doi.org/10.1109/tvcg.2018.2816059, fetched 2026-10-26
-[S3] Reducing Shape-Radiance Ambiguity in Radiance Fields with a Closed-Form Color Estimation Method, https://doi.org/10.52202/075280-2570, fetched 2026-10-26

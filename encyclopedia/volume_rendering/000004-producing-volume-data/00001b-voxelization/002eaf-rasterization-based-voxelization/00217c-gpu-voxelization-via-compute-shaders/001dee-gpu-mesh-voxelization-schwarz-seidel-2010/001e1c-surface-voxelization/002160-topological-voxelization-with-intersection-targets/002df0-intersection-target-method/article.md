@@ -7,14 +7,14 @@ The Intersection Target Method is a topological voxelization strategy for effect
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A parameterized continuous curve $c(t) = (f_x(t), f_y(t))$ for $t \in [0, 1]$.
-- Output: A set of voxels (pixels in 2D) $S_d$ such that the voxelization is 8-connected and 4-separable.
+- Input: A parameterized continuous curve $c(t) = (f_x(t), f_y(t))$ for $t \in [0, 1]$ [S1, unofficial].
+- Output: A set of voxels (pixels in 2D) $S_d$ such that the voxelization is 8-connected and 4-separable [S1, unofficial].
 
 **Data Structures:**
-The intersection target is defined within each pixel grid cell [S1, unofficial]. For the standard 8-connected variant, the target consists of two line segments: a horizontal segment centered at the pixel center extending to the midpoints of the left and right edges, and a vertical segment centered at the pixel center extending to the midpoints of the top and bottom edges [S1, unofficial]. This forms a "crosshairs" shape. An alternative is a "diamond" target connecting the midpoints of the four edges, corresponding to the "diamond exit" rule in OpenGL/DirectX [S1, unofficial].
+The intersection target is defined within each pixel grid cell [S1, unofficial]. For the standard 8-connected variant, the target consists of two line segments: a horizontal segment centered at the pixel center extending to the midpoints of the left and right edges, and a vertical segment centered at the pixel center extending to the midpoints of the top and bottom edges [S1, unofficial]. This forms a "crosshairs" shape [S1, unofficial]. An alternative is a "diamond" target connecting the midpoints of the four edges, corresponding to the "diamond exit" rule in OpenGL/DirectX [S1, unofficial].
 
 **Steps:**
-1. Iterate over each pixel $V$ in the grid covering the input bounds.
+1. Iterate over each pixel $V$ in the grid covering the input bounds [S1, unofficial].
 2. Define the intersection target $T_V$ for $V$ (crosshairs or diamond) [S1, unofficial].
 3. Test if the input curve $c(t)$ intersects any part of $T_V$ [S1, unofficial].
 4. If an intersection exists, add $V$ to the output set $S_d$ [S1, unofficial].
@@ -41,17 +41,18 @@ def intersection_target_voxelization(curve_fn, grid_bounds):
     """
     voxels = set()
     x_min, y_min, x_max, y_max = grid_bounds
-    start_x, end_x = int(math.floor(x_min)), int(math.ceil(x_max))
-    start_y, end_y = int(math.floor(y_min)), int(math.ceil(y_max))
+    start_x, end_x = int(math.floor(x_min)), int(math.ceil(x_max)) + 1
+    start_y, end_y = int(math.floor(y_min)), int(math.ceil(y_max)) + 1
     
     for x in range(start_x, end_x):
         for y in range(start_y, end_y):
             cx, cy = x + 0.5, y + 0.5
-            
-            # Check intersection with horizontal segment: y = cy, x in [x, x+1]
-            t_h = solve_fy_eq_target(curve_fn, cy, 0.0, 1.0)
             intersects = False
-            for t in t_h:
+            
+            # Check horizontal segment: f_y(t) = cy, x in [x, x+1]
+            # [G] The sources do not specify the root-finding algorithm.
+            # A standard bisection solver is used here.
+            for t in _bisect(lambda t: curve_fn(t)[1] - cy, 0.0, 1.0):
                 px, _ = curve_fn(t)
                 if x <= px <= x + 1:
                     intersects = True
@@ -60,9 +61,9 @@ def intersection_target_voxelization(curve_fn, grid_bounds):
                 voxels.add((x, y))
                 continue
                 
-            # Check intersection with vertical segment: x = cx, y in [y, y+1]
-            t_v = solve_fx_eq_target(curve_fn, x, 0.0, 1.0)
-            for t in t_v:
+            # Check vertical segment: f_x(t) = cx, y in [y, y+1]
+            # [G] Standard bisection on f_x(t) - cx = 0.
+            for t in _bisect(lambda t: curve_fn(t)[0] - cx, 0.0, 1.0):
                 _, py = curve_fn(t)
                 if y <= py <= y + 1:
                     intersects = True
@@ -72,16 +73,23 @@ def intersection_target_voxelization(curve_fn, grid_bounds):
                 
     return voxels
 
-def solve_fy_eq_target(curve_fn, target_y, t_min, t_max):
-    # [G] The sources do not specify the exact root-finding algorithm.
-    # In practice, this solves f_y(t) = target_y for t in [t_min, t_max]
-    # using analytical inversion for polynomials or bisection/Newton's method.
-    return []
-
-def solve_fx_eq_target(curve_fn, target_x, t_min, t_max):
-    # [G] The sources do not specify the exact root-finding algorithm.
-    # Solves f_x(t) = target_x for t in [t_min, t_max].
-    return []
+def _bisect(func, a, b, tol=1e-6, max_iter=100):
+    """[G] Standard bisection root finder for a continuous function."""
+    roots = []
+    fa, fb = func(a), func(b)
+    if fa * fb > 0:
+        return roots
+    for _ in range(max_iter):
+        mid = (a + b) / 2
+        fm = func(mid)
+        if abs(fm) < tol or (b - a) / 2 < tol:
+            roots.append(mid)
+            break
+        if fa * fm < 0:
+            b, fb = mid, fm
+        else:
+            a, fa = mid, fm
+    return roots
 ```
 
 **Edge Cases:**
@@ -94,11 +102,11 @@ def solve_fx_eq_target(curve_fn, target_x, t_min, t_max):
 A variant that guarantees 4-connectivity (adjacent voxels share an edge) and 8-separability [S1, unofficial]. It uses a cross-diagonal intersection target consisting of two curves connecting opposite corners of the pixel (e.g., top-left to bottom-right, and top-right to bottom-left), meeting at the pixel center [S1, unofficial]. This geometry ensures that any continuous path exiting the pixel must pass through the targets of the 4-neighbors, enforcing 4-connectivity [S1, unofficial]. An alternative is a square target pushed to the pixel boundary, but the cross-diagonal is preferred for thinness [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
 - **Strengths:** Guarantees topological connectivity (8-connected/4-separable) for 1D input [S1, unofficial]. Simple intersection targets (crosshairs or diamond) are easy to implement in shaders [S1, unofficial].
-- **Limitations:** Only suitable for effectively 1D input [S1, unofficial]. The diamond variant may include unnecessary voxels for aesthetic reasons but reduces connectivity guarantees slightly compared to the crosshairs variant in specific corner cases [S1, unofficial].
-- **When to use:** Not given in the sources.
+- **Limitations:** Only suitable for effectively 1D input [S1, unofficial]. The diamond variant is more eager to include pixels than the crosshairs variant, which may yield a more aesthetically pleasing result at the cost of producing unnecessary voxels [S1, unofficial].
+- **When to use:** Not given in the sources [S1, unofficial].
 
 ## Background
 The Intersection Target Method was introduced by Laine et al. in "A Topological Approach to Voxelization" (2013) [S1, unofficial]. It builds on the concept of topological voxelization where connectivity is enforced by the geometry of the intersection targets rather than geometric proximity [S1, unofficial]. The method leverages the properties of 8-connectivity and 4-separability, which are equivalent in 2D grid topology [S1, unofficial].

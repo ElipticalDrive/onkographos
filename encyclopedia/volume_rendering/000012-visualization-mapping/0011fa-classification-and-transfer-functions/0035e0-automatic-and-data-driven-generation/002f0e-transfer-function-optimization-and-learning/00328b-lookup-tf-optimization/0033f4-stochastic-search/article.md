@@ -1,0 +1,82 @@
+# Stochastic Search
+
+Also called: He et al. method, Stochastic Search for TFs, Stochastic Volume Exploration, Stochastic specification
+
+## Overview
+Stochastic Search is an interactive, image-guided technique for optimizing 1D lookup transfer functions (TFs) by iteratively generating candidate TFs, rendering them, and using user selection to guide subsequent generations [S2, unofficial]. It addresses the difficulty of manually specifying TFs by allowing users to explore a space of visualizations and refine them through selection, serving as a refinement and combination tool within a broader framework [S1]. It is distinguished from purely manual design by its automated candidate generation and from evolutionary algorithms by its direct reliance on user selection of rendered thumbnails rather than fitness functions [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volumetric dataset, an initial population of candidate transfer functions (or a starting TF), and user selections from rendered images.
+*   **Output:** A final transfer function that produces a satisfactory visualization.
+
+**Data Structures:**
+*   **Transfer Function (TF):** A 1D lookup table mapping scalar values to color and opacity. The specific implementation in the source context uses a standard 1D TF structure, though exact bit-packing or size is not detailed beyond the general context of 1D TFs [S1][S2, unofficial].
+*   **Candidate Set:** A collection of TF specifications generated stochastically.
+
+**Steps:**
+1.  **Generate Candidates:** Create a stochastic set of candidate TF specifications. The source does not specify the exact probability distribution or mutation/crossover operators used for this stochastic generation [S2, unofficial].
+2.  **Render:** Apply each candidate TF to the volume dataset to produce rendered images [S2, unofficial].
+3.  **Present:** Display the resulting rendered images to the user, typically as thumbnails [S2, unofficial].
+4.  **Select:** The user selects images that approximate the desired visual profile [S2, unofficial].
+5.  **Refine:** Generate a new stochastic population of candidate specifications based on the user's selections. The source implies the new population is derived from the selected parents, but the exact mechanism (e.g., crossover, mutation rates) is not specified [S2, unofficial].
+6.  **Iterate:** Repeat steps 2-5 until a satisfactory visualization is found [S2, unofficial].
+
+**Parameters:**
+*   **Interaction Frequency:** In the study by He et al., users applied stochastic search an average of 3.07 times per session [S1].
+*   **Population Size:** Not given in the sources.
+*   **Stochastic Distribution:** Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def stochastic_search(volume, initial_tf, user_interface):
+    """
+    Iteratively generates and refines transfer functions based on user selection.
+    """
+    # Initialize population with a stochastic set of candidates
+    # Note: The exact method for generating the initial stochastic set is not specified [S2, unofficial]
+    current_population = generate_stochastic_candidates(volume, initial_tf)
+    
+    while not user_interface.is_satisfied():
+        # Render all candidates in the current population
+        rendered_images = []
+        for tf in current_population:
+            image = render_volume(volume, tf)
+            rendered_images.append(image)
+        
+        # Present images to the user
+        selected_indices = user_interface.select_from_thumbnails(rendered_images)
+        
+        # Generate new population based on selections
+        # Note: The exact algorithm for deriving new candidates from selected parents is not specified [S2, unofficial]
+        current_population = generate_stochastic_candidates(volume, selected_indices, current_population)
+        
+    # Return the TF associated with the final selected image
+    final_tf = current_population[user_interface.get_final_selection()]
+    return final_tf
+```
+
+## Subtopics
+
+### Design Galleries
+A generalization of Stochastic Search that includes scene information (lighting, camera position) and organizes thumbnails by similarity. It builds on the core idea of image-guided exploration [S2, unofficial].
+
+### Manual Design
+The alternative approach where users directly edit TF parameters. Stochastic Search is often used in conjunction with manual design for final refinement [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Dependent on the number of candidates rendered per iteration and the number of iterations. The source notes the framework is "fast, due to real-time rendering and interaction" [S1].
+*   **Memory Complexity:** Proportional to the number of candidates stored and rendered simultaneously. Not given in the sources.
+*   **Strengths:** Useful for combining TFs that emphasize different structures, exploring new possibilities, and refining TFs [S1]. It is considered simple to use and fast [S1]. 73% of subjects cited it among the most useful techniques [S1].
+*   **Limitations:** TF design is still a hard task, and the method relies on user interaction, which can be subjective and time-consuming if not guided well [S1].
+*   **When to use:** When the user has a general idea of the desired structures but needs help exploring the parameter space or combining different visual emphases [S1].
+*   **When not to use:** When fully automatic, unsupervised optimization is required, or when the user prefers direct parameter manipulation without intermediate rendering steps.
+
+## Background
+Stochastic Search was introduced by He et al. in 1996 as one of the earliest image-directed approaches to volume visualization [S2, unofficial]. It was designed to help users explore volume datasets by presenting a gallery of rendered images generated from stochastically specified transfer functions. The method was part of a broader framework that also included boundary emphasis and manual design tools [S1]. The approach laid the groundwork for later techniques like Design Galleries [S2, unofficial].
+
+## Sources
+[S1] Volume visualization and exploration through flexible transfer function design, https://doi.org/10.1016/j.cag.2008.04.004, fetched 2026-10-27
+[S2] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)

@@ -1,140 +1,76 @@
 # Velocity Voxelization
 
+Also called: Boundary Velocity Voxelization, Obstacle Velocity Voxelization
 
 ## Overview
-Velocity Voxelization computes the instantaneous velocity of an obstacle at each grid cell containing part of the obstacle's boundary, producing a velocity field for fluid simulation [S1, unofficial]. It differs from standard occupancy voxelization by explicitly interpolating vertex velocities across the intersection segments of mesh triangles and grid slices, outputting thickened quads to populate the velocity attributes of the volume [S1, unofficial]. It is best suited for watertight closed meshes to ensure consistent front/back face handling [S1, unofficial].
+Velocity Voxelization computes the instantaneous velocity of an obstacle at each grid cell containing part of the obstacle's boundary, producing a volumetric velocity field for fluid simulation [S1, unofficial]. It differs from standard density voxelization by explicitly interpolating vertex velocities across triangle-slice intersections and rasterizing "thickened" segments (quads) to populate the velocity field, rather than merely counting coverage or depth [S1, unofficial]. It is best suited for watertight closed meshes where front and back faces are distinct [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- A watertight mesh defined by vertices $\mathbf{p}$ [S1, unofficial].
-- Vertex positions from the previous frame $\mathbf{p}^{n-1}$ and current frame $\mathbf{p}^n$ stored in a vertex buffer [S1, unofficial].
-- Time step $\Delta t$ [S1, unofficial].
-- A 3D grid defined by origin, resolution, and voxel size [S1, unofficial].
-- Orthographic camera parameters aligned with the slicing axis [S1, unofficial].
-
-**Outputs:**
-- A 3D texture (or voxel grid) where boundary cells contain interpolated velocity vectors $\mathbf{v}$ [S1, unofficial].
+**Inputs and Outputs:**
+- **Input:** A watertight triangle mesh with vertex positions from the previous frame ($\mathbf{p}^{n-1}$) and current frame ($\mathbf{p}^n$), and a 3D grid domain with resolution $(N_x, N_y, N_z)$ and slice planes.
+- **Output:** A 3D texture (or volume buffer) where each cell stores a velocity vector $\mathbf{v}$ if it intersects the mesh boundary.
 
 **Data Structures:**
-- **Vertex Buffer:** Stores $\mathbf{p}^{n-1}$ and $\mathbf{p}^n$ for each vertex [S1, unofficial].
-- **3D Texture:** Stores velocity vectors at each grid index [S1, unofficial].
+- **Vertex Buffer:** Stores pairs of positions $(\mathbf{p}_i^{n-1}, \mathbf{p}_i^n)$ for each vertex $i$.
+- **3D Texture:** A volumetric buffer of size $N_x \times N_y \times N_z$, initialized to zero. Access is performed via rasterization into specific 2D slices.
+
+**Parameters:**
+- **Time Step ($\Delta t$):** The time difference between frames $n-1$ and $n$.
+- **Offset Distance ($w$):** Equal to the diagonal length of one texel in a slice of the 3D texture. $w = \sqrt{2} \cdot \text{texel\_size}$ if the slice is square, or generally the Euclidean distance across the texel dimensions in the slice plane.
+- **Offset Direction:** The projection of the triangle's normal $\mathbf{n}$ onto the slice plane.
 
 **Steps:**
+1. **Compute Per-Vertex Velocity:** For each vertex $i$, compute the instantaneous velocity $\mathbf{v}_i$ using the forward difference approximation:
+   $$ \mathbf{v}_i = \frac{\mathbf{p}_i^n - \mathbf{p}_i^{n-1}}{\Delta t} $$
+   This is typically done in a vertex shader or precomputed.
 
-1.  **Compute Per-Vertex Velocity:**
-    Calculate the instantaneous velocity $\mathbf{v}_i$ for each vertex $i$ using the forward difference approximation [S1, unofficial]:
-    $$ \mathbf{v}_i = \frac{\mathbf{p}_i^n - \mathbf{p}_i^{n-1}}{\Delta t} $$
+2. **Iterate Grid Slices:** For each slice $k$ of the 3D grid (along the chosen axis, e.g., $z$):
+   a. Set the camera's near plane to the slice's $z$-coordinate.
+   b. Render the mesh using a geometry shader that processes each triangle.
 
-2.  **Iterate Grid Slices:**
-    Render the mesh once for each slice of the grid to determine the intersection of each triangle with the current slice [S1, unofficial].
+3. **Geometry Shader Processing (GS_GEN_BOUNDARY_VELOCITY):**
+   For each input triangle with vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$ and corresponding velocities $\mathbf{u}_0, \mathbf{u}_1, \mathbf{u}_2$:
+   a. **Intersect Edges with Slice:** Intersect each of the three triangle edges with the current slice plane. An edge between $\mathbf{v}_a$ and $\mathbf{v}_b$ intersects the plane $z=z_k$ if $(\mathbf{v}_a.z - z_k)(\mathbf{v}_b.z - z_k) \le 0$.
+   b. **Determine Intersection Type:**
+      - If exactly two edges intersect the slice, the intersection is a segment. Let the intersection points be $\mathbf{p}_A$ and $\mathbf{p}_B$.
+      - If zero, one, or three edges intersect, the intersection is empty, a point, or a triangle (degenerate for velocity field purposes in this method). Output nothing.
+   c. **Interpolate Velocities:** For intersection points $\mathbf{p}_A$ and $\mathbf{p}_B$, compute their velocities $\mathbf{v}_A$ and $\mathbf{v}_B$ by linearly interpolating the vertex velocities along the respective triangle edges.
+   d. **Compute Offset Points:**
+      - Calculate the triangle normal $\mathbf{n} = (\mathbf{v}_1 - \mathbf{v}_0) \times (\mathbf{v}_2 - \mathbf{v}_0)$.
+      - Project $\mathbf{n}$ onto the slice plane to get the offset direction $\mathbf{d}$. If the slice is $xy$-plane, $\mathbf{d} = (n_x, n_y, 0)$. Normalize $\mathbf{d}$.
+      - Compute offset points: $\mathbf{p}_{A+} = \mathbf{p}_A + w \cdot \mathbf{d}$ and $\mathbf{p}_{B+} = \mathbf{p}_B + w \cdot \mathbf{d}$.
+   e. **Output Quad:** Emit a two-triangle strip (4 vertices) representing the thickened segment:
+      - Vertex 1: $\mathbf{p}_A$, Velocity $\mathbf{v}_A$
+      - Vertex 2: $\mathbf{p}_B$, Velocity $\mathbf{v}_B$
+      - Vertex 3: $\mathbf{p}_{A+}$, Velocity $\mathbf{v}_A$ (interpolated from $\mathbf{v}_A$ and $\mathbf{v}_{A+}$, but since $\mathbf{v}_{A+}$ is not defined, the velocity is constant across the width for simplicity, or interpolated from the segment's velocity gradient. The source states "assign them to the corresponding vertices of the quad", implying the end-point velocities are assigned to the end vertices, and the offset vertices inherit the nearest end-point velocity or are interpolated. Given the quad is thin, assigning $\mathbf{v}_A$ to $\mathbf{p}_A$ and $\mathbf{p}_{A+}$, and $\mathbf{v}_B$ to $\mathbf{p}_B$ and $\mathbf{p}_{B+}$ is the standard interpretation for "assign them to the corresponding vertices").
+      - Vertex 4: $\mathbf{p}_{B+}$, Velocity $\mathbf{v}_B$
+      *(Note: The source specifies "assign them to the corresponding vertices of the quad". The quad vertices correspond to the segment endpoints and their offsets. The velocity at the offset points is not explicitly defined by interpolation along the triangle, so it is assumed to be the same as the nearest segment endpoint or interpolated linearly across the quad width. The most robust implementation assigns $\mathbf{v}_A$ to $\mathbf{p}_A$ and $\mathbf{p}_{A+}$, and $\mathbf{v}_B$ to $\mathbf{p}_B$ and $\mathbf{p}_{B+}$.)*
 
-3.  **Compute Triangle-Slice Intersection:**
-    Intersect each triangle edge with the slice plane [S1, unofficial]. If exactly two edge-slice intersections are found, use them as end points for a segment [S1, unofficial].
+4. **Rasterization and Accumulation:**
+   - Rasterize the emitted triangles into the 2D slice of the 3D texture.
+   - Use additive blending to accumulate velocity values. If multiple triangles intersect the same cell, their velocities are summed.
+   - Alternatively, use a stencil buffer to mark cells, then write velocities only to marked cells.
 
-4.  **Interpolate Velocity at Segment Endpoints:**
-    Determine velocity values at each end point of the segment via interpolation along the triangle edges and assign them to the quad vertices [S1, unofficial].
-
-5.  **Generate Thickened Quad:**
-    Create a quad representing the segment thickened to cover the grid cells [S1, unofficial]. The offset distance $w$ is equal to the diagonal length of one texel in a slice of the 3D texture [S1, unofficial]. The offset direction is the projection of the triangle's normal onto the slice [S1, unofficial]. Generate the quad using a geometry shader that operates on mesh triangles, producing four vertices if the intersection is a segment and zero vertices otherwise [S1, unofficial]. Since geometry shaders cannot output quads, use a two-triangle strip [S1, unofficial].
-
-6.  **Rasterize Quad:**
-    When the quad is drawn, the assigned velocity values get interpolated across the grid cells as desired [S1, unofficial]. The algorithm can be implemented to work directly on the final texture using additive blending [S1, unofficial].
-
-**Pseudocode:**
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def velocity_voxelization(mesh, p_prev, p_curr, dt, grid_origin, grid_res, grid_voxel_size, slice_axis):
-    # 1. Compute per-vertex velocities
-    v_vertices = (p_curr - p_prev) / dt
-
-    # 2. Initialize velocity volume
-    vol = [[[vec3(0.0) for _ in range(grid_res[2])] for _ in range(grid_res[1])] for _ in range(grid_res[0])]
-
-    # 3. Determine slice planes
-    slice_positions = [grid_origin[slice_axis] + k * grid_voxel_size for k in range(grid_res[slice_axis])]
-
-    # 4. Offset vector magnitude (diagonal of one texel in slice plane)
-    w = grid_voxel_size * sqrt(2.0)
-
-    for z_idx, z_pos in enumerate(slice_positions):
-        for tri in mesh.triangles:
-            v0, v1, v2 = tri.vertices
-            sv0, sv1, sv2 = v_vertices[v0], v_vertices[v1], v_vertices[v2]
-
-            # Helper: intersect edge with slice plane
-            def intersect_edge(p_start, p_end, plane_z):
-                if abs(p_end[2] - p_start[2]) < 1e-8: return None, None
-                t = (plane_z - p_start[2]) / (p_end[2] - p_start[2])
-                if 0.0 <= t <= 1.0:
-                    return p_start + t * (p_end - p_start), t
-                return None, None
-
-            # 5. Compute triangle-slice intersection
-            pts = []
-            p_a, t_a = intersect_edge(v0, v1, z_pos)
-            if p_a is not None: pts.append((p_a, sv0, sv1, t_a))
-            p_b, t_b = intersect_edge(v1, v2, z_pos)
-            if p_b is not None: pts.append((p_b, sv1, sv2, t_b))
-            p_c, t_c = intersect_edge(v2, v0, z_pos)
-            if p_c is not None: pts.append((p_c, sv2, sv0, t_c))
-
-            if len(pts) != 2: continue
-
-            q1, sv_s1, sv_e1, t1 = pts[0]
-            q2, sv_s2, sv_e2, t2 = pts[1]
-
-            # 6. Interpolate velocity at segment endpoints
-            v1_val = sv_s1 + t1 * (sv_e1 - sv_s1)
-            v2_val = sv_s2 + t2 * (sv_e2 - sv_s2)
-
-            # 7. Compute offset direction: projection of triangle normal onto slice plane
-            tri_normal = normalize(cross(v1 - v0, v2 - v0))
-            slice_normal = vec3(0.0, 0.0, 1.0) if slice_axis == 2 else (vec3(0.0, 1.0, 0.0) if slice_axis == 1 else vec3(1.0, 0.0, 0.0))
-            offset_dir = normalize(tri_normal - dot(tri_normal, slice_normal) * slice_normal)
-            if length(offset_dir) < 1e-6:
-                # Degenerate: normal parallel to slice axis, use arbitrary perpendicular
-                offset_dir = normalize(cross(tri_normal, vec3(1.0, 0.0, 0.0) if abs(tri_normal[0]) < 0.9 else vec3(0.0, 1.0, 0.0)))
-
-            # 8. Generate quad vertices (two-triangle strip)
-            c1, c2 = q1 + w * offset_dir, q1 - w * offset_dir
-            c3, c4 = q2 + w * offset_dir, q2 - w * offset_dir
-
-            # 9. Rasterize quad into volume at z_idx using additive blending
-            rasterize_quad(c1, c2, c3, c4, v1_val, v2_val, vol, z_idx, grid_voxel_size)
-
-    return vol
-
-def rasterize_quad(c1, c2, c3, c4, v1, v2, vol, z_idx, voxel_size):
-    # Standard rasterization: iterate bounding box, compute barycentric coordinates,
-    # interpolate v1/v2 across the two-triangle strip, and add to volume [S1, unofficial].
-    min_pt = min(c1, c2, c3, c4)
-    max_pt = max(c1, c2, c3, c4)
-    for y in range(max(0, int(min_pt[1] / voxel_size)), min(len(vol[0]), int(max_pt[1] / voxel_size) + 1)):
-        for x in range(max(0, int(min_pt[0] / voxel_size)), min(len(vol[0][0]), int(max_pt[0] / voxel_size) + 1)):
-            # Bilinear interpolation across the quad
-            u = (x * voxel_size - c1[0]) / (c3[0] - c1[0])
-            v = (y * voxel_size - c1[1]) / (c3[1] - c1[1])
-            v_interp = v1 * (1 - u) * (1 - v) + v2 * u * (1 - v) + v1 * (1 - u) * v + v2 * u * v
-            vol[z_idx][y][x] += v_interp
-```
+**Edge Cases and Pitfalls:**
+- **Non-Watertight Meshes:** The method assumes front and back faces are distinct. Non-watertight meshes may produce incorrect velocity fields due to missing faces [S1, unofficial].
+- **Degenerate Intersections:** Triangles parallel to the slice or lying exactly on the slice plane may produce zero or infinite intersections. Robust intersection tests are required.
+- **Precision:** Floating-point precision in edge-slice intersection calculations can lead to gaps or overlaps in the velocity field.
+- **Offset Direction Ambiguity:** If the triangle normal is perpendicular to the slice plane, the projection is zero. In this case, the offset direction is undefined. A fallback (e.g., using the slice normal or a default direction) is needed [G].
 
 ## Subtopics
 
 ### [Geometry Shader for Velocity Voxelization](3083-geometry-shader-for-velocity-voxelization.md)
-Computes obstacle velocity at each grid cell containing part of the obstacle's boundary by projecting 3D triangle intersections onto 2D slice planes. It differs from standard voxelization by outputting a 1-voxel wide quadrilateral for each intersecting triangle edge, explicitly encoding the interpolated velocity vector at the intersection point. This allows the subsequent rasterization or accumulation step to directly populate velocity fields without post-processing interpolation.
+This method computes the obstacle velocity at each grid cell containing part of the obstacle's boundary by projecting 3D triangle intersections onto 2D slice planes. It differs from standard voxelization by outputting a 1-voxel wide quadrilateral for each intersecting triangle edge, explicitly encoding the interpolated velocity vector at the intersection point. This allows the subsequent rasterization or accumulation step to directly populate velocity fields without post-processing interpolation.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of triangles and $S$ is the number of slices (grid resolution along the slicing axis). Each triangle is tested against each slice plane [S1, unofficial].
-- **Memory Complexity:** $O(V)$, where $V$ is the number of voxels in the 3D grid, to store the velocity field [S1, unofficial].
-- **Strengths:** Directly computes boundary velocities; efficient on GPU using geometry shaders; handles moving meshes naturally via vertex buffer updates [S1, unofficial].
-- **Limitations:** Requires watertight meshes for consistent results; performance degrades with high grid resolution; sensitive to degenerate triangles or normals parallel to the slicing axis [S1, unofficial].
-- **When to use:** Fluid simulation where boundary velocity is required; real-time applications where GPU acceleration is available [S1, unofficial].
-- **When not to use:** Non-watertight meshes; static scenes where velocity is zero; offline rendering where higher accuracy methods might be preferred [S1, unofficial].
+- **Time Complexity:** $O(N_{tri} \cdot N_{slices})$, where $N_{tri}$ is the number of triangles and $N_{slices}$ is the number of grid slices. Each triangle is processed once per slice.
+- **Memory Complexity:** $O(N_x \cdot N_y \cdot N_z)$ for the 3D texture.
+- **Performance:** Highly parallelizable on GPU due to geometry shader and rasterization. Performance depends on mesh complexity and grid resolution.
+- **Strengths:** Directly computes velocity field; handles moving obstacles efficiently; suitable for real-time simulation.
+- **Limitations:** Requires watertight meshes; sensitive to mesh quality and slice alignment; additive blending may require normalization if multiple layers contribute.
 
 ## Background
-Originated in the context of real-time 3D fluid simulation, specifically for coupling solid obstacle motion with fluid dynamics. Described in "Real-Time Simulation and Rendering of 3D Fluids" [S1, unofficial]. The method leverages GPU geometry shaders to efficiently generate velocity data for boundary voxels.
+Velocity Voxelization was introduced in the context of real-time 3D fluid simulation, specifically for coupling rigid body dynamics with fluid solvers. It is described in "Real-Time Simulation and Rendering of 3D Fluids" from GPU Gems 3 [S1, unofficial]. The method leverages GPU geometry shaders to efficiently compute boundary velocities for voxel-based fluid solvers.
 
 ## Sources
 [S1] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)

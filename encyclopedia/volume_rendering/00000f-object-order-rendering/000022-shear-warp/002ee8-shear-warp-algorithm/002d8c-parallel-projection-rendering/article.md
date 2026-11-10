@@ -3,143 +3,160 @@
 Also called: Parallel Projection Rendering 1
 
 ## Overview
-Parallel Projection Rendering is an object-order volume rendering algorithm optimized for parallel viewing transformations, utilizing the shear-warp factorization to align voxel scanlines with pixel scanlines [S2]. It solves the performance bottleneck of traditional volume rendering by exploiting spatial coherence in both the volume data and the intermediate image through run-length encoding, allowing it to skip transparent voxels and occluded pixels efficiently [S2]. Unlike general shear-warp implementations that may suffer performance degradation when the major viewing axis changes, this method maintains consistent performance provided the encoded data fits in memory [S2].
+Parallel Projection Rendering is an object-order volume rendering algorithm optimized for parallel projections, utilizing the shear-warp factorization to exploit spatial coherence [S2]. It solves the performance bottleneck of traditional ray-casting by traversing the volume and intermediate image in synchrony, using run-length encoding to skip transparent voxels and occluded pixels [S2]. Unlike general shear-warp implementations, it assumes a static opacity transfer function and leverages the property that parallel projections allow a unity scale factor, creating a one-to-one mapping between sheared voxel scanlines and intermediate image pixels [S2].
 
 ## How it works
-The algorithm assumes a static opacity transfer function and a parallel projection viewing transformation [S2]. It decomposes the rendering into a shear, a parallel projection, and a warp, but focuses specifically on the compositing step within the intermediate image space where geometric properties simplify the process [S2].
+**Inputs:**
+*   Volume data set (scalar field).
+*   Viewing parameters (parallel projection direction).
+*   Opacity threshold (user-specified value to distinguish transparent from non-transparent voxels) [S2].
 
-### Inputs and Outputs
-*   **Input:** A 3D volume dataset (scalar field), a parallel viewing transformation, and a user-specified opacity threshold for defining transparent vs. non-transparent runs [S2].
-*   **Output:** A 2D rendered image [S2].
+**Outputs:**
+*   Final rendered image.
 
-### Data Structures
-The algorithm relies on run-length encoding (RLE) for both the volume and the intermediate image to exploit spatial coherence [S2].
+**Data Structures:**
+1.  **Volume Data Structure:** Run-length encoded (RLE) voxel scanlines. Each scanline consists of two types of runs:
+    *   **Transparent runs:** Voxels with opacity below the threshold.
+    *   **Non-transparent runs:** Voxels with opacity at or above the threshold [S2].
+    *   **Layout:** Each non-transparent voxel consumes 4 bytes; each run header consumes 1 byte [S2].
+2.  **Intermediate Image Data Structure:** RLE of the intermediate image scanlines.
+    *   **Layout:** Stores offsets with opaque pixels. Specifically, each opaque pixel (based on the user threshold) has a pointer (or offset) to the next non-opaque pixel in the scanline [S1, unofficial][S2]. This allows efficient skipping of occluded regions [S2].
 
-1.  **Volume Data Structure:** The sheared, resampled volume is stored as run-length encoded voxel scanlines [S1, unofficial]. Each scanline consists of two types of runs:
-    *   **Transparent runs:** Voxels with opacity below the user-specified threshold.
-    *   **Non-transparent runs:** Voxels with opacity at or above the threshold [S1, unofficial].
-    *   **Layout:** Each copy of the run-length encoded volume contains four bytes per non-transparent voxel and one byte per run [S2]. Three copies are typically maintained to cover the traversal range [S2].
+**Steps:**
+1.  **Shear-Warp Factorization:** Decompose the viewing transformation into a 3D shear, a parallel projection, and a 2D warp [S2].
+2.  **Scale Selection:** For parallel projections, select a unity scale factor for the voxel slices. This ensures that for a given voxel scanline, there is a one-to-one mapping between voxels and intermediate-image pixels [S2].
+3.  **Preprocessing (Optional/Implicit):** If the opacity transfer function is static, the RLE structures can be precomputed or maintained [S2]. If dynamic, classification may occur during traversal (though the core Parallel Projection Rendering algorithm assumes static opacity) [S2].
+4.  **Synchronous Traversal:** Traverse the volume and the intermediate image in scanline order [S2].
+    *   Iterate through each slice of the sheared volume.
+    *   For each volume scanline, walk through the corresponding intermediate image scanline [S1, unofficial].
+5.  **Skipping Logic:**
+    *   Use the volume RLE to skip runs of transparent voxels [S1, unofficial].
+    *   Use the intermediate image RLE (pointers to next non-opaque pixel) to skip runs of occluded (already opaque) pixels [S1, unofficial][S2].
+6.  **Compositing:**
+    *   For the remaining unskipped voxel runs, perform resampling and compositing [S1, unofficial].
+    *   Because all voxels in a slice are scaled by the same factor (unity), resampling uses the same weights for the entire scanline [S1, unofficial].
+    *   Composite the voxel values into the intermediate image [S2].
+7.  **Warp:** Apply the 2D warp to transform the intermediate image into the final screen-space image [S2].
 
-2.  **Intermediate Image Data Structure:** The intermediate image scanlines store run information to skip occluded pixels [S1, unofficial].
-    *   **Layout:** For each opaque pixel (based on the user threshold), the structure stores a pointer (or offset) to the next non-opaque pixel in the scanline [S1, unofficial]. This allows the algorithm to skip over runs of opaque pixels that have already been filled by previous voxels [S1, unofficial].
-
-### Mathematical Properties
-The shear-warp factorization provides specific geometric properties for parallel projections [S2]:
-*   **Property 1:** Scanlines of pixels in the intermediate image are parallel to scanlines of voxels in the volume [S2].
-*   **Property 2:** All voxels in a given voxel slice are scaled by the same factor [S2].
-*   **Property 3 (Parallel Projections Only):** Every voxel slice has the same scale factor, which can be chosen arbitrarily [S2]. The algorithm chooses a **unity scale factor** ($s=1$) [S2]. This ensures a one-to-one mapping between voxels in a voxel scanline and pixels in the corresponding intermediate-image scanline [S2]. Consequently, resampling uses the same weights for all voxels in a slice [S1, unofficial].
-
-### Algorithm Steps
-1.  **Preprocessing:**
-    *   Compute the shear-warp factorization for the parallel projection [S2].
-    *   Generate three run-length encoded copies of the volume data [S2].
-    *   Initialize the intermediate image data structures with the opaque pixel pointers [S2].
-
-2.  **Traversal and Compositing:**
-    *   Traverse the volume and the intermediate image in synchrony, processing slice by slice [S2].
-    *   For each volume scanline in the current slice:
-        *   Walk through the volume scanline and the corresponding intermediate image scanline simultaneously [S1, unofficial].
-        *   Use the volume RLE to skip transparent voxel runs [S1, unofficial].
-        *   Use the intermediate image RLE (pointers) to skip occluded (already opaque) pixel runs [S1, unofficial].
-        *   For the remaining (unskipped) voxel runs:
-            *   Resample the voxel values to the intermediate image pixel centers. Since the scale factor is unity and all voxels in the slice are scaled equally, the resampling weights are constant for the slice [S1, unofficial].
-            *   Composite the resampled values into the intermediate image using front-to-back or back-to-front accumulation [S2].
-            *   Update the intermediate image RLE if new opaque pixels are created [S1, unofficial].
-
-3.  **Warp:**
-    *   Warp the intermediate image into the final screen space [S2].
-
-### Pseudocode
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def parallel_projection_render(volume, view_transform, opacity_threshold):
-    # 1. Preprocessing
-    # Compute shear-warp matrices for parallel projection
-    shear_matrix, projection_matrix, warp_matrix = compute_shear_warp_factors(view_transform)
+def parallel_projection_render(volume, view_params, opacity_threshold):
+    # 1. Factorize view into Shear, Project, Warp
+    shear_matrix, warp_matrix = shear_warp_factorization(view_params)
     
-    # Create 3 RLE copies of the volume
-    # Each copy stores runs of (is_transparent, length, data_pointer)
-    rle_copies = create_rle_copies(volume, opacity_threshold)
+    # 2. Prepare RLE structures
+    # Volume RLE: list of (start_index, length, type) for each scanline
+    # Type is 'transparent' or 'non-transparent'
+    volume_rle = build_volume_rle(volume, opacity_threshold)
     
-    # Initialize intermediate image RLE
-    # Each pixel has a pointer to the next non-opaque pixel
-    img_rle = initialize_image_rle()
+    # Intermediate Image RLE: initialized to empty or all transparent
+    # Structure: for each pixel, store pointer to next opaque pixel
+    # For simplicity, we assume an array of pointers or linked list nodes
+    img_width, img_height = get_intermediate_image_dimensions()
+    intermediate_image = create_intermediate_image(img_width, img_height)
+    img_rle = build_image_rle(intermediate_image, opacity_threshold)
     
-    # 2. Traversal
-    for slice_index in range(num_slices):
-        # Get current slice data from RLE copies
-        slice_runs = get_slice_runs(rle_copies, slice_index)
+    # 3. Traverse slices
+    for slice_idx in range(volume_depth):
+        # Get sheared volume scanline for this slice
+        vol_scanline = get_sheared_scanline(volume_rle, slice_idx)
         
         # Get corresponding intermediate image scanline
-        img_scanline = get_img_scanline(img_rle, slice_index)
+        img_scanline = get_intermediate_scanline(img_rle, slice_idx)
         
-        # Traverse volume scanlines and image scanlines in sync
-        # Due to Property 1, voxel scanlines align with pixel scanlines
-        for voxel_run in slice_runs:
-            if voxel_run.is_transparent:
-                continue # Skip transparent runs
+        # 4. Walk through both scanlines
+        vol_idx = 0
+        img_idx = 0
+        
+        while vol_idx < len(vol_scanline) and img_idx < len(img_scanline):
+            # Determine current run in volume
+            vol_run = vol_scanline[vol_idx]
             
-            # Map voxel run to image pixel range
-            # Due to Property 3 (unity scale), 1 voxel = 1 pixel
-            start_pixel = voxel_run.start_voxel_index
-            end_pixel = voxel_run.end_voxel_index
+            # Determine current run in image
+            img_run = img_scanline[img_idx]
             
-            # Skip occluded pixels using image RLE
-            current_pixel = start_pixel
-            while current_pixel < end_pixel:
-                next_non_opaque = img_rle.get_next_non_opaque(current_pixel)
+            # Skip transparent volume runs
+            if vol_run.type == 'transparent':
+                vol_idx += 1
+                continue
                 
-                if next_non_opaque >= end_pixel:
-                    break # All remaining pixels in this run are occluded
-                
-                # Process the valid pixel range
-                valid_start = current_pixel
-                valid_end = min(next_non_opaque, end_pixel)
-                
-                # Resample and Composite
-                # Weights are constant for this slice
-                for p in range(valid_start, valid_end):
-                    voxel_value = resample_voxel(volume, voxel_run, p)
-                    opacity = apply_transfer_function(voxel_value)
-                    
-                    # Front-to-back compositing
-                    # C_out = C_in + (1 - C_in) * alpha * opacity
-                    composite_pixel(img_scanline, p, voxel_value, opacity)
-                
-                current_pixel = next_non_opaque
-
-    # 3. Warp
-    final_image = apply_warp(img_rle, warp_matrix)
+            # Skip occluded image runs (pixels already opaque)
+            # The image RLE stores pointers to next non-opaque pixel.
+            # If the current pixel is opaque, we jump to the next non-opaque.
+            if img_run.is_opaque:
+                img_idx = img_run.next_non_opaque_index
+                continue
+            
+            # Process unskipped voxel runs
+            # Since scale factor is 1, 1 voxel maps to 1 pixel
+            # Resample voxel value (trilinear or nearest, typically nearest for 1:1)
+            voxel_value = resample_voxel(volume, vol_scanline, vol_idx)
+            
+            # Composite into intermediate image
+            composite_voxel_into_pixel(intermediate_image, img_scanline, img_idx, voxel_value)
+            
+            # Advance indices
+            vol_idx += 1
+            img_idx += 1
+            
+    # 5. Warp intermediate image to final screen
+    final_image = apply_warp(intermediate_image, warp_matrix)
     return final_image
 ```
 
-### Parameters and Edge Cases
-*   **Opacity Threshold:** A user-specified value defining the boundary between transparent and non-transparent runs [S1, unofficial].
-*   **Scale Factor:** Must be set to unity for the one-to-one mapping [S2].
-*   **Memory Constraints:** The algorithm requires three run-length encoded copies of the volume to fit in memory simultaneously [S2]. If they do not fit, performance may degrade or the algorithm may fail [S2].
-*   **Viewing Angle:** Performance is stable regardless of the major viewing axis, provided the memory constraint is met [S2].
+**Parameters:**
+*   **Opacity Threshold:** User-specified value to define transparent vs. non-transparent runs [S2].
+*   **Scale Factor:** Unity (1.0) for parallel projections [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Memory Usage:** The algorithm requires storing three run-length encoded copies of the volume in memory for optimal performance [S2]. If these do not fit in memory, performance degrades [S2].
+*   **Viewing Angle:** Performance is stable regardless of the major viewing axis, provided the RLE copies fit in memory [S2].
+*   **Color vs. Grayscale:** Color renderings take roughly twice as long as grayscale renderings [S2].
+
+## Subtopics
+
+### [Parallel Perspective Shear-Warp Rendering](802-parallel-perspective-shear-warp-rendering.md)
+Extends the shear-warp factorization to perspective projections, where the unity scale factor property no longer holds, requiring different handling of voxel-to-pixel mapping.
+
+### [CPU-based Shear-Warp](1161-cpu-based-shear-warp.md)
+Focuses on optimizing the shear-warp algorithm for CPU architectures, often leveraging cache coherence and SIMD instructions, whereas Parallel Projection Rendering focuses on data structure coherence.
+
+### [Permutation Proof for Projection and Warp](1702-permutation-proof-for-projection-and-warp.md)
+Provides the mathematical proof for the validity of the shear-warp factorization, which underpins the correctness of the Parallel Projection Rendering algorithm.
+
+### [Texture-Based Warp](1910-texture-based-warp.md)
+Uses texture mapping hardware to perform the final 2D warp step, which is a common optimization for the warp phase in shear-warp algorithms.
+
+### [Spatially Partitioned Shear-Warp Method](3481-spatially-partitioned-shear-warp-method.md)
+Partitions the volume spatially to improve cache locality and parallelism, potentially combining with RLE techniques.
+
+### [Shear-warp Factorization for Combined Surface/Volume Rendering](7392-shear-warp-factorization-for-combined-surface-volume-renderi.md)
+Extends the factorization to handle both surface and volume data simultaneously.
+
+### [GPU-based Shear-Warp](7425-gpu-based-shear-warp.md)
+Adapts the shear-warp algorithm for GPU execution, often using fragment shaders for the compositing step, moving away from the object-order CPU traversal described here.
+
+### [Optimization Technique](7922-optimization-technique.md)
+General optimizations for shear-warp, such as early ray termination or depth peeling, which can be applied to the Parallel Projection Rendering algorithm.
 
 ## Operating characteristics
-*   **Time Complexity:** The algorithm traverses the volume and image in synchrony, skipping transparent and occluded regions. The time complexity is proportional to the number of non-transparent, non-occluded voxels [S2].
-*   **Memory Complexity:** Requires $O(N)$ memory for the volume RLE (3 copies) and $O(P)$ for the image RLE, where $N$ is the number of non-transparent voxels and $P$ is the number of opaque pixels [S2].
+*   **Time Complexity:** Linear with respect to the number of non-transparent voxels and opaque pixels, due to the skipping mechanism [S2].
+*   **Memory Complexity:** Proportional to the size of the volume, specifically requiring storage for three RLE copies of the volume [S2]. Each copy uses 4 bytes per non-transparent voxel and 1 byte per run [S2].
 *   **Measured Performance:**
-    *   On an SGI Indigo R4000, the algorithm renders a $128 \times 128 \times 109$ ('brainsmall') dataset in an average of 0.4 seconds [S2].
-    *   On an SGI Indigo R4000, the algorithm renders a $128 \times 128 \times 113$ ('headsmall') dataset in an average of 0.4 seconds [S2].
-    *   On an SGI Indigo workstation, the algorithm renders a $256^3$ voxel medical dataset in one second [S2].
-    *   This is at least five times faster than previous algorithms on comparable hardware [S2].
-*   **Scaling:** Color renderings take roughly twice as long as grayscale renderings [S2].
-*   **Strengths:**
-    *   High performance due to spatial coherence exploitation [S2].
-    *   No performance degradation when the major viewing axis changes, unlike some other methods [S2].
-    *   Minimal loss of image quality compared to subsampling methods [S2].
-*   **Limitations:**
-    *   Assumes a static opacity transfer function [S2].
-    *   Requires sufficient memory for three RLE copies of the volume [S2].
-    *   Effectiveness of coherence optimizations varies with viewpoint [S2].
+    *   On an SGI Indigo R4000, renders a 128x128x109 'brainsmall' dataset in an average of 0.4 seconds [S2].
+    *   On an SGI Indigo R4000, renders a 128x128x113 'headsmall' dataset in an average of 0.4 seconds [S2].
+    *   On an SGI Indigo workstation, renders a 256^3 voxel medical data set in one second [S2].
+    *   At least five times faster than previous algorithms on comparable hardware [S2].
+*   **Scaling:** Performance is consistent across different viewing angles, provided the memory constraint (three RLE copies) is met [S2].
+*   **Strengths:** High speed for parallel projections; no performance degradation when the major viewing axis changes; minimal loss of image quality compared to subsampling methods [S2].
+*   **Limitations:** Assumes static opacity transfer function; requires significant memory for RLE copies; color rendering is slower than grayscale [S2].
+*   **When to use:** Interactive visualization of large medical volumes with parallel projections and static opacity functions.
+*   **When not to use:** Perspective projections (use Parallel Perspective Shear-Warp), dynamic opacity functions (requires re-computation of RLE), or memory-constrained environments where three RLE copies cannot fit.
 
 ## Background
-The Parallel Projection Rendering algorithm was developed by Lacroute and Levoy as part of their work on fast volume rendering using shear-warp factorization [S2]. It was published in 1995 as part of the Stanford Computer Science Laboratory Technical Report CSL-TR-95-678 [S2]. The algorithm extends the shear-warp factorization introduced by Levoy [S2] to specifically handle parallel projections with optimized coherence data structures [S2]. It is used in interactive volume visualization tools where performance is critical [S2].
+The Parallel Projection Rendering algorithm was introduced by Lacroute and Levoy in their 1995 paper "Fast Volume Rendering Using a Shear-warp Factorization of The Viewing Transformation" [S2]. It is part of a family of shear-warp algorithms that exploit the geometric properties of the shear-warp factorization to optimize volume rendering [S2]. The algorithm was designed to address the high computational cost of traditional ray-casting methods by leveraging spatial coherence in both the volume data and the intermediate image [S2]. It was implemented and tested on SGI Indigo workstations, demonstrating significant performance improvements over existing methods [S2].
 
 ## Sources
 [S1] Shear-Warp Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/ShearWarp.color.pdf, fetched 2026-10-27 (unofficial)

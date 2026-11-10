@@ -19,6 +19,7 @@ A real-time volumetric rendering technique that samples a 3D noise texture along
 - `minNoiseColor`: Base color for the noise volume [S1, unofficial].
 - `noiseColorScale`: Scaling factor for the noise color contribution [S1, unofficial].
 - `stepSize`: Step size in texture space [G].
+- `fragTex`: 2D screen-space or fragment texture coordinate for alpha falloff [G].
 
 **Outputs:**
 - `color`: Final RGBA color of the fragment [S1, unofficial].
@@ -31,13 +32,13 @@ A real-time volumetric rendering technique that samples a 3D noise texture along
 - `length(v)`: Euclidean length of vector `v` [G].
 
 **Steps:**
-1. **Ray-Sphere Intersection:** Compute the intersection of the ray `fragPos + t * viewRay` with the sphere defined by `center` and `radius`. Obtain `tnear` and `tfar` (the smallest and largest positive `t` values). If no intersection exists, discard the fragment [S1, unofficial].
-2. **World Space Bounds:** Calculate the world-space start and end points: `worldNear = fragPos + viewRay * tnear`, `worldFar = fragPos + viewRay * tfar` [S1, unofficial].
-3. **Local Texture Coordinates:** Convert to local texture space: `localTexNear = worldNear * fNoiseSizeAdjust`, `localTexFar = worldFar * fNoiseSizeAdjust` [S1, unofficial].
-4. **Step Count:** Calculate steps: `iSteps = length(localTexFar - localTexNear) / stepSize`. Clamp `iSteps` to `[minNoiseSteps, maxNoiseSteps]` [S1, unofficial].
-5. **Initialization:** Set `currentTex = localTexNear`, `localTexDelta = (localTexFar - localTexNear) / (iSteps - 1)`, `opacityAdjust = noiseOpacity / (iSteps - 1)`, `lightAdjust = 1.0 / (iSteps - 1)`, `runningOpacity = 0`, `runningLight = 0`, `unitTex = localTexNear` [S1, unofficial].
-6. **Marching Loop:** Iterate `iSteps` times: sample `noiseCell = noise3D(currentTex, numOctaves)`, adjust `noiseCell.xyz += normalize(unitTex)`, accumulate `runningOpacity += noiseCell.a * (1.0 - dot(unitTex, unitTex))`, accumulate `runningLight += saturate(dot(noiseCell.xyz, vec3(0, 1, 0)) * 0.5 + 0.5)`, advance `currentTex += localTexDelta`, advance `unitTex += localTexDelta` [S1, unofficial].
-7. **Final Computation:** Compute `col = minNoiseColor + (noiseColorScale * runningLight * lightAdjust)`, `alpha = 1 - length(fragTex - vec2(0.5)) * 2`, `runningOpacity = saturate(runningOpacity * opacityAdjust)`, `color = vec4(vec3(col), runningOpacity * alpha)` [S1, unofficial].
+1. Intersect ray `fragPos + t * viewRay` with sphere `(center, radius)` to obtain `tnear` and `tfar` [S1, unofficial]. Discard the fragment if no intersection exists [S1, unofficial].
+2. Compute world-space bounds using `worldNear = fragPos + viewRay * tnear` and `worldFar = fragPos + viewRay * tfar` [S1, unofficial].
+3. Convert to local texture space via `localTexNear = worldNear * fNoiseSizeAdjust` and `localTexFar = worldFar * fNoiseSizeAdjust` [S1, unofficial].
+4. Calculate step count as `iSteps = length(localTexFar - localTexNear) / stepSize` [S1, unofficial]. Clamp `iSteps` to the range `[minNoiseSteps, maxNoiseSteps]` [S1, unofficial].
+5. Initialize the marcher with `currentTex = localTexNear` [S1, unofficial], `unitTex = localTexNear` [G], `localTexDelta = (localTexFar - localTexNear) / (iSteps - 1)` [S1, unofficial], `opacityAdjust = noiseOpacity / (iSteps - 1)` [S1, unofficial], `lightAdjust = 1.0 / (iSteps - 1)` [S1, unofficial], `runningOpacity = 0` [S1, unofficial], and `runningLight = 0` [S1, unofficial].
+6. Iterate `iSteps` times: sample `noiseCell = noise3D(currentTex, numOctaves)` [S1, unofficial]. Adjust the noise vector with `noiseCell.xyz += normalize(unitTex)` [S1, unofficial]. Accumulate opacity via `runningOpacity += noiseCell.a * (1.0 - dot(unitTex, unitTex))` [S1, unofficial]. Accumulate light via `runningLight += saturate(dot(noiseCell.xyz, vec3(0, 1, 0)) * 0.5 + 0.5)` [S1, unofficial]. Advance positions with `currentTex += localTexDelta` [S1, unofficial] and `unitTex += localTexDelta` [S1, unofficial].
+7. Compute the base color as `col = minNoiseColor + (noiseColorScale * runningLight * lightAdjust)` [S1, unofficial]. Compute alpha using `alpha = 1 - length(fragTex - vec2(0.5)) * 2` [S1, unofficial]. Clamp the accumulated opacity with `runningOpacity = saturate(runningOpacity * opacityAdjust)` [S1, unofficial]. Return the final color as `color = vec4(vec3(col), runningOpacity * alpha)` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -45,7 +46,8 @@ A real-time volumetric rendering technique that samples a 3D noise texture along
 ```python
 def ray_march_noise(fragPos, viewRay, center, radius, fNoiseSizeAdjust, numOctaves,
                     noiseOpacity, minNoiseSteps, maxNoiseSteps, minNoiseColor,
-                    noiseColorScale, stepSize):
+                    noiseColorScale, stepSize, fragTex):
+    # Ray-sphere intersection is a standard quadratic solver [G]
     tnear, tfar = ray_sphere_intersect(fragPos, viewRay, center, radius)
     if tnear is None: return vec4(0, 0, 0, 0) # Discard if no intersection [S1, unofficial]
 
@@ -60,12 +62,12 @@ def ray_march_noise(fragPos, viewRay, center, radius, fNoiseSizeAdjust, numOctav
     if iSteps < 2: iSteps = 2 # Guard against division by zero [G]
 
     currentTex = localTexNear
+    unitTex = localTexNear # Initialized from standard practice [G]
     localTexDelta = (localTexFar - localTexNear) / (iSteps - 1)
     opacityAdjust = noiseOpacity / (iSteps - 1)
     lightAdjust = 1.0 / (iSteps - 1)
     runningOpacity = 0.0
     runningLight = 0.0
-    unitTex = localTexNear # Initialized from source context [G]
 
     for _ in range(iSteps):
         noiseCell = noise3D(currentTex, numOctaves)
@@ -87,6 +89,7 @@ def ray_march_noise(fragPos, viewRay, center, radius, fNoiseSizeAdjust, numOctav
 - `maxNoiseSteps`: Maximum number of steps [S1, unofficial].
 - `minNoiseColor`: Base color for the noise volume [S1, unofficial].
 - `noiseColorScale`: Scaling factor for the noise color contribution [S1, unofficial].
+- Typical values: Not given in the sources.
 
 **Edge Cases and Pitfalls:**
 - Division by zero in `localTexDelta` and adjustments if `iSteps` is 1. The clamping of `minNoiseSteps` should ensure `iSteps >= 2`, or a guard is required [G].

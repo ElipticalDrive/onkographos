@@ -3,63 +3,48 @@
 Also called: LEB scheme, Longest Edge Bisection (LEB) Diamond Hierarchy, Longest edge bisection of tetrahedra, diamond hierarchy
 
 ## Overview
-The Longest Edge Bisection (LEB) Tetrahedral Hierarchy is a method for generating adaptive, conforming tetrahedral meshes from a cubic domain, primarily used to eliminate cracks at resolution boundaries in volume rendering and terrain visualization [S1, unofficial]. Unlike octree decompositions which require complex stitching processes to handle discontinuities between cells of different resolutions, this method guarantees that neighboring cells share faces exactly, resulting in crack-free surfaces and well-shaped tetrahedra without degradation of element quality during subdivision [S1, unofficial]. It builds on [Recursive Subdivision](1304-recursive-subdivision.md) by providing a specific geometric subdivision rule and data structure (the diamond hierarchy) that ensures conformity.
+The Longest Edge Bisection (LEB) Tetrahedral Hierarchy is a method for generating adaptive, conforming tetrahedral meshes from a cubic domain, primarily used to eliminate cracks at resolution boundaries in volume rendering and terrain visualization [S1, unofficial]. Unlike octree decompositions which require complex stitching processes to handle discontinuities between cells of different resolutions, this method guarantees that neighboring cells share faces exactly, resulting in crack-free surfaces and well-shaped tetrahedra without degradation of element quality during subdivision [S1, unofficial]. It builds on [Recursive Subdivision](1304-recursive-subdivision.md) by providing a specific geometric subdivision rule and data structure (the diamond hierarchy) that ensures conformity [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- A cubic domain (initially split into six tetrahedra).
-- A viewer position and field of view (FOV).
-- A volumetric density function (e.g., signed distance field).
-- A refinement parameter $a$ controlling the detail-distance relationship.
+- A cubic domain (initially split into six tetrahedra) [S1, unofficial].
+- A viewer position and field of view (FOV) [S1, unofficial].
+- A volumetric density function (e.g., signed distance field) [S1, unofficial].
+- A refinement parameter $a$ controlling the detail-distance relationship [S1, unofficial].
 
 **Outputs:**
-- A conforming tetrahedral mesh (the "active front") adapted to the viewer's position.
-- Extracted isosurface geometry for the active cells.
+- A conforming tetrahedral mesh (the "active front") adapted to the viewer's position [S1, unofficial].
+- Extracted isosurface geometry for the active cells [S1, unofficial].
 
 **Data Structures:**
-1.  **Binary Tree:** Each node represents a single tetrahedron. The root represents the initial domain. Leaf nodes form the "active front," defining the current conforming mesh.
-2.  **Diamond Hashmap:** A hash map indexing diamonds by their central vertex position. A "diamond" is defined as a pair of tetrahedra sharing a common longest edge. This structure allows efficient dependency checking and simultaneous splitting of diamonds to maintain conformity [S1, unofficial].
-3.  **Encoding Scheme:** Uses the encoding scheme by Weiss and De Floriani [WDF08] to access diamonds and check dependencies efficiently [S1, unofficial].
+1.  **Binary Tree:** Each node represents a single tetrahedron [S1, unofficial]. The root represents the initial domain [S1, unofficial]. Leaf nodes form the "active front," defining the current conforming mesh [S1, unofficial].
+2.  **Diamond Hashmap:** A hash map indexing diamonds by their central vertex position [S1, unofficial]. A "diamond" is defined as a pair of tetrahedra sharing a common longest edge [S1, unofficial]. This structure allows efficient dependency checking and simultaneous splitting of diamonds to maintain conformity [S1, unofficial].
+3.  **Encoding Scheme:** Uses the encoding scheme by Weiss and De Floriani to access diamonds and check dependencies efficiently [S1, unofficial].
 
 **Algorithm Steps:**
-
-1.  **Initialization:**
-    - Start with a cubic domain.
-    - Split the cube into six initial tetrahedra. This forms the root level of the hierarchy.
-
-2.  **Hierarchy Construction (Refinement):**
-    - For each tetrahedron in the active front, calculate its target refinement level $l_t$ based on the distance $d$ from the viewer to the tetrahedron's bounding sphere:
-      $$ l_t = \log_a(d) $$
-      where $a$ is a parameter chosen according to the viewer's field of view [S1, unofficial].
-    - Compare $l_t$ with the current hierarchy level $l_h$ of the tetrahedron.
-    - If $l_t > l_h$, the tetrahedron must be split.
-    - **Diamond Check:** Identify if the tetrahedron shares its longest edge with another tetrahedron in the active front. If so, they form a diamond.
-    - **Simultaneous Split:** Split both tetrahedra in the diamond simultaneously. This is critical to maintain a conforming mesh (no cracks) [S1, unofficial].
-    - Add the resulting child tetrahedra to the active front.
-    - Apply a hysteresis of at least one hierarchy level to prevent rapid oscillation when coarsening [S1, unofficial].
-
-3.  **Coarsening:**
-    - If $l_t \le l_h - 1$ (accounting for hysteresis), the tetrahedron can be coarsened (merged back into its parent), provided its sibling is also coarsened to maintain the diamond structure and conformity.
-
-4.  **Surface Extraction:**
-    - Whenever a node in the active front is split, invoke the surface extraction procedure for both of its children [S1, unofficial].
-    - Since the mesh is conforming, no stitching is required between adjacent cells. The triangulation of the surface inside each cell is independent and does not need to be changed once created [S1, unofficial].
+1.  **Initialization:** Start with a cubic domain [S1, unofficial]. Split the cube into six initial tetrahedra [S1, unofficial]. This forms the root level of the hierarchy [S1, unofficial].
+2.  **Hierarchy Construction (Refinement):** For each tetrahedron in the active front, calculate its target refinement level $l_t$ based on the distance $d$ from the viewer to the tetrahedron's bounding sphere [S1, unofficial]:
+    $$ l_t = \log_a(d) $$
+    where $a$ is a parameter chosen according to the viewer's field of view [S1, unofficial]. Compare $l_t$ with the current hierarchy level $l_h$ of the tetrahedron [S1, unofficial]. If $l_t > l_h$, the tetrahedron must be split [S1, unofficial]. Identify if the tetrahedron shares its longest edge with another tetrahedron in the active front [S1, unofficial]. If so, they form a diamond [S1, unofficial]. Split both tetrahedra in the diamond simultaneously [S1, unofficial]. This is critical to maintain a conforming mesh (no cracks) [S1, unofficial]. Add the resulting child tetrahedra to the active front [S1, unofficial]. Apply a hysteresis of at least one hierarchy level to prevent rapid oscillation when coarsening [S1, unofficial].
+3.  **Coarsening:** If $l_t \le l_h - 1$ (accounting for hysteresis), the tetrahedron can be coarsened (merged back into its parent), provided its sibling is also coarsened to maintain the diamond structure and conformity [S1, unofficial].
+4.  **Surface Extraction:** Whenever a node in the active front is split, invoke the surface extraction procedure for both of its children [S1, unofficial]. Since the mesh is conforming, no stitching is required between adjacent cells [S1, unofficial]. The triangulation of the surface inside each cell is independent and does not need to be changed once created [S1, unofficial].
 
 **Properties and Parameters:**
 - **Congruence Classes:** Tetrahedra generated by the LEB scheme fall into exactly three congruence classes [S1, unofficial].
-- **Shape Quality:** Recursively splitting a tetrahedron three times yields smaller tetrahedra with exactly the same shape and quality as the initial one ($T_{3} \equiv T_{0}$) [S1, unofficial]. This guarantees that element quality does not degrade.
-- **Parameter $a$:** Controls the relationship between detail level and distance. It should be chosen according to the field of view of the viewer [S1, unofficial].
+- **Shape Quality:** Recursively splitting a tetrahedron three times yields smaller tetrahedra with exactly the same shape and quality as the initial one ($T_{3} \equiv T_{0}$) [S1, unofficial]. This guarantees that element quality does not degrade [S1, unofficial].
+- **Parameter $a$:** Controls the relationship between detail level and distance [S1, unofficial]. It should be chosen according to the field of view of the viewer [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Non-Conforming Meshes:** Failing to split diamonds simultaneously will result in cracks at cell boundaries.
-- **Precision:** The method relies on exact geometric coincidence of faces. Floating-point errors in vertex positions could theoretically break conformity, though the hierarchical structure mitigates this by reusing vertices [G].
-- **Degenerate Input:** The initial split into six tetrahedra must be done carefully to ensure the longest edges are well-defined and the congruence classes are maintained.
+- **Non-Conforming Meshes:** Failing to split diamonds simultaneously will result in cracks at cell boundaries [S1, unofficial].
+- **Precision:** The method relies on exact geometric coincidence of faces [G]. Floating-point errors in vertex positions could theoretically break conformity, though the hierarchical structure mitigates this by reusing vertices [G].
+- **Degenerate Input:** The initial split into six tetrahedra must be done carefully to ensure the longest edges are well-defined and the congruence classes are maintained [G].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 class Tetrahedron:
     def __init__(self, vertices, level=0, parent=None):
         self.vertices = vertices  # List of 4 vertex positions
@@ -70,11 +55,11 @@ class Tetrahedron:
 
     def get_longest_edge(self):
         # Returns the two vertices forming the longest edge
-        max_len = 0
+        max_len = 0.0
         edge = None
         for i in range(4):
             for j in range(i + 1, 4):
-                dist = length(self.vertices[i] - self.vertices[j])
+                dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(self.vertices[i], self.vertices[j])))
                 if dist > max_len:
                     max_len = dist
                     edge = (self.vertices[i], self.vertices[j])
@@ -84,11 +69,11 @@ class Tetrahedron:
         # Splits the tetrahedron into 4 smaller tetrahedra using LEB
         # The new vertex is the midpoint of the longest edge
         edge = self.get_longest_edge()
-        mid = (edge[0] + edge[1]) / 2.0
+        mid = tuple((a + b) / 2.0 for a, b in zip(edge[0], edge[1]))
         
-        # Create 4 new tetrahedra
-        # Note: The exact combination of vertices depends on the LEB rule
-        # Standard LEB splits into 4 tetrahedra sharing the new midpoint
+        # Standard LEB splits the tetrahedron into 4 children sharing the new midpoint.
+        # Exact vertex ordering depends on the labeling convention [G].
+        # The sources do not specify the exact permutation of vertices for the 4 children [S1, unofficial].
         t1 = Tetrahedron([self.vertices[0], self.vertices[1], self.vertices[2], mid], self.level + 1, self)
         t2 = Tetrahedron([self.vertices[0], self.vertices[1], mid, self.vertices[3]], self.level + 1, self)
         t3 = Tetrahedron([self.vertices[0], mid, self.vertices[2], self.vertices[3]], self.level + 1, self)
@@ -100,7 +85,7 @@ class Tetrahedron:
 
 class DiamondHierarchy:
     def __init__(self, initial_tetrahedra):
-        self.active_front = initial_tetrahedra  # List of leaf tetrahedra
+        self.active_front = list(initial_tetrahedra)  # List of leaf tetrahedra
         self.diamond_map = {}  # Hashmap: central_vertex -> list of tetrahedra
         self._index_diamonds()
 
@@ -109,7 +94,7 @@ class DiamondHierarchy:
         self.diamond_map.clear()
         for tet in self.active_front:
             edge = tet.get_longest_edge()
-            mid = (edge[0] + edge[1]) / 2.0
+            mid = tuple((a + b) / 2.0 for a, b in zip(edge[0], edge[1]))
             if mid not in self.diamond_map:
                 self.diamond_map[mid] = []
             self.diamond_map[mid].append(tet)
@@ -118,8 +103,9 @@ class DiamondHierarchy:
         # Identify tetrahedra that need refinement
         to_split = []
         for tet in self.active_front:
-            d = length(tet.vertices[0] - viewer_pos)  # Approximate distance
-            l_t = log(d) / log(param_a)
+            # Approximate distance using first vertex
+            d = math.sqrt(sum((v - p) ** 2 for v, p in zip(tet.vertices[0], viewer_pos)))
+            l_t = math.log(d, param_a)
             if l_t > tet.level:
                 to_split.append(tet)
         
@@ -129,7 +115,7 @@ class DiamondHierarchy:
         
         for tet in to_split:
             edge = tet.get_longest_edge()
-            mid = (edge[0] + edge[1]) / 2.0
+            mid = tuple((a + b) / 2.0 for a, b in zip(edge[0], edge[1]))
             
             # Find the sibling in the diamond
             siblings = self.diamond_map.get(mid, [])
@@ -176,29 +162,33 @@ class DiamondHierarchy:
         # Apply hysteresis: only coarsen if l_t <= l_h - 1
         to_coarsen = []
         for tet in self.active_front:
-            d = length(tet.vertices[0] - viewer_pos)
-            l_t = log(d) / log(param_a)
+            d = math.sqrt(sum((v - p) ** 2 for v, p in zip(tet.vertices[0], viewer_pos)))
+            l_t = math.log(d, param_a)
             if l_t <= tet.level - 1:
                 to_coarsen.append(tet)
         
         # Coarsening must be done in pairs (diamonds) to maintain conformity
-        # This is a simplified version; full implementation requires checking siblings
+        # The exact logic for merging parent nodes and removing children is not provided in the sources [S1, unofficial].
         for tet in to_coarsen:
-            # Check if parent exists and sibling is also to be coarsened
             if tet.parent and tet.parent in self.active_front:
-                # Logic to merge parent and remove children
+                # Logic to merge parent and remove children would go here [S1, unofficial].
                 pass
+
+def extract_surface(tet):
+    # Surface extraction is not detailed in the sources [S1, unofficial].
+    # Standard marching tetrahedra or similar algorithms would be applied here [G].
+    pass
 ```
 
 ## Operating characteristics
-- **Time Complexity:** Refinement and coarsening are $O(1)$ per tetrahedron for lookup and splitting, but the overall cost depends on the number of tetrahedra in the active front. Hashmap operations are $O(1)$ on average.
-- **Memory Complexity:** Linear in the number of tetrahedra in the active front. The binary tree structure requires storing parent pointers and children lists.
-- **Performance:** The method allows for interactive traversal of terrain with low memory consumption and no preprocessing [S1, unofficial]. It fully utilizes the GPU for surface extraction while the CPU handles the hierarchy adaptation [S1, unofficial].
-- **Strengths:** Eliminates cracks at cell boundaries without stitching. Guarantees well-shaped tetrahedra. Efficient real-time adaptation.
-- **Limitations:** Requires careful handling of diamond dependencies. The initial split into six tetrahedra must be done correctly. The method is specific to tetrahedral meshes and may not be directly applicable to other mesh types without modification.
+- **Time Complexity:** Refinement and coarsening are $O(1)$ per tetrahedron for lookup and splitting, but the overall cost depends on the number of tetrahedra in the active front [S1, unofficial]. Hashmap operations are $O(1)$ on average [G].
+- **Memory Complexity:** Linear in the number of tetrahedra in the active front [S1, unofficial]. The binary tree structure requires storing parent pointers and children lists [G].
+- **Performance:** The method allows for interactive traversal of terrain with low memory consumption and no preprocessing [S1, unofficial]. In the prototype implementation, all three components are executed on the CPU [S1, unofficial].
+- **Strengths:** Eliminates cracks at cell boundaries without stitching [S1, unofficial]. Guarantees well-shaped tetrahedra [S1, unofficial]. Efficient real-time adaptation [S1, unofficial].
+- **Limitations:** Requires careful handling of diamond dependencies [S1, unofficial]. The initial split into six tetrahedra must be done correctly [G]. The method is specific to tetrahedral meshes and may not be directly applicable to other mesh types without modification [G].
 
 ## Background
-The LEB Tetrahedral Hierarchy was introduced in the context of real-time volumetric terrain rendering to address the problem of cracks in isosurface extraction when using adaptive meshes [S1, unofficial]. It builds on the concept of diamond hierarchies [WDF08] and longest edge bisection schemes. The method was proposed as an alternative to octree decompositions, which suffer from non-conforming boundaries. The key insight is that LEB subdivision preserves element quality and allows for conforming meshes through simultaneous splitting of diamonds.
+The LEB Tetrahedral Hierarchy was introduced in the context of real-time volumetric terrain rendering to address the problem of cracks in isosurface extraction when using adaptive meshes [S1, unofficial]. It builds on the concept of diamond hierarchies and longest edge bisection schemes [S1, unofficial]. The method was proposed as an alternative to octree decompositions, which suffer from non-conforming boundaries [S1, unofficial]. The key insight is that LEB subdivision preserves element quality and allows for conforming meshes through simultaneous splitting of diamonds [S1, unofficial].
 
 ## Sources
 [S1] Level of Detail for Real-Time Volumetric Terrain Rendering, https://doi.org/10.2312/pe.vmv.vmv13.211-218, fetched 2026-10-26 (unofficial)
