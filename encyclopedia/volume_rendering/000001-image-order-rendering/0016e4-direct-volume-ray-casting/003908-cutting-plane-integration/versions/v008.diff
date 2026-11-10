@@ -1,0 +1,240 @@
+--- v007.md
++++ v008.md
+@@ -4,124 +4,105 @@
+ 
+ ## Overview
+-Cutting Plane Integration is an interactive volume rendering technique that dynamically slices a 3D dataset using a semi-transparent clipping plane to reveal internal structures that would otherwise be occluded by front-facing opaque regions [S1, unofficial]. It differs from standard direct volume ray casting by restricting the integration domain along the ray path to either the region "above" or "below" a user-defined plane, effectively performing a real-time, view-dependent region-of-interest extraction [S1, unofficial].
++Cutting Plane Integration is an interactive volume rendering technique that dynamically slices a 3D dataset using a semi-transparent geometric plane to reveal internal structures obscured by foreground opacity [S1, unofficial]. It solves the problem where standard front-to-back compositing accumulates full opacity before reaching deep internal features, by restricting the integration domain to one side of a user-defined clipping plane [S1, unofficial]. It sets itself apart from standard volume rendering by introducing a dynamic, user-controllable boundary that truncates the ray integration path, distinct from static clipping regions or multi-pass post-processing techniques [S1, unofficial].
+ 
+ ## How it works
+-The method extends the standard direct volume ray casting loop by introducing a dynamic clipping boundary. The ray is intersected with the volume bounding box to determine the initial entry and exit points. A cutting plane, defined by a position and orientation, further subdivides the ray segment. The integration proceeds only through the valid sub-segment defined by the `renderAbove` flag.
+-
+ **Inputs and Outputs:**
+-*   **Input:** 3D volume data (scalar field), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), cutting plane parameters (height $h$, rotation angles $\theta_x, \theta_y$, boolean `renderAbove`).
+-*   **Output:** Final pixel color $C_{out}$ and opacity $\alpha_{out}$.
++*   **Input:** A 3D scalar volume dataset $V$ (typically stored as a 1D array of normalized floats), camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), and cutting plane parameters (position, orientation, and side).
++*   **Output:** A 2D image where pixels are composited using the front-to-back equation, but only for samples lying within the valid half-space defined by the cutting plane.
+ 
+ **Data Structures:**
+-*   **Volume Data:** Stored as a `Float32Array` of normalized values $[0, 1]$. Dimensions are stored as `width`, `height`, `depth` [S1, unofficial].
+-*   **Cutting Plane:** Defined by a position vector $\mathbf{p}_{plane}$ and a normal vector $\mathbf{n}$. The position is derived from a normalized height parameter $h \in [0, 1]$ [S1, unofficial].
++The volume data is typically loaded into a 3D texture or a 1D `Float32Array` with dimensions $(W, H, D)$. The cutting plane is represented by a geometric mesh (e.g., a `PlaneGeometry`) and a visual indicator (e.g., an `ArrowHelper` for the normal vector) [S1, unofficial].
++
++**Parameters:**
++*   `planeHeight`: A normalized float in $[0, 1]$ mapping to the Z-axis position [S1, unofficial].
++*   `planeRotX`, `planeRotY`: Rotation angles in degrees around the X and Y axes [S1, unofficial].
++*   `renderAbove`: A boolean flag that flips the plane 180° around the Y-axis, effectively swapping the "valid" side of the cut [S1, unofficial].
+ 
+ **Steps:**
++1.  **Plane Position Calculation:** Map the normalized `planeHeight` to a world Z-coordinate. Based on the source implementation, the position is calculated as:
++    $$ z_{plane} = 200 - 400 \cdot \text{planeHeight} $$
++    This maps the range $[0, 1]$ to $[200, -200]$ [S1, unofficial].
++2.  **Plane Orientation:** Convert `planeRotY` from degrees to radians. If `renderAbove` is true, add $\pi$ to the rotation angle to flip the plane's normal direction [S1, unofficial].
++3.  **Ray Casting:** For each pixel, define the ray $r(t) = \mathbf{o} + t\mathbf{d}$ [G].
++4.  **Clipping Check:** For each sample point $\mathbf{p}_i$ along the ray, determine if it lies on the "visible" side of the cutting plane. Let $\mathbf{n}$ be the plane normal and $\mathbf{p}_{plane}$ be a point on the plane (e.g., the center). The sample is valid if:
++    $$ (\mathbf{p}_i - \mathbf{p}_{plane}) \cdot \mathbf{n} \ge 0 $$
++    (Assuming the normal points towards the visible side; this depends on the `renderAbove` logic) [S1, unofficial].
++5.  **Compositing:** Perform standard front-to-back compositing [Parent] only for samples that pass the clipping check. Samples on the invalid side are skipped (treated as transparent/background) [S1, unofficial].
+ 
+-1.  **Ray Generation:** Determine the ray segment $[t_{start}, t_{end}]$ intersecting the volume bounding box.
+-2.  **Plane Definition:** Calculate the cutting plane's world position and orientation based on input parameters [S1, unofficial]:
+-    *   Map normalized height $h$ to world Z position: $z_{plane} = 200 - 400 \cdot h$.
+-    *   Convert rotation angles $\theta_x, \theta_y$ (degrees) to radians. Apply rotation to the plane's normal vector. If `renderAbove` is true, apply a $180^\circ$ ($\pi$ radians) offset to the Y-rotation to flip the plane's orientation [S1, unofficial].
+-3.  **Ray-Plane Intersection:** Intersect the ray $r(t) = \mathbf{o} + t\mathbf{d}$ with the cutting plane to find the intersection parameter $t_{clip}$.
+-    *   If the ray is parallel to the plane, $t_{clip}$ is undefined; handle as no cut.
+-    *   Otherwise, $t_{clip} = \frac{(\mathbf{p}_{plane} - \mathbf{o}) \cdot \mathbf{n}}{\mathbf{d} \cdot \mathbf{n}}$.
+-4.  **Segment Clipping:** Determine the effective integration interval $[t_{eff\_start}, t_{eff\_end}]$ based on `renderAbove`:
+-    *   If `renderAbove` is true: The valid region is between the plane and the far boundary. Set $t_{eff\_start} = \max(t_{start}, t_{clip})$ and $t_{eff\_end} = t_{end}$.
+-    *   If `renderAbove` is false: The valid region is between the near boundary and the plane. Set $t_{eff\_start} = t_{start}$ and $t_{eff\_end} = \min(t_{end}, t_{clip})$.
+-    *   If $t_{eff\_start} \ge t_{eff\_end}$, the ray does not pass through the valid region; output background color.
+-5.  **Discretization and Integration:** Discretize the interval $[t_{eff\_start}, t_{eff\_end}]$ into $N$ samples with step $\Delta t = (t_{eff\_end} - t_{eff\_start}) / N$. For each sample $i$:
+-    *   Compute sample point $\mathbf{p}_i = \mathbf{o} + (t_{eff\_start} + i \cdot \Delta t) \mathbf{d}$.
+-    *   Sample volume value $V(\mathbf{p}_i)$ using trilinear interpolation [S1, unofficial].
+-    *   Map $V(\mathbf{p}_i)$ to color $C_i$ and opacity $\alpha_i$ using the transfer function.
+-    *   Composite front-to-back:
+-        $$ C_{out} = C_{in} + (1 - \alpha_{in}) \cdot C_i \cdot \alpha_i $$
+-        $$ \alpha_{out} = \alpha_{in} + (1 - \alpha_{in}) \cdot \alpha_i $$
+-        Initialize $C_{in} = 0, \alpha_{in} = 0$.
+-
+-**Parameters:**
+-*   `planeHeight`: Normalized float $[0, 1]$ controlling the Z-axis position of the plane [S1, unofficial].
+-*   `planeRotX`, `planeRotY`: Rotation angles in degrees [S1, unofficial].
+-*   `renderAbove`: Boolean flag determining which side of the plane is rendered [S1, unofficial].
+-
+-**Edge Cases:**
+-*   **Ray Parallel to Plane:** If $\mathbf{d} \cdot \mathbf{n} \approx 0$, the ray never intersects the plane. The integration interval remains $[t_{start}, t_{end}]$ (full volume) or is skipped depending on implementation logic [G].
+-*   **Precision:** Floating-point errors in ray-plane intersection may cause gaps or overlaps in the slice. Use a small epsilon for comparisons [G].
+-
++**Pseudocode:**
+ ```python
+-def cutting_plane_integration(ray_origin, ray_direction, volume, plane_height, plane_rot_x, plane_rot_y, render_above):
+-    # 1. Ray-Volume Intersection (simplified bounding box)
+-    t_min, t_max = intersect_ray_bbox(ray_origin, ray_direction, volume.bbox)
+-    if t_min > t_max:
+-        return background_color
+-
+-    # 2. Define Cutting Plane
+-    # Map height to Z position
+-    z_plane = 200 - 400 * plane_height
+-    plane_pos = Vector3(0, 0, z_plane)
++def render_cutting_plane(volume, camera, plane_params):
++    """
++    volume: 3D array of floats [W, H, D]
++    camera: object with origin o, direction d, and image dimensions
++    plane_params: dict with height (0-1), rot_x, rot_y, render_above (bool)
++    """
++    # 1. Calculate plane position and normal
++    # Map normalized height to world Z
++    plane_z = 200.0 - 400.0 * plane_params['height']
++    plane_center = Vector3(0, 0, plane_z)
+     
+-    # Calculate normal based on rotations
+-    # Convert degrees to radians
+-    theta_x = math.radians(plane_rot_x)
+-    theta_y = math.radians(plane_rot_y)
++    # Calculate normal based on rotation
++    rot_y_rad = math.radians(plane_params['rot_y'])
++    if plane_params['render_above']:
++        rot_y_rad += math.pi
++        
++    # Simple rotation around Y axis for normal (assuming initial normal is Z)
++    # Initial normal is (0, 0, 1)
++    # Rotate around Y: x' = x*cos + z*sin, z' = -x*sin + z*cos
++    nx = 0.0 * math.cos(rot_y_rad) + 1.0 * math.sin(rot_y_rad)
++    nz = -0.0 * math.sin(rot_y_rad) + 1.0 * math.cos(rot_y_rad)
++    normal = Vector3(nx, 0.0, nz).normalize()
+     
+-    # Base normal along Z
+-    normal = Vector3(0, 0, 1)
+-    
+-    # Apply rotations (simplified rotation matrix application)
+-    # Rotate around X
+-    normal = rotate_x(normal, theta_x)
+-    # Rotate around Y
+-    normal = rotate_y(normal, theta_y)
+-    
+-    # Flip if renderAbove is true (180 degree offset around Y)
+-    if render_above:
+-        normal = rotate_y(normal, math.pi)
+-    
+-    normal.normalize()
+-
+-    # 3. Ray-Plane Intersection
+-    denom = dot(ray_direction, normal)
+-    if abs(denom) < 1e-6:
+-        # Ray parallel to plane
+-        t_clip = float('inf')
+-    else:
+-        t_clip = dot(plane_pos - ray_origin, normal) / denom
+-
+-    # 4. Determine Integration Interval
+-    if render_above:
+-        t_start = max(t_min, t_clip)
+-        t_end = t_max
+-    else:
+-        t_start = t_min
+-        t_end = min(t_max, t_clip)
+-
+-    if t_start >= t_end:
+-        return background_color
+-
+-    # 5. Discretize and Composite
+-    num_samples = 100 # Typical value, not specified in sources
+-    delta_t = (t_end - t_start) / num_samples
+-    
+-    acc_color = Vector3(0, 0, 0)
+-    acc_alpha = 0.0
+-    
+-    for i in range(num_samples):
+-        t = t_start + i * delta_t
+-        p = ray_origin + ray_direction * t
+-        
+-        # Sample volume
+-        val = volume.sample_trilinear(p)
+-        
+-        # Transfer function
+-        color, alpha = transfer_function(val)
+-        
+-        # Front-to-back compositing
+-        acc_color = acc_color + (1 - acc_alpha) * color * alpha
+-        acc_alpha = acc_alpha + (1 - acc_alpha) * alpha
+-        
+-        if acc_alpha > 0.99: # Early ray marching termination
+-            break
++    # 2. Iterate over pixels
++    for y in range(camera.height):
++        for x in range(camera.width):
++            # Define ray for this pixel
++            ray_o = camera.origin
++            ray_d = camera.get_direction(x, y)
+             
+-    return acc_color
++            # Intersect ray with volume bounding box to get t_near, t_far
++            t_near, t_far = intersect_box(ray_o, ray_d, volume.bounds)
++            
++            acc_color = Vector3(0, 0, 0)
++            acc_alpha = 0.0
++            
++            # 3. Ray march
++            num_samples = 100
++            dt = (t_far - t_near) / num_samples
++            
++            for i in range(num_samples):
++                t = t_near + i * dt
++                p = ray_o + ray_d * t
++                
++                # 4. Check if point is on the valid side of the cutting plane
++                # Vector from plane center to sample point
++                vec_to_sample = p - plane_center
++                
++                # Dot product with normal
++                # If dot >= 0, it's on the "front" side defined by the normal
++                if (vec_to_sample.dot(normal)) >= 0:
++                    # Sample volume
++                    val = volume.sample(p)
++                    
++                    # Map to color and opacity (Transfer Function)
++                    color, alpha = transfer_function(val, dt)
++                    
++                    # Front-to-back compositing
++                    # C_out = C_acc + (1 - alpha_acc) * c * alpha
++                    # alpha_out = alpha_acc + (1 - alpha_acc) * alpha
++                    weight = (1.0 - acc_alpha) * alpha
++                    acc_color += weight * color
++                    acc_alpha += weight
++                    
++                    # Early ray termination optimization
++                    if acc_alpha > 0.99:
++                        break
++                else:
++                    # Point is behind the cut; skip compositing
++                    pass
++            
++            # Write final color to pixel buffer
++            pixel_buffer.set_pixel(x, y, acc_color)
+ ```
+ 
+@@ -129,15 +110,16 @@
+ 
+ ### [Region of Interest (ROI) Rendering](10737-region-of-interest-roi-rendering.md)
+-A generalization where the cut region is defined by arbitrary geometric or volumetric masks rather than a single plane. Choose when complex internal structures need isolation beyond a simple slice.
++Region of Interest (ROI) rendering is a technique to visualize internal features by defining a specific region and rendering only that portion of the dataset. It solves the problem where full opacity is obtained before reaching internal structures, making them difficult to see. It sets itself apart from standard volume rendering by restricting the integration domain to a user-defined subset, which can be geometric or volumetric, rather than the entire volume extent.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples in the valid interval. The interval length varies dynamically, potentially reducing $N$ compared to full volume rendering.
+-*   **Memory Complexity:** $O(1)$ additional memory per pixel for compositing state. The volume data must be resident in memory.
+-*   **Performance:** Interactive frame rates are achievable on GPU hardware due to the simplicity of the clipping logic and the use of 3D textures [S1, unofficial]. Performance scales with volume resolution and the size of the remaining valid interval.
+-*   **Strengths:** Enables interactive exploration of internal structures without pre-segmentation. Simple to implement as a shader modification.
+-*   **Limitations:** Only exposes structures on one side of the plane. Occlusion from the "cut" side is completely removed, which may be undesirable if context is needed.
++*   **Time Complexity:** $O(W \cdot H \cdot N)$, where $W, H$ are image dimensions and $N$ is the number of samples per ray. The clipping check adds a constant-time dot product per sample, which is negligible.
++*   **Memory Complexity:** $O(W \cdot H \cdot D)$ for the volume data. The plane geometry is minimal.
++*   **Strengths:** Interactive performance for exploration; allows users to "slice" through data to see inside without destroying the 3D context of the remaining volume.
++*   **Limitations:** The cut is binary (inside/outside); partial volume effects at the cut boundary may appear sharp unless the plane itself is rendered semi-transparently (as done in the source implementation) [S1, unofficial].
++*   **When to use:** Interactive exploration of large datasets where internal structures are occluded.
++*   **When not to use:** When precise quantitative analysis of the cut surface is required, or when the cut needs to be non-planar.
+ 
+ ## Background
+-Cutting Plane Integration is implemented in interactive visualization projects such as the SubairProject1 Volume Rendering Visualization Project, which uses Three.js for real-time rendering [S1, unofficial]. It builds on the principles of direct volume ray casting [19-direct-volume-ray-casting.md] and is closely related to Region of Interest (ROI) rendering techniques [10737-region-of-interest-roi-rendering.md].
++The technique is implemented in the "SubairProject1/Volume-Rendering-Visualization-Project" repository, authored by SubairProject1 [S1, unofficial]. It utilizes the Three.js library for WebGL rendering, leveraging `Data3DTexture` for volume storage and `ArrowHelper` for visualizing the cutting plane's normal vector [S1, unofficial]. The implementation demonstrates an interactive clipping technique that renders a semi-transparent plane mesh and normal arrow, dynamically updating raycasting uniforms to slice the volume [S1, unofficial].
+ 
+ ## Sources

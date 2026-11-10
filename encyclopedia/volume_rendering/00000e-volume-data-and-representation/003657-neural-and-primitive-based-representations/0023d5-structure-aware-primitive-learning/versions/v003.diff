@@ -1,0 +1,213 @@
+--- v002.md
++++ v003.md
+@@ -1,118 +1,117 @@
+ # Structure-aware primitive learning
+ 
+-Also called: ESVR (Ellipsoid-based Sparse Volume Rendering)
++Also called: Ellipsoid-based Sparse Volume Rendering (ESVR)
+ 
+ ## Overview
+-Structure-aware primitive learning represents volumetric data using a sparse set of parameterized ellipsoids, optimizing for structural similarity rather than just pixel-wise error [S1, unofficial]. It differs from dense voxel-based methods by explicitly modeling anisotropic structures through covariance matrices, and from isotropic Gaussian splatting by using ellipsoidal primitives that can capture elongated features more efficiently [S1, unofficial].
++Structure-aware primitive learning represents volumetric data using a sparse set of parameterized ellipsoids, optimizing their geometry and intensity to reconstruct ground-truth subvolumes [S1, unofficial]. It sets itself apart from grid-based or point-based neural fields by using explicit, differentiable geometric primitives that capture local structural anisotropy, allowing for efficient sparse representation of complex volume data [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Ground-truth volume data $V_{gt}$ and an initial set of ellipsoids $E$ [S1, unofficial].
+-**Outputs:** Optimized set of ellipsoids $E$ [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A sequence of ground-truth 3D subvolumes $V_{gt}$ [S1, unofficial].
++*   **Output:** A set of ellipsoidal primitives $E$, where each primitive $j$ is defined by parameters $(\boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j, I_j)$: mean position $\boldsymbol{\mu}_j$, covariance matrix $\boldsymbol{\Sigma}_j$, and intensity $I_j$ [S1, unofficial].
+ 
+ **Data Structures:**
+-Each ellipsoid primitive $j \in E$ is defined by a mean position $\boldsymbol{\mu}_j \in \mathbb{R}^3$, a symmetric positive-definite covariance matrix $\boldsymbol{\Sigma}_j \in \mathbb{R}^{3 \times 3}$, and an intensity or color value $I_j \in \mathbb{R}$ (or $\mathbb{R}^3$ for color) [S1, unofficial].
++*   **Primitive $E_j$:** A tuple containing:
++    *   $\boldsymbol{\mu}_j \in \mathbb{R}^3$: Center of the ellipsoid.
++    *   $\boldsymbol{\Sigma}_j \in \mathbb{R}^{3 \times 3}$: Covariance matrix defining orientation and scale. Must be positive semi-definite.
++    *   $I_j \in \mathbb{R}$: Scalar intensity value associated with the primitive.
++*   **Subvolume $V_{gt}$:** A 3D grid of intensity values.
++
++**Parameters:**
++*   $\beta \in [0, 1]$: Weight for the L1 reconstruction loss component [S1, unofficial].
++*   $d, p$: Iteration counts for densification and pruning steps [S1, unofficial].
+ 
+ **Algorithm:**
+-The method operates in iterations, processing the volume sequentially in subvolumes [S1, unofficial].
+-1. **Fetch Subvolume:** Retrieve the next ground-truth subvolume $V_{gt}$ from the input data [S1, unofficial].
+-2. **Retrieve Overlapping Primitives:** Identify the subset of ellipsoids $E'$ that overlap with $V_{gt}$ [S1, unofficial].
+-3. **Voxelize:** Render the overlapping ellipsoids into a voxel grid $\hat{V}$ to predict the subvolume [S1, unofficial]. This involves projecting each ellipsoid onto the grid cells it intersects [S1, unofficial].
+-4. **Compute Loss:** Calculate the reconstruction loss $L_{rec}$ using a weighted combination of L1 loss and Structural Similarity (DSSIM) loss [S1, unofficial]:
+-   $$ L_{rec} = \beta L_1(\hat{V}, V_{gt}) + (1 - \beta) L_{DSSIM}(\hat{V}, V_{gt}) $$
+-   where $\beta$ is the reconstruction loss weight [S1, unofficial].
+-5. **Update Parameters:** Update the parameters $(\boldsymbol{\mu}, \boldsymbol{\Sigma}, I)$ of the overlapping ellipsoids using the Adam optimizer on the gradient of $L_{rec}$ [S1, unofficial].
+-6. **Pruning:** Periodically, compute an importance score for each ellipsoid (e.g., based on fractional anisotropy or contribution to loss) and remove primitives with low scores [S1, unofficial].
++The method operates in epochs, traversing subvolumes sequentially. For each subvolume, it identifies overlapping primitives, renders a prediction, computes a composite loss, and updates parameters via Adam [S1, unofficial].
++
++1.  **Fetch Subvolume:** Retrieve the next ground-truth subvolume $V_{gt}$ from the input sequence [S1, unofficial].
++2.  **Identify Overlaps:** Retrieve the set of ellipsoids $E'$ that overlap with the spatial bounds of $V_{gt}$ from the global primitive set $E$ [S1, unofficial].
++3.  **Voxelize (Render):** Compute the predicted subvolume $\hat{V}$ by voxelizing the overlapping ellipsoids $E'$ [S1, unofficial]. This involves sampling the ellipsoid field at voxel centers.
++4.  **Compute Loss:** Calculate the reconstruction loss $L_{rec}$ using a combination of L1 error and Structural Similarity (DSSIM) [S1, unofficial]:
++    $$ L_{rec} = \beta L_1(\hat{V}, V_{gt}) + (1 - \beta) L_{DSSIM}(\hat{V}, V_{gt}) $$
++    where $L_1$ is the mean absolute error and $L_{DSSIM}$ is the structural dissimilarity loss [S1, unofficial].
++5.  **Update:** Update the primitive parameters $(\boldsymbol{\mu}_j, \boldsymbol{\Sigma}_j, I_j)$ for all $j \in E'$ using the Adam optimizer on the gradient $\nabla L_{rec}$ [S1, unofficial].
++6.  **Compute Metrics:** Calculate fractional anisotropy (FA) for each primitive to monitor structural alignment:
++    $$ FA_j = \text{ComputeFA}(\boldsymbol{\Sigma}_j) $$
++    [S1, unofficial].
++7.  **Prune:** Remove primitives with low importance scores from $E$ to maintain sparsity [S1, unofficial].
++8.  **Iterate:** Repeat until convergence or dataset exhaustion [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def structure_aware_primitive_learning(V_gt_data, E_initial, beta=0.5, max_iters=1000, prune_interval=10):
+-    E = list(E_initial)
+-    subvol_idx = 0
+-    i = 0
+-    while i < max_iters:
+-        # 1. Fetch next sequential ground-truth subvolume
+-        V_gt = V_gt_data[subvol_idx]
+-        subvol_idx += 1
+-        if subvol_idx >= len(V_gt_data):
+-            break
+-
+-        # 2. Retrieve ellipsoids overlapping the current subvolume
+-        E_overlapping = [p for p in E if p.bbox.overlaps(V_gt.bounds)]
+-
+-        # 3. Voxelize: Predict subvolume from ellipsoids
+-        V_hat = initialize_grid(V_gt.shape)
+-        for p in E_overlapping:
+-            for cell in V_gt.cells_intersecting(p.bbox):
+-                V_hat[cell] += ellipsoid_value(p.mu, p.Sigma, cell.center)
+-
+-        # 4. Compute reconstruction loss
+-        L1_loss = mean_absolute_error(V_hat, V_gt)
+-        # Structural similarity index computation is a standard metric [G]
+-        DSSIM_loss = structural_similarity_index(V_hat, V_gt)
+-        L_rec = beta * L1_loss + (1 - beta) * DSSIM_loss
+-
+-        # 5. Update primitive parameters using Adam optimizer
+-        # Gradient computation and Adam parameter update are standard optimization steps [G]
+-        gradients = compute_gradients(L_rec, E_overlapping)
+-        E_overlapping = adam_update(E_overlapping, gradients)
+-
+-        # 6. Prune primitives with low importance scores (periodic)
+-        if i % prune_interval == 0:
+-            E = remove_low_score_primitives(E)
+-
+-        i += 1
++def structure_aware_primitive_learning(Volumes, beta=0.5, max_epochs=100):
++    # Initialize empty set of ellipsoids E
++    E = set()
++    
++    for epoch in range(max_epochs):
++        # Iterate through all subvolumes in the dataset
++        for V_gt in Volumes:
++            # 1. Fetch next sequential ground-truth subvolume
++            # V_gt is already provided by iterator
++            
++            # 2. Retrieve ellipsoids overlapping the current subvolume
++            # GetOverlappingEllipsoids checks spatial intersection between 
++            # primitives in E and the bounding box of V_gt
++            E_overlapping = GetOverlappingEllipsoids(E, V_gt)
++            
++            if not E_overlapping:
++                # If no primitives overlap, initialize new ones or skip
++                # Implementation detail [G]: Initialize primitives at grid centers
++                continue
++                
++            # 3. Voxelize: Predict subvolume from primitives
++            # Voxelize samples the implicit field defined by E_overlapping
++            # at the voxel grid positions of V_gt
++            V_hat = Voxelize(E_overlapping, V_gt.grid_positions)
++            
++            # 4. Compute reconstruction loss
++            # L1: Mean Absolute Error
++            loss_l1 = MeanAbsoluteError(V_hat, V_gt)
++            # DSSIM: Structural Dissimilarity (1 - SSIM)
++            loss_dssim = 1.0 - StructuralSimilarity(V_hat, V_gt)
++            
++            L_rec = beta * loss_l1 + (1 - beta) * loss_dssim
++            
++            # 5. Update primitive parameters using Adam
++            # Gradients flow through the voxelization process to mu, Sigma, I
++            gradients = ComputeGradients(L_rec, E_overlapping)
++            E_overlapping = AdamUpdate(E_overlapping, gradients)
++            
++            # 6. Compute fractional anisotropy for monitoring
++            for prim in E_overlapping:
++                prim.FA = ComputeFA(prim.Sigma)
++                
++            # 7. Prune primitives with low importance scores
++            # Importance score is derived from contribution to loss or magnitude
++            E = RemoveLowScore(E)
++            
+     return E
+-
+-def initialize_grid(shape):
+-    return [0.0] * (shape[0] * shape[1] * shape[2])
+-
+-def ellipsoid_value(mu, Sigma, center):
+-    # Standard ellipsoid/Gaussian projection value [G]
+-    diff = center - mu
+-    return np.exp(-0.5 * diff.T @ np.linalg.inv(Sigma) @ diff)
+-
+-def mean_absolute_error(V_hat, V_gt):
+-    return np.mean(np.abs(V_hat - V_gt))
+-
+-def structural_similarity_index(V_hat, V_gt):
+-    # Standard DSSIM metric [G]
+-    pass
+-
+-def compute_gradients(loss, primitives):
+-    # Standard autograd/numerical gradient step [G]
+-    pass
+-
+-def adam_update(primitives, gradients, lr=1e-3):
+-    # Standard Adam optimizer step [G]
+-    pass
+-
+-def remove_low_score_primitives(E):
+-    # Computes fractional anisotropy from covariance and removes low-score primitives [S1, unofficial]
+-    return [p for p in E if compute_fa(p.Sigma) > threshold]
+-
+-def compute_fa(Sigma):
+-    # Standard fractional anisotropy calculation from covariance eigenvalues [S1, unofficial]
+-    pass
+ ```
+ 
+-**Parameters:**
+-- $\beta$: Weight for L1 loss vs DSSIM loss. Typical value not given in the sources.
+-- `prune_interval`: Frequency of pruning. Not given in the sources.
+-
+-**Edge Cases:**
+-- **Degenerate Covariance:** Ensure $\boldsymbol{\Sigma}_j$ remains positive-definite during updates [G].
+-- **Boundary Conditions:** Handle ellipsoids partially outside the volume bounds [G].
++**Edge Cases and Pitfalls:**
++*   **Precision:** The covariance matrix $\boldsymbol{\Sigma}_j$ must remain positive semi-definite during optimization. If it becomes indefinite, the ellipsoid geometry is invalid [S1, unofficial].
++*   **Boundaries:** Primitives at the boundary of a subvolume may be partially outside the voxel grid. The voxelization step must handle partial overlaps correctly [S1, unofficial].
++*   **Degenerate Input:** If a subvolume is empty or uniform, the optimizer may collapse primitives. Pruning and densification strategies are required to maintain representation capacity [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### Mixture-of-Experts Neural Fields
++A variant that routes coordinates through a policy network to one of seven expert decoders, each specializing in a spatially distinct subdomain, with a shared encoder [S2, unofficial]. It sets itself apart by maintaining boundary continuity via the shared encoder, which independent per-block INRs cannot guarantee [S2, unofficial]. Choose this for large, heterogeneous datasets where different regions have distinct structural characteristics [S2, unofficial].
++*   **Steps:** 1. Route coordinates through a policy network to one of seven expert decoders. 2. Use a shared encoder extracting features used by all experts to maintain boundary continuity. 3. Pretrain the policy network with voxel-clustering labels to prevent router collapse [S2, unofficial].
++*   **Pitfalls:** Requires 8–50 hours total training time. Without pretraining the policy network, the router collapses to a single expert [S2, unofficial].
++*   **Performance:** 60.24 dB PSNR at 1,951× compression on combustion data; 50.73 dB PSNR at 24,878× compression on ionization data [S2, unofficial].
++
+ ## Operating characteristics
+-**Time Complexity:** Depends on the number of overlapping ellipsoids per subvolume and the voxelization cost [S1, unofficial]. Sparse representation reduces computation compared to dense volumes [S1, unofficial].
+-**Memory Complexity:** Proportional to the number of ellipsoids, which is typically much smaller than the number of voxels in the volume [S1, unofficial].
+-**Strengths:** Efficient representation of anisotropic structures; structural similarity loss preserves edges and textures better than L1 alone [S1, unofficial].
+-**Limitations:** Requires careful initialization and pruning; covariance matrix updates can be unstable [S1, unofficial].
++*   **Time Complexity:** Training time depends on the number of primitives and subvolumes. The mixture-of-experts variant requires 8–50 hours total training time [S2, unofficial].
++*   **Memory Complexity:** Sparse representation. Memory usage scales with the number of primitives, not the full volume resolution, allowing high compression ratios (e.g., 1,951× to 24,878×) [S2, unofficial].
++*   **Strengths:** Captures local structural anisotropy via ellipsoids; sparse; high compression ratios; differentiable for end-to-end training [S1, unofficial].
++*   **Limitations:** Requires careful initialization and pruning; training time can be significant for large datasets; covariance matrix maintenance [S1, unofficial].
++*   **When to use:** Scientific volume data with strong directional structures; scenarios requiring high compression and structural fidelity [S1, S2, unofficial].
++*   **When not to use:** Uniform, isotropic data where simpler representations suffice; real-time rendering without precomputed primitives [S1, unofficial].
+ 
+ ## Background
+-Originated in the paper "ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling" [S1, unofficial]. The method addresses the need for efficient and structurally accurate volume representation by moving beyond isotropic primitives [S1, unofficial].
++Originated in the ESVR (Ellipsoid-based Sparse Volume Rendering) method, which introduces structure-aware primitive learning for 3D volume rendering [S1, unofficial]. The approach leverages the ability of ellipsoids to model anisotropic structures, addressing limitations of isotropic primitives like Gaussians in scientific visualization [S1, unofficial].
+ 
+ ## Sources
+-[S1] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)+[S1] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)
++[S2] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

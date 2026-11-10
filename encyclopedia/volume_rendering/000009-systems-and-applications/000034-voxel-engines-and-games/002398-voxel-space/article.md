@@ -14,9 +14,12 @@ Voxel Space is a 2.5D rendering technique that generates a pseudo-3D environment
 - A 2D frame buffer containing the rendered image [S1, unofficial].
 
 **Data Structures:**
-- **Color Map:** A 2D array of color values. Dimensions are not explicitly defined in the sources, but the demo uses maps reverse-engineered from *Comanche* [S1, unofficial].
-- **Depth Map:** A 2D array of height/depth values. The source code defines `dim_mapa` as 1024 and `dim_mapa_log2` as 10, implying a $1024 \times 1024$ map [S1, unofficial].
+- **Color Map:** A 2D array of color values [S1, unofficial]. Dimensions are not explicitly defined in the sources, but the demo uses maps reverse-engineered from *Comanche* [S1, unofficial].
+- **Depth Map:** A 2D array of height/depth values [S1, unofficial]. The source code defines `dim_mapa` as 1024 and `dim_mapa_log2` as 10, implying a $1024 \times 1024$ map [S1, unofficial].
 - **Math Tables:** Hardcoded tables for trigonometric and rotation calculations to avoid runtime computation [S1, unofficial].
+
+**Formulas:**
+Not given in the sources. Coordinate mapping relies on hardcoded math tables and bitwise shift approximations for rotation [S1, unofficial].
 
 **Steps:**
 1. **Initialize Frame Buffers:** Allocate two frame buffers to allow double buffering [S1, unofficial].
@@ -42,8 +45,9 @@ SCREEN_HEIGHT = 160 # Standard GBA resolution [G]
 
 # Hardcoded math tables for rotation and trigonometry
 # These limit camera heights and vertical angles to stored values [S1, unofficial]
-TABLE_ROTATE_X = [...]
-TABLE_ROTATE_Y = [...]
+# Exact table contents are implementation-specific; defined as lookup arrays [G]
+TABLE_ROTATE_X = [0.0] * 256
+TABLE_ROTATE_Y = [0.0] * 256
 
 def render_voxel_space(color_map, depth_map, camera_x, camera_y, camera_angle, camera_vertical_angle):
     # Allocate two frame buffers for double buffering [S1, unofficial]
@@ -54,15 +58,19 @@ def render_voxel_space(color_map, depth_map, camera_x, camera_y, camera_angle, c
     # System-level optimization: Copy ARM engine code to RAM for faster access [S1, unofficial]
 
     for x in range(SCREEN_WIDTH):
+        # Adaptive frequency: skip columns based on distance to decrease render frequency [S1, unofficial]
+        # Implementation detail not provided in the sources [G]
+
         # Map camera position and angle to depth map coordinates using fast approximations [S1, unofficial]
-        depth_map_x = (camera_x + TABLE_ROTATE_X[camera_angle][x]) & (DIM_MAPA - 1)
+        # Source uses bitwise shifts for rotation approximations [S1, unofficial]
+        depth_map_x = (camera_x + TABLE_ROTATE_X[camera_angle]) & (DIM_MAPA - 1)
         depth_map_y = (camera_y + TABLE_ROTATE_Y[camera_vertical_angle]) & (DIM_MAPA - 1)
 
         # Get depth value (height)
         depth_value = depth_map[depth_map_y][depth_map_x]
 
         # Get color value from color map
-        color_map_x = (camera_x + TABLE_ROTATE_X[camera_angle][x]) & (DIM_MAPA - 1)
+        color_map_x = (camera_x + TABLE_ROTATE_X[camera_angle]) & (DIM_MAPA - 1)
         color_map_y = (camera_y + TABLE_ROTATE_Y[camera_vertical_angle]) & (DIM_MAPA - 1)
         color = color_map[color_map_y][color_map_x]
 

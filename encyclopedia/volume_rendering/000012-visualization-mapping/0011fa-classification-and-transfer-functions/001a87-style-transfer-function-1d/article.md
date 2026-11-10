@@ -12,14 +12,14 @@ Style Transfer Function (1D) is a data-driven illumination technique that extend
 **Data Structures:**
 The method decomposes the high-dimensional lookup into three separate textures to avoid prohibitive memory requirements [S1][S2, unofficial]:
 
-1.  **Transfer Function Texture (tft):** A 1D texture mapping data values $s \in [0, 255]$ (or normalized range) to a pair $(i, \alpha_u)$.
-    *   $i$: A floating-point index value ranging from $0$ to $N-1$, where $N$ is the number of style entries defined in the transfer function. Fractional values indicate interpolation between two adjacent style entries.
+1.  **Transfer Function Texture (tft):** A 1D texture mapping data values $s \in [0, 255]$ (or normalized range) to a pair $(i, \alpha_u)$ [S2, unofficial].
+    *   $i$: A floating-point index value ranging from $0$ to $N-1$, where $N$ is the number of style entries defined in the transfer function [S2, unofficial]. Fractional values indicate interpolation between two adjacent style entries [S1].
     *   $\alpha_u$: Uniform opacity value in $[0, 1]$, controlling overall opacity independent of normal direction [S2, unofficial].
-2.  **Index Function Texture (ift):** A 1D texture mapping the continuous index $i$ from `tft` to discrete style indices $j$.
+2.  **Index Function Texture (ift):** A 1D texture mapping the continuous index $i$ from `tft` to discrete style indices $j$ [S2, unofficial].
     *   Input: Index $i \in [0, N-1]$.
     *   Output: Style index $j \in [0, M-1]$, where $M$ is the number of distinct styles.
     *   Note: This mapping is discrete; no interpolation is performed during lookup. If each style is used only once, this texture can be skipped [S2, unofficial].
-3.  **Style Function Texture (sft):** Stores $M$ distinct styles. Each style is a 2D image (lit sphere map) representing color and directional opacity $(r, g, b, \alpha_d)$ as a function of eye-space normal direction.
+3.  **Style Function Texture (sft):** Stores $M$ distinct styles [S2, unofficial]. Each style is a 2D image (lit sphere map) representing color and directional opacity $(r, g, b, \alpha_d)$ as a function of eye-space normal direction [S2, unofficial].
     *   Storage: Implemented as a 2D texture (preferred), 3D texture (with mipmapping disabled), or texture array [S2, unofficial].
     *   Domain: Eye-space normal components $(n_x, n_y)$ projected onto the sphere.
 
@@ -33,11 +33,11 @@ The method decomposes the high-dimensional lookup into three separate textures t
 5.  **Map to Distinct Styles:** Retrieve the discrete style indices $j_0$ and $j_1$ corresponding to $i_0$ and $i_1$ using `ift`:
     $$ j_0 = \text{ift}(i_0), \quad j_1 = \text{ift}(i_1) $$
     *   If no style is used multiple times in the transfer function, $j_0 = i_0$ and $j_1 = i_1$, and this step can be skipped [S2, unofficial].
-6.  **Interpolate Style:** Perform two lookups into `sft` using the normal components $(n_x, n_y)$ and the style indices $j_0, j_1$. Linearly interpolate between the results:
+6.  **Interpolate Style:** Perform two lookups into `sft` using the normal components $(n_x, n_y)$ and the style indices $j_0, j_1$ [S2, unofficial]. Linearly interpolate between the results:
     $$ (r, g, b, \alpha_d) = \text{sft}(n_x, n_y, j_0) \cdot (1 - w) + \text{sft}(n_x, n_y, j_1) \cdot w $$
     *   The interpolation is performed uniformly for all normal directions, ensuring transitions occur only between whole styles [S1][S2, unofficial].
-7.  **Compute Final Opacity:** Combine uniform and directional opacity. The sources define $\alpha_u$ as controlling overall opacity and $\alpha_d$ as the directional component from the style. The final opacity $\alpha$ is derived from these, typically as a product or weighted combination to maintain semantic opacity control (e.g., if $\alpha_u=1$, the sample should not be fully transparent due to $\alpha_d$ alone) [S2, unofficial].
-8.  **Final Color:** The color $(r, g, b)$ from step 6 is the final color contribution.
+7.  **Compute Final Opacity:** Combine uniform and directional opacity [S2, unofficial]. The sources define $\alpha_u$ as controlling overall opacity and $\alpha_d$ as the directional component from the style [S2, unofficial]. The final opacity $\alpha$ is derived from these, typically as a product or weighted combination to maintain semantic opacity control (e.g., if $\alpha_u=1$, the sample should not be fully transparent due to $\alpha_d$ alone) [S2, unofficial].
+8.  **Final Color:** The color $(r, g, b)$ from step 6 is the final color contribution [S1][S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -60,12 +60,10 @@ def style_transfer_lookup(s, n_x, n_y, tft, ift, sft):
     w = index_float - i0
     
     # Step 5: Map to distinct styles
-    # Check if ift is needed (if styles are unique, j0=i0, j1=i1)
     j0 = ift.sample(i0)
     j1 = ift.sample(i1)
     
     # Step 6: Interpolate style
-    # sft lookup returns (r, g, b, alpha_d)
     style0 = sft.sample(n_x, n_y, j0)
     style1 = sft.sample(n_x, n_y, j1)
     
@@ -77,8 +75,6 @@ def style_transfer_lookup(s, n_x, n_y, tft, ift, sft):
     # Step 7: Combine opacities
     # Constraint: alpha_u=1 should not result in full transparency
     # Implementation detail: typically alpha = alpha_u * alpha_d or similar blend
-    # Source [S2, unofficial] implies alpha_d is weighted by alpha_u or combined to maintain semantics.
-    # A common safe implementation for illustrative rendering:
     alpha = alpha_u * alpha_d
     
     return (r, g, b, alpha)
@@ -90,9 +86,9 @@ def style_transfer_lookup(s, n_x, n_y, tft, ift, sft):
 *   $M$: Number of distinct styles in `sft`.
 
 **Edge Cases and Pitfalls:**
-*   **Gradient Magnitude:** When gradient magnitude approaches zero, the normal direction becomes unreliable. Biasing the mip-map level or handling degenerate normals is required [S2, unofficial].
-*   **Memory:** A naive 3D/4D lookup table is impractical due to high storage requirements. The decomposition into `tft`, `ift`, and `sft` is necessary [S1][S2, unofficial].
-*   **Interpolation Restriction:** Basic implementation requires uniform interpolation across all normal directions. Non-uniform transitions require adding intermediate styles [S1][S2, unofficial].
+*   **Gradient Magnitude:** When gradient magnitude approaches zero, the normal direction becomes unreliable [S2, unofficial].
+*   **Memory Complexity:** Significantly reduced compared to a full high-dimensional lookup table [S1][S2, unofficial].
+*   **Interpolation Restriction:** Basic implementation requires uniform interpolation across all normal directions [S1][S2, unofficial].
 
 ## Subtopics
 
@@ -108,12 +104,12 @@ Optimizes the lookup by decomposing the mapping into separate 1D and 3D textures
 ## Operating characteristics
 *   **Time Complexity:** The lookup requires a maximum of 4 additional texture fetches compared to a regular 1D transfer function (2 for `ift`, 2 for `sft`) [S2, unofficial]. The `ift` texture is small and benefits from caching; it can be implemented as a buffer texture for performance gains on specific hardware (e.g., GeForce 8 series) [S2, unofficial].
 *   **Memory Complexity:** Significantly reduced compared to a full high-dimensional lookup table. Storage is proportional to $N$ (entries in `tft`) and $M$ (distinct styles in `sft`), rather than the product of data range and normal resolution [S1][S2, unofficial].
-*   **Performance:** On GeForce 8 series hardware, the overhead of additional fetches is offset by the savings from avoiding explicit illumination model evaluation (e.g., Phong shading) in the shader [S2, unofficial].
+*   **Performance:** The additional texture fetches incur an overhead, but the cost for evaluating the illumination model is saved when using style transfer functions [S2, unofficial].
 *   **Strengths:** Enables flexible combination of multiple non-photorealistic styles (unshaded, tone, cartoon, metallic) in a single rendering; allows inconsistent lighting to accentuate features; lit sphere maps provide intuitive preview images [S1][S2, unofficial].
-*   **Limitations:** Requires Shader Model 3.0 or higher for dynamic branching and texture sampling; interpolation is restricted to whole styles unless intermediate styles are added; relies on accurate normal estimation [S1][S2, unofficial].
+*   **Limitations:** Interpolation is restricted to whole styles unless intermediate styles are added; relies on accurate normal estimation [S1][S2, unofficial].
 
 ## Background
-The method was introduced by Stefan Bruckner and Michael E. Gröller in the paper "Style Transfer Functions for Illustrative Volume Rendering" (2007) [S1][S2, unofficial]. It was developed to address the difficulty of integrating multiple non-photorealistic rendering approaches into a single framework. The technique allows users to specify styles captured from existing artwork, enabling the generation of volumetric illustrations in the style of a given work of art [S2, unofficial]. It extends previous work on data-dependent lighting (e.g., Lum et al. [LM04]) by replacing fixed illumination models with image-based lighting via lit sphere maps [S1][S2, unofficial].
+The method was introduced by Stefan Bruckner and Michael E. Gröller in the paper "Style Transfer Functions for Illustrative Volume Rendering" (2007) [S1][S2, unofficial]. It was developed to address the difficulty of integrating multiple non-photorealistic rendering approaches into a single framework [S2, unofficial]. The technique allows users to specify styles captured from existing artwork, enabling the generation of volumetric illustrations in the style of a given work of art [S2, unofficial]. It extends previous work on data-dependent lighting (e.g., Lum et al. [LM04]) by replacing fixed illumination models with image-based lighting via lit sphere maps [S1][S2, unofficial].
 
 ## Sources
 [S1] Style Transfer Functions for Illustrative Volume Rendering, https://doi.org/10.1111/j.1467-8659.2007.01095.x, fetched 2026-10-26

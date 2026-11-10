@@ -1,127 +1,142 @@
 # Arbitrary Source-Detector Geometry Projector
+
 Also called: Arbitrary Source-Detector Geometry, Axial cone-beam, Cone-Beam Geometry Projector, Flexible cone-beam, Parallel-Beam Geometry Projector
 
 ## Overview
-The Arbitrary Source-Detector Geometry Projector defines rays for X-ray computed tomography (XCT) by allowing the user to specify the 3D location and orientation of every individual source-detector pair, overriding standard geometric assumptions [S1, unofficial]. It solves the problem of modeling complex or non-standard imaging systems where fixed camera models are insufficient, supporting arbitrary 3D detector shifts and non-equispaced projection angles [S1, unofficial]. It differs from its siblings, such as the [Grid Ray Sampler](3930-grid-ray-sampler.md) which assumes regular grids, by explicitly defining the geometry for each source-detector pair to support complex trajectories and parameterized detector surfaces [S1, unofficial].
+The Arbitrary Source-Detector Geometry Projector is a CT forward/backward projection method that supports flexible specification of geometry, including arbitrary 3D detector shifts and non-equispaced projection angles [S1, unofficial]. It allows users to define the 3D location and orientation of every individual source-detector pair, overriding standard geometric assumptions [S1, unofficial]. It differs from fixed-camera models by supporting complex trajectories (circular, spiral, saddle) and parameterized detector surfaces while maintaining exact cell-constant integration [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-- **Inputs**:
-  - Source positions: A set of 3D coordinates for each projection angle or view.
-  - Detector parameters: Detector size, pixel size, center offset (SID), and orientation.
-  - Volume data: A 3D voxel grid representing the attenuation coefficients (units: $\text{mm}^{-1}$) [S1, unofficial].
-- **Outputs**:
-  - Projection data: A 2D array (or set of arrays) representing the line integrals (or simulated radiographs) for each source-detector pair.
+**Inputs and Outputs:**
+*   **Input:** 3D volume data (voxels), geometry parameters (source positions, detector positions/orientations, pixel sizes, angles).
+*   **Output:** Projection data (sinograms or DRR images).
 
-**Data Structures**
-- **Detector Grid**: A 2D grid of pixels. For a detector with height $H$ and width $W$, pixel positions are computed in world coordinates.
-- **Ray Definition**: Each ray is defined by an origin $\mathbf{o}$ (the source position) and a direction $\mathbf{d}$ (from source to detector pixel) [G].
+**Data Structures:**
+*   **Volume:** 3D array of voxel values (e.g., attenuation coefficients in $mm^{-1}$) [S1, unofficial].
+*   **Geometry Object:** Contains attributes such as `DSO` (Source-to-Isocenter Distance), `DSD` (Source-to-Detector Distance), `det_pixels` (detector pixel count per side), `pixel_size`, and `angles` (array of rotation angles) [S3, unofficial]. For flexible geometry, it also stores explicit source and detector coordinates for each projection angle [S1, unofficial].
 
-**Steps**
-1. **Compute Detector Pixel Positions in World Coordinates**:
-   a. Calculate $y\_coords$ and $x\_coords$ using `linspace` based on `detector_size` and `pixel_size`.
-   b. Create a meshgrid with 'ij' indexing to generate 2D coordinate arrays.
-   c. Set the $z$ coordinate to `center_offset_z` (Source-to-Image Distance, SID).
-   d. Stack into a 3D array of shape $(H, W, 3)$ with order $[Z, Y, X]$ [S2, unofficial].
-2. **Compute Ray Directions**:
-   For each pixel $p$ at position $\mathbf{p}_{world}$, compute the ray direction:
-   $$ \mathbf{d}_p = \mathbf{p}_{world} - \mathbf{o} $$
-   where $\mathbf{o}$ is the source position for the current projection view [S2, unofficial].
-3. **Normalize Ray Direction**:
-   $$ \mathbf{d}_p \leftarrow \frac{\mathbf{d}_p}{\|\mathbf{d}_p\|} $$
-4. **Projection**:
-   Integrate the volume attenuation along the ray from the source to the detector. This can be done using methods such as Siddon’s method or the Distance Driven (DD) method [S1, unofficial].
+**Steps:**
+1.  **Compute Detector Pixel Positions in World Coordinates:**
+    a. Calculate `y_coords` and `x_coords` using `linspace` based on `detector_size` and `pixel_size` [S2, unofficial].
+    b. Create a meshgrid with 'ij' indexing [S2, unofficial].
+    c. Set the z-coordinate to `center_offset_z` (sid) [S2, unofficial].
+    d. Stack into an $(h, w, 3)$ array with order $[Z, Y, X]$ [S2, unofficial].
+2.  **Compute Ray Direction:** For each pixel, compute `ray_dir = detector_pixel - source` [S2, unofficial].
+3.  **Normalize Ray Direction:** Normalize `ray_dir` to unit length [S2, unofficial].
+4.  **Projection:** Integrate volume values along the rays. This can be done using Siddon’s method, Joseph’s method, Distance Driven (DD), or SF method [S1, unofficial].
 
-**Pseudocode**
+**Formulas:**
+*   Ray direction: $\mathbf{d} = \frac{\mathbf{p}_{det} - \mathbf{o}_{src}}{\|\mathbf{p}_{det} - \mathbf{o}_{src}\|}$
+*   Projection value: $P = \int_{ray} \mu(\mathbf{r}) d\mathbf{r}$
+
+**Parameters:**
+*   `DSO`: Source-to-Isocenter Distance (default 500) [S3, unofficial].
+*   `DSD`: Source-to-Detector Distance (default 800) [S3, unofficial].
+*   `det_pixels`: Detector pixel count per side (default 256) [S3, unofficial].
+*   `pixel_size`: Physical size of a detector pixel (default 1.0) [S3, unofficial].
+*   `angles`: Array of rotation angles from 0 to $2\pi$ (default 180 angles) [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   Precision issues in ray-volume intersection calculations.
+*   Boundary conditions for rays exiting the volume.
+*   Degenerate input (e.g., source on detector).
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-
-def compute_detector_pixels(detector_size, pixel_size, center_offset_z):
+def arbitrary_source_detector_projector(volume, geometry):
     """
-    Computes detector pixel positions in world coordinates.
-    """
-    # Calculate coordinates
-    y_coords = np.linspace(-detector_size[0]/2, detector_size[0]/2, int(detector_size[0]/pixel_size))
-    x_coords = np.linspace(-detector_size[1]/2, detector_size[1]/2, int(detector_size[1]/pixel_size))
+    Performs forward projection for arbitrary source-detector geometry.
     
-    # Create meshgrid with 'ij' indexing
-    Y, X = np.meshgrid(y_coords, x_coords, indexing='ij')
-    
-    # Set Z coordinate to center_offset_z (SID)
-    Z = np.full_like(X, center_offset_z)
-    
-    # Stack into (H, W, 3) array with order [Z, Y, X]
-    detector_pixels = np.stack([Z, Y, X], axis=-1)
-    return detector_pixels
-
-def generate_rays(source_positions, detector_pixels):
-    """
-    Generates rays for arbitrary source-detector geometry.
-    source_positions: (N, 3) array of source coordinates for N views.
-    detector_pixels: (H, W, 3) array of detector pixel positions.
+    Args:
+        volume: 3D numpy array of voxel values.
+        geometry: Object containing source positions, detector positions, pixel sizes, and angles.
+        
     Returns:
-        ray_origins: (N, H, W, 3)
-        ray_directions: (N, H, W, 3) normalized
+        projections: 2D array of projection values.
     """
-    N = source_positions.shape[0]
-    H, W, _ = detector_pixels.shape
+    projections = []
     
-    # Expand dimensions for broadcasting
-    # source_positions: (N, 1, 1, 3)
-    sources = source_positions[:, np.newaxis, np.newaxis, :]
-    # detector_pixels: (1, H, W, 3)
-    pixels = detector_pixels[np.newaxis, :, :, :]
-    
-    # Compute ray directions: detector_pixel - source
-    raw_directions = pixels - sources
-    
-    # Normalize ray directions
-    norms = np.linalg.norm(raw_directions, axis=-1, keepdims=True)
-    # Avoid division by zero
-    norms = np.maximum(norms, 1e-8)
-    normalized_directions = raw_directions / norms
-    
-    # Ray origins are the source positions, repeated for each pixel
-    ray_origins = np.broadcast_to(sources, (N, H, W, 3))
-    
-    return ray_origins, normalized_directions
+    # Iterate over each projection angle
+    for angle in geometry.angles:
+        # Get source position for this angle
+        source_pos = get_source_position(geometry, angle)
+        
+        # Get detector plane parameters for this angle
+        det_origin, det_u, det_v = get_detector_plane(geometry, angle)
+        
+        # Calculate detector pixel coordinates
+        h, w = geometry.det_pixels, geometry.det_pixels
+        pixel_size = geometry.pixel_size
+        
+        # Create meshgrid for detector coordinates
+        y_coords = np.linspace(-h/2 * pixel_size, h/2 * pixel_size, h)
+        x_coords = np.linspace(-w/2 * pixel_size, w/2 * pixel_size, w)
+        xx, yy = np.meshgrid(x_coords, y_coords, indexing='ij')
+        
+        # Stack into (h, w, 3) array
+        detector_pixels = np.stack([np.full_like(xx, det_origin[2]), yy, xx], axis=-1)
+        
+        # Transform detector pixels to world coordinates
+        # Assuming det_u and det_v are orthonormal vectors in the detector plane
+        world_detector_pixels = det_origin + np.einsum('ij,ijk->ik', np.stack([det_u, det_v], axis=0), detector_pixels)
+        world_detector_pixels = world_detector_pixels.reshape(-1, 3)
+        
+        # Compute ray directions
+        ray_dirs = world_detector_pixels - source_pos
+        ray_dirs = ray_dirs / np.linalg.norm(ray_dirs, axis=1, keepdims=True)
+        
+        # Compute ray origins (source position)
+        ray_origins = np.tile(source_pos, (h * w, 1))
+        
+        # Perform ray marching / integration
+        # This is a placeholder for the actual integration method (e.g., Siddon, DD)
+        # The integration depends on the specific volume and geometry
+        projection_values = integrate_along_rays(ray_origins, ray_dirs, volume)
+        
+        # Reshape to (h, w)
+        projection_image = projection_values.reshape(h, w)
+        projections.append(projection_image)
+        
+    return np.stack(projections, axis=0)
+
+def integrate_along_rays(ray_origins, ray_dirs, volume):
+    """
+    Placeholder for ray integration.
+    In practice, this would use Siddon's method, Distance Driven, etc.
+    """
+    # [G] This function needs to be implemented with a specific projector model.
+    # For example, using Siddon's method:
+    # For each ray, find intersections with volume boundaries.
+    # For each voxel intersected, calculate the path length.
+    # Sum the product of path length and voxel value.
+    pass
 ```
-
-**Parameters**
-- `detector_size`: Physical dimensions of the detector (height, width) in mm [S2, unofficial].
-- `pixel_size`: Size of each detector pixel in mm [S2, unofficial].
-- `center_offset_z`: Source-to-Image Distance (SID) in mm [S2, unofficial].
-
-**Edge Cases and Pitfalls**
-- **Precision**: Floating-point precision issues may arise when computing ray directions for very large or small geometries. Use double precision if necessary [G].
-- **Boundaries**: Ensure that the detector pixels are correctly mapped to the world coordinate system, especially when using non-planar or curved detectors [S1, unofficial].
-- **Degenerate Input**: If the source and detector pixel positions are identical, the ray direction will be zero. Guard against division by zero during normalization [G].
 
 ## Subtopics
 
 ### [t-beam projectors](3067-t-beam-projectors.md)
-t-beam projectors integrate the source-to-pixel segment along a ray for volume rendering or projection in arbitrary source-detector geometries. They differ from standard fixed-camera models by allowing explicit definition of every source-detector pair, supporting complex trajectories (circular, spiral, saddle) and parameterized detector surfaces while maintaining exact cell-constant integration. See [t-beam projectors](3067-t-beam-projectors.md).
+t-beam projectors integrate the source-to-pixel segment along a ray for volume rendering or projection in arbitrary source-detector geometries. They differ from standard fixed-camera models by allowing explicit definition of every source-detector pair, supporting complex trajectories (circular, spiral, saddle) and parameterized detector surfaces while maintaining exact cell-constant integration.
 
 ### [TIGRE Geometry Setup](5605-tigre-geometry-setup.md)
-Configures a TIGRE geometry object from a configuration dictionary, setting detector, voxel, and offset parameters for cone or parallel beam modes. It serves as the foundational step for defining the arbitrary source-detector geometry required by the parent projector, ensuring that ray origins and detector coordinates are mathematically consistent with the chosen scanner mode. See [TIGRE Geometry Setup](5605-tigre-geometry-setup.md).
+Configures a TIGRE geometry object from a configuration dictionary, setting detector, voxel, and offset parameters for cone or parallel beam modes. It serves as the foundational step for defining the arbitrary source-detector geometry required by the parent projector, ensuring that ray origins and detector coordinates are mathematically consistent with the chosen scanner mode.
 
 ### DRR Geometry and Coordinate Transformation
-DRR (Digitally Reconstructed Radiograph) geometry involves transforming 3D CT or MRI data into 2D X-ray projections. This requires coordinate transformation to align the 3D volume with the arbitrary source-detector setup, ensuring that the simulated X-ray path accurately reflects the physical imaging process [S2, unofficial].
+DRR (Digitally Reconstructed Radiograph) geometry involves transforming 3D volume data into 2D X-ray images by simulating the physical process of X-ray absorption [S2, unofficial]. It requires coordinate transformations to map 3D voxel coordinates to 2D detector coordinates, often involving rotation matrices and translation vectors to align the source, volume, and detector [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(N \cdot H \cdot W \cdot L)$, where $N$ is the number of projections, $H \times W$ is the detector resolution, and $L$ is the number of samples per ray or the number of voxels intersected [S1, unofficial].
-- **Memory Complexity**: $O(N \cdot H \cdot W)$ for storing projection data, plus $O(V)$ for the volume data, where $V$ is the number of voxels [S1, unofficial].
-- **Measured Performance**: Performance depends on the implementation (CPU vs. GPU) and the projector model (Siddon, SF, DD) [S1, unofficial]. GPU implementations using CUDA can achieve significant speedups [S1, unofficial].
-- **Strengths**: Flexibility in defining arbitrary geometries, support for complex trajectories, and compatibility with various projector models [S1, unofficial].
-- **Limitations**: Computational cost can be high for large volumes and many projections. Implementation complexity is higher than fixed camera models [S1, unofficial].
-- **When to Use**: When imaging systems have non-standard geometries, such as C-arms, interventional CT, or custom research scanners [S1, unofficial].
-- **When Not to Use**: For standard clinical CT scanners with well-defined, fixed geometries, simpler models may be more efficient [S1, unofficial].
+*   **Time Complexity:** Depends on the number of voxels, pixels, and the integration method. Siddon's method is $O(N_{voxels} + N_{rays})$. Distance Driven is more complex but often faster for large volumes.
+*   **Memory Complexity:** $O(N_{voxels} + N_{projections})$.
+*   **Performance:** GPU implementation (CUDA) is recommended for real-time performance [S1, unofficial].
+*   **Strengths:** Flexibility in geometry definition, support for complex trajectories.
+*   **Limitations:** Computational cost for arbitrary geometries, potential precision issues.
+*   **When to use:** When standard CT geometries (parallel, cone-beam) are insufficient.
+*   **When not to use:** When standard geometries are sufficient and performance is critical.
 
 ## Background
-The Arbitrary Source-Detector Geometry Projector is part of the broader field of X-ray Computed Tomography (XCT) forward modeling. It was developed to address the limitations of standard parallel-beam and axial cone-beam geometries, which cannot adequately model complex or flexible imaging systems [S1, unofficial]. The implementation is supported by software packages that provide flexible specification of geometry, including arbitrary 3D detector shifts and non-equispaced projection angles [S1, unofficial]. The method builds on established projector models such as Siddon’s method and the Distance Driven (DD) method [S1, unofficial].
+The Arbitrary Source-Detector Geometry Projector is part of a software package that implements three different 3D XCT geometry types: parallel-beam, axial cone-beam, and flexible cone-beam [S1, unofficial]. The flexible cone-beam geometry allows users to place X-ray sources and detectors at any position and orientation in space [S1, unofficial]. The implementation uses both CPU (C/C++) and GPU (CUDA) for parallelization [S1, unofficial].
 
 ## Sources
 [S1] PDF Differentiable Forward Projector for X-ray Computed Tomography, https://differentiable.xyz/papers-2023/paper_48.pdf, fetched 2026-10-29 (unofficial)
 [S2] 医疗影像开发实战:如何用光线投射算法快速生成DRR图像(附Python代码), https://un.csdn.net/98nhkcg5t04h, fetched 2026-10-26 (unofficial)
+[S3] ayush-chauhan-1202/physics-aware-ct-reconstruction, https://github.com/ayush-chauhan-1202/physics-aware-ct-reconstruction, fetched 2026-10-27 (unofficial)

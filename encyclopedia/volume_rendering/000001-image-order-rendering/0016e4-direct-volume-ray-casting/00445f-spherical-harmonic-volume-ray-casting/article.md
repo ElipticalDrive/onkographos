@@ -3,217 +3,194 @@
 Also called: GPU-based volume ray-caster with SH coefficients, SH Volume Ray Casting with Hybrid CPU/GPU Projection, SH-based interactive volume rendering, Spherical Harmonic (SH) Volume Ray Casting with Hybrid CPU/GPU Projection
 
 ## Overview
-Spherical Harmonic Volume Ray Casting is a technique for interactive volume rendering that approximates complex light-material interactions (such as scattering and color bleeding) by pre-computing Spherical Harmonic (SH) coefficients for material and light functions on the CPU, storing them in 3D volumes, and evaluating the rendering integral via Monte-Carlo ray marching in a GPU fragment shader [S1]. It differs from standard direct volume rendering [19-direct-volume-ray-casting.md] by decoupling the illumination integral from the per-ray traversal, allowing for view-independent pre-computation of lighting effects at the cost of increased memory usage and projection time.
+Spherical Harmonic Volume Ray Casting is a technique for interactive volume rendering that approximates complex light-material interactions (such as subsurface scattering and color bleeding) by pre-computing Spherical Harmonic (SH) coefficients for material and light functions on the CPU, storing them in 3D volumes, and evaluating the rendering integral via Monte-Carlo ray marching in a GPU fragment shader [S1]. It sets itself apart from standard direct volume ray casting by replacing expensive per-sample shading integrals with a pre-convolved SH representation, allowing for real-time performance at the cost of low-frequency approximation [S1].
 
 ## How it works
-The method extends the standard ray casting loop by incorporating SH-based illumination. The core computational engine consists of two phases: a CPU-side projection phase to generate SH coefficient volumes, and a GPU-side ray marching phase to evaluate the integral.
+The method operates in two distinct phases: an offline (or pre-computation) phase on the CPU to generate SH coefficient volumes, and an online rendering phase on the GPU using fragment shaders.
 
 ### Inputs and Outputs
-*   **Inputs**:
-    *   Volume data (scalar field).
-    *   Transfer function (mapping scalar values to optical properties).
-    *   Material function $M(\mathbf{x}, \omega_i, \omega_o)$ and Light probe $L_i(\omega_i)$.
-    *   Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$).
-*   **Outputs**:
-    *   Rendered image (color and opacity).
-    *   SH Coefficient Volumes (3D textures) for use during rendering.
+**Inputs:**
+*   Scalar volume data $V(\mathbf{x})$.
+*   Transfer function $T(V) \rightarrow (\mathbf{c}, \alpha)$ mapping scalar values to color and opacity [S1].
+*   Material function $M(\mathbf{x}, \omega_i, \omega_o)$ and incoming light $L_i(\mathbf{x}, \omega_i)$ [S1].
+*   Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) [S1].
 
-### Data Structures
+**Outputs:**
+*   Final image color $\mathbf{C}_{out}$ and accumulated opacity $\alpha_{out}$ [S1].
+*   3D coefficient volumes containing SH coefficients for the modulated material/light interactions [S1].
 
-**1. SH Coefficient Volume (GPU-side)**
-A 3D texture storing the pre-computed SH coefficients for each voxel.
-*   **Layout**: Optimized for chromaticity/luminance separation.
-    *   Luminance: 4-band projection (16 coefficients).
-    *   Chromaticity: 2-band projection (6 coefficients per channel, but combined).
-    *   Total: 12 coefficients per voxel (3 color channels $\times$ 4 bands).
-    *   Storage: Three 3D volume textures (one per color channel) or packed into RGB channels if bandwidth allows, though the source specifies handling via three FBO-attached textures during projection and three 3D volume textures during rendering [S1].
-*   **Resolution**: Downsampled to approximately 33% of the original volume size [S1].
+### Data Structures and Layouts
 
-**2. BRDF Coefficient Texture (CPU-side)**
-A partitioned 2D texture used to store the SH coefficients of the material function for outgoing directions $\omega_o$.
-*   **Dimensions**: 3 columns, 4 quadrants of size $N \times N$ texels ($N$ = number of random samples).
-*   **Quadrant Layout** (for $L=3$, 16 coefficients):
-    *   Lower-Left: First 4 coefficients (Bands 0 and 1).
-    *   Lower-Right: Next 4 coefficients (First 4 of Band 2).
-    *   Upper-Left: Next 4 coefficients (1 of Band 2, 3 of Band 3).
-    *   Upper-Right: Final 4 coefficients (Remaining 4 of Band 3).
-*   **Axes**:
-    *   X-axis: $\vartheta$ (theta) of $\omega_o$, range $[0, \pi]$.
-    *   Y-axis: $\phi$ (phi) of $\omega_o$, range $[0, 2\pi]$ [S1].
+**1. BRDF Coefficient Texture (CPU-side)**
+A partitioned 2D texture used to store SH coefficients for the material function $M$ and incoming light $L_i$.
+*   **Dimensions:** 3 columns, 4 quadrants per column. Each quadrant is $N \times N$ texels, where $N$ is the number of random samples.
+*   **Coordinate System:**
+    *   X-axis of each quadrant: $\vartheta$ of outgoing direction $\omega_o$, ranging from $0$ to $\pi$.
+    *   Y-axis of each quadrant: $\phi$ of outgoing direction $\omega_o$, ranging from $0$ to $2\pi$.
+*   **Content Layout (for Band Limit $L=3$, 16 coefficients):**
+    *   **Lower-Left Quadrant:** First 4 coefficients (Bands 0 and 1).
+    *   **Lower-Right Quadrant:** Next 4 coefficients (First 4 of Band 2).
+    *   **Upper-Left Quadrant:** Next 4 coefficients (One of Band 2, three of Band 3).
+    *   **Upper-Right Quadrant:** Final 4 coefficients (Remaining 4 of Band 3).
+*   **Purpose:** Allows the GPU to look up the necessary SH coefficients for any outgoing direction $\omega_o$ [S1].
 
-**3. Random Sample Texture (GPU-side)**
-A 2D texture containing normalized Cartesian vectors representing random sample directions for Monte-Carlo integration.
+**2. SH Coefficient Volumes (GPU-side)**
+3D textures storing the pre-computed SH coefficients for the volume.
+*   **Standard Layout:** 16 coefficients per color channel (for $L=3$). Rendered into 4 slices with 4 channels simultaneously using Multiple Render Targets (MRTs) [S1].
+*   **Optimized Chromaticity/Luminance Layout:** To reduce memory and MRT usage, chromaticity uses a 2-band projection (4 coefficients) and luminance uses a 4-band projection (16 coefficients).
+    *   Total coefficients: $3 \times 4 = 12$ (3 color channels $\times$ 4 coefficients for chroma/luma split logic described as 3 sets of 4, totaling 12 coefficients handled by three FBO-attached textures) [S1].
+    *   This fits within the 8 MRT limit (using 7 targets) [S1].
 
-**4. Basis Function Texture (GPU-side)**
-A 2D texture containing the values of spherical harmonic basis functions $Y_{lm}(\vartheta, \phi)$ for each sample direction.
+**3. Random Sample Textures (GPU-side)**
+*   **Sample Directions:** Normalized Cartesian vectors generated on the CPU, uploaded as a 2D texture [S1].
+*   **Basis Values:** Values of spherical harmonic basis functions $Y_{lm}(\vartheta, \phi)$ for each sample direction, uploaded as a second 2D texture [S1].
 
 ### Algorithm Steps
 
-#### Phase 1: CPU-side Projection (Pre-computation)
-1.  **Generate Random Samples**: Create $N$ random normalized Cartesian vectors on the CPU. Upload as a 2D texture to the GPU [S1].
-2.  **Compute Basis Functions**: Calculate $Y_{lm}(\vartheta, \phi)$ for each sample direction. Upload as a second 2D texture to the GPU [S1].
-3.  **Compute BRDF Coefficients**: On the CPU, partition the 2D texture representation of the material function $M$ according to the layout described above. This involves integrating the material function against the SH basis functions for various outgoing directions [S1].
+#### Phase 1: Pre-computation (CPU)
+1.  **Generate Random Samples:** Create $N$ random normalized Cartesian vectors on the CPU for Monte-Carlo integration [S1].
+2.  **Compute Basis Values:** Calculate $Y_{lm}(\vartheta, \phi)$ for each sample direction [S1].
+3.  **Compute SH Coefficients:** Project the material function $M$ and light $L_i$ onto the SH basis.
+    *   The physical triple product integral is approximated by two successive double products to simplify computation:
+        $$ L(\mathbf{x}, \omega_o) \approx \int_{\Omega} M(\mathbf{x}, \omega_i, \omega_o) L_i(\mathbf{x}, \omega_i) d\omega_i \cdot \int_{\Omega_{mi}} L_{mi}(\omega) d\omega $$
+        *(Note: The source text describes simplifying the triple product to two successive double products: first integrating over Material $M$ and Incoming Light $L_i$ to get local material effects, then modulating by Environmental Illumination $L_{mi}$)* [S1].
+    *   Store the resulting coefficients in the partitioned 2D BRDF texture [S1].
+4.  **Generate Coefficient Volumes:** Use GPU framebuffer objects (FBOs) and MRTs to ray march slice-by-slice into 3D coefficient textures, distributing the $(L+1)^2$ SH coefficients for each voxel to the attached render targets [S1].
 
-#### Phase 2: GPU-side Ray Marching (Rendering)
-The rendering is performed slice-by-slice into a 3D coefficient texture using Framebuffer Objects (FBOs) and Multiple Render Targets (MRTs).
+#### Phase 2: Rendering (GPU Fragment Shader)
+For each pixel, cast a ray $r(t) = \mathbf{o} + t\mathbf{d}$ intersecting the volume bounding box $[0,1]^3$.
 
-1.  **Ray Generation**: For each pixel, define the ray $r(t) = \mathbf{o} + t\mathbf{d}$. Intersect with the volume domain $[0, 1]^3$ [S1].
-2.  **Initialization**: Initialize accumulation variables.
-    *   $C_{in} = 0$
-    *   $\alpha_{in} = 0$
-    *   SH Accumulator $S_{lm} = 0$ for all $l, m$ [S1, S52].
-3.  **Marching Loop**: Iterate along the ray with step size $\Delta t$.
-    *   **Termination Checks**:
-        *   If $\alpha_{in} > 0.95$ (95% opacity threshold), terminate ray [S1].
-        *   If any coordinate of the current position $\mathbf{p}$ is outside $[0, 1]$, terminate ray [S1].
-    *   **Sampling**:
-        *   Sample the volume scalar value $V(\mathbf{p})$ using trilinear interpolation [S9, S11].
-        *   Map $V(\mathbf{p})$ to extinction coefficient $\sigma$ and color $C$ using the transfer function [S2, S2789].
-        *   Calculate opacity for the step: $\alpha_{step} = 1 - e^{-\sigma \Delta t}$ [S24, S30].
-    *   **Illumination Integration (Monte-Carlo)**:
-        *   For each random sample direction $\omega_s$ (from the Random Sample Texture):
-            *   Evaluate the material function $M(\mathbf{p}, \omega_s, \omega_o)$ using the BRDF Coefficient Texture. This involves looking up the SH coefficients for the outgoing direction $\omega_o$ (derived from the ray direction) and multiplying by the basis function values $Y_{lm}(\omega_s)$ [S1].
-            *   *Simplification*: The triple product integral is approximated by two successive double products: first integrating $M \cdot L_i$ to get local material effects, then modulating by environmental illumination $L_{mi}$ [S1].
-            *   Accumulate the contribution to the SH coefficients:
-                $$ S_{lm} \leftarrow S_{lm} + M(\mathbf{p}, \omega_s, \omega_o) \cdot Y_{lm}(\omega_s) $$
-    *   **Compositing**:
-        *   Update accumulated color and opacity:
-            $$ C_{in} \leftarrow C_{in} + (1 - \alpha_{in}) \cdot C \cdot \alpha_{step} $$
-            $$ \alpha_{in} \leftarrow \alpha_{in} + (1 - \alpha_{in}) \cdot \alpha_{step} $$
-        *   *Note*: The SH coefficients $S_{lm}$ represent the integrated lighting contribution. These are not directly composited in the standard alpha sense but are stored per-voxel for the final shading pass or accumulated differently depending on the specific implementation variant. In the described method, the resulting $(L+1)^2$ SH coefficients for the current voxel are distributed to the attached render targets (MRTs) [S1]. This implies a hybrid approach where lighting is pre-integrated into the coefficient volume, and the final color is derived from these coefficients during the final pass or via the accumulated SH values.
-4.  **Final Output**: After the ray terminates, the accumulated SH coefficients for the voxel are written to the 3D coefficient texture via MRTs. The final image is generated by reading these coefficients and evaluating the SH expansion for the view direction [S1].
+1.  **Initialization:** Initialize accumulated color $\mathbf{C}_{acc} = (0,0,0)$ and opacity $\alpha_{acc} = 0$. Initialize ray position $t = t_{near}$ [S1, S2].
+2.  **Ray Marching Loop:** While $t < t_{far}$ and $\alpha_{acc} < 0.95$ (early termination threshold) [S1]:
+    a.  **Sample Volume:** Retrieve scalar value $V(\mathbf{p})$ at current ray position $\mathbf{p} = r(t)$ using trilinear interpolation [S2].
+    b.  **Check Boundaries:** If any coordinate of $\mathbf{p}$ in volume space $[0,1]^3$ reaches $0$ or $1$, terminate ray [S1].
+    c.  **Classification:** Map $V(\mathbf{p})$ to color $\mathbf{c}$ and opacity $\alpha$ using the transfer function [S2].
+    d.  **SH Evaluation:**
+        i.  Retrieve the SH coefficients for the current voxel from the 3D coefficient volume [S1].
+        ii. Retrieve the pre-computed $Y_{lm}$ values for the current sample direction from the 2D texture [S1].
+        iii. Compute the contribution of the current sample by multiplying the ray's contribution with the $Y_{lm}$ values and adding to the total integration sum [S1].
+    e.  **Compositing:** Update $\mathbf{C}_{acc}$ and $\alpha_{acc}$ using the front-to-back equation [S2]:
+        $$ \mathbf{C}_{acc} \leftarrow \mathbf{C}_{acc} + (1 - \alpha_{acc}) \cdot \mathbf{c} \cdot \alpha $$
+        $$ \alpha_{acc} \leftarrow \alpha_{acc} + (1 - \alpha_{acc}) \cdot \alpha $$
+    f.  **Advance:** Increase $t$ by the ray step size $\Delta t$ [S1].
+3.  **Output:** Write $\mathbf{C}_{acc}$ and $\alpha_{acc}$ to the framebuffer [S1].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Phase 1: CPU Pre-computation (Simplified)
-def compute_brdf_coefficients(material_function, num_samples):
+# CPU Pre-computation
+def precompute_sh_coefficients(volume_data, transfer_function, material_func, light_func):
     """
-    Computes the partitioned 2D texture for BRDF coefficients.
+    Generates SH coefficient volumes on the GPU via CPU-initiated FBO operations.
     """
-    # Generate random outgoing directions omega_o
-    omega_o_list = generate_random_directions(num_samples)
+    N = 1024  # Number of random samples
+    L = 3     # Band limit
     
-    # Initialize texture buffer
-    brdf_texture = empty_2d_texture(width=3*N, height=4*N)
+    # 1. Generate random samples on CPU
+    random_samples = generate_normalized_cartesian_vectors(N)
     
-    for i, omega_o in enumerate(omega_o_list):
-        # Determine quadrant and position based on theta/phi of omega_o
-        theta = acos(omega_o.z)
-        phi = atan2(omega_o.y, omega_o.x)
-        
-        # Map theta/phi to texture coordinates
-        # X-axis: theta [0, pi], Y-axis: phi [0, 2pi]
-        # Assign coefficients to quadrants as per layout spec
-        coefficients = compute_sh_coefficients(material_function, omega_o)
-        write_to_quadrant(brdf_texture, i, coefficients)
-        
-    return brdf_texture
+    # 2. Compute Y_lm values for these samples
+    y_lm_values = compute_spherical_harmonics(random_samples, L)
+    
+    # 3. Upload textures to GPU
+    upload_2d_texture("random_samples_tex", random_samples)
+    upload_2d_texture("y_lm_values_tex", y_lm_values)
+    
+    # 4. Project Material and Light to SH coefficients
+    # Simplified triple product: Integrate M * Li, then modulate by L_mi
+    brdf_texture = create_partitioned_2d_texture(N, L)
+    for each voxel in volume_data:
+        for each outgoing direction omega_o in random_samples:
+            # Compute local material effect
+            local_effect = integrate_material_light(material_func, light_func, omega_o)
+            # Store in BRDF texture according to layout rules
+            store_in_brdf_texture(brdf_texture, omega_o, local_effect)
+            
+    # 5. Generate 3D Coefficient Volumes using GPU FBOs and MRTs
+    # Render into 4 slices with 4 channels simultaneously for 16 coefficients
+    coefficient_volumes = ray_march_coefficients(volume_data, brdf_texture, L)
+    return coefficient_volumes
 
-# Phase 2: GPU Fragment Shader (Per Ray)
-def fragment_shader(ray_origin, ray_direction, volume_data, 
-                    brdf_texture, random_samples_texture, basis_texture):
+# GPU Fragment Shader
+fragment_color = vec3(0.0)
+accumulated_alpha = 0.0
+
+# Ray setup
+ray_origin = camera_origin
+ray_direction = normalize(pixel_coord - camera_origin)
+t_near, t_far = intersect_volume_box(ray_origin, ray_direction)
+t = t_near
+
+while t < t_far:
+    # Boundary check in volume space [0,1]^3
+    p_world = ray_origin + t * ray_direction
+    p_vol = transform_to_volume_space(p_world)
     
-    # Initialize
-    acc_color = vec3(0.0)
-    acc_alpha = 0.0
-    sh_accumulator = vec4(0.0) # Simplified: assuming 4 channels per MRT slice
+    if any(p_vol <= 0.0) or any(p_vol >= 1.0):
+        break
+        
+    # Sample volume
+    v_val = trilinear_sample(volume_texture, p_vol)
     
-    # Ray bounds
-    t_start, t_end = intersect_volume(ray_origin, ray_direction)
-    step_size = (t_end - t_start) / num_samples
+    # Classification
+    color, alpha = transfer_function(v_val)
     
-    # Pre-fetch basis values for random samples
-    # basis_values[sample_idx] = Y_lm(theta, phi) for that sample
+    # SH Evaluation
+    # Retrieve SH coefficients for this voxel
+    sh_coeffs = sample_3d_texture(coefficient_volume, p_vol)
     
-    for t in range(t_start, t_end, step_size):
-        p = ray_origin + ray_direction * t
+    # Retrieve Y_lm values for current direction (approximated or from pre-computed set)
+    # In the described method, random samples are used for Monte Carlo integration
+    # The contribution is multiplied by Y_lm values
+    y_lm = sample_2d_texture(y_lm_values_tex, ray_direction)
+    
+    # Add contribution to integration sum
+    # Note: The exact Monte Carlo weight depends on the sampling distribution
+    contribution = sh_coeffs * y_lm 
+    fragment_color += contribution * alpha * (1.0 - accumulated_alpha)
+    
+    # Update accumulated opacity
+    accumulated_alpha += alpha * (1.0 - accumulated_alpha)
+    
+    # Early termination
+    if accumulated_alpha > 0.95:
+        break
         
-        # Boundary check
-        if not is_inside_volume(p):
-            break
-            
-        # Termination check
-        if acc_alpha > 0.95:
-            break
-            
-        # Sample volume
-        scalar_val = trilinear_sample(volume_data, p)
-        sigma, color = transfer_function(scalar_val)
-        
-        # Step opacity
-        alpha_step = 1.0 - exp(-sigma * step_size)
-        
-        # Monte-Carlo Integration for SH Coefficients
-        # This part approximates the lighting integral
-        sh_contrib = vec4(0.0)
-        
-        for sample_idx in range(num_random_samples):
-            # Get random direction from texture
-            omega_s = normalize(tex2D(random_samples_texture, sample_idx))
-            
-            # Get basis function values for this direction
-            y_lm = tex2D(basis_texture, sample_idx)
-            
-            # Get material coefficients for outgoing direction (ray_direction)
-            # This lookup uses the BRDF Coefficient Texture
-            # The texture stores coefficients for various omega_o
-            # We need to interpolate based on ray_direction's theta/phi
-            m_coeffs = lookup_brdf_coefficients(brdf_texture, ray_direction)
-            
-            # Evaluate material function M(omega_s, omega_o)
-            # Using SH expansion: M = sum(m_coeffs_l * Y_lm(omega_s))
-            m_val = dot(m_coeffs, y_lm)
-            
-            # Accumulate SH coefficients for the voxel
-            # The source implies distributing resulting coefficients to MRTs
-            # Here we accumulate the contribution to the final SH representation
-            sh_contrib += m_val * y_lm
-            
-        # Distribute sh_contrib to MRTs (handled by hardware in real implementation)
-        # For the purpose of the ray casting loop, we assume the SH volume is updated
-        
-        # Standard Alpha Compositing for Color/Opacity
-        # Note: The SH coefficients handle the lighting complexity, 
-        # but the basic color accumulation still follows front-to-back
-        if alpha_step > 0:
-            acc_color = acc_color + (1.0 - acc_alpha) * color * alpha_step
-            acc_alpha = acc_alpha + (1.0 - acc_alpha) * alpha_step
-            
-    return acc_color, acc_alpha, sh_accumulator
+    # Advance ray
+    t += ray_step_size
+
+gl_FragColor = vec4(fragment_color, accumulated_alpha)
 ```
 
-### Parameters
-*   **Ray Opacity Threshold**: 95% [S1].
-*   **SH Band Limit ($L$)**: 3, yielding 16 coefficients per color channel (or 12 total with chromaticity/luminance optimization) [S1].
-*   **Coefficient Volume Downsampling**: 33% of original size [S1].
-*   **Ray Step Size**: Variable, increased to speed up computation [S1].
-*   **Random Samples ($N$)**: Number of Monte-Carlo samples per voxel/direction.
-
-### Edge Cases and Pitfalls
-*   **Gibbs Ringing**: SH approximation is limited to low-frequency functions. Materials with sharp specular highlights may cause Gibbs ringing artifacts [S1].
-*   **MRT Limit**: Multiple Render Target functionality is limited to 8 simultaneous output targets. This constrains the maximum number of coefficients that can be written per fragment, necessitating the choice of $L=3$ and the chromaticity/luminance split [S1].
-*   **GLSL Random Numbers**: GLSL random number generation was not implemented in the target driver at the time, requiring CPU-side generation of random samples [S1].
-*   **Precision**: The method assumes low-frequency radiance transfer; high-frequency details may be lost due to downsampling and SH truncation [S1].
+### Parameters and Edge Cases
+*   **Ray Opacity Threshold:** 95% for early ray termination [S1].
+*   **Boundary Condition:** Ray terminates if any position coordinate reaches 0 or 1 in volume space $[0,1]^3$ [S1].
+*   **SH Band Limit ($L$):** Typically 3, yielding 16 coefficients per color channel [S1].
+*   **Coefficient Downsampling:** Coefficient volumes are downsampled to ~33% of the original size to optimize performance, assuming low-frequency radiance transfer [S1].
+*   **Ray Step Size:** Can be increased to speed up computation [S1].
+*   **Pitfalls:**
+    *   **GLSL Random Numbers:** GLSL random number generation was not implemented in the target driver at the time of the source, necessitating CPU-side generation [S1].
+    *   **MRT Limit:** Limited to 8 simultaneous output targets, constraining the max coefficients written per fragment (hence the choice of $L=3$ or chromaticity/luminance split) [S1].
+    *   **Gibbs Ringing:** SH approximation restricts representation to low-frequency functions. Materials with sharp specular highlights may cause Gibbs ringing artifacts [S1].
 
 ## Operating characteristics
-*   **Time Complexity**: The projection phase (CPU) is $O(V \cdot N \cdot L^2)$ where $V$ is voxels, $N$ is samples, $L$ is band limit. The rendering phase is $O(R \cdot S)$ where $R$ is rays and $S$ is samples per ray.
-*   **Memory Complexity**: Requires storing 3D coefficient volumes. With downsampling, memory usage is reduced to ~33% of the original volume size per coefficient set [S1].
-*   **Performance**:
-    *   On Intel Core2 Quad Q9450, 4GB RAM, nVidia GeForce 9800 GTX:
-        *   128^3 voxels, 400x400 window: Shadows only: 0.9s projection / 24 fps. +Scattering: 21.3s / 17 fps. +Bleeding: 58.9s / 13 fps [S1].
-        *   256^3 voxels, 400x400 window: Shadows only: 3.4s / 6 fps. +Scattering: 149s / 3 fps. +Bleeding: 388s / 1 fps [S1].
-*   **Strengths**: Enables interactive frame rates for complex lighting effects (scattering, color bleeding) that are otherwise too expensive to compute per-ray.
-*   **Limitations**: Restricted to low-frequency lighting variations. High-frequency specular highlights suffer from artifacts. Projection time can be significant for large volumes or high band limits.
-*   **When to Use**: Medical imaging and computational fluid dynamics where predefined transfer functions are used and low-frequency lighting effects are sufficient [S1].
-*   **When Not to Use**: Scenes with sharp specular highlights or high-frequency lighting variations [S1].
+*   **Time Complexity:** The pre-computation phase is expensive, scaling with the number of voxels and the complexity of the material/light integration. Rendering is interactive for simple effects (shadows only) but degrades with scattering and color bleeding [S1].
+*   **Memory Complexity:** Requires storing 3D coefficient volumes. Downsampling to 33% size mitigates this [S1].
+*   **Measured Performance:**
+    *   Hardware: Intel Core2 Quad Q9450 (2.66 GHz), 4GB RAM, nVidia GeForce 9800 GTX (512MB RAM) [S1].
+    *   Resolution: 400x400 window [S1].
+    *   **128^3 voxels:** Shadows only: 0.9s projection / 24 fps. +Scattering: 21.3s / 17 fps. +Bleeding: 58.9s / 13 fps [S1].
+    *   **256^2x128 voxels:** Shadows only: 2.6s / 20 fps. +Scattering: 70.2s / 14 fps. +Bleeding: 180s / 5 fps [S1].
+    *   **256^3 voxels:** Shadows only: 3.4s / 6 fps. +Scattering: 149s / 3 fps. +Bleeding: 388s / 1 fps [S1].
+*   **Strengths:** Enables interactive frame rates for complex lighting effects (shadows, scattering, color bleeding) that would otherwise be too slow for real-time ray casting [S1].
+*   **Limitations:** Restricted to low-frequency functions; unsuitable for materials with sharp specular highlights due to Gibbs ringing. Performance degrades significantly with color bleeding [S1].
 
 ## Background
-*   **Origin**: The method was introduced by F. Lindemann and T. Ropinski in 2010 [S1].
-*   **History**: It was implemented in the Voreen volume rendering engine [S1]. The technique builds on the concept of using Spherical Harmonics for global illumination in computer graphics, adapting it for direct volume rendering to handle light-material interactions efficiently.
-*   **Applications**: Medical imaging and computational fluid dynamics [S1].
+*   **Origin:** The method was introduced by F. Lindemann and T. Ropinski in the paper "Advanced Light Material Interaction for Direct Volume Rendering" (2010) [S1].
+*   **History:** It was implemented in the Voreen volume rendering engine [S1].
+*   **Usage:** Applied in medical imaging and computational fluid dynamics, where predefined transfer functions are common [S1].
 
 ## Sources
 [S1] Advanced Light Material Interaction for Direct Volume Rendering, https://doi.org/10.2312/vg/vg10/101-108, fetched 2026-10-26

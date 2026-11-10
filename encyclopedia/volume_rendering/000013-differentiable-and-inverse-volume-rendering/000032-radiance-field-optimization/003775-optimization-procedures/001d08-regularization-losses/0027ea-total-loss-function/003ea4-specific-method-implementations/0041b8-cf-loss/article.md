@@ -1,0 +1,146 @@
+# CF Loss
+
+Also called: Closed-form color loss
+
+## Overview
+CF Loss is a regularization term used in radiance-field optimization to mitigate shape-radiance ambiguity by enforcing geometric consistency through a closed-form estimation of color [S1]. Unlike standard photometric losses that measure pixel-wise color differences, CF Loss computes the error between the rendered image and a color field reconstructed directly from the density and albedo fields without ray marching, thereby providing strong supervision signals specifically for geometric errors [S1]. It sets itself apart from sibling losses (e.g., photometric, distortion) by being significantly more sensitive to false geometry, such as thick or floating surfaces, which other losses often ignore [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $\mathcal{R}_{cf}$: A set of $|\mathcal{R}_{cf}|$ rays sampled per iteration [S1].
+    *   $\sigma(\mathbf{x})$: The density field value at position $\mathbf{x}$ [S1].
+    *   $\mathbf{c}(\mathbf{x})$: The color (albedo) field value at position $\mathbf{x}$ [S1].
+    *   $\mathbf{C}_{\text{rendered}}$: The standard volume-rendered color for the rays [S1].
+    *   $\mathbf{C}_{\text{gt}}$: The ground-truth image colors for the rays [S1].
+*   **Outputs:**
+    *   $\mathcal{L}_{cf}$: The scalar loss value [S1].
+
+**Data Structures:**
+*   Rays are represented as origin $\mathbf{o}$ and direction $\mathbf{d}$ pairs.
+*   The closed-form color field is not stored as a separate grid but computed analytically from the existing density and color fields [S1].
+
+**Method Steps:**
+1.  **Sample Rays:** Select $|\mathcal{R}_{cf}|$ rays from the training view [S1].
+2.  **Compute Closed-Form Color:** For each ray, compute the color $\mathbf{C}_{cf}$ using the closed-form integration of the density and color fields. The closed-form color $\mathbf{C}_{cf}$ along a ray is derived from the integral of the color field weighted by the transmittance and density, effectively solving the volume rendering equation analytically or via a simplified approximation that assumes constant properties or specific field structures [S1, G]. *Note: The source [S1] describes the result as "rendered by the closed-form color field" and contrasts it with standard rendering, implying $\mathbf{C}_{cf}$ is a direct estimate of color based on the accumulated density and local color, bypassing the standard opacity-weighted accumulation if the field allows, or serving as a reference target.* Specifically, the loss is the difference between the standard rendered color and this closed-form estimate, or the difference between the closed-form estimate and the ground truth. The source states: "The errors can be reflected by the image rendered by the closed-form color field... this loss can be used to improve the geometry." The loss term is typically defined as the photometric error of this closed-form color against the ground truth or the standard render. Based on the context of "Reducing Shape-Radiance Ambiguity," the CF Loss $\mathcal{L}_{cf}$ is often formulated as:
+    $$ \mathcal{L}_{cf} = \| \mathbf{C}_{cf} - \mathbf{C}_{\text{gt}} \|_1 $$
+    or
+    $$ \mathcal{L}_{cf} = \| \mathbf{C}_{cf} - \mathbf{C}_{\text{rendered}} \|_1 $$
+    The source notes that CF loss accounts for 28% of loss in false regions, indicating it targets geometric discrepancies. The standard implementation in Plenoxels [S1] uses the closed-form color as a proxy for the "true" color given the current density, penalizing deviations that indicate geometric inconsistency.
+3.  **Calculate Loss:** Compute the $L_1$ norm (or similar) between the closed-form color $\mathbf{C}_{cf}$ and the ground truth $\mathbf{C}_{\text{gt}}$ (or the standard render) for the sampled rays [S1].
+4.  **Aggregate:** Average the loss over the $|\mathcal{R}_{cf}|$ rays [S1].
+5.  **Weight:** Multiply by the weight factor $\lambda$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_cf_loss(rays, density_field, color_field, gt_colors, lambda_cf, num_cf_rays):
+    """
+    Computes the Closed-Form Color Loss.
+    
+    Args:
+        rays: List of ray origins and directions.
+        density_field: Function/Structure to query density sigma(x).
+        color_field: Function/Structure to query color c(x).
+        gt_colors: Ground truth colors for the rays.
+        lambda_cf: Weight factor for the loss.
+        num_cf_rays: Number of rays to sample for CF loss calculation.
+        
+    Returns:
+        loss: Scalar CF loss value.
+    """
+    # Sample a subset of rays for CF loss calculation
+    # In practice, these might be the same rays as the main training or a specific subset
+    cf_rays = sample_rays(rays, num_cf_rays)
+    
+    total_loss = 0.0
+    count = 0
+    
+    for ray in cf_rays:
+        # 1. Compute Closed-Form Color
+        # The closed-form color C_cf is computed by integrating the color field
+        # weighted by the density/transmittance along the ray.
+        # In Plenoxels [S1], this is often an analytical solution or a specific
+        # approximation that serves as a geometric prior.
+        # C_cf = integral( c(x) * sigma(x) * T(x) dx ) along the ray
+        # However, the "Closed-Form" aspect often implies a direct mapping
+        # or a simplified integration that highlights geometric errors.
+        # We assume a standard volume rendering integral for C_cf here,
+        # as the distinction lies in its use as a geometric regularizer.
+        c_cf = render_ray_closed_form(ray, density_field, color_field)
+        
+        # 2. Compute Photometric Error
+        # Compare the closed-form color against the ground truth
+        # or the standard rendered color. The source implies it targets
+        # geometric consistency, so comparing against GT is common.
+        # Using L1 loss as is standard in these contexts.
+        error = abs(c_cf - ray.gt_color)
+        
+        total_loss += error
+        count += 1
+        
+    if count > 0:
+        avg_loss = total_loss / count
+        return lambda_cf * avg_loss
+    else:
+        return 0.0
+
+def render_ray_closed_form(ray, density_field, color_field):
+    """
+    Renders a ray using the closed-form color estimation.
+    This typically involves integrating the color field weighted by
+    the density and transmittance.
+    """
+    # Discretize the ray into steps
+    steps = 32 # Typical number of samples, not given in sources [G]
+    ray_length = 1.0 # Assume normalized or known bounds [G]
+    step_size = ray_length / steps
+    
+    accumulated_color = 0.0
+    accumulated_transmittance = 1.0
+    
+    for i in range(steps):
+        # Sample point along the ray
+        t = i * step_size
+        x = ray.origin + t * ray.direction
+        
+        # Query fields
+        sigma = density_field(x)
+        c = color_field(x)
+        
+        # Volume rendering equation step
+        # alpha = 1 - exp(-sigma * step_size)
+        # T_next = T * (1 - alpha)
+        # color += T * (1 - exp(-sigma * step_size)) * c
+        
+        # Simplified Euler integration for demonstration
+        alpha = 1.0 - exp(-sigma * step_size)
+        accumulated_color += accumulated_transmittance * alpha * c
+        accumulated_transmittance *= (1.0 - alpha)
+        
+    return accumulated_color
+```
+
+**Parameters:**
+*   $\lambda$ (Weight factor): Controls the influence of CF loss. Typical values: 1, 2, 5, 10. Optimal range is 1-10. Values $\ge 20$ degrade performance [S1].
+*   $|\mathcal{R}_{cf}|$ (Number of rays): Number of rays used for CF loss per iteration. Typical values: 10, 25. Higher values improve geometry but increase cost [S1].
+
+**Edge Cases and Pitfalls:**
+*   **High Weight:** If $\lambda$ is too large (e.g., 20), the CF loss dominates training, causing PSNR to decrease because the color field cannot be well optimized while only the density field receives strong geometric supervision [S1].
+*   **Computational Cost:** Increasing $|\mathcal{R}_{cf}|$ significantly increases training time (e.g., from 17 mins to 43 mins on DTU for 25 rays) [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Adds overhead proportional to $|\mathcal{R}_{cf}|$ ray marches per iteration. On the DTU dataset, training time increases from 17 minutes (no CF loss) to 32 minutes (10 rays) and 43 minutes (25 rays) [S1].
+*   **Memory Complexity:** Negligible additional memory overhead as it reuses existing density and color field queries [S1].
+*   **Performance:** Improves geometric accuracy (IMRC) and reduces false geometry (e.g., thick surfaces) [S1]. On DTU, average PSNR/IMRC improves with $\lambda \in [1, 10]$ and $|\mathcal{R}_{cf}| \in [10, 25]$. For example, $\lambda=10, |\mathcal{R}_{cf}|=25$ yields 32.08/16.66 vs baseline 32.00/16.18 (with $\lambda=1, |\mathcal{R}_{cf}|=10$) [S1].
+*   **Strengths:** Highly sensitive to geometric errors (28% of loss in false regions vs 4.7% for photometric) [S1].
+*   **Limitations:** Does not directly optimize color field appearance as effectively if $\lambda$ is too high; sensitive to hyperparameter tuning [S1].
+*   **When to use:** When shape-radiance ambiguity leads to false geometry (e.g., floating surfaces, thick walls) [S1].
+*   **When not to use:** When computational budget is extremely tight or when the geometry is already well-constrained [S1].
+
+## Background
+CF Loss was introduced in the context of Plenoxels and radiance field optimization to address the shape-radiance ambiguity problem [S1]. It leverages a closed-form color estimation method to provide geometric supervision [S1]. The method is detailed in "Reducing Shape-Radiance Ambiguity in Radiance Fields with a Closed-Form Color Estimation Method" [S1].
+
+## Sources
+[S1] Reducing Shape-Radiance Ambiguity in Radiance Fields with a Closed-Form Color Estimation Method, https://doi.org/10.52202/075280-2570, fetched 2026-10-26

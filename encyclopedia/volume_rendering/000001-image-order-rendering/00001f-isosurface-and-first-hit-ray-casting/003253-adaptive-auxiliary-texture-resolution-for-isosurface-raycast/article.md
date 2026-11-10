@@ -3,129 +3,220 @@
 Also called: Adaptive Algorithm for Accelerating Direct Isosurface Rendering, Adaptive Algorithm for Accelerating Direct Isosurface Rendering on GPU, Adaptive Two-Pass Isosurface Rendering
 
 ## Overview
-This method accelerates direct isosurface volume rendering on GPUs by decoupling the intersection search from the final pixel shading using a two-pass approach [S1, unofficial]. It renders ray-isosurface intersections into a low-resolution auxiliary texture in the first pass, then uses this depth information to predict starting points for ray marching in the second pass, effectively skipping empty space for most pixels [S1, unofficial]. Unlike preprocessing-based acceleration techniques (e.g., octrees or histogram pyramids), it constructs its auxiliary data dynamically every frame, requiring no prior analysis of the volume dataset [S1, unofficial].
+This method accelerates direct isosurface volume rendering on GPUs by using a two-pass approach that avoids preprocessing [S1, unofficial]. It renders ray-isosurface intersections into a low-resolution auxiliary texture for a subset of rays, then uses this data to predict intersection points for all other rays in the second pass [S1, unofficial]. Unlike preprocessing-based methods (e.g., octrees, kd-trees), it constructs auxiliary data every frame, allowing dynamic adaptation of sampling density to prevent artifacts while maintaining high performance [S1, unofficial].
 
 ## How it works
-The algorithm operates in two rendering passes on the GPU, coordinated by an adaptive control loop running on the CPU.
+**Inputs:**
+- Scalar volume dataset $V$.
+- Transfer function $T_f(v)$ mapping scalar values to opacity/color.
+- Isosurface threshold $\tau$.
+- Camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$ per pixel).
+- Adaptive resolution ratio $n$ (ratio of screen resolution to auxiliary texture resolution).
 
-### Inputs and Outputs
-*   **Inputs:** 3D scalar volume dataset $V$, camera parameters, isovalue threshold $\tau$, transfer function $T_f(v)$, and initial resolution ratio $n$.
-*   **Outputs:** Final color image for the current frame.
-*   **Auxiliary Data:** An auxiliary depth texture $T$ with resolution $W/n \times H/n$, where $W \times H$ is the screen resolution. $T$ stores the depth ($z$-coordinate) of the first isosurface intersection for the sampled rays.
+**Outputs:**
+- Final rendered image.
+- Updated $n$ for the next frame.
 
-### Data Structures
-*   **Auxiliary Texture $T$:** A 2D texture where each texel $(u, v)$ stores the depth $d$ of the isosurface intersection for the corresponding coarse pixel. If no intersection is found, a default value (e.g., far plane or infinity) is stored.
-*   **Lone/Tooth Texel Counters:** CPU-side integers tracking the frequency of specific topological patterns in $T$ to drive adaptation.
+**Data Structures:**
+- **Auxiliary Texture $T$**: A 2D texture with resolution $W/n \times H/n$, where $W \times H$ is the screen resolution. Each texel stores the depth ($z$-coordinate in view space) of the first isosurface intersection for the corresponding ray. If no intersection is found, it stores a value indicating "empty" (e.g., max depth or a specific flag).
+- **Final Image Buffer**: Standard color buffer.
 
-### Parameters
-*   **$n$ (Resolution Ratio):** The factor by which the auxiliary texture resolution is reduced relative to the screen in both dimensions. $n \in [2, 5]$ is the typical experimental range. The optimal value is approximately 5 for general scenes, but must be lower (higher resolution) for scenes with fine details or high curvature to prevent artifacts [S1, unofficial].
-*   **$S_{min}, S_{max}$ (Adaptation Thresholds):** $S_{max}$ is a user-defined quality parameter. $S_{min}$ is typically set to $S_{max}/2$ [S1, unofficial].
+**Algorithm Steps:**
 
-### Algorithm Steps
+1.  **Pass 1: Low-Resolution Intersection Rendering**
+    - Render the volume into auxiliary texture $T$ at resolution $W/n \times H/n$.
+    - For each texel in $T$, cast a ray through the volume and find the first intersection with the isosurface $f(\mathbf{p}) = \tau$.
+    - Store the depth $z$ of this intersection in the texel. If no intersection is found, store a "no-hit" value.
 
-#### Pass 1: Auxiliary Texture Construction
-1.  **Rasterization:** Rasterize the screen into the auxiliary texture $T$ with resolution $W/n \times H/n$.
-2.  **Ray Casting:** For each texel in $T$, construct a ray from the camera through the texel center.
-3.  **Intersection Search:** March along the ray to find the first point where the scalar field value satisfies the isosurface condition (e.g., $f(\mathbf{p}) \ge \tau$ or sign change relative to $\tau$).
-4.  **Depth Storage:** Store the $z$-coordinate of the intersection in the corresponding texel of $T$. If no intersection is found within the volume bounds, store a "no-hit" value.
+2.  **Pass 2: High-Resolution Raycasting with Prediction**
+    - For each pixel $p$ in the final image, determine the starting point for ray tracing using the depth information from $T$.
+    - Let $d_1, d_2, \dots, d_k$ be the depths of the neighboring texels in $T$ surrounding the pixel $p$'s corresponding region.
+    - **Case 1: Concave Surface (Start at minimum depth)**
+      - If the surface is concave relative to the camera, start ray tracing at $z_{start} = \min(d_1, d_2)$. This ensures the ray starts as close as possible to the surface without missing it [S1, unofficial].
+    - **Case 2: Convex Surface (Direction Selection)**
+      - If the surface is convex, simply starting at the minimum depth might cause the ray to miss the surface if it moves in the wrong direction. Evaluate the transfer function $T_f$ at the predicted hit point.
+      - If $T_f < \text{threshold}$, move in the ray direction.
+      - If $T_f \ge \text{threshold}$, move in the opposite direction [S1, unofficial].
+    - **Case 3: Culling**
+      - If surrounding texels in $T$ indicate no intersection with the isosurface (e.g., all are "no-hit"), cull the pixel and skip raycasting [S1, unofficial].
+    - **Case 4: Outlines (Red/White Pixels)**
+      - Pixels on object outlines may require many raytracing steps if they do not intersect the isosurface. These are rare but costly. The algorithm handles them by full raycasting from the near plane if prediction fails [S1, unofficial].
 
-#### Pass 2: Adaptive Ray Marching
-For each pixel $p$ in the final image:
-1.  **Lookup:** Identify the four neighboring texels in $T$ that surround pixel $p$. Let their depths be $d_1, d_2, d_3, d_4$.
-2.  **Culling:** If the surrounding texels indicate no intersection (e.g., all are "no-hit" or consistently outside the volume bounds), cull the pixel and skip raycasting [S1, unofficial].
-3.  **Start Point Calculation:** Determine the starting $z$-coordinate for ray marching based on the neighboring depths:
-    *   **Concave Surface Case:** If the surface geometry suggests concavity (based on depth gradients), start at $z_{start} = \min(d_1, d_2)$ for the relevant neighbors [S1, unofficial].
-    *   **Convex Surface Case:** If the surface is convex, the algorithm must determine the correct marching direction. Evaluate the transfer function $T_f$ at the current pixel's initial position.
-        *   If $T_f < \tau$ (below threshold), march in the ray direction (forward).
-        *   If $T_f \ge \tau$ (above threshold), march in the opposite direction (backward) to approach the surface from the other side [S1, unofficial].
-4.  **Refinement:** Perform ray marching from $z_{start}$ to refine the intersection position, typically using linear interpolation or binary search between the last sampled voxel and the hit voxel [S3, unofficial][S6, unofficial].
-5.  **Shading:** Compute the surface normal $\nabla f$ at the refined hit point using finite differences or tri-cubic filtering. Apply Phong-like shading (ambient, diffuse, specular) to compute the final color [S3, unofficial][S1, unofficial].
+3.  **Adaptive Control (CPU Side, Parallel to Pass 2)**
+    - Analyze the auxiliary texture $T$ from the current frame on the CPU.
+    - Count **lone texels**: texels containing the isosurface but whose neighbors do not.
+    - Count **tooth texels**: texels containing the isosurface and having only one neighbor that also contains the isosurface.
+    - Calculate the ratio $S_i = \frac{\text{count(lone)} + \text{count(tooth)}}{\text{total texels in } T}$.
+    - Determine $n_{i+1}$ for the next frame using the update rule:
+      $$
+      n_{i+1} = 
+      \begin{cases} 
+      n_i & \text{if } S_{min} \le S_i \le S_{max} \\
+      n_i - 1 & \text{if } S_i > S_{max} \\
+      n_i + 1 & \text{if } S_i < S_{min}
+      \end{cases}
+      $$
+    - Constraints: $n \in [2, 5]$. $S_{max}$ is a user-defined quality parameter, and $S_{min} = S_{max}/2$ [S1, unofficial].
 
-#### Adaptive Control (CPU)
-Running in parallel with Pass 2 of frame $i$:
-1.  **Copy:** Transfer texture $T$ from GPU to CPU memory.
-2.  **Analysis:** Scan $T$ to count "lone" and "tooth" texels:
-    *   **Lone Texel:** A texel containing an isosurface intersection, but none of its immediate neighbors do.
-    *   **Tooth Texel:** A texel containing an isosurface intersection, with exactly one neighbor that also contains an intersection.
-3.  **Ratio Calculation:** Compute the ratio $S_i$:
-    $$ S_i = \frac{\text{count}(\text{lone}) + \text{count}(\text{tooth})}{\text{total texels in } T} $$
-4.  **Update $n$:** Determine $n_{i+1}$ for the next frame using the update rule [S1, unofficial]:
-    $$
-    n_{i+1} =
-    \begin{cases}
-    n_i & \text{if } S_{min} \le S_i \le S_{max} \\
-    n_i - 1 & \text{if } S_i > S_{max} \\
-    n_i + 1 & \text{if } S_i < S_{min}
-    \end{cases}
-    $$
-    *   If $S_i$ is high (many isolated details or artifacts), $n$ decreases (higher resolution) to capture fine details.
-    *   If $S_i$ is low (smooth surfaces, no isolated texels), $n$ increases (lower resolution) to maximize performance.
-    *   Clamp $n$ to the range $[2, 5]$ [S1, unofficial].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def adaptive_isosurface_rendering(volume, camera, isovalue, transfer_func, n_init):
-    n = n_init
-    S_min = 0.0  # Placeholder, derived from S_max in practice
-    S_max = 0.0  # Placeholder, user-defined quality parameter
+def adaptive_isosurface_rendering(volume, transfer_function, threshold, camera, n):
+    """
+    Main rendering loop for one frame.
+    """
+    # Pass 1: Render to low-res auxiliary texture
+    aux_texture = render_auxiliary_texture(volume, transfer_function, threshold, camera, n)
     
-    for frame in frames:
-        # Pass 1: GPU - Render to auxiliary texture T
-        # T has resolution (screen_w / n) x (screen_h / n)
-        T = render_auxiliary_texture(volume, camera, isovalue, n)
+    # Pass 2: Render final image using aux_texture for prediction
+    final_image = render_final_image(volume, transfer_function, threshold, camera, aux_texture, n)
+    
+    # Adaptive Control: Analyze aux_texture on CPU
+    lone_count = count_lone_texels(aux_texture)
+    tooth_count = count_tooth_texels(aux_texture)
+    total_texels = aux_texture.width * aux_texture.height
+    S_i = (lone_count + tooth_count) / total_texels
+    
+    # Update n for next frame
+    S_max = 0.1  # Example user-defined value
+    S_min = S_max / 2
+    
+    if S_min <= S_i <= S_max:
+        n_next = n
+    elif S_i > S_max:
+        n_next = max(2, n - 1)
+    else:  # S_i < S_min
+        n_next = min(5, n + 1)
         
-        # Pass 2: GPU - Raycast final image using T
-        image = render_final_image(volume, camera, T, isovalue, transfer_func)
-        
-        # CPU: Analyze T and update n for next frame
-        # This runs in parallel with Pass 2 of the NEXT frame or concurrently
-        lone_count = 0
-        tooth_count = 0
-        total_texels = T.width * T.height
-        
-        for y in range(T.height):
-            for x in range(T.width):
-                if T.is_hit(x, y):
-                    neighbors_hit = 0
-                    for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
-                        nx, ny = x + dx, y + dy
-                        if T.is_valid(nx, ny) and T.is_hit(nx, ny):
-                            neighbors_hit += 1
-                    
-                    if neighbors_hit == 0:
-                        lone_count += 1
-                    elif neighbors_hit == 1:
-                        tooth_count += 1
-                        
-        S_i = (lone_count + tooth_count) / total_texels
-        
-        # Update n for next frame
-        if S_i > S_max:
-            n = max(2, n - 1)
-        elif S_i < S_min:
-            n = min(5, n + 1)
-        # else n remains unchanged
+    return final_image, n_next
+
+def render_auxiliary_texture(volume, transfer_function, threshold, camera, n):
+    """
+    Renders intersections into a texture of size W/n x H/n.
+    """
+    width = camera.width // n
+    height = camera.height // n
+    aux_texture = new_texture(width, height)
+    
+    for y in range(height):
+        for x in range(width):
+            # Map texel to screen pixel region
+            screen_x = x * n
+            screen_y = y * n
             
-        yield image, n
+            # Cast ray for this texel (e.g., center of the region)
+            ray = camera.get_ray(screen_x + n/2, screen_y + n/2)
+            hit_depth = find_first_intersection(volume, ray, threshold)
+            
+            if hit_depth is not None:
+                aux_texture.set(x, y, hit_depth)
+            else:
+                aux_texture.set(x, y, NO_HIT_VALUE)
+                
+    return aux_texture
+
+def render_final_image(volume, transfer_function, threshold, camera, aux_texture, n):
+    """
+    Renders the final image using aux_texture for starting points.
+    """
+    width = camera.width
+    height = camera.height
+    final_image = new_image(width, height)
+    
+    for y in range(height):
+        for x in range(width):
+            # Determine starting point from aux_texture
+            aux_x = x // n
+            aux_y = y // n
+            
+            # Get neighboring depths in aux_texture
+            neighbors = get_neighbor_depths(aux_texture, aux_x, aux_y)
+            
+            # Predict starting depth
+            start_depth = predict_start_depth(neighbors, transfer_function, x, y, camera)
+            
+            # Cast ray from predicted start
+            ray = camera.get_ray(x, y)
+            hit = trace_ray_from(volume, ray, start_depth, threshold)
+            
+            if hit is not None:
+                final_image.set(x, y, compute_color(hit, volume, transfer_function))
+            else:
+                final_image.set(x, y, BACKGROUND_COLOR)
+                
+    return final_image
+
+def predict_start_depth(neighbors, transfer_function, x, y, camera):
+    """
+    Predicts the starting depth for raycasting based on neighboring texels.
+    """
+    # Case 1: Concave surface - start at min depth
+    if is_concave(neighbors):
+        return min(neighbors)
+    
+    # Case 2: Convex surface - check transfer function
+    min_depth = min(neighbors)
+    # Evaluate transfer function at the predicted hit point
+    # Note: This requires reconstructing the 3D point from depth
+    point = camera.get_point_at_depth(min_depth, x, y)
+    value = transfer_function.evaluate(point)
+    
+    if value < threshold:
+        # Move in ray direction
+        return min_depth
+    else:
+        # Move in opposite direction (backwards)
+        # This is a simplification; actual implementation may vary
+        return max_depth(neighbors)
+
+def count_lone_texels(aux_texture):
+    """
+    Counts texels with isosurface but no neighbors with isosurface.
+    """
+    count = 0
+    for y in range(aux_texture.height):
+        for x in range(aux_texture.width):
+            if aux_texture.has_intersection(x, y):
+                if not any(aux_texture.has_intersection(nx, ny) 
+                           for nx, ny in get_neighbors(x, y)):
+                    count += 1
+    return count
+
+def count_tooth_texels(aux_texture):
+    """
+    Counts texels with isosurface and exactly one neighbor with isosurface.
+    """
+    count = 0
+    for y in range(aux_texture.height):
+        for x in range(aux_texture.width):
+            if aux_texture.has_intersection(x, y):
+                neighbor_count = sum(1 for nx, ny in get_neighbors(x, y) 
+                                     if aux_texture.has_intersection(nx, ny))
+                if neighbor_count == 1:
+                    count += 1
+    return count
 ```
 
-### Edge Cases and Pitfalls
-*   **Outline Pixels:** Pixels on object outlines (where the ray may miss the isosurface or intersect a different surface) can require many raytracing steps if they do not intersect the current isosurface. These are rare but costly [S1, unofficial].
-*   **Data Loss:** Choosing a high $n$ (low resolution auxiliary texture) increases the size of red/white regions (outlines/misses), leading to decreased performance and potential loss of fine details or small isolated structures [S1, unofficial].
-*   **Convexity Ambiguity:** For convex surfaces, the starting point derived from neighbors might be on the "wrong" side of the surface. The algorithm resolves this by checking the transfer function value at the pixel to determine marching direction [S1, unofficial].
+**Parameters:**
+- $n$: Ratio between screen resolution and auxiliary texture resolution. Typical optimal value is around 5 [S1, unofficial]. Must be lower (e.g., 2-3) for scenes with fine detail or large curvature to prevent artifacts [S1, unofficial]. Range is $[2, 5]$ [S1, unofficial].
+- $S_{max}$: User-defined quality parameter. $S_{min} = S_{max}/2$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Outlines (Red/White Pixels):** Pixels on object outlines may require many raytracing steps if they do not intersect the isosurface. These are rare but costly [S1, unofficial].
+- **High $n$ (Low Resolution):** Increases red/white regions, leading to decreased performance and artifacts (data loss) for fine details [S1, unofficial].
+- **Precision:** Depth prediction relies on accurate neighbor sampling. Incorrect prediction can lead to missed intersections or incorrect shading [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The first pass scales with $O((W/n) \cdot (H/n))$. The second pass scales with $O(W \cdot H)$ but with significantly reduced marching steps for most pixels due to the starting point prediction.
-*   **Memory Complexity:** Requires storage for the auxiliary texture $T$, which is $1/n^2$ the size of the screen buffer.
-*   **Performance:** Experiments show acceleration up to 10 times compared to common GPU ray casting methods [S1, unofficial].
-*   **Strengths:** No preprocessing required; adaptive resolution handles varying scene complexity automatically; efficient culling of empty space.
-*   **Limitations:** Performance degrades if $n$ is too high for complex scenes (artifacts/data loss); outline pixels remain a bottleneck; requires CPU-GPU synchronization for adaptation (mitigated by parallel execution).
+- **Time Complexity:** Pass 1 is $O((W/n) \times (H/n))$. Pass 2 is $O(W \times H)$ but with reduced raytracing steps due to prediction. Adaptive control is $O((W/n) \times (H/n))$. Overall, it is faster than standard raycasting by up to 10 times [S1, unofficial].
+- **Memory Complexity:** Requires storage for the auxiliary texture $T$, which is $1/n^2$ the size of the screen buffer [S1, unofficial].
+- **Performance:** Acceleration up to 10 times compared to common GPU raycasting methods [S1, unofficial]. Optimal $n$ is around 5 for general scenes [S1, unofficial].
+- **Strengths:** No preprocessing required; adaptive to scene complexity; fast on GPUs [S1, unofficial].
+- **Limitations:** Artifacts can occur if $n$ is too high for complex scenes; outline pixels are costly [S1, unofficial].
 
 ## Background
-The method was proposed by Belyaev et al. in 2018 [S1, unofficial]. It addresses the need for fast, dynamic isosurface visualization in medical data analysis, where transfer functions and isovalue thresholds may change frequently, making static preprocessing structures (like octrees) less suitable. The approach leverages the parallel nature of GPUs for the initial coarse search and the CPU for adaptive control, balancing quality and performance without prior knowledge of the volume data.
+This method was proposed by Belyaev et al. in 2018 [S1, unofficial]. It addresses the need for fast, dynamic isosurface rendering without the overhead of preprocessing, which is problematic for dynamic data or changing transfer functions [S1, unofficial]. It is particularly relevant for medical data visualization where real-time interaction is crucial [S1, unofficial].
 
 ## Sources
 [S1] Adaptive Algorithm for Accelerating Direct Isosurface Rendering on GPU, https://doi.org/10.11989/jest.1674-862x.71013102, fetched 2026-10-30 (unofficial)

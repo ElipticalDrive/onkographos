@@ -1,0 +1,231 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Feature-Driven Ambient Occlusion is a shading technique for direct volume rendering (DVR) that computes ambient occlusion separately for identified features (layers) to prevent the overdarkening of internal layers caused by inter-occlusions from neighboring features, while preserving auto-occlusions [S1]. Unlike classical ambient occlusion, which darkens internal layers in multi-layer volumes due to inter-occlusions, this method neglects inter-occlusions between features to prevent overdarkening while keeping auto-occlusions [S1]. It builds on [Local Ambient Occlusion](4977-local-ambient-occlusion.md) by introducing feature-based isolation of occlusion calculations.
++Feature-Driven Ambient Occlusion is a shading technique for direct volume rendering (DVR) that computes ambient occlusion separately for identified features (layers) to prevent the overdarkening of internal layers caused by inter-occlusions from neighboring features, while preserving auto-occlusions [S1]. Unlike classical ambient occlusion, which darkens internal layers in multi-layer volumes due to inter-occlusions, this method neglects inter-occlusions between features to prevent overdarkening while keeping auto-occlusions [S1]. It builds on [Local Ambient Occlusion](4977-local-ambient-occlusion.md) by introducing feature-based isolation of occlusion calculations [S1].
+ 
+ ## How it works
+@@ -12,5 +12,5 @@
+ 
+ **Data Structures:**
+-*   **Bricks:** The 3D dataset is decomposed into equal-sized bricks. Each brick stores a boolean indicating if it contains only empty voxels. Bricks overlap to prevent discontinuities at borders [S1].
++*   **Bricks:** The 3D dataset is decomposed into equal-sized bricks [S1]. Each brick stores a boolean indicating if it contains only empty voxels [S1]. Bricks overlap to prevent discontinuities at borders [S1].
+ *   **Occlusion Textures:** $n_f$ separate 3D textures $T_k$, one for each feature $k$, storing the occlusion factor for voxels belonging to that feature [S1].
+ 
+@@ -24,8 +24,8 @@
+ **Algorithm Steps:**
+ 
+-1.  **Preprocessing (Bricking):** Decompose the 3D dataset into equal-sized bricks. Scan each brick to determine if it contains only empty voxels, storing this as a boolean. Use overlapping bricks to prevent discontinuities at borders [S1].
++1.  **Preprocessing (Bricking):** Decompose the 3D dataset into equal-sized bricks [S1]. Scan each brick to determine if it contains only empty voxels, storing this as a boolean [S1]. Use overlapping bricks to prevent discontinuities at borders [S1].
+ 
+ 2.  **Per-Feature Occlusion Computation:** For each feature $k \in [1, n_f]$:
+-    a.  Initialize a 3D texture $T_k$ for the occlusion factor.
++    a.  Initialize a 3D texture $T_k$ for the occlusion factor [S1].
+     b.  For each voxel $v$ in the volume:
+         i.  If $v$ does not belong to feature $k$, set $T_k(v) = 1.0$ (fully lit/no occlusion) or skip computation if the voxel is empty [S1].
+@@ -34,5 +34,5 @@
+             2.  For each ray $l$, compute the light contribution $I_l(x_v, k)$ using $M$ samples in a front-to-back compositing scheme:
+                 $$ I_l(x_v, k) = \frac{1}{M} \sum_{m=0}^{M-1} \prod_{i=0}^{m-1} (1 - \alpha_{i,k}) $$
+-                where $\alpha_{i,k}$ is the opacity of sample $i$ along ray $l$, obtained via the transfer function. Crucially, for all neighboring voxels (inside sphere radius $R_\Omega$) that do *not* belong to feature $k$, set their opacity to 0 during this calculation [S1].
++                where $\alpha_{i,k}$ is the opacity of sample $i$ along ray $l$, obtained via the transfer function [S1]. Crucially, for all neighboring voxels (inside sphere radius $R_\Omega$) that do *not* belong to feature $k$, set their opacity to 0 during this calculation [S1].
+             3.  Combine ray contributions to get the occlusion factor for voxel $v$ in texture $T_k$:
+                 $$ T_k(v) = \frac{1}{L} \sum_{l=1}^{L} I_l(x_v, k) $$
+@@ -43,81 +43,129 @@
+     This operator is preferred over averaging because it reduces artifacts, improves contrast, and extends the influence of opaque features to neighboring less opaque ones, which is acceptable as less opaque features are less visible [S1].
+ 
+-4.  **Rendering:** Perform final rendering using a traditional volume raycasting algorithm (e.g., in GLSL). Fetch one additional texture for the precomputed ambient occlusion factor $AO(v)$ and two additional textures for preintegrated volume rendering [S1]. The light contribution $I_l(x_v)$ for a ray is approximated using the final AO factor:
+-    $$ I_l(x_v) = \sum_{m=0}^{M} \frac{1}{M} \prod_{i=0}^{m-1} (1 - \alpha_i) \cdot AO(x_v) $$
+-    (Note: The source formula [S1] Eq. 3 and 5 suggests the AO factor modulates the transmittance or is applied during compositing. The exact integration in the final pass uses the precomputed AO value) [S1].
++4.  **Rendering:** Perform final rendering using a traditional volume raycasting algorithm (e.g., in GLSL) [S1]. As occlusion factors are precomputed, the shader fetches one additional texture for the precomputed ambient occlusion factor $AO(v)$ and two additional textures for preintegrated volume rendering [S1]. The final rendering times are similar to classical ambient occlusion techniques [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def feature_driven_ao(volume, features, transfer_function, L, M, R_Omega, a):
++import numpy as np
++
++def feature_driven_ao(volume_data, feature_ids, transfer_fn, L, M, R_Omega, a):
+     """
+-    volume: 3D array of scalar values
+-    features: 3D array of feature IDs (0 for empty/background)
+-    transfer_function: function mapping scalar value to (opacity, color)
+-    L: number of rays
++    volume_data: 3D numpy array of scalar values
++    feature_ids: 3D numpy array of feature IDs (0 for empty/background)
++    transfer_fn: callable returning (opacity, color) for a scalar value
++    L: number of rays per voxel
+     M: number of samples per ray
+     R_Omega: occlusion sphere radius
+     a: initial offset
+     """
+-    n_f = max(features.flatten()) + 1
++    H, W, D = volume_data.shape
++    n_f = int(feature_ids.max()) + 1
+     occlusion_textures = []
++
++    # Preprocessing: Bricking
++    brick_size = 16
++    brick_grid = (H // brick_size, W // brick_size, D // brick_size)
++    empty_bricks = {}
+     
+-    # Preprocessing: Bricking
+-    bricks = decompose_into_bricks(volume)
+-    empty_bricks = scan_bricks_for_empty(bricks) # Boolean array
+-    
++    for bz in range(brick_grid[0]):
++        for by in range(brick_grid[1]):
++            for bx in range(brick_grid[2]):
++                z0, y0, x0 = bz * brick_size, by * brick_size, bx * brick_size
++                z1, y1, x1 = min(z0 + brick_size, H), min(y0 + brick_size, W), min(x0 + brick_size, D)
++                brick_empty = True
++                for z in range(z0, z1):
++                    for y in range(y0, y1):
++                        for x in range(x0, x1):
++                            if feature_ids[z, y, x] != 0:
++                                brick_empty = False
++                                break
++                        if not brick_empty: break
++                    if not brick_empty: break
++                empty_bricks[(bz, by, bx)] = brick_empty
++
+     for k in range(1, n_f + 1):
+-        T_k = create_3d_texture(volume.shape)
+-        
+-        for voxel in volume.voxels:
+-            if features[voxel] != k:
+-                T_k[voxel] = 1.0 # No occlusion for non-feature voxels in this texture
+-                continue
+-            
+-            # Check if voxel is in an empty brick (optimization)
+-            if is_in_empty_bricks(voxel, empty_bricks):
+-                T_k[voxel] = 1.0
+-                continue
+-                
+-            # Compute AO for feature k
+-            ao_sum = 0.0
+-            for l in range(L):
+-                ray = generate_ray(voxel, L) # Uniformly scattered on hemisphere
+-                light_contrib = 0.0
+-                
+-                # Front-to-back compositing
+-                transmittance = 1.0
+-                for m in range(M):
+-                    sample_pos = ray.origin + ray.direction * (a + m * (R_Omega - a) / M)
+-                    sample_val = interpolate_volume(volume, sample_pos)
++        T_k = np.zeros((H, W, D))
++
++        for z in range(H):
++            for y in range(W):
++                for x in range(D):
++                    voxel = (z, y, x)
+                     
+-                    # Get opacity for feature k only
+-                    # If sample is not in feature k, opacity is 0
+-                    sample_feature = get_feature_at(sample_pos, features)
+-                    if sample_feature == k:
+-                        alpha = transfer_function(sample_val).opacity
+-                    else:
+-                        alpha = 0.0
++                    # Skip if not feature k
++                    if feature_ids[voxel] != k:
++                        T_k[voxel] = 1.0
++                        continue
+                     
+-                    light_contrib += transmittance * alpha
+-                    transmittance *= (1 - alpha)
+-                
+-                light_contrib /= M
+-                ao_sum += light_contrib
+-            
+-            T_k[voxel] = ao_sum / L
+-        
++                    # Skip if in empty brick
++                    bz, by, bx = z // brick_size, y // brick_size, x // brick_size
++                    if empty_bricks.get((bz, by, bx), False):
++                        T_k[voxel] = 1.0
++                        continue
++                    
++                    # Compute AO for feature k
++                    ao_sum = 0.0
++                    for l in range(L):
++                        ray_dir = generate_ray(voxel, L)
++                        transmittance_product = 1.0
++                        light_contrib = 0.0
++                        
++                        for m in range(M):
++                            dist = a + m * (R_Omega - a) / M
++                            sample_pos = np.array(voxel) + ray_dir * dist
++                            sample_val = interpolate_volume(volume_data, sample_pos)
++                            sample_feature = get_feature_at(sample_pos, feature_ids)
++                            
++                            if sample_feature == k:
++                                alpha = transfer_fn(sample_val).opacity
++                            else:
++                                alpha = 0.0
++                            
++                            light_contrib += transmittance_product
++                            transmittance_product *= (1 - alpha)
++                        
++                        light_contrib /= M
++                        ao_sum += light_contrib
++                    
++                    T_k[voxel] = ao_sum / L
+         occlusion_textures.append(T_k)
+-    
++
+     # Recombination
+-    AO_volume = create_3d_texture(volume.shape)
+-    for voxel in volume.voxels:
+-        max_ao = 0.0
+-        for T_k in occlusion_textures:
+-            if T_k[voxel] > max_ao:
+-                max_ao = T_k[voxel]
+-        AO_volume[voxel] = max_ao
+-        
++    AO_volume = np.zeros((H, W, D))
++    for z in range(H):
++        for y in range(W):
++            for x in range(D):
++                voxel = (z, y, x)
++                max_ao = 0.0
++                for T_k in occlusion_textures:
++                    if T_k[voxel] > max_ao:
++                        max_ao = T_k[voxel]
++                AO_volume[voxel] = max_ao
++
+     return AO_volume
++
++def generate_ray(origin, num_rays):
++    """Generates a pseudo-random direction on the upper hemisphere."""
++    theta = np.random.uniform(0, 2 * np.pi)
++    phi = np.random.uniform(0, np.pi / 2)
++    return np.array([np.sin(phi) * np.cos(theta), np.sin(phi) * np.sin(theta), np.cos(phi)])
++
++def interpolate_volume(data, pos):
++    """Trilinear interpolation for a 3D scalar field."""
++    pos = np.clip(pos, 0, np.array(data.shape) - 1)
++    z, y, x = pos
++    z0, y0, x0 = np.floor([z, y, x]).astype(int)
++    z1, y1, x1 = np.ceil([z, y, x]).astype(int)
++    dz, dy, dx = z - z0, y - y0, x - x0
++    v00 = data[z0, y0, x0] * (1-dz) + data[z0, y0, x1] * dz
++    v01 = data[z0, y1, x0] * (1-dz) + data[z0, y1, x1] * dz
++    v10 = data[z1, y0, x0] * (1-dz) + data[z1, y0, x1] * dz
++    v11 = data[z1, y1, x0] * (1-dz) + data[z1, y1, x1] * dz
++    return v00 * (1-dy) * (1-dx) + v01 * (1-dy) * dx + v10 * dy * (1-dx) + v11 * dy * dx
++
++def get_feature_at(pos, feature_grid):
++    """Returns feature ID at a continuous position via nearest-neighbor lookup."""
++    idx = np.clip(np.floor(pos).astype(int), 0, np.array(feature_grid.shape) - 1)
++    return feature_grid[tuple(idx)]
+ ```
+ 
+@@ -125,5 +173,5 @@
+ *   **Visual Artifacts:** Naively setting opacity of neighboring features to 0 causes visual artifacts (white dots) at feature borders due to ray sampling and trilinear interpolation when there is a connected area with a different ambient occlusion value [S1].
+ *   **Inaccurate Recombination:** Averaging all occlusion textures $T_k$ results in inaccurate ambient occlusion values [S1].
+-*   **Parameter Sensitivity:** The sphere radius $R_\Omega$ is critical. If too large, it causes overocclusion; if too small, it results in poor shading [S1].
++*   **Parameter Sensitivity:** The sphere radius $R_\Omega$ is critical [S1]. If too large, it causes overocclusion; if too small, it results in poor shading [S1].
+ 
+ ## Operating characteristics

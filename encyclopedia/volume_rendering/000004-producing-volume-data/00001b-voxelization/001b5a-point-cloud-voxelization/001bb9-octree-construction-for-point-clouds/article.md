@@ -1,130 +1,56 @@
 # Octree Construction for Point Clouds
 
-Also called: Point Cloud Octree Construction
+Also called: Point Cloud Octree Construction, SVO Building, Sparse Voxel Octree (SVO) Construction
 
 ## Overview
-This method constructs a hierarchical spatial data structure (octree) to organize point cloud objects for rendering, recursively subdividing space into eight octants until a leaf condition is met [S1, unofficial]. It differs from flat voxel grids by maintaining a list of points at each node and aggregating their average position and color for spatial queries [S1, unofficial].
+This method constructs a hierarchical spatial data structure (octree) to organize point cloud objects for efficient rendering and culling [S1, unofficial][S2, unofficial]. It solves the problem of inefficiently storing and querying large, sparse point clouds by recursively subdividing space into eight octants until a leaf condition is met [S1, unofficial][S2, unofficial]. It sets itself apart from flat voxel grids by providing variable-resolution storage and from fixed-depth approaches by allowing dynamic termination based on point density or occupancy limits [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A list of point cloud objects (points with position and color attributes) and a global bounding volume.
-*   **Output:** A root `Node` of the octree, which recursively contains child nodes and leaf nodes holding lists of points.
+**Inputs:** A list of point cloud objects, where each object has a 3D position and color.
+**Outputs:** A root node of an octree, where each node contains a list of points, an Axis-Aligned Bounding Box (AABB), and a bitmask of active children.
 
 **Data Structures:**
-*   **Octant Enum:** An 8-bit bitmask representing the 8 sub-volumes. $O_1=0x01$ (0b00000001) through $O_8=0x80$ (0b10000000) [S1, unofficial].
-*   **Node Structure:**
-    *   `objects`: List of points assigned to this node.
-    *   `aabb`: Axis-Aligned Bounding Box defining the node's spatial extent.
-    *   `children`: Array of 8 pointers to child `Node` objects (null if leaf).
-    *   `activeOctants`: Bitmask indicating which children exist.
-    *   `depth`: Current recursion depth.
-    *   `parent`: Pointer to the parent node.
-    *   `averageObject`: Cached average position and color of all objects in the subtree [S1, unofficial].
+*   `Point`: Contains `position` (vec3) and `color` (vec3).
+*   `AABB`: Contains `min` (vec3) and `max` (vec3).
+*   `Node`:
+    *   `objects`: List of `Point` references.
+    *   `aabb`: The `AABB` enclosing this node's space.
+    *   `active_octants`: An 8-bit integer bitmask. Bit $i$ is set if child octant $i$ exists.
+    *   `children`: Array of 8 pointers to `Node` (or null if not created).
+    *   `depth`: Integer depth level (root is 0).
+    *   `average_object`: A `Point` representing the average position and color of all objects in this node's list (used for culling/LOD) [S1, unofficial].
+*   `Octant`: Enum mapping bits 0-7 to the 8 sub-volumes. $O_1=0x01$ (0b00000001) through $O_8=0x80$ (0b10000000) [S1, unofficial].
 
 **Parameters:**
 *   `MAX_LEAF_OBJECTS`: Maximum number of objects allowed in a leaf node before subdivision stops. Value: 5 [S1, unofficial].
 
-**Steps:**
-1.  **Calculate Average:** Compute the average position and color of all objects in the current node's list to store as `averageObject` [S1, unofficial].
-2.  **Check Termination:** If the number of objects in the current node is less than or equal to `MAX_LEAF_OBJECTS` (5), return without creating children [S1, unofficial].
-3.  **Calculate Child AABBs:** Iterate $i$ from 0 to 7. Cast $i$ to `Octant` via `(Octant)(1 << i)`. Call `calculateChildAABB` with the parent region to generate the 8 child Axis-Aligned Bounding Boxes (AABBs) [S1, unofficial].
-4.  **Distribute Objects:** Iterate through all objects in the current node. For each object, iterate through the 8 child AABBs. If `childAABBs[j].contains(o.position)` is true, push the object to `childObjs[j]` and break to the next object [S1, unofficial].
-5.  **Clear List:** Clear the current node's object list after distribution [S1, unofficial].
-6.  **Create Children:** Iterate $i$ from 0 to 7. If `childObjs[i].size() > 0`:
-    *   Create a new `Node` with the child's objects, child AABB, and `depth + 1` [S1, unofficial].
-    *   Set the child's parent pointer to `this` [S1, unofficial].
-    *   Activate the corresponding bit in `activeOctants` using `activeOctants |= (1 << i)` [S1, unofficial].
-    *   Recursively call `build()` on the new child [S1, unofficial].
+**Algorithm Steps:**
+1.  **Compute Root Bounding Box:** Calculate the AABB surrounding the entire point cloud [S2, unofficial].
+2.  **Square the Root:** Identify the length of the longest dimension of the root AABB. Scale the AABB in all three directions so that its edge length equals this maximum dimension. This ensures the root volume is a cube, guaranteeing that all resulting voxels are cubic rather than rectangular prisms [S2, unofficial].
+3.  **Initialize Root:** Create the root `Node` with the squared AABB, the full list of points, depth 0, and `active_octants` = 0.
+4.  **Recursive Build:** Call the build procedure on the root node.
+
+**Recursive Build Procedure (`Build(node)`):**
+1.  **Calculate Average:** Compute the average position and color of all points in `node.objects`. Store this in `node.average_object` [S1, unofficial].
+2.  **Check Termination:** If `node.objects.size() <= MAX_LEAF_OBJECTS`, return. The node is a leaf [S1, unofficial].
+3.  **Generate Child AABBs:** Iterate $i$ from 0 to 7. For each $i$, cast $i$ to `Octant`. Calculate the child AABB by splitting the current `node.aabb` into 8 equal octants. The split is performed by halving the boundaries in each of the three mutually perpendicular planes [S2, unofficial].
+4.  **Distribute Points:** Create 8 temporary lists `childObjs[0..7]`. Iterate through each point $p$ in `node.objects`:
+    *   Iterate through child AABBs $j$ from 0 to 7.
+    *   If `childAABBs[j].contains(p.position)` is true:
+        *   Add $p$ to `childObjs[j]`.
+        *   **Break** the inner loop immediately. This ensures that if a point lies on a boundary shared by multiple octants, it is assigned to the first octant (lowest index $j$) that contains it, preventing duplication [S1, unofficial].
+5.  **Clear Current List:** Clear `node.objects` to free memory [S1, unofficial].
+6.  **Create Children:** Iterate $i$ from 0 to 7:
+    *   If `childObjs[i]` is not empty:
+        *   Create a new `Node` with `childObjs[i]`, `childAABBs[i]`, and `depth + 1`.
+        *   Set the new node's parent pointer to `node` [S1, unofficial].
+        *   Set `node.children[i]` to the new node.
+        *   Update `node.active_octants |= (1 << i)` [S1, unofficial].
+        *   Recursively call `Build(node.children[i])` [S1, unofficial].
 
 **Pitfalls:**
-*   Object assignment uses a `break` after finding the first containing octant. If an object lies on a boundary shared by multiple octants, it is assigned to the first octant (lowest index $j$), preventing duplication across children [S1, unofficial].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-class vec3:
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
-    def __add__(self, other):
-        return vec3(self.x + other.x, self.y + other.y, self.z + other.z)
-    def __truediv__(self, scalar):
-        return vec3(self.x / scalar, self.y / scalar, self.z / scalar)
-
-class AABB:
-    def __init__(self, min_val, max_val):
-        self.min = min_val
-        self.max = max_val
-    def contains(self, point):
-        return (self.min.x <= point.x <= self.max.x and
-                self.min.y <= point.y <= self.max.y and
-                self.min.z <= point.z <= self.max.z)
-
-class Node:
-    def __init__(self, aabb, depth=0, parent=None):
-        self.aabb = aabb
-        self.depth = depth
-        self.parent = parent
-        self.objects = []
-        self.children = [None] * 8
-        self.active_octants = 0
-        self.average_object = None
-
-    def build(self, objects):
-        if not objects:
-            return
-        self.objects = objects
-        self.average_object = calculate_average(objects)
-        if len(objects) <= 5:
-            return
-        child_aabbs = []
-        for i in range(8):
-            octant = 1 << i
-            child_aabbs.append(calculate_child_aabb(self.aabb, octant))
-        child_objs = [[] for _ in range(8)]
-        for obj in objects:
-            for j in range(8):
-                if child_aabbs[j].contains(obj.position):
-                    child_objs[j].append(obj)
-                    break
-        self.objects = []
-        for i in range(8):
-            if len(child_objs[i]) > 0:
-                child_node = Node(child_aabbs[i], self.depth + 1, self)
-                child_node.build(child_objs[i])
-                self.children[i] = child_node
-                self.active_octants |= (1 << i)
-
-def calculate_average(objects):
-    # [G] Standard arithmetic mean of positions and colors
-    sum_pos = vec3(0, 0, 0)
-    sum_col = vec3(0, 0, 0)
-    count = len(objects)
-    for obj in objects:
-        sum_pos += obj.position
-        sum_col += obj.color
-    return {'pos': sum_pos / count, 'color': sum_col / count}
-
-def calculate_child_aabb(parent_aabb, octant):
-    # [G] Standard octree subdivision: split each dimension in half
-    # based on the bit flags in octant (0-7)
-    min_x, min_y, min_z = parent_aabb.min
-    max_x, max_y, max_z = parent_aabb.max
-    mid_x = (min_x + max_x) / 2
-    mid_y = (min_y + max_y) / 2
-    mid_z = (min_z + max_z) / 2
-    new_min = vec3(
-        mid_x if (octant & 1) else min_x,
-        mid_y if (octant & 2) else min_y,
-        mid_z if (octant & 4) else min_z
-    )
-    new_max = vec3(
-        max_x if (octant & 1) else mid_x,
-        max_y if (octant & 2) else mid_y,
-        max_z if (octant & 4) else mid_z
-    )
-    return AABB(new_min, new_max)
-```
+*   **Boundary Assignment:** Points on octree boundaries must be assigned deterministically to avoid duplication or gaps. The method uses a "first-fit" strategy (lowest index $j$) [S1, unofficial].
+*   **Isolated Points:** If the stop criterion is based solely on point count, isolated points may create disproportionately large octants, leading to inefficient rendering [S2, unofficial].
 
 ## Subtopics
 
@@ -134,15 +60,24 @@ This method reduces the rendering load of large point clouds by traversing a pre
 ### [Octree Data Structure](1276-octree-data-structure.md)
 The octree partitions 3D space into a hierarchical grid of voxels to organize point cloud data for volume rendering and surface extraction. It recursively subdivides space into eight octants, distinguishing it from flat voxel grids.
 
+### [Octree Construction with Dynamic Depth Stop Criterion](12308-octree-construction-with-dynamic-depth-stop-criterion.md)
+This method constructs a uniform-depth octree from a point cloud by dynamically determining the subdivision depth based on an occupancy ratio threshold, rather than using a fixed maximum depth or a simple point-count limit. It solves the problem of inconsistent voxel sizes and excessive memory usage caused by isolated points or arbitrary depth limits, ensuring all leaf nodes reside at the same level for compact storage. It differs from fixed-depth approaches by adapting to the geometric density of each pose, and from occupancy-count limits by preventing isolated points from creating disproportionately large octants.
+
 ### Hierarchical Rectilinear Grid (Octree)
-A hierarchical extension using an octree data structure for the interpolated volume to avoid problems of interpolating from curvilinear volumes with irregular sampling densities [S2]. It creates the octree by adding sample points from the original curvilinear grid one by one to the (originally empty) octree [S2]. Whenever a particular partition of the octree contains more than a user-specified number of curvilinear data samples, split that node into eight subnodes [S2]. After all curvilinear samples are added, calculate the estimated data value at the eight corners of each octree partition [S2]. Render the resulting volume using a hierarchical volume ray-tracer or the coherent projection approach [S2]. To avoid interpolation errors in creating the octree, an alternative is to use the octree together with the original curvilinear volume and render using values from the original sample values [S2].
+A hierarchical extension using an octree data structure for the interpolated volume to avoid problems of interpolating from curvilinear volumes with irregular sampling densities [S3]. It creates the octree by adding sample points from the original curvilinear grid one by one to the (originally empty) octree. Whenever a particular partition of the octree contains more than a user-specified number of curvilinear data samples, it splits that node into eight subnodes. After all curvilinear samples are added, it calculates the estimated data value at the eight corners of each octree partition. It renders the resulting volume using a hierarchical volume ray-tracer or the coherent projection approach. To avoid interpolation errors in creating the octree, an alternative is to use the octree together with the original curvilinear volume and render using values from the original sample values [S3].
 
 ## Operating characteristics
-Not given in the sources.
+*   **Time Complexity:** $O(N \log N)$ on average, where $N$ is the number of points, assuming a balanced tree. In the worst case (e.g., all points in one corner), it can degrade, but the bounding box squaring helps mitigate extreme aspect ratios [S2, unofficial].
+*   **Memory Complexity:** $O(N)$ for the points, plus overhead for node structures. The octree structure itself is sparse, storing only non-empty nodes [S2, unofficial].
+*   **Strengths:** Efficient spatial queries, support for variable resolution, and effective culling for rendering [S1, unofficial][S2, unofficial].
+*   **Limitations:** Construction time can be significant for very large point clouds. The choice of `MAX_LEAF_OBJECTS` affects tree balance and memory overhead [S1, unofficial].
+*   **When to use:** Large, sparse point clouds where rendering performance is critical and spatial locality can be exploited [S1, unofficial][S2, unofficial].
+*   **When not to use:** Dense, uniform grids where a simple 3D array is more efficient, or when dynamic updates are frequent and expensive [S2, unofficial].
 
 ## Background
-The construction of octrees for point clouds is a foundational technique in spatial indexing for rendering [S1, unofficial]. The application of octrees to curvilinear volumes for volume rendering was introduced in research addressing interpolation errors in irregular sampling [S2].
+The octree was introduced as a hierarchical spatial data structure for organizing point cloud objects for rendering [S1, unofficial][S2, unofficial]. The specific method of squaring the bounding box to ensure cubic voxels and using a point-count stop criterion was detailed in research on hardware-accelerated geometry instancing for surfel and voxel rendering of scanned 4D media [S2, unofficial]. The application of octrees to curvilinear volumes for volume rendering was also explored [S3].
 
 ## Sources
 [S1] arminkz/PointCloudRendering, https://github.com/arminkz/PointCloudRendering, fetched 2026-10-28 (unofficial)
-[S2] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28
+[S2] Hardware-accelerated geometry instancing for surfel and voxel rendering of scanned 4d media, http://133.5.19.150/papers/2010_2013/1-1-36.pdf, fetched 2026-10-31 (unofficial)
+[S3] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28
