@@ -1,0 +1,116 @@
+# Local Convex Hull (LCH)
+
+Also called: Local Hull-based Surface Construction
+
+## Overview
+Local Convex Hull (LCH) is a surface reconstruction method that constructs triangular patches from volumetric data by estimating surfaces from local convexities, assuming the object is piecewise convex and surfaces are tightly connected [S1]. It solves the problem of discontinuous surfaces and holes common in simpler methods like Marching Cubes (MC) and Visual Hull Methods (VMC) by enforcing connectivity and continuity properties [S1]. LCH is distinguished from its sibling [Delaunay Triangulation for Tetrahedral Representation](9905-delaunay-triangulation-for-tetrahedral-representation.md) (specifically Local DT) by using a convex hull algorithm rather than Delaunay triangulation for local surface construction, offering a trade-off between processing time and shape detail preservation [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of initial surface vertices (typically the best result from a Visual Hull Method, VMC) and an octree representation of the volumetric data [S1].
+*   **Output:** A continuous triangular mesh representing the object surface [S1].
+
+**Data Structures:**
+*   **Octree:** Hierarchical spatial partitioning. The implementation uses a 7-level octree with an initial octant size of 30 cm for the tested scenes [S1].
+*   **Slices:** 2D cross-sections of the initial surface vertices prepared for processing [S1].
+*   **Clusters:** Groups of points within a slice, defined by a cluster conditional probability density function (pdf) estimated from the octree [S1].
+*   **Local Convexities:** Defined by connecting clusters in a slice to neighboring clusters in adjacent slices using a Bayesian decision-making rule [S1].
+
+**Algorithm Steps:**
+1.  **Initialization:** Use the best VMC result as the initial set of surface vertices [S1].
+2.  **Slicing:** Prepare 2D slices from the initial surface vertices [S1].
+3.  **Clustering:** Cluster the sliced data based on a cluster conditional pdf estimated from the octree [S1].
+4.  **Connection:** Connect clusters in each slice to neighboring clusters in adjacent slices using a Bayesian decision-making rule to define local convexities [S1].
+5.  **Local Surface Construction:** Apply a convex hull algorithm to the connected clusters in each slice to create local surface patches [S1].
+6.  **Assembly:** Combine the local surface patches to complete the global surface construction [S1].
+
+**Parameters:**
+*   **Initial Octant Size:** 30 cm (for a 7-level octree) [S1].
+*   **Convex Hull Algorithm:** The implementation uses Qhull code for Convex Hull and Delaunay Triangulation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def local_convex_hull(surface_vertices, octree):
+    """
+    Reconstructs a surface from initial vertices using local convex hulls.
+    
+    Args:
+        surface_vertices: List of 3D points from VMC result.
+        octree: Octree structure representing volumetric data.
+        
+    Returns:
+        triangles: List of triangular patches.
+    """
+    # Step 1: Prepare slices from initial surface vertices
+    slices = prepare_slices(surface_vertices)
+    
+    # Step 2: Estimate cluster conditional pdf from octree
+    cluster_pdf = estimate_cluster_pdf(octree)
+    
+    triangles = []
+    
+    for slice_idx, slice_data in enumerate(slices):
+        # Step 3: Cluster sliced data based on pdf
+        clusters = cluster_data(slice_data, cluster_pdf)
+        
+        # Step 4: Connect to neighboring clusters in adjacent slices
+        # Using Bayesian decision-making rule
+        connected_clusters = connect_clusters(
+            clusters, 
+            slices[slice_idx - 1] if slice_idx > 0 else None,
+            slices[slice_idx + 1] if slice_idx < len(slices) - 1 else None
+        )
+        
+        # Step 5: Create local surfaces using convex hull
+        # Qhull implementation assumed
+        local_triangles = compute_convex_hull(connected_clusters)
+        triangles.extend(local_triangles)
+        
+    # Step 6: Combine local surfaces
+    return assemble_surface(triangles)
+
+def prepare_slices(vertices):
+    # Not given in the sources. Assumes projection or intersection with slicing planes.
+    pass
+
+def estimate_cluster_pdf(octree):
+    # Not given in the sources. Estimates probability density from octree structure.
+    pass
+
+def cluster_data(slice_data, pdf):
+    # Not given in the sources. Groups points based on pdf thresholds.
+    pass
+
+def connect_clusters(current_clusters, prev_slice_clusters, next_slice_clusters):
+    # Not given in the sources. Uses Bayesian decision rule to link clusters.
+    pass
+
+def compute_convex_hull(points):
+    # Not given in the sources. Calls Qhull convex hull algorithm.
+    pass
+
+def assemble_surface(triangles):
+    # Not given in the sources. Merges triangles into a final mesh.
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Concavity Disappearance:** Any concavity in the xy plane may disappear because the concavity of a cluster in a slice is regarded as a 2D convex [S1]. This can be alleviated by dividing a 2D non-convex cluster into convex regions [S1].
+*   **Elongated Patches:** Elongated or thin triangular patches are caused by using a small slicing level and the convex hull algorithm [S1]. This can be improved by inserting refining points on the side of the thin triangles [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The order of complexity is $O(m \times k)$, where $m$ is the number of slices and $k$ is the number of clusters [S1]. It also incorporates the Qhull algorithm with complexity $O(n \ln v)$, where $n$ is the number of input points and $v$ is the number of output vertices [S1].
+*   **Memory Complexity:** Peak memory usage is 3 to 6 times higher than general Convex Hull (CH) and Delaunay Triangulation (DT) because the method needs to store data slices, tree tables, and pdf information [S1].
+*   **Performance:** LCH is generally faster than MC, VMC, and Local DT (LDT), but slower than CH and DT, except when DT constructs a large number of tetrahedrons [S1]. CH requires the shortest time, followed by DT, LCH, LDT, VMC, and MC [S1].
+*   **Strengths:** LCH produces the best continuous surface compared to MC and VMC, which suffer from unattached segments and holes [S1]. It preserves shape details that are lost by simple CH on non-convex objects [S1].
+*   **Limitations:** Higher memory usage than CH and DT [S1]. Loss of concavity details in the xy plane [S1]. Potential for thin/elongated triangles [S1].
+*   **When to Use:** When continuous surface connectivity is critical and the object is piecewise convex, especially when MC/VMC produce holes.
+*   **When Not to Use:** For totally convex objects where CH is better in terms of processing time, memory, and efficiency [S1]. When memory is constrained.
+
+## Background
+LCH was proposed as a local hull-based surface construction method for volumetric data from silhouettes [S1]. It explores the properties of 3D objects, specifically the connectivity property (surface covers all area tightly) and the continuity property (object is piecewise convex) [S1]. The method was developed to address the limitations of simple thresholding, MC, and VMC in producing continuous and detailed surfaces from silhouette-based reconstructions [S1].
+
+## Sources
+[S1] Local hull-based surface construction of volumetric data from silhouettes, https://doi.org/10.1109/tip.2008.926149, fetched 2026-10-30

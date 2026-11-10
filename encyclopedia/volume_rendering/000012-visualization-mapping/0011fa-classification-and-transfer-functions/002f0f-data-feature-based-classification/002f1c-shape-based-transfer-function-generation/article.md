@@ -3,196 +3,407 @@
 Also called: Shape classification, Shape-based TF (Skeleton), Shape-based Transfer Functions, Curve-Skeleton Shape Classification TF, Shape classification for volume visualization, Skeleton-based shape descriptor classification
 
 ## Overview
-Shape-based Transfer Function Generation classifies volumetric features based on their 3D geometric shape rather than solely on intensity or gradient magnitude, solving the problem of distinguishing structures with overlapping intensity ranges (e.g., contrast-filled vessels vs. bones) [S3]. Unlike per-voxel classification methods that rely on local filters, this method assigns a uniform shape descriptor to each entire volumetric feature (segment) derived from curve-skeletons, allowing for a more intuitive user interface where optical properties are assigned to shape classes rather than individual voxels [S3]. It distinguishes itself from [Distance-based Transfer Function](5451-distance-based-transfer-function.md) by using topological skeletons for shape metrics rather than distance transforms alone, and from [Curvature-based Transfer Function](5452-curvature-based-transfer-function.md) by classifying complete volumetric features rather than per-voxel local structures [S3].
+Shape-based Transfer Function Generation is a classification method that assigns optical properties to volumetric features based on their 3D shape rather than just intensity or gradient magnitude [S3]. It solves the problem of distinguishing features with overlapping intensity ranges (e.g., contrast-filled vessels vs. bones) by using a shape descriptor derived from curve-skeletons [S3]. Unlike per-voxel classification methods that rely on local filters [S2, unofficial][S3], this method classifies complete volumetric features (segments) using curve-skeletons, allowing for a more intuitive user interface where optical properties are assigned to shape classes rather than individual voxels [S3].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Raw volume data $V$, a binary pre-segmentation mask $M$ specifying surface voxels of objects of interest.
-*   **Output:** A shape descriptor triple $(\tau, \sigma, \beta)$ for each voxel, where $\tau$ is tubiness, $\sigma$ is surfaceness, and $\beta$ is blobbiness. Background voxels have descriptor $(0,0,0)$.
+*   **Input:** A scalar volume dataset $V$. A pre-segmentation mask $M$ (binary volume specifying surface voxels of objects of interest) [S3].
+*   **Output:** A shape descriptor triple $(\tau, \sigma, \beta)$ for each segmented region, where $\tau$ is tubiness, $\sigma$ is surfaceness, and $\beta$ is blobbiness [S3]. These scores are used to map to opacity $\alpha$ and color $\mathbf{c}$ [S3].
 
 **Data Structures:**
-*   **Pre-segmentation Mask:** Binary volume $M \in \{0, 1\}^N$.
-*   **Curve-Skeleton:** A set of polygonal chains (segments). Each segment $S_k$ is a list of 3D points $p_1, \dots, p_m$.
-*   **Skeleton Regions:** A partition of the volume voxels belonging to the pre-segmentation. Each voxel $v$ is assigned to a region $R_i$ corresponding to a skeleton segment $S_i$.
-*   **Distance Map:** $D(v)$, the minimal Euclidean distance from voxel $v$ to the nearest point on the curve-skeleton of its region.
+*   **Pre-segmentation Mask:** Binary volume $M \in \{0, 1\}^N$. $M(\mathbf{x})=1$ if voxel $\mathbf{x}$ belongs to an object of interest, $0$ otherwise [S3].
+*   **Curve-Skeleton:** A set of polygonal chains (segments). Each segment is a list of 3D points $(x, y, z)$ [S3].
+*   **Skeleton Regions:** A partition of the pre-segmented volume. Each region $R$ is a set of voxel coordinates $\{\vec{r}\}$ corresponding to one or more merged skeleton segments [S3].
 
 **Parameters:**
-*   **Skeleton Length Threshold ($L_{thresh}$):** 5 to 10 voxels for $256^3$ to $512^3$ datasets [S3].
-*   **Field Strength:** 4 (for potential field method) [S3].
-*   **High Divergence Points:** 20% (default for potential field method) [S3].
+*   **Skeleton Field Strength:** Low value of 4 (for potential field method) to minimize complexity [S3].
+*   **High Divergence Points:** Default 20% [S3].
+*   **Skeleton Segment Length Threshold:** 5 to 10 voxels for datasets of size $256^3$ to $512^3$ [S3].
 
 **Steps:**
 
-1.  **Pre-segmentation:**
-    Perform a rough threshold-based pre-segmentation (windowing) of the volume data to obtain surface information. This defines the binary mask $M$. Simple methods like windowing are sufficient; full segmentation is not required [S3].
-    *   *Pitfall:* Imperfect pre-segmentations due to noise or low signal-to-noise ratio cause instabilities in shape-skeletons. Add extra layers of voxels at the surface of objects to handle cavities caused by noise, though this may smooth objects and merge adjacent features [S3].
+1.  **Pre-segmentation:** Perform a rough, threshold-based pre-segmentation (windowing) of the volume data to obtain surface information about objects of interest [S3]. If intensity ranges are known (e.g., Hounsfield scale for CT), this can be automatic [S3].
+    *   *Pitfall:* Imperfect pre-segmentations due to noise can cause instabilities in shape-skeletons [S3].
+    *   *Mitigation:* Add extra layers of voxels at the surface of objects to handle cavities caused by noise/artifacts [S3].
 
-2.  **Skeleton Computation:**
-    Compute curve-skeletons for each volumetric structure in $M$. The method uses the potential field method (e.g., Cornea’s pfSkel) [S3].
-    *   Input: Binary volume $M$.
-    *   Output: Multiple skeleton segments (polygonal chains).
-    *   Parameters: Field strength = 4, High divergence points = 20% [S3].
+2.  **Skeleton Computation:** Compute the curve-skeletons for each resulting volumetric structure using the potential field method (e.g., Cornea’s pfSkel) [S3]. Input is the binary volume $M$. Output is multiple skeleton segments (polygonal chains of seed points) [S3].
+    *   *Note:* The potential field method is chosen for producing the cleanest and smoothest curve-skeletons, despite being the slowest [S3].
 
-3.  **Skeleton Normalization:**
-    Normalize the computed skeletons to reduce artifacts from imperfect segmentations [S3].
-    *   **Gap Closing:** For thin longitudinal structures, connect each end node of a skeleton graph with its next neighboring skeleton point outside the end node's segment, if the connecting line lies completely within the pre-segmented object $M$. This handles gaps that boost standard deviation in tubiness calculation [S3].
-    *   **Segment Splitting:** Split curve-skeletons into segments not exceeding length $L_{thresh}$ (5–10 voxels). This prevents blobby shapes transitioning into tubular structures from being classified as a single ambiguous shape [S3].
-    *   **Pruning:** Discard degenerated skeleton branches shorter than $L_{thresh}$ [S3].
+3.  **Skeleton Normalization:** Normalize the computed skeletons to reduce artifacts caused by imperfect segmentations [S3].
+    *   **Step 3a (Gap Closing):** Close gaps in longitudinal structures by connecting each end node of the skeleton graph with its next neighboring skeleton point outside the end node's segment, if the connecting line lies completely within the pre-segmented object [S3].
+    *   **Step 3b (Splitting):** Split curve-skeleton into segments not exceeding a certain length (threshold 5-10 voxels) [S3]. This prevents blobby shapes transitioning into tubular structures from being classified as a single ambiguous shape [S3].
+    *   **Step 3c (Pruning):** Discard degenerated skeleton branches shorter than the length threshold [S3].
 
-4.  **Decomposition:**
-    Decompose the pre-segmented volume based on the normalized curve-skeleton segments. Divide the volume into 'skeleton regions' $R_i$, where each region corresponds to one segment of the curve-skeleton. A voxel $v$ belongs to region $R_i$ if it is in $M$ and its closest point on the skeleton is in segment $S_i$ [S3].
+4.  **Decomposition:** Decompose the pre-segmented volume based on the curve-skeleton segments. Divide the volume into 'skeleton regions', where each region $R$ corresponds to one segment of the curve-skeleton [S3].
 
-5.  **Merging:**
-    Merge adjacent skeleton regions based on criteria to improve classifiability, as ad-hoc decomposition may yield regions without meaningful shape. The merging process considers both geometry and shape properties of skeleton regions [S3].
+5.  **Merging:** Merge adjacent skeleton regions based on criteria to improve classifiability, as individual skeleton regions from ad-hoc decomposition may not have a meaningful shape [S3]. The fusion process takes into account the shape properties of skeleton regions [S3].
 
-6.  **Shape Analysis:**
-    Assign shape scores (membership values) to the merged skeleton regions. No binary decisions are made; scores specify how much the object part matches each shape class. Compute the following descriptors for each region $R$:
+6.  **Shape Analysis:** Incorporate both curve-skeleton and volume data to assign shape scores (membership values) to the merged skeleton regions [S3]. Only voxels in the pre-segmentation are considered; background voxels are ignored (descriptor set to all zero) [S3]. Classes are computed independently [S3].
 
-    *   **Tubiness $\tau(R)$:**
-        Measures longitudinal/tubular membership. Defined as the inverse of the standard deviation of surface voxels' minimal skeleton distances [S3].
-        $$ \tau(R) := \frac{1}{\max\left(\sqrt{\frac{1}{|\partial R|} \sum_{\vec{v} \in \partial R} (D(\vec{v}) - \bar{d})^2}, 1\right)} \in [0, 1] $$
-        Where $\partial R$ is the set of surface voxels of $R$, $D(\vec{v})$ is the distance map, and $\bar{d}$ is the mean skeleton distance of all $\vec{v} \in \partial R$. Reliability depends on skeleton quality; incomplete skeletons boost standard deviation [S3].
+**Formulas:**
 
-    *   **Surfaceness $\sigma(R)$:**
-        Measures surface-like membership. Combines planarity and convexity, weighted by inverse tubiness to avoid misclassifying curved longitudinal shapes [S3].
-        $$ \sigma(R) := (plan(R) + conv(R)) \cdot (1 - \tau(R)) \in [0, 2] $$
-        
-        *   **Planarity $plan(R)$:** Based on the minimal oriented bounding box's second shortest side $b_m(R)$ and shortest side $b_s(R)$ [S3]:
-            $$ plan(R) := \text{clamp}\left(\frac{1}{5} \frac{b_m(R)}{b_s(R)} - 1, 0, 1\right) $$
-            Regions with $b_m \ge 10 \cdot b_s$ are maximal flat; regions with $b_m \le 5 \cdot b_s$ are not flat at all [S3].
-            
-        *   **Convexity $conv(R)$:** For curved surfaces, select an arbitrary set of pairs of surface points. For each line segment formed by a point pair, determine the fraction that runs inside the shape. $conv(R)$ is the average of these fractions [S3].
+*   **Tubiness $\tau(R)$:**
+    Defined as the inverse of the standard deviation of surface voxels' minimal skeleton distances [S3].
+    $$ \tau(R) := \frac{1}{\max\left(\sqrt{\frac{1}{|\partial R|} \sum_{\vec{v} \in \partial R} (D(\vec{v}) - \bar{d})^2}, 1\right)} \in [0; 1] $$
+    Where:
+    *   $\partial R$ is the set of surface voxels of region $R$.
+    *   $D(\vec{v})$ is the distance map from skeleton region growing (minimal distance from voxel $\vec{v}$ to the skeleton segment).
+    *   $\bar{d}$ is the mean skeleton distance of all $\vec{v} \in \partial R$.
+    *   *Pitfall:* Reliability depends on skeleton quality. Incomplete/discontinuous skeleton segments boost standard deviation, causing misclassification [S3].
 
-    *   **Blobbiness $\beta(R)$:**
-        Measures blobby/compact membership. Defined as the region's variance relative to the variance of a sphere with the same volume [S3].
-        $$ \beta(R) := \frac{\sigma^2_{sph}(vol)}{\sigma^2(R)} \in [0, 1] $$
-        
-        *   **Variance $\sigma^2(R)$:** Measures compactness.
-            $$ \sigma^2(R) := \sum_{\vec{r} \in R} |\vec{r} - m|^2 $$
-            Where $\vec{r}$ are voxel coordinates and $m$ is the center of mass: $m = \frac{1}{|R|} \sum_{\vec{r} \in R} \vec{r}$ [S3].
-            
-        *   **Sphere Variance $\sigma^2_{sph}(vol)$:**
-            Radius $r(vol) = \left(\frac{3}{4\pi} vol\right)^{1/3}$.
-            Variance of a sphere with radius $r_0$ centered at origin: $\sigma^2_{r0} = \int_0^{r0} (4\pi r^2) r^2 dr = \frac{4}{5} \pi r_0^5$ [S3].
-            Substituting $r_0 = r(vol)$:
-            $$ \sigma^2_{sph}(vol) = \frac{4}{5} \pi \left(\frac{3}{4\pi} vol\right)^{5/3} $$
+*   **Planarity $plan(R)$:**
+    Based on the minimal oriented bounding box's second shortest side $b_m(R)$ and shortest side $b_s(R)$ [S3].
+    $$ plan(R) := \text{clamp}\left(\frac{1}{5} \frac{b_m(R)}{b_s(R)} - 1, 0, 1\right) \in [0; 1] $$
+    Regions with $b_m \ge 10 \cdot b_s$ are maximal flat; regions with $b_m \le 5 \cdot b_s$ are not flat at all [S3].
 
-7.  **Transfer Function Specification:**
-    Use the shape scores to allow the user to assign optical properties (color, opacity) to the shape classes via a continuous triangle-shaped plot showing the occurrence of detected shape classes [S3].
+*   **Convexity $conv(R)$:**
+    For curved surfaces, compute convexity by selecting an arbitrary set of pairs of surface points. For each line segment formed by a point pair, determine the fraction that runs inside the shape. $conv(R)$ is the average of these fractions [S3].
+
+*   **Surfaceness $surf(R)$:**
+    Sum of planarity and convexity weighted by inverse tubiness [S3].
+    $$ surf(R) := (plan(R) + conv(R)) \cdot (1 - \tau(R)) \in [0; 2] $$
+    *   *Note:* Weighting by $(1 - \tau(R))$ prevents curved longitudinal shapes (which have planar bounding boxes but low convexity) from being misclassified as surfaces [S3].
+
+*   **Blobbiness $blob(R)$:**
+    Region's variance $\sigma^2(R)$ relative to the variance of a sphere with the same volume $\sigma^2_{sph}(vol)$ [S3].
+    $$ blob(R) := \frac{\sigma^2_{sph}(vol)}{\sigma^2(R)} \in [0; 1] $$
+    Where:
+    *   Variance $\sigma^2(R)$ measures compactness: $\sigma^2(R) := \sum_{\vec{r} \in R} |\vec{r} - m|^2$, where $\vec{r}$ are voxel coordinates and $m$ is the center of mass: $m = \frac{1}{|R|} \sum_{\vec{r} \in R} \vec{r}$ [S3].
+    *   Sphere radius $r$ as function of volume $vol$: $r(vol) = \left(\frac{3}{4\pi} vol\right)^{1/3}$ [S3].
+    *   Variance of a sphere with volume $vol$: $\sigma^2_{sph}(vol) = \frac{4}{5} \pi \left(\frac{3}{4\pi} vol\right)^{5/3}$ [S3].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_shape_descriptor(region_voxels, skeleton_segment, pre_seg_mask):
+def shape_based_transfer_function(volume, intensity_thresholds):
     """
-    Computes tubiness, surfaceness, and blobbiness for a merged skeleton region.
+    Generates shape-based transfer functions for a volume.
     
     Args:
-        region_voxels: List of 3D coordinates (x,y,z) of voxels in the region.
-        skeleton_segment: List of 3D coordinates forming the polygonal chain.
-        pre_seg_mask: Binary volume or function to check if a point is in the object.
+        volume: 3D numpy array of scalar values.
+        intensity_thresholds: Tuple (min_val, max_val) for pre-segmentation windowing.
         
     Returns:
-        tuple: (tubiness, surfaceness, blobbiness)
+        shape_descriptors: Dictionary mapping region_id to (tubiness, surfaceness, blobbiness).
     """
-    if not region_voxels:
-        return (0.0, 0.0, 0.0)
-
-    # 1. Compute Distance Map and Surface Voxels
-    # D(v) is min distance from v to skeleton_segment
-    # Surface voxels are those in region_voxels adjacent to background (not in pre_seg_mask)
-    # Note: In implementation, 'surface' usually means boundary voxels of the region
-    surface_voxels = get_surface_voxels(region_voxels, pre_seg_mask)
     
-    if not surface_voxels:
-        return (0.0, 0.0, 0.0)
+    # Step 1: Pre-segmentation
+    mask = (volume >= intensity_thresholds[0]) & (volume <= intensity_thresholds[1])
+    
+    # Mitigation: Add extra layers of voxels at the surface to handle cavities/noise
+    # [G] Assuming a simple morphological dilation for smoothing
+    from scipy.ndimage import binary_dilation
+    mask = binary_dilation(mask, iterations=2)
+    
+    # Step 2: Skeleton Computation
+    # [G] Using a placeholder for Cornea's pfSkel potential field method
+    # Input: binary volume 'mask'. Output: list of skeleton segments (lists of 3D points)
+    skeleton_segments = compute_potential_field_skeleton(mask)
+    
+    # Step 3: Skeleton Normalization
+    normalized_segments = []
+    for segment in skeleton_segments:
+        # Step 3a: Gap Closing
+        segment = close_gaps_in_segment(segment, mask)
+        
+        # Step 3b: Splitting
+        # Threshold 5-10 voxels. Using 7 as a representative value.
+        split_segments = split_by_length(segment, threshold=7)
+        normalized_segments.extend(split_segments)
+        
+        # Step 3c: Pruning (handled by split_by_length discarding short branches)
+        
+    # Step 4: Decomposition
+    # Assign each voxel in mask to a skeleton segment
+    # [G] Assuming a function that grows regions from skeleton points within the mask
+    region_map = decompose_volume_by_skeleton(mask, normalized_segments)
+    
+    # Step 5: Merging
+    # Merge adjacent regions based on shape properties
+    # [G] Placeholder for merging logic
+    merged_regions = merge_adjacent_regions(region_map)
+    
+    # Step 6: Shape Analysis
+    shape_descriptors = {}
+    for region_id, region_voxels in merged_regions.items():
+        if not region_voxels:
+            continue
+            
+        # Compute surface voxels
+        surface_voxels = get_surface_voxels(region_voxels, mask)
+        
+        # Compute Tubiness
+        tubiness = compute_tubiness(region_voxels, surface_voxels)
+        
+        # Compute Surfaceness
+        surfaceness = compute_surfaceness(region_voxels, surface_voxels, tubiness)
+        
+        # Compute Blobbiness
+        blobbiness = compute_blobbiness(region_voxels)
+        
+        shape_descriptors[region_id] = (tubiness, surfaceness, blobbiness)
+        
+    return shape_descriptors
 
-    # Compute distances from surface voxels to skeleton
+def compute_tubiness(region_voxels, surface_voxels):
+    """
+    Computes tubiness tau(R) as inverse of std dev of surface voxels' minimal skeleton distances.
+    """
+    # [G] D(v) is distance from voxel v to its assigned skeleton segment
+    # [G] This requires access to the skeleton segment associated with the region
+    # Assuming region_voxels has an attribute 'skeleton_segment'
     distances = []
     for v in surface_voxels:
-        min_dist = infinity
-        for s_point in skeleton_segment:
-            d = euclidean_distance(v, s_point)
-            if d < min_dist:
-                min_dist = d
-        distances.append(min_dist)
-
-    # 2. Compute Tubiness
+        dist = distance_to_skeleton(v, region_voxels['skeleton_segment'])
+        distances.append(dist)
+        
+    if not distances:
+        return 0.0
+        
     mean_d = sum(distances) / len(distances)
-    variance_d = sum((d - mean_d)**2 for d in distances) / len(distances)
-    std_d = sqrt(variance_d)
-    tubiness = 1.0 / max(std_d, 1.0)
-
-    # 3. Compute Surfaceness
-    # 3a. Planarity
-    bbox = compute_oriented_bounding_box(region_voxels)
-    side_lengths = sorted(bbox.sides) # [shortest, middle, longest]
-    b_s = side_lengths[0]
-    b_m = side_lengths[1]
+    variance = sum((d - mean_d)**2 for d in distances) / len(distances)
+    std_dev = variance**0.5
     
-    if b_s == 0:
+    # Formula: 1 / max(std_dev, 1)
+    tubiness = 1.0 / max(std_dev, 1.0)
+    return tubiness
+
+def compute_surfaceness(region_voxels, surface_voxels, tubiness):
+    """
+    Computes surfaceness surf(R) = (plan(R) + conv(R)) * (1 - tau(R)).
+    """
+    # Compute Planarity
+    # [G] Compute minimal oriented bounding box
+    bbox = compute_oriented_bounding_box(region_voxels)
+    sides = sorted(bbox.sides) # [shortest, middle, longest]
+    bs = sides[0]
+    bm = sides[1]
+    
+    if bs == 0:
         planarity = 0.0
     else:
-        ratio = b_m / b_s
-        planarity = clamp((1.0 / 5.0) * ratio - 1.0, 0.0, 1.0)
-
-    # 3b. Convexity
-    # Select arbitrary pairs of surface points (e.g., random sampling or all pairs if small)
-    # For simplicity, assume we sample N pairs
-    num_pairs = 100
-    inside_fractions = []
-    for _ in range(num_pairs):
-        p1 = random.choice(surface_voxels)
-        p2 = random.choice(surface_voxels)
-        # Determine fraction of line segment p1->p2 inside the shape
-        # This requires ray-casting or voxel traversal
-        fraction = compute_line_inside_fraction(p1, p2, pre_seg_mask)
-        inside_fractions.append(fraction)
-    
-    convexity = sum(inside_fractions) / len(inside_fractions)
-
-    surfaceness = (planarity + convexity) * (1.0 - tubiness)
-
-    # 4. Compute Blobbiness
-    # 4a. Variance of region
-    center_of_mass = compute_center_of_mass(region_voxels)
-    variance_r = sum(euclidean_squared_distance(r, center_of_mass) for r in region_voxels)
-    
-    # 4b. Variance of sphere with same volume
-    vol = len(region_voxels) # Assuming unit voxel volume
-    r_sphere = (3.0 * vol / (4.0 * pi)) ** (1.0 / 3.0)
-    variance_sphere = (4.0 / 5.0) * pi * (r_sphere ** 5)
-    
-    if variance_r == 0:
-        blobbiness = 0.0
-    else:
-        blobbiness = variance_sphere / variance_r
-
-    return (tubiness, surfaceness, blobbiness)
-
-def normalize_skeleton(skeleton_segments, pre_seg_mask):
-    """
-    Normalizes skeleton segments by closing gaps, splitting, and pruning.
-    """
-    normalized_segments = []
-    
-    # Step 1: Close gaps in longitudinal structures
-    # Connect end nodes to next neighbor if line lies within pre_seg_mask
-    # Implementation detail: Iterate through segments, identify ends, check connectivity
-    connected_segments = close_skeleton_gaps(skeleton_segments, pre_seg_mask)
-    
-    # Step 2 & 3: Split and Prune
-    L_thresh = 10 # Example threshold
-    for seg in connected_segments:
-        if length(seg) > L_thresh:
-            # Split into chunks of max length L_thresh
-            chunks = split_segment(seg, L_thresh)
-            normalized_segments.extend(chunks)
-        # Discard segments shorter than L_thresh (pruning)
+        # clamp(1/5 * (bm/bs) - 1, 0, 1)
+        raw_planarity = (1.0 / 5.0) * (bm / bs) - 1.0
+        planarity = max(0.0, min(1.0, raw_planarity))
         
-    return normalized_segments
+    # Compute Convexity
+    # [G] Select arbitrary pairs of surface points
+    # For simplicity, pick first 10 pairs
+    num_pairs = min(10, len(surface_voxels))
+    if num_pairs < 2:
+        convexity = 0.0
+    else:
+        inside_count = 0
+        total_count = 0
+        for i in range(num_pairs):
+            for j in range(i + 1, num_pairs):
+                p1 = surface_voxels[i]
+                p2 = surface_voxels[j]
+                # Check fraction of line segment inside shape
+                # [G] Assuming a function that samples line segment and checks mask
+                fraction = check_line_segment_inside(p1, p2, region_voxels['mask'])
+                inside_count += fraction
+                total_count += 1
+                
+        convexity = inside_count / total_count if total_count > 0 else 0.0
+        
+    # Formula: (plan + conv) * (1 - tau)
+    surfaceness = (planarity + convexity) * (1.0 - tubiness)
+    return surfaceness
+
+def compute_blobbiness(region_voxels):
+    """
+    Computes blobbiness blob(R) = sigma^2_sph(vol) / sigma^2(R).
+    """
+    # Compute Variance of Region
+    voxels = region_voxels
+    n = len(voxels)
+    if n == 0:
+        return 0.0
+        
+    # Center of mass
+    cx = sum(v[0] for v in voxels) / n
+    cy = sum(v[1] for v in voxels) / n
+    cz = sum(v[2] for v in voxels) / n
+    
+    # Variance
+    variance = sum((v[0]-cx)**2 + (v[1]-cy)**2 + (v[2]-cz)**2 for v in voxels)
+    
+    # Volume (number of voxels)
+    vol = n
+    
+    # Variance of sphere with same volume
+    # sigma^2_sph(vol) = 4/5 * pi * (3/(4*pi) * vol)^(5/3)
+    import math
+    r_vol = (3.0 / (4.0 * math.pi) * vol) ** (1.0/3.0)
+    sphere_variance = (4.0 / 5.0) * math.pi * (r_vol ** 5)
+    
+    if variance == 0:
+        return 0.0
+        
+    blobbiness = sphere_variance / variance
+    return blobbiness
+
+def compute_potential_field_skeleton(binary_mask):
+    """
+    Placeholder for Cornea's pfSkel potential field method.
+    Returns list of skeleton segments (lists of 3D points).
+    """
+    # [G] Implementation details of pfSkel are complex and external.
+    # This function represents the call to the external tool.
+    pass
+
+def close_gaps_in_segment(segment, mask):
+    """
+    Connects end nodes of skeleton graph with next neighbor if line lies in mask.
+    """
+    # [G] Simplified logic
+    if len(segment) < 2:
+        return segment
+    
+    # Check ends
+    start = segment[0]
+    end = segment[-1]
+    
+    # Find next neighbor outside segment (simplified: assume we have access to global skeleton graph)
+    # [G] This requires graph traversal logic not fully detailed in sources
+    # Placeholder: return segment unchanged if logic is too complex to implement from text alone
+    return segment
+
+def split_by_length(segment, threshold):
+    """
+    Splits segment into parts not exceeding threshold length.
+    Discards parts shorter than threshold.
+    """
+    if len(segment) <= threshold:
+        return [segment]
+    
+    # [G] Simple splitting by index
+    parts = []
+    for i in range(0, len(segment), threshold):
+        part = segment[i:i+threshold]
+        if len(part) >= threshold: # Discard short branches
+            parts.append(part)
+        else:
+            # If last part is short, merge with previous or discard?
+            # Source says "discarded (pruning)"
+            pass
+            
+    return parts
+
+def decompose_volume_by_skeleton(mask, skeleton_segments):
+    """
+    Assigns each voxel in mask to a skeleton segment.
+    """
+    # [G] Region growing from skeleton points within mask
+    region_map = {}
+    region_id = 0
+    for segment in skeleton_segments:
+        # Grow region from segment points
+        region_voxels = grow_region_from_points(segment, mask)
+        if region_voxels:
+            region_map[region_id] = {'voxels': region_voxels, 'skeleton_segment': segment, 'mask': mask}
+            region_id += 1
+    return region_map
+
+def get_surface_voxels(region_voxels, mask):
+    """
+    Returns voxels in region that are on the boundary of the region within the mask.
+    """
+    # [G] Check neighbors
+    surface = []
+    for v in region_voxels:
+        is_surface = False
+        for neighbor in get_neighbors(v):
+            if not mask[neighbor]:
+                is_surface = True
+                break
+        if is_surface:
+            surface.append(v)
+    return surface
+
+def distance_to_skeleton(voxel, skeleton_segment):
+    """
+    Euclidean distance from voxel to closest point in skeleton segment.
+    """
+    min_dist = float('inf')
+    for point in skeleton_segment:
+        dist = euclidean_distance(voxel, point)
+        if dist < min_dist:
+            min_dist = dist
+    return min_dist
+
+def compute_oriented_bounding_box(voxels):
+    """
+    Computes minimal oriented bounding box.
+    Returns object with 'sides' attribute (list of 3 lengths).
+    """
+    # [G] Har-Peled's technique is referenced but not detailed.
+    # Placeholder: Return axis-aligned bounding box as fallback
+    if not voxels:
+        return type('Box', (), {'sides': [0,0,0]})()
+    
+    xs = [v[0] for v in voxels]
+    ys = [v[1] for v in voxels]
+    zs = [v[2] for v in voxels]
+    
+    sides = [max(xs)-min(xs), max(ys)-min(ys), max(zs)-min(zs)]
+    return type('Box', (), {'sides': sides})()
+
+def check_line_segment_inside(p1, p2, mask):
+    """
+    Checks fraction of line segment between p1 and p2 that lies inside mask.
+    """
+    # [G] Sample points along line
+    steps = 10
+    inside = 0
+    for i in range(steps + 1):
+        t = i / steps
+        x = p1[0] + t * (p2[0] - p1[0])
+        y = p1[1] + t * (p2[1] - p1[1])
+        z = p1[2] + t * (p2[2] - p1[2])
+        # Check if integer coordinates are in mask
+        ix, iy, iz = round(x), round(y), round(z)
+        if mask[ix, iy, iz]:
+            inside += 1
+    return inside / steps
+
+def grow_region_from_points(points, mask):
+    """
+    Grows a region from seed points within the mask.
+    """
+    # [G] BFS/DFS
+    visited = set()
+    queue = list(points)
+    region = []
+    
+    while queue:
+        p = queue.pop(0)
+        if p in visited:
+            continue
+        visited.add(p)
+        if mask[p]:
+            region.append(p)
+            for neighbor in get_neighbors(p):
+                if neighbor not in visited and mask[neighbor]:
+                    queue.append(neighbor)
+    return region
+
+def get_neighbors(v):
+    """
+    Returns 6-connected neighbors.
+    """
+    x, y, z = v
+    return [
+        (x+1, y, z), (x-1, y, z),
+        (x, y+1, z), (x, y-1, z),
+        (x, y, z+1), (x, y, z-1)
+    ]
+
+def euclidean_distance(p1, p2):
+    return ((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)**0.5
 ```
 
 ## Subtopics
@@ -201,17 +412,17 @@ def normalize_skeleton(skeleton_segments, pre_seg_mask):
 The Barycentric Shape Selection Widget is a user interface component that maps 4D transfer function space (tubiness, surfaceness, blobbiness, and intensity) onto a 2D equilateral triangle using barycentric coordinates, allowing users to intuitively select shape classes for volume rendering. It distinguishes itself from scalar-only transfer functions by enabling direct manipulation of geometric shape memberships (tubiness, surfaceness, blobbiness) derived from curve skeletons, serving as the first stage of classification before intensity-based optical property assignment.
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by skeleton computation (potential field method is slowest among examined techniques) and distance map calculation [S3]. Preprocessing time is not a main issue for the use case [S3].
-*   **Memory Complexity:** Requires storage for the volume, binary mask, distance map, and skeleton data structures.
+*   **Time Complexity:** The method is computationally expensive due to skeleton computation (potential field method is the slowest examined technique) and region merging [S3]. Preprocessing time is not a main issue for the use case [S3].
+*   **Memory Complexity:** Requires storage for the volume, mask, skeleton segments, and region maps [S3].
 *   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Length thresholds for skeleton splitting (5–10 voxels) are dependent on dataset size ($256^3$ to $512^3$) [S3].
-*   **Strengths:** Allows visual separation of objects with similar intensities but different shapes (e.g., contrast-filled heart vs. vessels/ribs) [S3]. Intuitive user interface for domain experts [S3]. Robust to moderate within-class deformation [S3].
-*   **Limitations:** Requires proper pre-segmentation/masking, which can be challenging [S1, unofficial]. Relies on skeleton quality; highly degenerated tubular regions may be misclassified [S3]. Potential field method is slow [S3].
-*   **When to use:** When features have overlapping intensity ranges but distinct 3D shapes (e.g., medical imaging of vessels vs. bones/organs) [S3].
-*   **When not to use:** When pre-segmentation is impossible or highly unreliable, or when per-voxel local texture/curvature is more important than global shape [S3].
+*   **Scaling:** Length thresholds for skeleton splitting (5-10 voxels) are specific to dataset sizes of $256^3$ to $512^3$ [S3]. Scaling to larger datasets may require adjustment of these parameters.
+*   **Strengths:** Allows visual separation of objects with similar intensity but different shapes (e.g., contrast-filled heart vs. vessels) [S3]. Intuitive user interface for domain experts [S3]. Robust to moderate within-class deformation [S3].
+*   **Limitations:** Requires proper masking/pre-segmentation, which can be challenging [S1, unofficial]. Imperfect pre-segmentations cause instabilities in shape-skeletons [S3]. Tubiness classifier reliability depends on skeleton quality [S3]. Heavily branching skeletons cause problems for decomposition and merging [S3].
+*   **When to use:** When features have overlapping intensity ranges but distinct shapes (e.g., medical imaging with contrast agents) [S3]. When an intuitive, shape-based classification is preferred over per-voxel filter responses [S3].
+*   **When not to use:** When high-quality manual segmentation is available and per-voxel detail is required [S3]. When computational resources are extremely limited and skeleton computation is too slow [S3].
 
 ## Background
-The concept of axial description of shape (skeleton) was proposed in 2D by Blum [2]. Binford [1] proposed generalized cylinders in 3D. Cornea et al. [4, 5] introduced hierarchical curve-skeletons using repulsive force fields. The specific method of Shape-based Transfer Function Generation was proposed by Praßni et al. [S3][S1, unofficial]. It is described in reference [17] [S1, unofficial].
+The concept of axial description of shape (skeleton) was proposed in 2D by Blum [2]. Binford [1] proposed generalized cylinders in 3D. Cornea et al. [4, 5] introduced hierarchical curve-skeletons using repulsive force fields. The specific method of Shape-based Transfer Functions was proposed by Praßni et al. [S3][S1, unofficial]. It is described in reference [17] [S1, unofficial].
 
 ## Sources
 [S1] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)

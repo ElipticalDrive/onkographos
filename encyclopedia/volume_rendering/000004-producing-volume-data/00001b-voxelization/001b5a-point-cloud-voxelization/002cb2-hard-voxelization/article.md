@@ -1,162 +1,27 @@
 # Hard Voxelization
 
-Also called: Point Cloud Voxelization, Grid-based Voxelization
+Also called: Point Cloud Hard Voxelization, Fixed-Size Voxelization
 
 ## Overview
-Hard Voxelization discretizes a continuous 3D point cloud into a fixed-size 3D grid of cubic voxels by binning points based on their spatial coordinates and aggregating associated attribute values within each voxel [S3, unofficial]. It outputs a single representative point per occupied voxel calculated as the centroid of the aggregated attributes [S1, unofficial]. Unlike its sibling [Multiscale Hard Voxelization](3319-multiscale-hard-voxelization.md), which handles multiple resolutions, this method operates on a single fixed scale [S2, unofficial]. It differs from the non-deterministic variant by guaranteeing reproducible output through explicit sorting and unique-coordinate identification, ensuring that the order of points within a voxel is preserved, whereas non-deterministic versions rely on atomic operations that may yield varying results across runs [S3, unofficial].
+Hard Voxelization discretizes a continuous 3D point cloud into a fixed-size 3D grid of cubic voxels by binning points based on their spatial coordinates and aggregating associated attribute values within each voxel [S3, unofficial]. It solves the problem of converting unstructured point data into a regular tensor format suitable for convolutional neural networks or efficient spatial indexing. It differs from [Gaussian Voxelization](8884-gaussian-voxelization.md) by using binary occupancy or simple aggregation rather than density estimation, and from [Ray Model Voxelization](4688-ray-model-voxelization.md) by relying on direct coordinate mapping rather than ray casting.
 
 ## Shared principles
-The method maps continuous point coordinates $(x, y, z)$ to discrete integer voxel indices $(i, j, k)$ using floor division relative to a bounding box origin and voxel dimensions [S1, unofficial].
+The core mechanism maps continuous coordinates $(x, y, z)$ to discrete integer voxel indices $(i, j, k)$ using floor division relative to a bounding box origin and voxel dimensions [S1, unofficial].
 
-### Inputs
-- `points`: A 2D array of shape $(N, D)$, where $N$ is the number of points and $D$ is the number of features [S2, S3, unofficial].
-- `voxel_size`: A 3-element array $[v_x, v_y, v_z]$ indicating the physical size of a voxel in x, y, and z dimensions [S3, unofficial].
-- `coors_range`: A 6-element array $[x_{min}, y_{min}, z_{min}, x_{max}, y_{max}, z_{max}]$ defining the bounding box of the voxel grid [S3, unofficial].
-- `max_points`: Integer. Maximum number of points allowed in a single voxel. If -1, dynamic voxelization is used [S2, unofficial].
-- `max_voxels`: Integer. Maximum number of voxels to create. Points falling into voxels beyond this limit are dropped. Typical value is 20000 [S2, unofficial].
-
-### Outputs
-- `voxels`: A tensor of shape $[M, \text{max\_points}, D]$, where $M$ is the number of valid voxels ($\le \text{max\_voxels}$). It stores the features of the points assigned to each voxel [S2, unofficial].
-- `coors`: A tensor of shape $[M, 3]$ containing the integer voxel indices $(i, j, k)$ for each of the $M$ voxels [S2, unofficial].
-- `num_points_per_voxel`: A tensor of shape $[M]$ storing the number of points assigned to each voxel [S2, unofficial].
-
-### Steps
-1. **Compute Bounding Box and Grid Dimensions**:
-    - If `coors_range` is not provided, iterate over all input points to find $x_{min}, x_{max}, y_{min}, y_{max}, z_{min}, z_{max}$ [S1, unofficial].
-    - Calculate grid dimensions using ceiling division:
-        $$
-        \text{dim}_x = \max(1, \lceil \frac{x_{max} - x_{min}}{v_x} \rceil), \quad
-        \text{dim}_y = \max(1, \lceil \frac{y_{max} - y_{min}}{v_y} \rceil), \quad
-        \text{dim}_z = \max(1, \lceil \frac{z_{max} - z_{min}}{v_z} \rceil)
-        $$
-        [S1, unofficial]
-    - Ensure dimensions are at least 1 to prevent zero-size allocations [S1, unofficial].
-
-2. **Map Points to Voxel Indices**:
-    - For each point $p = [x, y, z, \dots]$, compute voxel coordinates:
-        $$
-        i = \left\lfloor \frac{x - x_{min}}{v_x} \right\rfloor, \quad
-        j = \left\lfloor \frac{y - y_{min}}{v_y} \right\rfloor, \quad
-        k = \left\lfloor \frac{z - z_{min}}{v_z} \right\rfloor
-        $$
-        [S1, S2, S3, unofficial]
-    - Points with coordinates outside the range $R$ are mapped to invalid indices (e.g., $-1$) [S1, S2, unofficial].
-
-3. **Identify Unique Voxels and Map Indices (Deterministic Step)**:
-    - Collect all valid voxel coordinates $(i, j, k)$ (excluding $-1$) [S2, unofficial].
-    - Find unique voxel coordinates and generate a mapping from the original point index to a unique voxel index. This is typically done using a stable sort or a unique operation (e.g., `at::unique_dim` in PyTorch) to ensure reproducibility [S2, unofficial].
-    - If the invalid coordinate $(-1, -1, -1)$ is present in the unique list, remove it and adjust the mapping indices accordingly [S2, unofficial].
-    - Compute `coors_order` (the order in which voxels appear in the output) and `reduce_count` (number of points per voxel) [S2, unofficial].
-
-4. **Aggregate Attributes**:
-    - **CPU Approach**: Iterate through all points. For each point, increment `vcnt[i, j, k]` and add its attributes to `vsum[i, j, k]` [S4, unofficial].
-    - **GPU Approach**: Use a parallel kernel to accumulate sums into a `Voxel` struct array. Shared memory may be used for block-level reduction [S1, unofficial].
-    - Compute the average attribute value per voxel:
-        $$
-        \text{vavg} = \frac{\text{vsum}}{\text{vcnt}}
-        $$
-        [S4, unofficial]
-    - Handle empty voxels by setting their average value to NaN where the count is less than 1: `vavg[vcnt < 1] = np.nan` [S4, unofficial].
-
-5. **Assign Features to Output Tensors**:
-    - Iterate over the voxel grid or use a parallel kernel to write the aggregated data into the `voxels`, `coors`, and `num_points_per_voxel` tensors [S2, unofficial].
-    - For each voxel, store the coordinates in `coors` and the count in `num_points_per_voxel` [S2, unofficial].
-    - Store the point features (or centroids) in `voxels`. If multiple points exist in a voxel, they are stored sequentially up to `max_points` [S2, unofficial].
-    - Clamp the number of points per voxel to `max_points` [S2, unofficial].
-
-### Pseudocode (CPU Implementation)
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import numpy as np
-
-def hard_voxelize_deterministic(points, voxel_size, coors_range, max_points, max_voxels):
-    """
-    points: (N, C) array-like
-    voxel_size: (3,) float array [vx, vy, vz]
-    coors_range: (6,) float array [xmin, ymin, zmin, xmax, ymax, zmax]
-    max_points: int
-    max_voxels: int
-    Returns: voxels (M, max_points, C), coors (M, 3), num_points_per_voxel (M,)
-    """
-    N, C = points.shape
-    vx, vy, vz = voxel_size
-    xmin, ymin, zmin, xmax, ymax, zmax = coors_range
-    grid_x = int(np.round((xmax - xmin) / vx))
-    grid_y = int(np.round((ymax - ymin) / vy))
-    grid_z = int(np.round((zmax - zmin) / vz))
-
-    coors = np.zeros((N, 3), dtype=np.int32)
-    coors[:, 0] = np.floor((points[:, 0] - xmin) / vx).astype(np.int32)
-    coors[:, 1] = np.floor((points[:, 1] - ymin) / vy).astype(np.int32)
-    coors[:, 2] = np.floor((points[:, 2] - zmin) / vz).astype(np.int32)
-
-    invalid_mask = (
-        (coors[:, 0] < 0) | (coors[:, 0] >= grid_x) |
-        (coors[:, 1] < 0) | (coors[:, 1] >= grid_y) |
-        (coors[:, 2] < 0) | (coors[:, 2] >= grid_z)
-    )
-    coors[invalid_mask] = -1
-
-    unique_coors, inverse_indices = np.unique(coors, axis=0, return_inverse=True)
-    if unique_coors[0, 0] == -1:
-        unique_coors = unique_coors[1:]
-        inverse_indices[inverse_indices == 0] = -1
-        inverse_indices[inverse_indices > 0] -= 1
-
-    valid_point_mask = (inverse_indices >= 0)
-    valid_points = points[valid_point_mask]
-    valid_voxel_indices = inverse_indices[valid_point_mask]
-
-    seen = set()
-    ordered_unique_voxels = []
-    for vid in valid_voxel_indices:
-        if vid not in seen:
-            seen.add(vid)
-            ordered_unique_voxels.append(vid)
-    ordered_unique_voxels = np.array(ordered_unique_voxels, dtype=np.int32)
-
-    voxel_to_pos = {vid.item(): i for i, vid in enumerate(ordered_unique_voxels)}
-    point_to_voxel_pos = np.array([voxel_to_pos[vid.item()] for vid in valid_voxel_indices], dtype=np.int32)
-
-    M = len(ordered_unique_voxels)
-    if M > max_voxels:
-        M = max_voxels
-        ordered_unique_voxels = ordered_unique_voxels[:M]
-        drop_mask = (point_to_voxel_pos >= M)
-        point_to_voxel_pos[drop_mask] = -1
-        valid_point_mask = valid_point_mask & ~drop_mask
-        valid_points = points[valid_point_mask]
-        point_to_voxel_pos = point_to_voxel_pos[valid_point_mask]
-
-    voxels = np.zeros((M, max_points, C), dtype=points.dtype)
-    coors_out = np.zeros((M, 3), dtype=np.int32)
-    num_points_per_voxel = np.zeros((M), dtype=np.int32)
-
-    for i in range(len(valid_points)):
-        voxel_idx = point_to_voxel_pos[i]
-        if voxel_idx == -1:
-            continue
-        count = num_points_per_voxel[voxel_idx]
-        if count < max_points:
-            voxels[voxel_idx, count] = valid_points[i]
-            num_points_per_voxel[voxel_idx] += 1
-
-    coors_out = unique_coors[ordered_unique_voxels]
-    return voxels, coors_out, num_points_per_voxel
-```
-
-### Parameters and Typical Values
-- `voxel_size`: Typical value used in example: 0.7 [S4, unofficial].
-- `coors_range`: Not given in the sources.
-- `max_points`: Not given in the sources.
-- `max_voxels`: Typical value is 20000 [S2, unofficial].
-
-### Edge Cases and Pitfalls
-- **Points Outside Range**: Points with coordinates outside `coors_range` are mapped to $-1$ and must be filtered out before unique operations to avoid invalid indices [S2, unofficial].
-- **Empty Voxels**: Voxels with no points should be excluded from the output or marked with NaN for attributes to avoid division by zero during averaging [S4, unofficial].
-- **Boundary Precision**: Floating-point precision issues may cause points exactly on the boundary to be assigned to the wrong voxel. Clamping indices to $[0, \text{dim}-1]$ is recommended [S1, unofficial].
-- **Coordinate Systems**: Ensure the input point cloud coordinate system matches the expected range. For example, nuScenes uses $x=$right, $y=$forward, $z=$up, which may need conversion to KITTI/ROS ($x=$forward, $y=$left, $z=$up) [S1, unofficial].
+1.  **Bounding Box Definition**: The spatial extent is defined by $[x_{min}, y_{min}, z_{min}, x_{max}, y_{max}, z_{max}]$ [S3, unofficial].
+2.  **Grid Dimension Calculation**: The number of voxels along each axis is calculated. Sources differ on rounding:
+    *   Multiscale variant uses rounding: $grid_x = \text{round}\left(\frac{x_{max} - x_{min}}{v_x}\right)$ [S1, unofficial].
+    *   Deterministic variant uses ceiling: $\text{dim}_x = \max(1, \lceil \frac{x_{max} - x_{min}}{v_x} \rceil)$ [S1, unofficial].
+3.  **Coordinate Mapping**: For each point $p$ with coordinates $(x, y, z)$, the voxel index is computed as:
+    $$
+    i = \left\lfloor \frac{x - x_{min}}{v_x} \right\rfloor, \quad
+    j = \left\lfloor \frac{y - y_{min}}{v_y} \right\rfloor, \quad
+    k = \left\lfloor \frac{z - z_{min}}{v_z} \right\rfloor
+    $$
+    [S1, S2, S3, unofficial]
+4.  **Boundary Handling**: Points with indices outside $[0, grid_x)$, $[0, grid_y)$, or $[0, grid_z)$ are discarded or marked as invalid (e.g., index $-1$) [S1, S2, unofficial].
+5.  **Aggregation**: Points falling into the same voxel are aggregated. Common strategies include storing all points up to a limit, or computing the centroid (average attributes) [S1, S4, unofficial].
+6.  **Output Structure**: The result is typically a tensor of shape $[M, \text{max\_points}, D]$ for features, $[M, 3]$ for voxel coordinates, and $[M]$ for point counts, where $M$ is the number of occupied voxels [S2, unofficial].
 
 ## Subtopics
 
@@ -167,15 +32,16 @@ Multiscale Hard Voxelization is a GPU-accelerated method that simultaneously vox
 Hard Voxelization (Deterministic) discretizes a continuous 3D point cloud into a fixed-size 3D grid of cubic voxels by binning points based on their spatial coordinates and aggregating associated attribute values within each voxel. It outputs a single representative point per occupied voxel calculated as the centroid of the aggregated attributes. Unlike its sibling [Multiscale Hard Voxelization](3319-multiscale-hard-voxelization.md), which handles multiple resolutions, this method operates on a single fixed scale. It differs from the non-deterministic variant by guaranteeing reproducible output through explicit sorting and unique-coordinate identification, ensuring that the order of points within a voxel is preserved, whereas non-deterministic versions rely on atomic operations that may yield varying results across runs.
 
 ### [Point Cloud Voxelization Visualization](5628-point-cloud-voxelization-visualization.md)
-This method visualizes the occupancy of a point cloud after voxelization using the Point Cloud Library (PCL). It supports axis-aligned bounding boxes (AABB) or custom fixed-resolution grids, and offers three rendering modes: point cloud coloring, solid cubes, or wireframe cubes. It differs from standard hard voxelization by focusing on the visual representation of voxel centers and occupancy rather than producing a dense tensor for deep learning.
+This method visualizes the output of hard voxelization by rendering the input point cloud and/or the resulting voxel grid structure using the Point Cloud Library (PCL). It solves the problem of verifying voxelization correctness and inspecting spatial occupancy by offering three distinct rendering modes: point cloud coloring, solid cubes, and wireframe cubes. It differs from standard hard voxelization by focusing on the visual representation of the grid cells and their centers rather than just producing a tensor for downstream neural network processing.
 
-#### Dynamic Voxelization (Coordinate Only)
-- **Definition**: Computes only the voxel coordinates for each point, without assigning points to a fixed voxel grid structure or handling duplicates/max points. Used when max_points=-1 [S1, unofficial].
-- **Step**: Calculate grid dimensions: grid_x = round((coors_x_max - coors_x_min) / voxel_x), etc. Launch dynamic_voxelize_kernel to compute voxel coordinates for each point and store them in the coors tensor [S1, unofficial].
-- **Parameter**: NDim: Number of dimensions for coordinates, default 3 [S1, unofficial].
+### Dynamic Voxelization (Coordinate Only)
+- [S1, unofficial] Computes only the voxel coordinates for each point, without assigning points to a fixed voxel grid structure or handling duplicates/max points. Used when max_points=-1.
+- [S1, unofficial] Calculate grid dimensions: grid_x = round((coors_x_max - coors_x_min) / voxel_x), etc.
+- [S1, unofficial] Launch dynamic_voxelize_kernel to compute voxel coordinates for each point and store them in the coors tensor.
+- [S1, unofficial] NDim: Number of dimensions for coordinates, default 3.
 
 ## Background
-Hard voxelization is a fundamental technique in 3D computer vision and graphics for converting unstructured point clouds into structured grid representations suitable for convolutional neural networks (CNNs) or spatial hashing. It is widely used in autonomous driving perception pipelines, particularly for LiDAR data processing, where efficient spatial indexing is required for 3D object detection [S1, unofficial]. The deterministic variant ensures reproducibility across different hardware and software environments, which is critical for debugging and model training stability [S3, unofficial].
+Hard voxelization is a fundamental preprocessing step in 3D deep learning, particularly for LiDAR-based autonomous driving perception. It was popularized by frameworks like MMDetection3D and PointPillars, which require regular grid inputs for 3D CNNs or 2D projection networks [S1, unofficial]. The deterministic variant addresses the non-determinism inherent in GPU atomic operations, which is critical for debugging and reproducibility in training pipelines [S3, unofficial].
 
 ## Sources
 [S1] Susie0909/Multiscale_Voxelization_CUDA, https://github.com/Susie0909/Multiscale_Voxelization_CUDA, fetched 2026-10-27 (unofficial)

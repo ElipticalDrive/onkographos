@@ -1,35 +1,48 @@
 # Grid Ray Sampler
 
+Also called: Camera Ray Generation, Pixel Ray Sampling
 
 ## Overview
-The Grid Ray Sampler generates camera rays by mapping pixel coordinates from an image grid to 3D space, producing either a uniform set of rays covering the entire resolution or a random subset of rays for sparse sampling [S2, unofficial]. It provides the foundational geometric mapping from 2D pixel indices to 3D ray origins and directions, serving as the base for methods like [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md) that build upon this uniform sampling [S1, unofficial].
+The Grid Ray Sampler generates camera rays for volume rendering or neural rendering by mapping pixel coordinates to 3D space using camera intrinsics and extrinsics [S2, unofficial]. It solves the problem of converting a 2D image grid into a set of 3D ray origins and directions suitable for downstream sampling or rendering [S1, S2, unofficial]. It differs from its siblings by providing the foundational geometric ray definition; for instance, [Near-Middle-Far Ray Generation](6817-near-middle-far-ray-generation.md) builds on these rays to define sampling intervals, while [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md) uses them as a base for importance sampling [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   `camera`: Object containing intrinsic parameters (focal length, principal point) and extrinsic parameters (pose matrix) [S2, unofficial].
-*   `world_to_object`: Optional $4 \times 4$ transformation matrix to convert world coordinates to object space [S1, unofficial].
-*   `resolution`: Integer defining image dimensions $(H, W)$ and ray buffer size, typical value 512 [S1, unofficial].
-*   `full_grid`: Boolean flag. If `true`, generates rays for all pixels; if `false`, generates a random subset [S2, unofficial].
-*   `N_rays`: Integer specifying the number of rays to generate when `full_grid` is `false` [S2, unofficial].
-*   `framerate.count()`: `uint32_t` representing accumulated samples per pixel, passed to the ray generator for coherence handling [S1, unofficial].
+*   `camera`: Camera state object containing intrinsic parameters (focal length, principal point) and pose (world-to-object or view matrix) [S1, S2, unofficial].
+*   `world_to_object`: Transformation matrix from world coordinates to object/camera coordinates [S1, unofficial].
+*   `resolution`: Integer defining image dimensions $(H, W)$ and ray buffer size [S1, unofficial].
+*   `num_rays`: Number of rays to generate. If `full_grid` is false, this is the count of randomly sampled rays; if true, it is $H \times W$ [S2, unofficial].
+*   `full_grid`: Boolean flag. If true, generate rays for all pixels; if false, generate `num_rays` random rays [S2, unofficial].
+*   `framerate.count()`: Accumulated samples per pixel, used for coherence handling [S1, unofficial].
 
 **Outputs:**
-*   `rays_o`: Tensor of ray origins with shape `(prefix, N_rays, 3)` [S2, unofficial].
-*   `rays_d`: Tensor of normalized ray directions with shape `(prefix, N_rays, 3)` [S2, unofficial].
+*   `rays_o`: Tensor of ray origins, shape $[N_{rays}, 3]$ or $[B, N_{rays}, 3]$ for batched inputs [S2, unofficial].
+*   `rays_d`: Tensor of ray directions, shape $[N_{rays}, 3]$ or $[B, N_{rays}, 3]$ [S2, unofficial].
 
 **Data Structures:**
-*   **Pixel Coordinates**: Integer grids $(i, j)$ generated using `torch.meshgrid` with `indexing="ij"` [S2, unofficial].
+*   **Ray Buffer**: A contiguous memory block storing origins and directions. In GPU implementations, this is often a pointer to device memory (`rays->data()`) [S1, unofficial].
+*   **Pixel Coordinates**: Integer grids $(i, j)$ generated via meshgrid, reshaped to match batch dimensions [S2, unofficial].
 
 **Steps:**
-1.  **Determine Ray Count**: Set $N_{rays} = \text{self.num\_rays}$ if `not full_grid`, else $N_{rays} = H \times W$ [S2, unofficial].
-2.  **Extract Ray Origin**: Retrieve the camera center from the pose matrix: `rays_o = pose[..., :3, 3]` [S2, unofficial].
-3.  **Generate Pixel Indices**: Create 2D grids of pixel coordinates $i$ and $j$ using `torch.meshgrid` with `indexing="ij"` [S2, unofficial]. Reshape and expand $i$ and $j$ to match batch dimensions: `i = i.t().reshape([*[1] * len(prefix), H * W]).expand([*prefix, H * W])` and `j = j.reshape([*[1] * len(prefix), H * W]).expand([*prefix, H * W])` [S2, unofficial].
-4.  **Select Indices (Optional)**: If `not full_grid`, generate random indices: `select_inds = torch.randint(0, len(i.view(-1)), size=[N_rays], device=device)` [S2, unofficial]. Gather the corresponding $i$ and $j$ values using these indices [S2, unofficial].
-5.  **Lift to Camera Space**: Convert 2D pixel coordinates to 3D points in the camera coordinate system: `pixel_points_cam = lift(i, j, torch.ones_like(i), intrinsics=intrinsic)` [S2, unofficial].
-6.  **Transform to World Coordinates**: Apply the camera pose transformation: `world_coords = torch.bmm(pose, pixel_points_cam).transpose(-1, -2)[..., :3]` [S2, unofficial].
-7.  **Compute Ray Directions**: Calculate the direction vector: `rays_d = world_coords - rays_o[..., None, :]` [S2, unofficial].
-8.  **Normalize Directions**: Normalize the direction vectors to unit length: `rays_d = F.normalize(rays_d, dim=-1)` [S2, unofficial].
-9.  **Expand Origins**: Broadcast the ray origin to match the ray directions shape: `rays_o = rays_o[..., None, :].expand_as(rays_d)` [S2, unofficial].
+1.  **Determine Ray Count**: Calculate $N_{rays}$. If `full_grid` is true, $N_{rays} = H \times W$. Otherwise, $N_{rays} = \text{num\_rays}$ [S2, unofficial].
+2.  **Extract Pose**: Retrieve ray origins from the camera pose. The origin is typically the camera center in world coordinates: $\mathbf{o} = \text{pose}[:, :3, 3]$ [S2, unofficial].
+3.  **Generate Pixel Indices**: Create 2D grids of pixel indices $i \in [0, H-1]$ and $j \in [0, W-1]$ using `torch.meshgrid` with `indexing="ij"` [S2, unofficial].
+4.  **Reshape Indices**: Reshape $i$ and $j$ to shape $[1, \dots, 1, H \times W]$ (broadcasting prefix dimensions) to align with batch processing [S2, unofficial].
+5.  **Select Indices (Optional)**: If `full_grid` is false, select $N_{rays}$ random indices from the total $H \times W$ pixels:
+    $$ \text{select\_inds} = \text{randint}(0, H \times W, \text{size}=[N_{rays}]) $$
+    Gather the corresponding $i$ and $j$ values using these indices [S2, unofficial].
+6.  **Lift to Camera Space**: Convert pixel coordinates $(i, j)$ to 3D points in camera space $(x_c, y_c, z_c)$. Assuming a pinhole camera model with intrinsic matrix $K$:
+    $$ x_c = \frac{i - c_x}{f_x}, \quad y_c = \frac{j - c_y}{f_y}, \quad z_c = 1 $$
+    This is implemented as `lift(i, j, torch.ones_like(i), intrinsics=intrinsic)` [S2, unofficial].
+7.  **Transform to World Coordinates**: Transform camera-space points to world coordinates using the pose matrix $P$ (where $P$ maps camera to world, or is applied as $\mathbf{p}_{world} = P \cdot \mathbf{p}_{cam}$):
+    $$ \mathbf{p}_{world} = P \cdot \begin{bmatrix} x_c \\ y_c \\ z_c \\ 1 \end{bmatrix} $$
+    The 3D coordinates are extracted from the resulting homogeneous vector: $\mathbf{p}_{world, 3} = (\mathbf{p}_{world} / w)[:3]$ [S2, unofficial].
+8.  **Compute Directions**: Calculate the ray direction vector:
+    $$ \mathbf{d} = \mathbf{p}_{world} - \mathbf{o} $$
+    [S2, unofficial].
+9.  **Normalize Directions**: Normalize $\mathbf{d}$ to unit length:
+    $$ \mathbf{d} = \frac{\mathbf{d}}{\|\mathbf{d}\|} $$
+    [S2, unofficial].
+10. **Expand Origins**: Expand the origin tensor $\mathbf{o}$ to match the shape of $\mathbf{d}$ (adding the ray dimension) [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -38,112 +51,158 @@ The Grid Ray Sampler generates camera rays by mapping pixel coordinates from an 
 import torch
 import torch.nn.functional as F
 
-def lift(i, j, ones, intrinsic):
-    """Lift 2D pixel coordinates to 3D camera space using intrinsic matrix [G]."""
-    fx, fy = intrinsic[0, 0], intrinsic[1, 1]
-    cx, cy = intrinsic[0, 2], intrinsic[1, 2]
-    x = (i.float() - cx) / fx
-    y = (j.float() - cy) / fy
-    return torch.stack([x, y, ones], dim=-1)
-
-def grid_ray_sampler(camera, world_to_object=None, resolution=512, full_grid=True, N_rays=0):
+def generate_grid_rays(pose, intrinsics, resolution, num_rays, full_grid=False):
     """
-    Generate camera rays from a grid.
+    Generate camera rays for volume rendering.
     
     Args:
-        camera: Object with 'intrinsic' (3x3 matrix) and 'pose' (4x4 matrix).
-        world_to_object: Optional 4x4 matrix. If provided, transforms world coords to object space.
-        resolution: Integer, image height and width (assumes square).
-        full_grid: Boolean, if True generate H*W rays, else N_rays.
-        N_rays: Integer, number of rays if full_grid is False.
+        pose: Tensor [B, 4, 4] or [4, 4], world-to-camera or camera-to-world transform.
+              Note: Source [S2, unofficial] uses 'pose' to transform camera-space points to world.
+              Typically, pose[:, :3, 3] is the camera center in world space.
+        intrinsics: Tensor [B, 3, 3] or [3, 3], camera intrinsic matrix K.
+        resolution: Tuple (H, W).
+        num_rays: int, number of rays if full_grid is False.
+        full_grid: bool, if True, generate H*W rays.
         
     Returns:
-        rays_o: Tensor of origins.
-        rays_d: Tensor of normalized directions.
+        rays_o: Tensor [B, N, 3], ray origins.
+        rays_d: Tensor [B, N, 3], ray directions.
     """
-    H = resolution
-    W = resolution
-    intrinsic = camera.intrinsic
-    pose = camera.pose
-    prefix = []  # Batch dimensions handled implicitly by tensor shapes [G]
-
-    # 1. Determine Ray Count
-    num_rays = N_rays if not full_grid else H * W
-
-    # 2. Extract Ray Origin
-    rays_o = pose[..., :3, 3]
-
-    # 3. Generate Pixel Indices
-    i, j = torch.meshgrid(torch.arange(H), torch.arange(W), indexing="ij")
-    i_flat = i.t().reshape([*[1] * len(prefix), H * W]).expand([*prefix, H * W])
-    j_flat = j.reshape([*[1] * len(prefix), H * W]).expand([*prefix, H * W])
-
-    # 4. Select Indices (Optional)
+    H, W = resolution
+    B = pose.shape[0] if pose.dim() > 2 else 1
+    
+    # 1. Determine number of rays
+    N = H * W if full_grid else num_rays
+    
+    # 2. Extract ray origins from pose (camera center in world space)
+    # Assuming pose is [B, 4, 4] or [4, 4]
+    if pose.dim() == 2:
+        rays_o = pose[:3, 3].unsqueeze(0).expand(B, -1) # [B, 3]
+    else:
+        rays_o = pose[:, :3, 3] # [B, 3]
+        
+    # 3. Generate pixel coordinates
+    i, j = torch.meshgrid(torch.arange(H, device=pose.device), 
+                          torch.arange(W, device=pose.device), 
+                          indexing='ij')
+    
+    # 4. Reshape and expand to match batch dimensions
+    # Shape: [1, 1, H, W] -> [1, H*W]
+    i_flat = i.flatten().unsqueeze(0).unsqueeze(0) # [1, 1, H*W]
+    j_flat = j.flatten().unsqueeze(0).unsqueeze(0) # [1, 1, H*W]
+    
+    # Expand to batch size
+    i_flat = i_flat.expand(B, -1, -1) # [B, 1, H*W]
+    j_flat = j_flat.expand(B, -1, -1) # [B, 1, H*W]
+    
+    # 5. Select indices if not full grid
     if not full_grid:
-        select_inds = torch.randint(0, len(i_flat.view(-1)), size=[num_rays])
-        i_flat = i_flat[..., select_inds]
-        j_flat = j_flat[..., select_inds]
-
-    # 5. Lift to Camera Space
-    pixel_points_cam = lift(i_flat, j_flat, torch.ones_like(i_flat), intrinsic)
-
-    # 6. Transform to World Coordinates
-    world_coords = torch.bmm(pose, pixel_points_cam.transpose(-1, -2))[..., :3]
-
-    # 7. Compute Ray Directions
-    rays_d = world_coords - rays_o[..., None, :]
-
-    # 8. Normalize Directions
+        # Flatten for random selection
+        total_pixels = H * W
+        # Select N random indices per batch item? Or globally?
+        # Source [S2, unofficial] implies selecting from the flattened list.
+        # Assuming selection is per-batch or global. Let's assume global for simplicity 
+        # or per-batch if B > 1. Source code shows `len(i.view(-1))`.
+        # We will select N indices from the total H*W.
+        select_inds = torch.randint(0, total_pixels, size=[N], device=pose.device)
+        
+        # Gather i and j
+        # Note: Source [S2, unofficial] reshapes i and j to [prefix, H*W] then expands.
+        # Here we flatten and gather.
+        i_selected = i_flat.view(B, -1).gather(1, select_inds.unsqueeze(0).expand(B, -1)) # [B, N]
+        j_selected = j_flat.view(B, -1).gather(1, select_inds.unsqueeze(0).expand(B, -1)) # [B, N]
+    else:
+        i_selected = i_flat.view(B, -1)[:, :N] # [B, N]
+        j_selected = j_flat.view(B, -1)[:, :N] # [B, N]
+        
+    # 6. Lift to camera space
+    # Extract intrinsic parameters
+    if intrinsics.dim() == 2:
+        fx, fy = intrinsics[0, 0], intrinsics[1, 1]
+        cx, cy = intrinsics[0, 2], intrinsics[1, 2]
+    else:
+        fx, fy = intrinsics[:, 0, 0], intrinsics[:, 1, 1]
+        cx, cy = intrinsics[:, 0, 2], intrinsics[:, 1, 2]
+        
+    # Normalize pixel coordinates to camera space
+    # x_c = (i - cx) / fx, y_c = (j - cy) / fy, z_c = 1
+    # Broadcasting: i_selected [B, N], fx [B] or scalar
+    i_selected = i_selected.float()
+    j_selected = j_selected.float()
+    
+    x_c = (i_selected - cx.unsqueeze(1)) / fx.unsqueeze(1)
+    y_c = (j_selected - cy.unsqueeze(1)) / fy.unsqueeze(1)
+    z_c = torch.ones_like(x_c)
+    
+    # Stack to [B, N, 3]
+    pixel_points_cam = torch.stack([x_c, y_c, z_c], dim=-1) # [B, N, 3]
+    
+    # 7. Transform to world coordinates
+    # world_coords = pose * pixel_points_cam_homogeneous
+    # Add homogeneous coordinate 1
+    ones = torch.ones_like(x_c[..., :1])
+    pixel_points_cam_h = torch.cat([pixel_points_cam, ones], dim=-1) # [B, N, 4]
+    
+    # Apply pose transformation
+    # If pose is [B, 4, 4], use bmm. If [4, 4], expand.
+    if pose.dim() == 2:
+        pose_expanded = pose.unsqueeze(0).expand(B, -1, -1)
+    else:
+        pose_expanded = pose
+        
+    # world_points_h = pose_expanded @ pixel_points_cam_h.transpose(-1, -2) # [B, 4, N]
+    # Transpose to [B, N, 4] for easier indexing
+    world_points_h = torch.bmm(pose_expanded, pixel_points_cam_h.transpose(1, 2)).transpose(1, 2) # [B, N, 4]
+    
+    # Extract 3D coordinates
+    world_coords = world_points_h[..., :3] # [B, N, 3]
+    
+    # 8. Compute ray directions
+    # rays_d = world_coords - rays_o
+    # rays_o is [B, 3], world_coords is [B, N, 3]
+    rays_d = world_coords - rays_o.unsqueeze(1) # [B, N, 3]
+    
+    # 9. Normalize directions
     rays_d = F.normalize(rays_d, dim=-1)
-
-    # 9. Expand Origins
-    rays_o = rays_o[..., None, :].expand_as(rays_d)
-
-    return rays_o, rays_d
+    
+    # 10. Expand ray origins to match ray directions shape
+    rays_o_expanded = rays_o.unsqueeze(1).expand_as(rays_d) # [B, N, 3]
+    
+    return rays_o_expanded, rays_d
 ```
 
 **Parameters:**
-*   `resolution`: Integer defining image dimensions. Typical value: 512 [S1, unofficial].
-*   `framerate.count()`: `uint32_t` representing accumulated samples per pixel, passed to ray generator for coherence handling [S1, unofficial].
+*   `resolution`: Integer or tuple $(H, W)$. Typical value: 512 [S1, unofficial].
+*   `num_rays`: Integer. Number of rays to sample if `full_grid` is false.
+*   `full_grid`: Boolean. If true, samples all $H \times W$ pixels. If false, samples `num_rays` randomly [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-Not given in the sources.
+*   **Precision**: Floating-point precision in intrinsic matrix inversion and coordinate transformation can affect ray direction accuracy, especially for wide-angle lenses [S2, unofficial].
+*   **Boundaries**: Pixel coordinates must be handled carefully at image boundaries. The `meshgrid` typically generates indices $0 \dots H-1$ and $0 \dots W-1$.
+*   **Degenerate Input**: If the camera pose is singular or the intrinsic matrix is invalid (e.g., zero focal length), the ray generation will fail or produce NaNs [S2, unofficial].
 
 ## Subtopics
 
-### [Ray Sampling and Neural Rendering Pipeline](4255-ray-sampling-and-neural-rendering-pipeline.md)
-This method generates camera rays from pixel coordinates, passes them through an implicit neural renderer, and extracts rendered features (such as color or geometry) into image tensors. It differs from the parent [Grid Ray Sampler](3930-grid-ray-sampler.md) by handling the complete inference pipeline—transforming pixel grids into ray bundles, executing the neural network forward pass, and reshaping the output—rather than just sampling ray origins and directions.
-
-### [Near-Middle-Far Ray Generation](6817-near-middle-far-ray-generation.md)
-Near-Middle-Far Ray Generation divides a camera ray into two distinct segments: a linear interpolation from the near plane to a middle point, and a disparity (inverse-linear) interpolation from the middle point to the far plane. It allocates a configurable fraction of samples to the near-middle segment and the remainder to the middle-far segment. Choose this when depth resolution must adapt to geometric scale without relying on probabilistic sampling.
-
-### [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md)
-Refined Ray Generation via PDF Sampling generates refined ray samples for volume rendering by sampling new depth positions based on previous iteration's weights, then computing segment lengths and midpoints for rendering. It builds on the coarse sampling provided by the [Grid Ray Sampler](3930-grid-ray-sampler.md) by adaptively drawing new samples from the distribution defined by prior weights. Choose this when noise reduction in complex scenes is required.
-
-### [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md)
-Near-Far Linear Ray Generation generates a list of 3D sampling points along a ray segment defined by a near plane ($t_{min}$) and a far plane ($t_{max}$) for a specified number of points. It serves as the foundational sampling strategy for coarse volume rendering passes, building on the ray origins and directions provided by the [Grid Ray Sampler](3930-grid-ray-sampler.md). It differs from its siblings by offering two distinct spacing modes—linear depth and linear disparity—allowing the renderer to control sample density relative to geometric depth or inverse depth, which is critical for handling scenes with varying depth scales.
-
 ### Ray Unification
-Ray Unification is a technique to map every ray starting location onto a sphere circumscribed around the view cell, ensuring that identical rays have identical depth values regardless of the camera position, easing the task for the oracle network [S3]. For arbitrary views looking outside the view cell, the ray origin is mapped to the circumscribed sphere. For 360-degree object captures, the scheme is applied inversely by placing the circumscribed sphere around the object [S3]. Without ray unification, the same ray is encoded differently depending on the starting location, requiring different depth values [S3]. Ray unification adds about 0.6 dB in PSNR compared to no unification [S3].
+A technique to map every ray starting location onto a sphere circumscribed around the view cell, ensuring that identical rays have identical depth values regardless of the camera position, easing the task for the oracle network [S3]. For arbitrary views looking outside the view cell, the ray origin is mapped to the circumscribed sphere. For 360-degree object captures, the scheme is applied inversely by placing the circumscribed sphere around the object [S3]. Without ray unification, the same ray is encoded differently depending on the starting location, requiring different depth values [S3]. Ray unification adds about 0.6 dB in PSNR compared to no unification [S3].
 
 ### Candidate Generation
-Candidate Generation is a procedure to generate resampling candidates by tracing rays from the camera and sharing the same set of candidates at all texels, avoiding wasteful generation for invisible texels [S4]. It initializes reservoirs sized to the texture, loops through pixel samples, and updates positive and negative reservoirs with weights derived from the ratio of target to proposal densities [S4].
+A procedure to generate resampling candidates by tracing rays from the camera and sharing the same set of candidates at all texels, avoiding wasteful generation for invisible texels [S4]. It initializes reservoirs for positive and negative weights. For each pixel $j$, it samples $x_{j,k}$ from proposal distribution $p_j$. For each texel $i$ where $q_i(x_{j,k}) \neq 0$, it updates the reservoirs with weights $\max(q_i(x_{j,k}), 0)/p_j(x_{j,k})$ and $\max(-q_i(x_{j,k}), 0)/p_j(x_{j,k})$ [S4].
 
 ### Batch Stratified Pixel Sampling
-Batch Stratified Pixel Sampling samples a batch of pixels via stratified sampling at each iteration [S5]. It obtains ground-truth values at sub-pixel coordinates via bilinear interpolation on the target image, implemented as a CUDA texture lookup for efficiency [S5].
+Samples a batch of pixels via stratified sampling at each iteration [S5]. Ground-truth values at sub-pixel coordinates are obtained via bilinear interpolation on the target image, implemented as a CUDA texture lookup for efficiency [S5].
 
 ## Operating characteristics
-*   **Time Complexity**: Not given in the sources.
-*   **Memory Complexity**: Not given in the sources.
-*   **Measured Performance**: Not given in the sources.
-*   **Scaling**: Not given in the sources.
-*   **Strengths**: Not given in the sources.
-*   **Limitations**: Not given in the sources.
-*   **When to Use**: Not given in the sources.
-*   **When Not to Use**: Not given in the sources.
+*   **Time Complexity**: $O(N_{rays})$ for ray generation, where $N_{rays}$ is the number of rays. If `full_grid` is true, $N_{rays} = H \times W$. Random sampling adds $O(N_{rays})$ for index selection [S2, unofficial].
+*   **Memory Complexity**: $O(N_{rays})$ to store ray origins and directions [S2, unofficial].
+*   **Performance**: GPU-accelerated implementations (e.g., CUDA) can generate millions of rays per frame with minimal overhead [S1, unofficial].
+*   **Strengths**: Simple, parallelizable, and provides a geometric foundation for all downstream sampling methods [S2, unofficial].
+*   **Limitations**: Does not account for visibility or scene content; generates rays for all pixels or random pixels regardless of whether they intersect the scene [S2, unofficial].
+*   **When to Use**: As a base step for volume rendering, neural rendering, or any ray-based method requiring camera rays [S1, S2, unofficial].
+*   **When Not to Use**: When adaptive sampling based on scene content is required (use [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md) instead) [S1, unofficial].
 
 ## Background
-Not given in the sources.
+The Grid Ray Sampler is a fundamental component in computer graphics and neural rendering pipelines. It originates from the standard pinhole camera model used in ray tracing and rendering [S2, unofficial]. In the context of neural rendering, it is used to generate input rays for neural networks that predict color and density [S1, unofficial][S3]. The method is widely used in frameworks like Instant NGP and DONeRF [S3, S5].
 
 ## Sources
 [S1] Mike-Leo-Smith/SolidVoxelization, https://github.com/Mike-Leo-Smith/SolidVoxelization, fetched 2026-10-27 (unofficial)

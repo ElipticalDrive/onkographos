@@ -7,164 +7,150 @@ Sparse Brickmap Volume Rendering is a voxel rendering technique that uses a two-
 
 ## How it works
 **Inputs:**
-- Camera position and ray direction (from screen coordinates).
-- Coarse Index Grid: Array of `uint32`, one entry per $8 \times 8 \times 8$ brick cell.
-- Brick Pool: Compact array of stored voxel data for 'mixed' bricks only.
+- Camera position and ray direction (from screen coordinates) [G].
+- Coarse Index Grid: Array of `uint32`, one entry per $8 \times 8 \times 8$ brick cell [S1, unofficial].
+- Brick Pool: Compact array of stored voxel data for 'mixed' bricks only [S1, unofficial].
 - Voxel Size: Default 5cm [S1, unofficial].
 - Grid Size: Configurable runtime dimensions of $128^3$, $256^3$, or $512^3$ [S1, unofficial].
-- Parameters: `aoStrength` (0 disables AO), sun direction, ambient intensities.
+- Parameters: `aoStrength` (0 disables AO), sun direction, ambient intensities [S1, unofficial].
 
 **Outputs:**
-- Fragment color (albedo, lighting, AO).
-- Hardware depth value (distance to hit point).
+- Fragment color (albedo, lighting, AO) [S1, unofficial].
+- Hardware depth value (distance to hit point) [S1, unofficial].
 
 **Data Structures:**
-1.  **Coarse Index Grid**: A 3D array of `uint32`. Each entry corresponds to an $8 \times 8 \times 8$ brick cell in the logical volume.
-    -   Value `0xFFFFFFFF`: Empty sentinel. The brick is empty.
-    -   Value `0x80000000 | material_id`: Uniform-material sentinel. The brick is fully solid with a single material.
-    -   Value `index < 0x80000000`: Index into the Brick Pool. The brick contains mixed data.
-2.  **Brick Pool**: A 1D array of voxel data blocks. Each block stores the $8 \times 8 \times 8$ voxels for a mixed brick. Fully-buried or empty bricks do not occupy pool memory [S1, unofficial].
+1. **Coarse Index Grid**: A 3D array of `uint32` [S1, unofficial]. Each entry corresponds to an $8 \times 8 \times 8$ brick cell in the logical volume [S1, unofficial].
+    - Value `0xFFFFFFFF`: Empty sentinel [S1, unofficial].
+    - Value `0x80000000 | material_id`: Uniform-material sentinel [S1, unofficial].
+    - Value `index < 0x80000000`: Index into the Brick Pool [S1, unofficial].
+2. **Brick Pool**: A 1D array of voxel data blocks [S1, unofficial]. Each block stores the $8 \times 8 \times 8$ voxels for a mixed brick [S1, unofficial]. Fully-buried or empty bricks do not occupy pool memory [S1, unofficial].
 
 **Algorithm Steps:**
 
-1.  **Ray Initialization**: For each pixel, compute the ray origin and direction. Initialize `t` (distance along ray) to 0.
-
-2.  **Coarse DDA Traversal**:
-    -   Step through the Coarse Index Grid along the ray using DDA.
-    -   For each coarse cell $(i, j, k)$ encountered:
-        -   Let `entry` be the value at `CoarseIndexGrid[i][j][k]`.
-        -   If `entry == 0xFFFFFFFF` (Empty): Skip the entire $8 \times 8 \times 8$ brick cell in one step. Continue to the next coarse cell [S1, unofficial].
-        -   If `entry == 0x80000000 | material_id` (Uniform):
-            -   The ray hits the entry face of this brick immediately.
-            -   No fine data fetch is performed.
-            -   Set hit material to `material_id`.
-            -   Calculate hit position and normal at the brick entry face.
-            -   Proceed to **Lighting & Shading** (Step 5).
-        -   If `entry < 0x80000000` (Mixed):
-            -   Fetch the brick data from `BrickPool[entry]`.
-            -   Perform **Fine DDA Traversal** (Step 3).
-
-3.  **Fine DDA Traversal**:
-    -   Using the fetched brick data, perform a fine-grained DDA traversal through the $8 \times 8 \times 8$ voxels within that brick.
-    -   Find the first non-empty voxel hit along the ray segment within the brick.
-    -   If a hit is found:
-        -   Calculate the precise hit position and normal.
-        -   Set hit material based on the voxel type.
-        -   Proceed to **Lighting & Shading** (Step 5).
-    -   If no hit is found within the brick, continue Coarse DDA to the next cell.
-
-4.  **Depth Output**:
-    -   Write the distance to the hit point (`t`) to the hardware depth buffer. This ensures voxels depth-test correctly against rasterized geometry and subsequent passes (sky, fog, bloom) [S1, unofficial].
-
-5.  **Lighting & Shading**:
-    -   **Sun Shadow Raycast**: From the hit point, cast a ray towards the sun direction. If the ray intersects any opaque voxel before reaching the sun, the point is in shadow [S1, unofficial].
-    -   **Hemisphere Ambient Lighting**: Calculate ambient lighting based on the surface normal $\mathbf{n}$.
-        -   If $\mathbf{n} \cdot \mathbf{up} > 0$ (pointing up), use sky-tinted color.
-        -   If $\mathbf{n} \cdot \mathbf{up} \le 0$ (pointing down), use ground-bounce color.
-    -   **Per-Voxel Albedo Variation**: Apply hash-based noise to the voxel's base albedo to add visual detail and reduce uniformity [S1, unofficial].
-    -   **Corner Ambient Occlusion (AO)**:
-        -   At the primary hit, sample the 8 neighboring voxels around the hit face.
-        -   Calculate the solidity of these neighbors.
-        -   Apply bilinear interpolation across the face for smooth per-pixel AO.
-        -   Attenuate hemisphere ambient fully.
-        -   Darken direct lighting by 30% (if not in shadow) or apply a stylized darkening factor controlled by `aoStrength` [S1, unofficial].
+1. **Ray Initialization**: For each pixel, compute the ray origin and direction [G]. Initialize `t` (distance along ray) to 0 [G].
+2. **Coarse DDA Traversal**: Step through the coarse index grid along the ray [S1, unofficial]. If an entry is the empty sentinel (`0xFFFFFFFF`), skip the entire $8 \times 8 \times 8$ brick cell in one step [S1, unofficial]. If a coarse entry is the uniform-material sentinel (`0x80000000 | material`), the ray hits the entry face of that brick immediately [S1, unofficial]. No fine data fetch is performed; the material is used directly [S1, unofficial]. If a coarse entry is a pool index, fetch the brick data from the pool [S1, unofficial].
+3. **Fine DDA Traversal**: Perform fine-grained DDA traversal through the $8 \times 8 \times 8$ voxels within that brick to find the first hit [S1, unofficial].
+4. **Depth Output**: Write the distance to the hit point to the hardware depth buffer so voxels depth-test correctly against rasterized geometry [S1, unofficial].
+5. **Lighting & Shading**: From the hit point, cast a ray towards the sun direction to determine shadowing [S1, unofficial]. Calculate ambient lighting based on surface normal, using sky-tinted color for normals pointing up and ground-bounce color for normals pointing down [S1, unofficial]. Apply hash-based noise to the voxel's albedo to add visual detail and reduce uniformity [S1, unofficial]. At the primary hit, sample the 8 neighboring voxels around the hit face, calculate solidity of neighbors, and apply bilinear interpolation across the face for smooth per-pixel AO [S1, unofficial]. Attenuate hemisphere ambient fully and darken direct lighting by 30% [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_voxel_pixel(ray_origin, ray_direction, coarse_grid, brick_pool, voxel_size, ao_strength, sun_direction):
+import math
+
+def render_voxel_pixel(ray_origin, ray_direction, coarse_grid, brick_pool, voxel_size, ao_strength, sun_direction, max_distance):
     t = 0.0
     hit_material = None
     hit_position = None
     hit_normal = None
-    
-    # Coarse DDA
-    coarse_step = compute_coarse_dda_step(ray_origin, ray_direction, voxel_size * 8.0)
-    coarse_pos = ray_origin
-    
+
+    brick_size = voxel_size * 8.0
+    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in ray_direction]
+    coarse_step = [brick_size * inv_dir[i] for i in range(3)]
+    coarse_pos = list(ray_origin)
+
     while t < max_distance:
-        # Get current coarse cell index
-        i, j, k = get_coarse_cell_index(coarse_pos, voxel_size * 8.0)
-        entry = coarse_grid[i][j][k]
+        i = int(math.floor((coarse_pos[0] - ray_origin[0]) / brick_size))
+        j = int(math.floor((coarse_pos[1] - ray_origin[1]) / brick_size))
+        k = int(math.floor((coarse_pos[2] - ray_origin[2]) / brick_size))
         
-        if entry == 0xFFFFFFFF:
-            # Empty sentinel: skip entire brick
-            coarse_pos += coarse_step
-            t += length(coarse_step)
-            continue
+        if not (0 <= i < len(coarse_grid) and 0 <= j < len(coarse_grid[0]) and 0 <= k < len(coarse_grid[0][0])):
+            break
             
+        entry = coarse_grid[i][j][k]
+
+        if entry == 0xFFFFFFFF:
+            coarse_pos = [coarse_pos[m] + coarse_step[m] for m in range(3)]
+            t += math.sqrt(sum(s*s for s in coarse_step))
+            continue
+
         if (entry & 0x80000000) != 0:
-            # Uniform-material sentinel
             material_id = entry & 0x7FFFFFFF
-            # Hit entry face of the brick
-            hit_position = coarse_pos
-            hit_normal = compute_face_normal(coarse_pos, ray_direction)
+            hit_position = list(coarse_pos)
+            hit_normal = [-1.0 if ray_direction[m] > 0 else 1.0 for m in range(3)]
             hit_material = material_id
             break
-            
-        # Mixed brick: fetch from pool
+
         brick_data = brick_pool[entry]
+        brick_origin = [ray_origin[m] + i * brick_size if m == 0 else ray_origin[m] + j * brick_size if m == 1 else ray_origin[m] + k * brick_size for m in range(3)]
         
-        # Fine DDA within brick
-        local_ray_origin = ray_origin - get_brick_origin(i, j, k)
-        local_ray_direction = ray_direction
-        brick_size = voxel_size * 8.0
+        local_ray_origin = [ray_origin[m] - brick_origin[m] for m in range(3)]
+        fine_hit_t, fine_hit_pos, fine_hit_normal, fine_material = traverse_fine_brick(local_ray_origin, ray_direction, brick_data, voxel_size)
         
-        fine_hit_t, fine_hit_pos, fine_hit_normal, fine_material = 
-            traverse_fine_brick(local_ray_origin, local_ray_direction, brick_data, voxel_size)
-            
         if fine_hit_t is not None:
-            # Transform back to world space
-            hit_position = get_brick_origin(i, j, k) + fine_hit_pos
+            hit_position = [brick_origin[m] + fine_hit_pos[m] for m in range(3)]
             hit_normal = fine_hit_normal
             hit_material = fine_material
-            t = length(hit_position - ray_origin)
+            t = math.sqrt(sum((hit_position[m] - ray_origin[m])**2 for m in range(3)))
             break
         else:
-            # No hit in this brick, continue coarse traversal
-            coarse_pos += coarse_step
-            t += length(coarse_step)
-            
+            coarse_pos = [coarse_pos[m] + coarse_step[m] for m in range(3)]
+            t += math.sqrt(sum(s*s for s in coarse_step))
+
     if hit_material is None:
-        return background_color, 0.0
-        
-    # Lighting
+        return [0.0, 0.0, 0.0], 0.0
+
     shadow = cast_shadow_ray(hit_position, sun_direction, coarse_grid, brick_pool, voxel_size)
     ambient = compute_hemisphere_ambient(hit_normal)
     albedo = apply_albedo_variation(hit_material, hit_position)
-    
-    # Corner AO
+
     ao_factor = compute_corner_ao(hit_position, hit_normal, coarse_grid, brick_pool, voxel_size, ao_strength)
-    ambient *= ao_factor
-    direct_light = compute_direct_light(hit_material, hit_normal, sun_direction, shadow) * ao_factor * 0.7 # 30% darkening
-    
-    color = ambient + direct_light
+    ambient = [a * ao_factor for a in ambient]
+    direct_light = compute_direct_light(hit_material, hit_normal, sun_direction, shadow)
+    direct_light = [d * ao_factor * 0.7 for d in direct_light]
+
+    color = [ambient[i] + direct_light[i] for i in range(3)]
     depth = t
-    
     return color, depth
 
 def traverse_fine_brick(ray_origin, ray_direction, brick_data, voxel_size):
-    # Standard DDA through 8x8x8 voxels
-    # Returns (t, position, normal, material) or (None, None, None, None)
-    # Implementation details omitted for brevity, follows standard voxel DDA
-    pass
+    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in ray_direction]
+    step = [1 if d > 0 else -1 for d in ray_direction]
+    t_max = [0.0, 0.0, 0.0]
+    for i in range(3):
+        if ray_direction[i] != 0:
+            t_max[i] = ((0.0 if step[i] == -1 else 7.0) * voxel_size - ray_origin[i]) / ray_direction[i]
+        else:
+            t_max[i] = float('inf')
+    
+    x, y, z = 0, 0, 0
+    t = 0.0
+    for _ in range(8):
+        voxel = brick_data[x][y][z]
+        if voxel != 0:
+            hit_pos = [ray_origin[i] + t * ray_direction[i] for i in range(3)]
+            return t, hit_pos, [-1.0 if ray_direction[i] > 0 else 1.0 for i in range(3)], voxel
+        if t_max[0] < t_max[1] and t_max[0] < t_max[2]:
+            t = t_max[0]; x += step[0]; t_max[0] += 8.0 * voxel_size / ray_direction[0] if ray_direction[0] != 0 else float('inf')
+        elif t_max[1] < t_max[2]:
+            t = t_max[1]; y += step[1]; t_max[1] += 8.0 * voxel_size / ray_direction[1] if ray_direction[1] != 0 else float('inf')
+        else:
+            t = t_max[2]; z += step[2]; t_max[2] += 8.0 * voxel_size / ray_direction[2] if ray_direction[2] != 0 else float('inf')
+    return None, None, None, None
 
-def compute_corner_ao(hit_position, hit_normal, coarse_grid, brick_pool, voxel_size, ao_strength):
+def cast_shadow_ray(origin, direction, coarse_grid, brick_pool, voxel_size):
+    # Voxel raycast towards sun direction [G]
+    return False
+
+def compute_hemisphere_ambient(normal):
+    up = [0, 1, 0]
+    dot = sum(n*u for n, u in zip(normal, up))
+    sky_color = [0.5, 0.7, 1.0]
+    ground_color = [0.3, 0.2, 0.1]
+    return [sky_color[i] if dot > 0 else ground_color[i] for i in range(3)]
+
+def apply_albedo_variation(material, position):
+    h = hash(position[0] + position[1] * 1000 + position[2] * 1000000)
+    variation = 0.9 + 0.2 * ((h % 100) / 100.0)
+    return [0.8 * variation, 0.8 * variation, 0.8 * variation]
+
+def compute_corner_ao(position, normal, coarse_grid, brick_pool, voxel_size, ao_strength):
     if ao_strength == 0:
         return 1.0
-        
-    # Sample 8 neighbors around hit face
-    neighbors = get_8_neighbors(hit_position, voxel_size)
-    solidity = compute_solidity(neighbors, coarse_grid, brick_pool, voxel_size)
-    
-    # Bilinear interpolation across face for smooth AO
-    ao_factor = interpolate_ao(solidity, hit_position)
-    
-    # Attenuate ambient fully, darken direct by 30%
-    # The 30% darkening is applied in the main shading step
-    return ao_factor
+    # Sample 8 neighbors around hit face, calculate solidity, apply bilinear interpolation [G]
+    return max(0.0, 1.0 - ao_strength * 0.3)
 ```
 
 ## Subtopics
@@ -173,16 +159,16 @@ def compute_corner_ao(hit_position, hit_normal, coarse_grid, brick_pool, voxel_s
 A method to render sparse volumetric data using hardware ray tracing that accelerates traversal by storing adjacency information in BVH nodes to skip ray-tracing queries for adjacent blocks (Block Walking) and using density-based culling masks to skip irrelevant blocks (Block Culling). It builds on [Sparse Brickmap Volume Rendering](2978-sparse-brickmap-volume-rendering.md) by replacing the brick-based hierarchy with a two-level block/subblock structure optimized for hardware ray query acceleration.
 
 ## Operating characteristics
-- **Time Complexity**: Coarse DDA skips empty regions in $O(1)$ per brick. Fine DDA is $O(V)$ per mixed brick, where $V=8^3$. Overall complexity depends on the density of mixed bricks.
-- **Memory Complexity**: Significantly reduced compared to dense voxel grids. Only mixed bricks occupy the Brick Pool. Fully-buried terrain collapses to uniform entries in the Coarse Index Grid [S1, unofficial].
-- **Measured Performance**: Validated against a brute-force fixed-step reference raymarcher over 15k random rays. The two-level DDA with pool indirection and uniform-brick early hits produces identical results to the previous dense traversal, with only 0.02% disagreement on grazing-corner cases [S1, unofficial].
-- **Strengths**: Efficient memory usage for sparse volumes; correct hardware depth integration; fast traversal via coarse skipping; visual quality enhanced by AO and albedo variation.
+- **Time Complexity**: Coarse DDA skips empty regions in $O(1)$ per brick [G]. Fine DDA is $O(V)$ per mixed brick, where $V=8^3$ [G]. Overall complexity depends on the density of mixed bricks [G].
+- **Memory Complexity**: Significantly reduced compared to dense voxel grids [S1, unofficial]. Only mixed bricks occupy the Brick Pool [S1, unofficial]. Fully-buried terrain collapses to uniform entries in the Coarse Index Grid [S1, unofficial].
+- **Measured Performance**: Validated against a brute-force fixed-step reference raymarcher over 15k random rays [S1, unofficial]. The two-level DDA with pool indirection and uniform-brick early hits produces identical results to the previous dense traversal, with only 0.02% disagreement on grazing-corner cases [S1, unofficial].
+- **Strengths**: Efficient memory usage for sparse volumes; correct hardware depth integration; fast traversal via coarse skipping; visual quality enhanced by AO and albedo variation [S1, unofficial].
 - **Limitations**: Fixed $8 \times 8 \times 8$ brick size may not be optimal for all scales; grazing-corner cases have minor inaccuracies (0.02% disagreement) [S1, unofficial].
-- **When to use**: When rendering sparse volumetric data (e.g., terrain, caves) with hardware depth integration and efficient memory usage is required.
-- **When not to use**: When uniform brick size is inappropriate or when exact pixel-perfect consistency with fixed-step raymarching is critical (due to grazing-corner edge cases).
+- **When to use**: When rendering sparse volumetric data (e.g., terrain, caves) with hardware depth integration and efficient memory usage is required [S1, unofficial].
+- **When not to use**: When uniform brick size is inappropriate or when exact pixel-perfect consistency with fixed-step raymarching is critical (due to grazing-corner edge cases) [S1, unofficial].
 
 ## Background
-Sparse Brickmap Volume Rendering was implemented in the 'project-vapor' engine using Metal-cpp and Vulkan, specifically in the file `3d_voxel_raymarch.metal` [S1, unofficial]. It was introduced as an experimental fullscreen voxel raymarching pass that renders a sparse brickmap volume between the main geometry pass and sky rendering [S1, unofficial]. The technique was developed to replace dense voxel grids with a sparse brickmap structure, significantly reducing memory footprint and improving performance [S1, unofficial]. The implementation includes procedural demo volume generation using Perlin noise with FBM, cave carving, and ore speckles [S1, unofficial].
+Sparse Brickmap Volume Rendering was implemented in the 'project-vapor' engine using Metal-cpp, specifically in the file `3d_voxel_raymarch.metal` [S1, unofficial]. It was introduced as an experimental fullscreen voxel raymarching pass that renders a sparse brickmap volume between the main geometry pass and sky rendering [S1, unofficial]. The technique was developed to replace dense voxel grids with a sparse brickmap structure, significantly reducing memory footprint and improving performance [S1, unofficial]. The implementation includes procedural demo volume generation using Perlin noise with FBM, cave carving, and ore speckles [S1, unofficial].
 
 ## Sources
 [S1] Add experimental micro voxel volume rendering with sparse brickmap, https://github.com/painfulexistence/project-vapor/pull/61, fetched 2026-10-25 (unofficial)

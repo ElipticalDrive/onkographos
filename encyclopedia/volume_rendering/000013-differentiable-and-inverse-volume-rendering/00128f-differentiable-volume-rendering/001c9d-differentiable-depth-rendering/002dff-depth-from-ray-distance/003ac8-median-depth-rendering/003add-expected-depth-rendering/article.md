@@ -1,95 +1,90 @@
 # Expected Depth Rendering
 
-Also called: Depth Renderer (Expected)
+Also called: Depth Renderer (Expected), Expected Depth Estimation, Median Depth Accumulation, Opaque Mask Depth, Sigma Threshold Depth
 
 ## Overview
-Expected Depth Rendering computes the expected depth of a ray by calculating the weighted mean of sample depths [S1, unofficial]. It serves as a differentiable depth estimation method, distinct from Median Depth Rendering which uses the median of weighted depths [8815-median-depth-rendering.md]. While Median Depth Rendering is robust to outliers, Expected Depth Rendering provides a smooth, differentiable estimate of the center of mass of the volume along the ray, making it suitable for optimization tasks where gradient continuity is prioritized over robustness [S1, unofficial].
+Expected Depth Rendering estimates scene depth by computing the weighted average of depth samples along a ray, normalized by the accumulated weight [S1]. This method provides a stable geometric signal for pseudo-normal supervision and ray-tracing initialization, offering superior reconstruction quality and downstream stability compared to inverse-depth variants [S1]. It differs from Median Depth Rendering, which identifies the sample index where cumulative opacity crosses a threshold, by integrating the entire ray's contribution rather than selecting a single median point [S2, unofficial].
 
 ## How it works
-**Inputs:**
-- Ray samples: A set of $N$ samples along a ray, indexed $k=1 \dots N$.
-- Sample depths: $d_k$, the distance of the $k$-th sample from the camera origin.
-- Sample opacities: $o_k$, the opacity contribution of the $k$-th sample.
-- Transmittance: $T_k$, the accumulated transmittance up to the $k$-th sample.
-- Gaussian contribution (for Gaussian Splatting variants): $\mathcal{G}_k^{\text{D}}(\mathbf{x})$, the 2D Gaussian projection weight for pixel $\mathbf{x}$.
+**Inputs and Outputs**
+*   **Inputs:**
+    *   `z_vals`: Tensor of depth samples (z-coordinates) along each ray. Shape: $(H, W, N)$, where $H, W$ are image dimensions and $N$ is the number of samples per ray [S1][S2, unofficial].
+    *   `weights`: Tensor of density weights $w_i$ for each sample. Shape: $(H, W, N)$ [S1][S2, unofficial].
+*   **Outputs:**
+    *   `depth_map`: Tensor containing the expected depth for each pixel. Shape: $(H, W)$ [S2, unofficial].
 
-**Outputs:**
-- Expected depth $D$, a scalar value representing the mean depth along the ray.
+**Data Structures**
+*   **Weights ($w_i$):** Calculated as $w_i = T_i g_i \alpha_i$, where $T_i$ is transmittance, $g_i$ is Gaussian response (or density weight), and $\alpha_i$ is opacity [S1].
+*   **Transmittance ($T_i$):** Cumulative transmittance up to sample $i$, typically $T_i = \exp(-\sum_{j=0}^{i-1} \sigma_j \delta_j)$ or accumulated from previous steps [S1].
 
-**Data Structures:**
-- Arrays for $d_k$, $o_k$, and $T_k$ of size $N$.
-- $T_k$ is typically computed as $T_k = \prod_{j=1}^{k-1} (1 - o_j)$, with $T_1 = 1$.
+**Parameters**
+*   `method`: Strategy for computing depth. Set to `'expected'` for weighted mean [S3, unofficial].
+*   `depth_threshold`: Used in median variants, but not in expected depth calculation. Default 0.5 [S2, unofficial].
 
-**Steps:**
-1. **Compute Transmittance:** Calculate the transmittance $T_k$ for each sample. For standard volume rendering, $T_k = \prod_{j=1}^{k-1} (1 - o_j)$. For Gaussian-based methods, the weight may include the Gaussian projection term [S2].
-2. **Compute Weights:** Determine the weight $w_k$ for each sample.
-   - For standard volume rendering: $w_k = o_k T_k$.
-   - For Gaussian Depth Rendering: $w_k = o_k \mathcal{G}_k^{\text{D}}(\mathbf{x}) T_k$ [S2].
-3. **Compute Expected Depth:** Calculate the weighted sum of depths normalized by the sum of weights.
-   $$ D = \frac{\sum_{k=1}^N w_k d_k}{\sum_{k=1}^N w_k} $$
-   If $\sum w_k \approx 0$, return a default depth (e.g., far plane) [G].
+**Steps**
+1.  **Compute Weights:** For each sample $i$ along each ray, calculate the weight $w_i$. In Gaussian Splatting contexts, $w_i = T_i g_i \alpha_i$ [S1]. In standard volume rendering, $w_i = T_i (1 - \exp(-\sigma_i \delta_i))$ [S1].
+2.  **Accumulate Weight:** Compute the total accumulated weight $W$ for each ray:
+    $$ W = \sum_{i \in N} w_i $$
+    where $N$ is the set of all samples along the ray [S1].
+3.  **Compute Expected Depth:** Calculate the expected depth $z_E$ for each pixel using the weighted mean:
+    $$ z_E = \frac{\sum_{i \in N} w_i z_i}{W} $$
+    where $z_i$ is the depth of sample $i$ [S1].
 
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def expected_depth_rendering(depths, opacities, transmittances, gaussian_weights=None):
+def expected_depth_rendering(z_vals, weights):
     """
-    Computes the expected depth from ray samples.
+    Compute expected depth from depth samples and their associated weights.
     
     Args:
-        depths (Tensor): [N] depths d_k.
-        opacities (Tensor): [N] opacities o_k.
-        transmittances (Tensor): [N] transmittances T_k.
-        gaussian_weights (Tensor, optional): [N] Gaussian projection weights G_k^D(x).
+        z_vals: Tensor of shape (..., N) containing depth samples.
+        weights: Tensor of shape (..., N) containing pre-computed weights w_i.
         
     Returns:
-        Tensor: Expected depth scalar.
+        depth_map: Tensor of shape (...) containing expected depth.
     """
-    N = depths.shape[0]
+    # Step 1: Accumulate total weight W for each ray
+    # Sum along the last dimension (samples)
+    W = jnp.sum(weights, axis=-1)
     
-    # Compute weights
-    if gaussian_weights is not None:
-        weights = opacities * gaussian_weights * transmittances
-    else:
-        weights = opacities * transmittances
-        
-    # Sum of weights
-    sum_weights = torch.sum(weights)
+    # Step 2: Compute weighted sum of depths
+    # Element-wise multiply z_vals and weights, then sum along samples
+    weighted_depth_sum = jnp.sum(weights * z_vals, axis=-1)
     
-    # Handle empty or transparent rays
-    if sum_weights < 1e-6:
-        return torch.tensor(0.0) # Or far plane depth [G]
-        
-    # Weighted mean
-    expected_depth = torch.sum(weights * depths) / sum_weights
+    # Step 3: Normalize by total weight
+    # Add epsilon for numerical stability to avoid division by zero
+    epsilon = 1e-7
+    depth_map = weighted_depth_sum / (W + epsilon)
     
-    return expected_depth
+    return depth_map
 ```
 
-**Parameters:**
-- `method`: 'expected' indicates the use of weighted mean depth [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- **Transparency:** If all opacities are zero, the denominator is zero. A fallback value must be chosen [G].
-- **Precision:** Summing small weights can lead to numerical instability. Use Kahan summation or higher precision if necessary [G].
-- **Jensen's Inequality Gap:** In Gaussian Splatting contexts, fitting volumetric density (phasors or raw quads) does not guarantee consistency with the rendered mean depth [S2]. This is because sine/cosine functions in phase encoding oscillate, preventing equality in Jensen's inequality. The rendered mean depth diverges from depth derived from raw quads if multiple density peaks exist along a ray but only one surface exists [S2]. The gap reduces only when all Gaussians are clustered at the same z-position [S2].
+**Edge Cases and Pitfalls**
+*   **Zero Weight:** If $W = 0$ (e.g., completely transparent ray), the result is undefined. A small epsilon is added to the denominator for numerical stability [S1].
+*   **Precision:** Floating-point precision issues may arise if weights vary significantly in magnitude. Using double precision for accumulation can help [G].
+*   **Boundary Conditions:** Ensure $z_i$ values are correctly aligned with $w_i$. Misalignment leads to incorrect depth estimation [S1].
 
 ## Subtopics
 
 ### Mean Gaussian Depth Rendering
-A variant of Expected Depth Rendering specifically for 3D Gaussian Splatting. It computes the mean depth $d(\mathbf{x})$ for a pixel $\mathbf{x}$ as the weighted sum of Gaussian depths $d_k$, where weights are the product of opacity $o_k$, 2D Gaussian contribution $\mathcal{G}_k^{\text{D}}(\mathbf{x})$, and transmittance $T_k$ [S2]. It is chosen when differentiable depth is required from Gaussian primitives. A key pitfall is that optimizing volumetric density (phasors/quads) does not ensure the rendered mean depth matches the depth derived from raw quads due to oscillations in phase encoding [S2]. Consistency is only guaranteed when Gaussians are clustered at the same z-position [S2].
+Computes depth as the weighted sum of Gaussian depths $d_k$, where weights are the product of opacity $o_k$, 2D Gaussian contribution $\mathcal{G}_k^{\text{D}}(\mathbf{x})$, and transmittance $T_k$ [S4]. Formula: $d(\mathbf{x}) = \sum_{k=1}^N d_k o_k \mathcal{G}_k^{\text{D}}(\mathbf{x}) T_k$ [S4]. **Pitfall:** Fitting volumetric density does not guarantee consistency with rendered mean depth. If multiple density peaks exist along a ray but only one surface exists, rendered mean depth diverges from depth derived from raw quads due to oscillating sine/cosine functions in phase encoding, preventing equality in Jensen's inequality. The gap reduces only when all Gaussians are clustered at the same z-position [S4].
 
 ## Operating characteristics
-**Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. The computation involves a single pass to compute weights and a second pass (or accumulation) for the weighted sum.
-**Memory Complexity:** $O(N)$ to store sample attributes.
-**Performance:** Fast and differentiable. Suitable for real-time or near-real-time applications if $N$ is small.
-**Strengths:** Smooth gradients, differentiable, easy to implement.
-**Limitations:** Sensitive to outliers (unlike Median Depth). In Gaussian Splatting, inconsistent with raw quad depth if density peaks are distributed [S2].
+*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. Linear scan to compute weights and sum [S1].
+*   **Memory Complexity:** $O(N)$ per ray to store weights and depths [S1].
+*   **Performance:** Provides stable geometric signals, making it suitable for pseudo-normal supervision and ray-tracing initialization [S1].
+*   **Strengths:** Best overall reconstruction quality among depth variants; stable downstream supervision [S1].
+*   **Limitations:** Sensitive to noise in pure gradient-based normals derived from rendered depth; lacks multi-view consistency when applied to 3D Gaussian surfaces without additional constraints [S1].
+*   **When to Use:** When stable geometry is needed for supervision or initialization, and multi-view consistency can be handled by other means [S1].
+*   **When Not to Use:** When strict surface consistency is required without additional constraints, or when computational resources are extremely limited and simpler approximations suffice [S1, S4].
 
 ## Background
-Expected Depth Rendering is a standard technique in differentiable volume rendering. It is implemented in frameworks like GanERF [S1, unofficial]. The method is derived from the fundamental principles of volume rendering, where the expected value of the depth is the first moment of the depth distribution weighted by the alpha compositing weights.
+Expected Depth Rendering was introduced in the context of differentiable volume rendering and Gaussian Splatting for inverse rendering. It is used in methods like NeRFactor and GS-IR for depth estimation and normal supervision [S1]. The method was chosen over inverse-depth variants for its stability and reconstruction quality [S1]. It is also referenced in implementations like NeRFies and GaNeRF for depth visualization and evaluation [S2, S3, unofficial].
 
 ## Sources
-[S1] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
-[S2] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26
+[S1] VisibilitySplat: Ray-Traced Occlusion for Relighting with 3D Gaussian Splatting, https://doi.org/10.24132/csrn.2026-e17, fetched 2026-10-26
+[S2] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
+[S3] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S4] Time of the Flight of the Gaussians: Optimizing Depth Indirectly in Dynamic Radiance Fields, https://doi.org/10.1109/cvpr52734.2025.01958, fetched 2026-10-26

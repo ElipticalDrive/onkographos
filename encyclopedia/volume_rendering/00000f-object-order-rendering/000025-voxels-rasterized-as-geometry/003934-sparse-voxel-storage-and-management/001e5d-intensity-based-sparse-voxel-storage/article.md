@@ -3,29 +3,29 @@
 Also called: Detail Coefficient Representation (8-byte), Histogram-based Voxel Buffer
 
 ## Overview
-Intensity-based Sparse Voxel Storage is a memory-compression technique for volume rendering that eliminates redundant intensity data by leveraging the spatial coherence of voxel values. It solves the problem of high memory bandwidth and storage costs associated with storing full intensity attributes for every voxel in a sparse volume. By sorting voxels by intensity and using a histogram to track ranges, the method reduces per-voxel storage from 8 bytes to 6 bytes (or fewer) by transmitting intensity as a shader constant or texture coordinate for contiguous spans of identical values, rather than storing it per-voxel [S1]. This approach is distinct from [SVO LOD Management](2990-svo-lod-management.md), which focuses on hierarchical level-of-detail traversal, and [Sparse Voxel Rasterization](3032-sparse-voxel-rasterization.md), which typically uses explicit occupancy grids or hash tables without necessarily sorting by intensity for rendering optimization [S1][S2, unofficial].
+Intensity-based Sparse Voxel Storage is a memory-compression technique for volume rendering that eliminates redundant intensity data by leveraging the spatial coherence of voxel values [S1]. It solves the problem of high memory bandwidth and storage costs associated with storing full intensity attributes for every voxel in a sparse volume [S1]. By sorting voxels by intensity and using a histogram to track ranges, the method reduces per-voxel storage from 8 bytes to 6 bytes (or fewer) by transmitting intensity as a shader constant or texture coordinate for contiguous spans of identical values, rather than storing it per-voxel [S1]. This approach is distinct from [SVO LOD Management](2990-svo-lod-management.md), which focuses on hierarchical level-of-detail traversal, and [Sparse Voxel Rasterization](3032-sparse-voxel-rasterization.md), which typically uses explicit occupancy grids or hash tables without necessarily sorting by intensity for rendering optimization [S1][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of 3D voxels, each defined by integer coordinates $(x, y, z)$ and a scalar intensity value $I$.
-*   **Output:** A GPU vertex buffer containing sorted voxel positions and a histogram structure mapping intensity values to buffer offsets.
+*   **Input:** A set of 3D voxels, each defined by integer coordinates $(x, y, z)$ and a scalar intensity value $I$ [G].
+*   **Output:** A GPU vertex buffer containing sorted voxel positions and a histogram structure mapping intensity values to buffer offsets [S1].
 
 **Data Structures:**
 1.  **Voxel Buffer:** A continuous array of shorts created via `ARB_vertex_buffer_object` [S1].
-    *   **Layout (Naive):** 8 bytes per voxel. Stores $I, x, y, z$ as shorts (2 bytes each).
+    *   **Layout (Naive):** 8 bytes per voxel. Stores $I, x, y, z$ as shorts (2 bytes each) [S1].
     *   **Layout (Optimized):** 6 bytes per voxel. Stores only $x, y, z$ as shorts (2 bytes each). Intensity is omitted from the buffer [S1].
-2.  **Histogram:** An array of structures, one per unique intensity level present in the volume.
-    *   **Fields:** `begin_offset` (index in Voxel Buffer), `end_offset` (index in Voxel Buffer).
+2.  **Histogram:** An array of structures, one per unique intensity level present in the volume [S1].
+    *   **Fields:** `begin_offset` (index in Voxel Buffer), `end_offset` (index in Voxel Buffer) [S1].
     *   **Purpose:** Acts as a run-length encoding, defining the range of voxels in the buffer that share a specific intensity value [S1].
 
 **Steps:**
-1.  **Sort:** Sort all voxels in the volume by their intensity value $I$ in ascending (or descending) order.
-2.  **Build Histogram:** Iterate through the sorted voxels. For each unique intensity value, record the starting and ending indices of the contiguous block of voxels in the sorted buffer.
-3.  **Pack Coordinates:** Store the $x, y, z$ coordinates of each voxel into the Voxel Buffer.
+1.  **Sort:** Sort all voxels in the volume by their intensity value $I$ in ascending (or descending) order [S1].
+2.  **Build Histogram:** Iterate through the sorted voxels. For each unique intensity value, record the starting and ending indices of the contiguous block of voxels in the sorted buffer [S1].
+3.  **Pack Coordinates:** Store the $x, y, z$ coordinates of each voxel into the Voxel Buffer [S1].
     *   *Optimization:* If memory is constrained to 4 bytes per voxel, pack coordinates into 32 bits (e.g., 12 bits for X, 10 bits for Y, 10 bits for Z, supporting a $4096 \times 1024 \times 1024$ grid) [S1].
 4.  **Render Loop:** For each unique intensity level $I_k$:
-    *   Retrieve `begin_offset` and `end_offset` from the Histogram for $I_k$.
-    *   Set a shader constant or texture coordinate to the value $I_k$.
+    *   Retrieve `begin_offset` and `end_offset` from the Histogram for $I_k$ [S1].
+    *   Set a shader constant or texture coordinate to the value $I_k$ [S1].
     *   Invoke `glDrawArrays` (or equivalent) with the range `[begin_offset, end_offset)` to send the corresponding voxels to the vertex processor [S1].
 
 **Pseudocode:**
@@ -38,7 +38,6 @@ def intensity_based_sparse_storage(voxels):
     Returns: buffer (list of shorts), histogram (dict: intensity -> (start, end))
     """
     # Step 1: Sort voxels by intensity
-    # Stable sort is not strictly required but preserves order for identical intensities
     sorted_voxels = sorted(voxels, key=lambda v: v[3])
 
     buffer = []
@@ -53,12 +52,11 @@ def intensity_based_sparse_storage(voxels):
             if current_intensity is not None:
                 # Finalize previous range
                 histogram[current_intensity] = (start_index, i)
-            
             current_intensity = intensity
             start_index = i
 
-        # Store coordinates. 
-        # Using 2-byte shorts for x, y, z. 
+        # Store coordinates.
+        # Using 2-byte shorts for x, y, z.
         # Intensity is NOT stored in the buffer.
         buffer.append(x)
         buffer.append(y)
@@ -81,11 +79,19 @@ def render_intensity_sparse(buffer, histogram):
         # Number of voxels in this span
         count = end - start
         
-        # Draw the voxels. 
+        # Draw the voxels.
         # Each vertex consumes 3 shorts (x, y, z) from the buffer.
-        draw_arrays(mode='TRIANGLES', # or whatever primitive
+        draw_arrays(mode='TRIANGLES',
                     first=start * 3, 
                     count=count * 3)
+
+def set_shader_constant(name, value):
+    """Simulates setting a GPU shader constant for the current draw call."""
+    pass
+
+def draw_arrays(mode, first, count):
+    """Simulates issuing a draw call for a range of vertices in the buffer."""
+    pass
 ```
 
 **Parameters:**
@@ -101,24 +107,24 @@ def render_intensity_sparse(buffer, histogram):
 
 ### LiteVoxel
 LiteVoxel is an extension to SVRaster that addresses low-frequency underfitting and memory overgrowth in sparse voxel rasterization [S2, unofficial]. It introduces three modules:
-1.  **Inverse-Sobel Reweighted Loss:** Applies a Sobel filter to the ground-truth image $S$ to produce $S_2$. A per-pixel weight $S_3$ is computed using a gamma-ramped exponent to make the loss low-frequency-sensitive, shifting gradient focus to flat regions after geometric stabilization [S2, unofficial].
-2.  **Depth-Quantile Pruning:** Voxels are partitioned into depth bins $S_5$. Pruning thresholds are set adaptively via empirical quantiles of the maximum blending weight per bin. EMA-hysteresis guards, contour dilation, and per-step deletion caps stabilize pruning and prevent VRAM inflation near silhouettes [S2, unofficial].
-3.  **Priority-Driven Subdivision:** Ray-footprint eligibility restricts splits to voxels where resolution is warranted. Per-voxel priorities favor far geometry, and subdivision enforces a global growth budget [S2, unofficial].
-LiteVoxel matches SVRaster’s perceptual quality at 40–60% of peak VRAM, with less than 1% loss in PSNR, SSIM, or LPIPS. It reduces peak VRAM by up to 60% (e.g., from 12 GB to 7.9 GB) while maintaining PSNR $\approx 32.13$ dB and SSIM $\approx 0.937$ [S2, unofficial].
+1.  **Inverse-Sobel Reweighted Loss:** Applies a Sobel filter to the ground-truth image $S$ to produce $S_2$ [S2, unofficial]. A per-pixel weight $S_3$ is computed using a gamma-ramped exponent to make the loss low-frequency-sensitive, shifting gradient focus to flat regions after geometric stabilization [S2, unofficial].
+2.  **Depth-Quantile Pruning:** Voxels are partitioned into depth bins $S_5$ [S2, unofficial]. Pruning thresholds are set adaptively via empirical quantiles of the maximum blending weight per bin [S2, unofficial]. EMA-hysteresis guards, contour dilation, and per-step deletion caps stabilize pruning and prevent VRAM inflation near silhouettes [S2, unofficial].
+3.  **Priority-Driven Subdivision:** Ray-footprint eligibility restricts splits to voxels where resolution is warranted [S2, unofficial]. Per-voxel priorities favor far geometry, and subdivision enforces a global growth budget [S2, unofficial].
+LiteVoxel matches SVRaster’s perceptual quality at 40–60% of peak VRAM, with less than 1% loss in PSNR, SSIM, or LPIPS [S2, unofficial]. It reduces peak VRAM by up to 60% (e.g., from 12 GB to 7.9 GB) while maintaining PSNR $\approx 32.13$ dB and SSIM $\approx 0.937$ [S2, unofficial].
 
 ### Object-Voxel Set Storage for Time-Varying Data
 This variant stores only voxels belonging to segmented objects of interest in RAM, allowing multiple time-steps to be kept in memory simultaneously for animated data [S3, unofficial].
 *   **Steps:**
-    1.  Segment volume data into distinct objects.
-    2.  Store only voxels belonging to these objects.
-    3.  Keep multiple time-steps in memory.
+    1.  Segment volume data into distinct objects [S3, unofficial].
+    2.  Store only voxels belonging to these objects [S3, unofficial].
+    3.  Keep multiple time-steps in memory [S3, unofficial].
     4.  Render animated data identically to static data [S3, unofficial].
 *   **Parameter:** Animation phases are stored as separate volume objects (e.g., 12 phases for heart data) [S3, unofficial].
 *   **Benefit:** Avoids memory bandwidth limitations of hardware renderers by not reloading full volume textures for each time-step [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Sorting voxels takes $O(N \log N)$ where $N$ is the number of voxels. Rendering is $O(K)$ where $K$ is the number of unique intensity levels, as each level requires one draw call [S1].
-*   **Memory Complexity:** $O(N)$ for the voxel buffer. The histogram size is $O(U)$ where $U$ is the number of unique intensity values [S1].
+*   **Time Complexity:** Sorting voxels takes $O(N \log N)$ where $N$ is the number of voxels [G]. Rendering is $O(K)$ where $K$ is the number of unique intensity levels, as each level requires one draw call [S1].
+*   **Memory Complexity:** $O(N)$ for the voxel buffer [S1]. Histogram size is Not given in the sources.
 *   **Storage Efficiency:** Reduces storage from 8 bytes/voxel to 6 bytes/voxel (or 4 bytes/voxel with packing) [S1].
 *   **Performance:** Provides a major speedup for large volumes by reducing memory bandwidth requirements and draw call overhead per intensity level [S1].
 *   **Limitations:** Practical volume size is limited by available memory, not theoretical address space [S1]. Performance may degrade on GPUs without efficient bitwise operations if 4-byte packing is used [S1].

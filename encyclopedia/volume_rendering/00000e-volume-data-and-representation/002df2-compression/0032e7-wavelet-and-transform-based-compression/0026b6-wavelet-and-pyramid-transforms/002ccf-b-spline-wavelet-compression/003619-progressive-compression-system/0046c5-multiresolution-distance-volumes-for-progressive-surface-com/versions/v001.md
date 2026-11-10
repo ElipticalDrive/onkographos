@@ -1,0 +1,82 @@
+# Multiresolution Distance Volumes for Progressive Surface Compression
+
+Also called: Multiresolution Distance Volumes, Wavelet-compressed Signed-Distance Volumes
+
+## Overview
+A surface compression method that stores surfaces as wavelet-compressed signed-distance volumes, enabling the representation of surfaces with complex topology and arbitrary numbers of components within a single multiresolution data structure [S1]. It solves the problem of progressive surface transmission and storage by dispensing with the costly base mesh construction and explicit topology tracking required by subdivision surface methods [S1]. Unlike subdivision approaches, it operates entirely on regularly sampled volumes, allowing for elegant topological modification at high compression rates [S1].
+
+## How it works
+The system comprises four modules: (1) Transform input surface into a distance representation, (2) Decompose into linear B-spline wavelet coefficients, (3) Apply a thresholding algorithm using distance information to retain surface geometry, and (4) Produce a progressive bit stream using a zero-tree coder [S1].
+
+### Inputs and Outputs
+*   **Input:** A surface defined by a triangle mesh or an isosurface from regularly sampled volumetric data.
+*   **Output:** A progressive bit stream representing the compressed surface. The surface is reconstructed by extracting the zero-distance isosurface from the decoded signed-distance volume [S1].
+
+### Data Structures
+**Distance Volume Sample ($s$):**
+A regularly spaced sample in the 3D grid. Properties include:
+*   $d(s)$: The signed distance value.
+*   $c(s)$: The closest point on the surface $\Gamma$ to sample $s$ [S1].
+*   $\text{sign}(s)$: The sign of the distance (negative on one side, positive on the other) [S1].
+
+**Wavelet Coefficient:**
+Linear B-spline wavelet coefficients derived from the multiresolution decomposition of the signed-distance volume [S1].
+
+### Formulas
+The signed distance from a surface $\Gamma$ is defined as [S1]:
+$$ d(x) = \text{sign}(x) \cdot \min_{y \in \Gamma} ||x - y|| $$
+where $\text{sign}(\cdot)$ is negative on one side of the surface and positive on the other.
+
+The L2 error metric is defined by taking the maximum of $D(X, Y)$ and $D(Y, X)$, where $D(X, Y)$ is the distance between two surfaces $X$ and $Y$ [S1]:
+$$ D(X, Y) = \max_{x \in X} \min_{y \in Y} ||x - y|| $$
+and $D(x, Y)$ is the Euclidean distance from a point $x \in X$ to the closest point on $Y$ [S1].
+
+### Steps
+
+1.  **Distance Transform:**
+    Apply a modified closest-point propagation algorithm (based on Breen [S1]) to produce an approximation of the actual distance function. This algorithm runs in $O(n)$ time [S1].
+    *   **Initialization:** Identify all cells intersecting the surface (the zero set). Initialize the closest points $c(s)$ and signs $\text{sign}(s)$ for these samples.
+    *   **Propagation:** Propagate the closest points and signs to the rest of the volume samples using a point sampling approach [S1].
+
+2.  **Wavelet Decomposition:**
+    Apply a linear B-spline wavelet decomposition to the implicit signed-distance function to achieve a multiresolution representation [S1].
+
+3.  **Distance-Based Thresholding:**
+    Remove wavelet coefficients that do not contribute to the zero set to reduce coding size [S1]. For each wavelet coefficient:
+    *   Compute a bounding sphere containing the wavelet support.
+    *   Sample the distance value $d_{center}$ at the center of the sphere.
+    *   Let $r$ be the radius of the bounding sphere.
+    *   If $d_{center} > r$, set the coefficient to zero (the support does not intersect the surface) [S1].
+    *   If $r > d_{center}$ (the surface intersects the sphere), examine the distance values at all points in the support. Set the coefficient to zero if all distance values in the support have the same sign [S1].
+
+4.  **Zero-Tree Coding:**
+    Encode the thresholded wavelet coefficients using a zero-tree coder to generate a progressive bit stream. This sends the most significant bits of the most significant wavelet coefficients first, exploiting the decay of wavelet magnitudes at finer resolutions [S1].
+
+### Parameters and Typical Values
+*   **Wavelet Basis:** Linear B-spline [S1].
+*   **Distance Transform Complexity:** $O(n)$ [S1].
+*   **Error Metric:** L2 error, normalized relative to the bounding box diagonal length [S1].
+
+### Edge Cases and Pitfalls
+*   **Topology Verification:** There is no formalism to prove that new components or handles are not added by the thresholding method. For complicated surfaces, a verification step comparing the original and reconstructed distance volumes is required to warn of irregularities [S1].
+*   **Boundary Conditions:** For isosurfaces from scientific data, the boundary of the distance volume must coincide with the boundary of the sampled data if the isosurface has a boundary on the volume boundary [S1].
+*   **Inside/Outside Ambiguity:** For surfaces that exit the distance volume, the notion of inside/outside is not applicable; the sign is determined by the scalar function without relying on inside/outside relations [S1].
+
+## Subtopics
+
+### Distance-Based Thresholding
+A specialized thresholding scheme that removes wavelet coefficients not contributing to the reconstructed surface, ensuring no spurious surface components are added [S1]. It differs from Grisoni's method by considering wavelet coefficient location and providing a progressive bit ordering that reduces geometric error [S1]. It uses a bounding sphere test: if the distance at the sphere center exceeds the radius, the coefficient is zeroed; if the sphere intersects the surface, the coefficient is zeroed only if all distance values in the support share the same sign [S1]. No formal proof exists that this method preserves topology for all cases, requiring verification for complex surfaces [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The distance transform runs in $O(n)$ time [S1].
+*   **Scalability:** The method is not limited by the need to remap a complex surface to a base mesh with subdivision connectivity [S1].
+*   **Progressiveness:** Generates a progressive encoding where a usable approximation can be obtained with a small number of bits [S1].
+*   **Strengths:** Handles complex topology and arbitrary numbers of components in a single structure; dispenses with base mesh construction; allows topology modification at high compression rates [S1].
+*   **Limitations:** Requires a verification step for complicated surfaces to ensure no spurious components are added; relies on an approximation of the distance function via point sampling [S1].
+*   **Comparison:** Unlike subdivision surface methods, it does not require a coarse base mesh or explicit topology tracking [S1]. Unlike Grisoni's method, it uses location-based thresholding and progressive bit ordering to reduce geometric error [S1].
+
+## Background
+The method was presented by Mark Duchaineau (Lawrence Livermore National Laboratory) and Nelson Max (U.C. Davis) [S1]. It addresses limitations in subdivision surface compression, such as the difficulty of base mesh construction for large, complex surfaces with many components, and the need for explicit topology tracking [S1]. It builds on previous work in compressing signed-distance functions [S1] and improves upon methods that project wavelets onto scaling basis functions by providing a location-based thresholding scheme [S1].
+
+## Sources
+[S1] Multiresolution Distance Volumes for Progressive Surface Compression, https://digital.library.unt.edu/ark:/67531/metadc1409942/?q=volume data compression rendering, fetched 2026-10-28

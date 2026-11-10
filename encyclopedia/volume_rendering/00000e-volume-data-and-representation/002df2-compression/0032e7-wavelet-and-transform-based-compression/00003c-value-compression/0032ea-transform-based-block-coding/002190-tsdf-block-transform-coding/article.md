@@ -7,33 +7,36 @@ TSDF Block Transform Coding is a lossy compression method for Truncated Signed D
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A frame of TSDF volume data, represented as a sparse set of active voxel blocks. Each block contains $8 \times 8 \times 8$ voxels [S1]. A block is "active" if it contains at least one voxel with a valid TSDF value (i.e., within the truncation band) [S1].
+*   **Input:** A frame of TSDF volume data, represented as a sparse set of active voxel blocks [S1]. Each block contains $8 \times 8 \times 8$ voxels [S1]. A block is "active" if it contains at least one voxel with a valid TSDF value (i.e., within the truncation band) [S1].
 *   **Output:** A compressed bitstream representing the active blocks [S1].
 
 **Data Structures:**
-*   **Voxel Block:** A $8 \times 8 \times 8$ grid of floating-point TSDF values [S1].
+*   **Voxel Block:** An $8 \times 8 \times 8$ grid of floating-point TSDF values [S1].
 *   **Active Block List:** A list of indices or pointers to blocks containing valid data [S1].
 *   **Coefficient Streams:** $N$ separate streams of quantized integers, where each stream corresponds to a specific DCT coefficient index across all active blocks [S1].
 
 **Parameters:**
 *   **Block Size:** $8 \times 8 \times 8$ voxels [S1].
-*   **$N$:** Number of retained DCT coefficients. Typical range $N \in [27, 64]$ [S1].
-*   **$\Delta_{DC}$:** Fixed quantization step for the DC term. Value used in experiments: $0.001$ [S1].
-*   **$\Delta_{AC}$:** Tunable quantization step for AC coefficients. Smaller values reduce distortion but increase bitrate [S1].
+*   **$N$:** Number of retained DCT coefficients [S1]. Typical practical operating range is $N \in [27, 64]$ [S1].
+*   **$\Delta_{DC}$:** Fixed quantization step for the DC term [S1]. Value used in experiments: $0.001$ [S1].
+*   **$\Delta_{AC}$:** Tunable quantization step for AC coefficients [S1]. Smaller values reduce distortion but increase bitrate [S1].
 
 **Algorithm Steps:**
 
-1.  **Identify Active Blocks:** Iterate through the TSDF volume grid. Mark a block as active if any of its $8 \times 8 \times 8$ voxels has a valid TSDF value (within the truncation band) [S1].
-2.  **3D DCT Transform:** For each active block, apply the 3D DCT to map the spatial voxel values to the frequency domain. The 3D DCT basis functions are defined as:
+1.  **Identify Active Blocks:** Iterate through the TSDF volume grid and mark a block as active if any of its $8 \times 8 \times 8$ voxels has a valid TSDF value within the truncation band [S1].
+2.  **3D DCT Transform:** For each active block, apply the 3D DCT to map the spatial voxel values to the frequency domain [S1]. The 3D DCT basis functions are defined as:
     $$
     C(u,v,w) = \alpha(u)\alpha(v)\alpha(w) \sum_{x=0}^{7} \sum_{y=0}^{7} \sum_{z=0}^{7} f(x,y,z) \cos\left[\frac{\pi(2x+1)u}{16}\right] \cos\left[\frac{\pi(2y+1)v}{16}\right] \cos\left[\frac{\pi(2z+1)w}{16}\right]
     $$
     where $\alpha(k) = \sqrt{1/8}$ if $k=0$ and $\sqrt{2/8}$ otherwise, and $f(x,y,z)$ is the voxel value at spatial coordinates $(x,y,z)$ [S1].
-3.  **Coefficient Selection:** Sort the 512 DCT coefficients by increasing index sum $u+v+w$ (Manhattan distance from DC). Retain the first $N$ coefficients. Set all remaining $512-N$ coefficients to zero [S1].
-4.  **Quantization:** Quantize the retained coefficients. The DC coefficient ($u=v=w=0$) uses $Q_{DC} = \text{round}(C(0,0,0) / \Delta_{DC})$. AC coefficients use $Q_{AC} = \text{round}(C(u,v,w) / \Delta_{AC})$ [S1].
-5.  **Grouping:** Instead of encoding each block as a vector, group the quantized coefficients by their DCT index. Create $N$ separate streams, where stream $k$ contains the $k$-th coefficient from every active block [S1].
-6.  **Entropy Coding:** Apply lossless range coding to each of the $N$ coefficient streams independently. The range coder uses an adaptive probability model that updates symbol frequencies online as symbols are processed [S1].
-7.  **Decoding (Inverse):** Decode the $N$ streams using range decoding to recover quantized coefficients. Dequantize using $C_{rec}(u,v,w) = Q \times \Delta$. Reconstruct the $8 \times 8 \times 8$ block using the Inverse 3D DCT on the $N$ retained coefficients (with the other 512-N set to zero). Place reconstructed blocks back into the volume grid [S1].
+3.  **Coefficient Selection:** Sort the 512 DCT coefficients by increasing index sum $u+v+w$ (Manhattan distance from DC) [S1]. Retain the first $N$ coefficients and set all remaining $512-N$ coefficients to zero [S1].
+4.  **Quantization:** Quantize the retained coefficients using a fixed step for the DC term and a tunable step for AC coefficients [S1]. The DC coefficient ($u=v=w=0$) uses $Q_{DC} = \text{round}(C(0,0,0) / \Delta_{DC})$ [S1]. AC coefficients use $Q_{AC} = \text{round}(C(u,v,w) / \Delta_{AC})$ [S1].
+5.  **Grouping:** Group the quantized coefficients by their DCT index across all active blocks to produce $N$ coefficient streams, rather than encoding each block as a mixed $N$-vector [S1].
+6.  **Entropy Coding:** Apply lossless range coding to each of the $N$ coefficient streams independently [S1]. The range coder uses an adaptive probability model that updates symbol frequencies online as symbols are processed [S1].
+7.  **Decoding (Inverse):** Decode the $N$ streams using range decoding to recover quantized coefficients [S1]. Dequantize using $C_{rec}(u,v,w) = Q \times \Delta$ [S1]. Reconstruct the $8 \times 8 \times 8$ block using the Inverse 3D DCT on the $N$ retained coefficients (with the other $512-N$ set to zero) [S1]. Place reconstructed blocks back into the volume grid [S1]. The inverse transform is:
+    $$
+    f(x,y,z) = \sum_{u=0}^{7} \sum_{v=0}^{7} \sum_{w=0}^{7} \alpha(u)\alpha(v)\alpha(w) C(u,v,w) \cos\left[\frac{\pi(2x+1)u}{16}\right] \cos\left[\frac{\pi(2y+1)v}{16}\right] \cos\left[\frac{\pi(2z+1)w}{16}\right]
+    $$
 
 **Pseudocode:**
 
@@ -47,29 +50,28 @@ def tsdf_block_transform_coding(active_blocks, N, delta_dc, delta_ac):
     Compresses a set of active TSDF blocks using 3D DCT and range coding.
     
     Args:
-        active_blocks: List of 8x8x8 numpy arrays (or lists of lists) representing TSDF values.
+        active_blocks: List of 8x8x8 arrays representing TSDF values.
         N: Number of DCT coefficients to retain.
         delta_dc: Quantization step for DC coefficient.
         delta_ac: Quantization step for AC coefficients.
         
     Returns:
-        A dictionary mapping DCT index to a list of quantized integers.
+        A list of N lists, where each inner list contains quantized integers 
+        for one DCT index across all active blocks.
     """
     # Initialize coefficient streams: N streams, each will hold quantized values
     coefficient_streams = [[] for _ in range(N)]
+    
+    # Precompute sorting indices by Manhattan distance (u+v+w)
+    indices = [(u, v, w) for u in range(8) for v in range(8) for w in range(8)]
+    indices.sort(key=lambda k: sum(k))
+    selected_indices = indices[:N]
     
     for block in active_blocks:
         # Step 1: 3D DCT
         dct_coeffs = compute_3d_dct(block)
         
-        # Step 2: Select N lowest frequency coefficients
-        # Sort indices by Manhattan distance (u+v+w)
-        indices = [(u, v, w) for u in range(8) for v in range(8) for w in range(8)]
-        indices.sort(key=lambda k: sum(k))
-        
-        selected_indices = indices[:N]
-        
-        # Step 3: Quantize
+        # Step 2 & 3: Select and Quantize N lowest frequency coefficients
         for idx, (u, v, w) in enumerate(selected_indices):
             coeff = dct_coeffs[u, v, w]
             if u == 0 and v == 0 and w == 0:
@@ -82,10 +84,9 @@ def tsdf_block_transform_coding(active_blocks, N, delta_dc, delta_ac):
             # Append to the corresponding stream
             coefficient_streams[idx].append(q_val)
             
-    # Step 4: Entropy Coding (Conceptual)
-    # In practice, each stream in coefficient_streams is passed to a range encoder.
-    # The encoder maintains an adaptive probability model.
-    # Here we return the streams to represent the encoded data structure.
+    # Step 4: Entropy Coding
+    # Range coding implementation omitted; apply lossless range coding to each 
+    # stream in coefficient_streams with an adaptive probability model [S1].
     return coefficient_streams
 
 def compute_3d_dct(block):
@@ -141,19 +142,19 @@ def inverse_3d_dct(dct_coeffs, N):
 ## Subtopics
 
 ### Adaptive Range Coding
-A lossless entropy coding technique used within TSDF Block Transform Coding. It uses range coding with adaptive probability models where the encoder and decoder start from the same fixed initial model and update symbol frequencies online as the stream is encoded/decoded. This avoids the need to transmit explicit histogram tables, reducing metadata overhead and simplifying streaming for short streams [S1].
+A lossless entropy coding technique used within TSDF Block Transform Coding [S1]. It uses range coding with adaptive probability models where the encoder and decoder start from the same fixed initial model and update symbol frequencies online as the stream is encoded/decoded [S1]. This avoids the need to transmit explicit histogram tables, reducing metadata overhead and simplifying streaming for short streams [S1]. Explicit model approaches introduce per-stream metadata overhead and complicate streaming when many short streams are produced [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Encoding is linear with respect to the number of active blocks. The 3D DCT on $8 \times 8 \times 8$ blocks is computationally cheap, enabling real-time performance [S1].
-*   **Memory Complexity:** Depends on the number of active blocks and the number of retained coefficients $N$. The sparse representation avoids storing inactive blocks [S1].
-*   **Performance:** The method achieves good compression ratios for dynamic scenes with smooth surfaces. The choice of $N \in [27, 64]$ balances bitrate and reconstruction quality (Chamfer distance) [S1].
+*   **Time Complexity:** Encoding is linear with respect to the number of active blocks [S1]. The 3D DCT on $8 \times 8 \times 8$ blocks is computationally cheap, enabling real-time performance [S1].
+*   **Memory Complexity:** Depends on the number of active blocks and the number of retained coefficients $N$ [S1]. The sparse representation avoids storing inactive blocks [S1].
+*   **Performance:** The method achieves good compression ratios for dynamic scenes with smooth surfaces [S1]. The choice of $N \in [27, 64]$ balances bitrate and reconstruction quality (Chamfer distance) [S1].
 *   **Strengths:** Real-time capable; no need to transmit transform parameters; effective for locally smooth TSDF data; adaptive range coding reduces overhead [S1].
 *   **Limitations:** Lossy compression; performance degrades if the scene motion is not compensated (though motion compensation is a separate step in the full codec); fixed DCT may be suboptimal for highly complex or non-smooth surfaces compared to learned transforms (though cross-scene KLT is similar) [S1].
 *   **When to use:** Real-time streaming of dynamic implicit surfaces where low latency and predictable compute are required [S1].
 *   **When not to use:** Offline compression where maximum compression ratio is prioritized over speed, or for scenes with highly non-smooth geometry where learned transforms might offer slight gains [S1].
 
 ## Background
-TSDF Block Transform Coding was introduced in the context of implicit surface compression for dynamic scenes. It builds on the observation that TSDF volumes are sparse and locally smooth, allowing energy compaction via DCT. The method was proposed to enable real-time streaming, avoiding the overhead of learned transforms like the Karhunen-Loève Transform (KLT) which require computing and transmitting transform parameters. Experiments showed that cross-scene KLT closely tracks fixed DCT in practical operating ranges, justifying the use of a data-independent transform [S1].
+TSDF Block Transform Coding was introduced in the context of implicit surface compression for dynamic scenes [S1]. It builds on the observation that TSDF volumes are sparse and locally smooth, allowing energy compaction via DCT [S1]. The method was proposed to enable real-time streaming, avoiding the overhead of learned transforms like the Karhunen-Loève Transform (KLT) which require computing and transmitting transform parameters [S1]. Experiments showed that cross-scene KLT closely tracks fixed DCT in practical operating ranges, justifying the use of a data-independent transform [S1].
 
 ## Sources
 [S1] Implicit Surface Compression -- with Good Old Discrete Cosine Transform and Motion Compensation, https://doi.org/10.1145/3811298, fetched 2026-10-30

@@ -1,67 +1,81 @@
 # Training Objective for Fine Representation
 
-Also called: Fine-stage Training Configuration
+Also called: Fine Representation Training Objective, Fine-stage Training Configuration
 
 ## Overview
-This configuration defines the loss function and optimization strategy for the fine-stage of a two-stage radiance field optimization pipeline. It builds on [Training Configuration](2332-training-configuration.md) by specifying how to handle the second stage of training, typically following a coarse-stage initialization. The primary distinction from the coarse stage is the reduction of regularization weights to prioritize photometric accuracy and geometric detail over structural priors. It is distinct from [Training Loop Setup](1522-training-loop-setup.md) which handles the loop infrastructure, and [Regularization and Priors](6281-regularization-and-priors.md) which defines the specific prior terms.
+The training objective for the fine representation defines the loss configuration used during the optimization of the high-resolution or fine-grained radiance field component. It solves the problem of over-regularizing the detailed geometry and appearance that the coarse stage has already established, ensuring that the fine stage can converge to a sharper solution without being penalized excessively by smoothing priors. It differs from the coarse stage objective primarily by reducing the weight of regularization terms, a modification empirically shown to yield slightly better visual quality [S2].
 
 ## How it works
-The fine-stage training objective minimizes a composite loss function $\mathcal{L}_{fine}$ composed of photometric reconstruction loss and regularization terms.
+The fine representation training objective reuses the loss functions defined for the coarse stage but applies modified weights to the regularization components.
 
 **Inputs and Outputs:**
-- **Inputs:** Rendered images $\hat{I}$, ground truth images $I_{gt}$, accumulated alpha $\alpha$, density field $V(\rho)$, and scene geometry parameters.
-- **Outputs:** Scalar loss value $\mathcal{L}_{fine}$ for backpropagation.
+- **Inputs:** The rendered color and depth from the fine representation network, the ground truth images, and the regularization weights specific to the fine stage.
+- **Outputs:** A scalar loss value used to update the fine representation network parameters.
 
 **Data Structures:**
-- Loss weights are stored as scalar hyperparameters.
-- Regularization terms (e.g., density smoothness, sparsity) are computed per-sample or per-batch.
+The loss configuration is typically a dictionary or struct containing:
+- `loss_type`: Enum or string identifying the loss function (e.g., L1, L2, SSIM).
+- `weight`: Float scalar for the regularization term.
+- `coarse_weight`: Float scalar for the coarse stage regularization (used for comparison or fallback).
 
 **Steps:**
-1. **Compute Photometric Loss:** Calculate the pixel-wise difference between the rendered image $\hat{I}$ and the ground truth $I_{gt}$. Commonly, this is the L1 or L2 loss:
-   $$ \mathcal{L}_{rgb} = \sum_{p} \| \hat{I}_p - I_{gt, p} \| $$
-2. **Compute Regularization Losses:** Calculate regularization terms $\mathcal{L}_{reg}$ based on the density field $V(\rho)$ and accumulated alpha. This may include sparsity constraints or smoothness penalties.
-3. **Apply Fine-Stage Weights:** Scale the regularization losses by a smaller weight factor $w_{reg}^{fine}$ compared to the coarse stage weight $w_{reg}^{coarse}$. The photometric loss weight $w_{rgb}$ remains typically unchanged or is adjusted slightly.
-   $$ \mathcal{L}_{fine} = w_{rgb} \mathcal{L}_{rgb} + w_{reg}^{fine} \mathcal{L}_{reg} $$
-   where $w_{reg}^{fine} < w_{reg}^{coarse}$.
-4. **Backpropagate:** Compute gradients of $\mathcal{L}_{fine}$ with respect to the fine-stage network parameters and optimize.
+1. **Retrieve Coarse Loss Configuration:** Load the loss types and weights used in the coarse stage. This ensures consistency in the optimization landscape [S1, S2].
+2. **Apply Regularization Weight Reduction:** Modify the weights of the regularization losses. The sources indicate that a smaller weight is applied to regularization losses in the fine stage compared to the coarse stage [S1, S2].
+   - Let $L_{reg}^{coarse}$ be the regularization loss weight in the coarse stage.
+   - Let $L_{reg}^{fine}$ be the regularization loss weight in the fine stage.
+   - The relationship is $L_{reg}^{fine} < L_{reg}^{coarse}$ [S2].
+3. **Compute Total Loss:** Calculate the total training loss using the same loss types as the coarse stage but with the reduced regularization weights [S1, S2].
+   $$ L_{total} = L_{data} + \lambda_{reg}^{fine} L_{reg} $$
+   Where $L_{data}$ is the data fidelity loss (e.g., pixel-wise L1/L2) and $\lambda_{reg}^{fine}$ is the reduced regularization weight [S2].
 
 **Parameters:**
-- $w_{reg}^{fine}$: Weight for regularization losses in the fine stage. Typical value: Not given in the sources, but empirically smaller than coarse stage.
-- $w_{rgb}$: Weight for photometric loss. Typical value: 1.0.
+- **Regularization Weight Reduction Factor:** Not given in the sources. The sources state only that the weight is "smaller" [S2].
+- **Loss Types:** Same as coarse stage. Typically includes pixel-wise reconstruction loss (L1 or L2) and potentially perceptual losses [S2].
 
 **Edge Cases and Pitfalls:**
-- **Over-regularization:** If $w_{reg}^{fine}$ is not reduced sufficiently, the model may fail to capture high-frequency details.
-- **Precision:** Ensure that the reduction in regularization weight does not lead to instability in the density field, particularly in unknown space.
+- **Over-smoothing:** If the regularization weight is not reduced sufficiently, the fine details may be smoothed out, leading to blurry results [S2].
+- **Instability:** If the weight is reduced too aggressively, the optimization may become unstable, especially in regions with sparse supervision [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_fine_stage_loss(rendered_image, ground_truth_image, density_field, alpha, w_rgb=1.0, w_reg_fine=0.1):
+def compute_fine_stage_loss(rendered_color, ground_truth_color, coarse_loss_config):
     """
-    Computes the fine-stage training loss.
+    Computes the training loss for the fine representation stage.
     
     Args:
-        rendered_image: Rendered RGB image.
-        ground_truth_image: Ground truth RGB image.
-        density_field: Density field V(rho).
-        alpha: Accumulated alpha values.
-        w_rgb: Weight for photometric loss.
-        w_reg_fine: Weight for regularization losses in fine stage.
+        rendered_color: Tensor of rendered RGB images from the fine network.
+        ground_truth_color: Tensor of ground truth RGB images.
+        coarse_loss_config: Dict containing 'data_weight' and 'reg_weight' from coarse stage.
         
     Returns:
-        total_loss: Scalar loss value.
+        total_loss: Scalar tensor representing the total loss.
     """
-    # Step 1: Compute photometric loss (L1 loss)
-    rgb_loss = torch.mean(torch.abs(rendered_image - ground_truth_image))
+    # Step 1: Retrieve coarse loss configuration
+    data_weight = coarse_loss_config['data_weight']
+    reg_weight_coarse = coarse_loss_config['reg_weight']
     
-    # Step 2: Compute regularization losses
-    # Example: Sparsity regularization on density
-    reg_loss = torch.mean(density_field)
+    # Step 2: Apply smaller weight for regularization losses
+    # The sources state that a smaller weight is used for regularization in the fine stage.
+    # The exact reduction factor is not specified in the sources.
+    # We assume a simple reduction or a predefined smaller value.
+    # [G] In practice, this might be a fixed fraction (e.g., 0.1x) or a learned parameter.
+    # Here we use a placeholder reduction factor of 0.1 as an example of "smaller".
+    reg_weight_fine = reg_weight_coarse * 0.1 
     
-    # Step 3: Apply fine-stage weights
-    # Note: w_reg_fine is typically smaller than coarse stage weight
-    total_loss = w_rgb * rgb_loss + w_reg_fine * reg_loss
+    # Step 3: Compute data fidelity loss (same as coarse stage)
+    # Assuming L1 loss for data fidelity
+    data_loss = torch.mean(torch.abs(rendered_color - ground_truth_color))
+    
+    # Step 4: Compute regularization loss
+    # The specific form of regularization loss is not detailed in the sources for the fine stage,
+    # but it is assumed to be the same type as the coarse stage.
+    # [G] This would typically involve density or color regularization terms from the network.
+    reg_loss = compute_regularization_loss(rendered_color) # Placeholder for actual reg loss computation
+    
+    # Step 5: Combine losses
+    total_loss = data_weight * data_loss + reg_weight_fine * reg_loss
     
     return total_loss
 ```
@@ -69,19 +83,32 @@ def compute_fine_stage_loss(rendered_image, ground_truth_image, density_field, a
 ## Subtopics
 
 ### StyleGAN2-based Discriminator Integration
-Adapts a StyleGAN2 discriminator to evaluate NeRF-rendered images, configured for 64x64 RGB images with specific channel and resolution parameters. Instantiate discriminator only if `adv_loss_mult > 0.0`. Configure discriminator with empty `block_kwargs` and `mapping_kwargs`, and `mbstd_group_size=4` in epilogue. Set base channels to 16384, max channels to 512, FP16 resolution steps to 4, and convolution clamp to 256. Set image channels to 3, class conditioning dimension to 0, and resolution to 64. Parameters: `mbstd_group_size` (default: 4) for minibatch standard deviation layer; `conv_clamp` (default: 256) for maximum absolute value for convolution outputs to stabilize training [S2, unofficial].
+Adapts a StyleGAN2 discriminator to evaluate NeRF-rendered images, configured for 64x64 RGB images with specific channel and resolution parameters. The discriminator is instantiated only if `adv_loss_mult > 0.0`. It is configured with empty `block_kwargs` and `mapping_kwargs`, and `mbstd_group_size=4` in the epilogue. Base channels are set to 16384, max channels to 512, FP16 resolution steps to 4, and convolution clamp to 256. Image channels are 3, class conditioning dimension is 0, and resolution is 64. The `mbstd_group_size` defaults to 4, and `conv_clamp` defaults to 256 to stabilize training [S3, unofficial].
+
+### Geometry-Aware Attention
+A learnable module combining spatial (pixel) and geometric (camera) attention to regulate contributions from neighbours and reduce ghosting artifacts from remaining misalignments. It computes pixel attention weights $\psi_{pix}^{i} \in \mathbb{R}^{w \times h}$ using a module $\mathcal{A}_{pix}$ with two convolutional layers and sigmoid activation:
+$$ \psi_{pix}^{i} = \mathcal{A}_{pix}(H^{f^{'}}_{i\rightarrow k}, I^{f}_{k}, D_{i\rightarrow k}, D_{k}) $$
+where $w/h$ are image dimensions. Camera attention weights $\psi_{cam}^{i} \in \mathbb{R}^1$ are computed using a module $\mathcal{A}_{cam}$ with two fully connected layers and sigmoid activation:
+$$ \psi_{cam}^{i} = \mathcal{A}_{cam}(\pi (R_{i}), \pi (R_{k}), \mathbf {t}_{i}, \mathbf {t}_{k}) $$
+where $\pi(R)$ denotes Euler angles. The final attention-regulated features are:
+$$ H^{f^{a}}_{i\rightarrow k} = \psi_{cam}^{i} \times \psi_{pix}^{i} \times H^{f^{'}}_{i\rightarrow k} $$
+This module helps regulate contributions from neighbours based on pixel content and geometric distance [S4].
 
 ## Operating characteristics
-- **Time Complexity:** Similar to coarse stage, but potentially faster convergence due to reduced regularization overhead.
-- **Memory Complexity:** Same as coarse stage, as the network architecture remains unchanged.
-- **Strengths:** Improves high-frequency detail reconstruction by focusing on photometric accuracy.
-- **Limitations:** May be prone to overfitting if regularization is too weak.
-- **When to Use:** After coarse stage convergence, when fine details are needed.
-- **When Not to Use:** If the coarse stage already captures sufficient detail or if computational resources are limited.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Empirically leads to slightly better visual quality compared to using the same regularization weights as the coarse stage [S2].
+- **Scaling:** Not given in the sources.
+- **Strengths:** Prevents over-regularization of fine details, leading to sharper reconstructions.
+- **Limitations:** Requires careful tuning of the regularization weight reduction factor to avoid instability.
+- **When to use:** When the coarse stage has converged and the fine stage needs to capture high-frequency details without being penalized by strong smoothing priors.
+- **When not to use:** If the scene is very noisy or has sparse views, where stronger regularization might be needed to prevent artifacts.
 
 ## Background
-Originated in the context of two-stage NeRF optimization methods, such as Direct Voxel Grid Optimization [S1], where a coarse representation is first optimized followed by a fine representation. The approach was empirically found to yield better quality by reducing regularization weights in the fine stage.
+The concept of using different training objectives for coarse and fine stages in radiance field optimization originates from the Direct Voxel Grid Optimization paper, which introduced a two-stage optimization process to achieve super-fast convergence [S1, S2]. The fine stage objective was specifically designed to refine the details established by the coarse stage by reducing the influence of regularization terms [S2].
 
 ## Sources
 [S1] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26
-[S2] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S2] Direct Voxel Grid Optimization: Super-Fast Convergence ..., https://openaccess.thecvf.com/content/CVPR2022/papers/Sun_Direct_Voxel_Grid_Optimization_Super-Fast_Convergence_for_Radiance_Fields_Reconstruction_CVPR_2022_paper.pdf, fetched 2026-10-29
+[S3] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S4] RoGUENeRF: A Robust Geometry-Consistent Universal Enhancer for NeRF, https://doi.org/10.1007/978-3-031-73254-6_4, fetched 2026-10-29

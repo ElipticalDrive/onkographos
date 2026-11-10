@@ -94,13 +94,11 @@ def conservative_voxelization(vertices, rect, epsilon_I, epsilon_S, epsilon_m, e
     
     # 2. Handle Degenerate Triangle
     if abs(S) < epsilon_S:
-        # Calculate minimal height h of the triangle
         h = min(
             ((x2-x1)**2 + (y2-y1)**2)**0.5,
             ((x3-x2)**2 + (y3-y2)**2)**0.5,
             ((x1-x3)**2 + (y1-y3)**2)**0.5
         )
-        # Enlarge rectangle bounds by sqrt(2)*h
         rect['x_min'] -= (2**0.5) * h
         rect['x_max'] += (2**0.5) * h
         rect['y_min'] -= (2**0.5) * h
@@ -127,7 +125,8 @@ def conservative_voxelization(vertices, rect, epsilon_I, epsilon_S, epsilon_m, e
         dy = yj - yi
         
         # Handle parallel lines (nearly horizontal edge)
-        if abs(dx) > 1e-9 and abs(dy / dx) < epsilon_I:
+        # Evidence: if |yj − yi| < max(ε*I*, ε*I* |xj −xi|) then
+        if abs(dy) < max(epsilon_I, epsilon_I * abs(dx)):
             ay = 0.0
             by = 2.0
             yE = max(yE, epsilon_I)
@@ -194,11 +193,11 @@ def conservative_voxelization(vertices, rect, epsilon_I, epsilon_S, epsilon_m, e
 A technique to represent a binary 3D grid of voxels using a single 2D texture, where the $k$-th bit of the RGBA representation of pixel $(i, j)$ encodes the value of voxel $(i, j, k)$ [S2, unofficial]. It renders the scene and, for each fragment, if its depth lies in the $k$-th slice, outputs a color having only the $k$-th bit activated [S2, unofficial]. It uses a bitwise OR blending mode to combine all fragments projecting to the same pixel, allowing tracking of all fragments in a single pass rather than discarding all but the closest [S2, unofficial]. Unlike Conservative Voxelization via Depth Range, it does not compute geometric intersection bounds but relies on depth quantization and bitwise operations [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of triangles, as each triangle is processed in a single pass (or few passes for MRT). The intersection computation is constant time per triangle (12 intersections) [S1, unofficial].
-*   **Memory Complexity:** $O(res_x \times res_y \times \frac{res_z}{32})$ for the output texture. The lookup table is small ($32 \times 32$ or $512 \times 128$ texels) [S1, unofficial].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of triangles, as each triangle is processed in a single pass (or few passes for MRT) [S1, unofficial]. The intersection computation is constant time per triangle (12 intersections) [S1, unofficial].
+*   **Memory Complexity:** $O(res_x \times res_y \times \frac{res_z}{32})$ for the output texture [S1, unofficial]. The lookup table is small ($32 \times 32$ or $512 \times 128$ texels) [S1, unofficial].
 *   **Performance:** The method leverages GPU native 4D vector processing for intersection calculations, significantly accelerating the depth range computation [S1, unofficial]. MRT support allows processing 128 slices in a single pass, reducing the number of rendering passes required for high-resolution volumes [S1, unofficial].
 *   **Accuracy:** Theoretically accurate; misses no voxels. The number of redundant voxels is no more than 0.1% of the total number [S1, unofficial].
-*   **Limitations:** Requires hardware support for MRT and bitwise blending operations. The lookup table size grows with the number of slices if not using MRT. Parallel line and degenerate triangle cases require careful handling to maintain correctness [S1, unofficial].
+*   **Limitations:** Requires hardware support for MRT and bitwise blending operations. The lookup table size grows with the number of slices if not using MRT [S1, unofficial]. Parallel line and degenerate triangle cases require careful handling to maintain correctness [S1, unofficial].
 
 ## Background
 The method was introduced in a paper on conservative voxelization, which proposed computing the depth range of a projected triangle over a fragment rectangle to encode occupancy bits into a texture [S1, unofficial]. It builds upon the concept of slicemaps, where a 3D grid is represented by a 2D texture using bits of RGBA channels [S2, unofficial]. The approach addresses the limitations of pre-computation based approaches that use switch-case structures and costly intersection point location computations, offering a more hardware-friendly implementation using native GPU vector operations [S1, unofficial].

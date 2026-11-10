@@ -3,156 +3,95 @@
 Also called: 3D-HGS
 
 ## Overview
-3D Half-Gaussian Splatting (3D-HGS) is a reconstruction kernel for 3D Gaussian Splatting that replaces the standard isotropic Gaussian with a half-space truncated Gaussian to resolve shape and color discontinuities (Gibbs phenomenon) at object boundaries and texture-rich areas [S1]. It achieves state-of-the-art rendering quality on standard benchmarks without compromising the real-time performance of the underlying rasterizer, distinguishing itself from 2D-GS by retaining volumetric rendering and from GES by explicitly modifying the kernel function rather than just scaling factors [S1].
+3D Half-Gaussian Splatting (3D-HGS) is a reconstruction kernel for 3D Gaussian Splatting that replaces the standard full 3D Gaussian with a 3D Half-Gaussian to address shape and color discontinuities (Gibbs phenomenon) at object boundaries and texture-rich areas [S1]. It achieves higher rendering quality without compromising speed by allowing each half of the split Gaussian to have different opacity values while sharing geometric parameters [S1]. Unlike 2D-GS, which performs surface rendering, 3D-HGS retains volumetric rendering to preserve performance while enabling accurate modeling of discontinuous functions [S1].
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-- Initial set of 3D Gaussians from Structure-from-Motion (SfM) sparse points [S1].
+- Initial set of 3D Gaussians located at sparse points obtained via Structure-from-Motion (SfM) [S1].
 - Camera parameters (view matrix $W$, projection Jacobian $J$) [S1].
 - Ground-truth images for optimization [S1].
 
 **Outputs:**
 - Rendered 2D images [S1].
-- Optimized Gaussian parameters including split plane normals and dual opacities [S1].
+- Optimized parameters for each 3D Half-Gaussian primitive [S1].
 
 ### Data Structures
-Each 3D Half-Gaussian kernel extends the standard 3D-GS parameters [S1]:
-- **Location ($\mu$):** 3D vector $[\mu_x, \mu_y, \mu_z]^T$ [S1].
-- **Scale ($S$):** Scaling matrix (diagonal) [S1].
-- **Orientation ($R$):** Rotation matrix (quaternion or 3x3) [S1].
-- **Color ($c$):** Spherical Harmonics coefficients [S1].
-- **Split Plane Normal ($n$):** 3D vector defining the half-space boundary [S1].
+Each 3D Half-Gaussian primitive extends the standard 3D-GS primitive [S1]:
+- **Mean ($\boldsymbol{\mu}$):** 3D position vector $[\mu_x, \mu_y, \mu_z]^T$ [S1].
+- **Covariance ($\Sigma$):** Defined by scaling matrix $S$ and rotation matrix $R$ in world space: $\Sigma^w = R S S^T R^T$ [S1].
+- **Splitting Plane Normal ($\mathbf{n}$):** A 3D vector normal to the plane splitting the Gaussian through its center [S1].
 - **Opacities ($\alpha_1, \alpha_2$):** Two scalar opacity values, one for each half of the split Gaussian [S1].
+- **Color:** Spherical Harmonics (SH) coefficients [S1].
 
-### Formulas
-**Standard 3D Gaussian Kernel:**
-The base Gaussian density is defined as [S1]:
-$$G_{\Sigma}(\mathbf{x} - \boldsymbol{\mu}) = \frac{1}{(2\pi)^{3/2} |\Sigma|^{1/2}} e^{-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu})^T \Sigma^{-1}(\mathbf{x} - \boldsymbol{\mu})}$$
-where $\mathbf{x}$ and $\boldsymbol{\mu}$ are column vectors, and $\Sigma$ is the covariance matrix [S1].
+### Numbered Steps
 
-**Covariance Parameterization:**
-The world-space covariance $\Sigma^w$ is parameterized by scale $S$ and rotation $R$ to ensure positive definiteness [S1]:
-$$\Sigma^w = R S S^T R^T$$
-The camera-space covariance $\Sigma$ is computed via the viewing transformation $W$ and projective Jacobian $J$ [S1]:
-$$\Sigma = J W \Sigma^w W^T J^T$$
-
-**3D Half-Gaussian Density:**
-The 3D-HGS kernel is defined by truncating the Gaussian along a normal vector $\mathbf{n}$ [S1]:
-$$HG_{\Sigma}(\mathbf{x}) = \begin{cases} e^{-\frac{1}{2}\mathbf{x}^T\Sigma^{-1}\mathbf{x}} & \mathbf{n}^T\mathbf{x} \geq 0 \\ 0 & \mathbf{n}^T\mathbf{x} < 0 \end{cases}$$
-Note: The normalization constant is omitted in the source definition for the density function relative to the integral calculation [S1].
-
-**2D Projection Integral:**
-To rasterize, the integral of the 3D Half-Gaussian along the view direction (z-axis) is computed. The covariance $\Sigma$ is partitioned as [S1]:
-$$\Sigma = \begin{bmatrix} \Sigma_{xx} & \Sigma_{xz} \\ \Sigma_{zx} & \sigma_{zz} \end{bmatrix}$$
-where $\Sigma_{xx}$ is the $2 \times 2$ top-left submatrix, $\Sigma_{xz}$ and $\Sigma_{zx}$ are $2 \times 1$ and $1 \times 2$ vectors, and $\sigma_{zz}$ is the scalar z-variance [S1].
-
-The conditional mean and variance for z given x, y are [S1]:
-$$\mu_{z|xy} = \Sigma_{zx} \Sigma_{xx}^{-1} \begin{bmatrix} x \\ y \end{bmatrix}$$
-$$\sigma_{zz|xy} = \sigma_{zz} - \Sigma_{zx} \Sigma_{xx}^{-1} \Sigma_{xz}$$
-
-The projected 2D density is [S1]:
-$$\int_{\mathbf{n}^T \mathbf{x} \geq 0} HG_{\Sigma}(\mathbf{x}) dz = \hat{G}_{\Sigma}(\hat{\mathbf{x}} - \hat{\mu}) \frac{1}{2} \operatorname{erfc} \left( - \frac{([n_1 \ n_2] / n_3 + \Sigma_{zx} \Sigma_{xx}^{-1}) \begin{bmatrix} x \\ y \end{bmatrix}}{\sqrt{2 (\sigma_{zz} - \Sigma_{zx} \Sigma_{xx}^{-1} \Sigma_{xz})}} \right)$$
-where $\hat{G}_{\Sigma}$ is the standard 2D Gaussian component, $\operatorname{erfc}$ is the complementary error function, and $\hat{\mathbf{x}}$ represents the 2D coordinates [S1].
-
-### Steps
-1.  **Initialization:** Initialize 3D Gaussians at sparse points from SfM [S1].
-2.  **Parameterization:** For each kernel, define $\mu, S, R, c$, plus the split plane normal $\mathbf{n}$ and two opacities $\alpha_1, \alpha_2$ [S1].
-3.  **Covariance Transformation (Pre-computation):** To approximate the splitting plane boundary efficiently, compute a smaller circumscribing ellipsoid covariance $\sigma$ every 5000 iterations [S1]:
-    *   Normalize $\mathbf{n} \leftarrow \mathbf{n}/\|\mathbf{n}\|$ [S1].
-    *   Compute basis vectors $v_1, v_2$:
-        *   If $n_x = 0$ and $n_y = 0$, set $v_1 = (1, 0, 0)$ and $v_2 = (0, 1, 0)$ [S1].
-        *   Else, $v_1 \leftarrow (n_y, -n_x, 0)/\|(n_y, -n_x, 0)\|$ and $v_2 \leftarrow \mathbf{n} \times v_1/\|\mathbf{n} \times v_1\|$ [S1].
-    *   Construct basis matrix $basis \leftarrow \text{concatenate}(v_1, v_2, n)$ [S1].
-    *   Transform covariance: $cov \leftarrow basis^T \cdot \Sigma \cdot basis$ [S1].
-    *   Compute transformed components:
-        *   $a' \leftarrow cov[0, 0] - \frac{cov[0,2]^2}{cov[2,2]}$ [S1].
-        *   $b' \leftarrow cov[0, 1] - \frac{cov[0, 2] cov[1, 2]}{cov[2, 2]}$ [S1].
-        *   $c' \leftarrow cov[1, 1] - \frac{cov[1, 2] cov[1, 2]}{cov[2, 2]}$ [S1].
-    *   Construct new covariance $\sigma$ in basis frame:
-        $$\sigma \leftarrow \begin{bmatrix} a' & b' & 0 \\ b' & c' & 0 \\ 0 & 0 & \min(a', c')/100 \end{bmatrix}$$ [S1].
-    *   Transform back: $\sigma \leftarrow basis \cdot \sigma \cdot basis^T$ [S1].
-4.  **Rasterization:** Map 3D Half-Gaussians to 2D tiles using the projected integral formula. The precomputed $\sigma$ helps determine the inner boundary of the half-Gaussian, allowing efficient culling and splitting into two halves [S1].
-5.  **Optimization:** Optimize parameters ($\mu, S, R, c, \mathbf{n}, \alpha_1, \alpha_2$) using a loss function on rendered vs. ground-truth images. Perform adaptive kernel density adjustment (pruning and adding) based on opacity thresholds [S1].
+1.  **Initialization:** Initialize 3D Half-Gaussians at sparse points from SfM. Set initial opacity to 0.02 for each half [S1].
+2.  **Parameterization:** For each kernel, define $\boldsymbol{\mu}$, $S$, $R$, color, $\mathbf{n}$, and $\alpha_1, \alpha_2$ [S1].
+3.  **Covariance Transformation (Pre-computation):** To approximate the splitting plane, compute a transformed covariance matrix $\sigma$ that represents a smaller circumscribing ellipsoid with a shortened third axis aligned with $\mathbf{n}$ [S1]. This is performed every 5000 iterations [S1]:
+    - Normalize $\mathbf{n} \leftarrow \mathbf{n}/\|\mathbf{n}\|$ [S1].
+    - Compute basis vectors $v_1, v_2$:
+        - If $n_x = 0$ and $n_y = 0$, set $v_1 = (1, 0, 0)$ and $v_2 = (0, 1, 0)$ [S1].
+        - Else, $v_1 \leftarrow (n_y, -n_x, 0)/\|(n_y, -n_x, 0)\|$ and $v_2 \leftarrow \mathbf{n} \times v_1/\|\mathbf{n} \times v_1\|$ [S1].
+    - Construct basis matrix $basis \leftarrow [v_1, v_2, \mathbf{n}]$ (concatenation of column vectors) [S1].
+    - Transform covariance: $cov \leftarrow basis^T \cdot \Sigma \cdot basis$ [S1].
+    - Compute transformed components:
+        - $a' \leftarrow cov[0, 0] - \frac{cov[0,2]^2}{cov[2,2]}$ [S1].
+        - $b' \leftarrow cov[0, 1] - \frac{cov[0, 2] cov[1, 2]}{cov[2, 2]}$ [S1].
+        - $c' \leftarrow cov[1, 1] - \frac{cov[1, 2] cov[1, 2]}{cov[2, 2]}$ [S1].
+    - Construct new covariance $\sigma$ in basis frame:
+        $$ \sigma = \begin{bmatrix} a' & b' & 0 \\ b' & c' & 0 \\ 0 & 0 & \min(a', c')/100 \end{bmatrix} $$ [S1].
+    - Transform back: $\sigma \leftarrow basis \cdot \sigma \cdot basis^T$ [S1].
+4.  **Rasterization:** Map 3D Half-Gaussians to 2D images using a GPU-specified tile-based rasterization method [S1].
+    - Project covariance to camera space: $\Sigma = J W \Sigma^w W^T J^T$ [S1].
+    - Partition $\Sigma$ as:
+        $$ \Sigma = \begin{bmatrix} \Sigma_{xx} & \Sigma_{xz} \\ \Sigma_{zx} & \sigma_{zz} \end{bmatrix} $$
+        where $\Sigma_{xx}$ is $2 \times 2$, $\Sigma_{xz}$ is $2 \times 1$, $\Sigma_{zx}$ is $1 \times 2$, and $\sigma_{zz}$ is scalar [S1].
+    - Compute conditional mean and variance:
+        - $\mu_{z|xy} = \Sigma_{zx} \Sigma_{xx}^{-1} \begin{bmatrix} x \\ y \end{bmatrix}$ [S1].
+        - $\sigma_{zz|xy} = \sigma_{zz} - \Sigma_{zx} \Sigma_{xx}^{-1} \Sigma_{xz}$ [S1].
+    - Compute the 2D projected density using the complementary error function ($\operatorname{erfc}$):
+        $$ \int_{\mathbf{n}^T \mathbf{x} \geq 0} HG_{\Sigma}(\mathbf{x}) dz = \hat{G}_{\Sigma}(\hat{\mathbf{x}} - \hat{\mu}) \frac{1}{2} \operatorname{erfc} \left( - \frac{([n_1 \ n_2] / n_3 + \Sigma_{zx} \Sigma_{xx}^{-1}) \begin{bmatrix} x \\ y \end{bmatrix}}{\sqrt{2 (\sigma_{zz} - \Sigma_{zx} \Sigma_{xx}^{-1} \Sigma_{xz})}} \right) $$ [S1].
+        where $\hat{G}_{\Sigma}$ is the 2D Gaussian component [S1].
+    - Use the precomputed $\sigma$ to determine the inner boundary of the Gaussian for splitting, combined with the outer boundary from the original Gaussian, to partition into two halves [S1].
+5.  **Optimization:** Optimize parameters ($\boldsymbol{\mu}, S, R, \mathbf{n}, \alpha_1, \alpha_2$) based on a loss function on rendered vs. ground-truth images [S1].
+    - Learning rate for $\mathbf{n}$ is 0.003 [S1].
+    - Learning rates for opacity and $\mathbf{n}$ are reduced by a factor of 1.4 progressively [S1].
+    - Perform adaptive kernel density adjustment (pruning and adding) using an opacity threshold of 0.01 [S1].
 
 ### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_half_gaussian_integral(x, y, z, mu, Sigma, n):
-    """
-    Computes the integral of the 3D Half-Gaussian along the z-axis.
-    x, y: 2D coordinates on the image plane relative to the Gaussian center.
-    mu: Mean of the Gaussian [mx, my, mz].
-    Sigma: 3x3 Covariance matrix in camera space.
-    n: Normal vector of the splitting plane [nx, ny, nz].
-    """
-    # Partition Sigma
-    Sigma_xx = Sigma[0:2, 0:2]
-    Sigma_xz = Sigma[0:2, 2]
-    Sigma_zx = Sigma[2, 0:2]
-    sigma_zz = Sigma[2, 2]
-    
-    # Compute conditional mean and variance
-    # mu_z|xy = Sigma_zx * Sigma_xx_inv * [x, y]^T
-    Sigma_xx_inv = inverse(Sigma_xx)
-    xy_vec = [x, y]
-    mu_z_xy = dot(Sigma_zx, Sigma_xx_inv, xy_vec)
-    
-    # sigma_zz|xy = sigma_zz - Sigma_zx * Sigma_xx_inv * Sigma_xz
-    sigma_zz_xy = sigma_zz - dot(Sigma_zx, Sigma_xx_inv, Sigma_xz)
-    
-    # Compute the 2D Gaussian component G_hat
-    # G_hat(x, y) = exp(-0.5 * [x y] Sigma_xx_inv [x y]^T)
-    exponent_2d = -0.5 * dot(xy_vec, Sigma_xx_inv, xy_vec)
-    G_hat = exp(exponent_2d)
-    
-    # Compute the argument for erfc
-    # Term 1: ([n1 n2] / n3) * [x y]^T
-    # Note: Source uses n3 in denominator. If n3 is 0, this requires handling.
-    # Assuming n3 != 0 for standard perspective projection.
-    term1 = dot([n[0], n[1]], xy_vec) / n[2]
-    
-    # Term 2: Sigma_zx * Sigma_xx_inv * [x y]^T
-    term2 = dot(Sigma_zx, Sigma_xx_inv, xy_vec)
-    
-    # Numerator: -(term1 + term2)
-    # Denominator: sqrt(2 * sigma_zz_xy)
-    numerator = -(term1 + term2)
-    denominator = sqrt(2 * sigma_zz_xy)
-    
-    arg = numerator / denominator
-    
-    # Result
-    # Integral = G_hat * 0.5 * erfc(arg)
-    result = G_hat * 0.5 * erfc(arg)
-    
-    return result
+import numpy as np
 
-def compute_circumscribing_covariance(Sigma, n):
+def normalize(v):
+    return v / np.linalg.norm(v)
+
+def compute_covariance_transformation(Sigma, n):
     """
-    Computes the covariance matrix for the smaller circumscribing ellipsoid
-    used to approximate the splitting plane boundary.
+    Computes the transformed covariance matrix sigma for the circumscribing ellipsoid.
+    Sigma: 3x3 covariance matrix of the original Gaussian.
+    n: 3D normal vector of the splitting plane.
+    Returns: 3x3 transformed covariance matrix sigma.
     """
-    # Normalize n
-    n_norm = n / norm(n)
-    nx, ny, nz = n_norm
+    # Normalize normal vector
+    n = normalize(n)
     
     # Compute basis vectors v1, v2
-    if nx == 0 and ny == 0:
-        v1 = [1, 0, 0]
-        v2 = [0, 1, 0]
+    if n[0] == 0 and n[1] == 0:
+        v1 = np.array([1.0, 0.0, 0.0])
+        v2 = np.array([0.0, 1.0, 0.0])
     else:
-        v1_raw = [ny, -nx, 0]
-        v1 = v1_raw / norm(v1_raw)
-        cross_prod = cross(n_norm, v1)
-        v2 = cross_prod / norm(cross_prod)
-        
-    # Construct basis matrix
-    basis = concatenate_columns(v1, v2, n_norm)
+        v1 = normalize(np.array([n[1], -n[0], 0.0]))
+        v2 = normalize(np.cross(n, v1))
     
-    # Transform covariance
-    cov = transpose(basis) @ Sigma @ basis
+    # Construct basis matrix (columns are v1, v2, n)
+    basis = np.column_stack((v1, v2, n))
+    
+    # Transform covariance to basis frame
+    cov = basis.T @ Sigma @ basis
     
     # Compute transformed components
     a_prime = cov[0, 0] - (cov[0, 2]**2) / cov[2, 2]
@@ -160,16 +99,74 @@ def compute_circumscribing_covariance(Sigma, n):
     c_prime = cov[1, 1] - (cov[1, 2]**2) / cov[2, 2]
     
     # Construct new covariance in basis frame
-    sigma_basis = [
-        [a_prime, b_prime, 0],
-        [b_prime, c_prime, 0],
-        [0, 0, min(a_prime, c_prime) / 100]
-    ]
+    sigma_basis = np.array([
+        [a_prime, b_prime, 0.0],
+        [b_prime, c_prime, 0.0],
+        [0.0, 0.0, min(a_prime, c_prime) / 100.0]
+    ])
     
-    # Transform back
-    sigma = basis @ sigma_basis @ transpose(basis)
+    # Transform back to world/camera frame
+    sigma = basis @ sigma_basis @ basis.T
     
     return sigma
+
+def project_half_gaussian(Sigma, n, x, y):
+    """
+    Computes the 2D projected density of a 3D Half-Gaussian at screen coordinates (x, y).
+    Sigma: 3x3 covariance matrix in camera space.
+    n: 3D normal vector of the splitting plane in camera space.
+    x, y: Screen coordinates.
+    Returns: Projected density value.
+    """
+    # Partition Sigma
+    Sigma_xx = Sigma[:2, :2]
+    Sigma_xz = Sigma[:2, 2]
+    Sigma_zx = Sigma[2, :2]
+    sigma_zz = Sigma[2, 2]
+    
+    # Compute conditional mean and variance
+    # mu_z|xy = Sigma_zx @ Sigma_xx_inv @ [x, y]^T
+    Sigma_xx_inv = np.linalg.inv(Sigma_xx)
+    mu_z_xy = Sigma_zx @ Sigma_xx_inv @ np.array([x, y])
+    
+    # sigma_zz|xy = sigma_zz - Sigma_zx @ Sigma_xx_inv @ Sigma_xz
+    sigma_zz_xy = sigma_zz - Sigma_zx @ Sigma_xx_inv @ Sigma_xz
+    
+    # Compute 2D Gaussian component G_hat
+    # G_hat(x, y) = exp(-0.5 * [x, y] @ Sigma_xx_inv @ [x, y])
+    # Note: The source formula uses [x, y] relative to mean, assuming mean is at origin for this component calculation
+    # or that x, y are already relative coordinates.
+    xy_vec = np.array([x, y])
+    exponent_2d = -0.5 * xy_vec @ Sigma_xx_inv @ xy_vec
+    G_hat = np.exp(exponent_2d)
+    
+    # Compute erfc argument
+    # term1 = ([n1, n2] / n3)
+    # term2 = Sigma_zx @ Sigma_xx_inv
+    # arg_numerator = (term1 + term2) @ [x, y]
+    
+    if n[2] == 0:
+        # Handle division by zero if n3 is 0, though typically n3 != 0 for view direction
+        # This case might require special handling or fallback
+        # Based on source, we assume n3 != 0 for standard projection
+        raise ValueError("n3 should not be zero for standard projection")
+        
+    term1 = np.array([n[0], n[1]]) / n[2]
+    term2 = Sigma_zx @ Sigma_xx_inv
+    arg_numerator = (term1 + term2) @ xy_vec
+    
+    arg_denominator = np.sqrt(2 * sigma_zz_xy)
+    
+    erfc_arg = -arg_numerator / arg_denominator
+    
+    # Compute erfc
+    # erfc(z) = 1 - erf(z)
+    erfc_val = 0.5 * (1 - special.erf(erfc_arg)) # Using scipy.special.erf if available, else approximate
+    
+    # Final density
+    density = G_hat * erfc_val
+    
+    return density
 ```
 
 ### Parameters
@@ -180,19 +177,24 @@ def compute_circumscribing_covariance(Sigma, n):
 - **Covariance transformation frequency:** Every 5000 iterations [S1].
 
 ### Edge Cases and Pitfalls
-- **Division by Zero:** The integral formula divides by $n_3$ (the z-component of the normal). If the splitting plane is parallel to the view direction ($n_3 \approx 0$), the formula becomes unstable. The source does not specify a guard for this case, but standard rasterization culling should handle degenerate orientations [S1].
-- **Positive Definiteness:** The covariance matrix $\Sigma$ must remain positive definite. The parameterization via $R$ and $S$ ensures this for the base Gaussian, but the derived $\sigma$ for the circumscribing ellipsoid uses $\min(a', c')/100$ for the z-component, which is small but positive [S1].
-- **Gibbs Phenomenon:** Standard Gaussians oscillate near discontinuities. 3D-HGS mitigates this by truncating the kernel, but improper initialization of $\mathbf{n}$ may lead to suboptimal convergence [S1].
+- **Division by Zero:** In the covariance transformation, if $cov[2,2]$ is zero, division by zero occurs. This is unlikely if the Gaussian has non-zero extent along the normal, but should be guarded against [S1].
+- **Normal Vector Orientation:** The splitting plane normal $\mathbf{n}$ defines the half-space. The orientation of $\mathbf{n}$ affects which half is active. The optimization should handle this consistently [S1].
+- **Boundary Conditions:** The approximation of the splitting plane using the circumscribing ellipsoid is valid at the three-sigma boundary. Near the center, the approximation may be less accurate, but the source states this approach achieves accurate partitioning [S1].
+
+## Subtopics
+
+### [Bézier Gaussian Triangle](11816-b-zier-gaussian-triangle.md)
+Uses Bézier curves to define the shape of Gaussian primitives, offering a different approach to handling complex geometries compared to the half-Gaussian split. Choose when smooth, curved boundaries are needed.
 
 ## Operating characteristics
-- **Time Complexity:** Comparable to standard 3D Gaussian Splatting. The additional computation for the erfc function and normal vector updates is minimal [S1].
-- **Memory Complexity:** Slightly higher than 3D-GS due to the storage of the normal vector $\mathbf{n}$ and two opacity values per Gaussian [S1].
-- **Performance:** Achieves state-of-the-art PSNR on MipNeRF-360, Tanks&Temples, and Deep Blending datasets with similar or better rendering speed than corresponding 3D-GS methods [S1].
-- **Strengths:** Effectively models sharp edges and discontinuities without the Gibbs oscillatory effect. Higher bandwidth in frequency domain allows capturing high-frequency components better than full Gaussians [S1].
-- **Limitations:** Requires optimization of additional parameters ($\mathbf{n}, \alpha_1, \alpha_2$), which may increase training complexity slightly [S1].
+- **Time Complexity:** Comparable to standard 3D-GS due to the efficient tile-based rasterization and precomputed splitting plane approximation [S1].
+- **Memory Complexity:** Slightly higher than 3D-GS due to the additional parameters ($\mathbf{n}, \alpha_1, \alpha_2$) per primitive [S1].
+- **Measured Performance:** Achieves state-of-the-art PSNR on MipNeRF-360, Tanks&Temples, and Deep Blending datasets with similar or better rendering speed than 3D-GS [S1].
+- **Strengths:** Mitigates Gibbs oscillatory effect, better fits vertical discontinuities, higher bandwidth for high-frequency components [S1].
+- **Limitations:** Requires optimization of additional parameters, which may increase training complexity [S1].
 
 ## Background
-3D Half-Gaussian Splatting was introduced in a CVPR 2025 paper by Haolin Li et al. [S1]. It addresses the limitations of 3D Gaussian Splatting in handling discontinuous functions, which are common in 3D scenes at edges and texture-rich areas [S1]. The method builds on the plug-and-play nature of 3D-GS, allowing it to be integrated into existing pipelines [S1].
+3D Half-Gaussian Splatting was introduced in CVPR 2025 by Haolin Li et al. [S1]. It addresses the limitations of 3D Gaussian Splatting in modeling discontinuous functions, which are common in 3D scenes at edges, corners, and texture-rich areas [S1]. The method builds on the principles of 3D-GS but replaces the reconstruction kernel with a 3D Half-Gaussian [S1].
 
 ## Sources
 [S1] 3D-HGS: 3D Half-Gaussian Splatting*, https://doi.org/10.1109/cvpr52734.2025.01027, fetched 2026-10-30

@@ -1,0 +1,277 @@
+# Fourier Splatting Primitive
+
+Also called: Fourier encoded primitive, Fourier surfel
+
+## Overview
+The Fourier Splatting primitive is a planar surfel for radiance field rendering that replaces the fixed Gaussian or elliptical falloff with a boundary defined by a Fourier series, allowing the representation of arbitrary closed shapes [S1]. Unlike 3D Gaussian Splatting (3DGS) or 2D Gaussian Splatting (2DGS), which are limited to fixed elliptical/disc shapes, this primitive enables higher fidelity representation of complex geometry and fine-grained details [S1]. Its key differentiator is inherent scalability: the level of detail (LoD) is controlled by truncating Fourier coefficients at runtime, allowing a single trained model to be rendered at varying complexities without retraining or post-hoc compression [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Camera parameters (view/projection matrices), a set of primitives $\{s_i\}$, and a target resolution.
+*   **Output:** A rendered image with color and opacity per pixel.
+
+**Data Structures**
+Each primitive $s_i$ is parameterized by the following fields:
+1.  **Center:** $p_i \in \mathbb{R}^3$.
+2.  **Rotation:** $q_i \in \mathbb{R}^4$ (unit quaternion) defining the local tangent frame $(t_u, t_v, t_w)$.
+3.  **Opacity:** $o_i \in (0, 1)$.
+4.  **Appearance:** $c_i \in \mathbb{R}^{48}$ (Spherical Harmonics coefficients, degree 3).
+5.  **Circumradius:** $R_i \in \mathbb{R}_{>0}$, bounding the primitive extent.
+6.  **Fourier Amplitudes:** $\{r_{i,k}\}_{k=0}^{K-1} \in \mathbb{R}^K$.
+7.  **Fourier Phases:** $\{\phi_{i,k}\}_{k=0}^{K-1} \in \mathbb{R}$.
+8.  **Sharpness:** $\sigma_i \in \mathbb{R}_{>0}$.
+
+**Parameters**
+*   $K$: Number of Fourier frequencies. Typical value: 6 [S1].
+*   $K_{\text{active}}$: Number of active frequency components at the start of optimization. Typical value: 1 [S1].
+
+**Formulas**
+The boundary of the primitive in its local tangent plane is a closed curve $r_i(\theta)$. To ensure the boundary does not exceed the circumradius $R_i$, the raw amplitudes $r_{i,k}$ are normalized using squared-$\ell_1$ normalization [S1]:
+
+$$
+\bar{r}_{i,k} = \frac{r_{i,k}^2}{\sum_{k'=0}^{K-1} r_{i,k'}^2} \quad \text{such that} \quad \sum_{k=0}^{K-1} \bar{r}_{i,k} = 1
+$$
+
+This guarantees $r_i(\theta) \le R_i$ for all $\theta$ [S1].
+
+The boundary radius $r_i(\theta)$ is computed efficiently using Horner’s method to avoid transcendental calls for $e^{ik\theta}$ [S1]. Let $w = e^{i\theta} = (\cos \theta, \sin \theta)$. The coefficients $c_{i,k}$ are derived from the normalized amplitudes and phases (specifically, the complex Fourier coefficients). The recurrence is computed from $k = K-1$ down to 0 [S1]:
+
+$$
+z_{K-1} = c_{i,K-1}
+$$
+$$
+z_{k} = z_{k+1} \cdot w + c_{i,k} \quad \text{for } k = K-2, \dots, 0
+$$
+
+The final radius is:
+$$
+r_i(\theta) = R_i |z_0|
+$$
+
+This requires $K-1$ complex multiply-adds [S1].
+
+**Numbered Steps**
+1.  **Ray-Plane Intersection:** For each pixel, compute the intersection with the primitive's plane defined by $p_i$ and normal $t_w$. Transform the intersection point into the local tangent frame $(t_u, t_v)$ to obtain coordinates $(u_j, v_j)$ [S1].
+2.  **Polar Conversion:** Compute the polar coordinates $(\rho_j, \theta_j)$ in the tangent plane [S1].
+    *   $\rho_j = \sqrt{u_j^2 + v_j^2}$
+    *   $\cos \theta_j = u_j / \rho_j$
+    *   $\sin \theta_j = v_j / \rho_j$
+    *   [G] Handle $\rho_j \approx 0$ by setting $\theta_j = 0$ to avoid division by zero.
+3.  **Boundary Evaluation:** Compute $r_i(\theta_j)$ using the Horner’s method recurrence defined above [S1].
+4.  **Signed Distance:** Compute the signed distance $\varphi_j$ from the pixel to the boundary [S1]:
+    $$
+    \varphi_j = \rho_j - r_i(\theta_j)
+    $$
+5.  **Alpha Compositing:** Use a power window function (adapted from Triangle Splatting) based on $\varphi_j$ and the sharpness parameter $\sigma_i$ to determine the alpha value for the primitive at this pixel [S1].
+6.  **Color Evaluation:** Evaluate the spherical harmonics using the view direction to get the color contribution [S1].
+7.  **Rendering:** Composite the primitives tile-by-tile using standard alpha blending [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def compute_fourier_boundary_radius(rho, theta, R_i, r_raw, phi_raw, K):
+    """
+    Computes the boundary radius r_i(theta) for a Fourier Splatting primitive.
+    
+    Args:
+        rho: float, distance from center in tangent plane.
+        theta: float, angle in radians.
+        R_i: float, circumradius.
+        r_raw: list of K floats, raw amplitudes r_{i,k}.
+        phi_raw: list of K floats, raw phases phi_{i,k}.
+        K: int, number of frequencies.
+        
+    Returns:
+        float: r_i(theta).
+    """
+    # 1. Normalization
+    # Compute squared l1 norm of amplitudes
+    sum_sq = sum(r**2 for r in r_raw)
+    if sum_sq == 0:
+        return 0.0
+    
+    # Normalized amplitudes
+    r_norm = [r**2 / sum_sq for r in r_raw]
+    
+    # 2. Construct Complex Coefficients
+    # The Fourier series is typically sum r_k * exp(i(k*theta + phi_k))
+    # However, the paper uses a polynomial form z_0 via Horner's method.
+    # The coefficients c_{i,k} in the recurrence correspond to the complex Fourier terms.
+    # c_{i,k} = r_norm[k] * exp(i * phi_raw[k])
+    # Note: The paper states ri(theta) = R_i * |z0|.
+    # We must construct the complex coefficients for the polynomial.
+    
+    # Initialize complex coefficients c_k
+    # c_k = r_norm[k] * (cos(phi_k) + i * sin(phi_k))
+    c = []
+    for k in range(K):
+        real_part = r_norm[k] * math.cos(phi_raw[k])
+        imag_part = r_norm[k] * math.sin(phi_raw[k])
+        c.append((real_part, imag_part))
+        
+    # 3. Horner's Method
+    # z_{K-1} = c_{K-1}
+    # z_k = z_{k+1} * w + c_k
+    # w = cos(theta) + i * sin(theta)
+    
+    cos_theta = math.cos(theta)
+    sin_theta = math.sin(theta)
+    w_real = cos_theta
+    w_imag = sin_theta
+    
+    # Start with the highest degree coefficient
+    z_real = c[K-1][0]
+    z_imag = c[K-1][1]
+    
+    for k in range(K-2, -1, -1):
+        # Complex multiplication: z_{k+1} * w
+        # (a+bi)(c+di) = (ac-bd) + i(ad+bc)
+        new_real = z_real * w_real - z_imag * w_imag
+        new_imag = z_real * w_imag + z_imag * w_real
+        
+        # Add c_k
+        z_real = new_real + c[k][0]
+        z_imag = new_imag + c[k][1]
+        
+    # 4. Final Radius
+    # r_i(theta) = R_i * |z_0|
+    magnitude = math.sqrt(z_real**2 + z_imag**2)
+    return R_i * magnitude
+
+def render_primitive(p_i, q_i, o_i, c_sh, R_i, r_raw, phi_raw, sigma_i, K, camera_ray_origin, camera_ray_dir, image_width, image_height):
+    """
+    Renders a single Fourier Splatting primitive to an image.
+    Simplified for demonstration; assumes tile-based rasterization is handled externally.
+    """
+    # Extract local frame from quaternion q_i
+    # [G] Standard quaternion to rotation matrix conversion
+    R_mat = quaternion_to_rotation_matrix(q_i)
+    t_u = R_mat[:, 0]
+    t_v = R_mat[:, 1]
+    t_w = R_mat[:, 2] # Normal
+    
+    # Initialize image buffer
+    image = np.zeros((image_height, image_width, 3))
+    alpha_buffer = np.zeros((image_height, image_width))
+    
+    # Determine bounding box of primitive in screen space
+    # [G] Project center and extent to screen to find tile bounds
+    # This step is omitted for brevity, assuming pixel iteration over bounding box
+    
+    for y in range(image_height):
+        for x in range(image_width):
+            # 1. Ray-Plane Intersection
+            # Ray: O + t*D
+            # Plane: (X - p_i) . t_w = 0
+            denom = np.dot(t_w, camera_ray_dir)
+            if abs(denom) < 1e-6:
+                continue # Parallel to plane
+            
+            t = np.dot(p_i - camera_ray_origin, t_w) / denom
+            if t < 0:
+                continue # Behind camera
+                
+            intersection_point = camera_ray_origin + t * camera_ray_dir
+            
+            # 2. Local Tangent Coordinates
+            # Vector from center to intersection
+            vec = intersection_point - p_i
+            u_j = np.dot(vec, t_u)
+            v_j = np.dot(vec, t_v)
+            
+            # 3. Polar Coordinates
+            rho_j = math.sqrt(u_j**2 + v_j**2)
+            if rho_j < 1e-6:
+                theta_j = 0.0
+            else:
+                theta_j = math.atan2(v_j, u_j)
+                
+            # 4. Boundary Radius
+            r_boundary = compute_fourier_boundary_radius(rho_j, theta_j, R_i, r_raw, phi_raw, K)
+            
+            # 5. Signed Distance
+            phi_signed = rho_j - r_boundary
+            
+            # 6. Alpha Calculation
+            # Power window function from Triangle Splatting adapted for Fourier boundary
+            # [G] Exact power function parameters are not fully specified in notes, 
+            # assuming standard soft-edge approximation based on sigma_i
+            # alpha = exp(-sigma_i * phi_signed^2) or similar power law
+            # The paper mentions "power window function... to our polar coordinate formulation"
+            # We use a standard Gaussian-like falloff for the alpha mask inside the boundary
+            # and 0 outside, modulated by sigma.
+            if phi_signed > 0:
+                alpha = 0.0
+            else:
+                # Soft boundary
+                alpha = math.exp(-sigma_i * phi_signed**2)
+                
+            if alpha < 1e-4:
+                continue
+                
+            # 7. Color Evaluation
+            # View direction in local frame
+            view_dir_local = R_mat.T @ camera_ray_dir
+            color = evaluate_sh(c_sh, view_dir_local)
+            
+            # 8. Composite
+            # Simple alpha blending for single primitive
+            # [G] In full rasterizer, this is done with existing accumulated color/alpha
+            image[y, x] += color * alpha * o_i
+            alpha_buffer[y, x] += alpha * o_i
+            
+    return image, alpha_buffer
+
+def evaluate_sh(c_sh, view_dir):
+    """
+    Evaluates Spherical Harmonics of degree 3 (48 coefficients).
+    """
+    # [G] Standard SH evaluation routine
+    # c_sh is a vector of 48 floats.
+    # view_dir is a 3D vector.
+    # Returns RGB color.
+    pass
+
+def quaternion_to_rotation_matrix(q):
+    """
+    Converts a quaternion (x, y, z, w) to a 3x3 rotation matrix.
+    """
+    x, y, z, w = q
+    # Standard conversion
+    R = np.array([
+        [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+        [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
+        [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
+    ])
+    return R
+```
+
+**Edge Cases and Pitfalls**
+*   **Division by Zero:** When computing $\theta_j$, if $\rho_j \approx 0$, $\cos \theta_j$ and $\sin \theta_j$ are undefined. Handle by setting $\theta_j = 0$ [G].
+*   **Overshooting:** Without squared-$\ell_1$ normalization, amplitudes can sum to exceed $R_i$, causing the boundary to overshoot the circumscribed circle [S1].
+*   **Optimization Stability:** The optimization process begins with $K_{\text{active}} = 1$ to establish a stable global structure. Remaining coefficients are unfrozen at iteration 600 to prevent low-frequency dominance from obstructing finer details [S1].
+
+## Subtopics
+
+### HYDRA Densification
+A strategy that decomposes complex primitives into simpler constituents within the MCMC framework to facilitate stable optimization [S1]. [HYDRA Densification](link)
+
+### Fourier Splatting Rendering
+The tile-based rasterizer adapting the power window function of Triangle Splatting to the polar coordinate formulation [S1]. [Fourier Splatting Rendering](link)
+
+## Operating characteristics
+*   **Time Complexity:** The boundary evaluation uses Horner’s method, requiring $K-1$ complex multiply-adds, which is $O(K)$ per pixel per primitive [S1]. With $K=6$, this is constant and fast [S1].
+*   **Memory Complexity:** Each primitive stores $K$ amplitudes and $K$ phases. With $K=6$ and degree 3 SH (48 coeffs), plus center, quaternion, opacity, and radius, the parameter count is 70 per primitive [S1].
+*   **Scalability:** The method is inherently scalable. Rendering at lower LoD is achieved by truncating Fourier coefficients at runtime (e.g., using only $k < K_{\text{active}}$) without retraining [S1].
+*   **Strengths:** Arbitrary shape representation allows higher fidelity for complex geometry compared to 2D/3D Gaussians [S1]. Continuous LoD control [S1].
+*   **Limitations:** Requires careful initialization ($K_{\text{active}}=1$) to avoid optimization instability [S1].
+
+## Background
+The Fourier Splatting primitive was introduced in "Fourier Splatting: Generalized Fourier encoded primitives for scalable radiance fields" [S1]. It addresses the limitation of existing methods where visual fidelity is tied strictly to the number of primitives, requiring pruning for quality downscaling [S1]. It builds on the concept of planar surfels (like 2DGS) but enhances expressiveness with Fourier-encoded boundaries [S1].
+
+## Sources
+[S1] Fourier Splatting: Generalized Fourier encoded primitives for scalable radiance fields, https://doi.org/10.48550/arXiv.2603.19834, fetched 2026-10-30

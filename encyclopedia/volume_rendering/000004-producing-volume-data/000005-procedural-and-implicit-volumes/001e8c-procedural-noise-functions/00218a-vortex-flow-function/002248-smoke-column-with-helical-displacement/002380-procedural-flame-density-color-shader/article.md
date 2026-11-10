@@ -1,14 +1,12 @@
 # Procedural Flame Density & Color Shader
-
-
 ## Overview
 This method computes the density and color of a procedural flame volume by deforming a base helical flow path with height-scaled turbulence and applying spatial attenuation ramps [S1, unofficial]. It builds on [Smoke Column with Helical Displacement](2743-smoke-column-with-helical-displacement.md) by adding complex shaping via sine waves and a lookup table, while explicitly handling vertical fading and minimum density thresholds to create a realistic fire appearance [S1, unofficial]. It differs from its parent by introducing a multi-stage attenuation process (horizontal and vertical) and a direct density-to-color mapping that shifts from yellow to red based on density values [S1, unofficial].
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-- `pnt`: 3D sampling point in local space.
-- `pnt_w`: 3D sampling point in world space.
+- `pnt`: 3D sampling point in local space [S1, unofficial].
+- `pnt_w`: 3D sampling point in world space [S1, unofficial].
 - `vol`: Volume object containing shape metadata (`shape.b_box.center`, `shape.b_box.inv_rad`, `shape.b_box.inv_rad_sq`, `shape.inv_rad`, `shape.rad`, `shapecenter`) and output color (`color`) [S1, unofficial].
 - `parms`: Array of parameters controlling density scaling, power exponent, offset magnitude, thresholds, and sine frequency [S1, unofficial].
 - `frame_num`: Current animation frame [S1, unofficial].
@@ -32,6 +30,22 @@ This method computes the density and color of a procedural flame volume by defor
 
 ```python
 import math
+
+class Vector3:
+    def __init__(self, x, y, z):
+        self.x = x
+        self.y = y
+        self.z = z
+    def __add__(self, other):
+        return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __mul__(self, s):
+        return Vector3(self.x * s, self.y * s, self.z * s)
+
+class Color:
+    def __init__(self, r, g, b):
+        self.r = r
+        self.g = g
+        self.b = b
 
 def ease(t, t0, t1):
     """Linear easing clamped to [0, 1]."""
@@ -60,8 +74,9 @@ def compute_flame(pnt, pnt_w, vol, parms, frame_num, DOWN_FIRE, POW_TABLE_SIZE, 
     cos_theta2 = 0.09 * cos_theta + 2.0
     sin_theta2 = 0.06 * sin_theta - 2.0
 
-    # 2. Power lookup table is assumed precomputed per source loop
-    # pow_table[i] = pow((i / (POW_TABLE_SIZE - 1)) * parms[1] * 2.0, parms[2])
+    # 2. Initialize power lookup table (source provides this loop)
+    for i in range(POW_TABLE_SIZE - 1, -1, -1):
+        pow_table[i] = pow((i / (POW_TABLE_SIZE - 1)) * parms[1] * 2.0, parms[2])
 
     # 3. Height ratio for turbulence scaling
     height_ratio = (pnt_w.y - vol.shape.b_box.center.y) * vol.shape.b_box.inv_rad.y
@@ -78,7 +93,7 @@ def compute_flame(pnt, pnt_w, vol, parms, frame_num, DOWN_FIRE, POW_TABLE_SIZE, 
     tmp = fast_noise(pnt)
     hel_path = Vector3(cos_theta2 + tmp + turb_amount, -down - tmp - turb_amount, sin_theta2 + tmp + turb_amount)
     hel_len = norm_xyz(hel_path)  # Computed but unused in source
-    direction = Vector3(pnt.x + hel_path.x, pnt.y + hel_path.y, pnt.z + hel_path.z)
+    direction = pnt + hel_path
 
     # 6. Flame shaping
     tmp = new_turbulence_three(direction)
