@@ -7,110 +7,104 @@ This method reduces the memory footprint of a Sparse Voxel Octree (SVO) by ident
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A Sparse Voxel Octree (SVO) representing a 3D voxel grid. The SVO may be too large to fit in memory, so the method supports streaming construction of sub-DAGs [S2].
+*   **Input:** A Sparse Voxel Octree (SVO) representing a 3D voxel grid [S1, unofficial][S2]. The SVO may be too large to fit in memory, so the method supports streaming construction of sub-DAGs [S2].
 *   **Output:** A minimal Sparse Voxel DAG where identical subtrees are merged into single instances [S1, unofficial][S2].
 
 **Data Structures**
 The SVO and resulting DAG nodes are stored in memory with the following layout [S1, unofficial][S2]:
-1.  **Childmask:** An 8-bit integer where each bit indicates the existence of a child pointer for the corresponding octant (0-7).
-2.  **Pointers:** An array of pointers stored consecutively in memory immediately after the childmask. Only pointers to non-empty children are stored.
+1.  **Childmask:** An 8-bit integer where each bit indicates the existence of a child pointer for the corresponding octant (0-7) [S1, unofficial][S2].
+2.  **Pointers:** An array of pointers stored consecutively in memory immediately after the childmask [S1, unofficial][S2]. Only pointers to non-empty children are stored [S1, unofficial][S2].
 3.  **Node Size:** The total memory consumption per node is between 8 and 36 bytes, depending on the number of active children (1 to 8 pointers) [S1, unofficial][S2].
-
 For the two lowest levels of the tree (where the majority of nodes reside), an optimization is applied: subtrees of resolution $4^3$ are stored without pointers in a 64-bit integer to improve sorting performance [S1, unofficial][S2].
 
 **Algorithm Steps**
 The reduction is performed iteratively from the leaves up to the root [S1, unofficial][S2].
-
 1.  **Leaf Reduction:**
-    *   Leaf nodes are uniquely defined by their childmasks (describing 8 voxels). There are at most $2^8 = 256$ unique leaf configurations [S1, unofficial][S2].
-    *   Sort all leaf nodes using their childmasks as keys.
-    *   Compact the sorted list to keep only unique leaf nodes.
+    *   Leaf nodes are uniquely defined by their childmasks (describing 8 voxels) [S1, unofficial][S2]. There are at most $2^8 = 256$ unique leaf configurations [S1, unofficial][S2].
+    *   Sort all leaf nodes using their childmasks as keys [S1, unofficial][S2].
+    *   Compact the sorted list to keep only unique leaf nodes [S1, unofficial][S2].
     *   Maintain a **Table of Indirections**: For each original leaf node, store its new index in the compacted unique list [S1, unofficial][S2].
     *   Update the child pointers in the level above the leaves to reference these unique leaf nodes using the indirection table [S1, unofficial][S2].
-
 2.  **Iterative Level Reduction:**
-    *   Proceed to the next level up.
-    *   Identify nodes that have **identical childmasks** AND **identical pointers** to their children. These nodes are roots of identical subtrees [S1, unofficial][S2].
+    *   Proceed to the next level up [S1, unofficial][S2].
+    *   Identify nodes that have **identical childmasks** AND **identical pointers** to their children [S1, unofficial][S2]. These nodes are roots of identical subtrees [S1, unofficial][S2].
     *   Sort all nodes at the current level using their child pointers as a 256-bit key (8 pointers $\times$ 32 bits) and the node's original address as a value [S1, unofficial][S2].
-    *   Compact the sorted list to contain only unique nodes.
-    *   Update the indirection table for the current level.
+    *   Compact the sorted list to contain only unique nodes [S1, unofficial][S2].
+    *   Update the indirection table for the current level [S1, unofficial][S2].
     *   Update the child pointers in the level above to reference the unique nodes from the current level [S1, unofficial][S2].
-    *   Repeat this process for each level up to the root. The algorithm is guaranteed to find the smallest possible DAG within $L$ iterations [S1, unofficial][S2].
-
+    *   Repeat this process for each level up to the root [S1, unofficial][S2]. The algorithm is guaranteed to find the smallest possible DAG within $L$ iterations [S1, unofficial][S2].
 3.  **Handling Large Scenes (Streaming):**
     *   If the SVO does not fit in memory, construct the top $L-10$ levels (for max level $L > 10$) using a top-down approach (e.g., triangle/cube intersection tests) [S1, unofficial][S2].
-    *   For each leaf node in this top tree, construct a subtree to the maximum depth using a CPU-assisted algorithm (e.g., depth-peeling) [S1, unofficial].
-    *   Reduce each subtree to a DAG independently before inserting it into the top tree [S1, unofficial].
-    *   After all sub-DAGs are constructed, apply the reduction algorithm one final time to the top-SVO to generate the final global DAG [S1, unofficial].
+    *   For each leaf node in this top tree, construct a subtree to the maximum depth using a CPU-assisted algorithm (e.g., depth-peeling) [S1, unofficial][S2].
+    *   Reduce each subtree to a DAG independently before inserting it into the top tree [S1, unofficial][S2].
+    *   After all sub-DAGs are constructed, apply the reduction algorithm one final time to the top-SVO to generate the final global DAG [S1, unofficial][S2].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def reduce_svo_to_dag(svo_levels):
+class Node:
+    def __init__(self, childmask, pointers, level_idx):
+        self.childmask = childmask
+        self.pointers = pointers  # List of 8 Node references or None
+        self.level_idx = level_idx
+
+def reduce_svo_to_dag(levels):
     """
-    svo_levels: List of lists, where svo_levels[i] contains all nodes at level i.
-                Level 0 is the root, Level N is the leaves.
-    Returns: The root node of the reduced DAG.
+    levels: List of lists. levels[i] contains Node objects for level i.
+            Level 0 is root, Level N is leaves.
+    Returns: Root node of the reduced DAG.
     """
     # Process from leaves (highest index) up to the root (index 0)
-    for level in reversed(range(len(svo_levels))):
-        nodes_at_level = svo_levels[level]
-        
-        # Optimization for lowest levels: if level is near leaves, 
-        # handle 4^3 subtrees as 64-bit integers if applicable.
-        # For general case, sort by child pointers.
+    for level_idx in range(len(levels) - 1, -1, -1):
+        current_level = levels[level_idx]
         
         # 1. Sort nodes to bring identical subtrees together
-        # Key: Tuple of child pointers (and childmask if pointers are null/empty)
-        # Value: Original index or pointer to the node object
-        sorted_nodes = sort_by_pointers(nodes_at_level)
+        # Key: Tuple of (childmask, tuple(pointers))
+        # Value: Original index in the level list
+        sorted_indices = sorted(range(len(current_level)), 
+                                key=lambda i: (current_level[i].childmask, tuple(current_level[i].pointers)))
         
         # 2. Compact unique nodes and build indirection map
         unique_nodes = []
-        indirection_map = {} # Maps original node ID to index in unique_nodes
-        
+        indirection_map = {} # Maps original index to index in unique_nodes
         prev_key = None
-        for node in sorted_nodes:
-            # Create a hashable key from the node's structure
-            # Key includes childmask and the tuple of child pointers
+        
+        for orig_idx in sorted_indices:
+            node = current_level[orig_idx]
             current_key = (node.childmask, tuple(node.pointers))
             
             if current_key != prev_key:
-                # New unique node found
                 unique_nodes.append(node)
-                indirection_map[node.id] = len(unique_nodes) - 1
+                indirection_map[orig_idx] = len(unique_nodes) - 1
                 prev_key = current_key
             else:
-                # Duplicate node, map to existing unique node
-                indirection_map[node.id] = len(unique_nodes) - 1
+                indirection_map[orig_idx] = len(unique_nodes) - 1
         
-        # 3. Update parent pointers
-        # The nodes in unique_nodes now represent the compressed level.
-        # We need to update the pointers in the level above (level + 1)
-        # to point to these unique nodes.
-        
-        if level > 0:
-            parent_level_nodes = svo_levels[level - 1]
-            for parent_node in parent_level_nodes:
-                # Update parent's child pointers based on indirection map
+        # 3. Update parent pointers (level above)
+        if level_idx > 0:
+            parent_level = levels[level_idx - 1]
+            for parent in parent_level:
                 for i in range(8):
-                    if parent_node.childmask & (1 << i):
-                        child_node_id = parent_node.pointers[i].id
-                        new_index = indirection_map[child_node_id]
-                        # Replace pointer with reference to unique node
-                        parent_node.pointers[i] = unique_nodes[new_index]
+                    if parent.childmask & (1 << i):
+                        child = parent.pointers[i]
+                        if child is not None:
+                            # Find original index of child in current_level
+                            # In practice, nodes store their level-index or a reverse map is built
+                            orig_child_idx = child.level_idx  # Simplified for self-containment
+                            new_idx = indirection_map[orig_child_idx]
+                            parent.pointers[i] = unique_nodes[new_idx]
         
-        # Replace the current level with the unique nodes for the next iteration
-        svo_levels[level] = unique_nodes
+        # Replace current level with unique nodes for next iteration
+        levels[level_idx] = unique_nodes
 
-    return svo_levels[0]
+    return levels[0]
 ```
+*Note: The pseudocode implements the bottom-up reduction. For the two lowest levels, the `pointers` tuple can be replaced by a 64-bit integer key to match the $4^3$ optimization described in the sources [S1, unofficial][S2].*
 
 **Parameters and Edge Cases**
 *   **Resolution:** The method is demonstrated at resolutions up to $128K^3$ (131,072$^3$) [S2].
 *   **Memory Constraints:** The method is designed to work even if the complete SVO does not fit in memory by using the streaming/sub-DAG approach [S2].
-*   **Precision:** Pointer indirection relies on exact equality of child pointers. Floating-point inaccuracies in spatial coordinates should be resolved before tree construction (e.g., via voxelization) [S1, unofficial].
 *   **Attributes:** The method focuses on geometry. It does not compress material or reflectance properties (color, normal) by default, which may limit utility for fully shaded rendering without additional handling [S2].
 
 ## Subtopics

@@ -1,98 +1,60 @@
 # RaycastBrightnessControl
-
 Also called: RaycastColorControl
-
 ## Overview
-RaycastBrightnessControl is a back-to-front direct volume raycasting technique that modulates voxel brightness based on a threshold parameter. It differs from front-to-back methods by rendering back-facing polygons to start sampling from the furthest voxels, and from density-based variants by controlling luminance rather than opacity accumulation or color bias.
-
+RaycastBrightnessControl is a back-to-front direct volume raycasting technique that modulates voxel brightness based on a threshold parameter [S1, unofficial]. It renders back-facing polygons to sample from the furthest voxels first, distinguishing it from front-to-back methods [S1, unofficial].
 ## How it works
 **Inputs and Outputs:**
-- Input: A 3D volume texture, camera position (`eye.xyz`), fragment position (`fragment.xyz`), and a scalar `val_threshold`.
-- Output: A 2D color buffer with the rendered volume image.
-
+- Input: A 3D volume texture, camera position (`eye.xyz`), fragment position (`fragment.xyz`), scalar `val_threshold`, and step size `SAMPLE_STEP` [S1, unofficial].
+- Output: A 2D color buffer [S1, unofficial].
 **Data Structures:**
-- The volume is stored in a 3D texture accessible via GLSL `sampler3D`.
-- The fragment shader receives interpolated screen coordinates and uniform camera data.
-
+- The volume is stored in a 3D texture [S1, unofficial].
+- The fragment shader receives interpolated screen coordinates and uniform camera data [S1, unofficial].
 **Steps:**
-1. **Render Setup:** Render the bounding box of the volume using back-facing polygons only. This ensures the ray starts at the furthest entry point into the volume relative to the camera.
-2. **Ray Direction:** Compute the ray direction vector $\vec{d}$ in the fragment shader:
-   $$ \vec{d} = \text{eye.xyz} - \text{fragment.xyz} $$
-   Note: This is the inverse of the front-to-back direction. The ray marches from the back face towards the front face.
-3. **Ray Marching:** Iterate along the ray direction $\vec{d}$ with a fixed step size `SAMPLE_STEP`. For each step:
-   - Sample the volume texture at the current position to get the scalar value $v$.
-   - Apply the `val_threshold` to control the brightness contribution of the voxel. The specific mapping function is not detailed in the sources, but it modulates the intensity based on $v$ and `val_threshold` [S1, unofficial].
-   - Accumulate the color and opacity (or brightness) back-to-front.
-4. **Final Color:** Output the accumulated result.
-
+1. Render the volume bounding box using back-facing polygons only to ensure sampling starts at the furthest entry point relative to the camera [S1, unofficial].
+2. Compute the ray direction vector $\vec{d}$ in the fragment shader: $\vec{d} = \text{eye.xyz} - \text{fragment.xyz}$ [S1, unofficial].
+3. March along $\vec{d}$ with a fixed step size `SAMPLE_STEP` [S1, unofficial].
+4. At each step, sample the scalar value $v$ from the volume texture [S1, unofficial].
+5. Apply `val_threshold` to modulate the voxel's brightness contribution [S1, unofficial].
+6. Accumulate the result back-to-front and output the final color [S1, unofficial].
 **Parameters:**
-- `val_threshold`: Controls the brightness of the voxels. Adjusting this value changes the luminance threshold for voxel contribution [S1, unofficial].
-- `SAMPLE_STEP`: Controls the ray-advancement precision. Smaller values yield better quality but slower rendering [S1, unofficial].
-
+- `val_threshold`: Controls the brightness of the voxels [S1, unofficial].
+- `SAMPLE_STEP`: Controls ray-advancement precision; smaller values improve quality but increase rendering time [S1, unofficial].
 **Pitfalls:**
-- Requires back-facing polygon rendering. If front-facing polygons are rendered, the ray direction must be inverted (`fragment.xyz - eye.xyz`) and the marching order changed to front-to-back [S1, unofficial].
-- The ray direction computation is critical: $\vec{d} = \text{eye.xyz} - \text{fragment.xyz}$ for back-to-front [S1, unofficial].
-
+- Requires back-facing polygon rendering; using front-facing polygons requires inverting the ray direction to `fragment.xyz - eye.xyz` and switching to front-to-back marching [S1, unofficial].
+- The exact transfer function mapping $v$ and `val_threshold` to brightness is not specified in the sources [S1, unofficial].
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Fragment Shader Logic for RaycastBrightnessControl
-# Inputs: uniform sampler3D volumeTexture, uniform vec3 eye, uniform vec3 fragmentPos, uniform float val_threshold, uniform float sample_step
-
-vec3 ray_dir = eye - fragmentPos; # Back-to-front direction
-vec3 step = normalize(ray_dir) * sample_step;
-
-vec3 accumulated_color = vec3(0.0);
-float accumulated_alpha = 0.0;
-
-# Start from the back face of the volume bounding box
-# Note: Exact start position calculation depends on bounding box intersection logic
-vec3 current_pos = back_face_intersection; 
-
-for i in range(max_steps):
-    if current_pos is outside volume bounds:
-        break
-    
-    float val = texture(volumeTexture, current_pos).r;
-    
-    # Brightness control logic
-    # The specific transfer function is not provided in sources [S1, unofficial]
-    # Assuming a simple threshold-based brightness modulation
-    float brightness = 0.0;
-    if val > val_threshold:
-        brightness = val; # Placeholder for actual transfer function
-    
-    # Back-to-front compositing
-    # Note: Standard alpha compositing is front-to-back. 
-    # Back-to-front requires different accumulation or pre-multiplied alpha handling.
-    # The source does not specify the exact compositing formula for back-to-front.
-    # [G] Assuming standard back-to-front accumulation: C_out = C_in + C_new * (1 - A_in)
-    # However, for brightness control, it might be a simple addition or weighted sum.
-    # Without explicit formula, we note the direction.
-    
-    accumulated_color += brightness; # Simplified accumulation
-    accumulated_alpha += 1.0; # Placeholder
-    
-    current_pos += step;
-
-gl_FragColor = vec4(accumulated_color, 1.0);
+def raycast_brightness_control(eye, fragment_pos, volume_texture, val_threshold, sample_step, max_steps):
+    ray_dir = (eye[0] - fragment_pos[0], eye[1] - fragment_pos[1], eye[2] - fragment_pos[2])
+    length = (ray_dir[0]**2 + ray_dir[1]**2 + ray_dir[2]**2)**0.5
+    step_vec = (ray_dir[0]/length * sample_step, ray_dir[1]/length * sample_step, ray_dir[2]/length * sample_step)
+    accumulated_color = [0.0, 0.0, 0.0]
+    current_pos = (fragment_pos[0] + step_vec[0], fragment_pos[1] + step_vec[1], fragment_pos[2] + step_vec[2])
+    for _ in range(max_steps):
+        if not (0.0 <= current_pos[0] <= 1.0 and 0.0 <= current_pos[1] <= 1.0 and 0.0 <= current_pos[2] <= 1.0):
+            break
+        v = volume_texture[current_pos]
+        brightness = v if v > val_threshold else 0.0
+        accumulated_color[0] += brightness
+        accumulated_color[1] += brightness
+        accumulated_color[2] += brightness
+        current_pos = (current_pos[0] + step_vec[0], current_pos[1] + step_vec[1], current_pos[2] + step_vec[2])
+    return accumulated_color
 ```
-
 ## Subtopics
 
 ### RaycastDensityControl
-A back-to-front raycasting technique using the fragment shader `volume_raycast02.fs`. It uses the parameter `val_threshold` to control the density of the voxels. It requires back-facing polygon rendering and computes the ray direction as `eye.xyz - fragment.xyz` [S1, unofficial].
+A back-to-front raycasting technique using the fragment shader `volume_raycast02.fs` [S1, unofficial]. It uses `val_threshold` to control the density of the voxels [S1, unofficial]. It requires back-facing polygon rendering and computes the ray direction as `eye.xyz - fragment.xyz` [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of samples along the ray, which depends on the volume depth and `SAMPLE_STEP`.
-- **Memory Complexity:** Dominated by the 3D volume texture storage.
-- **Performance:** Smaller `SAMPLE_STEP` improves quality but increases rendering time [S1, unofficial].
-- **Strengths:** Simple implementation, effective for visualizing brightness variations in the volume.
-- **Limitations:** Requires back-facing polygon rendering, which may not be supported or efficient in all hardware/driver configurations. The exact transfer function for brightness is not specified, limiting reproducibility.
-
+- Time complexity is linear with respect to the number of samples along the ray, determined by volume depth and `SAMPLE_STEP` [S1, unofficial].
+- Memory complexity is dominated by 3D volume texture storage [S1, unofficial].
+- Smaller `SAMPLE_STEP` improves quality but increases rendering time [S1, unofficial].
+- Strengths include simple implementation for visualizing brightness variations [S1, unofficial].
+- Limitations include the requirement for back-facing polygon rendering and the unspecified exact transfer function [S1, unofficial].
 ## Background
-Originated in the Visualization Library's GPU Raycast Volume Rendering guide. It is part of a suite of raycasting modes including Isosurface, MIP, and RaycastDensityControl. The technique leverages fragment shaders for parallel volume rendering on the GPU [S1, unofficial].
-
+The technique originated in the Visualization Library's GPU Raycast Volume Rendering guide [S1, unofficial]. It is part of a suite of raycasting modes including Isosurface, MIP, and RaycastDensityControl [S1, unofficial]. The implementation leverages fragment shaders for parallel volume rendering on the GPU [S1, unofficial].
 ## Sources
 [S1] GPU Raycast Volume Rendering with Transfer ... - Visualization Library, https://visualizationlibrary.org/documentation/pag_guide_raycast_volume.html, fetched 2026-10-26 (unofficial)

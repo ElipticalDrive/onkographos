@@ -3,151 +3,91 @@
 Also called: Dynamic single and multi-frame rate rendering
 
 ## Overview
-Dynamic Multi-Frame Rate Rendering is a hybrid rendering system that dynamically switches between multi-frame rate rendering (using image-based warping for low latency) and single-frame rate parallel raycasting (using all GPUs for high quality) based on current workload complexity [S1]. It solves the trade-off between the low latency of multi-frame rate techniques and the high quality/artifact-free nature of parallel raycasting by selecting the optimal method for the current frame [S1]. It sets itself apart from its siblings by explicitly managing the transition between these two distinct rendering paradigms based on a runtime decision function, whereas siblings like [Volumetric Smoke Rendering with Worley Noise and Light Maps](2447-volumetric-smoke-rendering-with-worley-noise-and-light-maps.md) focus on procedural density and [GPU-accelerated ray casting with volumetric lenses](6767-gpu-accelerated-ray-casting-with-volumetric-lenses.md) focus on specific optical effects [S1].
+Dynamic Multi-Frame Rate Rendering is a hybrid rendering system that dynamically switches between multi-frame rate rendering (using image-based warping for low latency) and single-frame rate parallel raycasting (using all GPUs for high quality) based on current workload complexity [S1]. It solves the trade-off between the low latency of fast-node rendering and the high throughput of parallel raycasting by selecting the optimal method for the current frame's specific parameters [S1]. Unlike its siblings, which focus on procedural evaluation or specific hardware acceleration, this method focuses on runtime adaptation of the rendering paradigm itself [S1].
 
 ## How it works
+The method operates by periodically evaluating a decision function that predicts the performance of different rendering modes based on current scene parameters.
+
 **Inputs and Outputs:**
 *   **Inputs:** Current rendering parameters including sampling rate, zoom level (resolution), occlusion, dataset size, and transfer function [S1].
-*   **Outputs:** A selected rendering mode (Multi-Frame Rate or Single-Frame Rate Parallel Raycasting) and the corresponding rendered image [S1].
+*   **Outputs:** A binary or categorical decision indicating whether to use Multi-Frame Rate (MFR) rendering or Single-Frame Rate (SFR) parallel raycasting [S1].
 
 **Data Structures:**
-*   **Decision Function:** A lookup table or mathematical model mapping input parameters (sampling rate, resolution) to the superior rendering method [S1]. The structure is not explicitly defined in the sources, but it is evaluated periodically [S1].
-*   **Performance Data:** Pre-computed or approximated performance metrics for different parameter combinations [S1].
+*   **Decision Function:** A lookup table or mathematical model mapping input parameters (sampling rate, resolution) to a performance metric (FPS) for both MFR and SFR modes [S1]. The structure is not explicitly defined in the sources, but it is derived from empirical measurements [S1].
 
-**Numbered Steps:**
-1.  **Collect Performance Data:** Gather performance data for the relevant parameters (sampling rate, zoom level, occlusion, dataset size, transfer function) to form a decision function that yields the best rendering method for the current frame [S1]. This measurement takes approximately 2 minutes for full evaluation, but a good approximation can be obtained within 10 seconds [S1].
-2.  **Evaluate Decision Function:** Periodically evaluate the decision function during runtime using the current values of the performance-relevant parameters [S1].
-3.  **Select Rendering Method:**
-    *   If the volume rendering complexity exceeds a break-even point (e.g., high sampling rate, high resolution), use **Multi-Frame Rate Rendering** [S1]. This method uses image-based warping for low latency [S1].
-    *   If the complexity is below the break-even point (e.g., low sampling rate, low resolution), converge to **Single-Frame Rate Multi-GPU Raycasting** (specifically sort-first parallel raycasting) [S1]. This utilizes all available GPUs and avoids image warping artifacts [S1].
-4.  **Render:** Execute the selected rendering method for the current frame [S1].
-5.  **Re-evaluate:** If performance-relevant parameters not input to the function change, recompute the performance data for the decision function [S1].
-
-**Formulas:**
-*   **Resolution Measurement:** Resolution is measured by computing the pixel area of the bounding rectangle, serving as a measurement of the model's zoom level [S1].
-    $$ \text{Resolution} = \text{Pixel Area of Bounding Rectangle} $$
-*   **Sampling Rate Range:** Sampling rate ranges from 6x undersampling to 6x oversampling compared to Nyquist rate sampling [S1].
+**Steps:**
+1.  **Performance Data Collection:** Collect performance data for the relevant parameters (sampling rate, zoom level, occlusion, dataset size, transfer function) to form a decision function [S1]. This involves measuring the frame rate of both MFR and SFR modes across the parameter space [S1].
+2.  **Decision Function Approximation:** The full evaluation of the decision function takes approximately 2 minutes, but a good approximation can be obtained within 10 seconds [S1].
+3.  **Runtime Evaluation:** Periodically evaluate the decision function during runtime using the current values of the input parameters [S1].
+4.  **Method Selection:**
+    *   If the volume rendering complexity exceeds a break-even point (indicated by the decision function), use multi-frame rate rendering [S1].
+    *   Otherwise, converge to single-frame rate multi-GPU raycasting to utilize all available resources and avoid image warping artifacts [S1].
+5.  **Re-evaluation Trigger:** Recompute the performance data for the decision function if any performance-relevant parameters not input to the function change [S1].
 
 **Parameters:**
-*   **Sampling Rate:** A parameter affecting raycasting complexity, ranging from 6x undersampling to 6x oversampling compared to Nyquist rate sampling [S1].
-*   **Resolution:** Measured by computing the pixel area of the bounding rectangle [S1].
+*   **Sampling Rate:** Ranges from 6x undersampling to 6x oversampling compared to the Nyquist rate sampling [S1].
+*   **Resolution:** Measured by computing the pixel area of the bounding rectangle, serving as a measurement of the model's zoom level [S1].
 
-**Edge Cases and Pitfalls:**
-*   **Convergence to Single-Frame Rate:** When converging to single-frame rate rendering (e.g., $m=0$ in quality map approach), additional GPUs become useless as raycasting is performed entirely by the fast node [S1].
-*   **Parameter Changes:** Performance data for the decision function must be recomputed if performance-relevant parameters not input to the function change [S1].
-*   **Break-Even Point:** The system must accurately identify the break-even point where multi-frame rate rendering becomes beneficial over parallel raycasting [S1].
+**Pitfalls and Edge Cases:**
+*   **Useless GPUs in SFR:** When converging to single-frame rate rendering (e.g., $m=0$ in the quality map approach), additional GPUs become useless as raycasting is performed entirely by the fast node [S1].
+*   **Stale Decision Function:** Performance data for the decision function must be recomputed if performance-relevant parameters not input to the function change [S1].
+*   **Precision:** The decision function evaluation has virtually no performance impact [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for Dynamic Multi-Frame Rate Rendering
-# Assumes a pre-computed or approximated decision function `get_best_method`
-# which takes sampling_rate and resolution as inputs and returns 'MFR' or 'PARALLEL'
+# Pre-computed decision function mapping (sampling_rate, resolution) -> (mfr_fps, sfr_fps)
+# This data is collected offline or via approximation
+decision_function = load_decision_function()
 
-def render_frame(sampling_rate, resolution, dataset, transfer_function, occlusion):
+def get_rendering_method(sampling_rate, resolution, other_params):
     """
-    Renders a single frame using the optimal method based on complexity.
+    Determines the best rendering method based on current parameters.
     
     Args:
-        sampling_rate (float): Sampling rate relative to Nyquist (e.g., 0.5 to 6.0).
-        resolution (int): Pixel area of the bounding rectangle.
-        dataset (VolumeDataset): The volumetric dataset.
-        transfer_function (TF): The transfer function for opacity/color.
-        occlusion (float): Occlusion factor.
+        sampling_rate: Float, relative to Nyquist rate (e.g., 0.5 for 2x undersampling)
+        resolution: Float, pixel area of the bounding rectangle
+        other_params: Dict, containing occlusion, dataset size, transfer function info
         
     Returns:
-        Image: The rendered frame.
+        str: 'MFR' for Multi-Frame Rate, 'SFR' for Single-Frame Rate
     """
-    # Step 1: Evaluate the decision function
-    # The decision function maps parameters to the best rendering method.
-    # It is evaluated periodically, but for this frame, we use current values.
-    best_method = get_best_method(sampling_rate, resolution)
-    
-    # Step 2: Select and execute the rendering method
-    if best_method == 'MFR':
-        # Multi-Frame Rate Rendering: Uses image-based warping for low latency.
-        # The fast node achieves low latency, slow nodes act as frame source.
-        # The fast node is not synchronized with slow nodes.
-        image = render_multi_frame_rate(dataset, transfer_function, occlusion)
-    elif best_method == 'PARALLEL':
-        # Single-Frame Rate Parallel Raycasting: Uses all GPUs for high quality.
-        # Avoids image warping artifacts.
-        # Note: If complexity is very low, additional GPUs may be underutilized.
-        image = render_parallel_ray_casting(dataset, transfer_function, occlusion)
-    else:
-        raise ValueError("Unknown rendering method selected by decision function.")
+    # Check if other_params have changed in a way that invalidates the decision function
+    if other_params_changed_since_last_evaluation():
+        decision_function = recompute_decision_function(other_params)
         
-    return image
-
-def get_best_method(sampling_rate, resolution):
-    """
-    Returns the best rendering method based on the decision function.
-    The decision function is derived from performance data collected over time.
-    Blue region in decision function (low complexity) -> PARALLEL
-    Other regions (high complexity) -> MFR
-    """
-    # This function encapsulates the decision logic.
-    # In practice, this might be a lookup table or a simple threshold check.
-    # For example, if sampling_rate * resolution < threshold, use PARALLEL.
-    # The sources indicate that sort-first parallel raycasting is superior in the "blue region" (low complexity).
+    # Get predicted FPS for both methods
+    mfr_fps, sfr_fps = decision_function.get_fps(sampling_rate, resolution)
     
-    # Placeholder for the actual decision logic derived from performance data.
-    # The sources do not provide the exact formula for the decision function,
-    # only that it is based on sampling rate and resolution.
-    # We assume a threshold-based approach for simplicity, as the exact function is not given.
-    # A good approximation of the decision function can be obtained within 10 seconds.
-    
-    # Example threshold (not from sources, just for structure):
-    # threshold = 1000 # Arbitrary value
-    # if sampling_rate * resolution < threshold:
-    #     return 'PARALLEL'
-    # else:
-    #     return 'MFR'
-    
-    # Since the exact decision function is not provided, we return a placeholder.
-    # In a real implementation, this would be a lookup or a more complex function.
-    return 'MFR' # Placeholder
+    # Select method with higher FPS
+    if mfr_fps > sfr_fps:
+        return 'MFR'
+    else:
+        return 'SFR'
 
-def render_multi_frame_rate(dataset, transfer_function, occlusion):
-    """
-    Renders using Multi-Frame Rate technique.
-    """
-    # Implementation details of MFR are not provided in the sources.
-    # It involves image-based warping and unbalanced workloads between fast and slow nodes.
-    pass
-
-def render_parallel_ray_casting(dataset, transfer_function, occlusion):
-    """
-    Renders using Single-Frame Rate Parallel Raycasting (sort-first).
-    """
-    # Implementation details of parallel raycasting are not provided in the sources.
-    # It utilizes all available GPUs.
-    pass
+def render_frame(method, scene_data, camera):
+    if method == 'MFR':
+        # Use multi-frame rate rendering (image-based warping)
+        # Fast node renders low-latency frame, slow nodes act as frame source
+        return render_mfr(scene_data, camera)
+    else:
+        # Use single-frame rate parallel raycasting (sort-first or sort-last)
+        # Utilize all GPUs for high quality
+        return render_sfr_parallel(scene_data, camera)
 ```
 
-## Subtopics
-
-### Multi-Frame Rate Rendering
-Uses image-based warping for low latency. Superior when volume rendering complexity is high [S1]. Link: [Multi-Frame Rate Volume Rendering](https://doi.org/10.2312/egpgv.egpgv10.019-026).
-
-### Single-Frame Rate Parallel Raycasting
-Uses all GPUs for high quality, avoiding image warping artifacts. Superior when complexity is low [S1]. Link: [Direct volume ray casting](19-direct-volume-ray-casting.md).
-
 ## Operating characteristics
-*   **Time Complexity:** The decision function evaluation has virtually no performance impact [S1]. Full performance data collection takes approximately 2 minutes, but a good approximation can be obtained within 10 seconds [S1].
+*   **Time Complexity:** The decision function evaluation has virtually no performance impact [S1]. The full evaluation of the decision function takes approximately 2 minutes, but a good approximation can be obtained within 10 seconds [S1].
 *   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Tested on two datasets: dice (64^3 voxels) and MANIX (256x256x230 voxels) [S1]. Performance was measured for sampling rates from 6x undersampling to 6x oversampling compared to Nyquist rate sampling [S1]. The multi-frame rate system showed more stable frame rates than sort-first parallel raycasting in high complexity scenarios [S1].
-*   **Scaling:** The system uses unbalanced workloads between a fast node (low latency) and slow nodes (frame source) [S1]. The fast node is not synchronized with slow nodes to increase speed [S1].
-*   **Strengths:** Low latency (MFR), high quality and artifact-free (Parallel), adaptive to workload complexity [S1].
-*   **Limitations:** When converging to single-frame rate rendering, additional GPUs become useless [S1]. Performance data must be recomputed if parameters change [S1].
-*   **When to use:** Use when dynamic switching between low latency and high quality is required based on workload complexity [S1].
-*   **When not to use:** Use when workload complexity is static and always low (parallel raycasting is sufficient) or always high (MFR is sufficient) [S1].
+*   **Measured Performance:** In tests with the MANIX dataset (256x256x230 voxels), multi-frame rate rendering was superior when volume rendering complexity was high, while sort-first parallel raycasting was superior when complexity was low [S1]. The performance was measured for sampling rates ranging from 6x undersampling to 6x oversampling compared to Nyquist rate sampling [S1].
+*   **Scaling:** The system is designed for multi-GPU setups where a fast node handles low-latency rendering and slow nodes act as frame sources [S1].
+*   **Strengths:** Provides stable frame rates and low latency to user input using multi-frame rate approach in combination with image-based rendering techniques [S1]. Avoids image warping artifacts when converging to single-frame rate rendering [S1].
+*   **Limitations:** When converging to single-frame rate rendering, additional GPUs become useless as raycasting is performed entirely by the fast node [S1]. Requires periodic re-evaluation of the decision function if parameters change [S1].
+*   **When to use:** Use when volume rendering complexity is high and low latency is critical. Use single-frame rate parallel raycasting when complexity is low to utilize all available resources [S1].
 
 ## Background
-*   **Origin:** The method was described in the paper "Multi-Frame Rate Volume Rendering" by S. Hauswiesner, D. Kalkofen, and D. Schmalstieg [S1].
-*   **History and Development:** The paper was published in 2010 by The Eurographics Association [S1]. It builds on the concept of multi-frame rate rendering and aims to address its limitations by dynamically switching to parallel raycasting when appropriate [S1].
-*   **Where it is used:** Suitable for displaying transparent volumetric scenes at high frame rates and little latency to user input [S1].
+Dynamic Multi-Frame Rate Rendering was introduced by S. Hauswiesner, D. Kalkofen, and D. Schmalstieg in 2010 [S1]. It is part of a broader effort to display transparent volumetric scenes at high frame rates and little latency to user input [S1]. The method builds on the principles of multi-frame rate rendering and parallel volume raycasting [S1].
 
 ## Sources
 [S1] Multi-Frame Rate Volume Rendering, https://doi.org/10.2312/egpgv.egpgv10.019-026, fetched 2026-10-29

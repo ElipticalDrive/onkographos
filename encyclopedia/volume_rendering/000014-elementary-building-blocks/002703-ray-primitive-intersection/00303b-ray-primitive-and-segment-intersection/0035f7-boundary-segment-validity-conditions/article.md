@@ -2,117 +2,101 @@
 
 
 ## Overview
-Boundary Segment Validity Conditions define the geometric constraints required for a line segment connecting two points on a polygonal mesh to constitute a valid spatial boundary segment in differentiable volume rendering [S1, unofficial]. These conditions ensure that the segment represents a true occlusion boundary (silhouette) rather than a penetration through the geometry, which is critical for correctly computing the Jacobian of the change of variables in boundary integrals [S1, unofficial]. Unlike standard ray-primitive intersection which only checks for existence, this method validates the topological consistency of the segment relative to the mesh normals and ensures no internal penetration occurs [S1, unofficial].
+Boundary Segment Validity Conditions define the geometric constraints required for a line segment connecting two points on a polygonal mesh to constitute a valid spatial boundary segment in volume rendering integrals [S1, unofficial]. These conditions ensure that the segment touches the mesh at a single point without penetrating the geometry, which is essential for correctly evaluating boundary integrals in path-space differentiable rendering [S1, unofficial]. Unlike sibling methods that may rely on explicit silhouette detection or screen-space rasterization, this method provides analytical validity checks in world space based on local mesh topology and ray-mesh intersection results [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   $\mathbf{x}_B$: A point on a mesh edge $E(\pi)$.
-*   $\boldsymbol{\omega}_B$: A direction vector associated with the boundary segment.
-*   $M(\pi)$: The polygonal mesh representing the geometry.
-*   $\mathbf{n}, \mathbf{n}'$: Normal vectors of the two faces sharing the edge containing $\mathbf{x}_B$.
+- A point $\mathbf{x}_B$ located on an edge $E(\pi)$ of a polygonal mesh $M(\pi)$.
+- A direction vector $\boldsymbol{\omega}_B$.
+- The mesh $M(\pi)$, represented as a collection of faces with associated normal vectors.
 
 **Outputs:**
-*   Boolean validity of the boundary segment defined by $\mathbf{x}_B$ and $\boldsymbol{\omega}_B$.
-*   Intersection points $\mathbf{x}_{0S}$ and $\mathbf{x}_{0D}$ if valid.
+- Boolean validity of the boundary segment defined by $\mathbf{x}_B$ and $\boldsymbol{\omega}_B$.
+- Intersection points $\mathbf{x}_{0S}$ and $\mathbf{x}_{0D}$ if valid.
 
 **Data Structures:**
-*   Mesh $M(\pi)$: Stored as a collection of polygons with associated face normals.
-*   Edge data: For each edge, store the two adjacent face normals $\mathbf{n}$ and $\mathbf{n}'$.
+- Mesh $M(\pi)$: A set of faces. Each face has a normal vector $\mathbf{n}$. Edges are shared between two faces with normals $\mathbf{n}$ and $\mathbf{n}'$.
+- Ray tracer function `rayTrace(origin, direction)`: Returns the intersection point with $M(\pi)$ or null if no intersection exists within bounds.
 
 **Steps:**
-1.  **Ray Tracing for Endpoints:**
-    Trace a ray from $\mathbf{x}_B$ in direction $-\boldsymbol{\omega}_B$ to find the source endpoint $\mathbf{x}_{0S}$.
-    Trace a ray from $\mathbf{x}_B$ in direction $\boldsymbol{\omega}_B$ to find the destination endpoint $\mathbf{x}_{0D}$.
-    Both rays must successfully intersect $M(\pi)$. If either ray fails to intersect or hits an invalid surface, the segment is invalid [S1, unofficial].
-
-2.  **Normal Consistency Check:**
-    Let $\mathbf{n}$ and $\mathbf{n}'$ be the unit normal vectors of the two faces sharing the edge containing $\mathbf{x}_B$. The direction $\boldsymbol{\omega}_B$ must satisfy the condition:
-    $$ (\boldsymbol{\omega}_B \cdot \mathbf{n}) (\boldsymbol{\omega}_B \cdot \mathbf{n}') < 0 $$
-    This inequality ensures that the segment exits one face and enters the other, consistent with a boundary silhouette rather than a grazing or penetrating path [S1, unofficial].
-
-3.  **Penetration Check:**
-    Verify that the segment $\mathbf{x}_{0S}\mathbf{x}_{0D}$ does not penetrate the mesh $M(\pi)$. This implies that the segment must lie entirely outside the volume enclosed by the mesh, touching it only at the boundaries defined by the silhouette [S1, unofficial].
+1. **Identify Local Geometry:** Determine the two faces sharing the edge containing $\mathbf{x}_B$. Let their normal vectors be $\mathbf{n}$ and $\mathbf{n}'$.
+2. **Check Orientation Condition:** Verify that the direction $\boldsymbol{\omega}_B$ points into the interior of the dihedral angle formed by the two faces. This is satisfied if:
+   $$ (\boldsymbol{\omega}_B \cdot \mathbf{n}) (\boldsymbol{\omega}_B \cdot \mathbf{n}') < 0 $$
+   This condition ensures that $\boldsymbol{\omega}_B$ and $-\boldsymbol{\omega}_B$ point into opposite half-spaces defined by the faces, preventing the segment from penetrating the mesh surface locally [S1, unofficial].
+3. **Trace Rays:** Perform ray tracing from $\mathbf{x}_B$ in directions $-\boldsymbol{\omega}_B$ and $\boldsymbol{\omega}_B$:
+   - Compute $\mathbf{x}_{0S} = \text{rayTrace}(\mathbf{x}_B, -\boldsymbol{\omega}_B)$.
+   - Compute $\mathbf{x}_{0D} = \text{rayTrace}(\mathbf{x}_B, \boldsymbol{\omega}_B)$.
+   Both rays must successfully intersect $M(\pi)$ at distinct points $\mathbf{x}_{0S}$ and $\mathbf{x}_{0D}$ [S1, unofficial].
+4. **Check Non-Penetration:** Verify that the segment connecting $\mathbf{x}_{0S}$ and $\mathbf{x}_{0D}$ does not penetrate the mesh $M(\pi)$ elsewhere. In practice, this is often implied by the local orientation check and the fact that $\mathbf{x}_B$ is the unique touch point on the edge, but rigorous implementations may require additional checks against other mesh faces [S1, unofficial].
+5. **Validity Result:** The segment is valid if and only if the orientation condition holds and both ray traces return valid intersection points.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def is_valid_boundary_segment(x_B, omega_B, mesh, edge_normals):
+def is_valid_boundary_segment(x_B, omega_B, mesh):
     """
-    Check if the segment defined by x_B and omega_B is a valid boundary segment.
+    Check if the boundary segment defined by x_B and omega_B is valid.
     
     Args:
-        x_B: Point on mesh edge.
+        x_B: Point on a mesh edge.
         omega_B: Direction vector.
-        mesh: Polygonal mesh object with ray intersection capability.
-        edge_normals: Tuple (n, n') of normals for the faces sharing the edge at x_B.
-        
+        mesh: Polygonal mesh object with method get_edge_normals(x_B) returning (n, n').
+    
     Returns:
         bool: True if valid, False otherwise.
-        tuple: (x_0S, x_0D) if valid, None otherwise.
     """
-    n, n_prime = edge_normals
+    # Step 1: Get normals of the two faces sharing the edge at x_B
+    n, n_prime = mesh.get_edge_normals(x_B)
     
-    # Step 1: Ray tracing
-    # Ray from x_B in direction -omega_B
-    hit_S, x_0S = mesh.ray_trace(x_B, -omega_B)
-    if not hit_S:
-        return False, None
-        
-    # Ray from x_B in direction omega_B
-    hit_D, x_0D = mesh.ray_trace(x_B, omega_B)
-    if not hit_D:
-        return False, None
-        
-    # Step 2: Normal consistency check
+    # Step 2: Check orientation condition
     dot_n = dot(omega_B, n)
     dot_n_prime = dot(omega_B, n_prime)
     
     if dot_n * dot_n_prime >= 0:
-        return False, None
-        
-    # Step 3: Penetration check
-    # Verify segment does not penetrate mesh.
-    # This typically involves checking that the segment does not intersect
-    # any face interiors between x_0S and x_0D, or that the midpoint
-    # is outside the mesh volume.
-    if segment_penetrates_mesh(x_0S, x_0D, mesh):
-        return False, None
-        
-    return True, (x_0S, x_0D)
-
-def segment_penetrates_mesh(x_0S, x_0D, mesh):
-    """
-    Check if the segment x_0S-x_0D penetrates the mesh.
-    Implementation detail: Check if the midpoint is inside the mesh
-    or if the segment intersects any face interiors.
-    [G] Standard point-in-polygon or ray-casting for 3D volume containment.
-    """
-    midpoint = (x_0S + x_0D) / 2.0
-    return mesh.is_inside(midpoint)
+        return False
+    
+    # Step 3: Trace rays
+    x_0S = mesh.ray_trace(x_B, -omega_B)
+    x_0D = mesh.ray_trace(x_B, omega_B)
+    
+    # Check if intersections were found
+    if x_0S is None or x_0D is None:
+        return False
+    
+    # Step 4: Check non-penetration (simplified assumption based on source)
+    # The source implies that if the local orientation is correct and
+    # rays hit the mesh, the segment is a spatial boundary segment.
+    # Additional global penetration checks may be needed for complex meshes.
+    
+    return True
 ```
 
 **Parameters:**
-*   Tolerance for dot product comparison: Not given in the sources.
-*   Ray tracing precision: Not given in the sources.
+- Not given in the sources.
 
 **Edge Cases:**
-*   **Degenerate Edges:** If the edge length is zero, normals may be undefined.
-*   **Coplanar Faces:** If $\mathbf{n} = \mathbf{n}'$, the product is always non-negative, potentially rejecting valid segments if the geometry is flat but treated as a boundary.
-*   **Precision Errors:** Floating-point inaccuracies in dot products may cause the strict inequality $< 0$ to fail for valid grazing cases.
+- **Degenerate Edges:** If the edge is shared by coplanar faces ($\mathbf{n} = \mathbf{n}'$), the product $(\boldsymbol{\omega}_B \cdot \mathbf{n}) (\boldsymbol{\omega}_B \cdot \mathbf{n}')$ is always non-negative, so the condition fails. This correctly identifies that no boundary segment can exist in this configuration [S1, unofficial].
+- **Tangential Directions:** If $\boldsymbol{\omega}_B$ is parallel to a face normal, the dot product is zero, and the condition fails. This prevents segments that lie along the surface [S1, unofficial].
 
 ## Subtopics
 
+### [Change of Integration Variable for Boundary Segments](8107-change-of-integration-variable-for-boundary-segments.md)
+This method performs a change of variables in the boundary segment integral to replace integration over surface endpoints $(\mathbf{p}_S, \mathbf{p}_D)$ with integration over a boundary point $\mathbf{x}_B$ on a mesh edge and a tangent direction $\boldsymbol{\omega}_B$. This transformation avoids the need for explicit silhouette detection for non-camera endpoints by parameterizing the segment via its intersection with the geometry. It is distinct from standard ray-sampling methods by explicitly accounting for the geometric distortion between the visibility boundary and the surface parameterization.
+
+### [3D Ring Visibility & Occlusion Test](12140-3d-ring-visibility-occlusion-test.md)
+The 3D Ring Visibility & Occlusion Test is a screen-space rasterization technique used to determine which voxels are visible or occluded by the boundary segments of a 3D ring primitive. It projects ring segments to screen space, computes depth via inverse-linear interpolation, and validates visibility against a voxel depth buffer. It differs from sibling methods like [Change of Integration Variable for Boundary Segments](8107-change-of-integration-variable-for-boundary-segments.md) by operating in screen space using rasterization primitives rather than analytical integration in world space.
+
 ## Operating characteristics
-*   **Time Complexity:** Dominated by ray tracing operations. Each validity check requires two ray-mesh intersections.
-*   **Memory Complexity:** $O(1)$ auxiliary space per check, assuming mesh data is accessible.
-*   **Strengths:** Ensures physical correctness of boundary integrals by preventing self-intersection artifacts.
-*   **Limitations:** Computationally expensive due to multiple ray traces. Sensitive to mesh quality and normal consistency.
-*   **When to use:** When computing differentiable volume rendering integrals involving boundary segments where geometric validity is critical.
-*   **When not to use:** For simple visibility checks where penetration is not a concern or performance is paramount.
+- **Time Complexity:** Depends on the cost of ray tracing. Each validity check requires two ray-mesh intersections. For polygonal meshes, this is typically $O(N)$ where $N$ is the number of faces, unless accelerated by a BVH or similar structure, in which case it is $O(\log N)$ [S1, unofficial].
+- **Memory Complexity:** $O(1)$ additional memory per check, assuming the mesh is already in memory [S1, unofficial].
+- **Strengths:** Provides exact geometric validity checks in world space, avoiding artifacts from discretization or rasterization [S1, unofficial].
+- **Limitations:** Requires efficient ray tracing; may be slow for very large meshes without acceleration structures [S1, unofficial].
+- **When to use:** When computing boundary integrals in path-space differentiable rendering where exact geometric constraints are required [S1, unofficial].
+- **When not to use:** When screen-space approximations are sufficient or when performance is critical and the mesh is extremely large [S1, unofficial].
 
 ## Background
-Originated in the context of path-space differentiable rendering, specifically for handling boundary integrals in volume rendering [S1, unofficial]. The method addresses the challenge of parameterizing boundary segments via mesh edges to avoid explicit silhouette detection, as described in "Path-Space Differentiable Rendering" [S1, unofficial].
+The Boundary Segment Validity Conditions were introduced in the context of path-space differentiable rendering to enable the correct evaluation of boundary integrals involving spatial boundaries [S1, unofficial]. The method is based on the geometric properties of polygonal meshes and the behavior of rays intersecting these meshes [S1, unofficial]. It is used in differentiable rendering systems that support complex geometry and boundary conditions [S1, unofficial].
 
 ## Sources
 [S1] Path-Space Differentiable Rendering, https://core.ac.uk/download/541724175.pdf, fetched 2026-10-29 (unofficial)

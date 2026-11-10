@@ -10,8 +10,9 @@ This method manages the lifecycle of voxel chunks by maintaining a hash map of a
 **Outputs:** A set of chunks to render and an updated hash map $H$ [S1, unofficial].
 
 **Data Structures:**
-*   **Chunk Class:** Must disable copy and move constructors and assignment operators to prevent accidental copying and aid in debugging memory management [S1, unofficial].
-*   **Hash Map $H$:** Maps 3D integer coordinates $(cx, cy, cz)$ to `Chunk` pointers. The hash function must handle tuples, as standard libraries may not provide a built-in hash for 3D tuples [S1, unofficial].
+*   **Chunk Class:** The implementation must disable copy and move constructors and assignment operators to prevent accidental copying and aid in debugging memory management [S1, unofficial].
+*   **Hash Map $H$:** The hash map maps 3D integer coordinates $(cx, cy, cz)$ to `Chunk` pointers [S1, unofficial].
+*   The hash function must handle tuples, as standard libraries may not provide a built-in hash for 3D tuples [S1, unofficial].
 
 **Steps:**
 1.  **Define AoI:** Calculate the bounding cube of the Area of Interest as:
@@ -21,20 +22,22 @@ This method manages the lifecycle of voxel chunks by maintaining a hash map of a
     *   If $(cx, cy, cz)$ exists in $H$, fetch the chunk object [S1, unofficial].
     *   If $(cx, cy, cz)$ does not exist in $H$, create a new chunk object, insert it into $H$, and fetch it [S1, unofficial].
 3.  **Render:** Render all fetched chunks [S1, unofficial].
-4.  **Unload:** Identify all chunks in $H$ whose coordinates lie outside the AoI. Delete these chunk objects and remove them from $H$ [S1, unofficial].
+4.  **Unload:** The unload step identifies all chunks in $H$ whose coordinates lie outside the AoI [S1, unofficial]. Delete these chunk objects and remove them from $H$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def update_chunks(camera_pos, render_distance, chunk_hashmap):
     # 1. Define AoI bounds (floored/ceiled to chunk coordinates)
-    min_cx = int(floor(camera_pos.x - render_distance))
-    max_cx = int(ceil(camera_pos.x + render_distance))
-    min_cy = int(floor(camera_pos.y - render_distance))
-    max_cy = int(ceil(camera_pos.y + render_distance))
-    min_cz = int(floor(camera_pos.z - render_distance))
-    max_cz = int(ceil(camera_pos.z + render_distance))
+    min_cx = math.floor(camera_pos.x - render_distance)
+    max_cx = math.ceil(camera_pos.x + render_distance)
+    min_cy = math.floor(camera_pos.y - render_distance)
+    max_cy = math.ceil(camera_pos.y + render_distance)
+    min_cz = math.floor(camera_pos.z - render_distance)
+    max_cz = math.ceil(camera_pos.z + render_distance)
 
     # 2. Load chunks inside AoI
     chunks_to_render = []
@@ -59,8 +62,8 @@ def update_chunks(camera_pos, render_distance, chunk_hashmap):
     # 3. Unload chunks outside AoI
     keys_to_remove = []
     for key, chunk in chunk_hashmap.items():
-        if not (min_cx <= key[0] <= max_cx and 
-                min_cy <= key[1] <= max_cy and 
+        if not (min_cx <= key[0] <= max_cx and
+                min_cy <= key[1] <= max_cy and
                 min_cz <= key[2] <= max_cz):
             keys_to_remove.append(key)
     
@@ -81,11 +84,11 @@ def update_chunks(camera_pos, render_distance, chunk_hashmap):
 ## Subtopics
 
 ### Underground Sub-chunk Culling
-An optimization where sub-chunks (smaller subdivisions within a chunk) are culled when the camera is underground. This results in up to 70x fewer sub-chunks being drawn and loaded compared to non-underground scenarios [S2, unofficial].
+This optimization culls sub-chunks (smaller subdivisions within a chunk) when the camera is underground [S2, unofficial]. This results in up to 70x fewer sub-chunks being drawn and loaded compared to non-underground scenarios [S2, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** $O(V)$ where $V$ is the number of voxels in the AoI, assuming constant-time hash map lookups and chunk creation [G]. Unloading is $O(C)$ where $C$ is the number of active chunks [G].
-**Memory Complexity:** Proportional to the number of chunks within the AoI [G].
+**Time Complexity:** The load step runs in $O(V)$ where $V$ is the number of voxels in the AoI, assuming constant-time hash map lookups and chunk creation [G]. The unload step runs in $O(C)$ where $C$ is the number of active chunks [G].
+**Memory Complexity:** Memory usage is proportional to the number of chunks within the AoI [G].
 **Performance:** On an Apple M4, rendering 277 million voxels (4,225 chunks) at radius 32 took 8.2 ms [S2, unofficial]. Underground optimization can reduce loaded sub-chunks by up to 70x [S2, unofficial].
 
 ## Background

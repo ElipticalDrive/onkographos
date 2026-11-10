@@ -1,9 +1,8 @@
 # Tri-linear Interpolation via LRP
 
-Also called: Tri-linear Interpolation, LRP-based Interpolation
 
 ## Overview
-Tri-linear interpolation via LRP is a GPU-accelerated method for sampling volumetric data stored in 3D textures, estimating the scalar value at arbitrary floating-point coordinates by linearly interpolating the eight surrounding voxel values [S2, S3, unofficial]. It solves the problem of resampling discrete voxel grids into continuous space for volume rendering, providing smoother structural details than direct voxel rendering [S2, S3, unofficial]. It sets itself apart from higher-order methods by using only linear blending factors and from CPU-based raycasting by leveraging hardware rasterization to interpolate texture coordinates "for free" between vertices [S3, unofficial].
+Tri-linear interpolation via LRP is a GPU-accelerated method for sampling volumetric data stored in 3D textures, estimating the scalar value at arbitrary floating-point coordinates by linearly interpolating the eight surrounding voxel values [S2, S3, unofficial]. It solves the problem of resampling discrete voxel grids into continuous space for volume rendering, providing smoother structural details than direct voxel rendering [S2, unofficial]. It sets itself apart from higher-order methods by using only linear blending factors and from CPU-based raycasting by leveraging hardware rasterization to interpolate texture coordinates "for free" between vertices [S3, unofficial].
 
 ## How it works
 **Inputs:**
@@ -14,19 +13,19 @@ Tri-linear interpolation via LRP is a GPU-accelerated method for sampling volume
 - The interpolated scalar value $S_X$ at the query point [S2, unofficial].
 
 **Data Structures:**
-- **3D Texture:** Stores the volume data. Accessed via hardware texture units [S3, unofficial].
+- **3D Texture:** Stores the volume data and is accessed via hardware texture units [S3, unofficial].
 - **Vertex Attributes:** Eight texture-coordinate attributes per vertex, storing the pre-computed texture coordinates for the eight nearest neighbors of the vertex [S3, unofficial].
 - **Interpolated Coordinates:** During rasterization, the GPU interpolates the eight vertex attributes across the primitive, providing eight distinct texture coordinates $(u_i, v_i, w_i)$ for each fragment [S3, unofficial].
 
 **Steps:**
-1. **Pre-computation (Per-Vertex Stage):** For each vertex of the proxy geometry, calculate the texture coordinates of its eight nearest neighbors in the 3D texture grid. Store these in eight separate texture-coordinate vertex attributes [S3, unofficial].
-2. **Rasterization:** The GPU interpolates these eight sets of texture coordinates across the rendered primitive. Each fragment receives eight interpolated texture coordinates corresponding to the eight corners of the voxel cell containing the fragment's position [S3, unofficial].
-3. **Blending Factor Calculation (Per-Fragment Stage):** For each of the eight interpolated texture coordinates $(u, v, w)$, calculate the blending factors. Multiply the texture coordinate by the original texture resolution $(W, H, D)$ to get absolute texel coordinates. Take the fractional part of these coordinates to determine the interpolation weights [S3, unofficial].
+1. **Pre-computation (Per-Vertex Stage):** For each vertex of the proxy geometry, calculate the texture coordinates of its eight nearest neighbors in the 3D texture grid and store them in eight separate texture-coordinate vertex attributes [S3, unofficial].
+2. **Rasterization:** The GPU interpolates these eight sets of texture coordinates across the rendered primitive, so each fragment receives eight interpolated texture coordinates corresponding to the eight corners of the voxel cell containing the fragment's position [S3, unofficial].
+3. **Blending Factor Calculation (Per-Fragment Stage):** For each of the eight interpolated texture coordinates $(u, v, w)$, calculate the blending factors by multiplying the texture coordinate by the original texture resolution $(W, H, D)$ to get absolute texel coordinates, then taking the fractional part of these coordinates [S3, unofficial].
    $$ \alpha = \text{frac}(u \cdot W) $$
    $$ \beta = \text{frac}(v \cdot H) $$
    $$ \gamma = \text{frac}(w \cdot D) $$
    Where $\text{frac}(x) = x - \lfloor x \rfloor$ [S2, S3, unofficial].
-4. **Voxel Fetching:** Fetch the scalar values $S_{ijk}$ from the 3D texture using the eight interpolated texture coordinates. The indices correspond to the integer parts of the absolute coordinates [S2, S3, unofficial].
+4. **Voxel Fetching:** Fetch the scalar values $S_{ijk}$ from the 3D texture using the eight interpolated texture coordinates, where the indices correspond to the integer parts of the absolute coordinates [S2, S3, unofficial].
    $$ S_{000} = \text{tex3D}(u, v, w) \text{ at } (\lfloor uW \rfloor, \lfloor vH \rfloor, \lfloor wD \rfloor) $$
    $$ S_{100} = \text{tex3D}(u, v, w) \text{ at } (\lfloor uW \rfloor + 1, \lfloor vH \rfloor, \lfloor wD \rfloor) $$
    $$ S_{010} = \text{tex3D}(u, v, w) \text{ at } (\lfloor uW \rfloor, \lfloor vH \rfloor + 1, \lfloor wD \rfloor) $$
@@ -43,14 +42,15 @@ Tri-linear interpolation via LRP is a GPU-accelerated method for sampling volume
 - $W, H, D$: Original dimensions (width, height, depth) of the 3D texture [S3, unofficial].
 
 **Pitfalls:**
-- **Memory Bandwidth:** Trilinear interpolation requires eight memory reads per sample point. For real-time rendering, this creates a high demand for memory bandwidth, potentially slowing down rendering speed if memory latency is high [S1, unofficial].
+- **Memory Bandwidth:** Trilinear interpolation requires eight memory reads per sample point, creating a high demand for memory bandwidth that can severely slow down rendering speed if memory latency is high [S1, unofficial].
 - **Boundary Handling:** If the ceiling coordinate exceeds the volume dimension (e.g., $\lfloor uW \rfloor + 1 \ge W$), it must be clamped to the maximum index ($W-1$) to prevent out-of-bounds array access [S2, unofficial].
-- **Precision:** The LRP instruction relies on accurate interpolation of texture coordinates. Precision errors in coordinate interpolation can lead to incorrect blending factors [S3, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def tri_linear_interpolation_via_lrp(tex_coord, resolution, texture_fetch):
     """
     Performs tri-linear interpolation using the LRP method.
@@ -72,12 +72,12 @@ def tri_linear_interpolation_via_lrp(tex_coord, resolution, texture_fetch):
     abs_w = w * D
     
     # Calculate integer floor and ceiling coordinates
-    xf = int(abs_u)
-    xc = min(xf + 1, W - 1)  # Clamp to max index
-    yf = int(abs_v)
-    yc = min(yf + 1, H - 1)  # Clamp to max index
-    zf = int(abs_w)
-    zc = min(zf + 1, D - 1)  # Clamp to max index
+    xf = math.floor(abs_u)
+    xc = min(xf + 1, W - 1)  # Clamp to max index per [S2, unofficial]
+    yf = math.floor(abs_v)
+    yc = min(yf + 1, H - 1)  # Clamp to max index per [S2, unofficial]
+    zf = math.floor(abs_w)
+    zc = min(zf + 1, D - 1)  # Clamp to max index per [S2, unofficial]
     
     # Calculate blending factors (fractional parts)
     alpha = abs_u - xf
@@ -110,7 +110,7 @@ def tri_linear_interpolation_via_lrp(tex_coord, resolution, texture_fetch):
 ## Subtopics
 
 ### [Coarsest-Level Lerp](2770-coarsest-level-lerp.md)
-Coarsest-Level Lerp is a method for computing the value of a coarser-side octant vertex in Adaptive Mesh Refinement (AMR) volume rendering by performing trilinear interpolation on the coarsest refinement level involved in the input data. It solves the problem of defining continuous boundary values for octants that abut coarser regions by ensuring the interpolant is based on the lowest-resolution grid that covers the spatial extent of the query. It sets itself apart from Finest Level Lerp by prioritizing the coarsest available data rather than the finest, and from Current-Level Lerp by using a fixed global level rather than an adaptive leaf-level lookup.
+Coarsest-Level Lerp is a method for computing the value of a coarser-side octant vertex in Adaptive Mesh Refinement (AMR) volume rendering by performing trilinear interpolation on the coarsest level involved for any of the inputs. It solves the problem of generating consistent, continuous interpolants at level boundaries where a coarse octant meets finer children. It sets itself apart from Finest Level Lerp by utilizing the coarsest available resolution rather than the finest, and from Blending Between Levels (Fast) by being a deterministic, non-blending average that avoids the computational overhead of transparency-based blending.
 
 ### Index of Refraction Update via Trilinear Interpolation
 A method to update a 3D volume texture of index of refraction (IOR) values based on particle positions, using trilinear interpolation to distribute a constant IOR increment (0.1) to the 8 surrounding grid cells [S4, unofficial]. It involves resetting the IOR volume, calculating floating-point cell coordinates for each particle, and updating the 8 neighboring cells using trilinear weights based on the fractional part of the cell coordinates [S4, unofficial].
@@ -118,13 +118,16 @@ A method to update a 3D volume texture of index of refraction (IOR) values based
 ### Tensor Core Accelerated Texture Interpolation
 An attempt to use GPU matrix-multiplication units (Tensor Cores) to perform texture interpolation, outside of artificial neural networks [S5, unofficial]. This approach was found to be not very performant compared to standard methods, as matrix-multiplication units only work with predefined matrix sizes, achieve peak efficiency only with heavily reduced precision number formats, and are complicated to feed, making them difficult to use for applications that do not fit within those narrow constraints [S5, unofficial].
 
+### Manual 3D Texture Interpolation
+A custom interpolation method for 3D textures because hardware filtering cannot be used to avoid interpolating across block edges [S6, unofficial]. For a 2px width texture, sample locations are interpreted as 0 and 2 (edges) rather than 0.5 and 1.5 [S6, unofficial].
+
 ## Operating characteristics
 - **Time Complexity:** $O(1)$ per sample point, as it involves a fixed number of arithmetic operations and memory fetches [S2, S3, unofficial].
 - **Memory Complexity:** $O(1)$ per sample point, requiring storage for 8 voxel values and blending factors [S1, unofficial].
-- **Measured Performance:** Requires at least eight memory reads per sample point. For real-time rendering, this can result in millions or billions of memory reads per frame, creating a significant bottleneck if memory bandwidth is insufficient [S1, unofficial].
+- **Measured Performance:** Requires at least eight memory reads per sample point, resulting in millions or billions of memory reads per frame for real-time rendering [S1, unofficial].
 - **Scaling:** Performance scales linearly with the number of sample points, but is heavily dependent on memory bandwidth and latency [S1, unofficial].
-- **Strengths:** Provides smooth rendering of volumetric data, avoiding the blocky appearance of direct voxel rendering [S2, S3, unofficial]. Hardware-accelerated via LRP instruction and texture units [S3, unofficial].
-- **Limitations:** High memory bandwidth requirement. Less structural detail compared to higher-order interpolation methods [S2, S3, unofficial].
+- **Strengths:** Provides smooth rendering of volumetric data, avoiding the blocky appearance of direct voxel rendering [S2, unofficial]. Hardware-accelerated via LRP instruction and texture units [S3, unofficial].
+- **Limitations:** High memory bandwidth requirement and less structural detail compared to higher-order interpolation methods [S2, S3, unofficial].
 - **When to use:** Real-time volume rendering where smoothness is prioritized over extreme detail, and hardware supports efficient 3D texture sampling [S1, S3, unofficial].
 - **When not to use:** When memory bandwidth is severely constrained and higher-order interpolation is required for visual fidelity [S2, S3, unofficial].
 
@@ -137,3 +140,4 @@ Tri-linear interpolation is the primary interpolation method for volume renderin
 [S3] PDF Hardware-Accelerated Frequency Domain Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2004/viola-2004-har2/viola-2004-har2-Paper.pdf, fetched 2026-10-27 (unofficial)
 [S4] ShengzhiWu/taichi-volume-renderer, https://github.com/ShengzhiWu/taichi-volume-renderer, fetched 2026-10-26 (unofficial)
 [S5] Real-Time Rendering of Ultra-Large and Ultra-Detailed Virtual World using Voxels, https://hal.science/tel-05803730v1, fetched 2026-10-26 (unofficial)
+[S6] Signed Distance Field Rendering Journey pt.1 – kosmonaut's blog, https://kosmonautblog.wordpress.com/2017/05/01/signed-distance-field-rendering-journey-pt-1/, fetched 2026-10-29 (unofficial)

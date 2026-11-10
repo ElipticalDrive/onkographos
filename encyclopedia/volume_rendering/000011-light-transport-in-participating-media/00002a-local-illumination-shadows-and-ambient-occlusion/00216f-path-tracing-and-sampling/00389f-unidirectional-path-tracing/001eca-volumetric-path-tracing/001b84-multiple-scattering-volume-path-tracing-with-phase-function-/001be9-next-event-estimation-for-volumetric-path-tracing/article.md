@@ -7,11 +7,11 @@ Next Event Estimation (NEE) for volumetric path tracing is an optimization that 
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Current scattering position $\mathbf{p}$ in the medium, current medium properties $\sigma_t$ (extinction coefficient), view direction $\omega_o$, light sampler, and scene geometry including index-matching surfaces (surfaces with no material assigned, `material_id == -1`) [S1, S3].
-*   **Output:** Direct lighting contribution $L_s$ at $\mathbf{p}$ from the sampled light, or 0 if blocked.
+*   **Input:** Current scattering position $\mathbf{p}$ in the medium, current medium extinction coefficient $\sigma_t$, view direction $\omega_o$, light sampler, and scene geometry including index-matching surfaces (surfaces with `material_id == -1`) [S1, S3].
+*   **Output:** Direct lighting contribution $L_s$ at $\mathbf{p}$ from the sampled light, or $0$ if blocked [S1, S3].
 
 **Data Structures:**
-*   `Ray`: Origin $\mathbf{o}$, direction $\mathbf{d}$, medium reference.
+*   `Ray`: Origin $\mathbf{o}$, direction $\mathbf{d}$, medium reference [S4].
 *   `Intersection`: Hit position $\mathbf{p}_{hit}$, distance $t$, `material_id` (opaque if $\ge 0$, index-matching if $-1$) [S1, S3].
 *   `LightSampleContext`: Contains surface interaction info for light sampling [S4].
 
@@ -22,46 +22,46 @@ Next Event Estimation (NEE) for volumetric path tracing is an optimization that 
 **Steps:**
 
 1.  **Light Sampling:**
-    Sample a light source and a point $\mathbf{p}'$ on it.
-    *   Sample light index: $u_1 = \text{sampler.Get1D()}$.
-    *   Sample point on light: $u_2 = \text{sampler.Get2D()}$.
+    Sample a light source and a point $\mathbf{p}'$ on it [S4].
+    *   Sample light index: $u_1 = \text{sampler.Get1D()}$ [S4].
+    *   Sample point on light: $u_2 = \text{sampler.Get2D()}$ [S4].
     *   Compute light PDF: $p_{light} = p_{\text{selection}} \cdot p_{\text{point}}$ [S4].
-    *   If no sample or $L_e(\mathbf{p}') = 0$, return 0 [S4].
+    *   If no sample or $L_e(\mathbf{p}') = 0$, return $0$ [S4].
 
 2.  **Shadow Ray Initialization:**
-    *   Direction to light: $\mathbf{d}_{light} = \text{normalize}(\mathbf{p}' - \mathbf{p})$.
-    *   Initialize transmittance accumulator: $T_{light} = 1$.
-    *   Initialize shadow medium: $\text{shadow\_medium} = \text{current\_medium}$.
-    *   Initialize shadow bounce counter: $\text{shadow\_bounces} = 0$.
+    *   Direction to light: $\mathbf{d}_{light} = \text{normalize}(\mathbf{p}' - \mathbf{p})$ [S1, S3].
+    *   Initialize transmittance accumulator: $T_{light} = 1$ [S1, S3].
+    *   Initialize shadow medium: $\text{shadow\_medium} = \text{current\_medium}$ [S3].
+    *   Initialize shadow bounce counter: $\text{shadow\_bounces} = 0$ [S3].
     *   Initialize MIS transmittance PDF factor: $p_{trans\_dir} = 1$ [S1, S3].
 
 3.  **Shadow Ray Tracing Loop:**
     While $\mathbf{d}_{light} \neq \mathbf{0}$:
-    *   Create shadow ray: $\mathbf{r} = \text{Ray}(\mathbf{p}, \mathbf{d}_{light})$.
-    *   Intersect with scene: $\text{isect} = \text{intersect}(\text{scene}, \mathbf{r})$.
+    *   Create shadow ray: $\mathbf{r} = \text{Ray}(\mathbf{p}, \mathbf{d}_{light})$ [S1, S3].
+    *   Intersect with scene: $\text{isect} = \text{intersect}(\text{scene}, \mathbf{r})$ [S1, S3].
     *   Determine segment distance:
-        *   If $\text{isect}$ exists: $t_{seg} = \text{distance}(\mathbf{p}, \text{isect.position})$.
-        *   Else: $t_{seg} = \text{distance}(\mathbf{p}, \mathbf{p}')$.
+        *   If $\text{isect}$ exists: $t_{seg} = \text{distance}(\mathbf{p}, \text{isect.position})$ [S1, S3].
+        *   Else: $t_{seg} = \text{distance}(\mathbf{p}, \mathbf{p}')$ [S1, S3].
     *   **Compute Transmittance:**
         *   If $\text{shadow\_medium}$ is valid:
-            *   $T_{light} \leftarrow T_{light} \cdot \exp(-\sigma_t \cdot t_{seg})$.
+            *   $T_{light} \leftarrow T_{light} \cdot \exp(-\sigma_t \cdot t_{seg})$ [S1, S3].
             *   $p_{trans\_dir} \leftarrow p_{trans\_dir} \cdot \exp(-\sigma_t \cdot t_{seg})$ [S1, S3].
     *   **Check Visibility:**
-        *   If no intersection: Light is visible. Break loop.
+        *   If no intersection: Light is visible. Break loop [S1, S3].
         *   If intersection exists:
-            *   If $\text{isect.material\_id} \ge 0$ (Opaque): Ray is blocked. Return 0 [S1, S3].
+            *   If $\text{isect.material\_id} \ge 0$ (Opaque): Ray is blocked. Return $0$ [S1, S3].
             *   If $\text{isect.material\_id} == -1$ (Index-Matching):
-                *   Increment $\text{shadow\_bounces}$.
-                *   Check depth limit: If $\text{bounces} + \text{shadow\_bounces} \ge \text{max\_depth}$, return 0 [S1, S3].
+                *   Increment $\text{shadow\_bounces}$ [S1, S3].
+                *   Check depth limit: If $\text{bounces} + \text{shadow\_bounces} + 1 \ge \text{max\_depth}$, return $0$ [S1]. (Note: Source [S3] uses $\ge \text{max\_depth}$ without the $+1$; implementations should follow their specific depth accounting convention [S1, S3]).
                 *   Update $\text{shadow\_medium}$ based on the surface intersection (entering/exiting volume) [S1, S3].
-                *   Advance position: $\mathbf{p} \leftarrow \mathbf{p} + t_{seg} \cdot \mathbf{d}_{light}$.
+                *   Advance position: $\mathbf{p} \leftarrow \mathbf{p} + t_{seg} \cdot \mathbf{d}_{light}$ [S1, S3].
                 *   Continue loop [S1, S3].
 
 4.  **Contribution Calculation:**
     If $T_{light} > 0$:
     *   Compute Geometry Term: $G = \frac{|\mathbf{n}_{\mathbf{p}'} \cdot \mathbf{d}_{light}|}{\|\mathbf{p} - \mathbf{p}'\|^2}$ [S1, S3].
-    *   Evaluate Phase Function: $f_p = \text{phase}(\omega_o, -\mathbf{d}_{light})$ [S2, unofficial][S4].
-    *   Compute NEE PDF (Area measure): $p_{nee} = p_{light}$ [S1, S3].
+    *   Evaluate Phase Function: $f_p = \text{phase}(\omega_o, -\mathbf{d}_{light})$ [S4].
+    *   Compute NEE PDF (Area measure): $p_{nee} = p_{light} \cdot p_{pos} \cdot \frac{|\cos \theta|}{d^2}$ [S2, unofficial].
     *   Compute Phase Function PDF (converted to area measure for MIS):
         *   $p_{phase\_area} = p_{\text{sample\_phase}}(\omega_o, -\mathbf{d}_{light}) \cdot G \cdot p_{trans\_dir}$ [S1, S3].
     *   Compute Contribution:
@@ -102,7 +102,7 @@ def next_event_estimation(p, current_medium, phase_function, light_sampler, scen
     p_trans_dir = 1.0
     
     # 3. Trace Shadow Ray
-    while d_light != Vector3f(0, 0, 0):
+    while d_light != Vector3(0, 0, 0):
         shadow_ray = Ray(p, d_light)
         isect = scene.intersect(shadow_ray)
         
@@ -129,7 +129,8 @@ def next_event_estimation(p, current_medium, phase_function, light_sampler, scen
             else:
                 # Index-matching surface: pass through
                 shadow_bounces += 1
-                if max_depth != -1 and bounces + shadow_bounces >= max_depth:
+                # Source [S1] uses +1, Source [S3] uses >= without +1; follow implementation convention [S1, S3]
+                if max_depth != -1 and bounces + shadow_bounces + 1 >= max_depth:
                     return 0.0
                     
                 # Update medium for the next segment
@@ -150,7 +151,7 @@ def next_event_estimation(p, current_medium, phase_function, light_sampler, scen
     G = abs(dot(ls.n, -d_light)) / dist_sq
     
     # Phase function evaluation
-    f_p = phase_function.p(-d_light, -d_light) # Assuming phase function takes incoming/outgoing relative to surface normal or similar convention; typically p(wo, wi)
+    f_hat = phase_function.p(-d_light, -d_light) # Placeholder for actual phase eval, usually depends on view dir too.
     # Note: In standard NEE, we evaluate phase at the scattering point p.
     # wo is the view direction (from p to camera), wi is from p to light (-d_light).
     # The pseudocode in [S1] implies f is evaluated at the scattering angle.
@@ -196,9 +197,9 @@ A strategy for sampling the boundary term of the differential path integral usin
 Proposed by Weber et al., this method connects a point to the light source with sub-paths generated by perturbation, instead of one-segment connections [S6]. It is intended for multiple scattering in high-order scattering homogeneous participating media and is combined with a path tracer via MIS [S6]. It significantly reduces noise and increases performance in highly anisotropic, optically dense media but is unsuitable for participating media with boundaries [S6].
 
 ## Operating characteristics
-*   **Time Complexity:** Adds $O(K)$ cost per scattering event, where $K$ is the number of shadow ray bounces (index-matching surfaces) before hitting the light or an opaque surface. In dense media, transmittance computation dominates.
+*   **Time Complexity:** Adds $O(K)$ cost per scattering event, where $K$ is the number of shadow ray bounces (index-matching surfaces) before hitting the light or an opaque surface [S1, S3]. In dense media, transmittance computation dominates [S4].
 *   **Memory Complexity:** Minimal additional memory, requiring only state variables for the shadow ray ($T_{light}$, medium, bounces) [S1, S3].
-*   **Performance:** Significantly reduces variance for scenes with small or distant lights compared to pure phase function sampling [S1]. Performance degrades if the shadow ray traverses many index-matching surfaces or if the medium is extremely dense (requiring many small steps for transmittance) [S1, S4].
+*   **Performance:** Reduces inefficiency for scenes with small or distant lights compared to pure phase function sampling [S1]. Performance degrades if the shadow ray traverses many index-matching surfaces or if the medium is extremely dense (requiring many small steps for transmittance) [S1, S4].
 *   **Strengths:** Handles index-matching surfaces correctly; provides unbiased direct lighting estimation; integrates with MIS to balance with phase function sampling [S1, S3].
 *   **Limitations:** Requires handling of index-matching surfaces explicitly; transmittance calculation can be expensive in heterogeneous media (though this method assumes homogeneous for the core algorithm, [S4] extends it with ratio tracking) [S1, S4].
 

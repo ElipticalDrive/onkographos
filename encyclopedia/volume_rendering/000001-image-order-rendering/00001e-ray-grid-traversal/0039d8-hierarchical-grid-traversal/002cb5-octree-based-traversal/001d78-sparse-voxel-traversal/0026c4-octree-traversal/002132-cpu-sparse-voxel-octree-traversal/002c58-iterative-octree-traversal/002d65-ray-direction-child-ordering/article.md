@@ -1,0 +1,278 @@
+# Ray-Direction Child Ordering
+
+Also called: Direction-Aware Traversal Order, Front-to-Back Child Visit Order, Ordered Octree Traversal, Sequential Octree Traversal
+
+## Overview
+Ray-Direction Child Ordering is an iterative traversal optimization for sparse voxel octrees that processes child nodes in a specific sequence determined by the ray's direction, ensuring that nodes closer to the ray origin are visited first [S1, S2, unofficial]. It solves the inefficiency of standard recursive traversal, which examines all eight children and performs redundant intersection tests for non-intersected subtrees, by using a deterministic neighbor-linking strategy to skip empty or non-intersected branches [S1, unofficial]. Unlike its siblings, it avoids recursion entirely within a node's children by maintaining a `currNode` state and computing the next neighbor based on exit plane t-values, thereby reducing the number of intersection tests and improving performance on sparse structures [S1, S2, unofficial].
+
+## How it works
+### Inputs and Outputs
+- **Inputs**: Ray origin $(o_x, o_y, o_z)$, ray direction $(d_x, d_y, d_z)$, octree root node, and the bounding box size of the octree root ($S$).
+- **Outputs**: A sequence of leaf nodes (or internal nodes, depending on the stopping condition) visited by the ray, typically added to a processing list or stack.
+
+### Data Structures
+- **Octree Node**: Contains a boolean `isLeaf` flag and an array of 8 child pointers (`child[0..7]`).
+- **Child Indexing**: Children are indexed 0–7 based on spatial position:
+  - Bit 2 (Value 4): Left (0) / Right (1)
+  - Bit 1 (Value 2): Near (0) / Far (1)
+  - Bit 0 (Value 1): Lower (0) / Upper (1)
+  - Index $i = 4 \cdot \text{Left/Right} + 2 \cdot \text{Near/Far} + 1 \cdot \text{Lower/Upper}$ [S1, unofficial].
+  - Specifically: 0) Lower Near Left, 1) Lower Far Left, 2) Upper Near Left, 3) Upper Far Left, 4) Lower Near Right, 5) Lower Far Right, 6) Upper Near Right, 7) Upper Far Right [S1, unofficial].
+- **Exit State**: The integer value 8 is used to indicate that the ray has exited the current parent node's volume [S1, unofficial].
+
+### Algorithm Steps
+
+#### 1. Direction Normalization and Transformation
+To simplify traversal logic, the algorithm assumes all ray direction components are positive. If a component is negative, the ray origin is reflected across the root's midplane, and the direction is negated. A transformation mask $a$ is computed to adjust child indices later [S1, unofficial].
+
+1. Initialize $a = 0$.
+2. If $d_x < 0$:
+   - $o_x \leftarrow S - o_x$
+   - $d_x \leftarrow -d_x$
+   - $a \leftarrow a \lor 4$
+3. If $d_y < 0$:
+   - $o_y \leftarrow S - o_y$
+   - $d_y \leftarrow -d_y$
+   - $a \leftarrow a \lor 2$
+4. If $d_z < 0$:
+   - $o_z \leftarrow S - o_z$
+   - $d_z \leftarrow -d_z$
+   - $a \leftarrow a \lor 1$
+
+*Pitfall*: Axis-aligned rays (zero direction component) cause division by zero or incorrect t-value comparisons. The source suggests overwriting zero direction components with a very small positive value to avoid this, ensuring the value is small enough not to affect node selection within object space [S1, unofficial].
+
+#### 2. Ray-Box Intersection (Root)
+Compute the entry and exit t-values for the ray against the root bounding box.
+
+1. Compute $tx_0, tx_1, ty_0, ty_1, tz_0, tz_1$ using the standard slab method:
+   $$ tx_0 = \frac{x_{min} - o_x}{d_x}, \quad tx_1 = \frac{x_{max} - o_x}{d_x} $$
+   (Similarly for $y$ and $z$).
+2. Ensure $tx_0 \le tx_1$ (swap if necessary, though the normalization step above handles direction, the slab logic typically requires ordered t-values).
+3. Compute intersection interval:
+   $$ t_{min} = \max(tx_0, ty_0, tz_0) $$
+   $$ t_{max} = \min(tx_1, ty_1, tz_1) $$
+4. If $t_{min} \ge t_{max}$ or $t_{max} \le 0$, the ray does not intersect the octree. Terminate [S1, unofficial].
+
+#### 3. Determine First Intersected Child
+The first child is determined by identifying the entry plane (XY, YZ, or XZ) based on which axis produced $t_{min}$. The entry plane logic sets bits in the child index [S1, unofficial].
+
+Let $tx_M, ty_M, tz_M$ be the midplane t-values for the current node (initially the root's midplanes).
+$$ tx_M = 0.5(tx_0 + tx_1), \quad ty_M = 0.5(ty_0 + ty_1), \quad tz_M = 0.5(tz_0 + tz_1) $$
+
+Initialize `currNode` = 0. Apply the following bit settings based on the entry plane (the axis with the largest $t_0$):
+
+- **If entry is XY plane** ($t_{min}$ comes from $z$):
+  - If $tx_M < tz_0$, set bit 2: `currNode` $\leftarrow$ `currNode` $\lor 4$
+  - If $ty_M < tz_0$, set bit 1: `currNode` $\leftarrow$ `currNode` $\lor 2$
+- **If entry is YZ plane** ($t_{min}$ comes from $x$):
+  - If $ty_M < tx_0$, set bit 1: `currNode` $\leftarrow$ `currNode` $\lor 2$
+  - If $tz_M < tx_0$, set bit 0: `currNode` $\leftarrow$ `currNode` $\lor 1$
+- **If entry is XZ plane** ($t_{min}$ comes from $y$):
+  - If $tx_M < ty_0$, set bit 2: `currNode` $\leftarrow$ `currNode` $\lor 4$
+  - If $tz_M < ty_0$, set bit 0: `currNode` $\leftarrow$ `currNode` $\lor 1$
+
+*Note*: The source notes that assuming positive directions excludes child 7 from being the first intersected node in the initial root check, but the general logic holds for subsequent nodes [S1, unofficial].
+
+#### 4. Iterative Traversal Loop
+Process the current node and determine the next neighbor until the exit state (8) is reached.
+
+1. If `currNode` == 8, terminate loop.
+2. If `n->isLeaf` is true, add node to list and continue to next neighbor.
+3. If `n->isLeaf` is false, recursively (or iteratively) process the child at index `currNode ^ a`.
+   - The bounds for the child are derived from the current node's $t_0, t_1$ values and the midplanes $t_M$.
+   - Example for Child 0: bounds are $(tx_0, ty_0, tz_0)$ to $(tx_M, ty_M, tz_M)$.
+4. Determine `next_Node` using the exit t-values of the current child.
+
+#### 5. Next Node Determination
+The `next_Node` function identifies the neighbor with the smallest positive exit t-value ($t_1$) among the potential face neighbors. The source provides a hardcoded switch-case logic where the arguments to `next_Node` are the $t_1$ values of the neighbors in a specific order, and the function returns the index of the neighbor with the minimum $t_1$ (or 8 if no neighbor is valid) [S1, unofficial].
+
+For a given `currNode`, the call structure is:
+`currNode = next_Node(t1_neighbor1, t1_neighbor2, t1_neighbor3, index1, index2, index3)`
+
+The source pseudocode maps specific t-value arguments to specific neighbor indices. For example, for `currNode` 0:
+`next_Node(tx_M, ty_M, tz_M, 4, 2, 1)`
+This implies checking neighbors 4, 2, and 1. The function returns the index corresponding to the smallest t-value among the provided t-values. If the smallest t-value corresponds to an invalid neighbor (e.g., outside bounds or behind ray), it returns 8 (Exit) [S1, unofficial].
+
+*Pitfall*: The default `next_Node` only considers face neighbors. Edge and vertex intersections may result in 1 or 2 extra nodes being processed, which is considered an acceptable cost compared to the complexity of handling all edge/vertex cases [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_direction_child_ordering(octree, ray):
+    # 1. Direction Normalization
+    a = 0
+    if ray.d.x < 0:
+        ray.o.x = octree.size - ray.o.x
+        ray.d.x = -ray.d.x
+        a |= 4
+    if ray.d.y < 0:
+        ray.o.y = octree.size - ray.o.y
+        ray.d.y = -ray.d.y
+        a |= 2
+    if ray.d.z < 0:
+        ray.o.z = octree.size - ray.o.z
+        ray.d.z = -ray.d.z
+        a |= 1
+    
+    # Handle axis-aligned rays by setting zero components to a small epsilon
+    EPSILON = 1e-9
+    if ray.d.x == 0: ray.d.x = EPSILON
+    if ray.d.y == 0: ray.d.y = EPSILON
+    if ray.d.z == 0: ray.d.z = EPSILON
+
+    # 2. Root Intersection
+    tx0, tx1 = slab_intersect(ray.o.x, ray.d.x, octree.bounds.x_min, octree.bounds.x_max)
+    ty0, ty1 = slab_intersect(ray.o.y, ray.d.y, octree.bounds.y_min, octree.bounds.y_max)
+    tz0, tz1 = slab_intersect(ray.o.z, ray.d.z, octree.bounds.z_min, octree.bounds.z_max)
+    
+    t_min = max(tx0, ty0, tz0)
+    t_max = min(tx1, ty1, tz1)
+    
+    if t_min >= t_max or t_max <= 0:
+        return []
+
+    # 3. Find First Node
+    txM = 0.5 * (tx0 + tx1)
+    tyM = 0.5 * (ty0 + ty1)
+    tzM = 0.5 * (tz0 + tz1)
+    
+    curr_node = find_first_node(tx0, ty0, tz0, txM, tyM, tzM)
+    
+    visited = []
+    while curr_node < 8:
+        # Process current node
+        node = octree.root.child[curr_node ^ a]
+        if node is None:
+            curr_node = next_node_for_child(curr_node, tx0, ty0, tz0, tx1, ty1, tz1, txM, tyM, tzM)
+            continue
+            
+        if node.is_leaf:
+            visited.append(node)
+        else:
+            # Determine bounds for the child
+            child_bounds = get_child_bounds(curr_node, tx0, ty0, tz0, tx1, ty1, tz1, txM, tyM, tzM)
+            # Recursively/Iteratively process child
+            # Note: The source uses a loop with 'curr_node' update, implying the 
+            # 'proc_subtree' logic is unrolled or managed via the loop variable.
+            # For a pure iterative implementation of the *child ordering* within one node:
+            # We process the child, then find the next sibling.
+            # However, the source pseudocode calls proc_subtree recursively for the child.
+            # To implement "Ray-Direction Child Ordering" as a method of *visiting* children:
+            # We assume the caller handles the recursion, or we inline it.
+            # Here we follow the source's structure: process child, then find next sibling.
+            pass 
+            
+        curr_node = next_node_for_child(curr_node, tx0, ty0, tz0, tx1, ty1, tz1, txM, tyM, tzM)
+        
+    return visited
+
+def find_first_node(tx0, ty0, tz0, txM, tyM, tzM):
+    # Determine entry plane based on which t0 is max
+    # This is a simplified logic; the source details bit setting based on entry plane
+    node = 0
+    # Check XY entry (tz0 is max)
+    if tz0 >= tx0 and tz0 >= ty0:
+        if txM < tz0: node |= 4
+        if tyM < tz0: node |= 2
+    # Check YZ entry (tx0 is max)
+    elif tx0 >= ty0 and tx0 >= tz0:
+        if tyM < tx0: node |= 2
+        if tzM < tx0: node |= 1
+    # Check XZ entry (ty0 is max)
+    else:
+        if txM < ty0: node |= 4
+        if tzM < ty0: node |= 1
+    return node
+
+def next_node_for_child(curr, tx0, ty0, tz0, tx1, ty1, tz1, txM, tyM, tzM):
+    # This function implements the logic from the switch-case in proc_subtree
+    # It returns the index of the next neighbor with the smallest t1, or 8
+    # The source passes t1 values of neighbors to next_Node.
+    # We must compute the t1 values for the specific neighbors of 'curr'.
+    
+    # Helper to get t1 for a neighbor
+    # The source logic is hardcoded per case. We replicate the logic:
+    
+    if curr == 0:
+        # Neighbors: 4 (Right), 2 (Far), 1 (Upper)
+        # t1 values passed: txM, tyM, tzM
+        # Indices: 4, 2, 1
+        t_vals = [txM, tyM, tzM]
+        indices = [4, 2, 1]
+    elif curr == 1:
+        # Neighbors: 5 (Right), 3 (Far), 8 (Exit)
+        # t1 values passed: txM, tyM, tz1
+        t_vals = [txM, tyM, tz1]
+        indices = [5, 3, 8]
+    elif curr == 2:
+        # Neighbors: 6 (Right), 8 (Exit), 3 (Far)
+        # t1 values passed: txM, ty1, tzM
+        t_vals = [txM, ty1, tzM]
+        indices = [6, 8, 3]
+    elif curr == 3:
+        # Neighbors: 7 (Right), 8 (Exit), 8 (Exit)
+        # t1 values passed: txM, ty1, tz1
+        t_vals = [txM, ty1, tz1]
+        indices = [7, 8, 8]
+    elif curr == 4:
+        # Neighbors: 8 (Exit), 6 (Far), 5 (Upper)
+        # t1 values passed: tx1, tyM, tzM
+        t_vals = [tx1, tyM, tzM]
+        indices = [8, 6, 5]
+    elif curr == 5:
+        # Neighbors: 8 (Exit), 7 (Far), 8 (Exit)
+        # t1 values passed: tx1, tyM, tz1
+        t_vals = [tx1, tyM, tz1]
+        indices = [8, 7, 8]
+    elif curr == 6:
+        # Neighbors: 8 (Exit), 8 (Exit), 7 (Far)
+        # t1 values passed: tx1, ty1, tzM
+        t_vals = [tx1, ty1, tzM]
+        indices = [8, 8, 7]
+    elif curr == 7:
+        return 8
+    
+    # Find min t_val among valid indices (not 8)
+    min_t = float('inf')
+    next_idx = 8
+    for t, idx in zip(t_vals, indices):
+        if idx != 8 and t < min_t:
+            min_t = t
+            next_idx = idx
+            
+    return next_idx
+
+def slab_intersect(origin, direction, min_val, max_val):
+    t0 = (min_val - origin) / direction
+    t1 = (max_val - origin) / direction
+    if t0 > t1:
+        t0, t1 = t1, t0
+    return t0, t1
+
+def get_child_bounds(child_idx, tx0, ty0, tz0, tx1, ty1, tz1, txM, tyM, tzM):
+    # Returns (t0_x, t0_y, t0_z, t1_x, t1_y, t1_z) for the child
+    # Logic derived from switch cases in proc_subtree
+    if child_idx == 0: return (tx0, ty0, tz0, txM, tyM, tzM)
+    if child_idx == 1: return (tx0, ty0, tzM, txM, tyM, tz1)
+    if child_idx == 2: return (tx0, tyM, tz0, txM, ty1, tzM)
+    if child_idx == 3: return (tx0, tyM, tzM, txM, ty1, tz1)
+    if child_idx == 4: return (txM, ty0, tz0, tx1, tyM, tzM)
+    if child_idx == 5: return (txM, ty0, tzM, tx1, tyM, tz1)
+    if child_idx == 6: return (txM, tyM, tz0, tx1, ty1, tzM)
+    if child_idx == 7: return (txM, tyM, tzM, tx1, ty1, tz1)
+```
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of visited nodes. The ordering reduces the number of intersection tests compared to naive traversal.
+- **Memory Complexity**: $O(D)$ where $D$ is the depth of the octree, due to the recursion stack (if implemented recursively) or explicit stack/queue. The iterative neighbor-linking approach minimizes stack usage within a single node's children.
+- **Performance**: The source reports an increase in FPS from ~13 to ~16 with ordering alone, and up to ~30 FPS with ordering and culling, reducing peak intersection tests from ~170 to ~85 in their test scene [S2, unofficial].
+- **Strengths**: Avoids unnecessary recursive calls for non-intersected subtrees; efficient for sparse structures; simple bit-manipulation for direction handling.
+- **Limitations**: Edge and vertex intersections may result in processing 1-2 extra nodes; axis-aligned rays require special handling (epsilon injection); the transformation of the ray origin is destructive if not copied [S1, unofficial].
+
+## Background
+The method originates from discussions on recursive octree traversal optimization, specifically addressing the inefficiency of examining all children in a standard recursive approach [S1, unofficial]. It was further analyzed in the context of Sparse Voxel Octree compression and global illumination calculation, where direction-aware ordering was shown to reduce intersection tests and improve performance [S2, unofficial]. The technique is part of the broader family of hierarchical grid traversal methods used in volume rendering and ray tracing.
+
+## Sources
+[S1] Recursive Octree traversal, https://chiranjivi.tripod.com/octrav.html, fetched 2026-10-24 (unofficial)
+[S2] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)

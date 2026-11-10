@@ -19,6 +19,18 @@ Differences-based Compression (Mensmann) is a hybrid compression scheme that res
 3.  **Delta Encoding:** The calculated 16-bit value is added to the existing value in the volume buffer [S1][S2]. This step does not overwrite the existing value but accumulates the delta [S1][S2].
 4.  **Brick Assembly:** The reconstructed values are assembled into the final brick structure [S1][S2].
 
+**Formulas:**
+*   Data expansion: $V_{16}[i] = (V_{comp}[i] \ll S_{bit}) \ \& \ 0xFFFF$, where $V_{comp}[i]$ is the compressed chunk, $S_{bit}$ is the shift amount from the shift patterns table, and $V_{16}[i]$ is the expanded 16-bit value [S1][S2].
+*   Delta accumulation: $V_{final}[i] = V_{initial}[i] + V_{16}[i]$, where $V_{initial}[i]$ is the existing value in the volume buffer and $V_{final}[i]$ is the reconstructed value [S1][S2].
+
+**Parameters:**
+*   **Bit Lengths:** The specific bit depths supported by the scheme are not given in the sources [S1][S2].
+*   **Shift Patterns:** Pre-computed tables used for data shuffling [S1][S2].
+
+**Edge Cases and Pitfalls:**
+*   **Bit Length Mismatch:** The kernel must match the bit length of the brick; using the wrong addressing mode will result in incorrect data expansion [S1][S2].
+*   **Delta Accumulation:** Since delta encoding adds to existing values, the volume buffer must be initialized correctly (e.g., to zero) before the first delta is applied, or the initial base values must be known [G].
+
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -37,11 +49,11 @@ def decompress_mensmann(compressed_brick, bit_length, shift_table, volume_buffer
     # Step 1 & 2: Resolve variable-length coding and expand to 16-bit
     # Individual kernels are used for different bit lengths based on addressing modes [S1][S2].
     # The sources state that lookups from the shift_table are used to shuffle data [S1][S2].
-    # [G] Standard bit-shifting and masking logic applies here based on the selected kernel.
-    pattern = shift_table[str(bit_length) + 'bit']
+    shift_amount = shift_table[bit_length]
     expanded_values = []
     for chunk in compressed_brick:
-        expanded_values.append((chunk << pattern['shift_amount']) & 0xFFFF)
+        # Expand chunk to 16-bit using the pre-computed shift pattern [S1][S2].
+        expanded_values.append((chunk << shift_amount) & 0xFFFF)
         
     # Step 3: Delta Encoding
     # Add calculated value to existing value in the volume instead of overwriting [S1][S2].
@@ -50,27 +62,18 @@ def decompress_mensmann(compressed_brick, bit_length, shift_table, volume_buffer
         
     # Step 4: Brick Assembly
     # The values are now in the volume buffer, ready for rendering [S1][S2].
-    pass
 ```
-
-**Parameters:**
-*   **Bit Lengths:** The specific bit depths supported by the scheme are not given in the sources [S1][S2].
-*   **Shift Patterns:** Pre-computed tables used for data shuffling [S1][S2].
-
-**Edge Cases and Pitfalls:**
-*   **Bit Length Mismatch:** The kernel must match the bit length of the brick; using the wrong addressing mode will result in incorrect data expansion [S1][S2].
-*   **Delta Accumulation:** Since delta encoding adds to existing values, the volume buffer must be initialized correctly (e.g., to zero) before the first delta is applied, or the initial base values must be known [G].
 
 ## Subtopics
 
 ### Variable-Length Coding Kernels
-Individual kernels for each supported bit length to handle different addressing modes [S1][S2]. Not given in the sources. [Link](5723-differences-based-compression.md)
+Individual kernels for each supported bit length to handle different addressing modes [S1][S2]. Not given in the sources [S1][S2]. [Link](5723-differences-based-compression.md)
 
 ### Delta Encoding
-Adding calculated values to existing volume data [S1][S2]. Not given in the sources. [Link](5723-differences-based-compression.md)
+Adding calculated values to existing volume data [S1][S2]. Not given in the sources [S1][S2]. [Link](5723-differences-based-compression.md)
 
 ### Brick Assembly
-Reconstructing the final brick structure [S1][S2]. Not given in the sources. [Link](5723-differences-based-compression.md)
+Reconstructing the final brick structure [S1][S2]. Not given in the sources [S1][S2]. [Link](5723-differences-based-compression.md)
 
 ## Operating characteristics
 *   **Time Complexity:** Decompression involves kernel selection, shift pattern lookups, and addition operations [S1][S2]. The overhead of lookups is negligible [S1][S2].
@@ -78,8 +81,8 @@ Reconstructing the final brick structure [S1][S2]. Not given in the sources. [Li
 *   **Performance:** The scheme is designed for GPU-based direct volume rendering [S1][S2].
 *   **Strengths:** Efficient handling of variable bit depths through specialized kernels; low overhead for data expansion [S1][S2].
 *   **Limitations:** Requires multiple kernels for different bit lengths, increasing implementation complexity [S1][S2].
-*   **When to Use:** Not given in the sources.
-*   **When Not to Use:** Not given in the sources.
+*   **When to Use:** Not given in the sources [S1][S2].
+*   **When Not to Use:** Not given in the sources [S1][S2].
 
 ## Background
 The scheme was proposed by Mensmann et al. in [MRH10] [S1][S2]. The sources discuss it within the context of compressed GPU-based direct volume rendering and contrast it with hardware-supported fixed-rate block-coding techniques like VTC and S3TC [S1][S2].

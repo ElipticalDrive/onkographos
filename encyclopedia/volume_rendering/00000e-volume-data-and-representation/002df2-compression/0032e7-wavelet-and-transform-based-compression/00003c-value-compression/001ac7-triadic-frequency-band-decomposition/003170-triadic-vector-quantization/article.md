@@ -7,7 +7,7 @@ Triadic Vector Quantization is a lossy compression method for volumetric data th
 
 ## How it works
 **Inputs and Outputs**
-- Input: A 3D scalar volume dataset.
+- Input: A 3D scalar volume dataset [S1, unofficial].
 - Output: Two codebook textures, a stream of per-block mean values, and two per-block indices [S1, unofficial].
 
 **Data Structures**
@@ -26,12 +26,12 @@ Triadic Vector Quantization is a lossy compression method for volumetric data th
 8. **Storage:** Store the mean value and the two indices for each block [S1, unofficial].
 
 **Formulas**
-Let $O[i]$ be the original voxel values for $i \in [0, 63]$.
-- Mean: $M = \frac{1}{64} \sum_{i=0}^{63} O[i]$
-- Down-sampled values: $D[j] = \frac{1}{8} \sum_{k \in \text{subblock}_j} O[k]$ for $j \in [0, 7]$
-- Expanded down-sampled: $E[i] = D[\lfloor i/8 \rfloor]$ for $i \in [0, 63]$
-- High-frequency vector: $V_{64}[i] = O[i] - E[i]$ for $i \in [0, 63]$
-- Mid-frequency vector: $V_{8}[j] = D[j] - M$ for $j \in [0, 7]$
+Let $O[i]$ be the original voxel values for $i \in [0, 63]$ [S1, unofficial].
+- Mean: $M = \frac{1}{64} \sum_{i=0}^{63} O[i]$ [S1, unofficial].
+- Down-sampled values: $D[j] = \frac{1}{8} \sum_{k \in \text{subblock}_j} O[k]$ for $j \in [0, 7]$ [S1, unofficial].
+- Expanded down-sampled: $E[i] = D[\lfloor i/8 \rfloor]$ for $i \in [0, 63]$ [S1, unofficial].
+- High-frequency vector: $V_{64}[i] = O[i] - E[i]$ for $i \in [0, 63]$ [S1, unofficial].
+- Mid-frequency vector: $V_{8}[j] = D[j] - M$ for $j \in [0, 7]$ [S1, unofficial].
 
 **Parameters and Typical Values**
 - Block size: $4^3$ voxels [S1, unofficial].
@@ -62,54 +62,68 @@ def triadic_vector_quantization_encode(volume, codebook_64, codebook_8):
     D, H, W = len(volume), len(volume[0]), len(volume[0][0])
     bs = 4
     out_d, out_h, out_w = D // bs, H // bs, W // bs
-    means = [[0.0] * out_w for _ in range(out_h)]
-    indices_64 = [[0] * out_w for _ in range(out_h)]
-    indices_8 = [[0] * out_w for _ in range(out_h)]
-    
+    means = [[[0.0] * out_w for _ in range(out_h)] for _ in range(out_d)]
+    indices_64 = [[[0] * out_w for _ in range(out_h)] for _ in range(out_d)]
+    indices_8 = [[[0] * out_w for _ in range(out_h)] for _ in range(out_d)]
+
     for d in range(out_d):
         for h in range(out_h):
             for w in range(out_w):
-                # Extract 4x4x4 block
-                block = [volume[d*bs + i][h*bs + j][w*bs + k] for i in range(bs) for j in range(bs) for k in range(bs)]
-                
+                # Extract 4x4x4 block and flatten to 64 components
+                block = []
+                for i in range(bs):
+                    for j in range(bs):
+                        for k in range(bs):
+                            block.append(volume[d*bs + i][h*bs + j][w*bs + k])
+
                 # Compute mean
                 mean_val = sum(block) / 64.0
                 means[d][h][w] = mean_val
-                
+
                 # Down-sample to 2x2x2 by averaging disjoint 2x2x2 sets
                 downsampled = []
-                for i in range(2):
-                    for j in range(2):
-                        for k in range(2):
+                for i2 in range(2):
+                    for j2 in range(2):
+                        for k2 in range(2):
                             sub_sum = 0.0
                             for di in range(2):
                                 for dj in range(2):
                                     for dk in range(2):
-                                        sub_sum += block[(2*i + di)*4 + (2*j + dj)] # Flattened index mapping
+                                        # Map 3D to 1D: index = i*16 + j*4 + k
+                                        idx = (2*i2 + di)*16 + (2*j2 + dj)*4 + (2*k2 + dk)
+                                        sub_sum += block[idx]
                             downsampled.append(sub_sum / 8.0)
-                
-                # Expand downsampled to 64 components
-                expanded = []
-                for val in downsampled:
-                    expanded.extend([val] * 8)
-                
+
+                # Expand downsampled to 64 components matching original layout
+                expanded = [0.0] * 64
+                for i in range(bs):
+                    for j in range(bs):
+                        for k in range(bs):
+                            i2, j2, k2 = i // 2, j // 2, k // 2
+                            expanded[i*16 + j*4 + k] = downsampled[i2*4 + j2*2 + k2]
+
                 # Compute vectors
                 v_64 = [block[i] - expanded[i] for i in range(64)]
                 v_8 = [downsampled[j] - mean_val for j in range(8)]
-                
+
                 # Quantize: find index minimizing Euclidean distance
-                def min_index(vec, codebook):
-                    best_idx, best_dist = 0, float('inf')
-                    for idx, codeword in enumerate(codebook):
-                        dist = sum((a - b) ** 2 for a, b in zip(vec, codeword))
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_idx = idx
-                    return best_idx
-                
-                indices_64[d][h][w] = min_index(v_64, codebook_64)
-                indices_8[d][h][w] = min_index(v_8, codebook_8)
-                
+                best_idx_64, best_dist_64 = 0, float('inf')
+                for idx, codeword in enumerate(codebook_64):
+                    dist = sum((a - b) ** 2 for a, b in zip(v_64, codeword))
+                    if dist < best_dist_64:
+                        best_dist_64 = dist
+                        best_idx_64 = idx
+
+                best_idx_8, best_dist_8 = 0, float('inf')
+                for idx, codeword in enumerate(codebook_8):
+                    dist = sum((a - b) ** 2 for a, b in zip(v_8, codeword))
+                    if dist < best_dist_8:
+                        best_dist_8 = dist
+                        best_idx_8 = idx
+
+                indices_64[d][h][w] = best_idx_64
+                indices_8[d][h][w] = best_idx_8
+
     return means, indices_64, indices_8
 
 def triadic_vector_quantization_decode(means, indices_64, indices_8, codebook_64, codebook_8):
@@ -120,39 +134,42 @@ def triadic_vector_quantization_decode(means, indices_64, indices_8, codebook_64
     bs = 4
     D, H, W = out_d * bs, out_h * bs, out_w * bs
     volume = [[[0.0] * W for _ in range(H)] for _ in range(D)]
-    
+
     for d in range(out_d):
         for h in range(out_h):
             for w in range(out_w):
                 mean_val = means[d][h][w]
                 idx_64 = indices_64[d][h][w]
                 idx_8 = indices_8[d][h][w]
-                
+
                 v_64 = codebook_64[idx_64]
                 v_8 = codebook_8[idx_8]
-                
+
                 # Reconstruct downsampled 2x2x2
                 downsampled = [v_8[j] + mean_val for j in range(8)]
-                
+
                 # Expand downsampled
-                expanded = []
-                for val in downsampled:
-                    expanded.extend([val] * 8)
-                
+                expanded = [0.0] * 64
+                for i in range(bs):
+                    for j in range(bs):
+                        for k in range(bs):
+                            i2, j2, k2 = i // 2, j // 2, k // 2
+                            expanded[i*16 + j*4 + k] = downsampled[i2*4 + j2*2 + k2]
+
                 # Reconstruct original block
                 block = [v_64[i] + expanded[i] for i in range(64)]
-                
+
                 # Place back into volume
                 for i in range(bs):
                     for j in range(bs):
                         for k in range(bs):
-                            volume[d*bs + i][h*bs + j][w*bs + k] = block[i * bs * bs + j * bs + k]
-                            
+                            volume[d*bs + i][h*bs + j][w*bs + k] = block[i * 16 + j * 4 + k]
+
     return volume
 ```
 
 ## Operating characteristics
-- **Time Complexity:** Encoding is $O(N)$ where $N$ is the number of voxels, dominated by distance calculations against the codebooks [G]. Decoding is $O(N)$, dominated by texture lookups and arithmetic [G].
+- **Time Complexity:** Encoding is $O(N \cdot C)$ where $N$ is the number of voxels and $C$ is the codebook size, dominated by distance calculations against the codebooks [G]. Decoding is $O(N)$, dominated by texture lookups and arithmetic [G].
 - **Memory Complexity:** Compressed size scales with the number of blocks times the index size, plus fixed codebook memory [G].
 - **Performance:** Achieves significant memory reduction, dropping 1.4 GB to 70 MB and 200 MB to 11.1 MB in tested sequences [S1, unofficial].
 - **Strengths:** Fast hardware decoding via fragment shaders; effective compression for medical volumetric data [S1, unofficial].

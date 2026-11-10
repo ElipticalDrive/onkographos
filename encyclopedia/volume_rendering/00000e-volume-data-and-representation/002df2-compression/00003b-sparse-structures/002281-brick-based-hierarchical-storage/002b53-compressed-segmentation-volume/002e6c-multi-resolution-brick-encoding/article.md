@@ -7,41 +7,37 @@ Multi-resolution Brick Encoding is a lossless compression technique for segmenta
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A segmentation volume brick of size $b \times b \times b$ labels, where $b = 2^N$ and $N \in \mathbb{N}$. Input volumes are padded to multiples of $b$ in each dimension [S1].
+*   **Input:** A segmentation volume brick of size $b \times b \times b$ labels, where $b = 2^N$ and $N \in \mathbb{N}$ [S1]. Input volumes are padded to multiples of $b$ in each dimension [S1].
 *   **Output:** A palette of labels (integer values) and a sequence of operations (one per node in the pyramid) that reconstruct the brick [S1].
 
 **Data Structures:**
-1.  **Resolution Pyramid:** An explicit octree-like structure with $N+1$ levels, indexed $L_0$ to $L_N$.
+1.  **Resolution Pyramid:** An explicit octree-like structure with $N+1$ levels, indexed $L_0$ to $L_N$ [S1].
     *   Level $L_l$ stores $(b/2^l)^3$ nodes [S1].
     *   Level $L_0$ is the finest, storing $b^3$ labels (the original brick) [S1].
     *   Level $L_N$ is the coarsest, storing $1^3 = 1$ node (the root) [S1].
     *   Each voxel in $L_l$ overlaps $2^3=8$ voxels in $L_{l-1}$ [S1].
-2.  **Palette:** A list of unique or duplicate label integers [S1].
+2.  **Palette:** A list of label integers, which may contain duplicates [S1].
 3.  **Operation Sequence:** A list of commands corresponding to the traversal order of the pyramid nodes [S1].
 
 **Parameters:**
-*   $b$: Brick side length, a power of 2.
-*   $N = \log_2 b$: Number of coarsening steps.
+*   $b$: Brick side length, a power of 2 [S1].
+*   $N = \log_2 b$: Number of coarsening steps [S1].
 
 **Algorithm Steps:**
 
-1.  **Build Pyramid:** Construct the resolution pyramid explicitly.
+1.  **Build Pyramid:** Construct the resolution pyramid explicitly [S1].
     *   Initialize $L_0$ with the input brick labels [S1].
     *   For each level $l$ from 1 to $N$:
         *   For each node in $L_l$, identify the corresponding $2 \times 2 \times 2$ block of 8 voxels in $L_{l-1}$ [S1].
-        *   Assign the label of the node in $L_l$ to be the **most frequent label** among those 8 voxels [S1].
-    *   *Note:* This step requires approximately 14% additional temporary memory for the explicit pyramid storage [S1].
+        *   Assign the label of the node in $L_l$ to be the most frequent label among those 8 voxels [S1].
+    *   This step requires approximately 14% additional temporary memory for the explicit pyramid storage [S1].
 
-2.  **Traverse and Encode:** Process the pyramid nodes to generate the operation sequence and palette.
-    *   **Traversal Order:** Start from the root node (coarsest level $L_N$). Process nodes coarse-to-fine (from $L_N$ down to $L_0$). Within each level, process nodes along the Morton Z-curve [S1].
-    *   **Operation Generation:** For each node in the traversal order, determine the operation that assigns its label. The operations define how labels are assigned, such as reading from the palette or reusing a parent/neighbor label [S1].
-        *   **Root Node ($L_N$):** The label of the root is the first entry in the palette. The operation is typically "Read Palette" (or similar, referencing the first palette index) [S1].
-        *   **Subsequent Nodes:** The specific operation depends on the label assignment strategy. Common operations include:
-            *   $P_0$: Read a new label from the palette.
-            *   $R_p$: Reuse the label of the parent node.
-            *   $R_{\{x,y,z\}}$: Reuse the label of a specific neighbor (e.g., x-neighbor) [S1].
-            *   $P_\delta$: (Specific variant mentioned in source, likely related to palette or delta encoding) [S1].
-    *   **Palette Management:** If an operation requires a new label (e.g., $P_0$), append that label to the palette and record its index in the operation sequence [S1].
+2.  **Traverse and Encode:** Process the pyramid nodes to generate the operation sequence and palette [S1].
+    *   **Traversal Order:** Start from the root node (coarsest level $L_N$) [S1]. Process nodes coarse-to-fine (from $L_N$ down to $L_0$) [S1]. Within each level, process nodes along the Morton Z-curve [S1].
+    *   **Operation Generation:** For each node in the traversal order, determine the operation that assigns its label [S1]. The operations define how labels are assigned, such as reading from the palette or reusing a parent/neighbor label [S1].
+        *   **Root Node ($L_N$):** The label of the root is the first entry in the palette [S1].
+        *   **Subsequent Nodes:** The specific operation depends on the label assignment strategy [S1]. Common operations include reading a new label from the palette ($P_0$), reusing the label of the parent node ($R_p$), reusing the label of a specific neighbor ($R_{\{x,y,z\}}$), or delta/palette variants ($P_\delta$) [S1].
+    *   **Palette Management:** If an operation requires a new label, append that label to the palette and record its index in the operation sequence [S1].
 
 3.  **Output:** Return the final palette and the sequence of operations [S1].
 
@@ -50,103 +46,77 @@ Multi-resolution Brick Encoding is a lossless compression technique for segmenta
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def multi_resolution_brick_encoding(brick: List[List[List[int]]], b: int) -> tuple:
+def multi_resolution_brick_encoding(brick: list, b: int) -> tuple:
     """
     Encodes a brick of size bxbxb using multi-resolution brick encoding.
     brick: 3D list of integers (labels).
     b: Side length of the brick (power of 2).
-    Returns: (palette: List[int], operations: List[Operation])
+    Returns: (palette: list[int], operations: list[Operation])
     """
+    import math
+    
     N = int(math.log2(b))
     
     # Step 1: Build Resolution Pyramid
     # pyramid[l] is a 3D list of labels at level l
     # Level 0 is the original brick
     pyramid = [None] * (N + 1)
-    pyramid[0] = copy.deepcopy(brick)
+    pyramid[0] = [[[v for v in row] for row in plane] for plane in brick]
     
     for l in range(1, N + 1):
         coarse_size = b // (2 ** l)
-        fine_size = b // (2 ** (l - 1))
-        pyramid[l] = [[ [0] * coarse_size for _ in range(coarse_size) ] for _ in range(coarse_size)]
+        pyramid[l] = [[[0] * coarse_size for _ in range(coarse_size)] for _ in range(coarse_size)]
         
         for z in range(coarse_size):
             for y in range(coarse_size):
                 for x in range(coarse_size):
-                    # Find the 8 voxels in the previous level
-                    # The voxel at (x,y,z) in level l covers
-                    # x*2 to x*2+1, y*2 to y*2+1, z*2 to z*2+1 in level l-1
                     base_x = x * 2
                     base_y = y * 2
                     base_z = z * 2
                     
-                    # Collect labels from the 8 neighbors in l-1
                     labels = []
                     for dz in range(2):
                         for dy in range(2):
                             for dx in range(2):
                                 labels.append(pyramid[l-1][base_z + dz][base_y + dy][base_x + dx])
                     
-                    # Assign most frequent label
                     pyramid[l][z][y][x] = get_most_frequent_label(labels)
     
     # Step 2: Traverse and Generate Operations
     palette = []
     operations = []
     
-    # Helper to get Morton index for a node at level l, position (z,y,x)
-    # Morton index interleaves bits of z, y, x
-    def get_morton_index(l, z, y, x):
-        # Implementation of Morton code for 3D coordinates
-        # Since we process coarse-to-fine, we can just generate indices
-        # and sort them, or generate them in order.
-        # For simplicity, we assume a function that returns the Morton index
-        # for the given level and coordinates.
-        pass 
+    def get_morton_index(z: int, y: int, x: int) -> int:
+        # Standard 3D Morton Z-curve interleaving [G]
+        idx = 0
+        for i in range(10): # Sufficient for typical brick sizes
+            idx |= (x & (1 << i)) << (2 * i)
+            idx |= (y & (1 << i)) << (2 * i + 1)
+            idx |= (z & (1 << i)) << (2 * i + 2)
+        return idx
 
-    # We need to traverse all nodes from L_N down to L_0
-    # Within each level, sort by Morton Z-curve
-    
     all_nodes = []
     for l in range(N, -1, -1):
         level_size = b // (2 ** l)
         for z in range(level_size):
             for y in range(level_size):
                 for x in range(level_size):
-                    # Calculate Morton index for sorting
-                    # Note: Morton index usually for the finest level, 
-                    # but we can map (l, z, y, x) to a unique Morton-like key
-                    # or simply generate the Morton index for the finest level 
-                    # corresponding to the top-left corner of the coarse node.
-                    # The source says "along the Morton Z-curve within a level".
-                    # This implies sorting nodes at level l by their spatial position
-                    # mapped to the Z-curve of that level's grid.
-                    index = get_morton_index(l, z, y, x)
+                    index = get_morton_index(z, y, x)
                     all_nodes.append((l, z, y, x, index))
     
-    # Sort by Morton index
     all_nodes.sort(key=lambda node: node[4])
     
-    # Process nodes
     for l, z, y, x, _ in all_nodes:
         label = pyramid[l][z][y][x]
-        
-        # Determine operation
-        # The specific logic for choosing between P0, Rp, R_neighbor depends on
-        # the implementation details not fully specified in the source text
-        # beyond "reading from palette or reusing parent/neighbors".
-        # We assume a greedy approach or a predefined heuristic.
-        
         op = None
+        
         if l == N:
-            # Root node
+            # Root node: first palette entry
             if not palette or palette[0] != label:
                 palette.append(label)
-                op = Operation.ReadPalette(index=0)
-            else:
-                op = Operation.ReadPalette(index=0)
+            op = Operation.ReadPalette(index=0)
         else:
-            # Check if label matches parent
+            # Check parent
             parent_l = l + 1
             parent_z = z // 2
             parent_y = y // 2
@@ -156,10 +126,18 @@ def multi_resolution_brick_encoding(brick: List[List[List[int]]], b: int) -> tup
             if label == parent_label:
                 op = Operation.ReuseParent()
             else:
-                # Check neighbors? (Source mentions R{x,y,z})
-                # For simplicity, if not parent, read from palette
-                # In a real implementation, neighbor checks would happen here
-                if label in palette:
+                # Check neighbors or palette [G]
+                # Source mentions R_{x,y,z} and P_0/P_δ but does not specify the exact heuristic
+                # for choosing between them. A standard implementation checks spatial neighbors
+                # before falling back to palette reads.
+                neighbor_label = None
+                if x > 0: neighbor_label = pyramid[l][z][y][x-1]
+                elif y > 0: neighbor_label = pyramid[l][z][y-1][x]
+                elif z > 0: neighbor_label = pyramid[l][z-1][y][x]
+                
+                if neighbor_label == label:
+                    op = Operation.ReuseNeighbor()
+                elif label in palette:
                     op = Operation.ReadPalette(index=palette.index(label))
                 else:
                     palette.append(label)
@@ -169,11 +147,19 @@ def multi_resolution_brick_encoding(brick: List[List[List[int]]], b: int) -> tup
         
     return palette, operations
 
-def get_most_frequent_label(labels: List[int]) -> int:
+def get_most_frequent_label(labels: list[int]) -> int:
     counts = {}
     for l in labels:
         counts[l] = counts.get(l, 0) + 1
     return max(counts, key=counts.get)
+
+class Operation:
+    def __init__(self, type: str, index: int = None):
+        self.type = type
+        self.index = index
+    def ReadPalette(index: int): return Operation("ReadPalette", index)
+    def ReuseParent(): return Operation("ReuseParent")
+    def ReuseNeighbor(): return Operation("ReuseNeighbor")
 ```
 
 **Edge Cases and Pitfalls:**
@@ -184,14 +170,14 @@ def get_most_frequent_label(labels: List[int]) -> int:
 ## Subtopics
 
 ### Compressed Segmentation Volume (CSV)
-The parent method that uses this encoding as its core representation, applying rANS entropy coding to the operation sequence [4985-compressed-segmentation-volume.md].
+A compression technique for segmentation volumes that uses this multi-resolution brick encoding as its core representation, applying rANS entropy coding to the operation sequence [4985-compressed-segmentation-volume.md]. Choose it when GPU-based on-the-fly decompression and high throughput are required [S1]. [4985-compressed-segmentation-volume.md]
 
 ### rANS Entropy Coding
-A secondary compression step applied to the operation sequence generated by this method, leveraging global frequency tables for parallel efficiency [S1].
+A fast asymmetric numeral systems entropy coding scheme applied to the operation sequence generated by this method, leveraging global frequency tables for parallel efficiency [S1]. Choose it when compressing large datasets with similar operation frequency distributions across bricks [S1]. [S1]
 
 ## Operating characteristics
-*   **Time Complexity:** Encoding involves building the pyramid ($O(b^3)$) and traversing it ($O(b^3)$). The source reports high throughput, up to gigabytes per second for both compression and decompression [S1].
-*   **Memory Complexity:** Encoding requires $O(b^3)$ for the input brick and $O(b^3)$ for the explicit pyramid (with ~14% overhead). Decoding memory is proportional to the output resolution level [S1].
+*   **Time Complexity:** Encoding involves building the pyramid and traversing it, requiring $O(b^3)$ time [G]. The source reports high throughput, up to gigabytes per second for both compression and decompression [S1].
+*   **Memory Complexity:** Encoding requires $O(b^3)$ for the input brick and $O(b^3)$ for the explicit pyramid (with ~14% overhead) [S1]. Decoding memory is proportional to the output resolution level [S1].
 *   **Compression Ratio:** Achieves strong compression ratios of about 1% to 3% of the original data set size [S1].
 *   **Strengths:** Lossless, high throughput, suitable for GPU-based on-the-fly rendering, lightweight [S1].
 *   **Limitations:** Requires input padding to power-of-2 brick sizes. Explicit pyramid generation adds temporary memory overhead [S1].

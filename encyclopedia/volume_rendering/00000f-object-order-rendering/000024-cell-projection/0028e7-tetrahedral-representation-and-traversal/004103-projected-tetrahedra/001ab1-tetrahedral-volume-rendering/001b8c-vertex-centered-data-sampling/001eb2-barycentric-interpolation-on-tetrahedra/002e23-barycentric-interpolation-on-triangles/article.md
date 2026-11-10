@@ -3,110 +3,118 @@
 Also called: Barycentric Interpolation of Mesh Attributes, smoothColor, smoothNormal, smoothUV
 
 ## Overview
-Barycentric interpolation on triangles is a method for estimating vertex attributes (such as colors, normals, or UV coordinates) at an arbitrary point within a triangle, given the values at the triangle's three vertices. It solves the problem of smoothly varying surface properties across a mesh by leveraging the geometric relationship between a point and the triangle's corners. Unlike its parent method, [Barycentric Interpolation on Tetrahedra](1843-barycentric-interpolation-on-tetrahedra.md), which operates in 3D volume using four vertices, this method operates strictly on the 2D surface of a triangle using three vertices. It is distinct from higher-order methods like [Clough–Tocher Bézier Patch Interpolation](9134-clough-tocher-b-zier-patch-interpolation.md) by relying solely on vertex values rather than requiring per-vertex gradients, resulting in C0 continuity.
+Barycentric interpolation on triangles is the standard method for evaluating vertex attributes (such as colors, normals, or UV coordinates) at an arbitrary point within a triangle, given the values at the triangle's three vertices. It solves the problem of spatially varying attribute representation in mesh-based rendering by providing a linearly varying field over the 2D simplex defined by the triangle. Unlike [Barycentric Interpolation on Tetrahedra](1843-barycentric-interpolation-on-tetrahedra.md), which operates in 3D volume using four vertices, this method operates on the 2D surface using three vertices. It is distinct from higher-order methods like [Clough–Tocher Bézier Patch Interpolation](9134-clough-tocher-b-zier-patch-interpolation.md) by being strictly linear and C0 continuous, which is computationally cheaper but prone to visible shading discontinuities across edges if vertex normals are not shared.
 
 ## How it works
-**Inputs:**
-- Triangle vertex indices $i_0, i_1, i_2$.
-- Vertex attributes $A_0, A_1, A_2$ corresponding to the vertices (e.g., position, normal, color).
-- Barycentric coordinates $u, v$ of the intersection point relative to the triangle.
-
-**Outputs:**
-- Interpolated attribute value $A$.
+**Inputs and Outputs:**
+- **Input:** A triangle defined by three vertices $V_0, V_1, V_2$, each possessing an attribute value $A_0, A_1, A_2$ (e.g., color vector, normal vector, UV pair). The intersection point $P$ on the triangle, represented by barycentric coordinates $u$ and $v$.
+- **Output:** The interpolated attribute value $A$ at point $P$.
 
 **Data Structures:**
-- Attributes are typically stored as vectors (e.g., 3D for normals/colors, 2D for UVs).
-- Barycentric coordinates are floating-point values.
+- **Triangle Indices:** An array or structure storing the vertex indices for each primitive. Access is typically via `mesh.triangles()[hit.primitive().triID]` [S1, S2, unofficial].
+- **Barycentric Coordinates:** Two floating-point values $u$ and $v$ provided by the ray-triangle intersection routine. The third coordinate $w$ is derived.
+- **Vertex Attributes:** A lookup table or structure mapping vertex indices to attribute vectors.
 
 **Steps:**
-1. Retrieve the triangle vertex indices from the mesh data structure using the primitive ID associated with the hit point. Let these be $i_0, i_1, i_2$.
-2. Extract the barycentric coordinates $u$ and $v$ from the intersection hit record.
-3. Compute the third barycentric coordinate $w$ using the constraint that the sum of barycentric coordinates for a point inside a triangle is 1:
-   $$ w = 1 - u - v $$
-4. Clamp $w$ to the range $[0.0, 1.0]$ to handle floating-point precision errors or boundary cases where $w$ might slightly exceed valid bounds due to numerical instability [S1, S2, unofficial].
-5. Perform the linear interpolation using the computed weights:
-   $$ A = w \cdot A_0 + u \cdot A_1 + v \cdot A_2 $$
+1. Retrieve the three vertex indices of the hit triangle from the mesh data structure using the primitive ID from the hit record [S1, S2, unofficial].
+2. Extract the barycentric coordinates $u$ and $v$ from the hit record [S1, S2, unofficial].
+3. Compute the third barycentric coordinate $w$ using the constraint that the sum of barycentric coordinates is 1:
+   $$w = 1 - u - v$$
+4. Clamp $w$ to the range $[0.0, 1.0]$ to handle floating-point precision errors or boundary cases where $w$ might slightly exceed valid bounds due to numerical instability [S1, S2, unofficial]. Note: $u$ and $v$ are assumed to be valid within $[0, 1]$ and $u+v \le 1$ by the intersection routine, but clamping $w$ ensures the weights are non-negative for the final weighted sum [S1, unofficial].
+5. Perform the weighted sum of the vertex attributes:
+   $$A = w \cdot A_0 + u \cdot A_1 + v \cdot A_2$$
 6. If the attribute is a normal vector, normalize the result to ensure it remains a unit vector:
-   $$ \hat{N} = \frac{A}{\|A\|} $$
-   where $A$ is the interpolated normal from step 5.
+   $$\hat{N} = \frac{A}{\|A\|}$$
+   [S2, unofficial]. This normalization is critical because linear interpolation of normals does not preserve unit length [S3, unofficial].
+7. If the mesh lacks the requested attribute, handle the error gracefully (e.g., return a default value or log an error) [S1, S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def barycentric_interpolate_triangle(vertices, attributes, u, v, attr_type='generic'):
+def barycentric_interpolate(triangle_indices, vertex_attributes, u, v, attribute_type='color'):
     """
-    Interpolates an attribute at a point defined by barycentric coordinates (u, v)
-    within a triangle defined by three vertices.
+    Interpolate an attribute at a point on a triangle using barycentric coordinates.
     
     Args:
-        vertices: List of 3 vertex objects or indices [v0, v1, v2]
-        attributes: List of 3 attribute values [A0, A1, A2] corresponding to vertices
-        u: First barycentric coordinate
-        v: Second barycentric coordinate
-        attr_type: 'generic' for colors/UVs, 'normal' for normals requiring normalization
-    
+        triangle_indices: List of 3 vertex indices [i0, i1, i2]
+        vertex_attributes: Dictionary or array mapping vertex index to attribute vector
+        u: Barycentric coordinate u
+        v: Barycentric coordinate v
+        attribute_type: 'color' or 'normal'
+        
     Returns:
-        Interpolated attribute value
+        Interpolated attribute vector
     """
-    # Step 1 & 2: Retrieve u, v (already provided as inputs)
-    # Step 3: Compute w
+    # Step 1: Retrieve vertex indices
+    i0, i1, i2 = triangle_indices
+    
+    # Step 2 & 3: Compute w
     w = 1.0 - u - v
     
-    # Step 4: Clamp w to handle precision errors [S1, S2, unofficial]
+    # Step 4: Clamp w to handle precision errors
+    # [G] Clamping w ensures non-negative weights even if u+v is slightly > 1 due to float error.
+    # In strict barycentric logic, if u+v > 1, the point is outside, but intersection routines
+    # usually guarantee validity. Clamping w to [0,1] is a robustness measure [S1, unofficial].
     w = max(0.0, min(1.0, w))
     
-    # Step 5: Linear interpolation
-    # A0, A1, A2 are vectors (e.g., [x, y, z])
-    A0 = attributes[0]
-    A1 = attributes[1]
-    A2 = attributes[2]
+    # Retrieve attributes
+    A0 = vertex_attributes[i0]
+    A1 = vertex_attributes[i1]
+    A2 = vertex_attributes[i2]
     
-    # Vector addition and scalar multiplication
-    A = [
-        w * A0[0] + u * A1[0] + v * A2[0],
-        w * A0[1] + u * A1[1] + v * A2[1],
-        w * A0[2] + u * A1[2] + v * A2[2]
-    ]
+    # Step 5: Weighted sum
+    # [G] Assuming attributes are vectors (e.g., numpy arrays or lists of floats)
+    A = w * A0 + u * A1 + v * A2
     
     # Step 6: Normalize if normal
-    if attr_type == 'normal':
-        length = (A[0]**2 + A[1]**2 + A[2]**2)**0.5
-        if length > 1e-8: # Guard against zero-length normal
-            A[0] /= length
-            A[1] /= length
-            A[2] /= length
-        else:
-            # Fallback if normal is degenerate
-            A = [0.0, 0.0, 1.0] 
-            
+    if attribute_type == 'normal':
+        norm = vector_norm(A)
+        if norm == 0:
+            # [G] Degenerate case: all normals are zero or cancel out perfectly.
+            # Return a default normal (e.g., up vector) or handle error.
+            return [0.0, 1.0, 0.0] 
+        A = A / norm
+        
     return A
+
+def vector_norm(v):
+    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
 ```
 
 **Parameters:**
-- `hit.barycentricCoord().u` and `.v`: The barycentric coordinates of the intersection point [S1, unofficial].
+- $u, v$: Barycentric coordinates of the intersection point [S1, unofficial]. Typically in $[0, 1]$.
+- $A_0, A_1, A_2$: Vertex attributes. Dimension depends on attribute (e.g., 3 for RGB/Normal, 2 for UV).
 
 **Edge Cases and Pitfalls:**
-- **Missing Attributes:** If the mesh lacks the requested attribute (normals, colors, or UVs), the function should log an error and return undefined behavior or fail gracefully depending on the caller [S1, S2, unofficial].
-- **Precision Errors:** Due to floating-point arithmetic, $u + v$ might slightly exceed 1.0, resulting in a negative $w$. Clamping $w$ to $[0, 1]$ is necessary to prevent accessing invalid memory or producing incorrect signs [S1, S2, unofficial].
-- **Degenerate Triangles:** If the triangle has zero area, barycentric coordinates may be ill-defined. Standard intersection routines usually handle this, but interpolation results may be unstable.
+- **Precision Errors:** Floating-point arithmetic may result in $u + v + w \neq 1$ or $w < 0$ slightly. Clamping $w$ to $[0, 1]$ mitigates this [S1, unofficial].
+- **Missing Attributes:** If the mesh does not have normals, colors, or UVs, the function must check for existence before accessing [S1, S2, unofficial].
+- **Normal Interpolation:** Linear interpolation of normals distorts the vector length and direction relative to the surface curvature. Normalization is required [S2, unofficial]. However, this does not fix the C0 discontinuity at edges if adjacent triangles have different vertex normals.
 
 ## Subtopics
 
 ### [Clough–Tocher Bézier Patch Interpolation](9134-clough-tocher-b-zier-patch-interpolation.md)
-Replaces linear barycentric interpolation with a cubic Bézier patch construction to interpolate feature values and gradients over a triangle, guaranteeing C1 continuity everywhere and C∞ within each triangle. It solves the problem of visible seam artifacts caused by gradient discontinuities across triangle edges in fully opaque meshes, which arise because standard barycentric interpolation produces a C0 feature field. Unlike this method, which only uses vertex values, Clough–Tocher requires per-vertex gradients to define the patch geometry.
+Replaces linear barycentric interpolation with a cubic Bézier patch construction to interpolate feature values and gradients over a triangle, guaranteeing C1 continuity everywhere and C∞ within each triangle. It solves the problem of visible seam artifacts caused by gradient discontinuities across triangle edges in fully opaque meshes, which arise because standard barycentric interpolation produces a C0 feature field. Unlike the parent method, [Barycentric Interpolation on Tetrahedra](1843-barycentric-interpolation-on-tetrahedra.md), which only uses vertex values, this method requires per-vertex gradients to define the patch geometry.
+
+### Component-wise Tensor Interpolation
+A method for interpolating second-order tensor fields by treating the tensor as a linear combination of surrounding edge tensors, avoiding the orientation ambiguities and non-unit vector issues of interpolating eigenvectors directly [S3, unofficial]. It calculates barycentric coordinates $\beta_k$ for the point $p$ and computes the interpolated tensor component $T_{ij}$ as:
+$$T_{ij} = \frac{\sum_{0 < k < 3} \beta_k T_{ij}^k}{\sum_{0 < k < 3} \beta_k}$$
+[S3, unofficial]. Pitfalls include naive interpolation of eigenvectors with different orientations causing rotation of vectors and potential zero vectors due to numerical instabilities [S3, unofficial]. This method preserves symmetry and reduces computational effort compared to interpolating raw MRI data or derived quantities like eigenvectors [S3, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per intersection point. The computation involves a constant number of arithmetic operations (subtraction, multiplication, addition).
-- **Memory Complexity:** $O(1)$ auxiliary memory. No additional data structures are required beyond the vertex attributes and barycentric coordinates.
-- **Strengths:** Simple to implement, computationally inexpensive, and provides smooth visual results for attributes like color and UVs.
-- **Limitations:** Produces C0 continuous fields, which can lead to visible shading artifacts (faceting) for normals on low-polygon meshes. It does not account for curvature or gradients.
-- **When to use:** Standard rasterization and ray tracing for diffuse colors, UV mapping, and smooth shading where high-order continuity is not critical.
-- **When not to use:** When C1 continuity is required for normals or when the mesh has low polygon count and shading artifacts are visible.
+- **Time Complexity:** $O(1)$ per triangle hit. The computation involves a few floating-point subtractions, multiplications, and additions. Normalization requires a square root, which is slightly more expensive but still constant time.
+- **Memory Complexity:** $O(1)$ auxiliary memory. Requires storage for the vertex attributes and the barycentric coordinates.
+- **Measured Performance:** Extremely fast, suitable for real-time rendering and ray tracing kernels. The primary cost is memory access to vertex attributes.
+- **Scaling:** Scales linearly with the number of triangles intersected. No precomputation is required beyond storing vertex attributes.
+- **Strengths:** Simple to implement, computationally inexpensive, works for any scalar or vector attribute.
+- **Limitations:** Produces C0 continuous fields, leading to visible shading discontinuities (faceting) on curved surfaces if vertex normals are not shared or if the mesh is coarse. Not suitable for high-quality smooth shading without additional techniques (e.g., Phong shading or higher-order patches).
+- **When to use:** Real-time rendering, simple mesh visualization, UV mapping, color interpolation.
+- **When not to use:** High-quality offline rendering requiring smooth shading, tensor field visualization requiring C1 continuity, or when gradient information is available and needed.
 
 ## Background
-Barycentric interpolation is a fundamental technique in computer graphics, rooted in the mathematical concept of barycentric coordinates. It is widely used in rasterization pipelines and ray tracers to interpolate vertex attributes across triangle faces. The method is implicitly used in the fixed-function pipeline of OpenGL and DirectX for varying variables. In the context of volume rendering and tetrahedral representations, it serves as the 2D simplex counterpart to 3D barycentric interpolation.
+Barycentric interpolation on triangles is a fundamental technique in computer graphics, originating from the mathematical theory of barycentric coordinates in geometry. It has been used since the early days of rasterization and ray tracing to interpolate vertex attributes across triangle surfaces. The method is standard in graphics APIs (OpenGL, DirectX) and rendering engines. The specific implementation details regarding clamping and normalization are common practices in modern ray tracers and Gaussian Splatting frameworks (e.g., 3DGS-FLoD, whu-lyh/flod) to ensure robustness against floating-point errors [S1, S2, unofficial]. The extension to tensor fields via component-wise interpolation is discussed in the context of diffusion tensor imaging visualization [S3, unofficial].
 
 ## Sources
 [S1] 3DGS-FLoD/flod, https://github.com/3DGS-FLoD/flod, fetched 2026-10-27 (unofficial)
 [S2] whu-lyh/flod, https://github.com/whu-lyh/flod, fetched 2026-10-27 (unofficial)
+[S3] Image-Space Tensor Field Visualization Using a LIC-like Method, https://doi.org/10.1007/978-3-642-21608-4_11, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,172 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Chunk Region Meshing with Dirty Regions is an incremental surface extraction method that generates geometry for a voxel chunk by processing only a specified subset of "dirty" cells, while consulting the complete chunk and its neighbors for visibility, ambient occlusion (AO), and fluid data [S1, unofficial]. It solves the problem of expensive full-chunk remeshing by allowing partial updates, ensuring that only changed geometry is regenerated [S1, unofficial]. Unlike [Section-based Mesh Generation](4220-section-based-mesh-generation.md), which processes the entire chunk layer by layer, this method restricts computation to a local `dirtyRegion`, significantly reducing work for sparse updates [S1, unofficial].
++Chunk Region Meshing with Dirty Regions is an incremental surface extraction method that generates geometry for a voxel chunk by processing only a specified subset of "dirty" cells, while consulting the complete chunk and its neighbors for visibility, ambient occlusion (AO), and fluid data [S1, unofficial]. It solves the problem of expensive full-chunk remeshing by allowing partial updates, ensuring that only changed geometry is regenerated [S1, unofficial].
+ 
+ ## How it works
+@@ -31,11 +31,12 @@
+ **Pseudocode:**
+ ```python
++CHUNK_SIZE = 16  # Implied constant from context [S1, unofficial]
++
+ def mesh_chunk_region(chunk, neighbors, dirty_region, config):
+-    # 1. Validate inputs
++    # 1. Validate chunk views and neighbors
+     if not chunk.valid or not neighbors.valid:
+         raise ValueError("Invalid chunk or neighbor views")
+ 
+-    # 2. Normalize dirty region to chunk bounds
+-    # CHUNK_SIZE is typically 16
++    # 2. Normalize dirty region coordinates to bounds [0, CHUNK_SIZE] for X/Z, [0, height] for Y
+     x_min = max(dirty_region.x_min, 0)
+     x_max = min(dirty_region.x_max, CHUNK_SIZE)
+@@ -45,45 +46,38 @@
+     y_max = min(dirty_region.y_max, chunk.height)
+ 
+-    # 3. Check for empty region
++    # 3. If empty, return empty mesh result with empty layers
+     if x_min >= x_max or z_min >= z_max or y_min >= y_max:
+         return {
+             "dirtyRegion": {"x_min": x_min, "x_max": x_max, "z_min": z_min, "z_max": z_max, "y_min": y_min, "y_max": y_max},
+-            "layers": {
+-                "crossPlants": [],
+-                "fluids": [],
+-                "opaque": [],
+-                "specialBlocks": [],
+-                "transparentSolid": [],
+-                "water": []
+-            },
++            "layers": {"crossPlants": [], "fluids": [], "opaque": [], "specialBlocks": [], "transparentSolid": [], "water": []},
+             "ownedRegion": {"x_min": x_min, "x_max": x_max, "z_min": z_min, "z_max": z_max, "y_min": y_min, "y_max": y_max}
+         }
+ 
+-    # 4. Retrieve lookups
+-    special_lookup = get_special_block_lookup(config)
+-    fluid_lookup = get_fluid_lookup(config)
+-    plant_lookup = get_plant_lookup(config)
++    # 4. Retrieve lookup tables
++    special_lookup = config.special_block_lookup
++    fluid_lookup = config.fluid_lookup
++    plant_lookup = config.plant_lookup
+ 
+-    # 5. Mesh special blocks
+-    special_meshes = mesh_special_blocks(chunk, dirty_region, special_lookup)
++    # 5. Mesh special blocks within dirty region
++    special_meshes = [build_special_block_mesh(chunk.get_block(x, y, z), x, y, z) 
++                      for y in range(y_min, y_max) for z in range(z_min, z_max) for x in range(x_min, x_max) 
++                      if chunk.get_block(x, y, z) in special_lookup]
+ 
+-    # 6. Mesh fluids
+-    fluid_meshes = mesh_fluids(chunk, dirty_region, fluid_lookup)
++    # 6. Mesh fluid surfaces within dirty region
++    fluid_meshes = [build_fluid_surface_mesh(chunk.get_block(x, y, z), x, y, z, neighbors) 
++                    for y in range(y_min, y_max) for z in range(z_min, z_max) for x in range(x_min, x_max) 
++                    if chunk.get_block(x, y, z) in fluid_lookup]
+ 
+-    # 7. Initialize sink
+-    sink = []
++    # 7. Create sink and push results
++    sink = {"crossPlants": [], "fluids": fluid_meshes, "specialBlocks": special_meshes}
+ 
+-    # 8. Generate light masks
+-    light_masks = generate_light_masks(chunk, dirty_region)
++    # 8. Generate light masks for required cells
++    light_masks = {(x, y, z): compute_light_level(chunk, x, y, z) 
++                   for y in range(y_min, y_max) for z in range(z_min, z_max) for x in range(x_min, x_max)}
+ 
+-    # 9. Initialize greedy mesh mask
+-    # Size depends on dirty region dimensions
+-    mask_width = x_max - x_min
+-    mask_depth = z_max - z_min
+-    mask_height = y_max - y_min
+-    mask = [0] * (mask_width * mask_depth * mask_height)
++    # 9. Initialize Uint32Array mask for greedy meshing
++    mask = [0] * ((x_max - x_min) * (z_max - z_min) * (y_max - y_min))
+ 
+-    # 10. Mesh faces (Greedy Meshing)
+-    # The owned region includes a 1-cell halo
++    # 10. Mesh all faces using greedy approach
+     halo_x_min = max(x_min - 1, 0)
+     halo_x_max = min(x_max + 1, CHUNK_SIZE)
+@@ -93,40 +87,25 @@
+     halo_y_max = min(y_max + 1, chunk.height)
+ 
+-    owned_region = {
+-        "x_min": halo_x_min, "x_max": halo_x_max,
+-        "z_min": halo_z_min, "z_max": halo_z_max,
+-        "y_min": halo_y_min, "y_max": halo_y_max
+-    }
++    opaque_meshes = []
++    for y in range(y_min, y_max):
++        for z in range(z_min, z_max):
++            for x in range(x_min, x_max):
++                idx = (y - y_min) * (x_max - x_min) * (z_max - z_min) + (z - z_min) * (x_max - x_min) + (x - x_min)
++                if mask[idx] == 0:
++                    face = extract_greedy_face(chunk, neighbors, x, y, z, light_masks, mask, fluid_lookup, plant_lookup, special_lookup, chunk.height)
++                    if face:
++                        opaque_meshes.append(face)
++                        sink["opaque"].append(face)
+ 
+-    opaque_meshes = mesh_faces_greedy(
+-        chunk=chunk,
+-        neighbors=neighbors,
+-        dirty_region=dirty_region,
+-        light_masks=light_masks,
+-        mask=mask,
+-        lookup=special_lookup,
+-        fluids=fluid_lookup,
+-        plants=plant_lookup,
+-        y_limit=chunk.height,
+-        push_function=lambda layer_type, mesh_data: sink.append((layer_type, mesh_data))
+-    )
++    # 11. Return ownedRegion with 1-cell halo clamped at chunk boundaries
++    owned_region = {"x_min": halo_x_min, "x_max": halo_x_max, "z_min": halo_z_min, "z_max": halo_z_max, "y_min": halo_y_min, "y_max": halo_y_max}
++    return {"dirtyRegion": {"x_min": x_min, "x_max": x_max, "z_min": z_min, "z_max": z_max, "y_min": y_min, "y_max": y_max}, "layers": sink, "ownedRegion": owned_region}
+ 
+-    # 11. Compile results
+-    # Note: The source implies layers are populated via the sink and specific passes
+-    # We aggregate them here for the return structure
+-    layers = {
+-        "crossPlants": [], # Populated by plant pass if applicable
+-        "fluids": fluid_meshes,
+-        "opaque": opaque_meshes,
+-        "specialBlocks": special_meshes,
+-        "transparentSolid": [],
+-        "water": []
+-    }
+-
+-    return {
+-        "dirtyRegion": {"x_min": x_min, "x_max": x_max, "z_min": z_min, "z_max": z_max, "y_min": y_min, "y_max": y_max},
+-        "layers": layers,
+-        "ownedRegion": owned_region
+-    }
++def build_special_block_mesh(block, x, y, z): return {"type": "special", "block": block, "pos": (x, y, z)}
++def build_fluid_surface_mesh(block, x, y, z, neighbors): return {"type": "fluid", "block": block, "pos": (x, y, z)}
++def compute_light_level(chunk, x, y, z): return chunk.get_light(x, y, z)
++def extract_greedy_face(chunk, neighbors, x, y, z, light_masks, mask, fluid_lookup, plant_lookup, special_lookup, y_limit):
++    # Standard greedy meshing: check 6 faces, merge adjacent quads, update mask, return geometry or None
++    return {"type": "opaque", "pos": (x, y, z)}
+ ```
+ 
+@@ -147,15 +126,10 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Proportional to the volume of the `dirtyRegion` plus the overhead of neighbor lookups for the halo. Significantly faster than full-chunk meshing for sparse updates.
+-*   **Memory Complexity:** Proportional to the size of the `dirtyRegion` and the `ownedRegion` (including halo). The greedy mesh mask requires $O(W \times D \times H)$ space for the dirty region dimensions.
+-*   **Performance:** Measured performance depends on the density of dirty cells. Fluid meshing is priced separately due to its variable complexity [S1, unofficial].
+-*   **Strengths:** Incremental updates reduce CPU load for dynamic scenes. Consistent face culling via the halo ensures visual correctness.
+-*   **Limitations:** Requires careful management of neighbor data and halo regions. Not suitable for full-chunk regeneration where full consistency is needed without neighbor context.
+-*   **When to Use:** When only a small portion of a chunk has changed (e.g., player block placement).
+-*   **When Not to Use:** When the entire chunk needs remeshing or when neighbor consistency cannot be guaranteed.
++Not given in the sources.
+ 
+ ## Background
+-This method is part of the `mc-meshing` library, an unofficial implementation for Minecraft-style voxel rendering [S1, unofficial]. It addresses the performance bottleneck of full-chunk meshing in dynamic voxel worlds by enabling incremental updates. The approach is inspired by the need for real-time performance in game engines where voxel data changes frequently.
++This method is part of the `mc-meshing` library, an unofficial implementation for Minecraft-style voxel rendering [S1, unofficial].
+ 
+ ## Sources
+-[S1] nerima-games/mc-meshing, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)+[S1] nerima-games/mc-meshing, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)
++[S2] Mesh Generation & Entity Spawning Pipeline, https://github.com/nerima-games/mc-meshing, fetched 2026-10-28 (unofficial)

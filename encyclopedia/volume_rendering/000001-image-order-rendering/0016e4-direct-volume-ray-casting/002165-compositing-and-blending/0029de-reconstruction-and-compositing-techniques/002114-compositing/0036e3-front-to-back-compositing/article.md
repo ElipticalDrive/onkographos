@@ -1,0 +1,118 @@
+# Front-to-Back Compositing
+
+Also called: Front-to-back algorithm, Levoy's front-to-back method, Levoy's Front-to-Back Ray Casting, Front-to-Back Integration, front-to-back volume rendering integral, front-to-back image-order volume rendering
+
+## Overview
+Front-to-Back Compositing is a recursive implementation of the volume rendering equation that resolves redundant computation, enabling real-time processing of semi-transparent volume data [S1, unofficial]. It differs from back-to-front methods by accumulating contributions from the viewer outward, allowing for early ray termination when the accumulated opacity approaches unity [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A viewing ray defined by origin and direction, traversing a volume dataset. For each sample point $x$ along the ray, the method requires the sample's color $C(x)$ and opacity $\alpha(x)$ [S1, unofficial].
+- Output: The final pixel color $C_{out}$ and accumulated opacity $\alpha_{out}$ [S1, unofficial].
+
+**Data Structures:**
+- Accumulators: Two scalar values per ray, $C_{in}$ (current accumulated color) and $\alpha_{in}$ (current accumulated opacity), initialized to zero [S1, unofficial].
+- Sample Data: Interpolated color $C(x)$ and opacity $\alpha(x)$ at each sample step [S1, unofficial].
+
+**Numbered Steps:**
+1. Initialize accumulators: Set $C_{in} = 0$ and $\alpha_{in} = 0$ [S1, unofficial].
+2. Iterate through samples $i = 0$ to $N$ along the viewing ray from front to back [S2, unofficial].
+3. For each sample $i$, retrieve the sample color $c_i$ and sample opacity $\alpha_i$ [S2, unofficial].
+4. Update the accumulated color using the recursive formula:
+   $$ C_{out} = C_{in} + c_i \cdot \alpha_i \cdot (1 - \alpha_{in}) $$
+   where $C_{in}$ is the color before iteration and $C_{out}$ is the color after [S1, unofficial].
+5. Update the accumulated opacity using the recursive formula:
+   $$ \alpha_{out} = \alpha_{in} + \alpha_i \cdot (1 - \alpha_{in}) $$
+   where $\alpha_{in}$ is the opacity before iteration and $\alpha_{out}$ is the opacity after [S1, unofficial].
+6. Update the state for the next iteration: Set $C_{in} = C_{out}$ and $\alpha_{in} = \alpha_{out}$ [S1, unofficial].
+7. Check for early ray termination: If $\alpha_{out} \approx 1$, stop the calculation to save computation [S2, unofficial].
+8. Return $C_{out}$ as the final pixel color [S1, unofficial].
+
+**Formulas:**
+The core recursive updates are [S1, unofficial]:
+$$ C_{out} = C_{in} + C(x)\alpha(x)(1 - \alpha_{in}) $$
+$$ \alpha_{out} = \alpha_{in} + \alpha(x)(1 - \alpha_{in}) $$
+
+Alternatively expressed with index $i$ [S2, unofficial]:
+$$ C_i = C_{i-1} + (1 - A_{i-1}) c_i \alpha_i $$
+$$ A_i = A_{i-1} + (1 - A_{i-1}) \alpha_i $$
+where $C_i$ is the accumulated color, $A_i$ is the accumulated opacity, $c_i$ is the emitted light energy at point $i$, and $\alpha_i$ is the opacity of light absorption at one sample step [S2, unofficial].
+
+**Parameters:**
+- $C_{in}, C_{out}$: Color values before and after any iteration [S1, unofficial].
+- $\alpha_{in}, \alpha_{out}$: Opacity values before and after any iteration [S1, unofficial].
+- $\alpha$: Opacity of light absorption at one sample step [S2, unofficial].
+- $c_i$: Emitted light energy for a given point $i$ [S2, unofficial].
+- $A_i$: Accumulated opacity at position $i$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Early ray termination: The calculation should stop when accumulated opacity $A'_i$ is approximately 1 to save computation [S2, unofficial].
+- Precision: The method assumes pre-multiplied alpha for the numerical approximation [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def front_to_back_compositing(ray_samples):
+    """
+    ray_samples: list of tuples (color, opacity) from front to back.
+    Returns: (final_color, final_opacity)
+    """
+    # Initialize accumulators
+    c_in = (0.0, 0.0, 0.0)  # RGB color
+    alpha_in = 0.0
+    
+    for c_sample, alpha_sample in ray_samples:
+        # Early ray termination check
+        if alpha_in >= 0.9999:
+            break
+            
+        # Calculate transmittance (light reaching this sample)
+        transmittance = 1.0 - alpha_in
+        
+        # Update accumulated color
+        # C_out = C_in + C(x) * alpha(x) * (1 - alpha_in)
+        c_out = c_in + c_sample * alpha_sample * transmittance
+        
+        # Update accumulated opacity
+        # alpha_out = alpha_in + alpha(x) * (1 - alpha_in)
+        alpha_out = alpha_in + alpha_sample * transmittance
+        
+        # Update state for next iteration
+        c_in = c_out
+        alpha_in = alpha_out
+        
+    return c_in, alpha_in
+```
+
+## Subtopics
+
+### [Alpha Compositing Ray Casting](922-alpha-compositing-ray-casting.md)
+Uses standard Porter-Duff alpha compositing rules; suitable for discrete semi-transparent surfaces rather than continuous volumes.
+
+### [Ray Compositing and Accumulation](3449-ray-compositing-and-accumulation.md)
+General accumulation strategy; front-to-back is a specific ordered implementation of this.
+
+### [Average Compositing](5286-average-compositing.md)
+Computes the mean value along the ray; ignores opacity and depth cues, unlike front-to-back.
+
+### [Raymarch Blending](5322-raymarch-blending.md)
+Often implies a specific shading or blending function during marching; front-to-back is the compositing order.
+
+### [Alpha Blending](5750-alpha-blending.md)
+General 2D blending technique; front-to-back extends this to 3D volume integration.
+
+## Operating characteristics
+- Time Complexity: $O(N)$ per ray, where $N$ is the number of samples. Early ray termination can reduce the average case significantly for opaque regions [S2, unofficial].
+- Memory Complexity: $O(1)$ auxiliary memory per ray, as it only stores current accumulators [S1, unofficial].
+- Strengths: Enables real-time processing by resolving redundant computation inherent in the non-recursive volume rendering equation [S1, unofficial]. Allows early ray termination [S2, unofficial].
+- Limitations: Order-dependent; requires strict front-to-back traversal. Not suitable for order-independent transparency without modification [S2, unofficial].
+- When to use: Real-time volume rendering where performance is critical and the volume has regions of high opacity [S1, unofficial].
+- When not to use: When order-independent transparency is required or when using back-to-front shading models [S2, unofficial].
+
+## Background
+The method was introduced by Marc Levoy as a recursive implementation of the volume rendering equation to enable real-time visualization [S1, unofficial]. It is a fundamental technique in direct volume ray casting, forming the compositing step in the volume rendering pipeline [S2, unofficial].
+
+## Sources
+[S1] Antara: An Interactive 3D Volume Rendering and Visualization Framework, https://arxiv.org/abs/1812.04233v1, fetched 2026-10-26 (unofficial)
+[S2] PDF Volume Rendering - Isenberg, https://tobias.isenberg.cc/graphics/uploads/Class/07-volume-rendering.pdf, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,199 @@
+# TRIPS
+
+Also called: TRIPS, Trilinear Point Splatting, TRIPS: Neural Feature Attachment and Pyramid Rendering for 3DGS
+
+## Overview
+TRIPS is a point-based radiance field rendering technique that rasterizes points into a screen-space image pyramid using trilinear splats, followed by a neural reconstruction network to produce hole-free, crisp images [S2]. It solves the blurriness and cloudy artifacts of 3D Gaussian Splatting [KKLD23] and the temporal instability and large-gap handling issues of ADOP [RFS22] by projecting neural color descriptors into an image pyramid using trilinear writes to two neighboring resolution layers based on projected point size, avoiding overdraw by rendering only 2x2 splats [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Point positions $\mathbf{x}_w$, world-space sizes $s_w$, neural feature descriptors $\tau$, point opacities $\alpha$, camera intrinsics $C$ (including focal length $f$), and camera extrinsics $(R, t)$ [S2].
+*   **Outputs:** Final RGB image [S2].
+
+**Data Structures:**
+*   **Image Pyramid:** A set of $n$ layers. Layer $L$ has resolution $2^L \times 2^L$ (relative to finest layer 0) [S2]. Each pixel in each layer stores a depth-sorted list of fragments $\Lambda_{l,x,y}$ containing colors and alpha values, clamped to a maximum size of 16 elements [S2].
+*   **Neural Reconstruction Network:** A small decoder consisting of gated convolutions, with only a single gated convolution per layer [S2].
+*   **Spherical Harmonics Module:** Optional module applied after the neural network to model view-dependent artifacts [S2].
+
+**Steps:**
+1.  **Projection:** For each point, project its position $\mathbf{x}_w = (x_w, y_w, z_w)$ to continuous screen space coordinates $(x, y, z)$ using camera intrinsics $C$ and extrinsics $(R, t)$ [S2]. Calculate the screen space size $s$ from the world space size $s_w$ and depth $z$:
+    $$s = \frac{f \cdot s_w}{z}$$
+    where $f$ is the focal length [S2].
+
+2.  **Layer Selection:** Determine the two resolution layers for each point based on its projected size $s$:
+    $$L_{lower} = \lfloor \log(s) \rfloor$$
+    $$L_{upper} = \lceil \log(s) \rceil$$
+    Points are rasterized as 2x2x2 trilinear splats into these two layers [S2].
+
+3.  **Trilinear Splatting:** For each of the eight pixels (2x2 in each of the 2 selected layers), compute the contribution of the point. The final opacity value $\gamma$ written to the image pyramid for pixel $(x_i, y_i, s_i)$ with $s_i = 2^L$ is:
+    $$\gamma = \beta \cdot \iota \cdot \alpha$$
+    where $\alpha$ is the point opacity [S2].
+    *   **Bilinear Weight ($\beta$):** Computed inside the image layer based on continuous screen coordinates $(x, y)$ and pixel coordinates $(x_i, y_i)$:
+        $$\beta = (1 - |x - x_i|) \cdot (1 - |y - y_i|)$$
+        [S2]
+    *   **Linear Layer Weight ($\iota$):** Interpolates between the two selected layers based on projected size $s$ and layer sizes $s_{lower}=2^{L_{lower}}$ and $s_{upper}=2^{L_{upper}}$:
+        $$\iota = \begin{cases} 1 - \frac{|s - s_i|}{2^{L_{upper}} - 2^{L_{lower}}} & s \geq 1 \\ \epsilon + (1 - \epsilon)s & s_i = 0 \wedge s < 1 \end{cases}$$
+        where $\epsilon = 0.25$ is a minimum weight constant to ensure far-away points with pixel size $< 1$ do not disappear [S2].
+
+4.  **Alpha Blending:** Collect all fragments in per-pixel lists $\Lambda_{l,x,y}$ for each layer. Sort lists by depth. Compute the color $C_\Lambda$ for each pixel using front-to-back alpha blending:
+    $$C_\Lambda = \sum_{m=1}^{|\Lambda|} T_m \cdot \alpha_m \cdot c_m$$
+    $$T_m = \prod_{i=1}^{m-1} (1 - \alpha_i)$$
+    where $c_m$ is the color of the $m$-th fragment, $\alpha_m$ is its opacity, and $T_m$ is the transmittance [S2].
+
+5.  **Neural Reconstruction:** Feed the feature image pyramid through the compact neural reconstruction network. The network harmonizes the various layers, addresses remaining gaps, and conceals rendering artifacts [S2].
+
+6.  **Optional View Dependency:** Apply the spherical harmonics module to the output of the neural network to preserve high levels of detail and model view-dependent artifacts [S2].
+
+7.  **Tone Mapping:** Apply a tone mapping module to transform the resulting features into RGB colors [S2].
+
+**Parameters:**
+*   **Splat Size:** Points are rasterized as 2x2x2 trilinear splats [S2].
+*   **Minimum Weight:** $\epsilon = 0.25$ [S2].
+*   **Feature Descriptors:** Default is 4 feature vectors per point [S2].
+*   **Network Architecture:** Small decoder made out of gated convolutions [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def trips_render(points, camera_intrinsics, camera_extrinsics, pyramid_layers):
+    """
+    points: List of dicts with keys 'pos' (x,y,z), 'size' (sw), 'features' (tau), 'alpha'
+    camera_intrinsics: Dict with 'f' (focal length)
+    camera_extrinsics: Rotation matrix R, Translation vector t
+    pyramid_layers: List of layer indices L_lower to L_upper
+    """
+    # Initialize image pyramid with empty fragment lists
+    image_pyramid = {L: {} for L in pyramid_layers}
+    
+    for point in points:
+        # 1. Project position
+        x_w, y_w, z_w = point['pos']
+        # Apply extrinsics to get camera-space position
+        x_c, y_c, z_c = apply_extrinsics(x_w, y_w, z_w, camera_extrinsics)
+        # Project to screen space (continuous)
+        f = camera_intrinsics['f']
+        x_screen = f * x_c / z_c
+        y_screen = f * y_c / z_c
+        z_screen = z_c # Depth for sorting
+        
+        # 2. Calculate screen size
+        s_w = point['size']
+        s = (f * s_w) / z_screen
+        
+        # 3. Select layers
+        L_lower = floor(log2(s))
+        L_upper = ceil(log2(s))
+        
+        # Handle far-away points (s < 1)
+        if s < 1:
+            L_lower = 0
+            L_upper = 0
+            
+        selected_layers = [L_lower, L_upper]
+        
+        # 4. Splat to selected layers
+        for L in selected_layers:
+            s_i = 2 ** L
+            # Calculate layer weight iota
+            if s >= 1:
+                if L == L_lower:
+                    iota = 1 - abs(s - s_i) / (2**L_upper - 2**L_lower)
+                else: # L == L_upper
+                    iota = 1 - abs(s - s_i) / (2**L_upper - 2**L_lower)
+            else:
+                iota = 0.25 + (1 - 0.25) * s
+                
+            # Determine 2x2 pixel coordinates in this layer
+            # Pixel coordinates are integer indices
+            x_i = floor(x_screen / (image_width / 2**L)) # Assuming normalized screen coords -1 to 1
+            y_i = floor(y_screen / (image_height / 2**L))
+            
+            # Iterate over 2x2 pixels
+            for dx in [0, 1]:
+                for dy in [0, 1]:
+                    px = x_i + dx
+                    py = y_i + dy
+                    
+                    # Continuous coordinates within the pixel
+                    # Assuming pixel center is at integer coordinate
+                    # Adjust x_screen, y_screen to be relative to pixel center if needed
+                    # Simplified: assume x_screen, y_screen are in pixel units
+                    # Beta calculation
+                    beta_x = 1 - abs(x_screen - (px + 0.5))
+                    beta_y = 1 - abs(y_screen - (py + 0.5))
+                    beta = beta_x * beta_y
+                    
+                    gamma = beta * iota * point['alpha']
+                    
+                    # Add fragment to list
+                    if L not in image_pyramid:
+                        image_pyramid[L] = {}
+                    if (px, py) not in image_pyramid[L]:
+                        image_pyramid[L][(px, py)] = []
+                    
+                    image_pyramid[L][(px, py)].append({
+                        'z': z_screen,
+                        'color': point['features'],
+                        'alpha': gamma
+                    })
+    
+    # 5. Sort and Blend
+    blended_pyramid = {}
+    for L, pixels in image_pyramid.items():
+        blended_pyramid[L] = {}
+        for (px, py), fragments in pixels.items():
+            # Sort by depth
+            fragments.sort(key=lambda f: f['z'])
+            # Clamp to 16 elements
+            fragments = fragments[:16]
+            
+            # Front-to-back blending
+            T = 1.0
+            color = [0.0, 0.0, 0.0]
+            for frag in fragments:
+                alpha = frag['alpha']
+                c = frag['color']
+                color = color + T * alpha * c
+                T = T * (1 - alpha)
+            blended_pyramid[L][(px, py)] = color
+            
+    # 6. Neural Reconstruction
+    # Input: blended_pyramid (feature pyramid)
+    # Output: Reconstructed features
+    reconstructed_features = neural_network(blended_pyramid)
+    
+    # 7. Optional Spherical Harmonics
+    # If view dependency is needed
+    if use_sh:
+        reconstructed_features = spherical_harmonics_module(reconstructed_features)
+        
+    # 8. Tone Mapping
+    final_image = tone_mapping(reconstructed_features)
+    
+    return final_image
+```
+
+## Subtopics
+
+### Hierarchical 3D Gaussian Splatting (H-3DGS)
+Uses an octree structure to manage Gaussian primitives at different levels of detail, allowing for efficient rendering and compression. [Link](10279-hierarchical-3d-gaussian-splatting-h-3dgs.md)
+
+### Sequential Point Trees (SPTs)
+Organizes points into a tree structure to facilitate efficient rendering and LOD management. [Link](10290-sequential-point-trees-spts.md)
+
+## Operating characteristics
+*   **Time Complexity:** Real-time performance is maintained. For the OFFICE scene with 72.5M points, render time is 15.0ms [S2]. On the PLAYGROUND scene (12.5M points), rasterization takes 6.2ms (counting/memory allocation 1.9ms, splatting 2.6ms, sorting/blending 1.7ms), and the neural network takes 4.5ms [S2].
+*   **Memory Complexity:** Uses 4 feature descriptors per point by default [S2].
+*   **Performance:** Maintains a real-time frame rate of 60 frames per second on readily available hardware (RTX4090 for rendering, Nvidia A100 for training) [S2].
+*   **Strengths:** Crisper images than 3D Gaussian Splatting, better gap filling and temporal consistency than ADOP, efficient handling of large point clouds [S2].
+*   **Limitations:** Requires an initial dense reconstruction [S2]. Lack of anisotropic splat formulation causes noisy artifacts around silhouettes of elongated, slender objects during strong hole-filling [S2]. Hole-filling near the camera exhibits fuzzy edges and shine-through artifacts [S2]. Slight flickering can occur in areas with too many or too few points [S2].
+*   **When to use:** When crisp, hole-free images are required and temporal consistency is important, especially for scenes with intricate geometry or expansive landscapes [S2].
+*   **When not to use:** When anisotropic splatting is needed for slender objects, or when an initial dense reconstruction is not available [S2].
+
+## Background
+TRIPS was introduced by Linus Franke, Darius Rückert, Laura Fink, and Marc Stamminger from Visual Computing Erlangen, Friedrich-Alexander-Universität Erlangen-Nürnberg, Germany [S2]. It combines ideas from 3D Gaussian Splatting and ADOP [S2]. It is used on datasets such as Tanks&Temples, MipNeRF-360, BOAT, OFFICE, GARDEN, PLAYGROUND, HORSE, and FAMILY [S2].
+
+## Sources
+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S2] TRIPS: Trilinear Point Splatting for Real‐Time Radiance Field Rendering, https://doi.org/10.1111/cgf.15012, fetched 2026-10-27

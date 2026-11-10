@@ -1,0 +1,126 @@
+# Box Filter Dye Advection
+
+Also called: Hanning filter replacement, Phase-shifted box filter
+
+## Overview
+Box Filter Dye Advection is a variation of Line Integral Convolution (LIC) that replaces the standard Hanning windowed filter with a simple box filter to facilitate the visualization of dye advection in vector fields [S1, unofficial]. While standard LIC produces static textures, this method introduces a phase-shift mechanism that allows the "dye" to move along streamlines over time, creating natural flow motion [S1, unofficial]. It is distinguished from its parent method by its specific kernel choice and temporal animation capability, and from siblings like Variable Convolution Length by its focus on temporal phase shifting rather than spatial length variation [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A 2D vector field $\mathbf{V}(x,y)$.
+- A scalar noise field (dye texture).
+- The current animation step $l$.
+- The total number of animation steps $\text{steps}$.
+- The filter box length $\Delta L$.
+
+**Outputs:**
+- A rendered scalar field $F_{out}(l,x,y)$.
+
+**Data Structures:**
+- The algorithm operates on pixel coordinates $(x,y)$.
+- Streamlines are computed by integrating the vector field.
+- The filter box is defined by a start position $L$ and length $\Delta L$ along the streamline parameter $s$.
+
+**Steps:**
+1. For each pixel $(x,y)$, compute the streamline path through the vector field.
+2. Determine the integration interval for the current frame. The interval is defined by the start position $L$ and length $\Delta L$.
+3. Calculate the predicate $T(I, s_i)$ for each sample point $s_i$ along the streamline:
+   - $T(I, s_i) = 1$ if the sample point lies within the filter box range $[L, L + \Delta L)$.
+   - $T(I, s_i) = 0$ otherwise.
+   - Handle wrap-around: If $L + \Delta L > L_{max}$ (where $L_{max}$ is the total streamline length or period), use modulo arithmetic: $(L + \Delta L) \pmod{L_{max}}$.
+4. Compute the output value using the revised LIC formula:
+   $$ F_{out}(l,x,y) = \frac{\sum_{i} T(I, s_i) \cdot \text{Noise}(s_i)}{\sum_{i} T(I, s_i)} $$
+   Where the summation is over all sample points $s_i$ along the streamline. The denominator acts as a normalization factor for the box filter.
+5. The start position $L$ is shifted based on the animation step $l$ to create motion. The shift is typically proportional to $l / \text{steps}$.
+
+**Formulas:**
+- Predicate:
+  $$ T(I, s_i) = \begin{cases} 1 & \text{if } s_i \in [L, L + \Delta L) \\ 0 & \text{otherwise} \end{cases} $$
+- Output:
+  $$ F_{out}(l,x,y) = \frac{\sum_{i} T(I, s_i) \cdot \text{Noise}(s_i)}{\sum_{i} T(I, s_i)} $$
+  Note: The source text contains garbled equations (Equation 4 and 5). The interpretation above is derived from the description of the box filter replacing the Hanning window and the definition of the predicate $T(I, s_i)$ [S1, unofficial]. The standard LIC convolution with a box filter implies uniform weighting $1/\Delta s$ over the interval, which simplifies to the average of noise values within the box [S1, unofficial].
+
+**Parameters:**
+- $\Delta L$: Length of the filter box. Not given in the sources.
+- $\text{steps}$: Number of LIC animation steps. Not given in the sources.
+- $l$: Current animation step, $l \in [0, \text{steps}-1]$.
+
+**Pitfalls:**
+- Box filters can cause artifacts when the boxes re-enter the interval, particularly in periodic flows or when the box length is large relative to the streamline length [S1, unofficial]. A solution to avoid this problem is referenced in [7] but not detailed in the source text [S1, unofficial].
+- Precision issues may arise if the wrap-around logic is not handled correctly for closed streamlines.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def box_filter_dye_advection(vector_field, noise_field, streamline, l, steps, delta_L):
+    """
+    Compute the output value for a single pixel using Box Filter Dye Advection.
+    
+    Args:
+        vector_field: Vector field function V(x, y).
+        noise_field: Noise field function N(s).
+        streamline: List of points along the streamline.
+        l: Current animation step.
+        steps: Total number of animation steps.
+        delta_L: Length of the filter box.
+        
+    Returns:
+        The output scalar value for the pixel.
+    """
+    # Calculate the start position L based on the animation step
+    # The source does not specify the exact mapping from l to L.
+    # A common approach is to shift L proportionally to l/steps.
+    # Assuming streamline length is L_max.
+    L_max = len(streamline)
+    L = (l / steps) * L_max
+    
+    # Define the filter box range [L, L + delta_L)
+    # Handle wrap-around
+    L_end = (L + delta_L) % L_max
+    
+    sum_noise = 0.0
+    count = 0
+    
+    for i, point in enumerate(streamline):
+        # Check if point index i is within the filter box range
+        # The range is [L, L_end) if L < L_end, or [L, L_max) U [0, L_end) if L >= L_end
+        if L < L_end:
+            if L <= i < L_end:
+                sum_noise += noise_field(i)
+                count += 1
+        else:
+            if i >= L or i < L_end:
+                sum_noise += noise_field(i)
+                count += 1
+                
+    if count == 0:
+        return 0.0
+        
+    return sum_noise / count
+```
+
+## Subtopics
+
+### [Seed Line Integral Convolution](8864-seed-line-integral-convolution.md)
+Uses seed lines to initialize the dye concentration, allowing for controlled injection of dye. Choose when you need to control where the dye originates.
+
+### [Image Space Fabric Visualization](10569-image-space-fabric-visualization.md)
+A texture-based approach that operates in image space, often faster but less physically accurate. Choose when performance is critical and physical accuracy is less important.
+
+### [Variable Convolution Length for Dye](12158-variable-convolution-length-for-dye.md)
+Varies the convolution length based on local flow features. Choose when you need to highlight local flow structures with varying scales.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of sample points along the streamline.
+- **Memory Complexity:** Linear with respect to the number of sample points along the streamline.
+- **Strengths:** Simple to implement; easier to control dye concentration and motion compared to Hanning filters; allows for natural dye advection effects [S1, unofficial].
+- **Limitations:** Can cause artifacts when boxes re-enter the interval; less smooth than Hanning filters due to the sharp edges of the box filter [S1, unofficial].
+- **When to use:** When visualizing time-varying flow with dye advection is desired, and simplicity of parameter control is important.
+- **When not to use:** When smooth, high-quality static textures are required, or when artifacts from box re-entry are unacceptable without additional processing.
+
+## Background
+The method was introduced in a NASA Technical Report by [S1, unofficial]. It addresses the limitations of the Hanning windowed filter used in earlier LIC implementations, which were difficult to tune for smooth dye advection due to their periodic nature and attenuation at the ends [S1, unofficial]. The box filter was chosen for its simplicity and ease of control [S1, unofficial].
+
+## Sources
+[S1] NASA Technical Reports Server (NTRS) 19970011183: Visualizing Vector Fields Using Line Integral Convolution and Dye Advection, https://archive.org/details/NASA_NTRS_Archive_19970011183, fetched 2026-10-26 (unofficial)

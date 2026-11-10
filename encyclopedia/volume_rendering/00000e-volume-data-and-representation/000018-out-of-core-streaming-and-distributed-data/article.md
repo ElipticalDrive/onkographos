@@ -1,61 +1,77 @@
 # Out-of-core, streaming and distributed data
 
+Also called: out-of-core rendering, volume streaming, distributed volume rendering
 
 ## Overview
-This family addresses the rendering of volumetric datasets that exceed the memory capacity of a single processing unit or the bandwidth limits of the system bus [S1, S2, S4, unofficial]. It solves the scalability bottleneck inherent in single-node rendering by partitioning data or computation across multiple nodes, or by streaming data from disk to GPU in chunks [G]. What sets this family apart from [Dense grids and memory layout](3-dense-grids-and-memory-layout.md) is the explicit handling of data movement and partitioning strategies, whereas dense grids focus on in-memory organization [G]. It differs from [Compression](4-compression.md) by focusing on temporal/spatial streaming rather than static storage reduction, and from [Multiresolution and level of detail](7-multiresolution-and-level-of-detail.md) by prioritizing data delivery over visual approximation, though they often combine [G].
+This family addresses the problem of rendering volumetric datasets that exceed the capacity of a single machine's main memory or GPU video RAM (VRAM) [S1, S2, S4, unofficial]. It enables interactive visualization of massive datasets by partitioning data and computation across storage hierarchies or networked clusters [S1, S2, S4, unofficial]. Unlike [Dense grids and memory layout](3-dense-grids-and-memory-layout.md) which assumes full residency, or [Compression](4-compression.md) which focuses on storage density, this family focuses on the dynamic management of data movement and computational load to maintain real-time framerates [Parent].
 
 ## Shared principles
+All methods in this family share the following core mechanisms and constraints:
+
+1.  **Decomposition Strategy**: The volume or dataset is partitioned into subdomains, bricks, or cells. This partitioning can be:
+    *   **Spatial**: Dividing the 3D space into rectangular blocks (e.g., 1D, 2D, or 3D grids) [S2, S4, unofficial].
+    *   **Data-Driven**: Dividing based on cell counts or resolution levels (e.g., adaptive grids) [S1, unofficial].
+    *   **Topology-Aware**: Dividing unstructured meshes based on connectivity [S2, unofficial].
+
+2.  **Work Assignment**: Each processor (or memory tier) is assigned a subset of the partitioned data. The goal is to minimize the maximum workload across all processors:
+    $$ T_{max} = \max_{p \in Processors} (T_{compute, p} + T_{comm, p}) $$
+    Where $T_{compute}$ is the rendering time and $T_{comm}$ is the communication/compositing time [S1, unofficial].
+
+3.  **Compositing Order**: For correct alpha compositing, the relative depth order of rendered partitions must be preserved. If partitions are spatial, the compositing order is often determined by the view direction and the spatial position of the partitions [S1, S2, unofficial]. In distributed systems, partial images are often sent to a root node or composed in a tree-like structure [S2, unofficial].
+
+4.  **Communication Overhead**: Methods must account for the cost of transferring data to processors and transferring partial images for compositing. Load balancing algorithms often trade off spatial locality (which reduces communication) against computational balance (which reduces idle time) [S2, S4, unofficial].
+
+5.  **Caching and Prefetching**: Out-of-core techniques physically split data into pieces that fit into available memory (texture or main memory) while providing a virtual unified view [S1, unofficial].
+    *   **Asynchronous Loading**: Data loading is performed asynchronously to hide transfer latency [S1, unofficial].
+    *   **Speculative Prefetching**: Visibility algorithms predict which blocks will be needed next and prefetch them [S1, unofficial].
+    *   **Cache Policies**: Replacement strategies like Least Recently Used (LRU) are used to manage limited cache space [S1, unofficial].
+    *   **Multilevel Hierarchies**: Systems may implement multiple cache levels (e.g., GPU memory, main memory, disk) where each level is larger than the previous [S1, unofficial].
 
 ## Subtopics
 
 ### [Sectioning](1636-sectioning.md)
-Partitions a volume into segments to constrain on-chip FIFO buffer usage, solving limited hardware memory for intermediate ray-casting values by off-loading to external memory. Unlike [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) which uses hardware buffers, or [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md) which divides space for load balancing, Sectioning manages recirculation within a single pass for exact precision.
-
-### [VolumeLoader](2045-volumeloader.md)
-A generic ingestion method handling loading, resampling, and coordinate alignment for medical formats. It solves heterogeneous file conversion to device-ready tensors while managing memory via automatic downscaling. It differs from specialized loaders by providing a unified interface with overflow guards rather than focusing on specific headers.
+Sectioning partitions a volume dataset into smaller segments to constrain the on-chip memory usage of First-In-First-Out (FIFO) buffers within hardware pipelines. It solves the problem of limited on-chip storage for intermediate values required for ray-casting by off-loading these values to external memory between processing sections. Unlike [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) which relies on hardware buffers for streaming, or [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md) which divides space for load balancing, Sectioning specifically manages the recirculation of data within a single rendering pass to maintain exact numerical precision without approximation.
 
 ### [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md)
-An irregular volume rendering algorithm streaming data to solve visibility sorting for unstructured grids by combining object-space and image-space processing. It offers more accurate sorting than centroid sort methods like HAPT while avoiding the high memory overhead of storing the entire volume on the GPU.
+Hardware-Assisted Volume Streaming (HAVS) is an irregular volume rendering method that streams volumetric data to perform rendering, offering more accurate visibility sorting than centroid-based approaches like HAPT. It distinguishes itself from methods requiring full volume upload to GPU memory (e.g., PTINT, HARC) by streaming chunks, thereby avoiding memory limitations and the performance penalties associated with repeated data transfers.
 
 ### [Bandwidth-based Streaming Interval Calculation](3128-bandwidth-based-streaming-interval-calculation.md)
-A method to calculate the minimum time interval between data fetches and simulation slice skipping based on system bandwidth limits to ensure real-time streaming from HDD to GPU.
+Bandwidth-based Streaming Interval Calculation is a method to calculate the minimum time interval between data fetches and the number of simulation slices to skip, based on system bandwidth limits to ensure real-time streaming from HDD to GPU. It solves the problem of managing large volumetric datasets that exceed GPU and RAM capacity by calculating a safe skip count ($N_{\text{skip}}$) that accounts for transfer latency and user-defined time multipliers.
 
 ### [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md)
-Divides space into chunks for load balancing and efficient data access.
+Chunk-based spatial partitioning divides a volumetric dataset into fixed-size spatial subvolumes (chunks or bricks) to manage memory, enable out-of-core streaming, and facilitate parallel processing [Parent]. It solves the problem of handling datasets larger than available main memory or GPU VRAM by ensuring only relevant chunks reside in active memory [2369-chunk-based-world-streaming.md]. It is distinguished from sibling methods by its reliance on fixed-size spatial blocks as the atomic unit of data management, contrasting with [Sectioning](1636-sectioning.md)'s view-dependent slicing, [Uniform Block Partitioning with Acceleration](6098-uniform-block-partitioning-with-acceleration.md)'s focus on local acceleration within a single context, and [Distributed computing and load balancing](5624-distributed-computing-and-load-balancing.md)'s network-distributed strategies [Parent].
 
 ### [Distributed computing and load balancing](5624-distributed-computing-and-load-balancing.md)
-Techniques for rendering datasets exceeding single-machine capacity by distributing workload across multiple nodes. It solves scalability bottlenecks by partitioning data or computation. What sets this family apart from [Out-of-core, streaming and distributed data](8-out-of-core-streaming-and-distributed-data.md) is the explicit focus on simultaneous multi-node processing and load balancing, whereas out-of-core methods primarily address single-node memory limits via disk swapping [G].
+Distributed computing and load balancing in volume rendering addresses the problem of rendering volumetric datasets that exceed the memory or computational capacity of a single machine by partitioning data and computation across a cluster of processors. It solves the scalability bottleneck inherent in single-node rendering, enabling the visualization of massive unstructured grids, adaptive-resolution datasets, and large scalar fields. Unlike sibling methods that focus on data streaming or hardware acceleration, this family focuses on the algorithmic partitioning of work and data to minimize the maximum execution time ($T_{max}$) while preserving the strict front-to-back compositing order required for correct alpha blending. It sets itself apart from [Out-of-core, streaming and distributed data](8-out-of-core-streaming-and-distributed-data.md) by explicitly managing the trade-off between computational balance and communication overhead during the distributed compositing phase.
 
 ### [MapReduce-based Volume Rendering](5963-mapreduce-based-volume-rendering.md)
-A multi-GPU parallel implementation using the MapReduce model, designed to handle large datasets by streaming data to GPUs and eliminating the need for custom I/O algorithms.
+MapReduce-based Volume Rendering is a multi-GPU parallel volume rendering implementation built using the MapReduce programming model, designed to handle large volumetric datasets by streaming data to GPUs and eliminating the need for custom I/O algorithms. It splits rendering into two embarrassingly parallel steps: partial ray casting against volume bricks (Map) and compositing unsorted ray fragments into final pixels (Reduce), with Partition and Sort stages managing data distribution. Unlike traditional in-core renderers or those requiring custom I/O pipelines, this method leverages a streaming interface that allows network communication, CPU/GPU data transfers, and disk access to overlap with computation, making it suitable for both in-core and out-of-core visualizations.
 
 ### [Out-of-core brick-based volume rendering](6288-out-of-core-brick-based-volume-rendering.md)
-A system streaming multi-GB datasets over HTTP with a fixed VRAM budget by decoupling logical 3D grid coordinates from physical GPU memory using a brick pyramid and indirection texture.
+Out-of-core brick-based volume rendering is a technique that streams multi-GB volumetric datasets over HTTP and renders them interactively with a fixed VRAM budget by decoupling logical 3D grid coordinates from physical GPU memory using a brick pyramid and indirection texture. It solves the problem of rendering datasets too large to fit in memory or download entirely before the first frame. It sets itself apart from monolithic download approaches by streaming only visible bricks via HTTP range reads, avoiding the need to download the entire dataset before rendering a single pixel. Unlike [I/O-Conscious Volume Rendering](6929-i-o-conscious-volume-rendering.md), which tightly integrates algorithm-specific prefetching with the ray casting traversal using a dedicated prefetch thread, this method relies on general-purpose disk prefetching and fixed memory budgets managed by a page cache.
+
+### [Kiln Out-of-Core Volume Rendering](8806-kiln-out-of-core-volume-rendering.md)
+Kiln is a WebGPU-native out-of-core volume rendering system designed to stream multi-gigabyte virtualized volumetric datasets (specifically OME-Zarr) over HTTP at interactive framerates. It distinguishes itself from other out-of-core methods by utilizing a bounded GPU residency cache combined with virtual-texture indirection to manage memory, allowing for fixed VRAM footprints regardless of dataset size. Unlike hardware-assisted streaming which relies on specific GPU texture fetch capabilities, Kiln implements its own compute-shader-based raymarching pipeline with SSE-based Level of Detail (LOD) selection and an LRU brick cache.
 
 ### Out-of-Core Array (OOCArray)
-- **Definition:** A templated class that manages large arrays by buffering data in memory and paging it to a temporary file, enabling out-of-core storage for datasets exceeding RAM [S1, unofficial].
-- **Step:** Resize: Extends the backing file by seeking to `sizeof(Data) * sz` using `_fseeki64` (Windows) or `fseek` (Unix) [S1, unofficial].
-- **Layout:** Template parameters: `Data` (element type), `BufferSize` (default 64). Fields: `FILE* _fp` (file pointer), `char _fileName[512]` (temp file path), `size_t _currentBufferIndex` (active buffer page), `Data _buffer[BufferSize]` (in-memory page) [S1, unofficial].
-- **Pitfall:** Not thread-safe. Uses `mktemp`/`_mktemp` which may have race conditions or portability issues. File path separator handling differs between Windows (`\`) and Unix (`/`) [S1, unofficial].
+A templated class that manages large arrays by buffering data in memory and paging it to a temporary file, enabling out-of-core storage for datasets exceeding RAM [S3, unofficial]. It extends the backing file by seeking to `sizeof(Data) * sz` using `_fseeki64` (Windows) or `fseek` (Unix) [S3, unofficial]. The layout includes template parameters `Data` (element type) and `BufferSize` (default 64), with fields for a file pointer `_fp`, temp file path `_fileName[512]`, active buffer page `_currentBufferIndex`, and in-memory page `Data _buffer[BufferSize]` [S3, unofficial]. It is not thread-safe and uses `mktemp`/`_mktemp` which may have race conditions or portability issues; file path separator handling differs between Windows (`\`) and Unix (`/`) [S3, unofficial].
 
 ### Subvolume Updates
-- **Definition:** A technique allowing transfer of any subvolume (from single voxel to full volume) between host memory and Voxel Memory, enabling dynamic updates and partial loading [S2, unofficial].
-- **Step:** Update subvolumes in-between frames to achieve 4D animation effects or load sections of a larger supervolume piece-wise. Select any subvolume of the loaded volume for rendering to reduce rendering times on an area of interest [S2, unofficial].
-- **Parameter:** Subvolumes can have as little as one voxel on each edge [S2, unofficial].
+A technique allowing transfer of any subvolume (from single voxel to full volume) between host memory and Voxel Memory, enabling dynamic updates and partial loading [S4, unofficial]. Subvolumes can be updated in-between frames to achieve 4D animation effects or load sections of a larger supervolume piece-wise [S4, unofficial]. Any subvolume of the loaded volume may be selected for rendering to reduce rendering times on an area of interest [S4, unofficial]. Subvolumes can have as little as one voxel on each edge [S4, unofficial].
 
 ### Indexed Leaf for Stream Processing
-- **Definition:** A wrapper for a Leaf node that includes its index in the stream, used for building the SVO [S3, unofficial].
-- **Layout:** `IndexedLeaf` contains: `leaf` (Leaf), `index` (unsigned long long int) [S3, unofficial].
+A wrapper for a Leaf node that includes its index in the stream, used for building the SVO [S5, unofficial]. The `IndexedLeaf` structure contains a `leaf` (Leaf) and an `index` (unsigned long long int) [S5, unofficial].
 
 ### Generic Data Producer Model
-- **Definition:** A producer/consumer architecture where a generic data producer provides a request interface to obtain volumetric data based on position, size, and resolution, outputting to a specified memory zone [S4, unofficial].
-- **Parameter:** Scene Coordinates: Position and size are defined between 0.0 and 1.0 on each axis. Output Memory Zone: Can be a standard memory zone or an OpenGL buffer object for direct GPU transfer [S4, unofficial].
+A producer/consumer architecture where a generic data producer provides a request interface to obtain volumetric data based on position, size, and resolution, outputting to a specified memory zone [S6, unofficial]. Scene coordinates for position and size are defined between 0.0 and 1.0 on each axis [S6, unofficial]. The output memory zone can be a standard memory zone or an OpenGL buffer object for direct GPU transfer [S6, unofficial].
 
 ## Background
-Early systems like VolumePro introduced hardware-assisted streaming and subvolume updates to handle large datasets on limited hardware (e.g., 128 MB Voxel Memory) by transferring subvolumes between host and device memory [S2, unofficial]. The Generic Data Producer Model further abstracted data access, allowing for flexible integration with various rendering pipelines and GPU memory management [S4, unofficial]. Out-of-core array implementations page data to temporary files to support datasets exceeding RAM [S1, unofficial].
+The need for out-of-core techniques arose as volumetric datasets grew larger than the texture memory available in graphics hardware [S1, unofficial]. Early systems like VolumePro demonstrated that memory controllers could be programmed to transfer subvolumes from host memory to Voxel Memory, allowing for dynamic updates and partial loading [S4, unofficial]. Research by Hadwiger et al. highlighted the importance of spatial coherence and Group of Blocks (GOBs) to minimize disk read requests, noting that disk transfer rates are approximately 60 MB/s and random access of small blocks is inefficient [S2, unofficial]. Castanie et al. investigated multilevel cache hierarchies spanning graphics memory, local main memory, cross-node memory, and disk, implementing a global software-based distributed shared memory scheme over a high-speed network [S1, unofficial]. More recently, systems like Kiln have adapted these principles to WebGPU, using virtual-texture indirection to manage multi-gigabyte OME-Zarr datasets [S1, unofficial].
 
 ## Sources
-[S1] mkazhdan/IsoSurfaceExtraction, https://github.com/mkazhdan/IsoSurfaceExtraction, fetched 2026-10-27 (unofficial)
-[S2] [PDF] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)
-[S3] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)
-[S4] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
+[S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)
+[S2] GPU-Based Volume Ray-Casting with Advanced Illumination, https://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/viscom/2008/advanced_illumination.pdf, fetched 2026-10-29 (unofficial)
+[S3] mkazhdan/IsoSurfaceExtraction, https://github.com/mkazhdan/IsoSurfaceExtraction, fetched 2026-10-27 (unofficial)
+[S4] [PDF] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)
+[S5] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)
+[S6] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)

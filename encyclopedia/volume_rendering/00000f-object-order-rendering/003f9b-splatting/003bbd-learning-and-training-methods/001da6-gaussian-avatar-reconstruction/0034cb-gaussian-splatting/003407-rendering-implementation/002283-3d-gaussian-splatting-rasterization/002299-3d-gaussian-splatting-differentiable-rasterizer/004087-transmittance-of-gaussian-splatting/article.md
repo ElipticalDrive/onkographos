@@ -1,0 +1,210 @@
+# Transmittance of Gaussian Splatting
+
+Also called: Proposition 2, Ray-marching equivalence of Gaussian Splatting
+
+## Overview
+This method establishes that the image formation model of 3D Gaussian Splatting (alpha-blending) is mathematically equivalent to a ray-marching volumetric rendering model under specific assumptions [S1]. It defines a continuous transmittance function and a view-dependent attenuation coefficient that, when integrated along a ray, produce the same color output as the standard discrete alpha-compositing rasterizer [S1]. It sets itself apart from sibling methods by providing the theoretical bridge between the discrete rasterization pipeline and continuous volume rendering, enabling density-based optimizations or alternative sampling strategies that are provably consistent with the original rendering [S1].
+
+## How it works
+**Inputs:**
+- Ray origin $\mathbf{o} \in \mathbb{R}^3$ (in empty space).
+- Ray direction $\mathbf{w} \in \mathbb{S}^2$.
+- Distance parameter $t \in [0, +\infty)$.
+- Set of $N$ 3D Gaussians $\{G_i\}_{i=1}^N$, where each $G_i(\mathbf{x})$ is the Gaussian density function at position $\mathbf{x}$.
+- View-dependent colors $\mathbf{c}_i(\mathbf{w})$ for each Gaussian.
+
+**Outputs:**
+- Total transmittance $T_{\mathbf{o}, \mathbf{w}}(t)$.
+- Rendered color $C_{\mathbf{o}, \mathbf{w}}$.
+
+**Data Structures:**
+- The Gaussian primitives are stored as a list or array. Each primitive $i$ contains parameters defining $G_i(\mathbf{x})$ (mean, covariance) and color $\mathbf{c}_i$.
+- No explicit volumetric grid is required; the attenuation is computed analytically from the Gaussian parameters.
+
+**Assumptions:**
+1. **Statistical Independence:** The presence of one Gaussian does not affect the transmission properties of another [S1]. This follows the RayGauss assumption [S1].
+2. **Non-overlapping Primitives:** In the 3D domain, Gaussians do not significantly overlap [S1]. This is an approximation similar to the sorting assumption in alpha blending [S1].
+
+**Formulas:**
+
+1. **Capped Gaussian Value:**
+   Let $t_{\mathbf{o}, \mathbf{w}}^{G_i}$ be the distance along the ray where the Gaussian $G_i$ reaches its maximum contribution (or effectively ends, depending on the cutoff). The capped Gaussian value along the ray is:
+   $$ \bar{G}_{\mathbf{o}, \mathbf{w}}^{(i)}(t) = G_i(\mathbf{o} + \min(t, t_{\mathbf{o}, \mathbf{w}}^{G_i})\mathbf{w}) $$
+   [S1]
+
+2. **Continuous Transmittance Function:**
+   The total transmittance from the origin to distance $t$ is the product of the individual transmittances of all $N$ Gaussians:
+   $$ T_{\mathbf{o}, \mathbf{w}}(t) = \prod_{i=1}^N \left(1 - \bar{G}_{\mathbf{o}, \mathbf{w}}^{(i)}(t)\right) $$
+   [S1]
+
+3. **View-Dependent Attenuation Coefficient:**
+   The attenuation coefficient $\sigma(\mathbf{x}, \mathbf{w})$ at position $\mathbf{x}$ for direction $\mathbf{w}$ is derived from the transmittance:
+   $$ \sigma(\mathbf{x}, \mathbf{w}) = \sum_{i=1}^N \max(0, -\mathbf{w} \cdot \nabla \log(1 - G_i(\mathbf{x}))) $$
+   [S1]
+   Note: This coefficient is not reciprocal ($\sigma(\mathbf{x}, \mathbf{w}) \neq \sigma(\mathbf{x}, -\mathbf{w})$) because each Gaussian contributes to attenuation only before the ray reaches its point of maximum contribution [S1].
+
+4. **Rendered Color:**
+   To verify equivalence, order $M$ Gaussians with positive projection along the ray by increasing distance from $\mathbf{o}$. Define intervals $t_0=0 < t_1 < \dots < t_M=+\infty$ such that within $[t_{i-1}, t_i]$, only Gaussian $i$ contributes significantly and previous Gaussians are fully attenuated [S1]. The color is:
+   $$ C_{\mathbf{o}, \mathbf{w}} = \sum_{i=1}^M \mathbf{c}_i(\mathbf{w}) \bar{G}_{\mathbf{o}, \mathbf{w}}^{(i)}(t_{\mathbf{o}, \mathbf{w}}^{G_i}) \prod_{j=1}^{i-1} \left( 1 - \bar{G}_{\mathbf{o}, \mathbf{w}}^{(j)}(t_{\mathbf{o}, \mathbf{w}}^{G_j}) \right) $$
+   [S1]
+   This matches the standard alpha-blending formula [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_transmittance_and_color(ray_origin, ray_direction, gaussians):
+    """
+    Computes the transmittance and color for a ray using the 
+    Transmittance of Gaussian Splatting equivalence.
+    
+    Args:
+        ray_origin: 3D vector (o)
+        ray_direction: 3D vector (w), normalized
+        gaussians: List of Gaussian objects, each with:
+            - evaluate(x): returns G_i(x)
+            - get_max_distance(): returns t_{o,w}^{G_i} (distance to max contribution)
+            - color(w): returns view-dependent color c_i(w)
+            - gradient_log(x): returns w . grad(log(1 - G_i(x)))? 
+              Actually, we need -w . grad(log(1-G_i)). 
+              Note: The formula uses -w . nabla log(1-G_i).
+              Since G_i is a Gaussian, we can compute this analytically or numerically.
+              For implementation, we might just use the transmittance product directly.
+    
+    Returns:
+        transmittance: float T(o, w, t_max)
+        color: 3D vector C(o, w)
+    """
+    # 1. Filter and Order Gaussians
+    # Keep only Gaussians with positive projection along the ray
+    # Project centers onto ray direction to determine order
+    projected_distances = []
+    valid_gaussians = []
+    
+    for i, g in enumerate(gaussians):
+        # Assuming Gaussian has a center c_i
+        # Vector from ray origin to center
+        vec_to_center = g.center - ray_origin
+        # Project onto ray direction
+        proj_dist = dot(vec_to_center, ray_direction)
+        
+        if proj_dist > 0:
+            projected_distances.append((proj_dist, i))
+            valid_gaussians.append(g)
+            
+    # Sort by increasing projected distance
+    projected_distances.sort(key=lambda x: x[0])
+    sorted_indices = [idx for _, idx in projected_distances]
+    sorted_gaussians = [gaussians[idx] for idx in sorted_indices]
+    
+    M = len(sorted_gaussians)
+    
+    # 2. Compute Color using Alpha-Blending Equivalence
+    # This is the standard alpha blending loop, which is proven equivalent
+    accumulated_alpha = 0.0
+    color = [0.0, 0.0, 0.0]
+    
+    for i, g in enumerate(sorted_gaussians):
+        # Get the capped Gaussian value at the end of its contribution
+        # t_{o,w}^{G_i} is the distance where G_i peaks or ends
+        t_max = g.get_max_distance(ray_origin, ray_direction)
+        
+        # Evaluate G_i at the ray point corresponding to t_max
+        # Point p = o + t_max * w
+        p = ray_origin + ray_direction * t_max
+        g_val = g.evaluate(p)
+        
+        # The term (1 - G) is the transmittance contribution of this Gaussian
+        # In alpha blending, alpha = G (if G is normalized to [0,1])
+        # Here, the formula uses (1 - G) as the transmittance factor.
+        # So, alpha_i = G_i
+        alpha_i = g_val
+        
+        # Color contribution: c_i * alpha_i * product(1 - alpha_j) for j < i
+        # product(1 - alpha_j) is the accumulated transmittance from previous Gaussians
+        # accumulated_alpha tracks sum(alpha_j * product(1 - alpha_k))
+        # But we need the product of (1-alpha) for the current step
+        
+        # Current transmittance from previous Gaussians
+        current_transmittance = 1.0 - accumulated_alpha
+        
+        # Add color contribution
+        c_i = g.color(ray_direction)
+        color[0] += c_i[0] * alpha_i * current_transmittance
+        color[1] += c_i[1] * alpha_i * current_transmittance
+        color[2] += c_i[2] * alpha_i * current_transmittance
+        
+        # Update accumulated alpha
+        accumulated_alpha += alpha_i * current_transmittance
+        
+    # 3. Compute Total Transmittance
+    # T(o, w, infinity) = product(1 - G_i(t_max_i))
+    # Note: The formula T(t) = product(1 - G_bar(t))
+    # At t = infinity, G_bar(t) = G_i(t_max_i)
+    
+    total_transmittance = 1.0
+    for g in sorted_gaussians:
+        t_max = g.get_max_distance(ray_origin, ray_direction)
+        p = ray_origin + ray_direction * t_max
+        g_val = g.evaluate(p)
+        total_transmittance *= (1.0 - g_val)
+        
+    return total_transmittance, color
+
+def compute_attenuation_coefficient(position, ray_direction, gaussians):
+    """
+    Computes the view-dependent attenuation coefficient sigma(x, w).
+    sigma(x, w) = sum_i max(0, -w . grad(log(1 - G_i(x))))
+    """
+    sigma = 0.0
+    for g in gaussians:
+        # Compute gradient of log(1 - G_i(x))
+        # Let f(x) = 1 - G_i(x)
+        # grad(log(f(x))) = grad(f(x)) / f(x) = -grad(G_i(x)) / (1 - G_i(x))
+        # So -w . grad(log(1-G_i)) = w . grad(G_i) / (1 - G_i)
+        
+        g_val = g.evaluate(position)
+        if g_val >= 1.0:
+            # Avoid division by zero, though G_i is typically < 1
+            grad_G = g.gradient(position)
+            # If G_i is 1, transmittance is 0, attenuation is infinite?
+            # In practice, clamp or handle carefully.
+            # The formula has max(0, ...).
+            # If G_i -> 1, log(1-G_i) -> -inf, grad -> inf.
+            # We assume G_i < 1.
+            pass
+            
+        grad_G = g.gradient(position)
+        numerator = dot(ray_direction, grad_G)
+        denominator = 1.0 - g_val
+        
+        if denominator > 1e-6:
+            term = numerator / denominator
+            if term > 0:
+                sigma += term
+        else:
+            # If G_i is very close to 1, attenuation is very high
+            # Approximate as large positive number
+            sigma += 1e6 # [G] Placeholder for numerical stability
+            
+    return sigma
+```
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** In the attenuation coefficient formula, if $G_i(\mathbf{x}) \approx 1$, the term $\log(1 - G_i(\mathbf{x}))$ approaches $-\infty$. Numerical stability requires clamping or handling this singularity [S1].
+- **Non-Reciprocity:** The attenuation coefficient is not reciprocal. Reversing the ray direction changes the attenuation because Gaussians only attenuate before their peak [S1].
+- **Overlap Assumption:** The equivalence relies on non-overlapping Gaussians. In practice, if Gaussians overlap significantly, the alpha-blending approximation may deviate from the true volumetric integral, but it remains effective [S1].
+
+## Operating characteristics
+- **Time Complexity:** Computing the transmittance and color is $O(N)$ per ray, where $N$ is the number of Gaussians. This is identical to the standard alpha-blending rasterizer [S1].
+- **Memory Complexity:** $O(N)$ to store the Gaussian parameters [S1].
+- **Strengths:** Provides a theoretical foundation for treating Gaussian Splatting as a volume rendering problem. Enables the use of volume rendering techniques (e.g., adaptive sampling, density pruning) that are consistent with the original rendering [S1].
+- **Limitations:** The equivalence is approximate due to the non-overlapping assumption. It does not change the computational cost of rendering but adds complexity if used for density-based optimizations [S1].
+- **When to Use:** When implementing density-based optimizations, pruning, or alternative sampling strategies for Gaussian Splatting that require a volumetric interpretation [S1].
+
+## Background
+This result is presented as "Proposition 2" in the paper "From Blobs to Spokes: High-Fidelity Surface Reconstruction via Oriented Gaussians" [S1]. It builds on the observation that alpha blending approximates volumetric rendering by sorting and compositing [S1]. The statistical independence assumption follows from RayGauss [S1]. The non-overlapping assumption is noted as an approximation similar to alpha blending sorting [S1].
+
+## Sources
+[S1] From Blobs to Spokes: High-Fidelity Surface Reconstruction via Oriented Gaussians, https://doi.org/10.1007/978-3-032-37095-2_4, fetched 2026-10-29

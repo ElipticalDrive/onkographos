@@ -1,127 +1,106 @@
 # INR Training Loop
+Also called: Standard INR Volumetric Training, Batched Coordinate Sampling for INR
+
 ## Overview
-The Implicit Neural Representation (INR) training loop optimizes a neural network to approximate a discrete volumetric dataset by minimizing the mean squared error between network predictions and ground-truth values sampled from the volume. It differs from explicit volume rendering methods by learning a continuous function $f_\theta$ rather than storing discrete voxels, enabling resolution-independent querying [S1, unofficial].
+The INR Training Loop is the fundamental optimization procedure for fitting an Implicit Neural Representation (INR) to a discrete volumetric dataset. It solves the problem of learning a continuous function $f_\theta$ that approximates a 3D volume $V$ by minimizing the mean squared error (MSE) between network predictions and ground-truth samples. It differs from [Neural Surface Rendering Training (Eikonal & Boundary Regularization)](3430-neural-surface-rendering-training-eikonal-boundary-regulariz.md) by focusing on volumetric density/attenuation rather than surface geometry, and from [Global Optimization](5436-global-optimization.md) by using stochastic gradient descent on random batches rather than full-volume or global constraints.
+
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A discrete 3D volume $V$ of size $N \times N \times N$; a neural network $f_\theta$ with parameters $\theta$; an encoding function $\gamma$ (positional or hash); learning rate $\eta$; batch size $B$.
-*   **Output:** Trained network parameters $\theta$ representing $V$ as a continuous function.
+**Inputs:**
+*   $V$: Discrete volume of size $N \times N \times N$.
+*   $f_\theta$: Neural network with parameters $\theta$.
+*   $\gamma$: Encoding function (positional or hash).
+*   $\eta$: Learning rate.
+*   $B$: Batch size.
+
+**Outputs:**
+*   Trained network $f_\theta$ representing $V$ as a continuous function.
 
 **Data Structures:**
-*   **Volume $V$:** Stored as a 3D array of size $N^3$.
-*   **Network $f_\theta$:** A multi-layer perceptron (MLP) or similar architecture.
-*   **Encoding $\gamma$:** Maps 3D coordinates to a higher-dimensional latent space.
+*   Coordinates: Set of $B$ tuples $\{(x_j, y_j, z_j)\}_{j=1}^B$.
+*   Encodings: Vector $e_j = \gamma(x_j, y_j, z_j)$.
+*   Predictions: Scalar $\hat{v}_j = f_\theta(e_j)$.
+*   Ground Truth: Scalar $v_j$ obtained via trilinear interpolation.
 
 **Steps:**
-1.  **Sampling:** For each training iteration, sample $B$ coordinates $\{(x_j, y_j, z_j)\}_{j=1}^B$ uniformly from the volume domain.
-2.  **Encoding:** For each coordinate $(x_j, y_j, z_j)$, compute the encoded representation $e_j = \gamma(x_j, y_j, z_j)$.
-3.  **Prediction:** Pass the encoded coordinate through the network to obtain the predicted value $\hat{v}_j = f_\theta(e_j)$.
-4.  **Ground Truth Retrieval:** Retrieve the ground truth value $v_j$ from the discrete volume $V$ at $(x_j, y_j, z_j)$ using trilinear interpolation: $v_j = \text{trilinear}(V, x_j, y_j, z_j)$.
-5.  **Loss Calculation:** Compute the Mean Squared Error (MSE) loss over the batch:
-    $$ L = \frac{1}{B} \sum_{j=1}^{B} (\hat{v}_j - v_j)^2 $$
-6.  **Update:** Perform a gradient descent step to update the network parameters:
-    $$ \theta \leftarrow \theta - \eta \nabla_\theta L $$
+1.  **Sample:** Uniformly sample $B$ coordinates $\{(x_j, y_j, z_j)\}_{j=1}^B$ from the volume domain.
+2.  **Encode:** For each coordinate, compute encoding $e_j \leftarrow \gamma(x_j, y_j, z_j)$.
+3.  **Predict:** Compute network output $\hat{v}_j \leftarrow f_\theta(e_j)$.
+4.  **Retrieve Ground Truth:** Compute $v_j \leftarrow \text{trilinear}(V, x_j, y_j, z_j)$.
+5.  **Loss:** Compute MSE loss $L \leftarrow \frac{1}{B} \sum_{j=1}^B (\hat{v}_j - v_j)^2$.
+6.  **Update:** Perform gradient descent $\theta \leftarrow \theta - \eta \nabla_\theta L$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_inr(volume_V, network_f_theta, encoding_gamma, learning_rate_eta, batch_size_B, num_iterations):
+def train_inr(V, f_theta, gamma, eta, B, num_iterations):
     """
-    Trains an Implicit Neural Representation to approximate a discrete volume.
-    
-    Args:
-        volume_V: 3D numpy array of shape (N, N, N) containing ground truth values.
-        network_f_theta: Neural network function taking encoded coordinates and returning scalar predictions.
-        encoding_gamma: Function mapping 3D coordinates to encoded vectors.
-        learning_rate_eta: Scalar learning rate for gradient descent.
-        batch_size_B: Number of coordinates to sample per iteration.
-        num_iterations: Total number of training steps.
+    V: numpy array of shape (N, N, N)
+    f_theta: callable neural network
+    gamma: callable encoding function
+    eta: float learning rate
+    B: int batch size
+    num_iterations: int total steps
     """
-    # Assume network_f_theta has a method to compute gradients and update weights
-    # or we use a standard optimizer loop. Here we assume a generic update step.
+    N = V.shape[0]
     
-    for iteration in range(num_iterations):
-        # 1. Sample B coordinates uniformly from the volume domain [0, N-1] or [0, 1]
-        # Assuming coordinates are in continuous space [0, 1] for trilinear interpolation
-        coords = np.random.uniform(0, 1, size=(batch_size_B, 3))
+    for _ in range(num_iterations):
+        # 1. Sample B coordinates uniformly from [0, N-1] or [0, 1] depending on V definition
+        # Assuming V is indexed 0..N-1, coordinates are integers or floats within bounds
+        coords = np.random.uniform(0, N - 1, size=(B, 3))
         
         losses = []
-        gradients = []
-        
-        for j in range(batch_size_B):
+        for j in range(B):
             x, y, z = coords[j]
             
-            # 2. Encode coordinates
-            e_j = encoding_gamma(x, y, z)
+            # 2. Encode
+            e_j = gamma(x, y, z)
             
-            # 3. Network prediction
-            v_hat_j = network_f_theta(e_j)
+            # 3. Predict
+            v_hat_j = f_theta(e_j)
             
-            # 4. Ground truth via trilinear interpolation
-            # Note: Trilinear interpolation requires the volume to be defined on a grid.
-            # If volume_V is size N x N x N, coordinates should be scaled to [0, N-1]
-            # or the interpolation function handles [0,1] mapping.
-            v_j = trilinear_interpolate(volume_V, x, y, z)
+            # 4. Ground Truth via Trilinear Interpolation
+            # Note: Trilinear requires handling boundary conditions if coords are outside [0, N-1]
+            v_j = trilinear_interpolate(V, x, y, z)
             
-            # 5. Compute loss for this sample (for gradient accumulation or batch mean)
-            loss_j = (v_hat_j - v_j) ** 2
-            losses.append(loss_j)
+            # 5. Accumulate for loss
+            losses.append((v_hat_j - v_j) ** 2)
             
-            # Compute gradients for this sample (conceptually, usually done via backprop on the batch)
-            # In practice, we compute the batch loss and backprop once.
+        # 5. Compute MSE Loss
+        L = np.mean(losses)
         
-        # Compute batch loss
-        batch_loss = np.mean(losses)
+        # 6. Gradient Update
+        # Compute gradient of L w.r.t theta
+        grad_theta = compute_gradient(f_theta, L)
+        theta = theta - eta * grad_theta
         
-        # 6. Gradient update
-        # Compute gradients of loss with respect to theta
-        grad_theta = compute_gradients(network_f_theta, batch_loss)
-        
-        # Update parameters
-        network_f_theta.update_parameters(grad_theta, learning_rate_eta)
-
-def trilinear_interpolate(volume, x, y, z):
-    """
-    Performs trilinear interpolation on a 3D volume.
-    Assumes volume is a numpy array of shape (N, N, N).
-    Coordinates x, y, z are expected in the range [0, N-1] or [0, 1] depending on implementation.
-    This is a placeholder for the actual interpolation logic.
-    """
-    # Implementation details depend on the specific library or custom code.
-    # Standard trilinear interpolation involves finding the 8 surrounding voxels
-    # and weighting them based on the fractional part of the coordinates.
-    # Not given in the sources. [G]
-    pass
+    return f_theta
 ```
 
 **Parameters:**
-*   **Batch Size ($B$):** Not given in the sources.
-*   **Learning Rate ($\eta$):** Not given in the sources.
-*   **Encoding ($\gamma$):** Positional encoding or hash encoding. Hash encodings replace position with multi-resolution hash grids [S1, unofficial].
+*   $\eta$: Not given in the sources.
+*   $B$: Not given in the sources.
+*   $\gamma$: Positional or hash encoding [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** Trilinear interpolation is used to retrieve ground truth from discrete volumes, which may introduce smoothing artifacts compared to nearest-neighbor, but is standard for continuous approximation [S1, unofficial].
-*   **Boundaries:** Sampling is uniform from the volume domain. Boundary handling depends on the interpolation function.
-*   **Degenerate Input:** None specified.
+**Edge Cases:**
+*   **Boundary Conditions:** Trilinear interpolation requires coordinates to be within the volume bounds. If sampling is uniform over the domain, coordinates may fall outside if not clamped or if the domain definition differs from the volume indices [G].
+*   **Precision:** Trilinear interpolation introduces smoothing artifacts compared to nearest-neighbor, which may affect high-frequency reconstruction [G].
 
 ## Subtopics
 
-### Meta-INR
-A method reducing training cost for time-varying INRs by applying Model-Agnostic Meta-Learning (MAML) to pretrain a shared parameter set on a spatiotemporally subsampled subset, followed by per-volume finetuning [S1, unofficial].
-*   **Definition:** Pretrain a shared parameter set on a spatiotemporally subsampled subset (<1% of original data) using MAML, then perform per-volume finetuning from this initialization [S1, unofficial].
-*   **Performance:** Converged 5.87× faster on average than training a SIREN from scratch, with higher reconstruction quality (55.92 dB vs. 48.89 dB on the half-cylinder dataset) [S1, unofficial].
-*   **Pitfall:** Validated only with MLP-based SIREN backbones; transfer to hash-grid or feature-grid encoders is untested [S1, unofficial].
+### [Meta-INR](10630-meta-inr.md)
+A pretraining strategy using meta-learning to optimize initial network parameters from a sparse dataset, enabling rapid adaptation to unseen volumes. It reduces encoding speed overhead by ~5.87× compared to training from scratch.
 
 ## Operating characteristics
-*   **Time Complexity:** Training a fresh INR for each timestep scales linearly with volume count [S1, unofficial]. Meta-INR reduces this cost significantly.
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Enables resolution-independent querying; Meta-INR offers faster convergence for time-varying data [S1, unofficial].
-*   **Limitations:** Meta-INR is limited to SIREN backbones in current validation; hash-grid transfer is untested [S1, unofficial].
-*   **When to use:** When continuous representation is needed or for time-varying data where Meta-INR can be applied.
-*   **When not:** When hash-grid/feature-grid encoders are required for Meta-INR (currently untested) [S1, unofficial].
+*   **Time Complexity:** $O(I \cdot B \cdot C)$, where $I$ is iterations, $B$ is batch size, and $C$ is network evaluation cost.
+*   **Memory Complexity:** $O(N^3)$ for storing $V$ plus $O(C)$ for network parameters.
+*   **Strengths:** Simple to implement; differentiable end-to-end; supports arbitrary continuous domains.
+*   **Limitations:** Requires random access to $V$ for ground truth; slow convergence for high-frequency details without advanced encodings; sensitive to learning rate and batch size [S1, unofficial].
+*   **When to Use:** When a continuous representation is needed for a single volume or when using meta-learning variants.
+*   **When Not to Use:** For large-scale dynamic scenes requiring real-time rendering without pre-training [S1, unofficial].
 
 ## Background
-The INR training loop is a fundamental procedure for optimizing implicit neural representations of volumetric data. It builds on the concept of representing continuous functions with neural networks. Meta-INR extends this to time-varying data using MAML [S1, unofficial]. HyperINR is another variant that predicts INR weights from scene parameters via a hypernetwork, avoiding per-volume optimization entirely [S1, unofficial].
+Originated from standard neural network training practices applied to volumetric data. Algorithm 1 is described in [S1, unofficial] as "INR training for volumetric data." Hash encodings are noted as a replacement for positional encoding in modern implementations [S1, unofficial].
 
 ## Sources
 [S1] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,122 @@
+# Piecewise Constant Transfer Function
+
+Also called: Step Transfer Function, TF1, TF2
+
+## Overview
+The Piecewise Constant Transfer Function maps voxel intensity values to RGBA color and opacity using disjoint, non-overlapping intervals. It sets the output color and opacity to fixed constants within each interval, creating a "step" response rather than a smooth gradient. It is distinguished from its parent [Transfer Function](1272-transfer-function.md) by its lack of interpolation; it is a binary classification tool where voxels are either fully included in a material definition or excluded. It differs from [Transfer Function Mapping via 1D Textures](8608-transfer-function-mapping-via-1d-textures.md) by not requiring texture sampling or linear interpolation between control points.
+
+## How it works
+**Inputs and Outputs**
+- Input: A voxel intensity value $v$ (typically a signed short or integer).
+- Input: A global opacity parameter $O_{skin}$ (double, range $[0, 1]$).
+- Output: A color vector $(R, G, B)$ and an opacity value $O$.
+
+**Data Structures**
+No complex data structures are required. The function is defined by hardcoded thresholds and constant color values.
+
+**Steps**
+The implementation follows a strict `if-else` chain based on the value of $v$. Two variants are defined in the source literature: TF1 and TF2.
+
+1. **Evaluate Interval 1 (Skin):**
+   Check if $-299 < v < 50$.
+   - If true:
+     - Set $R = 1.0$
+     - Set $G = 0.79$
+     - Set $B = 0.6$
+     - Set $O = O_{skin}$
+     - Return $(R, G, B, O)$.
+
+2. **Evaluate Interval 2 (Bone) - TF1 Only:**
+   If the first condition is false, check if $v > 300$.
+   - If true (TF1 only):
+     - Set $R = 1.0$
+     - Set $G = 1.0$
+     - Set $B = 1.0$
+     - Set $O = 0.8$
+     - Return $(R, G, B, O)$.
+   - If false (TF1) or if using TF2:
+     - Proceed to Step 3.
+
+3. **Default (Background):**
+   - Set $R = 0.0$
+   - Set $G = 0.0$
+   - Set $B = 0.0$
+   - Set $O = 0.0$
+   - Return $(R, G, B, O)$.
+
+**Formulas**
+For TF1:
+$$
+\text{Color}(v) = \begin{cases} 
+(1.0, 0.79, 0.6, O_{skin}) & \text{if } -299 < v < 50 \\
+(1.0, 1.0, 1.0, 0.8) & \text{if } v > 300 \\
+(0.0, 0.0, 0.0, 0.0) & \text{otherwise}
+\end{cases}
+$$
+
+For TF2:
+$$
+\text{Color}(v) = \begin{cases} 
+(1.0, 0.79, 0.6, O_{skin}) & \text{if } -299 < v < 50 \\
+(0.0, 0.0, 0.0, 0.0) & \text{otherwise}
+\end{cases}
+$$
+
+**Parameters**
+- $O_{skin}$: Opacity of the skin material. Default value in source is $0.12$. Range $[0, 1]$.
+- Thresholds: $-299$, $50$, $300$. These are hardcoded integers.
+
+**Edge Cases and Pitfalls**
+- **Boundary Precision:** The intervals are open on the left and right for the skin range ($-299 < v < 50$). Values exactly equal to $-299$, $50$, or $300$ fall through to the default black/transparent case. Implementers must ensure strict inequality operators are used if matching the source behavior exactly.
+- **Data Type:** The source code uses `short` for voxel input. Ensure the comparison logic handles signed integers correctly.
+- **TF1 vs TF2:** TF2 is a subset of TF1, removing the bone classification. The choice depends on whether the volume contains bone structures that need to be visualized as white.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def piecewise_constant_transfer_function(voxel: int, opacity_skin: float) -> tuple:
+    """
+    Maps a voxel intensity to RGBA using piecewise constant intervals.
+    
+    Args:
+        voxel: The intensity value of the voxel (signed integer).
+        opacity_skin: The opacity for the skin material (float 0.0-1.0).
+        
+    Returns:
+        A tuple (R, G, B, O) where R, G, B are floats in [0, 1] and O is float in [0, 1].
+    """
+    # Interval 1: Skin
+    if -299 < voxel < 50:
+        return (1.0, 0.79, 0.6, opacity_skin)
+    
+    # Interval 2: Bone (TF1 variant)
+    # Note: TF2 variant skips this block entirely.
+    if voxel > 300:
+        return (1.0, 1.0, 1.0, 0.8)
+    
+    # Default: Background
+    return (0.0, 0.0, 0.0, 0.0)
+```
+
+## Subtopics
+
+### TF1
+Includes bone classification (white, opaque). Use when visualizing CT scans with bone structures. [TF1](1272-transfer-function.md)
+
+### TF2
+Excludes bone classification (only skin). Use when focusing solely on soft tissue visualization. [TF2](1272-transfer-function.md)
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per voxel. The function involves a constant number of comparisons.
+- **Memory Complexity:** $O(1)$. No lookup tables or textures are stored.
+- **Strengths:** Extremely fast; minimal memory footprint; simple to implement and debug.
+- **Limitations:** No smooth transitions between materials; hard edges in visualization; limited expressiveness compared to linear or cubic transfer functions.
+- **When to use:** Real-time visualization on low-power hardware, or when distinct, non-overlapping material classes are sufficient.
+- **When not to use:** When smooth blending between tissues is required, or when partial volume effects need to be represented with varying opacity.
+
+## Background
+The method originates from the `joshcodd/volume-rendering` project, an unofficial educational implementation of volume rendering techniques. It is presented as a basic example of classification mapping, contrasting with more complex interpolation-based methods. The specific thresholds and colors are tailored for a "visible human dataset" CT scan, distinguishing skin from background (and bone in TF1).
+
+## Sources
+[S1] joshcodd/volume-rendering, https://github.com/joshcodd/volume-rendering, fetched 2026-10-26 (unofficial)

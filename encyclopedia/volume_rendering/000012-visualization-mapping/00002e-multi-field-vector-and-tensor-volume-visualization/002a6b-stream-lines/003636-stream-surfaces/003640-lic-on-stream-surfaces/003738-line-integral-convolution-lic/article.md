@@ -1,144 +1,188 @@
 # Line Integral Convolution (LIC)
 Also called: 线积分卷积
+
 ## Overview
-Line Integral Convolution (LIC) is a texture-based flow visualization method that densely displays direction information across an entire vector field without requiring seed points [S2, unofficial]. It solves the problem of sparse or discontinuous flow representation by convolving a random scalar noise field along the streamlines of the input vector field, producing streak-like textures that intuitively show flow direction [S1, S2, unofficial]. Unlike streamline methods that rely on discrete seed points, LIC provides a continuous, global overview of the flow structure [S2, unofficial].
+Line Integral Convolution (LIC) is a texture-based flow visualization method that generates a scalar field by convolving a white noise texture with a one-dimensional low-pass filter along the streamlines of a vector field [S2, unofficial]. It solves the problem of visualizing global flow direction densely across the entire field without requiring the selection of seed points, which is a limitation of streamline-based methods [S3, unofficial]. Unlike streamlines that show individual particle paths, LIC produces streak-like textures that intuitively display the flow direction everywhere, making it suitable for global overviews rather than local trajectory tracing [S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input 1:** A 2D vector field $\mathbf{V}(x, y)$ defined on a discrete grid.
-*   **Input 2:** A scalar noise field $N(x, y)$, typically white noise [S1, S2, unofficial].
-*   **Output:** A scalar field $L(x, y)$ representing the convolved texture [S1, unofficial].
+*   **Input 1:** A vector field $\vec{V}(x,y)$ defined on a 2D grid.
+*   **Input 2:** A scalar noise texture $F_{in}$ (typically white noise) with the same resolution as the vector field [S1, S2, unofficial].
+*   **Output:** A scalar field $F_{out}$ representing the convolved texture [S1, S2, unofficial].
 
 **Data Structures:**
-*   The vector field is stored as a 2D array of 2D vectors.
-*   The noise field is stored as a 2D array of scalar values.
-*   The output is a 2D array of scalar values with the same dimensions as the input grid.
+*   **Vector Field:** Stored as a 2D array of 2D vectors $(u, v)$ corresponding to grid points $(x,y)$.
+*   **Noise Texture:** Stored as a 2D array of scalar values.
+*   **Streamline Representation:** For each pixel $(x,y)$, a sequence of points $P_i$ is computed by integrating the vector field in both positive and negative directions.
 
 **Algorithm Steps:**
-1.  **Generate Noise:** Create a white noise image $N(x, y)$ where pixel values are random [S1, S2, unofficial].
-2.  **Rasterize Streamlines:** For each pixel $(x, y)$ in the output grid, determine the local vector $\mathbf{V}(x, y)$. Rasterize a line segment centered at $(x, y)$ oriented in the direction of $\mathbf{V}(x, y)$ [S1, unofficial].
-3.  **Integrate:** Sum the values of the noise field $N$ at the pixels covered by the rasterized line segment [S1, unofficial].
-4.  **Assign:** Assign the sum to the output pixel $L(x, y)$ [S1, unofficial].
-
-**Formula:**
-The LIC value $L(x, y)$ at a point $(x, y)$ is computed as:
-$$ L(x, y) = \int_{-L/2}^{L/2} N(\mathbf{r}(t)) \, dt $$
-where $\mathbf{r}(t)$ is the streamline passing through $(x, y)$, and $L$ is the integration length [S1, S2, unofficial]. In discrete implementation, this integral is approximated by summing noise values along the rasterized line segment [S1, unofficial].
-
-**Parameters:**
-*   **Integration Length:** The length of the line segment used for convolution. Not given in the sources.
-*   **Noise Type:** Typically white noise [S1, S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Direction Ambiguity:** LIC does not distinguish between positive and negative flow directions; the texture looks the same for opposite vectors [S2, unofficial].
-*   **Speed Magnitude:** LIC does not display flow speed magnitude [S2, unofficial].
-*   **Computational Cost:** Standard LIC is computationally expensive because it performs independent integrations for every pixel [S1, unofficial].
+1.  **Streamline Integration:** For each output pixel $(x,y)$, compute the streamline path by integrating the vector field $\vec{V}$ starting from $(x,y)$. This generates a sequence of points $P_i$ in the positive direction and $P'_i$ in the negative direction [S2, unofficial].
+2.  **Kernel Definition:** Define a one-dimensional low-pass filter kernel $k(w)$. A common choice is a Hanning ripple function with a period of $2\pi$ [S2, unofficial].
+3.  **Weight Calculation:** For each segment of the streamline between points $s_i$ and $s_{i+1}$, calculate the weighting variable $h_i$ by integrating the kernel $k(w)$ over the arc length $\Delta S_i$ [S2, unofficial]:
+    $$ h_i = \int_{s_i}^{s_{i+1}} k(w) dw $$
+    The same is done for the negative direction to get $h'_i$ [S2, unofficial].
+4.  **Convolution Summation:** Compute the output value $F_{out}(x,y)$ by summing the input noise values $F_{in}(P_i)$ weighted by $h_i$ along the streamline in both directions, normalized by the sum of the weights [S2, unofficial]:
+    $$ F_{out}(x,y) = \frac{\sum_{i=0}^{n} h_i F_{in}(P_i) + \sum_{i=0}^{n'} h'_i F_{in}(P'_i)}{\sum_{i=0}^{n} h_i + \sum_{i=0}^{n'} h'_i} $$
+    where $P_0 = (x,y)$, $n$ and $n'$ are the number of steps in positive and negative directions, and $l, l'$ are the convolution distances [S2, unofficial].
+5.  **Rasterization (Discrete Approximation):** In a discrete grid implementation, the streamline is rasterized into a line segment centered at each point and oriented in the flow direction. The values of the noise function for the pixels covered by this rasterized line are summed [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def line_integral_convolution(vector_field, noise_field, integration_length):
+def line_integral_convolution(vector_field, noise_texture, kernel_function, max_steps):
     """
     Computes Line Integral Convolution for a 2D vector field.
     
     Args:
-        vector_field: 2D array of (vx, vy) vectors.
-        noise_field: 2D array of scalar noise values.
-        integration_length: Length of the integration segment.
+        vector_field: 2D array of vectors (u, v).
+        noise_texture: 2D array of scalar noise values.
+        kernel_function: Function k(w) defining the low-pass filter.
+        max_steps: Maximum number of integration steps in each direction.
         
     Returns:
-        2D array of convolved scalar values.
+        output_texture: 2D array of convolved values.
     """
     height, width = vector_field.shape
-    output = zeros_like(noise_field)
-    
-    # Precompute streamline paths for efficiency [S1, unofficial]
-    # Note: Standard LIC recomputes or approximates for each pixel [S1, unofficial]
+    output_texture = zeros_like(noise_texture)
     
     for y in range(height):
         for x in range(width):
-            # Get local vector
-            vx, vy = vector_field[y, x]
+            # 1. Integrate streamline in positive direction
+            pos_points = []
+            pos_weights = []
+            curr_x, curr_y = x, y
+            total_pos_weight = 0.0
             
-            # Normalize vector to get direction
-            magnitude = sqrt(vx**2 + vy**2)
-            if magnitude == 0:
-                output[y, x] = noise_field[y, x]
+            for i in range(max_steps):
+                # Get vector at current position
+                u, v = vector_field[curr_y, curr_x]
+                length = sqrt(u*u + v*v)
+                if length == 0:
+                    break
+                
+                # Normalize vector
+                u, v = u/length, v/length
+                
+                # Determine step size (e.g., based on grid resolution or fixed)
+                # For simplicity, assume unit step or adaptive step based on kernel support
+                step_size = 1.0 
+                
+                # Calculate arc length contribution for weight
+                # In discrete rasterization, this approximates the integral of the kernel
+                # over the segment covered by the pixel
+                weight = integrate_kernel(kernel_function, step_size)
+                
+                pos_points.append((curr_x, curr_y))
+                pos_weights.append(weight)
+                total_pos_weight += weight
+                
+                # Move to next point
+                curr_x += u * step_size
+                curr_y += v * step_size
+                
+                # Boundary check
+                if not (0 <= curr_x < width and 0 <= curr_y < height):
+                    break
+            
+            # 2. Integrate streamline in negative direction
+            neg_points = []
+            neg_weights = []
+            total_neg_weight = 0.0
+            
+            curr_x, curr_y = x, y
+            for i in range(max_steps):
+                u, v = vector_field[curr_y, curr_x]
+                length = sqrt(u*u + v*v)
+                if length == 0:
+                    break
+                
+                u, v = -u/length, -v/length # Negative direction
+                
+                step_size = 1.0
+                weight = integrate_kernel(kernel_function, step_size)
+                
+                neg_points.append((curr_x, curr_y))
+                neg_weights.append(weight)
+                total_neg_weight += weight
+                
+                curr_x += u * step_size
+                curr_y += v * step_size
+                
+                if not (0 <= curr_x < width and 0 <= curr_y < height):
+                    break
+            
+            # 3. Compute weighted sum
+            numerator = 0.0
+            denominator = total_pos_weight + total_neg_weight
+            
+            if denominator == 0:
+                output_texture[y, x] = noise_texture[y, x]
                 continue
                 
-            dir_x = vx / magnitude
-            dir_y = vy / magnitude
+            for i in range(len(pos_points)):
+                px, py = pos_points[i]
+                # Clamp coordinates to valid range if necessary
+                if 0 <= px < width and 0 <= py < height:
+                    numerator += pos_weights[i] * noise_texture[py, px]
+                    
+            for i in range(len(neg_points)):
+                px, py = neg_points[i]
+                if 0 <= px < width and 0 <= py < height:
+                    numerator += neg_weights[i] * noise_texture[py, px]
+                    
+            output_texture[y, x] = numerator / denominator
             
-            # Rasterize line segment centered at (x, y)
-            # Approximate integration by sampling points along the segment
-            sum_noise = 0.0
-            num_samples = int(integration_length)
-            
-            for i in range(-num_samples // 2, num_samples // 2 + 1):
-                # Calculate position along streamline
-                t = i * (integration_length / num_samples)
-                sample_x = x + dir_x * t
-                sample_y = y + dir_y * t
-                
-                # Sample noise field (interpolation required for non-integer coords)
-                # [G] Bilinear interpolation is standard for sampling noise
-                noise_val = sample_noise(noise_field, sample_x, sample_y)
-                sum_noise += noise_val
-                
-            output[y, x] = sum_noise
-            
-    return output
+    return output_texture
 
-def sample_noise(noise_field, x, y):
+def integrate_kernel(kernel_function, length):
     """
-    Samples noise field at non-integer coordinates using bilinear interpolation.
+    Approximates the integral of the kernel over a segment of given length.
+    For a Hanning ripple, this might involve analytical integration or numerical quadrature.
     """
-    x0 = floor(x)
-    y0 = floor(y)
-    x1 = x0 + 1
-    y1 = y0 + 1
-    
-    # Handle boundaries [G]
-    x0 = clamp(x0, 0, noise_field.shape[1] - 1)
-    y0 = clamp(y0, 0, noise_field.shape[0] - 1)
-    x1 = clamp(x1, 0, noise_field.shape[1] - 1)
-    y1 = clamp(y1, 0, noise_field.shape[0] - 1)
-    
-    # Bilinear interpolation weights
-    dx = x - x0
-    dy = y - y0
-    
-    val00 = noise_field[y0, x0]
-    val10 = noise_field[y0, x1]
-    val01 = noise_field[y1, x0]
-    val11 = noise_field[y1, x1]
-    
-    top = val00 * (1 - dx) + val10 * dx
-    bottom = val01 * (1 - dx) + val11 * dx
-    
-    return top * (1 - dy) + bottom * dy
+    # Placeholder for specific kernel integration logic
+    # For a simple box filter, this would be length * amplitude
+    # For Hanning, it requires integration of cos/sin terms
+    return kernel_function(length) # Simplified
 ```
+
+**Parameters:**
+*   **Kernel $k(w)$:** A low-pass filter. A Hanning ripple function with a period of $2\pi$ is commonly used [S2, unofficial].
+*   **Convolution Distance ($l, l'$):** The length of the streamline integration in positive and negative directions [S2, unofficial].
+*   **Noise Texture:** Typically white noise, uncorrelated random values [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Direction Ambiguity:** LIC does not distinguish between positive and negative flow directions; the texture looks the same in both directions [S3, unofficial].
+*   **Speed Magnitude:** LIC does not display flow speed magnitude; additional encoding is required to show velocity [S3, unofficial].
+*   **Computational Cost:** Standard LIC is computationally expensive because it performs independent integrations for each pixel [S1, unofficial]. Optimizations like Fast LIC reuse calculations for adjacent pixels along the same streamline [S1, unofficial].
+*   **Phase Shifting:** To generate periodic motion effects (animation), the phase of the convolution filter function must be shifted during convolution [S2, unofficial].
 
 ## Subtopics
 
 ### [Seed Line Integral Convolution](8864-seed-line-integral-convolution.md)
-Computes LIC only along field lines from sparse seed points, reducing computational cost for sparse inputs but increasing susceptibility to aliasing.
+A variant that computes LIC only along streamlines from sparse seed points, reducing computational cost for sparse inputs but increasing susceptibility to aliasing.
 
 ### [Image Space Fabric Visualization](10569-image-space-fabric-visualization.md)
-Adapts LIC to visualize symmetric tensor fields on surfaces by projecting tensor data into image space and advecting noise along eigenvectors, enabling real-time performance on GPU.
+Adapts LIC to symmetric tensor fields on surfaces by projecting data into image space and using GPU FBOs for real-time performance.
+
+### [Box Filter Dye Advection](12157-box-filter-dye-advection.md)
+Uses a box filter instead of Hanning and introduces phase shifting for temporal dye advection animation.
+
+### [Variable Convolution Length for Dye](12158-variable-convolution-length-for-dye.md)
+Decouples the convolution length of the dye from the global LIC texture to allow long dye trails without degrading the LIC texture.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot L)$, where $N$ is the number of pixels and $L$ is the integration length. Standard LIC is computationally expensive [S1, unofficial].
-*   **Memory Complexity:** $O(N)$ for storing the input fields and output texture.
-*   **Strengths:** Densely displays direction information across the entire field without seed points [S2, unofficial]. Intuitively shows flow direction via streak-like textures [S2, unofficial].
-*   **Limitations:** Does not display flow direction (positive/negative looks the same) [S2, unofficial]. Does not show flow speed magnitude [S2, unofficial]. Computationally expensive compared to optimized versions [S1, unofficial].
-*   **When to Use:** When a global, continuous overview of flow direction is needed without selecting seed points [S2, unofficial].
-*   **When Not to Use:** When flow direction (sign) or speed magnitude is critical, or when computational resources are limited [S2, unofficial].
+*   **Time Complexity:** $O(N \cdot L)$ where $N$ is the number of pixels and $L$ is the average streamline length (number of integration steps). Standard LIC is expensive due to redundant calculations [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for storing the input noise, vector field, and output texture [S1, S2, unofficial].
+*   **Strengths:** Densely displays direction information across the entire field without seed points; intuitively shows global flow structure [S3, unofficial].
+*   **Limitations:** Does not show flow direction (positive/negative) or speed magnitude; computationally expensive in its basic form [S3, unofficial].
+*   **When to Use:** When a global overview of flow direction is needed and seed point selection is undesirable [S3, unofficial].
+*   **When Not to Use:** When specific particle trajectories, flow direction (sign), or speed magnitude are critical [S3, unofficial].
 
 ## Background
-Line Integral Convolution was introduced as one of the most visible recent flow visualization algorithms [S1, unofficial]. It operates on a discrete grid by rasterizing line segments and integrating noise values [S1, unofficial]. Stalling and Hege proposed an extension to speed up the process by reusing calculations for adjacent pixels along the same streamline [S1, unofficial].
+Line Integral Convolution was introduced by Cabral and Leedom [S2, unofficial]. It is one of the most visible flow visualization algorithms [S1, unofficial]. The method was later extended by Stalling and Hege to speed up the process by reusing calculations for adjacent pixels along the same streamline [S1, unofficial]. Improvements were also proposed by Forssell and Cohen [S2, unofficial].
 
 ## Sources
 [S1] Flow Visualization Techniques for CDF using Volume Rendering, https://www.osti.gov/servlets/purl/790542, fetched 2026-10-26 (unofficial)
-[S2] 第9 章：科学可视化, http://simingchen.me/smart-textbook/ch9/index.html, fetched 2026-10-30 (unofficial)
+[S2] NASA Technical Reports Server (NTRS) 19970011183: Visualizing Vector Fields Using Line Integral Convolution and Dye Advection, https://archive.org/details/NASA_NTRS_Archive_19970011183, fetched 2026-10-26 (unofficial)
+[S3] 第9 章：科学可视化, http://simingchen.me/smart-textbook/ch9/index.html, fetched 2026-10-30 (unofficial)

@@ -1,16 +1,16 @@
 # Hardware Ray Tracing Global Illumination
+
+
 ## Overview
-Hardware Ray Tracing Global Illumination approximates one-bounce diffuse global illumination by cosine-sampling the hemisphere around a surface normal, tracing short rays via hardware RT cores, and gathering indirect irradiance from hits or skylight if rays escape [S1, unofficial]. It differs from sibling methods like Voxel Cone Tracing by using explicit ray queries against voxel bricks rather than cone-based approximations, and from Precomputed Lighting by computing the indirect term per-frame rather than baking it offline [S1, unofficial].
+Hardware Ray Tracing Global Illumination is a real-time, one-bounce diffuse global illumination technique that leverages hardware-accelerated ray tracing (RT) cores to compute indirect lighting [S1, unofficial]. It solves the problem of approximating multiple scattering orders in participating media or on opaque surfaces by cosine-sampling the hemisphere around a surface normal, tracing short rays, and gathering indirect irradiance from hits or skylight [S1, unofficial]. It sets itself apart from sibling methods like Voxel Cone Tracing by using explicit ray queries against a voxel grid rather than cone-based approximations, offering higher geometric accuracy at the cost of higher per-sample computational overhead [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Surface position $o$, surface normal $n$, camera direction $v$, and a voxel grid data structure containing active bricks and solid voxels [S1, unofficial].
-*   **Output:** Indirect irradiance contribution to the pixel color [S1, unofficial].
+*   **Input:** Surface position $o$, surface normal $n$, camera direction $v$, and a precomputed voxel grid representing the scene geometry and lighting.
+*   **Output:** Accumulated indirect irradiance contribution to the pixel color.
 
 **Data Structures:**
-*   **GiProbe:** Stores SH-L1 coefficients for irradiance. Fields: `sh_r`, `sh_g`, `sh_b` (each `vec4<f32>`), `sh_dist`, `sh_dist2`, `info` (world grid coordinate + sample age), `st_r`, `st_g`, `st_b`, `st_dist`, `st_dist2`, `st_info` (staging accumulator) [S1, unofficial].
-*   **Ray Query:** Hardware abstraction for tracing. Supports `RayDesc` with origin, direction, and hit range $[0.02, \text{GI\_DIST}]$ [S1, unofficial].
-*   **Brick/Voxel:** Voxel grid is organized into bricks. Each brick has an active flag. Solid voxels are identified by `resolve_brick` with `skip_transparent = true` [S1, unofficial].
+The method relies on a voxel grid where each voxel (or "brick") contains metadata. The specific internal layout of the voxel data is not detailed in the sources, but the access pattern involves querying for the first solid, non-transparent voxel along a ray [S1, unofficial]. The system uses a `RayQuery` object (standard in DXR/Vulkan RT) to manage traversal state.
 
 **Parameters:**
 *   `GI_RAYS`: Number of fresh samples per frame. Value: 1 [S1, unofficial].
@@ -18,122 +18,119 @@ Hardware Ray Tracing Global Illumination approximates one-bounce diffuse global 
 *   `GI_STRENGTH`: Multiplier for GI intensity. Value: 1.0 [S1, unofficial].
 *   `GI_SKY`: Soft skylight fill factor. Value: 0.32 [S1, unofficial].
 
-**Steps:**
-1.  **Tangent Frame Construction:** Compute tangent and bitangent vectors from normal $n$ [S1, unofficial]:
-    $$ \text{up} = \begin{cases} \mathbf{z} & \text{if } |n_z| > 0.9 \\ \mathbf{x} & \text{otherwise} \end{cases} $$
-    $$ \mathbf{tang} = \text{normalize}(\mathbf{n} \times \text{up}) $$
-    $$ \mathbf{bitan} = \mathbf{n} \times \mathbf{tang} $$
-2.  **Ray Generation:** For each ray $k$ in `GI_RAYS`, generate two random numbers $r_1, r_2$ from a hash of position and seed [S1, unofficial]. Compute cosine-weighted hemisphere direction [S1, unofficial]:
-    $$ rr = \sqrt{r_1} $$
-    $$ \phi = 2\pi r_2 $$
-    $$ \mathbf{dl} = (rr \cos \phi, rr \sin \phi, \sqrt{\max(0, 1 - r_1)}) $$
-    $$ \mathbf{dir} = \text{normalize}(\mathbf{tang} \cdot \mathbf{dl}_x + \mathbf{bitan} \cdot \mathbf{dl}_y + \mathbf{n} \cdot \mathbf{dl}_z) $$
-3.  **Ray Tracing (`gi_trace`):** Initialize ray query with origin $o$, direction $\mathbf{dir}$, and hit range $[0.02, \text{GI\_DIST}]$ [S1, unofficial]. Loop through candidates:
-    *   If candidate is an AABB, get brick index $bi$. If `rt_brick_active(bi)` is false, continue [S1, unofficial].
-    *   Call `resolve_brick(bi, skip_transparent=true)` to find the first solid, non-transparent voxel [S1, unofficial].
-    *   If hit ($t \ge 0$), generate intersection `rayQueryGenerateIntersection(&rq, t)` and update `best_t` if $t < \text{best\_t}$ [S1, unofficial].
-4.  **Irradiance Accumulation:**
-    *   If a hit is found, accumulate light based on the hit voxel's albedo and the sun term [S1, unofficial].
-    *   If no hit is found (ray escapes), accumulate skylight using `GI_SKY` [S1, unofficial].
-    *   Multiply accumulated irradiance by `GI_STRENGTH` [S1, unofficial].
+**Algorithm Steps:**
+1.  **Tangent Frame Construction:** Construct a local tangent frame from the surface normal $n$ to facilitate hemisphere sampling.
+    *   Select an up vector: `up = (0,0,1)` if $|n_z| > 0.9$, else `(1,0,0)`.
+    *   Compute tangent: `tang = normalize(cross(n, up))`.
+    *   Compute bitangent: `bitan = cross(n, tang)`.
+2.  **Ray Sampling Loop:** For each ray $k$ in `GI_RAYS`:
+    *   Generate two random numbers $r_1, r_2$ from a hash of the pixel position and a seed [S1, unofficial].
+    *   Compute a cosine-weighted hemisphere direction $d_{local}$:
+        $$ rr = \sqrt{r_1} $$
+        $$ \phi = 2\pi r_2 $$
+        $$ d_{local} = (rr \cos \phi, rr \sin \phi, \sqrt{\max(0, 1 - r_1)}) $$
+    *   Transform to world space:
+        $$ dir = \text{normalize}(tang \cdot d_{local}.x + bitan \cdot d_{local}.y + n \cdot d_{local}.z) $$
+3.  **Ray Tracing (`gi_trace`):**
+    *   Initialize a `RayQuery` with origin $o$, direction $dir$, and hit range $[0.02, \text{GI\_DIST}]$. The minimum distance $0.02$ prevents self-intersection [S1, unofficial].
+    *   Iterate through ray query candidates.
+    *   If a candidate is an Axis-Aligned Bounding Box (AABB), retrieve its brick index $bi$.
+    *   Check if the brick is active using `rt_brick_active(bi)`. If inactive, continue to the next candidate [S1, unofficial].
+    *   Call `resolve_brick` with `skip_transparent = true` to find the first solid, non-transparent voxel within the brick.
+    *   If a hit is found at distance $t \ge 0$, generate an intersection in the ray query: `rayQueryGenerateIntersection(&rq, t)`.
+    *   Update the best hit distance `best_t` if $t < \text{best\_t}$ [S1, unofficial].
+4.  **Irradiance Accumulation (`rt_gather_indirect`):**
+    *   If a hit is recorded with voxel $hv$, normal $hn$, and brick $hbi$:
+        *   Retrieve the albedo or color of the hit voxel.
+        *   Accumulate light: `light += hit_color * GI_STRENGTH`.
+    *   If no hit is recorded (ray escapes):
+        *   Accumulate skylight: `light += GI_SKY`.
+    *   The final contribution is typically scaled by the cosine of the angle between the ray direction and the surface normal, though the source notes imply the cosine-weighted sampling handles the distribution, and the accumulation sums the gathered values [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Parameters from [S1, unofficial]
-GI_RAYS = 1
-GI_DIST = 40.0
-GI_STRENGTH = 1.0
-GI_SKY = 0.32
-PI = 3.141592653589793
-
 def rt_gather_indirect(o: vec3, n: vec3, v: vec3) -> vec3:
-    # 1. Tangent frame construction [S1, unofficial]
-    up = vec3(0.0, 0.0, 1.0) if abs(n.z) > 0.9 else vec3(1.0, 0.0, 0.0)
+    # 1. Tangent Frame
+    up = vec3(0, 0, 1) if abs(n.z) > 0.9 else vec3(1, 0, 0)
     tang = normalize(cross(n, up))
     bitan = cross(n, tang)
 
-    acc = vec3(0.0)
-
-    # 2. Ray generation and tracing [S1, unofficial]
-    for k in range(GI_RAYS):
-        r1, r2 = hash_randoms(o, k)
+    total_irradiance = vec3(0.0)
+    
+    # 2. Sample Loop (GI_RAYS = 1)
+    for k in range(1):
+        # Generate randoms from hash of position and seed
+        r1, r2 = hash_randoms(pixel_pos, k)
+        
+        # Cosine-weighted hemisphere direction
         rr = sqrt(r1)
-        phi = 2.0 * PI * r2
-        dl = vec3(rr * cos(phi), rr * sin(phi), sqrt(max(0.0, 1.0 - r1)))
-        dir = normalize(tang * dl.x + bitan * dl.y + n * dl.z)
-
-        hit_voxel, hit_normal, hit_brick, hit_local = gi_trace(o, dir)
-
-        if hit_voxel is not None:
-            albedo = get_albedo(hit_voxel)
-            sun_term = get_sun_irradiance(hit_normal)
-            acc += albedo * sun_term
+        phi = 2 * PI * r2
+        dl_x = rr * cos(phi)
+        dl_y = rr * sin(phi)
+        dl_z = sqrt(max(0.0, 1.0 - r1))
+        
+        dir = normalize(tang * dl_x + bitan * dl_y + n * dl_z)
+        
+        # 3. Trace Ray
+        hit = gi_trace(o, dir)
+        
+        # 4. Accumulate
+        if hit:
+            # hit.color is the albedo/light from the hit voxel
+            total_irradiance += hit.color * GI_STRENGTH
         else:
-            acc += vec3(GI_SKY)
+            total_irradiance += vec3(GI_SKY)
+            
+    return total_irradiance
 
-    return acc * GI_STRENGTH
-
-def gi_trace(o: vec3, dir: vec3) -> tuple:
+def gi_trace(o: vec3, dir: vec3) -> HitRecord:
+    # Initialize RayQuery
+    rq = RayQuery()
+    rq.init(o, dir, min_t=0.02, max_t=GI_DIST)
+    
     best_t = GI_DIST
     best_hit = None
-
-    # [G] Hardware ray query initialization
-    rq = RayQuery(origin=o, direction=dir, min_t=0.02, max_t=GI_DIST)
-    for candidate in rq.candidates():
+    
+    # Iterate candidates
+    while rq.proceed():
+        candidate = rq.candidate()
+        
         if candidate.is_aabb():
             bi = candidate.brick_index()
             if not rt_brick_active(bi):
                 continue
-
+            
+            # Resolve brick for first solid voxel
             t = resolve_brick(bi, skip_transparent=True)
+            
             if t >= 0 and t < best_t:
-                best_t = t
                 rq.generate_intersection(t)
-                best_hit = candidate.get_hit_info(t)
-
+                best_t = t
+                # Store hit info (voxel, normal, brick)
+                best_hit = get_hit_info(rq)
+                
     return best_hit
-
-# Helper definitions [S1, unofficial] / [G]
-def hash_randoms(pos, seed):
-    # [G] Standard hash-based PRNG for deterministic randoms
-    h = hash((pos.x, pos.y, pos.z, seed))
-    return (h % 10000) / 10000.0, ((h >> 16) % 10000) / 10000.0
-
-def rt_brick_active(bi):
-    # [G] Checks if the voxel brick at index bi is active in the grid
-    return True
-
-def resolve_brick(bi, skip_transparent):
-    # [G] Finds the first solid, non-transparent voxel in brick bi
-    return 0.0
-
-def get_albedo(hit_voxel):
-    # [G] Retrieves material albedo from hit voxel data
-    return vec3(0.8)
-
-def get_sun_irradiance(hit_normal):
-    # [G] Computes direct sun irradiance for the hit normal
-    return vec3(1.0)
 ```
 
 ## Subtopics
 
 ### [Dynamic Diffuse Global Illumination (DDGI)](8142-dynamic-diffuse-global-illumination-ddgi.md)
-A Global Illumination technique using a 3D grid array of very low resolution cubemaps (e.g., 4x4), built using raytracing or cone tracing, with a second depth cubemap to prevent light/shadow leaks.
+DDGI extends this concept by maintaining persistent probe data that adapts to geometry changes over time, offering $O(1)$ rendering complexity but with slightly lower quality than Voxel Cone Tracing and no specular support.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Performance:** Real-time on hardware with RT cores [S1, unofficial].
-*   **Strengths:** Accurate one-bounce diffuse GI, handles complex geometry via ray tracing, no precomputation required [S1, unofficial].
-*   **Limitations:** Single bounce only, requires hardware RT support [S1, unofficial].
-*   **When to use:** Real-time scenes requiring accurate diffuse GI without precomputation, on hardware with RT cores [S1, unofficial].
-*   **When not to use:** Scenes requiring multiple bounces or hardware without RT cores [S1, unofficial].
+*   **Time Complexity:** $O(N \cdot R)$ where $N$ is the number of pixels/samples and $R$ is the number of rays per sample (typically 1). The cost is dominated by the hardware ray traversal.
+*   **Memory Complexity:** Depends on the voxel grid size. The method itself requires minimal per-pixel state, storing only the accumulated irradiance.
+*   **Performance:** Performance scales with the number of active bricks and the depth of the ray traversal. Hardware RT cores provide significant acceleration over software ray tracing.
+*   **Strengths:** High geometric accuracy for indirect lighting; handles complex occlusion and shadowing naturally via ray tracing; simple to implement on modern hardware.
+*   **Limitations:** Limited to one-bounce illumination (diffuse GI); noisy with low sample counts (mitigated by temporal accumulation); no specular reflections; performance can degrade with deep voxel grids or high `GI_DIST` values.
+*   **When to use:** Real-time applications requiring accurate diffuse global illumination where hardware RT is available.
+*   **When not to use:** Applications requiring specular GI, multi-bounce lighting, or running on hardware without RT cores.
 
 ## Background
-Implemented in the `voxelG` project [S1, unofficial]. It is part of a family of real-time approximations that use spatial discretization and hardware acceleration to solve the radiative transfer equation for participating media [S1, unofficial].
+This method is derived from techniques demonstrated in the `voxelG` project, which implements real-time global illumination using hardware ray tracing and voxel grids [S1, unofficial]. It represents a shift from traditional rasterization-based GI approximations (like VCT) towards explicit ray tracing for indirect lighting calculations.
 
 ## Sources
 [S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)

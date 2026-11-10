@@ -1,0 +1,51 @@
+# Sorting and Rendering Pipeline Optimization
+
+Also called: Pipeline acceleration, Hardware-aware 3DGS optimization
+
+## Overview
+Sorting and Rendering Pipeline Optimization addresses the computational bottlenecks in 3D Gaussian Splatting (3DGS) rendering, specifically the high memory bandwidth requirements of depth sorting and the compute intensity of alpha blending [S1, unofficial]. It sets itself apart from generic optimization by explicitly aligning software strategies with hardware bottlenecks identified via the Roofline model, applying memory-centric optimizations to memory-bound stages and compute-centric optimizations to compute-bound stages [S1, unofficial].
+
+## Shared principles
+The rendering pipeline for 3D Gaussian Splatting consists of two primary stages that this family optimizes: depth sorting and rasterization (alpha blending) [S1, unofficial].
+
+**Depth Sorting**
+Gaussians must be sorted front-to-back for correct alpha compositing. The baseline approach uses global radix sort, which incurs high memory traffic and variable latency [S1, unofficial]. Optimization principles include:
+1.  **Key Compression:** Reducing the bit-width of depth keys to minimize memory bandwidth during sorting [S1, unofficial].
+2.  **Tile-Local Processing:** Restricting sorting to individual tiles to avoid global synchronization and reduce hardware complexity [S1, unofficial].
+3.  **Comparison-Free Logic:** Using parallel bitwise comparison for sorting within tiles to achieve fixed latency per output, suitable for hardware accelerators [S1, unofficial].
+
+**Rasterization**
+The rasterizer evaluates Gaussian opacity and blends colors. The baseline evaluation for a Gaussian-pixel pair is [S1, unofficial]:
+$$p(x, y) = -\frac{1}{2} \left( a(x - w)^2 + b(x - u)(y - v) + c(y - v)^2 \right) \quad (10)$$
+where $(x, y)$ is the target pixel coordinate, $(u, v)$ is the projected 2D Gaussian center, and $a, b, c$ are derived from the projected 2D covariance matrix. The unclamped opacity contribution is:
+$$\tilde{\alpha}(x, y) = o \exp(p(x, y)) \quad (11)$$
+where $o$ is the Gaussian opacity [S1, unofficial]. Optimization principles include:
+1.  **Attribute Quantization:** Compressing Spherical Harmonic (SH) coefficients to reduce global memory traffic. Standard 3rd-degree SH requires 48 coefficients per RGB channel (192 bytes in single precision for $D_{SH}=3$) [S1, unofficial]. RoofGS uses quantization with a single shared scale [S1, unofficial].
+2.  **Kernel Fusion:** Fusing front-end kernels to reduce intermediate data movement [S1, unofficial].
+3.  **Instruction-Level Parallelism (ILP):** Reformulating per-pixel evaluation to increase ILP inside the blending loop [S1, unofficial].
+4.  **Fast Exponential Evaluation:** Optimizing the computation of $\exp(p(x, y))$ [S1, unofficial].
+
+## Subtopics
+
+### [RoofGS](9830-roofgs.md)
+**What it is:** An end-to-end acceleration method for 3DGS that optimizes the rendering pipeline by aligning software strategies with hardware bottlenecks identified via the Roofline model.
+**Distinction:** Unlike generic optimization, it explicitly uses the Roofline model to identify the "knee" point, applying memory-centric optimizations to stages below it and compute-centric optimizations to stages near it.
+**When to choose:** When hardware bottlenecks are mixed (memory bandwidth vs. compute throughput) and a holistic hardware-aware optimization is required.
+**Link:** [RoofGS](9830-roofgs.md)
+
+### [Tile-Based Comparison-Free Sorting](9991-tile-based-comparison-free-sorting.md)
+**What it is:** A sorting method that restricts depth sorting operations to individual rendering tiles to avoid global synchronization, reduce hardware complexity, and achieve fixed latency per output.
+**Distinction:** Unlike full-scene sorting which causes excess traffic and latency spikes, this method uses $\langle \text{tile-id}, \text{depth} \rangle$ keys to order Gaussians front-to-back, matching the $\alpha$-blending requirement with deterministic, fixed per-output latency.
+**When to choose:** For hardware accelerators where variable latency and high memory overhead of radix sort are prohibitive.
+**Link:** [Tile-Based Comparison-Free Sorting](9991-tile-based-comparison-free-sorting.md)
+
+### Mobile-GS Rendering
+**Definition:** A sorting-free rendering method that uses a transmittance proxy enriched with view-dependent modulation [S1, unofficial].
+**Formula:** Pixel color $C = (1 - T) \sum_{i=1}^N \frac{c_i \alpha_i + T c_i b_g}{\sum_{i=1}^N \alpha_i w_i} + T c_i b_g$. Weight $w_i = \phi_i^2 + \frac{\phi_i}{d_i^2} + \exp \left( \frac{x_{max}}{d_i} \right)$. $T$ is transmittance, $c_i$ is color, $\alpha_i$ is opacity, $b_g$ is background color, $d_i$ is depth, $\phi_i$ is auxiliary feature from MLP, $x_{max}$ is a constant [S1, unofficial].
+**Comparison:** Unlike SortFreeGS which uses Gaussian depth but not scale, Mobile-GS exploits both depth and scale attributes to compute importance weight, reflecting that farther Gaussians have lower contribution and larger Gaussians provide more meaningful evidence [S1, unofficial]. Unlike GES which uses a two-stage rendering pipeline (depth image then filtering), Mobile-GS is single-stage and better suited for mobile deployment [S1, unofficial].
+
+## Background
+3D Gaussian Splatting (3DGS) was introduced by Kerbl et al. [S1, unofficial]. The standard rendering pipeline involves projecting 3D Gaussians, sorting them by depth, and alpha blending [S1, unofficial]. Optimization efforts have focused on reducing the memory bandwidth of sorting and the compute load of blending. Roofline model analysis has been applied to identify bottlenecks in 3DGS [S1, unofficial]. Mobile-GS was developed to enable real-time 3DGS on mobile devices, introducing sorting-free techniques [S1, unofficial].
+
+## Sources
+[S1] Mobile-GS: Real-time Gaussian Splatting for Mobile Devices, https://doi.org/10.48550/arXiv.2603.11531, fetched 2026-10-29 (unofficial)

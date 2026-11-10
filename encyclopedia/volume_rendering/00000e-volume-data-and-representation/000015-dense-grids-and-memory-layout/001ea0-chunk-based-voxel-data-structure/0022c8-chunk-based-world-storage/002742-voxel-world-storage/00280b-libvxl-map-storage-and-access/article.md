@@ -61,8 +61,6 @@ def realloc(ptr, new_size):
     if len(ptr) < new_size:
         ptr.extend([None] * (new_size - len(ptr)))
     return ptr
-def memmove(dest, src, count):
-    dest[count:] = src[:count]
 def sizeof_block():
     return 8  # Simulated size of libvxl_block
 
@@ -106,7 +104,8 @@ def libvxl_chunk_insert(chunk, pos, color):
             return
             
     if start < chunk.index:
-        memmove(chunk.blocks, chunk.blocks[start:chunk.index], chunk.index - start)
+        # Shift blocks from start..index-1 to start+1..index
+        chunk.blocks[start+1 : start+1 + (chunk.index - start)] = chunk.blocks[start : chunk.index]
         
     chunk.blocks[start].position = pos
     chunk.blocks[start].color = color
@@ -126,6 +125,11 @@ def libvxl_chunk_gequal_block(chunk, pos):
     return chunk.blocks[start]
 ```
 
+**Pitfalls:**
+- Out of bounds access: Functions like `libvxl_map_issolid`, `libvxl_map_get`, and `libvxl_map_set` check bounds. `libvxl_map_issolid` returns non-solid (0) for out-of-bounds. `libvxl_map_gettop` leaves result unmodified for out-of-bounds. `libvxl_map_set` does nothing for out-of-bounds [S1, unofficial].
+- Coordinate System: All functions use voxlap's coordinate system where X and Y are 12 bits (0-4095) and Z is 8 bits (0-255) in the key format `0xYYYXXXZZ` [S1, unofficial].
+- Chunk growth triggers when `chunk->index == chunk->length`, multiplying length by `LIBVXL_CHUNK_GROWTH` and reallocating blocks [S1, unofficial].
+
 ## Subtopics
 
 ### [Chunked Voxel Map Serialization with Visfaces](4201-chunked-voxel-map-serialization-with-visfaces.md)
@@ -135,8 +139,8 @@ This method serializes a chunked voxel map into a compact file format by iterati
 Span-based Column Encoding encodes a single $(x,y)$ column of a sparse voxel map into a sequence of `libvxl_span` structures containing air runs, top color runs, and bottom color runs. It solves the problem of efficiently serializing sparse voxel data by reducing the storage of empty space and surface boundaries to compact run-length encoded structures.
 
 ## Operating characteristics
-- **Time Complexity:** Block lookup and insertion are $O(\log N)$ where $N$ is the number of blocks in a chunk, due to binary search. Geometry access is $O(1)$ [S1, unofficial].
-- **Memory Complexity:** Storage is proportional to the number of blocks plus the geometry bitmask. Chunk growth factor of 2 may lead to up to 50% wasted space in extreme cases before reallocation [S1, unofficial].
+- **Time Complexity:** Block lookup and insertion are $O(\log N)$ where $N$ is the number of blocks in a chunk, due to binary search [S1, unofficial]. Geometry access is $O(1)$ [S1, unofficial].
+- **Memory Complexity:** Storage is proportional to the number of blocks plus the geometry bitmask [S1, unofficial].
 - **Performance:** Lower chunk sizes (e.g., 16) speed up access but increase memory fragmentation [S1, unofficial].
 - **Strengths:** Fast direct access to blocks, support for floating block detection, and efficient serialization via column encoding [S1, unofficial].
 - **Limitations:** Sparse data may still consume significant memory if not properly chunked. Boundary conditions require explicit handling [S1, unofficial].
