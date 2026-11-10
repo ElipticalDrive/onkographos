@@ -1,38 +1,37 @@
 # Cartoon Noise Lattice Generation
 
-Also called: Cartoon Noise Set Generation
+Also called: Cartoon Noise Set Generation, Macro/Body/Edge/Flow Lattice Generation
 
 ## Overview
-Cartoon Noise Lattice Generation produces independent, tileable noise lattices for stylized "cartoon" clouds by separating the noise field into four distinct functional groups: macro (outline), body (fill), edge (detail), and flow (disturbance) [S1, unofficial]. It differs from standard gradient or value noise by explicitly structuring the lattice generation to avoid fixed-direction ripple artifacts and ensuring stability across different spatial scales, which is critical for the blocky, high-contrast aesthetic of cartoon rendering [S1, unofficial].
+Cartoon Noise Lattice Generation produces independent, tileable noise lattices for stylized, cartoon-style cloud rendering by separating noise into four distinct functional groups: macro (outline), body (fill), edge (detail), and flow (disturbance) [S1, unofficial]. Unlike standard gradient noise which produces a single continuous field, this method generates multiple specialized lattices with specific frequency constraints to ensure stability and avoid fixed-direction ripple artifacts, building on [Gradient-based Noise (Perlin/Simplex)](3860-gradient-based-noise-perlin-simplex.md).
 
 ## How it works
 **Inputs and Outputs:**
-- **Inputs:** A random number generator (`rng`), resolution parameters, and configuration for cloud types.
+- **Inputs:** A `MaskParameters` object containing resolution (512, 1024, or 2048), global height bounds (`global_min_cm`, `global_max_cm`), weather type, seed, coverage percentage, cloud region count, and optional `CloudHeightRule` configurations [S1, unofficial].
 - **Outputs:** A `_CartoonNoiseSet` dataclass containing four tuples of numpy arrays: `macro_lattices`, `body_lattices`, `edge_lattices`, and `flow_lattices` [S1, unofficial].
 
 **Data Structures:**
-The core output is a frozen dataclass:
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+1.  **`MaskParameters`**:
+    -   `resolution`: `int` (512, 1024, 2048) [S1, unofficial].
+    -   `global_min_cm`, `global_max_cm`: `int` defining the vertical volume bounds [S1, unofficial].
+    -   `seed`: `int` for deterministic generation [S1, unofficial].
+    -   `cloud_region_count`: `int` (1–500) [S1, unofficial].
+    -   `cloud_height_rules`: `tuple[CloudHeightRule, ...]` [S1, unofficial].
+2.  **`CloudHeightRule`**:
+    -   `type_id`: `int` [S1, unofficial].
+    -   `center_min_cm`, `center_max_cm`: `int` defining the target center height range [S1, unofficial].
+    -   `height_delta_min_cm`, `height_delta_max_cm`: `int` defining the vertical thickness range [S1, unofficial].
+3.  **`_CartoonNoiseSet`**:
+    -   `macro_lattices`: `tuple[np.ndarray, ...]` [S1, unofficial].
+    -   `body_lattices`: `tuple[np.ndarray, ...]` [S1, unofficial].
+    -   `edge_lattices`: `tuple[np.ndarray, ...]` [S1, unofficial].
+    -   `flow_lattices`: `tuple[np.ndarray, ...]` [S1, unofficial].
 
-```python
-@dataclass(frozen=True)
-class _CartoonNoiseSet:
-    macro_lattices: tuple[np.ndarray, ...]
-    body_lattices: tuple[np.ndarray, ...]
-    edge_lattices: tuple[np.ndarray, ...]
-    flow_lattices: tuple[np.ndarray, ...]
-```
-Each lattice is a numpy array representing the noise field for that specific group [S1, unofficial].
-
-**Steps:**
-1. **Initialize Container:** Create an instance of `_CartoonNoiseSet` to hold the generated lattices [S1, unofficial].
-2. **Generate Lattices:** Call the helper function `_make_noise_lattices` for each of the four groups (macro, body, edge, flow). This function generates the underlying noise arrays using specific frequency parameters tailored to each group's role [S1, unofficial].
-   - **Macro Lattices:** Designed for large-scale outlines. Frequencies are kept low to ensure stability and prevent high-frequency artifacts [S1, unofficial].
-   - **Body Lattices:** Provide the main fill density. Frequencies are balanced to maintain volume without excessive detail [S1, unofficial].
-   - **Edge Lattices:** Contain higher-frequency details to define the sharp edges characteristic of cartoon clouds [S1, unofficial].
-   - **Flow Lattices:** Used for disturbance and advection. Frequencies are selected to avoid fixed-direction ripple artifacts [S1, unofficial].
-3. **Frequency Selection:** The `_make_noise_lattices` function applies specific frequency multipliers to ensure the lattices are "small" (in terms of spatial period relative to the domain) and stable. This prevents the visual artifact of fixed-direction ripples that can occur when noise frequencies align with grid axes [S1, unofficial].
-4. **Return Set:** Assemble the four tuples into the `_CartoonNoiseSet` and return it [S1, unofficial].
+**Algorithm Steps:**
+1.  **Validate Parameters:** Ensure `resolution` is in {512, 1024, 2048}, `global_max_cm > global_min_cm`, and `0 <= coverage_percent <= 100` [S1, unofficial].
+2.  **Generate Height Rules:** For each cloud type, determine vertical bounds. If a `CloudHeightRule` is provided, use its `center_min_cm` and `center_max_cm` sampled via `rng.integers`. Otherwise, derive bounds from legacy constants: for `type_id == 10`, use span multipliers `(0.62, 0.92)`; for others, use `(0.22, 0.58)` [S1, unofficial]. Calculate `delta_min` and `delta_max` using `VOLUME_BOX_HEIGHT_MULTIPLIER` (value not given) applied to the span [S1, unofficial].
+3.  **Generate Lattices:** Call `_make_noise_lattices` for each of the four groups (macro, body, edge, flow). Use specific frequencies for each group to ensure they are small and stable, preventing fixed-direction ripple artifacts [S1, unofficial].
+4.  **Construct Set:** Pack the resulting tuples into the `_CartoonNoiseSet` dataclass [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -40,48 +39,57 @@ Each lattice is a numpy array representing the noise field for that specific gro
 ```python
 import numpy as np
 from dataclasses import dataclass
-from typing import Tuple
+
+@dataclass(frozen=True)
+class CloudHeightRule:
+    type_id: int
+    center_min_cm: int
+    center_max_cm: int
+    height_delta_min_cm: int
+    height_delta_max_cm: int
+
+@dataclass(frozen=True)
+class MaskParameters:
+    resolution: int
+    global_min_cm: int
+    global_max_cm: int
+    seed: int
+    coverage_percent: int
+    cloud_region_count: int
+    cloud_height_rules: tuple[CloudHeightRule, ...] = ()
 
 @dataclass(frozen=True)
 class _CartoonNoiseSet:
-    macro_lattices: Tuple[np.ndarray, ...]
-    body_lattices: Tuple[np.ndarray, ...]
-    edge_lattices: Tuple[np.ndarray, ...]
-    flow_lattices: Tuple[np.ndarray, ...]
+    macro_lattices: tuple[np.ndarray, ...]
+    body_lattices: tuple[np.ndarray, ...]
+    edge_lattices: tuple[np.ndarray, ...]
+    flow_lattices: tuple[np.ndarray, ...]
 
-def _make_noise_lattices(group_type: str, rng: np.random.Generator, resolution: int) -> Tuple[np.ndarray, ...]:
+def _make_noise_lattices(group_type: str, params: MaskParameters, rng: np.random.Generator) -> tuple[np.ndarray, ...]:
     """
-    Generates noise lattices for a specific group (macro, body, edge, flow).
-    Uses specific frequencies to avoid fixed-direction ripple artifacts.
+    Generates lattices for a specific group (macro, body, edge, flow).
+    Uses specific frequencies to ensure stability and avoid artifacts.
+    Implementation details of the noise generation kernel are not provided in sources.
     """
-    # Define frequencies based on group type to ensure stability and distinct roles
-    # Exact frequency values are implementation-specific but must be small/stable
-    if group_type == "macro":
-        freqs = [0.1, 0.2] # Example low frequencies for outlines
-    elif group_type == "body":
-        freqs = [0.3, 0.5] # Example mid frequencies for fill
-    elif group_type == "edge":
-        freqs = [0.6, 0.8] # Example higher frequencies for detail
-    else: # flow
-        freqs = [0.2, 0.4] # Example frequencies for disturbance
-    
-    lattices = []
-    for freq in freqs:
-        # Generate a 2D or 3D noise lattice using a standard noise function (e.g., Perlin or Value)
-        # The noise function should be tileable if required
-        lattice = generate_tileable_noise(resolution, freq, rng)
-        lattices.append(lattice)
-    
-    return tuple(lattices)
+    # Placeholder for the actual noise lattice generation logic
+    # which uses the group-specific frequency constraints.
+    pass
 
-def generate_cartoon_noise_set(rng: np.random.Generator, resolution: int) -> _CartoonNoiseSet:
-    """
-    Generates the complete set of cartoon noise lattices.
-    """
-    macro_lattices = _make_noise_lattices("macro", rng, resolution)
-    body_lattices = _make_noise_lattices("body", rng, resolution)
-    edge_lattices = _make_noise_lattices("edge", rng, resolution)
-    flow_lattices = _make_noise_lattices("flow", rng, resolution)
+def generate_cartoon_noise_lattices(params: MaskParameters) -> _CartoonNoiseSet:
+    if params.resolution not in (512, 1024, 2048):
+        raise ValueError("Resolution must be 512, 1024, or 2048.")
+    if params.global_max_cm <= params.global_min_cm:
+        raise ValueError("Max height must be greater than min height.")
+    if not (0 <= params.coverage_percent <= 100):
+        raise ValueError("Coverage percent must be between 0 and 100.")
+    
+    rng = np.random.default_rng(params.seed)
+    
+    # Generate lattices for each group
+    macro_lattices = _make_noise_lattices("macro", params, rng)
+    body_lattices = _make_noise_lattices("body", params, rng)
+    edge_lattices = _make_noise_lattices("edge", params, rng)
+    flow_lattices = _make_noise_lattices("flow", params, rng)
     
     return _CartoonNoiseSet(
         macro_lattices=macro_lattices,
@@ -92,29 +100,25 @@ def generate_cartoon_noise_set(rng: np.random.Generator, resolution: int) -> _Ca
 ```
 
 **Edge Cases and Pitfalls:**
-- **Fixed-Direction Ripples:** If frequencies are not carefully chosen, the noise may exhibit visible directional artifacts. The method explicitly avoids this by using specific, non-harmonic frequencies for each group [S1, unofficial].
-- **Stability:** High-frequency noise in macro or body groups can lead to visual instability. Frequencies must be kept low enough to ensure smooth, stable outlines and fills [S1, unofficial].
+-   **Resolution Constraints:** Only 512, 1024, and 2048 are supported [S1, unofficial].
+-   **Height Bounds:** `global_max_cm` must be strictly greater than `global_min_cm` [S1, unofficial].
+-   **Artifact Avoidance:** Frequencies must be carefully selected per group to prevent fixed-direction ripple artifacts [S1, unofficial].
 
 ## Subtopics
 
 ### Cartoon Flow Noise Generation
-This variant computes a coherent flow field by combining the flow, macro, and body noise channels. It is used to drive advection or distortion in the cloud simulation.
-- **Step 1:** Compute the initial coherent flow by taking a weighted sum of the flow, macro, and body lattices: `coherent = 0.58 * flow + 0.27 * macro + 0.15 * body` [S1, unofficial].
-- **Step 2:** Clip the result to the range `[0.0, 1.0]` [S1, unofficial].
-- **Step 3:** Modulate the clipped value around the center value `0.5` by a `strength` parameter: `result = 0.5 + (coherent - 0.5) * strength` [S1, unofficial].
-- **Step 4:** Clip the final result to `[0.0, 1.0]` to ensure it remains a valid flow value [S1, unofficial].
-- **When to choose:** Use this when you need a unified, coherent flow field that respects the large-scale structure (macro/body) while being influenced by the dedicated flow noise. It is distinct from using raw flow noise alone as it integrates the cloud's shape into the flow direction.
+A variant that computes a coherent flow field by combining the generated lattices. It clips the weighted sum of flow, macro, and body noise channels: `coherent = np.clip(0.58 * flow + 0.27 * macro + 0.15 * body, 0.0, 1.0)` [S1, unofficial]. It then modulates this coherent flow around the center value 0.5 by a strength parameter: `return np.clip(0.5 + (coherent - 0.5) * strength, 0.0, 1.0)` [S1, unofficial]. This is used to drive disturbance in the cloud volume.
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of lattice points and the number of octaves/groups. Generation is a one-time precomputation step.
-- **Memory Complexity:** Proportional to the resolution squared (for 2D) or cubed (for 3D) times the number of lattices (4 groups * multiple frequencies).
-- **Strengths:** Produces stable, artifact-free noise suitable for stylized rendering. The separation of concerns (macro/body/edge/flow) allows for fine-tuned control over the cloud's appearance.
-- **Limitations:** Requires precomputation of multiple lattices. The specific frequency parameters are implementation-dependent and may need tuning for different resolutions or scene scales.
-- **When to use:** When rendering cartoon-style clouds where stability and distinct visual layers (outline, fill, detail) are prioritized over photorealistic turbulence.
-- **When not to use:** For photorealistic volumetric clouds where continuous, high-frequency turbulence is required without the blocky, stylized aesthetic.
+-   **Time Complexity:** Not given in the sources.
+-   **Memory Complexity:** Not given in the sources.
+-   **Strengths:** Produces stable, tileable noise suitable for cartoon-style rendering; separates concerns (outline, fill, detail, flow) for artistic control.
+-   **Limitations:** Requires specific resolution support; relies on hardcoded legacy constants for height rules if not explicitly configured.
+-   **When to use:** When generating stylized, non-photorealistic cloud volumes.
+-   **When not to use:** When photorealistic, single-field noise is sufficient.
 
 ## Background
-This method originates from the "Noise-Cloud" project by mingtu149411, an unofficial implementation focused on procedural cloud generation with a cartoon aesthetic [S1, unofficial]. It was developed to address the visual artifacts (ripples) and lack of structural control in standard noise functions when applied to stylized cloud rendering. The separation into macro, body, edge, and flow groups is a design choice specific to this project to achieve a clean, outlined cloud look.
+Originated in the open-source project `Noise-Cloud` by mingtu149411 [S1, unofficial]. The method is designed to address the visual artifacts of standard noise in cloud rendering by decomposing the noise field into specialized components.
 
 ## Sources
 [S1] mingtu149411/Noise-Cloud, https://github.com/mingtu149411/Noise-Cloud, fetched 2026-10-27 (unofficial)

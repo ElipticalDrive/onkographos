@@ -1,0 +1,214 @@
+--- v004.md
++++ v005.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The Compact Pointer Tree is a tree-based data structure and traversal algorithm designed for the interactive visualization of terabyte-scale RGBA volumetric data with voxel-level details [S1][S2, unofficial]. It solves the problem of rendering massive, sparse volumes on GPUs by combining wavelet-based color compression with compact 8-bit relative pointers [S1][S2, unofficial]. Unlike standard octrees that use fixed 8 children, this structure uses a variable branching factor $N$ ($2 \le N \le 6$) to optimize memory usage, enabling real-time frame rates for 8K resolution volumes [S1][S2, unofficial]. It builds on [Tree-based structures (Octree, Pointer Tree, Sparse Voxel DAG)](4139-tree-based-structures-octree-pointer-tree-sparse-voxel-dag.md) by introducing recursive color attribute compression and hierarchical DDA traversal that avoids full root traversal for subsequent accesses [S1][S2, unofficial].
++The Compact Pointer Tree is a tree-based data structure and traversal algorithm designed for the interactive visualization of terabyte-scale RGBA volumetric data with voxel-level details [S1][S2, unofficial]. It solves the problem of rendering massive, sparse volumes on GPUs by combining wavelet-based color compression with compact 8-bit relative pointers [S1][S2, unofficial]. Unlike standard octrees that use a fixed branching factor of 8, this structure uses a variable branching factor $N$ ($2 \le N \le 6$) to optimize memory usage, enabling real-time frame rates for 8K resolution volumes [S1][S2, unofficial]. It builds on [Tree-based structures (Octree, Pointer Tree, Sparse Voxel DAG)](4139-tree-based-structures-octree-pointer-tree-sparse-voxel-dag.md) by introducing recursive color attribute compression and hierarchical DDA traversal that avoids full root traversal for subsequent accesses [S1][S2, unofficial].
+ 
+ ## How it works
+@@ -78,122 +78,118 @@
+ 
+ ### Pseudocode
+-
+ ```python
++class Node:
++    def __init__(self):
++        self.min_color = 0.0
++        self.ave_color = 0.0
++        self.max_color = 0.0
++        self.child_masks = []
++        self.base_address = 0
++        self.compressed_max = 0.0
++        self.compressed_ave = 0.0
++        self.compressed_min = 0.0
++        self.sign_bit = 0
++        self.children = []
++        self.is_leaf_flag = False
++
+ def build_compact_pointer_tree(input_data, N):
+-    """
+-    Builds the Compact Pointer Tree in two passes.
+-    :param input_data: Terabyte-scale RGBA volumetric data
+-    :param N: Branching factor (2 <= N <= 6)
+-    :return: Root node of the compressed tree
+-    """
++    node_map = {}
++    level = 0
+     # First Pass: Node Creation
+-    node_map = {}  # Hashmap: key=(level, x, y, z), value=node_data
+-    
+-    # Build Level 0
+-    level = 0
+-    # Parallel job: process blocks of input data
+-    for block in parallel_blocks(input_data, N):
+-        node = create_level_0_node(block, N)
+-        key = (level, block.x, block.y, block.z)
+-        node_map[key] = node
+-        
+-    # Build higher levels recursively
+-    while not is_root(level):
++    for block in input_data.blocks(N):
++        node = Node()
++        node.min_color = min(block.colors)
++        node.ave_color = sum(block.colors) / len(block.colors)
++        node.max_color = max(block.colors)
++        node.child_masks = compute_child_masks(block, N)
++        node_map[(level, block.x, block.y, block.z)] = node
++
++    while not is_root_level(level, input_data.max_depth):
+         level += 1
+         next_level_map = {}
+-        # Parallel job: process nodes from previous level
+         for key, parent_node in node_map.items():
+             child_nodes = get_children(parent_node, N)
+-            new_node = create_internal_node(child_nodes, N)
+-            new_key = (level, new_node.x, new_node.y, new_node.z)
+-            next_level_map[new_key] = new_node
++            new_node = Node()
++            new_node.min_color = min(c.min_color for c in child_nodes)
++            new_node.ave_color = sum(c.ave_color for c in child_nodes) / len(child_nodes)
++            new_node.max_color = max(c.max_color for c in child_nodes)
++            new_node.child_masks = compute_child_masks(child_nodes, N)
++            next_level_map[(level, new_node.x, new_node.y, new_node.z)] = new_node
+         node_map = next_level_map
+-        
+-    root = node_map[root_key]
+-    
++
++    root = node_map[(level, 0, 0, 0)]
+     # Second Pass: Compression
+     compress_nodes(root, N)
+-    
+     return root
+ 
+-def create_level_0_node(block, N):
+-    """
+-    Creates a Level 0 node from input data block.
+-    """
+-    node = Node()
+-    node.min_color = compute_min(block)
+-    node.ave_color = compute_average(block)
+-    node.max_color = compute_max(block)
+-    node.child_masks = compute_child_masks(block, N)
+-    # Store initial 32/64-bit types
+-    return node
+-
+-def create_internal_node(child_nodes, N):
+-    """
+-    Creates an internal node from child nodes.
+-    """
+-    node = Node()
+-    node.min_color = compute_min(child_nodes)
+-    node.ave_color = compute_average(child_nodes)
+-    node.max_color = compute_max(child_nodes)
+-    node.child_masks = compute_child_masks(child_nodes, N)
+-    return node
+-
+ def compress_nodes(node, N):
+-    """
+-    Recursively compresses color attributes using wavelet transform.
+-    """
+-    if is_leaf(node):
++    if node.is_leaf_flag:
+         return
+-    
+-    # Compress max, min, ave using local compression
+-    # Requires knowledge of one level above (handled by preprocessor seeking file handles)
+-    node.compressed_max = wavelet_compress(node.max_color)
+-    node.compressed_ave = wavelet_compress(node.ave_color)
+-    node.compressed_min = wavelet_compress(node.min_color)
+-    
+-    # Store sign bit for reconstruction
++    node.compressed_max = wavelet_transform(node.max_color)
++    node.compressed_ave = wavelet_transform(node.ave_color)
++    node.compressed_min = wavelet_transform(node.min_color)
+     node.sign_bit = determine_sign_bit(node)
+-    
+-    # Recurse
+     for child in node.children:
+         compress_nodes(child, N)
+ 
+ def reconstruct_voxel(node, compressed_value, sign_bit):
+-    """
+-    Reconstructs a voxel value from compressed data.
+-    """
+     if sign_bit == 0:
+-        reconstructed = (node.max_color - node.ave_color) * compressed_value + node.ave_color
++        return (node.max_color - node.ave_color) * compressed_value + node.ave_color
+     else:
+-        reconstructed = (node.ave_color - node.min_color) * compressed_value + node.min_color
+-    return reconstructed
++        return (node.ave_color - node.min_color) * compressed_value + node.min_color
+ 
+ def traverse_hierarchical_dda(root, ray_origin, ray_direction):
+-    """
+-    Traverses the tree using hierarchical DDA.
+-    """
+-    # Initial traversal to bottom
+     stack = []
+     current_node = root
+-    while not is_leaf(current_node):
++    # Initial traversal to bottom
++    while not current_node.is_leaf_flag:
+         stack.append(current_node)
+-        current_node = get_next_node_in_dda(current_node, ray_origin, ray_direction)
+-    
+-    # Process leaf nodes
++        current_node = step_dda(current_node, ray_origin, ray_direction)
+     process_leaf(current_node)
+-    
++
+     # Backtrack for subsequent accesses
+     while stack:
+         current_node = stack.pop()
+-        # Find next node to descend from
+         next_node = find_next_node(current_node, ray_origin, ray_direction)
+-        if next_node:
++        if next_node is None:
++            continue
++        stack.append(next_node)
++        while not next_node.is_leaf_flag:
+             stack.append(next_node)
+-            # Descend to leaf
+-            while not is_leaf(next_node):
+-                stack.append(next_node)
+-                next_node = get_next_node_in_dda(next_node, ray_origin, ray_direction)
+-            process_leaf(next_node)
++            next_node = step_dda(next_node, ray_origin, ray_direction)
++        process_leaf(next_node)
++
++def step_dda(node, ray_origin, ray_direction):
++    # Standard hierarchical DDA step handling zero/negative directions and boundaries [G]
++    dx, dy, dz = ray_direction
++    if dx == 0: dx = 1e-9
++    if dy == 0: dy = 1e-9
++    if dz == 0: dz = 1e-9
++    # Determine next child index based on ray intersection with node boundaries [G]
++    next_idx = compute_dda_child_index(node, ray_origin, ray_direction)
++    return node.children[next_idx] if next_idx < len(node.children) else None
++
++def find_next_node(current_node, ray_origin, ray_direction):
++    # Backtrack logic: find next sibling or parent's sibling [G]
++    # Returns None if traversal is complete
++    return None # Placeholder for specific sibling traversal logic [G]
++
++def compute_child_masks(block, N):
++    return [1 if block.has_data(i) else 0 for i in range(N**3)]
++
++def get_children(parent_node, N):
++    return parent_node.children[:N**3]
++
++def is_root_level(level, max_depth):
++    return level >= max_depth
++
++def wavelet_transform(value):
++    return value * 0.5 # Simplified wavelet step [G]
++
++def determine_sign_bit(node):
++    return 1 if node.max_color > node.ave_color else 0
++
++def process_leaf(leaf_node):
++    pass # Process voxel data [G]
+ ```
+ 

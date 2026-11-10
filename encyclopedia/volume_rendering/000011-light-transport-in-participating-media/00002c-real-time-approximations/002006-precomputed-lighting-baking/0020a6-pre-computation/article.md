@@ -1,103 +1,94 @@
 # Pre-computation
 ## Overview
-Pre-computation is a technique used in volume rendering to accelerate the evaluation of light transport in participating media by calculating and storing intermediate radiance variables as voxel data [S1]. It solves the problem of redundant per-voxel integration during ray marching by pre-calculating terms such as direct radiance ($L_{ri}$), diffusion radiance ($L_{0d}, \vec{L}_{1d}$), and their density derivatives, allowing the renderer to reuse these values instead of recomputing them for every camera ray [S1]. Unlike [Hybrid Preshading with Postclassification](2171-hybrid-preshading-with-postclassification.md), which handles post-classification differently, this method explicitly pre-computes the diffusion components via a solver to enable efficient derivative-based shading [S1].
+Pre-computation is a method in volume rendering that calculates intermediate radiance variables and their density derivatives, storing them as voxels to avoid redundant calculations during the ray marching phase [S1]. It solves the problem of expensive volumetric illumination by pre-calculating terms such as incident radiance, absorption coefficients, and scattering sources, allowing the renderer to skip evaluating these complex integrals at each raymarching step [S1]. It is distinguished from full path-tracing methods by its reliance on precomputed segment data and from simple direct illumination by its inclusion of first-order inscattering approximations via a diffusion solver [S1].
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Initial diffusion radiance estimates $L_{0d}, \vec{L}_{1d}$ and their derivatives; scattering coefficient $\kappa$; absorption coefficient $\kappa_a$; total extinction coefficient $\kappa_t$; source term $S$ [S1].
-*   **Outputs:** Pre-computed radiance fields $L_{ri}, L_{0d}, \vec{L}_{1d}$ and their density derivatives $\partial_\pi L_{ri}, \partial_\pi L_{0d}, \partial_\pi \vec{L}_{1d}$ stored as voxels [S1].
+*   **Inputs:** Diffusion radiance fields $L_{0d}$, $\vec{L}_{1d}$ and their derivatives; scattering source $S$; extinction coefficient $\kappa$; absorption coefficient $\kappa_a$; total extinction coefficient $\kappa_t$.
+*   **Outputs:** Precomputed radiance field $L_{ri}$ and its derivative $\partial_\pi L_{ri}$; diffusion radiance fields $L_{0d}$, $\vec{L}_{1d}$ and their derivatives $\partial_\pi L_{0d}$, $\partial_\pi \vec{L}_{1d}$.
 
 **Data Structures:**
-The method stores fields as 3D grids (voxels) [S1]. Each voxel at position $v_{xu}$ holds scalar or vector values for the radiance terms and their derivatives [S1]. The exact bit-packing or memory layout is not given in the sources [S1].
+The method stores fields as voxels. Each voxel at position $v_{xu}$ contains scalar or vector values for the computed variables. The specific bit-packing or memory layout is not given in the sources [S1].
 
 **Steps:**
-The pre-computation is performed in parallel for all voxel positions $v_{xu}$ in the volume [S1].
-
-1.  **Compute Radiance and Derivatives ($L_{ri}$):** Calculate $L_{ri}(v_{xu}, \boldsymbol{\omega}')$ and its density derivative $\partial_\pi L_{ri}(v_{xu}, \boldsymbol{\omega}')$ using Equations 31 and 41 [S1]. The source notes that $L_{ri}$ involves estimating the integral of solid angle over the unit sphere $S^2$ using the Monte Carlo Method [S1].
-2.  **Compute Intermediate Variable $Q_{0ri}$:** Calculate $Q_{0ri}(v_{xu})$ and $\partial_\pi Q_{0ri}(v_{xu})$ using Equations 37 and 15 [S1].
-3.  **Compute Intermediate Variable $\vec{Q}_{1ri}$:** Calculate $\vec{Q}_{1ri}(v_{xu})$ and $\partial_\pi \vec{Q}_{1ri}(v_{xu})$ using Equations 38 and 16 [S1].
-4.  **Compute Extinction Coefficient $\kappa$:** Calculate $\kappa(v_{xu})$ and $\partial_\pi \kappa(v_{xu})$ using Equations 35 and 12 [S1].
-5.  **Compute Source Term $S$:** Calculate $S(v_{xu})$ and $\partial_\pi S(v_{xu})$ using Equations 36 and 14 [S1].
-6.  **Solve Diffusion Radiance:** Call `DiffusionSolver` to compute the final diffusion radiance $L_{0d}, \vec{L}_{1d}$ and their derivatives $\partial_\pi L_{0d}, \partial_\pi \vec{L}_{1d}$ using the pre-computed $S, \kappa, \kappa_a$ [S1]. The solver uses a Jacobi iterative method to solve the differential diffusion equation [S1].
-7.  **Return Results:** Return the fields $L_{ri}, L_{0d}, \vec{L}_{1d}$ and their derivatives [S1].
+1.  Iterate over each voxel position $v_{xu}$ in the volume in parallel.
+2.  Compute the incident radiance $L_{ri}(v_{xu}, \boldsymbol{\omega}')$ and its density derivative $\partial_\pi L_{ri}(v_{xu}, \boldsymbol{\omega}')$ using Equation 31 and Equation 41 from [S1].
+3.  Compute the intermediate variable $Q_{0ri}(v_{xu})$ and its derivative $\partial_\pi Q_{0ri}(v_{xu})$ using Equation 37 and Equation 15 from [S1].
+4.  Compute the intermediate variable $\vec{Q}_{1ri}(v_{xu})$ and its derivative $\partial_\pi \vec{Q}_{1ri}(v_{xu})$ using Equation 38 and Equation 16 from [S1].
+5.  Compute the extinction coefficient $\kappa(v_{xu})$ and its derivative $\partial_\pi \kappa(v_{xu})$ using Equation 35 and Equation 12 from [S1].
+6.  Compute the scattering source $S(v_{xu})$ and its derivative $\partial_\pi S(v_{xu})$ using Equation 36 and Equation 14 from [S1].
+7.  Call `DiffusionSolver` to compute the diffusion radiance $L_{0d}$, $\vec{L}_{1d}$ and their derivatives $\partial_\pi L_{0d}$, $\partial_\pi \vec{L}_{1d}$ using the pre-computed $S$, $\kappa$, and $\kappa_a$ [S1].
+8.  Return $L_{ri}$, $L_{0d}$, $\vec{L}_{1d}$ and their derivatives.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def Precomputation(L0d, dL0d, L1d, dL1d, S, kappa, kappa_a, kappa_t, voxels):
-    # Initialize output arrays matching the voxel grid dimensions
-    Lri = [None] * len(voxels)
-    dLri = [None] * len(voxels)
-    Q0ri = [None] * len(voxels)
-    dQ0ri = [None] * len(voxels)
-    Q1ri = [None] * len(voxels)
-    dQ1ri = [None] * len(voxels)
-    dkappa = [None] * len(voxels)
-    dS = [None] * len(voxels)
+def Precomputation(L0d, L1d, S, kappa, kappa_a, kappa_t):
+    # Initialize output fields for all voxels
+    Lri = Field()
+    dLri = Field()
+    L0d_out = Field()
+    L1d_out = Field()
+    dL0d_out = Field()
+    dL1d_out = Field()
 
-    # Parallel iteration over all voxel positions vxu [S1]
-    for i, vxu in enumerate(voxels):
-        # Compute Lri(vxu, ω') and ∂πLri(vxu, ω') [S1]
-        # Equation 31 and 41 from [S1] estimate solid angle integral over S^2 via Monte Carlo
-        # Sources do not provide explicit implementation details for Equations 31 and 41.
-        Lri[i], dLri[i] = 0.0, 0.0
+    # Iterate over each voxel position in parallel
+    for vxu in voxels:
+        # Compute incident radiance and its derivative
+        # Equations 31 and 41 from [S1]
+        Lri[vxu], dLri[vxu] = compute_incident_radiance_and_derivative(vxu)
 
-        # Compute Q0ri(vxu) and ∂πQ0ri(vxu) [S1]
-        # Equation 37 and 15 from [S1]
-        # Sources do not provide explicit implementation details for Equations 37 and 15.
-        Q0ri[i], dQ0ri[i] = 0.0, 0.0
+        # Compute intermediate variable Q0ri and its derivative
+        # Equations 37 and 15 from [S1]
+        Q0ri[vxu], dQ0ri[vxu] = compute_Q0ri_and_derivative(vxu)
 
-        # Compute Q1ri(vxu) and ∂πQ1ri(vxu) [S1]
-        # Equation 38 and 16 from [S1]
-        # Sources do not provide explicit implementation details for Equations 38 and 16.
-        Q1ri[i], dQ1ri[i] = 0.0, 0.0
+        # Compute intermediate variable Q1ri and its derivative
+        # Equations 38 and 16 from [S1]
+        Q1ri[vxu], dQ1ri[vxu] = compute_Q1ri_and_derivative(vxu)
 
-        # Compute κ(vxu) and ∂πκ(vxu) [S1]
-        # Equation 35 and 12 from [S1]
-        # Sources do not provide explicit implementation details for Equations 35 and 12.
-        dkappa[i] = 0.0
+        # Compute extinction coefficient and its derivative
+        # Equations 35 and 12 from [S1]
+        kappa[vxu], dkappa[vxu] = compute_extinction_and_derivative(vxu)
 
-        # Compute S(vxu) and ∂πS(vxu) [S1]
-        # Equation 36 and 14 from [S1]
-        # Sources do not provide explicit implementation details for Equations 36 and 14.
-        dS[i] = 0.0
+        # Compute scattering source and its derivative
+        # Equations 36 and 14 from [S1]
+        S[vxu], dS[vxu] = compute_scattering_source_and_derivative(vxu)
 
-    # Solve diffusion radiance and derivatives using pre-computed fields [S1]
-    # Uses Jacobi iterative method to solve differential diffusion equation [S1]
-    # Sources do not provide explicit implementation details for the solver.
-    L0d, dL0d, L1d, dL1d = DiffusionSolver(L0d, dL0d, L1d, dL1d, S, kappa, kappa_a)
+    # Solve for diffusion radiance and its derivatives
+    # Uses Jacobi iterative method as described in [S1]
+    L0d_out, dL0d_out, L1d_out, dL1d_out = DiffusionSolver(
+        L0d, dL0d, L1d, dL1d, S, kappa, kappa_a
+    )
 
-    return Lri, L0d, L1d, dLri, dL0d, dQ0ri, dQ1ri, dkappa, dS
-
-def DiffusionSolver(L0d, dL0d, L1d, dL1d, S, kappa, kappa_a):
-    # Sources do not provide explicit implementation details for the Jacobi iterative solver.
-    return L0d, dL0d, L1d, dL1d
+    return Lri, L0d_out, L1d_out, dLri, dL0d_out, dL1d_out
 ```
 
-**Parameters:**
-*   **Grid Resolution:** Not given in the sources [S1].
-*   **Monte Carlo Samples:** Not given in the sources [S1].
-*   **Jacobi Iterations:** Not given in the sources [S1].
+**Parameters and Edge Cases:**
+*   The Monte Carlo method is used to estimate the integral of solid angle over the unit sphere $S^2$ for $L_{ri}$ [S1]. The number of samples is not specified [S1].
+*   The `DiffusionSolver` uses a Jacobi iterative method [S1]. The number of iterations and convergence criteria are not given in the sources [S1].
+*   Precision issues with density derivatives $\partial_\pi$ are handled by the pre-computation step, but specific numerical stability guards are not detailed [S1].
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** The method relies on density derivatives ($\partial_\pi$). Numerical stability during the Jacobi iteration for diffusion radiance is critical [S1].
-*   **Boundaries:** Boundary conditions for the diffusion solver are not specified in the provided text [S1].
-*   **Degenerate Input:** If $\kappa_t$ is zero, division by zero may occur in extinction calculations [G].
 ## Subtopics
-
-### [Local Piecewise Integration for Light Propagation](2365-local-piecewise-integration-for-light-propagation.md)
-Local Piecewise Integration is a precomputation technique used in direct volume rendering to efficiently calculate high-resolution global shadows and light propagation from a distant light source through a participating medium. It solves the problem of expensive per-voxel absorption integration by approximating the opacity integral using short, reusable local segments, enabling interactive frame rates for large-scale volumes. Unlike object-order light propagation methods, it allows the light source to be positioned anywhere in the scene, including within the volume, and handles large scales via multi-resolution data management. Compared to simple blur-based approximations like Kniss et al. [KPH*03], it provides nearly physically correct scattering effects.
-
 ## Operating characteristics
-*   **Time Complexity:** The pre-computation step is performed once per volume update or light change [S1]. It involves a parallel iteration over all voxels and a global diffusion solver [S1]. The exact complexity is not given, but the voxel loop scales linearly with the number of voxels $N$, plus the cost of the diffusion solver [G].
-*   **Memory Complexity:** Requires storing multiple fields ($L_{ri}, L_{0d}, \vec{L}_{1d}$ and their derivatives) for every voxel [S1]. The exact memory footprint is not given [S1].
-*   **Measured Performance:** Not given in the sources [S1].
-*   **Strengths:** Eliminates redundant calculations during ray marching by reusing pre-computed voxel data [S1]. Enables efficient computation of radiance derivatives for density-based shading [S1].
-*   **Limitations:** Requires significant memory to store the pre-computed fields [S1].
-*   **When to Use:** When rendering participating media with density-dependent shading effects where ray marching is performed frequently [S1].
-*   **When Not to Use:** When memory is constrained or the volume changes dynamically every frame without pre-computation updates [G].
+**Time and Memory Complexity:**
+The pre-computation step requires iterating over all voxels in parallel, making it $O(N)$ with respect to the number of voxels $N$ [S1]. The `DiffusionSolver` involves iterative solving, the complexity of which depends on the convergence rate of the Jacobi method [S1]. Memory usage is proportional to the number of voxels, storing multiple fields ($L_{ri}$, $L_{0d}$, $\vec{L}_{1d}$, and their derivatives) [S1].
+
+**Measured Performance:**
+Not given in the sources [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Eliminates redundant calculations during ray marching by storing intermediate variables as voxels [S1]. Allows for efficient reuse of precomputed values [S1].
+*   **Limitations:** Requires significant memory to store multiple radiance fields and their derivatives [S1]. The accuracy depends on the pre-computation of incident radiance and the diffusion solver's convergence [S1].
+
+**When to Use:**
+Use when rendering participating media where the lighting term is expensive to compute per-voxel during ray marching, and sufficient memory is available to store the precomputed fields [S1].
+
 ## Background
-*   **Origin:** The method is described in "A Differential Diffusion Theory for Participating Media" [S1].
-*   **Usage:** Used in real-time approximations of light transport in participating media [S1].
+**Origin:**
+The method is described in "A Differential Diffusion Theory for Participating Media" [S1].
+
+**History and Development:**
+The method incorporates a pre-computation step to address challenges in rendering participating media and computing radiance derivatives [S1]. It builds on differential diffusion theory [S1].
+
 ## Sources
 [S1] A Differential Diffusion Theory for Participating Media, https://doi.org/10.1111/cgf.14956, fetched 2026-10-30

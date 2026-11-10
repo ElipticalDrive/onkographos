@@ -1,0 +1,184 @@
+--- v006.md
++++ v007.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Ambient Occlusion via Shadow Rays approximates the lack of secondary (reflected) light rays by evaluating the geometric obscurance of a point $\mathbf{p}$ within or on the boundary of a volume [S1, unofficial]. It solves the problem of flat, unshaded volume appearances by darkening crevices and areas shielded from the environment, providing a view-independent shading term that can be combined with arbitrary direct illumination [S1, unofficial].
++Ambient Occlusion via Shadow Rays approximates the lack of secondary (reflected) light rays by evaluating the geometric obscurance of a point $\mathbf{p}$ within or on the boundary of a volume [S1, unofficial]. It solves the problem of flat, unshaded volume appearances by darkening crevices and areas shielded from the environment, providing a view-independent shading term that can be combined with arbitrary direct illumination [S1, unofficial]. The method builds on [Shadow Ray Casting](2796-shadow-ray-casting.md) by evaluating visibility along sampled hemisphere directions to modulate ambient lighting [S2, unofficial].
+ 
+ ## How it works
+@@ -41,27 +41,35 @@
+ ```python
+ import math
+-import random
++
++def normalize(v):
++    l = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    return (v[0]/l, v[1]/l, v[2]/l) if l > 0 else (0.0, 0.0, 0.0)
++
++def cross(a, b):
++    return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
++
++def clamp(x, lo, hi):
++    return max(lo, min(hi, x))
+ 
+ def sample_hemisphere_uniform(seed):
+-    """Deterministic pseudo-random hemisphere sample."""
+-    random.seed(seed)
+-    u1 = random.random()
+-    u2 = random.random()
+-    z = 1.0 - 2.0 * u2
++    u1 = (seed * 2654435761) & 0xFFFFFFFF
++    u2 = ((seed + 12345) * 2654435761) & 0xFFFFFFFF
++    u1_norm = (u1 & 0xFFFFFF) / 16777215.0
++    u2_norm = (u2 & 0xFFFFFF) / 16777215.0
++    z = 1.0 - 2.0 * u2_norm
+     r = math.sqrt(1.0 - z * z)
+-    phi = 2.0 * math.pi * u1
+-    return math.cos(phi) * r, math.sin(phi) * r, z
++    phi = 2.0 * math.pi * u1_norm
++    return (math.cos(phi) * r, math.sin(phi) * r, z)
+ 
+ def sample_hemisphere_cosine(seed):
+-    """Deterministic pseudo-random cosine-weighted hemisphere sample."""
+-    random.seed(seed)
+-    u1 = random.random()
+-    u2 = random.random()
+-    r = math.sqrt(u1)
+-    phi = 2.0 * math.pi * u2
+-    return r * math.cos(phi), r * math.sin(phi), u1
++    u1 = (seed * 2654435761) & 0xFFFFFFFF
++    u2 = ((seed + 12345) * 2654435761) & 0xFFFFFFFF
++    u1_norm = (u1 & 0xFFFFFF) / 16777215.0
++    u2_norm = (u2 & 0xFFFFFF) / 16777215.0
++    r = math.sqrt(u1_norm)
++    phi = 2.0 * math.pi * u2_norm
++    return (r * math.cos(phi), r * math.sin(phi), u1_norm)
+ 
+-def ray_march_density(pos, dir, volume_texture, max_dist, t_min, t_max):
+-    """Simple ray marcher returning distance to first threshold hit."""
++def ray_march_density(pos, dir, volume_texture, max_dist):
+     step_size = 0.01
+     dist = 0.0
+@@ -69,5 +77,5 @@
+         sample_pos = (pos[0] + dir[0]*dist, pos[1] + dir[1]*dist, pos[2] + dir[2]*dist)
+         density = volume_texture.sample(sample_pos)
+-        if t_min <= density <= t_max:
++        if density > 0.0:
+             return dist
+         dist += step_size
+@@ -75,17 +83,12 @@
+ 
+ def compute_ambient_occlusion_density(pos, normal, volume_texture, num_rays=10, num_samples_per_ray=5, t_min=0.0, t_max=1.0, min_slices=(0,0,0), max_slices=(1,1,1)):
+-    """Computes density-weighted ambient occlusion [S4, unofficial]."""
+-    # 1. Tangent Basis Construction [S6, unofficial]
+-    if abs(normal.z) > 0.5:
+-        t0 = (-normal.y, normal.x, 0.0)
++    if abs(normal[2]) > 0.5:
++        t0 = (-normal[1], normal[0], 0.0)
+     else:
+         t0 = (1.0, 0.0, 0.0)
+     t0 = normalize(t0)
+     t1 = cross(normal, t0)
+-
+     occlusion_sum = 0.0
+     delta = 0.01
+-
+-    # 2. Ray Casting Loop [S4, unofficial]
+     for i in range(num_rays):
+         dir_local = sample_hemisphere_uniform(i)
+@@ -93,43 +96,26 @@
+                      t0[1]*dir_local[0] + t1[1]*dir_local[1] + normal[1]*dir_local[2],
+                      t0[2]*dir_local[0] + t1[2]*dir_local[1] + normal[2]*dir_local[2])
+-
+         offset = (dir_world[0]*delta, dir_world[1]*delta, dir_world[2]*delta)
+         sample_pos = (pos[0]+offset[0], pos[1]+offset[1], pos[2]+offset[2])
+-
+-        # 3. Sample along ray [S4, unofficial]
+         for j in range(num_samples_per_ray):
+             sample_pos = (sample_pos[0]+offset[0], sample_pos[1]+offset[1], sample_pos[2]+offset[2])
+-
+-            # Boundary check [S4, unofficial]
+             if sample_pos[0] < min_slices[0] or sample_pos[1] < min_slices[1] or sample_pos[2] < min_slices[2]:
+                 break
+             if sample_pos[0] > max_slices[0] or sample_pos[1] > max_slices[1] or sample_pos[2] > max_slices[2]:
+                 break
+-
+-            # Sample density [S4, unofficial]
+             neighbor_intensity = volume_texture.sample(sample_pos)
+-
+-            # Check density threshold [S4, unofficial]
+             if t_min <= neighbor_intensity <= t_max:
+-                # Accumulate attenuation [S4, unofficial]
+                 occlusion_sum += -7.0 * neighbor_intensity / (num_rays * num_samples_per_ray)
+-
+-    # 4. Final Calculation [S4, unofficial]
+     ao_factor = clamp(2.0 * math.exp(occlusion_sum), 0.0, 1.0)
+     return ao_factor
+ 
+ def compute_ao_radiance(pos, normal, volume_texture, ambient_color, constant_color, ambient_exponent=1.3, max_dist=24.0):
+-    """Computes final AO radiance contribution [S6, unofficial]."""
+     output_color = (0.0, 0.0, 0.0)
+-
+-    # Tangent Basis [S6, unofficial]
+-    if abs(normal.z) > 0.5:
+-        t0 = (-normal.y, normal.x, 0.0)
++    if abs(normal[2]) > 0.5:
++        t0 = (-normal[1], normal[0], 0.0)
+     else:
+         t0 = (1.0, 0.0, 0.0)
+     t0 = normalize(t0)
+     t1 = cross(normal, t0)
+-
+-    # Sample Hemisphere [S6, unofficial]
+     for k in range(2):
+         dir_local = sample_hemisphere_cosine(k)
+@@ -137,16 +123,8 @@
+                      t0[1]*dir_local[0] + t1[1]*dir_local[1] + normal[1]*dir_local[2],
+                      t0[2]*dir_local[0] + t1[2]*dir_local[1] + normal[2]*dir_local[2])
+-
+-        # Incoming light approximation [S6, unofficial]
+         incoming = dir_world[1] * 0.2 + 0.8
+-
+-        # Raycast for distance [S6, unofficial]
+-        hit_dist = ray_march_density(pos, dir_world, volume_texture, max_dist, 0.0, 1.0)
+-
+-        # Falloff [S6, unofficial]
++        hit_dist = ray_march_density(pos, dir_world, volume_texture, max_dist)
+         t = hit_dist / max_dist
+-        t = pow(t, ambient_exponent)
+-
+-        # Accumulate [S6, unofficial]
++        t = math.pow(t, ambient_exponent)
+         output_color = (output_color[0] + ambient_color[0] * (incoming * t),
+                         output_color[1] + ambient_color[1] * (incoming * t),
+@@ -155,5 +133,4 @@
+                         output_color[1] + constant_color[1] * (incoming * max(1.0, hit_dist * 0.25)),
+                         output_color[2] + constant_color[2] * (incoming * max(1.0, hit_dist * 0.25)))
+-
+     return (output_color[0] / 2.0, output_color[1] / 2.0, output_color[2] / 2.0)
+ ```
+@@ -175,8 +152,8 @@
+ 
+ ### [Evans Ambient Occlusion](1083-evans-ambient-occlusion.md)
+-Evans Ambient Occlusion is a technique for approximating ambient occlusion by sampling a Signed Distance Field (SDF) along the surface normal to estimate sky visibility. It differs from its siblings [Incremental Local Ambient Occlusion](1089-incremental-local-ambient-occlusion.md) and [Zhukov Ambient Occlusion](2245-zhukov-ambient-occlusion.md) by relying on a global distance field texture rather than local geometric primitives or hemisphere sampling, making it suitable for dynamic or deforming scenes where explicit geometry is unavailable or expensive to query.
++Evans Ambient Occlusion approximates ambient occlusion by sampling a Signed Distance Field (SDF) along the surface normal to estimate sky visibility. It measures occlusion by comparing the distance field value at sampled points against the actual distance traveled from the surface.
+ 
+ ### [Incremental Local Ambient Occlusion](1089-incremental-local-ambient-occlusion.md)
+-Incremental Local Ambient Occlusion (LAO) is a shading model for direct volume rendering that enhances ambient lighting by computing incident light from a local spherical neighborhood around each voxel, rather than using a constant ambient factor or global shadows. It solves the problem of missing local shadowing and context in volume rendering while avoiding global shadows that obscure relevant internal structures. Unlike traditional "all-or-nothing" ambient occlusion methods that treat voxels as opaque blockers, LAO incorporates semitransparency by integrating opacity along rays, and it uses an incremental update scheme to allow interactive frame rates during computation.
++Incremental Local Ambient Occlusion (LAO) is a shading model for direct volume rendering that computes ambient lighting by integrating attenuated density over a local spherical neighborhood around each voxel, rather than using a constant ambient factor or global shadow rays. It solves the problem of missing local shadowing and context in volume visualization while avoiding global shadows that obscure relevant internal structures. Unlike its siblings, LAO-I computes the occlusion map incrementally, updating one ray direction per frame and storing the result in an ambient light texture using OpenGL blend operations, which allows for interactive user interaction during the computation phase.
+ 
+ ### [Solid Angle Early Termination for Ambient Occlusion](1146-solid-angle-early-termination-for-ambient-occlusion.md)
+@@ -190,10 +167,10 @@
+ 
+ ### Ambient Occlusion Field
+-A storage and reconstruction method where the reciprocal of a quadratic polynomial encodes how ambient occlusion changes with distance. Coefficients are stored in a cube map [S3, unofficial].
++A storage and reconstruction method where the reciprocal of a quadratic polynomial encodes how ambient occlusion changes with distance [S3, unofficial]. Coefficients are stored in a cube map [S3, unofficial].
+ *   **Layout:** Data structure is a cube map storing coefficients of the reciprocal of a quadratic polynomial [S3, unofficial].
+ *   **Pitfall:** Requires reconstructing the ambient occlusion factor at runtime, which incurs a performance penalty [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_R \cdot N_S \cdot T_{ray})$, where $N_R$ is the number of rays, $N_S$ is samples per ray, and $T_{ray}$ is the cost of ray traversal/sampling in the volume. With $N_R=64$ and $N_S=5$, this is computationally expensive for real-time without acceleration [S4, unofficial][S5].
++*   **Time Complexity:** $O(N_R \cdot N_S \cdot T_{ray})$, where $N_R$ is the number of rays, $N_S$ is samples per ray, and $T_{ray}$ is the cost of ray traversal/sampling in the volume [G]. With $N_R=64$ and $N_S=5$, this is computationally expensive for real-time without acceleration [S4, unofficial][S5].
+ *   **Memory Complexity:** Not given in the sources. Methods may store occlusion data in textures, volumes, or cube maps [S3, unofficial].
+ *   **Measured Performance:** On high-resolution sparse voxel DAGs, shooting 64 shadow rays per pixel provides high quality but requires denoising for low sample counts [S5]. Hardware-accelerated ray tracing (DXR, Vulkan RT) allows implementation of the original formulation, but 1–2 samples per pixel are often used in practice due to cost, leading to noise [S3, unofficial].

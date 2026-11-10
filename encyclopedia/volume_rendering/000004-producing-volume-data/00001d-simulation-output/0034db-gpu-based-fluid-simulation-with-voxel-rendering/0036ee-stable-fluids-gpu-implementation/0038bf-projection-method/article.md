@@ -1,0 +1,111 @@
+# Projection Method
+
+Also called: Hodge Decomposition, Pressure Projection
+
+## Overview
+The Projection Method enforces the incompressibility constraint (zero divergence) on a fluid velocity field by subtracting the gradient of a pressure field [S1, unofficial]. It sets itself apart from sibling methods like Free-Slip Boundary Condition Enforcement by directly addressing the mass conservation violation inherent in intermediate velocity steps, rather than merely adjusting boundary values [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A velocity field $\mathbf{u}^*$ (intermediate, non-divergence-free) on a 3D grid of size $N \times N \times N$.
+*   Output: A divergence-free velocity field $\mathbf{u}$ and a pressure field $p$.
+
+**Data Structures:**
+*   Grid: 3D array of floats, indexed by $IX(x, y, z) = x + y \cdot N + z \cdot N^2$.
+*   Pressure $p$: Scalar field on the same grid.
+*   Velocity $\mathbf{u}$: Vector field (components $u, v, w$) on the same grid.
+
+**Steps:**
+1.  **Solve Poisson Equation:** Compute the pressure field $p$ that satisfies $\nabla^2 p = \nabla \cdot \mathbf{u}^*$. This is typically done using Jacobi iteration for 20-40 iterations [S1, unofficial].
+2.  **Project Velocity:** Subtract the gradient of the pressure field from the intermediate velocity to obtain the divergence-free velocity:
+    $$ \mathbf{u} = \mathbf{u}^* - \nabla p $$
+    The gradient is computed using finite differences. For the $x$-component:
+    $$ u_{i,j,k} = u^*_{i,j,k} - \frac{p_{i+1,j,k} - p_{i-1,j,k}}{2\Delta x} $$
+    (Similar formulas apply for $v$ and $w$ components).
+
+**Parameters:**
+*   Jacobi Iterations: 20-40 [S1, unofficial].
+*   Grid Size $N$: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   Boundary Conditions: The pressure boundary conditions must be consistent with the velocity boundary conditions. For free-slip boundaries, the normal derivative of pressure is zero. For no-slip, the pressure gradient must account for the fixed velocity [S1, unofficial].
+*   Corner Handling: Corners require special handling to maintain consistency. A simplified approach averages neighboring values [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def projection_method(u_star, N, iterations=30):
+    """
+    Enforce incompressibility on velocity field u_star.
+    :param u_star: 3D array of shape (N, N, N, 3) representing intermediate velocity
+    :param N: Grid dimension
+    :param iterations: Number of Jacobi iterations for pressure solve
+    :return: Divergence-free velocity field u
+    """
+    # Initialize pressure field
+    p = [[[[0.0 for _ in range(N)] for _ in range(N)] for _ in range(N)] for _ in range(3)]
+    
+    # Compute divergence of u_star
+    div = [[[[0.0 for _ in range(N)] for _ in range(N)] for _ in range(N)] for _ in range(3)]
+    for i in range(1, N-1):
+        for j in range(1, N-1):
+            for k in range(1, N-1):
+                # Central difference for divergence
+                div[i][j][k][0] = (u_star[i+1][j][k][0] - u_star[i-1][j][k][0]) / 2.0
+                div[i][j][k][1] = (u_star[i][j+1][k][1] - u_star[i][j-1][k][1]) / 2.0
+                div[i][j][k][2] = (u_star[i][j][k+1][2] - u_star[i][j][k-1][2]) / 2.0
+                
+    # Jacobi iteration to solve Poisson equation: Laplacian(p) = div
+    for _ in range(iterations):
+        new_p = [[[[0.0 for _ in range(N)] for _ in range(N)] for _ in range(N)] for _ in range(3)]
+        for i in range(1, N-1):
+            for j in range(1, N-1):
+                for k in range(1, N-1):
+                    # Laplacian approximation
+                    laplacian = (p[i+1][j][k][0] + p[i-1][j][k][0] +
+                                 p[i][j+1][k][0] + p[i][j-1][k][0] +
+                                 p[i][j][k+1][0] + p[i][j][k-1][0] - 6.0 * p[i][j][k][0])
+                    new_p[i][j][k][0] = (laplacian + div[i][j][k][0] + div[i][j][k][1] + div[i][j][k][2]) / 6.0
+        p = new_p
+        
+    # Apply boundary conditions for pressure (simplified)
+    # For free-slip, normal derivative is zero. For no-slip, more complex.
+    # Here we assume zero Neumann for simplicity unless specified otherwise.
+    for i in range(N):
+        for j in range(N):
+            for k in range(N):
+                # Corners and edges handling would go here
+                pass
+                
+    # Subtract gradient of pressure from velocity
+    u = [[[[0.0 for _ in range(3)] for _ in range(N)] for _ in range(N)] for _ in range(N)]
+    for i in range(1, N-1):
+        for j in range(1, N-1):
+            for k in range(1, N-1):
+                u[i][j][k][0] = u_star[i][j][k][0] - (p[i+1][j][k][0] - p[i-1][j][k][0]) / 2.0
+                u[i][j][k][1] = u_star[i][j][k][1] - (p[i][j+1][k][0] - p[i][j-1][k][0]) / 2.0
+                u[i][j][k][2] = u_star[i][j][k][2] - (p[i][j][k+1][0] - p[i][j][k-1][0]) / 2.0
+                
+    return u
+```
+
+## Subtopics
+
+### [Neural Pressure Projection Solver](12463-neural-pressure-projection-solver.md)
+A neural network-based pressure projection solver for fluid simulation that predicts velocity updates ($Δu$) to enforce incompressibility, replacing traditional iterative solvers.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N^3 \cdot I)$, where $N$ is the grid dimension and $I$ is the number of Jacobi iterations.
+*   **Memory Complexity:** $O(N^3)$ for storing velocity and pressure fields.
+*   **Performance:** The method is computationally intensive due to the iterative pressure solve. Performance scales with grid resolution and the number of iterations required for convergence.
+*   **Strengths:** Ensures strict incompressibility, which is crucial for realistic fluid behavior.
+*   **Limitations:** The iterative nature can be slow for high-resolution simulations. Convergence depends on the grid structure and boundary conditions.
+*   **When to Use:** When incompressibility is critical and computational resources allow for iterative solving.
+*   **When Not to Use:** For real-time applications with very high resolutions where iterative solving is too slow.
+
+## Background
+The Projection Method is a fundamental technique in computational fluid dynamics (CFD) for solving the Navier-Stokes equations. It was popularized by Jos Stam in his work on stable fluids [S1, unofficial]. The method decomposes the velocity field into a divergence-free component and a gradient component, allowing for efficient enforcement of the incompressibility constraint.
+
+## Sources
+[S1] tzhazuma/Fluid_simulation, https://github.com/tzhazuma/Fluid_simulation, fetched 2026-10-26 (unofficial)

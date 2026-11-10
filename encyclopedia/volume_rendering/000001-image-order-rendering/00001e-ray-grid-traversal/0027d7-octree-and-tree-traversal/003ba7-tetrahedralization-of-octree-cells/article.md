@@ -3,10 +3,10 @@
 Also called: Dual Tetrahedralization, Octree Tetrahedralization
 
 ## Overview
-Tetrahedralization of Octree Cells is a technique for generating a manifold isosurface from an adaptive octree by constructing a dual simplicial partition. It solves the problem of self-intersections and non-manifold vertices inherent in adaptive octrees by ensuring convexity and manifold topology through a specific dual structure [S1]. Unlike Dual Marching Tetrahedra (DMC), which can produce self-intersecting "flaps" because it does not strictly respect the primal octree grid's convexity, this method guarantees a manifold surface [S1]. Compared to Dual Contouring (DC), it samples the function at a higher effective resolution by utilizing extra samples on edges, faces, and cells, though at the cost of increased computation time [S1].
+Tetrahedralization of Octree Cells is a technique for generating a manifold isosurface from an adaptive octree by constructing a dual simplicial partition [S1]. It solves the problem of self-intersections and non-manifold vertices inherent in adaptive octrees by creating a dual structure that ensures convexity and manifold topology [S1]. Unlike Dual Marching Tetrahedra (DMC), which can produce self-intersecting "flaps" because it does not strictly respect the primal octree grid's convexity, this method guarantees a manifold surface [S1]. Compared to Dual Contouring (DC), it samples the function at a higher effective resolution by utilizing extra samples on edges, faces, and cells, though at the cost of increased computation time [S1].
 
 ## How it works
-The method constructs a tetrahedral mesh dual to the octree structure and applies a table-based contouring algorithm to extract the isosurface.
+The method constructs a tetrahedral mesh dual to the octree structure and applies a table-based contouring algorithm to extract the isosurface [S1].
 
 ### Inputs and Outputs
 *   **Input:** An adaptive octree where each node (cube) contains scalar field values at its vertices. The octree may be generated via bottom-up pruning or by refining cells where polygons intersect the signed distance function [S1].
@@ -14,18 +14,13 @@ The method constructs a tetrahedral mesh dual to the octree structure and applie
 
 ### Data Structures
 *   **Octree:** The primary data structure. Nodes represent cubes. No auxiliary data structures are required beyond the octree itself and the computed dual vertices [S1].
-*   **Dual Vertices:** For each cube, edge, and face in the octree, a dual vertex is computed. These vertices are typically placed to minimize the error of the piecewise linear approximation of the scalar field [S1].
+*   **Dual Vertices:** For each cube, edge, and face in the octree, a dual vertex is computed. These vertices are positioned using function values to minimize a four-dimensional error function [S1].
 
 ### Algorithm Steps
-1.  **Recursive Traversal:** Perform a recursive octree traversal (similar to Dual Contouring [S1]) to identify leaves surrounding minimal edges of the tree.
-2.  **Identify Minimal Edge:** For a given minimal edge, determine the cube at the deepest depth that contains this edge. Let this cube be $C$.
-3.  **Create Line Segments:** For the identified minimal edge, create two line segments:
-    *   One segment connecting the octree vertices of the minimal edge.
-    *   One segment connecting the dual vertex of the minimal edge to the dual vertex of the cube $C$ [S1].
-4.  **Form Triangles:** For each pair of face-adjacent cubes surrounding the minimal edge:
-    *   Identify the minimal face between these cubes.
-    *   Connect the two line segments (from Step 3) to the vertex dual to this minimal face.
-    *   This connection creates two triangles for each minimal face [S1].
+1.  **Recursive Traversal:** Perform a recursive octree traversal (similar to Dual Contouring) to identify leaves surrounding minimal edges of the tree [S1].
+2.  **Identify Minimal Edge:** For a given minimal edge, determine the cube at the deepest depth that contains this edge [S1].
+3.  **Create Line Segments:** For the identified minimal edge, create two line segments: one corresponding to the octree vertices of the minimal edge, and one connecting the dual vertex of the minimal edge to the dual vertex of the identified cube [S1].
+4.  **Form Triangles:** For each pair of face-adjacent cubes surrounding the minimal edge, identify the minimal face between them. Connect the two line segments to the vertex dual to this minimal face. This creates two triangles for each minimal face [S1].
 5.  **Form Tetrahedra:** Connect each of the triangles formed in Step 4 to the vertex dual to the cube they are adjacent to. This forms four tetrahedra for each face-adjacent cube [S1].
 6.  **Contouring:** Contour each tetrahedron using a table-based method based on the sign configuration of the tetrahedron's vertices. A simplex table is used, which has size $2m+1$ for dimension $m$ (in 3D, this is manageable) [S1].
 
@@ -33,110 +28,89 @@ The method constructs a tetrahedral mesh dual to the octree structure and applie
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def tetrahedralize_octree(octree, isosurface_value):
+def tetrahedralize_octree(octree, scalar_field, isosurface_value):
     """
     Generates a manifold isosurface from an octree using tetrahedralization.
     
     Args:
         octree: The root node of the adaptive octree.
-        isosurface_value: The scalar value defining the isosurface.
+        scalar_field: Function returning scalar values at any coordinate.
+        isosurface_value: The scalar threshold for contouring.
         
     Returns:
         A list of triangles forming the manifold surface.
     """
     triangles = []
     
-    # Helper to get dual vertex for a geometric entity (vertex, edge, face, cube)
-    # In practice, dual vertices are pre-computed or computed on-the-fly
-    # to minimize field approximation error [S1].
-    def get_dual_vertex(entity):
-        # Implementation detail: [G] Compute position based on scalar values
-        # at the entity's corners to minimize linear approximation error.
-        pass
+    def compute_dual_vertex(entity_type, entity_coords):
+        # [G] Standard implementation minimizes a 4D error function using
+        # scalar values at the entity's corners/edges/faces [S1].
+        # Returns a 3D coordinate.
+        return (0.0, 0.0, 0.0)
 
-    # Helper to contour a single tetrahedron
-    def contour_tetrahedron(tet, iso_val):
+    def simplex_contour(vertices, iso_val):
         """
         Contours a tetrahedron using a simplex table based on sign configuration.
-        Returns a list of triangles.
+        Returns a list of triangles (each triangle is a list of 3 vertices).
         """
-        signs = [1 if v > iso_val else -1 for v in tet.vertices]
-        # Map signs to simplex table index
-        # Table size is 2*m+1 for dimension m (here m=3)
-        # [G] Standard simplex contouring logic (e.g., from DK91)
-        return simplex_contour(signs, tet.vertices, iso_val)
+        signs = [1 if v > iso_val else -1 for v in vertices]
+        if all(s == 1 for s in signs) or all(s == -1 for s in signs):
+            return []
+        # Compute edge intersections
+        edges = [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
+        pts = []
+        for i, j in edges:
+            if signs[i] != signs[j]:
+                t = (iso_val - vertices[i]) / (vertices[j] - vertices[i])
+                pts.append(vertices[i] + t * (vertices[j] - vertices[i]))
+        # [G] Standard simplex table lookup for 3D maps sign patterns to triangle indices.
+        # We implement the core table-based logic directly.
+        pattern = tuple(signs)
+        tri_indices = {
+            (1,1,1,-1): [(0,1,2)], (1,1,-1,1): [(0,1,3)], (1,-1,1,1): [(0,2,3)], (-1,1,1,1): [(1,2,3)],
+            (1,1,-1,-1): [(0,1), (2,3)], (1,-1,1,-1): [(0,2), (1,3)], (1,-1,-1,1): [(0,3), (1,2)],
+            (-1,1,1,-1): [(0,1), (2,3)], (-1,1,-1,1): [(0,2), (1,3)], (-1,-1,1,1): [(0,3), (1,2)],
+            (1,-1,-1,-1): [(0,1,2), (0,1,3), (0,2,3)], (-1,1,-1,-1): [(0,1,2), (0,2,3), (1,2,3)],
+            (-1,-1,1,-1): [(0,1,2), (0,1,3), (1,2,3)], (-1,-1,-1,1): [(0,1,3), (0,2,3), (1,2,3)]
+        }.get(pattern, [])
+        return [[pts[a], pts[b], pts[c]] for a, b, c in tri_indices]
 
-    # Recursive traversal to find minimal edges and build tetrahedra
-    def process_node(node):
+    def traverse(node):
         if node.is_leaf():
-            # Leaf handling: [G] Standard DDA or voxel sampling might be used
-            # for volume rendering, but for isosurface extraction, we process
-            # the tetrahedra formed by the dual structure.
-            # The core logic below handles the dual construction for the
-            # minimal edges found during traversal.
-            pass
-        else:
-            for child in node.children:
-                process_node(child)
-        
-        # Process minimal edges within this node's context
-        # The traversal identifies minimal edges shared by children
+            return
+        for child in node.children:
+            traverse(child)
+        # Find minimal edges in this subtree
         minimal_edges = find_minimal_edges(node)
-        
         for edge in minimal_edges:
-            # Find the deepest cube containing this edge
+            # Identify cube at deepest depth containing the edge
             deepest_cube = find_deepest_cube_containing(edge, node)
-            
             # Get dual vertices
-            dual_edge = get_dual_vertex(edge)
-            dual_cube = get_dual_vertex(deepest_cube)
-            
-            # Identify face-adjacent cubes surrounding the edge
-            face_adjacent_pairs = get_face_adjacent_cubes(edge, deepest_cube)
-            
-            for cube1, cube2 in face_adjacent_pairs:
-                # Get dual vertex for the minimal face between cube1 and cube2
-                minimal_face = get_minimal_face(cube1, cube2)
-                dual_face = get_dual_vertex(minimal_face)
-                
-                # Create two triangles for the minimal face
-                # Connect dual_edge and dual_cube to dual_face
-                # This forms the base of the tetrahedra
-                tri1 = Triangle(dual_edge, dual_cube, dual_face)
-                tri2 = Triangle(dual_edge, dual_cube, dual_face) # Note: Source says "two triangles"
-                # [G] The source implies connecting the segments to the dual face vertex.
-                # Specifically: "connect the two line segments to the vertex dual to the minimal face"
-                # The two line segments are (octree_edge_vertices) and (dual_edge_dual_cube).
-                # This creates two triangles sharing the edge (dual_edge, dual_cube)?
-                # Or sharing the edge (octree_edge_vertices)?
-                # Source: "connect the two line segments to the vertex dual to the minimal face... creates two triangles"
-                # Let's assume the triangles are (v1, v2, dual_face) and (v3, v4, dual_face)
-                # where v1..v4 are the endpoints of the two segments.
-                
-                # Actually, the source says: "connect the two line segments to the vertex dual to the minimal face"
-                # Segment 1: Octree vertices of minimal edge (A, B)
-                # Segment 2: Dual vertex of minimal edge (D_e) to Dual vertex of cube (D_c)
-                # Connecting these to Dual Face (D_f) creates:
-                # Triangle (A, B, D_f) and Triangle (D_e, D_c, D_f)?
-                # No, "connect the two line segments TO the vertex".
-                # This implies edges (A, D_f), (B, D_f), (D_e, D_f), (D_c, D_f).
-                # And the existing segments (A,B) and (D_e, D_c).
-                # This forms two triangles: (A, B, D_f) and (D_e, D_c, D_f).
-                
-                # Then: "Connect each of these triangles to the vertex dual to the cube they are adjacent to"
-                # This forms tetrahedra.
-                
-                # Let's refine the tetrahedron construction:
-                # Tetrahedron 1: (A, B, D_f, D_c) ? Or (A, B, D_f, D_e)?
-                # Source: "forming four tetrahedra for each face-adjacent cube"
-                # This part is slightly ambiguous in the text.
-                # "For each pair of face-adjacent cubes... connect... to create two triangles...
-                # Connect each of these triangles to the vertex dual to the cube they are adjacent to."
-                
-                # Let's stick to the high-level description for the pseudocode structure.
-                pass
+            dual_edge = compute_dual_vertex("edge", edge)
+            dual_cube = compute_dual_vertex("cube", deepest_cube)
+            # Two line segments: octree edge vertices and dual edge to dual cube
+            octree_edge_verts = get_octree_vertices(edge)
+            seg1 = octree_edge_verts
+            seg2 = [dual_edge, dual_cube]
+            # Face-adjacent cubes surrounding the edge
+            adj_cubes = get_face_adjacent_cubes(edge, deepest_cube)
+            for cube1, cube2 in adj_cubes:
+                # Minimal face between cube1 and cube2
+                face = get_minimal_face(cube1, cube2)
+                dual_face = compute_dual_vertex("face", face)
+                # Connect segments to dual face vertex -> two triangles
+                tri1 = [seg1[0], seg1[1], dual_face]
+                tri2 = [seg2[0], seg2[1], dual_face]
+                # Connect each triangle to dual vertex of adjacent cube -> tetrahedra
+                tet1 = [tri1[0], tri1[1], tri1[2], compute_dual_vertex("cube", cube1)]
+                tet2 = [tri2[0], tri2[1], tri2[2], compute_dual_vertex("cube", cube1)]
+                tet3 = [tri1[0], tri1[1], tri1[2], compute_dual_vertex("cube", cube2)]
+                tet4 = [tri2[0], tri2[1], tri2[2], compute_dual_vertex("cube", cube2)]
+                # Contour each tetrahedron
+                for tet in [tet1, tet2, tet3, tet4]:
+                    triangles.extend(simplex_contour(tet, isosurface_value))
 
-    process_node(octree)
+    traverse(octree)
     return triangles
 ```
 
@@ -159,8 +133,8 @@ def tetrahedralize_octree(octree, isosurface_value):
 *   **Memory Complexity:** No auxiliary data structures are required beyond the octree itself and the dual vertices [S1].
 *   **Strengths:** Generates manifold surfaces; avoids self-intersections; recovers sharp features; extends easily to higher dimensions (simplex table size $2m+1$ vs MC's $2^m$) [S1].
 *   **Limitations:** Slower than DC and DMC; generates more triangles than DC (though fewer than DMC with triangulation improvement) [S1].
-*   **When to Use:** When a manifold surface is required from an adaptive octree and self-intersections from DMC are unacceptable.
-*   **When Not to Use:** When performance is critical and non-manifold artifacts are tolerable (use DC or DMC).
+*   **When to Use:** When a manifold surface is required from an adaptive octree and self-intersections from DMC are unacceptable [S1].
+*   **When Not to Use:** When performance is critical and non-manifold artifacts are tolerable (use DC or DMC) [S1].
 
 ## Background
 The method was introduced in the paper "Isosurfaces Over Simplicial Partitions of Multiresolution Grids" [S1]. It builds on the recursive octree traversal of Dual Contouring [JLSW02] and uses a table-based contouring method based on the sign configuration of tetrahedra [DK91]. The approach is inductive, allowing it to extend to higher dimensions, unlike Marching Cubes which suffers from table explosion ($2^m$ entries) [S1].

@@ -22,7 +22,7 @@ A three-phase rendering technique for simulating light interaction with a voxel-
 
 **Steps:**
 
-1.  **Ray Initialization (Camera to Surface):** Construct the ray origin and direction. For perspective projection, the origin is the camera position. For orthographic projection, the origin is backed up beyond the grid AABB [S1, unofficial].
+1.  **Ray Initialization (Camera to Surface):** Construct the ray origin and direction [S1, unofficial]. For perspective projection, the origin is the camera position [S1, unofficial]. For orthographic projection, the origin is backed up beyond the grid AABB [S1, unofficial].
     $$
     p_0 = U.inv\_view\_proj \cdot [ndc_x, ndc_y, 0.0, 1.0]^T
     $$
@@ -39,9 +39,9 @@ A three-phase rendering technique for simulating light interaction with a voxel-
     org = \begin{cases} U.camera\_pos & \text{if } U.ortho\_backup == 0 \\ near\_pt - dir \cdot U.ortho\_backup & \text{otherwise} \end{cases}
     $$
 
-2.  **Phase 1: Surface Entry:** March the ray from $org$ along $dir$ using the DDA until the first non-air/water cell is found. Let the entry point be $entry\_p$ and the entry axis be $entry\_axis$ [S1, unofficial].
+2.  **Phase 1: Surface Entry:** March the ray from $org$ along $dir$ using the DDA until the first non-air/water cell is found [S1, unofficial]. Let the entry point be $entry\_p$ and the entry axis be $entry\_axis$ [S1, unofficial].
 
-3.  **Phase 2: Surface Interaction:** Calculate the surface normal $n_{entry}$ based on the entry axis. Calculate the view vector $V$ from the entry point to the camera [S1, unofficial].
+3.  **Phase 2: Surface Interaction:** Calculate the surface normal $n_{entry}$ based on the entry axis [S1, unofficial]. Calculate the view vector $V$ from the entry point to the camera [S1, unofficial].
     $$
     V = normalize(org - entry\_p)
     $$
@@ -58,7 +58,7 @@ A three-phase rendering technique for simulating light interaction with a voxel-
     $$
     Sample the sky cube for the reflection color, adding sun specular highlights:
     $$
-    reflection = sky\_cube.sample(cube\_smp, R).rgb + U.sun\_color \cdot \max(dot(R, sun), 0.0)^{U.sun\_shininess}
+    reflection = sky\_cube.sample(R).rgb + U.sun\_color \cdot \max(dot(R, sun), 0.0)^{U.sun\_shininess}
     $$
     Calculate the refracted ray direction $rdir$:
     $$
@@ -80,7 +80,7 @@ A three-phase rendering technique for simulating light interaction with a voxel-
     1.  Increment $steps$.
     2.  Read material $m$ at $W.idx$.
     3.  If $m$ is not $MAT\_AIR$, $MAT\_WATER$, or $MAT\_BUBBLE$:
-        - Set $end\_mat = m$, $end\_axis = W.axis$.
+        - Set $end\_mat = m$, $end\_axis = W.axis$ [S1, unofficial].
         - Break loop.
     4.  Record $t\_enter = W.t\_cur$.
     5.  Step the DDA: $alive = dda\_step(W, G)$.
@@ -96,8 +96,8 @@ A three-phase rendering technique for simulating light interaction with a voxel-
     - Lava: Return tonemapped palette color multiplied by 1.25.
 
 6.  **Background and Attenuation:** Determine the background color $bg$ behind the water:
-    - If $end\_mat \neq MAT\_AIR$: $bg = terrain\_color(end\_mat, face\_normal(end\_axis, W.d), sun, U)$.
-    - Else if $exited\_up$: $bg = sky\_cube.sample(cube\_smp, rdir).rgb$.
+    - If $end\_mat \neq MAT\_AIR$: $bg = terrain\_color(end\_mat, face\_normal(end\_axis, W.d), sun, U)$ [S1, unofficial].
+    - Else if $exited\_up$: $bg = sky\_cube.sample(cube\_smp, rdir).rgb$ [S1, unofficial].
     - Else: $bg = U.deep\_water\_color$.
 
     Apply Beer-Lambert transmission:
@@ -138,7 +138,9 @@ def dda_init(start_pos, direction, grid):
     W['t_step'] = [0.0, 0.0, 0.0]
     for i in range(3):
         if direction[i] != 0:
-            W['t_max'][i] = ((W['idx'][i] + (0.5 if direction[i] > 0 else 1.0)) * grid['cell'][i] + grid['bmin'][i] - start_pos[i]) / direction[i]
+            # Distance to next grid boundary
+            boundary = grid['bmin'][i] + (W['idx'][i] + 1) * grid['cell'][i] if direction[i] > 0 else grid['bmin'][i] + W['idx'][i] * grid['cell'][i]
+            W['t_max'][i] = (boundary - start_pos[i]) / direction[i]
             W['t_step'][i] = grid['cell'][i] / abs(direction[i])
         else:
             W['t_max'][i] = float('inf')
@@ -158,22 +160,22 @@ def dda_step(W, grid):
     W['t_cur'] = W['t_max'][axis]
     W['t_max'][axis] += W['t_step'][axis]
     W['axis'] = axis
-    # Check bounds
-    if (W['idx'][0] < grid['bmin'][0] or W['idx'][0] >= grid['bmax'][0] or
-        W['idx'][1] < grid['bmin'][1] or W['idx'][1] >= grid['bmax'][1] or
-        W['idx'][2] < grid['bmin'][2] or W['idx'][2] >= grid['bmax'][2]):
+    # Check bounds against grid dimensions
+    if (W['idx'][0] < grid['bmin_idx'][0] or W['idx'][0] >= grid['bmax_idx'][0] or
+        W['idx'][1] < grid['bmin_idx'][1] or W['idx'][1] >= grid['bmax_idx'][1] or
+        W['idx'][2] < grid['bmin_idx'][2] or W['idx'][2] >= grid['bmax_idx'][2]):
         return False
     return True
 
 def read_material(vg, idx):
-    # Returns material ID at voxel index [G]
-    return MAT_WATER if idx[1] < 0 else MAT_AIR
+    # Read material ID from voxel grid at index [G]
+    return vg.materials[idx[0], idx[1], idx[2]]
 
-def march_to_surface(org, dir, vg, G):
+def march_to_surface(org, dir, vg, G, max_steps):
     # Phase 1: March from camera to first non-air/water cell [S1, unofficial]
     W = dda_init(org, dir, G)
     steps = 0
-    while steps < 10000:
+    while steps < max_steps:
         m = read_material(vg, W['idx'])
         if m != MAT_AIR and m != MAT_WATER:
             return [org[i] + dir[i] * W['t_cur'] for i in range(3)], W['axis']
@@ -202,7 +204,7 @@ def voxel_water_refraction(ndc, inv_view_proj, camera_pos, ortho_backup,
         org = [near_pt[i] - dir[i] * ortho_backup for i in range(3)]
 
     # Phase 1: March to surface
-    entry_p, entry_axis = march_to_surface(org, dir, vg, G)
+    entry_p, entry_axis = march_to_surface(org, dir, vg, G, U.max_steps)
 
     # Phase 2: Surface Interaction
     n_entry = get_surface_normal(entry_axis)
@@ -211,7 +213,7 @@ def voxel_water_refraction(ndc, inv_view_proj, camera_pos, ortho_backup,
     F = 0.02 + 0.98 * pow(1.0 - nv, 5.0)
 
     R = reflect([-V[i] for i in range(3)], n_entry)
-    reflection = sky_cube.sample(cube_smp, R).rgb + \
+    reflection = sky_cube.sample(R).rgb + \
                  U.sun_color * pow(max(dot(R, sun), 0.0), U.sun_shininess)
 
     rdir = refract(dir, n_entry, 1.0 / U.water_ior)
@@ -260,7 +262,7 @@ def voxel_water_refraction(ndc, inv_view_proj, camera_pos, ortho_backup,
     if end_mat != MAT_AIR:
         bg = terrain_color(end_mat, face_normal(end_axis, W['d']), sun, U)
     elif exited_up:
-        bg = sky_cube.sample(cube_smp, rdir).rgb
+        bg = sky_cube.sample(rdir).rgb
     else:
         bg = U.deep_water_color
 
@@ -273,7 +275,7 @@ def voxel_water_refraction(ndc, inv_view_proj, camera_pos, ortho_backup,
 ```
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of voxels traversed in the water volume and the distance to the surface. Bounded by $U.max\_steps$ [S1, unofficial].
+- **Time Complexity:** Linear with respect to the number of voxels traversed in the water volume and the distance to the surface [S1, unofficial]. Bounded by $U.max\_steps$ [S1, unofficial].
 - **Memory Complexity:** Constant, $O(1)$, aside from the voxel grid storage [S1, unofficial].
 - **Strengths:** Efficiently handles refraction and reflection in a single pass without recursive ray tracing. Correctly handles complex terrain occlusion behind the water [S1, unofficial].
 - **Limitations:** Does not simulate subsurface scattering or multiple bounces within the water. Accuracy depends on voxel resolution [S1, unofficial].

@@ -3,20 +3,20 @@
 Also called: Screen-space narrow beam filtering, Shinya et al. method
 
 ## Overview
-A screen-space multiple-scattering approximation that filters vacuum-rendered images using a heuristic distribution function derived from the assumption that light remains concentrated in narrow beams. It differs from sibling methods by explicitly modeling the spatial variation of scattering moments for heterogeneous media, though it is generally too slow for real-time performance compared to simpler MIP-map based approaches.
+A screen-space multiple-scattering approximation that filters vacuum-rendered images using a heuristic distribution function derived from the assumption that light remains concentrated in narrow beams [S1, unofficial]. It differs from sibling methods by explicitly modeling the spatial variation of scattering moments for heterogeneous media, though it is generally too slow for real-time performance compared to simpler MIP-map based approaches [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   Vacuum-rendered image $I(\mathbf{r}, \mathbf{s})$, where $\mathbf{r}$ is the screen-space position and $\mathbf{s}$ is the view direction.
-*   Medium parameters: absorption coefficient $C_a$, scattering coefficient $C_s$, and density profile $\varrho(z)$.
-*   Phase function approximation (Gaussian).
+*   Vacuum-rendered image $I(\mathbf{r}, \mathbf{s})$, where $\mathbf{r}$ is the screen-space position and $\mathbf{s}$ is the view direction [S1, unofficial].
+*   Medium parameters: absorption coefficient $C_a$, scattering coefficient $C_s$, and density profile $\varrho(z)$ [S1, unofficial].
+*   Phase function approximation (Gaussian) [S1, unofficial].
 
 **Outputs:**
-*   Final radiance image with multiple scattering effects.
+*   Final radiance image with multiple scattering effects [S1, unofficial].
 
 **Data Structures:**
-*   **Heuristic Distribution Function $\Psi(z, r)$**: A 2D function mapping depth $z$ and radial distance $r = \|\mathbf{r}\|$ to a weighting factor. For heterogeneous media, this is computed per pixel or per sample plane.
-*   **Weighting Function $w_{\mathbf{x}}$**: Derived from $\Psi$, used in the screen-space convolution kernel.
+*   **Heuristic Distribution Function $\Psi(z, r)$**: A 2D function mapping depth $z$ and radial distance $r = \|\mathbf{r}\|$ to a weighting factor [S1, unofficial]. For heterogeneous media, this is computed per pixel or per sample plane [S1, unofficial].
+*   **Weighting Function $w_{\mathbf{x}}$**: Derived from $\Psi$, used in the screen-space convolution kernel [S1, unofficial].
 
 **Assumptions:**
 1.  Radiance $L$ is concentrated near the original ray direction [S1, unofficial].
@@ -39,83 +39,32 @@ A screen-space multiple-scattering approximation that filters vacuum-rendered im
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for the Narrow Beam Distribution Method
-# Note: The exact derivation of Psi(z, r) from moments is complex and omitted.
-# This code assumes Psi is pre-computed or available as a lookup.
-
-def narrow_beam_filter(vacuum_image, medium_params, resolution):
-    """
-    Filters a vacuum image to approximate multiple scattering.
-    
-    Args:
-        vacuum_image: 2D array of radiance values I(r, s)
-        medium_params: Object containing Ca, Cs, rho(z)
-        resolution: (width, height)
-        
-    Returns:
-        filtered_image: 2D array with multiple scattering
-    """
+def narrow_beam_filter(vacuum_image, depth_buffer, medium_params, resolution):
     width, height = resolution
-    filtered_image = zeros_like(vacuum_image)
-    
-    # Pre-compute or load the heuristic distribution function Psi(z, r)
-    # For heterogeneous media, this may vary per pixel or be sampled from planes
-    psi_function = compute_heuristic_distribution(medium_params)
-    
-    # Screen-space filtering loop
-    # In practice, this is done in a GPU shader using splatting/gathering
+    filtered_image = [[0.0] * width for _ in range(height)]
+    Ca, Cs, rho = medium_params
+
+    # Heuristic distribution function Psi(z, r) derivation from moments is not provided in sources [G]
+    def compute_psi(z, r):
+        # Exact moment calculation and Gaussian phase approximation omitted in sources
+        return 0.0
+
+    # Kernel support bounds are not specified in sources [G]
+    KERNEL_RADIUS = 10
+
     for y in range(height):
         for x in range(width):
-            # Current pixel position in screen space
-            r_current = (x, y)
-            
-            # Accumulate contributions from neighboring pixels
-            # The integral is approximated by a discrete sum over the kernel
+            z = depth_buffer[y][x]
             contribution = 0.0
-            
-            # Define kernel bounds based on the support of Psi
-            # Not given in sources: specific kernel radius or decay threshold
-            kernel_radius = estimate_kernel_radius(psi_function) 
-            
-            for dy in range(-kernel_radius, kernel_radius + 1):
-                for dx in range(-kernel_radius, kernel_radius + 1):
-                    r_neighbor = (x + dx, y + dy)
-                    
-                    # Check boundary
-                    if not (0 <= r_neighbor[0] < width and 0 <= r_neighbor[1] < height):
-                        continue
-                        
-                    # Radial distance between current and neighbor
-                    r_diff = sqrt(dx*dx + dy*dy)
-                    
-                    # Get depth z for the current pixel (from Z-buffer)
-                    z = get_depth(x, y)
-                    
-                    # Get weighting from heuristic distribution
-                    # Psi depends on z and r (radial distance)
-                    weight = psi_function.evaluate(z, r_diff)
-                    
-                    # Get vacuum radiance at neighbor
-                    # Note: s' (direction) is also part of the integral, 
-                    # but simplified here to spatial filtering for clarity
-                    # as per the abstract integral form in sources
-                    i_neighbor = vacuum_image[r_neighbor[1], r_neighbor[0]]
-                    
-                    contribution += weight * i_neighbor
-            
-            filtered_image[y, x] = contribution
-            
+            for dy in range(-KERNEL_RADIUS, KERNEL_RADIUS + 1):
+                for dx in range(-KERNEL_RADIUS, KERNEL_RADIUS + 1):
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < width and 0 <= ny < height:
+                        r_diff = (dx*dx + dy*dy)**0.5
+                        weight = compute_psi(z, r_diff)
+                        contribution += weight * vacuum_image[ny][nx]
+            filtered_image[y][x] = contribution
     return filtered_image
-
-def compute_heuristic_distribution(medium_params):
-    """
-    Computes the heuristic distribution function Psi(z, r).
-    This involves solving moments of the RTE with Gaussian phase function.
-    Exact implementation details are in Shinya et al. [2016].
-    """
-    # Placeholder for the complex mathematical derivation
-    # Returns a function or lookup table for Psi(z, r)
-    pass
 ```
 
 **Edge Cases and Pitfalls:**
@@ -127,8 +76,8 @@ def compute_heuristic_distribution(medium_params):
 *   **Measured Performance**: Filtered a single frame in 100–110 ms for 640x480 resolution on a GeForce GTX 690 [S1, unofficial]. Path tracing took several days on the same hardware [S1, unofficial].
 *   **Strengths**: Can handle non-homogeneous media by calculating moments separately for each pixel or sample plane [S1, unofficial]. Claims higher accuracy than Elek et al. [2013] method [S1, unofficial].
 *   **Limitations**: Rendering times are too high for real-time applications (e.g., video games) [S1, unofficial].
-*   **When to use**: When high accuracy for heterogeneous media is required and real-time performance is not critical.
-*   **When not to use**: For real-time applications requiring < 40 ms frame times.
+*   **When to use**: When high accuracy for heterogeneous media is required and real-time performance is not critical [S1, unofficial].
+*   **When not to use**: For real-time applications requiring < 40 ms frame times [S1, unofficial].
 
 ## Background
 *   **Origin**: Presented by Shinya et al. in 2016 [S1, unofficial].

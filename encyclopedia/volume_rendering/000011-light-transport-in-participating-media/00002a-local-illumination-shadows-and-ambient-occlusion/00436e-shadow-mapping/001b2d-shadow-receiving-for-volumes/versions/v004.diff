@@ -1,0 +1,132 @@
+--- v003.md
++++ v004.md
+@@ -4,49 +4,36 @@
+ 
+ ## Overview
+-Shadow Receiving for Volumes is a technique that allows volumetric data to receive shadows cast by polygonal actors without requiring the volume to be rendered twice [S1]. It solves the performance bottleneck associated with traditional shadow pipelines, where rendering a volume as a shadow caster or receiver typically incurs significant overhead due to double traversal [S1]. Unlike sibling methods that compute self-shadowing or light-space transmittance buffers, this method integrates shadow occlusion checks directly into the view-space ray traversal against a pre-computed shadow map [S1]. It is distinct from [Lookup Table Shadow Rendering](3588-lookup-table-shadow-rendering.md) and [Ray Marching with Shadow Mapping](1415-ray-marching-with-shadow-mapping.md) by relying on standard shadow map textures rather than 3D transmittance textures or light-strength buffers [S1].
++Shadow Receiving for Volumes is a technique that allows volumetric data to receive shadows cast by polygonal actors without requiring the volume to be rendered twice [S1]. It solves the performance bottleneck associated with traditional shadow pipelines, where rendering a volume as a shadow receiver typically incurs significant overhead due to double traversal [S1]. Unlike methods that compute self-shadowing or light-space transmittance buffers, this approach integrates shadow occlusion checks directly into the view-space ray traversal against a pre-computed shadow map [S1].
+ 
+ ## How it works
+-The method operates within a GPU-based volume ray casting pipeline (specifically `vtkGPUVolumeRayCastMapper2` in VTK) [S1]. It utilizes a shadow map generated from the light's perspective, which contains depth information for polygonal actors [S1]. During the volume rendering pass, the ray caster samples this shadow map to determine if the current ray segment is occluded by any polygon [S1].
++The method operates within a GPU-based volume ray casting pipeline, specifically implemented in `vtkGPUVolumeRayCastMapper2` [S1]. It utilizes a shadow map generated from the light's perspective, which contains depth information for polygonal actors [S1]. During the volume rendering pass, the ray caster samples this shadow map to determine if the current ray segment is occluded by any polygon [S1].
+ 
+ **Inputs and Outputs:**
+-*   **Inputs:** Volume dataset (scalar field), transfer function, light source position/direction, shadow map (depth texture) from the light's view, volume actor metadata.
+-*   **Outputs:** Final color buffer with volume shaded by direct illumination modulated by shadow occlusion.
++*   **Inputs:** Volume dataset, transfer function, light source parameters, shadow map (depth texture), and volume actor metadata [S1].
++*   **Outputs:** Final color buffer with volume shaded by direct illumination modulated by shadow occlusion [G].
+ 
+ **Data Structures:**
+-*   **Shadow Map:** A 2D texture storing depth values from the light's perspective.
+-*   **Property Keys:** A metadata structure attached to the volume actor to configure shadow behavior. Key fields include:
+-    *   `vtkShadowMapBakerPass::RECEIVER`: Integer flag (0 or 1) enabling the volume to receive shadows [S1].
++*   **Shadow Map:** A 2D texture storing depth values from the light's perspective [G].
++*   **Property Keys:** A metadata structure attached to the volume actor to configure shadow behavior [G]. Key fields include:
++    *   `RECEIVER`: Integer flag (0 or 1) enabling the volume to receive shadows [S1].
+     *   `SoftShadows`: Boolean flag enabling soft shadow calculation [S1].
+     *   `SoftShadowsOffset`: Float value controlling the offset for soft shadow filtering in pixels [S1].
+-    *   `NoiseTextureSize` and `MaxNoiseFactor`: Parameters for stochastic jittering (optional, for noise reduction) [S1].
++    *   `NoiseTextureSize` and `MaxNoiseFactor`: Parameters for stochastic jittering to reduce banding artifacts [S1].
+ 
+ **Steps:**
+-1.  **Pipeline Setup:** Initialize a rendering pipeline including `vtkShadowMapPass` and `vtkShadowMapBakerPass` [S1].
+-2.  **Polygon Shadow Casting:** Render polygonal actors to generate the shadow map (depth texture) from the light's perspective [S1].
+-3.  **Volume Configuration:** Create a `vtkInformation` object and set the key `vtkShadowMapBakerPass::RECEIVER()` to `1` (or `0`, as the presence of the key is the trigger) on the volume's property keys [S1].
+-    *   Pseudocode for configuration:
+-        ```python
+-        info = vtkInformation.New()
+-        info.Set(vtkShadowMapBakerPass.RECEIVER(), 1)
+-        volume.SetPropertyKeys(info)
+-        ```
+-4.  **Soft Shadow Configuration (Optional):** If soft shadows are desired, set `SoftShadows` to `true` and `SoftShadowsOffset` to a float value (e.g., `1.0`) on the mapper [S1].
+-    *   Pseudocode:
+-        ```python
+-        mapper.SetSoftShadows(True)
+-        mapper.SetSoftShadowsOffset(1.0)
+-        ```
+-5.  **Ray Traversal with Shadow Check:** During the volume ray casting loop, for each sample point $\mathbf{p}$ along the view ray:
+-    a. Transform $\mathbf{p}$ into the light's clip space coordinates $(u, v, z)$ [G].
+-    b. Sample the shadow map at $(u, v)$ to retrieve the depth $d_{shadow}$ [S1].
+-    c. Compare the transformed depth $z$ of the sample point with $d_{shadow}$ [G].
+-    d. If $z > d_{shadow} + \epsilon$ (where $\epsilon$ is a small bias), the point is in shadow [G].
+-    e. If soft shadows are enabled, use `SoftShadowsOffset` to perform linear interpolation or filtering on the shadow texture to determine partial occlusion [S1].
+-6.  **Shading:** Modulate the direct illumination contribution at $\mathbf{p}$ by the shadow factor (1.0 if lit, 0.0 if fully shadowed, or intermediate value for soft shadows) [S1].
++1.  **Pipeline Setup:** Initialize a rendering pipeline including shadow pass and shadow baker passes [S1].
++2.  **Polygon Shadow Casting:** Render polygonal actors to generate the shadow map from the light's perspective [S1].
++3.  **Volume Configuration:** Create a metadata object and set the receiver flag to `1` (or `0`) on the volume's property keys to enable shadow receiving [S1].
++4.  **Soft Shadow Configuration (Optional):** If soft shadows are desired, enable soft shadows and set a float offset value (e.g., `1.0`) on the mapper [S1].
++5.  **Ray Traversal with Shadow Check:** During the volume ray casting loop, for each sample point along the view ray:
++    a. Transform the sample point into the light's clip space coordinates [G].
++    b. Sample the shadow map at the projected texture coordinates to retrieve the stored depth [G].
++    c. Compare the transformed depth of the sample point with the stored depth [G].
++    d. If the sample depth exceeds the stored depth plus a small bias, the point is in shadow [G].
++    e. If soft shadows are enabled, apply linear interpolation or filtering using the offset parameter to determine partial occlusion [S1].
++6.  **Shading:** Modulate the direct illumination contribution at the sample point by the computed shadow factor (1.0 if lit, 0.0 if fully shadowed, or an intermediate value for soft shadows) [S1].
+ 
+ **Formulas:**
+-The transmittance $T$ and color $C$ accumulation remain standard for volume rendering, but the direct light term $L_{direct}$ is modulated by the shadow factor $S$:
+-$$ L_{direct}(\mathbf{p}) = L_{source} \cdot T(\mathbf{p}_{source} \to \mathbf{p}) \cdot S(\mathbf{p}) $$
+-Where $S(\mathbf{p})$ is determined by the shadow map comparison [S1].
++Not given in the sources. Direct illumination is modulated by a shadow factor determined during ray traversal [S1].
+ 
+ **Parameters:**
+@@ -56,20 +43,54 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Performance Loss:** Using the standard shadow pipeline (rendering shadows separately) requires rendering the volume twice, causing significant performance loss [S1]. This method avoids that by integrating the check into the traversal [S1].
++*   **Performance Loss:** Using the standard shadow pipeline requires rendering the volume twice, causing significant performance loss [S1]. This method avoids that by integrating the check into the traversal [S1].
+ *   **Precision:** Linear interpolation is used for the shadow texture, so `SoftShadowsOffset` does not need to be an integer [S1].
+ *   **Blending Modes:** If `BlendModeIsosurface` is set to `true`, the blending mode is forced to isosurface rendering, and other blending modes have no effect [S1].
++
++**Pseudocode:**
++```python
++# Configuration step (abstracted from VTK API to standard operations)
++volume_metadata = create_metadata_object()
++volume_metadata.set_flag("RECEIVER_SHADOWS", 1)  # 0 or 1 enables receiving [S1]
++volume.set_property_keys(volume_metadata)
++
++# Soft shadow configuration
++mapper.set_soft_shadows(True)
++mapper.set_soft_shadows_offset(1.0)  # Float offset in pixels [S1]
++
++# Ray traversal loop (standard volume rendering structure)
++for sample_point in view_ray_samples:
++    # Transform to light space and project to shadow map coordinates [G]
++    light_clip = transform_to_light_clip_space(sample_point)
++    shadow_coords = light_clip.xy / light_clip.w
++
++    # Sample shadow map and compare depths [G]
++    shadow_depth = sample_shadow_map(shadow_coords)
++    is_lit = sample_point.z < shadow_depth + epsilon
++
++    # Apply soft shadow filtering if enabled [S1]
++    if soft_shadows_enabled:
++        shadow_factor = linear_interpolate_shadow(shadow_coords, soft_shadows_offset)
++    else:
++        shadow_factor = 1.0 if is_lit else 0.0
++
++    # Modulate direct illumination [S1]
++    direct_light = compute_direct_light(sample_point) * shadow_factor
++    accumulate_color(sample_point, direct_light)
++```
+ 
+ ## Subtopics
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of samples along the view ray. The shadow map lookup is $O(1)$ per sample [S1].
+-*   **Memory Complexity:** $O(W \times H)$ for the shadow map, where $W, H$ are the shadow map dimensions [S1].
+-*   **Performance:** Avoids the double rendering cost of traditional shadow pipelines for volumes [S1].
++*   **Time Complexity:** Linear in the number of view-ray samples, with constant-time shadow map lookups per sample [G].
++*   **Memory Complexity:** $O(W \times H)$ for the shadow map, where $W$ and $H$ are the shadow map dimensions [G].
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Not given in the sources.
+ *   **Strengths:** Efficient integration of shadows from polygons into volume rendering; supports soft shadows via offset and interpolation [S1].
+ *   **Limitations:** Only handles shadows cast by polygons; does not compute self-shadowing or shadows cast by other volumes [S1].
+ *   **When to Use:** When polygonal actors cast shadows onto volumetric data and performance is a concern compared to double-rendering approaches [S1].
++*   **When Not to Use:** When self-shadowing or volume-to-volume shadowing is required [S1].
+ 
+ ## Background
+-This method was introduced in the context of the Visualization Toolkit (VTK) to enhance realism and depth perception in volume visualizations, particularly in simulators where locating tools or objects is critical [S1]. It was implemented in `vtkGPUVolumeRayCastMapper2` to allow shadow receiving without the computational penalty of rendering the volume twice [S1]. The approach leverages existing shadow map infrastructure (`vtkShadowMapPass`, `vtkShadowMapBakerPass`) and extends it to volumetric ray casting by adding a receiver flag and shadow lookup during traversal [S1].
++This method was introduced in the context of the Visualization Toolkit (VTK) to enhance realism and depth perception in volume visualizations, particularly in simulators where locating tools or objects is critical [S1]. It was implemented in `vtkGPUVolumeRayCastMapper2` to allow shadow receiving without the computational penalty of rendering the volume twice [S1]. The approach leverages existing shadow map infrastructure and extends it to volumetric ray casting by adding a receiver flag and shadow lookup during traversal [S1].
+ 
+ ## Sources

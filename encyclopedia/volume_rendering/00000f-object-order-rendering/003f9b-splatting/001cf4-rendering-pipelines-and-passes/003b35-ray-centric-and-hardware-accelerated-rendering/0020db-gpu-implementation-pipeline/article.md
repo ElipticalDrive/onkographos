@@ -3,84 +3,69 @@
 Also called: Single-pass GPU Raycasting, Volumetric Raycasting
 
 ## Overview
-A GPU-accelerated rendering technique that traces rays from the camera through each pixel into a 3D volume to compute color and opacity, implemented in a single pass using fragment shaders [S2, unofficial]. It solves the problem of visualizing volumetric data directly on the GPU without generating intermediate polygonal meshes [S4]. It differs from isosurface extraction (e.g., [Marching Cubes](53-marching-cubes.md)) by preserving internal volume information [S1], and from splatting ([Splatting](10-splatting.md)) by avoiding sorting and blending overheads for dense volumes, though it is computationally heavier per pixel than texture-based splatting [G].
+The GPU Implementation Pipeline is a method for direct volume rendering that traces rays from the camera through each pixel into a 3D volume to compute color and opacity, implemented in a single pass using fragment shaders [S2, unofficial]. It solves the problem of visualizing volumetric data directly on the GPU without generating intermediate polygonal meshes, differing from splatting ([Splatting](10-splatting.md)) by avoiding sorting and blending overheads for dense volumes, though it is computationally heavier per pixel than texture-based splatting [G]. It differs from isosurface extraction (e.g., [Marching Cubes](53-marching-cubes.md)) by preserving internal volume information [S1].
 
 ## How it works
-**Inputs:**
-*   Volume data: A 3D texture (e.g., `volume` in texture unit 0) containing scalar density/intensity values.
-*   Camera parameters: View matrix, Model-View-Projection (MVP) matrix, aspect ratio, focal length, viewport size, ray origin, and bounding box (`top`, `bottom`) [S2, unofficial].
-*   Rendering parameters: Step length, threshold, gamma, background color, and light position (if lighting is included) [S2, unofficial].
-*   Jitter data: A 2D texture (e.g., `jitter` in texture unit 1) for anti-aliasing [S2, unofficial].
+The method executes a single fragment shader per pixel to march a ray through the volume, accumulating color and opacity using front-to-back alpha blending.
 
-**Outputs:**
-*   Final color buffer with alpha channel, representing the composited volume [S2, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D texture (`volume`) containing scalar density/intensity values; a 1D or 2D texture (`jitter`) for anti-aliasing; camera parameters (View Matrix, Model-View-Projection Matrix, Ray Origin, Ray Direction); rendering parameters (step length, background color, gamma).
+*   **Output:** A 2D color buffer with the final rendered image.
 
 **Data Structures:**
-*   `Ray`: Struct containing `origin` (vec3) and `direction` (vec3) [S2, unofficial].
-*   `AABB`: Struct containing `top` (vec3) and `bottom` (vec3) defining the volume bounds [S2, unofficial].
-*   `Color`: vec4 representing RGBA output [S2, unofficial].
+*   `volume`: 3D texture (e.g., `GL_TEXTURE_3D`), typically `GL_R8` or `GL_R16F` for scalar data.
+*   `jitter`: 2D texture (e.g., `GL_TEXTURE_2D`), used to store pre-generated random values for jittering ray steps.
+*   `Ray`: A structure or pair of vectors containing `origin` (vec3) and `direction` (vec3).
+*   `AABB`: Axis-Aligned Bounding Box defined by `top` (vec3) and `bottom` (vec3) corners.
 
-**Steps:**
+**Numbered Steps:**
 
-1.  **Initialization:**
-    *   Clear the color buffer with the specified `background_colour` [S2, unofficial].
-    *   Compute the View-Projection matrix using perspective projection with field of view ($m_{fov}$), aspect ratio ($scaled\_width()/scaled\_height()$), near plane (0.1), and far plane (100.0) [S2, unofficial].
-    *   Compute the view matrix by translating along the Z-axis: $translate(0, 0, -4.0 \cdot \exp(m_{distExp} / 600.0))$ [S2, unofficial].
-    *   Compute the ray origin in world space by inverting the view matrix and transforming $(0,0,0)$ [S2, unofficial].
+1.  **Initialize OpenGL State:** Create the volume data structure and generate noise or load data into the `volume` texture [S2, unofficial].
+2.  **Compute Matrices:**
+    *   Compute the Model-View-Projection (MVP) matrix using a perspective projection with field of view $m_{fov}$, aspect ratio $\frac{scaled\_width}{scaled\_height}$, near plane $0.1$, and far plane $100.0$ [S2, unofficial].
+    *   Compute the view matrix by translating along the Z-axis: $T_z = -4.0 \cdot \exp(\frac{m_{distExp}}{600.0})$ [S2, unofficial].
+3.  **Compute Ray Origin:** Invert the view matrix and transform the world origin $(0,0,0)$ to get the ray origin in world space [S2, unofficial].
+4.  **Bind Shaders and Uniforms:** Bind the fragment shader and set uniforms: `ViewMatrix`, `ModelViewProjectionMatrix`, `aspect_ratio`, `focal_length`, `viewport_size`, `ray_origin`, `top`, `bottom`, `background_colour`, `step_length`, `threshold`, `gamma`, `volume` (texture unit 0), and `jitter` (texture unit 1) [S2, unofficial].
+5.  **Clear Buffer:** Clear the color buffer with `background_colour` [S2, unofficial].
+6.  **Fragment Shader Execution (Per Pixel):**
+    *   **Ray Direction:** Calculate the ray direction from screen coordinates $(x,y)$:
+        $$ \mathbf{d}_{screen} = \left( 2\frac{x}{W} - 1, 2\frac{y}{H} - 1, -f \right) $$
+        where $W, H$ are viewport dimensions and $f$ is focal length. Transform $\mathbf{d}_{screen}$ by the View Matrix to get world-space direction $\mathbf{d}$ [S2, unofficial].
+    *   **Ray-Box Intersection:** Determine entry ($t_0$) and exit ($t_1$) distances of the ray with the volume's AABB using the slab method [S2, unofficial]:
+        $$ \mathbf{d}_{inv} = \frac{1}{\mathbf{d}} $$
+        $$ \mathbf{t}_{top} = \mathbf{d}_{inv} \cdot (\mathbf{top} - \mathbf{origin}) $$
+        $$ \mathbf{t}_{bottom} = \mathbf{d}_{inv} \cdot (\mathbf{bottom} - \mathbf{origin}) $$
+        $$ t_0 = \max(0, \max(\min(\mathbf{t}_{top}), \min(\mathbf{t}_{bottom}))) $$
+        $$ t_1 = \min(\max(\mathbf{t}_{top}), \max(\mathbf{t}_{bottom})) $$
+    *   **Ray Parameters:** Convert $t_0, t_1$ to texture coordinates. Calculate the ray vector $\mathbf{r} = \mathbf{ray}_{stop} - \mathbf{ray}_{start}$ and length $L = \|\mathbf{r}\|$. Compute the step vector $\mathbf{s} = \text{step\_length} \cdot \frac{\mathbf{r}}{L}$ [S2, unofficial].
+    *   **Jitter:** Add a random offset to the start position using the `jitter` texture: $\mathbf{pos} = \mathbf{ray}_{start} + \mathbf{s} \cdot \text{jitter}(x,y)$ [S2, unofficial].
+    *   **Ray Marching Loop:** Initialize accumulated color $\mathbf{C}_{acc} = (0,0,0,0)$. While $L > 0$ and $\mathbf{C}_{acc}.a < 1.0$:
+        1.  Sample volume: $v = \text{texture}(\text{volume}, \mathbf{pos}).r$ [S2, unofficial].
+        2.  Transfer Function: Map $v$ to color $\mathbf{c}$ and opacity $\alpha$. A simple exponential transfer function is:
+            $$ \alpha = \frac{e^v - 1}{e^1 - 1} $$
+            $$ \mathbf{c} = v \cdot \mathbf{high} + (1-v) \cdot \mathbf{low} $$
+            where $\mathbf{high}=(1,1,1)$ and $\mathbf{low}=(0,0,0)$ [S2, unofficial].
+        3.  Alpha Blending (Front-to-Back):
+            $$ \mathbf{C}_{acc}.rgb = \alpha \mathbf{c} + (1-\alpha) \mathbf{C}_{acc}.rgb $$
+            $$ \mathbf{C}_{acc}.a = \alpha + (1-\alpha) \mathbf{C}_{acc}.a $$
+        4.  Advance: $L \leftarrow L - \text{step\_length}$, $\mathbf{pos} \leftarrow \mathbf{pos} + \mathbf{s}$ [S2, unofficial].
+    *   **Background Blend:** Blend the accumulated color with the background color:
+        $$ \mathbf{C}_{final}.rgb = \mathbf{C}_{acc}.a \cdot \mathbf{C}_{acc}.rgb + (1 - \mathbf{C}_{acc}.a) \cdot \text{pow}(\text{background\_colour}, \gamma).rgb $$
+        $$ \mathbf{C}_{final}.a = 1.0 $$
+    *   **Gamma Correction:** Apply gamma correction to the output:
+        $$ \mathbf{C}_{out}.rgb = \text{pow}(\mathbf{C}_{final}.rgb, \frac{1}{\gamma}) $$
+        $$ \mathbf{C}_{out}.a = \mathbf{C}_{final}.a $$
+    *   Write $\mathbf{C}_{out}$ to the color buffer [S2, unofficial].
 
-2.  **Ray Generation (Vertex/Fragment Shader):**
-    *   For each pixel $(x,y)$, compute the ray direction in clip space:
-        $$ \mathbf{d}_{clip}.xy = 2.0 \cdot \frac{\mathbf{gl\_FragCoord}.xy}{\mathbf{viewport\_size}} - 1.0 $$
-        $$ \mathbf{d}_{clip}.x \cdot= \mathbf{aspect\_ratio} $$
-        $$ \mathbf{d}_{clip}.z = -\mathbf{focal\_length} $$
-    *   Transform to world space:
-        $$ \mathbf{d}_{world} = \text{normalize}((\mathbf{ViewMatrix} \cdot \text{vec4}(\mathbf{d}_{clip}, 0)).xyz) $$
-    *   Define the ray: $\mathbf{ray} = \{\mathbf{o} = \mathbf{ray\_origin}, \mathbf{d} = \mathbf{d}_{world}\}$ [S2, unofficial].
-
-3.  **Ray-Volume Intersection (Slab Method):**
-    *   Compute intersection with the AABB defined by `top` and `bottom` [S2, unofficial]:
-        $$ \mathbf{t}_{top} = \frac{\mathbf{box}.top - \mathbf{o}}{\mathbf{d}} $$
-        $$ \mathbf{t}_{bottom} = \frac{\mathbf{box}.bottom - \mathbf{o}}{\mathbf{d}} $$
-        $$ t_0 = \max(0.0, \max(\min(\mathbf{t}_{top}, \mathbf{t}_{bottom}).x, \min(\mathbf{t}_{top}, \mathbf{t}_{bottom}).y)) $$
-        $$ t_1 = \min(\max(\mathbf{t}_{top}, \mathbf{t}_{bottom}).x, \max(\mathbf{t}_{top}, \mathbf{t}_{bottom}).y) $$
-    *   If $t_0 > t_1$, the ray misses the volume [S2, unofficial].
-
-4.  **Ray Marching Setup:**
-    *   Convert entry/exit points to texture coordinates:
-        $$ \mathbf{ray\_start} = \frac{\mathbf{o} + \mathbf{d} \cdot t_0 - \mathbf{bottom}}{\mathbf{top} - \mathbf{bottom}} $$
-        $$ \mathbf{ray\_stop} = \frac{\mathbf{o} + \mathbf{d} \cdot t_1 - \mathbf{bottom}}{\mathbf{top} - \mathbf{bottom}} $$
-    *   Compute ray vector and length:
-        $$ \mathbf{ray\_vec} = \mathbf{ray\_stop} - \mathbf{ray\_start} $$
-        $$ L = \|\mathbf{ray\_vec}\| $$
-    *   Compute step vector:
-        $$ \mathbf{step\_vec} = \mathbf{step\_length} \cdot \frac{\mathbf{ray\_vec}}{L} $$
-    *   Apply random jitter to start position using `jitter` texture:
-        $$ \mathbf{position} = \mathbf{ray\_start} + \mathbf{step\_vec} \cdot \text{texture}(\mathbf{jitter}, \frac{\mathbf{gl\_FragCoord}.xy}{\mathbf{viewport\_size}}).r $$
-    *   Initialize accumulated color: $\mathbf{colour} = (0,0,0,0)$ [S2, unofficial].
-
-5.  **Marching Loop:**
-    *   While $L > 0$ and $\mathbf{colour}.a < 1.0$:
-        1.  Sample density: $I = \text{texture}(\mathbf{volume}, \mathbf{position}).r$ [S2, unofficial].
-        2.  Apply Transfer Function (TF) to get color $C$ and opacity $\alpha$:
-            *   Example TF: $\alpha = \frac{\exp(I) - 1.0}{\exp(1.0) - 1.0}$, $C = I \cdot \mathbf{high} + (1.0 - I) \cdot \mathbf{low}$ [S2, unofficial].
-        3.  Front-to-Back Compositing:
-            $$ \mathbf{colour}.rgb = \alpha \cdot C.rgb + (1 - \alpha) \cdot \mathbf{colour}.a \cdot \mathbf{colour}.rgb $$
-            $$ \mathbf{colour}.a = \alpha + (1 - \alpha) \cdot \mathbf{colour}.a $$
-        4.  Update: $L \leftarrow L - \mathbf{step\_length}$, $\mathbf{position} \leftarrow \mathbf{position} + \mathbf{step\_vec}$ [S2, unofficial].
-
-6.  **Final Compositing and Output:**
-    *   Blend with background:
-        $$ \mathbf{colour}.rgb = \mathbf{colour}.a \cdot \mathbf{colour}.rgb + (1 - \mathbf{colour}.a) \cdot \text{pow}(\mathbf{background\_colour}, \gamma).rgb $$
-        $$ \mathbf{colour}.a = 1.0 $$
-    *   Apply Gamma correction to output:
-        $$ \mathbf{output}.rgb = \text{pow}(\mathbf{colour}.rgb, \frac{1.0}{\gamma}) $$
-        $$ \mathbf{output}.a = \mathbf{colour}.a $$
-    *   Write to framebuffer [S2, unofficial].
+**Parameters:**
+*   `step_length`: Distance between samples. Typical values depend on resolution and volume size; smaller values increase accuracy but reduce performance [S2, unofficial].
+*   `gamma`: Gamma value for color correction. Typical value: 2.2 [S2, unofficial].
+*   `background_colour`: Color of the background. Typical value: Black $(0,0,0)$ [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Floating-point precision in texture lookups can cause artifacts if the volume bounds do not align perfectly with texture coordinates [G].
-*   **Empty Blocks:** In multi-resolution structures, rays may originate in empty blocks. The ray must be advanced to the next non-empty block to avoid occlusion artifacts [S1].
-*   **Saturation:** The loop terminates early if opacity reaches 1.0 to save computation, which may cause artifacts if the step size is too large relative to thin structures [S2, unofficial].
+*   **Precision:** Floating-point precision in texture lookups can cause artifacts if the volume is not properly normalized [S2, unofficial].
+*   **Boundaries:** The ray-box intersection must handle rays that do not intersect the volume ($t_0 > t_1$) by skipping the march [S2, unofficial].
+*   **Empty Blocks:** In multi-resolution structures, rays may pass through empty blocks. If a sample point is in an empty block, the ray should be advanced to the next non-empty block to avoid artifacts [S1].
 
 ## Subtopics
 
@@ -94,19 +79,16 @@ The NVIDIA GeForce3 Volume Rendering Pipeline is a hardware-accelerated method f
 This method implements a real-time rendering pipeline for 3D Gaussian Splatting that streams Gaussian data to GPU memory on demand using a virtual memory system. It solves the memory capacity bottleneck of large scenes by mapping logical page IDs to physical GPU memory pages, replacing unused pages based on a least-recently-used (LRU) policy. Unlike software-based tile-sorting approaches (e.g., Kerbl et al.), this method performs global distance sorting of Gaussians in a GLSL compute shader before splatting them via the hardware rasterizer.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(P \cdot N)$, where $P$ is the number of pixels and $N$ is the number of steps per ray. Performance depends on volume size, step length, and data reduction [S1].
-*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels. Multi-resolution structures can reduce this significantly (e.g., 512^3 dataset stored as 256x256x128) [S1].
-*   **Measured Performance:** On an Nvidia GeForce 8800 Ultra with 768 MB graphics texture memory, for a 512^3 volume with 8.9:1 data reduction and SVR size 256^3:
-    *   Global light integration (A) takes 284-552 ms [S1].
-    *   First order scattering incremental refinements (B) take 62-233 ms [S1].
-    *   High frame rates (15-22 fps) are reached after light update [S1].
-*   **Strengths:** Single-pass execution allows for real-time interaction; no intermediate buffers required in basic implementations [S2, unofficial].
-*   **Limitations:** Computationally heavy per pixel compared to splatting; sensitive to step size and transfer function complexity [G].
-*   **When to use:** Real-time visualization of dense volumetric data where internal structure is important [S4].
-*   **When not to use:** When extreme performance is required for very large datasets without multi-resolution acceleration, or when sparse data is better suited to splatting [G].
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of samples per ray. Performance depends on the step length and volume density [S2, unofficial].
+*   **Memory Complexity:** $O(V)$, where $V$ is the volume of the 3D texture data [S1].
+*   **Measured Performance:** On an Nvidia GeForce 8800 Ultra with 768 MB graphics texture memory, a 512^3 volume with 8.9:1 data reduction (SVR size 256^3, piecewise segment length 8 voxels) achieves global light integration (A) in 284-552 ms and first order scattering incremental refinements (B) in 62-233 ms. High frame rates (15-22 fps) are reached after light update [S1].
+*   **Strengths:** Real-time interactivity; no intermediate buffers required (single-pass); preserves internal volume information [S1][S2, unofficial].
+*   **Limitations:** Computationally heavy per pixel compared to splatting; artifacts can appear if empty blocks are not handled correctly [S1, G].
+*   **When to Use:** When visualizing dense volumetric data with internal structure is required, and real-time performance is needed [S4].
+*   **When Not to Use:** When the volume is sparse and splatting would be more efficient, or when isosurface extraction is sufficient [S1, G].
 
 ## Background
-The method originates from GPU-accelerated single-pass volumetric raycasting, implemented in GLSL and C++ with the Qt framework [S2, unofficial]. It builds on the shared principles of object-order evaluation where each pixel is processed independently [S2, unofficial]. The approach was popularized by simple visualizers that provide a basic skeleton for feature-rich GUIs [S2, unofficial].
+The GPU Implementation Pipeline was introduced as a technique for interactive volume rendering using fragment shaders [S2, unofficial]. It builds on the principles of ray casting and hardware acceleration [S1, S2, S3, unofficial]. The method was developed to provide a basic skeleton for a visualizer that can be easily extended with a feature-rich GUI [S2, unofficial]. It is used in medical imaging and scientific visualization [S4].
 
 ## Sources
 [S1] Interactive Global Light Propagation in Direct Volume Rendering using Local Piecewise Integration, https://doi.org/10.2312/vg/vg-pbg08/105-112, fetched 2026-10-26

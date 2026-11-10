@@ -1,0 +1,132 @@
+--- v003.md
++++ v004.md
+@@ -4,97 +4,55 @@
+ 
+ ## Overview
+-The Normal Equations Solver addresses the overdetermined linear system $Ax = b$ by explicitly forming the symmetric positive semi-definite matrix $A^T A$ and vector $A^T b$, then solving the resulting square system [S1, unofficial]. It is distinguished from matrix-free iterative methods (like CGLS) by its direct assembly of the normal equations, making it the fastest alternative for small-to-medium systems but prone to numerical instability if the system matrix is ill-conditioned [S1, unofficial].
++The Normal Equations Solver addresses the overdetermined linear system $Ax = b$ by explicitly forming the symmetric positive semi-definite system $A^T A x = A^T b$ and solving it using a standard linear solver [S1, unofficial]. It is distinguished from iterative methods (like CGLS) and direct factorizations of the original matrix (like QR) by its reliance on the explicit construction of the Hessian matrix $A^T A$ [S1, unofficial]. While generally the fastest alternative for small-to-medium systems, it is prone to numerical instability if the system matrix $A$ is ill-conditioned [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- System matrix $A \in \mathbb{R}^{m \times n}$, where $m \gg n$ (tall and skinny). In volume rendering contexts, $m$ is the number of voxels and $n$ is the number of transfer function parameters.
+-- Target vector $b \in \mathbb{R}^m$.
+-
+-**Outputs:**
+-- Solution vector $x \in \mathbb{R}^n$.
++**Inputs and Outputs:**
++- Input: System matrix $A \in \mathbb{R}^{m \times n}$ (where $m \gg n$) and vector $b \in \mathbb{R}^m$.
++- Output: Solution vector $x \in \mathbb{R}^n$.
+ 
+ **Data Structures:**
+-- **Matrix $A$**: Stored in Compressed Sparse Row (CSR) format. This allows sequential querying of non-zero entries for the $i$-th voxel (row), which is efficient for assembly [S1, unofficial].
+-- **Matrix $A^T A$**: A band matrix stored in dense or sparse format. Due to symmetry, only the upper triangular part is stored. The sparsity pattern consists of non-zero entries only on the main diagonal and two diagonals four rows/columns away from the main diagonal. This distance of four arises from the separate handling of RGB$\alpha$ channels [S1, unofficial].
+-- **Vector $A^T b$**: Dense vector of size $n$.
++- Matrix $A$: Stored in Compressed Sparse Row (CSR) format to allow efficient sequential querying of non-zero entries for the $i$-th voxel (row) [S1, unofficial].
++- Matrix $A^T A$: A band matrix with non-zero entries only on the main diagonal and two diagonals four rows/columns away from the main diagonal. The distance of four arises from the separate handling of RGB*$\alpha$ channels [S1, unofficial]. Due to symmetry, only the upper triangular part is stored [S1, unofficial].
++- Vector $A^T b$: Standard dense or sparse vector representation.
+ 
+ **Steps:**
+-1. **Assemble $A^T A$ and $A^T b$**:
+-   - Compute the sparse matrix-matrix product $A^T A$ and sparse matrix-vector product $A^T b$.
+-   - On CPU, use libraries like Eigen [S1, unofficial].
+-   - On GPU, use cuSPARSE [S1, unofficial] or custom matrix-free Vulkan compute shaders [S1, unofficial].
+-   - **Vulkan Compute Implementation**:
+-     - Iterate over all voxels $i$.
+-     - Determine column indices $j(D_i)$ and $j(D_i)+1$ and interpolation weight $w(i)$ (from the underlying radiance field parameterization).
+-     - Atomically add contributions to $A^T A$:
+-       - $(1 - w(i))^2$ to entry $(j(D_i), j(D_i))$.
+-       - $w(i)^2$ to entry $(j(D_i)+1, j(D_i)+1)$.
+-       - $(1 - w(i))w(i)$ to entry $(j(D_i)+1, j(D_i))$.
+-     - Note: Atomic additions may cause write conflicts on GPU, but this remains one of the fastest assembly methods [S1, unofficial].
+-2. **Solve the System**:
+-   - Use a dense or sparse linear least squares solver (e.g., QR, LLT, LDLT) on the assembled $A^T A$ and $A^T b$ [S1, unofficial].
+-   - If using QR, pivoting may be required for numerical stability [S1, unofficial].
+-3. **Handle Constraints (Optional)**:
+-   - The standard normal equations solver does not enforce box constraints $0 \le x_i \le 1$.
+-   - If constraints are not explicitly handled by the solver, apply truncation: $x'_i = \max\{\min\{x_i, 1\}, 0\}$ [S1, unofficial].
+-   - For explicit constraint enforcement, use a Quadratic Programming (QP) solver like ADMM via OSQP [S1, unofficial].
++1. **Assemble $A^T A$ and $A^T b$**: Compute the sparse matrix-matrix product $A^T A$ and the sparse matrix-vector product $A^T b$. This can be done using linear algebra libraries (e.g., Eigen on CPU, cuSPARSE on GPU) or custom matrix-free compute shaders [S1, unofficial].
++   - In a matrix-free GPU implementation (e.g., Vulkan compute), iterate over all voxels. For each voxel $i$, compute the column indices $j(D_i)$ and $j(D_i)+1$ and the interpolation weight $w(i)$ [S1, unofficial].
++   - Atomically add the following values to $A^T A$:
++     - $(1 - w(i))^2$ to entry $(j(D_i), j(D_i))$
++     - $w(i)^2$ to entry $(j(D_i)+1, j(D_i)+1)$
++     - $(1 - w(i))w(i)$ to entry $(j(D_i)+1, j(D_i))$ [S1, unofficial]
++   - Similarly compute $A^T b$ [S1, unofficial].
++2. **Solve the Symmetric System**: Solve the ordinary least squares problem $A^T A x = A^T b$ using a dense or sparse linear least squares solver (e.g., QR, LLT, LDLT) [S1, unofficial].
++3. **Constraint Handling**: The standard normal equations solver does not enforce box constraints $0 \le x_i \le 1$. If the unconstrained solution violates these constraints, apply truncation: $x'_i = \max\{\min\{x_i, 1\}, 0\}$ [S1, unofficial]. If explicit constraint enforcement is required, a constrained quadratic programming solver (e.g., ADMM via OSQP) should be used instead [S1, unofficial].
+ 
+-**Pseudocode (Vulkan-style Assembly):**
+-```python
+-# Initialize A_T_A as a dense band matrix or sparse structure
+-# Initialize A_T_b as a zero vector of size n
+-
+-for each voxel i in voxels:
+-    # Determine which transfer function entries are affected
+-    col_idx = get_column_index(D_i)
+-    w = get_interpolation_weight(i)
+-    
+-    # Contribution to A^T A (upper triangular only)
+-    # Entry (col_idx, col_idx)
+-    atomic_add(A_T_A[col_idx, col_idx], (1 - w)**2)
+-    
+-    # Entry (col_idx + 1, col_idx + 1)
+-    atomic_add(A_T_A[col_idx + 1, col_idx + 1], w**2)
+-    
+-    # Entry (col_idx + 1, col_idx) - symmetric, stored in upper triangle
+-    # Note: col_idx < col_idx + 1, so this is the off-diagonal term
+-    atomic_add(A_T_A[col_idx, col_idx + 1], (1 - w) * w)
+-    
+-    # Contribution to A^T b
+-    # Assuming b[i] is the target value for voxel i
+-    atomic_add(A_T_b[col_idx], (1 - w) * b[i])
+-    atomic_add(A_T_b[col_idx + 1], w * b[i])
+-
+-# Solve the system
+-x = solve_linear_system(A_T_A, A_T_b)
+-
+-# Apply truncation if constraints are not enforced by the solver
+-x = clamp(x, 0, 1)
+-```
++**Formulas:**
++- Normal Equations: $A^T A x = A^T b$ [S1, unofficial]
++- Condition Number Relationship: $\text{cond}(A^T A) = \text{cond}(A)^2$. The source text states "cond(A T A) = cond(A)" but notes the squaring effect on condition number magnitude and instability, implying the squared relationship is the operative numerical concern [S1, unofficial].
++- Truncation: $x'_i = \max\{\min\{x_i, 1\}, 0\}$ [S1, unofficial]
+ 
+ **Parameters:**
+-- **Precision**: 32-bit floating point is common, but memory usage scales with $m$. For $1.76 \cdot 10^6$ voxels, $A$ requires almost 7 GiB [S1, unofficial].
++- Precision: 32-bit floating point is typical. For a dataset with $1.76 \cdot 10^6$ voxels, storing $A$ in CSR format requires almost 7 GiB of memory [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Ill-conditioning**: The condition number squares: $\text{cond}(A^T A) = \text{cond}(A)^2$. This leads to numerical instability if $A$ is ill-conditioned [S1, unofficial].
+-- **Rank Deficiency**: $A^T A$ may be nearly rank deficient if certain transfer function values are rarely referenced by voxel values, or rank deficient if no values fall within a certain range. Pivoting (e.g., in QR) is recommended [S1, unofficial].
+-- **Constraint Violation**: Without explicit handling, solutions may violate physical bounds (e.g., negative opacity). Truncation is a simple fix but may not yield the true constrained optimum [S1, unofficial].
++- **Ill-conditioning**: The condition number of $A^T A$ is the square of the condition number of $A$, leading to potential numerical instability [S1, unofficial].
++- **Rank Deficiency**: $A^T A$ is often nearly rank deficient because certain transfer function values are hardly referenced by voxel values, or rank deficient if no values fall within a certain range. Solvers like QR may require pivoting for stability [S1, unofficial].
++- **GPU Atomic Contention**: While atomic additions on GPU for assembling $A^T A$ might theoretically cause write conflicts and slowdowns, in practice this method proved to be one of the fastest solutions [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Normal Equations-based Solver](5483-normal-equations-based-solver.md)
+-Addresses box-constrained least squares ($0 \le x_i \le 1$) via Quadratic Programming (QP) using ADMM. Distinguished by explicit constraint handling, unlike direct solvers that rely on post-hoc truncation. Chosen when strict bounds are required, despite higher computational overhead.
++Addresses the box-constrained least squares problem ($0 \le x_i \le 1$) by formulating it as a quadratic programming (QP) problem. It differs from direct unconstrained solvers by explicitly handling constraints (often via ADMM) and differs from iterative solvers by relying on the explicit construction of the Hessian $Q = A^T A$.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Assembly of $A^T A$ and $A^T b$ is $O(m \cdot k)$ where $k$ is the number of non-zeros per row (typically small). Solving the dense system is $O(n^3)$ for dense solvers or $O(n^2)$ for sparse solvers. Since $n$ is small (transfer function size), this is fast.
+-- **Memory Complexity**: $O(m \cdot k)$ for $A$ (if stored) and $O(n^2)$ for $A^T A$. For large $m$, storing $A$ is expensive (e.g., 7 GiB for $1.76 \cdot 10^6$ voxels) [S1, unofficial]. Matrix-free assembly avoids storing $A$ entirely.
+-- **Performance**: Generally the fastest alternative for small $n$ [S1, unofficial].
+-- **Strengths**: Simplicity, speed for small systems, well-supported by standard linear algebra libraries.
+-- **Limitations**: Numerical instability due to squared condition number; does not natively support constraints; memory intensive if $A$ is stored.
+-- **When to use**: Small to medium-sized transfer function optimization where speed is critical and constraints are not strict or can be handled via truncation.
+-- **When not to use**: Large-scale problems where memory is constrained, or when high numerical precision is required for ill-conditioned systems (use CGLS or QR with pivoting).
++- **Time Complexity**: Generally the fastest alternative for small-to-medium systems where $A^T A$ is small enough to fit in memory and be solved directly [S1, unofficial].
++- **Memory Complexity**: Storing $A$ is expensive (e.g., ~7 GiB for $1.76 \cdot 10^6$ voxels with 32-bit floats), but $A^T A$ is usually quite small and can be stored in dense or sparse format [S1, unofficial].
++- **Strengths**: Fast assembly and solution for small systems; leverages highly optimized dense linear algebra libraries for the final solve step [S1, unofficial].
++- **Limitations**: Prone to stability issues if $A$ is ill-conditioned due to the squaring of the condition number; does not natively support box constraints without post-processing or external QP solvers [S1, unofficial].
++- **When to Use**: When $A^T A$ is small enough to be stored and solved directly, and numerical stability is not a primary concern or the matrix is well-conditioned.
++- **When Not to Use**: When $A$ is ill-conditioned (use QR or iterative methods); when explicit box constraints are required (use Normal Equations-based Solver with QP).
+ 
+ ## Background
+-Originated from the standard approach to solving overdetermined linear least squares problems in numerical linear algebra. In volume rendering, it is applied to transfer function optimization, where the system matrix relates voxel colors to transfer function values. The specific implementation details (Vulkan assembly, band matrix structure) are documented in recent comparative studies on transfer function optimization [S1, unofficial].
++The method originates from the formulation of ordinary least squares problems in volume rendering transfer function optimization. It is discussed in the context of comparing solver strategies for optimizing RGB*$\alpha$ values, where the system matrix $A$ is tall and skinny ($m \gg n$) [S1, unofficial]. The approach is noted as the most straightforward solution, with implementations supporting CPU (Eigen), GPU (cuSPARSE), and matrix-free Vulkan compute [S1, unofficial].
+ 
+ ## Sources

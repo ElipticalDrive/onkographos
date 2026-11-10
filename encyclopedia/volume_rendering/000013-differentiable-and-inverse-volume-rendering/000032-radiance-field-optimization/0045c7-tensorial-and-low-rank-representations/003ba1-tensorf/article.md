@@ -3,68 +3,66 @@
 Also called: TensoRF (Tensorial Radiance Field Representation), TensoRF Representation, TensoRF Representation and Reconstruction, Tensorial Radiance Field Representation, Tensorial Radiance Fields
 
 ## Overview
-TensoRF models a radiance field as a factorized 4D tensor, replacing the multi-layer perceptrons (MLPs) used in [NeRF](4972-neural-radiance-fields.md) with compact vector and matrix factors. It achieves significantly faster reconstruction times and smaller model sizes by exploiting the low-rank structure of the scene's geometry and appearance. Unlike [Direct Voxel Grid Optimization](4694-direct-voxel-grid-optimization.md) which stores dense voxel grids, TensoRF uses tensor decomposition (CP or VM) to correlate and regularize the entire field, reducing space complexity from $O(n^3)$ to $O(n)$ or $O(n^2)$ [S1, S3].
+TensoRF models a 3D radiance field by treating the complete volume as a 4D tensor (spatial dimensions $X, Y, Z$ and appearance channel dimension $C$) and decomposing it into compact, low-rank tensor components using Canonical Polyadic (CP) or Vector-Matrix (VM) factorization [S1, S2, S4]. Unlike implicit MLP-based methods like NeRF, TensoRF replaces the neural network with a set of global mode vectors and matrices, enabling significantly faster reconstruction times and smaller model sizes while maintaining high rendering quality [S3, unofficial][S4]. It distinguishes itself from other explicit grid methods (like Plenoxels) by achieving superior memory efficiency through tensor decomposition rather than just sparse voxel storage, and from Instant-NGP by relying on standard PyTorch implementations without custom CUDA kernels [S4][S6, unofficial].
 
 ## How it works
-**Inputs:** Multi-view images with known camera poses.
-**Outputs:** Optimized tensor factors representing the scene's volume density $\sigma$ and view-dependent color $c$.
+**Inputs and Outputs:**
+*   **Inputs:** A set of multi-view images with known camera poses.
+*   **Outputs:** A factorized tensorial radiance field representation (vectors and matrices) and rendered novel views.
 
-### Data Structures
-The method maintains two factorized grids:
-1.  **Geometry Grid ($G_\sigma$):** A 3D tensor of size $I \times J \times K$ representing volume density. It is factorized into vectors $\mathbf{v}$ and matrices $\mathbf{M}$.
-2.  **Appearance Grid ($G_c$):** A 4D tensor of size $I \times J \times K \times P$ representing appearance features. It is factorized into vectors $\mathbf{v}$, matrices $\mathbf{M}$, and a global appearance dictionary matrix $\mathbf{B}$.
+**Data Structures:**
+The radiance field is split into two grids:
+1.  **Geometry Grid ($G_\sigma$):** A 3D tensor of size $I \times J \times K$, where $I, J, K$ are the resolutions along the X, Y, Z axes. It stores scalar volume density $\sigma$.
+2.  **Appearance Grid ($G_c$):** A 4D tensor of size $I \times J \times K \times P$, where $P$ is the number of appearance feature channels. It stores view-dependent features.
 
-**Factor Layout:**
-*   **CP Decomposition:**
-    *   $G_\sigma$: $R_\sigma$ components. Each component $r$ consists of three vectors $\mathbf{v}_{\sigma,r}^X \in \mathbb{R}^I$, $\mathbf{v}_{\sigma,r}^Y \in \mathbb{R}^J$, $\mathbf{v}_{\sigma,r}^Z \in \mathbb{R}^K$.
-    *   $G_c$: $R_c$ components. Each component $r$ consists of three vectors $\mathbf{v}_{c,r}^X, \mathbf{v}_{c,r}^Y, \mathbf{v}_{c,r}^Z$ and one feature vector $\mathbf{b}_r \in \mathbb{R}^P$.
-*   **VM Decomposition (Vector-Matrix):**
-    *   $G_\sigma$: $R_\sigma$ components. Each component $r$ consists of three vectors $\mathbf{v}_{\sigma,r}^X \in \mathbb{R}^I$, $\mathbf{v}_{\sigma,r}^Y \in \mathbb{R}^J$, $\mathbf{v}_{\sigma,r}^Z \in \mathbb{R}^K$ and three matrices $\mathbf{M}_{\sigma,r}^{YZ} \in \mathbb{R}^{J \times K}$, $\mathbf{M}_{\sigma,r}^{XZ} \in \mathbb{R}^{I \times K}$, $\mathbf{M}_{\sigma,r}^{XY} \in \mathbb{R}^{I \times J}$.
-    *   $G_c$: $R_c$ components. Each component $r$ consists of three vectors $\mathbf{v}_{c,r}^X, \mathbf{v}_{c,r}^Y, \mathbf{v}_{c,r}^Z$, three matrices $\mathbf{M}_{c,r}^{YZ}, \mathbf{M}_{c,r}^{XZ}, \mathbf{M}_{c,r}^{XY}$, and three feature vectors $\mathbf{b}_{3r-2}, \mathbf{b}_{3r-1}, \mathbf{b}_{3r} \in \mathbb{R}^P$.
-    *   **Global Appearance Dictionary ($\mathbf{B}$):** A matrix of size $P \times 3R_c$ formed by stacking all $\mathbf{b}$ vectors as columns [S1][S5, unofficial].
+**Factorization Schemes:**
+TensoRF uses two decomposition schemes to compress these grids [S1, S2]:
 
-### Parameters
-*   $I, J, K$: Grid resolutions along X, Y, Z axes.
-*   $P$: Number of appearance feature channels. Typical value: 27 (3rd-order SH coefficients for RGB) [S1][S5, unofficial].
-*   $R_\sigma, R_c$: Number of components for geometry and appearance. Typically $R_\sigma, R_c \ll I, J, K$ [S1][S5, unofficial].
-*   $Q$: Number of shading points sampled per ray.
-*   $N_0$: Initial low-resolution grid dimension for coarse-to-fine reconstruction. Typical value: 128 [S1][S5, unofficial].
-*   Optimizer: Adam [S1][S5, unofficial].
-    *   Learning rate for tensor factors: 0.02 [S1][S5, unofficial].
-    *   Learning rate for MLP decoder (if used): 0.001 [S1][S5, unofficial].
-*   Batch size: 4096 pixel rays [S1][S5, unofficial].
-*   Hardware: Single Tesla V100 GPU (16GB) [S1][S5, unofficial].
+1.  **Canonical Polyadic (CP) Decomposition:** Factorizes tensors into pure vector outer products.
+    *   Geometry: $\mathcal{G}_\sigma = \sum_{r=1}^{R_\sigma} \mathbf{v}_{\sigma,r}^X \circ \mathbf{v}_{\sigma,r}^Y \circ \mathbf{v}_{\sigma,r}^Z$
+    *   Appearance: $\mathcal{G}_c = \sum_{r=1}^{R_c} \mathbf{v}_{c,r}^X \circ \mathbf{v}_{c,r}^Y \circ \mathbf{v}_{c,r}^Z \circ \mathbf{b}_r$
+    *   *Note:* CP is extremely compact but may have lower visual quality than VM for the same parameter count [S2][S6, unofficial].
 
-### Algorithm Steps
+2.  **Vector-Matrix (VM) Decomposition:** Factorizes tensors into vector/matrix outer products. This is the primary variant described in the core implementation [S2][S6, unofficial].
+    *   **Geometry ($G_\sigma$):**
+        $$ \mathcal{G}_\sigma = \sum_{r=1}^{R_\sigma} \sum_{m \in \{X,Y,Z\}} \mathcal{A}_{\sigma,r}^m $$
+        where $\mathcal{A}_{\sigma,r}^X = \mathbf{v}_{\sigma,r}^X \circ \mathbf{M}_{\sigma,r}^{YZ}$, $\mathcal{A}_{\sigma,r}^Y = \mathbf{v}_{\sigma,r}^Y \circ \mathbf{M}_{\sigma,r}^{XZ}$, and $\mathcal{A}_{\sigma,r}^Z = \mathbf{v}_{\sigma,r}^Z \circ \mathbf{M}_{\sigma,r}^{XY}$.
+        Here, $\mathbf{v}^X \in \mathbb{R}^I$, $\mathbf{v}^Y \in \mathbb{R}^J$, $\mathbf{v}^Z \in \mathbb{R}^K$ are vectors, and $\mathbf{M}^{YZ} \in \mathbb{R}^{J \times K}$, etc., are matrices. $R_\sigma$ is the number of geometry components.
 
-1.  **Initialization:** Initialize tensor factors for $G_\sigma$ and $G_c$ with random values. Set initial grid resolution $N_0^3$ (e.g., $128^3$) [S1][S5, unofficial].
-2.  **Coarse-to-Fine Upsampling:** During optimization, upsample the vector and matrix factors at specific steps (e.g., 2000, 3000, 4000, 5500, 7000) to increase grid resolution from $N_0^3$ to $N^3$. Interpolation is linear for vectors and bilinear for matrices [S1][S5, unofficial].
-3.  **Ray Sampling:** For each ray $\mathbf{r}$, sample $Q$ points $\mathbf{x}_q$ along the ray segment within the scene bounding box. Compute step sizes $\Delta_q$ [S1][S5, unofficial].
-4.  **Feature Evaluation (Trilinear Interpolation):** For each sample point $\mathbf{x} = (x, y, z)$, compute the interpolated geometry and appearance features using the factorized tensors.
-    *   **Geometry Density:**
-        $$ \sigma(\mathbf{x}) = \mathcal{G}_\sigma(\mathbf{x}) = \sum_{r=1}^{R_\sigma} \sum_{m \in \{X,Y,Z\}} \mathcal{A}_{\sigma,r}^m(\mathbf{x}) $$
-        where for VM decomposition:
-        $$ \mathcal{A}_{\sigma,r}^X(\mathbf{x}) = \mathbf{v}_{\sigma,r}^X(x) \cdot \mathbf{M}_{\sigma,r}^{YZ}(y, z) $$
-        $$ \mathcal{A}_{\sigma,r}^Y(\mathbf{x}) = \mathbf{v}_{\sigma,r}^Y(y) \cdot \mathbf{M}_{\sigma,r}^{XZ}(x, z) $$
-        $$ \mathcal{A}_{\sigma,r}^Z(\mathbf{x}) = \mathbf{v}_{\sigma,r}^Z(z) \cdot \mathbf{M}_{\sigma,r}^{XY}(x, y) $$
-        Here, $\mathbf{v}(t)$ denotes linear interpolation of the vector at coordinate $t$, and $\mathbf{M}(t_1, t_2)$ denotes bilinear interpolation of the matrix at coordinates $(t_1, t_2)$ [S1][S5, unofficial].
-        *Note: For CP decomposition, $\mathcal{A}_{\sigma,r}^X(\mathbf{x}) = \mathbf{v}_{\sigma,r}^X(x)\mathbf{v}_{\sigma,r}^Y(y)\mathbf{v}_{\sigma,r}^Z(z)$ is not used; instead, the CP sum is $\sum_r \mathbf{v}_{\sigma,r}^X(x)\mathbf{v}_{\sigma,r}^Y(y)\mathbf{v}_{\sigma,r}^Z(z)$ directly.*
-    *   **Appearance Features:**
-        $$ \mathcal{G}_c(\mathbf{x}) = \mathbf{B} \left( \bigoplus_{r=1}^{R_c} \bigoplus_{m \in \{X,Y,Z\}} \mathcal{A}_{c,r}^m(\mathbf{x}) \right) $$
-        where $\mathcal{A}_{c,r}^m(\mathbf{x})$ is computed similarly to geometry but using appearance factors, and $\bigoplus$ denotes concatenation into a $3R_c$-dimensional vector [S1][S5, unofficial].
-5.  **Color Decoding:** Compute view-dependent color $c(\mathbf{x}, \mathbf{d})$ using the decoded features $\mathcal{G}_c(\mathbf{x})$ and viewing direction $\mathbf{d}$:
+    *   **Appearance ($G_c$):**
+        $$ \mathcal{G}_c = \sum_{r=1}^{R_c} \left( \mathcal{A}_{c,r}^X \circ \mathbf{b}_{3r-2} + \mathcal{A}_{c,r}^Y \circ \mathbf{b}_{3r-1} + \mathcal{A}_{c,r}^Z \circ \mathbf{b}_{3r} \right) $$
+        where $\mathcal{A}_{c,r}^X = \mathbf{v}_{c,r}^X \circ \mathbf{M}_{c,r}^{YZ}$, etc.
+        The vectors $\mathbf{b}_r \in \mathbb{R}^P$ correspond to the feature channel mode. Since the feature dimension $P$ is typically small, it is not combined into matrices but kept as vectors.
+        Total parameters: $3R_\sigma + 3R_c$ matrices and $3R_\sigma + 6R_c$ vectors [S2].
+
+**Efficient Feature Evaluation (Trilinear Interpolation):**
+To evaluate the field at continuous coordinates $\mathbf{x}=(x,y,z)$, TensoRF exploits the linearity of interpolation. Instead of interpolating 8 voxel values, it interpolates the factors directly [S2][S6, unofficial]:
+*   $\mathcal{A}_r^X(\mathbf{x}) = \mathbf{v}_r^X(x) \mathbf{M}_r^{YZ}(y, z)$, where $\mathbf{v}_r^X(x)$ is linearly interpolated along X, and $\mathbf{M}_r^{YZ}(y, z)$ is bilinearly interpolated in the YZ plane.
+*   Similarly for Y and Z modes.
+
+**Density and Color Computation:**
+1.  **Density:** Sum the interpolated geometry components:
+    $$ \sigma(\mathbf{x}) = \mathcal{G}_\sigma(\mathbf{x}) = \sum_{r=1}^{R_\sigma} \sum_{m \in \{X,Y,Z\}} \mathcal{A}_{\sigma,r}^m(\mathbf{x}) $$
+2.  **Appearance Features:** Concatenate the interpolated appearance components into a vector of size $3R_c$ and multiply by a global appearance dictionary matrix $\mathbf{B} \in \mathbb{R}^{P \times 3R_c}$ (formed by stacking all $\mathbf{b}_r$ vectors as columns) [S2][S6, unofficial]:
+    $$ \mathcal{G}_c(\mathbf{x}) = \mathbf{B} \left( \bigoplus_{r=1}^{R_c} [\mathcal{A}_{c,r}^X(\mathbf{x}), \mathcal{A}_{c,r}^Y(\mathbf{x}), \mathcal{A}_{c,r}^Z(\mathbf{x})] \right) $$
+    where $\oplus$ denotes concatenation.
+3.  **Color:** Apply a decoding function $S$ to the appearance features and viewing direction $\mathbf{d}$:
     $$ c(\mathbf{x}, \mathbf{d}) = S(\mathcal{G}_c(\mathbf{x}), \mathbf{d}) $$
-    $S$ is either a Spherical Harmonics (SH) function (using 3rd-order coefficients) or a small MLP (two fully connected layers with 128 hidden units and ReLU activation) [S1][S5, unofficial].
-6.  **Volume Rendering:** Compute the pixel color $\hat{C}(\mathbf{r})$ using the standard differentiable volume rendering equation:
-    $$ \hat{C}(\mathbf{r}) = \sum_{q=1}^Q \tau_q (1 - \exp(-\sigma_q \Delta_q)) c_q $$
-    $$ \tau_q = \exp\left(-\sum_{p=1}^{q-1} \sigma_p \Delta_p\right) $$
-    where $\sigma_q = \sigma(\mathbf{x}_q)$ and $c_q = c(\mathbf{x}_q, \mathbf{d})$ [S1][S5, unofficial].
-7.  **Loss Computation and Optimization:**
-    *   Compute L2 rendering loss between $\hat{C}(\mathbf{r})$ and ground truth pixel color.
-    *   Add regularization terms: L1 norm loss on tensor factors (for sparsity) and/or Total Variation (TV) loss on factors (for smoothness). TV loss is preferred for datasets with few views or imperfect capture (e.g., LLFF, Tanks and Temples) [S1][S5, unofficial].
-    *   Update tensor factors using Adam optimizer [S1][S5, unofficial].
+    $S$ can be Spherical Harmonics (SH) or a small MLP [S2][S6, unofficial].
 
-### Pseudocode
+**Rendering:**
+Differentiable volume rendering is used [S2][S6, unofficial]:
+$$ C = \sum_{q=1}^Q \tau_q (1 - \exp(-\sigma_q \Delta_q)) c_q $$
+where $\tau_q = \exp(-\sum_{p=1}^{q-1} \sigma_p \Delta_p)$, $Q$ is the number of shading points, $\sigma_q, c_q$ are density and color at sample $q$, and $\Delta_q$ is the ray step size.
+
+**Optimization Steps:**
+1.  **Initialization:** Initialize tensor factors randomly.
+2.  **Coarse-to-Fine Strategy:** Start with a low-resolution grid $N_0^3$ (typically $N_0=128$). Upsample vectors (linear interpolation) and matrices (bilinear interpolation) at specific iteration steps (e.g., 2000, 3000, 4000, 5500, 7000) to reach the final resolution $N^3$. The voxel count interpolates linearly in logarithmic space between $N_0^3$ and $N^3$ [S2][S6, unofficial].
+3.  **Loss Function:** Minimize L2 rendering loss between predicted and ground truth pixel colors.
+4.  **Regularization:** Apply L1 norm loss on factors (for sparsity) and Total Variation (TV) loss on factors (for smoothness). L1 is sufficient for most datasets; TV is preferred for datasets with few views or imperfect capture (e.g., LLFF, Tanks and Temples) [S2][S6, unofficial].
+5.  **Optimizer:** Adam optimizer.
+
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -73,247 +71,233 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class TensoRF:
-    def __init__(self, I, J, K, P, R_sigma, R_c, use_vm=True, use_sh=True):
+class TensoRFVM:
+    def __init__(self, I, J, K, P, R_sigma, R_c, use_sh=False):
         """
-        Initialize TensoRF model.
-        I, J, K: Grid dimensions.
-        P: Appearance feature channels.
+        I, J, K: Grid resolutions along X, Y, Z axes.
+        P: Number of appearance feature channels.
         R_sigma: Number of geometry components.
         R_c: Number of appearance components.
-        use_vm: Use Vector-Matrix decomposition (True) or CP (False).
-        use_sh: Use Spherical Harmonics (True) or MLP (False) for color decoding.
+        use_sh: If True, use Spherical Harmonics for color decoding; else MLP.
         """
         self.I, self.J, self.K = I, J, K
         self.P = P
         self.R_sigma = R_sigma
         self.R_c = R_c
-        self.use_vm = use_vm
-        self.use_sh = use_sh
         
-        # Geometry Factors (G_sigma)
-        if use_vm:
-            # Vectors
-            self.v_sigma_X = nn.Parameter(torch.randn(R_sigma, I))
-            self.v_sigma_Y = nn.Parameter(torch.randn(R_sigma, J))
-            self.v_sigma_Z = nn.Parameter(torch.randn(R_sigma, K))
-            # Matrices
-            self.M_sigma_YZ = nn.Parameter(torch.randn(R_sigma, J, K))
-            self.M_sigma_XZ = nn.Parameter(torch.randn(R_sigma, I, K))
-            self.M_sigma_XY = nn.Parameter(torch.randn(R_sigma, I, J))
-        else:
-            # CP: Only vectors
-            self.v_sigma_X = nn.Parameter(torch.randn(R_sigma, I))
-            self.v_sigma_Y = nn.Parameter(torch.randn(R_sigma, J))
-            self.v_sigma_Z = nn.Parameter(torch.randn(R_sigma, K))
-
-        # Appearance Factors (G_c)
-        # Vectors
-        self.v_c_X = nn.Parameter(torch.randn(R_c, I))
-        self.v_c_Y = nn.Parameter(torch.randn(R_c, J))
-        self.v_c_Z = nn.Parameter(torch.randn(R_c, K))
+        # Geometry Factors (VM)
+        # v_sigma: [R_sigma, 3, max_dim] -> stores v^X, v^Y, v^Z
+        # M_sigma: [R_sigma, 3, dim1, dim2] -> stores M^YZ, M^XZ, M^XY
+        self.v_sigma = nn.Parameter(torch.randn(R_sigma, 3, max(I, J, K)))
+        self.M_sigma = nn.Parameter(torch.randn(R_sigma, 3, max(I, J, K), max(I, J, K)))
         
-        if use_vm:
-            # Matrices
-            self.M_c_YZ = nn.Parameter(torch.randn(R_c, J, K))
-            self.M_c_XZ = nn.Parameter(torch.randn(R_c, I, K))
-            self.M_c_XY = nn.Parameter(torch.randn(R_c, I, J))
+        # Appearance Factors (VM)
+        # v_c: [R_c, 3, max_dim]
+        # M_c: [R_c, 3, dim1, dim2]
+        self.v_c = nn.Parameter(torch.randn(R_c, 3, max(I, J, K)))
+        self.M_c = nn.Parameter(torch.randn(R_c, 3, max(I, J, K), max(I, J, K)))
         
-        # Global Appearance Dictionary B (P x 3*R_c)
+        # Appearance Dictionary B: [P, 3 * R_c]
         self.B = nn.Parameter(torch.randn(P, 3 * R_c))
         
-        # Color Decoder
+        # Decoder
         if use_sh:
-            self.decoder = SHDecoder(P) # Simplified SH implementation
+            self.decoder = SphericalHarmonicsDecoder(P)
         else:
-            self.decoder = nn.Sequential(
-                nn.Linear(P, 128),
-                nn.ReLU(),
-                nn.Linear(128, 128),
-                nn.ReLU(),
-                nn.Linear(128, 3) # RGB
-            )
+            self.decoder = MLPDecoder(P)
 
-    def linear_interp(self, vec, coord):
-        """Linear interpolation of a 1D vector at coordinate coord."""
-        # coord is in [0, dim-1]
-        idx0 = coord.long()
-        idx1 = (idx0 + 1) % vec.size(1)
-        weight = coord - idx0.float()
-        val0 = vec[:, idx0]
-        val1 = vec[:, idx1]
-        return val0 * (1 - weight) + val1 * weight
+    def interpolate_vector(self, v, coord, dim_size):
+        """Linear interpolation of a 1D vector v at coordinate coord (0 to 1)."""
+        # coord is in [0, 1], map to [0, dim_size-1]
+        idx = coord * (dim_size - 1)
+        i0 = int(torch.floor(idx))
+        i1 = i0 + 1
+        w = idx - i0
+        # Clamp indices
+        i0 = torch.clamp(i0, 0, dim_size - 1)
+        i1 = torch.clamp(i1, 0, dim_size - 1)
+        return (1 - w) * v[i0] + w * v[i1]
 
-    def bilinear_interp(self, mat, coord_y, coord_z):
-        """Bilinear interpolation of a 2D matrix at coordinates (y, z)."""
-        # coord_y, coord_z in [0, dim-1]
-        y0 = coord_y.long()
-        y1 = (y0 + 1) % mat.size(1)
-        z0 = coord_z.long()
-        z1 = (z0 + 1) % mat.size(2)
+    def interpolate_matrix(self, M, coord_y, coord_z, dim_y, dim_z):
+        """Bilinear interpolation of a 2D matrix M at (coord_y, coord_z)."""
+        # Map coords to grid indices
+        idx_y = coord_y * (dim_y - 1)
+        idx_z = coord_z * (dim_z - 1)
         
-        wy = coord_y - y0.float()
-        wz = coord_z - z0.float()
+        i0y = int(torch.floor(idx_y))
+        i1y = i0y + 1
+        w_y = idx_y - i0y
         
-        val00 = mat[:, y0, z0]
-        val01 = mat[:, y0, z1]
-        val10 = mat[:, y1, z0]
-        val11 = mat[:, y1, z1]
+        i0z = int(torch.floor(idx_z))
+        i1z = i0z + 1
+        w_z = idx_z - i0z
         
-        val0 = val00 * (1 - wz) + val01 * wz
-        val1 = val10 * (1 - wz) + val11 * wz
-        return val0 * (1 - wy) + val1 * wy
+        i0y = torch.clamp(i0y, 0, dim_y - 1)
+        i1y = torch.clamp(i1y, 0, dim_y - 1)
+        i0z = torch.clamp(i0z, 0, dim_z - 1)
+        i1z = torch.clamp(i1z, 0, dim_z - 1)
+        
+        # Bilinear interpolation
+        val_00 = M[i0y, i0z]
+        val_01 = M[i0y, i1z]
+        val_10 = M[i1y, i0z]
+        val_11 = M[i1y, i1z]
+        
+        val_0 = (1 - w_z) * val_00 + w_z * val_01
+        val_1 = (1 - w_z) * val_10 + w_z * val_11
+        return (1 - w_y) * val_0 + w_y * val_1
 
     def compute_density(self, x, y, z):
-        """Compute density sigma(x,y,z) using VM or CP decomposition."""
+        """Compute density sigma(x,y,z) using VM decomposition."""
         sigma = 0.0
-        if self.use_vm:
-            # Term X: v_X(x) * M_YZ(y,z)
-            v_x = self.linear_interp(self.v_sigma_X, x) # (R_sigma,)
-            m_yz = self.bilinear_interp(self.M_sigma_YZ, y, z) # (R_sigma,)
-            sigma += torch.sum(v_x * m_yz, dim=0)
+        for r in range(self.R_sigma):
+            # Mode X: v^X(x) * M^YZ(y,z)
+            v_x = self.interpolate_vector(self.v_sigma[r, 0], x, self.I)
+            m_yz = self.interpolate_matrix(self.M_sigma[r, 0], y, z, self.J, self.K)
+            sigma += v_x * m_yz
             
-            # Term Y: v_Y(y) * M_XZ(x,z)
-            v_y = self.linear_interp(self.v_sigma_Y, y)
-            m_xz = self.bilinear_interp(self.M_sigma_XZ, x, z)
-            sigma += torch.sum(v_y * m_xz, dim=0)
+            # Mode Y: v^Y(y) * M^XZ(x,z)
+            v_y = self.interpolate_vector(self.v_sigma[r, 1], y, self.J)
+            m_xz = self.interpolate_matrix(self.M_sigma[r, 1], x, z, self.I, self.K)
+            sigma += v_y * m_xz
             
-            # Term Z: v_Z(z) * M_XY(x,y)
-            v_z = self.linear_interp(self.v_sigma_Z, z)
-            m_xy = self.bilinear_interp(self.M_sigma_XY, x, y)
-            sigma += torch.sum(v_z * m_xy, dim=0)
-        else:
-            # CP Decomposition
-            v_x = self.linear_interp(self.v_sigma_X, x)
-            v_y = self.linear_interp(self.v_sigma_Y, y)
-            v_z = self.linear_interp(self.v_sigma_Z, z)
-            # Outer product sum
-            sigma = torch.sum(v_x * v_y * v_z, dim=0)
+            # Mode Z: v^Z(z) * M^XY(x,y)
+            v_z = self.interpolate_vector(self.v_sigma[r, 2], z, self.K)
+            m_xy = self.interpolate_matrix(self.M_sigma[r, 2], x, y, self.I, self.J)
+            sigma += v_z * m_xy
         return sigma
 
-    def compute_appearance_features(self, x, y, z):
+    def compute_appearance(self, x, y, z):
         """Compute appearance feature vector G_c(x,y,z) using VM decomposition."""
-        # Concatenate all A_c factors
-        features_list = []
+        # Concatenate all A_c components into a vector of size 3*R_c
+        app_vec = []
+        for r in range(self.R_c):
+            # Mode X
+            v_x = self.interpolate_vector(self.v_c[r, 0], x, self.I)
+            m_yz = self.interpolate_matrix(self.M_c[r, 0], y, z, self.J, self.K)
+            app_vec.append(v_x * m_yz)
+            
+            # Mode Y
+            v_y = self.interpolate_vector(self.v_c[r, 1], y, self.J)
+            m_xz = self.interpolate_matrix(self.M_c[r, 1], x, z, self.I, self.K)
+            app_vec.append(v_y * m_xz)
+            
+            # Mode Z
+            v_z = self.interpolate_vector(self.v_c[r, 2], z, self.K)
+            m_xy = self.interpolate_matrix(self.M_c[r, 2], x, y, self.I, self.J)
+            app_vec.append(v_z * m_xy)
+            
+        # Stack into [3*R_c]
+        app_concat = torch.stack(app_vec, dim=0) # Shape: [3*R_c]
         
-        # Term X: v_c_X(x) * M_c_YZ(y,z)
-        v_x = self.linear_interp(self.v_c_X, x)
-        m_yz = self.bilinear_interp(self.M_c_YZ, y, z)
-        features_list.append(v_x * m_yz)
-        
-        # Term Y: v_c_Y(y) * M_c_XZ(x,z)
-        v_y = self.linear_interp(self.v_c_Y, y)
-        m_xz = self.bilinear_interp(self.M_c_XZ, x, z)
-        features_list.append(v_y * m_xz)
-        
-        # Term Z: v_c_Z(z) * M_c_XY(x,y)
-        v_z = self.linear_interp(self.v_c_Z, z)
-        m_xy = self.bilinear_interp(self.M_c_XY, x, y)
-        features_list.append(v_z * m_xy)
-        
-        # Concatenate along feature dimension
-        # features_list contains R_c vectors of size (R_c,) -> shape (3, R_c)
-        # We need to stack them to get (3*R_c,)
-        all_features = torch.cat(features_list, dim=0) # (3*R_c,)
-        
-        # Multiply by Global Appearance Dictionary B
-        # B is (P, 3*R_c)
-        features = torch.matmul(self.B, all_features) # (P,)
+        # Multiply by B: [P, 3*R_c] @ [3*R_c] -> [P]
+        features = torch.matmul(self.B, app_concat)
         return features
 
-    def render_ray(self, ray_origin, ray_direction, num_samples):
-        """Render a single ray."""
-        # Sample points along ray
-        t_vals = torch.linspace(0, 1, num_samples)
-        points = ray_origin.unsqueeze(0) + ray_direction.unsqueeze(0) * t_vals.unsqueeze(0).unsqueeze(-1)
+    def forward(self, rays_o, rays_d, t_near, t_far, num_samples):
+        """
+        rays_o: [N, 3] origin
+        rays_d: [N, 3] direction
+        t_near, t_far: [N] near/far planes
+        num_samples: int
+        """
+        # Sample points along rays
+        t_vals = torch.linspace(0, 1, num_samples).to(rays_o.device)
+        # Use midpoints for sampling
+        t_mid = (t_vals[:-1] + t_vals[1:]) / 2.0
+        # Expand to [N, num_samples]
+        t_mid = t_mid.unsqueeze(0).expand_as(rays_o[:, :1])
         
-        # Convert to grid coordinates (assuming bounding box is normalized or known)
-        # This is a placeholder for coordinate transformation logic
-        x, y, z = points[:, 0], points[:, 1], points[:, 2]
+        # Sample positions
+        t_samples = t_mid * (t_far - t_near).unsqueeze(1) + t_near.unsqueeze(1)
+        xyz = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_samples.unsqueeze(2)
         
-        # Compute densities
-        sigmas = self.compute_density(x, y, z)
+        # Normalize xyz to [0, 1] assuming bounding box is [-1, 1] or similar
+        # Note: Actual implementation requires mapping to grid coordinates [0, I-1] etc.
+        # For simplicity, assume xyz is already in [0, 1] range relative to grid size
+        x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
         
-        # Compute transmittance
-        deltas = torch.diff(torch.cat([torch.zeros_like(t_vals), t_vals], dim=0))
-        alpha = 1 - torch.exp(-sigmas * deltas)
-        T = torch.cumprod(torch.cat([torch.ones_like(t_vals[:1]), 1 - alpha[:-1] + 1e-10], dim=0), dim=0)
+        # Compute density and appearance for all samples
+        # Vectorized implementation would be preferred in practice
+        sigma = self.compute_density(x, y, z)
+        features = self.compute_appearance(x, y, z)
         
-        # Compute colors
-        # Get viewing direction (constant for the ray)
-        # Compute appearance features
-        app_features = self.compute_appearance_features(x, y, z)
-        colors = self.decoder(app_features, ray_direction) # (num_samples, 3)
+        # Decode color
+        # features shape: [N, num_samples, P]
+        # rays_d shape: [N, 3] -> expand to [N, num_samples, 3]
+        d_expanded = rays_d.unsqueeze(1).expand_as(xyz)
+        color = self.decoder(features, d_expanded)
         
-        # Volume rendering
+        # Volume Rendering
+        # Compute deltas
+        deltas = t_samples[:, 1:] - t_samples[:, :-1]
+        # Add last delta
+        deltas = torch.cat([deltas, (t_far - t_samples[:, -1]).unsqueeze(1)], dim=1)
+        
+        # Alpha
+        alpha = 1 - torch.exp(-sigma * deltas)
+        
+        # Transmittance
+        T = torch.cumprod(1 - alpha + 1e-10, dim=1)
+        T = torch.cat([torch.ones_like(T[:, :1]), T[:, :-1]], dim=1)
+        
+        # Color
         weights = alpha * T
-        color = torch.sum(weights.unsqueeze(-1) * colors, dim=0)
+        C = torch.sum(weights.unsqueeze(2) * color, dim=1)
         
-        return color
-
-    def forward(self, rays, gt_colors):
-        """Forward pass for a batch of rays."""
-        pred_colors = []
-        for ray, gt in zip(rays, gt_colors):
-            # ray: (origin, direction)
-            color = self.render_ray(ray.origin, ray.direction, 128) # 128 samples
-            pred_colors.append(color)
-        
-        pred_colors = torch.stack(pred_colors)
-        loss = F.mse_loss(pred_colors, gt_colors)
-        
-        # Regularization
-        reg_loss = 0.0
-        # L1 on factors
-        for param in self.parameters():
-            reg_loss += torch.norm(param, p=1)
-        
-        # TV loss on factors (simplified)
-        # ... compute TV on v_sigma_X, M_sigma_YZ, etc. ...
-        
-        return loss + reg_loss
-
-class SHDecoder(nn.Module):
-    def __init__(self, P):
-        super().__init__()
-        self.P = P
-        # SH coefficients for 3rd order (9 coefficients per channel)
-        # P=27 implies 9 coefficients * 3 channels
-        self.coeffs = nn.Parameter(torch.randn(3, 9))
-    
-    def forward(self, features, direction):
-        # features: (batch, P)
-        # direction: (batch, 3)
-        # Compute SH basis for direction
-        # ...
-        # Return RGB
-        return torch.zeros_like(features[:, :3]) # Placeholder
+        return C
 ```
 
 ## Subtopics
 
 ### [CasCPRF](7415-cascprf.md)
-A multi-scale tensor decomposition radiance field representation that achieves superior compactness compared to TensoRF by employing a cascaded scheme to separate frequencies across multiple hierarchical levels.
+A multi-scale tensor decomposition radiance field representation that achieves superior compactness compared to TensoRF by employing a cascaded scheme to separate frequencies across multiple hierarchical levels. It approximates a high-order radiance field feature volume using a tree structure inspired by Hierarchical Tucker decomposition, where vectors in higher levels are estimated by multiplying vectors from lower levels. This approach implicitly controls the frequency band of learned contents, separating low spatial/high angular frequency components (coarse scale) from high spatial/low angular frequency components (fine scale) to enable robust and compact scene reconstruction.
 
 ### [Simple-TensoRF Augmentation](7596-simple-tensorf-augmentation.md)
-A regularization method for TensoRF designed to mitigate overfitting and geometric distortions when training with sparse input views by using a secondary, lower-capacity model for depth priors.
+Simple-TensoRF Augmentation is a regularization method for [TensoRF](3026-tensorf.md) designed to mitigate overfitting and geometric distortions (such as floaters and incorrect object placement) when training with sparse input views. It operates by training a secondary, lower-capacity "augmented" model that produces reliable depth priors, which are then used to supervise the main TensoRF model. Unlike vanilla TensoRF or simple depth-supervised variants (DS-TensoRF), this approach explicitly constrains the model capacity to force simpler solutions, significantly improving depth estimation accuracy and view-synthesis quality in few-shot scenarios.
 
 ### [Generalized Tensorial Radiance Fields (GTensoRF)](8560-generalized-tensorial-radiance-fields-gtensorf.md)
-A framework that learns multiple scenes simultaneously using higher-order tensor decomposition, shifting from scene-specific to generalizable radiance fields.
+Generalized Tensorial Radiance Fields (GTensoRF) is a framework for simultaneous multi-scene optimization that shifts from per-scene training to generalizable radiance fields using higher-order tensor decomposition. It builds on [TensoRF](3026-tensorf.md) by initializing scene-specific low-rank tensors to enable parallelized learning of multiple environments in a single session, drastically reducing training time while enabling view-consistent 3D editing. Unlike [TensoRF](3026-tensorf.md), which optimizes one scene at a time, GTensoRF handles multiple scenes concurrently, and unlike [CasCPRF](7415-cascprf.md) or [Simple-TensoRF Augmentation](7596-simple-tensorf-augmentation.md), it explicitly supports cross-scene generative editing by decoupling density and radiance components.
+
+### [Strivec](11863-strivec.md)
+A neural scene representation that models a 3D scene as a radiance field using sparsely distributed and compactly factorized local tensor feature grids. It leverages tensor decomposition to model tensor grids, utilizing a cloud of local tensors and applying CP decomposition to factorize each tensor into triple vectors.
 
 ## Operating characteristics
-**Time Complexity:** Reconstruction time is significantly faster than NeRF. For example, TensoRF-VM-192 on Synthetic NeRF takes ~17.4 minutes for 30k steps, compared to NeRF's ~35 hours [S1][S5, unofficial].
-**Space Complexity:** Reduced from $O(n^3)$ to $O(n)$ with CP decomposition or $O(n^2)$ with VM decomposition [S3]. Model sizes are compact: TensoRF-CP-384 is <4MB, TensoRF-VM-192 is ~72MB [S1][S5, unofficial].
-**Performance:** On Synthetic NeRF, TensoRF-VM-192 achieves PSNR 33.14 and SSIM 0.963 [S1][S5, unofficial]. On NSVF, it achieves PSNR 36.52 and SSIM 0.982 [S1][S5, unofficial]. On Tanks and Temples, it achieves PSNR 28.56 and SSIM 0.920 [S1][S5, unofficial].
-**Strengths:** Fast convergence, compact model size, no need for customized CUDA kernels (standard PyTorch implementation) [S3][S5, unofficial].
-**Limitations:** May suffer from overfitting and local minima with few views, requiring regularization (TV loss) [S1]. VM decomposition is more complex to implement than CP [S1].
+**Time and Memory Complexity:**
+*   **Space Complexity:** Reduced from $O(n^3)$ (dense grid) to $O(n)$ with CP decomposition or $O(n^2)$ with VM decomposition, where $n$ is the linear grid resolution [S4][S6, unofficial].
+*   **Training Time:** Significantly faster than NeRF. VM models can reconstruct scenes in less than 10-30 minutes on a single Tesla V100 GPU, compared to ~35 hours for NeRF [S2][S6, unofficial]. Training speed is comparable to Plenoxels [S1].
+
+**Measured Performance:**
+*   **Synthetic NeRF:**
+    *   TensoRF-VM-192 (300^3 voxels, 30k steps): PSNR 33.14, SSIM 0.963, Time 17.4 min, Size 71.8 MB [S2][S6, unofficial].
+    *   TensoRF-CP-384 (500^3 voxels, 30k steps): PSNR 31.56, Size <4 MB [S2][S6, unofficial].
+*   **NSVF:**
+    *   TensoRF-VM-192 (300^3 voxels, 30k steps): PSNR 36.52, SSIM 0.982 [S6, unofficial].
+*   **Tanks and Temples:**
+    *   TensoRF-VM-192 (300^3 voxels, 30k steps): PSNR 28.56, SSIM 0.920 [S6, unofficial].
+*   **LLFF (Forward-facing):**
+    *   TensoRF-VM-96 (300^3 voxels, 30k steps): PSNR 26.73, SSIM 0.839, Size 179.7 MB [S6, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Extremely compact model size (CP can be <4MB), fast reconstruction time, high rendering quality (VM outperforms CP and many other methods), no need for custom CUDA kernels (standard PyTorch implementation) [S2, S4][S6, unofficial].
+*   **Limitations:** VM decomposition has higher memory usage than CP. May suffer from overfitting or local minima without regularization (L1/TV loss) [S2]. Performance on real-world datasets with few views (LLFF) is lower than on synthetic datasets [S6, unofficial].
+
+**When to Use:**
+*   Use when computational efficiency (training time) and model size are critical constraints.
+*   Use when hardware does not support custom CUDA kernels.
+*   Use for synthetic datasets or well-captured real datasets where high quality is needed.
+
+**When Not to Use:**
+*   Use NeRF if maximum possible quality is required and training time is not a constraint.
+*   Use Instant-NGP if hardware supports custom CUDA kernels and faster inference is needed (though TensoRF is competitive in training speed).
 
 ## Background
-TensoRF was introduced by Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su in 2022 at the European Conference on Computer Vision (ECCV) [S1, S3]. It addresses the limitations of NeRF, which relies on MLPs for scene representation, leading to high memory usage and slow training times. TensoRF proposes modeling the radiance field as a factorized tensor, enabling efficient scene modeling and reconstruction [S1, S3].
+TensoRF was introduced by Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and Hao Su in March 2022 at the European Conference on Computer Vision (ECCV) [S1, S2][S6, unofficial]. It was developed to address the high computational cost and memory footprint of implicit neural representations like NeRF. By treating the radiance field as a factorized tensor, TensoRF leverages techniques from compressive sensing and tensor decomposition to achieve efficient scene modeling. It is implemented in PyTorch and has been used on datasets such as Synthetic NeRF, NSVF, Tanks and Temples, and LLFF [S6, unofficial].
 
 ## Sources
-[S1] TensoRF: Tensorial Radiance Fields, https://doi.org/10.1007/978-3-031-19824-3_20, fetched 2026-10-26
-[S2] Low-Cost Neural Radiance Fields, https://doi.org/10.48550/arxiv.2605.09312, fetched 2026-10-26 (unofficial)
-[S3] TensoRF: Tensorial Radiance Fields - GitHub Pages, https://apchenstu.github.io/TensoRF/, fetched 2026-10-29
-[S4] PDF TensoRF: Tensorial Radiance Fields - ECVA, https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136920332.pdf, fetched 2026-10-29 (unofficial)
-[S5] Tensorial Radiance Fields - TensoRF, https://www.cvlibs.net/publications/Chen2022ECCV.pdf, fetched 2026-10-29 (unofficial)
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] TensoRF: Tensorial Radiance Fields, https://doi.org/10.1007/978-3-031-19824-3_20, fetched 2026-10-26
+[S3] Low-Cost Neural Radiance Fields, https://doi.org/10.48550/arxiv.2605.09312, fetched 2026-10-26 (unofficial)
+[S4] TensoRF: Tensorial Radiance Fields - GitHub Pages, https://apchenstu.github.io/TensoRF/, fetched 2026-10-29
+[S5] PDF TensoRF: Tensorial Radiance Fields - ECVA, https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136920332.pdf, fetched 2026-10-29 (unofficial)
+[S6] Tensorial Radiance Fields - TensoRF, https://www.cvlibs.net/publications/Chen2022ECCV.pdf, fetched 2026-10-29 (unofficial)

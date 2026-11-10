@@ -3,178 +3,188 @@
 Also called: GLSL reflect function for raymarching, Metal Material Scattering, Ray Marching with Recursive Reflections, Reflection and Refraction in Raymarching, Spherical Marching with Reflections, raytraced reflections, renderReflection
 
 ## Overview
-Ray Marching with Reflections extends distance-field ray marching by continuing the ray path after a surface intersection to simulate specular reflections, effectively transitioning from raycasting to raytracing [S6, unofficial]. It introduces a reflection loop that computes a new ray direction upon intersection, casts this new ray, and accumulates the resulting color weighted by a reflectivity factor [S1, unofficial][S4, unofficial]. Unlike standard sphere tracing which terminates at the first hit, this method iteratively casts new rays in the reflected direction, attenuating their contribution based on material reflectivity [S1, unofficial][S4, unofficial]. It distinguishes itself from [Ray Marching with Refraction and Beer's Law Absorption](1947-ray-marching-with-refraction-and-beer-s-law-absorption.md) by preserving the ray within the same medium and from [Approximate Refraction](3072-approximate-refraction.md) by providing an exact geometric reflection rather than a texture-coordinate offset [S1, unofficial].
+Ray Marching with Reflections extends distance-field ray marching by iteratively casting secondary rays upon surface intersection to simulate specular reflections, allowing the ray to bounce off surfaces and gather lighting from other parts of the scene [S1, S3, S4, unofficial]. It sets itself apart from standard sphere tracing, which terminates at the first hit, by continuing the ray path to compute indirect specular highlights, and from [Screen-Space Reflections](9698-screen-space-reflections.md) by operating in full 3D space rather than being limited to visible screen pixels [S2, S9698].
 
 ## How it works
-The method builds on [Distance-field ray marching](21-distance-field-ray-marching.md).
+The method builds on [Distance-field ray marching](21-distance-field-ray-marching.md). Upon a surface hit, it computes a reflected ray direction, offsets the origin to prevent self-intersection, and marches again, accumulating color with attenuation based on material reflectivity.
 
-### Inputs and Outputs
-*   **Inputs**:
-    *   `ro`: Ray origin (initially camera position) [S2, unofficial].
-    *   `v`: Ray direction (normalized) [S2, unofficial].
-    *   `scene`: Signed Distance Function (SDF) evaluator [S2, unofficial].
-    *   `max_reflections` ($N$): Maximum number of reflection bounces (integer, typically 1–4) [S4, unofficial].
-    *   `reflectivity` ($R$): Material reflectivity coefficient (float, $0 \le R \le 1$) [S2, unofficial].
-    *   `hit_threshold` ($\epsilon$): Distance threshold for surface hit (float, typically 0.001) [S2, unofficial].
-    *   `max_steps`: Maximum SDF evaluations per ray (integer) [S2, unofficial].
-    *   `max_range`: Maximum travel distance for a single ray (float) [S2, unofficial].
-*   **Outputs**:
-    *   `color`: Accumulated RGB color of the pixel [S2, unofficial].
+**Inputs and Outputs:**
+*   **Input:** Primary ray $\mathbf{r}_0 = (\mathbf{o}_0, \mathbf{d}_0)$, scene SDF $f(\mathbf{p})$, material reflectivity coefficient $c_{refl}$, maximum bounces $N_{max}$, convergence threshold $\epsilon$.
+*   **Output:** Final pixel color $\mathbf{C}_{final}$.
 
-### Data Structures
-*   **Ray**: Struct containing `origin` ($p$) and `direction` ($d$), both 3D vectors [S2, unofficial].
-*   **HitRecord**: Struct containing `hit_point` ($p_{hit}$), `normal` ($n$), and `distance` ($t$) [S1, unofficial].
+**Data Structures:**
+*   `Ray`: Struct containing `origin` ($\mathbf{o}$, `vec3`) and `direction` ($\mathbf{d}$, `vec3`, normalized).
+*   `HitRecord`: Struct containing `hit_point` ($\mathbf{p}$, `vec3`), `normal` ($\mathbf{n}$, `vec3`, normalized), and `distance` ($t$, `float`).
 
-### Algorithm Steps
-1.  Initialize `accum_color` to $(0, 0, 0)$ and `mask` (transmittance/weight) to $(1, 1, 1)$ [S2, unofficial][S4, unofficial].
-2.  Initialize `curr_ray` with `ro` and `v` [S2, unofficial].
-3.  Loop $i$ from $0$ to $N$ (or $0$ to $N-1$ depending on implementation) [S2, unofficial][S4, unofficial]:
-    a.  **March**: Call the standard ray marching function on `curr_ray` to find the nearest surface [S2, unofficial].
-        *   If no intersection is found within `max_steps` and `max_range`:
-            *   If $i == 0$, set `accum_color` to the background/sky color [S2, unofficial].
-            *   Break the loop [S4, unofficial].
-        *   If an intersection is found at distance $t$:
-            b.  **Compute Normal**: Calculate the surface normal $n$ at the hit point $p_{hit} = curr\_ray.origin + t \cdot curr\_ray.direction$ using the SDF gradient [S2, unofficial].
-                $$ n = \frac{\nabla S(p_{hit})}{\|\nabla S(p_{hit})\|} $$
-            c.  **Compute Lighting**: Calculate the direct illumination color $C_{direct}$ at $p_{hit}$ using $n$ and the incoming ray direction [S2, unofficial][S4, unofficial].
-            d.  **Accumulate**: Add the weighted contribution to the accumulator:
-                $$ accum\_color \leftarrow accum\_color + mask \cdot C_{direct} $$
-            e.  **Update Weight**: Attenuate the mask for the next bounce:
-                $$ mask \leftarrow mask \cdot R $$
-                *   If $\|mask\| < 0.001$, break the loop to prevent infinite recursion [S4, unofficial].
-            f.  **Cast Reflection**:
-                *   Compute the reflected direction $d_{refl}$:
-                    $$ d_{refl} = reflect(-curr\_ray.direction, n) $$
-                    *(Note: GLSL `reflect(I, N)` expects $I$ as the incident vector pointing *towards* the surface, i.e., $-d$. If $d_{refl}$ is near zero, fallback to $n$ [S1, unofficial].)*
-                *   Offset the new origin to prevent self-intersection (shadow acne):
-                    $$ p_{new} = p_{hit} + \epsilon_{offset} \cdot n $$
-                    Where $\epsilon_{offset}$ is typically $0.001$ [S4, unofficial] or $0.05$ [S2, unofficial].
-                *   Update `curr_ray`:
-                    $$ curr\_ray.origin \leftarrow p_{new} $$
-                    $$ curr\_ray.direction \leftarrow d_{refl} $$
+**Numbered Steps:**
+1.  **Initialization:** Initialize accumulated color $\mathbf{C}_{accum} = \mathbf{0}$, transmission mask $\mathbf{M} = \mathbf{1}$ (white), and current ray $\mathbf{r}_{curr} = \mathbf{r}_0$ [S2, S4, unofficial].
+2.  **Bounce Loop:** Iterate $i$ from $0$ to $N_{max}-1$:
+    a.  **March:** Perform sphere tracing with $\mathbf{r}_{curr}$ to find intersection distance $t$ [S2, S4, unofficial].
+    b.  **Hit Check:** If $t < \epsilon$ (hit) or $t > t_{max}$ (miss):
+        *   If hit:
+            i.  Compute surface normal $\mathbf{n} = \nabla f(\mathbf{p}) / \|\nabla f(\mathbf{p})\|$ at $\mathbf{p} = \mathbf{o}_{curr} + t\mathbf{d}_{curr}$ [S2, S3, unofficial].
+            ii. Compute direct illumination $\mathbf{L}_{dir}$ at $\mathbf{p}$ using $\mathbf{n}$ and $\mathbf{r}_{curr}$ [S2, S4, unofficial].
+            iii. Add to accumulation: $\mathbf{C}_{accum} \leftarrow \mathbf{C}_{accum} + \mathbf{M} \odot \mathbf{L}_{dir}$ [S2, S4, unofficial].
+            iv. Update mask: $\mathbf{M} \leftarrow \mathbf{M} \odot c_{refl}$ [S2, S4, unofficial].
+            v.  **Self-Intersection Guard:** Offset new origin $\mathbf{o}_{new} = \mathbf{p} + \epsilon_{offset} \mathbf{n}$, where $\epsilon_{offset}$ is typically $0.001$ to $0.05$ [S2, S4, unofficial].
+            vi. **Reflect:** Compute new direction $\mathbf{d}_{new} = \text{reflect}(-\mathbf{d}_{curr}, \mathbf{n})$ [S1, S3, unofficial]. Note: GLSL `reflect(I, N)` expects incident vector $\mathbf{I}$ pointing *towards* the surface; if $\mathbf{d}_{curr}$ points away from origin, use $\mathbf{d}_{new} = \text{reflect}(\mathbf{d}_{curr}, \mathbf{n})$ depending on convention. Standard physics: $\mathbf{d}_{new} = \mathbf{d}_{curr} - 2(\mathbf{d}_{curr} \cdot \mathbf{n})\mathbf{n}$ [S3, unofficial].
+            vii. Update ray: $\mathbf{r}_{curr} = (\mathbf{o}_{new}, \mathbf{d}_{new})$.
+        *   If miss:
+            i.  If $i=0$, set $\mathbf{C}_{accum} = \mathbf{C}_{sky}$ (e.g., sky color) [S2, unofficial].
+            ii. Else, add $\mathbf{M} \odot \mathbf{C}_{sky}$ to $\mathbf{C}_{accum}$ [S4, unofficial].
+            iii. Break loop.
+    c.  **Termination:** If $\|\mathbf{M}\| < \epsilon_{trans}$ (e.g., $0.001$), break loop to prevent infinite recursion [S4, unofficial].
+3.  **Post-Processing:** Apply tone mapping $\mathbf{C}_{final} = \mathbf{C}_{accum} / (\mathbf{C}_{accum} + \mathbf{1})$ and gamma correction $\mathbf{C}_{final} = \mathbf{C}_{accum}^{1/\gamma}$ [S2, unofficial].
 
-4.  **Post-Processing**: Apply tone mapping and gamma correction to `accum_color` [S2, unofficial].
-    *   Tone Mapping: $C_{out} = \frac{C_{accum}}{C_{accum} + 1}$ [S2, unofficial].
-    *   Gamma: $C_{final} = C_{out}^{(1/\gamma)}$, where $\gamma \approx 1.1$ [S2, unofficial].
+**Formulas:**
+*   Reflection Direction: $\mathbf{d}_{new} = \mathbf{d}_{curr} - 2(\mathbf{d}_{curr} \cdot \mathbf{n})\mathbf{n}$ [S3, unofficial].
+*   Attenuation: $\mathbf{M}_{i+1} = \mathbf{M}_i \cdot c_{refl}$ [S2, S4, unofficial]. Some implementations use squared reflectivity for energy conservation: $\mathbf{M}_{i+1} = \mathbf{M}_i \cdot c_{refl}^2$ [S4, unofficial].
 
-### Pseudocode
+**Parameters:**
+*   $c_{refl}$: Reflection coefficient multiplier. Default: $0.3$ [S2, unofficial].
+*   $N_{max}$: Number of reflection bounces. Default: $0$ (no reflections) or $1$ [S2, S4, unofficial].
+*   $\epsilon_{offset}$: Offset for self-intersection prevention. Values: $0.001$ [S4, unofficial], $0.05$ [S2, unofficial].
+*   $\epsilon_{trans}$: Transmittance threshold. Default: $0.001$ [S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Self-Intersection (Shadow Acne):** Casting a ray from exactly the hit point causes immediate re-intersection. Must offset origin along normal [S2, S4, unofficial].
+*   **Zero Vector:** If reflected direction is near zero (degenerate case), fallback to normal [S1, unofficial].
+*   **Precision:** Floating point errors in SDF evaluation can cause jitter in normals; use normalized gradient [S2, unofficial].
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def reflect(I, N):
-    return I - 2.0 * dot(I, N) * N
-
-def ray_march(ro, rd, scene, max_steps, hit_threshold, max_range):
-    p = ro
-    for _ in range(max_steps):
-        d = scene(p)
-        if d <= hit_threshold:
-            return p, compute_normal(scene, p), d, True
-        p = p + rd * d
-        if dot(p - ro, rd) > max_range:
-            break
-    return p, vec3(0.0), 0.0, False
-
-def compute_normal(scene, p):
-    eps = 0.001
-    n = vec3(
-        scene(p + vec3(eps, 0.0, 0.0)) - scene(p - vec3(eps, 0.0, 0.0)),
-        scene(p + vec3(0.0, eps, 0.0)) - scene(p - vec3(0.0, eps, 0.0)),
-        scene(p + vec3(0.0, 0.0, eps)) - scene(p - vec3(0.0, 0.0, eps))
-    )
-    return normalize(n)
-
-def shade(p, n, rd, scene):
-    # Standard diffuse shading [G]
-    light_dir = normalize(vec3(1.0, 1.0, -1.0))
-    diff = max(dot(n, light_dir), 0.0)
-    return vec3(0.8) * diff
-
-def ray_march_with_reflections(ro, v, scene, max_reflections=2, reflectivity=0.3,
-                               hit_threshold=0.001, max_steps=64, max_range=100.0,
-                               offset_scale=0.001, gamma=1.1):
+def ray_march_with_reflections(ray_origin, ray_direction, sdf_func, max_bounces=1, reflectivity=0.3, epsilon=0.001, offset_scale=0.01):
+    """
+    ray_origin: vec3
+    ray_direction: vec3 (normalized)
+    sdf_func: function(p) -> float
+    max_bounces: int
+    reflectivity: float (0.0 to 1.0)
+    epsilon: float
+    offset_scale: float
+    """
     accum_color = vec3(0.0)
     mask = vec3(1.0)
-    curr_ro = ro
-    curr_rd = normalize(v)
-
-    for i in range(max_reflections + 1):
-        hit_point, hit_normal, t, hit = ray_march(curr_ro, curr_rd, scene, max_steps, hit_threshold, max_range)
-
-        if not hit:
+    current_ray_origin = ray_origin
+    current_ray_dir = ray_direction
+    
+    for i in range(max_bounces + 1):
+        # Sphere tracing step
+        t = 0.0
+        hit = False
+        hit_point = vec3(0.0)
+        
+        # Simplified sphere trace loop (builds on parent)
+        for step in range(1000): # Max steps
+            p = current_ray_origin + t * current_ray_dir
+            d = sdf_func(p)
+            if d < epsilon:
+                hit = True
+                hit_point = p
+                break
+            if t > 100.0: # Max distance
+                break
+            t += d
+            
+        if hit:
+            # Compute normal via gradient
+            eps = 0.001
+            grad = vec3(
+                sdf_func(hit_point + vec3(eps, 0, 0)) - sdf_func(hit_point - vec3(eps, 0, 0)),
+                sdf_func(hit_point + vec3(0, eps, 0)) - sdf_func(hit_point - vec3(0, eps, 0)),
+                sdf_func(hit_point + vec3(0, 0, eps)) - sdf_func(hit_point - vec3(0, 0, eps))
+            )
+            normal = normalize(grad)
+            
+            # Compute direct illumination (placeholder for lighting model)
+            # In practice, this calls shadow rays and light sources
+            direct_light = compute_direct_lighting(hit_point, normal, current_ray_origin)
+            
+            accum_color += mask * direct_light
+            
+            # Attenuate mask
+            mask *= reflectivity
+            
+            # Check for termination
+            if length(mask) < 0.001:
+                break
+                
+            # Prepare next ray
+            # Offset to prevent self-intersection
+            new_origin = hit_point + normal * offset_scale
+            
+            # Reflect direction
+            # GLSL reflect(I, N) where I is incident vector (pointing towards surface)
+            # If current_ray_dir points away from origin, incident is -current_ray_dir
+            # Standard formula: R = D - 2(D.N)N
+            new_dir = current_ray_dir - 2.0 * dot(current_ray_dir, normal) * normal
+            
+            # Handle degenerate case
+            if length(new_dir) < 1e-8:
+                new_dir = normal
+                
+            current_ray_origin = new_origin
+            current_ray_dir = normalize(new_dir)
+        else:
+            # Missed everything
+            sky_color = vec3(0.3, 0.2, 0.8) # Example sky
             if i == 0:
-                accum_color = vec3(0.3, 0.2, 0.8)
+                accum_color = sky_color
+            else:
+                accum_color += mask * sky_color
             break
-
-        direct_color = shade(hit_point, hit_normal, curr_rd, scene)
-        accum_color = accum_color + mask * direct_color
-
-        mask = mask * reflectivity
-        if length(mask) < 0.001:
-            break
-
-        incident = -curr_rd
-        refl_dir = reflect(incident, hit_normal)
-
-        if length(refl_dir) < 1e-8:
-            refl_dir = hit_normal
-
-        new_origin = hit_point + offset_scale * hit_normal
-        curr_ro = new_origin
-        curr_rd = normalize(refl_dir)
-
+            
+    # Tone mapping
     accum_color = accum_color / (accum_color + vec3(1.0))
-    accum_color = pow(accum_color, vec3(1.0 / gamma))
+    # Gamma correction
+    gamma = 1.1
+    accum_color = pow(accum_color, vec3(1.0/gamma))
+    
     return accum_color
 ```
-
-### Parameters
-*   `max_reflections`: Controls recursion depth. Default 0–2 for performance [S2, unofficial][S4, unofficial].
-*   `reflectivity` ($c_{refl}$): Attenuation factor per bounce. Default 0.3 [S2, unofficial].
-*   `offset_scale`: Epsilon to offset ray origin. Values range from 0.001 [S4, unofficial] to 0.05 [S2, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Self-Intersection**: Casting a reflection ray from the exact hit point causes the ray to immediately re-intersect the same surface (shadow acne). The origin must be offset along the normal [S2, unofficial][S4, unofficial].
-*   **Zero Reflection Vector**: If the incident ray is parallel to the normal, `reflect` may return a zero vector. This must be handled by falling back to the normal or skipping the bounce [S1, unofficial].
-*   **Infinite Recursion**: Without a `max_reflections` cap or a transmittance threshold (e.g., mask < 0.001), highly reflective scenes can cause stack overflows or excessive computation [S4, unofficial].
 
 ## Subtopics
 
 ### [Ray Marching with Refraction and Beer's Law Absorption](1947-ray-marching-with-refraction-and-beer-s-law-absorption.md)
-This method extends distance-field ray marching to simulate transparent dielectric objects by handling refraction, total internal reflection (TIR), and exponential light absorption (Beer's Law) over multiple bounces. Unlike standard ray marching which terminates at the first surface hit, this approach continues the ray through transparent boundaries, flipping the normal direction to track interior traversal and accumulating distance for attenuation. It distinguishes itself from [Approximate Refraction](3072-approximate-refraction.md) by explicitly computing the refracted ray direction and handling TIR, and from [Cone Marching](3808-cone-marching.md) by using a single ray path rather than volumetric cone integration for absorption.
-
-### [Reflected Ray Directions](2028-reflected-ray-directions.md)
-A method to determine the direction of a ray after it interacts with a surface during distance-field ray marching. It calculates the new propagation direction based on the incident ray and the surface normal, enabling specular highlights and environment mapping in volume rendering. It differs from [Ray Marching with Refraction and Beer's Law Absorption](1947-ray-marching-with-refraction-and-beer-s-law-absorption.md) by preserving the ray within the same medium (no index of refraction change) and from [Approximate Refraction](3072-approximate-refraction.md) by providing an exact geometric reflection rather than an approximation [G].
-
-### [Approximate Refraction](3072-approximate-refraction.md)
-Approximate refraction is a technique to make a fluid surface appear to refract objects behind it, providing a visual effect similar to ray tracing but with significantly lower computational cost and implementation complexity. It differs from [Ray Marching with Refraction and Beer's Law Absorption](1947-ray-marching-with-refraction-and-beer-s-law-absorption.md) by avoiding the physical simulation of light paths through the volume, instead relying on a 2D texture coordinate offset derived from the surface normal. It is distinct from [Reflected Ray Directions](2028-reflected-ray-directions.md) as it targets transmission rather than reflection, and from [Cone Marching](3808-cone-marching.md) by using point-sampled normals rather than volume-aware cone intersections for the offset calculation [G].
-
-### [Cone Marching](3808-cone-marching.md)
-Cone Marching is an optimization for distance-field ray marching that groups bundles of rays into a cone to skip repeated Signed Distance Function (SDF) calculations. It differs from standard ray marching by performing a coarse, vertex-shader-based march of these cones to advance the ray origin and step count before the fragment shader resumes fine-grained marching.
+Extends ray marching to transparent dielectrics by refracting rays upon entry, marching inside, and refracting upon exit, while accumulating Beer's Law absorption. Chosen for glass/water; distinguishes itself from [Approximate Refraction](3072-approximate-refraction.md) by explicit ray bending and TIR handling.
 
 ### [Nested Raymarching for Refraction](1957-nested-raymarching-for-refraction.md)
-A reflection type that models a glass-like surface by refracting the ray direction upon entering the glass, marching inside the object, and refracting again upon exiting. When a ray intersects a GLASSREFLECT surface, the new refracted ray direction is computed using the GLSL `refract` function with incident direction $i$, normal $n$, and refractive index ratio $\eta$. The ray marches inside the glass object using a nested for-loop, subtracting distances since signed distances become negative inside the object. Upon exiting (when signed distance becomes positive), the ray is refracted again using the negated normal $-n$ and the reciprocal of $\eta$. Pitfalls include ensuring the normal is negated upon exit and inverting the refractive index ratio.
+Models glass by refracting in, marching, and refracting out. Chosen for simple glass objects; differs from [Ray Marching with Reflections](1963-ray-marching-with-reflections.md) by handling transmission rather than surface reflection.
 
-### Real-time Reflection of Clouds
-A technique for rendering reflections in volumetric clouds [S5, unofficial]. It renders a low-resolution (256x128) panoramic cloud view in an extra pass and blends it into the sky Cubemap [S5, unofficial]. Pitfalls include the fact that SSR only reflects clouds within screen space, and the method has low precision, suitable only for blurry reflections; water reflections may require separate specular handling [S5, unofficial].
+### [Reflected Ray Directions](2028-reflected-ray-directions.md)
+Geometric method to compute specular reflection vectors $\mathbf{r} = \mathbf{d} - 2(\mathbf{d}\cdot\mathbf{n})\mathbf{n}$. Foundation for energy-splitting techniques like [Fresnel Reflection/Refraction](9067-fresnel-reflection-refraction.md).
 
-### Raytracing Extension (Reflections)
-Extending the raycasting process by continuing the ray path after intersection to realize reflections [S6, unofficial]. Raycasting throws rays into the scene, while raytracing continues the interaction of rays with the scene (e.g., reflecting off surfaces like a silver wall) [S6, unofficial].
+### [Approximate Refraction](3072-approximate-refraction.md)
+Fast technique to simulate refraction by distorting background pixels based on surface curvature (convex magnifies, concave shrinks). Chosen for performance; simpler than explicit ray tracing.
 
-### Chromatic Dispersion Glass Rendering
-Renders glass with Fresnel reflection and per-channel refraction for chromatic dispersion [S7, unofficial]. It applies Fresnel reflection plus per-channel refraction for chromatic dispersion (n = 1.48/1.50/1.52) [S7, unofficial]. It falls back to the reflected ray on total-internal-reflection and applies distance-compounding tint [S7, unofficial]. The 3-trace dispersion path is gated to grazing angles [S7, unofficial].
+### [Cone Marching](3808-cone-marching.md)
+Optimization grouping rays into cones to skip SDF evaluations. Chosen for dense volumes; uses coarse vertex-shader marching before fragment shader fine marching.
+
+### [Screen-Space Reflections](9698-screen-space-reflections.md)
+Uses screen-space depth buffer to trace reflections. Chosen for cheap global illumination; limited to visible geometry, unlike 3D ray marching.
+
+#### Real-time Reflection of Clouds
+Renders low-res (256x128) panoramic cloud view in extra pass, blends into sky cubemap [S5, unofficial]. Used for blurry cloud reflections; low precision, SSR only reflects visible clouds.
+
+#### Raytracing Extension (Reflections)
+Continues ray path after intersection to realize reflections (e.g., silver wall) [S6, unofficial]. Distinguishes raytracing (interaction continuation) from raycasting (single throw).
+
+#### Chromatic Dispersion Glass Rendering
+Renders glass with Fresnel reflection and per-channel refraction ($n=1.48/1.50/1.52$) for chromatic dispersion [S7, unofficial]. Falls back to reflection on TIR; gated to grazing angles.
 
 ## Operating characteristics
-*   **Time Complexity**: Not given in the sources.
-*   **Memory Complexity**: Not given in the sources.
-*   **Performance**: Not given in the sources.
-*   **Strengths**: Not given in the sources.
-*   **Limitations**: Not given in the sources.
-*   **When to use**: Not given in the sources.
-*   **When not to use**: Not given in the sources.
+*   **Time Complexity:** $O(N_{max} \cdot N_{steps})$ per pixel, where $N_{max}$ is reflection bounces and $N_{steps}$ is sphere trace steps. Linear scaling with bounces.
+*   **Memory Complexity:** $O(1)$ per pixel (stack depth limited by $N_{max}$).
+*   **Performance:** Significantly slower than single-bounce ray marching due to multiple SDF evaluations and lighting calculations per bounce. [S4, unofficial] notes transmittance thresholding helps prune deep bounces.
+*   **Strengths:** Physically plausible specular highlights, recursive detail.
+*   **Limitations:** High computational cost, prone to noise if not converged, self-intersection artifacts if offset is insufficient.
+*   **When to Use:** Mirror-like surfaces, glossy materials.
+*   **When Not to Use:** Real-time performance-critical scenes with many reflective objects, or when approximate screen-space reflections suffice.
 
 ## Background
-The concept of continuing ray paths after intersection to simulate reflections is a fundamental extension of raycasting to raytracing [S6, unofficial]. In the context of Signed Distance Fields (SDFs), this technique was popularized in real-time graphics for creating mirror-like and glass-like materials [S3, unofficial]. The use of the GLSL `reflect` function for specular scattering and attenuation via texture lookups or scalar multipliers is a standard practice in raymarching shaders [S1, unofficial][S4, unofficial].
+Originating from early ray tracing literature, the method adapts the sphere tracing algorithm for SDFs to support recursive reflection [S3, S6, unofficial]. It is widely used in real-time raymarching demos (e.g., Shadertoy) and offline rendering for material definition [S1, S4, unofficial]. The GLSL `reflect` function is standard in shader languages for this purpose [S3, unofficial].
 
 ## Sources
 [S1] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)

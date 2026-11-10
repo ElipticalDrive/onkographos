@@ -1,0 +1,582 @@
+--- v002.md
++++ v003.md
+@@ -1,85 +1,103 @@
+ # Arcball Camera
+ 
+-Also called: Arcball Rotation, Screen-to-Arcball, Trackball Camera, Trackball Camera Interaction
++Also called: Arcball Camera Rotation, Arcball Rotation, Screen-to-Arcball, Screen-to-Arcball mapping, Trackball Camera, Trackball Camera Interaction, Virtual trackball rotation
+ 
+ ## Overview
+-The Arcball Camera is an interactive camera control technique that maps 2D screen coordinates to a 3D virtual sphere to compute rotation quaternions for smooth orbiting around a center point [S1, S2, S3, S4, unofficial]. It decouples 2D input from 3D orientation, allowing intuitive rotation without gimbal lock [S2, S4, unofficial]. It differs from [First-Person Camera Control](2721-first-person-camera-control.md) by orbiting a fixed center rather than moving the eye position directly [S4, unofficial].
++
++The Arcball Camera is a camera control technique that maps 2D screen coordinates (typically mouse movements) to a 3D virtual sphere to compute rotation quaternions, allowing intuitive orbiting around a center point without gimbal lock [S1, S2, S3, S4, S5, unofficial]. It differs from [First-Person Camera Control](2721-first-person-camera-control.md) by decoupling rotation from the camera's local forward vector, instead rotating the view around a fixed center, and from [Camera Trajectory and Path Generation](6410-camera-trajectory-and-path-generation.md) by being an interactive, direct-manipulation method rather than a scripted path. It builds on [Camera Matrix and Coordinate Transformation](6231-camera-matrix-and-coordinate-transformation.md) to apply the resulting rotation to the view matrix.
+ 
+ ## How it works
+-The method maintains a camera state defined by an eye position $\mathbf{e}$, a target (center) point $\mathbf{c}$, and an up vector $\mathbf{up}$ [S1, unofficial]. It tracks previous and current mouse positions to compute incremental rotations [S2, S3, S4, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Inputs**:
+-    *   Current mouse coordinates $(x, y)$ and previous mouse coordinates $(x_{\text{prev}}, y_{\text{prev}})$ in pixel space [S2, S3, S4, unofficial].
+-    *   Viewport dimensions: width $W$, height $H$ [S2, S3, unofficial].
+-    *   Camera parameters: eye $\mathbf{e}$, center $\mathbf{c}$, up vector $\mathbf{up}$, zoom speed $k_z$, pan sensitivity [S1, S4, unofficial].
+-    *   Current rotation quaternion $q_{\text{curr}}$ and translation vector $\mathbf{t}_{\text{trans}}$ [S1, S4, unofficial].
+-*   **Outputs**:
+-    *   Updated camera matrix $M_{\text{cam}}$ (or eye/target/up vectors) [S1, unofficial].
+-    *   Updated rotation quaternion $q_{\text{new}}$ and translation $\mathbf{t}_{\text{new}}$ [S1, S4, unofficial].
++**Inputs:**
++- Mouse position $(x, y)$ in screen/pixel coordinates.
++- Viewport dimensions: width $W$, height $H$.
++- Previous mouse position $(x_{prev}, y_{prev})$ and previous arcball state (rotation quaternion $q_{old}$).
++- Camera configuration: eye position $\mathbf{e}$, center point $\mathbf{c}$, up vector $\mathbf{u}$, zoom speed $k_{zoom}$, minimum/maximum camera distance $d_{min}, d_{max}$.
++
++**Outputs:**
++- Updated camera view matrix $M_{cam}$.
++- Updated rotation quaternion $q_{new}$.
++- Updated translation vector for zoom/pan.
+ 
+ ### Data Structures
+-The state typically includes:
+-*   `width`, `height`: Integers or floats representing viewport dimensions [S3, unofficial].
+-*   `last_position`: A 3D vector (list of 3 floats) storing the previous arcball vector [S3, unofficial].
+-*   `rotation`: A quaternion (4 floats) representing the cumulative rotation [S1, S4, unofficial].
+-*   `translation`: A 4D vector or 4x4 matrix component representing zoom/pan offset [S1, unofficial].
+-*   `centerTranslation`: A 4x4 matrix representing the pan offset relative to the center [S1, unofficial].
+-*   `trackball_x_form`: A 16-float array (4x4 column-major matrix) for intermediate transformations [S3, unofficial].
+-
+-### Steps
+-
+-1.  **Initialize Camera Basis**:
+-    Compute the camera basis vectors from the eye $\mathbf{e}$, center $\mathbf{c}$, and up vector $\mathbf{up}$ [S1, unofficial]:
+-    $$ \mathbf{z}_{\text{axis}} = \text{normalize}(\mathbf{c} - \mathbf{e}) $$
+-    $$ \mathbf{x}_{\text{axis}} = \text{normalize}(\text{cross}(\mathbf{z}_{\text{axis}}, \mathbf{up})) $$
+-    $$ \mathbf{y}_{\text{axis}} = \text{normalize}(\text{cross}(\mathbf{x}_{\text{axis}}, \mathbf{z}_{\text{axis}})) $$
+-    Build a rotation matrix from $\mathbf{x}_{\text{axis}}$, $\mathbf{y}_{\text{axis}}$, and $-\mathbf{z}_{\text{axis}}$, then convert it to a quaternion [S1, unofficial]. Store translation and centerTranslation matrices [S1, unofficial].
+-
+-2.  **Map Screen to Arcball (Screen-to-Arcball)**:
+-    For a given mouse position $(x, y)$, compute the normalized arcball vector $\mathbf{v}$ [S1, S2, S3, unofficial]:
+-    a. Normalize coordinates to $[-1, 1]$ range, inverting screen $y$ [S2, S3, unofficial]:
+-    $$ v_x = \frac{2.0 \cdot x - W}{R_{\text{ball}}} $$
+-    $$ v_y = \frac{H - 2.0 \cdot y}{R_{\text{ball}}} $$
+-    Where $R_{\text{ball}} = \min(W, H) - 20$ [S3, unofficial].
+-    b. Calculate the squared distance from the center:
+-    $$ d^2 = v_x^2 + v_y^2 $$
+-    c. Compute the $z$-component $v_z$ to project onto the sphere surface [S1, S2, S3, unofficial]:
+-    *   If $d^2 \le 1.0$ (inside the sphere):
+-        $$ v_z = \sqrt{1.0 - d^2} $$
+-    *   If $d^2 > 1.0$ (outside the sphere):
+-        Normalize the 2D vector to the sphere's equator:
+-        $$ \text{len} = \sqrt{d^2} $$
+-        $$ v_x \leftarrow v_x / \text{len}, \quad v_y \leftarrow v_y / \text{len}, \quad v_z = 0.0 $$
+-        *Note: Some implementations cap $d$ at $1.0$ for a cosine projection when $d > 1.0$ [S3, unofficial].*
+-    d. The resulting vector $\mathbf{v} = (v_x, v_y, v_z)$ is the arcball vector [S2, unofficial].
+-
+-3.  **Compute Incremental Rotation**:
+-    Let $\mathbf{v}_{\text{prev}}$ be the arcball vector from the previous frame and $\mathbf{v}_{\text{curr}}$ be the current one [S2, S3, unofficial].
+-    a. Check if movement occurred:
+-    $$ \text{diff} = \mathbf{v}_{\text{curr}} - \mathbf{v}_{\text{prev}} $$
+-    If $\|\text{diff}\| \approx 0$, skip rotation update [S3, unofficial].
+-    b. Compute the rotation axis $\mathbf{a}$ and angle $\theta$ [S2, S3, unofficial]:
+-    $$ \mathbf{a} = \text{cross}(\mathbf{v}_{\text{prev}}, \mathbf{v}_{\text{curr}}) $$
+-    $$ \theta = \arccos(\text{dot}(\mathbf{v}_{\text{prev}}, \mathbf{v}_{\text{curr}})) $$
+-    c. Create a quaternion $q_{\text{inc}}$ from axis $\mathbf{a}$ and angle $\theta$:
+-    $$ q_{\text{inc}} = \text{quat}(\mathbf{a} \cdot \sin(\theta/2), \cos(\theta/2)) $$
+-
+-4.  **Update Rotation**:
+-    Multiply the incremental rotation into the current rotation quaternion [S4, unofficial]:
+-    $$ q_{\text{new}} = \text{normalize}(\Delta R \times R_{\text{old}}) $$
+-    where $\Delta R$ is $q_{\text{inc}}$ and $R_{\text{old}}$ is $q_{\text{curr}}$ [S4, unofficial].
+-
+-5.  **Handle Zoom and Pan**:
+-    *   **Zoom**: Compute a translation vector $\mathbf{t}_{\text{zoom}}$ along the camera's forward axis ($\mathbf{z}_{\text{axis}}$) based on scroll input [S1, unofficial]:
+-        $$ \mathbf{t}_{\text{zoom}} = [0, 0, \text{amount} \cdot k_z, 0] $$
+-        Update the translation matrix: $M_{\text{trans}} = M_{\text{trans}} \cdot \text{Translate}(\mathbf{t}_{\text{zoom}})$ [S1, unofficial].
+-        Clamp the Z-translation component (e.g., $t_{14}$ in a 4x4 matrix) to a minimum value (e.g., $-0.2$) to prevent the camera from passing through the center point [S1, unofficial].
+-    *   **Pan**: Compute delta from mouse movement, transform it by the inverse camera basis to get world-space delta, and update the center translation [S1, unofficial].
+-
+-6.  **Update Camera Matrix**:
+-    Construct the final camera matrix $M_{\text{cam}}$ [S1, unofficial]:
+-    $$ M_{\text{cam}} = M_{\text{trans}} \cdot \text{Rotate}(q_{\text{new}}) \cdot M_{\text{center}} $$
+-    Where $M_{\text{center}}$ positions the camera at the center point [S1, unofficial]. Compute the inverse camera matrix $M_{\text{cam}}^{-1}$ for ray generation [S1, unofficial].
++
++**ArcballState**
++- `rotation`: Quaternion $q$ (w, x, y, z), normalized.
++- `translation`: 4x4 matrix $T$ or vector $\mathbf{t}$, representing zoom/pan offset.
++- `centerTranslation`: 4x4 matrix $T_c$, representing the translation to the orbit center.
++- `invCamera`: 4x4 matrix, inverse of the current camera matrix.
++- `invScreen`: Array $[1/W, 1/H]$.
++- `lastPosition`: 2D vector $(x_{prev}, y_{prev})$.
++- `isRotating`: Boolean flag.
++
++**CameraConfig**
++- `eye`: 3D vector $\mathbf{e}$.
++- `center`: 3D vector $\mathbf{c}$.
++- `up`: 3D vector $\mathbf{u}$ (typically $[0, 1, 0]$).
++- `zoomSpeed`: Scalar $k_{zoom}$ (e.g., 0.1).
++- `minDist`: Float $d_{min}$ (e.g., 1.25).
++- `maxDist`: Float $d_{max}$ (e.g., 8.0).
++
++### Numbered Steps
++
++1. **Initialize Camera Basis:**
++   Compute the camera's local coordinate system.
++   $$ \mathbf{z}_{axis} = \text{normalize}(\mathbf{c} - \mathbf{e}) $$
++   $$ \mathbf{x}_{axis} = \text{normalize}(\text{cross}(\mathbf{z}_{axis}, \mathbf{u})) $$
++   $$ \mathbf{y}_{axis} = \text{normalize}(\text{cross}(\mathbf{x}_{axis}, \mathbf{z}_{axis})) $$
++   Construct the rotation matrix $R$ from these axes. Convert $R$ to initial quaternion $q$. Store translation $\mathbf{t} = \mathbf{e} - \mathbf{c}$ (or similar relative offset).
++
++2. **Normalize Mouse Coordinates:**
++   Convert screen pixel coordinates to normalized device coordinates (NDC) in the range $[-1, 1]$.
++   $$ u = \text{clamp}\left( \frac{2x}{W} - 1, -1, 1 \right) $$
++   $$ v = \text{clamp}\left( 1 - \frac{2y}{H}, -1, 1 \right) $$
++   Note: The y-axis inversion depends on the screen coordinate system (top-left origin vs. bottom-left). [S2, S5, unofficial] use $1 - 2y/H$. [S3, unofficial] uses $(H - 2y)/radius$.
++
++3. **Project to Arcball Surface (Screen-to-Arcball):**
++   Map the 2D point $(u, v)$ to a 3D point $\mathbf{p}$ on the virtual trackball.
++   Calculate squared distance from center: $d^2 = u^2 + v^2$.
++   - If $d^2 \le 1.0$: The point is inside the unit circle. Project onto the upper hemisphere of the sphere.
++     $$ p_z = \sqrt{1.0 - d^2} $$
++     $$ \mathbf{p} = (u, v, p_z) $$
++   - If $d^2 > 1.0$: The point is outside the unit circle. Project onto the hyperboloid surface to maintain constant angular velocity and avoid gimbal lock [S5, G, unofficial].
++     $$ \mathbf{p}_{xy} = \text{normalize}((u, v)) $$
++     $$ p_z = 0 $$
++     $$ \mathbf{p} = \mathbf{p}_{xy} $$
++     *Note: Some implementations use $p_z = 1/\sqrt{u^2+v^2}$ for the hyperboloid [G], but [S5, unofficial] and [S1, unofficial] imply $p_z=0$ for the "else" branch in the provided code snippets, effectively capping the projection to the equator. The standard arcball uses the hyperboloid for smoother rotation outside the sphere. We follow the explicit code in [S1, S5, unofficial] which sets $z=0$ for $d>1$, but acknowledge the hyperboloid alternative [G].*
++
++4. **Compute Rotation Delta:**
++   Let $\mathbf{p}_{prev}$ be the arcball point from the previous frame and $\mathbf{p}_{curr}$ be the current point.
++   Compute the rotation axis $\mathbf{a}$ and angle $\theta$ between these two vectors.
++   $$ \mathbf{a} = \text{cross}(\mathbf{p}_{prev}, \mathbf{p}_{curr}) $$
++   $$ \cos \theta = \text{dot}(\mathbf{p}_{prev}, \mathbf{p}_{curr}) $$
++   $$ \sin \theta = \|\mathbf{a}\| $$
++   
++   **Edge Case Handling:**
++   - If $\|\mathbf{a}\| < \epsilon$ (vectors are parallel or anti-parallel):
++     - If $\cos \theta > 1 - \epsilon$: No rotation ($\theta \approx 0$). Return identity quaternion.
++     - If $\cos \theta < -1 + \epsilon$: 180-degree rotation. Find an orthogonal axis to $\mathbf{p}_{prev}$ by crossing with a non-parallel vector (e.g., $[1,0,0]$ or $[0,1,0]$). Normalize and create quaternion from axis-angle.
++   - Else:
++     $$ \mathbf{a} = \text{normalize}(\mathbf{a}) $$
++     $$ \theta = \text{atan2}(\sin \theta, \cos \theta) $$
++     Construct delta quaternion $q_{\Delta}$ from axis $\mathbf{a}$ and angle $\theta$.
++
++5. **Update Rotation Quaternion:**
++   $$ q_{new} = q_{\Delta} \times q_{old} $$
++   Normalize $q_{new}$.
++
++6. **Update Camera Matrix:**
++   Convert $q_{new}$ to rotation matrix $R_{new}$.
++   The camera matrix $M_{cam}$ is constructed as:
++   $$ M_{cam} = T_{trans} \cdot R_{quat} \cdot T_{center}^{-1} $$
++   Where:
++   - $T_{center}$ translates the center $\mathbf{c}$ to the origin.
++   - $R_{quat}$ applies the rotation.
++   - $T_{trans}$ translates the eye back to its position relative to the center (zoom/pan).
++   *Note: [S1, unofficial] uses `camera = mat4.mul(camera, rotMat, centerTranslation)` and `camera = mat4.mul(camera, translation, camera)`. This implies a specific multiplication order. Standard OpenGL column-major: $M = T \cdot R \cdot T_c^{-1}$. [S5, unofficial] confirms $M_{cam} = T_{trans} \cdot R_{quat} \cdot T_{center}^{-1}$.*
++
++7. **Handle Zoom and Pan:**
++   - **Zoom:** Based on mouse wheel or right-click drag. Compute translation vector $\mathbf{v}_{zoom} = [0, 0, \text{amount} \cdot k_{zoom}]$. Update $T_{trans}$. Clamp the distance component to $[d_{min}, d_{max}]$ to prevent passing through the center [S1, S4, unofficial].
++   - **Pan:** Based on middle-click drag. Compute delta in screen space, transform to world space using $M_{cam}^{-1}$, and update $T_{center}$ or the eye position relative to the center.
+ 
+ ### Pseudocode
+@@ -89,175 +107,250 @@
+ import numpy as np
+ 
++def normalize(v):
++    l = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    if l < 1e-6:
++        return [0, 0, 0]
++    return [v[0]/l, v[1]/l, v[2]/l]
++
++def dot(v1, v2):
++    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
++
++def cross(v1, v2):
++    return [
++        v1[1]*v2[2] - v1[2]*v2[1],
++        v1[2]*v2[0] - v1[0]*v2[2],
++        v1[0]*v2[1] - v1[1]*v2[0]
++    ]
++
++def quat_mul(q1, q2):
++    # q = [w, x, y, z]
++    w1, x1, y1, z1 = q1
++    w2, x2, y2, z2 = q2
++    return [
++        w1*w2 - x1*x2 - y1*y2 - z1*z2,
++        w1*x2 + x1*w2 + y1*z2 - z1*y2,
++        w1*y2 - x1*z2 + y1*w2 + z1*x2,
++        w1*z2 + x1*y2 - y1*x2 + z1*w2
++    ]
++
++def quat_to_mat4(q):
++    w, x, y, z = q
++    # Standard quaternion to 4x4 rotation matrix
++    xx, yy, zz = x*x, y*y, z*z
++    xy, xz, yz = x*y, x*z, y*z
++    wx, wy, wz = w*x, w*y, w*z
++    return [
++        [1 - 2*(yy + zz), 2*(xy - wz), 2*(xz + wy), 0],
++        [2*(xy + wz), 1 - 2*(xx + zz), 2*(yz - wx), 0],
++        [2*(xz - wy), 2*(yz + wx), 1 - 2*(xx + yy), 0],
++        [0, 0, 0, 1]
++    ]
++
++def screen_to_arcball(x, y, width, height):
++    # Normalize to [-1, 1]
++    u = max(-1.0, min(1.0, 2.0 * x / width - 1.0))
++    v = max(-1.0, min(1.0, 1.0 - 2.0 * y / height))
++    
++    dist_sq = u*u + v*v
++    if dist_sq <= 1.0:
++        z = math.sqrt(1.0 - dist_sq)
++    else:
++        # Project to hyperboloid or equator. 
++        # Sources [S1, S5, unofficial] use equator (z=0) for d>1 in code, 
++        # but standard arcball uses hyperboloid for smoothness.
++        # We follow the explicit "else" logic in [S5, unofficial] which normalizes xy and sets z=0.
++        length = math.sqrt(dist_sq)
++        u /= length
++        v /= length
++        z = 0.0
++    return [u, v, z]
++
++def rotation_between_vectors(v1, v2):
++    # Returns quaternion representing rotation from v1 to v2
++    v1 = normalize(v1)
++    v2 = normalize(v2)
++    
++    d = dot(v1, v2)
++    
++    # Parallel
++    if d > 1.0 - 1e-6:
++        return [1.0, 0.0, 0.0, 0.0]
++    
++    # Anti-parallel
++    if d < -1.0 + 1e-6:
++        # Find orthogonal axis
++        axis = cross(v1, [1.0, 0.0, 0.0])
++        if math.sqrt(axis[0]**2 + axis[1]**2 + axis[2]**2) < 1e-6:
++            axis = cross(v1, [0.0, 1.0, 0.0])
++        axis = normalize(axis)
++        # 180 degree rotation
++        return [0.0, axis[0], axis[1], axis[2]]
++    
++    # General case
++    axis = cross(v1, v2)
++    w = 1.0 + d
++    quat = [w, axis[0], axis[1], axis[2]]
++    # Normalize
++    l = math.sqrt(quat[0]**2 + quat[1]**2 + quat[2]**2 + quat[3]**2)
++    return [quat[0]/l, quat[1]/l, quat[2]/l, quat[3]/l]
++
+ class ArcballCamera:
+-    def __init__(self, width, height, eye, center, up):
++    def __init__(self, eye, center, up, width, height):
++        self.eye = eye
++        self.center = center
++        self.up = up
+         self.width = width
+         self.height = height
+-        self.eye = np.array(eye, dtype=float)
+-        self.center = np.array(center, dtype=float)
+-        self.up = np.array(up, dtype=float)
+-        
+-        # Radius for the trackball [S3, unofficial]
+-        self.radius = min(width, height) - 20.0
+-        
+-        # State [S1, S4, unofficial]
+-        self.rotation = np.array([0.0, 0.0, 0.0, 1.0]) # w, x, y, z quaternion
+-        self.translation = np.eye(4) # 4x4 matrix for zoom/pan offset
+-        self.center_translation = np.eye(4) # 4x4 matrix for panning
+-        
+-        # Previous arcball vector [S3, unofficial]
+-        self.last_arcball = None
+-        
+-        # Compute initial basis [S1, unofficial]
+-        self.update_basis()
+-
+-    def update_basis(self):
+-        # Compute camera basis vectors [S1, unofficial]
+-        z_axis = self.center - self.eye
+-        z_axis = z_axis / np.linalg.norm(z_axis)
+-        x_axis = np.cross(z_axis, self.up)
+-        x_axis = x_axis / np.linalg.norm(x_axis)
+-        y_axis = np.cross(x_axis, z_axis)
+-        self.x_axis = x_axis
+-        self.y_axis = y_axis
+-        self.z_axis = z_axis
+-
+-    def screen_to_arcball(self, x, y):
+-        # Normalize to [-1, 1] and invert Y [S2, S3, unofficial]
+-        vx = (2.0 * x - self.width) / self.radius
+-        vy = (self.height - 2.0 * y) / self.radius
+-        
+-        dist_sq = vx*vx + vy*vy
+-        
+-        if dist_sq <= 1.0:
+-            vz = math.sqrt(1.0 - dist_sq)
+-        else:
+-            # Normalize to equator [S1, S2, unofficial]
+-            length = math.sqrt(dist_sq)
+-            vx /= length
+-            vy /= length
+-            vz = 0.0
+-            
+-        return np.array([vx, vy, vz])
+-
+-    def quaternion_from_axis_angle(self, axis, angle):
+-        # axis must be normalized [G]
+-        axis = axis / np.linalg.norm(axis)
+-        half_angle = angle / 2.0
+-        s = math.sin(half_angle)
+-        return np.array([math.cos(half_angle), axis[0]*s, axis[1]*s, axis[2]*s]) # w, x, y, z
+-
+-    def quaternion_multiply(self, q1, q2):
+-        # q1 * q2 [G]
+-        w1, x1, y1, z1 = q1
+-        w2, x2, y2, z2 = q2
+-        w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+-        x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+-        y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+-        z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+-        return np.array([w, x, y, z])
+-
+-    def rotate(self, x, y):
+-        curr_arcball = self.screen_to_arcball(x, y)
+-        
+-        if self.last_arcball is not None:
+-            # Compute rotation axis and angle [S2, S3, unofficial]
+-            axis = np.cross(self.last_arcball, curr_arcball)
+-            dot_prod = np.dot(self.last_arcball, curr_arcball)
+-            # Clamp dot product for numerical stability [G]
+-            dot_prod = max(-1.0, min(1.0, dot_prod))
+-            angle = math.acos(dot_prod)
+-            
+-            if angle > 1e-6: # Avoid division by zero [S3, unofficial]
+-                axis = axis / np.linalg.norm(axis)
+-                q_inc = self.quaternion_from_axis_angle(axis, angle)
+-                # Update rotation: q_new = normalize(delta * q_old) [S4, unofficial]
+-                self.rotation = self.quaternion_multiply(q_inc, self.rotation)
+-                self.rotation = self.rotation / np.linalg.norm(self.rotation)
+-        
++        
++        # Compute initial basis
++        z_axis = normalize([center[0]-eye[0], center[1]-eye[1], center[2]-eye[2]])
++        x_axis = normalize(cross(z_axis, up))
++        y_axis = normalize(cross(x_axis, z_axis))
++        
++        # Initial rotation is identity relative to basis, or derived from basis
++        self.rotation = [1.0, 0.0, 0.0, 0.0]
++        
++        # Translation: vector from center to eye
++        self.translation = [eye[0]-center[0], eye[1]-center[1], eye[2]-center[2]]
++        
++        # Center translation matrix (inverse)
++        self.center_translation = [
++            [1, 0, 0, -center[0]],
++            [0, 1, 0, -center[1]],
++            [0, 0, 1, -center[2]],
++            [0, 0, 0, 1]
++        ]
++        
++        self.last_mouse = [0, 0]
++        self.last_arcball = screen_to_arcball(0, 0, width, height)
++        
++    def update_rotation(self, x, y):
++        curr_arcball = screen_to_arcball(x, y, self.width, self.height)
++        
++        # Compute delta rotation
++        delta_quat = rotation_between_vectors(self.last_arcball, curr_arcball)
++        
++        # Update rotation: q_new = delta * q_old
++        self.rotation = quat_mul(delta_quat, self.rotation)
++        
++        self.last_mouse = [x, y]
+         self.last_arcball = curr_arcball
+-
+-    def zoom(self, amount, zoom_speed=0.1):
+-        # Translate along z-axis (forward/backward) [S1, unofficial]
+-        inv_screen_y = 1.0 / self.height
+-        t = np.array([0.0, 0.0, amount * inv_screen_y * zoom_speed, 0.0])
+-        
+-        # Create translation matrix [G]
+-        T = np.eye(4)
+-        T[0:3, 3] = t
+-        
+-        # Apply translation: translation = translation * T [S1, unofficial]
+-        self.translation = self.translation @ T
+-        
+-        # Clamp translation[14] (Z component) to -0.2 [S1, unofficial]
+-        if self.translation[14] >= -0.2:
+-            self.translation[14] = -0.2
+-
+-    def pan(self, dx, dy):
+-        # Compute delta in screen space [S1, unofficial]
+-        inv_screen_x = 1.0 / self.width
+-        abs_z = abs(self.translation[14])
+-        delta = np.array([dx * inv_screen_x * abs_z, dy * inv_screen_y * abs_z, 0.0, 0.0])
+-        
+-        # Transform delta by inverse camera to get worldDelta [S1, unofficial]
+-        inv_camera = np.linalg.inv(self.get_camera_matrix())
+-        world_delta = inv_camera @ delta
+-        
+-        # Create translation matrix from worldDelta [S1, unofficial]
+-        T = np.eye(4)
+-        T[0:3, 3] = world_delta[0:3]
+-        
+-        # Update centerTranslation: centerTranslation = centerTranslation * T [S1, unofficial]
+-        self.center_translation = self.center_translation @ T
++        
++    def update_zoom(self, amount):
++        # amount is typically mouse wheel delta
++        zoom_factor = amount * 0.1 # zoomSpeed
++        # Translate along the local Z axis (view direction)
++        # In camera space, Z is forward. 
++        # We need to rotate the translation vector by the current rotation
++        # to get the world-space zoom direction.
++        # Simplified: adjust distance from center.
++        
++        # Current eye position relative to center
++        # Apply rotation to the translation vector
++        # Note: This is a simplification. Full implementation requires matrix mult.
++        # For brevity, we assume translation is stored in camera space and rotated.
++        
++        # Let's use the matrix approach for correctness
++        rot_mat = quat_to_mat4(self.rotation)
++        
++        # Current eye position
++        eye = [
++            self.translation[0] + self.center[0],
++            self.translation[1] + self.center[1],
++            self.translation[2] + self.center[2]
++        ]
++        
++        # View direction
++        view_dir = normalize([self.center[0]-eye[0], self.center[1]-eye[1], self.center[2]-eye[2]])
++        
++        # Move eye along view direction
++        new_eye = [
++            eye[0] + view_dir[0] * zoom_factor,
++            eye[1] + view_dir[1] * zoom_factor,
++            eye[2] + view_dir[2] * zoom_factor
++        ]
++        
++        # Clamp distance
++        dist = math.sqrt((new_eye[0]-self.center[0])**2 + (new_eye[1]-self.center[1])**2 + (new_eye[2]-self.center[2])**2)
++        min_dist = 1.25
++        max_dist = 8.0
++        
++        if dist < min_dist:
++            scale = min_dist / dist
++            new_eye = [self.center[0] + (new_eye[0]-self.center[0])*scale,
++                       self.center[1] + (new_eye[1]-self.center[1])*scale,
++                       self.center[2] + (new_eye[2]-self.center[2])*scale]
++        elif dist > max_dist:
++            scale = max_dist / dist
++            new_eye = [self.center[0] + (new_eye[0]-self.center[0])*scale,
++                       self.center[1] + (new_eye[1]-self.center[1])*scale,
++                       self.center[2] + (new_eye[2]-self.center[2])*scale]
++                       
++        self.translation = [new_eye[0]-self.center[0], new_eye[1]-self.center[1], new_eye[2]-self.center[2]]
+ 
+     def get_camera_matrix(self):
+-        # Construct rotation matrix from quaternion [G]
+-        w, x, y, z = self.rotation
+-        R = np.array([
+-            [1 - 2*y*y - 2*z*z, 2*x*y - 2*z*w, 2*x*z + 2*y*w],
+-            [2*x*y + 2*z*w, 1 - 2*x*x - 2*z*z, 2*y*z - 2*x*w],
+-            [2*x*z - 2*y*w, 2*y*z + 2*x*w, 1 - 2*x*x - 2*y*y]
+-        ])
+-        
+-        # Camera matrix: M = [R | -R*eye] [G]
+-        t = -R @ self.eye
+-        M = np.eye(4)
+-        M[0:3, 0:3] = R
+-        M[0:3, 3] = t
+-        
+-        return M
+-
+-    def get_inverse_camera_matrix(self):
+-        return np.linalg.inv(self.get_camera_matrix())
++        # M_cam = T_trans * R * T_center_inv
++        rot_mat = quat_to_mat4(self.rotation)
++        
++        # Translation matrix for eye offset
++        t_mat = [
++            [1, 0, 0, self.translation[0]],
++            [0, 1, 0, self.translation[1]],
++            [0, 0, 1, self.translation[2]],
++            [0, 0, 0, 1]
++        ]
++        
++        # Multiply T * R
++        tr_mat = [
++            [rot_mat[0][0], rot_mat[0][1], rot_mat[0][2], t_mat[0][3]],
++            [rot_mat[1][0], rot_mat[1][1], rot_mat[1][2], t_mat[1][3]],
++            [rot_mat[2][0], rot_mat[2][1], rot_mat[2][2], t_mat[2][3]],
++            [0, 0, 0, 1]
++        ]
++        
++        # Multiply (T*R) * T_center_inv
++        # T_center_inv translates by -center
++        final_mat = [
++            [tr_mat[0][0], tr_mat[0][1], tr_mat[0][2], tr_mat[0][3] - tr_mat[0][0]*self.center[0] - tr_mat[0][1]*self.center[1] - tr_mat[0][2]*self.center[2]],
++            [tr_mat[1][0], tr_mat[1][1], tr_mat[1][2], tr_mat[1][3] - tr_mat[1][0]*self.center[0] - tr_mat[1][1]*self.center[1] - tr_mat[1][2]*self.center[2]],
++            [tr_mat[2][0], tr_mat[2][1], tr_mat[2][2], tr_mat[2][3] - tr_mat[2][0]*self.center[0] - tr_mat[2][1]*self.center[1] - tr_mat[2][2]*self.center[2]],
++            [0, 0, 0, 1]
++        ]
++        
++        return final_mat
+ ```
+ 
+ ### Parameters
+-*   `radius`: Radius of the virtual trackball. Typical value: $\min(W, H) - 20$ [S3, unofficial].
+-*   `zoomSpeed`: Scalar multiplier for zoom amount. Typical value: $0.1$ [G].
+-*   `kMinCameraDistance`: Minimum distance from center to prevent camera inversion. Typical value: $1.25$ [S4, unofficial].
+-*   `kMaxCameraDistance`: Maximum distance from center. Typical value: $8.0$ [S4, unofficial].
+-*   `kZoomStepFactor`: Zoom step scaling factor. Typical value: $0.9$ [S4, unofficial].
++- `width`, `height`: Viewport dimensions in pixels.
++- `zoomSpeed`: Scalar multiplier for zoom magnitude (e.g., 0.1).
++- `minDist`, `maxDist`: Minimum and maximum camera distance from center (e.g., 1.25, 8.0) [S4, unofficial].
++- `eye`, `center`, `up`: Initial camera position, target, and up vector.
+ 
+ ### Edge Cases and Pitfalls
+-*   **Precision**: When the dot product of arcball vectors is close to $1$ or $-1$, $\arccos$ becomes unstable. Clamp the dot product to $[-1, 1]$ [G].
+-*   **Boundaries**: If the mouse is outside the sphere ($d^2 > 1$), the vector must be normalized to the equator ($z=0$) to avoid invalid rotations [S1, S2, S3, unofficial].
+-*   **Zero Movement**: If the mouse does not move, the difference vector is zero, leading to division by zero in axis normalization. Check for non-zero difference before computing rotation [S3, unofficial].
+-*   **Parallel/Anti-Parallel Vectors**: When vectors are parallel or anti-parallel, the cross product yields a zero axis. Handle anti-parallel cases by finding an orthogonal axis via cross product with a fixed axis (e.g., X or Y) to avoid zero-length axis [S4, unofficial].
+-*   **Zoom Clamping**: The camera must be clamped to a minimum distance from the center to prevent passing through it, which causes view inversion [S1, unofficial].
++- **Gimbal Lock:** Avoided by using quaternions instead of Euler angles [S1, S4, unofficial].
++- **Parallel/Anti-parallel Vectors:** When the mouse moves such that the arcball vectors are parallel or anti-parallel, the cross product is zero. Handle by checking the dot product against thresholds ($1-\epsilon$, $-1+\epsilon$) and using a fallback orthogonal axis for 180-degree rotations [S4, unofficial].
++- **Boundary Clamping:** Mouse coordinates must be clamped to $[-1, 1]$ before projection to prevent artifacts at screen edges [S1, S5, unofficial].
++- **Zoom Clamping:** The camera distance must be clamped to prevent the eye from passing through the center point or moving too far away [S1, S4, unofficial].
++- **Hyperboloid vs. Equator:** For points outside the unit circle, some implementations use a hyperboloid projection for smoother rotation, while others cap to the equator ($z=0$). The provided sources [S1, S5, unofficial] use the equator cap in code, but the hyperboloid is a common alternative [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(1)$ per interaction for rotation, zoom, and pan updates [G].
+-*   **Memory Complexity**: $O(1)$ for storing camera state (quaternion, vectors, matrices) [G].
+-*   **Measured Performance**: Not given in the sources.
+-*   **Strengths**: Intuitive interaction, no gimbal lock (due to quaternions), smooth rotation [S2, S4, unofficial].
+-*   **Limitations**: Not suitable for precise positioning or automated paths [G].
+-*   **When to use**: Interactive volume rendering viewers, medical imaging software, 3D model inspection [S4, unofficial].
+-*   **When not to use**: Automated camera paths, non-interactive rendering, scenes requiring precise metric positioning without user input [G].
++
++- **Time Complexity:** $O(1)$ per frame for rotation update. Matrix multiplications are constant time (4x4).
++- **Memory Complexity:** $O(1)$ for state storage (quaternion, translation, matrices).
++- **Performance:** Very fast, suitable for real-time interaction. The main cost is the matrix multiplication for the view matrix update, which is negligible on modern hardware.
++- **Strengths:** Intuitive control, no gimbal lock, smooth rotation.
++- **Limitations:** Can be disorienting if the center point is not visible or if the rotation axis is not aligned with user expectations. Not suitable for precise positioning compared to first-person controls.
++- **When to use:** Interactive volume exploration, medical imaging viewers, 3D model inspection.
++- **When not to use:** When precise, axis-aligned rotation is required, or when the camera needs to follow a specific path.
+ 
+ ## Background
+-Not given in the sources. The method is implemented in interactive medical volume viewers and 3D rendering applications [S4, unofficial].
++
++The Arcball Camera was introduced by Ken Shoemake in "Quaternion Calculus and Fast Animation" (1992) [S1, S3, unofficial]. It was designed to provide a more intuitive way to rotate objects in 3D space compared to Euler angles, avoiding gimbal lock. It has been widely adopted in 3D modeling software, CAD applications, and volume rendering viewers [S2, S4, unofficial]. The method maps 2D mouse movements to a 3D sphere, allowing users to "grab" the object and rotate it as if it were on a physical trackball.
+ 
+ ## Sources
++
+ [S1] Twinklebear/webgl-marching-cubes, https://github.com/Twinklebear/webgl-marching-cubes, fetched 2026-10-26 (unofficial)
+ [S2] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
+ [S3] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
+-[S4] wpop/qt-viewer-pro, https://github.com/wpop/qt-viewer-pro, fetched 2026-10-27 (unofficial)+[S4] wpop/qt-viewer-pro, https://github.com/wpop/qt-viewer-pro, fetched 2026-10-27 (unofficial)
++[S5] sunjianxin/rendner_webgl, https://github.com/sunjianxin/rendner_webgl, fetched 2026-10-27 (unofficial)

@@ -3,175 +3,130 @@
 Also called: Direct Volume Rendering in WebGL, Ray Casting in Fragment Shader
 
 ## Overview
-WebGL Volume Rendering performs direct volume ray casting within a web browser using the WebGL API, typically leveraging the Three.js library for scene management and shader execution [S1, unofficial]. It solves the problem of interactive 3D visualization of scalar volumes (such as microscopy or medical data) in client-side applications without requiring native plugins or server-side rendering [S1, unofficial]. It is distinguished from other GPU-based methods by its specific implementation constraints and optimizations for the web ecosystem, including the use of `SharedArrayBuffer` for high-performance data transfer and specific handling of cross-origin isolation requirements [S1, unofficial]. Unlike CUDA-based approaches, it runs on the client's GPU via JavaScript bindings, trading some raw performance for accessibility and ease of deployment [S1, unofficial].
+WebGL Volume Rendering performs direct volume rendering (DVR) using ray casting executed within the fragment shader of a WebGL context [S1, unofficial]. It solves the problem of visualizing 3D scalar fields in web browsers without requiring native plugins or server-side rendering [S1, unofficial]. It is distinguished from CPU-based WebGL approaches by performing the heavy ray-casting computation on the GPU, and from desktop GPU methods (like CUDA) by its constraint to the WebGL API and browser security model [S1, unofficial].
 
 ## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D volume dataset represented as a `Uint8Array` of voxel values [S1, unofficial].
+*   **Input:** Volume dimensions `volumeSize` as an array `[x, y, z]` in voxels [S1, unofficial].
+*   **Input:** Voxel physical dimensions `voxelSize` as an array `[x, y, z]` in consistent units (e.g., microns) [S1, unofficial].
+*   **Input:** A transfer function texture `transferFunctionTex`, a Three.js `DataTexture` with width 256, height 1, and format `THREE.RGBAFormat` [S1, unofficial]. The data is a `Uint8Array` of size $256 \times 4$, mapping each 8-bit input value to an RGBA color [S1, unofficial].
+*   **Output:** A rendered 2D image displayed in the WebGL canvas [S1, unofficial].
 
-### Inputs and Outputs
-**Inputs:**
-*   `volumeDataUint8`: A JavaScript `Uint8Array` containing the scalar volume data, with one 8-bit value per voxel [S1, unofficial].
-*   `volumeSize`: An array `[x, y, z]` specifying the dimensions of the volume in voxels [S1, unofficial].
-*   `voxelSize`: An array `[x, y, z]` specifying the physical dimensions of each voxel in consistent units (e.g., microns) [S1, unofficial].
-*   `transferFunctionTex`: A Three.js `DataTexture` with width 256 and height 1, using `THREE.RGBAFormat`. The data is a `Uint8Array` of size $256 \times 4$, mapping each 8-bit input value to a 4-byte RGBA color [S1, unofficial].
-*   Optional parameters: `cameraPosition`, `cameraTarget`, `cameraUp`, `cameraFovDegrees`, `orbitZoomSpeed`, `alphaScale`, `dtScale`, `finalGamma`, `useLighting`, `useVolumeMirrorX`, `useSurface`, `surfaceMesh`, `surfaceColor`, `interactionSpeedup`, `heightCorrection` [S1, unofficial].
+**Data Structures**
+The volume data is stored in a 1D `Uint8Array` of length $x \times y \times z$. The transfer function is a 1D texture of width 256.
 
-**Outputs:**
-*   A rendered 2D image displayed in the WebGL canvas [S1, unofficial].
-*   Optional callbacks: `onCameraChange`, `onWebGLRender`, `onRenderedImage` [S1, unofficial].
+**Parameters**
+*   `alphaScale` (default: 1): Scales the opacity $\alpha$ at each sample [S1, unofficial].
+*   `dtScale` (default: 1): Scales the step size $dt$ during ray casting [S1, unofficial].
+*   `finalGamma` (default: 4.5): Gamma applied to the accumulated color [S1, unofficial].
+*   `useLighting` (default: true): Enables gradient-based lighting [S1, unofficial].
+*   `useVolumeMirrorX` (default: false): Mirrors data along the X-axis [S1, unofficial].
+*   `interactionSpeedup` (default: 1): Reduces rendering resolution during interaction [S1, unofficial].
+*   `cameraPosition` (default: `[0, 0, -2]`): Camera position relative to the volume box [S1, unofficial].
+*   `cameraTarget` (default: `[0, 0, 0]`): Camera look-at point [S1, unofficial].
+*   `cameraUp` (default: `[0, -1, 0]`): Camera up vector [S1, unofficial].
+*   `cameraFovDegrees` (default: 45.0): Vertical field of view [S1, unofficial].
+*   `orbitZoomSpeed` (default: 0.15): Zoom speed on mouse wheel [S1, unofficial].
+*   `useSurface` (default: false): Toggles surface mesh visibility [S1, unofficial].
+*   `surfaceColor` (default: `'#00ff00'`): Opaque color of the surface mesh [S1, unofficial].
+*   `heightCorrection` (default: true): Corrects DOM height resizing [S1, unofficial].
 
-### Data Structures
-The volume data is stored in a flat `Uint8Array` [S1, unofficial]. The transfer function is stored in a 1D texture (`DataTexture`) of size $256 \times 1$ [S1, unofficial]. The camera state is managed by a Three.js `PerspectiveCamera` and `OrbitUnlimitedControls` instance [S1, unofficial].
+**Algorithm**
+The rendering is performed via ray casting in the fragment shader. For each pixel:
+1.  Compute the ray origin and direction from the camera parameters and viewport [S1, unofficial].
+2.  Determine the entry and exit points of the ray into the volume bounding box [S1, unofficial].
+3.  Iterate along the ray with step size $dt = dtScale \times \text{voxel\_size}$ [S1, unofficial].
+4.  At each sample point, sample the volume data using trilinear interpolation [S1, unofficial].
+5.  Map the sampled value to color and opacity using the transfer function texture [S1, unofficial].
+6.  Accumulate color and opacity using front-to-back compositing [S1, unofficial].
+7.  If `useLighting` is true, compute the gradient at the sample point for lighting calculations [S1, unofficial].
+8.  Apply final gamma correction: $C_{final} = C_{accumulated}^{(1.0 / finalGamma)}$ [S1, unofficial].
 
-### Steps
-1.  **Initialization**: Create a Three.js scene, camera, and WebGL renderer [S1, unofficial]. Initialize the `DataTexture` for the transfer function with the provided RGBA mapping [S1, unofficial].
-2.  **Camera Setup**: Configure the camera using `cameraPosition`, `cameraTarget`, `cameraUp`, and `cameraFovDegrees` [S1, unofficial]. Set up orbit controls with `orbitZoomSpeed` [S1, unofficial].
-3.  **Ray Casting Loop**: For each pixel in the viewport:
-    a.  Compute the ray origin and direction based on the camera matrix and pixel coordinates [S1, unofficial].
-    b.  Determine the entry and exit points of the ray into the volume bounding box [S1, unofficial].
-    c.  Sample the volume along the ray using a step size scaled by `dtScale` [S1, unofficial].
-    d.  For each sample, retrieve the scalar value from `volumeDataUint8` using `volumeSize` and `voxelSize` [S1, unofficial].
-    e.  Apply the transfer function from `transferFunctionTex` to get color $C$ and opacity $\alpha$ [S1, unofficial].
-    f.  Scale the opacity by `alphaScale` [S1, unofficial].
-    g.  Apply front-to-back compositing:
-        $$ C_{out} = C_{in} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{in}) $$
-        $$ \alpha_{out} = \alpha_{in} + \alpha_{sample} \cdot (1 - \alpha_{in}) $$
-        where $C_{in}$ and $\alpha_{in}$ are the accumulated color and opacity from previous samples [S1, unofficial].
-    h.  If `useLighting` is true, compute lighting based on gradients in the volume as surface normals [S1, unofficial].
-4.  **Post-Processing**: Apply the final gamma correction to the accumulated color $C_{out}$:
-    $$ C_{final} = C_{out}^{(1.0 / \text{finalGamma})} $$
-    where $C_{out}$ components are normalized to $[0, 1]$ [S1, unofficial].
-5.  **Surface Rendering**: If `useSurface` is true and `surfaceMesh` is provided, render the mesh within the volume [S1, unofficial]. The mesh color is defined by `surfaceColor` and must be fully opaque (no alpha) [S1, unofficial].
-6.  **Mirroring**: If `useVolumeMirrorX` is true, mirror the volume data along the x-axis during sampling [S1, unofficial].
-7.  **Interaction Speedup**: If `interactionSpeedup` > 1, reduce the rendering resolution during camera manipulation to improve performance [S1, unofficial].
-8.  **Callbacks**: Trigger `onCameraChange` when the camera moves, `onWebGLRender` after each render, and `onRenderedImage` with the pixel data [S1, unofficial].
-
-### Pseudocode
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Initialization
-scene = create_threejs_scene()
-camera = PerspectiveCamera(fov=cameraFovDegrees, aspect=width/height)
-camera.position = cameraPosition
-camera.lookAt(cameraTarget)
-camera.up = cameraUp
-renderer = WebGLRenderer()
-renderer.setSize(width, height)
-
-# Transfer Function
-tf_texture = DataTexture(width=256, height=1, format=RGBAFormat)
-tf_texture.data = transferFunctionTexData # Uint8Array of size 256*4
-tf_texture.needsUpdate = True
-
-# Volume Data
-volume_data = volumeDataUint8
-volume_size = volumeSize # [x, y, z]
-voxel_size = voxelSize   # [x, y, z]
-
-# Ray Casting Function
-def cast_ray(ray_origin, ray_direction):
-    # Compute intersection with volume bounding box
-    t_min, t_max = compute_box_intersection(ray_origin, ray_direction, volume_size, voxel_size)
+# Fragment Shader Logic (Conceptual)
+def render_fragment(pixel_coord, camera_matrix, volume_tex, tf_tex, params):
+    # 1. Ray Setup
+    ray_origin = unproject(pixel_coord, camera_matrix)
+    ray_direction = normalize(unproject_next(pixel_coord, camera_matrix) - ray_origin)
     
-    accumulated_color = [0.0, 0.0, 0.0]
+    # 2. Volume Bounds Intersection
+    t_min, t_max = intersect_box(ray_origin, ray_direction, volume_bounds)
+    
+    if t_max < t_min:
+        return vec4(0.0)
+
+    # 3. Ray Casting Loop
+    accumulated_color = vec4(0.0)
     accumulated_alpha = 0.0
-    
-    # Step size scaled by dtScale
-    step_size = compute_step_size(t_max - t_min, volume_size, dtScale)
+    step_size = params.dtScale * voxel_size_magnitude
     
     t = t_min
     while t < t_max:
-        # Sample position
         sample_pos = ray_origin + ray_direction * t
         
-        # Handle mirroring
-        if useVolumeMirrorX:
+        # 4. Sample Volume
+        # Handle mirroring if enabled
+        if params.useVolumeMirrorX:
             sample_pos.x = -sample_pos.x
             
-        # Get scalar value
-        scalar = sample_volume_data(sample_pos, volume_data, volume_size, voxel_size)
+        voxel_value = texture(volume_tex, sample_pos).r
+        tf_rgba = texture(tf_tex, vec4(voxel_value / 255.0, 0.0, 0.0, 0.0))
         
-        # Get color and alpha from transfer function
-        tf_index = clamp(scalar, 0, 255)
-        color, alpha = sample_transfer_function(tf_index, tf_texture)
+        color = tf_rgba.rgb
+        alpha = tf_rgba.a * params.alphaScale
         
-        # Scale alpha
-        alpha = alpha * alphaScale
+        # 5. Compositing
+        # Front-to-back blending
+        contribution = alpha * (1.0 - accumulated_alpha)
+        accumulated_color += color * contribution
+        accumulated_alpha += contribution
         
-        # Front-to-back compositing
-        weight = alpha * (1.0 - accumulated_alpha)
-        accumulated_color = accumulated_color + color * weight
-        accumulated_alpha = accumulated_alpha + weight
-        
-        t += step_size
-        
-    # Final gamma correction
-    final_color = [c ** (1.0 / finalGamma) for c in accumulated_color]
-    
-    return final_color
-
-# Render Loop
-def render():
-    # Interaction speedup
-    if interaction_speedup > 1:
-        render_width = width / interaction_speedup
-        render_height = height / interaction_speedup
-    else:
-        render_width = width
-        render_height = height
-        
-    for y in range(render_height):
-        for x in range(render_width):
-            # Compute ray for pixel (x, y)
-            ray_origin, ray_direction = compute_ray_from_pixel(x, y, camera, width, height)
-            color = cast_ray(ray_origin, ray_direction)
-            set_pixel_color(x, y, color)
+        if accumulated_alpha >= 1.0:
+            break
             
-    # Render surface mesh if enabled
-    if useSurface and surfaceMesh:
-        render_mesh(surfaceMesh, surfaceColor)
-        
-    renderer.render(scene, camera)
+        t += step_size
+
+    # 6. Lighting (if enabled)
+    if params.useLighting:
+        # Compute gradient from volume texture for normal estimation
+        normal = compute_gradient_normal(volume_tex, sample_pos)
+        # Apply lighting model (e.g., Phong)
+        # This modifies accumulated_color
+        pass
+
+    # 7. Final Gamma Correction
+    # Formula: c ** (1.0 / finalGamma)
+    final_color = pow(accumulated_color, vec3(1.0 / params.finalGamma))
     
-    # Callbacks
-    if onWebGLRender:
-        onWebGLRender()
-    if onRenderedImage:
-        onRenderedImage(get_pixel_data())
+    return vec4(final_color, accumulated_alpha)
 ```
 
-### Parameters
-*   `alphaScale` (default: 1): Scales opacity at each sample [S1, unofficial].
-*   `dtScale` (default: 1): Scales step size; higher values increase performance but decrease quality [S1, unofficial].
-*   `finalGamma` (default: 4.5): Gamma correction applied to accumulated color; increases visibility of faint details [S1, unofficial].
-*   `useLighting` (default: true): Enables lighting using gradients as normals; if false, resembles maximum intensity projection [S1, unofficial].
-*   `useVolumeMirrorX` (default: false): Mirrors volume data along the x-axis [S1, unofficial].
-*   `interactionSpeedup` (default: 1): Reduces rendering resolution during camera interaction [S1, unofficial].
-*   `cameraPosition` (default: [0, 0, -2]): Initial camera position relative to the volume box (centered at origin, longest dimension -0.5 to 0.5) [S1, unofficial].
-*   `cameraTarget` (default: [0, 0, 0]): Initial camera target [S1, unofficial].
-*   `cameraUp` (default: [0, -1, 0]): Initial camera up direction [S1, unofficial].
-*   `cameraFovDegrees` (default: 45.0): Vertical field of view in degrees [S1, unofficial].
-*   `orbitZoomSpeed` (default: 0.15): Speed of camera zoom on mouse-wheel event [S1, unofficial].
-*   `useSurface` (default: false): Controls visibility of the surface mesh [S1, unofficial].
-*   `surfaceColor` (default: '#00ff00'): Color of the opaque surface mesh; no alpha allowed [S1, unofficial].
-*   `heightCorrection` (default: true): Applies correction when resizing DOM item height [S1, unofficial].
+**Edge Cases and Pitfalls**
+*   **SharedArrayBuffer Error:** Opening H5J files may fail with "SharedArrayBuffer is not defined" if the server does not have cross-origin isolation headers configured [S1, unofficial].
+*   **Precision:** The volume data is 8-bit `Uint8`, limiting dynamic range compared to 16-bit or 32-bit floating point formats [S1, unofficial].
+*   **Boundary Conditions:** Ray casting must correctly handle rays that miss the volume entirely [S1, unofficial].
 
-### Edge Cases and Pitfalls
-*   **SharedArrayBuffer Error**: Opening H5J files may produce a "SharedArrayBuffer is not defined" error if cross-origin isolation is not set up properly [S1, unofficial].
-*   **Surface Mesh Alpha**: The surface mesh color must be fully opaque; alpha is not supported for the mesh [S1, unofficial].
-*   **Data Peak and Gamma**: The opacity falloff is controlled by the "data peak" and "data $\gamma$" parameters, which affect the transfer function application [S1, unofficial].
+## Subtopics
+
+### H5J Volume Data
+A specific file format supported by the reference implementation, requiring cross-origin isolation for efficient loading [S1, unofficial].
+
+### Transfer Function Mapping
+The use of a 1D texture to map scalar values to RGBA, allowing interactive adjustment of opacity and color [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: Linear with respect to the number of pixels and the number of samples per ray [S1, unofficial].
-*   **Memory Complexity**: Linear with respect to the volume size and the transfer function size [S1, unofficial].
-*   **Performance**: Performance can be improved by increasing `dtScale` or `interactionSpeedup`, at the cost of quality and interactivity [S1, unofficial].
-*   **Strengths**: Runs in the browser, no plugin required, interactive camera controls [S1, unofficial].
-*   **Limitations**: Limited by WebGL capabilities and browser security restrictions (e.g., cross-origin isolation) [S1, unofficial].
-*   **When to Use**: Client-side visualization of scalar volumes in web applications [S1, unofficial].
-*   **When Not to Use**: When high-performance rendering is required and server-side rendering is an option, or when the browser environment cannot be configured for cross-origin isolation [S1, unofficial].
+*   **Time Complexity:** Linear with respect to the number of pixels and the number of samples per ray ($O(P \cdot S)$) [S1, unofficial].
+*   **Memory Complexity:** Linear with respect to the volume size ($O(V)$) for storing the volume data and transfer function [S1, unofficial].
+*   **Performance:** Performance is heavily dependent on GPU capabilities and WebGL implementation. The `interactionSpeedup` parameter allows for resolution reduction during camera manipulation to maintain interactivity [S1, unofficial].
+*   **Strengths:** Runs in standard web browsers without plugins; leverages GPU parallelism for real-time rendering [S1, unofficial].
+*   **Limitations:** Limited by WebGL memory constraints and 8-bit data precision by default; requires cross-origin isolation for certain advanced data loading features [S1, unofficial].
 
 ## Background
-WebGL Volume Rendering is implemented in the `@janelia/web-vol-viewer` package by JaneliaSciComp [S1, unofficial]. It provides a reusable component for integrating volume rendering into web applications, including React functional components [S1, unofficial]. The package includes a basic UI for controlling rendering parameters and supports keyboard shortcuts for toggling surface visibility, lighting, and mirroring [S1, unofficial].
+The method is implemented in the `@janelia/web-vol-viewer` library, developed by Janelia SciComp [S1, unofficial]. It provides a reusable React component for volume rendering in web applications [S1, unofficial]. The approach builds on standard WebGL ray casting techniques but packages them with specific UI controls and data handling for scientific visualization [S1, unofficial].
 
 ## Sources
 [S1] JaneliaSciComp/web-vol-viewer, https://github.com/JaneliaSciComp/web-vol-viewer, fetched 2026-10-26 (unofficial)

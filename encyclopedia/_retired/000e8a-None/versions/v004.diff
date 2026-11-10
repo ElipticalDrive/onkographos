@@ -1,0 +1,155 @@
+--- v003.md
++++ v004.md
+@@ -1,100 +1,94 @@
+ # GPU-based Ray-casting for Unstructured Grids
+-
+ Also called: Accurate and efficient GPU ray‐casting algorithm for volume rendering of unstructured grid data
+ 
+ ## Overview
+-This method is a GPU-based ray-casting algorithm designed for the volume rendering of unstructured grid data, specifically guaranteeing accurate rendering results for non-convex meshes [S1, unofficial]. It solves the problem of efficiently mapping irregular unstructured grid data to GPU hardware while maintaining topological accuracy, which is often lost in simpler projection methods. It sets itself apart from sibling methods like [CUDA Volume Ray Casting](2048-cuda-volume-ray-casting.md) by explicitly handling non-convexity through per-pixel intersection lists, and differs from [Pixel Ray Image (PRI)](2467-pixel-ray-image-pri.md) by relying on explicit face intersection logic rather than implicit grid sampling [S1, unofficial].
++This method is a GPU-based ray-casting algorithm designed for the volume rendering of unstructured grid data, specifically guaranteeing accurate rendering results for non-convex meshes [S1, unofficial]. It solves the problem of efficiently mapping irregular unstructured grid geometry to GPU hardware while maintaining topological accuracy, which is often lost in simpler projection methods. It sets itself apart from siblings like [CUDA Volume Ray Casting](2048-cuda-volume-ray-casting.md) by explicitly handling non-convexity through per-pixel intersection lists, and differs from [VOGUE Architecture](3149-vogue-architecture.md) by relying on a ray-casting approach rather than a voxelization-based one. It builds on [Hardware and Platform Specific](2517-hardware-and-platform-specific.md) principles by optimizing work distribution for modern GPU architectures.
+ 
+ ## How it works
+-**Inputs:** Unstructured grid dataset (mesh topology and vertex positions); rendering parameters (view matrix, projection matrix, transfer function).
+-**Outputs:** Rendered image (color and opacity per pixel).
++**Inputs:** Unstructured grid dataset (mesh topology and cell data); rendering parameters (camera, transfer functions).
++**Outputs:** Rendered image (pixel colors).
+ 
+ **Data Structures:**
+-1.  **Intersection List Array:** A flat array representing the intersection lists for all faces. The construction algorithm organizes these lists to ensure efficient memory access patterns on the GPU [S1, unofficial].
+-2.  **Thread Block Configuration:** Organized to maximize ray coherency within blocks, extending prior image-tile-based work distribution methods [S1, unofficial].
++1.  **Intersection Lists:** A flat array representing intersection lists for all faces. This structure replaces the traditional linked-list or complex tree structures to ensure coalesced memory access on the GPU. The construction algorithm maps face intersections to this array [S1, unofficial].
++2.  **Thread Block Mapping:** Rays are grouped into thread blocks based on an extended image-tile-based work distribution method. This increases ray coherency within a block [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Intersection List Construction:** Generate the intersection lists for all faces in the unstructured grid. This involves calculating the intersection of rays (defined by pixel coordinates and camera parameters) with the mesh faces [S1, unofficial].
+-2.  **Work Distribution:** Distribute the rendering workload to GPU threads. Each GPU thread is assigned to handle a single ray [S1, unofficial]. The distribution is organized by image tiles to increase ray coherency within thread blocks, optimizing memory access efficiency [S1, unofficial].
+-3.  **Ray Casting Execution:** For each ray, the thread accesses the pre-constructed intersection list array. The thread iterates through the intersections to determine the visible surfaces [S1, unofficial].
+-4.  **Visibility Sorting and Rendering:** The method relies on the accuracy of visibility sorting of faces projected onto the same pixel. It employs the per-pixel intersection list concept from the Bunyk algorithm to ensure correct ordering and accurate results for non-convex meshes [S1, unofficial].
+-5.  **On-Demand Calculation:** Instead of using a per-thread local buffer to cache intermediate results (which is deemed inappropriate for modern GPU architectures due to register pressure or cache inefficiencies), the method uses an on-demand calculation strategy [S1, unofficial]. This allows for duplicate computations but achieves better overall performance [S1, unofficial].
++1.  **Preprocessing (Intersection List Construction):**
++    *   For each pixel in the image, determine the set of grid faces intersected by the viewing ray.
++    *   Construct the intersection lists for all faces across the entire image.
++    *   Store these lists in a flat array optimized for GPU memory access patterns [S1, unofficial].
++2.  **Work Distribution:**
++    *   Assign a GPU thread to handle each ray (one thread per pixel/ray).
++    *   Group threads into blocks such that rays within a block correspond to spatially adjacent pixels (tiles), maximizing memory access efficiency [S1, unofficial].
++3.  **Ray Casting (Per-Pixel):**
++    *   Each thread retrieves the intersection list for its assigned pixel from the flat array.
++    *   Sort the intersections to ensure correct visibility ordering (critical for non-convex meshes) [S1, unofficial].
++    *   Perform ray-casting integration through the sorted intersections.
++    *   **Calculation Strategy:** Use an on-demand calculation strategy. Do not use a per-thread local buffer to cache intermediate results, as this is inefficient on modern GPUs. Instead, allow duplicate computations if necessary to maintain throughput [S1, unofficial].
++4.  **Compositing:**
++    *   Composite the optical properties (color, opacity) along the ray path using the sorted intersection data.
++    *   Write the final color to the output image buffer [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for a single GPU thread handling one ray
+-def render_ray(ray_origin, ray_direction, pixel_id, intersection_list_array):
+-    # 1. Retrieve the intersection list for this ray from the global array
+-    # The array structure is assumed to be pre-constructed by the host or a setup kernel
+-    intersections = get_intersections_for_ray(ray_id=pixel_id, array=intersection_list_array)
++# Kernel executed by one thread per pixel
++def ray_cast_kernel(pixel_x, pixel_y, intersection_lists, grid_data, transfer_function):
++    # 1. Retrieve intersection list for this pixel
++    # The intersection_lists array is pre-constructed to map pixel indices to face intersection data
++    ray = get_ray_from_pixel(pixel_x, pixel_y)
++    intersections = intersection_lists[pixel_y * image_width + pixel_x]
+     
+-    # 2. Sort intersections by distance from ray_origin
+-    # The Bunyk algorithm concept ensures correct visibility sorting
+-    sorted_intersections = sort_by_distance(intersections, ray_origin)
++    # 2. Sort intersections for correct visibility
++    # Essential for non-convex meshes to handle occlusion correctly
++    sort_intersections(intersections)
+     
+-    # 3. Iterate through sorted intersections to compute color
++    # 3. On-demand integration
++    # No local caching/buffering; compute values as needed
+     accumulated_color = vec3(0.0)
+     accumulated_opacity = 0.0
+     
+-    for intersection in sorted_intersections:
+-        # On-demand calculation of optical properties (color, opacity)
+-        # No local buffer caching; recompute as needed
+-        sample_color = compute_sample_color(intersection.position, intersection.normal)
+-        sample_opacity = compute_sample_opacity(intersection.position)
++    for intersection in intersections:
++        # Calculate optical properties on demand
++        # This may involve redundant calculations but avoids memory latency of local buffers
++        color, opacity = compute_cell_properties(intersection, grid_data, transfer_function)
+         
+-        # Standard volume rendering compositing (front-to-back)
+-        # Note: Specific transfer function application is implied but not detailed in source
+-        alpha = sample_opacity * intersection.face_weight # face_weight [G]
++        # Standard volume rendering compositing
++        # C_out = C_in + (1 - C_in_opacity) * C_cell * O_cell
++        accumulated_color = accumulated_color + (1.0 - accumulated_opacity) * color * opacity
++        accumulated_opacity = accumulated_opacity + (1.0 - accumulated_opacity) * opacity
+         
+-        accumulated_color += sample_color * alpha * (1.0 - accumulated_opacity)
+-        accumulated_opacity += alpha * (1.0 - accumulated_opacity)
+-        
+-        # Early termination if fully opaque
+         if accumulated_opacity >= 1.0:
+             break
+             
+     return accumulated_color
+-
+-# Helper to retrieve intersections (conceptual, based on "novel construction algorithm")
+-def get_intersections_for_ray(ray_id, array):
+-    # Implementation details of the novel construction algorithm are not provided in the source
+-    # This function accesses the flat array structure optimized for GPU memory access
+-    pass
+ ```
+ 
+ **Parameters:**
+-*   **Thread Block Size:** Not given in the sources.
+-*   **Tile Size:** Not given in the sources.
+-*   **On-Demand Strategy:** Enabled (explicitly preferred over local buffering) [S1, unofficial].
++*   **Image Tile Size:** Determines the block size for thread grouping. Not given in the sources.
++*   **Sorting Algorithm:** Used for visibility sorting. Not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Non-Convex Meshes:** The method specifically addresses non-convex meshes by using per-pixel intersection lists to guarantee accuracy [S1, unofficial].
+-*   **Per-Thread Local Buffer:** Using a per-thread local buffer to reduce redundant computation is explicitly noted as inappropriate for modern GPU architectures in this context [S1, unofficial].
+-*   **Duplicate Computations:** The on-demand strategy allows for duplicate computations, which is a trade-off for better performance [S1, unofficial].
++*   **Non-Convex Meshes:** Standard ray casting may fail to render correctly if faces are not sorted by depth. This method explicitly addresses this via the intersection list sorting [S1, unofficial].
++*   **Per-Thread Local Buffers:** Using local buffers to reduce redundant computation is inappropriate for modern GPU architectures and should be avoided [S1, unofficial].
++*   **Duplicate Computations:** The on-demand strategy allows duplicate computations. This is a deliberate trade-off for performance on modern hardware [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Pixel Ray Image (PRI)](2467-pixel-ray-image-pri.md)
+-A semi-regular data structure replacing the irregular mesh with a pixelized projection plane and 1D linear splines. It differs by using implicit grid sampling and slice-based rendering, whereas this method uses explicit face intersections. Choose PRI for efficient shader programming on regular-like structures; choose this method for accurate non-convex mesh rendering.
++Replaces the irregular mesh with a pixelized projection plane and 1D linear splines. It pre-processes geometry into a texture-friendly format, differing from this method's explicit intersection list construction.
+ 
+ ### [GPU-based Ray Traversal on Tetrahedral Meshes](3165-gpu-based-ray-traversal-on-tetrahedral-meshes.md)
+-Performs volume rendering by executing fast ray traversal concurrently using neighbor pointers. It differs by relying on explicit tetrahedral adjacency and imaginary cells for non-convexity, whereas this method uses per-pixel intersection lists. Choose this for tetrahedral-specific topological traversal; choose this method for general unstructured grid face-based intersection.
++Relies on explicit tetrahedral adjacency and neighbor pointers for traversal. It builds on this method by guaranteeing accurate traversal through non-convex meshes via imaginary cells.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Measured Performance:**
+-    *   Up to 36.5 times higher performance for the ray-casting process compared with the Bunyk algorithm using a CPU core [S1, unofficial].
+-    *   Up to 19.7 times higher performance for the whole volume rendering process compared with the Bunyk algorithm using a CPU core [S1, unofficial].
+-    *   Up to 8.2 times higher performance than a GPU-based cell projection method [S1, unofficial].
+-*   **Accuracy:** Generates more accurate rendering results than the GPU-based cell projection method, specifically guaranteeing accuracy for non-convex meshes [S1, unofficial].
+-*   **Strengths:** High performance on modern GPUs; accurate handling of non-convex meshes; efficient memory access via novel intersection list construction.
+-*   **Limitations:** Allows duplicate computations due to the on-demand strategy; requires complex intersection list construction.
+-*   **When to use:** When rendering unstructured grids with non-convex meshes on modern GPUs where accuracy is critical.
+-*   **When not to use:** When per-thread local caching is beneficial (not recommended for modern GPUs per this method); when simpler cell projection accuracy is sufficient.
++*   **Performance:** Achieves up to 36.5 times higher performance for the ray-casting process and 19.7 times higher performance for the whole volume rendering process compared with the Bunyk algorithm using a CPU core [S1, unofficial].
++*   **Comparison to Cell Projection:** Shows up to 8.2 times higher performance than a GPU-based cell projection method while generating more accurate rendering results [S1, unofficial].
++*   **Strengths:** Guarantees accurate results for non-convex meshes; efficient memory access via flat array intersection lists; high performance on modern GPUs due to on-demand calculation and tile-based work distribution [S1, unofficial].
++*   **Limitations:** Allows duplicate computations due to the on-demand strategy; requires preprocessing to construct intersection lists [S1, unofficial].
++*   **Scaling:** Performance scales with GPU hardware capabilities; the method was tested on three unstructured grid datasets with different characteristics [S1, unofficial].
+ 
+ ## Background
+-The method was presented in February 2020 by Gibeom Gu and Duksu Kim in the *ETRI Journal* [S1, unofficial]. It builds on prior work including the Bunyk algorithm for per-pixel intersection lists and image-tile-based work distribution methods. It addresses the limitations of previous GPU-based cell projection methods and CPU-based approaches like the Bunyk algorithm, aiming to leverage modern GPU architectures more effectively by avoiding per-thread local buffers [S1, unofficial].
++The method was presented in a 2020 article in the *ETRI Journal* by Gibeom Gu and Duksu Kim [S1, unofficial]. It extends prior image-tile-based work distribution methods to fit modern GPU architectures. It addresses limitations in previous GPU-based approaches, such as the inefficiency of per-thread local buffers and the inaccuracy of cell projection methods for non-convex geometries. The work is part of a broader effort to optimize volume rendering on unstructured data using GPU shaders, CUDA, and ray tracing techniques [S1, unofficial].
+ 
+ ## Sources
+-[S1] Accurate and efficient GPU ray‐casting algorithm for volume rendering of unstructured grid data, https://doi.org/10.4218/etrij.2020-0008, fetched 2026-10-28 (unofficial)+[S1] Accurate and efficient GPU ray‐casting algorithm for volume rendering of unstructured grid data, https://www.researchgate.net/publication/339158888_Accurate_and_efficient_GPU_ray_casting_algorithm_for_volume_rendering_of_unstructured_grid_data, fetched 2026-10-28 (unofficial)

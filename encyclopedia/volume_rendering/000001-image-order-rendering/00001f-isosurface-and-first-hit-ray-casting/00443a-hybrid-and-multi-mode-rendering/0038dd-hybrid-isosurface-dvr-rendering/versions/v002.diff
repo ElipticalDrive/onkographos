@@ -1,0 +1,179 @@
+--- v001.md
++++ v002.md
+@@ -4,96 +4,104 @@
+ 
+ ## Overview
+-Hybrid Isosurface/DVR Rendering is a technique for viewpoints inside a volume with a wide field of view, such as virtual colonoscopy, that combines surface rendering for the near wall with Direct Volume Rendering (DVR) for structures behind it [S1, S2, unofficial]. It sets itself apart from pure DVR by providing sharp surface detail for the immediate foreground (the colon wall) while preserving the internal texture and transparency of distant structures, which pure isosurface rendering would occlude [S1, S2, unofficial].
++Hybrid Isosurface/DVR Rendering is a technique for viewpoints inside a volume with a wide field of view, such as virtual colonoscopy, that combines surface rendering for near structures (e.g., the colon wall) with Direct Volume Rendering (DVR) for structures behind it [S1, unofficial][S2, unofficial]. It sets itself apart from pure isosurface methods by preserving the visibility of internal volumetric details behind the first-hit surface, and from pure DVR by providing sharp, shaded surface definition for the immediate foreground [S1, unofficial][S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: A volumetric dataset, a camera position inside the volume, a target isosurface value, and an opacity transfer function.
+-*   Output: A final color image.
++*   **Input:** A scalar volume dataset $V$, a threshold $\tau$ for isosurface detection, an isosurface opacity $\alpha_{iso}$, and a camera position $\mathbf{o}$ inside the volume.
++*   **Output:** A 2D image where the near surface is shaded and the background is volume-rendered.
+ 
+ **Data Structures:**
+-*   **Ray:** Defined by origin $O$ (camera position) and direction $D$.
+-*   **Isosurface Intersection:** A point $P_{iso}$ along the ray where the scalar field value equals the target isosurface value.
+-*   **Opacity Accumulation:** A scalar value representing the accumulated opacity of the ray up to the current step.
++*   **Volume Data:** A 3D grid of scalar values.
++*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
++*   **Accumulators:** Color $C_{acc}$ and Opacity $A_{acc}$, initialized to $(0, 0)$.
+ 
+ **Steps:**
+-1.  **Ray Casting Initialization:** For each pixel, cast a ray from the camera origin into the volume.
+-2.  **Isosurface Detection:** March along the ray from the camera origin to find the first intersection with the isosurface. This can be done using a fixed number of bisection or binary search steps, which has virtually no impact on performance [S1, unofficial].
+-    *   *Pitfall:* Small features or silhouettes may require adaptive sampling to handle intersection problems correctly [S1, unofficial].
+-3.  **Isosurface Rendering:** If an intersection $P_{iso}$ is found within the volume bounds:
+-    *   Compute the color $C_{iso}$ and opacity $\alpha_{iso}$ at $P_{iso}$ using standard surface shading techniques (e.g., normal estimation from the gradient of the scalar field).
+-    *   Set the initial accumulated opacity for the DVR phase to $1.0 - \alpha_{iso}$ [S2, unofficial].
+-    *   Set the current ray position to $P_{iso}$ [S2, unofficial].
+-    *   If no intersection is found, set the initial accumulated opacity to $1.0$ and proceed with DVR from the camera origin.
+-4.  **DVR Integration:** Continue ray marching from the current position (either $P_{iso}$ or the camera origin) to the far clipping plane or volume exit.
+-    *   At each step, sample the volume scalar value.
+-    *   Compute the color $C_{vol}$ and opacity $\alpha_{vol}$ using the transfer function.
+-    *   Update the accumulated color and opacity using front-to-back compositing:
+-        $$ C_{out} = C_{in} + C_{vol} \cdot \alpha_{vol} \cdot (1.0 - \alpha_{in}) $$
+-        $$ \alpha_{out} = \alpha_{in} + \alpha_{vol} \cdot (1.0 - \alpha_{in}) $$
+-    *   *Note:* The DVR phase is typically unshaded to save computation, as shading is expensive [S1, unofficial].
+-5.  **Blending:** The final pixel color is the result of the compositing process. If an isosurface was hit, the final color is a blend of the surface color and the volume behind it, weighted by the accumulated opacity.
+-
+-**Parameters:**
+-*   **Isosurface Value:** The scalar threshold for the surface.
+-*   **Sampling Distance:** Affects performance and quality. For example, a sampling distance of 1.0 yields 24 fps, while 5.0 yields 66 fps on the tested hardware [S1, unofficial].
+-*   **Bisection Steps:** A fixed number of steps for isosurface detection.
++1.  **Ray Initialization:** Define the ray $r(t) = \mathbf{o} + t\mathbf{d}$ starting from the camera position $\mathbf{o}$ inside the volume.
++2.  **Isosurface Detection:** March along the ray to find the first intersection with the isosurface defined by $f(\mathbf{p}) = \tau$.
++    *   Sample the volume at discrete intervals.
++    *   Detect a threshold crossing where the scalar value exceeds $\tau$ [S1, unofficial][S2, unofficial].
++    *   **Refinement:** Refine the intersection position $t_{hit}$ using a fixed number of bisection or binary search steps to reduce discretization artifacts [S1, unofficial]. This step has virtually no impact on performance [S1, unofficial].
++    *   **Pitfall:** Small features or silhouettes may require adaptive sampling to handle intersection problems correctly [S1, unofficial].
++3.  **Surface Shading:** At the hit point $\mathbf{p}_{hit}$, compute the surface normal $\mathbf{n}$ using the gradient $\nabla f$ (via finite differences or tri-cubic filtering) [G]. Apply a local lighting model (e.g., Phong) to compute the shaded color $C_{surf}$ and opacity $\alpha_{iso}$ [S2, unofficial].
++4.  **DVR Continuation:** Continue ray marching from $t_{hit}$ to the end of the volume domain.
++    *   Initialize the opacity accumulator with $A_{acc} = 1.0 - \alpha_{iso}$ [S2, unofficial].
++    *   For each subsequent sample, compute the volume color $C_{vol}$ and opacity $\alpha_{vol}$ based on the transfer function.
++    *   Composite using front-to-back blending:
++        $$ C_{out} = C_{acc} + C_{vol} \cdot \alpha_{vol} \cdot A_{acc} $$
++        $$ A_{acc} = A_{acc} \cdot (1 - \alpha_{vol}) $$
++    *   The volume behind the surface is rendered with unshaded DVR [S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def hybrid_isosurface_dvr(ray_origin, ray_direction, volume_data, isosurface_value, transfer_function):
+-    # Step 1: Find isosurface intersection
+-    iso_point = None
+-    iso_opacity = 0.0
++def hybrid_isosurface_dvr(ray_origin, ray_direction, volume, threshold, alpha_iso):
++    # Step 1: Find isosurface
++    t_hit = find_isosurface_intersection(ray_origin, ray_direction, volume, threshold)
+     
+-    # Use fixed bisection or binary search to find intersection
+-    # [G] Implementation detail: standard bisection on scalar field values
+-    iso_point = find_isosurface_intersection(ray_origin, ray_direction, volume_data, isosurface_value)
++    if t_hit is None:
++        # No surface hit, render full DVR (or handle as background)
++        return render_full_dvr(ray_origin, ray_direction, volume)
+     
+-    if iso_point is not None:
+-        # Step 2: Render isosurface
+-        normal = compute_gradient(ray_origin, ray_direction, volume_data, iso_point)
+-        color_iso, opacity_iso = compute_surface_shading(iso_point, normal, transfer_function)
++    # Step 2: Shading at hit point
++    hit_point = ray_origin + t_hit * ray_direction
++    normal = compute_gradient(volume, hit_point)
++    color_surf = compute_phong_shading(hit_point, normal, ray_direction)
++    
++    # Step 3: DVR behind surface
++    color_acc = color_surf
++    alpha_acc = 1.0 - alpha_iso
++    
++    t_current = t_hit + epsilon
++    while t_current < ray_length:
++        sample_point = ray_origin + t_current * ray_direction
++        value = sample_volume(volume, sample_point)
++        color_vol, alpha_vol = apply_transfer_function(value)
+         
+-        # Step 3: Initialize DVR with remaining opacity
+-        accumulated_color = color_iso
+-        accumulated_opacity = opacity_iso
++        # Front-to-back blending
++        color_acc = color_acc + color_vol * alpha_vol * alpha_acc
++        alpha_acc = alpha_acc * (1.0 - alpha_vol)
+         
+-        # Start DVR from isosurface point
+-        current_pos = iso_point
+-        start_t = distance(ray_origin, iso_point)
+-    else:
+-        # No isosurface found, start DVR from origin
+-        accumulated_color = (0.0, 0.0, 0.0)
+-        accumulated_opacity = 0.0
+-        current_pos = ray_origin
+-        start_t = 0.0
++        if alpha_acc < epsilon:
++            break
++            
++        t_current += step_size
+         
+-    # Step 4: DVR integration from current position to end of volume
+-    t = start_t
+-    step_size = get_sampling_step_size() # e.g., 1.0 or 5.0 units
+-    
+-    while t < volume_max_distance:
+-        sample_point = ray_origin + ray_direction * t
+-        scalar = sample_volume(volume_data, sample_point)
+-        color_vol, opacity_vol = transfer_function(scalar)
+-        
+-        # Front-to-back compositing
+-        weight = opacity_vol * (1.0 - accumulated_opacity)
+-        accumulated_color = accumulated_color + color_vol * weight
+-        accumulated_opacity = accumulated_opacity + weight
+-        
+-        t += step_size
+-        
+-    return accumulated_color
++    return color_acc
++
++def find_isosurface_intersection(origin, direction, volume, threshold):
++    # Marching cubes or simple step-wise detection
++    t = 0.0
++    step = 0.1 # Example step size
++    while t < max_distance:
++        p = origin + t * direction
++        val = sample_volume(volume, p)
++        if val >= threshold:
++            # Refine with bisection
++            return refine_intersection(origin, direction, t, volume, threshold)
++        t += step
++    return None
++
++def refine_intersection(origin, direction, t_approx, volume, threshold):
++    # Fixed number of bisection steps
++    t_low = t_approx - step
++    t_high = t_approx
++    for _ in range(5): # Example: 5 steps
++        t_mid = (t_low + t_high) / 2.0
++        p_mid = origin + t_mid * direction
++        val = sample_volume(volume, p_mid)
++        if val >= threshold:
++            t_high = t_mid
++        else:
++            t_low = t_mid
++    return t_high
+ ```
+ 
+ ## Operating characteristics
+-*   **Performance:** Shading is expensive, so the method often computes only the intersection image for the isosurface part and uses unshaded DVR for the rest [S1, unofficial]. This reduces the computational load compared to full ray casting with shading for the entire volume.
+-*   **Memory:** If the dataset is too large to fit into local GPU memory, it must be divided into smaller chunks (bricks) [S1, unofficial].
+-*   **Quality:** Adaptive sampling is recommended for small features or silhouettes to avoid intersection artifacts [S1, unofficial]. Without refinement, sampling rate may need to be higher (e.g., 1/5 voxel) to hide sampling artifacts [S1, unofficial].
+-*   **Use Cases:** Ideal for virtual colonoscopy and other endoscopic views where the viewer is inside the volume and needs to see both the wall structure and internal contents [S1, S2, unofficial].
++*   **Performance:** Shading is expensive, so full ray casting steps compute only the intersection image initially [S1, unofficial]. The refinement step has virtually no impact on performance [S1, unofficial].
++*   **Scalability:** If the data set is too large to fit into local GPU memory, it must be divided into smaller chunks (bricks) [S1, unofficial].
++*   **Strengths:** Provides sharp surface detail for the near field while maintaining volumetric context for the background.
++*   **Limitations:** Requires adaptive sampling for small features or silhouettes to avoid intersection errors [S1, unofficial].
+ 
+ ## Background
+-This technique is described in the context of advanced illumination techniques for GPU-based volume raycasting, specifically for viewpoints inside the volume with a wide field of view [S1, S2, unofficial]. It addresses the limitation of pure DVR (lack of sharp surface detail) and pure isosurface rendering (occlusion of internal structures) in internal viewing scenarios.
++This method is used in applications like virtual colonoscopy where the viewer is inside the volume [S1, unofficial][S2, unofficial]. It was described in the context of advanced illumination techniques for GPU-based volume raycasting [S1, unofficial][S2, unofficial].
+ 
+ ## Sources
