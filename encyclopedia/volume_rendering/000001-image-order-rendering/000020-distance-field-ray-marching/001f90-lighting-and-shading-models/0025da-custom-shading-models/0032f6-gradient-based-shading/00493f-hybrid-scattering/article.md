@@ -1,0 +1,166 @@
+# Hybrid Scattering
+Also called: Gradient-guided Hybrid Scattering
+
+## Overview
+Hybrid Scattering is a stochastic shading technique for distance-field ray marching that switches between surface-based Bidirectional Reflectance Distribution Function (BRDF) and volumetric phase function scattering based on the local gradient magnitude [S1]. It solves the problem of rendering ambiguity in ill-defined regions by providing specular highlights where gradients are strong and volumetric scattering where gradients are weak, reducing sample variance compared to pure volumetric methods [S1]. Unlike conventional Phong shading, the underlying BRDF model is reciprocal and energy conserving [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D volume texture (stored in CUDA texture memory), directional light vector, camera ray direction, sample position $x$, and gradient factor $g \in [0, 1]$ [S1].
+*   **Output:** Shaded color contribution for the current sample [S1].
+
+**Data Structures:**
+The transfer function is a 1D texture stored in CUDA texture memory with the following channels, each stored as a 16-bit unsigned short:
+1.  Opacity ($a_x$)
+2.  Emission
+3.  Diffuse Color
+4.  Specular Color
+5.  Specular Roughness
+6.  Index of Reflection [S1]
+
+**Algorithm Steps:**
+
+1.  **Compute Gradient:** Calculate the local voxel gradient vector $\nabla V(x)$ at sample position $x$ on the fly using finite differences [S1]. Compute the normalized gradient magnitude $D_{+tn}(\tilde{x}) = \|\nabla V(x)\|$ [S1].
+
+2.  **Calculate BRDF Probability:** Compute the probability $P_{brdf}$ that surface scattering will be used. The formula is:
+    $$ P_{brdf} = a_x \cdot (1 - e^{-25 \cdot g \cdot D_{+tn}(\tilde{x})}) $$
+    Where:
+    *   $a_x$ is the opacity at position $x$ retrieved from the transfer function [S1].
+    *   $g$ is the gradient factor, a scalar in $[0, 1]$ controlling the balance between surface and volumetric scattering [S1].
+    *   $D_{+tn}(\tilde{x})$ is the normalized gradient magnitude [S1].
+    *   The constant $25$ is hardcoded in the source [S1].
+
+3.  **Calculate Phase Probability:** Compute the probability $P_{phase}$ for volumetric scattering:
+    $$ P_{phase} = 1 - P_{brdf} $$
+
+4.  **Stochastic Selection:** Draw a random number $j$ from a uniform distribution $U[0, 1]$.
+    *   If $j < P_{brdf}$, select **Surface Scattering**.
+    *   Otherwise, select **Volumetric Scattering** [S1].
+
+5.  **Shading Calculation:**
+    *   **If Surface Scattering:** Use the Fresnel Blend BRDF model [S1].
+        *   The model blends a diffuse Lambertian component and a glossy microfacet Blinn component [S1].
+        *   The blend is controlled by Schlick’s approximation to Fresnel reflectance [S1].
+        *   Parameters used: Diffuse color, Specular color, Specular roughness (Blinn exponent), and Index of Reflection from the transfer function [S1].
+        *   This model is reciprocal and energy conserving, unlike conventional Phong shading [S1].
+    *   **If Volumetric Scattering:** Use an isotropic phase function [S1]. (Note: Anisotropic functions like Schlick’s phase function could be used, but isotropic is the default implementation) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def hybrid_scattering(sample_pos, light_dir, view_dir, gradient_factor, volume_texture):
+    """
+    Performs hybrid scattering at a given sample position.
+    
+    Args:
+        sample_pos: 3D vector (x, y, z)
+        light_dir: 3D vector (normalized)
+        view_dir: 3D vector (normalized)
+        gradient_factor: float in [0, 1]
+        volume_texture: Object providing access to 1D transfer function channels
+        
+    Returns:
+        float: Shaded color contribution (simplified to scalar for this example)
+    """
+    
+    # Step 1: Compute gradient magnitude on the fly
+    # Finite differences approximation
+    dx = volume_texture.get(sample_pos + (1.0, 0, 0)) - volume_texture.get(sample_pos - (1.0, 0, 0))
+    dy = volume_texture.get(sample_pos + (0, 1.0, 0)) - volume_texture.get(sample_pos - (0, 1.0, 0))
+    dz = volume_texture.get(sample_pos + (0, 0, 1.0)) - volume_texture.get(sample_pos - (0, 0, 1.0))
+    
+    gradient_magnitude = math.sqrt(dx*dx + dy*dy + dz*dz)
+    
+    # Step 2: Retrieve opacity from transfer function
+    opacity = volume_texture.get_opacity(sample_pos)
+    
+    # Step 3: Calculate BRDF probability
+    # P_brdf = a_x * (1 - exp(-25 * g * D+tn(x)))
+    exponent = -25.0 * gradient_factor * gradient_magnitude
+    p_brdf = opacity * (1.0 - math.exp(exponent))
+    
+    # Step 4: Stochastic selection
+    j = random.uniform(0.0, 1.0)
+    
+    if j < p_brdf:
+        # Surface Scattering: Fresnel Blend BRDF
+        return fresnel_blend_brdf(light_dir, view_dir, sample_pos, volume_texture)
+    else:
+        # Volumetric Scattering: Isotropic Phase Function
+        return isotropic_phase_function(light_dir, view_dir)
+
+def fresnel_blend_brdf(light_dir, view_dir, pos, volume_texture):
+    """
+    Implements the Fresnel Blend BRDF.
+    Blends Lambertian diffuse and Blinn-Phong glossy using Schlick's Fresnel.
+    """
+    # Retrieve parameters from transfer function
+    diffuse_color = volume_texture.get_diffuse_color(pos)
+    specular_color = volume_texture.get_specular_color(pos)
+    roughness = volume_texture.get_specular_roughness(pos)
+    ior = volume_texture.get_index_of_reflection(pos)
+    
+    # Normal estimation for surface shading (derived from gradient)
+    # Note: The source states the gradient vector is used for BRDF calculations.
+    # We assume the gradient vector is normalized to serve as the pseudo-normal.
+    # In a full implementation, this would be the normalized gradient computed in hybrid_scattering.
+    normal = normalize(volume_texture.get_gradient(pos)) 
+    
+    half_vector = normalize(light_dir + view_dir)
+    
+    # Schlick's approximation for Fresnel reflectance
+    # F(theta) = F0 + (1 - F0) * (1 - cos(theta))^5
+    cos_theta = max(0.0, dot(view_dir, normal))
+    f0 = (1.0 - ior) / (1.0 + ior)
+    f0 = f0 * f0 # Simplified F0 calculation for normal incidence
+    fresnel = f0 + (1.0 - f0) * math.pow(1.0 - cos_theta, 5.0)
+    
+    # Diffuse component (Lambert)
+    # L_d = k_d * C_d * max(0, N . L)
+    diffuse_term = max(0.0, dot(normal, light_dir))
+    diffuse_contribution = diffuse_color * diffuse_term
+    
+    # Glossy component (Microfacet Blinn)
+    # L_s = k_s * C_s * (N . H)^alpha
+    # Note: Energy conservation requires scaling by (1 - fresnel) for diffuse and 
+    # fresnel for specular in a physically plausible blend.
+    cos_h_n = max(0.0, dot(half_vector, normal))
+    glossy_term = math.pow(cos_h_n, roughness)
+    glossy_contribution = specular_color * glossy_term
+    
+    # Blend
+    # The source describes blending diffuse and glossy using Schlick's.
+    # A standard physically plausible blend:
+    # Color = (1 - F) * Diffuse + F * Specular
+    shaded_color = (1.0 - fresnel) * diffuse_contribution + fresnel * glossy_contribution
+    
+    return shaded_color
+
+def isotropic_phase_function(light_dir, view_dir):
+    """
+    Returns a constant value for isotropic scattering.
+    """
+    return 1.0 / (4.0 * math.pi)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Gradient Noise:** In regions with low signal-to-noise ratio, the gradient magnitude may be unreliable. The gradient factor $g$ should be adjusted to mitigate this [S1].
+*   **Precision:** The opacity and transfer function channels are stored as 16-bit unsigned shorts. Precision loss may occur in high-dynamic-range scenes [S1].
+*   **Boundary Conditions:** Finite difference gradient computation requires access to neighboring voxels. Boundary checks must be implemented to avoid out-of-bounds memory access [G].
+
+## Operating characteristics
+*   **Complexity:** The method adds a constant-time stochastic decision and gradient computation per sample to the standard DVR loop. The gradient computation involves 6 texture lookups and basic arithmetic [S1].
+*   **Performance:** The method reduces sample variance compared to pure volumetric rendering, potentially allowing for faster convergence in noisy regions [S1].
+*   **Strengths:** Provides vivid specular highlights in well-defined regions while maintaining volumetric appearance in ill-defined regions. It is more physically plausible than Phong shading [S1].
+*   **Limitations:** Requires on-the-fly gradient computation, increasing memory bandwidth usage. The stochastic nature introduces noise in low-sample counts, though less than pure volumetric methods [S1].
+
+## Background
+Hybrid Scattering was introduced in the "Exposure Render" framework, an interactive photo-realistic volume rendering system [S1]. The method was designed to integrate surface and volumetric scattering into stochastic volume rendering, addressing the limitations of conventional ray casters that use non-energy-conserving shading models like Phong [S1].
+
+## Sources
+[S1] Exposure Render: An Interactive Photo-Realistic Volume Rendering Framework, https://doi.org/10.1371/journal.pone.0038586, fetched 2026-10-26

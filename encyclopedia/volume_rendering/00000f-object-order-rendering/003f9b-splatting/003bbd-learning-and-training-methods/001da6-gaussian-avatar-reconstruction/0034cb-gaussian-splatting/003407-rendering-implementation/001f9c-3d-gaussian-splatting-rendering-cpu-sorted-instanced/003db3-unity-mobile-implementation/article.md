@@ -1,0 +1,92 @@
+# Unity Mobile Implementation
+
+Also called: SplattingAvatar Unity Renderer
+
+## Overview
+This method implements a display-only renderer for trained 3D Gaussian Splatting scenes within the Unity engine, optimized for mobile compatibility. It solves the problem of rendering high-fidelity Gaussian avatars on constrained hardware by relying exclusively on a warped canonical mesh for rigging and using a standard front-to-back alpha blending pipeline. It sets itself apart from its siblings by prioritizing maximum compatibility with existing game engine workflows (Mixamo rigging) and mobile stability over the raw performance optimizations found in tiled or sort-free variants.
+
+## How it works
+The implementation follows a specific export and rendering pipeline designed for Unity's compute shader architecture.
+
+**Inputs and Outputs:**
+*   **Inputs:** A canonical mesh (`.obj`), Gaussian data (`.ply`), embedding description (`.json`), and a rigged mesh (`.fbx`).
+*   **Outputs:** A rendered video frame with photorealistic details, achieving steady 30 FPS on iPhone 13.
+
+**Data Structures:**
+*   **Gaussians:** Stored in a `.ply` file. Each Gaussian is defined by its 3D position, covariance matrix, spherical harmonics coefficients (for color), and opacity.
+*   **Rigging:** The canonical mesh is exported to Mixamo for autorigging. The resulting `.fbx` file maintains triangle order to ensure correct deformation.
+*   **Embedding:** Described in a `.json` file, linking the geometric structure to the Gaussian attributes.
+
+**Rendering Steps:**
+1.  **Rigging and Export:**
+    *   Export the canonical mesh as `.obj` to Mixamo for autorigging [S1, unofficial].
+    *   Export one `.ply` file containing the Gaussians [S1, unofficial].
+    *   Export one `.json` file describing the embedding [S1, unofficial].
+    *   Export the rigged mesh as `.fbx` from Mixamo to Unity [S1, unofficial].
+    *   Note: The `.fbx` file can be rigged by other software if triangle order is maintained [S1, unofficial].
+
+2.  **Sorting:**
+    *   Sort all Gaussians by the z-axis in camera coordinates from near to far [S1, unofficial].
+
+3.  **Primitive Generation:**
+    *   Based on the calculated 2D covariance $\Sigma'$, draw one front-parallel quad primitive for every visible Gaussian centered at its position [S1, unofficial].
+    *   This "one-primitive-one-Gaussian" strategy is critical for the game engine to properly handle occlusion against other regular objects [S1, unofficial].
+
+4.  **Fragment Shader:**
+    *   For every pixel to draw, emit color with alpha pre-multiplication [S1, unofficial].
+    *   Set the blend function to `(ONE, ONE_MINUS_SRC_ALPHA)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Unity Compute Shader / C# Integration Pseudocode
+
+def render_gaussians(camera, gaussians, rigged_mesh):
+    # 1. Sorting
+    # Sort all Gaussians by z-axis in camera coordinates from near to far
+    sorted_gaussians = sort_by_camera_z(gaussians, camera)
+
+    # 2. Primitive Setup
+    # For each visible Gaussian, create a front-parallel quad
+    for gaussian in sorted_gaussians:
+        # Calculate 2D covariance Sigma' in screen space
+        sigma_2d = calculate_2d_covariance(gaussian.covariance_3d, camera.projection_matrix, camera.view_matrix)
+        
+        # Define quad vertices centered at gaussian.position
+        # The quad is front-parallel to the camera plane
+        quad_vertices = create_front_parallel_quad(gaussian.position, sigma_2d)
+        
+        # Pass to fragment shader
+        render_quad(quad_vertices, gaussian.color, gaussian.opacity)
+
+def render_quad(vertices, color, opacity):
+    # Fragment Shader Logic
+    # Emit color with alpha pre-multiplication
+    # Blend function: (ONE, ONE_MINUS_SRC_ALPHA)
+    gl_FragColor = vec4(color * opacity, opacity)
+```
+
+**Parameters and Edge Cases:**
+*   **Blend Function:** Must be `(ONE, ONE_MINUS_SRC_ALPHA)` to correctly handle pre-multiplied alpha [S1, unofficial].
+*   **Occlusion:** The one-primitive-one-Gaussian strategy ensures proper occlusion handling with other scene objects [S1, unofficial].
+*   **Rigging:** Triangle order in the `.fbx` file must be maintained for correct deformation [S1, unofficial].
+
+## Subtopics
+
+### Unity Sentis Implementation for Gaussian Splats
+This variant uses the Unity Sentis framework to predict Gaussian splats from anchors and control encodings at runtime [S2]. It builds model graphs and loads MLP weights at runtime, translating each MLP via Sentis to run as a custom compute shader [S2]. Anchor features and positions are uploaded at initialization and pinned in GPU memory to avoid CPU-GPU readbacks [S2]. Computed 3D Gaussians are accessed in compute buffers and passed to the standard 3DGS renderer [S2]. Appearance can be changed at runtime by invoking MLPs with a different encoding $\Psi(x)$ without reallocating GPU memory, as the number of predicted Gaussians remains constant [S2]. MLPs are loaded at initialization and serialized from `.onnx` to `.sentis` models [S2]. To avoid unnecessary rendering, Gaussians with negative opacity are culled [S2]. The quad should fit the respective Gaussian tightly to avoid overdraw and achieve smooth rendering, decomposing eigenvalues of anisotropic 3D Gaussians into rotation and scale components [S2].
+
+## Operating characteristics
+*   **Performance:** Achieves over 300 FPS on a modern GPU and a steady 30 FPS on an iPhone 13 [S1, unofficial].
+*   **Strengths:** High compatibility with game engine workflows; proper occlusion handling with other objects; stable performance on mobile devices.
+*   **Limitations:** Relies on a single front-parallel quad per Gaussian, which may result in higher overdraw compared to tiled or sort-free methods. Performance is limited by the number of Gaussians and the cost of sorting on the CPU.
+*   **When to use:** When maximum compatibility with existing Unity workflows and mobile stability is required, and when integrating with rigged meshes via Mixamo.
+*   **When not to use:** When raw rendering performance on high-end desktop GPUs is the primary concern, or when complex occlusion handling with dynamic objects is not needed.
+
+## Background
+This implementation is part of the SplattingAvatar project, which focuses on creating photorealistic avatars using 3D Gaussian Splatting. The method was developed to demonstrate the effectiveness of Gaussian Splatting for head and full-body avatars, comparing favorably with state-of-the-art methods in terms of PSNR, SSIM, and LPIPS [S1, unofficial]. The approach leverages the ubiquity of Unity and Mixamo to streamline the pipeline from training to deployment.
+
+## Sources
+[S1] SplattingAvatar, https://arxiv.org/abs/2403.05087, fetched 2026-10-27 (unofficial)
+[S2] Shape-Shifting Splats: Realtime Context Translation for Gaussian Splatting in VR, https://doi.org/10.1109/vr67842.2026.00046, fetched 2026-11-01

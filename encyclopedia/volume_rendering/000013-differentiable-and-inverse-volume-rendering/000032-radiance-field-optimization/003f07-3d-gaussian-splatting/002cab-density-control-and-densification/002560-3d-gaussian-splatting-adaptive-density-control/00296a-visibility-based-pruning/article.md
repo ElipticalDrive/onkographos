@@ -3,37 +3,40 @@
 Also called: Gradient-based Pruning, Zero-gradient Pruning
 
 ## Overview
-Visibility-Based Pruning removes surfels that failed to contribute to the training signal during the backward pass, indicating they were persistently occluded, outside camera frustums, or failed kernel cutoff tests [S1, unofficial]. It differs from opacity-based pruning by relying on gradient flow rather than static opacity thresholds, ensuring only geometrically relevant primitives are retained [S1, unofficial].
+Visibility-Based Pruning removes surfels that were never reached during the backward pass, which occurs when they are persistently occluded, lie outside all camera frustums, or fail the kernel cutoff test at every pixel [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Set of surfels $S$, cumulative screen-space gradient magnitudes $g_i$ for each surfel $i$, and training epoch counter.
+- Input: Set of surfels $S$ with accumulated screen-space gradient magnitudes across all training views, and a flag indicating the end of a training epoch.
 - Output: Pruned set of surfels $S' \subset S$.
+[S1, unofficial]
 
 **Data Structures:**
-- `surfel`: Contains position, orientation, scale, opacity, and `cumulative_gradient` (float).
-- `cumulative_gradient`: Accumulates the magnitude of the gradient of the loss with respect to the surfel's parameters projected onto screen space across all views in an epoch.
+- `surfel`: Contains geometric and appearance parameters, plus a `cumulative_gradient` field (float) that accumulates the magnitude of the loss gradient projected onto screen space across all views in an epoch.
+[S1, unofficial]
 
 **Steps:**
-1. **Accumulate Gradients:** During the training epoch, for each surfel $i$ rendered in each view $v$, compute the gradient of the loss $\mathcal{L}$ with respect to the surfel's parameters. Project this gradient to screen space and compute its magnitude $\|\nabla_{screen} \mathcal{L}_i\|$. Add this magnitude to `surfel[i].cumulative_gradient`.
+1. **Accumulate Gradients:** During the training epoch, for each surfel $i$ rendered in each view $v$, compute the gradient of the loss $\mathcal{L}$ with respect to the surfel's parameters, project it to screen space, and compute its magnitude $\|\nabla_{\text{screen}} \mathcal{L}_i^{(v)}\|$. Add this magnitude to `surfel[i].cumulative_gradient`.
 2. **Check Zero Gradient:** At the end of the epoch, iterate through all surfels $i \in S$.
-3. **Prune:** If `surfel[i].cumulative_gradient` is exactly zero, remove surfel $i$ from $S$.
+3. **Prune:** If `surfel[i].cumulative_gradient` equals zero, remove surfel $i$ from $S$.
+[S1, unofficial]
 
 **Formula:**
-$$ S' = \{ s_i \in S \mid \sum_{v \in \text{Views}} \|\nabla_{screen} \mathcal{L}_i^{(v)}\| > 0 \} $$
-
+$$ S' = \{ s_i \in S \mid \sum_{v \in \text{Views}} \|\nabla_{\text{screen}} \mathcal{L}_i^{(v)}\| > 0 \} $$
 Where:
-- $S$: Set of surfels at start of epoch.
+- $S$: Set of surfels at the start of the epoch.
 - $S'$: Set of surfels after pruning.
 - $s_i$: The $i$-th surfel.
-- $\nabla_{screen} \mathcal{L}_i^{(v)}$: Screen-space gradient of the loss for surfel $i$ in view $v$.
+- $\nabla_{\text{screen}} \mathcal{L}_i^{(v)}$: Screen-space gradient of the loss for surfel $i$ in view $v$.
+[S1, unofficial]
 
 **Parameters:**
-- Threshold: 0.0 (exact zero check).
+- Threshold: $0.0$ (exact zero check).
+[S1, unofficial]
 
 **Edge Cases and Pitfalls:**
-- **Numerical Precision:** Ensure that "zero" is checked against floating-point epsilon if gradients are extremely small but non-zero due to numerical noise. However, the source specifies "zero gradient," implying exact zero from no backward pass reach [S1, unofficial].
-- **First Epoch:** If a surfel is initialized but never rendered (e.g., completely outside all frustums), its gradient will be zero, and it will be pruned immediately. This is intended behavior.
+- **Numerical Precision:** The source specifies an exact zero check, implying that any non-zero accumulation survives pruning [S1, unofficial]. Implementers should ensure gradients are not artificially clamped to zero during accumulation. [G]
+- **First Epoch:** If a surfel is initialized but never rendered (e.g., completely outside all frustums), its gradient will be zero, and it will be pruned immediately. This is intended behavior. [G]
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -48,10 +51,10 @@ def visibility_based_pruning(surfels, epoch_end_flag):
 
     pruned_surfels = []
     for surfel in surfels:
-        # cumulative_gradient is accumulated during forward/backward passes
         if surfel.cumulative_gradient > 0.0:
             pruned_surfels.append(surfel)
         # Else: surfel is removed (never reached in backward pass)
+        surfel.cumulative_gradient = 0.0  # Reset cumulative_gradient for next epoch [G]
     
     return pruned_surfels
 ```
@@ -61,16 +64,15 @@ def visibility_based_pruning(surfels, epoch_end_flag):
 ### Isolation-Based Pruning
 Removes surfels that have no neighbors within their kernel support radius, identified as isolated primitives with low accumulated weight and coverage [S1, unofficial]. It complements visibility pruning by removing geometrically degenerate single-surfel groups that do not form coherent surface layers [S1, unofficial]. Choose this when surface coherence is critical and isolated noise points are present [S1, unofficial].
 
+### Anchor Pruning with View-Frequency
+Removes redundant and ineffective anchors that cause artifacts (floaters) by using 'view-frequency' instead of opacity alone [S2]. View-frequency is defined as the probability that an anchor is selected in training views, which correlates with the gradient received [S2]. Compute the average opacity of Gaussians generated over $T$ training iterations for each anchor [S2]. Calculate the view-frequency for each anchor [S2]. Remove anchors where the view-frequency is below a visibility threshold $\tau_v$ [S2]. Parameter $\epsilon$: A small user-defined quantity added to $\Delta L$ to prevent stagnation, typically $0.01$ [S2]. Pitfall: Insufficiently optimized anchors (low view-frequency) produce artifacts if pruning is based solely on opacity, as they are not visible or selected in most training view frustums and are not sufficiently optimized [S2].
+
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ per epoch, where $N$ is the number of surfels, for the pruning step. Gradient accumulation is part of the standard rendering cost.
-- **Memory Complexity:** $O(N)$ to store cumulative gradients.
-- **Strengths:** Efficiently removes geometrically irrelevant surfels without requiring opacity thresholds. Ensures only surfels contributing to the image are kept.
-- **Limitations:** Requires full backward pass accumulation. May be sensitive to gradient precision.
-- **When to Use:** When training inverse rendering models with surfels and occlusion is common.
-- **When Not to Use:** If real-time inference without training is the only goal (pruning is a training-time optimization).
+Time and memory complexity are not given in the sources. The method requires $O(N)$ memory to store cumulative gradients per surfel, where $N$ is the number of surfels [S1, unofficial]. Gradient accumulation occurs during the standard rendering cost [G]. The method is strictly a training-time optimization and is not used for real-time inference without training [G]. It efficiently removes primitives that carry no scene information [S1, unofficial].
 
 ## Background
-Originated in the 3DSS (3D Surface Splatting for Inverse Rendering) paper [S1, unofficial]. It is part of the adaptive density control strategy for 3D Gaussian Splatting variants that use surfels. The method leverages the fact that surfels not reached in the backward pass carry no scene information [S1, unofficial].
+It is part of the adaptive density control strategy for 3D Gaussian Splatting variants that use surfels [S1, unofficial]. The method leverages the fact that surfels not reached in the backward pass carry no scene information [S1, unofficial].
 
 ## Sources
 [S1] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)
+[S2] Octree-GS: Towards Consistent Real-time Rendering with LOD-Structured 3D Gaussians, https://doi.org/10.1109/tpami.2025.3568201, fetched 2026-10-27

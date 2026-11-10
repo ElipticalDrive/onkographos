@@ -7,77 +7,35 @@ This method extends volumetric path tracing to handle multiple scattering events
 
 ## How it works
 ### Inputs and Outputs
-- **Inputs**: Camera ray origin/direction, scene geometry (with medium assignments), volume properties ($\sigma_a, \sigma_s$), phase function $\rho$, emission $L_e$, random number generator, `max_depth`, `rr_depth`.
-- **Outputs**: Radiance value for the pixel.
+- **Inputs**: Camera ray origin and direction, scene geometry with medium assignments, volume absorption and scattering coefficients ($\sigma_a, \sigma_s$), phase function $\rho$, surface emission $L_e$, random number generator, `max_depth`, and `rr_depth` [S1].
+- **Outputs**: Radiance value for the pixel [S1].
 
 ### Data Structures
-- **Intersection**: Contains `material_id`, `interior_medium`, `exterior_medium`, `geometry_normal`, and position.
-- **Ray**: Contains `origin`, `direction`, and `t_max`.
-- **Medium**: Defined by absorption coefficient $\sigma_a$ and scattering coefficient $\sigma_s$. The method assumes monochromatic volumes where color channels are identical [S1].
+- **Intersection**: Contains `material_id`, `interior_medium`, `exterior_medium`, `geometry_normal`, and position [S1].
+- **Ray**: Contains `origin`, `direction`, and `t_max` [G].
+- **Medium**: Defined by absorption coefficient $\sigma_a$ and scattering coefficient $\sigma_s$ [S1]. The method assumes monochromatic volumes where $\sigma_a$ and $\sigma_s$ are identical across color channels [S1].
 
 ### Parameters
 - `max_depth`: Controls the maximum number of bounces. If `-1`, bounces are infinite. Otherwise, the path can have at most `max_depth + 1` vertices [S1].
-- `rr_depth`: The bounce count at which Russian roulette begins. Russian roulette is initialized when the path has `rr_depth + 1` vertices [S1].
+- `rr_depth`: The bounce count at which Russian roulette begins. Russian roulette initializes when the path has `rr_depth + 1` vertices [S1].
 
 ### Algorithm Steps
-1. **Initialization**:
-   - Sample the primary ray from the camera.
-   - Set `current_medium` to the camera's medium.
-   - Set `current_path_throughput` to $1$.
-   - Set `radiance` to $0$.
-   - Set `bounces` to $0$.
-
-2. **Main Loop**:
-   - Intersect the ray with the scene to find the closest intersection `isect`.
-   - Initialize `scatter = False`, `transmittance = 1`, and `trans_pdf = 1`.
-
-3. **Volume Scattering**:
-   - If `current_medium` exists:
-     - Sample a distance $t$ from the transmittance distribution $p(t) \propto e^{-\sigma_t t}$, where $\sigma_t = \sigma_a + \sigma_s$.
-     - Calculate the transmittance $T(t) = e^{-\sigma_t t}$ and the PDF $p(t) = \sigma_t e^{-\sigma_t t}$.
-     - If $t$ is less than the distance to the surface intersection (`t_hit`):
-       - Set `scatter = True`.
-       - Update the ray origin: `ray.org = ray.org + t * ray.dir`.
-       - Update throughput: `current_path_throughput *= (T(t) / p(t))`.
-     - Else:
-       - The ray hits a surface. Set `ray.org` to the intersection point.
-
-4. **Surface Interaction**:
-   - If `scatter` is `False` (surface hit):
-     - Add emission contribution: `radiance += current_path_throughput * L_e(isect)`.
-     - If `bounces == max_depth - 1` and `max_depth != -1`, break the loop.
-     - If `isect.material_id == -1` (index-matched surface):
-       - Update the medium using `update_medium(isect, ray, current_medium)`.
-       - Increment `bounces`.
-       - Continue to the next iteration (skip direction sampling).
-     - Else (non-index-matched surface):
-       - Break the loop (no reflection/refraction handled).
-
-5. **Direction Sampling**:
-   - If `scatter` is `True`:
-     - Sample a new direction $\omega'$ from the phase function $\rho(\omega_{in}, \omega')$, where $\omega_{in}$ is the incoming direction ($-ray.dir$).
-     - Update throughput:
-       $$ \text{current\_path\_throughput} *= \frac{\rho(-ray.dir, \omega')}{p_{phase}(-ray.dir, \omega')} \cdot \sigma_s $$
-     - If `bounces == max_depth - 1` and `max_depth != -1`, break the loop.
-
-6. **Russian Roulette**:
-   - If `bounces >= rr_depth`:
-     - Calculate termination probability:
-       $$ P_{rr} = \min \left( \frac{\text{contrib}(\text{path})}{p(\text{path})}, 0.95 \right) $$
-       Where $\text{contrib}(\text{path})$ is the integrand evaluation and $p(\text{path})$ is the path probability density [S1]. In practice, this is often approximated by `current_path_throughput` if normalized correctly, but the source specifies the ratio [S1].
-     - If `next(rng) > P_{rr}`, break the loop.
-     - Else, divide `current_path_throughput` by $P_{rr}$.
-   - Increment `bounces`.
-
-7. **Return**:
-   - Return `radiance`.
+1. Initialize ray, `current_medium`, `current_path_throughput` ($1$), `radiance` ($0$), and `bounces` ($0$) [S1].
+2. If in a volume, sample distance $t$ from the transmittance distribution, update ray origin, and update throughput by transmittance/trans_pdf [S1].
+3. If no scattering occurred (hit surface), add emission contribution to radiance [S1].
+4. If `max_depth` is reached (and not infinite), break the loop [S1].
+5. If a surface was hit and is index-matched (`material_id == -1`), update the medium, increment bounces, and continue to the next iteration without sampling a new direction [S1].
+6. If scattering occurred, sample a new direction from the phase function and update throughput by phase function PDF and $\sigma_s$ [S1].
+7. Apply Russian roulette if `bounces >= rr_depth`. Terminate with probability $P_{rr}$, otherwise divide throughput by $P_{rr}$ [S1].
+8. Increment bounces and return radiance [S1].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def L(screen_pos, rng, scene, camera, max_depth, rr_depth):
-    ray = sample_primary(camera, screen_pos, rng)
+    # Standard primary ray generation [G]
+    ray = Ray(origin=camera.origin, direction=sample_direction(screen_pos, rng))
     current_medium = camera.medium
     current_path_throughput = 1.0
     radiance = 0.0
@@ -88,60 +46,55 @@ def L(screen_pos, rng, scene, camera, max_depth, rr_depth):
         transmittance = 1.0
         trans_pdf = 1.0
         
-        isect = intersect(scene, ray)
+        isect = intersect(scene, ray) # Standard scene intersection [G]
         
         if current_medium is not None:
             sigma_t = current_medium.sigma_a + current_medium.sigma_s
-            # Sample t from p(t) ~ sigma_t * exp(-sigma_t * t)
-            # t = -log(1 - rng()) / sigma_t
-            t = sample_distance(current_medium, rng)
+            # Sample t from p(t) ~ sigma_t * exp(-sigma_t * t) [G]
+            t = -math.log(1.0 - rng()) / sigma_t
             
-            # Calculate transmittance and PDF
-            transmittance = exp(-sigma_t * t)
-            trans_pdf = sigma_t * exp(-sigma_t * t)
+            transmittance = math.exp(-sigma_t * t)
+            trans_pdf = sigma_t * math.exp(-sigma_t * t)
             
             if t < isect.t_hit:
                 scatter = True
-                ray.org = ray.org + t * ray.dir
+                ray.origin = ray.origin + t * ray.direction
                 current_path_throughput *= (transmittance / trans_pdf)
             else:
-                ray.org = isect.point
+                ray.origin = isect.point
         
         if not scatter:
-            # Hit a surface
+            # Hit a surface, include emission
             radiance += current_path_throughput * isect.emission
             
             if max_depth != -1 and bounces == max_depth - 1:
                 break
                 
             if isect.material_id == -1:
-                # Index-matched surface
+                # Index-matched surface: pass through, update medium, count as bounce
                 current_medium = update_medium(isect, ray, current_medium)
                 bounces += 1
                 continue
         
         if scatter:
             # Sample phase function
-            next_dir = sample_phase_function(-ray.dir, rng)
-            phase_val = phase_function(-ray.dir, next_dir)
-            phase_pdf = pdf_sample_phase(-ray.dir, next_dir)
+            next_dir = sample_phase_function(-ray.direction, rng)
+            phase_val = phase_function(-ray.direction, next_dir)
+            phase_pdf = pdf_sample_phase(-ray.direction, next_dir)
             
             current_path_throughput *= (phase_val / phase_pdf) * current_medium.sigma_s
             
             if max_depth != -1 and bounces == max_depth - 1:
                 break
         else:
-            # Hit non-index-matched surface
+            # Hit non-index-matched surface: terminate (no reflection/refraction)
             break
             
         # Russian Roulette
         if bounces >= rr_depth:
-            # P_rr calculation as per source [S1]
-            # Note: contrib(path)/p(path) is often approximated by throughput in simple implementations
-            # but strictly follows the formula in the source.
-            rr_prob = min(current_path_throughput, 0.95) # Simplified approximation if contrib/p is not explicitly tracked separately
-            # The source formula is: min(contrib(path)/p(path), 0.95)
-            # In many path tracers, current_path_throughput represents this ratio relative to the initial state.
+            # P_rr formula from source [S1]
+            # current_path_throughput represents contrib(path)/p(path) relative to initialization
+            rr_prob = min(current_path_throughput, 0.95)
             
             if rng() > rr_prob:
                 break
@@ -153,9 +106,10 @@ def L(screen_pos, rng, scene, camera, max_depth, rr_depth):
     return radiance
 
 def update_medium(isect, ray, current_medium):
+    # Only update on medium transition [S1]
     if isect.interior_medium != isect.exterior_medium:
-        # At medium transition
-        if dot(ray.dir, isect.geometry_normal) > 0:
+        # Update based on ray direction relative to geometry normal [S1]
+        if dot(ray.direction, isect.geometry_normal) > 0:
             return isect.exterior_medium
         else:
             return isect.interior_medium
@@ -168,15 +122,15 @@ def update_medium(isect, ray, current_medium):
 - **Monochromatic Volumes**: The method assumes $\sigma_a$ and $\sigma_s$ are constant across color channels [S1].
 
 ## Operating characteristics
-- **Time Complexity**: Linear in the number of bounces, which is controlled by `max_depth`. Each bounce involves a ray intersection and potentially a phase function sample.
-- **Memory Complexity**: Low, as it does not store path history for MIS weights in this specific variant (unlike the NEE variant mentioned in the source notes, this version skips NEE).
-- **Strengths**: Handles multiple scattering in homogeneous volumes correctly. Simple to implement compared to methods requiring NEE or complex MIS weights for volume-surface interactions.
-- **Limitations**: Only handles emission from surfaces; no reflection or refraction. Assumes homogeneous volumes. No next event estimation, which can lead to high variance in scenes with small light sources.
-- **When to use**: Scenes with multiple homogeneous participating media where surfaces are emissive only.
-- **When not to use**: Scenes with reflective/refractive surfaces, heterogeneous volumes, or where NEE is required for efficiency.
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+- **Strengths**: Handles multiple scattering in homogeneous volumes correctly. Simple to implement compared to methods requiring NEE or complex MIS weights for volume-surface interactions [S1].
+- **Limitations**: Only handles emission from surfaces; no reflection or refraction. Assumes homogeneous volumes. No next event estimation, which can lead to high variance in scenes with small light sources [S1].
+- **When to use**: Scenes with multiple homogeneous participating media where surfaces are emissive only [S1].
+- **When not to use**: Scenes with reflective/refractive surfaces, heterogeneous volumes, or where NEE is required for efficiency [S1].
 
 ## Background
-This method is described in the context of a course assignment for CSE 272 at UC San Diego [S1]. It builds upon previous volumetric path tracing methods that handled single scattering or transmittance sampling. The specific variant focuses on multiple scattering with phase function sampling only, serving as a "bonus" implementation in the course [S1].
+This method handles multiple scattering in multiple homogeneous volumes with phase function sampling only [S1]. It builds upon previous volumetric path tracing methods that handled single scattering or transmittance sampling [S1].
 
 ## Sources
 [S1] Volumetric Path Tracing, https://cseweb.ucsd.edu/~tzli/cse272/wi2022/homework2.pdf, fetched 2026-10-30

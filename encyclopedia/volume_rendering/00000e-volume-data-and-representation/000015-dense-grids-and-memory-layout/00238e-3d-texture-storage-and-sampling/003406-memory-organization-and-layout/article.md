@@ -3,27 +3,27 @@
 Also called: 3D Texture Memory Layout, Texture Memory Interleaving
 
 ## Overview
-This article defines the memory organization strategies for storing dense voxel grids in GPU texture resources, focusing on how linear voxel coordinates map to physical memory addresses to optimize cache locality and bandwidth. It distinguishes between standard row-major storage, which relies on hardware caching for spatial coherence, and hardware-specific interleaving schemes designed to ensure that all voxels required for a single tri-linear interpolation fetch reside in distinct memory modules, allowing the entire cell to be retrieved in a single memory transaction.
+This article defines memory organization strategies for storing dense voxel grids in GPU texture resources, mapping linear voxel coordinates to physical memory addresses to optimize cache locality and bandwidth [G]. It distinguishes between standard row-major storage, which relies on hardware caching for spatial coherence [G], and hardware-specific interleaving schemes designed to ensure that all voxels required for a single tri-linear interpolation fetch reside in distinct memory modules, allowing the entire cell to be retrieved in a single memory transaction [S2].
 
 ## Shared principles
-The core mechanism involves mapping a 3D voxel coordinate $(x, y, z)$ to a linear memory address or memory module index. The choice of layout directly impacts the efficiency of tri-linear interpolation, which requires accessing a $2 \times 2 \times 2$ block of adjacent voxels.
+The core mechanism involves mapping a 3D voxel coordinate $(x, y, z)$ to a linear memory address or memory module index [G]. The choice of layout directly impacts the efficiency of tri-linear interpolation, which requires accessing a $2 \times 2 \times 2$ block of adjacent voxels [G].
 
 ### Linear Indexing (Row-Major)
-In standard 3D texture storage, voxels are laid out in memory such that spatially adjacent voxels are also adjacent in memory. For a grid of width $W$, height $H$, and depth $D$, the linear index $v$ for a voxel at integer coordinates $(x, y, z)$ is calculated as [S1, unofficial]:
+In standard 3D texture storage, voxels are laid out in memory such that spatially adjacent voxels are also adjacent in memory [G]. For a grid of width $W$, height $H$, and depth $D$, the linear index $v$ for a voxel at integer coordinates $(x, y, z)$ is calculated as [3D Texture Storage](5797-3d-texture-storage.md):
 
 $$ v = x + y \cdot W + z \cdot W^2 $$
 
-This layout ensures that the 8 voxels forming a tri-linear interpolation cell are contiguous in memory, minimizing cache misses when the hardware fetches the cell. However, this relies on the texture cache to handle the fetch efficiently.
+This layout ensures that the 8 voxels forming a tri-linear interpolation cell are contiguous in memory, minimizing cache misses when the hardware fetches the cell [G]. However, this relies on the texture cache to handle the fetch efficiently [G].
 
 ### Interleaved Memory Organization
-For hardware architectures that support multi-bank or multi-module memory systems (such as the SGI Reality Engine or the VIRIM geometry unit), a different organization is used to guarantee that no two voxels in a $2 \times 2 \times 2$ cell map to the same memory module. This allows the texture engine to fetch any tri-linear cell in a single memory access without bank conflicts [S2].
+For hardware architectures that support multi-bank or multi-module memory systems (such as the SGI Reality Engine or the VIRIM geometry unit), a different organization is used to guarantee that no two voxels in a $2 \times 2 \times 2$ cell map to the same memory module [S2]. This allows the texture engine to fetch any tri-linear cell in a single memory access without bank conflicts [S2].
 
 For a voxel with address $a = [zyx]$, the memory module index $k$ and the local index $i$ within that module are calculated as [S2]:
 
 $$ k = (x \mod 2) + 2 (y \mod 2) + 4 (z \mod 2) $$
 $$ i = \lfloor x/2 \rfloor + 2 \lfloor y/2 \rfloor + 4 \lfloor z/2 \rfloor $$
 
-Here, $k$ is a 3-bit index (0–7) determining the memory module, derived from the parity of the voxel coordinates. The local index $i$ determines the position within the module. This scheme distributes the 8 voxels of any interpolation cell across all 8 available memory modules [S2].
+Here, $k$ is a 3-bit index (0–7) determining the memory module, derived from the parity of the voxel coordinates [S2]. The local index $i$ determines the position within the module [S2]. This scheme distributes the 8 voxels of any interpolation cell across all 8 available memory modules [S2].
 
 ## Subtopics
 
@@ -31,15 +31,15 @@ Here, $k$ is a 3-bit index (0–7) determining the memory module, derived from t
 Maps a voxel grid directly into a GPU `Texture3D` resource using row-major ordering. It differs from interleaved schemes by relying on hardware-accelerated coordinate-based sampling and caching rather than explicit memory module distribution. It is chosen for general-purpose volume rendering on modern GPUs where explicit memory control is abstracted away. See [3D Texture Storage](5797-3d-texture-storage.md).
 
 ### 16-Bit Texture Storage
-A variant of standard texture storage that uses 16-bit floating-point formats (e.g., `float16`) for data storage to reduce memory bandwidth requirements. Arithmetic is still performed in 32-bit floating point, with results truncated upon writing to the texture. This yields roughly twice the performance (half the penalty) compared to 32-bit textures, with little visually discernible degradation [S1, unofficial].
+A variant of standard texture storage that uses 16-bit floating-point formats (e.g., `float16`) for data storage to reduce memory bandwidth requirements [S1, unofficial]. Arithmetic is still performed in 32-bit floating point, with results truncated upon writing to the texture [S1, unofficial]. This yields roughly twice the performance (half the penalty) compared to 32-bit textures, with little visually discernible degradation [S1, unofficial].
 
 ### 8-way Interleaved Texture Memory
-A memory organization technique where voxels are distributed across 8 memory modules based on coordinate parity. It ensures that any tri-linear interpolation cell (8 adjacent voxels) is fetched in one memory access. This organization is identical to that used in the VIRIM geometry unit and SGI Reality Engine [S2].
+A memory organization technique where voxels are distributed across 8 memory modules based on coordinate parity [S2]. It ensures that any tri-linear interpolation cell (8 adjacent voxels) is fetched in one memory access [S2]. This organization is identical to that used in the VIRIM geometry unit and SGI Reality Engine [S2].
 
 ## Background
-The concept of 8-way interleaved texture memory originated in high-performance 3D graphics engines such as the SGI Reality Engine [Ake93]. It was designed to optimize tri-linear interpolation by ensuring that the 8 voxels required for a single fetch are distributed across 8 distinct memory modules, allowing parallel access [S2]. This architecture was notably used in the VIRIM (Volume Rendering Image Machine) system, which employed a dedicated 8-way interleaved memory system for its geometry unit [S2].
+The concept of 8-way interleaved texture memory originated in high-performance 3D graphics engines such as the SGI Reality Engine [S2]. It was designed to optimize tri-linear interpolation by ensuring that the 8 voxels required for a single fetch are distributed across 8 distinct memory modules, allowing parallel access [S2]. This architecture was notably used in the VIRIM (Volume Rendering Image Machine) system, which employed a dedicated 8-way interleaved memory system for its geometry unit [S2].
 
-Standard row-major 3D texture storage became the dominant model for general-purpose GPU volume rendering as hardware APIs (like Direct3D and OpenGL) abstracted memory management. Research into fluid simulation and real-time rendering, such as that documented in GPU Gems 3, highlighted the bandwidth benefits of using 16-bit textures for storage while maintaining 32-bit arithmetic precision [S1, unofficial].
+Standard row-major 3D texture storage became the dominant model for general-purpose GPU volume rendering as hardware APIs (like Direct3D and OpenGL) abstracted memory management [G]. Research into fluid simulation and real-time rendering, such as that documented in GPU Gems 3, highlighted the bandwidth benefits of using 16-bit textures for storage while maintaining 32-bit arithmetic precision [S1, unofficial].
 
 ## Sources
 [S1] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)

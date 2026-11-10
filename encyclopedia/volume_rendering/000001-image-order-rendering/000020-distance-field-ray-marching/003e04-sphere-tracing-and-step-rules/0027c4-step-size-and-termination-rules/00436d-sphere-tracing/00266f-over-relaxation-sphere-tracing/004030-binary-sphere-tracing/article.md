@@ -1,0 +1,89 @@
+# Binary Sphere Tracing
+
+Also called: Speculative sphere tracing with overrelaxation
+
+## Overview
+Binary sphere tracing is a trial-and-error search algorithm designed to find unbounding spheres for conformally transformed Kernel-Reflection Sequences (KRSs) [S1]. It serves as an extreme variant of over-relaxation sphere tracing, specifically tailored for geometries where the center of the world-space sphere is not necessarily at the original world-space point [S1]. Unlike direct sphere tracing, which relies on distance functions, binary sphere tracing only requires a binary intersection test with a sphere, relaxing the requirement that kernel geometries be defined by explicit distance functions [S1]. It is distinguished by its binary decision process: it either advances the ray by the full diameter of a confirmed unbounding sphere or reduces the probe radius, effectively acting as a numerical root-finding method employing binary search [S1].
+
+## How it works
+**Inputs:** Ray origin $\tau$, ray direction $\omega$, initial probe radius $s_0 = 1$, error threshold $\epsilon$, bonus factor $\xi_{bonus}$, penalty factor $\xi_{penalty}$.
+**Outputs:** Intersection point $\tau_{final}$.
+**Data Structures:** No complex structures; state is maintained in scalar variables $\tau$, $s$, and boolean flags from the intersection test.
+
+The algorithm iteratively refines the probe sphere until it converges on an intersection or the probe radius falls below $\epsilon$. The probing sphere does not need to be centered at the last known free ray position; it only needs to touch it [S1].
+
+1.  Initialize the probe radius $s \leftarrow 1$.
+2.  While $s > \epsilon$:
+    a.  Construct a probe sphere centered at $c = \tau + \omega s$ with radius $s$.
+    b.  Evaluate `ISUNBOUNDING(c, s)`. This function returns `true` if the probe sphere is an unbounding sphere (i.e., it does not intersect the geometry) [S1].
+    c.  If `ISUNBOUNDING` is `true`:
+        i.  The probe is valid. Advance the ray origin by the sphere's diameter: $\tau \leftarrow \tau + \omega (2s)$.
+        ii. Increase the probe radius for the next iteration to traverse empty areas faster: $s \leftarrow s \cdot \xi_{bonus}$.
+    d.  If `ISUNBOUNDING` is `false`:
+        i.  The probe intersects the geometry. Reduce the probe radius: $s \leftarrow s \cdot \xi_{penalty}$.
+        ii. Keep $\tau$ unchanged to re-evaluate a smaller probe at the same location.
+3.  Return $\tau$ as the intersection point [S1].
+
+**Parameters:**
+*   $\xi_{bonus}$: Factor to increase probe radius upon success. Typical value: 2.0 [S1].
+*   $\xi_{penalty}$: Factor to decrease probe radius upon failure. Typical value: 0.3 [S1].
+*   $\epsilon$: Error threshold for termination. Must be set much lower than in regular sphere tracing to avoid artifacts [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def binary_trace(ray_origin: Vector3, ray_direction: Vector3, epsilon: float, 
+                 xi_bonus: float = 2.0, xi_penalty: float = 0.3) -> Vector3:
+    """
+    Binary sphere tracing for conformally transformed KRSs.
+    
+    Args:
+        ray_origin: Starting point of the ray (tau).
+        ray_direction: Normalized direction of the ray (omega).
+        epsilon: Convergence threshold for probe radius.
+        xi_bonus: Multiplier for probe radius on success.
+        xi_penalty: Multiplier for probe radius on failure.
+        
+    Returns:
+        The estimated intersection point.
+    """
+    s = 1.0  # Initial probe radius
+    
+    while s > epsilon:
+        # Probe sphere center touches the current ray position
+        # Center is at tau + omega * s
+        probe_center = ray_origin + ray_direction * s
+        
+        # Check if the probe sphere is unbounding (does not intersect geometry)
+        # ISUNBOUNDING returns True if the sphere is strictly outside the geometry
+        if is_unbounding(probe_center, s):
+            # Success: Advance ray by diameter (2*s)
+            ray_origin = ray_origin + ray_direction * (2.0 * s)
+            # Increase probe radius for faster traversal of empty space
+            s = s * xi_bonus
+        else:
+            # Failure: Probe intersects geometry
+            # Reduce probe radius to refine search
+            s = s * xi_penalty
+            
+    return ray_origin
+```
+
+**Edge Cases and Pitfalls:**
+*   **Discontinuities:** Binary tracing produces visual discontinuities where unbounding sphere decisions diverge between adjacent pixels [S1].
+*   **Iteration Count:** It requires approximately twice as many iterations as direct sphere tracing due to suboptimal unbounding spheres and rejected probes [S1].
+*   **Termination:** The error threshold $\epsilon$ must be significantly lower than in standard sphere tracing to prevent artifacts caused by the binary search nature [S1].
+*   **Geometry Constraints:** This method is necessary for non-symmetric KRSs where conformal transformation moves the sphere center away from the original world-space point [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm exhibits linear scaling of rendering times with respect to the number of expansion levels in the KRS model, despite exponential geometry expansion [S1]. However, the constant factor is worse than direct sphere tracing.
+*   **Performance:** On an nVidia GeForce Titan X at 1920 × 1200 resolution, direct sphere tracing of linear KRS geometries maintained 15 FPS up to 28 expansion levels (approx. 0.5 billion toroidal primitives) [S1]. Binary sphere tracing performed poorly in comparison, achieving only 14 expansion levels at 15 FPS [S1].
+*   **Strengths:** It enables the rendering of conformally transformed geometries that do not have explicit distance functions, relying only on binary intersection tests [S1]. It can exploit coherence by performing initial steps at lower resolution [S1].
+*   **Limitations:** Higher iteration count compared to direct sphere tracing. Susceptible to aliasing and discontinuities. Performance is heavily dependent on camera view, with significantly shorter frame times in scenes with large empty zones [S1].
+
+## Background
+Binary sphere tracing was introduced in the context of Kernel-Reflection Sequences (KRSs) [S1]. It is described as an extreme version of sphere tracing with over-relaxation [KSK*14], removing the option to revert to classical sphere tracing near surfaces or to accept unbounding spheres larger than speculated [S1]. These restrictions are necessary to admit conformally transformed geometry where the sphere center is displaced [S1]. The method is part of a pipeline where task buffers are processed, and free distance/index are updated upon task completion [S1].
+
+## Sources
+[S1] Kernel-Reflection Sequences, https://doi.org/10.2312/stag.20161364, fetched 2026-10-26

@@ -7,116 +7,117 @@ Active Cut Management is a view-dependent level-of-detail technique for volume r
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A hierarchical data structure (e.g., octree) representing the volume; current camera parameters; frame time budget; texture memory limits; transfer function.
-*   **Output:** A set of leaf nodes (the active cut) to be rendered; updated texture memory state.
+*   **Input:** A hierarchical data structure (e.g., octree) representing the volume; current camera parameters; frame time budget; texture memory limits; transfer function [S1].
+*   **Output:** A set of leaf nodes (the active cut) to be rendered; updated texture memory state [S1].
 
 **Data Structures:**
-1.  **Octree Nodes:** Each node contains spatial bounds, scalar field data (or references to external storage), and status flags (leaf/non-leaf, on-cut).
-2.  **Priority Queues:** Two queues are constructed each frame:
-    *   `Merge Queue`: Contains parents of all nodes currently on the active cut. Sorted by priority (error metric).
-    *   `Split Queue`: Contains non-leaf nodes on the active cut (or candidates for splitting). Sorted by priority.
+1.  **Octree Nodes:** Each node contains spatial bounds, scalar field data (or references to external storage), and status flags (leaf/non-leaf, on-cut) [S1].
+2.  **Priority Queues:** Two queues are constructed each frame: `Merge Queue` (parents of all nodes on the active cut, sorted by error) and `Split Queue` (nodes on the active cut, sorted by error) [S1].
 3.  **Texture Cache:** Maintained in main memory and texture memory using a Least Recently Used (LRU) policy [S1].
 
 **Error Metric:**
 The priority for merge/split operations is determined by the maximum screen-space size of a node’s texels in pixel units [S1].
-$$ E_{node} = \max(\text{screen\_space\_size\_of\_texels}) $$
-Ideally, $E_{node} \approx 1$ pixel [S1].
+$$ E_{\text{node}} = \max(\text{screen\_space\_size\_of\_texels}) $$
+Ideally, $E_{\text{node}} \approx 1$ pixel [S1].
 
 **Algorithm Steps:**
 1.  **Initialize Queues:** Construct the `Merge Queue` and `Split Queue` based on the current active cut and error metrics [S1].
-2.  **Frame Time Budgeting:** Determine the maximum number of merges and splits allowed in the current frame, bounded by:
-    *   Fill rate limits (number of nodes rendered).
-    *   Bandwidth limits (disk to RAM, RAM to texture memory) [S1].
-3.  **Process Splits:**
-    *   Select the highest priority node from the `Split Queue`.
-    *   If texture memory limits are reached, a split is only performed if it is preceded by a merge that reduces overall error. Specifically, a merge followed by a split is allowed only if:
-        $$ E_{merge\_node} < E_{split\_node} $$
-        where $E_{merge\_node}$ is the error of the parent node being merged, and $E_{split\_node}$ is the error of the child node being split [S1].
-    *   If a split operation spans multiple frames (due to data loading from RAM/disk), monitor for higher-priority candidates. If another node has a higher error than the currently splitting node, stall the current split and begin splitting the new candidate immediately [S1].
-4.  **Process Merges:**
-    *   Select the highest priority node from the `Merge Queue`.
-    *   Perform the merge if it fits within the frame time budget and improves the error metric relative to potential splits [S1].
-5.  **Cull/Render:** Traverse the updated active cut hierarchically. Cull nodes outside the viewing frustum or with zero opacity according to the transfer function [S1]. Render the remaining nodes.
+2.  **Frame Time Budgeting:** Determine the maximum number of merges and splits allowed in the current frame, bounded by fill rate limits (number of nodes rendered) and bandwidth limits (disk to RAM, RAM to texture memory) [S1].
+3.  **Process Splits:** Select the highest priority node from the `Split Queue` [S1]. If texture memory or frame rate limits are reached, a split is only performed if it is preceded by a merge that reduces overall error ($E_{\text{merge}} < E_{\text{split}}$) [S1]. If a split operation spans multiple frames (due to data loading from RAM/disk), monitor for higher-priority candidates; if another node has a higher error, stall the current split and begin splitting the new candidate immediately [S1].
+4.  **Process Merges:** Select the highest priority node from the `Merge Queue` [S1].
+5.  **Cull/Render:** Traverse the updated active cut hierarchically [S1]. Cull nodes outside the viewing frustum or with zero opacity according to the transfer function [S1]. Render the remaining nodes [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def active_cut_management(frame_budget, texture_memory_limit, transfer_function):
-    # 1. Construct priority queues based on current active cut
-    merge_queue = PriorityQueue()
-    split_queue = PriorityQueue()
-    
+def active_cut_management(active_cut, frame_budget, texture_memory_limit, target_frame_rate):
+    # 1. Construct priority queues based on current active cut [S1]
+    merge_queue = []
+    split_queue = []
     for node in active_cut:
-        if node.is_leaf:
-            # Parents of leaf nodes are candidates for merging
-            if node.parent:
-                merge_queue.push(node.parent, error_metric(node.parent))
+        if node.is_leaf and node.parent is not None:
+            merge_queue.append((node.parent.error, node.parent))
         else:
-            # Non-leaf nodes on cut are candidates for splitting
-            split_queue.push(node, error_metric(node))
-            
-    # 2. Determine operation limits based on bandwidth and fill rate
-    max_merges = calculate_max_operations(frame_budget, type='merge')
-    max_splits = calculate_max_operations(frame_budget, type='split')
-    
+            split_queue.append((node.error, node))
+    merge_queue.sort(key=lambda x: x[0], reverse=True)
+    split_queue.sort(key=lambda x: x[0], reverse=True)
+
+    # 2. Limits bounded by frame time budget, fill rate, and bandwidth [S1]
+    # Exact calculation not given in sources [G]
+    max_merges = 10
+    max_splits = 10
+
     merges_performed = 0
     splits_performed = 0
-    
-    # 3. Process splits
-    while splits_performed < max_splits and not split_queue.empty():
-        candidate = split_queue.peek()
-        
-        # Check texture memory constraints
-        if texture_memory_usage >= texture_memory_limit:
-            # Only split if a merge reduces error first
-            if not merge_queue.empty():
-                merge_candidate = merge_queue.peek()
-                if error_metric(merge_candidate) < error_metric(candidate):
-                    perform_merge(merge_candidate)
+    current_split_node = None
+
+    # 3. Process splits [S1]
+    while splits_performed < max_splits:
+        if current_split_node is None:
+            if not split_queue:
+                break
+            candidate = split_queue.pop(0)[1]
+        else:
+            candidate = current_split_node
+
+        # Check texture memory and frame rate limits [S1]
+        if texture_memory_usage() >= texture_memory_limit or frame_time_exceeded(target_frame_rate):
+            if merge_queue:
+                merge_err, merge_node = merge_queue[0]
+                if merge_err < candidate.error:
+                    perform_merge(merge_node)
                     merges_performed += 1
-                    # Re-evaluate split queue after merge
-                    split_queue = update_split_queue(active_cut)
+                    # Rebuild queues after merge [S1]
+                    merge_queue = []
+                    split_queue = []
+                    for n in active_cut:
+                        if n.is_leaf and n.parent: merge_queue.append((n.parent.error, n.parent))
+                        else: split_queue.append((n.error, n))
+                    merge_queue.sort(key=lambda x: x[0], reverse=True)
+                    split_queue.sort(key=lambda x: x[0], reverse=True)
                     continue
                 else:
-                    break # Cannot split without beneficial merge
+                    break
             else:
-                break # No merges available to free memory
-        
-        # Check if a higher priority split exists
-        # Note: In a real implementation, this requires checking if the 
-        # 'candidate' is still the best choice, potentially stalling 
-        # ongoing multi-frame splits.
-        if is_higher_priority_split_available(split_queue, candidate):
-            stall_current_split()
-            candidate = split_queue.pop() # Get new best candidate
-            
+                break
+
+        # Check for higher priority split (multi-frame stall) [S1]
+        if current_split_node is not None and split_queue and split_queue[0][0] > candidate.error:
+            current_split_node = None
+            continue
+
         perform_split(candidate)
         splits_performed += 1
         update_active_cut(candidate)
-        
-    # 4. Process merges
-    while merges_performed < max_merges and not merge_queue.empty():
-        candidate = merge_queue.peek()
-        
-        # Check if merge reduces error relative to potential splits
-        if not split_queue.empty():
-            split_candidate = split_queue.peek()
-            if error_metric(candidate) >= error_metric(split_candidate):
-                break # Splitting is more beneficial
-        
-        perform_merge(candidate)
+        current_split_node = None
+
+    # 4. Process merges [S1]
+    while merges_performed < max_merges and merge_queue:
+        merge_err, merge_node = merge_queue[0]
+        if split_queue and split_queue[0][0] > merge_err:
+            break
+        perform_merge(merge_node)
         merges_performed += 1
-        update_active_cut(candidate)
-        
-    # 5. Cull and Render
-    render_nodes = hierarchical_cull(active_cut, transfer_function)
+        update_active_cut(merge_node)
+
+    # 5. Cull and Render [S1]
+    render_nodes = hierarchical_cull(active_cut)
     render(render_nodes)
+
+# Standard operations / helpers
+def texture_memory_usage(): return 0  # [G]
+def frame_time_exceeded(rate): return False  # [G]
+def perform_merge(node): pass  # [G]
+def perform_split(node): pass  # [G]
+def update_active_cut(node): pass  # [G]
+def hierarchical_cull(nodes): return nodes  # [G]
+def render(nodes): pass  # [G]
 ```
 
 **Parameters:**
 *   **Frame Time Budget:** The total time allowed for rendering and cut adaptation. It limits the number of nodes rendered and the number of merges/splits [S1].
-*   **Texture Memory Limit:** The maximum size of texture memory available. Splits increase usage, so this restricts refinement depth [S1].
+*   **Texture Memory Limit:** The maximum size of texture memory available. Splits increase texture memory usage and frame time, restricting the number of splits performed per frame or forcing merges [S1].
 *   **Target Frame Rate:** Used to calculate the frame time budget [S1].
 
 **Edge Cases and Pitfalls:**
@@ -139,7 +140,7 @@ Maintains a consistent, multi-resolution tetrahedral mesh using a graph cut thro
 *   **When Not to Use:** Static scenes with no need for dynamic LOD; hardware with very limited texture memory or no disk-to-RAM bandwidth optimization [G].
 
 ## Background
-Active Cut Management was introduced by Leven et al. in the context of interactive visualization of unstructured grids using hierarchical 3D structures [S1]. It builds on the concept of the "active cut" from view-dependent continuous level of detail for polygonal models, such as those by Xia and Varshney (1996), Duchaideau et al. (1997), Hoppe (1997), and Luebke and Erikson (1997) [S1]. The method was designed to handle the specific challenges of volume rendering, including texture memory constraints and the need for real-time adaptation [S1].
+Active Cut Management was introduced by Leven et al. in the context of interactive visualization of unstructured grids using hierarchical 3D structures [S1]. It builds on the concept of the "active cut" from view-dependent continuous level of detail for polygonal models, such as those by Xia and Varshney (1996), Duchaineau et al. (1997), Hoppe (1997), and Luebke and Erikson (1997) [S1]. The method was designed to handle the specific challenges of volume rendering, including texture memory constraints and the need for real-time adaptation [S1].
 
 ## Sources
 [S1] Interactive Visualization of Unstructured Grids Using Hierarchical 3D Structures, https://web.eecs.umich.edu/~jjcorso/pubs/leven02unstructgrid.pdf, fetched 2026-10-27

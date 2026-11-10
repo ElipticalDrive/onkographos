@@ -1,0 +1,239 @@
+--- v001.md
++++ v002.md
+@@ -4,180 +4,84 @@
+ 
+ ## Overview
+-This method learns a scene-level Signed Directional Distance Function (SDDF) using a hybrid explicit-implicit representation to enable fast, single-query differentiable novel view synthesis and geometric reconstruction [S1]. It solves the challenge of learning directional distance fields for complex scenes by combining an explicit ellipsoidal prior, which approximates coarse object shapes and occlusions, with an implicit neural residual network that refines fine details [S1]. Unlike standard SDFs that require iterative sphere tracing, or NeRFs that optimize volume density for photometry, this approach directly predicts the signed distance to the nearest surface along a specific viewing direction in a single forward pass [S1].
++This method learns a scene-level Signed Directional Distance Function (SDDF) by combining an explicit ellipsoidal prior with an implicit neural residual network [S1]. It solves the problem of reconstructing complex 3D environments from sensor data (LiDAR or RGB-D depth) while maintaining differentiability for novel view synthesis and avoiding the iterative sphere tracing required by standard SDFs [S1]. Unlike its siblings, it explicitly models occlusions via ellipsoids to handle discontinuities, while the neural network recovers fine details, satisfying the directional Eikonal constraint by construction [S1].
+ 
+ ## How it works
+-The model predicts the SDDF value $\hat{f}(\mathbf{p}, \mathbf{v})$ for a query position $\mathbf{p} \in \mathbb{R}^3$ and viewing direction $\mathbf{v} \in S^2$ by summing an explicit ellipsoidal prior $f(\mathbf{p}, \mathbf{v})$ and a neural residual $\delta f(\mathbf{p}, \mathbf{v})$ [S1]:
++**Inputs:**
++- A set of sensor measurements $\{T_t, Z_t\}_{t=1}^T$, where $T_t \in SE(3)$ is the sensor pose and $Z_t$ contains viewing directions $v_i \in S^2$ and range measurements $r_{t,i} \in \mathbb{R}_{>0}$ [S1].
++- Query inputs: a 3D position $p \in \mathbb{R}^3$ and a viewing direction $v \in S^2$ [S1].
+ 
+-$$ \hat{f}(\mathbf{p}, \mathbf{v}) = f(\mathbf{p}, \mathbf{v}) + \delta f(\mathbf{p}, \mathbf{v}) $$
++**Outputs:**
++- The predicted SDDF value $\hat{f}(p, v)$, representing the signed distance to the observed surface along direction $v$ from position $p$ [S1].
+ 
+-The SDDF is defined such that it is continuous when a ray enters occupied space from free space, but discontinuous when leaving occupied space [S1]. The method assumes sensors remain in free space and observe the scene from outside-in, avoiding the discontinuity issue [S1].
++**Data Structures:**
++1.  **Ellipsoid Prior:** A set of $M$ learnable ellipsoids. Each ellipsoid $j$ is defined by parameters $\theta_j$ (center, orientation, scale). The total number of ellipsoids $M$ is typically 128 (256 for Gibson Allensville) [S1].
++2.  **Latent Feature Network ($L$):** A neural network that maps the intersection point and viewing direction to a latent feature vector $z \in \mathbb{R}^m$ [S1].
++3.  **Residual Decoder ($R$):** A neural network that takes the latent feature $z$ and outputs the residual prediction $\delta_f(p, v)$ [S1].
+ 
+-### Data Structures
++**Definitions:**
++-   **SDDF Definition:** For a query $(p, v)$, the SDDF $f^*(p, v)$ is the signed distance to the first intersection of the ray $p + dv$ with the occupied space boundary $\partial O$. The sign is positive if $p$ is in free space and negative if $p$ is inside the occupied space [S1]. The function is continuous when entering occupied space from free space, but discontinuous when leaving occupied space (inside-out). This discontinuity is handled by assuming sensors remain in free space, observing the scene from outside-in [S1].
++-   **Directional Eikonal Constraint:** The gradient of the SDDF with respect to position $p$ in the direction $v$ must have unit magnitude: $\nabla_p f(p, v) \cdot v = 1$ [S1].
+ 
+-**Ellipsoidal Prior Parameters:**
+-The prior consists of $N$ ellipsoids. For each ellipsoid $i \in \{1, \dots, N\}$, the parameters are:
+-*   Center $\mathbf{c}_i \in \mathbb{R}^3$
+-*   Rotation matrix $\mathbf{R}_i \in \mathbb{R}^{3 \times 3}$ (orthonormal)
+-*   Scale vector $\mathbf{s}_i \in \mathbb{R}^3$ (semi-axes lengths)
+-*   Weight $\alpha_i \in \mathbb{R}$ (optional, often normalized)
+-
+-**Neural Residual Network:**
+-*   **Latent Network ($L$):** A small MLP that takes the intersection point and viewing direction to produce a latent feature vector $\mathbf{z} \in \mathbb{R}^m$.
+-*   **Residual Decoder ($R$):** An MLP that takes $\mathbf{z}$ and outputs the residual scalar $\delta f$.
+-
+-### Inputs and Outputs
+-*   **Inputs:** 3D position $\mathbf{p}$, viewing direction $\mathbf{v}$.
+-*   **Outputs:** Signed distance $\hat{f}(\mathbf{p}, \mathbf{v})$.
+-*   **Training Data:** RGB-D images or LiDAR scans. RGB-D data is downsampled (20× for most datasets, 5× for Replica Hotel) to match LiDAR ray density [S1].
+-
+-### Algorithm Steps
++**Algorithm Steps:**
+ 
+ 1.  **Initialize Ellipsoids:**
+-    Initialize $N$ ellipsoids to approximate the scene geometry. $N=128$ for most scenes, $N=256$ for Gibson Allensville [S1]. Initialization should not rely solely on K-means++ as it over-segments planar surfaces; a specialized initialization is preferred [S1].
++    Initialize the $M$ ellipsoids to approximate the coarse shape of the scene. Do not use K-means++ initialization alone, as it causes excessive ellipsoids for planar surfaces and larger errors [S1]. Use a method that provides a balanced initial coverage [S1].
+ 
+-2.  **Compute Ellipsoidal Prior $f(\mathbf{p}, \mathbf{v})$:**
+-    For each ellipsoid $i$, compute the distance from $\mathbf{p}$ to the ellipsoid surface along direction $\mathbf{v}$. The prior $f(\mathbf{p}, \mathbf{v})$ is the minimum signed distance among all ellipsoids that are "visible" or relevant, typically the closest intersection [S1]. The specific closed-form SDDF for an ellipsoid is defined in [Ellipsoid SDDF Prior](10639-ellipsoid-sddf-prior.md). The prior is optimized using closed-form gradients to accelerate training [S1].
++2.  **Compute Ellipsoid Prior $f(p, v)$:**
++    For a query $(p, v)$, compute the distance to the nearest ellipsoid surface along $v$.
++    Let $d_j(p, v)$ be the distance from $p$ to the surface of ellipsoid $j$ along direction $v$.
++    The prior $f(p, v)$ is the minimum of these distances, considering the sign based on whether $p$ is inside or outside the ellipsoid [S1].
++    *Note: The exact closed-form solution for $d_j(p, v)$ involves solving a quartic equation for the intersection of a ray and an ellipsoid. The sources state that gradients are derived in closed-form to accelerate training [S1], but do not provide the explicit quartic solver code. [G] The standard approach is to find the smallest positive root $d$ of the quadratic form defining the ellipsoid surface in the local frame transformed to global coordinates.*
+ 
+-3.  **Construct Latent Feature:**
+-    Find the intersection point $\mathbf{p}_{int} = \mathbf{p} + f(\mathbf{p}, \mathbf{v})\mathbf{v}$ on the surface predicted by the prior. Construct a latent feature $\mathbf{z}$ using $\mathbf{p}_{int}$ and $\mathbf{v}$. The construction must satisfy the directional Eikonal constraint to ensure robustness to viewing distance [S1].
+-    *   *Embedding:* The inputs to the Latent Network are embedded. The source notes a Fourier embedding ablation: $\mathbf{m} = [\sin(2\pi\mathbf{B}_{\text{p}}\mathbf{p}), \cos(2\pi\mathbf{B}_{\text{p}}\mathbf{p}), \sin(2\pi\mathbf{B}_{\text{v}}\mathbf{v}), \cos(2\pi\mathbf{B}_{\text{v}}\mathbf{v})]$ where $\mathbf{B}_p, \mathbf{B}_v \in \mathbb{R}^{25 \times 3}$ are random Fourier features sampled from $\mathcal{N}(0, 1)$ [S1]. However, the method prefers **polynomial embedding** for better generalization across scenes without scene-specific frequency tuning [S1].
++3.  **Find Intersection Point:**
++    Identify the ellipsoid $j^*$ that provides the minimum distance $f(p, v)$. Calculate the intersection point $p_{int} = p + f(p, v)v$ [S1].
+ 
+-4.  **Predict Residual:**
+-    Pass $\mathbf{z}$ through the Residual Decoder $R$ to get $\delta f(\mathbf{p}, \mathbf{v})$ [S1].
++4.  **Construct Latent Feature $z$:**
++    Pass $p_{int}$ and $v$ through the Latent Feature Network $L$ to obtain $z = L(p_{int}, v)$ [S1]. The network is designed such that the resulting residual satisfies the directional Eikonal constraint [S1].
+ 
+-5.  **Combine:**
+-    Compute $\hat{f}(\mathbf{p}, \mathbf{v}) = f(\mathbf{p}, \mathbf{v}) + \delta f(\mathbf{p}, \mathbf{v})$ [S1].
++5.  **Predict Residual $\delta_f(p, v)$:**
++    Pass $z$ through the Residual Decoder $R$ to obtain the residual: $\delta_f(p, v) = R(z)$ [S1].
+ 
+-6.  **Training Optimization:**
+-    *   **Loss:** Minimize the difference between $\hat{f}(\mathbf{p}, \mathbf{v})$ and ground truth SDDF values derived from sensor measurements.
+-    *   **Eikonal Constraint:** The model is designed such that the combination satisfies an Eikonal-like constraint by construction, ensuring unit gradient magnitude properties [S1].
+-    *   **Negative Sample Augmentation:** Crucial for training. Without negative SDDF samples (points inside objects), ellipsoids regress into the interior, causing missing ray intersections and wrong ellipsoid selection [S1].
++6.  **Compute Final SDDF:**
++    Combine the prior and the residual:
++    $$ \hat{f}(p, v) = f(p, v) + \delta_f(p, v) $$
++    [S1]
+ 
+-### Pseudocode
++**Training:**
++-   **Loss Function:** Minimize the difference between $\hat{f}(p, v)$ and the ground truth SDDF derived from sensor measurements.
++-   **Negative Sample Augmentation:** Include negative SDDF samples (points inside the object) in the training data. Without this, ellipsoids regress into the interior of objects, leading to missing ray intersections and wrong ellipsoid selection [S1].
++-   **Embedding:** Use polynomial embedding for the neural networks. Fourier embedding is inferior due to the need for scene-specific spatial frequency tuning [S1].
++    -   Fourier embedding formula (for ablation comparison):
++        $$ \mathbf{m} = [\sin(2\pi\mathbf{B}_{\text{p}}\mathbf{p}), \cos(2\pi\mathbf{B}_{\text{p}}\mathbf{p}), \sin(2\pi\mathbf{B}_{\text{v}}\mathbf{v}), \cos(2\pi\mathbf{B}_{\text{v}}\mathbf{v})] $$
++        where $\mathbf{B}_p, \mathbf{B}_v \in \mathbb{R}^{25 \times 3}$ are random Fourier features sampled from $\mathcal{N}(0, 1)$ [S1].
+ 
+-```python
+-import numpy as np
++**Parameters:**
++-   Number of ellipsoids $M$: 128 (default), 256 for Gibson Allensville [S1].
++-   RGB-D Downsampling: 20× for most datasets, 5× for Replica Hotel, to match LiDAR ray density [S1].
++-   Fourier Feature Dimensions: 25 (for ablation) [S1].
+ 
+-def compute_ellipsoid_sddf(p, v, ellipsoid_params):
+-    """
+-    Computes the SDDF for a single ellipsoid.
+-    ellipsoid_params: dict with 'center', 'R' (3x3 rotation), 's' (3x1 scales).
+-    Returns signed distance.
+-    Implementation details depend on [Ellipsoid SDDF Prior](10639-ellipsoid-sddf-prior.md).
+-    """
+-    # Placeholder for the specific closed-form ellipsoid SDF calculation
+-    # defined in the child article.
+-    pass
+-
+-def get_prior_distance(p, v, ellipsoids):
+-    """
+-    Computes the ellipsoidal prior f(p, v).
+-    Returns the minimum signed distance among all ellipsoids.
+-    """
+-    min_dist = np.inf
+-    for ell in ellipsoids:
+-        dist = compute_ellipsoid_sddf(p, v, ell)
+-        if dist < min_dist:
+-            min_dist = dist
+-    return min_dist
+-
+-def polynomial_embedding(p, v, dim=25):
+-    """
+-    Polynomial embedding preferred over Fourier for generalization.
+-    """
+-    # Generate polynomial features for p and v
+-    # Exact polynomial order and combination not specified in sources,
+-    # but Fourier ablation uses 25 dimensions per input [S1].
+-    # We assume a standard polynomial expansion or the Fourier variant if specified.
+-    # Note: Source says Fourier is used in ablation, Polynomial is preferred.
+-    # Since exact polynomial formula is not given, we use the Fourier formula
+-    # as a concrete implementation detail from the ablation, noting the preference.
+-    B_p = np.random.normal(0, 1, (dim, 3))
+-    B_v = np.random.normal(0, 1, (dim, 3))
+-    
+-    sin_p = np.sin(2 * np.pi * B_p @ p)
+-    cos_p = np.cos(2 * np.pi * B_p @ p)
+-    sin_v = np.sin(2 * np.pi * B_v @ v)
+-    cos_v = np.cos(2 * np.pi * B_v @ v)
+-    
+-    return np.concatenate([sin_p, cos_p, sin_v, cos_v])
+-
+-def neural_residual_forward(p, v, ellipsoids, latent_net, residual_net):
+-    """
+-    Full forward pass of the SDDF model.
+-    """
+-    # 1. Compute Prior
+-    f_prior = get_prior_distance(p, v, ellipsoids)
+-    
+-    # 2. Compute Intersection Point
+-    # p_int = p + f_prior * v
+-    # Note: If f_prior is infinite (no intersection), handle appropriately.
+-    # Assuming valid query within scene bounds.
+-    p_int = p + f_prior * v
+-    
+-    # 3. Construct Latent Feature
+-    # Using polynomial embedding as preferred, but Fourier parameters from ablation
+-    # for concrete implementation.
+-    z_input = polynomial_embedding(p_int, v)
+-    
+-    # 4. Latent Network
+-    z = latent_net(z_input)
+-    
+-    # 5. Residual Decoder
+-    delta_f = residual_net(z)
+-    
+-    # 6. Combine
+-    f_hat = f_prior + delta_f
+-    
+-    return f_hat
+-
+-def train_step(p, v, gt_f, ellipsoids, latent_net, residual_net, optimizer):
+-    """
+-    Single training step.
+-    """
+-    # Forward pass
+-    f_hat = neural_residual_forward(p, v, ellipsoids, latent_net, residual_net)
+-    
+-    # Loss: MSE between predicted and ground truth SDDF
+-    loss = np.mean((f_hat - gt_f) ** 2)
+-    
+-    # Backward pass
+-    # Gradients for residual network and ellipsoid parameters
+-    # Ellipsoid gradients are computed in closed-form [S1]
+-    # Residual network gradients via standard backprop
+-    
+-    optimizer.step()
+-    return loss
+-```
+-
+-### Parameters and Typical Values
+-*   **Number of Ellipsoids:** 128 (standard), 256 (Gibson Allensville) [S1].
+-*   **RGB-D Downsampling:** 20× (most datasets), 5× (Replica Hotel) [S1].
+-*   **Embedding Dimensions:** 25 dimensions per input (position/direction) in Fourier ablation [S1].
+-*   **Random Fourier Features:** Sampled from $\mathcal{N}(0, 1)$ [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Discontinuity:** The SDDF definition is discontinuous when a ray leaves occupied space. This is handled by assuming sensors stay in free space and only observe from outside-in [S1].
+-*   **Too Few Ellipsoids:** Prevents accurate approximation of object shapes [S1].
+-*   **Too Many Ellipsoids:** Causes spurious occlusions between ellipsoids and moves redundant ellipsoids out of the scene during testing [S1].
+-*   **Missing Negative Samples:** Without negative SDDF samples, ellipsoids regress into object interiors, leading to missing ray intersections and incorrect ellipsoid selection [S1].
+-*   **K-means++ Initialization:** Causes larger errors by using excessive ellipsoids for planar surfaces [S1].
+-*   **Embedding Choice:** Fourier embedding requires scene-specific spatial frequency tuning; polynomial embedding is preferred for generalization [S1].
++**Edge Cases and Pitfalls:**
++-   **Discontinuity:** The SDDF is discontinuous when a ray leaves the occupied space from inside out. This is handled by assuming sensors remain in free space [S1].
++-   **Too Few Ellipsoids:** Prevents accurate approximation of object shapes [S1].
++-   **Too Many Ellipsoids:** Causes the model to learn spurious occlusions between ellipsoids and moves redundant ellipsoids out of the scene during testing [S1].
++-   **Missing Negative Samples:** Causes ellipsoids to regress into object interiors, leading to missing ray intersections [S1].
++-   **K-means++ Initialization:** Causes larger errors due to excessive ellipsoids for planar surfaces [S1].
+ 
+ ## Subtopics
+ 
+ ### [Ellipsoid SDDF Prior](10639-ellipsoid-sddf-prior.md)
+-A closed-form analytical function for computing the SDDF of a single ellipsoid, serving as the geometric prior. It provides the coarse structure and handles occlusion modeling explicitly. Choose this when you need a differentiable, explicit geometric primitive for the coarse approximation stage.
++The explicit geometric representation using learnable ellipsoids to approximate coarse shapes and handle occlusions. It provides an analytic, differentiable prior that satisfies the directional Eikonal equation by construction.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Inference is a single forward pass, making it significantly faster than iterative sphere tracing (SDF-Instant-NGP) or volume rendering (Nerfacto). On Replica-Hotel (Intel 14900K, RTX-3090), inference is 69 ms/frame, which is 1.5× faster than SDF-Instant-NGP and 4× faster than Nerfacto [S1].
+-*   **Memory Complexity:** Low GPU memory usage. Max training memory is 3.3 GB on Replica-Hotel, lower than RaDe-GS (18.7 GB) and Nerfacto (4.7 GB) [S1].
+-*   **Training Time:** 100 minutes on Replica-Hotel, slower than SDF-Instant-NGP (3 min) and RaDe-GS (30 min), attributed to the extra direction input and hybrid optimization [S1].
+-*   **Accuracy:** State-of-the-art MAE on Replica and Gibson datasets for both LiDAR and RGB-D inputs. Outperforms Nerfacto in distance prediction error and captures sharper details than SDF-Instant-NGP [S1].
+-*   **Strengths:** Single-query differentiable synthesis, low memory, handles occlusions well via explicit prior, robust to viewing distance due to Eikonal constraint satisfaction.
+-*   **Limitations:** Slower inference than highly optimized Gaussian Splatting (RaDe-GS: 7 ms vs 69 ms), requires careful initialization and negative sample augmentation.
++-   **Time Complexity:** Inference is a single forward pass through the ellipsoid prior and the neural network, making it faster than iterative sphere tracing methods. It is 1.5× faster than SDF-Instant-NGP sphere tracing and 4× faster than Nerfacto [S1].
++-   **Memory Complexity:** Low GPU memory usage. On Replica-Hotel, max training GPU memory is 3.3 GB, significantly lower than RaDe-GS (18.7 GB) and Nerfacto (4.7 GB) [S1].
++-   **Performance:** On Replica-Hotel (Intel 14900K CPU, NVIDIA RTX-3090 GPU), training time is 100 minutes, inference time is 69 ms/frame, and the model has 2.7M parameters [S1].
++-   **Strengths:** Single-query differentiable novel view synthesis; handles occlusions explicitly; low memory footprint; robust to varying viewing distances due to Eikonal constraint satisfaction; works with LiDAR and depth-only data [S1].
++-   **Limitations:** Slower inference than highly optimized Gaussian Splatting methods like RaDe-GS (69 ms vs 7 ms); requires careful tuning of the number of ellipsoids; sensitive to initialization [S1].
++-   **When to Use:** When geometric reconstruction accuracy with low memory usage is required, and differentiable depth rendering is needed without RGB supervision.
++-   **When Not to Use:** When maximum inference speed is critical (use RaDe-GS) or when photometric rendering with RGB is the primary goal (use Nerfacto) [S1].
+ 
+ ## Background
+-The method was introduced in "Learning Scene-Level Signed Directional Distance Function With Ellipsoidal Priors and Neural Residuals" [S1]. It addresses limitations of previous SDDF formulations: object-level SDDF [15] ignores objects behind the viewing position, and PDDF [16] lacks sign information and has discontinuities. This work defines a scene-level SDDF that is continuous when entering occupied space and retains sign information. It builds on [SDF Training with Eikonal Loss](2553-sdf-training-with-eikonal-loss.md) by incorporating Eikonal regularization but extends it to the directional domain with a hybrid explicit-implicit architecture.
++The method was introduced in "Learning Scene-Level Signed Directional Distance Function With Ellipsoidal Priors and Neural Residuals" [S1]. It addresses the limitations of previous SDDF formulations: object-level SDDF ignores objects behind the viewing position, and PDDF lacks sign information and has discontinuities. This method defines a scene-level SDDF that is continuous when entering occupied space and retains sign information, enabling accurate scene reconstruction from sensor data [S1].
+ 
+ ## Sources

@@ -3,77 +3,75 @@
 Also called: DirectXSplat, DirectXSplat Rendering Pipeline, directxsplat::Renderer
 
 ## Overview
-DirectXSplat is a C++/Direct3D 12 library for rendering 3D Gaussian Splats, providing a rasterization pipeline that handles scene upload, preparation, rendering, and frame submission with explicit resource management [S1, unofficial]. It is designed as a fast, GPU-accelerated alternative to other Gaussian Splatting renderers, achieving up to 2.4x higher frame rates in matched-quality resident-scene benchmarks compared to [gsplat](981-plug-and-play-ray-marching-and-rendering.md) [S1, unofficial]. Unlike [Time-Sliced Pipelined Architecture](1435-time-sliced-pipelined-architecture.md) which may abstract away hardware specifics, DirectXSplat exposes a host-owned device, queue, command list, and fence architecture, giving the application full control over the D3D12 submission loop while managing the complexity of Gaussian splat rasterization internally [S1, unofficial].
+DirectXSplat is a C++/Direct3D 12 library for rendering 3D Gaussian Splats, providing a rasterization pipeline that handles scene upload, preparation, rendering, and frame submission with explicit resource management [S1, unofficial]. It differs from general-purpose splatting libraries by enforcing a host-owned device/queue/command list/fence architecture, allowing integration into existing D3D12 applications while managing its own internal COM references and resource transitions [S1, unofficial]. It is optimized for high performance, claiming up to 2.4x faster rendering than `gsplat` in matched-quality benchmarks on NVIDIA hardware [S1, unofficial].
 
 ## How it works
-The method operates as a prepare-then-render pipeline. The host application initializes a `D3D12Context` and a `Renderer`, loads a scene into a `directxsplat::Scene` object, and creates an `UploadedSceneHandle` to transfer data to GPU memory [S1, unofficial]. For each frame, the host populates a `RenderFrameContext` and calls `PrepareSceneForRender` to handle LOD selection, culling, and memory residency management [S1, unofficial]. Finally, `Render` is called with a reset command list and target binding to record the rasterization commands, which are then submitted to the D3D12 queue [S1, unofficial].
+The method operates as a prepare-then-render pipeline. The host application owns the D3D12 device, command queue, and fences, while the renderer manages the Gaussian splat data structures and recording of rendering commands into the host's command list.
 
 ### Inputs and Outputs
 *   **Inputs**:
-    *   `ID3D12Device*`, `ID3D12CommandQueue*`, `ID3D12Fence*`: Host-owned D3D12 resources [S1, unofficial].
-    *   Scene file path or `directxsplat::Scene` object: Supports PLY, compressed PLY, SPZ, `.splat`, SOG, and hierarchical LOD metadata [S1, unofficial].
-    *   `RenderInput`: Camera matrices, frame index, and configuration parameters [S1, unofficial].
-    *   `ID3D12GraphicsCommandList*`: A reset, open command list for recording [S1, unofficial].
-    *   `RenderTargetBinding`: Color (and optional depth) target resources, RTV/DSV handles, formats, and states [S1, unofficial].
+    *   `ID3D12Device*`, `ID3D12CommandQueue*`, `ID3D12Fence*`: Host-owned D3D12 primitives.
+    *   Scene data: Loaded via `LoadSceneFromFile` from formats including PLY, compressed PLY, SPZ, `.splat`, SOG, and hierarchical LOD metadata [S1, unofficial].
+    *   `RenderInput`: Camera matrices, view parameters, and frame index.
+    *   `RenderTargetBinding`: Color target resource, RTV handle, format, states, viewport, and scissor.
 *   **Outputs**:
-    *   Rendered image in the color target resource [S1, unofficial].
-    *   `RenderResult`: Contains submission status, sync points, and timing information [S1, unofficial].
+    *   Rendered image on the provided color target.
+    *   `RenderResult`: Contains submission status, sync points, and potential errors.
 
 ### Data Structures
 
+**`D3D12Context`**
+*   Stores non-owning pointers to `ID3D12Device`, `ID3D12CommandQueue`, and `ID3D12Fence`. Does not retain COM references [S1, unofficial].
+
 **`RenderFrameContext`**
-Tracks frame submission state for resource reuse.
-*   `fence`: `ID3D12Fence*` (Same fence passed to `D3D12Context::Initialize`)
-*   `completedFenceValue`: `uint64_t` (Latest known completed value from `GetCompletedValue()`)
-*   `submissionFenceValue`: `uint64_t` (Unique, nonzero, strictly increasing per frame)
-*   `frameIndex`: `uint32_t` (Host frame index)
+*   `fence`: `ID3D12Fence*` (must match the one passed to `D3D12Context::Initialize`) [S1, unofficial].
+*   `completedFenceValue`: `uint64_t` (latest known completed value, typically from `GetCompletedValue()`) [S1, unofficial].
+*   `submissionFenceValue`: `uint64_t` (nonzero, unique per frame, strictly greater than all previously signaled values and `completedFenceValue`) [S1, unofficial].
+*   `frameIndex`: `uint32_t` (host frame index) [S1, unofficial].
 
 **`RenderTargetBinding`**
-Defines the output targets and transition modes.
 *   `colorTarget`: `ID3D12Resource*`
 *   `colorRtv`: `D3D12_CPU_DESCRIPTOR_HANDLE`
 *   `colorFormat`: `DXGI_FORMAT`
 *   `colorStateBefore`: `D3D12_RESOURCE_STATES`
 *   `colorStateAfter`: `D3D12_RESOURCE_STATES`
-*   `transitionMode`: `ResourceTransitionMode` (`LibraryManaged` or `CallerManaged`)
+*   `transitionMode`: `ResourceTransitionMode` (`LibraryManaged` or `CallerManaged`) [S1, unofficial].
 *   `viewport`: `D3D12_VIEWPORT`
 *   `scissor`: `D3D12_RECT`
-*   `depthTarget`: `ID3D12Resource*` (Optional)
-*   `depthDsv`: `D3D12_CPU_DESCRIPTOR_HANDLE` (Optional)
-*   `depthFormat`: `DXGI_FORMAT` (Optional)
 
 **`RendererConfig`**
-*   `residencyBudgetGaussians`: `uint64_t` (Default: $16 \times 1024 \times 1024$)
-*   `uploadBudgetGaussians`: `uint64_t` (Default: 650,000)
-*   `warmUploadBudgetGaussians`: `uint64_t` (Default: 1,200,000)
-*   `maxUploadsPerFrame`: `uint32_t` (Default: 16)
-*   `chunkTargetSize`: `uint32_t` (Default: 65,536)
-*   `lod0ScreenRadius`: `float` (Default: 72.0f)
-*   `lod1ScreenRadius`: `float` (Default: 24.0f)
-*   `cullScreenRadius`: `float` (Default: 0.35f)
-*   `residencyCacheFrames`: `uint32_t` (Default: 120)
-*   `enableGpuTiming`: `bool` (Default: true)
+*   `residencyBudgetGaussians`: `uint64_t` (Default: $16 \times 1024 \times 1024$) [S1, unofficial].
+*   `uploadBudgetGaussians`: `uint64_t` (Default: 650,000) [S1, unofficial].
+*   `warmUploadBudgetGaussians`: `uint64_t` (Default: 1,200,000) [S1, unofficial].
+*   `maxUploadsPerFrame`: `uint32_t` (Default: 16) [S1, unofficial].
+*   `chunkTargetSize`: `uint32_t` (Default: 65,536) [S1, unofficial].
+*   `lod0ScreenRadius`: `float` (Default: 72.0f) [S1, unofficial].
+*   `lod1ScreenRadius`: `float` (Default: 24.0f) [S1, unofficial].
+*   `cullScreenRadius`: `float` (Default: 0.35f) [S1, unofficial].
+*   `residencyCacheFrames`: `uint32_t` (Default: 120) [S1, unofficial].
+*   `enableGpuTiming`: `bool` (Default: true) [S1, unofficial].
 
 **Gaussian Primitive Fields**
 *   `position`: `Vec3`
 *   `scale`: `Vec3`
-*   `rotation`: `Vec4` (Quaternion)
+*   `rotation`: `Vec4` (quaternion)
 *   `opacity`: `float`
-*   `sh`: `array` of floats (Spherical Harmonics coefficients)
+*   `sh`: `array` of floats (Spherical Harmonics coefficients) [S1, unofficial].
 
 ### Numbered Steps
 
 1.  **Initialize Context**: Create `D3D12Context` with host `ID3D12Device*`, `ID3D12CommandQueue*`, and `ID3D12Fence*` [S1, unofficial].
-2.  **Initialize Renderer**: Create `Renderer` instance [S1, unofficial].
-3.  **Load Scene**: Call `LoadSceneFromFile(scenePath)` to detect format (PLY, SPZ, etc.) and populate `directxsplat::Scene` [S1, unofficial].
-4.  **Create Uploaded Scene**: Call `CreateUploadedScene(loadedScene, sceneHandle)` to transfer data to GPU memory [S1, unofficial].
-5.  **Prepare Frame Context**: Populate `RenderFrameContext` with the fence pointer, `completedFenceValue` (from `GetCompletedValue()`), unique `submissionFenceValue`, and `frameIndex` [S1, unofficial].
-6.  **Prepare Scene**: Call `PrepareSceneForRender(sceneHandle, input, frameContext, &preparationResult)` [S1, unofficial].
-7.  **Configure Target**: Populate `RenderTargetBinding` with color/depth targets, formats, states, viewport, scissor, and `transitionMode` [S1, unofficial].
-8.  **Render**: Call `Render(commandList, targetBinding, sceneHandle, input, frameContext, &result)` [S1, unofficial].
-9.  **Handle Sync**: If `result.submission.uploadSyncPoint` is valid, wait on the direct queue for that sync point [S1, unofficial].
-10. **Submit**: Close the command list, execute it on the direct queue, and signal the fence with `submissionFenceValue` [S1, unofficial].
-11. **Update Fence**: On subsequent frames, update `completedFenceValue` with the new fence completion progress [S1, unofficial].
+2.  **Initialize Renderer**: Call `Renderer::Initialize(context)` [S1, unofficial].
+3.  **Load Scene**: Call `LoadSceneFromFile(scenePath)` to create a `directxsplat::Scene` object. The loader detects format automatically (PLY, SPZ, etc.) [S1, unofficial].
+4.  **Create Uploaded Scene**: Call `Renderer::CreateUploadedScene(loadedScene, sceneHandle)` to transfer data to GPU memory [S1, unofficial].
+5.  **Prepare Frame Context**: Populate `RenderFrameContext` with the fence pointer, `GetCompletedValue()`, a unique `submissionFenceValue`, and `frameIndex` [S1, unofficial].
+6.  **Prepare Scene**: Call `Renderer::PrepareSceneForRender(sceneHandle, input, frameContext, &preparationResult)` [S1, unofficial].
+7.  **Configure Render Target**: Populate `RenderTargetBinding` with the color target, RTV, format, states, viewport, scissor, and transition mode [S1, unofficial].
+8.  **Render**: Call `Renderer::Render(commandList, targetBinding, sceneHandle, input, frameContext, &renderResult)` [S1, unofficial].
+    *   The command list must be reset and open.
+    *   If `renderResult.submission.uploadSyncPoint` is valid, the host must wait on the direct queue for that sync point before executing the command list [S1, unofficial].
+9.  **Submit**: Close the command list, execute it on the direct queue via `ExecuteCommandLists`, and signal the fence with `submissionFenceValue` [S1, unofficial].
+10. **Handle Errors**: If `Render` returns an error with `submissionRequired == true`, the command list work must still be submitted/signaled or device-lost cleanup entered [S1, unofficial].
 
 ### Pseudocode
 
@@ -85,7 +83,7 @@ context = D3D12Context()
 context.Initialize(device, directQueue, directFence)
 
 renderer = Renderer()
-renderer.Initialize(context, config) # config uses defaults or custom values
+renderer.Initialize(context)
 
 # Scene Loading
 loaded_scene = LoadSceneFromFile(scene_path)
@@ -100,10 +98,10 @@ for frame_index in range(num_frames):
     frame_context = RenderFrameContext()
     frame_context.fence = directFence
     frame_context.completedFenceValue = directFence.GetCompletedValue()
-    frame_context.submissionFenceValue = next_unique_fence_value() # Must be > previous signals and > completedFenceValue
+    frame_context.submissionFenceValue = next_unique_fence_value() # Must be > all previous and > completedFenceValue
     frame_context.frameIndex = frame_index
 
-    # 2. Prepare Scene (LOD, Culling, Residency)
+    # 2. Prepare Scene for Render
     preparation_result = RenderPreparationResult()
     status = renderer.PrepareSceneForRender(scene_handle, render_input, frame_context, preparation_result)
     if not status.ok:
@@ -114,24 +112,25 @@ for frame_index in range(num_frames):
     target_binding.colorTarget = color_target_resource
     target_binding.colorRtv = color_rtv_handle
     target_binding.colorFormat = color_format
-    target_binding.colorStateBefore = D3D12_RESOURCE_STATES.PRESENT
-    target_binding.colorStateAfter = D3D12_RESOURCE_STATES.RENDER_TARGET
+    target_binding.colorStateBefore = D3D12_RESOURCE_STATES.RENDER_TARGET
+    target_binding.colorStateAfter = D3D12_RESOURCE_STATES.PRESENT
     target_binding.transitionMode = ResourceTransitionMode.LibraryManaged
     target_binding.viewport = viewport
-    target_binding.scissor = scissor_rect
+    target_binding.scissor = scissor
 
     # 4. Render
-    result = RenderResult()
-    status = renderer.Render(command_list, target_binding, scene_handle, render_input, frame_context, result)
+    render_result = RenderResult()
+    status = renderer.Render(command_list, target_binding, scene_handle, render_input, frame_context, render_result)
     
-    # Handle error with submission required
-    if not status.ok and result.submission.submissionRequired:
-        # Command list work was recorded; must submit or enter device-lost cleanup
-        pass 
+    # Error handling for submission required
+    if not status.ok and render_result.submission.submissionRequired:
+        # Command list work may already be recorded; must submit or cleanup
+        pass
 
-    # 5. Handle Upload Sync
-    if result.submission.uploadSyncPoint.IsValid():
-        directQueue.Wait(result.submission.uploadSyncPoint.fence, result.submission.uploadSyncPoint.value)
+    # 5. Handle Sync Points
+    if render_result.submission.uploadSyncPoint.IsValid():
+        directQueue.Wait(render_result.submission.uploadSyncPoint.fence, 
+                         render_result.submission.uploadSyncPoint.value)
 
     # 6. Submit Command List
     command_list.Close()
@@ -145,29 +144,30 @@ context.Shutdown()
 ```
 
 ### Parameters and Typical Values
-*   `lod0ScreenRadius`: 72.0f. Splats larger than this use LOD 0 (highest quality).
-*   `lod1ScreenRadius`: 24.0f. Splats between this and `cullScreenRadius` use LOD 1.
-*   `cullScreenRadius`: 0.35f. Splats smaller than this are culled.
-*   `residencyBudgetGaussians`: 16,777,216. Maximum Gaussians resident in GPU memory.
-*   `uploadBudgetGaussians`: 650,000. Maximum Gaussians uploaded per frame for dynamic updates.
+*   `lod0ScreenRadius`: 72.0f. Splats larger than this in screen space use LOD0 [S1, unofficial].
+*   `lod1ScreenRadius`: 24.0f. Splats between LOD1 and LOD0 radii use LOD1 [S1, unofficial].
+*   `cullScreenRadius`: 0.35f. Splats smaller than this are culled [S1, unofficial].
+*   `residencyBudgetGaussians`: 16,777,216. Maximum Gaussians resident in GPU memory [S1, unofficial].
+*   `uploadBudgetGaussians`: 650,000. Maximum Gaussians uploaded per frame [S1, unofficial].
 
 ### Edge Cases and Pitfalls
 *   **Fence Values**: `submissionFenceValue` must be nonzero, unique per frame, strictly greater than every previously signaled value on that fence, and strictly greater than `completedFenceValue` [S1, unofficial].
-*   **Format Mismatch**: `colorRtv` must describe `colorTarget`, and `colorFormat` must match the RTV's single-sampled format; unsupported formats fail pipeline creation [S1, unofficial].
-*   **Error Handling**: If `Render` returns an error with `submissionRequired == true`, command-list work may already be recorded. The host must submit/signal it or enter device-lost cleanup [S1, unofficial].
+*   **Resource Formats**: `colorRtv` must describe `colorTarget`, and `colorFormat` must match the RTV's single-sampled format. Unsupported formats fail pipeline creation [S1, unofficial].
+*   **Submission Required**: If `Render` returns an error with `submissionRequired == true`, command-list work may already be recorded. The host must submit/signal it or enter device-lost cleanup [S1, unofficial].
 *   **Mutual Exclusion**: Rendering and scene mutation are mutually exclusive for the same uploaded scene. `BeginSceneMutation` waits for active render encoding to finish [S1, unofficial].
-*   **Resource Transitions**: If `transitionMode` is `CallerManaged`, the host must handle color, depth, and motion-vector transitions; if `LibraryManaged`, DirectXSplat handles them [S1, unofficial].
+*   **Device Lost**: If queue execution or signaling fails after renderer work was recorded, call `renderer.NotifyDeviceLost()` before shutdown [S1, unofficial].
 
 ## Operating characteristics
-*   **Performance**: Benchmarked on NVIDIA GeForce RTX 4070 SUPER, DirectXSplat achieves up to 2.4x higher FPS than [gsplat](981-plug-and-play-ray-marching-and-rendering.md) in resident-scene benchmarks (e.g., 382 FPS vs 165 FPS on the 'bicycle' dataset at 1237x822 resolution) [S1, unofficial].
+*   **Performance**: Benchmarked on NVIDIA GeForce RTX 4070 SUPER, Windows 11. DirectXSplat achieves up to 2.4x faster FPS than `gsplat` in resident-scene benchmarks [S1, unofficial].
+    *   Bicycle dataset (6.1M splats, 1237x822): 382.51 FPS (DirectXSplat) vs 165.82 FPS (gsplat) [S1, unofficial].
+    *   Garden dataset (5.8M splats, 1297x840): 319.14 FPS (DirectXSplat) vs 131.68 FPS (gsplat) [S1, unofficial].
+    *   Treehill dataset (3.8M splats, 1267x832): 491.86 FPS (DirectXSplat) vs 224.86 FPS (gsplat) [S1, unofficial].
 *   **Memory**: Memory-conscious design with persistent uploaded scenes and configurable residency/upload budgets [S1, unofficial].
-*   **Strengths**: High performance, native D3D12 integration, explicit resource control, support for multiple scene formats (PLY, SPZ, .splat, SOG) [S1, unofficial].
-*   **Limitations**: Tied to Direct3D 12; requires host-managed D3D12 infrastructure (device, queue, fences, command lists) [S1, unofficial].
-*   **When to use**: When integrating Gaussian Splatting into a custom D3D12 application requiring high performance and explicit control over the rendering loop [S1, unofficial].
-*   **When not to use**: For Vulkan/Metal applications, or for simple prototyping where a convenience wrapper or higher-level API is preferred [S1, unofficial].
+*   **Strengths**: High performance, native D3D12 integration, explicit resource management, support for multiple scene formats (PLY, SPZ, .splat, SOG) [S1, unofficial].
+*   **Limitations**: Tied to Direct3D 12; requires host to manage D3D12 primitives (device, queue, fences, command lists) [S1, unofficial].
 
 ## Background
-DirectXSplat is a C++/Direct3D 12 library for rendering 3D Gaussian Splats, based on the techniques described in "3D Gaussian Splatting for Real-Time Radiance Field Rendering" [S1, unofficial]. It was developed to provide a fast, embeddable renderer for D3D12 applications, addressing the need for efficient rasterization of Gaussian primitives with explicit resource management [S1, unofficial].
+DirectXSplat is a C++/Direct3D 12 library for rendering 3D Gaussian Splats, designed to render scenes captured via techniques described in "3D Gaussian Splatting for Real-Time Radiance Field Rendering" [S1, unofficial]. It was developed to provide a fast, embeddable renderer with host-owned resource management [S1, unofficial].
 
 ## Sources
 [S1] pbkx/DirectXSplat, https://github.com/pbkx/DirectXSplat, fetched 2026-10-27 (unofficial)

@@ -3,72 +3,89 @@
 Also called: Majorant Transmittance Sampling
 
 ## Overview
-Estimates the transmittance from a surface point to a distant light source through participating media using majorant sampling [S1, unofficial]. It differs from standard majorant sampling by integrating the sampling loop directly into the shadow ray traversal, allowing for tighter bounds per channel in chromatic variants and reducing variance caused by global majorants [S1, unofficial].
+Estimates the transmittance from a surface point to a distant light source through participating media using majorant sampling [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Current position in the volume.
-- Direction to the distant light source ($\omega_i$).
-- Density grid and accessor.
-- Total extinction coefficient ($\sigma_t$).
-- Random number generator (RNG).
+- Current position in the volume [S1, unofficial].
+- Direction to the distant light source $\omega_i$ [S1, unofficial].
+- Density grid and accessor [S1, unofficial].
+- Total extinction coefficient $\sigma_t$ [S1, unofficial].
+- Random number generator (RNG) [S1, unofficial].
 
 **Outputs:**
-- Estimated transmittance ($T_{ray}$).
+- Estimated transmittance $T_{ray}$ [S1, unofficial].
 
 **Data Structures:**
-- `MajorantTransmittanceSampler`: Initialized with intersection data, RNG, density grid, accessor, and total extinction coefficient.
-- `T_ray`: Floating-point accumulator initialized to 1.0f.
+- `MajorantTransmittanceSampler`: Initialized with intersection data, RNG, density grid, accessor, and total extinction coefficient [S1, unofficial].
+- `T_ray`: Floating-point accumulator initialized to 1.0f [S1, unofficial].
 
 **Steps:**
-1. Initialize transmittance $T_{ray} = 1.0$.
-2. Create a shadow ray from the current position in the direction of the distant light $\omega_i$.
-3. Intersect the shadow ray with the volume grid to obtain a majorant iterator.
-4. Initialize `MajorantTransmittanceSampler` with the intersection, RNG, density grid, accessor, and total extinction coefficient.
-5. Loop through sampled points:
-   - Update $T_{ray}$ with null event probabilities.
-   - If $T_{ray} \le 0.05$, apply Russian Roulette.
-6. Multiply the phase function value (Henyey-Greenstein) by the estimated transmittance and light intensity to return radiance.
+1. Initialize transmittance $T_{ray} = 1.0$ [S1, unofficial].
+2. Create a shadow ray from the current position in the direction of the distant light $\omega_i$ [S1, unofficial].
+3. Intersect the shadow ray with the volume grid to obtain the entry and exit distances [S1, unofficial].
+4. Initialize `MajorantTransmittanceSampler` with the intersection, RNG, density grid, accessor, and total extinction coefficient [S1, unofficial].
+5. Loop through sampled points along the ray: update $T_{ray}$ with null event probabilities and apply Russian Roulette if $T_{ray} \le 0.05$ [S1, unofficial].
+6. Multiply the phase function value (Henyey-Greenstein) by the estimated transmittance and light intensity to return radiance [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def estimate_shadow_transmittance(position, light_direction, density_grid, accessor, sigma_t, rng):
-    # Initialize transmittance
+import math
+
+def ray_aabb_intersect(origin, direction, box_min, box_max):
+    """Returns (t0, t1) for ray-box intersection. Fixes inside-origin bug by clamping t0 to 0.0."""
+    t0 = 0.0
+    t1 = float('inf')
+    for i in range(3):
+        if direction[i] == 0:
+            if origin[i] < box_min[i] or origin[i] > box_max[i]:
+                return None
+        else:
+            t_enter = (box_min[i] - origin[i]) / direction[i]
+            t_exit = (box_max[i] - origin[i]) / direction[i]
+            if t_enter > t_exit:
+                t_enter, t_exit = t_exit, t_enter
+            t0 = max(t0, t_enter)
+            t1 = min(t1, t_exit)
+    if t0 < t1:
+        return t0, t1
+    return None
+
+def estimate_shadow_transmittance(position, light_direction, grid_min, grid_max, density_grid, accessor, sigma_t, rng):
+    # 1. Initialize transmittance
     T_ray = 1.0
     
-    # Create shadow ray
-    shadow_ray = Ray(position, light_direction)
-    
-    # Intersect with volume grid
-    intersection = intersect_volume_grid(shadow_ray, density_grid)
-    
-    # Initialize sampler
-    sampler = MajorantTransmittanceSampler(
-        intersection=intersection,
-        rng=rng,
-        density_grid=density_grid,
-        accessor=accessor,
-        sigma_t=sigma_t
-    )
-    
-    # Loop through sampled points
-    while sampler.has_next():
-        # Sample next point along ray
-        point, step_size = sampler.sample_next()
+    # 2. Create shadow ray and 3. Intersect with volume grid
+    t0, t1 = ray_aabb_intersect(position, light_direction, grid_min, grid_max)
+    if t0 is None or t0 >= t1:
+        return 1.0  # Ray misses or is degenerate
         
-        # Update transmittance with null event probability
-        # Note: Exact formula for null event probability not provided in sources [S1, unofficial]
-        null_prob = compute_null_event_probability(point, step_size, sigma_t)
-        T_ray *= null_prob
+    # 4. Initialize sampler (majorant sampling loop)
+    t = t0
+    while t < t1:
+        # Sample step size from exponential distribution with rate sigma_t [G]
+        step = -math.log(rng.uniform()) / sigma_t
+        t += step
+        
+        if t >= t1:
+            step = t1 - (t - step)
+            t = t1
+            
+        # Sample density at current position
+        density = accessor.sample(position + light_direction * (t - step))
+        
+        # 5. Update transmittance with null event probability: exp(-sigma_t * step) [G]
+        T_ray *= math.exp(-sigma_t * step)
         
         # Russian Roulette if transmittance is low
         if T_ray <= 0.05:
-            # Apply Russian Roulette to avoid zeroing out transmittance
-            # Note: Exact Russian Roulette implementation not provided in sources [S1, unofficial]
-            T_ray = apply_russian_roulette(T_ray, rng)
+            if rng.uniform() > T_ray / 0.05:
+                return 0.0
+            T_ray = 0.05
             
+    # 6. Caller multiplies T_ray by phase function and light intensity to return radiance
     return T_ray
 ```
 
@@ -77,9 +94,9 @@ def estimate_shadow_transmittance(position, light_direction, density_grid, acces
 - Phase function: Henyey-Greenstein [S1, unofficial].
 
 **Edge Cases:**
-- Precision issues when $T_{ray}$ approaches zero.
-- Boundary conditions when the shadow ray exits the volume grid.
-- Degenerate input when the density grid is empty or invalid.
+- Precision issues when $T_{ray}$ approaches zero [G].
+- Boundary conditions when the shadow ray exits the volume grid [G].
+- Degenerate input when the density grid is empty or invalid [G].
 
 ## Subtopics
 
@@ -91,15 +108,15 @@ This method estimates the transmittance from a surface point to a light source i
 - **Memory Complexity:** Not given in the sources.
 - **Measured Performance:** Not given in the sources.
 - **Scaling:** Not given in the sources.
-- **Strengths:** Reduces variance in chromatic media by using tighter bounds per channel [S1, unofficial].
-- **Limitations:** Requires accurate density grid and accessor [S1, unofficial].
-- **When to Use:** When estimating transmittance in participating media with distant light sources [S1, unofficial].
-- **When Not to Use:** When the density grid is unavailable or invalid [S1, unofficial].
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
+- **When to Use:** Not given in the sources.
+- **When Not to Use:** Not given in the sources.
 
 ## Background
-Origin: Not given in the sources.
-History and Development: Not given in the sources.
-Where it is used: Volumetric path tracing [S1, unofficial].
+- **Origin:** Not given in the sources.
+- **History and Development:** Not given in the sources.
+- **Where it is used:** Not given in the sources.
 
 ## Sources
 [S1] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)

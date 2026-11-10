@@ -3,52 +3,34 @@
 Also called: Density encoding scheme, Two-bit cell coding
 
 ## Overview
-Adaptive Thresholding for Rapid Transfer Function Switching is a classification optimization that enables instant switching between a fixed set of predefined transfer functions without re-evaluating voxel data or re-classifying the volume [S1, unofficial]. Unlike standard pre-classification which requires re-computation when opacity thresholds change, this method pre-computes a two-bit code per voxel cell based on density intervals, allowing the renderer to skip transparent cells by simply changing a lookup table pointer [S1, unofficial]. It is distinct from general binary classification [6229-binary-and-soft-classification.md] by its specific use of multi-bit interval coding to support multiple simultaneous threshold configurations.
+Adaptive Thresholding for Rapid Transfer Function Switching is a classification optimization that enables instant switching between a fixed set of predefined transfer functions without re-evaluating voxel data or re-classifying the volume [S1, unofficial]. Unlike standard pre-classification which requires re-computation when opacity thresholds change, this method pre-computes a two-bit code per voxel cell based on density intervals, allowing the renderer to skip transparent cells by simply changing a lookup table pointer [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   A scalar volume dataset $V$ with dimensions $D_x \times D_y \times D_z$.
-*   A set of $N$ predefined transfer functions, each defined by a lower density threshold $T_i$.
-*   A rendering ray traversal routine (e.g., Depth routine).
+*   A scalar volume dataset $V$ with density values [S1, unofficial].
+*   A set of $N$ predefined transfer functions, each defined by a lower density threshold [S1, unofficial].
+*   A rendering ray traversal routine (e.g., Depth routine) [S1, unofficial].
 
 **Outputs:**
-*   A pre-computed two-bit code array $C$ of size $D_x \times D_y \times D_z$.
-*   A set of Lookup Tables (LUTs) for rapid cell skipping.
+*   A pre-computed two-bit code array $C$ of size $D_x \times D_y \times D_z$ [S1, unofficial].
+*   A set of Lookup Tables (LUTs) for rapid cell skipping [S1, unofficial].
 
 **Data Structures:**
-1.  **Code Array ($C$):** An integer array where each element stores a 2-bit code for a corresponding voxel cell. The array is packed such that codes are contiguous but must be treated as atomic 2-bit units during memory operations.
-2.  **Lookup Table (LUT):** A small table mapping byte patterns to bit offsets. For a specific transfer function, the LUT contains the offset of the first occurrence of the required non-transparent bit pattern (e.g., '10' or '11') within a byte.
+1.  **Code Array ($C$):** An integer array where each element stores a 2-bit code for a corresponding voxel cell [S1, unofficial]. The array is packed such that codes are contiguous but must be treated as atomic 2-bit units during memory operations [S1, unofficial].
+2.  **Lookup Table (LUT):** A small table mapping byte patterns to bit offsets [S1, unofficial]. For a specific transfer function, the LUT contains the offset of the first occurrence of the required non-transparent bit pattern (e.g., '10' or '11') within a byte [S1, unofficial].
 
 **Steps:**
 
 1.  **Define Intervals:**
-    Let the $N$ transfer functions have lower density thresholds $T_0 < T_1 < \dots < T_{N-1}$. These thresholds divide the density domain into $N+1$ intervals $I_0, I_1, \dots, I_N$, sorted in ascending order.
-    *   $I_0$: $[min\_density, T_0)$
-    *   $I_k$: $[T_{k-1}, T_k)$ for $0 < k < N$
-    *   $I_N$: $[T_{N-1}, max\_density]$
-
+    Define $N$ transfer functions, each with a lower density threshold [S1, unofficial]. These thresholds divide the density domain into intervals $I_0, I_1, \dots, I_N$ sorted in ascending order [S1, unofficial].
 2.  **Assign Codes:**
-    Assign a unique 2-bit binary code to each interval index $k$. The code is the binary representation of $k$ using 2 bits.
-    *   Code for $I_0$: `00`
-    *   Code for $I_1$: `01`
-    *   Code for $I_2$: `10`
-    *   Code for $I_3$: `11`
-    *(Note: This supports up to 4 intervals, i.e., 3 transfer functions, as per the source example.)*
-
+    Assign a unique two-bit binary code to each interval, corresponding to the binary format of the interval index [S1, unofficial].
 3.  **Compute Cell Codes:**
-    For each voxel cell (or voxel, depending on implementation granularity) at position $\mathbf{x}$:
-    *   Identify the density value $v$ of the "highest corner" voxel. In the context of the source, this refers to the voxel value determining the cell's classification status. Let $v = V[\mathbf{x}]$.
-    *   Determine which interval $I_k$ contains $v$.
-    *   Store the 2-bit code for $k$ in $C[\mathbf{x}]$.
-
+    For each cell, determine the code based on the interval containing the highest corner voxel density [S1, unofficial].
 4.  **Store and Shear:**
-    Store $C$ in memory. When applying shear transformations (e.g., for rotation), the two bits of each code must be moved together as a unit to avoid splitting the code across memory boundaries or misalignment [S1, unofficial].
-
+    Store these two-bit codes in an integer array and shear this array during transformation [S1, unofficial]. When applying shear transformations, the two bits of a code must be moved together as a unit to avoid the cutting of the codes [S1, unofficial].
 5.  **Rendering (LUT Selection):**
-    *   When a user selects a transfer function $TF_j$ with threshold $T_j$, identify the required non-transparent codes. Samples with density $< T_j$ are transparent (codes $0$ to $j-1$). Samples with density $\ge T_j$ are potentially opaque (codes $j$ to $N$).
-    *   The renderer searches for the first cell with a code $\ge j$.
-    *   The Depth routine uses a LUT specific to $TF_j$. The LUT maps byte patterns to the bit offset of the first matching pattern (e.g., searching for '10' or '11' if $j=2$).
-    *   Update the LUT pointer to the address of the LUT corresponding to $TF_j$. This allows the renderer to skip transparent cells rapidly without re-evaluating the transfer function for every sample [S1, unofficial].
+    During rendering, the Depth routine uses a lookup table determined by the current transfer function's bit pattern to search for the first non-transparent cell [S1, unofficial]. When the user changes the transfer function, update the LUT pointer to the address of the corresponding lookup table [S1, unofficial]. This encoding scheme allows rapid access to the first non-transparent cell along the viewing ray independently from the selected transfer function [S1, unofficial].
 
 **Pseudocode:**
 
@@ -56,111 +38,44 @@ Adaptive Thresholding for Rapid Transfer Function Switching is a classification 
 
 ```python
 def precompute_codes(volume, thresholds):
-    """
-    Pre-compute two-bit codes for rapid TF switching.
-    
-    Args:
-        volume: 3D array of voxel densities.
-        thresholds: List of N lower density thresholds [T0, T1, ..., T_{N-1}].
-                    Sorted ascending.
-    
-    Returns:
-        codes: 2D/3D array of 2-bit integers.
-        intervals: List of interval boundaries for reference.
-    """
-    # Define interval boundaries
-    # I_0: [min, T0), I_1: [T0, T1), ..., I_N: [T_{N-1}, max]
-    # Number of intervals is len(thresholds) + 1
-    num_intervals = len(thresholds) + 1
-    
-    # Ensure codes fit in 2 bits (max 4 intervals)
-    if num_intervals > 4:
-        raise ValueError("Adaptive Thresholding supports up to 4 intervals (3 thresholds) with 2-bit coding.")
-
-    min_val = volume.min()
-    max_val = volume.max()
-    
-    # Initialize codes array
-    codes = np.zeros_like(volume, dtype=np.uint8)
-    
+    """Pre-compute two-bit codes per cell based on highest corner voxel density."""
+    # volume: 3D array of densities
+    # thresholds: sorted list of lower density thresholds [T0, T1, ...]
+    codes = [[[0] * volume.shape[2] for _ in range(volume.shape[1])] for _ in range(volume.shape[0])]
     for x in range(volume.shape[0]):
         for y in range(volume.shape[1]):
             for z in range(volume.shape[2]):
-                v = volume[x, y, z]
-                
-                # Determine interval index k
+                v = volume[x][y][z]  # Highest corner voxel density for the cell
                 k = 0
                 for i, t in enumerate(thresholds):
                     if v >= t:
                         k = i + 1
                     else:
                         break
-                
-                # Store 2-bit code
-                # k is 0, 1, 2, or 3
-                codes[x, y, z] = k
-                
+                codes[x][y][z] = k
     return codes
 
-def get_lut_for_tf(threshold_index, num_intervals):
-    """
-    Generate a Lookup Table for skipping transparent cells.
-    
-    Args:
-        threshold_index: The index of the selected transfer function's threshold.
-                         If TF_j is selected, we skip codes 0 to j-1.
-                         We search for codes >= threshold_index.
-        num_intervals: Total number of intervals (max 4).
-    
-    Returns:
-        lut: Dictionary or array mapping byte patterns to bit offsets.
-             Simplified: returns the minimum code value to search for.
-    """
-    # The LUT helps find the first byte containing a code >= threshold_index.
-    # For implementation simplicity in this context, the LUT effectively
-    # tells the renderer which bit patterns are "active".
-    # In the source, the LUT contains bit offsets of the first matching pattern.
-    # Here we return the target code range.
-    return threshold_index
+def apply_shear(codes, shear_vector):
+    """Shear the code array. Two bits of each code must be moved together as a unit."""
+    # Standard geometric shear operation applied to array indices
+    # Implementation detail: bits must not be split across memory boundaries [G]
+    pass
 
-def render_with_rapid_switching(codes, ray, current_tf_index, lut):
-    """
-    Render a single ray using the pre-computed codes and LUT.
-    
-    Args:
-        codes: Pre-computed 2-bit code array.
-        ray: Ray object with origin and direction.
-        current_tf_index: Index of the currently selected transfer function.
-        lut: Lookup table for the current TF.
-    
-    Returns:
-        Color and opacity of the first non-transparent hit.
-    """
-    # Intersect ray with volume
-    t_min, t_max = ray.intersect_volume()
-    
-    # Sample along ray
-    t = t_min
-    while t < t_max:
-        # Get voxel coordinates
-        x, y, z = ray.get_coordinates(t)
-        
-        # Get code for this cell
-        code = codes[x, y, z]
-        
-        # Check if code is in the non-transparent range for current TF
-        # Codes < current_tf_index are transparent (skipped)
-        if code >= current_tf_index:
-            # Found a potentially opaque cell
-            # Perform standard volume rendering step (e.g., alpha blending)
-            # using the actual transfer function for this TF
-            color, alpha = evaluate_tf_and_sample(volume, ray, t, current_tf_index)
-            return color, alpha
-        
-        # Advance ray
-        t += ray.step_size
-        
-    return 0.0, 0.0
+def get_lut_pointer(tf_index):
+    """Return LUT address for the selected transfer function."""
+    # LUT contains bit offsets of the first matching bit pattern (e.g., '10' or '11')
+    # inside a given byte for the selected transfer function [S1, unofficial]
+    return tf_index  # Actual address mapping [G]
+
+def depth_routine(codes, ray_origin, ray_direction, tf_index):
+    """Find first non-transparent cell along ray using LUT."""
+    target_code = get_lut_pointer(tf_index)
+    # Traverse cells along ray direction
+    for cell in ray.traverse_cells(codes.shape):
+        code = codes[cell.x][cell.y][cell.z]
+        if code >= target_code:
+            return cell  # First non-transparent cell found
+    return None
 ```
 
 **Parameters:**

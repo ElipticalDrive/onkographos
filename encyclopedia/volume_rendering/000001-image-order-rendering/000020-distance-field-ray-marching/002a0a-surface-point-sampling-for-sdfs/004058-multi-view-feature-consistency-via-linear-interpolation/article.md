@@ -1,0 +1,141 @@
+# Multi-view Feature Consistency via Linear Interpolation
+
+Also called: differentiable surface point extraction
+
+## Overview
+This method extracts a differentiable surface point from volume rendering samples by linearly interpolating SDF zero-crossings, enabling the enforcement of multi-view feature consistency constraints [S1, unofficial]. It differs from sibling methods by relying on the hierarchical sampling density near the surface to approximate the zero-crossing with a single secant step, rather than recursive root-finding or mesh-based parameterization [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
+- Hierarchical sampling points $\mathbf{x}(t_i) = \mathbf{o} + t_i \mathbf{d}$ for $i=1, \dots, N$, where $t_i$ are the sampled distances [S1, unofficial].
+- SDF values $f(\mathbf{x}(t_i))$ computed by the geometry network at each sample point [S1, unofficial].
+- Reference pixel $\mathbf{p}_0$ and its associated feature $\mathbf{F}_0(\mathbf{p}_0)$ from a pre-trained CNN [S1, unofficial].
+- Camera parameters $\{\mathbf{K}_i, \mathbf{R}_i, \mathbf{t}_i\}$ for $N_v$ neighboring source views [S1, unofficial].
+
+**Outputs:**
+- Extracted surface point $\hat{\mathbf{x}}$ [S1, unofficial].
+- Multi-view feature consistency loss $\mathcal{L}_{feat.}$ [S1, unofficial].
+
+**Data Structures:**
+- Array of distances $t$ of size $N$.
+- Array of SDF values $f$ of size $N$.
+- Array of 3D points $\mathbf{x}$ of size $N$ (implicitly defined by $t$).
+
+**Steps:**
+1. **Search for sign change:** Find the first index $s$ such that the SDF value is positive at $t_s$ and negative at $t_{s+1}$ [S1, unofficial].
+   $$ s = \arg \min_i \{ t_i \mid f(\mathbf{x}(t_i)) > 0 \text{ and } f(\mathbf{x}(t_{i+1})) < 0 \} $$
+   If no such $s$ exists (no sign change in the sampled range), skip constraints for this ray [S1, unofficial].
+
+2. **Linear Interpolation:** Approximate the zero-crossing parameter $\hat{t}$ using linear interpolation between $t_s$ and $t_{s+1}$ [S1, unofficial]:
+   $$ \hat{t} = \frac{f(\mathbf{x}(t_s))t_{s+1} - f(\mathbf{x}(t_{s+1}))t_s}{f(\mathbf{x}(t_s)) - f(\mathbf{x}(t_{s+1}))} $$
+   Compute the surface point $\hat{\mathbf{x}} = \mathbf{x}(\hat{t})$ [S1, unofficial].
+
+3. **Feature Consistency Loss:** Compute the loss by comparing the reference feature with features from neighboring views projected to the extracted surface point [S1, unofficial]:
+   $$ \mathcal{L}_{feat.} = \frac{1}{N_c N_v} \sum_{i=1}^{N_v} |\mathbf{F}_0(\mathbf{p}_0) - \mathbf{F}_i(\mathbf{K}_i(\mathbf{R}_i\hat{\mathbf{x}} + \mathbf{t}_i))| $$
+   where $N_c$ is the number of feature channels, $\mathbf{F}_i$ is the feature map from view $i$, and $\mathbf{K}_i, \mathbf{R}_i, \mathbf{t}_i$ are the intrinsic, rotation, and translation parameters of view $i$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_surface_point_and_loss(t, f, x, p0, F0, camera_params, F_extractor):
+    """
+    t: array of shape (N,), distances along ray
+    f: array of shape (N,), SDF values at t
+    x: array of shape (N, 3), 3D points at t
+    p0: reference pixel coordinates
+    F0: reference feature vector
+    camera_params: list of dicts with keys 'K', 'R', 't' for N_v views
+    F_extractor: function to extract features from image and pixel
+    """
+    N = len(t)
+    s = -1
+    
+    # Step 1: Find first sign change from positive to negative
+    for i in range(N - 1):
+        if f[i] > 0 and f[i+1] < 0:
+            s = i
+            break
+            
+    if s == -1:
+        # No sign change found, skip constraints
+        return None, 0.0
+        
+    # Step 2: Linear interpolation for zero-crossing
+    fs = f[s]
+    fs1 = f[s+1]
+    ts = t[s]
+    ts1 = t[s+1]
+    
+    # Avoid division by zero if SDF values are identical (unlikely with sign change)
+    denom = fs - fs1
+    if abs(denom) < 1e-8:
+        # Fallback to midpoint if denominator is near zero
+        t_hat = (ts + ts1) / 2.0
+    else:
+        t_hat = (fs * ts1 - fs1 * ts) / denom
+        
+    x_hat = x[s] + (x[s+1] - x[s]) * ((t_hat - ts) / (ts1 - ts))
+    
+    # Step 3: Compute multi-view feature consistency loss
+    loss = 0.0
+    N_v = len(camera_params)
+    N_c = len(F0) # Assuming feature vector length
+    
+    for i, cam in enumerate(camera_params):
+        # Project surface point to view i
+        # X_world = R_i * x_hat + t_i
+        X_world = cam['R'] @ x_hat + cam['t']
+        X_cam = cam['K'] @ X_world
+        
+        # Normalize to get pixel coordinates (assuming homogeneous division)
+        u = X_cam[0] / X_cam[2]
+        v = X_cam[1] / X_cam[2]
+        
+        # Extract feature from view i at projected pixel
+        # Note: F_extractor should handle boundary checks
+        Fi = F_extractor(image_i, (u, v))
+        
+        # Compute L1 difference
+        diff = abs(F0 - Fi)
+        loss += sum(diff)
+        
+    loss = loss / (N_c * N_v)
+    
+    return x_hat, loss
+```
+
+**Parameters:**
+- $N$: Number of hierarchical samples. Typical values depend on the scene scale and desired precision; hierarchical sampling concentrates points near the surface [S1, unofficial].
+- $\alpha, \beta$: Weights for other loss terms (eikonal, color) in the total loss function. Not given in the sources for this specific method's internal parameters.
+
+**Edge Cases:**
+- **No sign change:** If the ray does not intersect the surface within the sampled range, or if the SDF does not change sign between consecutive samples, the constraints are skipped for that ray [S1, unofficial].
+- **Degenerate interpolation:** If $f(\mathbf{x}(t_s)) \approx f(\mathbf{x}(t_{s+1}))$, the denominator in the interpolation formula approaches zero. A fallback to the midpoint is recommended [G].
+- **Precision:** The accuracy depends on the density of samples near the surface. Hierarchical sampling helps mitigate this by placing more samples near the expected surface location [S1, unofficial].
+
+## Subtopics
+
+### [Near-Surface Point Sampling](2910-near-surface-point-sampling.md)
+Focuses on sampling strategies near the surface without explicit feature consistency.
+
+### [Surfel Parameterization from Mesh Sampling](4501-surfel-parameterization-from-mesh-sampling.md)
+Uses mesh-based parameterization for feature consistency.
+
+### [Bidirectional Projective Sampling](8824-bidirectional-projective-sampling.md)
+Uses bidirectional projection for feature consistency.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ for finding the sign change and $O(N_v)$ for computing the feature loss, where $N$ is the number of samples per ray and $N_v$ is the number of neighboring views.
+- **Memory Complexity:** $O(N)$ to store sample points and SDF values.
+- **Strengths:** Differentiable, allowing gradient-based optimization. Leverages existing hierarchical sampling for efficiency.
+- **Limitations:** Accuracy depends on sample density. May fail if the surface is not well-sampled.
+- **When to use:** When multi-view feature consistency is required for neural implicit surface reconstruction.
+- **When not to use:** When high precision is needed without sufficient sampling, or when computational resources are extremely limited.
+
+## Background
+This method was introduced in "Recovering Fine Details for Neural Implicit Surface Reconstruction" (WACV 2023) by Chen et al. [S1, unofficial]. It builds on the idea of using SDF values for surface extraction, contrasting with IDR's recursive secant method by using a single interpolation step enabled by hierarchical sampling [S1, unofficial].
+
+## Sources
+[S1] Recovering Fine Details for Neural Implicit Surface Reconstruction, https://openaccess.thecvf.com/content/WACV2023/html/Chen_Recovering_Fine_Details_for_Neural_Implicit_Surface_Reconstruction_WACV_2023_paper.html, fetched 2026-10-29 (unofficial)

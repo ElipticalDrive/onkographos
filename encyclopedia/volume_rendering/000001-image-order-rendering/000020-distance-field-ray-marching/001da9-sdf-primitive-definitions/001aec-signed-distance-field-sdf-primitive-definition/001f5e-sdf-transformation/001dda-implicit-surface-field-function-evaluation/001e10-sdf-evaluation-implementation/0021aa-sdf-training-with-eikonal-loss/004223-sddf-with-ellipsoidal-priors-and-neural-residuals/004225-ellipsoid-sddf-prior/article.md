@@ -1,0 +1,142 @@
+# Ellipsoid SDDF Prior
+
+Also called: Ellipsoid Signed Directional Distance Function, Single Ellipsoid SDDF, Ellipsoid-based Prior Network, Prior network P
+
+## Overview
+The Ellipsoid SDDF Prior is an explicit geometric representation that approximates the coarse shape of an environment using a set of $M$ learnable ellipsoids [S1]. It serves as the foundational prior for a Signed Directional Distance Function (SDDF), handling occlusions explicitly and providing a closed-form analytical solution for the distance field [S1]. It differs from implicit neural fields by offering an analytic, differentiable geometric prior that satisfies the directional Eikonal equation by construction, leaving fine details to be recovered by a subsequent neural residual network [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Ray origin $\mathbf{p} \in \mathbb{R}^3$, ray direction $\mathbf{v} \in \mathbb{S}^2$ (unit vector), and ellipsoid parameters: center $\mathbf{c} \in \mathbb{R}^3$, rotation matrix $\mathbf{R} \in \mathbb{R}^{3 \times 3}$, and radii vector $\mathbf{r} \in \mathbb{R}^3_+$.
+*   **Outputs:** SDDF value $f(\mathbf{p}, \mathbf{v}; \mathcal{E})$, intersection indicator $i(\mathbf{p}, \mathbf{v})$, and sign indicator $s(\mathbf{p}, \mathbf{v})$ [S1].
+
+**Data Structures:**
+*   **Ellipsoid Parameters:**
+    *   $\mathbf{c}$: Center position.
+    *   $\mathbf{R}$: Rotation matrix. Parameterized via Lie algebra: $\mathbf{T} = \mathbf{T}_0 \exp(\xi^\wedge)$, where $\mathbf{T}_0$ is a fixed initial pose, $\xi = (\boldsymbol{\rho}, \boldsymbol{\theta}) \in \mathbb{R}^6$ is learnable, $\boldsymbol{\rho}$ is translation, $\boldsymbol{\theta}$ maps to rotation via skew-symmetric matrix $\xi^\wedge$ and matrix exponential [S1].
+    *   $\mathbf{r}$: Radii vector. Parameterized as $\mathbf{r} = \mathbf{r}_0 \exp(\mathbf{s})$, where $\mathbf{r}_0 \in \mathbb{R}^3_+$ is fixed initialization and $\mathbf{s} \in \mathbb{R}^3$ is learnable. This ensures $\mathbf{r}$ remains positive [S1].
+    *   $\mathbf{Q}_0 = \text{diag}(\mathbf{r})$ [S1].
+
+**Formulas and Definitions:**
+1.  **Local Frame Transformation:**
+    Transform world-space coordinates to the ellipsoid's local frame:
+    $$ \mathbf{p}' = \mathbf{R}^\top (\mathbf{p} - \mathbf{c}) $$
+    $$ \mathbf{v}' = \mathbf{R}^\top \mathbf{v} $$
+    $$ \mathbf{w}' = \mathbf{p}' \times \mathbf{v}' $$
+    $$ \mathbf{Q}_1 = \det(\mathbf{Q}_0) \mathbf{Q}_0^{-1} $$
+    [S1]
+
+2.  **Intersection Indicator:**
+    Determines if the ray intersects the ellipsoid.
+    $$ i(\mathbf{p}, \mathbf{v}) = \mathbf{v}'^\top \mathbf{Q}_1^2 \mathbf{v}' - \mathbf{w}'^\top \mathbf{Q}_0^2 \mathbf{w}' $$
+    If $i(\mathbf{p}, \mathbf{v}) < 0$, the ray does not intersect the ellipsoid [S1].
+
+3.  **Sign Indicator:**
+    Determines if the point is inside or outside the ellipsoid.
+    $$ s(\mathbf{p}, \mathbf{v}) = \mathbf{p}'^\top \mathbf{Q}_1^2 \mathbf{p}' - \det(\mathbf{Q}_0)^2 $$
+    $s(\mathbf{p}, \mathbf{v}) < 0$ means $\mathbf{p} \in \mathcal{E}$ (inside); $s(\mathbf{p}, \mathbf{v}) > 0$ means $\mathbf{p} \notin \mathcal{E}$ (outside). This form is used for better numerical stability than $\mathbf{p}'^\top \mathbf{Q}_0^{-2} \mathbf{p}' - 1$ [S1].
+
+4.  **Validity Function:**
+    Handles cases where the ellipsoid is behind the ray.
+    $$ \beta = \max(i(\mathbf{p}, \mathbf{v}), 0) + \epsilon, \quad \epsilon > 0 $$
+    $$ v(\mathbf{p}, \mathbf{v}) = -\frac{\det(\mathbf{Q}_0)\sqrt{\beta} + \mathbf{p}'^\top \mathbf{Q}_1^2 \mathbf{v}'}{\mathbf{v}'^\top \mathbf{Q}_1^2 \mathbf{v}'} s(\mathbf{p}, \mathbf{v}) $$
+    $v(\mathbf{p}, \mathbf{v}) < 0$ indicates the ellipsoid is behind the view ray [S1].
+
+5.  **SDDF Prior Value:**
+    $$ f(\mathbf{p}, \mathbf{v}; \mathcal{E}) = \begin{cases} -\frac{\det(\mathbf{Q}_0)\sqrt{\beta} + \mathbf{p}'^\top \mathbf{Q}_1^\top \mathbf{v}'}{\mathbf{v}'^\top \mathbf{Q}_1^\top \mathbf{v}'}, & v(\mathbf{p}, \mathbf{v}) \geq 0 \\ \infty, & v(\mathbf{p}, \mathbf{v}) < 0 \end{cases} $$
+    When $i(\mathbf{p}, \mathbf{v}) < 0$ (no intersection) and valid, this simplifies to the distance to a virtual plane: $-\frac{\mathbf{p}'^\top \mathbf{Q}_1^2 \mathbf{v}'}{\mathbf{v}'^\top \mathbf{Q}_1^2 \mathbf{v}'}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ellipsoid_sddf_prior(p, v, c, R, r):
+    # 1. Compute Q0 and Q1
+    Q0 = diag(r)
+    det_Q0 = det(Q0)
+    Q1 = det_Q0 * inv(Q0)
+    
+    # 2. Transform to local frame
+    p_prime = R.T @ (p - c)
+    v_prime = R.T @ v
+    w_prime = cross(p_prime, v_prime)
+    
+    # 3. Compute Intersection Indicator
+    # i = v'^T Q1^2 v' - w'^T Q0^2 w'
+    v_Q1_sq_v = dot(v_prime, (Q1 @ Q1) @ v_prime)
+    w_Q0_sq_w = dot(w_prime, (Q0 @ Q0) @ w_prime)
+    i = v_Q1_sq_v - w_Q0_sq_w
+    
+    # 4. Compute Sign Indicator
+    # s = p'^T Q1^2 p' - det(Q0)^2
+    p_Q1_sq_p = dot(p_prime, (Q1 @ Q1) @ p_prime)
+    s = p_Q1_sq_p - det_Q0**2
+    
+    # 5. Compute Validity and SDDF
+    epsilon = 1e-8
+    beta = max(i, 0.0) + epsilon
+    
+    # Denominator for validity and SDDF
+    denom_valid = dot(v_prime, (Q1 @ Q1) @ v_prime)
+    denom_sddf = dot(v_prime, (Q1.T @ Q1) @ v_prime) # Note: Q1 is symmetric in standard ellipsoid def, but formula uses Q1^T
+    
+    # Numerator for validity
+    num_valid = det_Q0 * sqrt(beta) + dot(p_prime, (Q1 @ Q1) @ v_prime)
+    
+    # Validity function
+    if denom_valid == 0:
+        v_val = 0 # Guard against division by zero
+    else:
+        v_val = -(num_valid / denom_valid) * s
+        
+    if v_val < 0:
+        return infinity, i, s
+        
+    # Numerator for SDDF
+    num_sddf = det_Q0 * sqrt(beta) + dot(p_prime, (Q1.T @ Q1) @ v_prime)
+    
+    if denom_sddf == 0:
+        f_val = infinity # Guard
+    else:
+        f_val = -num_sddf / denom_sddf
+        
+    return f_val, i, s
+```
+[G] The pseudocode assumes standard matrix operations. `Q1` is defined as $\det(\mathbf{Q}_0)\mathbf{Q}_0^{-1}$. Since $\mathbf{Q}_0$ is diagonal, $\mathbf{Q}_1$ is also diagonal and symmetric, so $\mathbf{Q}_1^\top = \mathbf{Q}_1$. The term $\mathbf{v}'^\top \mathbf{Q}_1^\top \mathbf{v}'$ in the denominator of Eq. 7 is equivalent to $\mathbf{v}'^\top \mathbf{Q}_1^2 \mathbf{v}'$ only if $\mathbf{Q}_1$ is symmetric, which it is. However, Eq. 12 uses $\mathbf{Q}_1^2$ in the validity numerator. The pseudocode reflects the specific terms in the source equations.
+
+**Parameters:**
+*   $M$: Number of ellipsoids. Defines the capacity of the explicit prior. Typical value not specified [S1].
+
+**Edge Cases and Pitfalls:**
+*   **No Intersection:** If $i(\mathbf{p}, \mathbf{v}) < 0$, the SDDF is $\infty$. This must be handled to avoid numerical issues [S1].
+*   **Ellipsoid Behind Ray:** If $s(\mathbf{p}, \mathbf{v}) > 0$ (point outside) and the ellipsoid is behind the ray, the standard formula yields a negative value, but the true SDDF should be $\infty$. The validity function $v(\mathbf{p}, \mathbf{v})$ detects this and returns $\infty$ [S1].
+*   **Numerical Stability:** A small $\epsilon > 0$ is added to $\beta$ in the square root term to ensure stable backward propagation [S1].
+
+## Subtopics
+
+### Residual Network for SDDF Correction
+A neural network component that predicts a correction term $\delta_f(\mathbf{p}, \mathbf{v})$ to refine the coarse geometric prior [S1]. It uses a degree-2 monomial embedding $\mathbf{E}(\mathbf{p}) = [p_x^2, p_x p_y, p_x p_z, p_y^2, p_y p_z, p_z^2, p_x, p_y, p_z, 1]^\top \in \mathbb{R}^{10}$ [S1]. The latent feature $\mathbf{z} = \mathbf{W}_{j_f} \mathbf{m}$, where $\mathbf{m} = \text{vec}(\mathbf{E}(\mathbf{q})\mathbf{E}(\mathbf{v}')^\top) \in \mathbb{R}^{100}$ is the outer product of embeddings of the intersection point $\mathbf{q}$ and local direction $\mathbf{v}'$, and $\mathbf{W}_{j_f} \in \mathbb{R}^{m \times 100}$ is a weight matrix specific to the intersected ellipsoid index $j_f$ [S1]. The residual decoder is an MLP mapping $\mathbb{R}^m \to \mathbb{R}^3$ producing $(\delta_i, \delta_s, \delta_f)$ [S1]. Final predictions are $\hat{i} = \tanh(\alpha i) + \delta_i$, $\hat{s} = \tanh(\alpha s) + \delta_s$, $\hat{f} = f + \delta_f$. Residuals are added after tanh to prevent gradient clipping [S1].
+
+### Fusing Multiple Ellipsoid SDDFs
+Computes the SDDF for a union of $M$ ellipsoids by aggregating individual properties [S1].
+*   **Intersection Indicator:** $i_{\text{union}} = \max_j i_j(\mathbf{p}, \mathbf{v})$ [S1].
+*   **Sign Indicator:** $s_{\text{union}} = \min_j s_j(\mathbf{p}, \mathbf{v})$ [S1].
+*   **SDDF Value:** $f_{\text{union}} = \min_{j: i_j \geq 0} f_j(\mathbf{p}, \mathbf{v})$ if any ellipsoid is intersected; otherwise $f_{\text{union}} = \min_j f_j(\mathbf{p}, \mathbf{v})$ [S1].
+Time complexity is $O(M)$ per ray [S1]. The network is differentiable with respect to $\mathbf{p}, \mathbf{v}, \mathbf{T}_j, \mathbf{r}_j$ [S1].
+
+### Custom Backward Propagation for Ellipsoidal SDDF Prior
+Manual gradient implementation to optimize GPU memory and speed, replacing automatic differentiation [S1].
+*   **Intermediate Variables:** $t_0 = \mathbf{v}'^\top \mathbf{Q}_1^2 \mathbf{v}'$, $t_1 = \mathbf{w}'^\top \mathbf{Q}_0^2 \mathbf{w}'$, $t_2 = \mathbf{p}'^\top \mathbf{Q}_1^2 \mathbf{v}'$ [S1].
+*   **Gradients:** Computed via chain rule for $\nabla_{\mathbf{p}'} \mathcal{L}_P, \nabla_{\mathbf{v}'} \mathcal{L}_P, \nabla_{\mathbf{r}} \mathcal{L}_P$ using the simplified forms $i = t_0 - t_1$ and $f = -(\det(\mathbf{Q}_0)\max(i, 0) + \epsilon + t_2)/t_0$ [S1].
+
+## Operating characteristics
+*   **Complexity:** The prior network computation is $O(M)$ per ray due to the min/max operations over $M$ ellipsoids [S1].
+*   **Strengths:** Provides a closed-form, differentiable geometric prior that satisfies the directional Eikonal equation by construction [S1]. Handles occlusions explicitly [S1]. Compatible with unsigned DDF by setting one axis radius to 0 (forming a 2D disk) for non-watertight objects [S1].
+*   **Limitations:** The prior network alone provides only a coarse approximation; fine details require the residual network [S1]. Numerical stability requires careful handling of the validity function and $\epsilon$ [S1].
+*   **When to use:** When a coarse, analytic geometric prior is needed for scene-level SDDF reconstruction, especially for differentiable rendering or SLAM where Eikonal constraints are beneficial [S1].
+
+## Background
+The method originates from the paper "Learning Scene-Level Signed Directional Distance Function With Ellipsoidal Priors and Neural Residuals" [S1]. It addresses the challenge of learning a continuous, implicit representation of scene-level SDDFs, which are sensitive to both position and direction [S1]. The approach builds on the definition of SDDF as a function measuring signed distance from a point to an occupied space along a viewing direction, extending object-level SDDFs to scene-level representations [S1].
+
+## Sources
+[S1] Learning Scene-Level Signed Directional Distance Function With Ellipsoidal Priors and Neural Residuals., https://doi.org/10.1109/tpami.2026.3688658, fetched 2026-10-26

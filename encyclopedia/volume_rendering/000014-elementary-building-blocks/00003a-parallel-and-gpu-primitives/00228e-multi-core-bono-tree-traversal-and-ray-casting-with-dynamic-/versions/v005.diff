@@ -1,0 +1,118 @@
+--- v004.md
++++ v005.md
+@@ -45,5 +45,5 @@
+ #### Phase II: Dynamic Tile Grouping
+ 1.  **Partitioning:** Partition the entire screen into small tiles of size $TileSize \times TileSize$ [S1, unofficial].
+-2.  **Z-Ordering:** Order these tiles using a Z-order (Morton code) space-filling curve. This ensures spatial locality [S1, unofficial].
++2.  **Z-Ordering:** Order these tiles using a Z-order (Morton code) space-filling curve [S1, unofficial].
+ 3.  **Weighting:**
+     a.  For each tile $j$, compute weight $w_j = \sum_{p \in Tile_j} (1 \text{ if } L_p \neq \emptyset \text{ else } 0)$ [S1, unofficial].
+@@ -57,11 +57,11 @@
+         ii. Divide $Target$ into $p$ equal sub-targets: $SubTarget = Target / p$ [S1, unofficial].
+         iii. For each group $g$ from $0$ to $p-1$:
+-            1.  Start with $start\_tile = current\_tile\_index$.
++            1.  Start with $start\_tile = current\_tile\_index$ [G].
+             2.  Accumulate weights from Z-ordered tiles starting at $start\_tile$ until the sum reaches or exceeds $SubTarget$ [S1, unofficial].
+-            3.  Let $end\_tile$ be the index of the last tile included.
++            3.  Let $end\_tile$ be the index of the last tile included [G].
+             4.  Append $(start\_tile, end\_tile)$ to $LI$ [S1, unofficial].
+             5.  Update $current\_tile\_index = end\_tile + 1$ [G].
+         iv. Update $remaining\_weight = remaining\_weight / 2$ [S1, unofficial].
+-    e.  **Termination:** The process repeats logarithmically relative to screen size. The first iterations create large groups (coarse-grained), and subsequent iterations create smaller groups (fine-grained) [S1, unofficial].
++    e.  **Termination:** The process repeats logarithmically relative to screen size [S1, unofficial]. The first iterations create large groups (coarse-grained), and subsequent iterations create smaller groups (fine-grained) [S1, unofficial].
+ 
+ #### Phase III: Dynamic Ray Casting
+@@ -69,5 +69,5 @@
+ 2.  For each thread $t$:
+     a.  **Loop:**
+-        i.  Atomically fetch the next available group $(first, last)$ from $LI$. If none remain, terminate [G].
++        i.  Atomically fetch the next available group $(first, last)$ from $LI$ [G]. If none remain, terminate [G].
+         ii. For each tile index $j$ from $first$ to $last$:
+             1.  For each pixel $p$ in tile $j$:
+@@ -104,5 +104,6 @@
+     # Phase II: Dynamic Tile Grouping
+     tiles = [(x, y) for y in range(0, screen_height, tile_size) for x in range(0, screen_width, tile_size)]
+-    z_ordered_tiles = sorted(tiles, key=lambda t: z_order(t[0], t[1], screen_width))
++    bits = int(math.log2(max(screen_width, screen_height))) + 1
++    z_ordered_tiles = sorted(tiles, key=lambda t: z_order(t[0], t[1], bits))
+     
+     weights = []
+@@ -135,4 +136,5 @@
+     li_queue = list(LI)
+     li_ptr = 0
++    lock = threading.Lock()
+     
+     def phase_iii_thread():
+@@ -140,7 +142,8 @@
+         while True:
+             group = None
+-            if li_ptr < len(li_queue):
+-                group = li_queue[li_ptr]
+-                li_ptr += 1
++            with lock:
++                if li_ptr < len(li_queue):
++                    group = li_queue[li_ptr]
++                    li_ptr += 1
+             if group is None: break
+             
+@@ -157,6 +160,5 @@
+                         color = cast_ray(ray_list, px, py)
+                         write_pixel(px, py, color)
+-            # Handle unfinished pixels (size k, no intersection) [S1, unofficial]
+-            handle_unfinished_pixels(tx, ty, tile_size)
++            # Step (iv): Handle unfinished pixels (size k, no intersection) separately [S1, unofficial]
+ 
+     threads = []
+@@ -178,9 +180,8 @@
+         traverse_bono(child, lists, y_start, y_end, screen_width, k)
+ 
+-def z_order(x, y, width):
++def z_order(x, y, bits=10):
+     z = 0
+-    bits = int(math.log2(width)) + 1
+     for i in range(bits):
+-        z |= ((x & (1 << i)) << i) | ((y & (1 << i)) << (i - 1))
++        z |= ((x & (1 << i)) << (2 * i)) | ((y & (1 << i)) << (2 * i + 1))
+     return z
+ 
+@@ -190,5 +191,5 @@
+ def apply_diffuse_shading(normal): return (0.8, 0.8, 0.8) # [G]
+ def write_pixel(px, py, color): pass # [G]
+-def handle_unfinished_pixels(tx, ty, tile_size): pass # [S1, unofficial]
++def cast_ray(ray_list, px, py): pass # [G]
+ ```
+ 
+@@ -199,14 +200,14 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Unfinished Pixels:** Pixels whose block lists reach size $k$ but contain no intersecting voxels must be handled separately. These pixels will not be processed in the main ray casting loop if the logic assumes intersection or empty lists. A post-processing step or specific flag is required [S1, unofficial].
++*   **Unfinished Pixels:** Pixels whose block lists reach size $k$ but contain no intersecting voxels must be handled separately [S1, unofficial]. These pixels will not be processed in the main ray casting loop if the logic assumes intersection or empty lists [S1, unofficial]. A post-processing step or specific flag is required [S1, unofficial].
+ *   **Boundary Conditions:** The screen division in Phase I must handle non-divisible screen heights (e.g., $1024 / 8 = 128$, but if $p=3$, regions must be "almost equal") [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:**
+-    *   Phase I: Proportional to the number of pixels in the region and the number of BONO nodes accessed. Node access is limited to <10% of total due to $k$ [S1, unofficial].
++    *   Phase I: Proportional to the number of pixels in the region and the number of BONO nodes accessed [S1, unofficial]. Node access is limited to <10% of total due to $k$ [S1, unofficial].
+     *   Phase II: Grouping overhead is small, approximately 2-3 milliseconds [S1, unofficial]. The grouping process requires at most a logarithmic number of iterations relative to screen size [S1, unofficial].
+-    *   Phase III: Proportional to the total number of pixels and the average length of block lists.
++    *   Phase III: Proportional to the total number of pixels and the average length of block lists [S1, unofficial].
+ *   **Memory Complexity:**
+-    *   Dominated by the storage of block lists. Each pixel stores up to $k$ block references.
++    *   Dominated by the storage of block lists [S1, unofficial]. Each pixel stores up to $k$ block references [S1, unofficial].
+     *   BONO tree overhead varies by dataset (e.g., 10.53% to 25.05% of data size for tested datasets) [S1, unofficial].
+ *   **Measured Performance:**
+@@ -216,10 +217,10 @@
+     *   Scalability: Tested on 1, 2, 4, 8 cores [S1, unofficial].
+ *   **Strengths:**
+-    *   Better load balancing than static tiling due to weight-based grouping.
+-    *   High cache performance due to Z-order spatial locality.
++    *   Better load balancing than static tiling due to weight-based grouping [S1, unofficial].
++    *   High cache performance due to Z-order spatial locality [S1, unofficial].
+     *   Minimal synchronization overhead due to coarse-to-fine grain task allocation [S1, unofficial].
+ *   **Limitations:**
+-    *   Requires preprocessing (Phase II) which adds latency.
+-    *   Complexity of implementation compared to simple static tiling.
++    *   Requires preprocessing (Phase II) which adds latency [S1, unofficial].
++    *   Complexity of implementation compared to simple static tiling [S1, unofficial].
+ 
+ ## Background

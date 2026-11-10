@@ -1,0 +1,159 @@
+# Incremental Scaling Algorithm
+
+Also called: Incremental Geometric Transformation, Back Scaling
+
+## Overview
+The Incremental Scaling Algorithm performs geometric transformations (specifically scaling, but also translation and rotation) on voxel primitives by calculating the new position of a voxel based on the already-transformed position of its immediate predecessor, using a maximum of 3 additions per voxel instead of full matrix multiplication [S1]. It solves the performance bottleneck of per-voxel coordinate transformation in hardware voxel processors by exploiting inter- and intra-scan-line coherency [S1]. Unlike standard forward scaling which may produce holes when expanding volume, this method includes a "back scaling" variant to ensure complete coverage [S1].
+
+## How it works
+**Inputs:** Source voxel primitive defined by bounding box corners $(X_{src}, Y_{src}, Z_{src})$ to $(X_{src\_end}, Y_{src\_end}, Z_{src\_end})$; scaling factors $S_x, S_y, Z_z$; destination bounding box corners $(X_s, Y_s, Z_s)$ to $(X_e, Y_e, Z_e)$ [S1].
+**Outputs:** Transformed voxel data in the destination memory space [S1].
+
+**Data Structures:**
+The algorithm operates on integer coordinates representing voxel indices. It maintains current position variables for the source and destination rooms.
+
+**Steps:**
+1.  **Determine Transformation Direction:**
+    *   If scaling factors $S_x, S_y, S_z \le 1$ (shrinking or identity), use **Forward Scaling**.
+    *   If any scaling factor $> 1$ (expansion), use **Back Scaling** to prevent holes [S1].
+
+2.  **Forward Scaling (Shrinking):**
+    *   Initialize current destination coordinates $(X_{dest}, Y_{dest}, Z_{dest})$ to the starting corner of the destination primitive $(X_s, Y_s, Z_s)$ [S1].
+    *   Initialize source coordinates $(X_{src}, Y_{src}, Z_{src})$ to the starting corner of the source primitive [S1].
+    *   Iterate through the destination room. For each voxel, read the value from the source coordinate.
+    *   Update coordinates using incremental additions:
+        $$ X_{dest} \leftarrow X_{dest} + S_x $$
+        $$ Y_{dest} \leftarrow Y_{dest} + S_y $$
+        $$ Z_{dest} \leftarrow Z_{dest} + S_z $$
+    *   Round the resulting floating-point coordinates to the nearest integer to find the next source voxel index [S1].
+    *   *Note:* The source coordinates are updated implicitly by the rounding of the destination increments. The relation is derived from $X_{dest} = X_{src} S_x$, implying $X_{src} \approx X_{dest}/S_x$. The incremental step $S_x$ in destination space corresponds to a step of $1$ in source space scaled by $S_x$ [S1].
+
+3.  **Back Scaling (Expansion):**
+    *   Transform the two opposite corners of the source room to find the corresponding opposite corners of the destination room [S1].
+    *   Initialize current destination coordinates $(X_{dest}, Y_{dest}, Z_{dest})$ to the starting corner of the destination primitive $(X_s, Y_s, Z_s)$ [S1].
+    *   Iterate through the destination room.
+    *   For each destination voxel, reverse-transform the coordinates to determine the source voxel value. This is done by multiplying the destination coordinates by the inverse scaling factors $(1/S_x, 1/S_y, 1/S_z)$ [S1].
+    *   Alternatively, step through the source and destination rooms in parallel. The increments used in stepping through the source room are $(X_{incr}/S_x, Y_{incr}/S_y, Z_{incr}/S_z)$, where $X_{incr}, Y_{incr}, Z_{incr}$ are the integer increments (typically 1) used in stepping through the destination room [S1].
+    *   Round the resulting source coordinates to the nearest integer [S1].
+
+4.  **Handling Overwrites:**
+    *   If the source and destination primitives overlap, source voxels may be overwritten before they are read.
+    *   Resolve this by choosing the starting corner of the transformation based on the values of $S_x, S_y, S_z$ and the direction of the scan [S1]. The operations are performed in a predefined sequence according to an orientation algorithm [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def incremental_scaling(source_voxels, dest_voxels, src_box, dest_box, scale_factors):
+    """
+    source_voxels: 3D array of voxel values
+    dest_voxels: 3D array to store results
+    src_box: tuple (x_min, y_min, z_min, x_max, y_max, z_max)
+    dest_box: tuple (x_min, y_min, z_min, x_max, y_max, z_max)
+    scale_factors: tuple (sx, sy, sz)
+    """
+    sx, sy, sz = scale_factors
+    
+    # Determine if back scaling is needed
+    if sx > 1 or sy > 1 or sz > 1:
+        return back_scale(source_voxels, dest_voxels, src_box, dest_box, scale_factors)
+    else:
+        return forward_scale(source_voxels, dest_voxels, src_box, dest_box, scale_factors)
+
+def forward_scale(source_voxels, dest_voxels, src_box, dest_box, scale_factors):
+    sx, sy, sz = scale_factors
+    dx_min, dy_min, dz_min, dx_max, dy_max, dz_max = dest_box
+    # Source start is derived from dest start via inverse scaling, rounded
+    # However, the algorithm steps dest and maps to source.
+    # We iterate dest and compute source index.
+    
+    # Initialize current dest position
+    cx, cy, cz = dx_min, dy_min, dz_min
+    
+    # Initialize source position corresponding to dest start
+    # X_dest = X_src * Sx => X_src = X_dest / Sx
+    # Using incremental updates:
+    # Next X_dest = Current X_dest + Sx
+    # Next X_src = Round(Next X_dest / Sx)
+    
+    # To avoid division in loop, we track source coordinates incrementally?
+    # The source says: "coordinates of the next transformed voxel can thus be obtained 
+    # by simply adding the respective scaling factor to the X, Y, or Z coordinate 
+    # of the predecessor voxel and rounding". This refers to Dest coords.
+    # We need to map Dest -> Source.
+    
+    # Let's track source coordinates explicitly to read from source_voxels
+    # Initial source coord
+    sx_curr = round(dx_min / sx)
+    sy_curr = round(dy_min / sy)
+    sz_curr = round(dz_min / sz)
+    
+    # Increment for source coord calculation
+    # If we move dest by Sx, source moves by 1.
+    # But we need to know when to increment source index.
+    # The text implies we step dest by Sx, round dest, and that maps to a source voxel.
+    # Actually, the text says: "Xdest + Sx = (Xsrc + 1) Sx".
+    # This implies Xsrc increments by 1 for every Sx step in Xdest.
+    
+    # We iterate through dest voxels.
+    for y in range(dy_min, dy_max + 1):
+        for z in range(dz_min, dz_max + 1):
+            for x in range(dx_min, dx_max + 1):
+                # Map dest (x,y,z) to source
+                # The source voxel that maps to this dest voxel is:
+                src_x = round(x / sx)
+                src_y = round(y / sy)
+                src_z = round(z / sz)
+                
+                # Check bounds
+                if (src_box[0] <= src_x <= src_box[3] and
+                    src_box[1] <= src_y <= src_box[4] and
+                    src_box[2] <= src_z <= src_box[5]):
+                    dest_voxels[y][z][x] = source_voxels[src_y][src_z][src_x]
+                else:
+                    dest_voxels[y][z][x] = 0 # Empty
+
+def back_scale(source_voxels, dest_voxels, src_box, dest_box, scale_factors):
+    sx, sy, sz = scale_factors
+    dx_min, dy_min, dz_min, dx_max, dy_max, dz_max = dest_box
+    
+    # Iterate through destination room
+    for y in range(dy_min, dy_max + 1):
+        for z in range(dz_min, dz_max + 1):
+            for x in range(dx_min, dx_max + 1):
+                # Reverse transform: Source = Dest / Scale
+                src_x = round(x / sx)
+                src_y = round(y / sy)
+                src_z = round(z / sz)
+                
+                # Check if source voxel exists
+                if (src_box[0] <= src_x <= src_box[3] and
+                    src_box[1] <= src_y <= src_box[4] and
+                    src_box[2] <= src_z <= src_box[5]):
+                    dest_voxels[y][z][x] = source_voxels[src_y][src_z][src_x]
+                else:
+                    dest_voxels[y][z][x] = 0 # Empty
+```
+*[G] The pseudocode above uses division for clarity. The hardware implementation described in [S1] avoids division by using the incremental property: $X_{dest} + S_x = (X_{src} + 1) S_x$. This allows updating the destination coordinate by adding $S_x$ and determining the source index by tracking the integer part of the division or using a parallel counter. The provided Python code is a functional equivalent for verification, but the core "Incremental" aspect is the addition of $S_x$ to the destination coordinate rather than recalculating $X_{src} S_x$ from scratch.]*
+
+**Pitfalls:**
+*   **Holes in Expansion:** Forward scaling with $S > 1$ creates gaps because the volume increases but the number of voxels does not. Back scaling is required [S1].
+*   **Overwriting:** If source and destination overlap, source data may be destroyed. The starting corner must be chosen based on scaling factors and scan direction to read before write [S1].
+
+## Subtopics
+
+### Incremental Geometric Transformation
+A broader technique encompassing translation, scaling, and rotation. It calculates the new position of a voxel based on the already-transformed position of its immediate predecessor, using a maximum of 3 additions/increments per voxel [S1]. It exploits inter- and intra-scan-line coherency: after calculating the new location for one voxel/beam, its neighbours relate to it as they did in the original location [S1]. Overlapping source and destination primitives are resolved by performing operations in a predefined sequence according to an orientation algorithm, starting from a specific source corner situated in the destination primitive range [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the destination primitive. The cost per voxel is constant (3 additions and rounding) compared to $O(1)$ matrix multiplications or divisions in standard methods, but significantly faster in hardware due to barrel shifter and parallel memory usage [S1].
+*   **Memory Complexity:** $O(1)$ auxiliary space if performed in-place with careful ordering, or $O(V)$ for the destination buffer [S1].
+*   **Strengths:** Extremely efficient for hardware implementation (voxel frame buffer processors); avoids expensive multiplication/division operations per voxel [S1].
+*   **Limitations:** Requires careful handling of overlap and boundary conditions; "Back Scaling" is necessary for expansion, which changes the iteration direction and logic [S1].
+*   **When to use:** Hardware voxel rendering pipelines where computational resources are limited and coherency can be exploited [S1].
+
+## Background
+The algorithm was developed for the **Voxblt Engine**, a voxel frame buffer processor described in the 1988 Eurographics Workshop on Graphics Hardware [S1]. The engine was designed to perform geometric operations (translation, scaling, rotation) on voxel primitives efficiently by exploiting parallel memory and barrel shifters [S1]. The incremental transformation technique was a key feature to reduce the complexity of computations for large rooms [S1].
+
+## Sources
+[S1] The voxblt Engine: A Voxel Frame Buffer Processor, https://doi.org/10.2312/eggh/eggh88/085-102, fetched 2026-10-26
