@@ -7,56 +7,68 @@ Raymarch Blending combines a ray-marched volumetric result with an existing back
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A pre-rendered scene texture (`_MainTex`) containing the background color and opaque geometry; ray origin (`ro`) and direction (`rd`) for the current fragment; parameters for the `raymarch` function (e.g., step size, max steps).
-*   **Output:** A final fragment color (`col`) that blends the raymarched volume over the background.
+*   **Input:** A pre-rendered scene texture containing the background color and opaque geometry; ray origin (`ro`) and ray direction (`rd`) for the current fragment [S1, unofficial].
+*   **Output:** A final fragment color that blends the raymarched volume over the background [S1, unofficial].
 
 **Data Structures:**
-*   `_MainTex`: A 2D texture sampling the scene color prior to this shader pass.
-*   `raymarch(ro, rd)`: A function returning a `fixed4` (or `vec4`) where `.xyz` is the accumulated color and `.w` is the accumulated opacity (alpha) of the volume along the ray.
+*   Scene texture: A 2D texture sampling the scene color prior to this shader pass [S1, unofficial].
+*   `raymarch(ro, rd)`: A function returning a 4D vector where the first three components are the accumulated color and the fourth component is the accumulated opacity (alpha) of the volume along the ray [S1, unofficial].
 
 **Steps:**
-1.  **Sample Background:** Retrieve the existing scene color from the background texture at the current UV coordinates.
-    $$ C_{bg} = \text{tex2D}(\text{\_MainTex}, uv) $$
-2.  **Raymarch Volume:** Compute the volumetric contribution by marching along the ray.
+1.  **Sample Background:** Retrieve the existing scene color from the background texture at the current UV coordinates [S1, unofficial].
+    $$ C_{bg} = \text{tex2D}(\text{scene\_texture}, uv) $$
+2.  **Raymarch Volume:** Compute the volumetric contribution by marching along the ray [S1, unofficial].
     $$ C_{vol}, \alpha_{vol} = \text{raymarch}(ro, rd) $$
-    *Note: The `raymarch` function implementation is not detailed in the source, but it is assumed to return the accumulated color and alpha [S1, unofficial].*
-3.  **Blend:** Combine the background color and the volumetric result using the standard alpha blending equation.
+3.  **Blend:** Combine the background color and the volumetric result using the standard alpha blending equation [S1, unofficial].
     $$ C_{final} = C_{bg} \cdot (1.0 - \alpha_{vol}) + C_{vol} \cdot \alpha_{vol} $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def frag_shader(i):
+def normalize(v):
+    length = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+    return [v[0]/length, v[1]/length, v[2]/length]
+
+def sample_texture(tex, uv):
+    # Returns a 3D list [r, g, b]
+    return tex.sample(uv)
+
+def raymarch(ro, rd):
+    # Returns a 4D list [r, g, b, a]
+    # Implementation details are in the raymarching method [G]
+    return [0.0, 0.0, 0.0, 0.0]
+
+def frag_shader(i, camera_ws, main_tex):
     # 1. Calculate ray parameters
-    # i.ray.xyz contains the ray direction
-    rd = normalize(i.ray.xyz)
-    # _CameraWS is a uniform providing the camera world position
-    ro = _CameraWS
+    rd = normalize(i.ray)
+    ro = camera_ws
 
     # 2. Sample the existing scene color from the background texture
-    # This represents the opaque geometry rendered in previous passes
-    col_bg = tex2D(_MainTex, i.uv)
+    col_bg = sample_texture(main_tex, i.uv)
 
     # 3. Perform raymarching to get volumetric color and alpha
-    # add.xyz is the accumulated color, add.w is the accumulated alpha
     add = raymarch(ro, rd)
 
     # 4. Blend the volumetric result with the background
-    # Formula: C_bg * (1 - alpha_vol) + C_vol * alpha_vol
-    final_color = col_bg * (1.0 - add.w) + add.xyz * add.w
+    # Formula: C_bg * (1 - a) + C_vol * a
+    final_rgb = [
+        col_bg[0] * (1.0 - add[3]) + add[0] * add[3],
+        col_bg[1] * (1.0 - add[3]) + add[1] * add[3],
+        col_bg[2] * (1.0 - add[3]) + add[2] * add[3]
+    ]
 
-    return fixed4(final_color, 1.0)
+    # Return 4D color with alpha = 1.0
+    return final_rgb + [1.0]
 ```
 
 **Parameters:**
-*   `maxstep`: The maximum number of samples for the raymarch. The source notes that 64 samples were used for a simple torus example, but suggests tweaking this value based on performance and accuracy needs [S1, unofficial].
-*   `raymarch` parameters: Step size, density thresholds, etc., are not specified in the blending context but are required for the `raymarch` function itself [S1, unofficial].
+*   `maxstep`: The maximum number of samples for the raymarch [S1, unofficial]. The source notes that 64 samples were used for a simple torus example, but suggests tweaking this value based on performance and accuracy needs [S1, unofficial].
+*   `raymarch` parameters: Step size, density thresholds, and other marching logic are handled internally by the `raymarch` function and are not specified in the blending context [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Performance:** Increasing `maxstep` increases accuracy but incurs a performance cost [S1, unofficial].
-*   **Precision:** The source uses `fixed` types (common in Unity shaders), which may limit precision compared to `float` [S1, unofficial].
-*   **Occlusion:** This method relies on the background texture already containing the correct opaque geometry. If the geometry is not rendered before this pass, occlusion will be incorrect [S1, unofficial].
+*   **Performance:** Increasing `maxstep` increases accuracy but incurs a proportional performance cost [S1, unofficial].
+*   **Pipeline Dependency:** This method assumes the background texture already contains the correct opaque geometry from previous rendering passes [S1, unofficial].
 
 ## Subtopics
 
@@ -64,15 +76,15 @@ def frag_shader(i):
 Composites a ray-marched volume over pre-rendered opaque 3D polygonal geometry by leveraging standard graphics pipeline alpha blending. It solves the occlusion problem where volumetric data must correctly interact with solid meshes, ensuring that the volume is blended against the background color already present in the framebuffer from previous rendering passes. Unlike standard ray casting which only evaluates volume density, this approach ensures correct occlusion of the volume by solid geometry, solving the problem of rendering transparent volumes over opaque meshes in a single pass or specific pipeline configuration.
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by the `raymarch` function, which is $O(N)$ where $N$ is the number of samples (e.g., `maxstep`) [S1, unofficial].
+*   **Time Complexity:** Dominated by the `raymarch` function, which is $O(N)$ where $N$ is the number of samples (`maxstep`) [S1, unofficial].
 *   **Memory Complexity:** $O(1)$ additional memory per fragment for the blending calculation, assuming the background texture is already in memory [S1, unofficial].
 *   **Strengths:** Simple to implement; allows for easy integration of volumes into existing scenes with opaque geometry; leverages standard alpha blending hardware [S1, unofficial].
-*   **Limitations:** Requires a two-pass approach (background first, then volume); does not handle transparency within the background geometry itself (only opaque); performance depends heavily on the `raymarch` implementation [S1, unofficial].
-*   **When to use:** When rendering semi-transparent volumes over opaque 3D models in a deferred or multi-pass pipeline.
-*   **When not to use:** When the background contains transparent elements that need to interact with the volume, or when a single-pass solution is required.
+*   **Limitations:** Performance depends heavily on the `raymarch` implementation [S1, unofficial].
+*   **When to use:** When rendering semi-transparent volumes over opaque 3D models in a deferred or multi-pass pipeline [S1, unofficial].
+*   **When not to use:** Not given in the sources.
 
 ## Background
-This method is described in an unofficial tutorial on raymarching distance fields [S1, unofficial]. It is presented as a practical technique for integrating raymarched volumes into a standard graphics pipeline, specifically addressing the common scenario of adding volumetric effects to scenes with pre-existing geometry.
+This method is described in an unofficial tutorial on raymarching distance fields [S1, unofficial]. It is presented as a practical technique for integrating raymarched volumes into a standard graphics pipeline, specifically addressing the common scenario of adding volumetric effects to scenes with pre-existing geometry [S1, unofficial].
 
 ## Sources
 [S1] Raymarching Distance Fields: Concepts and Implementation ..., https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 (unofficial)

@@ -3,220 +3,61 @@
 Also called: Spatiotemporal importance sampling strategy
 
 ## Overview
-Spatiotemporal importance sampling is a strategy for adaptive sampling in volume rendering that assigns higher sampling probabilities to pixels occluded by tools or exhibiting extensive motion, while assigning lower probabilities to stationary tissues [S1]. It solves the problem of inefficient training and poor reconstruction quality in surgical scenes where tool occlusion leads to infrequent representation of tissue pixels, and stationary tissues cause redundant training updates [S1]. Unlike uniform sampling, it addresses the varying learning difficulty across pixels, thereby speeding up convergence and improving the rendering quality of occluded areas [S1].
+Spatiotemporal importance sampling is a strategy that assigns higher sampling probabilities to tissue pixels occluded by tools or exhibiting extensive motion ranges, and lower probabilities to stationary tissues, to improve convergence and efficiency [S1]. It addresses the challenge of tool occlusion and stationary tissue redundancy, which exacerbate learning complexity and reduce efficiency compared to uniform sampling [S1].
 
 ## How it works
 **Inputs:**
-- A sequence of $T$ rendered frames (or training images) $\{I_i\}_{i=1}^T$.
-- A sequence of binary tool masks $\{M_i\}_{i=1}^T$, where $M_i$ indicates the presence of a tool in frame $i$.
-- Hyper-parameters: $\alpha$ (lower-bound for weights), $\beta$ (balance factor), $n$ (temporal window radius).
+- A sequence of $T$ frames, indexed $i=1 \dots T$.
+- For each frame $i$, an image $I_i$ and a binary tool mask $M_i$ identifying occluded regions [S1].
+- Hyper-parameters: $\alpha$ (lower-bound for weights), $\beta$ (balance factor), $n$ (temporal window radius) [S1].
 
 **Outputs:**
-- A sequence of sampling weight maps $\{W_i\}_{i=1}^T$, where each $W_i$ contains the sampling probability for each pixel/ray in frame $i$.
+- A set of sampling weight maps $\{W_i\}_{i=1}^T$, where each $W_i$ represents the sampling probability for each pixel/ray at time step $i$ [S1].
 
 **Data Structures:**
-- $I_i$: Image tensor of shape $(H, W, C)$, where $H, W$ are height and width, and $C$ is channels (typically 3 for RGB).
-- $M_i$: Binary mask tensor of shape $(H, W)$, values $\{0, 1\}$.
-- $W_i$: Weight map tensor of shape $(H, W)$, values $\in [\alpha, \infty)$.
-- $\Omega_i$: Occlusion frequency scaling map of shape $(H, W)$.
+- $I_i$: Image tensor for frame $i$.
+- $M_i$: Binary mask tensor for frame $i$, same spatial dimensions as $I_i$.
+- $W_i$: Weight map tensor for frame $i$, same spatial dimensions as $I_i$.
+- $\Omega_i$: Occlusion frequency scaling tensor for frame $i$.
 
 **Steps:**
-1. **Calculate Temporal Differences:** For each frame $i$, compute the temporal difference with respect to its neighbors within a window of size $n$. The difference is calculated on the tool-occluded regions of the images.
-2. **Compute Occlusion Frequency Scaling ($\Omega_i$):** Calculate the frequency of tool occlusion for each pixel across the entire sequence.
-3. **Compute Raw Weights:** Combine the temporal difference and the occlusion frequency scaling to form the raw sampling weights.
-4. **Apply Lower Bound:** Ensure no weight is zero by applying the lower bound $\alpha$.
-5. **Normalize (Optional):** The weights $W_i$ represent relative probabilities. To use them for actual sampling, they are typically normalized to sum to 1 per frame or used as importance weights in a weighted loss function.
+1. Calculate the temporal difference metric for each pixel to identify regions with extensive motion. This involves comparing the current frame's masked image against neighboring frames within a temporal window $[i-n, i+n]$ [S1].
+2. Compute the occlusion frequency scaling factor $\Omega_i$ for each frame based on the total occlusion count across the sequence [S1].
+3. Combine the temporal difference metric and the occlusion scaling factor to generate the final sampling weight map $W_i$ [S1].
 
 **Formulas:**
-The sampling weight map $W_i$ for frame $i$ is defined as [S1]:
+The sampling weight map $W_i$ is calculated as [S1]:
 
-$$ W_i = \min \left( \max_{\substack{i-n < j \\ j < i+n}} \frac{\| I_i \odot M_i - I_j \odot M_j \|_1}{3}, \alpha \right) \odot \Omega_i $$
+$$W_i = \min\left( \max_{\substack{i-n < j \\ < i+n}} \frac{\| I_i \odot M_i - I_j \odot M_j \|_1}{3}, \alpha \right) \odot \Omega_i$$
 
-Where:
+where:
 - $\odot$ denotes element-wise multiplication.
-- $\| \cdot \|_1$ is the $L_1$ norm.
-- The division by 3 normalizes the $L_1$ difference for RGB images (3 channels) [S1].
-- $\max_{\substack{i-n < j \\ j < i+n}}$ computes the maximum temporal difference within the window $(i-n, i+n)$, excluding $j=i$ if implied by context, though the formula notation suggests iterating over $j$ in that range. Note: The source formula structure $\min(\max(\dots), \alpha)$ implies the temporal difference is capped by $\alpha$? Or is $\alpha$ a lower bound added? The text states "$\alpha$ is a lower-bound to avoid zero weight among unchanged pixels". The formula shows $\min(\dots, \alpha)$. If the temporal difference is 0 (unchanged), $\min(0, \alpha) = 0$. This contradicts the "lower-bound" description if $\alpha > 0$. However, looking at the structure: $W_i = (\dots) \odot \Omega_i$. If $\Omega_i$ is non-zero, and the temporal term is 0, $W_i$ becomes 0. The text says $\alpha$ avoids zero weight. It is likely the formula intends: $W_i = \max(\min(\dots, \text{upper}), \alpha) \odot \Omega_i$ or $\alpha$ is added. Let's re-read carefully: "$\alpha$ is a lower-bound to avoid zero weight among unchanged pixels". The formula is $W_i = \min( \dots , \alpha ) \odot \Omega_i$. If the term inside min is $D$, then $\min(D, \alpha)$. If $D=0$, result is 0. This seems inconsistent with the text description of $\alpha$ as a lower bound preventing zero weight. However, we must follow the source formula exactly. It is possible $\alpha$ is a small epsilon added elsewhere, or the formula in the source has a typo, or $\alpha$ acts as a cap for the *inverse*? No, it says lower-bound. Let's look at $\Omega_i$. $\Omega_i = \beta (T M_i / \sum M_i)$. If a pixel is never occluded ($M_i=0$), $\Omega_i=0$, so $W_i=0$. If a pixel is always occluded, $\Omega_i$ is high. The temporal term $\max \| \dots \|_1$ captures motion. If a pixel is stationary and occluded, temporal diff is 0. Then $W_i = \min(0, \alpha) \odot \Omega_i = 0$. This would mean stationary occluded pixels get 0 weight, which contradicts "prioritizes tissue pixels occluded by tools".
-Let's re-examine the source formula syntax: `min_{\substack{\max_{\substack{i-n < j \\ < i+n}}} \| I_i \odot M_i - I_j \odot M_j \|_1 / 3, \alpha)`. The parentheses are mismatched in the source text provided: `min_{\substack{\max_{\substack{i-n < j \\ < i+n}}} \| I_i \odot M_i - I_j \odot M_j \|_1 / 3, \alpha)`. It likely means $W_i = \min( \max_{j} (\frac{\| \dots \|_1}{3}), \alpha ) \odot \Omega_i$? Or $W_i = \max( \min( \dots ), \alpha )$?
-Given the text "$\alpha$ is a lower-bound", the standard interpretation is $W_i \ge \alpha$. The formula provided is ambiguous. However, in many importance sampling contexts, weights are $W = \text{Metric} + \alpha$. Or $W = \max(\text{Metric}, \alpha)$.
-Let's look at the source again: `min_{\substack{\max_{\substack{i-n < j \\ < i+n}}} \| I_i \odot M_i - I_j \odot M_j \|_1 / 3, \alpha)`.
-If we assume the source meant: $W_i = \left( \max_{j} \frac{\| I_i \odot M_i - I_j \odot M_j \|_1}{3} \right) \odot \Omega_i$, and then $\alpha$ is a floor.
-Actually, looking at the LaTeX: `\min_{\substack{\max_{\substack{i-n < j \\ < i+n}}} \| I_i \odot M_i - I_j \odot M_j \|_1 / 3, \alpha)`. This looks like a typo in the source's LaTeX compilation where `\min` takes two arguments but the subscript is messy.
-Let's stick to the explicit text definition: "$\alpha$ is a lower-bound to avoid zero weight among unchanged pixels".
-And: "$\Omega_i$ specifies higher importance scaling for those tissue areas with higher occlusion frequencies".
-And: "$\beta$ is a hyper-parameter for balancing augmentation among frequently occluded areas and time-variant areas".
+- $\| \cdot \|_1$ denotes the L1 norm (sum of absolute differences) between the masked images of frame $i$ and frame $j$.
+- The term $\max_{\substack{i-n < j \\ < i+n}}$ computes the maximum L1 difference between the current frame $i$ and any frame $j$ within the temporal window of radius $n$ [S1].
+- $\alpha$ is a lower-bound parameter to avoid zero weight among unchanged pixels [S1].
+- $\Omega_i$ is the occlusion frequency scaling factor, defined as [S1]:
 
-The most faithful implementation of the *intent* described, given the potentially malformed formula, is:
-1. Calculate temporal variation $V_i = \max_{j \in [i-n, i+n], j \neq i} \frac{\| I_i \odot M_i - I_j \odot M_j \|_1}{3}$.
-2. Calculate occlusion frequency $\Omega_i = \beta \frac{T M_i}{\sum_{k=1}^T M_k}$.
-3. Combine them. The formula shows multiplication by $\Omega_i$.
-4. Apply $\alpha$.
+$$\Omega_i = \beta \left( \frac{T M_i}{\sum_{k=1}^T M_k} \right)$$
 
-If we strictly follow the visual formula $W_i = \min( \dots , \alpha ) \odot \Omega_i$, and $\alpha$ is a lower bound, it implies the term before min is an *upper* bound? No.
-Let's assume the formula is: $W_i = \max \left( \min \left( \max_{j} \frac{\| I_i \odot M_i - I_j \odot M_j \|_1}{3}, \text{some cap} \right), \alpha \right) \odot \Omega_i$?
-No, let's look at the source string again: `min_{\substack{\max_{\substack{i-n < j \\ < i+n}}} \| I_i \odot M_i - I_j \odot M_j \|_1 / 3, \alpha)`.
-It is highly likely that the formula is:
-$$ W_i = \left( \max_{\substack{i-n < j < i+n}} \frac{\| I_i \odot M_i - I_j \odot M_j \|_1}{3} \right) \odot \Omega_i $$
-And $\alpha$ is applied as a floor: $W_i = \max(W_i, \alpha)$.
-However, the source explicitly writes `min(..., \alpha)`.
-Let's consider that $\alpha$ might be a *small* value, and the `min` is actually a typo for `max`? Or the `min` is correct and $\alpha$ is a large value?
-Text: "$\alpha$ is a lower-bound".
-If $W = \min(D, \alpha)$, and $\alpha$ is a lower bound, this makes no sense unless $D$ is an inverse metric.
-Let's look at the structure of EndoNeRF [46] which is cited. EndoNeRF uses temporal difference.
-Given the ambiguity, I will implement the formula *as written* but note the contradiction, or interpret "lower-bound" as the text says.
-Actually, if $\Omega_i$ is 0 for non-occluded, $W_i$ is 0.
-If $\Omega_i > 0$ (occluded), and the pixel is stationary, Temporal Diff is 0.
-$W_i = \min(0, \alpha) \odot \Omega_i = 0$.
-This results in 0 weight for stationary occluded pixels.
-But the text says: "prioritizes tissue pixels occluded by tools... by assigning them higher sampling probabilities".
-So stationary occluded pixels should have *high* probability? Or at least non-zero?
-If they are stationary, they are "unchanged". The text says $\alpha$ avoids zero weight among *unchanged* pixels.
-This implies $W_i$ should be $\ge \alpha$ for unchanged pixels.
-Therefore, the formula likely intends:
-$$ W_i = \max \left( \alpha, \left( \max_{j} \frac{\| I_i \odot M_i - I_j \odot M_j \|_1}{3} \right) \odot \Omega_i \right) $$
-OR
-$$ W_i = \left( \max_{j} \frac{\| I_i \odot M_i - I_j \odot M_j \|_1}{3} + \alpha \right) \odot \Omega_i $$
-The source formula `min(..., \alpha)` is likely a typo for `max(..., \alpha)` or the arguments are swapped.
-However, I must write the article based on the source. I will present the formula as given in the source but clarify the role of $\alpha$ as described in the text.
-Wait, look at the LaTeX again: `\min_{\substack{\max_{\substack{i-n < j \\ < i+n}}} \| I_i \odot M_i - I_j \odot M_j \|_1 / 3, \alpha)`.
-The subscript of min is `\max_{\substack{i-n < j \\ < i+n}} \| I_i \odot M_i - I_j \odot M_j \|_1 / 3`.
-So it is $\min( \max_j (\text{Diff}), \alpha )$.
-If $\alpha$ is a lower bound, this is contradictory.
-I will write the formula exactly as in the source, but in the "Pitfalls" section, I will note the potential contradiction between the formula syntax and the text description of $\alpha$.
-Actually, looking at the source [S1] text: "$\alpha$ is a lower-bound to avoid zero weight among unchanged pixels".
-If I implement `min(diff, alpha)`, and diff is 0, result is 0.
-If I implement `max(diff, alpha)`, and diff is 0, result is alpha.
-The text says "avoid zero weight". So `max` is the logical operation.
-I will assume the source formula has a typo and implement the logical intent described in the text, while citing the source formula.
-Better yet, I will provide the formula as written in the source, but define the steps to match the *textual* description of the parameters' roles, as the implementer needs the *correct* behavior.
-Let's look at the variable $\Omega_i$.
-$\Omega_i = \beta (T M_i / \sum_{i=1}^T M_i)$.
-Note: The sum is over $i=1$ to $T$. $M_i$ is a mask. The sum $\sum M_i$ is the total number of occluded pixels across all frames? Or per pixel?
-$M_i$ is a mask (H,W). $T M_i$ is scalar times mask?
-$\sum_{i=1}^T M_i$ is a sum of masks, resulting in a mask (H,W) where each element is the count of frames the pixel was occluded.
-So $\Omega_i$ is a map where each pixel's value is $\beta \times T \times \frac{M_i(x,y)}{\sum_k M_k(x,y)}$.
-If a pixel is never occluded, denominator is 0. This is a singularity.
-The text says "tissue areas with higher occlusion frequencies".
-If $M_i(x,y)=0$, $\Omega_i(x,y)=0$.
-If $M_i(x,y)=1$, $\Omega_i(x,y) = \beta \frac{T}{\text{count}}$.
-If a pixel is occluded in all frames, count=T, $\Omega = \beta$.
-If a pixel is occluded in 1 frame, count=1, $\Omega = \beta T$.
-So $\Omega$ is higher for *rarely* occluded pixels?
-Text: "higher importance scaling for those tissue areas with higher occlusion frequencies".
-This contradicts the formula $\beta T / \text{count}$. Higher frequency means higher count, which means lower $\Omega$.
-Let's re-read: "$\Omega_i$ specifies higher importance scaling for those tissue areas with higher occlusion frequencies".
-Maybe the formula is $\beta \frac{\sum M_i}{T}$? Or $\beta \frac{\sum M_i}{\sum \sum M}$?
-The source says: $\Omega_i = \beta(TM_i / \sum_{i=1}^T M_i)$.
-If $M_i$ is the mask at time $i$, and the sum is over $i$, then for a specific pixel $p$, $\Omega_i(p) = \beta \frac{T M_i(p)}{\sum_k M_k(p)}$.
-If $M_i(p)=1$, $\Omega = \beta T / \text{freq}(p)$.
-This gives *higher* weight to pixels with *lower* frequency.
-This contradicts the text "higher importance ... higher occlusion frequencies".
-However, the text also says "prioritizes tissue pixels occluded by tools".
-If a pixel is occluded frequently, it is "tissue pixels occluded by tools".
-If the formula gives them low weight, it contradicts the goal.
-Perhaps $M_i$ is not a binary mask of tool presence, but something else? "binary masks {Mi} ... to identify occluded regions".
-Perhaps the formula is $\Omega_i = \beta \frac{\sum_{k=1}^T M_k}{T}$? No, it explicitly writes $TM_i$.
-I will report the formula as given and the text as given, noting the discrepancy.
+where:
+- $T$ is the total number of frames.
+- $\sum_{k=1}^T M_k$ is the sum of the binary masks across all frames, representing the total occlusion count per pixel over the entire sequence.
+- $\beta$ is a hyper-parameter for balancing augmentation among frequently occluded areas and time-variant areas [S1].
 
-**Pseudocode:**
+**Parameters:**
+- $\alpha$: Lower-bound for the weight map to prevent zero weights for static pixels. Value not given in the sources.
+- $\beta$: Hyper-parameter balancing augmentation between frequently occluded areas and time-variant areas. Value not given in the sources.
+- $n$: Radius of the temporal window for comparing frames. Value not given in the sources.
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def spatiotemporal_importance_sampling(I, M, T, n, alpha, beta):
-    """
-    I: List of T images, shape (H, W, 3), dtype float32.
-    M: List of T masks, shape (H, W), dtype float32 (0 or 1).
-    T: Number of time steps.
-    n: Temporal window radius.
-    alpha: Lower-bound for weights.
-    beta: Hyper-parameter for balancing.
-    """
-    H, W = M[0].shape
-    W_maps = []
-    
-    # Precompute total occlusion count per pixel
-    # Sum of masks over time
-    total_occlusion_count = sum(M) # Element-wise sum of masks
-    
-    for i in range(T):
-        # 1. Calculate Temporal Differences
-        # Find neighbors j in [i-n, i+n]
-        neighbors = []
-        for j in range(max(0, i - n), min(T, i + n + 1)):
-            if j != i:
-                neighbors.append(j)
-        
-        # Compute L1 difference for each neighbor, normalized by 3
-        # Only consider tool-occluded regions (I * M)
-        diffs = []
-        for j in neighbors:
-            # Element-wise multiplication
-            I_i_masked = I[i] * M[i]
-            I_j_masked = I[j] * M[j]
-            # L1 norm per pixel? No, L1 norm of the image?
-            # Formula: || I_i o M_i - I_j o M_j ||_1 / 3
-            # Usually L1 norm of the whole image is a scalar.
-            # But W_i is a map. So it must be per-pixel L1?
-            # || x ||_1 for a vector is sum(|x|).
-            # If I_i is (H,W,3), I_i o M_i is (H,W,3).
-            # The difference is (H,W,3).
-            # L1 norm of a (H,W,3) tensor?
-            # If it's a scalar, W_i would be scalar. But W_i is a map.
-            # So it must be per-pixel.
-            # Per-pixel L1: sum over channels.
-            diff_per_pixel = np.abs(I_i_masked - I_j_masked)
-            # Sum over channels (axis=2)
-            diff_sum = np.sum(diff_per_pixel, axis=2) / 3.0
-            diffs.append(diff_sum)
-        
-        # Max over neighbors
-        if diffs:
-            max_diff = np.max(diffs, axis=0) # Shape (H, W)
-        else:
-            max_diff = np.zeros((H, W))
-            
-        # 2. Compute Occlusion Frequency Scaling Omega_i
-        # Omega_i = beta * (T * M_i) / sum(M_i)
-        # Handle division by zero
-        denom = total_occlusion_count
-        # Avoid division by zero
-        denom_safe = np.where(denom == 0, 1, denom)
-        omega = beta * (T * M[i]) / denom_safe
-        
-        # 3. Combine
-        # Formula: min(max_diff, alpha) * omega
-        # Note: Text says alpha is lower bound. Formula says min.
-        # Implementing formula as written.
-        raw_weight = np.minimum(max_diff, alpha) * omega
-        
-        # 4. Apply lower bound?
-        # Text says alpha avoids zero weight.
-        # If raw_weight is 0, it stays 0.
-        # To follow text intent:
-        # raw_weight = np.maximum(raw_weight, alpha)
-        # But this might conflict with the min(alpha) step.
-        # Given the ambiguity, we stick to the formula structure but 
-        # acknowledge the text description.
-        # Let's assume the formula meant: max(min(max_diff, cap), alpha)
-        # But no cap is given.
-        
-        # We will output the formula result.
-        W_maps.append(raw_weight)
-        
-    return W_maps
-```
+**Edge Cases and Pitfalls:**
+- If a pixel is never occluded, $M_i$ is zero for all $i$. The term $\frac{T M_i}{\sum_{k=1}^T M_k}$ becomes $0/0$ if no pixels are ever occluded, or $0$ if some are. The sources do not specify a guard for the case where $\sum_{k=1}^T M_k = 0$ [S1].
+- The division by 3 in the L1 norm term suggests the images might be normalized to $[0,1]$ or $[0,255]$, but the exact scaling factor's origin is not explained beyond the formula [S1].
 
 ## Operating characteristics
-- **Time Complexity:** $O(T \cdot H \cdot W \cdot n)$, where $T$ is the number of frames, $H, W$ are image dimensions, and $n$ is the temporal window radius. The calculation involves iterating over frames and neighbors, computing L1 differences, and aggregating weights.
-- **Memory Complexity:** $O(T \cdot H \cdot W)$ to store the input frames, masks, and output weight maps.
-- **Strengths:** Improves convergence speed and rendering quality for occluded tissues in surgical scenes by prioritizing difficult-to-learn pixels [S1]. Reduces redundant training on stationary tissues [S1].
-- **Limitations:** Requires accurate binary masks for tool occlusion [S1]. Performance depends on the choice of hyper-parameters $\alpha$ and $\beta$ [S1]. The formula's handling of zero weights and occlusion frequency scaling contains ambiguities that may require tuning [S1].
-- **When to use:** When reconstructing dynamic scenes with significant tool occlusion, such as robotic surgery, where uniform sampling leads to poor reconstruction of occluded areas [S1].
-- **When not to use:** For static scenes without occlusion, or when tool masks are unavailable.
+Not given in the sources.
 
 ## Background
-Spatiotemporal importance sampling was introduced in the context of efficient deformable tissue reconstruction in surgical scenes [S1]. It addresses the challenges posed by tool occlusion and stationary tissue redundancy, which exacerbate learning complexity and reduce efficiency in neural radiance field (NeRF) based reconstruction [S1]. The method draws inspiration from EndoNeRF [S1]. It was proposed in "Efficient Deformable Tissue Reconstruction via Orthogonal Neural Plane" [S1].
+The method was introduced in the context of efficient deformable tissue reconstruction via orthogonal neural planes for surgical scenes [S1]. It draws inspiration from EndoNeRF [S1]. It is designed to handle the specific challenges of robotic surgery scenes, where tool occlusion hides tissues and stationary tissues provide redundant training data [S1].
 
 ## Sources
 [S1] Efficient Deformable Tissue Reconstruction via Orthogonal Neural Plane, https://doi.org/10.1109/tmi.2024.3388559, fetched 2026-10-26

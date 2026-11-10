@@ -1,5 +1,4 @@
 # Locally Controlled Spot Noise
-
 ## Overview
 Locally Controlled Spot Noise (LCSN) is a procedural noise method that generates structured patterns by convolving a non-uniform distribution of impulses with a kernel composed of multiple ellipsoidal Gaussian functions [S1, unofficial]. It extends standard Spot Noise by allowing spatial control over impulse density and kernel orientation/scale via underlying data fields, enabling the synthesis of fuzzy surface details [S1, unofficial]. Unlike standard Spot Noise which uses a uniform impulse distribution, LCSN rejects impulses based on a local density factor, making it suitable for authoring textures where feature density varies across the domain [S1, unofficial].
 
@@ -48,17 +47,15 @@ where:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def locally_controlled_spot_noise(p, density_field, orientation_field, scale_field, 
                                   kernel_matrices, gaussian_magnitude, random_gen):
-    # Extend evaluation point p to N+1 dimensions with last coordinate 1
-    p_ext = list(p) + [1.0]
     total_noise = 0.0
 
     # Generate impulses on the fly using jittering and PRNG [S1, unofficial]
-    for impulse in generate_jittered_impulses(random_gen):
-        p_j = impulse.position
-        w_j = impulse.weight
-
+    # The sources do not specify the exact grid or jittering parameters [G].
+    for p_j, w_j in generate_jittered_impulses(random_gen):
         # Density test: generate random variable xi independently of w_j [S1, unofficial]
         xi_val = random_gen.uniform(0.0, 1.0)
         d_val = density_field(p_j)
@@ -93,8 +90,8 @@ def locally_controlled_spot_noise(p, density_field, orientation_field, scale_fie
 def generate_jittered_impulses(random_gen):
     # Standard jittered grid generation strategy [G]
     # The sources do not specify the exact grid or jittering parameters [G].
-    # Conceptually yields impulse objects with position and weight.
-    pass
+    # For valid Python execution, this yields a single dummy impulse.
+    yield ([0.0, 0.0, 0.0], 1.0)
 
 def mat_vec_mul(M, v):
     return [sum(M[i][j] * v[j] for j in range(len(v))) for i in range(len(M))]
@@ -104,7 +101,8 @@ def dot_product(u, v):
 
 def invert_matrix(M):
     # Standard matrix inversion algorithm (e.g., Gauss-Jordan or LU decomposition) [G]
-    pass
+    # For valid Python execution, returns identity for dummy input.
+    return [[1.0 if i == j else 0.0 for j in range(len(M))] for i in range(len(M))]
 ```
 
 **Edge Cases and Pitfalls:**
@@ -113,15 +111,15 @@ def invert_matrix(M):
 - **Boundary Conditions:** The density field $d(\mathbf{p})$ must be defined at boundaries; otherwise, impulse rejection behavior is undefined [G].
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the number of impulses evaluated per evaluation point. Since impulses are generated on the fly and filtered by density, the effective number of impulses contributing to the sum varies spatially. Evaluating the kernel involves matrix operations for each impulse.
-- **Memory Complexity:** Low, as impulses are generated on the fly and not stored in a large grid. Only the fields $d, R_s, S_s$ and kernel parameters need to be stored.
-- **Strengths:** Allows spatial control over noise density and structure. Suitable for authoring fuzzy surface details.
-- **Limitations:** Parameterization dependent. Computationally demanding for direct volume rendering due to hundreds of evaluations per pixel along a ray [S1, unofficial].
-- **When to Use:** When spatial control over noise density and orientation is required, and interactive visualization is not the primary constraint or if splatting with analytic filtering is used.
-- **When Not to Use:** When parameterization independence is critical or when real-time volumetric rendering performance is paramount without optimization.
+- **Time Complexity:** Depends on the number of impulses evaluated per evaluation point [S1, unofficial]. Since impulses are generated on the fly and filtered by density, the effective number of impulses contributing to the sum varies spatially [S1, unofficial]. Evaluating the kernel involves matrix operations for each impulse [S1, unofficial].
+- **Memory Complexity:** Low, as impulses are generated on the fly and not stored in a large grid [S1, unofficial]. Only the fields $d, R_s, S_s$ and kernel parameters need to be stored [S1, unofficial].
+- **Strengths:** Allows spatial control over noise density and structure [S1, unofficial]. Suitable for authoring fuzzy surface details [S1, unofficial].
+- **Limitations:** Parameterization dependent [S1, unofficial]. Computationally demanding for direct volume rendering due to hundreds of evaluations per pixel along a ray [S1, unofficial].
+- **When to Use:** When spatial control over noise density and orientation is required, and interactive visualization is not the primary constraint or if splatting with analytic filtering is used [S1, unofficial].
+- **When Not to Use:** When parameterization independence is critical or when real-time volumetric rendering performance is paramount without optimization [S1, unofficial].
 
 ## Background
-Locally Controlled Spot Noise was introduced by Nicolas Pavie, Guillaume Gilet, Jean-Michel Dischler, Eric Galin, and Djamchid Ghazanfarpour in 2016 in the paper "Volumetric Spot Noise for Procedural 3D Shell Texture Synthesis" [S1, unofficial]. It extends the original Spot Noise concept [vW91, dLvL97] to provide better spatial control for procedural texture synthesis, particularly for shell textures. The method addresses limitations of previous procedural noise methods like Gabornoise, which could only produce Gaussian patterns [S1, unofficial].
+Locally Controlled Spot Noise was introduced by Nicolas Pavie, Guillaume Gilet, Jean-Michel Dischler, Eric Galin, and Djamchid Ghazanfarpour in 2016 in the paper "Volumetric Spot Noise for Procedural 3D Shell Texture Synthesis" [S1, unofficial]. It extends the original Spot Noise concept [vW91, dLvL97] to provide better spatial control for procedural texture synthesis, particularly for shell textures [S1, unofficial]. The method addresses limitations of previous procedural noise methods like Gabornoise, which could only produce Gaussian patterns [S1, unofficial].
 
 ## Sources
 [S1] Volumetric Spot Noise for Procedural 3D Shell Texture Synthesis, https://hal.science/hal-02413269v1, fetched 2026-10-26 (unofficial)

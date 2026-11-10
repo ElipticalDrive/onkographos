@@ -1,0 +1,145 @@
+# Octree-based AMR Data Splitting
+Also called: Chopping up AMR data set, Overlaying with octree
+
+## Overview
+This method partitions hierarchical Adaptive Mesh Refinement (AMR) data into uniform, rectilinear blocks by overlaying the data domain with an octree aligned to the finest grid resolution [S1, unofficial]. It solves the problem of distributing irregular AMR structures for parallel rendering by converting them into a set of uniform volumes that can be efficiently uploaded to graphics hardware or distributed across processing nodes [S1, unofficial]. It differs from sibling methods like [TET-AMR Data Structure](1094-tet-amr-data-structure.md) by enforcing a uniform grid layout at the leaf level, and from [Exact AMR Rendering](4399-exact-amr-rendering.md) by approximating the geometry with axis-aligned blocks rather than exact cell boundaries.
+
+## How it works
+**Inputs:** An AMR dataset consisting of a hierarchy of grids with varying resolutions.
+**Outputs:** A set of uniform rectilinear grid blocks (octree leaves), each containing a subset of the original AMR data values.
+
+**Data Structures:**
+The primary structure is an octree. Each node in the octree represents a spatial region.
+*   **Node:** Contains spatial bounds (aligned with the finest grid cells) and a flag indicating if it is a leaf.
+*   **Leaf:** Represents a uniform rectilinear grid. The data values within a leaf are stored in a contiguous array or texture memory, indexed by local 3D coordinates $(i, j, k)$ relative to the leaf's origin. The dimensions of the leaf correspond to the number of finest grid cells covered by that octree node.
+
+**Algorithm Steps:**
+1.  **Overlay:** Define an octree root that encompasses the entire AMR data domain. The octree resolution is aligned such that the finest possible grid cells in the AMR hierarchy correspond to the smallest possible voxel size in the octree [S1, unofficial].
+2.  **Recursive Splitting:** For each octree node, determine if it is "completely overlaid" by a single AMR grid level.
+    *   A node is completely overlaid if all data values within its spatial bounds are defined by the same AMR grid level and the node's spatial extent aligns perfectly with the grid cells of that level [S1, unofficial].
+    *   If a node is completely overlaid, it becomes a leaf. The data values from the corresponding AMR grid cells are copied into the leaf's uniform grid structure [S1, unofficial].
+    *   If a node is not completely overlaid (i.e., it spans multiple grid levels or contains empty space), it is split into 8 children (sub-octants). The splitting process is applied recursively to each child [S1, unofficial].
+3.  **Leaf Generation:** Continue recursion until all nodes are leaves. Each leaf now represents a uniform block of data [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def split_amr_to_octree(amr_data, finest_cell_size):
+    """
+    Splits AMR data into uniform octree leaves.
+    
+    Args:
+        amr_data: The hierarchical AMR dataset.
+        finest_cell_size: The size of the smallest grid cell in the AMR hierarchy.
+        
+    Returns:
+        root_node: The root of the generated octree.
+    """
+    # Determine the bounding box of the entire AMR dataset
+    domain_bounds = get_amr_domain_bounds(amr_data)
+    
+    # Initialize the root node covering the entire domain
+    root_node = OctreeNode(bounds=domain_bounds, level=0)
+    
+    # Start the recursive splitting process
+    split_node(root_node, amr_data, finest_cell_size)
+    
+    return root_node
+
+def split_node(node, amr_data, finest_cell_size):
+    """
+    Recursively splits an octree node based on AMR grid coverage.
+    """
+    # Check if the current node's bounds align with the finest grid
+    # and if all data within these bounds comes from a single AMR grid level.
+    if is_node_fully_covered_by_single_grid(node, amr_data, finest_cell_size):
+        # Node is a leaf: extract data into a uniform grid
+        node.is_leaf = True
+        node.data = extract_uniform_grid_data(node.bounds, amr_data, finest_cell_size)
+    else:
+        # Node is not a leaf: split into 8 children
+        node.is_leaf = False
+        children_bounds = divide_bounds_into_octants(node.bounds)
+        
+        for child_bounds in children_bounds:
+            child_node = OctreeNode(bounds=child_bounds, level=node.level + 1)
+            node.children.append(child_node)
+            split_node(child_node, amr_data, finest_cell_size)
+
+def is_node_fully_covered_by_single_grid(node, amr_data, finest_cell_size):
+    """
+    Determines if a node's spatial extent is fully covered by a single AMR grid level.
+    """
+    # Check if the node's bounds are an integer multiple of the finest cell size
+    # and if the node's dimensions match the grid spacing of a specific AMR level.
+    # Also verify that no part of the node's volume is outside the AMR data domain
+    # or covered by a different grid level.
+    
+    # [G] Implementation detail: This requires checking the AMR hierarchy to see
+    # if the node's bounding box is a subset of a single coarse grid's cells.
+    # If the node spans multiple refinement levels, this returns False.
+    
+    covering_grid = find_covering_grid_for_bounds(node.bounds, amr_data)
+    
+    if covering_grid is None:
+        return False
+        
+    # Check if the node's bounds exactly match the grid cells of covering_grid
+    # within the finest_cell_size resolution.
+    if bounds_match_grid_cells(node.bounds, covering_grid, finest_cell_size):
+        return True
+    else:
+        return False
+
+def extract_uniform_grid_data(bounds, amr_data, finest_cell_size):
+    """
+    Extracts data values from AMR grids into a uniform 3D array.
+    """
+    # Calculate the dimensions of the uniform grid based on bounds and finest_cell_size
+    dims = calculate_grid_dimensions(bounds, finest_cell_size)
+    grid_data = empty_array(dims)
+    
+    # Iterate over the finest grid cells within the bounds
+    for cell in get_finest_cells_in_bounds(bounds, finest_cell_size):
+        # Find the AMR grid that defines the value for this cell
+        value = get_value_for_cell(cell, amr_data)
+        
+        # Map the cell's global coordinates to local grid indices
+        local_indices = global_to_local_indices(cell.center, bounds, finest_cell_size)
+        
+        # Assign the value to the uniform grid
+        grid_data[local_indices] = value
+        
+    return grid_data
+```
+
+**Parameters:**
+*   `finest_cell_size`: The resolution of the finest AMR grid. This determines the granularity of the octree [S1, unofficial].
+*   `domain_bounds`: The bounding box of the entire AMR dataset [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Partial Coverage:** If an octree node partially overlaps with an AMR grid, it must be split further until it is either fully covered by a single grid or becomes a leaf representing a uniform block [S1, unofficial].
+*   **Empty Space:** Nodes that fall entirely outside the AMR data domain should be handled appropriately (e.g., marked as empty leaves or pruned) to avoid unnecessary memory usage [S1, unofficial].
+*   **Precision:** Alignment with the finest grid cells is critical. Misalignment can lead to incorrect data assignment or incomplete coverage [S1, unofficial].
+
+## Subtopics
+
+### Back-to-front Cell Assignment
+A parallel distribution strategy that breaks octree leaves down to the cell level, numbers them in viewing direction, and assigns contiguous ranges of cells to processing nodes for good load balancing [S1, unofficial]. It provides very good load balancing because rendering cost can be estimated accurately, unlike round-robin leaf assignment [S1, unofficial]. Compositing is extremely simple because partial images can be composited in order of processing node numbers [S1, unofficial]. However, assignment depends on viewing direction, which might increase I/O overhead during viewpoint animation [S1, unofficial].
+
+### Round-robin Leaf Assignment
+A parallel distribution strategy where octree leaves are assigned to processing nodes based on their index in an octree traversal, independent of viewing direction [S1, unofficial]. Unlike back-to-front cell assignment, this method's assignment is static and independent of viewing direction, reducing I/O overhead during viewpoint animation [S1, unofficial]. However, load balancing problems are expected because octree leaves can vary vastly in size [S1, unofficial]. Compositing is complicated and involves a lot of communication because nodes render multiple non-contiguous leaves [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The splitting process is linear with respect to the number of octree nodes generated, which depends on the complexity of the AMR hierarchy and the finest grid resolution [S1, unofficial].
+*   **Memory Complexity:** Memory usage is proportional to the number of octree leaves and the size of the uniform grids they contain. This can be significantly larger than the original AMR data if there is significant empty space or if the finest grid resolution is very high [S1, unofficial].
+*   **Performance:** The method allows for hardware-accelerated rendering by uploading uniform blocks as stacks of 2D textures [S1, unofficial]. Parallel distribution strategies (back-to-front or round-robin) affect load balancing and communication overhead [S1, unofficial].
+*   **Strengths:** Simple implementation, efficient for hardware rendering, good load balancing with back-to-front assignment [S1, unofficial].
+*   **Limitations:** Potential for high memory usage, I/O overhead with view-dependent distribution [S1, unofficial].
+
+## Background
+This method was developed for the visualization of AMR data, specifically in the context of parallel rendering on graphics workstations [S1, unofficial]. It was introduced as a simple and efficient way to chop up AMR data sets into uniform blocks suitable for distribution to processing nodes [S1, unofficial]. The approach leverages the hierarchical nature of AMR data and the efficiency of octree-based spatial partitioning [S1, unofficial].
+
+## Sources
+[S1] Volume Visualization of AMR Data, https://graphics.cs.ucdavis.edu/~okreylos/Research/AMRVis/MainPage.html, fetched 2026-10-26 (unofficial)

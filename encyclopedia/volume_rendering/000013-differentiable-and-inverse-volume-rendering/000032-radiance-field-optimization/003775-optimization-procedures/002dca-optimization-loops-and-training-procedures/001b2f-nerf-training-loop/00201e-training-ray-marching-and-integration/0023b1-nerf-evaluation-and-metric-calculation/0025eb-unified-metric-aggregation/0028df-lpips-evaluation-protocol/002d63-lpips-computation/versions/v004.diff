@@ -1,0 +1,206 @@
+--- v003.md
++++ v004.md
+@@ -1,30 +1,41 @@
+ # LPIPS Computation
+-Also called: LPIPS, Learned Perceptual Image Patch Similarity, LPIPS Loss
++Also called: Learned Perceptual Image Patch Similarity, LPIPS, LPIPS Loss
++
+ ## Overview
+-LPIPS (Learned Perceptual Image Patch Similarity) measures perceptual similarity between original and reconstructed images by comparing deep features extracted from neural networks, outputting a distance metric where lower values indicate higher similarity [S1][S2, unofficial]. It is preferred over pixel-space metrics like Mean Squared Error (MSE) because it accounts for neighboring information and structural context, providing a more robust optimization objective for differentiable rendering [S3, unofficial].
++LPIPS is a full-reference perceptual quality metric that measures the similarity between two images by comparing deep feature representations extracted from a pretrained convolutional neural network [S1, S3]. Unlike pixel-wise metrics such as PSNR or MSE, which often correlate poorly with human perception, LPIPS aligns closely with human judgments of image similarity by leveraging semantic features [S2][S5, unofficial]. It is primarily used in volume rendering and NeRF optimization to evaluate reconstruction fidelity or as a perceptual loss function to guide training, capturing nuances like texture and structure that standard metrics miss [S3][S5, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Two image tensors, `render` (the generated image) and `gt` (the ground truth image), both in the range $[0, 1]$ [S2, unofficial].
+-- Output: A scalar float representing the perceptual distance [S2, unofficial].
++- **Input:** Two images, $x$ (reference) and $y$ (assessed/reconstructed), typically of shape $(H, W, C)$ or $(C, H, W)$.
++- **Output:** A scalar distance value $LPIPS(x, y) \in [0, \infty)$. Lower values indicate higher perceptual similarity.
+ 
+ **Data Structures:**
+-- The method relies on a pretrained VGG network configured as a feature extractor, set to evaluation mode to disable dropout and batch normalization updates [S2, unofficial].
++- **Feature Maps:** For each layer $l$ in the backbone network, the output is a tensor of activations. Let $x^l$ and $y^l$ be the feature maps for images $x$ and $y$ at layer $l$.
++- **Weights:** A learnable vector $w_l$ of size equal to the number of channels in layer $l$, used to weight the importance of each channel.
++
++**Parameters:**
++- **Backbone Network:** The original implementation uses a pretrained VGG16 [S1][S4, unofficial], though AlexNet [S1, S2] and SqueezeNet [S1] are also supported. VGG16 is the standard for high-fidelity evaluation [S1][S4, unofficial].
++- **Normalization:** Input images must be normalized to the range $[-1, 1]$ before feature extraction [S4, unofficial].
++- **Weights ($w_l$):** These are pre-computed using a dataset of natural images (e.g., ImageNet) to minimize the distance between features of human-judged similar images [S1]. They are fixed during the LPIPS computation itself.
+ 
+ **Steps:**
+-1. **Initialization:** Load the pretrained VGG model and set it to evaluation mode [S2, unofficial].
+-2. **Normalization:** Scale the pixel values of both `render` and `gt` from the range $[0, 1]$ to $[-1, 1]$ using the linear transformation:
+-   $$ x_{norm} = 2.0 \cdot x - 1.0 $$
+-   This aligns the input distribution with the expectations of the pretrained VGG model [S2, unofficial].
+-3. **Batching:** If the input tensors do not have a batch dimension, add one using `unsqueeze(0)` [S2, unofficial].
+-4. **Feature Extraction:** Pass the normalized tensors through the pretrained VGG model to extract multi-layer feature maps [S2, unofficial].
+-5. **Aggregation:** Compute the L2 distance between corresponding feature maps, average across layers and spatial dimensions, and return the mean as a single float [S2, unofficial][G].
++1. **Preprocessing:** Scale the input images $x$ and $y$ from their native range (typically $[0, 1]$) to $[-1, 1]$ using the transformation $x' = 2.0 \cdot x - 1.0$ and $y' = 2.0 \cdot y - 1.0$ [S4, unofficial].
++2. **Feature Extraction:** Pass $x'$ and $y'$ through the chosen backbone network (e.g., VGG16). Extract feature maps from specific intermediate layers (typically conv1_2, conv2_2, conv3_3, conv4_3, conv5_4 for VGG16) [S1][S4, unofficial]. Let $x^l_{hw}$ and $y^l_{hw}$ denote the feature values at pixel $(h, w)$ for layer $l$.
++3. **Distance Calculation:** Compute the weighted squared Euclidean distance for each layer, normalized by the spatial dimensions and channel weights [S1].
++4. **Aggregation:** Sum the normalized distances across all selected layers to produce the final score [S1].
+ 
+-**Parameters:**
+-- `net`: The backbone architecture for perceptual features. The default and most common value is `"vgg"` [S2, unofficial].
++**Formula:**
++The LPIPS distance is defined as [S1]:
+ 
+-**Pitfalls:**
+-- **First Run Download:** The first execution requires downloading pretrained weights to the `TORCH_HOME` cache directory, which requires an internet connection or pre-cached weights [S2, unofficial].
+-- **Input Range:** Failing to normalize inputs to $[-1, 1]$ before passing them to the VGG model will result in incorrect feature activations and invalid distance scores [S2, unofficial].
++$$
++LPIPS(x, y) = \sum_{l} \frac{1}{H_l W_l} \sum_{h=1}^{H_l} \sum_{w=1}^{W_l} || w_l \odot (x^l_{hw} - y^l_{hw}) ||_2^2
++$$
++
++Where:
++- $l$ indexes the selected layers of the backbone network.
++- $H_l$ and $W_l$ are the height and width of the feature map at layer $l$.
++- $x^l_{hw}$ and $y^l_{hw}$ are the feature vectors at pixel $(h, w)$ for the reference and assessed images, respectively.
++- $w_l$ is the vector of learned weights for layer $l$, with one weight per channel. $\odot$ denotes element-wise multiplication.
++- $|| \cdot ||_2^2$ is the squared $L_2$ norm (sum of squared elements) of the vector.
+ 
+ **Pseudocode:**
+@@ -33,74 +44,80 @@
+ import torch.nn as nn
+ 
+-class VGGFeatureExtractor(nn.Module):
+-    def __init__(self):
+-        super().__init__()
+-        # Standard VGG-16 feature layers [G]
+-        self.features = nn.Sequential(
+-            nn.Conv2d(3, 64, 3, padding=1), nn.ReLU(inplace=True),
+-            nn.Conv2d(64, 64, 3, padding=1), nn.ReLU(inplace=True), nn.MaxPool2d(2, 2),
+-            nn.Conv2d(64, 128, 3, padding=1), nn.ReLU(inplace=True),
+-            nn.Conv2d(128, 128, 3, padding=1), nn.ReLU(inplace=True), nn.MaxPool2d(2, 2),
+-            nn.Conv2d(128, 256, 3, padding=1), nn.ReLU(inplace=True),
+-            nn.Conv2d(256, 256, 3, padding=1), nn.ReLU(inplace=True),
+-            nn.Conv2d(256, 256, 3, padding=1), nn.ReLU(inplace=True), nn.MaxPool2d(2, 2),
+-            nn.Conv2d(256, 512, 3, padding=1), nn.ReLU(inplace=True),
+-            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(inplace=True),
+-            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(inplace=True), nn.MaxPool2d(2, 2),
+-            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(inplace=True),
+-            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(inplace=True),
+-            nn.Conv2d(512, 512, 3, padding=1), nn.ReLU(inplace=True), nn.MaxPool2d(2, 2)
+-        )
+-        # Load ImageNet weights [G]
+-
+-    def forward(self, x):
+-        features = []
+-        for layer in self.features:
+-            x = layer(x)
+-            if isinstance(layer, nn.ReLU):
+-                features.append(x)
+-        return features
+-
+-def compute_lpips(render: torch.Tensor, gt: torch.Tensor) -> float:
+-    # 1. Load pretrained VGG model and set to evaluation mode [S2, unofficial]
+-    model = VGGFeatureExtractor()
+-    model.eval()
+-
+-    # 2. Scale render and GT tensors from [0,1] to [-1,1] [S2, unofficial]
+-    render_norm = 2.0 * render - 1.0
+-    gt_norm = 2.0 * gt - 1.0
+-
+-    # 3. Add batch dimension with unsqueeze(0) [S2, unofficial]
+-    if render_norm.dim() == 3:
+-        render_norm = render_norm.unsqueeze(0)
+-    if gt_norm.dim() == 3:
+-        gt_norm = gt_norm.unsqueeze(0)
+-
+-    # 4. Pass through model [S2, unofficial]
+-    with torch.no_grad():
+-        feat_r = model(render_norm)
+-        feat_g = model(gt_norm)
+-
+-    # 5. Return mean of output tensor as float [S2, unofficial]
+-    # Compute L2 distance across feature maps and average [G]
+-    distance = 0.0
+-    for f_r, f_g in zip(feat_r, feat_g):
+-        distance += torch.mean((f_r - f_g) ** 2)
+-    return distance.mean().item()
++def compute_lpips(reference: torch.Tensor, assessed: torch.Tensor, 
++                  backbone: nn.Module, weights: dict) -> float:
++    """
++    Compute LPIPS distance between two images.
++    
++    Args:
++        reference: Tensor of shape (C, H, W) or (B, C, H, W) with values in [0, 1].
++        assessed: Tensor of shape (C, H, W) or (B, C, H, W) with values in [0, 1].
++        backbone: Pretrained VGG16 model in eval mode.
++        weights: Dictionary mapping layer names to weight tensors (C_l,).
++    
++    Returns:
++        Scalar LPIPS distance.
++    """
++    # 1. Preprocessing: Scale from [0, 1] to [-1, 1]
++    # Handle both single image and batched inputs
++    if reference.dim() == 3:
++        reference = reference.unsqueeze(0)
++        assessed = assessed.unsqueeze(0)
++    
++    ref_scaled = 2.0 * reference - 1.0
++    ass_scaled = 2.0 * assessed - 1.0
++    
++    # 2. Feature Extraction
++    # Extract features from specific layers (e.g., conv1_2, conv2_2, etc.)
++    # This requires modifying the backbone to return intermediate outputs
++    ref_features = backbone.extract_features(ref_scaled)
++    ass_features = backbone.extract_features(ass_scaled)
++    
++    lpips_score = 0.0
++    
++    # 3. Compute weighted distance for each layer
++    for layer_name in weights.keys():
++        x_l = ref_features[layer_name] # Shape: (B, C_l, H_l, W_l)
++        y_l = ass_features[layer_name]
++        
++        w_l = weights[layer_name] # Shape: (C_l,)
++        
++        # Compute difference
++        diff = x_l - y_l
++        
++        # Apply weights: element-wise multiply each channel by its weight
++        # w_l needs to be reshaped to (1, C_l, 1, 1) for broadcasting
++        weighted_diff = diff * w_l.view(1, -1, 1, 1)
++        
++        # Compute squared L2 norm per pixel
++        # Sum over channels first
++        sq_norm = torch.sum(weighted_diff ** 2, dim=1) # Shape: (B, H_l, W_l)
++        
++        # Normalize by spatial dimensions H_l * W_l
++        # H_l and W_l are the last two dimensions of sq_norm
++        h_l, w_l_dim = sq_norm.shape[-2], sq_norm.shape[-1]
++        normalized_dist = torch.mean(sq_norm, dim=[1, 2]) # Shape: (B,)
++        
++        # Sum over batch dimension if present, otherwise take mean
++        lpips_score += torch.mean(normalized_dist)
++        
++    return lpips_score.item()
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources. [G]
+-- **Memory Complexity:** Not given in the sources. [G]
+-- **Strengths:** Accounts for neighboring information and structural context, providing a more robust optimization objective than pixel-space metrics [S3, unofficial].
+-- **Limitations:** Requires a pretrained model and internet access for initial weight download [S2, unofficial].
+-- **When to use:** When perceptual quality is more important than exact pixel fidelity [S3, unofficial].
+-- **When not to use:** When computational efficiency is paramount and pixel-level accuracy is sufficient, or when network access is unavailable for weight caching [S2, unofficial].
++- **Time Complexity:** Dominated by the forward pass of the backbone network. For VGG16, this is $O(H \cdot W \cdot C_{total})$ where $C_{total}$ is the total number of parameters in the feature extraction path. It is significantly slower than PSNR or MSE but faster than full generative model evaluations.
++- **Memory Complexity:** Requires storing intermediate feature maps for all selected layers. For VGG16, this is manageable but non-trivial for high-resolution images.
++- **Performance:** LPIPS correlates strongly with human perception, often outperforming PSNR and SSIM in ranking reconstructed images [S3][S5, unofficial]. It is sensitive to high-frequency details and textures [S3].
++- **Strengths:** Captures perceptual quality better than pixel-wise metrics; robust to small geometric shifts and color variations that penalize MSE [S5, unofficial].
++- **Limitations:** Computationally expensive; requires a pretrained network and internet access for initial weight download [S4, unofficial]; less effective for evaluating structural alignment if the backbone does not capture spatial coherence well enough (though VGG does this reasonably well) [S2].
++- **When to use:** When human perceptual quality is the primary goal, such as in final evaluation of NeRF renderings or as a perceptual loss in training [S3][S5, unofficial].
++- **When not to use:** When computational resources are extremely limited, or when strict pixel-perfect reconstruction is required regardless of perceptual quality [S5, unofficial].
+ 
+ ## Background
+-LPIPS was introduced by Zhang et al. in 2018 to address the limitations of pixel-space metrics like MSE [S1][S3, unofficial]. It was designed to account for neighboring information and structural context, which often lead to suboptimal optimization results in perceptual tasks [S3, unofficial]. It is widely used in differentiable rendering pipelines to evaluate reconstruction quality against human perception [S1][S3, unofficial].
++LPIPS was introduced by Zhang et al. in 2018 [S1][S5, unofficial]. The authors observed that traditional metrics like MSE and SSIM do not correlate well with human perception of image similarity. They proposed using features from pretrained convolutional networks (AlexNet, VGG, SqueezeNet) as a proxy for human perception. The weights for the feature channels were learned by optimizing for human similarity judgments. In the context of NeRF and volume rendering, LPIPS has become a standard metric for evaluating the perceptual quality of novel view synthesis, often used alongside PSNR and SSIM to provide a more comprehensive assessment [S1, S3]. It is also used as a loss function in differentiable rendering to encourage perceptually pleasing results [S5, unofficial].
+ 
+ ## Sources
+-[S1] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26
+-[S2] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
+-[S3] Feature-Guided Diffusion for Non-Differentiable Inverse Rendering, https://doi.org/10.48550/arXiv.2607.17411, fetched 2026-10-29 (unofficial)+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
++[S2] Blended-NeRF: Zero-Shot Object Generation and Blending in Existing Neural Radiance Fields, https://arxiv.org/abs/2306.12760v2, fetched 2026-10-26
++[S3] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26
++[S4] 3DAgentWorld/Advanced3DGS, https://github.com/3DAgentWorld/Advanced3DGS, fetched 2026-10-27 (unofficial)
++[S5] Feature-Guided Diffusion for Non-Differentiable Inverse Rendering, https://doi.org/10.48550/arXiv.2607.17411, fetched 2026-10-29 (unofficial)

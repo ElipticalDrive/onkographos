@@ -1,0 +1,154 @@
+# Planar Contour Tiling
+
+Also called: Fuchs Tiling Rules
+
+## Overview
+Planar Contour Tiling is a method for solving the tiling problem in volume rendering, specifically determining how to join triangle sections (tiles) between two parallel contour segments [S1, unofficial]. It strictly defines the geometry of triangle segments using two topological rules and solves the orientation decision using graph theory to find an optimal surface [S1, unofficial]. It sets itself apart from heuristic variants (like Ganapathy or Fuchs Area) by providing a rigorous, global optimization framework via a directed toroidal graph, rather than a local greedy decision [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Two parallel contour segments, $P$ and $Q$, defined by vertices $P_i, P_j, \dots$ and $Q_i, Q_j, \dots$.
+*   **Output:** A set of triangular tiles connecting the contours, forming a surface mesh.
+
+**Data Structures:**
+*   **Contours:** Lists of 3D points.
+*   **Graph:** A directed toroidal graph where nodes represent contour vertices and edges represent potential tile connections.
+
+**Rules:**
+Fuchs [FKU77] strictly specifies the triangle segment, nicknamed a "tile," with two rules [S1, unofficial]:
+1.  Each contour segment will be used for exactly one tile.
+2.  A left span of a particular tile will also be used as the right span of another tile, and vice versa [S1, unofficial].
+
+**Graph Theory Solution:**
+The problem of deciding the orientation of the next tile (e.g., whether the next tile is $C_1$ or $C_2$) is solved by associating all acceptable surfaces with certain cycles in a directed toroidal graph [S1, unofficial].
+*   **Nodes:** Represent the vertices of the contours.
+*   **Edges:** Represent valid connections between contour vertices that form tiles.
+*   **Cost:** The cost of a trail is the sum of the arcs traversed by it [S1, unofficial].
+*   **Optimum Surface:** Corresponds to a "minimum cost acceptable trail" in the toroidal graph [S1, unofficial].
+
+**Algorithm Steps:**
+1.  Construct a directed toroidal graph from the two contour segments $P$ and $Q$.
+2.  Assign weights to the arcs (edges) of the graph. The specific weight definition is not detailed in the primary source for the base Fuchs method, but the cost is the sum of traversed arcs [S1, unofficial].
+3.  Find the minimum cost acceptable trail in the graph. This can be studied using standard shortest-path algorithms [S1, unofficial].
+4.  The trail defines the sequence of tiles connecting the contours.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def planar_contour_tiling(contour_P, contour_Q):
+    """
+    Solves the tiling problem between two parallel contours P and Q
+    using Fuchs' graph-theoretic approach.
+    """
+    # 1. Build the directed toroidal graph
+    # Nodes are indices into contour_P and contour_Q
+    # Edges connect vertices to form valid tiles based on Fuchs' rules
+    graph = build_toroidal_graph(contour_P, contour_Q)
+    
+    # 2. Assign costs to arcs
+    # The source states cost is the sum of arcs traversed.
+    # Specific arc weighting formula for the base Fuchs method is not provided.
+    # [G] In practice, arc weights might be based on geometric properties like area or span length,
+    # but the base method relies on the graph structure itself.
+    assign_arc_costs(graph)
+    
+    # 3. Find minimum cost acceptable trail
+    # This corresponds to finding a cycle or path that satisfies the tiling rules
+    # with minimum total cost.
+    # [G] Standard shortest path algorithms (e.g., Bellman-Ford or Dijkstra if no negative cycles)
+    # can be adapted for the toroidal graph structure.
+    optimal_trail = find_minimum_cost_trail(graph)
+    
+    # 4. Generate tiles from the trail
+    tiles = generate_tiles_from_trail(optimal_trail, contour_P, contour_Q)
+    
+    return tiles
+
+def build_toroidal_graph(P, Q):
+    """
+    Constructs a directed graph where nodes represent contour vertices.
+    Edges represent potential tile connections.
+    """
+    # Implementation details depend on the specific graph construction
+    # described in Fuchs [FKU77].
+    # The graph is "toroidal" implying a cyclic structure.
+    # Nodes: (P_index, Q_index) pairs or individual vertices.
+    # Edges: Connections between vertices that form valid triangles.
+    pass
+
+def assign_arc_costs(graph):
+    """
+    Assigns costs to the arcs of the graph.
+    The source states cost is the sum of arcs traversed.
+    """
+    # Specific cost function for the base Fuchs method is not detailed.
+    pass
+
+def find_minimum_cost_trail(graph):
+    """
+    Finds the minimum cost acceptable trail in the graph.
+    """
+    # Implementation depends on the graph structure.
+    pass
+
+def generate_tiles_from_trail(trail, P, Q):
+    """
+    Generates the final triangle tiles from the optimal trail.
+    """
+    tiles = []
+    for edge in trail:
+        # Create triangle from vertices in P and Q
+        tile = create_triangle(edge, P, Q)
+        tiles.append(tile)
+    return tiles
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** The method assumes parallel contours. Degenerate contours (e.g., single points) are not discussed.
+*   **Complexity:** The graph construction and shortest path finding can be computationally expensive for large contours.
+
+## Subtopics
+
+### Ganapathy Cumulative Weight Heuristic
+A heuristic that determines the next contour by considering the cumulative addition of previous weights and new possible weights to minimize the difference between horizontal and vertical scores [S1, unofficial]. The weight of a contour tile is defined as the circumference of a normalised tile divided into the length of the contour segment [S1, unofficial]. Horizontal and vertical weights are accumulated into two separate running scores. The decision regarding the next tile is taken so that the difference between these scores is minimised. For an optimum surface, the difference between these scores is zero [S1, unofficial].
+
+### Fuchs Area Heuristic
+A heuristic method using the area of the tiles to decide the next tile orientation [S1, unofficial]. It chooses the tile with the smallest area [S1, unofficial]. This method works best with a normalisation to the unit square at the origin [S1, unofficial].
+
+### Christianson Span Heuristic
+A heuristic using the length of a span (left or right) as the appropriate heuristic weight to decide the next tile [S1, unofficial]. It chooses the smaller span [S1, unofficial]. This method works best on contour pairs that are coherent in shape and mutually centered. Centering and coherency can be achieved by a normalisation from a transformation to the unit square at the origin [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+Not given in the sources. The graph-based approach suggests complexity related to the number of contour vertices and the graph size.
+
+**Measured Performance:**
+Not given in the sources.
+
+**Scaling:**
+Not given in the sources.
+
+**Strengths and Limitations:**
+*   **Strengths:** Provides a rigorous, global optimization for the tiling problem.
+*   **Limitations:** Computationally more complex than local heuristics. Requires careful graph construction.
+
+**When to Use:**
+When an optimal surface is required and computational resources allow for graph-based optimization.
+
+**When Not to Use:**
+When real-time performance is critical and approximate solutions from heuristics are acceptable.
+
+## Background
+**Origin:**
+The method was described by Fuchs [FKU77] [S1, unofficial].
+
+**History and Development:**
+The method is part of the broader field of volume rendering and surface reconstruction from contour data. It builds on the Keppel Heuristic [10336-keppel-heuristic.md].
+
+**Where it is Used:**
+Surface rendering in volume data, particularly in medical imaging and scientific visualization.
+
+## Sources
+[S1] An Overview of Rendering from Volume Data --- including Surface and Volume Rendering, https://core.ac.uk/download/63614.pdf, fetched 2026-10-30 (unofficial)

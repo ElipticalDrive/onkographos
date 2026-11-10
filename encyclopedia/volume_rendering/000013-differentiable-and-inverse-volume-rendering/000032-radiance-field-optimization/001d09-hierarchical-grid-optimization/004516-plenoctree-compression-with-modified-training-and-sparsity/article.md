@@ -1,0 +1,91 @@
+# PlenOctree Compression with Modified Training and Sparsity
+
+Also called: Sparse PlenOctree Training
+
+## Overview
+This method reduces the storage size of PlenOctree models by modifying the NeRF-SH training loss to optimize sparsity and compressing the resulting voxelized point cloud attributes [S1]. It differs from the original PlenOctree method by using a Cauchy loss instead of the standard sparsity loss, adding total variation regularization, using half-pixel ray offsets, and performing post-thresholding fine-tuning [S1].
+
+## How it works
+**Inputs:** Training images and camera poses.
+**Outputs:** Compressed PlenOctree model (encoded point cloud attributes).
+
+**Data Structures:**
+The PlenOctree is represented as a set of octree leaves. The raw data structure fields for a scene (e.g., Lego) are:
+*   **Child:** Array of size $2,982,398 \times 8$, 32-bit integers.
+*   **Parent depth:** Array of size $2,982,398 \times 2$, 32-bit integers.
+*   **Data ($\sigma, k$):** Array of size $2,982,398 \times 8 \times 49$, 16-bit floats. This stores density $\sigma$ and Spherical Harmonics (SH) coefficients $k$.
+*   **Metadata:** 32/64-bit values.
+*   Total uncompressed size is approximately 2.3 GB for the Lego scene [S1].
+
+**Steps:**
+
+1.  **Modified NeRF-SH Training:**
+    Train a NeRF-SH network [6] to output SH coefficients $k$ of degree $\ell_{max}$ instead of RGB colors. The ray directions are modified by adding a half-pixel offset so they pass through pixel centers [S1]. The total training loss $L$ is:
+    $$
+    L = L_r + L_{cauchy} + L_{TV}
+    $$
+    where $L_r$ is the rendering loss, $L_{cauchy}$ is the Cauchy sparsity loss, and $L_{TV}$ is the total variation regularization [S1].
+
+2.  **PlenOctree Extraction:**
+    Sample the trained NeRF-SH to extract density $\sigma$ and SH coefficients $k$ into octree leaves. The SH coefficients are evaluated according to the ray direction $(\theta, \phi)$ to obtain view-dependent color [S1].
+
+3.  **PlenOctree Optimization:**
+    Fine-tune the extracted octree using the rendering loss $L_r$ on training images [S1].
+
+4.  **Thresholding for Sparsity:**
+    Estimate opacity $\alpha$ for each node to remove nodes with low influence. The opacity is estimated as:
+    $$
+    \alpha = 1 - \exp(-\sigma \delta)
+    $$
+    where $\delta \approx 2/2^N$ and $N$ is the octree depth [S1]. Nodes with low $\alpha$ are removed.
+
+5.  **Post-thresholding Fine-tuning:**
+    Re-fine-tune the "distilled" PlenOctree with cross-validation to compensate for knowledge loss from removed points [S1].
+
+6.  **Compression Preparation:**
+    View the octree leaves as a voxelized point cloud $P$ with $N$ voxels. The coordinates $x_{pc}$ are calculated from the octree child indices $x_{oct} = [X_n, Y_n, Z_n]$ and octree depth $M$:
+    $$
+    x_{pc} = x_{oct} \times 2^M - 0.5
+    $$
+    The attributes $s(n)$ for each point are:
+    $$
+    s(n) = [\sigma_n, k^0_{n0}, k^{-1}_{n1}, k^1_{n1}, \dots, k^\ell_{n\ell}]
+    $$
+    where $k^\ell_{nm} \in \mathbb{R}^3$ [S1].
+
+7.  **Attribute Encoding:**
+    Encode $\sigma$ and $k$ coefficients as attributes of the point cloud $P$ using a point cloud compression method, specifically Geometry-Based Point Cloud Coding (G-PCC) [S1].
+
+**Parameters:**
+*   Total variation hyperparameter $\eta$: $10^{-11}$ [S1].
+*   Cauchy loss hyperparameter $\lambda_s$: $10^{-4}$ [S1].
+
+**Formulas:**
+*   **Total Variation Regularization:**
+    $$
+    L_{TV} = \frac{\eta}{|R|} \sum_{i,k} \| \nabla \sigma(r_i(t_k)) \|_2
+    $$
+    where $R$ is the ray batch size [S1].
+*   **Cauchy Sparsity Loss:**
+    $$
+    L_{cauchy} = \lambda_s \sum_{i,k} \log(1 + 2\sigma(r_i(t_k))^2)
+    $$
+    where $\sigma$ is volume density [S1].
+
+**Edge Cases and Pitfalls:**
+*   The SH coefficients of degree $\ell=3$ account for 98% of the data size, making them the primary bottleneck for compression [S1].
+*   Child and Parent depth structures must be conveyed losslessly to maintain fast rendering speed [S1].
+
+## Operating characteristics
+*   **Compression:** Reduces bit rates by approximately 8x with higher quality than the original PlenOctree, or by approximately 50x with minimal degradation for novel view synthesis [S1].
+*   **Storage:** The original PlenOctree model for the Lego scene requires ~2.3 GB, with 95% of that size coming from $\sigma$ and $k$ coefficients [S1].
+*   **Strengths:** Maintains high rendering speed and quality while significantly reducing model size [S1].
+*   **Limitations:** The method relies on the efficiency of G-PCC for compression; the underlying representation remains large before compression [S1].
+
+## Background
+*   **Origin:** The method is described in "Compression of PlenOctree Model Attributes Enabling Fast Communication and Rendering of Neural Radiance Fields" [S1].
+*   **Development:** It improves upon the PlenOctree method [6] by addressing its large storage requirements. It incorporates techniques from Mip-NeRF [11] for ray offsets and SNeRG [7] for the Cauchy loss.
+*   **Usage:** Used for fast communication and rendering of Neural Radiance Fields, particularly where bandwidth or storage is constrained [S1].
+
+## Sources
+[S1] Compression of PlenOctree Model Attributes Enabling Fast Communication and Rendering of Neural Radiance Fields, https://hal.science/hal-04195520v1, fetched 2026-10-26

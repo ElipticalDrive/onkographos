@@ -1,78 +1,86 @@
 # Voxel Child Address Calculation
-
 Also called: Voxel address_of
 
 ## Overview
-Calculates the linear index (address) of a specific child octant within a compact block of valid children, based on a validity bitmask [S1, unofficial]. It maps a logical octant index (0–7) to its physical position in a dense array that only stores active children [S1, unofficial].
+Voxel Child Address Calculation computes the linear index of a specific child octant within a compact payload array, given its logical octant index and a bitmask of active children. It solves the problem of mapping sparse octree children to a dense, contiguous memory block, allowing traversal to skip empty octants without allocating storage for them. Unlike [Octree Child Index Computation](1807-octree-child-index-computation.md), which yields the 0-7 octant offset, this method translates that offset into the actual storage position based on the validity mask.
 
 ## How it works
 **Inputs:**
-- `valid`: Bitmask where bit $i$ is 1 if child $i$ is active, 0 otherwise.
-- `octant`: Target child index (0–7).
+- `octant`: The logical index of the target child (0–7).
+- `valid`: A bitmask where the $i$-th bit is set if child $i$ exists.
 
 **Outputs:**
-- `address`: 0-based index of the target child within the compact array of valid children.
+- `address`: The linear index in the compact child array.
 
 **Data Structures:**
-- `valid`: Integer type (e.g., `uint8_t`), 8 bits.
+- `valid`: Integer bitmask (8 bits).
 
 **Steps:**
-1. Create a mask that isolates all bits lower than the target `octant`:
-   $$ \text{mask} = \sim(0xFF \ll \text{octant}) $$
-   This isolates the bits corresponding to children with indices lower than `octant` [S1, unofficial].
-2. Compute the bitwise AND of `valid` and `mask` to isolate valid children preceding the target [S1, unofficial].
-3. Count the number of set bits (population count) in the result to determine the offset [S1, unofficial].
-   $$ \text{address} = \text{popcount}(\text{valid} \ \& \ \text{mask}) $$
+1. Create a mask that isolates all bits preceding the target `octant`.
+2. Count the number of set bits in the intersection of the mask and `valid`.
+3. Return the count as the address.
 
-**Parameters:**
-- `octant`: Integer, 0–7.
+**Formula:**
+$$ \text{address} = \text{octant} + \text{popcount}(\sim(0xFF \ll \text{octant}) \ \& \ \text{valid}) $$
 
-**Edge Cases and Pitfalls:**
-- The calculation assumes children are stored in order of their octant index, but only valid children are present in the block; the popcount determines the offset [S1, unofficial].
-- If `octant` is not valid (bit is 0 in `valid`), the result is the index where it *would* be if it were valid [S1, unofficial].
+Where:
+- `popcount` counts the number of set bits (population count).
+- `~` is bitwise NOT.
+- `<<` is bitwise left shift.
+- `&` is bitwise AND.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def voxel_child_address(valid: int, octant: int) -> int:
-    # Create mask: isolate bits lower than octant
-    # ~0xFF inverts all bits; shifting left moves the zero-bits to the right
-    # Masking with 0xFF ensures 8-bit wrap-around for languages with infinite precision integers
-    mask = (~0xFF << octant) & 0xFF
+def voxel_child_address_calculation(octant: int, valid: int) -> int:
+    """
+    Calculate the linear address of a child in a compact array.
+    
+    Args:
+        octant: Logical child index (0-7).
+        valid: Bitmask of active children.
+        
+    Returns:
+        Linear index in the compact payload array.
+    """
+    # Create mask: isolate bits preceding the target octant
+    # ~0xFF is 0xFFFFFF00 (assuming 32-bit int), shifting left by octant
+    # ensures bits 0 to octant-1 are 1, and octant onwards are 0.
+    mask = ~(0xFF << octant)
+    
     # Count valid children preceding the target
-    return bin(valid & mask).count('1')
+    preceding_valid = popcount(mask & valid)
+    
+    # The address is the number of preceding valid children
+    return preceding_valid
+
+def popcount(n: int) -> int:
+    """Count the number of set bits in an integer."""
+    count = 0
+    while n:
+        n &= n - 1
+        count += 1
+    return count
 ```
+
+**Edge Cases:**
+- If `octant` is not set in `valid`, the result is the insertion point where that child would be if added.
+- If `valid` is 0, the result is 0 (though accessing child 0 is invalid).
 
 ## Subtopics
 
-### Prefix Rank for Compact Child Indexing
-Counts the number of active children (bits set to 1) in a bitmask that precede a given `child_index` [S2, unofficial]. Used to map a child index to a compact payload index in sparse octrees [S2, unofficial]. Supports wider nodes (e.g., 0–63 for 64-way) [S2, unofficial].
-- **Definition:** Maps a logical child index to its rank among valid children [S2, unofficial].
-- **Steps:** If `child_index <= 0`, return 0. Create `lower_mask = (1 << child_index) - 1`. Return `popcount(mask & lower_mask)` [S2, unofficial].
-- **Parameters:** `mask`: Bitmask representing occupied children. `child_index`: Target child index (0–7 for 8-way, 0–63 for wide) [S2, unofficial].
-- **Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def prefix_rank(mask: int, child_index: int) -> int:
-    if child_index <= 0:
-        return 0
-    lower_mask = (1 << child_index) - 1
-    return bin(mask & lower_mask).count('1')
-```
+### [Prefix Rank for Compact Child Indexing](5129-prefix-rank-for-compact-child-indexing.md)
+Maps a child's logical index to its compact position using a rank query on a bit vector. Chosen when storage must be minimized by skipping empty octants.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ assuming fixed-width integers and hardware popcount [G].
-- **Memory Complexity:** $O(1)$ [G].
-- **Strengths:** Extremely fast, branchless (if popcount is hardware-supported), essential for compact memory layouts [G].
-- **Limitations:** Only works for direct child indexing within a single node [G].
-- **When to use:** When storing children in a compact array and needing to find the index of a specific child [G].
-- **When not to use:** When traversing the tree or locating a node in the tree structure [G].
+- **Time Complexity:** $O(1)$ assuming hardware popcount or $O(\log N)$ where $N$ is the number of bits (8 for octants).
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Strengths:** Extremely fast, enables dense packing of sparse data.
+- **Limitations:** Requires the children to be stored in octant order within the compact array.
 
 ## Background
-Originated in implementations of sparse voxel octrees for efficient memory storage and ray traversal [G]. Popularized by libraries like [zazen](https://github.com/gabrielmuller/zazen) and [sparse-voxels](https://github.com/hectorpiteau/sparse-voxels) for GPU-based volume rendering [S1, S2, unofficial].
+Originated in implementations of sparse voxel octrees for real-time rendering, such as in the Zazen renderer [S1, unofficial]. It is a fundamental component of hierarchical grid traversal methods that use compact child arrays.
 
 ## Sources
 [S1] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)
-[S2] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)

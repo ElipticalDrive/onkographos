@@ -1,0 +1,2194 @@
+Analyzing the Internals of Neural Radiance Fields
+Lukas Radl
+Andreas Kurz
+Michael Steiner
+Markus Steinberger
+{lukas.radl, andreas.kurz, michael.steiner, steinberger}@icg.tugraz.at
+arXiv:2306.00696v2 [cs.CV] 11 Apr 2024
+Graz University of Technology, Austria
+Figure 1. We show how density estimates derived from intermediate activations can accelerate inference for pre-trained Neural Radiance
+Fields by effectively reducing the capacity of large MLPs. Here, we show a small toy example for a ray with seven, uniformly placed
+samples between tn and tf . We obtain an activation feature vector fℓ for layer ℓ, apply a function to obtain a density estimate d̂, leveraging
+the observation that minima in activation feature space indicate samples with high density σ. Finally, we perform inverse transform sampling
+with our weight estimate ŵ.
+Abstract
+Modern Neural Radiance Fields (NeRFs) learn a mapping from position to volumetric density leveraging proposal
+network samplers. In contrast to the coarse-to-fine sampling approach with two NeRFs, this offers significant potential for acceleration using lower network capacity. Given
+that NeRFs utilize most of their network capacity to estimate radiance, they could store valuable density information
+in their parameters or their deep features. To investigate
+this proposition, we take one step back and analyze large,
+trained ReLU-MLPs used in coarse-to-fine sampling. Building on our novel activation visualization method, we find
+that trained NeRFs, Mip-NeRFs and proposal network samplers map samples with high density to local minima along
+a ray in activation feature space. We show how these large
+MLPs can be accelerated by transforming intermediate activations to a weight estimate, without any modifications to
+the training protocol or the network architecture. With our
+approach, we can reduce the computational requirements of
+trained NeRFs by up to 50% with only a slight hit in rendering quality. Extensive experimental evaluation on a variety
+of datasets and architectures demonstrates the effectiveness
+of our approach. Consequently, our methodology provides
+valuable insight into the inner workings of NeRFs.
+1. Introduction
+Neural Fields [43] parameterize implicit functions over continuous domains using neural networks and have gained
+popularity due to their ability to represent various types of
+signals. To represent arbitrary high-frequency functions,
+positional encoding [20], Fourier features [34], Gaussian
+activations [6, 26], among other alternatives [7, 30, 31],
+are used to overcome the spectral bias [25]. Compared to
+their explicit counterparts, implicit representations are more
+memory-efficient and can achieve higher quality, but regrettably suffer from slower inference. In addition, as the signal
+is encoded in the weights and biases of a neural network,
+every change to a parameter has a non-local effect, which
+makes implicit representations hard to modify.
+For novel view synthesis problems, the 5D plenoptic
+function mapping positions and directions to radiance and
+density can be learned from posed images leveraging a neural
+field. NeRFs [20] have recently demonstrated impressive
+performance for real-world and synthetic datasets. However,
+the naı̈ve approach of sampling the scene densely is slow and
+inefficient due to the prohibitive number of required samples.
+A coarse-to-fine sampling strategy is adopted to overcome
+these limitations, estimating the density distribution along a
+ray by uniformly sampling a coarse NeRF, which generates a
+new set of samples for a subsequent fine NeRF using inverse
+transform sampling. Although performance is improved
+substantially, the number of required samples still prohibits
+real-time rendering. Furthermore, as no ground-truth density
+information is available, the coarse NeRF is supervised with
+an MSE reconstruction loss.
+Reducing the number of required samples for NeRFs is a
+fruitful endeavor to lower the computational requirements.
+Sampling networks [1, 3, 16, 22], which predict volumetric density along a ray to produce a set of samples for a
+subsequent shading network, prove highly effective for this
+task. The network capacity for a sampling network is significantly reduced, as solely predicting volumetric density
+is view-independent and thus easier to learn. For supervising these sampling networks ground-truth depth data [22],
+a pre-trained NeRF [24], multi-view stereo [17] or distillation from a concurrently trained shading network [1, 3, 16]
+may be used. Alternatively, occupancy grids [21] allow for
+efficient empty-space skipping by encoding the expected
+density within a discretized region.
+A clear disadvantage of the coarse-to-fine NeRF pipeline
+is the use of the coarse model for density prediction only,
+even though it is optimized to reconstruct the ground-truth
+image. Sampling networks, on the other hand, map sample positions to volumetric density using a network with
+reduced capacity and can be supervised by the shading network. Given that sampling networks show that density can
+be modelled with lower capacity, a subset of a coarse NeRF
+should be able to model density accurately as well — particularly since recent work has found that NeRF-MLPs naturally
+partition themselves into structural and color layers [38].
+To this end, we analyze the intermediate activations of
+coarse NeRFs: We derive a representation from these activations and show how it is tied to the density distribution along
+a view ray. Building on this crucial finding, we devise a novel
+method to extract density estimates given intermediate activations of coarse NeRFs. By elegantly combining activation
+analysis and our method to extract densities, our approach
+can reduce inference times while maintaining high quality
+at test-time. We demonstrate that our approach is not only
+applicable to NeRF and Mip-NeRF [2], but produces similar
+results when applied to proposal network samplers as well,
+with extensive evaluation supporting our claim. To the best
+of our knowledge, our approach is the first to use intermediate activations to accelerate inference for coordinate-based
+MLPs.
+To summarize, our contributions are as follows:
+• We present a novel method for visualizing and analyzing
+the activations of coordinate-based ReLU-MLPs.
+• We present an approach for extracting a density estimate for fine re-sampling from activations in early layers of coarse NeRFs, significantly reducing the inference
+time with little decrease in quality. Consequently, our
+method provides valuable insight into the inner workings
+of NeRFs.
+• We demonstrate the effectiveness of our method for several
+architectures with real-world and synthetic data.
+2. Related Work
+In the following, we review related work, focusing on realtime rendering and efficient sampling for NeRFs.
+NeRFs for Real-time Rendering. Instead of the implicit
+representation of radiance fields used in NeRF [20], explicit
+representations with grid-like data structures [8, 33] or hybrid representation [4, 13, 21, 42, 44] are often used to accelerate inference and training. Most prominently of the
+aforementioned, Instant-NGP [21] replaces the fixed positional encoding used by NeRF with a learnable hash encoding, allowing for the use of much smaller MLPs and thus
+rapid convergence. Alternatively, 3D Gaussian Splatting [14]
+has recently demonstrated state-of-the-art rendering quality
+in addition to fast training and rendering using a fully explicit representation relying on anisotropic 3D Gaussians.
+Other works [27, 28] suggest a divide-and-conquer approach,
+utilizing many tiny MLPs responsible for a small region instead of a large MLP for the whole scene. Distillation of a
+NeRF into a render-friendly format has been explored extensively [9, 11], but these approaches are memory-intensive
+and require an additional distillation step after training. Recent work [15, 37] has also investigated approximate geometry equipped with neural features and small, global decoders.
+Finally, mesh-based view synthesis [5, 29, 45] has recently
+demonstrated real-time rendering on low-power devices, relying on approximate meshes extracted from radiance fields
+and the well-known graphics pipeline.
+Efficient Sampling. Several works investigate a learnable
+proposal sampler, which can predict volumetric density [3] or
+sample locations [1]. DONeRF [22] learns a density volume
+as a multi-class classification task to guide sample placement with direct depth supervision. Building on DONeRF,
+AdaNeRF [16] mitigates the requirement of pre-training and
+depth supervision for the sampling network with a 4-phase
+training recipe. EfficientNeRF [12] proposes valid sampling,
+caching densities of sample positions and exclusively evaluating those with positive density — this approach shares
+similarities with our method in that it is motivated by the
+density distribution of coarse NeRFs. TermiNeRF [24] distills a NeRF into a sampling and shading network. For their
+sampling network, they perform distribution matching, effectively reparameterizing NeRFs intervals to allow for fewer
+samples. Lin et al. [17] learn a proxy geometry with a cost
+volume for depth guidance, uniformly sampling a smaller
+depth range with a lower sample count. A better sampling
+strategy is also attained by unifying implicit surface models
+and radiance fields [23]. To enable mesh-based view synthesis, SDFs [45] or Binary Opacity Grids [29] can accurately
+locate surfaces. Finally, by restricting volume rendering to a
+small band around the surface [41], the number of samples
+can be reduced significantly.
+3. Preliminaries
+In the following section, we briefly summarize the most
+important architectures and concepts which build the foundation for our work.
+3.1. NeRF
+NeRFs [20] learn a function
+\Theta _{\text {NeRF}}: \R ^5 \rightarrow \R ^4,\ (\vec {p}, \vec {d}) \mapsto (\vec {c}, \sigma ),
+(1)
+where p = (x, y, z) and d = (θ, ϕ) are the sample position
+and viewing direction, c ∈ [0, 1]3 denotes the predicted
+output color and σ ∈ R is the volumetric density. NeRF uses
+a ReLU-MLP with 8 layers and 56 hidden units to predict
+a feature vector f ∈ R256 and σ. This feature vector is then
+concatenated with d and passed through a small ReLU-MLP
+to produce c, which allows view-dependent phenomena to
+be modelled. For each pixel, we cast a ray r(t) = o + td
+from the origin o in the direction of d. We evaluate ΘNeRF
+at different sample positions t ∈ [tn , tf ] between the near
+bound tn and the far bound tf . The color Cˆ of a ray r can be
+estimated using Ns samples with
+\hat {\mathcal {C}}(\vec {r}) = \sum _{i=1}^{N_s} T_i (1 - \exp ({-\sigma _i \delta _i}))\vec {c}_i,
+(2)
+where δi and Ti are given as
+\delta _i = t_{i+1}-t_i, \quad T_i = \exp {\left (- \sum _{j=1}^{i-1} {\sigma _j \delta _j}\right )}.
+(3)
+used to express the estimated coarse radiance as a weighted
+sum
+\hat {\mathcal {C}}_c(\vec r) = \sum _{i=1}^{N_c} \mathrm {w}_i \vec c_i.
+(5)
+The weights w are normalized such that 1T w = 1 to obtain
+a piecewise-constant PDF along r. This distribution is used
+to produce a new set of Nf samples with inverse transform
+sampling. The final rendered color is produced by Θfine
+using all Nc + Nf samples.
+NeRF applies positional encoding γ(·) to p and d, allowing the network to model high-frequency details effectively [34]. The network isP
+supervised with the MSE loss for
+both Θcoarse and Θfine , i.e. r ∥Cˆc (r) − C(r)∥22 + ∥Cˆf (r) −
+C(r)∥22 , with C(r) denoting the ground truth color for r and
+Cˆf (r) denoting the estimated fine radiance of r.
+3.2. Mip-NeRF
+Mip-NeRF [2] builds on NeRF and tackles the problem of
+aliasing when scene content is observed at various resolutions. The standard computer graphics solution of supersampling is prohibitively expensive when considering NeRFs
+volume rendering. Instead, Mip-NeRF introduces a novel Integrated Positional Encoding (IPE), which is the expected positional encoding of all coordinates within a conical frustum.
+Each conical frustum is approximated with a multivariate
+Gaussian, and the IPE feature serves as the encoded input for
+ΘNeRF . This modification allows the MLP to reason about the
+size and shape of the encoded region, efficiently combating
+aliasing which occurs for ambiguous point samples.
+As the network can now learn a multi-scale scene representation, ΘNeRF performs both coarse and fine sampling,
+reducing the model size by 50% — however, the network is
+still supervised with an MSE loss.
+3.3. Mip-NeRF 360
+NeRF and Mip-NeRF require that 3D coordinates exist in
+a bounded domain for sampling — an assumption which is
+violated in unbounded 3D scenes, where objects may exist
+at any distance from the camera. Therefore, Mip-NeRF
+360 [3] proposes a spatial contraction contract(·), which
+maps coordinates from R3 to a ball of radius 2:
+\text {contract}(\vec x) = \begin {cases} \vec x & \|\vec x \| \leq 1 \\ \left ( 2 - \frac {1}{\|\vec x \|}\right )\left ( \frac {\vec x}{\|\vec x \|}\right ) & \|\vec x \| > 1 \\ \end {cases}.
+(6)
+To increase rendering efficiency, two NeRFs are concurrently
+optimized. The coarse NeRF Θcoarse places Nc samples
+uniformly for each ray r, which produces a set of weights
+w ∈ RNc with
+To handle the increased capacity required for unbounded
+scenes and increase rendering efficiency, Mip-NeRF 360
+concurrently optimizes two MLPs, Θprop and ΘNeRF . Their
+proposal network sampler Θprop learns a function
+\mathrm {w}_i = { T_i(1 - \exp (-\sigma _i \delta _i))}, \label {eq:3:weights}
+\Theta _{\text {prop}}: \R ^3 \rightarrow \R ,\ \vec {p} \mapsto \sigma ,
+(4)
+(7)
+Figure 3. Intermediate activations allow for simple performance
+improvements. We can reduce the inference time of NeRFs in
+synthetic scenes if we perform the fine pass only if the condition
+vℓ < µ(Vℓ ) is met.
+We analyze the hidden layer activations of NeRF MLPs as
+follows: For each pixel (x, y), a ray r is generated, positional
+encoding γ(·) is applied and each sample along the ray is
+passed through ΘNeRF . In the following, we describe the
+intermediate activations in terms of a single ray/pixel. After
+each linear layer, the activation A(ℓ) is of size RNs ×Nh ,
+where Ns and Nh denote the number of samples and the
+number of hidden units, respectively. To obtain a feature
+representation fℓ ∈ RNs for the activation in layer ℓ, we
+compute the mean over the dimension Nh :
+Figure 2. Ground-truth images and their corresponding normalized
+coarse and fine activations vℓ using the magma colormap reveal an
+interesting relationship between activations and outputs. With our
+visualization approach, we can infer some scene content using only
+vℓ . For each scene, we visualize activations for different layers ℓ.
+and is optimized to bound the weights w produced by ΘNeRF .
+Two subsequent rounds of proposal sampling produce two
+weights {ŵ1 , ŵ2 }, which is efficient due to the small size of
+Θprop with 4 layers and 256 hidden units.
+4. Activation Analysis
+In this section, we present our method for visualizing and
+analyzing the intermediate activations for ReLU-MLPs. In
+addition, we show how we can leverage these intermediate
+activations to accelerate inference for pre-trained NeRFs.
+4.1. Visualizing and Analyzing Activations
+Benefiting from the inherent spatial structure baked into
+their building blocks, several works [32, 47] investigate the
+visualization of intermediate features for Convolutional Neural Networks (CNNs). These methods typically operate by
+back-projection from feature space to pixel space, allowing
+informative insight into the inner workings of these models. For MLPs, which are mostly used as universal function
+approximators, practitioners have not been as interested in
+their activations. To this end, we propose a novel method for
+visualizing activations of coordinate-based MLPs.
+\fl = \frac {1}{N_h}\ \sum _{i=1}^{N_h}\ {\vec {A}^{(\ell )}_{i}}. \label {eq:feature_per_sample}
+(8)
+Further, we can produce a scalar vℓ ∈ R for each ray r for
+visualization purposes with
+\vl = \frac {1}{N_s}\ \sum _{i=1}^{N_s}\ \sum _{j=1}^{N_h}\ {\vec {A}^{(\ell )}_{i, j}}. \label {eq:activation}
+(9)
+We visualize the activations of different layers ℓ for some
+example views using Eqn. (9) in Fig. 2. As we can see, intermediate activations exhibit notable structural information.
+We note that when recording activations A(ℓ) , we have the
+option to apply or not apply the activation function. Unless
+stated otherwise, we work with activations after the ReLU
+s ×Nh
+has been applied, thus A(ℓ) ∈ RN
+. Although unintu+
+itive due to the information loss caused by the ReLU, early
+experiments showed that applying the activation function
+resulted in more consistent histograms for fℓ .
+4.2. Reducing Unnecessary Network Evaluations
+using Activations
+As a first step towards speeding up the coarse-to-fine NeRF
+rendering pipeline, we analyze the densities σ predicted
+by Θcoarse . Take, for example, any of the synthetic scenes
+from the Blender dataset [20]. Along rays r in empty space,
+we do not expect any sample with significant volumetric
+density. We can sum the number of densities along each
+ray r larger than a small threshold τ to obtain a mapping
+ℓ
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+t [s]
+Speedup
+% fine Rays
+1
+2
+3
+4
+29.66
+30.45
+31.21
+30.71
+0.93
+0.94
+0.95
+0.95
+0.04
+0.03
+0.02
+0.03
+34.69
+34.02
+33.11
+34.76
+40%
+43%
+47%
+43%
+59%
+58%
+55%
+59%
+NeRF
+32.20
+0.96
+0.02
+48.98
+-
+100%
+Table 1. Quantitative results for our activation informed coarse-tofine experiment for the lego scene from the Blender dataset [20].
+Only performing the fine pass for rays r where the summed activation is smaller than τ = µ(Vℓ ) yields a significant performance
+gain with a slight drop in rendering quality.
+g : r 7→ {0, . . . , Nc }. If for any of the rays the result is
+0, the corresponding pixel likely belongs to the transparent
+background. We see in Fig. 3 that when the value of g is
+high, the value of vℓ is low, and vice-versa.
+For each ray r, we record the predicted coarse radiance Cˆc
+and the activations vℓ from Θcoarse . We choose a threshold τ ,
+which indicates whether we observe scene content along r.
+We choose τ = µ(Vℓ ), the mean activation of the activation
+image Vℓ . We obtain a set of rays P = {r : vℓ < τ }, which
+we treat as a mask. If r ∈ P , we evaluate Θfine . Otherwise,
+we treat the coarse radiance Cˆc as our final output. Using
+this approach, we can significantly reduce the number of
+evaluations for Θfine , which uses Nc + Nf = 192 samples,
+which results in a significant performance improvement. As
+we cover most of the object in the scene with our derived
+mask P , the image quality loss is negligible. We report the
+results for the lego scene from the Blender dataset [20] in
+Tab. 1 and visualize our approach in Fig. 3. This experiment
+demonstrates that early intermediate activations already contain notable density information and reveals an interesting
+connection between density and activations.
+Figure 4. Visualization of our proposed approach for approximate
+density extraction for a real-world example: We visualize activation features fℓ and densities σ for 128 uniform samples along an
+example ray, for a Mip-NeRF trained on the chair scene. Using
+Eqn. (10), a plausible density estimate d̂ is extracted from a activation feature fℓ .
+4.3. Approximating Density using Activations
+Clearly, the approach from Sec. 4.2 heavily relies on the
+transparent background present in synthetic scenes. Realworld captures, on the other hand, often include highly detailed backgrounds. Therefore, we go beyond this basic
+approach by analyzing the activation features fℓ along a ray
+r. We accomplish this by examining histograms of the predicted density σ and the activation features fℓ , as can be
+seen in Fig. 4. We notice a trend throughout multiple scenes:
+Activation feature space minima indicate samples with significant density. If we can find a function to transform fℓ to
+a reasonable density estimate d̂, we can effectively replace
+the expensive evaluation for Θcoarse with a pass through a
+smaller MLP. Ideally, this function should transform fℓ to
+a vector of mostly zeros, except for locations where σ is
+significant. To this end, we propose 3 different functions
+fi to map the intermediate activations directly to estimated
+densities d̂, which were handcrafted based on the observed
+relationship between activations and density:
+\comm {\hat {\vec d} =} f_1\left ( \fl \right ) &= \text {ReLU} \left ( \left (\mu (\fl ) - \sigma (\fl )\right ) - \fl \right ), \label {eq:std}\\ \comm {\hat {\vec d} =} f_2\left ( \fl \right ) &= \text {ReLU} \left ( \left (\mu (\fl ) - \frac {\sigma (\fl )}{2}\right ) - \fl \right ), \label {eq:stdhalf}\\ \comm {\hat {\vec d} =} f_3\left ( \fl \right ) &= \text {ReLU} \left ( \left (\mu (\fl ) - \frac {\sigma (\fl )}{2}\right ) - \fl \right )^2, \label {eq:stdhalfsq}
+(12)
+where fℓ denotes the intermediate activation feature for layer
+ℓ and µ(·), σ(·) denote the mean and standard deviation
+along the last dimension (i.e. along the Ns samples of the
+ray r). We visualize our approach for a toy example in Fig. 1.
+Using Eqn. (10) results in fewer intervals with density
+along the ray, but is prone to failures if the distribution
+along a ray exhibits high standard deviation. On the other
+hand, Eqns. (11) and (12) extract density estimates more
+conservatively but might lead to insufficient detail, as the
+interval between fine samples grows larger.
+Given a well-behaved distribution, we can estimate densities sufficiently close to σ such that we get good reconstruction quality when converting d̂ to a weight estimate ŵ.
+Further, we can significantly reduce the required inference
+time by using only a small subset of the large Θcoarse MLP.
+Clearly, the potential speedup is dependent on the number
+of samples Ns , which is large for NeRFs.
+Our Proposed Method for Weight Estimation. First, we
+extract the activation features fℓ and apply a function fi to
+transform this to a density estimate d̂ for each ray r. To
+obtain our estimated weights ŵ, which should conform to
+a piecewise-constant
+PDF along the ray r, we use ŵi =
+PNs ˆ
+dˆi / j=1
+dj and subsequently perform inverse transform
+sampling, as done in NeRF [20] (c.f. Fig. 1).
+5. Experiments
+In the following, we apply our presented method to
+NeRF [20] and Mip-NeRF [2]. Additionally, we apply our
+method to proposal network samplers, utilizing a nerfacto
+model [35] with a Mip-NeRF 360 [3] proposal sampler,
+which we dub nerfacto† . We only apply our density extraction method to the first 3 layers: Recent work by Wang et
+al. [38] has found that NeRF MLPs naturally store structural
+information within the first MLP layers. In addition, when
+applying our method to earlier layers, we can accelerate
+inference more substantially.
+NeRF
+ℓ
+Blender, 800 × 800
+f
+PSNR SSIM LPIPS
+1
+f1
+f2
+f3
+27.48
+28.69
+28.63
+0.92
+0.92
+0.92
+0.09
+0.08
+0.08
+2
+f1
+f2
+f3
+27.99
+29.05
+29.44
+0.92
+0.93
+0.93
+3
+f1
+f2
+f3
+24.17
+26.23
+25.07
+NeRF
+29.87
+LLFF, 1008 × 756
+Speedup PSNR SSIM LPIPS
+Speedup
+24%
+25.11
+25.40
+25.34
+0.75
+0.76
+0.75
+0.23
+0.22
+0.23
+28%
+0.08
+0.07
+0.07
+20%
+24.72
+25.12
+25.01
+0.73
+0.74
+0.74
+0.26
+0.24
+0.25
+24%
+0.88
+0.90
+0.89
+0.12
+0.11
+0.11
+18%
+24.21
+24.99
+24.87
+0.71
+0.74
+0.73
+0.28
+0.25
+0.26
+20%
+0.94
+0.06
+-
+25.89
+0.78
+0.18
+-
+Mip-NeRF
+Datasets. For our evaluation, we use four diverse datasets,
+which are well-established in the novel view synthesis literature: The Blender dataset [20] consists of 360◦ captures of synthetic objects with complex geometry, realistic
+non-Lambertian effects and transparent backgrounds in a
+bounded domain. LLFF [19] is a dataset of forward-facing,
+real-world scenes in high resolution. The Mip-NeRF 360
+dataset [3] contains 360◦ captures of real-world, unbounded
+scenes and is the most challenging benchmark in our evaluation. Finally, we also use 2 large-scale, bounded indoor
+scenes from Deep Blending [10] (playroom & drjohnson).
+For both LLFF and Mip-NeRF 360, we use the 4× downsampled images. We report per-scene results in the supplementary material.
+Implementation Details. We use the NeRF and MipNeRF implementations from Nerfstudio [35] and use the hyperparameter settings as reported in the respective works [2,
+20]. To facilitate sampling in NDC, as NeRF does for
+LLFF [19], we implement a custom LLFF dataloader
+adapted from the nerf-pytorch codebase [46].
+For our experiments with proposal network samplers,
+we adapt the nerfacto model from Nerfstudio [35]. This
+architecture unifies recent NeRF-related research [3, 18, 21,
+36, 40] into a single, universally-applicable method. For
+our nerfacto† model, we replace the HashMLPDensityField
+with a 4-layer ReLU-MLP with 256 hidden units, following
+Mip-NeRF 360 [3], and use positional encoding [20]. Note
+that this configuration is slower than nerfacto due to the large
+MLP, however, it enables experiments with our proposed
+method for proposal network samplers.
+5.1. Speeding up NeRF and Mip-NeRF
+We evaluate our approach for NeRF and Mip-NeRF using
+the Blender dataset [20] and the LLFF dataset [19]. For the
+NeRF experiment, we could either record the activations
+from Θcoarse or Θfine . However, only Θcoarse is trained for
+uniform samples, hence we use the coarse MLP, which also
+performed better in our experiments.
+1
+f1
+f2
+f3
+27.54
+28.75
+28.72
+0.92
+0.92
+0.93
+0.09
+0.08
+0.08
+58%
+25.07
+25.45
+25.35
+0.74
+0.76
+0.75
+0.24
+0.22
+0.22
+50%
+2
+f1
+f2
+f3
+26.67
+29.04
+29.35
+0.91
+0.93
+0.93
+0.09
+0.07
+0.07
+49%
+25.02
+25.44
+25.35
+0.74
+0.75
+0.75
+0.25
+0.22
+0.23
+40%
+3
+f1
+f2
+f3
+23.47
+27.47
+26.45
+0.90
+0.92
+0.91
+0.10
+0.09
+0.09
+39%
+24.21
+25.49
+25.42
+0.71
+0.76
+0.75
+0.28
+0.22
+0.22
+35%
+Mip-NeRF 29.69
+0.94
+0.06
+-
+25.99
+0.78
+0.18
+-
+nerfacto
+†
+1
+f1
+f2
+f3
+25.67
+26.20
+26.17
+0.91
+0.91
+0.91
+0.10
+0.09
+0.09
+83%
+24.46
+24.69
+24.13
+0.81
+0.81
+0.80
+0.15
+0.14
+0.16
+79%
+2
+f1
+f2
+f3
+26.24
+26.56
+26.31
+0.91
+0.91
+0.91
+0.09
+0.09
+0.09
+29%
+24.21
+24.83
+23.51
+0.80
+0.81
+0.78
+0.16
+0.14
+0.18
+29%
+3
+f1
+f2
+f3
+26.16
+25.58
+24.79
+0.91
+0.91
+0.90
+0.09
+0.10
+0.10
+-
+23.21
+23.78
+23.04
+0.78
+0.79
+0.77
+0.19
+0.17
+0.22
+-
+nerfacto†
+27.61
+0.93
+0.07
+-
+25.35
+0.83
+0.12
+-
+Table 2. Quantitative evaluation of our approach for NeRF, MipNeRF and nerfacto† . For each dataset, we report PSNR, SSIM [39]
+and LPIPS [48]. We highlight best , second-best and third-best
+and point out failures of our method.
+We report quantitative results in Tab. 2 and show our
+visual results in Fig. 5. For NeRF, the performance gain is not
+as significant as for Mip-NeRF due to the different number of
+samples Nc , Nf : For Mip-NeRF, Nc = Nf = 128, contrary
+to Nc = 64, Nf = 128 + 64 for NeRF. Hence, our approach
+performs favorably for Mip-NeRF due to its more expensive
+coarse network evaluation. We find that Eqn. (11) for ℓ = 2
+performs best in our experiments. All run-time results for
+NeRF and Mip-NeRF were obtained on an NVIDIA Quadro
+RTX 8000.
+5.2. Speeding up Proposal Networks
+First, we evaluate our approach for nerfacto† using the
+Blender dataset [20] and the LLFF dataset [19]. For our
+experiments, we approximate the first iteration of proposal
+sampling: As the proposal sampler iterations use {256, 96}
+Mip-NeRF 360
+Deep Blending
+PSNR SSIM LPIPS Speedup PSNR SSIM LPIPS Speedup
+1
+f1
+f2
+f3
+22.80 0.687
+22.92 0.691
+22.80 0.687
+0.282
+0.279
+0.283
+76 %
+28.01 0.858
+28.01 0.859
+27.98 0.858
+0.237
+0.237
+0.239
+72 %
+2
+f1
+f2
+f3
+22.71 0.683
+22.66 0.681
+22.67 0.680
+0.289
+0.292
+0.297
+28 %
+27.97 0.858
+27.95 0.856
+27.94 0.856
+0.239
+0.243
+0.242
+27 %
+3
+f1
+f2
+f3
+22.44 0.675
+22.21 0.669
+22.39 0.669
+0.305
+0.309
+0.316
+-
+27.77 0.849
+27.48 0.844
+27.78 0.847
+0.256
+0.264
+0.262
+-
+nerfacto† 24.20 0.732
+0.237
+-
+29.26 0.880
+0.207
+-
+Table 3. Quantitative evaluation of our approach for nerfacto† for
+Mip-NeRF 360 [3] and Deep Blending [10]. For each dataset, we
+report PSNR, SSIM [39] and LPIPS [48]. We highlight best ,
+second-best and third-best for each image metric.
+The reported run-time results for nerfacto† were obtained on
+an NVIDIA RTX 2070 Super.
+Further, we evaluate our method on unbounded, realworld scenes, leveraging the Mip-NeRF 360 [3] and Deep
+Blending [10] datasets. We adapt nerfacto† in the following
+ways: We use 7 × 105 training iterations, disable the appearance embedding, camera optimizer, distortion loss and the
+collider. We present our results in Tab. 3 and show example
+outputs in Fig. 6. Compared to the results presented for the
+LLFF dataset [19], our method performs less favorably in
+this scenario. We attribute this to the large sampling domain
+in these datasets, which requires more precise density estimates. Performance-wise, we observe the same trends as for
+the previous experiments. We used an NVIDIA RTX 4090
+for these two datasets.
+Figure 5. Qualitative results for our approach (top row) compared to
+baseline methods (bottom row) for synthetic and real-world scenes.
+As can be seen in the zoomed-in views, our best renderings are
+virtually indistinguishable from the baseline in most configurations.
+samples, respectively, approximating the first round yields
+more performance improvements1 . In addition, our functions
+fi are biased towards uniform or piecewise-linear sample
+placement, and lead to unfavorable results when interval
+sizes vary significantly.
+We report quantitative results in Tab. 2 and show our
+visual results in Fig. 5. For the nerfacto† model, we observe
+a huge performance gain for the first layer, which declines
+sharply — this is due to the large number of samples for
+the first proposal sampler iteration and the small shading
+network. We find that Eqn. (11) applied in layer ℓ = 2
+performed best when considering standard image metrics.
+1 Please note that nerfacto† is significantly slower than nerfacto due to
+the use of an MLP.
+5.3. Ablation studies
+To support our quantitative evaluation, we conduct additional
+ablation studies to analyze the effect of varying network
+capacity and the use of the ReLU function in our proposed
+functions fi . More details and ablation studies are provided
+in the supplementary material.
+Varying Network Capacity. To investigate the effect of
+network capacity, we vary the number of layers for the proposal network sampler of nerfacto† using the Mip-NeRF 360
+dataset [3]. We report results in Tab. 4 — remarkably, lower
+network capacity allows for better visual quality retention
+for our best configuration. As the decomposition property
+of NeRFs [38] does not apply to proposal network samplers,
+lower network capacity forces the proposal network sampler
+to learn a more informative latent representation of density.
+We report results for all configurations of ℓ and fi in the
+supplementary material — the configuration ℓ = 1 and f2
+performs best for all tested network capacities.
+with ReLU
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+1
+f1
+f2
+f3
+22.796
+22.925
+22.804
+0.687
+0.691
+0.687
+0.282
+0.279
+0.283
+22.347
+22.565
+22.535
+0.666
+0.671
+0.670
+0.291
+0.284
+0.285
+2
+f1
+f2
+f3
+22.708
+22.656
+22.666
+0.683
+0.681
+0.680
+0.289
+0.292
+0.297
+21.527
+21.536
+21.501
+0.637
+0.637
+0.635
+0.327
+0.327
+0.329
+3
+f1
+f2
+f3
+22.443
+22.214
+22.390
+0.675
+0.669
+0.669
+0.305
+0.309
+0.316
+21.598
+21.618
+21.570
+0.635
+0.637
+0.636
+0.334
+0.332
+0.333
+Ours
+Baseline
+Ours
+without ReLU
+Baseline
+Table 5. Ablation study on the effectiveness of using the ReLU
+function. We evaluate our method with fi , either using the ReLU or
+not, for the Mip-NeRF 360 dataset [3] and report averaged scores.
+With the ReLU, we obtain better performance for all configurations.
+Figure 6. Example renderings from our our method compared to
+nerfacto† (Baseline) for the Mip-NeRF 360 dataset [3]. In most
+configurations, our approach is able to retain high visual fidelity on
+this challenging benchmark.
+nerfacto†
+#Layers
+Ours, ℓ = 1, f2
+PSNR ↑ SSIM ↑ LPIPS ↓ PSNR ↑
+2
+3
+4
+5
+6
+24.201
+24.272
+24.201
+24.176
+24.247
+0.726
+0.732
+0.732
+0.729
+0.732
+0.247
+0.237
+0.237
+0.240
+0.234
+23.686
+23.310
+22.925
+22.941
+22.891
+SSIM ↑
+LPIPS ↓
+0.704
+0.700
+0.691
+0.692
+0.690
+0.267
+0.268
+0.279
+0.276
+0.278
+distributed samples. Eqns. (11) and (12) mitigate this issue
+effectively, but might lead to outputs with less detail due to
+their more conservative formulation.
+Although our approach performs well for a variety of
+architectures and datasets, extending it to hybrid or explicit
+representations such as [8, 21, 33, 44] is not trivial, as these
+approaches replace the MLP with more efficient alternatives.
+Further, our handcrafted functions for density estimation
+were created intuitively and are biased towards uniform or
+piecewise-linear sample placement.
+Table 4. Effect of varying network capacity for nerfacto† using the
+Mip-NeRF 360 dataset [3]: When we decrease capacity and use
+the previous best configuration of ℓ = 1 and f2 , our method retains
+more quality and exhibits better image metrics.
+ReLU or no ReLU. We also conduct an additional ablation study to test the effectiveness of applying the ReLU in
+Eqns. (10), (11) and (12): We remove the ReLU for all fi ,
+use the nerfacto† model for the Mip-NeRF 360 dataset [3]
+and report the results in Tab. 5.
+As we can see, not applying the ReLU leads to worse
+outputs for every configuration we tested. Empirically, this
+is caused by the more inconsistent histograms and larger
+standard deviation σ(fℓ ). We note that the configuration
+ℓ = 1, f2 performs best for both variants of our method.
+6. Limitations
+Our method is not without its limitations. For certain test set
+views, using Eqn. (10) results in rays r with ŵ = 0, which
+does not produce a good set of samples for the subsequent
+shading pass. We indicate these cases in Tab. 2 and show
+examples in Fig. 7. These failures are particularly evident for
+Mip-NeRF, as the fine pass does not include the uniformly
+Chair
+Drums
+Hotdog
+Ficus
+Figure 7. Examples of failures of our method. Using Eqn. (10)
+may lead to rays r with ŵ = 0, producing wrong samples for the
+subsequent fine pass.
+7. Conclusion and Outlook
+We have presented a generally applicable framework
+to analyze and visualize the intermediate activations of
+coordinate-based ReLU-MLPs. Building on our findings,
+we proposed a novel method to obtain density estimates
+using our derived activation features. We demonstrated
+that our approach produces faithful renderings with
+improved performance and provided valuable insight into
+the internals of neural fields. We believe our concepts could
+be applied to other tasks involving coordinate-based MLPs.
+References
+[1] Relja Arandjelović and Andrew Zisserman. NeRF in detail: Learning to sample for view synthesis. arXiv CoRR,
+abs/2106.05264, 2021. 2
+[2] Jonathan T. Barron, Ben Mildenhall, Matthew Tancik, Peter
+Hedman, Ricardo Martin-Brualla, and Pratul P. Srinivasan.
+Mip-NeRF: A Multiscale Representation for Anti-Aliasing
+Neural Radiance Fields. In ICCV, 2021. 2, 3, 6, 12
+[3] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded
+Anti-Aliased Neural Radiance Fields. In CVPR, 2022. 2, 3,
+6, 7, 8, 11, 12, 13
+[4] Anpei Chen, Zexiang Xu, Andreas Geiger, Jingyi Yu, and
+Hao Su. TensoRF: Tensorial Radiance Fields. In ECCV, 2022.
+2
+[5] Zhiqin Chen, Thomas Funkhouser, Peter Hedman, and Andrea Tagliasacchi. MobileNeRF: Exploiting the Polygon
+Rasterization Pipeline for Efficient Neural Field Rendering
+on Mobile Architectures. In CVPR, 2023. 2
+[6] Shin-Fang Chng, Sameera Ramasinghe, Jamie Sherrah, and
+Simon Lucey. Gaussian Activated Neural Radiance Fields for
+High Fidelity Reconstruction & Pose Estimation. In ECCV,
+2022. 1
+[7] Rizal Fathony, Anit Kumar Sahu, Devin Willmott, and J Zico
+Kolter. Multiplicative Filter Networks. In ICLR, 2021. 1
+[8] Sara Fridovich-Keil, Alex Yu, Matthew Tancik, Qinhong
+Chen, Benjamin Recht, and Angjoo Kanazawa. Plenoxels:
+Radiance Fields without Neural Networks. In CVPR, 2022.
+2, 8
+[9] Stephan J. Garbin, Marek Kowalski, Matthew Johnson, Jamie
+Shotton, and Julien Valentin. FastNeRF: High-Fidelity Neural
+Rendering at 200FPS. In ICCV, 2021. 2
+[10] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
+George Drettakis, and Gabriel Brostow. Deep Blending for
+Free-viewpoint Image-based Rendering. ACM TOG, 37(6),
+2018. 6, 7, 11, 12, 13
+[11] Peter Hedman, Pratul P. Srinivasan, Ben Mildenhall,
+Jonathan T. Barron, and Paul E. Debevec. Baking Neural
+Radiance Fields for Real-Time View Synthesis. In ICCV,
+2021. 2
+[12] Tao Hu, Shu Liu, Yilun Chen, Tiancheng Shen, and Jiaya Jia.
+EfficientNeRF: Efficient Neural Radiance Fields. In CVPR,
+2022. 2
+[13] Animesh Karnewar, Tobias Ritschel, Oliver Wang, and
+Niloy J. Mitra. ReLU Fields: The Little Non-linearity That
+Could. In SIGGRAPH, 2022. 2
+[14] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and
+George Drettakis. 3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM TOG, 42(4), 2023. 2
+[15] Jonas Kulhanek and Torsten Sattler. Tetra-NeRF: Representing Neural Radiance Fields Using Tetrahedra. In ICCV, 2023.
+2
+[16] Andreas Kurz, Thomas Neff, Zhaoyang Lv, Michael
+Zollhöfer, and Markus Steinberger. AdaNeRF: Adaptive
+Sampling for Real-time Rendering of Neural Radiance Fields.
+In ECCV, 2022. 2
+[17] Haotong Lin, Sida Peng, Zhen Xu, Yunzhi Yan, Qing Shuai,
+Hujun Bao, and Xiaowei Zhou. Efficient Neural Radiance
+Fields with Learned Depth-Guided Sampling. In SIGGRAPH
+Asia, 2022. 2, 3
+[18] Ricardo Martin-Brualla, Noha Radwan, Mehdi S. M. Sajjadi, Jonathan T. Barron, Alexey Dosovitskiy, and Daniel
+Duckworth. NeRF in the Wild: Neural Radiance Fields for
+Unconstrained Photo Collections. In CVPR, 2021. 6
+[19] Ben Mildenhall, Pratul P. Srinivasan, Rodrigo Ortiz-Cayon,
+Nima Khademi Kalantari, Ravi Ramamoorthi, Ren Ng, and
+Abhishek Kar. Local Light Field Fusion: Practical View
+Synthesis with Prescriptive Sampling Guidelines. ACM TOG,
+38(4), 2019. 6, 7, 11, 12
+[20] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
+Representing Scenes as Neural Radiance Fields for View Synthesis. In ECCV, 2020. 1, 2, 3, 4, 5, 6, 11, 12, 13
+[21] Thomas Müller, Alex Evans, Christoph Schied, and Alexander Keller. Instant Neural Graphics Primitives with a Multiresolution Hash Encoding. ACM TOG, 41(4), 2022. 2, 6,
+8
+[22] Thomas Neff, Pascal Stadlbauer, Mathias Parger, Andreas
+Kurz, Joerg H. Mueller, Chakravarty R. Alla Chaitanya, Anton S. Kaplanyan, and Markus Steinberger. DONeRF: Towards Real-Time Rendering of Compact Neural Radiance
+Fields using Depth Oracle Networks. Comput. Graph. Forum,
+40(4):45–59, 2021. 2, 12
+[23] Michael Oechsle, Songyou Peng, and Andreas Geiger.
+UNISURF: Unifying Neural Implicit Surfaces and Radiance
+Fields for Multi-View Reconstruction. In ICCV, 2021. 3
+[24] Martin Piala and Ronald Clark. TermiNeRF: Ray Termination
+Prediction for Efficient Neural Rendering. In 3DV, 2021. 2, 3
+[25] Nasim Rahaman, Aristide Baratin, Devansh Arpit, Felix
+Draxler, Min Lin, Fred Hamprecht, Yoshua Bengio, and
+Aaron Courville. On the Spectral Bias of Neural Networks.
+In ICLR, 2019. 1
+[26] Sameera Ramasinghe and Simon Lucey. Beyond Periodicity:
+Towards a Unifying Framework for Activations in CoordinateMLPs. In ECCV, 2022. 1
+[27] Daniel Rebain, Wei Jiang, Soroosh Yazdani, Ke Li, Kwang M.
+Yi, and Andrea Tagliasacchi. DeRF: Decomposed Radiance
+Fields. In CVPR, 2021. 2
+[28] Christian Reiser, Songyou Peng, Yiyi Liao, and Andreas
+Geiger. KiloNeRF: Speeding up Neural Radiance Fields with
+Thousands of Tiny MLPs. In ICCV, 2021. 2
+[29] Christian Reiser, Stephan Garbin, Pratul P Srinivasan, Dor
+Verbin, Richard Szeliski, Ben Mildenhall, Jonathan T Barron,
+Peter Hedman, and Andreas Geiger. Binary Opacity Grids:
+Capturing Fine Geometric Detail for Mesh-Based View Synthesis. arXiv CoRR, abs/2402.12377, 2024. 2, 3
+[30] Vishwanath Saragadam, Daniel LeJeune, Jasper Tan, Guha
+Balakrishnan, Ashok Veeraraghavan, and Richard G Baraniuk.
+WIRE: Wavelet Implicit Neural Representations. In CVPR,
+2023. 1
+[31] Vincent Sitzmann, Julien N.P. Martel, Alexander W. Bergman,
+David B. Lindell, and Gordon Wetzstein. Implicit Neural Representations with Periodic Activation Functions. In NeurIPS,
+2020. 1
+[32] Jost T. Springenberg, Alexey Dosovitskiy, Thomas Brox, and
+Martin Riedmiller. Striving for Simplicity: The All Convolutional Net. In ICLR, 2015. 4
+[33] Cheng Sun, Min Sun, and Hwann-Tzong Chen. Direct Voxel
+Grid Optimization: Super-fast Convergence for Radiance
+Fields Reconstruction. In CVPR, 2022. 2, 8
+[34] Matthew Tancik, Pratul P. Srinivasan, Ben Mildenhall, Sara
+Fridovich-Keil, Nithin Raghavan, Utkarsh Singhal, Ravi Ramamoorthi, Jonathan T. Barron, and Ren Ng. Fourier Features
+Let Networks Learn High Frequency Functions in Low Dimensional Domains. In NeurIPS, 2020. 1, 3
+[35] Matthew Tancik, Ethan Weber, Evonne Ng, Ruilong Li, Brent
+Yi, Justin Kerr, Terrance Wang, Alexander Kristoffersen, Jake
+Austin, Kamyar Salahi, Abhik Ahuja, David McAllister, and
+Angjoo Kanazawa. Nerfstudio: A Modular Framework for
+Neural Radiance Field Development. In SIGGRAPH, 2023.
+6, 11
+[36] Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler,
+Jonathan T. Barron, and Pratul P. Srinivasan. Ref-NeRF:
+Structured View-Dependent Appearance for Neural Radiance
+Fields. In CVPR, 2022. 6
+[37] Ziyu Wan, Christian Richardt, Aljaž Božič, Chao Li, Vijay
+Rengarajan, Seonghyeon Nam, Xiaoyu Xiang, Tuotuo Li, Bo
+Zhu, Rakesh Ranjan, and Jing Liao. Learning Neural Duplex
+Radiance Fields for Real-Time View Synthesis. In CVPR,
+2023. 2
+[38] Shengze Wang, Alexey Supikov, Joshua Ratcliff, Henry
+Fuchs, and Ronald Azuma. INV: Towards Streaming Incremental Neural Videos. arXiv CoRR, abs/2302.01532, 2023.
+2, 6, 7
+[39] Zhou Wang, Alam C. Bovik, Hamid R. Sheikh, and Eero P.
+Simoncelli. Image Quality Assessment: From Error Visibility
+to Structural Similarity. IEEE TIP, 13(4):600–612, 2004. 6,
+7
+[40] Zirui Wang, Shangzhe Wu, Weidi Xie, Min Chen, and
+Victor Adrian Prisacariu. NeRF−−: Neural Radiance
+Fields Without Known Camera Parameters. arXiv CoRR,
+abs/2102.07064, 2021. 6
+[41] Zian Wang, Tianchang Shen, Merlin Nimier-David, Nicholas
+Sharp, Jun Gao, Alexander Keller, Sanja Fidler, Thomas
+Müller, and Zan Gojcic. Adaptive Shells for Efficient Neural
+Radiance Field Rendering. ACM TOG, 42(6), 2023. 3
+[42] Liwen Wu, Jae Yong Lee, Anand Bhattad, Yuxiong Wang,
+and David Forsyth. DIVeR: Real-time and Accurate Neural
+Radiance Fields with Deterministic Integration for Volume
+Rendering. In CVPR, 2022. 2
+[43] Yiheng Xie, Towaki Takikawa, Shunsuke Saito, Or Litany,
+Shiqin Yan, Numair Khan, Federico Tombari, James Tompkin,
+Vincent Sitzmann, and Srinath Sridhar. Neural Fields in
+Visual Computing and Beyond. Comput. Graph. Forum, 41
+(2):641–676, 2022. 1
+[44] Qiangeng Xu, Zexiang Xu, Julien Philip, Sai Bi, Zhixin Shu,
+Kalyan Sunkavalli, and Ulrich Neumann. Point-NeRF: Pointbased Neural Radiance Fields. In CVPR, 2022. 2, 8
+[45] Lior Yariv, Peter Hedman, Christian Reiser, Dor Verbin,
+Pratul P Srinivasan, Richard Szeliski, Jonathan T Barron,
+and Ben Mildenhall. BakedSDF: Meshing Neural SDFs for
+Real-Time View Synthesis. In SIGGRAPH, 2023. 2, 3
+[46] Lin Yen-Chen. NeRF-pytorch. https://github.com/
+yenchenlin/nerf-pytorch/, 2020. 6
+[47] Matthew D. Zeiler and Rob Fergus. Visualizing and Understanding Convolutional Networks. In ECCV, 2014. 4
+[48] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman,
+and Oliver Wang. The Unreasonable Effectiveness of Deep
+Features as a Perceptual Metric. In CVPR, 2018. 6, 7
+Analyzing the Internals of Neural Radiance Fields
+Supplementary Material
+A. Additional Implementation Details for
+nerfacto†
+Method
+# Layers
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+Blender. For the Blender dataset [20], we set tn =
+2.0, tf = 6.0 for all scenes. We disable the camera optimizer, the appearance embedding, the distortion loss and
+the scene contraction. We manually set the background color
+to white. For all scenes, we use a batch size of 2048 rays
+during training and use a uniform initial proposal network
+sampler. We train nerfacto† for 16.5 × 103 epochs, as in [35].
+nerfacto†
+2
+3
+4
+5
+6
+24.201
+24.272
+24.201
+24.176
+24.247
+0.726
+0.732
+0.732
+0.729
+0.732
+0.247
+0.237
+0.237
+0.240
+0.234
+24.682
+0.735
+0.229
+Mip-NeRF 360 and Deep Blending. For Mip-NeRF
+360 [3] and Deep Blending [10], we use the Nerfstudio
+data processing pipeline [35] to extract the dataset using the
+given SfM output. As we use an MLP with NeRFs positional
+encoding [20], the hyperparameters reported in [35] do not
+necessarily provide the best results. We experimented with
+different hyperparameters and ultimately used the configuration reported in the main paper, as it resulted in the best
+performance for nerfacto† . Also, note that the results for
+Mip-NeRF 360 reported in [35] do not include the scenes
+flowers and treehill, for which nerfacto† exhibits the worst
+image metrics (c.f. Sec. C).
+with ReLU
+Table 6. Comparison of nerfacto† (with MLP) and nerfacto (with
+HashMLPDensityField) for the Mip-NeRF 360 dataset [3].
+without ReLU
+LLFF. For the LLFF dataset [19], we disable the camera optimizer, the appearance embedding and the distortion
+loss. We use a ℓ∞ scene contraction as default for nerfacto [35], contrary to the use of NDC coordinates in NeRF
+and Mip-NeRF. We do not use our custom LLFF dataparser,
+we instead opt for the nerfstudio dataparser, which requires
+pre-processing the data. For all scenes, we use a batch size
+of 1024 rays during training and a batch size of 2048 during evaluation. We train nerfacto† for 30 × 103 epochs, as
+in [35]. For the leaves scenes, we use a uniform initial proposal network sampler, as the piecewise-uniform sampler
+did not result in stable optimization.
+nerfacto
+Figure 8. Example renderings from our our method (with ReLU)
+compared to without ReLU for the the Mip-NeRF 360 dataset [3].
+Not using the ReLU results in artefacts for various renderings due
+to not being able to capture fine geometry.
+NeRF
+Blender, 800 × 800
+Method
+LLFF, 1008 × 756
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+Base
+Upsampling
+29.05
+28.90
+0.93
+0.93
+0.07
+0.08
+25.12
+24.60
+0.74
+0.73
+0.24
+0.26
+NeRF
+29.87
+0.94
+0.06
+25.89
+0.78
+0.18
+Base
+Upsampling
+29.04
+28.94
+0.93
+0.93
+0.07
+0.08
+25.44
+24.90
+0.75
+0.74
+0.22
+0.25
+Mip-NeRF
+29.69
+0.94
+0.06
+25.99
+0.78
+0.18
+Mip-NeRF
+Comparison with nerfacto. To investigate the effect of the
+MLP introduced for nerfacto† , we compare the results with
+nerfacto (with HashMLPDensityField) in Tab. 6. We use the
+Mip-NeRF 360 dataset [3] and use the same hyperparameter
+settings as reported in the main paper. Both variants achieve
+comparable results, although nerfacto is significantly faster.
+B. Ablation Studies
+First, we present an extensions to our method, which reduces
+processing time even further. In addition, we also report
+more detailed results for the ablation studies in Sec. 5.3.
+Table 7. Ablation study: We can further improve the performance
+of our implementation by obtaining the activations at a lower resolution. We use the Blender [20] and LLFF [19] datasets and use
+ℓ = 2 and f2 , the configuration which performed best in our experiments for these datasets.
+B.1. Upsampling Activations
+As our approach builds on the intermediate activations for
+a proposal of density along a ray, a natural extension to our
+method is to obtain the activations A(ℓ) at a lower resolution. To this end, we perform an ablation study, where we
+record A(ℓ) at a resolution of w2 × h2 × N2c × Nh , then perform upsampling to obtain a full-resolution activation A(ℓ) .
+As our interpolation method, we choose nearest neighbor
+upsampling due to its negligible cost. Similarly to this approach, DONeRF [22] filters along the depth axis and across
+neighboring rays to obtain a smoothed depth target for their
+oracle network. For the Blender dataset [20] and the LLFF
+dataset [19], we use our method with ℓ = 1 and f2 and report
+results in Tab. 7. We perform this experiments for NeRF [20]
+and Mip-NeRF [2]: As we can see, this modifications impacts visual quality only slightly.
+Reduced Capacity: 2 Layers
+scenarios. This further indicates that capacity has minimal
+impact on our approach.
+B.3. ReLU or no ReLU
+We provide two example renderings comparing our method
+with the variant without the ReLU in Fig. 8. As can clearly be
+seen, not using the ReLU leads to more artefacts, particularly
+around sharp edges, causing the drop in all image metrics.
+This is caused by the more inconsistent histograms and the
+larger standard deviation.
+C. Per-Scene Results
+In Tabs. 9 and 10, we show per-scene results for the Blender
+dataset [20] and the LLFF dataset [19]. For the drums scene,
+we manage to outperform Mip-NeRF quantitatively. In
+Tabs. 11 and 12, we also report the per-scene results for
+Mip-NeRF 360 [3] and Deep Blending [10].
+Reduced Capacity: 3 Layers
+PSNR SSIM LPIPS Speedup PSNR SSIM LPIPS Speedup
+f1
+1 f2
+f3
+23.66 0.703
+23.69 0.704
+23.66 0.703
+0.267
+0.267
+0.269
+-
+f1
+2 f2
+f3
+nerfacto
+†
+24.20 0.726
+0.247
+-
+Increased Capacity: 5 Layers
+23.20 0.696
+23.31 0.700
+23.20 0.697
+0.272
+0.268
+0.272
+44%
+22.63 0.677
+22.56 0.676
+22.71 0.676
+0.299
+0.299
+0.306
+-
+24.27 0.732
+0.237
+-
+NeRF
+ℓ
+Fct.
+Chair Drums Ficus Hotdog Lego Materials
+Mic
+1
+f1
+f2
+f3
+30.10
+30.12
+30.43
+22.33
+23.30
+23.23
+26.21
+28.25
+28.14
+32.41
+33.40
+33.26
+26.79
+28.99
+28.75
+28.05
+28.58
+28.61
+29.10 24.86
+30.53 26.30
+30.48 26.16
+2
+f1
+f2
+f3
+30.66
+30.19
+30.69
+23.57
+23.63
+23.91
+25.83
+28.45
+29.03
+33.17
+33.61
+33.86
+28.54
+30.03
+30.62
+28.87
+28.73
+29.01
+31.27 22.04
+30.97 26.79
+31.37 27.03
+3
+f1
+f2
+f3
+27.93
+28.98
+27.93
+20.26
+20.46
+19.62
+21.74
+22.42
+21.29
+28.10
+32.97
+32.15
+20.56
+27.62
+26.14
+26.13
+26.18
+24.17
+28.15 20.48
+25.28 25.91
+23.59 25.71
+NeRF
+31.16
+24.09
+29.26
+34.33
+31.34
+29.08
+31.75 27.92
+Increased Capacity: 6 Layers
+PSNR SSIM LPIPS Speedup PSNR SSIM LPIPS Speedup
+f1
+1 f2
+f3
+22.83 0.689
+22.94 0.692
+22.83 0.688
+0.279
+0.276
+0.280
+101%
+f1
+2 f2
+f3
+22.82 0.688
+22.84 0.688
+22.78 0.686
+0.280
+0.281
+0.284
+50%
+f1
+3 f2
+f3
+22.70 0.684
+22.60 0.682
+22.64 0.680
+0.287
+0.291
+0.295
+20%
+f1
+4 f2
+f3
+22.54 0.677
+22.28 0.670
+22.62 0.673
+0.299
+0.305
+0.308
+-
+f1
+5 f2
+f3
+nerfacto†
+24.18 0.729
+0.240
+-
+Ship
+Mip-NeRF
+22.73 0.686
+22.89 0.690
+22.75 0.686
+0.282
+0.278
+0.283
+120%
+22.67 0.683
+22.69 0.683
+22.62 0.680
+0.287
+0.289
+0.294
+69%
+22.64 0.683
+22.58 0.680
+22.47 0.675
+0.289
+0.294
+0.303
+37%
+22.52 0.678
+22.31 0.672
+22.41 0.671
+0.298
+0.304
+0.310
+15%
+1
+f1
+f2
+f3
+30.14
+30.01
+30.34
+22.33
+23.36
+23.34
+26.10
+27.60
+27.44
+33.06
+33.64
+33.87
+27.52
+29.83
+29.70
+28.21
+28.60
+28.61
+28.54 24.44
+30.25 26.69
+29.93 26.56
+2
+f1
+f2
+f3
+30.77
+30.13
+30.65
+23.91
+23.66
+23.95
+27.46
+28.07
+28.39
+31.67
+33.57
+33.72
+28.97
+30.38
+30.82
+27.97
+28.62
+28.83
+30.99 11.65
+30.97 26.89
+31.30 27.16
+3
+f1
+f2
+f3
+28.77
+29.19
+28.07
+22.31
+22.68
+21.86
+25.96
+25.16
+23.22
+17.52
+33.60
+33.44
+23.23
+29.64
+29.64
+27.85
+27.75
+26.27
+30.90 11.20
+25.06 26.66
+21.98 27.10
+Mip-NeRF 31.13
+23.82
+28.52
+34.41
+31.07
+29.31
+31.54 27.71
+nerfacto
+22.45 0.673
+22.18 0.665
+22.55 0.673
+0.305
+0.317
+0.312
+-
+24.25 0.732
+0.234
+-
+Table 8. Detailed Results for our capacity ablation study with the
+Mip-NeRF 360 dataset [3]. In every configuration, our method
+performs best at ℓ = 1, f2 . We color code best , second-best and
+third-best for each scene.
+B.2. Impact of Capacity
+We provide the full results for our capacity experiment from
+the main material in Tab. 8. As we can see, layer ℓ =
+1, f2 is the best configuration for our method across various
+†
+1
+f1
+f2
+f3
+28.30
+29.07
+29.07
+20.80
+21.17
+21.18
+22.06
+22.36
+22.21
+31.48
+31.98
+32.03
+25.89
+26.89
+26.91
+24.19
+24.35
+24.30
+27.49 25.14
+28.19 25.56
+28.02 25.66
+2
+f1
+f2
+f3
+29.16
+29.35
+28.56
+20.89
+21.36
+21.24
+22.08
+22.17
+22.04
+31.19
+31.46
+31.18
+27.26
+28.16
+27.40
+24.61
+24.56
+24.66
+29.18 25.57
+29.45 25.93
+29.51 25.92
+3
+f1
+f2
+f3
+27.96
+28.01
+27.95
+20.59
+20.64
+20.60
+22.02
+22.00
+22.02
+31.00
+31.03
+31.01
+28.50
+25.24
+22.69
+24.64
+24.36
+23.53
+29.52 25.04
+28.16 25.16
+25.55 24.97
+nerfacto†
+30.64
+22.11
+22.86
+32.67
+30.65
+24.76
+29.78 27.38
+Table 9. Per-Scene PSNR results for the LLFF dataset [19]. We
+color code best , second-best and third-best for each scene. In
+addition, we highlight failures of our method.
+Outdoor Scenes
+ℓ
+Fct.
+Bicycle
+Flowers
+Garden
+Stump
+Treehill
+1
+f1
+f2
+f3
+20.47
+20.70
+20.51
+20.15
+20.17
+20.14
+23.69
+23.75
+23.69
+22.88
+22.98
+22.90
+17.55
+17.55
+17.54
+2
+f1
+f2
+f3
+20.45
+20.59
+20.41
+20.13
+20.03
+20.12
+23.58
+23.45
+23.61
+22.89
+22.97
+22.86
+17.35
+17.33
+17.46
+3
+f1
+f2
+f3
+24.52
+20.03
+20.12
+19.98
+19.94
+19.89
+23.48
+23.20
+23.54
+22.71
+22.56
+22.70
+17.47
+17.42
+17.48
+nerfacto†
+22.19
+20.81
+24.87
+24.03
+17.88
+Bonsai
+Counter
+Kitchen
+Room
+NeRF
+ℓ
+Fct.
+Fern
+Flower Fortress Horns Leaves Orchids Room T-Rex
+1
+f1
+f2
+f3
+23.83
+24.19
+24.07
+27.61
+28.03
+27.97
+28.12
+28.27
+28.22
+25.11
+25.52
+25.42
+21.38
+21.35
+21.38
+19.35
+19.57
+19.48
+30.32
+30.81
+30.73
+25.16
+25.44
+25.43
+2
+f1
+f2
+f3
+23.76
+24.03
+23.92
+27.68
+27.95
+27.86
+27.95
+28.17
+28.09
+24.84
+25.26
+25.14
+21.08
+21.23
+21.19
+19.48
+19.62
+19.56
+28.66
+29.44
+29.13
+24.32
+25.30
+25.21
+3
+f1
+f2
+f3
+23.61
+23.92
+23.82
+27.65
+27.95
+27.88
+27.74
+28.06
+27.95
+24.34
+24.96
+24.79
+20.97
+21.17
+21.12
+19.50
+19.65
+19.61
+28.18
+28.94
+28.66
+21.73
+25.26
+25.17
+NeRF
+24.70
+28.61
+29.07
+26.05
+21.56
+19.95
+31.49
+25.72
+Mip-NeRF
+f1
+f2
+f3
+23.56
+23.93
+23.80
+27.73
+28.26
+28.16
+28.04
+28.50
+28.32
+24.79
+25.51
+25.35
+21.38
+21.37
+21.39
+19.34
+19.59
+19.50
+30.57
+30.89
+30.79
+25.16
+25.56
+25.46
+2
+f1
+f2
+f3
+23.41
+23.72
+23.60
+27.88
+28.33
+28.29
+28.13
+28.52
+28.37
+24.89
+25.49
+25.35
+21.23
+21.34
+21.34
+19.41
+19.60
+19.53
+30.47
+30.92
+30.78
+24.72
+25.58
+25.51
+3
+f1
+f2
+f3
+23.51
+23.83
+23.71
+25.69
+28.37
+28.34
+28.31
+28.72
+28.60
+23.68
+25.52
+25.37
+20.74
+21.32
+21.31
+18.75
+19.67
+19.61
+30.14
+30.90
+30.81
+15.30
+25.61
+25.57
+Mip-NeRF 24.54
+28.69
+29.47
+26.13
+21.59
+20.01
+31.59
+25.92
+1
+nerfacto
+Indoor Scenes
+1
+f1
+f2
+f3
+25.43
+25.65
+25.40
+24.06
+24.20
+24.00
+24.29
+24.54
+24.32
+26.66
+26.79
+26.73
+2
+f1
+f2
+f3
+25.47
+25.41
+25.15
+23.96
+23.99
+23.94
+23.97
+23.68
+23.93
+26.56
+26.47
+26.52
+3
+f1
+f2
+f3
+24.52
+24.36
+24.29
+23.76
+23.64
+23.90
+23.82
+23.15
+23.63
+26.03
+25.63
+25.96
+nerfacto†
+27.55
+25.36
+26.76
+28.37
+Table 11. Per-Scene PSNR results for the Mip-NeRF 360
+dataset [3]. We color code best , second-best and third-best
+for each scene.
+†
+1
+f1
+f2
+f3
+23.52
+23.72
+23.10
+26.60
+26.78
+26.30
+27.59
+27.70
+27.22
+25.18
+26.44
+24.88
+17.98
+17.86
+18.14
+19.03
+19.06
+18.92
+29.81
+30.09
+29.45
+25.95
+25.88
+25.06
+2
+f1
+f2
+f3
+22.32
+22.98
+21.97
+26.06
+26.64
+25.21
+26.84
+27.53
+26.45
+25.97
+26.65
+23.85
+18.61
+19.25
+18.29
+18.57
+18.99
+18.33
+30.20
+30.28
+29.98
+25.07
+26.34
+24.03
+3
+f1
+f2
+f3
+22.44
+22.06
+22.13
+25.83
+25.96
+25.77
+27.23
+26.76
+27.05
+23.65
+24.58
+23.51
+18.34
+18.46
+18.32
+17.88
+17.77
+17.40
+28.03
+28.81
+27.62
+22.28
+25.87
+22.49
+nerfacto†
+23.83
+27.01
+27.94
+26.91
+21.28
+19.11
+30.36
+26.39
+1
+Table 10. Per-Scene PSNR results for the Blender dataset [20]. We
+color code best , second-best and third-best for each scene. In
+addition, we highlight failures of our method.
+Dr Johnson
+Playroom
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+f1
+f2
+f3
+28.39
+28.39
+28.42
+0.885
+0.885
+0.885
+0.195
+0.196
+0.194
+27.63
+27.64
+27.55
+0.831
+0.833
+0.830
+0.280
+0.279
+0.284
+2
+f1
+f2
+f3
+28.46
+28.47
+28.38
+0.886
+0.886
+0.885
+0.194
+0.194
+0.196
+27.49
+27.44
+27.49
+0.830
+0.827
+0.828
+0.284
+0.291
+0.289
+3
+f1
+f2
+f3
+28.23
+28.03
+28.18
+0.881
+0.879
+0.877
+0.202
+0.205
+0.209
+27.30
+26.93
+27.38
+0.818
+0.809
+0.817
+0.310
+0.322
+0.315
+nerfacto†
+29.65
+0.903
+0.171
+28.87
+0.856
+0.242
+Table 12. Full Per-Scene Results for the Deep Blending
+dataset [10]. We color code best , second-best and third-best
+for each scene.

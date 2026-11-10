@@ -3,57 +3,37 @@
 Also called: BuildScaleBiasProgram, Window/Level (Windowing) Adjustment
 
 ## Overview
-Scaling and Biasing is a fragment shader-based technique that applies a linear transformation to volume texture samples to adjust contrast and brightness, commonly known as window/level adjustment [S1, S2, unofficial]. It maps a specific range of input intensities (the window) to the full display range, while clamping values outside this range to the display minimum or maximum [S1, S2, unofficial]. Unlike non-linear methods such as Power Transformation, it preserves the linear relationship between input intensity and output brightness within the window [S2, unofficial].
+Scaling and Biasing applies a linear transformation to volume texture samples to adjust contrast and brightness, commonly known as window/level adjustment [S1, unofficial]. It maps a specific range of input intensities to the full display range [S2, unofficial]. Unlike non-linear methods such as [Power Transformation](2346-power-transformation.md), it preserves the linear relationship between input intensity and output brightness within the window [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A texture sample value $x$ (float), representing the volume scalar at the current ray-marching position.
-*   **Parameters:**
-    *   `windowWidth` ($w$): The range of intensities to map to the display range. Default: 1048 [S2, unofficial].
-    *   `windowLevel` ($c$): The center of the intensity window. Default: 0 [S2, unofficial].
-*   **Output:** A normalized float value $y$ in the range $[0, 1]$ suitable for color mapping.
+*   **Input:** A texture sample value $x$ (float) [G].
+*   **Parameters:** `windowWidth` ($w$): range of intensities mapped to the display. Default: 1048 [S2, unofficial]. `windowLevel` ($c$): center of the intensity window. Default: 0 [S2, unofficial].
+*   **Output:** A normalized float value $y$ in the range $[0, 1]$ [G].
 
 **Data Structures:**
-The method is typically implemented as a uniform float pair passed to a fragment shader. In some implementations, these are exposed via UI sliders that trigger a viewport invalidation upon change [S2, unofficial].
+The parameters are passed as uniform floats to a fragment shader [S1, unofficial]. In some implementations, UI sliders parse float values and call `volume.setWindowLevel(value)` or `volume.setWindowWidth(value)`, then invalidate the viewport [S2, unofficial].
 
 **Formula:**
 The transformation is defined as:
 $$ y = \frac{x - (c - w/2)}{w} $$
-
-Where:
-*   $x$ is the input sample value.
-*   $c$ is `windowLevel`.
-*   $w$ is `windowWidth`.
-
-The result $y$ is typically clamped to $[0, 1]$ in the shader to handle values outside the window [S1, S2, unofficial].
+Where $x$ is the input sample, $c$ is `windowLevel`, and $w$ is `windowWidth` [S2, unofficial].
 
 **Steps:**
-1.  Retrieve the current texture sample value $x$.
-2.  Calculate the lower bound of the window: $L = c - w/2$.
-3.  Calculate the upper bound of the window: $U = c + w/2$.
-4.  If $x < L$, set $y = 0$.
-5.  If $x > U$, set $y = 1$.
-6.  Otherwise, compute $y = (x - L) / w$.
+1. Retrieve the current texture sample value $x$ [G].
+2. Calculate the lower bound of the window: $L = c - w/2$ [G].
+3. Calculate the upper bound of the window: $U = c + w/2$ [G].
+4. If $x < L$, set $y = 0$ [G].
+5. If $x > U$, set $y = 1$ [G].
+6. Otherwise, compute $y = (x - L) / w$ [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def scale_and_bias(x: float, window_level: float, window_width: float) -> float:
-    """
-    Applies window/level scaling and biasing to a volume sample.
-    
-    Args:
-        x: Input volume sample value.
-        window_level: Center of the intensity window (c).
-        window_width: Range of intensities mapped to display (w).
-        
-    Returns:
-        Normalized value in [0, 1].
-    """
     lower_bound = window_level - window_width / 2.0
     upper_bound = window_level + window_width / 2.0
-    
     if x < lower_bound:
         return 0.0
     elif x > upper_bound:
@@ -63,39 +43,28 @@ def scale_and_bias(x: float, window_level: float, window_width: float) -> float:
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Division by Zero:** If `window_width` is 0, the division is undefined. Implementations should clamp `window_width` to a minimum positive value or handle this case explicitly [S2, unofficial].
-*   **Precision:** Floating-point precision in the shader may cause slight inaccuracies at the boundaries of the window [S1, unofficial].
-*   **Clamping:** Values outside the window are clamped, which can lead to loss of information for very bright or very dark regions if the window is too narrow [S2, unofficial].
+*   **Division by Zero:** If `window_width` is 0, the division is undefined. Implementations should clamp `window_width` to a minimum positive value or handle this case explicitly [G].
+*   **Precision:** Floating-point precision in the shader may cause slight inaccuracies at the boundaries of the window [G].
 
 ## Subtopics
 
 ### Volume Slide Down
-A variant where the volume of the current sample is adjusted by a fixed amount $x$ before further processing. It increments or decrements the volume, with clamping to legal bounds (0..64 for increment, 0 for decrement if exceeding 200) [S3, unofficial].
+A variant where the volume of the current sample is adjusted by a fixed amount before further processing. It increments or decrements the volume, with clamping to legal bounds [S3, unofficial].
 *   **Definition:** Increments or decrements the volume of the current sample by $x$ at the beginning of the division. No sliding occurs [S3, unofficial].
-*   **Steps:**
-    1.  Set `cptr->volume += (effect & 0xF)`. If `cptr->volume > 64`, set `cptr->volume = 64` [S3, unofficial].
-    2.  Or, Set `cptr->volume -= (effect & 0xF)`. If `cptr->volume > 200`, set `cptr->volume = 0` [S3, unofficial].
+*   **Steps:** Set `cptr->volume += (effect & 0xF)`. If `cptr->volume > 64`, set `cptr->volume = 64` [S3, unofficial]. Or, Set `cptr->volume -= (effect & 0xF)`. If `cptr->volume > 200`, set `cptr->volume = 0` [S3, unofficial].
 *   **Pitfalls:** Cannot slide beyond volume 64 (for increment) or 0 (for decrement) [S3, unofficial].
 
 ### Texture Format Remapping
 A variant used when GPU texture formats (e.g., `r16float`) do not natively support the required precision or range for uint16 data. It applies a scale and bias to map texels back to normalized float values [S4, unofficial].
 *   **Definition:** Converts uint16 data stored in `r16float` textures back to normalized float values for rendering by applying scale and bias [S4, unofficial].
-*   **Steps:**
-    1.  If `gpu.textureFormat` is `'r16float'` and `!metadata.isFloat`, set `renderer.texelScale = 65535` and `renderer.texelBias = -UINT16_FLOAT16_OFFSET` [S4, unofficial].
-    2.  The renderer applies these to map texels back to `value / 65535` [S4, unofficial].
-*   **Parameters:** `UINT16_FLOAT16_OFFSET`: Constant offset used when storing uint16 in r16float format; exact value not given in this section [S4, unofficial].
+*   **Steps:** If `gpu.textureFormat` is `'r16float'` and `!metadata.isFloat`, set `renderer.texelScale = 65535` and `renderer.texelBias = -UINT16_FLOAT16_OFFSET` [S4, unofficial]. The renderer applies these to map texels back to `value / 65535` [S4, unofficial].
+*   **Parameters:** `UINT16_FLOAT16_OFFSET`: constant offset used when storing uint16 in r16float format; exact value not given in this section [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample. The operation is a simple arithmetic calculation performed in the fragment shader.
-*   **Memory Complexity:** $O(1)$ additional memory. Only uniform variables are needed.
-*   **Performance:** Very fast, as it is a single instruction in the shader pipeline [S1, S2, unofficial].
-*   **Strengths:** Simple to implement, efficient, and provides intuitive control over contrast and brightness [S1, S2, unofficial].
-*   **Limitations:** Linear transformation may not be suitable for data with non-linear intensity distributions. Clamping can lead to information loss [S2, unofficial].
-*   **When to Use:** When linear contrast adjustment is desired, or when the data distribution is relatively uniform within the window of interest [S2, unofficial].
-*   **When Not to Use:** When non-linear contrast enhancement is needed (use Power Transformation) or when preserving all data values without clamping is critical [S2, unofficial].
+Not given in the sources.
 
 ## Background
-Scaling and Biasing, often referred to as Window/Level adjustment, is a standard technique in medical imaging and volume visualization. It allows users to focus on specific intensity ranges of interest, such as soft tissue or bone in CT scans [S1, S2, unofficial]. The method is widely supported in visualization toolkits like VTK [S1, unofficial] and WebGL-based renderers [S2, unofficial].
+Not given in the sources.
 
 ## Sources
 [S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)

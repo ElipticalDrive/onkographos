@@ -1,0 +1,469 @@
+--- v006.md
++++ v007.md
+@@ -4,273 +4,212 @@
+ 
+ ## Overview
+-The Feature Graph is a hierarchical data structure for volume rendering that represents classified voxel models as a directed acyclic graph (DAG) [S1, unofficial]. It solves the problem of efficiently managing and rendering complex, multi-label volumetric data by grouping voxels into "features" based on boolean classification criteria and organizing these features into an inclusion hierarchy [S1, unofficial]. Unlike flat transfer function approaches, it explicitly models the set-inclusion relationships between voxel clusters, allowing for direct access to voxel subsets and native multiresolution support [S1, unofficial]. It is distinguished from sibling methods like [Curvature-based Transfer Function](5452-curvature-based-transfer-function.md) by its reliance on explicit boolean label combinations rather than geometric derivatives, and from [Robust Material Graph Deduction](7459-robust-material-graph-deduction.md) by its deterministic construction from user-defined criteria rather than learned similarity maps [S1, unofficial].
++The Feature Graph is a hierarchical data structure that represents classified voxel models as a directed acyclic graph (DAG), where nodes correspond to non-empty clusters of voxels (features) sharing specific label values, and arcs represent the inclusion relationship of these voxel sets [S1, unofficial]. It solves the problem of efficiently managing and rendering multiresolution volume data by organizing voxels into disjoint sets at leaf nodes, allowing ancestor features to be reconstructed via traversal, thereby avoiding redundancy [S1, unofficial]. Unlike flat transfer functions, it explicitly models the topological inclusion of material regions, enabling focused visualization and efficient out-of-core traversal [S1, unofficial].
+ 
+ ## How it works
+-
+-### Inputs and Outputs
+-**Inputs:**
+-*   A voxel volume $V$.
+-*   A set of $n_c$ non-exclusive classification criteria (boolean expressions) [S1, unofficial].
+-*   For each voxel $v$, a label vector $\mathbf{r}(v) = [r_1(v), r_2(v), \dots, r_{n_c}(v)]$, where $r_i(v) \in \{0, 1\}$ indicates if voxel $v$ satisfies criterion $i$ [S1, unofficial].
+-
+-**Outputs:**
+-*   A Feature Graph: a DAG where nodes are features and arcs represent voxel set inclusion [S1, unofficial].
+-*   A Feature Hash Table: providing direct index access to graph nodes [S1, unofficial].
+-*   Sets of Voxels (SOVs): associated with graph nodes, stored primarily at leaf nodes [S1, unofficial].
+-
+-### Data Structures
+-
+-**Feature Hash Table**
+-*   **Purpose:** Maps label combinations to graph nodes [S1, unofficial].
+-*   **Layout:** A hash map or array indexed by the label vector (or a hash of it).
+-*   **Content:** References to Feature Node objects.
+-
+-**Feature Node**
+-*   **Fields:**
+-    *   `id`: Unique identifier.
+-    *   `labels`: The specific subset of boolean values defining this feature [S1, unofficial].
+-    *   `children`: List of descendant nodes (smaller features) [S1, unofficial].
+-    *   `parent`: Reference to the ancestor node (larger feature) [S1, unofficial].
+-    *   `sovs`: List of Set of Voxels objects associated with this node at various resolution levels [S1, unofficial].
+-    *   `optical_properties`: Opacity $\alpha$ and color $C$ for rendering [S1, unofficial].
+-
+-**Set of Voxels (SOV)**
+-*   **Definition:** The set of voxels belonging to a specific feature $f_i$, denoted $SOV(f_i)$ [S1, unofficial].
+-*   **Storage Policy:** SOVs are stored **only** in leaf nodes to avoid redundancy. The SOV of an intermediate node is the union of the SOVs of its descendants [S1, unofficial].
+-*   **Representation Options:**
+-    1.  **Submodel (Octree):** Preserves spatial ordering. Voxels not belonging to the feature are assigned zero value, ensuring a voxel has a non-zero value in only one unique leaf SOV [S1, unofficial].
+-    2.  **Voxel List:** Stores coordinates only. No spatial ordering. Convenient for view-aligned splatting [S1, unofficial].
+-    3.  **Compacted List:** For lists, stores only "black" nodes of an implicit octree with their associated voxel size [S1, unofficial].
+-
+-### Algorithm: Graph Construction
+-
+-The construction process consists of three main steps: Clustering, Hierarchy Creation, and Multiresolution Distribution [S1, unofficial].
+-
+-#### Step 1: Clustering (Leaf Node Creation)
+-1.  Initialize an empty `Feature Hash Table`.
+-2.  Initialize an empty list of `Leaf Nodes`.
+-3.  Traverse the input voxel volume $V$.
+-4.  For each voxel $v$:
+-    a. Compute its label vector $\mathbf{r}(v)$.
+-    b. Use $\mathbf{r}(v)$ as a key to index into the `Feature Hash Table`.
+-    c. If the key does not exist, create a new `Feature Node` with these labels and add it to the `Feature Hash Table`.
+-    d. Add voxel $v$ to the `SOV` list of this node.
+-5.  After traversal, identify all nodes with non-empty SOVs as `Leaf Nodes` (at the highest resolution) [S1, unofficial].
+-6.  **Compression (Optional):**
+-    a. Compute the bounding box for each filled SOV.
+-    b. Create a voxel submodel (octree) for each SOV.
+-    c. Compress these submodels. If using list representation, traverse octrees to create a list-based representation with variable voxel sizes [S1, unofficial].
+-
+-#### Step 2: Hierarchy Creation
+-1.  For each `Leaf Node` created in Step 1:
+-    a. Identify all possible ancestor features. An ancestor feature is defined by a subset of the leaf node's labels (i.e., a label vector with some bits set to "don't care" or implicitly 1 if the leaf has 1).
+-    b. Specifically, recursively create common ancestor nodes for all nodes sharing a bit in their hash code [S1, unofficial].
+-    c. If an ancestor node does not exist in the `Feature Hash Table`, create it.
+-    d. Add the current node as a child of the ancestor node.
+-    e. Add the ancestor node as a parent of the current node.
+-2.  Update the `Feature Hash Table` to reference all newly created ancestor nodes [S1, unofficial].
+-3.  **Root Creation:**
+-    a. Identify all nodes that do not have a parent (disconnected hierarchies).
+-    b. Create a special root node `fall` (feature fall).
+-    c. Set `fall` as the parent of all identified root nodes. `fall` includes all features that do not have an explicit ancestor [S1, unofficial].
+-
+-#### Step 3: Multiresolution Distribution
+-1.  Define coarser resolution levels for the voxel volume (e.g., by grouping $2 \times 2 \times 2$ voxels into larger super-voxels).
+-2.  For each coarser level:
+-    a. Compute the label vector for each super-voxel. The label of a super-voxel can be computed by aggregating the labels of its constituent fine voxels (e.g., logical OR for boolean presence) [S1, unofficial].
+-    b. Repeat the clustering process (Step 1 logic) for these super-voxels to generate SOVs at the coarser resolution.
+-    c. Distribute these coarser SOVs through the existing graph hierarchy.
+-    d. Attach the coarser SOV to the corresponding feature node in the graph. Note: A feature node may contain SOVs from multiple resolution levels [S1, unofficial].
+-    e. **Note:** Some clusters non-empty at high resolution may become empty at lower resolution. Not all features exist at all levels. A feature may be a leaf at one resolution and an intermediate node at another [S1, unofficial].
+-
+-### Pseudocode
++**Inputs and Outputs:**
++*   **Input:** A labeled voxel model where each voxel $v$ has a set of $n_c$ boolean labels $r_i(v)$ for $i \in [1, n_c]$, indicating fulfillment of $n_c$ non-exclusive classification criteria [S1, unofficial].
++*   **Output:** A Feature Graph (DAG) with nodes representing features, arcs representing inclusion, and leaf nodes storing Sets of Voxels (SOVs). A Feature Hash Table provides direct index access to nodes [S1, unofficial].
++
++**Data Structures:**
++1.  **Feature Hash Table:** Maps a hash code (derived from the boolean label vector of a voxel) to a graph node.
++2.  **Node:** Represents a feature. Contains:
++    *   Label signature (subset of boolean expressions).
++    *   Reference to SOV (if leaf) or list of children.
++    *   Optional optical properties.
++3.  **Set of Voxels (SOV):** The set of voxels belonging to feature $f_i$.
++    *   **Storage Policy:** SOVs are stored **only** in leaf nodes to avoid redundancy. Ancestor SOVs are virtual, computed by recursively traversing descendant nodes [S1, unofficial].
++    *   **Representation:**
++        *   *List-based:* List of voxels with various sizes (from octree compression). Does not preserve spatial ordering.
++        *   *Submodel:* Octree or voxel grid. Voxels not belonging to the feature are assigned zero value. Preserves spatial ordering. A voxel has a non-zero value in only one unique leaf SOV [S1, unofficial].
++4.  **Feature (fall):** A special root node representing the union of all features that do not have an ancestor.
++
++**Algorithm Steps:**
++
++1.  **Clustering (High Resolution):**
++    *   Traverse the labeled voxel model.
++    *   For each voxel $v$, compute its label vector $\mathbf{r}(v) = [r_1(v), \dots, r_{n_c}(v)]$.
++    *   Compute hash code $h = \text{Hash}(\mathbf{r}(v))$.
++    *   Add $v$ to the SOV indexed by $h$ in the Feature Hash Table.
++    *   Initially, SOVs are represented as lists of voxels [S1, unofficial].
++
++2.  **Compression (Optional but recommended):**
++    *   Compute the bounding box for each filled SOV.
++    *   Create a voxel submodel (e.g., octree) for each SOV.
++    *   Compress submodels as octrees.
++    *   *Alternative:* Traverse octrees to create a list-based representation of SOVs with voxels of various sizes (storing only black nodes of the octree with associated size) [S1, unofficial].
++
++3.  **Hierarchy Creation:**
++    *   Create leaf nodes in the graph for each non-empty SOV computed in Step 1. Associate them with the SOVs.
++    *   Derive the hierarchy iteratively:
++        *   Identify common ancestors for nodes sharing bits in their hash codes.
++        *   Create intermediate nodes for these common ancestors.
++        *   Update the Feature Hash Table to reference new nodes [S1, unofficial].
++    *   If the graph consists of multiple disconnected hierarchies, create the `fall` node as the common root, linking to the roots of each hierarchy [S1, unofficial].
++
++4.  **Multiresolution Handling:**
++    *   Compute label sets at coarser resolution levels (larger voxels).
++    *   Repeat the clustering process (Step 1) for larger voxels.
++    *   Distribute the SOVs computed from coarser clusters through the existing graph hierarchy, attaching them to corresponding nodes.
++    *   Note: Some features non-empty at high resolution may become empty at lower resolution. Features can be leaves at one resolution and intermediate nodes at another.
++    *   Store SOVs only at the leaves of *each* resolution level [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
+-class FeatureNode:
+-    def __init__(self, labels):
+-        self.labels = labels  # Tuple of boolean values
++class Node:
++    def __init__(self, label_signature):
++        self.label_signature = label_signature
+         self.children = []
+-        self.parent = None
+-        self.sovs = []  # List of SOV objects at different resolutions
+-        self.optical_properties = None
+-
+-class SOV:
+-    def __init__(self, voxels, resolution_level):
+-        self.voxels = voxels  # List of voxel coordinates or octree structure
+-        self.resolution_level = resolution_level
+-
+-def build_feature_graph(volume, labels_grid, nc):
+-    """
+-    volume: 3D array of voxel data (not strictly needed for graph structure, but implied)
+-    labels_grid: 4D array [X, Y, Z, nc] of boolean labels
+-    nc: number of classification criteria
+-    """
+-    feature_hash_table = {}
+-    
+-    # Step 1: Clustering
+-    # Traverse all voxels
+-    for x in range(volume.shape[0]):
+-        for y in range(volume.shape[1]):
+-            for z in range(volume.shape[2]):
+-                label_vec = tuple(labels_grid[x, y, z])
+-                
+-                # Create node if not exists
+-                if label_vec not in feature_hash_table:
+-                    feature_hash_table[label_vec] = FeatureNode(label_vec)
+-                
+-                node = feature_hash_table[label_vec]
+-                # Add voxel to SOV
+-                node.sovs.append(SOV([(x,y,z)], resolution_level=0))
+-
+-    # Step 2: Hierarchy Creation
+-    # Get all unique label vectors present in the data
+-    present_labels = list(feature_hash_table.keys())
+-    
+-    # Create ancestors
+-    # An ancestor is defined by a subset of labels. 
+-    # If a node has labels (1, 0, 1), its ancestors might be (1, *, 1), (1, 0, *), etc.
+-    # However, the source specifies: "recursively create common ancestor nodes for all the nodes sharing a bit in their hash code"
+-    # And "feature (fall) that includes all the features that do not have an ancestor"
+-    
+-    # We need to generate all possible subsets of labels that could form valid ancestors.
+-    # A valid ancestor label vector has '1' where the descendant has '1', and '*' (or None) elsewhere.
+-    # The 'fall' node corresponds to all '*' (or empty set of constraints).
+-    
+-    fall_node = FeatureNode(tuple([None] * nc))
+-    feature_hash_table[tuple([None] * nc)] = fall_node
+-    
+-    for label_vec in present_labels:
+-        node = feature_hash_table[label_vec]
++        self.sov = None  # Only for leaf nodes
++        self.is_leaf = True
++
++class FeatureGraph:
++    def __init__(self, num_criteria):
++        self.num_criteria = num_criteria
++        self.hash_table = {}  # Maps hash_code -> Node
++        self.fall_node = None
++
++    def build(self, voxels, labels):
++        """
++        voxels: list of voxel objects with position and value
++        labels: list of boolean vectors, labels[i] is the label vector for voxels[i]
++        """
++        # Step 1: Clustering
++        # Group voxels by their label signature
++        clusters = {}
++        for i, voxel in enumerate(voxels):
++            label_vec = labels[i]
++            # Convert boolean vector to a hashable key (e.g., tuple or integer bitmask)
++            hash_code = self._compute_hash(label_vec)
++            
++            if hash_code not in clusters:
++                clusters[hash_code] = []
++            clusters[hash_code].append(voxel)
++
++        # Step 2: Create Leaf Nodes and SOVs
++        leaf_nodes = []
++        for hash_code, voxel_list in clusters.items():
++            if not voxel_list:
++                continue
++            
++            # Determine label signature from hash_code (inverse of hash or stored in node)
++            label_sig = self._decode_hash(hash_code)
++            node = Node(label_sig)
++            node.sov = voxel_list  # Store as list initially
++            node.is_leaf = True
++            
++            self.hash_table[hash_code] = node
++            leaf_nodes.append(node)
++
++        # Step 3: Hierarchy Creation
++        # Create ancestors based on shared bits in hash codes
++        # This is an iterative process: for each pair of nodes, find common ancestors
++        # A simplified approach: group nodes by prefix of their label signature
++        self._build_hierarchy(leaf_nodes)
++
++        # Step 4: Create 'fall' node if needed
++        # Check if there are disconnected components or nodes without parents
++        roots = self._find_roots()
++        if len(roots) > 1:
++            self.fall_node = Node(None) # Special root
++            for root in roots:
++                self.fall_node.children.append(root)
++        elif len(roots) == 1:
++            self.fall_node = roots[0]
++        else:
++            self.fall_node = None
++
++        # Step 5: Multiresolution (Simplified)
++        # In practice, this requires re-running clustering on downsampled data
++        # and merging results into the existing graph structure.
++        # Not fully implemented here as it requires access to coarser voxel data.
++
++    def _compute_hash(self, label_vec):
++        # Example: convert boolean list to integer
++        return int("".join(map(str, label_vec)), 2)
++
++    def _decode_hash(self, hash_code):
++        # Inverse operation to retrieve label signature
++        # This assumes a fixed number of criteria
++        return [(hash_code >> i) & 1 for i in range(self.num_criteria)]
++
++    def _build_hierarchy(self, leaf_nodes):
++        # Group nodes by their label signature prefixes
++        # For each bit position, if two nodes differ, they may share an ancestor
++        # This is a simplified recursive grouping
++        if not leaf_nodes:
++            return
+         
+-        # Generate all possible ancestor masks
+-        # An ancestor mask is a tuple where each element is either the value from label_vec or None
+-        # But we must ensure at least one bit is constrained? 
+-        # The source says "fall" includes features without ancestors. 
+-        # Let's generate all sub-masks.
++        # Group by first bit
++        groups = {}
++        for node in leaf_nodes:
++            # Assuming label_signature is a list of booleans
++            key = node.label_signature[0] if node.label_signature else None
++            if key not in groups:
++                groups[key] = []
++            groups[key].append(node)
+         
+-        ancestors = get_ancestors(label_vec, nc)
++        # Create intermediate nodes if there are multiple groups
++        if len(groups) > 1:
++            parent = Node(None) # Intermediate node
++            for key, child_nodes in groups.items():
++                parent.children.extend(child_nodes)
++                for child in child_nodes:
++                    child.is_leaf = False
++            # Recursively build hierarchy for children
++            for key, child_nodes in groups.items():
++                self._build_hierarchy(child_nodes)
++            # Add parent to hash table if it represents a valid feature
++            # (i.e., if it covers a non-empty set of voxels)
++            # This requires checking if the union of children's SOVs is non-empty
++            # For simplicity, we assume all intermediate nodes are valid features
++            # In reality, we must check if the feature is non-empty
++            pass
++        else:
++            # All nodes share the same first bit, recurse
++            for key, child_nodes in groups.items():
++                self._build_hierarchy(child_nodes)
++
++    def _find_roots(self):
++        # Find nodes that are not children of any other node
++        all_nodes = set(self.hash_table.values())
++        children_set = set()
++        for node in self.hash_table.values():
++            for child in node.children:
++                children_set.add(child)
+         
+-        for ancestor_labels in ancestors:
+-            if ancestor_labels not in feature_hash_table:
+-                feature_hash_table[ancestor_labels] = FeatureNode(ancestor_labels)
+-            
+-            ancestor_node = feature_hash_table[ancestor_labels]
+-            
+-            # Add edge if not already present
+-            if ancestor_node not in node.children:
+-                node.children.append(ancestor_node)
+-                ancestor_node.parent = node # Note: DAG, so multiple parents possible? 
+-                # Source says "directed acyclic graph... arcs represent inclusion". 
+-                # Usually inclusion is a tree if labels are exclusive, but here they are non-exclusive.
+-                # So it's a DAG.
+-            
+-            # Update parent reference? In a DAG, a node can have multiple parents.
+-            # The source says "associate to them the computed SOVs" for leaves.
+-            # And "ancestor SOVs are obtained by recursively traversing descendant nodes".
+-            # This implies the graph structure defines the hierarchy.
+-
+-    # Handle disconnected components by ensuring 'fall' is the root
+-    # The 'fall' node should be the parent of all nodes that don't have a more specific ancestor?
+-    # Actually, the 'fall' node is created for features that do not have an ancestor.
+-    # In our generation, every node has 'fall' as an ancestor (all None).
+-    # So 'fall' is the global root.
+-
+-    # Step 3: Multiresolution
+-    # This step requires coarser labels_grid. Assuming we have a function to get coarser labels
+-    for level in range(1, max_resolution_levels):
+-        coarse_labels_grid = get_coarser_labels(labels_grid, level)
+-        
+-        # Re-cluster for this level
+-        # Note: We reuse the same graph structure, just adding SOVs to existing nodes
+-        for x in range(coarse_volume_shape[0]):
+-            for y in range(coarse_volume_shape[1]):
+-                for z in range(coarse_volume_shape[2]):
+-                    label_vec = tuple(coarse_labels_grid[x, y, z])
+-                    
+-                    # Find the node in the graph that matches these labels
+-                    # Since the graph contains all possible combinations, we look it up
+-                    if label_vec in feature_hash_table:
+-                        node = feature_hash_table[label_vec]
+-                        # Add coarse voxel to SOV
+-                        node.sovs.append(SOV([(x,y,z)], resolution_level=level))
+-                    else:
+-                        # If the combination is empty at this resolution, no SOV is added
+-                        pass
+-
+-    return feature_hash_table[tuple([None] * nc)] # Return the fall node
+-
+-def get_ancestors(label_vec, nc):
+-    """
+-    Generate all ancestor label vectors.
+-    An ancestor has '*' (None) in positions where the descendant has 0 or 1,
+-    but must have '1' where the descendant has '1'? 
+-    Actually, inclusion means: SOV(ancestor) contains SOV(descendant).
+-    If descendant has labels (1, 0), it satisfies criteria A and not B.
+-    Ancestor (1, *) satisfies A. SOV(1, *) contains SOV(1, 0).
+-    Ancestor (*, *) satisfies nothing. SOV(*, *) contains SOV(1, 0).
+-    """
+-    ancestors = []
+-    # Iterate through all subsets of the bits that are 1
+-    # And all combinations of 0s becoming *
+-    # Actually, simpler: any label vector L' is an ancestor of L if for all i:
+-    # L'[i] is None OR L'[i] == L[i]
+-    # AND L'[i] == 1 implies L[i] == 1? 
+-    # No, if L'[i] == 1 and L[i] == 0, then L' requires criterion i, but L does not satisfy it.
+-    # So L cannot be in SOV(L'). Thus, L' cannot be an ancestor.
+-    # So condition: For all i, if L'[i] == 1, then L[i] must be 1.
+-    # If L'[i] == 0, L[i] can be 0 or 1? 
+-    # If L'[i] == 0, it means "not i". If L[i] == 1, it means "is i". Contradiction.
+-    # So if L'[i] == 0, L[i] must be 0.
+-    # If L'[i] == None, L[i] can be 0 or 1.
+-    
+-    # So, L' is an ancestor of L if:
+-    # For all i: L'[i] == None OR L'[i] == L[i]
+-    
+-    # Generate all such L'
+-    import itertools
+-    # For each bit in L, the ancestor can have the same value or None
+-    options = []
+-    for bit in label_vec:
+-        if bit == 1:
+-            options.append([1, None])
+-        else: # bit == 0
+-            options.append([0, None])
+-            
+-    for combo in itertools.product(*options):
+-        ancestors.append(combo)
+-        
+-    return ancestors
++        roots = all_nodes - children_set
++        return list(roots)
+ ```
+ 
+-### Parameters and Edge Cases
+-*   **$n_c$**: The number of classification criteria. The theoretical number of clusters is $2^{n_c}$, but many may be empty [S1, unofficial].
+-*   **`fall`**: The root node representing the feature with no constraints (all `None` labels). It includes all features that do not have a more specific ancestor [S1, unofficial].
+-*   **Empty Clusters**: Clusters that are empty at a high resolution may become empty at lower resolutions. The algorithm must handle the absence of nodes/SOVs for these cases [S1, unofficial].
+-*   **Precision**: When using submodels (octrees), assigning zero values to non-feature voxels ensures that a voxel has a non-zero value in only one unique leaf SOV, preserving spatial integrity [S1, unofficial].
+-*   **Rendering Choice**: The choice between submodel and list representation depends on the spatial distribution of the feature and the rendering algorithm (e.g., splatting favors lists) [S1, unofficial].
++**Parameters:**
++*   $n_c$: The number of non-exclusive classification criteria (boolean conditions) [S1, unofficial].
++*   `fall`: The entry point node of the graph, representing a feature that includes all features that do not have an ancestor [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Empty Clusters:** The theoretical number of clusters is $2^{n_c}$, but many are empty. The algorithm must handle empty clusters by not creating nodes for them [S1, unofficial].
++*   **Multiresolution Consistency:** A feature may be a leaf at one resolution and an intermediate node at another. The storage policy (SOVs only at leaves) must be applied per resolution level [S1, unofficial].
++*   **Spatial Ordering:** List-based SOVs do not preserve spatial ordering, making them unsuitable for methods requiring spatial locality (e.g., ray casting with interpolation). Submodel representations (octrees) preserve ordering but may have overlapping bounding boxes [S1, unofficial].
++
++## Subtopics
++
++### View-Aligned Splatting
++A rendering technique for Feature Graphs using list-based SOVs. It transforms and inserts voxels in view order to handle the lack of spatial ordering [S1, unofficial].
++
++### Octree Compression
++A method to compact homogeneous regions within an SOV using different voxel sizes, represented as octrees. This reduces memory usage for sparse data [S1, unofficial].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:**
+-    *   Construction: $O(N \cdot 2^{n_c})$ in the worst case for hierarchy creation, where $N$ is the number of voxels. However, only present label combinations are processed, so it is proportional to the number of non-empty clusters times the number of ancestors per cluster.
+-    *   Rendering: Depends on the SOV representation. View-aligned splatting on lists is efficient for non-spatially-ordered data [S1, unofficial].
+-*   **Memory Complexity:**
+-    *   The graph structure is compact. SOVs are stored only at leaves, reducing redundancy.
+-    *   Multiresolution SOVs are stored at corresponding nodes, allowing for out-of-core strategies if SOVs are stored in separate files [S1, unofficial].
+-*   **Strengths:**
+-    *   Direct access to voxel subsets via the hash table.
+-    *   Native multiresolution support.
+-    *   Efficient handling of non-exclusive labels.
+-    *   Compact storage of homogeneous regions via octrees [S1, unofficial].
+-*   **Limitations:**
+-    *   Requires pre-computation of labels and graph construction.
+-    *   Performance depends on the spatial distribution; list representation loses spatial ordering, requiring view-aligned techniques [S1, unofficial].
+-    *   Not suitable for dynamic data without graph updates [S1, unofficial].
++*   **Time Complexity:** Construction is $O(N)$ for clustering, where $N$ is the number of voxels, assuming hash table operations are $O(1)$. Hierarchy creation depends on the number of features and criteria. Rendering complexity depends on the number of features and the traversal depth.
++*   **Memory Complexity:** Proportional to the number of non-empty features and the size of their SOVs. Storing SOVs only at leaves reduces redundancy. Octree compression further reduces memory for homogeneous regions [S1, unofficial].
++*   **Performance:** Efficient for focused visualization and multiresolution rendering. Out-of-core traversal is supported due to the hierarchical structure and file-based storage of SOVs [S1, unofficial].
++*   **Strengths:** Explicit modeling of feature inclusion; efficient multiresolution support; direct access via hash table; compact storage for sparse data.
++*   **Limitations:** Construction can be complex; list-based SOVs lack spatial ordering; requires careful handling of empty clusters and multiresolution consistency [S1, unofficial].
++*   **When to Use:** When visualizing complex, multi-label volume data with hierarchical relationships; when multiresolution rendering is required; when memory efficiency for sparse data is critical.
++*   **When Not to Use:** When spatial locality is crucial for rendering performance (e.g., standard ray casting); when the number of criteria is very large (leading to many potential features).
+ 
+ ## Background
+-
+-The Feature Graph was introduced in the paper "Splatting multiresolution volume data using the feature graph" [S1, unofficial]. It addresses the need for efficient visualization of complex volumetric data with multiple overlapping features. The method builds on the principles of data feature-based classification, where derived features (boolean labels) are used to group voxels. It is particularly useful for medical imaging and scientific visualization where anatomical or physical structures overlap (e.g., bone and toe) [S1, unofficial].
++The Feature Graph was introduced in the paper "Splatting multiresolution volume data using the feature graph" [S1, unofficial]. It is designed to address the limitations of flat classification methods by providing a structured representation of voxel data that supports multiresolution and focused visualization. The method is particularly relevant in medical imaging and scientific visualization, where data often has multiple overlapping labels and varying levels of detail [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] Splatting multiresolution volume data using the feature graph, http://hdl.handle.net/2117/86461, fetched 2026-10-26 (unofficial)

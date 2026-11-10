@@ -1,56 +1,110 @@
 # Semantic Consistency Loss (CLIP-based)
-Also called: CLIP-ViT Feature Consistency Loss, DietNeRF, DietNeRF Loss
+Also called: CLIP Direction Similarity, CLIP-ViT Feature Consistency Loss, DietNeRF, DietNeRF Loss, Direction Loss
 
 ## Overview
-This method introduces a semantic regularization term to NeRF training by enforcing consistency between the features of a rendered image and a ground-truth image using a pre-trained CLIP-ViT encoder [S1]. It addresses the ambiguity in single-view or sparse-view synthesis by aligning the high-level semantic structure of the output with the input, distinct from photometric or geometric constraints [S1]. Unlike [Diffusion-regularized NeRF](7381-diffusion-regularized-nerf.md) which uses generative priors, this method uses discriminative feature matching [S1].
+Semantic Consistency Loss is a regularization term that aligns the semantic content of rendered images with ground-truth training images using features from the CLIP vision encoder. It solves the problem of photometric ambiguity in sparse-view or ill-posed volume rendering by enforcing that the rendered output preserves the high-level semantic structure of the input, rather than just pixel-wise color values. It differs from sibling methods like [Diffusion-regularized NeRF](7381-diffusion-regularized-nerf.md) by using a frozen, pre-trained 2D vision-language model (CLIP) for feature extraction rather than a generative diffusion prior, and from [RegNeRF](8582-regnerf.md) by operating in the semantic feature space rather than the geometric or photometric space.
 
 ## How it works
+The loss is computed by extracting feature vectors from both the ground-truth training image and the rendered image, then measuring the distance between these vectors.
+
 **Inputs and Outputs:**
-- Input: Ground-truth image $I$, rendered image $\hat{I}$, CLIP-ViT encoder $\phi$.
-- Output: Scalar loss value $\mathcal{L}_{sc}$.
+*   Input: Ground-truth image $I$ (from the training dataset) and rendered image $\hat{I}$ (produced by the NeRF for the same camera pose).
+*   Output: Scalar loss value $\mathcal{L}_{sc}$.
 
 **Data Structures:**
-- Feature vectors: $\phi(I)$ and $\phi(\hat{I})$ are normalized vectors of dimension $D$ (typically 768 for ViT-B/16) [S1].
+*   $\phi(\cdot)$: The CLIP-ViT image encoder. It takes an image tensor and outputs a normalized feature vector $\mathbf{f} \in \mathbb{R}^D$, where $D$ is the dimension of the CLIP embedding space (e.g., 768 or 1024 depending on the ViT variant). The output is typically L2-normalized.
 
 **Steps:**
-1. Extract features from the ground-truth image: $\mathbf{f}_{gt} = \phi(I)$.
-2. Extract features from the rendered image: $\mathbf{f}_{pred} = \phi(\hat{I})$.
-3. Normalize the feature vectors to unit length: $\hat{\mathbf{f}}_{gt} = \frac{\mathbf{f}_{gt}}{||\mathbf{f}_{gt}||_2}$ and $\hat{\mathbf{f}}_{pred} = \frac{\mathbf{f}_{pred}}{||\mathbf{f}_{pred}||_2}$ [S1].
-4. Compute the cosine similarity loss [S1]:
-   $$ \mathcal{L}_{sc} = \frac{||\phi(I) - \phi(\hat{I})||_2^2}{2} $$
-   This is equivalent to $1 - \cos(\phi(I), \phi(\hat{I}))$ for normalized vectors [S1].
+1.  Preprocess the ground-truth image $I$ and the rendered image $\hat{I}$ to match the input resolution and normalization expected by the CLIP-ViT encoder (typically resizing to 224x224 and normalizing pixel values to $[-1, 1]$ or $[0, 1]$ as per the specific CLIP implementation).
+2.  Pass $I$ through the frozen CLIP-ViT encoder to obtain the feature vector $\mathbf{f}_I = \phi(I)$.
+3.  Pass $\hat{I}$ through the same frozen CLIP-ViT encoder to obtain the feature vector $\mathbf{f}_{\hat{I}} = \phi(\hat{I})$.
+4.  Compute the loss as the squared Euclidean distance between the normalized feature vectors, divided by 2.
+
+**Formula:**
+$$ \mathcal{L}_{sc} = \frac{||\phi(I) - \phi(\hat{I})||_2^2}{2} $$
+
+Where:
+*   $\phi(I)$ is the CLIP-ViT feature vector for the training image.
+*   $\phi(\hat{I})$ is the CLIP-ViT feature vector for the rendered image.
+*   $||\cdot||_2$ denotes the L2 norm.
 
 **Parameters:**
-- $\lambda_{sc}$: Weight for the semantic loss in the total loss function. Typical values are not specified in the sources [S1].
+*   $\lambda_{sc}$: The weight for the semantic consistency loss in the total loss function. Not given in the sources.
+*   CLIP Model Variant: The specific CLIP-ViT architecture (e.g., ViT-B/16, ViT-L/14). Not given in the sources.
 
-**Edge Cases:**
-- If the rendered image is blank or invalid, feature extraction may fail or produce degenerate vectors. Guard against division by zero during normalization [G].
+**Edge Cases and Pitfalls:**
+*   **Gradient Flow:** The CLIP encoder must be frozen (no gradients computed through it) to prevent destroying the pre-trained semantic features. Gradients flow only through the NeRF rendering process to update the radiance field parameters.
+*   **Resolution Mismatch:** The rendered image and ground-truth image must be processed at the same resolution for the feature vectors to be comparable.
+*   **Normalization:** The sources note that the loss is "reduced to a cosine similarity loss for normalized feature vectors" [S1]. Since CLIP features are typically normalized, the squared L2 distance is equivalent to $1 - \text{cosine\_similarity}$ (scaled). Implementers should ensure the CLIP output is normalized before computing the distance.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def semantic_consistency_loss(ground_truth_image, rendered_image, clip_encoder):
+    """
+    Computes the Semantic Consistency Loss between a ground truth image and a rendered image.
+    
+    Args:
+        ground_truth_image (torch.Tensor): Image tensor of shape (C, H, W) or (B, C, H, W).
+        rendered_image (torch.Tensor): Rendered image tensor of same shape as ground_truth_image.
+        clip_encoder (nn.Module): Frozen CLIP-ViT image encoder.
+        
+    Returns:
+        torch.Tensor: Scalar loss value.
+    """
+    # 1. Preprocess images for CLIP
+    # Note: Specific preprocessing (resize, normalization) depends on the CLIP model used.
+    # Assuming clip_encoder expects inputs normalized to [-1, 1] and resized to 224x224.
+    gt_processed = preprocess_for_clip(ground_truth_image)
+    render_processed = preprocess_for_clip(rendered_image)
+    
+    # 2. Extract features using frozen CLIP encoder
+    with torch.no_grad():
+        feature_gt = clip_encoder(gt_processed)
+        feature_render = clip_encoder(render_processed)
+        
+    # 3. Compute squared L2 distance divided by 2
+    # feature_gt and feature_render are typically L2-normalized vectors
+    diff = feature_gt - feature_render
+    loss = torch.sum(diff ** 2) / 2.0
+    
+    return loss
+
+def preprocess_for_clip(image):
+    """
+    Placeholder for CLIP-specific preprocessing.
+    In practice, this involves resizing to 224x224 and applying the normalization
+    used by the specific CLIP model (e.g., ImageNet normalization or CLIP-specific stats).
+    """
+    # Implementation detail: [G]
+    # Resize image to 224x224
+    # Normalize pixel values according to CLIP's expected input distribution
+    pass
+```
 
 ## Subtopics
 
 ### CLIP Distillation for Semantic NeRFs
-A method that distills knowledge from an off-the-shelf 2D feature extractor (CLIP-based) into 3D feature fields, optimized in conjunction with in-scene radiance fields to produce a NeRF model with semantic understanding [S1]. It allows for zero-shot segmentation from an open set of text labels or queries via distillation from the CLIP-based feature extractor [S1].
+A method that distills knowledge from an off-the-shelf 2D feature extractor (CLIP-based) into 3D feature fields, optimized in conjunction with in-scene radiance fields to produce a NeRF model with semantic understanding [S1]. It allows for zero-shot segmentation from an open set of text labels or queries via distillation from the CLIP-based feature extractor [S1]. This variant extends the basic semantic consistency loss by explicitly modeling semantic features in 3D space, enabling direct manipulation of semantic attributes in the radiance field.
+
+### CLIP Direction Consistency
+A metric measuring consistency between adjacent frames by calculating CLIP embeddings of two corresponding pairs of consecutive views (original and edited), computing similarity between the change in original and edited scene views [S2]. It is used to evaluate temporal or editing consistency rather than static semantic alignment. The score is computed on six consecutive views and averaged [S2]. The formula is:
+$$ L_{direction} = \frac{\Delta I_o \cdot \Delta I_e}{|\Delta I_o| |\Delta I_e|} $$
+where $\Delta I_o = E_I(I^o_{i+1}) - E_I(I^o_i)$ and $\Delta I_e = E_I(I^e_{i+1}) - E_I(I^e_i)$ [S2]. $E_I$ is the CLIP image encoder, $I^o_i, I^o_{i+1}$ are original consecutive views, and $I^e_i, I^e_{i+1}$ are edited consecutive views [S2].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-- Adds the computational cost of running the CLIP-ViT encoder on each rendered image per training step. CLIP-ViT is significantly heavier than the NeRF MLP [S1].
-- Memory overhead is minimal as only feature vectors are stored/computed, not full intermediate feature maps [S1].
-
-**Measured Performance:**
-- Benchmarked on subsampled NeRF synthetic dataset and DTU dataset [S1].
-- Best-performing method for single-view novel synthesis was a pixelNeRF model fine-tuned using this loss [S1].
-- Enables semantic segmentation synthesis, instance segmentation synthesis, and scene editing [S1].
-
-**Strengths and Limitations:**
-- Strength: Improves semantic coherence in sparse-view scenarios; enables zero-shot semantic tasks [S1].
-- Limitation: Computationally expensive due to CLIP inference; relies on the quality of the pre-trained CLIP model [S1].
-
-**When to use/not use:**
-- Use when semantic consistency is more important than photometric fidelity, or when training data is sparse [S1].
-- Do not use when real-time training speed is critical or when semantic labels are irrelevant [S1].
+*   **Time Complexity:** The loss computation adds the cost of two forward passes through the CLIP-ViT encoder per training step. CLIP-ViT is significantly larger than the NeRF MLP, so this can be a bottleneck if not batched efficiently or if the encoder is not frozen and optimized.
+*   **Memory Complexity:** Requires storing the CLIP model weights in memory. Since the encoder is frozen, no gradients need to be stored for it, reducing memory overhead compared to optimizing the encoder.
+*   **Measured Performance:** DietNeRF was benchmarked on the DTU dataset and a subsampled NeRF synthetic dataset [S1]. It reached results comparable to hours of baseline NeRF training within 15 minutes on DTU [S1]. The best-performing method for single-view novel synthesis was a pixelNeRF model fine-tuned using this loss [S1].
+*   **Strengths:** Improves semantic coherence in novel views, especially in sparse-view settings where photometric loss alone is insufficient. Enables zero-shot semantic segmentation and editing.
+*   **Limitations:** Relies on the quality of the CLIP embeddings; may not capture fine-grained geometric details. Computationally expensive due to the large CLIP model.
+*   **When to use:** When training on sparse views, single-view inputs, or when semantic understanding (e.g., segmentation, editing) is required.
+*   **When not to use:** When high-fidelity photometric reconstruction is the sole goal and sufficient multi-view data is available.
 
 ## Background
-Originated with DietNeRF (June 2021) [S1]. It builds on [Regularization and Loss Functions](8586-regularization-and-loss-functions.md) by adding a semantic term to the loss function [S1]. It is related to [RegNeRF](8582-regnerf.md) in its goal of improving generalization but uses a different modality (semantic features vs. geometric priors) [S1].
+The Semantic Consistency Loss was introduced by DietNeRF in June 2021 [S1]. It leverages the CLIP-ViT model [123] to provide semantic guidance during NeRF optimization. The method was designed to enable semantic understanding in NeRFs, allowing for tasks like zero-shot segmentation and scene editing. It has been used in conjunction with other methods like pixelNeRF for single-view novel synthesis [S1]. The related CLIP Direction Similarity and Consistency metrics were introduced in later works (e.g., [18], [23]) to evaluate editing consistency and semantic alignment in text-guided NeRF editing tasks [S2].
 
 ## Sources
 [S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] Blended-NeRF: Zero-Shot Object Generation and Blending in Existing Neural Radiance Fields, https://arxiv.org/abs/2306.12760v2, fetched 2026-10-26

@@ -1,0 +1,37 @@
+# Rotational Swept-Screen Projection
+Also called: Rotational Volumetric Display Systems, Rotating Screen Volumetric Displays
+
+## Overview
+Rotational swept-screen projection is a class of volumetric display systems that generates a continuous 3D image by projecting 2D image patterns onto a screen undergoing rotational motion [S1, unofficial]. It solves the problem of creating a stationary, viewable 3D volume without requiring the light source itself to scan the entire volume mechanically, instead relying on the temporal integration of the human eye as the screen sweeps through space [S1, unofficial]. It differs from translational swept-screen methods by utilizing rotational kinematics to define the volume, and from static multi-layer displays by physically moving the projection surface [S1, unofficial].
+
+## Shared principles
+The core mechanism involves a screen (reflective, transmissive, or emissive) rotating at a constant angular velocity $\omega$ around a central axis. A projection system (LED array, laser, or projector) updates the image on the screen synchronously with the rotation angle $\theta$.
+
+1.  **Coordinate Mapping**: The 3D world coordinates $(X, Y, Z)$ of a voxel must be mapped to 2D screen coordinates $(u, v)$ and a specific frame index $k$ corresponding to the rotation angle $\theta_k = k \cdot \Delta \theta$.
+2.  **Temporal Integration**: The screen speed and frame rate are chosen such that the persistence of vision blends the discrete 2D slices into a continuous 3D volume. The sweep frequency $f_{sweep}$ must typically exceed the flicker fusion threshold (e.g., $> 24$ Hz) [S1, unofficial].
+3.  **Synchronization**: Precise timing between the screen's angular position and the image update is critical. Misalignment results in Z-depth distortion [S1, unofficial].
+
+## Subtopics
+
+### [Volumetric Display using Rotating Mirror (VRDM)](2567-volumetric-display-using-rotating-mirror-vrdm.md)
+VRDM uses a rotating mirror surface illuminated by surrounding LED screens. It differs from other rotational methods by using analytical mirror reflection matrices to map 3D coordinates directly to 2D screen pixels, avoiding per-pixel ray tracing loops. It is chosen when a reflective, pyramid-shaped volume is desired with high geometric precision.
+
+### [Multi-planar volumetric 3D display](8515-multi-planar-volumetric-3d-display.md)
+This method projects sequences of 2D patterns onto a screen moving along the Z-axis (translational), but is grouped here due to the swept-screen principle. It differs from VRDM by using a planar moving screen rather than a rotating reflective surface. It is chosen for systems requiring a box-like volume with planar symmetry.
+
+### 2D Full-Color LED Array Rotational Display
+A system using a 2D full-color LED array rotation to display volumetric images. It updates 512 display images per rotation of the LED array to create the volumetric image without requiring synchronization with external devices like electron beams or lasers [S1, unofficial].
+
+### Cathode Ray Volumetric Display
+A volumetric display system that generates voxels by irradiating a fluorescent screen coated on a rotating plane with an electron beam [S1, unofficial]. This is an early implementation of the rotational swept-screen principle, predating laser and LED variants.
+
+### Seelinder
+A cylindrical 3D display using a parallax barrier with multiple slits and a 1D LED array rotating along the slits. It utilizes the scanning of light rays when slit and LED positions change to reproduce multiple viewpoints in 360 degrees [S1, unofficial].
+
+## Background
+The concept of rotational volumetric displays dates back to the 1940s and 1950s. Parker and Wallis pioneered the use of electron beams and reflective screens in 1948 [S1, unofficial]. Withey proposed a vacuum container system with a translating fluorescent screen in 1958 [S1, unofficial]. In the 1960s, laser-based systems emerged, with Hartwig proposing laser irradiation of rotating screens [S1, unofficial].
+
+In 1994, the "Cathode ray sphere" was proposed, using a 15 Hz rotating fluorescent plane [S1, unofficial]. The 1990s and 2000s saw a shift towards LED and laser excitation. Downing et al. (1996) used laser-excited dust [S1, unofficial]. Xie et al. (2009) proposed a 2D full-color LED array rotational system updating 512 images per rotation [S1, unofficial]. Sumalley et al. (2018) classified these as "free-space" displays, distinguishing them from scanned or filled-volume types [S1, unofficial]. Recent developments include drone-mounted LED arrays (Yamada et al., 2017) and holographic diffuser combinations (Joens et al., 2007) [S1, unofficial].
+
+## Sources
+[S1] ボリュメトリックディスプレイ, https://www.jstage.jst.go.jp/article/jvrsj/29/3/29_27/_pdf/-char/ja, fetched 2026-10-30 (unofficial)

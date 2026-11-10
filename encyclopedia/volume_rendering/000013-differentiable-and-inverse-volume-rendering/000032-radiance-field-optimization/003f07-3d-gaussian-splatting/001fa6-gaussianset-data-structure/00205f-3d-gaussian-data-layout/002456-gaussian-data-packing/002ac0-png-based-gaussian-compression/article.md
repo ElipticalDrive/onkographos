@@ -1,248 +1,273 @@
 # PNG-based Gaussian Compression
 
-Also called: PNG Compression for 3D Gaussians, PngCompression, gsplat_mlx compression
+Also called: Compact 3D Scene Representation via Self-Organizing Gaussian Grids, PNG Compression for 3D Gaussians, PNG Compression for Gaussian Splats, gsplat PNG Compression, gsplat_mlx compression
 
 ## Overview
-A compression technique for trained 3D Gaussian splats that quantizes parameters to 8-bit or 16-bit and stores them as lossless PNG images, optionally using spatial sorting (Morton code) to improve compression ratios [S1, unofficial]. It serves as a port of the PyTorch `gsplat` compression module to the MLX framework [S1, unofficial]. It achieves approximately 10x compression on standard 3DGS models [S1, unofficial]. Unlike the PyTorch upstream which uses `torchpq` for k-means clustering of higher-order spherical harmonics, this method falls back to NPZ for higher-order bands due to library availability constraints [S1, unofficial].
+PNG-based Gaussian Compression is a lossless compression technique for trained 3D Gaussian Splatting models that quantizes splat parameters into 8-bit and 16-bit PNG images [S2, unofficial]. It serves as a port of the PyTorch `gsplat` compression module to MLX [S2, unofficial]. By leveraging the spatial locality of Gaussian splats (optionally enhanced via Morton code sorting) and the efficiency of PNG encoding, this method achieves approximately 10x compression on standard 3DGS models [S2, unofficial]. It builds on [Gaussian Data Packing](3257-gaussian-data-packing.md) by mapping scalar and vector fields to image formats, differing from [Gaussian Splat Texture Packing](3283-gaussian-splat-texture-packing.md) which targets GPU texture formats, and [SPZ Packed Format](3926-spz-packed-format.md) which uses a different binary layout [S1, S2, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input**: A dictionary of Gaussian splat parameters with keys `'means'`, `'quats'`, `'scales'`, `'opacities'`, and `'sh0'` [S1, unofficial].
-*   **Output**: A directory containing PNG images for quantized parameters and metadata files containing normalization constants (`mins`, `maxs`, `shape`) for each parameter [S1, unofficial].
+**Inputs and Outputs:**
+- **Input:** A dictionary of Gaussian splat parameters: `means` (N, 3), `quats` (N, 4), `scales` (N, 3), `opacities` (N, 1), and `sh0` (N, 3). Higher-order spherical harmonic coefficients `shN` are also supported [S2, unofficial].
+- **Output:** A set of PNG image files for each parameter field and a `meta.json` file containing metadata (shape, dtype, mins, maxs) required for decompression [S1, S2, unofficial].
 
-**Data Structures**
-*   **Metadata**: For each parameter array, store `shape`, `mins`, and `maxs` to enable inverse quantization [S1, unofficial].
-*   **PNG Images**: 8-bit PNGs store values quantized to `[0, 255]` [S1, unofficial]. 16-bit values are split into low byte (`img16 & 0xFF`) and high byte (`(img16 >> 8) & 0xFF`) stored as two separate 8-bit PNGs [S1, unofficial].
+**Data Structures:**
+- **Metadata (`meta.json`):** Stores `shape`, `dtype`, `mins`, and `maxs` for each compressed parameter [S2, unofficial].
+- **PNG Images:**
+  - 8-bit PNGs for `scales`, `quats`, `opacities`, and `sh0` [S2, unofficial].
+  - 16-bit `means` are split into two 8-bit PNGs (low byte and high byte) [S2, unofficial].
+  - Higher-order SH coefficients `shN` are stored in NPZ format if K-means clustering is unavailable [S2, unofficial].
 
-**Numbered Steps**
+**Parameters:**
+- `use_sort` (bool): Whether to sort splats by Morton code before compression to improve spatial locality. Default: `True` [S2, unofficial].
+- `verbose` (bool): Whether to print progress information. Default: `True` [S2, unofficial].
 
-1.  **Pre-processing**:
-    *   Apply a log-transform to the `means` coordinates: $y = \text{sign}(x) \cdot \log(1 + |x|)$ [S1, unofficial].
-    *   Normalize quaternions to unit length [S1, unofficial].
+**Steps:**
 
-2.  **Crop to Square**:
-    *   Let $N$ be the number of Gaussians.
-    *   Drop the lowest-opacity Gaussians until the remaining count is the nearest perfect square $n_{side}^2$ [S1, unofficial].
+1. **Preprocessing:**
+   - Apply log-transform to `means`: $y = \text{sign}(x) \cdot \log(1 + |x|)$ [S2, unofficial].
+   - Normalize `quats` to unit length: $q_{norm} = q / \|q\|$ [S1, unofficial].
 
-3.  **Sort (Optional)**:
-    *   If `use_sort` is True, sort splats by Morton code to improve spatial locality [S1, unofficial].
+2. **Crop to Square:**
+   - Calculate side length: $n_{side} = \lfloor \sqrt{N} \rfloor$ [S2, unofficial].
+   - Calculate number of Gaussians to drop: $n_{crop} = N - n_{side}^2$ [S2, unofficial].
+   - If $n_{crop} > 0$:
+     - Sort opacities in descending order.
+     - Keep indices of the top $n_{side}^2$ Gaussians.
+     - Apply this mask to all splat parameters [S2, unofficial].
 
-4.  **Quantize and Pack**:
-    *   **Means**: Quantize to 16-bit by splitting into two 8-bit PNGs [S1, unofficial].
-    *   **Scales, Quats, Opacities, SH0**: Quantize to 8-bit and save as a single 8-bit PNG [S1, unofficial].
-    *   **Higher-order SH (shN)**: Compress using NPZ format because k-means clustering via `torchpq` is unavailable in MLX [S1, unofficial].
+3. **Sorting (Optional):**
+   - If `use_sort` is `True`, sort the remaining Gaussians by their Morton code to enhance spatial locality [S2, unofficial].
 
-5.  **Save Metadata**:
-    *   Store `mins`, `maxs`, and `shape` for each parameter in a metadata file [S1, unofficial].
+4. **Quantization and PNG Encoding:**
+   - **8-bit Parameters (`scales`, `quats`, `opacities`, `sh0`):**
+     - Reshape parameter array to $(n_{side}, n_{side}, C)$ where $C$ is the channel dimension [S1, unofficial].
+     - Compute per-channel minimum ($min$) and maximum ($max$) [S1, unofficial].
+     - Normalize to $[0, 1]$: $x_{norm} = (x - min) / (max - min)$ [S2, unofficial].
+     - Scale to $[0, 255]$ and round to uint8: $img = \text{clip}(\text{round}(x_{norm} \cdot 255), 0, 255)$ [S2, unofficial].
+     - Save as PNG [S1, unofficial].
+   - **16-bit Parameters (`means`):**
+     - Perform 16-bit quantization: $img16 = \text{round}((x - min) / (max - min) \cdot 65535)$ [S2, unofficial].
+     - Split into low byte ($img16 \& 0xFF$) and high byte ($(img16 >> 8) \& 0xFF$) [S2, unofficial].
+     - Save each byte plane as a separate 8-bit PNG [S2, unofficial].
+   - **Higher-order SH (`shN`):**
+     - If K-means clustering is not available (e.g., in MLX without `torchpq`), compress using NPZ format [S2, unofficial].
 
-**Formulas**
+5. **Metadata Storage:**
+   - Save `shape`, `dtype`, `mins`, and `maxs` for each parameter in `meta.json` [S2, unofficial].
 
-*   **Log-transform**:
-    $$y = \text{sign}(x) \cdot \log(1 + |x|)$$
-    Inverse:
-    $$x = \text{sign}(y) \cdot (\exp(|y|) - 1)$$
-    [S1, unofficial]
+**Decompression:**
+1. Load `meta.json` [S1, unofficial].
+2. Load PNG images and reconstruct quantized arrays [S1, unofficial].
+3. Inverse quantization:
+   - 8-bit: $x = \text{normalised} \cdot (max - min) + min$, where $\text{normalised} = img / 255.0$ [S2, unofficial].
+   - 16-bit: Reconstruct 16-bit integer from two PNGs, then $x = \text{normalised} \cdot (max - min) + min$, where $\text{normalised} = img16 / 65535.0$ [S2, unofficial].
+4. Apply inverse log-transform to `means`: $y = \text{sign}(x) \cdot (\exp(|x|) - 1)$ [S2, unofficial].
+5. Normalize `quats` if necessary (though they are stored as unit vectors, reconstruction should preserve this if quantization is precise) [S1, unofficial].
 
-*   **8-bit Quantization**:
-    $$img = \text{clip}\left(\text{round}\left(\frac{arr - mins}{maxs - mins} \cdot 255\right), 0, 255\right)$$
-    [S1, unofficial]
-
-*   **8-bit Decompression**:
-    $$arr = \frac{img}{255.0} \cdot (maxs - mins) + mins$$
-    [S1, unofficial]
-
-*   **16-bit Decompression**:
-    Reconstruct 16-bit integer: $img16 = low + (high \ll 8)$ [S1, unofficial].
-    $$arr = \frac{img16}{65535.0} \cdot (maxs - mins) + mins$$
-    [S1, unofficial]
-
-**Parameters**
-*   `use_sort`: Boolean flag to enable sorting splats by Morton code before compression. Default: `True` [S1, unofficial].
-*   `verbose`: Boolean flag to print progress information. Default: `True` [S1, unofficial].
-
-**Edge Cases and Pitfalls**
-*   **Non-square Gaussian counts**: The method requires a square grid for PNG reshaping [S1, unofficial]. If $N$ is not a perfect square, the lowest-opacity Gaussians are dropped to allow reshaping into a square image [S1, unofficial].
-*   **Higher-order SH compression**: Due to the lack of `torchpq` in MLX, higher-order spherical harmonics are stored via NPZ rather than k-means clustering, resulting in less compression for models with many SH bands [S1, unofficial].
-*   **Precision**: Quantization introduces rounding errors [S1, unofficial]. 16-bit is used for `means` to preserve spatial accuracy, while 8-bit is used for other parameters [S1, unofficial].
-
-**Pseudocode**
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
-import mlx.core as mx
 import json
 import os
 
-def _log_transform(x: mx.array) -> mx.array:
-    """Apply log-transform to means."""
-    return mx.sign(x) * mx.log1p(mx.abs(x))
+def log_transform(x):
+    """Apply log-transform: y = sign(x) * log(1 + |x|)"""
+    return np.sign(x) * np.log1p(np.abs(x))
 
-def _crop_to_square(splats: dict) -> dict:
-    """Drop lowest-opacity Gaussians to make count a perfect square."""
+def inverse_log_transform(x):
+    """Apply inverse log-transform: y = sign(x) * (exp(|x|) - 1)"""
+    return np.sign(x) * (np.exp(np.abs(x)) - 1)
+
+def crop_to_square(splats):
+    """Crop splats to nearest perfect square by dropping lowest opacity."""
     n_gs = splats["means"].shape[0]
-    n_side = int(n_gs ** 0.5)
+    n_side = int(np.sqrt(n_gs))
     n_crop = n_gs - n_side * n_side
     
     if n_crop == 0:
         return splats
     
-    opacities_np = np.array(splats["opacities"]).ravel()
-    keep_indices = np.argsort(opacities_np)[::-1][: n_side * n_side]
+    # Sort opacities descending, keep top n_side^2
+    opacities = splats["opacities"].ravel()
+    keep_indices = np.argsort(opacities)[::-1][:n_side * n_side]
     keep_indices.sort()
-    keep_mx = mx.array(keep_indices.astype(np.uint32))
     
     cropped = {}
     for k, v in splats.items():
-        cropped[k] = v[keep_mx]
+        cropped[k] = v[keep_indices]
     return cropped
 
-def _quantize_8bit(arr: mx.array, mins: float, maxs: float) -> np.ndarray:
-    """Quantize float array to 8-bit uint8."""
+def compress_png_8bit(arr, mins, maxs):
+    """Compress array to 8-bit PNG."""
     ranges = maxs - mins
-    if ranges == 0:
-        ranges = 1e-8
-    normalized = (np.array(arr) - mins) / ranges
+    normalized = (arr - mins) / ranges
     img = np.clip(np.round(normalized * 255), 0, 255).astype(np.uint8)
     return img
 
-def _quantize_16bit(arr: mx.array, mins: float, maxs: float) -> tuple:
-    """Quantize float array to 16-bit, split into two 8-bit arrays."""
+def decompress_png_8bit(img, mins, maxs):
+    """Decompress 8-bit PNG to array."""
+    normalized = img / 255.0
+    return normalized * (maxs - mins) + mins
+
+def compress_png_16bit(arr, mins, maxs):
+    """Compress array to two 8-bit PNGs (low and high bytes)."""
     ranges = maxs - mins
-    if ranges == 0:
-        ranges = 1e-8
-    normalized = (np.array(arr) - mins) / ranges
+    normalized = (arr - mins) / ranges
     img16 = np.clip(np.round(normalized * 65535), 0, 65535).astype(np.uint16)
-    
     low_byte = (img16 & 0xFF).astype(np.uint8)
     high_byte = ((img16 >> 8) & 0xFF).astype(np.uint8)
     return low_byte, high_byte
 
-def png_compress_gaussians(splats: dict, out_dir: str, use_sort: bool = True, verbose: bool = True) -> dict:
-    """
-    Compress 3D Gaussian splats to PNG images.
-    
-    Args:
-        splats: Dictionary with keys 'means', 'quats', 'scales', 'opacities', 'sh0'.
-        out_dir: Output directory.
-        use_sort: Whether to sort by Morton code.
-        verbose: Print progress.
-        
-    Returns:
-        Metadata dictionary.
-    """
+def decompress_png_16bit(low_byte, high_byte, mins, maxs):
+    """Decompress two 8-bit PNGs to array."""
+    img16 = (high_byte.astype(np.uint16) << 8) | low_byte.astype(np.uint16)
+    normalized = img16 / 65535.0
+    return normalized * (maxs - mins) + mins
+
+def compress_gaussians_png(splats, use_sort=True, out_dir="output"):
+    """Compress Gaussian splats to PNGs."""
     os.makedirs(out_dir, exist_ok=True)
     
-    # 1. Pre-processing
-    if verbose:
-        print("Pre-processing...")
-    
-    means = splats["means"].copy()
-    means = _log_transform(means)
-    
-    quats = splats["quats"].copy()
-    quats = quats / mx.linalg.norm(quats, axis=-1, keepdims=True)
-    
-    processed_splats = {
-        "means": means,
-        "quats": quats,
-        "scales": splats["scales"].copy(),
-        "opacities": splats["opacities"].copy(),
-        "sh0": splats["sh0"].copy()
-    }
+    # 1. Preprocessing
+    splats["means"] = log_transform(splats["means"])
+    # Normalize quaternions
+    quats = splats["quats"]
+    norms = np.linalg.norm(quats, axis=-1, keepdims=True)
+    splats["quats"] = quats / norms
     
     # 2. Crop to square
-    if verbose:
-        print("Cropping to square...")
-    cropped_splats = _crop_to_square(processed_splats)
-    n_gs = cropped_splats["means"].shape[0]
-    n_side = int(n_gs ** 0.5)
+    splats = crop_to_square(splats)
+    n_side = int(np.sqrt(splats["means"].shape[0]))
     
-    # 3. Sort (Optional)
+    # 3. Sorting (Morton code) - Placeholder for actual Morton sort
     if use_sort:
-        if verbose:
-            print("Sorting by Morton code...")
-        # Sources do not specify Morton code implementation; standard Z-order curve sorting is applied.
-        # indices = compute_morton_sort(cropped_splats["means"])
-        # cropped_splats = {k: v[indices] for k, v in cropped_splats.items()}
+        # Morton code sorting would go here
+        pass
     
-    metadata = {}
+    # 4. Compress parameters
+    meta = {}
     
-    # 4. Quantize and Save
-    
-    # Means (16-bit)
-    if verbose:
-        print("Compressing means (16-bit)...")
-    means_np = np.array(cropped_splats["means"])
-    mins_m = np.min(means_np, axis=0)
-    maxs_m = np.max(means_np, axis=0)
-    metadata["means"] = {"shape": means_np.shape, "mins": mins_m.tolist(), "maxs": maxs_m.tolist()}
-    
-    means_reshaped = means_np.reshape(n_side, n_side, 3)
-    
-    for i, ch in enumerate(['x', 'y', 'z']):
-        low, high = _quantize_16bit(means_reshaped[:, :, i], mins_m[i], maxs_m[i])
-        # Sources do not specify image library; standard lossless PNG encoding is used.
-        # save_png(low, f"{out_dir}/means_{ch}_low.png")
-        # save_png(high, f"{out_dir}/means_{ch}_high.png")
+    # 8-bit params: scales, quats, opacities, sh0
+    for param in ["scales", "quats", "opacities", "sh0"]:
+        arr = splats[param]
+        # Reshape to (n_side, n_side, C)
+        C = arr.shape[-1]
+        arr_reshaped = arr.reshape(n_side, n_side, C)
         
-    # Scales, Quats, Opacities, SH0 (8-bit)
-    for param in ['scales', 'quats', 'opacities', 'sh0']:
-        if verbose:
-            print(f"Compressing {param} (8-bit)...")
-        arr_np = np.array(cropped_splats[param])
+        mins = np.min(arr_reshaped, axis=(0, 1))
+        maxs = np.max(arr_reshaped, axis=(0, 1))
         
-        mins_p = np.min(arr_np)
-        maxs_p = np.max(arr_np)
+        # Handle zero range to avoid division by zero
+        ranges = maxs - mins
+        ranges[ranges == 0] = 1.0
         
-        if param == 'opacities':
-            channels = 1
-        elif param == 'sh0':
-            channels = 3
-        elif param == 'scales':
-            channels = 3
-        elif param == 'quats':
-            channels = 4
-        else:
-            channels = 1
-            
-        if arr_np.ndim == 1:
-            arr_reshaped = arr_np.reshape(n_side, n_side, 1)
-        else:
-            arr_reshaped = arr_np.reshape(n_side, n_side, channels)
-            
-        metadata[param] = {"shape": arr_np.shape, "mins": float(mins_p), "maxs": float(maxs_p)}
+        img = compress_png_8bit(arr_reshaped, mins, maxs)
+        # Save img as PNG (implementation depends on library, e.g., PIL)
+        # For pseudocode, assume save_png(img, f"{param}.png")
+        save_png(img, os.path.join(out_dir, f"{param}.png"))
         
-        img = _quantize_8bit(arr_reshaped, mins_p, maxs_p)
-        # Sources do not specify image library; standard lossless PNG encoding is used.
-        # save_png(img, f"{out_dir}/{param}.png")
-
-    # Higher-order SH (NPZ)
-    if 'shN' in splats:
-        if verbose:
-            print("Compressing shN (NPZ)...")
-        np.savez_compressed(f"{out_dir}/shN.npz", shN=np.array(splats['shN']))
-        metadata['shN'] = {"format": "npz"}
+        meta[param] = {
+            "shape": arr.shape,
+            "dtype": "uint8",
+            "mins": mins.tolist(),
+            "maxs": maxs.tolist()
+        }
+        
+    # 16-bit params: means
+    param = "means"
+    arr = splats[param]
+    C = arr.shape[-1]
+    arr_reshaped = arr.reshape(n_side, n_side, C)
+    
+    mins = np.min(arr_reshaped, axis=(0, 1))
+    maxs = np.max(arr_reshaped, axis=(0, 1))
+    ranges = maxs - mins
+    ranges[ranges == 0] = 1.0
+    
+    low_byte, high_byte = compress_png_16bit(arr_reshaped, mins, maxs)
+    save_png(low_byte, os.path.join(out_dir, f"{param}_low.png"))
+    save_png(high_byte, os.path.join(out_dir, f"{param}_high.png"))
+    
+    meta[param] = {
+        "shape": arr.shape,
+        "dtype": "uint16",
+        "mins": mins.tolist(),
+        "maxs": maxs.tolist()
+    }
+    
+    # Higher-order SH (shN) - NPZ fallback
+    # If shN exists and is not sh0, compress with NPZ
+    if "shN" in splats:
+        np.savez_compressed(os.path.join(out_dir, "shN.npz"), splats["shN"])
+        meta["shN"] = {"dtype": "npz"}
         
     # Save metadata
-    with open(f"{out_dir}/metadata.json", 'w') as f:
-        json.dump(metadata, f)
+    with open(os.path.join(out_dir, "meta.json"), "w") as f:
+        json.dump(meta, f)
+
+def decompress_gaussians_png(out_dir="output"):
+    """Decompress Gaussian splats from PNGs."""
+    with open(os.path.join(out_dir, "meta.json"), "r") as f:
+        meta = json.load(f)
+    
+    splats = {}
+    
+    # Decompress 8-bit params
+    for param in ["scales", "quats", "opacities", "sh0"]:
+        info = meta[param]
+        img = load_png(os.path.join(out_dir, f"{param}.png"))
+        mins = np.array(info["mins"])
+        maxs = np.array(info["maxs"])
+        arr = decompress_png_8bit(img, mins, maxs)
+        # Reshape back to (N, C)
+        arr = arr.reshape(info["shape"])
+        splats[param] = arr
         
-    return metadata
+    # Decompress 16-bit params (means)
+    param = "means"
+    info = meta[param]
+    low_byte = load_png(os.path.join(out_dir, f"{param}_low.png"))
+    high_byte = load_png(os.path.join(out_dir, f"{param}_high.png"))
+    mins = np.array(info["mins"])
+    maxs = np.array(info["maxs"])
+    arr = decompress_png_16bit(low_byte, high_byte, mins, maxs)
+    arr = arr.reshape(info["shape"])
+    # Inverse log-transform
+    splats[param] = inverse_log_transform(arr)
+    
+    # Decompress higher-order SH
+    if "shN" in meta:
+        data = np.load(os.path.join(out_dir, "shN.npz"))
+        splats["shN"] = data["arr_0"]
+        
+    return splats
 ```
 
+**Edge Cases and Pitfalls:**
+- If the number of Gaussians is not a perfect square, the lowest opacity Gaussians are removed, potentially losing data [S1, S2, unofficial].
+- Higher-order SH coefficients (`shN`) are compressed via NPZ rather than K-means clustering if the upstream dependency `torchpq` is not available, resulting in less compression [S2, unofficial].
+- Division by zero in quantization must be handled if `max == min` for a channel [G].
+
+## Subtopics
+
+### [Gaussian Splat Chunk Compression with Morton Reordering](12243-gaussian-splat-chunk-compression-with-morton-reordering.md)
+This method reduces the storage size of trained 3D Gaussian Splatting models by reordering splats into spatially local chunks, normalizing data within each chunk to a 0..1 range, and storing the results in GPU textures using compression formats. It builds on [PNG-based Gaussian Compression](4834-png-based-gaussian-compression.md) by introducing spatial locality via Morton ordering to improve the efficiency of block-based texture compression (BCn). Unlike direct compression of raw data arrays, which suffers from poor compression ratios due to spatial discontinuity, this method aligns data with hardware compression block structures.
+
 ## Operating characteristics
-*   **Compression Ratio**: Approximately 10x compression on standard 3DGS models [S1, unofficial].
-*   **Time Complexity**: [G] Not given in the sources.
-*   **Memory Complexity**: [G] Not given in the sources.
-*   **Strengths**: Lossless storage of quantized data via PNG [S1, unofficial]. Spatial sorting improves compression [S1, unofficial].
-*   **Limitations**: Requires dropping Gaussians if count is not a perfect square [S1, unofficial]. Higher-order SH compression is suboptimal (NPZ) compared to k-means [S1, unofficial]. Quantization loss is inherent [S1, unofficial].
-*   **When to use**: [G] Not given in the sources.
-*   **When not to use**: [G] Not given in the sources.
+- **Compression Ratio:** Approximately 10x compression on standard 3DGS models [S2, unofficial].
+- **Time Complexity:** Dominated by sorting (if enabled) and PNG encoding/decoding. Sorting is $O(N \log N)$ [S2, unofficial].
+- **Memory Complexity:** Requires storing the original data during preprocessing and the compressed PNGs. Metadata is minimal [S2, unofficial].
+- **Strengths:** Lossless compression of quantized data, simple file format (PNG), good compression ratios due to spatial locality [S2, unofficial].
+- **Limitations:** Requires cropping to perfect square, higher-order SH compression is less efficient without K-means, PNG is not optimized for GPU texture access [S2, unofficial].
+- **When to Use:** When storage size is a concern and random access to individual Gaussians is not required (or can be handled via Morton code indexing) [S2, unofficial].
+- **When Not to Use:** When GPU texture compression (BCn) is preferred for rendering performance, or when higher-order SH coefficients are significant and K-means is not available [S2, unofficial].
 
 ## Background
-Originated as a port of the PyTorch `gsplat` compression module to the MLX framework [S1, unofficial]. The technique leverages the ubiquity of PNG compression and the spatial locality of 3D Gaussians via Morton sorting to achieve efficient storage [S1, unofficial].
+PNG-based Gaussian Compression is a technique for compressing trained 3D Gaussian Splatting models by quantizing parameters into 8-bit and 16-bit PNG images [S2, unofficial]. It was originally developed as part of the `gsplat` library for PyTorch and later ported to MLX by the `gsplat-mlx` project [S2, unofficial]. The method leverages the spatial coherence of Gaussian splats to improve compression ratios [S2, unofficial].
 
 ## Sources
-[S1] RobotFlow-Labs/gsplat-mlx, https://github.com/RobotFlow-Labs/gsplat-mlx, fetched 2026-10-27 (unofficial)
+[S1] nerfstudio-project/gsplat, https://github.com/nerfstudio-project/gsplat, fetched 2026-10-27 (unofficial)
+[S2] RobotFlow-Labs/gsplat-mlx, https://github.com/RobotFlow-Labs/gsplat-mlx, fetched 2026-10-27 (unofficial)

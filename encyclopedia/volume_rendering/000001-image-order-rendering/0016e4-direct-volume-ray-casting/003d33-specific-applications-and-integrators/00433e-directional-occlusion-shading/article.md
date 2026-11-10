@@ -3,236 +3,168 @@
 Also called: DOS, Directional Occlusion, Directional Occlusion Shading Model
 
 ## Overview
-Directional Occlusion Shading (DOS) is an image-order shading technique for interactive direct volume rendering that approximates in-scattered radiance using a cone-shaped phase function to model directional occlusion [S2]. It provides perceptual cues similar to ambient occlusion for solid and transparent surface-like features without precomputation [S2]. Unlike standard local shading models, DOS integrates soft shadowing effects and first-order scattering by restricting occlusion computation to a cone oriented toward the viewer, allowing interactive manipulation of camera position, transfer function, and clipping planes without re-computation [S2]. It differs from half-angle slicing by not adapting the slicing axis to the light position, and from translucency models by using a backward-peaked phase function to accentuate surface features rather than forward-peaked scattering for light penetration [S1, S2].
+Directional Occlusion Shading (DOS) is an image-order shading technique for interactive direct volume rendering that approximates in-scattered radiance using a cone-shaped phase function to model directional occlusion [S2]. It provides perceptual cues similar to ambient occlusion for solid and transparent surface-like features without precomputation [S2]. Unlike half-angle slicing, DOS does not adapt the slicing axis to the light position; instead, it assumes a single light source at the camera position and uses a backward-peaked phase function to integrate soft shadowing effects during front-to-back slice traversal [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** 3D scalar volume data, 2D transfer functions (mapping scalar values to color and opacity), camera parameters (view and projection matrices), aperture angle $\theta$, inter-slice distance $d$, and sample grid resolution for occlusion estimation.
-*   **Output:** Final color and opacity buffer (Eye Buffer) and Occlusion Factor buffer.
+*   **Input:** 3D scalar volume data, transfer function (mapping scalar values to color and opacity), camera parameters (view and projection matrices), aperture angle $\theta$, inter-slice distance $d$, and sample grid resolution for occlusion computation.
+*   **Output:** Final color image in the frame buffer.
 
 **Data Structures:**
-*   **Eye Buffer:** Floating-point buffer (typically 16-bit per channel) storing accumulated color and opacity. Two buffers (`eye_current`, `eye_next`) are used for double buffering during slice traversal.
-*   **Occlusion Buffer:** Floating-point buffer storing the fractional visibility (occlusion factor). Two buffers (`occlusion_current`, `occlusion_next`) are used.
-*   **Proxy Geometry:** View-aligned slices (quads) representing intersections of the volume bounding box with planes parallel to the view plane.
+1.  **Volume Texture:** 3D texture storing scalar values.
+2.  **Eye Buffer:** Floating-point buffer (16-bit precision recommended) storing the accumulated color and opacity of the ray-cast slices.
+3.  **Occlusion Buffers:** Two floating-point buffers (current and next) storing the fractional visibility (occlusion factor) for each fragment. These are swapped after each slice is processed [S2].
+4.  **Proxy Geometry:** View-aligned slices (quads) intersecting the volume bounding box, generated on the CPU [S2].
 
 **Formulas:**
-1.  **Phase Function:** A backward-peaked cone phase function $\Phi_\theta(\vec{\omega}, \vec{\omega}_i)$ defines the occlusion cone [S2]:
+*   **Phase Function:** The backward-peaked cone phase function $\Phi_\theta(\vec{\omega}, \vec{\omega}_i)$ is defined as [S2]:
     $$
     \Phi_\theta(\vec{\omega}, \vec{\omega}_i) = \begin{cases} \frac{1}{2\pi(1-\cos \theta)} & \text{if } \langle \vec{\omega}, \vec{\omega}_i \rangle > \cos(\theta) \\ 0 & \text{otherwise} \end{cases}
     $$
     where $\vec{\omega}$ is the viewing direction, $\vec{\omega}_i$ are directions within the cone, and $\theta \in [0, \pi/2)$ is the aperture angle [S2].
-
-2.  **Transmittance:**
-    $$
-    T(\vec{x}_a, \vec{x}_b) = e^{-\tau(\vec{x}_a, \vec{x}_b)}, \quad \tau(\vec{x}_a, \vec{x}_b) = \int_{\vec{x}_a}^{\vec{x}_b} \sigma_t(\vec{x}) d\vec{x}
-    $$
-    where $\sigma_t = \sigma_a + \sigma_s$ [S2].
-
-3.  **Radiance:**
-    $$
-    L(\vec{x}, \vec{\omega}) = T(\vec{x}, \vec{x}_0) L_b(\vec{x}_0, \vec{\omega}) + L_m(\vec{x}, \vec{\omega})
-    $$
-    where $L_b$ is background radiance and $L_m$ is medium radiance [S2].
-
-4.  **Medium Radiance (First-Order Scattering Approximation):**
-    $$
-    L_m(\vec{x}, \vec{\omega}) = \int_{\vec{x}}^{\vec{x}_0} T(\vec{x}, \vec{x}') \sigma_s(\vec{x}') L_i(\vec{x}', \vec{\omega}) d\vec{x}'
-    $$
-    where $L_i$ is in-scattered radiance [S2].
-
-5.  **In-Scattered Radiance:**
-    $$
-    L_i(\vec{x}', \vec{\omega}) = L_a V(\vec{x}', \vec{\omega})
-    $$
-    where $L_a$ is constant ambient radiance and $V$ is fractional visibility [S2].
-
-6.  **Fractional Visibility (Occlusion Factor):**
-    $$
-    V(\vec{x}', \vec{\omega}) = \int_{4\pi} T(\vec{x}', \vec{x}_{0,i}) \Phi_\theta(\vec{\omega}, \vec{\omega}_i) d\vec{\omega}_i
-    $$
-    where $\vec{x}_{0,i}$ is the point where the ray leaves the volume [S2].
+*   **Transmittance:** $T(\vec{x}_a, \vec{x}_b) = e^{-\tau(\vec{x}_a, \vec{x}_b)}$, where $\tau(\vec{x}_a, \vec{x}_b) = \int_{\vec{x}_a}^{\vec{x}_b} \sigma_t(\vec{x}) d\vec{x}$ and $\sigma_t = \sigma_a + \sigma_s$ [S2].
+*   **Radiance:** The final radiance is $L(\vec{x}, \vec{\omega}) = T(\vec{x}, \vec{x}_0) L_b(\vec{x}_0, \vec{\omega}) + L_m(\vec{x}, \vec{\omega})$, where $L_b$ is background radiance and $L_m$ is medium radiance [S2].
+*   **Medium Radiance:** $L_m(\vec{x}, \vec{\omega}) = \int_{\vec{x}}^{\vec{x}_0} T(\vec{x}, \vec{x}') \sigma_s(\vec{x}') L_i(\vec{x}', \vec{\omega}) d\vec{x}'$ [S2].
+*   **In-scattered Radiance Approximation:** $L_i(\vec{x}', \vec{\omega}) = L_a V(\vec{x}', \vec{\omega})$, where $L_a$ is constant ambient radiance and $V$ is fractional visibility [S2].
+*   **Fractional Visibility:** $V(\vec{x}', \vec{\omega}) = \int_{4\pi} T(\vec{x}', \vec{x}_{0,i}) \Phi_\theta(\vec{\omega}, \vec{\omega}_i) d\vec{\omega}_i$, where $\vec{x}_{0,i}$ is the point where the ray leaves the volume [S2].
 
 **Algorithm Steps:**
-The method extends a slice-based renderer. For each view-aligned slice:
-
-1.  **Compute Proxy Geometry:** Generate view-aligned slice quads on the CPU [S2].
-2.  **Render to Eye Buffer:**
-    *   Render the slice from the eye's point of view.
-    *   For each fragment, read the current occlusion factor $V_{prev}$ from the `occlusion_current` buffer.
-    *   Compute sample color $C_{sample}$ and opacity $\alpha_{sample}$ from volume data and transfer function.
-    *   Compute contribution: $C_{contrib} = C_{sample} \cdot L_a \cdot V_{prev}$.
-    *   Blend front-to-back into `eye_current`:
-        $$
-        C_{out} = C_{in} + C_{contrib} \cdot \alpha_{sample} \cdot (1 - \alpha_{in})
-        $$
-        $$
-        \alpha_{out} = \alpha_{in} + \alpha_{sample} \cdot (1 - \alpha_{in})
-        $$
-3.  **Update Occlusion Buffer:**
-    *   Render the same slice again, but target `occlusion_next`.
-    *   Calculate occlusion extent: $R = d \tan(\theta)$ [S2].
-    *   Compute correction factor $\vec{c}$ in vertex shader to handle perspective distortion (see below) [S2].
-    *   Generate sample positions $\vec{p}$ on a disk of radius $R$ using a uniform grid [S2].
-    *   For each fragment (representing a point on the slice):
-        *   Project fragment position to NDC: $\vec{x}_y d$ [S2].
-        *   Calculate NDC sample positions: $\vec{p}_d = \vec{x}_y d + \vec{c} \otimes \vec{p}$ [S2].
-        *   Convert to texture coordinates: $\vec{p}_t = 0.5 \cdot \vec{p}_d + [0.5, 0.5]^T$ [S2].
-        *   Read previous occlusion values $V_k$ from `occlusion_current` at $\vec{p}_t$.
-        *   Attenuate by transmittance approximation using inter-slice distance $d$: $A_k = V_k \cdot e^{-\sigma_t d}$ [S2]. (Note: Sources indicate using approx distance $d$ for performance, which increases speed by up to 23% [S2]).
-        *   Average weighted samples to compute new visibility $V_{new}$ [S2].
-        *   Write $V_{new}$ to `occlusion_next`.
-4.  **Swap Buffers:** Swap `eye_current`/`eye_next` and `occlusion_current`/`occlusion_next` [S2].
-5.  **Repeat:** Process next slice.
-6.  **Finalize:** Copy `eye_current` to frame buffer, converting float to fixed-point [S2].
+1.  **Generate Proxy Geometry:** Compute world-space proxy geometry (view-aligned slices) by intersecting view-aligned planes with the volume bounding box on the CPU [S2].
+2.  **Initialize Buffers:** Clear the Eye Buffer and both Occlusion Buffers.
+3.  **Slice Traversal:** For each slice from front to back:
+    a.  **Render to Eye Buffer:** Render the slice from the eye's point of view into the Eye Buffer.
+        i.  For each fragment, read the occlusion factor $V$ from the *current* Occlusion Buffer at the fragment's projected position.
+        ii. Compute the fragment's color $C$ and opacity $\alpha$ from the volume data using the transfer function.
+        iii. Compute the contribution: $C_{contrib} = C \cdot V \cdot L_a$.
+        iv. Blend $C_{contrib}$ and $\alpha$ into the Eye Buffer using front-to-back compositing [S2].
+    b.  **Update Occlusion Buffer:** Render the slice again into the *next* Occlusion Buffer to update the occlusion factors.
+        i.  Calculate the occlusion extent radius: $r = d \tan(\theta)$, where $d$ is the inter-slice distance [S2].
+        ii. Compute the correction factor $\vec{c}$ in the vertex shader to handle perspective distortion. $\vec{c}$ is derived from the projection matrix $P$ and the view-space z-coordinate of the slice vertices [S2]:
+            $$
+            \vec{c} = \begin{pmatrix} x_{scale} \\ y_{scale} \\ z_{scale} \end{pmatrix} = P \begin{pmatrix} x_{scale} \\ y_{scale} \\ z_{scale} \end{pmatrix} \quad \text{(Note: Source defines } \vec{c} \text{ via projection matrix scaling)}
+            $$
+            Specifically, $\vec{c}$ scales the sample positions to account for the varying cone base size in screen space due to perspective [S2].
+        iii. Generate sample positions $\vec{p}$ on a disk of radius $r$ using a uniform grid aligned with the occlusion buffer axes [S2].
+        iv. For each fragment, calculate the NDC sample positions $\vec{p}_d$:
+            $$
+            \vec{p}_d = \vec{x}_y d + \vec{c} \otimes \vec{p}
+            $$
+            where $\vec{x}_y d$ is the fragment's NDC position, $\otimes$ is component-wise multiplication, and $\vec{p}$ is the disk sample position [S2].
+        v.  Calculate texture coordinates $\vec{p}_t$:
+            $$
+            \vec{p}_t = 0.5 \cdot \vec{p}_d + \begin{bmatrix} 0.5 \\ 0.5 \end{bmatrix}
+            $$
+            [S2].
+        vi. Read the previous occlusion factor $V_{prev}$ from the *current* Occlusion Buffer at $\vec{p}_t$.
+        vii. Attenuate $V_{prev}$ by the transmittance $T$. The sources note that approximating the distance for transmittance calculation with the inter-slice distance $d$ increases performance with negligible visual difference [S2].
+        viii. Average the weighted samples to compute the new occlusion factor $V_{new}$ for the fragment.
+    c.  **Swap Buffers:** Swap the current and next Occlusion Buffers [S2].
+4.  **Final Output:** Copy the Eye Buffer to the frame buffer, converting from floating-point to fixed-point format [S2].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_directional_occlusion_shading(volume, transfer_function, camera, theta, d, sample_grid_res):
-    """
-    Renders volume using Directional Occlusion Shading.
-    """
-    # Initialize buffers (16-bit float)
-    eye_current = create_buffer(width, height)
-    eye_next = create_buffer(width, height)
-    occlusion_current = create_buffer(width, height)
-    occlusion_next = create_buffer(width, height)
-    
-    # Initialize occlusion buffer with 1.0 (full visibility) for first slice
-    occlusion_current.fill(1.0)
+def directional_occlusion_shading(volume, transfer_function, camera, theta, d, sample_grid_res):
+    # Initialize buffers
+    eye_buffer = create_floating_point_buffer(width, height)
+    occlusion_buffer_1 = create_floating_point_buffer(width, height)
+    occlusion_buffer_2 = create_floating_point_buffer(width, height)
+    current_occlusion = occlusion_buffer_1
+    next_occlusion = occlusion_buffer_2
     
     # Generate view-aligned slices
     slices = generate_view_aligned_slices(volume.bounding_box, camera.view_direction, d)
     
     for slice in slices:
-        # Step 1: Render to Eye Buffer
-        render_eye_pass(slice, camera, volume, transfer_function, theta, d, 
-                        occlusion_current, eye_current, eye_next)
+        # Pass 1: Render to Eye Buffer
+        render_slice_to_eye(slice, camera, volume, transfer_function, current_occlusion, eye_buffer, theta, d)
         
-        # Step 2: Update Occlusion Buffer
-        render_occlusion_pass(slice, camera, volume, transfer_function, theta, d, 
-                              occlusion_current, occlusion_next)
+        # Pass 2: Update Occlusion Buffer
+        update_occlusion_buffer(slice, camera, volume, current_occlusion, next_occlusion, theta, d, sample_grid_res)
         
-        # Step 3: Swap Buffers
-        eye_current, eye_next = eye_next, eye_current
-        occlusion_current, occlusion_next = occlusion_next, occlusion_current
+        # Swap buffers
+        swap(current_occlusion, next_occlusion)
+        
+    # Copy to frame buffer
+    frame_buffer = convert_to_fixed_point(eye_buffer)
+    return frame_buffer
 
-    # Copy final eye buffer to screen
-    copy_to_framebuffer(eye_current)
-
-def render_eye_pass(slice, camera, volume, tf, theta, d, occlusion_buf, eye_in, eye_out):
-    """
-    Renders slice into eye buffer, blending color modulated by occlusion.
-    """
-    # Vertex shader computes clip space position
-    # Fragment shader:
-    for each fragment f on slice:
-        # Read occlusion factor from previous pass
-        V = occlusion_buf.read(f.texture_coords)
-        
-        # Sample volume data at fragment position
-        value = volume.sample(f.world_position)
-        color, alpha = tf.apply(value)
-        
-        # Ambient radiance (constant)
-        L_a = vec3(1.0, 1.0, 1.0) # Or user-defined
-        
-        # Contribution: Color * Ambient * Occlusion
-        # Note: Standard front-to-back compositing
-        # C_out = C_in + (C_sample * L_a * V) * alpha * (1 - alpha_in)
-        
-        contrib_color = color * L_a * V
-        
-        alpha_in = eye_in.read_alpha(f.texture_coords)
-        color_in = eye_in.read_color(f.texture_coords)
-        
-        weight = alpha * (1.0 - alpha_in)
-        
-        new_alpha = alpha_in + weight * alpha
-        new_color = color_in * (1.0 - weight) + contrib_color * weight
-        
-        eye_out.write(f.texture_coords, new_color, new_alpha)
-
-def render_occlusion_pass(slice, camera, volume, tf, theta, d, occlusion_in, occlusion_out):
-    """
-    Renders slice into next occlusion buffer, integrating visibility from previous buffer.
-    """
-    # Precompute correction factor c in vertex shader
-    # c = P * (1, 1, z_view, 1) adjusted for scaling
-    # See Eq 12 in [S2]
+def render_slice_to_eye(slice, camera, volume, transfer_function, occlusion_buffer, eye_buffer, theta, d):
+    # Project slice vertices to screen space
+    screen_vertices = project_to_screen(slice.vertices, camera.projection_matrix, camera.view_matrix)
     
-    # Generate uniform grid samples on disk of radius R = d * tan(theta)
-    samples = generate_disk_samples(theta, d, sample_grid_res)
+    for fragment in screen_vertices:
+        # Read occlusion factor from previous buffer
+        occlusion_factor = occlusion_buffer.read(fragment.ndc_position)
+        
+        # Sample volume at fragment's world position
+        color, opacity = transfer_function.sample(volume, fragment.world_position)
+        
+        # Compute contribution
+        ambient_radiance = 1.0 # Assuming normalized ambient
+        contribution_color = color * occlusion_factor * ambient_radiance
+        
+        # Front-to-back compositing into eye buffer
+        eye_buffer.composite(fragment.ndc_position, contribution_color, opacity)
+
+def update_occlusion_buffer(slice, camera, volume, current_occlusion, next_occlusion, theta, d, sample_grid_res):
+    occlusion_extent = d * tan(theta)
     
-    for each fragment f on slice:
-        # Get NDC position of fragment
-        x_ndc = f.ndc_position.xy
-        
-        # Correction factor c (from vertex shader, constant per slice or interpolated)
-        c = f.correction_factor
-        
-        total_weighted_visibility = 0.0
-        total_weight = 0.0
+    # Compute correction factor in vertex shader
+    # c is derived from projection matrix and view-space z
+    correction_factor = compute_correction_factor(slice.vertices, camera.projection_matrix)
+    
+    # Generate uniform grid samples on disk of radius occlusion_extent
+    samples = generate_uniform_disk_samples(occlusion_extent, sample_grid_res)
+    
+    for fragment in slice.screen_projection:
+        new_occlusion = 0.0
+        sample_count = 0
         
         for p in samples:
             # Calculate NDC sample position
-            # p_d = x_ndc + c * p (component-wise multiplication)
-            p_ndc = x_ndc + c * p
+            # p_d = x_y_d + c ⊗ p
+            ndc_sample = fragment.ndc_position + component_wise_multiply(correction_factor, p)
             
-            # Convert to texture coordinates
-            p_tex = 0.5 * p_ndc + vec2(0.5, 0.5)
+            # Calculate texture coordinates
+            tex_coord = 0.5 * ndc_sample + [0.5, 0.5]
             
-            # Read previous occlusion value
-            V_prev = occlusion_in.read(p_tex)
+            # Read previous occlusion
+            prev_v = current_occlusion.read(tex_coord)
             
-            # Attenuate by transmittance over distance d
-            # Approximation: T = exp(-sigma_t * d)
-            # sigma_t is derived from transfer function or volume data at fragment
-            sigma_t = tf.get_extinction(f.value)
-            T = exp(-sigma_t * d)
+            # Attenuate by transmittance (approximate distance as d)
+            transmittance = exp(-sigma_t * d) # sigma_t approximated or from volume
+            attenuated_v = prev_v * transmittance
             
-            weighted_V = V_prev * T
-            total_weighted_visibility += weighted_V
-            total_weight += 1.0
+            new_occlusion += attenuated_v
+            sample_count += 1
             
         # Average
-        V_new = total_weighted_visibility / total_weight
-        
-        # Write to next occlusion buffer
-        occlusion_out.write(f.texture_coords, V_new)
+        next_occlusion.write(fragment.ndc_position, new_occlusion / sample_count)
 ```
 
 **Parameters:**
 *   **Aperture Angle ($\theta$):** Controls the influence of features at different distances. Range $[0, \pi/2)$. Typical value: $80^\circ$ [S2].
 *   **Inter-slice Distance ($d$):** Distance between view-aligned slices. Typical value: $0.001$ [S2].
-*   **Sample Grid Resolution:** User-specified resolution for the uniform grid used to approximate the integral in Eq. 10. Higher resolution improves quality but reduces performance [S2].
+*   **Sample Grid Resolution:** User-specified resolution for the uniform grid used to approximate the integral in the occlusion buffer update. Higher resolution improves quality but reduces performance [S2].
 
 **Edge Cases and Pitfalls:**
-*   **Perspective Distortion:** The cone base size varies with z-coordinate in screen space. Handled by computing correction factor $\vec{c}$ in the vertex shader using the projection matrix and view space z [S2].
-*   **Inter-frame Artifacts:** Camera movement can cause artifacts. Mitigated by using a symmetric uniform grid for sample positions aligned with occlusion buffer axes [S2].
-*   **MRT Undefined Behavior:** Reading and writing to the same layered render target is undefined by OpenGL spec but works in practice if reads/writes do not reference the same layer [S2].
-*   **Single Light Source:** Bound to the slice-based rendering paradigm and supports only a single light source located at the camera position [S1].
-*   **Precision:** Floating-point buffers are required to increase precision, especially for low-transparency materials and low inter-slice distances [S2].
+*   **Perspective Distortion:** The cone base size varies with z-coordinate in screen space. This is handled by the correction factor $\vec{c}$ computed in the vertex shader [S2].
+*   **Inter-frame Artifacts:** Camera movement can cause artifacts. Using a symmetric uniform grid for sample positions aligned with occlusion buffer axes mitigates this [S2].
+*   **Undefined OpenGL Behavior:** Reading and writing to the same layered render target (MRT) is undefined by the OpenGL spec but works in practice if reads and writes do not reference the same layer [S2].
+*   **Single Light Source:** DOS is bound to the slice-based rendering paradigm and supports only a single light source located at the camera position [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Interactive. Performance depends on the number of slices and the sample grid resolution for occlusion estimation.
-*   **Memory Complexity:** Low. Requires two additional floating-point buffers (Eye and Occlusion) per slice traversal pass [S1, S2].
-*   **Measured Performance:**
-    *   Stag Beetle (1046 slices, 80° aperture): 10.6 FPS [S2].
-    *   Brain MRI (256x256x160, 1000 slices): 3.7 FPS (DOS) vs 1.6 FPS (Lambertian) [S2].
-    *   Carp CT (256x288x512, 220 slices): 48.3 FPS (DOS) vs 8.8 FPS (Lambertian) [S2].
-    *   Visible Male (512x512x302, 962 slices): 5.0 FPS (DOS) vs 25.7 FPS (Lambertian) [S2].
-    *   Engine Block CT (256x256x128, 679 slices): 5.6 FPS (DOS) vs 5.6 FPS (Lambertian) [S2].
-    *   Hand CT (244x124x257, 619 slices): 13.3 FPS (DOS) vs 16.0 FPS (Lambertian) [S2].
-    *   Tree CT (512x512x512, 1563 slices): 59.0 FPS (DOS) vs 29.1 FPS (Lambertian) [S2] [S2].
-*   **Scaling:** Performance is strongly dependent on the sample grid resolution [S2]. MRT (Multiple Render Targets) increases performance by 44-99% compared to SRT (Single Render Target), especially for low sample counts. For high sample counts, memory bandwidth becomes the bottleneck [S2].
-*   **Strengths:** Interactive frame rates without precomputation; supports interactive clipping planes and transfer function changes; accentuates concavities, depth discontinuities, and soft shadows better than Lambertian shading [S2].
-*   **Limitations:** Limited to a single light source at the camera position; bound to slice-based rendering; artifacts may appear on regular structures [S2].
+*   **Time Complexity:** Interactive frame rates are achieved, but performance is strongly dependent on the sample grid resolution and the number of slices. For example, on a Stag Beetle dataset (1046 slices, 80° aperture), DOS achieved 10.6 FPS [S2]. On a Brain MRI (256x256x160, 1000 slices), it achieved 3.7 FPS compared to 1.6 FPS for Lambertian shading [S2]. On a Carp CT (256x288x512, 220 slices), it achieved 48.3 FPS compared to 8.8 FPS for Lambertian [S2].
+*   **Memory Complexity:** Low memory footprint, requiring only the additional occlusion buffers (two floating-point buffers) in addition to the standard buffers used for slice rendering [S1, S2].
+*   **Strengths:** Provides perceptual cues similar to ambient occlusion for both solid and transparent features without precomputation. Allows interactive manipulation of camera position, transfer function, and clipping planes, with clipping planes directly influencing occlusion effects [S2].
+*   **Limitations:** Bound to view-aligned slicing and a single light source at the camera position. Performance degrades with high sample counts due to memory bandwidth bottlenecks, especially when using Multiple Render Targets (MRT) [S2].
+*   **When to Use:** When interactive exploration of volumetric data with ambient occlusion-like shading is required, and precomputation is not feasible or desirable. Particularly effective for accentuating concavities, depth discontinuities, and soft shadows [S2].
+*   **When Not to Use:** When multiple light sources or arbitrary light positions are required (use Multidirectional Occlusion Shading instead) [S1]. When high-quality translucency effects are needed (use forward-peaked phase functions like Kniss et al.) [S2].
 
 ## Background
-Directional Occlusion Shading was introduced by Mathias Schott, Vincent Pegoraro, Charles Hansen, Kévin Boulanger, and Kadi Bouatouch in 2009 at the Eurographics/ IEEE-VGTC Symposium on Visualization [S2]. It was published in the Journal of Computer Graphics Forum (Eurographics) in 2009 [S2]. The method is derived from the radiative transport equation using a specialized backward-peaked cone phase function [S2]. It differs from Kniss et al. [KPH* 03] by using a backward-peaked phase function to accentuate semi-transparent solid and surface-like features, instead of a forward-peaked phase function to approximate translucency [S2]. Unlike precomputed AO methods, clipping planes influence the occlusion effects [S2]. Unlike Vicinity Shading and Obscurance Shading, it does not require recomputation of occlusion values when volume classification parameters change [S2]. Unlike Ritschel [Rit07], it does not require seconds for recomputation of the visibility function when changing the transfer function [S2]. Unlike Desgrange et al. [DE07], it does not use blurred opacity volumes or summed area volumes [S2]. Unlike Filterable occlusion maps [PM08], semi-transparent materials influence the occlusion computation [S2].
+Directional Occlusion Shading was introduced by Mathias Schott, Vincent Pegoraro, Charles Hansen, Kévin Boulanger, and Kadi Bouatouch in 2009 at the Eurographics/ IEEE-VGTC Symposium on Visualization [S2]. It was published in the Journal of Computer Graphics Forum (Eurographics) in 2009 [S2]. The method extends slice-based volume rendering by incorporating a specialized backward-peaked cone phase function to approximate in-scattered radiance, allowing for interactive occlusion effects without the need for precomputed visibility data [S2].
 
 ## Sources
 [S1] Interactive Volume Rendering with Volumetric Illumination, https://doi.org/10.2312/conf/eg2012/stars/053-074, fetched 2026-10-26

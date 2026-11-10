@@ -1,112 +1,95 @@
 # Boundary Emphasis Slider
 
-Also called: Boundary Emphasis, Boundary Emphasis Control, Second Derivative Opacity Control
+Also called: Boundary Emphasis Control, Second Derivative Opacity Control
 
 ## Overview
-The Boundary Emphasis Slider is a user interface control used to modulate the opacity of a volume rendering transfer function based on the magnitude of the second derivative of the scalar data [S2][S3, book][S4]. It solves the problem of distinguishing material boundaries by assigning maximal opacity to regions where the second derivative is zero (indicating a linear ramp or constant region in the data, often associated with sharp edges in the gradient) and decreasing opacity as the second derivative magnitude increases [S2][S3, book][S4]. It sets itself apart from its parent [Boundary-Enhanced Opacity](795-boundary-enhanced-opacity.md), which uses the first derivative (gradient magnitude), by utilizing the second derivative to refine boundary selection, particularly in conjunction with 3D histograms for automated control point placement [S1].
+The Boundary Emphasis Slider is a user interface control used to modulate the opacity of a transfer function based on the magnitude of the second derivative of the scalar data [S2][S3, book][S4]. It serves as a starting point for transfer function design by emphasizing regions where the second derivative magnitude is small or zero, which typically correspond to material boundaries or homogeneous regions, while suppressing regions with high second derivative values [S1, S2][S3, book][S4]. It sets itself apart from its parent [Boundary-Enhanced Opacity](795-boundary-enhanced-opacity.md) by explicitly using the second derivative magnitude as the primary modulation factor for opacity, rather than just the gradient magnitude, and from [Silhouette Enhancement](796-silhouette-enhancement.md) by focusing on the scalar field's curvature rather than surface normals or view-dependent effects.
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** A selected classification widget (defining the voxel value interval) and a scalar value $v$ for the current sample.
-*   **Intermediate Data:** The first derivative magnitude $|\nabla v|$ and the second derivative magnitude $|d^2v|$ (or a specific directional second derivative) at the sample location [S1, S2].
-*   **Output:** A final opacity value $\alpha_{final}$ for the sample, derived from the widget's base opacity and the boundary emphasis factor.
+The method operates within the context of a multi-dimensional transfer function (TF) interface, specifically managing the third dimension of the TF domain: the second derivative [S2][S3, book][S4].
 
-**Data Structures**
-The transfer function is typically represented as a lookup table (LUT) or a set of classification widgets.
-*   **Classification Widget:** Defines an interval of voxel values $[v_{min}, v_{max}]$ and a base opacity function $\alpha_{base}(v)$.
-*   **Boundary Emphasis Slider:** A single scalar parameter $s \in [0, 1]$ associated with the selected widget.
-    *   $s = 0$ (Left-most position): Zero opacity is given to extremal second derivatives [S2][S3, book][S4].
-    *   $s = 1$ (Right-most position): Opacity is constant with respect to the second derivative [S2][S3, book][S4].
+**Inputs and Outputs:**
+*   **Input:** The current classification widget (selected in the TF domain), the scalar data value $v$, the second derivative magnitude $|f''|$ at the sample point, and the slider position $s \in [0, 1]$.
+*   **Output:** The final opacity $\alpha$ for the sample point.
 
-**Algorithm Steps**
-1.  **Calculate Derivatives:** Compute the first derivative magnitude $|\nabla v|$ and the second derivative magnitude $|d^2v|$ for the current voxel value $v$ [S1, S2].
-2.  **Determine Extrema:** Identify the maximum possible second derivative magnitude $D_{max}$ in the dataset or the relevant range [S2][S3, book][S4].
-3.  **Compute Base Opacity:** Determine the base opacity $\alpha_{base}$ from the selected classification widget based on $v$ [S1, S2].
-4.  **Compute Boundary Emphasis Factor:** Calculate a factor $E$ based on the second derivative magnitude and the slider position $s$.
-    *   The factor $E$ is maximal (1.0) when $|d^2v| = 0$ [S2][S3, book][S4].
-    *   The factor $E$ decreases linearly as $|d^2v|$ increases towards $D_{max}$ [S2][S3, book][S4].
-    *   The rate of decrease is controlled by $s$.
-5.  **Apply Modulation:** Multiply the base opacity by the boundary emphasis factor: $\alpha_{final} = \alpha_{base} \times E$.
-6.  **Global Application (Optional):** For global boundary emphasis across all widgets, modulate the output of a 2D transfer function with the per-sample boundary emphasis value [S2].
+**Data Structures:**
+The transfer function is typically represented as a lookup table or a set of classification widgets. Each widget defines an interval of scalar values $[v_{min}, v_{max}]$ and an associated opacity function. The boundary emphasis slider is a global or per-widget control located on the top edge of the transfer function widget interface [S2, S4].
 
-**Formulas**
-Let $|d^2v|$ be the magnitude of the second derivative at the sample point.
-Let $D_{max}$ be the maximum second derivative magnitude in the data range [S2][S3, book][S4].
-Let $s$ be the slider position, where $s \in [0, 1]$ [S2][S3, book][S4].
+**Steps:**
+1.  **Identify Selected Widget:** Determine which classification widget is currently selected by the user [S2, S4].
+2.  **Compute Second Derivative:** Calculate the magnitude of the second derivative $|f''|$ for the current sample point. This is typically derived from the scalar field $f$ using finite differences or a Hessian-based approach [S1, S2].
+3.  **Determine Base Opacity:** Determine the base opacity $\alpha_{base}$ from the classification widget's definition for the current scalar value $v$. If $v$ is outside the widget's interval, $\alpha_{base} = 0$. If inside, it may be a constant or vary with $v$ [S1, S2].
+4.  **Apply Boundary Emphasis:** Modulate $\alpha_{base}$ using the boundary emphasis slider $s$ and the second derivative magnitude $|f''|$.
+    *   Let $|f''|_{max}$ be the maximum possible second derivative magnitude in the dataset or a normalized range [S2][S3, book][S4].
+    *   The modulation factor $M$ is calculated as:
+        $$ M = 1 - s \cdot \frac{|f''|}{|f''|_{max}} $$
+    *   The final opacity is:
+        $$ \alpha = \alpha_{base} \cdot M $$
+    *   When $s=0$ (left-most position), $M=1$, and opacity is constant with respect to the second derivative [S2][S3, book][S4].
+    *   When $s=1$ (right-most position), $M = 1 - \frac{|f''|}{|f''|_{max}}$, meaning opacity decreases linearly from 1 (at $|f''|=0$) to 0 (at $|f''|=|f''|_{max}$) [S2][S3, book][S4].
+5.  **Handle Global Emphasis:** If global boundary emphasis is desired across all widgets, the boundary emphasis value can be applied as a separable modulation to the output of a 2D transfer function [S2].
 
-The boundary emphasis factor $E$ is defined as:
-$$ E = 1 - s \cdot \frac{|d^2v|}{D_{max}} $$
-
-*   When $s = 0$, $E = 1$ for all $|d^2v|$, resulting in constant opacity with respect to the second derivative [S2][S3, book][S4].
-*   When $s = 1$, $E = 1 - \frac{|d^2v|}{D_{max}}$. At $|d^2v| = 0$, $E = 1$ (maximal opacity). At $|d^2v| = D_{max}$, $E = 0$ (zero opacity) [S2][S3, book][S4].
-
-**Parameters**
-*   **Slider Position ($s$):** Controls the strength of the boundary emphasis. Typical values are between 0 and 1 [S2][S3, book][S4].
-*   **Max Second Derivative ($D_{max}$):** The maximum magnitude of the second derivative in the dataset. This value must be computed from the data [S2][S3, book][S4].
-
-**Edge Cases and Pitfalls**
-*   **Zero Second Derivative:** Regions with zero second derivative (linear ramps) receive maximal opacity [S2][S3, book][S4]. This is the intended behavior for boundary emphasis.
-*   **Extremal Second Derivatives:** Regions with high second derivative magnitude receive reduced opacity, potentially becoming transparent if $s=1$ [S2][S3, book][S4].
-*   **Data Range:** $D_{max}$ must be accurately computed to ensure the linear decrease is normalized correctly [S2][S3, book][S4].
-*   **Widget Selection:** The slider controls the boundary emphasis for the *currently selected* classification widget [S2, S4].
-
-**Pseudocode**
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def boundary_emphasis_slider(v, grad_mag, second_deriv_mag, slider_pos, d_max, base_opacity):
+def apply_boundary_emphasis(scalar_value, second_derivative_magnitude, slider_position, max_second_derivative, base_opacity):
     """
-    Calculate final opacity using the Boundary Emphasis Slider.
+    Applies the boundary emphasis slider to modulate opacity based on second derivative magnitude.
     
     Args:
-        v (float): Voxel value.
-        grad_mag (float): Magnitude of the first derivative.
-        second_deriv_mag (float): Magnitude of the second derivative.
-        slider_pos (float): Slider position s in [0, 1].
-        d_max (float): Maximum second derivative magnitude in the dataset.
-        base_opacity (float): Opacity from the classification widget.
+        scalar_value (float): The scalar value at the sample point.
+        second_derivative_magnitude (float): The magnitude of the second derivative |f''| at the sample point.
+        slider_position (float): The slider position s in [0, 1]. 0 is left-most, 1 is right-most.
+        max_second_derivative (float): The maximum second derivative magnitude in the dataset or normalization range.
+        base_opacity (float): The opacity determined by the classification widget for the scalar_value.
         
     Returns:
-        float: Final opacity.
+        float: The final modulated opacity.
     """
-    # Clamp slider position to [0, 1]
-    s = max(0.0, min(1.0, slider_pos))
+    if max_second_derivative == 0:
+        return base_opacity
     
-    # Clamp second derivative magnitude to [0, d_max]
-    sd = max(0.0, min(d_max, second_deriv_mag))
+    # Normalize second derivative magnitude to [0, 1]
+    normalized_second_derivative = min(second_derivative_magnitude / max_second_derivative, 1.0)
     
-    # Calculate boundary emphasis factor E
-    # E = 1 - s * (|d^2v| / D_max)
-    # When s=0, E=1 (constant opacity)
-    # When s=1, E=1 - |d^2v|/D_max (linear decrease from 1 to 0)
-    if d_max == 0:
-        e = 1.0
-    else:
-        e = 1.0 - s * (sd / d_max)
-        
+    # Calculate modulation factor based on slider position
+    # s=0 -> M=1 (constant opacity)
+    # s=1 -> M=1 - normalized_second_derivative (linear decrease)
+    modulation_factor = 1.0 - slider_position * normalized_second_derivative
+    
     # Apply modulation
-    final_opacity = base_opacity * e
+    final_opacity = base_opacity * modulation_factor
     
     return final_opacity
 ```
 
+**Parameters:**
+*   **Slider Position ($s$):** Controls the rate of opacity change relative to second-derivative magnitude. Range: $[0, 1]$ [S2][S3, book][S4].
+*   **Max Second Derivative ($|f''|_{max}$):** The normalization factor for the second derivative magnitude. Not explicitly defined in sources, but implied by the linear decrease towards extremal values [S2][S3, book][S4].
+
+**Edge Cases and Pitfalls:**
+*   **Zero Second Derivative:** Opacity is maximal (modulation factor is 1) regardless of slider position, emphasizing homogeneous regions or flat boundaries [S2][S3, book][S4].
+*   **Extremal Second Derivative:** Opacity is minimized (modulation factor is $1-s$). At $s=1$, opacity becomes zero, effectively removing regions with high curvature [S2][S3, book][S4].
+*   **Normalization:** The choice of $|f''|_{max}$ affects the sensitivity of the slider. If not normalized correctly, the slider may not provide the expected range of opacity modulation [S2][S3, book][S4].
+
 ## Subtopics
 
 ### [Second Directional Derivative for Boundary Disambiguation](5654-second-directional-derivative-for-boundary-disambiguation.md)
-This method resolves ambiguities in volume rendering transfer functions where distinct material boundaries share identical data values and gradient magnitudes, causing them to overlap in standard 2D histograms. It introduces the second directional derivative along the gradient vector as a third dimension to the classification space, allowing for the precise isolation of specific boundaries that are indistinguishable using only density and gradient magnitude. Unlike edge-center detection methods such as Marr-Hildreth, which rely on Laplacian zero-crossings, this approach characterizes the boundary shape directly within the transfer function space.
+A method to disambiguate complex material boundaries that overlap in 2D data-value/gradient-magnitude histograms by using a second derivative measure along the gradient direction. It sets itself apart from its parent [Boundary Emphasis Slider](5644-boundary-emphasis-slider.md) by providing the specific mathematical mechanism (the Hessian-based directional derivative) that enables the slider's logic, and from [3D Histogram TF (Scalar-Gradient-Direction)](11571-3d-histogram-tf-scalar-gradient-direction.md) by focusing on the computation of the scalar field $f''$ rather than the construction of the 3D histogram visualization.
 
 ## Operating characteristics
-*   **Time Complexity:** The calculation of the boundary emphasis factor is $O(1)$ per sample, assuming the second derivative and $D_{max}$ are precomputed or available.
-*   **Memory Complexity:** Requires storage for the second derivative data (or its magnitude) and the precomputed $D_{max}$ [S2][S3, book][S4].
+*   **Time Complexity:** The computation of the second derivative is $O(1)$ per sample point if precomputed or using finite differences. The application of the slider is $O(1)$ per sample point.
+*   **Memory Complexity:** Requires storage for the second derivative field, which is $O(N)$ where $N$ is the number of voxels, if precomputed. Otherwise, it can be computed on the fly with minimal additional memory.
 *   **Measured Performance:** Not given in the sources.
-*   **Scaling:** The method scales linearly with the number of samples. The precomputation of $D_{max}$ is $O(N)$ where $N$ is the number of voxels.
-*   **Strengths:** Provides a simple, single-parameter control for emphasizing boundaries based on the second derivative [S2][S3, book][S4]. It is effective for visualizing boundaries between material regions [S2][S3, book][S4].
-*   **Limitations:** Relies on the accuracy of the second derivative calculation, which can be noisy [S1, S2]. The linear decrease in opacity may not be optimal for all data types [S2][S3, book][S4].
-*   **When to Use:** When the goal is to emphasize boundaries between material regions and the second derivative provides a useful discriminant [S2][S3, book][S4].
-*   **When Not to Use:** When the data is noisy, as the second derivative is sensitive to noise [S1, S2]. When the boundaries are not characterized by zero second derivatives [S2][S3, book][S4].
+*   **Scaling:** The method scales linearly with the number of sample points.
+*   **Strengths:** Provides an intuitive way to emphasize or suppress regions based on their curvature, which is useful for visualizing boundaries between materials [S2][S3, book][S4]. It simplifies the exploration of the third dimension of the TF domain [S2].
+*   **Limitations:** Relies on the accuracy of the second derivative computation, which can be noisy in real-world data [S1, S2]. The linear modulation may not be suitable for all data types [S2][S3, book][S4].
+*   **When to Use:** When the goal is to visualize boundaries between material regions or homogeneous areas, and when the user wants to quickly generate a starting point for TF design [S1, S2][S3, book][S4].
+*   **When Not to Use:** When the data has high noise levels that would make the second derivative unreliable, or when the user needs fine-grained control over the opacity function beyond linear modulation [S2][S3, book][S4].
 
 ## Background
-The Boundary Emphasis Slider was introduced in the context of interactive volume rendering using multi-dimensional transfer functions [S2][S3, book][S4]. It is based on the idea of using the second derivative to emphasize regions where the second derivative magnitude is small or zero, which often correspond to boundaries between material regions [S2][S3, book][S4]. The technique was developed by researchers including James K. Hahn, John C. Hart, and others [S2][S3, book][S4]. It has been used in various volume visualization systems and interfaces [S1, S2][S3, book][S4].
+The Boundary Emphasis Slider was introduced in the context of interactive volume rendering using multi-dimensional transfer functions [S2][S3, book][S4]. It is based on the idea that the second derivative can be used to emphasize regions where the second derivative magnitude is small or zero, which typically correspond to material boundaries or homogeneous regions [S2][S3, book][S4]. The technique was further developed and applied in the context of flexible transfer function design for volume visualization [S1]. The use of the second derivative for boundary emphasis was also discussed in earlier work by Kindlmann and Durkin [S1]. The method has been used in experiments to evaluate user interaction with transfer function design tools, where it was found to be a useful starting point for generating appealing thumbnails [S1].
 
 ## Sources
 [S1] Volume visualization and exploration through flexible transfer function design, https://doi.org/10.1016/j.cag.2008.04.004, fetched 2026-10-27

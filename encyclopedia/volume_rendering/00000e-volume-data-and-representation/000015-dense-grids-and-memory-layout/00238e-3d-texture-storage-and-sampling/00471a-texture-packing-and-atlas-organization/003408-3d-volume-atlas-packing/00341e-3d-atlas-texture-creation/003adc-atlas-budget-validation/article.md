@@ -8,10 +8,8 @@ Atlas Budget Validation ensures that the coarsest pyramid level's brick grid fit
   - `metadata.maxLod`: Integer, the highest level of detail index.
   - `metadata.levels`: Array of level objects. Each level object contains:
     - `lod`: Integer, the level index.
-    - `brickGrid`: Object or structure representing the 3D grid of bricks for that level. The product of its dimensions gives the total brick count.
+    - `brickGrid`: Object representing the 3D grid of bricks for that level. The product of its X, Y, and Z dimensions gives the total brick count [S1, unofficial].
 - `textureFormat`: String, the format of the volume data.
-  - If `'r8unorm'`, bytes per voxel is 1.
-  - Otherwise, bytes per voxel is 2 [S1, unofficial].
 - `numChannels`: Integer, number of channels per voxel.
 - `atlasBudgetBytes`: Integer, the maximum VRAM budget in bytes allocated for the atlas [S1, unofficial].
 
@@ -20,65 +18,57 @@ Atlas Budget Validation ensures that the coarsest pyramid level's brick grid fit
 - Failure: Throws `UnsupportedDatasetError` with details if the budget is exceeded [S1, unofficial].
 
 **Data Structures:**
-The validation relies on the `brickGrid` dimensions from the metadata. The `brickGrid` is assumed to be a 3D grid where the total number of bricks is the product of its X, Y, and Z dimensions.
+The validation relies on the `brickGrid` dimensions from the metadata [S1, unofficial]. The `brickGrid` is a 3D grid where the total number of bricks is the product of its X, Y, and Z dimensions [S1, unofficial].
 
 **Steps:**
-1.  **Calculate bytes per voxel:**
-    - If `textureFormat` is `'r8unorm'`, set `bytesPerVoxel = 1`.
-    - Else, set `bytesPerVoxel = 2` [S1, unofficial].
-
-2.  **Calculate total atlas slots:**
-    - Call `computeAtlasGrid(numChannels, bytesPerVoxel, atlasBudgetBytes)`.
-    - This function returns an object containing `gridSize`.
-    - Calculate `totalSlots = gridSize ** 3` [S1, unofficial].
-
-3.  **Retrieve base bricks:**
-    - Find the level in `metadata.levels` where `level.lod === metadata.maxLod`.
-    - Retrieve the `brickGrid` product (total brick count) from this level. Let this be `baseBricks` [S1, unofficial].
-
-4.  **Calculate working slots:**
-    - If `metadata.maxLod > 0`, set `workingSlots = 1`.
-    - Else, set `workingSlots = 0` [S1, unofficial].
-
-5.  **Validate:**
-    - If `baseBricks + workingSlots > totalSlots`, throw `UnsupportedDatasetError` with details about the overflow [S1, unofficial].
+1. Calculate `bytesPerVoxel`: 1 if `textureFormat` is `'r8unorm'`, else 2 [S1, unofficial].
+2. Compute `totalSlots` by calling `computeAtlasGrid(numChannels, bytesPerVoxel, atlasBudgetBytes)` and taking the result's `gridSize` cubed [S1, unofficial].
+3. Retrieve `baseBricks` from the level where `level.lod === metadata.maxLod` by taking the product of its `brickGrid` dimensions [S1, unofficial].
+4. Set `workingSlots` to 1 if `metadata.maxLod > 0`, else 0 [S1, unofficial].
+5. If `baseBricks + workingSlots > totalSlots`, throw `UnsupportedDatasetError` with details [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+class UnsupportedDatasetError(Exception):
+    pass
+
+def compute_atlas_grid(num_channels, bytes_per_voxel, atlas_budget_bytes):
+    # Finds the maximum integer gridSize such that gridSize^3 * num_channels * bytes_per_voxel <= atlas_budget_bytes
+    # Returns an object with a 'gridSize' field
+    budget_per_voxel = num_channels * bytes_per_voxel
+    if budget_per_voxel <= 0:
+        return {"gridSize": 0}
+    gridSize = int((atlas_budget_bytes / budget_per_voxel) ** (1/3))
+    while (gridSize + 1) ** 3 * budget_per_voxel <= atlas_budget_bytes:
+        gridSize += 1
+    return {"gridSize": gridSize}
+
 def validate_atlas_budget(metadata, texture_format, num_channels, atlas_budget_bytes):
     # Step 1: Calculate bytes per voxel
-    if texture_format == 'r8unorm':
-        bytes_per_voxel = 1
-    else:
-        bytes_per_voxel = 2
+    bytes_per_voxel = 1 if texture_format == 'r8unorm' else 2
 
     # Step 2: Calculate total atlas slots
-    # computeAtlasGrid is a helper that determines the max grid size fitting the budget
-    # It returns an object with a 'gridSize' field
     atlas_grid_info = compute_atlas_grid(num_channels, bytes_per_voxel, atlas_budget_bytes)
-    total_slots = atlas_grid_info.grid_size ** 3
+    total_slots = atlas_grid_info["gridSize"] ** 3
 
     # Step 3: Retrieve base bricks from the coarsest level (maxLod)
-    max_lod = metadata.max_lod
+    max_lod = metadata["maxLod"]
     coarsest_level = None
-    for level in metadata.levels:
-        if level.lod == max_lod:
+    for level in metadata["levels"]:
+        if level["lod"] == max_lod:
             coarsest_level = level
             break
-    
+
     if coarsest_level is None:
         raise ValueError("Coarsest level not found in metadata")
 
-    # brick_grid_product is the total number of bricks in the 3D grid
-    base_bricks = coarsest_level.brick_grid_product
+    # brickGrid product is the total number of bricks in the 3D grid
+    base_bricks = coarsest_level["brickGrid"]["product"]
 
     # Step 4: Calculate working slots
-    if max_lod > 0:
-        working_slots = 1
-    else:
-        working_slots = 0
+    working_slots = 1 if max_lod > 0 else 0
 
     # Step 5: Validate
     if base_bricks + working_slots > total_slots:
@@ -89,11 +79,10 @@ def validate_atlas_budget(metadata, texture_format, num_channels, atlas_budget_b
 ```
 
 **Parameters:**
-- `atlasBudgetBytes`: Maximum VRAM budget for the atlas in bytes. Typical value is ~1.3 GiB. Lower values are used for mobile GPUs, while higher values are used to accommodate larger grids (e.g., $660^3$) for many channels [S1, unofficial].
+- `atlasBudgetBytes`: Maximum VRAM budget for the atlas in bytes. The default is ~1.3 GiB, lower for mobile GPUs, and raised to keep a $660^3$ grid for many channels [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- Mobile GPUs are prone to OOM crashes at startup if the atlas is too large. This is mitigated by shrinking the atlas grid based on channel count and budget before allocation [S1, unofficial].
-- Precision issues are not explicitly detailed, but the calculation relies on integer arithmetic for slot counts.
+- Mobile GPUs are prone to OOM crashes at startup if the atlas is too large, mitigated by shrinking the atlas grid based on channel count and budget before allocation [S1, unofficial].
 
 ## Subtopics
 
@@ -101,14 +90,14 @@ def validate_atlas_budget(metadata, texture_format, num_channels, atlas_budget_b
 Configures the maximum VRAM allocated for the volume atlas, allowing the grid to shrink to fit constrained hardware [S1, unofficial]. It involves passing `atlasBudgetBytes` to `GpuSetup` and `DatasetConfig` to limit atlas memory usage [S1, unofficial]. The default budget is ~1.3 GiB. Lower values are recommended for mobile GPUs, while higher values should be raised to maintain a $660^3$ grid for datasets with many channels [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ relative to the volume size, as it only inspects the metadata of the coarsest level and performs constant-time arithmetic.
-- **Memory Complexity:** $O(1)$ auxiliary memory.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
 - **Strengths:** Prevents fatal OOM errors on resource-constrained devices (especially mobile GPUs) by validating memory requirements before allocation [S1, unofficial].
-- **Limitations:** Requires accurate estimation of `atlasBudgetBytes`. If the budget is set too low, valid datasets may be rejected. If set too high, it may still fail on specific hardware with lower VRAM limits.
+- **Limitations:** Requires accurate estimation of `atlasBudgetBytes`. Not given in the sources.
 - **When to use:** Always before allocating the 3D atlas texture, especially in cross-platform or mobile-aware renderers [S1, unofficial].
 
 ## Background
-Originated in the context of WebGPU-native out-of-core volume rendering for multi-GB datasets, specifically within the Kiln renderer project [S1, unofficial]. The method addresses the challenge of managing VRAM budgets on diverse hardware, including mobile GPUs, which have significantly lower memory constraints than desktop GPUs [S1, unofficial].
+The method addresses the challenge of managing VRAM budgets on diverse hardware, including mobile GPUs, which have significantly lower memory constraints than desktop GPUs [S1, unofficial]. Origin and development history are not given in the sources.
 
 ## Sources
 [S1] Show HN: Kiln – WebGPU-native out-of-core volume rendering for multi-GB datasets, https://github.com/MPanknin/kiln-render, fetched 2026-10-26 (unofficial)

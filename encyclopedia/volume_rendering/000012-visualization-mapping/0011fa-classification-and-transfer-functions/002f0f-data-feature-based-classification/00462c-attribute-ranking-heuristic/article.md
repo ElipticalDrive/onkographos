@@ -1,43 +1,33 @@
 # Attribute Ranking Heuristic
-
 Also called: Attribute Selection Ranking, Ranking de Atributos
-
 ## Overview
-The Attribute Ranking Heuristic is a greedy method for selecting and ordering volumetric attributes to construct voxel signatures for multidimensional transfer function (MTF) classification [S1, unofficial]. It solves the problem of high-dimensional complexity in volume visualization by ranking candidate features based on their relevance, ensuring that the most informative attributes are prioritized while minimizing redundancy [S1, unofficial]. Unlike sibling methods that may rely on user-defined thresholds or learned graphs, this heuristic provides an automated, data-driven ranking that balances information content against correlation, allowing users to empirically select the optimal subset of attributes [S1, unofficial].
-
+The Attribute Ranking Heuristic is a greedy method for selecting relevant volumetric attributes to construct voxel signatures for multidimensional transfer function (MTF) classification. It solves the problem of high-dimensional data complexity by ranking candidate attributes (e.g., intensity, gradient, curvature) based on their information content and redundancy, presenting the top $n$ candidates to the user for signature construction [S1, unofficial]. It differs from sibling methods like [Attribute Selection Heuristic for Multidimensional Transfer Functions](11717-attribute-selection-heuristic-for-multidimensional-transfer-.md) by using a simpler pairwise correlation model for the initial selection, whereas its child extends this to multiple correlation with all previously selected attributes [S1, unofficial].
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A set of $c$ candidate volumetric attributes $D = \{a_1, a_2, \dots, a_c\}$ computed per-voxel.
-*   **Output:** A ranked list of attributes, ordered by relevance. The user selects the top $n$ attributes from this list to form the voxel signature [S1, unofficial].
+**Inputs:**
+*   $D$: The set of all available candidate attributes (dimensions) in the volume data.
+*   $R$: The set of ranked/selected attributes, initially empty.
+
+**Outputs:**
+*   $R$: An ordered list of attributes ranked by relevance.
 
 **Data Structures:**
-*   $D$: Set of available (unselected) attributes.
-*   $R$: Set of selected (ranked) attributes.
-*   $Score(a, R)$: A scalar value representing the relevance of attribute $a$ given the already selected set $R$.
-
-**Algorithm Steps:**
-1.  Initialize $D$ with all $c$ candidate attributes and $R$ as an empty set.
-2.  Compute the entropy $H(a)$ for each attribute $a \in D$. Entropy measures the information content or variability of the attribute distribution.
-3.  Select the attribute $d^*$ with the maximum entropy:
-    $$ d^* = \arg\max_{a \in D} H(a) $$
-4.  Move $d^*$ from $D$ to $R$:
-    $$ D \leftarrow D \setminus \{d^*\} $$
-    $$ R \leftarrow R \cup \{d^*\} $$
-5.  While $D$ is not empty:
-    a. For each remaining attribute $a \in D$, compute a score based on its correlation with the attributes in $R$. The method uses multiple linear regression to quantify this relationship [S1, unofficial]. Specifically, it calculates the coefficient of determination ($R^2$) or a similar metric derived from linear regression as defined by Abdi (2007) [S1, unofficial]. This step ensures that attributes highly correlated with already selected ones are penalized.
-    b. Select the attribute $d^*$ with the highest score:
-       $$ d^* = \arg\max_{a \in D} Score(a, R) $$
-    c. Move $d^*$ from $D$ to $R$:
-       $$ D \leftarrow D \setminus \{d^*\} $$
-       $$ R \leftarrow R \cup \{d^*\} $$
-6.  Return the ordered set $R$ as the ranking.
+*   $D$: A set or list of attribute identifiers.
+*   $R$: A list of attribute identifiers.
 
 **Parameters:**
 *   $n$: The number of top-ranked candidates to present to the user. This is not computed by the algorithm but chosen empirically by the user [S1, unofficial].
 
-**Pitfalls:**
-*   Adding too many attributes (large $n$) causes high false-positive sensitivity and fragments clusters, making graph exploration exhaustive [S1, unofficial].
-*   The initial selection relies solely on entropy, which may not account for inter-attribute correlations present in the data [S1, unofficial].
+**Steps:**
+1.  Initialize $R = \emptyset$ and $D$ as the set of all available attributes.
+2.  Compute the entropy $H(a)$ for each attribute $a \in D$. Entropy measures the information content or uncertainty of the attribute's distribution [S1, unofficial].
+3.  Select the attribute $d^*$ with the maximum entropy: $d^* = \arg\max_{a \in D} H(a)$.
+4.  Remove $d^*$ from $D$ and add it to $R$: $D \leftarrow D \setminus \{d^*\}$, $R \leftarrow R \cup \{d^*\}$.
+5.  While $D$ is not empty:
+    a. For each remaining attribute $a \in D$, compute a score based on its correlation with the attributes already in $R$.
+    b. The score uses linear regression to estimate the multiple correlation between $a$ and the set $R$. This quantifies how much new information $a$ provides given the already selected attributes [S1, unofficial].
+    c. Select the attribute $d^*$ with the highest score.
+    d. Remove $d^*$ from $D$ and add it to $R$: $D \leftarrow D \setminus \{d^*\}$, $R \leftarrow R \cup \{d^*\}$.
+6.  Return $R$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -45,57 +35,81 @@ The Attribute Ranking Heuristic is a greedy method for selecting and ordering vo
 ```python
 def attribute_ranking_heuristic(attributes):
     """
-    attributes: list of attribute objects, each having a method compute_entropy()
-                and a method compute_multiple_correlation(selected_attributes).
+    Greedy heuristic to rank attributes by relevance.
+    attributes: list of attribute objects or identifiers.
     Returns: list of attributes sorted by relevance.
     """
     available = list(attributes)
     selected = []
-    ranking = []
-
+    
     if not available:
-        return ranking
+        return selected
 
     # Step 1: Select attribute with highest entropy
-    best_attr = max(available, key=lambda a: a.compute_entropy())
-    available.remove(best_attr)
-    selected.append(best_attr)
-    ranking.append(best_attr)
+    # Entropy is calculated based on the distribution of values for each attribute
+    def calculate_entropy(attr):
+        # Implementation detail: Compute histogram of attr values and calculate Shannon entropy
+        # [G] Standard Shannon entropy calculation: -sum(p * log2(p)) for p > 0
+        pass 
 
-    # Step 2: Iteratively select based on multiple correlation
+    first_attr = max(available, key=calculate_entropy)
+    available.remove(first_attr)
+    selected.append(first_attr)
+
+    # Step 2: Iteratively select attributes based on multiple correlation
     while available:
-        # Compute score for each available attribute based on correlation with selected
-        # Score is derived from linear regression as per Abdi (2007) [S1, unofficial]
-        scores = {}
+        best_attr = None
+        best_score = -1
+        
         for attr in available:
-            scores[attr] = attr.compute_multiple_correlation(selected)
+            # Score based on multiple correlation with selected attributes
+            # [G] Multiple correlation coefficient R^2 from linear regression of attr 
+            # against all attributes in selected. Higher R^2 means higher redundancy, 
+            # so we might want to minimize it or maximize the unique variance.
+            # The source implies maximizing a score that balances relevance and redundancy.
+            # Assuming the score represents "unique information" or inverse redundancy.
+            score = compute_multiple_correlation_score(attr, selected)
+            if score > best_score:
+                best_score = score
+                best_attr = attr
         
-        # Select attribute with highest score
-        best_attr = max(scores, key=scores.get)
-        
-        # Move to selected
         available.remove(best_attr)
         selected.append(best_attr)
-        ranking.append(best_attr)
 
-    return ranking
+    return selected
+
+def compute_multiple_correlation_score(target_attr, selected_attrs):
+    """
+    Computes a score based on the multiple correlation between target_attr 
+    and the set of selected_attrs.
+    [G] Typically, this involves fitting a linear model: target_attr ~ sum(w_i * selected_attr_i)
+    and computing the coefficient of determination (R^2).
+    The heuristic likely selects attributes that have high correlation with the data 
+    but low redundancy with already selected attributes.
+    """
+    pass
 ```
+
+**Edge Cases and Pitfalls:**
+*   Adding too many attributes to the voxel signature causes high false-positive sensitivity and fragments clusters, making graph exploration exhaustive [S1, unofficial].
+*   The user must empirically decide the number $n$ of attributes to use; the algorithm does not determine this [S1, unofficial].
+*   The method relies on linear regression for multiple correlation; non-linear relationships may not be captured [S1, unofficial].
 
 ## Subtopics
 
 ### [Attribute Selection Heuristic for Multidimensional Transfer Functions](11717-attribute-selection-heuristic-for-multidimensional-transfer-.md)
-This method provides a greedy heuristic to rank volumetric attributes for inclusion in voxel signatures, thereby reducing the complexity of specifying multidimensional transfer functions (MTFs). It extends the original Zhou, Schott, and Hansen (2012) pairwise selection by generating a full ranking of candidate attributes using multiple correlation with all previously selected attributes, rather than just the initial one. It builds on [Attribute Ranking Heuristic](11691-attribute-ranking-heuristic.md) by refining the scoring mechanism to explicitly balance information content (entropy) against redundancy (correlation) for sequential attribute selection.
+Extends this method by using multiple correlation with *all* previously selected attributes for every step, rather than just pairwise, and explicitly balances entropy against redundancy. Choose this when higher accuracy in attribute selection is needed and computational cost is acceptable.
 
 ## Operating characteristics
-*   **Time Complexity:** The heuristic step has a time complexity of $O(c^2 \cdot n)$, where $c$ is the number of dimensions (attributes) and $n$ is the number of instances (voxels) [S1, unofficial]. The total complexity is $O(c^3 \cdot n)$ because the heuristic executes $c$ linear regressions, each involving operations proportional to the square of the number of selected attributes [S1, unofficial].
+*   **Time Complexity:** The heuristic step is $O(c^2 \cdot n)$ where $c$ is the number of dimensions and $n$ is the number of instances (voxels/samples). The total complexity is $O(c^3 \cdot n)$ because the heuristic executes $c$ linear regressions [S1, unofficial].
 *   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Automates the selection of relevant attributes, reducing the burden on the user to manually define multidimensional transfer functions [S1, unofficial].
-*   **Limitations:** The quality of the ranking depends on the accuracy of the entropy and correlation calculations. Adding too many attributes can lead to overfitting and fragmented clusters [S1, unofficial].
-*   **When to use:** When dealing with high-dimensional volume data where manual selection of relevant attributes is impractical.
-*   **When not to use:** When computational resources are extremely limited, or when the user has strong prior knowledge about specific attribute relevance that contradicts the data-driven ranking.
+*   **Strengths:** Simple, greedy approach that reduces the complexity of specifying MTFs by ranking attributes [S1, unofficial].
+*   **Limitations:** Greedy selection may not find the globally optimal set of attributes. Performance depends on the linear regression assumption.
+*   **When to use:** When exploring multidimensional volume data and needing a quick, automated way to identify relevant attributes for classification.
+*   **When not to use:** When non-linear attribute relationships are dominant or when the computational cost of $O(c^3 \cdot n)$ is prohibitive for very high-dimensional data.
 
 ## Background
-The Attribute Ranking Heuristic originates from research into clustering and dimensional reduction for volume exploration [S1, unofficial]. It was developed to support the definition of multidimensional transfer functions by providing a systematic way to rank attributes based on their relevance [S1, unofficial]. The method builds upon earlier work in attribute selection, such as the pairwise selection by Zhou, Schott, and Hansen (2012), but extends it to a full ranking using multiple correlation [S1, unofficial]. The use of linear regression for correlation calculation follows the definitions provided by Abdi (2007) [S1, unofficial].
+The method was introduced by Zhou, Schott, and Hansen in 2012 as part of a volume exploration approach based on clustering and dimensional reduction [S1, unofficial]. It is designed to support the definition of multidimensional transfer functions by providing a ranked list of candidate attributes for voxel signatures.
 
 ## Sources
 [S1] A volume exploration approach based on clustering and dimensional reduction to support the definition of multidimensional transfer functions, http://hdl.handle.net/11449/153618, fetched 2026-10-26 (unofficial)

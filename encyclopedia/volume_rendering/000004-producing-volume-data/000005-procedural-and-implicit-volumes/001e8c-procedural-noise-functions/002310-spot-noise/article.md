@@ -6,17 +6,17 @@ Also called: Impulse convolution noise, Sparse convolution noise
 Spot Noise is a procedural noise method that synthesizes structured textures by convolving a uniform distribution of impulses with an arbitrary spatially defined kernel [S2, unofficial]. It develops patterns after many thousands of tiny drops, representing a flow field or spatial distribution [S1, unofficial]. The method can also be implemented using a spectral approach to achieve the desired result [S1, unofficial].
 
 ## How it works
-**Inputs:** Query point $\mathbf{P} = (x, y, z)$; impulse density parameter; kernel definition $K(\mathbf{u})$ [G].
+**Inputs:** Query point $\mathbf{P} = (x, y, z)$; impulse density parameter $\rho$; kernel function $K(\mathbf{u})$ [G].
 **Outputs:** Scalar density value $V(\mathbf{P})$ [G].
 
 **Data Structures:**
-*   **Impulse List:** A sparse set of points $\{I_j\}$ representing the uniform distribution of impulses [S2, unofficial]. In on-the-fly implementations, these are generated using jittering and pseudorandom number generation [S2, unofficial].
-*   **Kernel:** A function $K(\mathbf{u})$ centered at an impulse, spatially defined and arbitrary [S2, unofficial].
+*   **Impulse Grid:** A uniform lattice of impulse locations $\{\mathbf{I}_j\}$ generated via jittering and pseudorandom number generation for on-the-fly evaluation [S2, unofficial].
+*   **Kernel:** A spatially defined function $K(\mathbf{u})$ centered at each impulse, where $\mathbf{u} = \mathbf{P} - \mathbf{I}_j$ [S2, unofficial].
 
 **Steps:**
-1.  **Impulse Generation:** For a query point $\mathbf{P}$, determine the relevant neighborhood of impulses. On-the-fly generation uses jittering and pseudorandom number generation to place impulses within the spatial domain [S2, unofficial].
-2.  **Kernel Evaluation:** Evaluate the kernel function $K(\mathbf{u})$ at the offset $\mathbf{u}$ from each impulse to the query point.
-3.  **Summation:** Sum the kernel contributions from all relevant impulses in the neighborhood to compute the final value.
+1.  **Impulse Generation:** For a query point $\mathbf{P}$, identify the surrounding grid cells containing impulses. Generate deterministic jittered impulse positions within each cell using a pseudorandom number generator seeded by cell coordinates [S2, unofficial].
+2.  **Kernel Evaluation:** Compute the offset vector $\mathbf{u} = \mathbf{P} - \mathbf{I}_j$ for each impulse in the neighborhood. Evaluate the kernel function $K(\mathbf{u})$ at this offset [S2, unofficial].
+3.  **Summation:** Sum the kernel contributions from all relevant impulses in the neighborhood to compute the final value: $V(\mathbf{P}) = \sum_{j} K(\mathbf{P} - \mathbf{I}_j)$ [S2, unofficial].
 
 **Parameters:**
 *   **Impulse Density:** Controls the average number of impulses per unit volume [G].
@@ -31,27 +31,30 @@ Spot Noise is a procedural noise method that synthesizes structured textures by 
 
 ```python
 def spot_noise(p, impulse_density, kernel_func, seed):
-    """
-    Compute spot noise value at point p.
-    Implements on-the-fly impulse generation using jittering and pseudorandom number generation [S2, unofficial].
-    """
-    # 1. Impulse Generation: Determine grid cell and generate jittered impulse position
+    """Compute spot noise value at point p by convolving impulses with a kernel [S2, unofficial]."""
     cell = tuple(int(c) for c in p)
-    # Deterministic pseudorandom offset using standard hash
-    hash_val = hash(cell + (seed,))
-    jitter = (
-        (hash_val % 1000) / 1000.0,
-        ((hash_val * 7) % 1000) / 1000.0,
-        ((hash_val * 13) % 1000) / 1000.0
-    )
-    impulse_pos = tuple(cell[i] + jitter[i] for i in range(3))
-    
-    # 2. Kernel Evaluation: Compute offset vector and evaluate kernel
-    u = tuple(p[i] - impulse_pos[i] for i in range(3))
-    contribution = kernel_func(u)
-    
-    # 3. Summation: Return contribution (full implementation sums over neighborhood)
-    return contribution
+    total = 0.0
+    # Iterate over a 3x3x3 neighborhood of cells to cover typical kernel support
+    # Note: Neighborhood size should match kernel support radius; sources do not specify exact radius [G].
+    for dx in range(-1, 2):
+        for dy in range(-1, 2):
+            for dz in range(-1, 2):
+                # Deterministic pseudorandom offset using a simple integer hash
+                h = ((cell[0]+dx)*73 + (cell[1]+dy)*131 + (cell[2]+dz)*173 + seed) % 10000
+                jitter = (
+                    (h % 1000) / 1000.0,
+                    ((h * 7) % 1000) / 1000.0,
+                    ((h * 13) % 1000) / 1000.0
+                )
+                impulse_pos = (cell[0]+dx + jitter[0], cell[1]+dy + jitter[1], cell[2]+dz + jitter[2])
+                
+                # 2. Kernel Evaluation: Compute offset and evaluate kernel
+                u = (p[0] - impulse_pos[0], p[1] - impulse_pos[1], p[2] - impulse_pos[2])
+                contribution = kernel_func(u)
+                
+                # 3. Summation: Accumulate contributions
+                total += contribution
+    return total
 ```
 
 ## Subtopics
@@ -60,10 +63,10 @@ def spot_noise(p, impulse_density, kernel_func, seed):
 Extends standard Spot Noise by allowing spatial control over impulse density and kernel orientation/scale via underlying data fields, enabling the synthesis of fuzzy surface details. Unlike standard Spot Noise which uses a uniform impulse distribution, LCSN rejects impulses based on a local density factor, making it suitable for authoring textures where feature density varies across the domain.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [G]
+*   **Memory Complexity:** Not given in the sources. [G]
 *   **Strengths:** Flexible kernel shapes; coherent, structured patterns [S2, unofficial].
-*   **Limitations:** Not given in the sources.
+*   **Limitations:** Not given in the sources. [G]
 
 ## Background
 Spot Noise is a sparse convolution noise method where a uniform distribution of impulses is convolved with an arbitrary kernel spatially defined [S2, unofficial]. It develops patterns after many thousands of tiny drops, representing a flow field, and Van Wijk presented a spectral approach to achieving this as well [S1, unofficial].

@@ -1,0 +1,335 @@
+--- v001.md
++++ v002.md
+@@ -4,224 +4,127 @@
+ 
+ ## Overview
+-Marching Cubes Tetrahedron Decomposition is a surface extraction algorithm that resolves the topological ambiguities inherent in standard Marching Cubes by decomposing each cubic voxel into a fixed set of tetrahedra [S1, unofficial][S2, unofficial]. Unlike Marching Cubes, which requires complex disambiguation logic for ambiguous cases, this method ensures a unique intersection topology for each of the 16 possible vertex configurations within a tetrahedron [S1, unofficial].
++Marching Cubes Tetrahedron Decomposition is a surface extraction algorithm that resolves the topological ambiguities inherent in standard Marching Cubes by decomposing each voxel cube into tetrahedra and applying a 16-case lookup table for edge interpolation [S1, S2, unofficial]. It differs from its sibling [Subgrid Marching Tetrahedra](1737-subgrid-marching-tetrahedra.md) by operating on the primary voxel grid without sub-voxel refinement, and from [Error Analysis via Marching Tetrahedra](1308-error-analysis-via-marching-tetrahedra.md) by focusing on the geometric decomposition strategy itself rather than error metrics.
+ 
+ ## How it works
+-The algorithm operates on a discretized scalar field defined on a 3D grid. It processes each voxel independently by subdividing it into tetrahedra, determining surface intersections, and assembling the resulting mesh.
++**Inputs:** A 3D scalar field defined on a regular grid, an isovalue (target threshold), and the grid dimensions.
++**Outputs:** A triangle mesh (list of vertices and indices) representing the isosurface.
+ 
+-### Inputs and Outputs
+-- **Input**: A 3D scalar field $V$ defined on a grid of integer coordinates $(x, y, z)$. A scalar threshold value $T$ (isosurface value).
+-- **Output**: A triangular mesh represented by a list of vertices and a list of triangle indices.
++**Data Structures:**
++1.  `vertexOffset[8][3]`: Integer array mapping the 8 vertices of a cube relative to the cube's origin.
++    *   Layout: `{{0,0,0}, {1,0,0}, {1,1,0}, {0,1,0}, {0,0,1}, {1,0,1}, {1,1,1}, {0,1,1}}` [S2, unofficial].
++2.  `tetrahedronsInACube[6][4]`: Integer array defining the 6 tetrahedra that partition a cube. Each row contains 4 indices into the cube's 8 vertices.
++    *   Layout:
++        *   T0: `{0, 5, 1, 6}`
++        *   T1: `{0, 1, 2, 6}`
++        *   T2: `{0, 2, 3, 6}`
++        *   T3: `{0, 3, 7, 6}`
++        *   T4: `{0, 7, 4, 6}`
++        *   T5: `{0, 4, 5, 6}` [S2, unofficial].
++3.  `tetrahedronEdgeFlags[16]`: A lookup table where each entry is a bitmask indicating which of the 6 edges of a tetrahedron are intersected by the isosurface for a given vertex configuration (16 cases) [S2, unofficial].
++4.  `EdgeConnection[6][2]`: Maps edge indices to the pair of vertex indices in the tetrahedron that form that edge.
++    *   Layout: `{{0,1}, {1,2}, {2,0}, {0,3}, {1,3}, {2,3}}` [S2, unofficial].
++5.  `edgeVertex` cache: A memoization structure (e.g., hash map or array) storing the interpolated vertex position for each unique edge shared between adjacent tetrahedra/cubes to ensure mesh coherence [S1, unofficial].
+ 
+-### Data Structures
+-The core of the method relies on a predefined decomposition of a cube into 6 tetrahedra. The connectivity is defined by the `tetrahedronsInACube` table, which maps the 8 vertices of a cube (indexed 0–7) to the 4 vertices of each of the 6 tetrahedra [S2, unofficial].
++**Steps:**
++1.  **Grid Traversal:** Iterate over all voxels in the volume grid. For each voxel at grid coordinates $(x, y, z)$, retrieve the scalar values $v_0 \dots v_7$ at its 8 corners.
++2.  **Cube Decomposition:** Define the 8 world positions of the cube's vertices using the grid position and `vertexOffset` [S2, unofficial].
++3.  **Tetrahedron Processing:** For each of the 6 tetrahedra defined in `tetrahedronsInACube`:
++    a.  Extract the 4 vertex positions and their corresponding scalar values from the cube data.
++    b.  Determine the vertex configuration (inside/outside relative to isovalue) to form a 4-bit index (0-15).
++    c.  Look up the intersected edges in `tetrahedronEdgeFlags`.
++    d.  For each intersected edge, calculate the intersection point via linear interpolation.
++    e.  Use `edgeVertex` memoization to ensure that if an edge is shared with a previously processed tetrahedron, the same vertex position is reused. This prevents gaps or overlaps [S1, unofficial].
++    f.  Generate triangles based on the intersected edges and add them to the mesh.
++4.  **Coordinate Mapping:** Apply spatial transforms to map chunk/grid coordinates to world coordinates if necessary [S1, unofficial].
+ 
+-**Table 1: Tetrahedron Vertex Indices**
+-The table `tetrahedronsInACube` is a $6 \times 4$ integer array:
+-$$
+-\begin{bmatrix}
+-0 & 5 & 1 & 6 \\
+-0 & 1 & 2 & 6 \\
+-0 & 2 & 3 & 6 \\
+-0 & 3 & 7 & 6 \\
+-0 & 7 & 4 & 6 \\
+-0 & 4 & 5 & 6
+-\end{bmatrix}
+-$$
+-Vertex indices correspond to the standard cube corner offsets:
+-- 0: $(0,0,0)$, 1: $(1,0,0)$, 2: $(1,1,0)$, 3: $(0,1,0)$
+-- 4: $(0,0,1)$, 5: $(1,0,1)$, 6: $(1,1,1)$, 7: $(0,1,1)$
++**Pseudocode:**
++```python
++def marching_cubes_tetrahedron_decomposition(volume, isovalue, grid_shape):
++    vertices = []
++    indices = []
++    edge_cache = {} # Maps edge_key -> vertex_index
+ 
+-**Table 2: Edge Intersection Flags**
+-For a tetrahedron, there are 6 edges. The intersection state is determined by a 16-entry lookup table `tetrahedronEdgeFlags`, where each entry is a 6-bit integer. If bit $k$ is set, the $k$-th edge is intersected by the isosurface [S2, unofficial]. The edge indices correspond to the pairs defined in `EdgeConnection`:
+-$$
+-\begin{bmatrix}
+-0 & 1 \\ 1 & 2 \\ 2 & 0 \\ 0 & 3 \\ 1 & 3 \\ 2 & 3
+-\end{bmatrix}
+-$$
+-Note: The specific bit values for `tetrahedronEdgeFlags` are not provided in the sources [S2, unofficial].
++    # Predefined decomposition tables
++    tetrahedrons_in_cube = [
++        [0, 5, 1, 6], [0, 1, 2, 6], [0, 2, 3, 6],
++        [0, 3, 7, 6], [0, 7, 4, 6], [0, 4, 5, 6]
++    ]
++    edge_connection = [[0,1], [1,2], [2,0], [0,3], [1,3], [2,3]]
++    # tetrahedron_edge_flags[16] is assumed to be defined elsewhere
++    
++    for x in range(grid_shape[0] - 1):
++        for y in range(grid_shape[1] - 1):
++            for z in range(grid_shape[2] - 1):
++                # Get 8 corner values and positions
++                cube_values = [volume[x+i, y+j, z+k] for k in [0,1] for j in [0,1] for i in [0,1]]
++                cube_positions = [
++                    Vector3(x + i, y + j, z + k) for k in [0,1] for j in [0,1] for i in [0,1]
++                ]
++                
++                for tet_idx in range(6):
++                    tet_verts_indices = tetrahedrons_in_cube[tet_idx]
++                    tet_values = [cube_values[i] for i in tet_verts_indices]
++                    tet_positions = [cube_positions[i] for i in tet_verts_indices]
++                    
++                    # Determine case index (0-15)
++                    case_index = 0
++                    for i in range(4):
++                        if tet_values[i] > isovalue:
++                            case_index |= (1 << i)
++                    
++                    # Get intersected edges bitmask
++                    edge_mask = tetrahedron_edge_flags[case_index]
++                    
++                    # Generate triangles for this tetrahedron
++                    # Implementation depends on specific triangulation of the 16 cases
++                    # For each set bit in edge_mask, find the edge and interpolate
++                    triangles = generate_triangles_from_edges(case_index, edge_mask, edge_connection, tet_positions, tet_values, isovalue, edge_cache)
++                    
++                    for tri in triangles:
++                        indices.append(tri)
+ 
+-### Algorithm Steps
++    return vertices, indices
+ 
+-1.  **Grid Iteration**: Iterate over all voxels in the grid, excluding the boundary layer if necessary to ensure all 8 neighbors exist.
+-2.  **Vertex Sampling**: For each voxel at grid position $(x, y, z)$, retrieve the 8 scalar values $v_0, \dots, v_7$ from the grid $V$ and their corresponding world positions $p_0, \dots, p_7$.
+-    -   $p_i = (x + \text{offset}_x[i], y + \text{offset}_y[i], z + \text{offset}_z[i]) \times \text{voxelSize} + \text{origin}$ [S1, unofficial][S2, unofficial].
+-3.  **Tetrahedron Decomposition**: For each of the 6 tetrahedra $T_k$ ($k=0 \dots 5$):
+-    a.  Identify the 4 vertex indices $idx_0, idx_1, idx_2, idx_3$ from `tetrahedronsInACube[k]`.
+-    b.  Retrieve the scalar values $s_0, s_1, s_2, s_3$ and positions $q_0, q_1, q_2, q_3$ for these vertices.
+-4.  **Case Determination**: Compute the binary configuration mask $M$ based on whether each vertex is inside ($s_i < T$) or outside ($s_i \ge T$) the isosurface.
+-    -   $M = \sum_{i=0}^{3} b_i 2^i$, where $b_i = 1$ if $s_i < T$ else $0$.
+-5.  **Edge Intersection**: Look up the intersection mask $E = \text{tetrahedronEdgeFlags}[M]$.
+-6.  **Vertex Generation**: For each bit $j$ set in $E$:
+-    a.  Identify the edge endpoints $u, v$ from `EdgeConnection[j]`.
+-    b.  Interpolate the intersection point $P_{int}$ on the edge between $q_u$ and $q_v$.
+-        -   $P_{int} = q_u + \frac{T - s_u}{s_v - s_u} (q_v - q_u)$ [G].
+-    c.  Store $P_{int}$ in a memoization structure keyed by the edge index (e.g., `min(u,v), max(u,v)`) to ensure shared vertices between adjacent tetrahedra are identical [S1, unofficial].
+-7.  **Triangle Assembly**: Based on the mask $M$ and the generated intersection points, form triangles. The specific triangulation for each of the 16 cases is determined by a lookup table `tetrahedronTriangles` [S2, unofficial].
+-    -   The table `tetrahedronTriangles` maps the case $M$ to a sequence of triangle definitions. Each triangle is defined by 3 edge indices or intersection points.
+-    -   The sources indicate that `tetrahedronTriangles[flagIndex, 3*i] < 0` signals the end of triangles for that case [S2, unofficial].
+-8.  **Mesh Assembly**: Add the generated triangles to the global mesh. Vertices are merged if they correspond to the same edge intersection (handled by memoization).
++def interpolate_edge(p1, p2, v1, v2, isovalue):
++    # Linear interpolation
++    t = (isovalue - v1) / (v2 - v1)
++    return p1 + t * (p2 - p1)
+ 
+-### Pseudocode
+-
+-```python
+-def marching_cubes_tetrahedron_decomposition(grid, grid_origin, grid_spacing, threshold):
+-    """
+-    Extracts isosurface from grid using Marching Cubes Tetrahedron Decomposition.
+-    
+-    Args:
+-        grid: 3D numpy array of scalar values.
+-        grid_origin: 3D vector (x, y, z) of the grid's first voxel center or corner.
+-        grid_spacing: 3D vector (dx, dy, dz) of voxel dimensions.
+-        threshold: Scalar value for the isosurface.
+-        
+-    Returns:
+-        vertices: List of 3D points.
+-        triangles: List of 3-tuples of vertex indices.
+-    """
+-    vertices = []
+-    triangles = []
+-    
+-    # Memoization for edge vertices: key=(edge_idx), value=vertex_index
+-    edge_vertices = {}
+-    
+-    # Predefined decomposition tables from [S2, unofficial]
+-    # tetrahedronsInACube: 6 tetrahedra, each with 4 vertex indices (0-7)
+-    tetrahedronsInACube = [
+-        [0, 5, 1, 6],
+-        [0, 1, 2, 6],
+-        [0, 2, 3, 6],
+-        [0, 3, 7, 6],
+-        [0, 7, 4, 6],
+-        [0, 4, 5, 6]
+-    ]
+-    
+-    # EdgeConnection: 6 edges, each with 2 vertex indices (0-7)
+-    EdgeConnection = [
+-        [0, 1], [1, 2], [2, 0], [0, 3], [1, 3], [2, 3]
+-    ]
+-    
+-    # vertexOffset: 8 vertices, each with 3 integer offsets (0 or 1)
+-    vertexOffset = [
+-        [0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+-        [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]
+-    ]
+-    
+-    # tetrahedronEdgeFlags: 16 cases, each with a 6-bit integer mask
+-    # Note: Exact values not provided in sources [S2, unofficial]
+-    tetrahedronEdgeFlags = [0] * 16 
+-    
+-    # tetrahedronTriangles: 16 cases, each with a list of triangle definitions
+-    # Note: Exact structure/values not provided in sources [S2, unofficial]
+-    tetrahedronTriangles = [None] * 16
+-
+-    height, width, depth = grid.shape
+-    
+-    for x in range(height - 1):
+-        for y in range(width - 1):
+-            for z in range(depth - 1):
+-                # 1. Get 8 cube vertices
+-                cube_positions = []
+-                cube_values = []
+-                for i in range(8):
+-                    ox, oy, oz = vertexOffset[i]
+-                    # World position calculation [S1, unofficial][S2, unofficial]
+-                    wx = grid_origin[0] + (x + ox) * grid_spacing[0]
+-                    wy = grid_origin[1] + (y + oy) * grid_spacing[1]
+-                    wz = grid_origin[2] + (z + oz) * grid_spacing[2]
+-                    cube_positions.append([wx, wy, wz])
+-                    cube_values.append(grid[x, y, z]) # Placeholder for actual indexing
+-                
+-                # Correct indexing for cube_values based on vertexOffset
+-                # The source [S2, unofficial] implies cube[i] corresponds to vertexOffset[i]
+-                # Assuming grid is indexed [x, y, z] and vertexOffset adds to it
+-                for i in range(8):
+-                    ox, oy, oz = vertexOffset[i]
+-                    cube_values[i] = grid[x + ox, y + oy, z + oz]
+-
+-                # 2. Process each of the 6 tetrahedra
+-                for t_idx in range(6):
+-                    tetra_verts_indices = tetrahedronsInACube[t_idx]
+-                    tetra_positions = [cube_positions[i] for i in tetra_verts_indices]
+-                    tetra_values = [cube_values[i] for i in tetra_verts_indices]
+-                    
+-                    # 3. Determine case mask
+-                    case_mask = 0
+-                    for i in range(4):
+-                        if tetra_values[i] < threshold:
+-                            case_mask |= (1 << i)
+-                    
+-                    # 4. Get edge intersection mask
+-                    edge_mask = tetrahedronEdgeFlags[case_mask]
+-                    
+-                    # 5. Generate intersection points and memoize
+-                    current_edge_points = {} # Local map for this tetrahedron's edges
+-                    
+-                    for edge_idx in range(6):
+-                        if (edge_mask >> edge_idx) & 1:
+-                            v1_idx, v2_idx = EdgeConnection[edge_idx]
+-                            # Global edge key to ensure consistency across tetrahedra
+-                            # Map local tetra indices to global cube indices
+-                            g_v1 = tetra_verts_indices[v1_idx]
+-                            g_v2 = tetra_verts_indices[v2_idx]
+-                            edge_key = (min(g_v1, g_v2), max(g_v1, g_v2))
+-                            
+-                            if edge_key not in edge_vertices:
+-                                # Interpolate
+-                                p1 = tetra_positions[v1_idx]
+-                                p2 = tetra_positions[v2_idx]
+-                                s1 = tetra_values[v1_idx]
+-                                s2 = tetra_values[v2_idx]
+-                                
+-                                # Linear interpolation [G]
+-                                if abs(s2 - s1) < 1e-9:
+-                                    # Degenerate case: values are equal. 
+-                                    # Typically handled by returning midpoint or skipping.
+-                                    # Source does not specify. [G]
+-                                    t = 0.5
+-                                else:
+-                                    t = (threshold - s1) / (s2 - s1)
+-                                
+-                                int_point = [
+-                                    p1[0] + t * (p2[0] - p1[0]),
+-                                    p1[1] + t * (p2[1] - p1[1]),
+-                                    p1[2] + t * (p2[2] - p1[2])
+-                                ]
+-                                edge_vertices[edge_key] = int_point
+-                            
+-                            current_edge_points[edge_idx] = edge_vertices[edge_key]
+-                    
+-                    # 6. Form triangles
+-                    # Source [S2, unofficial] uses tetrahedronTriangles lookup
+-                    # Structure: list of triangles, each triangle is 3 edge indices or points
+-                    # Since exact table is missing, we describe the process [S2, unofficial]
+-                    triangles_for_case = tetrahedronTriangles[case_mask]
+-                    
+-                    if triangles_for_case:
+-                        for tri_def in triangles_for_case:
+-                            # tri_def contains 3 references to edges or points
+-                            # The source [S2, unofficial] implies winding order application
+-                            # We assume tri_def contains indices into current_edge_points or direct points
+-                            # This part is implementation-dependent due to missing table data
+-                            pass 
+-
+-    return vertices, triangles
++def get_or_create_edge_vertex(edge_key, p1, p2, v1, v2, isovalue, edge_cache):
++    if edge_key not in edge_cache:
++        pt = interpolate_edge(p1, p2, v1, v2, isovalue)
++        idx = len(vertices) # Assuming global vertices list
++        vertices.append(pt)
++        edge_cache[edge_key] = idx
++    return edge_cache[edge_key]
+ ```
+ 
+-### Parameters and Edge Cases
+--   **Threshold ($T$)**: The isosurface value. Must be within the range of the scalar field.
+--   **Precision**: Linear interpolation assumes the scalar field is piecewise linear within the tetrahedron. If the field is not smooth, the surface may be jagged [S1, unofficial].
+--   **Degenerate Input**: If two vertices of an edge have identical scalar values, the denominator in interpolation becomes zero. A guard clause (e.g., returning the midpoint) is required [G].
+--   **Boundary Conditions**: The algorithm iterates over voxels. Care must be taken at the grid boundaries to ensure all 8 vertices of a cube are within the grid bounds.
++**Parameters:**
++*   `isovalue`: The scalar threshold defining the surface. Typical values depend on the data range (e.g., 0.5 for normalized -1 to 1 data) [S2, unofficial].
++*   `winding_order`: Defines the triangle vertex ordering (e.g., `{0, 1, 2}`) [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** Linear interpolation assumes the field is linear within the tetrahedron. Non-linear fields may introduce artifacts.
++*   **Boundary Conditions:** The algorithm iterates `grid_shape - 1`, assuming the volume data includes the boundary vertices. If the volume is defined by cell centers, offsets must be adjusted [S2, unofficial].
++*   **Ambiguity Resolution:** The specific decomposition (T0-T5) is one of several possible ways to split a cube. Other decompositions exist, but this one is standard for this implementation [S2, unofficial].
++
++## Subtopics
++
++### Binary MT
++A variant using binary occupancy (inside/outside) rather than scalar values, significantly faster than smoothing variants [S1, unofficial].
++
++### CA Smoothing MT
++A variant that applies smoothing to the scalar field before extraction, resulting in higher quality but much slower performance (~161.5s vs ~13-15s for Binary MT on MRI data) [S1, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: $O(N)$, where $N$ is the number of voxels. Each voxel is processed in constant time (6 tetrahedra, 16 cases).
+--   **Memory Complexity**: $O(V + E)$, where $V$ is the number of vertices and $E$ is the number of edges in the output mesh. The memoization structure requires $O(E)$ space.
+--   **Performance**: Binary MT is significantly faster than CA Smoothing MT (~13-15 seconds vs ~161.5 seconds on a 3.5M mm³ MRI dataset) [S1, unofficial].
+--   **Comparison to Marching Cubes**: This method is slower and creates more vertices than standard Marching Cubes, but it better represents the mesh surface by avoiding ambiguous cases [S2, unofficial].
+--   **Strengths**: Topologically correct, no disambiguation logic needed.
+--   **Limitations**: Slower than Marching Cubes, more vertices.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels. Each voxel is processed once, decomposed into 6 tetrahedra.
++*   **Memory Complexity:** $O(V + E)$ where $V$ is the number of output vertices and $E$ is the number of edges. The `edge_cache` requires memory proportional to the surface area.
++*   **Performance:** Binary MT is significantly faster than CA Smoothing MT (~13-15 seconds vs ~161.5 seconds on a 3.5M mm³ MRI T1 dataset) [S1, unofficial].
++*   **Comparison to Marching Cubes:** This method is slower than standard Marching Cubes and creates more vertices, but it better represents the mesh surface by avoiding topological ambiguities [S2, unofficial].
++*   **Strengths:** Topologically correct, watertight meshes without ambiguous cases.
++*   **Limitations:** Slower than Marching Cubes; higher vertex count.
+ 
+ ## Background
+-The method was introduced as a stable surface extraction algorithm alongside Marching Cubes in the Invesalius project [S1, unofficial]. It is implemented in Rust with a Python wrapper using PyO3 [S1, unofficial]. The specific decomposition and lookup tables are derived from earlier work on Marching Tetrahedra [S2, unofficial].
++The method was introduced as a stable alternative to Marching Cubes to resolve topological ambiguities. It was implemented in the Invesalius project (Rust backend) and is also present in C# implementations like the one by Jason Fisher [S1, S2, unofficial]. The approach relies on the mathematical property that a tetrahedron cannot have the same topological ambiguity as a cube for a linear scalar field.
+ 
+ ## Sources

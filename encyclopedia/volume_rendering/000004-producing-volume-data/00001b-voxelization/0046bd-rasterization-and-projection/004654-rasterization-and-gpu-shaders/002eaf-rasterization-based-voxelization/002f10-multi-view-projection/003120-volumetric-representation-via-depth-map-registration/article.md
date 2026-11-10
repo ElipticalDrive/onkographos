@@ -3,211 +3,177 @@
 Also called: Sparse Multi-View Volumetric Representation, Sparse Non-Lambertian Multi-view Volume Construction, Volume Initialization
 
 ## Overview
-This method constructs a 3D volumetric representation from a sparse set of calibrated multi-view images by registering estimated depth maps into a voxel grid [S1, S2]. It specifically addresses non-Lambertian scenes by using individual minimum cost per view for depth estimation rather than a global threshold, and represents geometry as a sparse voxel cloud where voxel values indicate the number of views mapping to that location [S1, S2]. It distinguishes itself from static voxelization methods by incorporating an iterative refinement loop that cleans scattering voxels, smooths sharp corners, and re-evaluates visibility to ensure the final volume accurately represents the real scene for virtual view synthesis [S1, S2].
+This method constructs a 3D volumetric representation from a sparse set of calibrated multi-view images by registering estimated depth maps into a voxel grid [S1, S2]. It specifically addresses non-Lambertian scenes by using individual minimum cost per view for depth estimation rather than a global threshold, and represents geometry as a sparse voxel cloud where voxel values indicate the number of views mapping to that location [S1, S2]. It distinguishes itself from static voxelization methods by incorporating an iterative refinement loop that removes isolated voxels and smooths sharp corners to increase coding gain for virtual view synthesis [S1, S2].
 
 ## How it works
-**Inputs:** A set of $N$ calibrated reference views (images and camera parameters); estimated depth maps for each reference view.
-**Outputs:** A sparse 3D voxel grid where each active voxel stores a count of contributing views and a color value.
+**Inputs:**
+*   $N$ calibrated reference views with known camera parameters.
+*   For each view, an initial depth map $D_v$ estimated by searching along the view's geometry, compensating for non-Lambertian reflection using individual minimum cost [S1, S2].
+
+**Outputs:**
+*   A sparse 3D voxel grid where each active voxel $(i, j, k)$ stores a weight $\delta_{ijk}$ (count of views) and a color $C_{ijk}$.
 
 **Data Structures:**
-*   **Voxel Grid:** A 3D array or sparse hash map. Each voxel at integer coordinates $(i, j, k)$ stores:
-    *   $\delta_{ijk}$: An integer counter representing the number of reference views that map to this voxel location. Range: $0$ to $N$.
-    *   $C_{ijk}$: A color value (Y, U, V or RGB) assigned during the color selection phase.
-*   **Depth Map:** A 2D array for each view, storing depth values $d$ and potentially multiple depth candidates per pixel during refinement.
+*   **Voxel Grid:** A 3D array or sparse hash map.
+    *   Key: Voxel coordinates $(i, j, k)$.
+    *   Value: A struct containing:
+        *   `weight`: Integer $\delta_{ijk} \in \{0, 1, ..., N\}$.
+        *   `color`: RGB or YUV tuple.
+        *   `valid`: Boolean flag (optional, implied by weight > 0).
+*   **Depth Map:** 2D array for each view, storing depth values $d$.
 
-**Parameters:**
-*   $N$: Total number of reference views.
-*   $K$: Number of depth values in the front cluster for a pixel.
-*   Threshold: A mean square error (MSE) threshold for volume refinement.
-*   Window size: For error calculation (e.g., $3 \times 3$ pixels) [S2].
+**Algorithm Steps:**
 
-**Steps:**
+1.  **Volume Initialization (Registration):**
+    For each reference view $v \in \{1, ..., N\}$:
+    For each pixel $p$ in view $v$ with depth $d_p$:
+    1.  Project the 3D point corresponding to $d_p$ into the global voxel grid coordinates $(i, j, k)$ using the view's projection matrix and the scene's axis-aligned bounding box (AABB) [S1, S2, Parent].
+    2.  Increment the weight of the voxel at $(i, j, k)$:
+        $$ \delta_{ijk} \leftarrow \delta_{ijk} + 1 $$
+    3.  If $\delta_{ijk}$ was 0, mark the voxel as active [S1, S2].
 
-1.  **Depth Estimation (Per View):**
-    For each reference view, estimate a depth map by searching along the view's geometry. Compensate for non-Lambertian reflections by exploiting the individual minimum cost for that view, rather than applying a global threshold [S1, S2].
+2.  **Isolated Voxel Removal:**
+    Iterate through all active voxels.
+    For each voxel $x$, check its 6-connected (or 26-connected) neighbors.
+    If a voxel has no active neighbors (weight > 0), remove it from the volume [S1, S2].
 
-2.  **Volume Initialization (Registration):**
-    Register the estimated depth maps into the 3D volume. For each voxel at location $(i, j, k)$:
-    *   If a depth map from any view registers to this voxel, increment its counter $\delta_{ijk}$.
-    *   The value $\delta_{ijk}$ is defined as:
-        $$
-        \delta_{ijk} = \begin{cases} 
-        n & \text{if registering depth} \\
-        0 & \text{otherwise}
-        \end{cases}
-        $$
-        where $n \in \{1, 2, ..., N\}$ is the number of views mapped to voxel $x$, and $N$ is the total number of reference views [S1, S2].
-    *   Unmapped voxels have a value of 0 [S1, S2].
+3.  **Depth Map Reconstruction (Back-Projection):**
+    Project the current volume back to each reference view geometry to build new depth maps [S1, S2].
+    For each pixel $p$ in view $v$:
+    1.  Cast a ray from the camera center through $p$.
+    2.  Identify all voxels intersected by the ray.
+    3.  Collect the depth values $d_k$ of these voxels.
+    4.  Identify the "front cluster" of depths (the closest group of voxels to the camera) [S1, S2].
+    5.  Calculate the proper depth value $d$ for the pixel:
+        $$ d = \begin{cases} d_n & \text{if only one depth has } \delta_n = \max(\delta) \\ \frac{\sum_{k=1}^{K} \delta_k d_k}{\sum_{k=1}^{K} \delta_k} & \text{otherwise} \end{cases} $$
+        Where $K$ is the number of depth values in the front cluster, $d_k$ is the depth value, and $\delta_k$ is the voxel weight [S1, S2].
 
-3.  **Isolated Voxel Removal and Depth Consolidation:**
-    *   Detect isolated voxels (voxels with no neighbors). These are likely errors and are removed from the volume [S1, S2].
-    *   Project the current volume back to the reference view geometry to build new depth maps. This step incorporates depth information from other views, removing errors from the previous step [S1, S2].
-    *   If multiple depth values exist for a pixel in the projected map, consider the front cluster of depths. Ideally, there is one depth value from the front surface, but noise causes dispersion [S1, S2].
-    *   Calculate the proper depth value $d$ for a pixel:
-        $$
-        d = \begin{cases} 
-        d_n & \text{if only one depth has } \delta_n = \max(\delta) \\
-        \frac{\sum_{k=1}^{K} \delta_k d_k}{\sum_{k=1}^{K} \delta_k} & \text{otherwise}
-        \end{cases}
-        $$
-        where $K$ is the number of depth values in the front cluster, $d_k$ is the depth value, and $\delta_k$ is the voxel weight (number of views mapping to the voxel containing depth $d_k$) [S1, S2].
+4.  **Volume Refinement (Iterative):**
+    Initialize temporary colors for all active voxels as the median color of all visible views at that voxel [S2].
+    Repeat until convergence or max iterations:
+    1.  **Reconstruction:** Render all $N$ reference views from the current volume using the temporary colors.
+    2.  **Error Calculation:** For each view $v$ (processed in order, e.g., left to right):
+        1.  Calculate the Mean Square Error (MSE) between the reconstructed view and the original reference image $I_v$. Use a window-based computation (e.g., 3x3 pixels) to handle calibration/imperfect resolution issues [S2].
+        2.  If $MSE > \text{threshold}$:
+            a.  Remove the old depth and associated voxel from the volume.
+            b.  Investigate a new depth derived from neighboring pixels in the reference view (smooth surface assumption) [S2].
+            c.  If the new depth satisfies color constraints for all visible views, generate the new associated voxel with the new depth [S2].
+    3.  **Color Update:** If any voxels were removed or generated, update the temporary colors (median of visible views) and repeat the reconstruction step, as voxel position changes affect visibility (invisible to visible or vice versa) [S2].
 
-4.  **Volume Reconstruction and Interpolation:**
-    Reconstruct the volume again using the consolidated depth values. Interpolate voxels to connect the surface of the volume among near voxels. This is necessary because reference views may have different resolutions, and direct registration may leave gaps [S1, S2].
-
-5.  **Iterative Volume Refinement:**
-    Refine the shape of the volume by iterating several times to smooth sharp corners and remove errors [S1, S2].
-    *   **Temporary Coloring:** Assign temporary colors to voxels by taking the median of color values from all visible views. The median is less sensitive to extreme values than the mean [S2].
-    *   **Error Calculation:** Iterate through reference views (e.g., left to right). For each view, calculate the Mean Square Error (MSE) between the reconstructed view (using temporary colors) and the original reference image. Use a window-based computation (e.g., $3 \times 3$ pixels) to handle imperfect camera calibration and unequal resolutions [S2].
-    *   **Depth Replacement:** If the MSE exceeds a threshold:
-        *   Remove the old depth and its associated voxel.
-        *   Investigate a new depth derived from neighboring pixels (smooth surface assumption).
-        *   If the new depth satisfies color constraints for all visible views, generate the new associated voxel [S2].
-    *   **Reconstruction Loop:** If voxels are removed or generated, iteratively reconstruct the images. This is because the change in voxel position produces a new depth, which might change an invisible point to a visible point and vice versa [S2].
-
-6.  **Color Selection (Post-Processing):**
-    Define proper colors for each voxel to handle non-Lambertian reflectance [S2].
-    *   For a voxel $x$ and two views 1 and 2, let $L_1$ and $L_2$ be lines from the camera centers to the voxel. Let $\alpha_1$ and $\alpha_2$ be the angles between the voxel $x$ and the points on lines $L_1$ and $L_2$ respectively [S2].
-    *   Blend colors $C_1$ and $C_2$ (intensity Y or color U,V components):
-        $$
-        C = \begin{cases} 
-        \frac{\alpha_1 C_2 + \alpha_2 C_1}{\alpha_1 + \alpha_2} & \text{if condition is true} \\
-        C_1 & \text{otherwise}
-        \end{cases}
-        $$
-        The "condition" typically involves checking if the color difference is within a threshold to avoid blur [S2].
-    *   **Blur Handling:** If the difference between $C_1$ and $C_2$ is large, the average method causes object blur. In this case, set the color into a "blur group." Replace the color $C_{old}$ of the voxel in the blur group with the color of a neighboring voxel that has the closest value to $C_{old}$ and is in a "clear group" (where color difference is small) [S2].
+5.  **Color Selection (Post-Processing):**
+    For each active voxel, determine its final color $C$ based on visible views [S2].
+    For two views 1 and 2 with colors $C_1, C_2$ and angles $a_1, a_2$ between the voxel and the points on lines $L_1, L_2$:
+    $$ C = \begin{cases} \frac{a_1 C_2 + a_2 C_1}{a_1 + a_2} & \text{if condition is true} \\ C_1 & \text{otherwise} \end{cases} $$
+    If the difference between $C_1$ and $C_2$ exceeds a threshold, the color is placed in a "blur group" to prevent object blur. In this case, replace the color with that of a neighboring voxel in a "clear group" that has the closest value [S2].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def volumetric_representation_via_depth_map_registration(reference_views, depth_maps):
+def volumetric_representation_via_depth_map_registration(reference_views, initial_depth_maps, threshold, max_iterations):
     """
-    reference_views: List of view objects containing camera params and image data.
-    depth_maps: List of depth map arrays corresponding to reference_views.
-    Returns: Sparse voxel grid with delta values and colors.
+    reference_views: List of camera objects with projection matrices.
+    initial_depth_maps: List of 2D arrays, one per view.
+    threshold: MSE threshold for refinement.
+    max_iterations: Max refinement loops.
     """
-    N = len(reference_views)
-    voxel_grid = SparseVoxelGrid() # Stores (i,j,k) -> {delta, color}
-
-    # Step 1 & 2: Initialization
-    for view_idx in range(N):
-        depth_map = depth_maps[view_idx]
-        camera = reference_views[view_idx].camera
-        
-        # Project depth map into 3D space
-        for pixel in depth_map:
-            # Get 3D point from depth and camera projection
-            point_3d = camera.unproject(pixel.u, pixel.v, pixel.depth)
-            voxel_coords = world_to_voxel(point_3d)
+    # 1. Initialization
+    voxel_grid = SparseVoxelGrid()
+    
+    for view_idx, view in enumerate(reference_views):
+        depth_map = initial_depth_maps[view_idx]
+        for y, x in pixels_in_view(view):
+            d = depth_map[y, x]
+            if d is valid:
+                # Project 3D point to voxel coordinates
+                voxel_coords = project_to_voxel_grid(view, d, x, y)
+                voxel_grid.increment_weight(voxel_coords)
+                
+    # 2. Remove isolated voxels
+    active_voxels = voxel_grid.get_active_voxels()
+    for voxel in active_voxels:
+        if not voxel_grid.has_active_neighbors(voxel):
+            voxel_grid.remove(voxel)
             
-            # Increment delta for this voxel
-            voxel_grid.increment_delta(voxel_coords)
-
-    # Step 3: Isolated Voxel Removal
-    voxel_grid.remove_isolated_voxels()
-
-    # Step 3: Depth Consolidation via Back-Projection
-    for view_idx in range(N):
-        # Project current volume back to view geometry
-        projected_depths = voxel_grid.project_to_view(reference_views[view_idx].camera)
+    # 3. Back-projection to get refined depth maps
+    refined_depth_maps = []
+    for view in reference_views:
+        new_depth_map = create_empty_depth_map(view)
+        for y, x in pixels_in_view(view):
+            ray = view.cast_ray(x, y)
+            front_cluster = voxel_grid.get_front_cluster(ray)
+            if front_cluster:
+                # Calculate proper depth d
+                weights = [v.weight for v in front_cluster]
+                depths = [v.depth for v in front_cluster]
+                max_weight = max(weights)
+                max_count = weights.count(max_weight)
+                
+                if max_count == 1:
+                    # Find the depth corresponding to the unique max weight
+                    idx = weights.index(max_weight)
+                    d = depths[idx]
+                else:
+                    # Weighted average
+                    numerator = sum(w * d_val for w, d_val in zip(weights, depths))
+                    denominator = sum(weights)
+                    d = numerator / denominator
+                new_depth_map[y, x] = d
+        refined_depth_maps.append(new_depth_map)
         
-        # Consolidate multiple depths per pixel
-        for pixel in projected_depths:
-            if pixel.has_multiple_depths():
-                front_cluster = pixel.get_front_cluster()
-                # Calculate weighted average depth
-                new_depth = calculate_weighted_depth(front_cluster)
-                pixel.depth = new_depth
-
-    # Step 4: Reconstruction and Interpolation
-    voxel_grid.reconstruct_and_interpolate()
-
-    # Step 5: Iterative Refinement
-    max_iterations = 10
+    # 4. Iterative Refinement
+    # Initialize temporary colors
+    for voxel in voxel_grid.get_active_voxels():
+        voxel.color = median_color_from_views(voxel, reference_views)
+        
     for iteration in range(max_iterations):
         changed = False
-        for view_idx in range(N):
-            # Assign temporary median colors
-            voxel_grid.assign_temp_median_colors(reference_views)
+        for view_idx, view in enumerate(reference_views):
+            # Render view
+            rendered_view = render_volume(voxel_grid, view)
+            original_view = get_original_image(view)
             
-            # Calculate MSE for this view
-            mse = calculate_mse(voxel_grid, reference_views[view_idx], window_size=3)
+            # Calculate MSE with window
+            mse = calculate_windowed_mse(rendered_view, original_view, window_size=3)
             
-            if mse > REFINE_THRESHOLD:
-                # Remove old depth/voxel and try new depth from neighbors
-                old_depth = voxel_grid.get_depth_for_view(view_idx)
-                new_depth = estimate_smooth_depth_from_neighbors(view_idx, old_depth)
+            if mse > threshold:
+                # Remove old voxel and try new depth
+                # Note: This logic implies we are modifying the volume based on view errors
+                # The source describes removing the "old depth" and associated voxel.
+                # We need to identify which voxel caused the error.
+                # Simplified: Assume we re-evaluate the voxel at the error location
+                # using neighboring pixels' depth (smooth surface assumption).
                 
-                if new_depth_satisfies_constraints(new_depth, reference_views):
-                    voxel_grid.update_depth(view_idx, new_depth)
+                # Find error location (simplified)
+                error_loc = find_max_error_location(rendered_view, original_view)
+                if error_loc:
+                    # Remove voxel at error_loc
+                    voxel_grid.remove(error_loc)
                     changed = True
-        
+                    
+                    # Try new depth from neighbors
+                    new_depth = estimate_depth_from_neighbors(view, error_loc)
+                    if new_depth is valid:
+                        # Check color constraints for all visible views
+                        if satisfies_color_constraints(new_depth, error_loc, reference_views):
+                            new_voxel = create_voxel(error_loc, new_depth)
+                            voxel_grid.add(new_voxel)
+                            changed = True
+                            
         if not changed:
             break
-
-    # Step 6: Color Selection
-    for voxel in voxel_grid.active_voxels():
-        voxel.color = select_color_for_voxel(voxel, reference_views)
-
-    return voxel_grid
-
-def calculate_weighted_depth(front_cluster):
-    """
-    front_cluster: List of (depth, delta) tuples
-    Returns: Weighted average depth
-    """
-    total_delta = sum(d for _, d in front_cluster)
-    if total_delta == 0:
-        return front_cluster[0].depth # Fallback
-    
-    # Check if one depth has max delta
-    max_delta = max(d for _, d in front_cluster)
-    max_delta_depths = [depth for depth, d in front_cluster if d == max_delta]
-    
-    if len(max_delta_depths) == 1:
-        return max_delta_depths[0]
-    else:
-        # Weighted average
-        weighted_sum = sum(depth * delta for depth, delta in front_cluster)
-        return weighted_sum / total_delta
-
-def select_color_for_voxel(voxel, reference_views):
-    """
-    Selects color for a voxel based on visible views, handling non-Lambertian blur.
-    """
-    visible_views = voxel.get_visible_views(reference_views)
-    if not visible_views:
-        return None
-    
-    # Get colors and angles for visible views
-    view_colors = []
-    view_angles = []
-    for view in visible_views:
-        # Calculate angle between voxel and view ray
-        angle = calculate_angle(voxel.position, view.camera_position, view.direction)
-        color = view.get_color_at_voxel_projection(voxel)
-        view_colors.append(color)
-        view_angles.append(angle)
-    
-    # Simple blending for demonstration; complex logic in S2 handles blur groups
-    # Using weighted average based on angles
-    total_angle = sum(view_angles)
-    if total_angle == 0:
-        return view_colors[0]
-        
-    blended_color = sum(c * a for c, a in zip(view_colors, view_angles)) / total_angle
-    
-    # Check for blur condition (simplified)
-    # If color difference is high, replace with neighbor color
-    if is_blur_group(view_colors):
-        neighbor_color = find_closest_clear_neighbor_color(voxel)
-        if neighbor_color:
-            return neighbor_color
             
-    return blended_color
+        # Update colors if changed
+        if changed:
+            for voxel in voxel_grid.get_active_voxels():
+                voxel.color = median_color_from_views(voxel, reference_views)
+                
+    # 5. Color Selection
+    for voxel in voxel_grid.get_active_voxels():
+        voxel.color = select_final_color(voxel, reference_views)
+        
+    return voxel_grid
 ```
 
 ## Subtopics
@@ -216,16 +182,16 @@ def select_color_for_voxel(voxel, reference_views):
 Iterative Volume Refinement is a post-initialization algorithm that cleans and smooths a sparse voxel cloud generated from multi-view depth maps by removing scattering voxels and smoothing sharp corners to increase coding gain. It distinguishes itself from static voxelization by dynamically regenerating voxels based on a smooth surface assumption and iteratively re-evaluating visibility, ensuring the final volume accurately represents the real scene for virtual view synthesis.
 
 ## Operating characteristics
-*   **Time Complexity:** The initialization phase is linear with respect to the number of pixels in the depth maps and the number of views. The refinement phase is iterative and depends on the number of voxels and views, potentially requiring multiple passes to converge.
-*   **Memory Complexity:** The voxel grid size depends on the scene volume and resolution. The sparse representation helps, but storing delta values and colors for active voxels can be memory-intensive for high-resolution scenes.
-*   **Performance:** The method is effective for sparse multi-view setups and handles non-Lambertian reflections better than global threshold methods. However, it can be computationally expensive due to the iterative refinement and back-projection steps.
-*   **Strengths:** Handles non-Lambertian scenes; iterative refinement improves visual quality; sparse representation is efficient for scenes with large empty spaces.
-*   **Limitations:** Sensitive to depth estimation errors; iterative refinement can be slow; color blending may cause blur if not handled carefully.
-*   **When to use:** Virtual view synthesis for sparse multi-view setups with non-Lambertian objects.
-*   **When not to use:** Dense multi-view setups with high computational constraints; scenes with significant dynamic content.
+*   **Time Complexity:** The initialization step is $O(N \cdot W \cdot H)$ where $N$ is the number of views and $W \cdot H$ is the image resolution. The refinement step is iterative and depends on the number of voxels and views, potentially $O(I \cdot N \cdot V)$ where $I$ is iterations and $V$ is active voxels.
+*   **Memory Complexity:** Proportional to the number of active voxels. The sparse representation helps, but storing weights and colors for each voxel can be significant for high-resolution scenes.
+*   **Performance:** The method is simple and fast for initialization [S1]. However, the iterative refinement can be computationally expensive due to repeated rendering and error calculation.
+*   **Strengths:** Handles non-Lambertian reflections well by using per-view minimum cost [S1]. The iterative refinement improves visual quality for view synthesis by smoothing sharp corners and removing noise [S1, S2].
+*   **Limitations:** Sensitive to calibration errors and resolution mismatches between views, requiring window-based error calculation [S2]. The average color method can cause object blur if color components differ significantly between views [S2].
+*   **When to use:** Suitable for sparse multi-view setups where high-quality virtual view synthesis is required, and computational resources allow for iterative refinement.
+*   **When not to use:** Not suitable for real-time applications due to the iterative nature. Not ideal for dense, highly dynamic scenes where rapid updates are needed.
 
 ## Background
-The method was proposed by N. Anantrasirichai, C. Nishan Canagarajah, David W. Redmill, and David R. Bull from the University of Bristol [S2]. It was introduced in 2006 as a novel volumetric representation for sparse multi-view images of non-Lambertian scenes [S2]. The work builds on earlier depth registration methods [S1]. It is used in 3D visual environments, particularly for view synthesis and compression applications [S1, S2].
+The method was proposed by N. Anantrasirichai, C. Nishan Canagarajah, David W. Redmill, and David R. Bull from the University of Bristol [S2]. It was presented at the IEEE International Conference on Image Processing (ICIP) in 2006 [S2]. The work focuses on volumetric representation for sparse multi-view images of non-Lambertian scenes, aiming to provide a basis for realistic view synthesis [S2]. The approach builds on the idea that depth registration provides a good representation for natural scenery [S1].
 
 ## Sources
 [S1] Colour volumetric compression for realistic view synthesis applications, https://doi.org/10.1007/s11042-010-0484-4, fetched 2026-10-26

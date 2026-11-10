@@ -3,86 +3,108 @@
 Also called: Octree Leaf Culling, Recursive Status Check
 
 ## Overview
-Octree Empty Block Culling recursively traverses an octree to determine if a node contains any non-empty data blocks, returning a status of `EMPTY` or `NONEMPTY` to enable early ray termination or skipping of empty regions [S1, unofficial].
+Octree Empty Block Culling is a visibility culling technique that recursively traverses an octree to determine if a node contains any non-empty data blocks, returning a status of `EMPTY` or `NONEMPTY` to enable early ray termination or skipping of empty regions [S1, unofficial]. It builds on [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md) by providing the specific recursive logic required to classify node occupancy. It differs from [Octree Traversal with Min/Max Pruning](1739-octree-traversal-with-min-max-pruning.md) by relying on explicit block existence checks rather than bounding volume overlaps, and from [View-Dependent Working Set Generation](4965-view-dependent-working-set-generation.md) by being view-independent and focused on data presence rather than occlusion [S1, unofficial][S4, unofficial].
 
 ## How it works
-**Inputs:** An octree structure where each node has a `depth` field and a `status` field [S1, unofficial]. A memory management unit (MMU) or similar accessor providing a `getBlock` function that returns a pointer to the data block associated with a leaf node, or `nullptr` if the block is not loaded or does not exist [S1, unofficial].
-
-**Outputs:** A boolean indicating whether the node (and its subtree) contains non-empty data (`true` for `NONEMPTY`, `false` for `EMPTY`) [S1, unofficial].
+**Inputs and Outputs:**
+- Input: An octree node pointer (or index), the maximum tree depth, and a memory management unit (MMU) or data accessor capable of retrieving data blocks.
+- Output: A boolean status (`true` for `NONEMPTY`, `false` for `EMPTY`) and an updated node status field.
 
 **Data Structures:**
-*   `Node`:
-    *   `depth`: Integer, the depth of the node in the octree [S1, unofficial].
-    *   `status`: Enum or integer, `EMPTY` or `NONEMPTY` [S1, unofficial].
-    *   `children`: Array of 8 pointers to child nodes (for internal nodes) [G].
-*   `MMU`:
-    *   `getBlock(node_index)`: Returns a pointer to the data block for the leaf node identified by `node_index`, or `nullptr` [S1, unofficial].
+- `Node`: Contains `depth` (current depth), `status` (enum: `EMPTY`, `NONEMPTY`), and children pointers or indices.
+- `Block`: The data chunk associated with a leaf node. `nullptr` indicates no data.
 
-**Algorithm Steps:**
-1. Initialize the current node's `status` to `EMPTY` [S1, unofficial].
-2. Check if the current node is a leaf. A node is a leaf if `node->depth` equals the maximum tree depth [S1, unofficial].
-    *   If it is a leaf:
-        *   Attempt to load the block using `mmu->getBlock(node_index)` [S1, unofficial].
-        *   If the returned block is `nullptr`, set `node->status = EMPTY` and return `false` [S1, unofficial].
-        *   Otherwise, set `node->status = NONEMPTY` and return `true` [S1, unofficial].
-    *   If it is an internal node:
-        *   Recursively call the status check function on all 8 children [S1, unofficial].
-        *   Children are accessed using linear indexing: `child_index = (index << 3) + i + 1` for `i` from 0 to 7, where `index` is the index of the current node in a flat array representation [S1, unofficial].
-        *   If any child returns `true` (indicating `NONEMPTY`), set `node->status = NONEMPTY` [S1, unofficial].
-        *   Return `node->status == NONEMPTY` [S1, unofficial].
+**Numbered Steps:**
+1. Initialize the current node's status to `EMPTY`.
+2. Check if the node is a leaf. A node is a leaf if `node->depth` equals the maximum tree depth [S1, unofficial].
+3. If the node is a leaf:
+   a. Attempt to load the data block using the MMU (e.g., `mmu->getBlock`).
+   b. If the block is `nullptr`, the status remains `EMPTY`. Return `false`.
+   c. If the block exists, set status to `NONEMPTY`. Return `true` [S1, unofficial].
+4. If the node is internal:
+   a. Iterate through all 8 children.
+   b. Calculate the child index using linear indexing: `child_index = (index << 3) + i + 1`, where `index` is the current node's index and `i` is the child offset (0-7) [S1, unofficial].
+   c. Recursively call the status check on each child.
+   d. If any child returns `true` (is `NONEMPTY`), set `node->status = NONEMPTY` and return `true`.
+   e. If all children return `false`, return `false` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-EMPTY = 0
-NONEMPTY = 1
-
-def check_status(node, mmu, max_depth, node_index):
+def check_node_status(node, max_depth, mmu, node_index):
     """
-    Recursively checks if a node or its subtree contains non-empty data.
+    Recursively determines if an octree node contains non-empty data.
+    
+    Args:
+        node: The current octree node object.
+        max_depth: The maximum depth of the octree.
+        mmu: Memory management unit with getBlock method.
+        node_index: The linear index of the current node in the octree array.
+        
+    Returns:
+        bool: True if the node or any descendant is NONEMPTY, False otherwise.
     """
-    node.status = EMPTY
+    # Initialize status to EMPTY
+    node.status = "EMPTY"
+    
+    # Check if leaf node
     if node.depth == max_depth:
-        block = mmu.getBlock(node_index)
+        # Attempt to load block
+        block = mmu.getBlock(node)
         if block is None:
-            node.status = EMPTY
+            node.status = "EMPTY"
             return False
         else:
-            node.status = NONEMPTY
+            node.status = "NONEMPTY"
             return True
-    else:
-        base_index = (node_index << 3) + 1
-        for i in range(8):
-            child_index = base_index + i
-            if check_status(node.children[i], mmu, max_depth, child_index):
-                node.status = NONEMPTY
-        return node.status == NONEMPTY
+    
+    # Internal node: check all 8 children
+    # Linear indexing: (index << 3) + i + 1
+    for i in range(8):
+        child_index = (node_index << 3) + i + 1
+        # Assume children are accessible via node.children[i] or similar
+        # If using a flat array, access node_array[child_index]
+        child_node = node.children[i]
+        
+        if check_node_status(child_node, max_depth, mmu, child_index):
+            node.status = "NONEMPTY"
+            return True
+            
+    return False
 ```
 
 **Parameters:**
-*   `max_depth`: The maximum depth of the octree [S1, unofficial]. This must be set correctly during initialization [S1, unofficial].
+- `max_depth`: The depth at which nodes are considered leaves. Typical values depend on the dataset resolution and memory constraints. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Incorrect Depth Initialization:** If the tree depth is not set correctly during initialization, the leaf check `node->depth == depth` may fail, causing all nodes to be treated as internal or leaf incorrectly [S1, unofficial].
-*   **Empty Blocks:** A leaf node may exist in the octree structure but have no associated data block (e.g., not loaded into memory) [S1, unofficial]. The `getBlock` function must return `nullptr` in this case, and the node should be marked as `EMPTY` [S1, unofficial].
+- **Depth Initialization:** The leaf check relies on `node->depth` being correctly set during initialization. If the tree depth is not set correctly, all nodes may be treated as internal or leaf incorrectly, leading to incorrect culling or crashes [S1, unofficial].
+- **Memory Access:** The MMU must handle `nullptr` returns gracefully. If `getBlock` throws an exception instead of returning `nullptr`, the logic must be adapted [G].
 
 ## Subtopics
 
 ### Octree Range Culling
-Octree Range Culling is a variant where shells' ranges over a node are computed once per pass for up to 4 tiles of 64 functions (each lane owns a function of every tile) instead of once per tile, only for shells reaching the node [S2, unofficial]. A dropped shell has every AO below $10^{-10}$ over the node; `fn_tail` ($2 \times 10^{-10}$ times the column sum of $|C|$) is added to every function's bound for them [S2, unofficial].
+Shells' ranges over a node are computed once per pass for up to 4 tiles of 64 functions (each lane owns a function of every tile) instead of once per tile, only for shells reaching the node [S2, unofficial]. A dropped shell has every AO below $10^{-10}$ over the node. `fn_tail` ($2 \times 10^{-10}$ times column sum of $|C|$) is added to every function's bound for them [S2, unofficial].
+
+### Octree Node Collision Test
+Tests whether an octree node collides with obstacles to classify it as Empty or Mixed, avoiding explicit Blocked detection [S3, unofficial]. Run collision test using node size; return Empty if no collision, Mixed if collision detected [S3, unofficial]. Single-pass size test may miss internal full occlusion; resolved by recursive subdivision in BuildNodeRecursive [S3, unofficial].
+
+### View-Dependent Visibility Culling
+An extension of extraction acceleration that orders visibility based on camera position and culls nodes occluded by previously traversed nodes [S4, unofficial]. Prune empty subtrees (nodes containing no surface) and cull nodes that are occluded by nodes already traversed that are closer to the camera [S4, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** Not given in the sources.
-**Memory Complexity:** Not given in the sources.
-**Strengths:** Not given in the sources.
-**Limitations:** Not given in the sources.
-**When to use:** Not given in the sources.
-**When not to use:** Not given in the sources.
+- **Time Complexity:** $O(N)$ in the worst case where all nodes are visited, but typically much faster for sparse data as empty subtrees are skipped.
+- **Memory Complexity:** $O(1)$ additional memory per recursive call stack frame.
+- **Strengths:** Simple to implement, effective for sparse datasets, reduces memory bandwidth by avoiding loading empty blocks.
+- **Limitations:** Requires recursive traversal overhead, less effective for dense data where most nodes are non-empty.
+- **When to use:** Sparse volumetric data, isosurface extraction, ray marching.
+- **When not to use:** Dense data, real-time rendering with very shallow octrees where overhead dominates.
 
 ## Background
-The method is described in the context of parallel volume rendering systems, specifically in the `VolumeRenderingParallel` project [S1, unofficial]. It is used to optimize ray traversal by skipping empty regions of the volume, thereby reducing the number of samples taken and improving rendering performance [S1, unofficial].
+Originated in the context of octree-based volume rendering and isosurface extraction. The recursive status check is a fundamental component of space-skipping techniques. Livnat and Hansen [LH98] and Westermann et al. [WKE99] are cited in the context of view-dependent culling and multiresolution exploitation, which often build upon basic empty block culling [S4, unofficial].
 
 ## Sources
 [S1] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
 [S2] md_gto_iso_gpu: optimized GPU isosurface extraction (non-blocking jobs, flood, one measured path), https://github.com/scanberg/mdlib/pull/15, fetched 2026-10-28 (unofficial)
+[S3] UE5 Tutorial | Simple SVO Pathfinder for 3D Pathfinding, https://www.youtube.com/watch?v=QmDbX_gZSLA, fetched 2026-10-27 (unofficial)
+[S4] PDF A Survey of Octree Volume Rendering Methods, https://www.sci.utah.edu/~knolla/octsurvey.pdf, fetched 2026-10-29 (unofficial)

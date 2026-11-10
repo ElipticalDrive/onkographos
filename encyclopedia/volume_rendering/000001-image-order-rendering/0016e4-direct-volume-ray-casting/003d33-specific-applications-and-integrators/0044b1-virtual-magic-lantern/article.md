@@ -3,142 +3,150 @@
 Also called: Magic Lantern metaphor
 
 ## Overview
-The Virtual Magic Lantern (VML) is an interaction metaphor for volumetric data inspection that uses a virtual right circular cone to define a region of interest (ROI) [S1]. It solves the problem of simultaneously viewing a focal region with enhanced detail (via a secondary transfer function or shading style) and its surrounding context (via the primary transfer function) [S1]. Unlike the Virtual Magic Window (VMW), which restricts the ROI to the viewing direction, VML allows the cone to be positioned and oriented independently of the camera, providing richer contextual information at the boundary of the ROI, albeit with a performance penalty compared to classical ray casting [S1].
+The Virtual Magic Lantern (VML) is an interaction metaphor for volumetric data inspection that uses a virtual right circular cone, guided by a 3D pointer device, to define a region of interest (ROI) [S1]. Inside this cone, the volume is rendered using a secondary transfer function or shading style, while the exterior uses the primary style, allowing simultaneous visualization of the focal region and its context [S1]. It distinguishes itself from siblings like [Virtual Magic Window](11345-virtual-magic-window.md) by providing explicit contextual information at the boundary of the ROI, whereas VMW acts as a restricted implementation where the lantern aligns with the viewing direction [S1, 11345-virtual-magic-window.md].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A 3D volumetric dataset (texture), a primary transfer function (TF), a secondary transfer function (TF), cone geometry parameters (apex position, axis direction, aperture angle), and camera parameters.
-*   **Outputs:** A rendered image where voxels inside the cone are colored using the secondary TF and voxels outside are colored using the primary TF.
+*   **Inputs:** 3D volumetric dataset (texture), primary transfer function (TF), secondary transfer function (TF), cone geometry (apex position, axis direction, aperture angle), and camera parameters.
+*   **Outputs:** Rendered image with dual-style visualization.
 
 **Data Structures:**
-*   **Volume Texture:** 3D texture storing the scalar field values. In the source implementation, models are $512 \times 512 \times 512$ voxels [S1].
-*   **Cone Geometry:** Defined by three parameters passed to the GPU:
-    *   `apex`: The 3D position of the cone's tip (typically derived from a 3D pointer device like the Wanda) [S1].
-    *   `axis`: The 3D direction vector of the cone's central axis (derived from the pointer device) [S1].
-    *   `aperture`: The half-angle of the cone [S1].
+*   **Volume Texture:** 3D texture storing voxel values. In the source implementation, resolution is $512 \times 512 \times 512$ [S1].
+*   **Cone Parameters:**
+    *   Apex: $\mathbf{a}$ (vec3), position of the pointer device.
+    *   Axis: $\mathbf{d}$ (vec3), normalized direction vector of the pointer.
+    *   Aperture: $\alpha$ (float), half-angle of the cone in radians.
 
 **Algorithm Steps:**
-1.  **Initialization:** Pass the primary and secondary transfer functions, the volume texture, and the cone geometry (apex, axis, aperture) to the GPU fragment shader [S1].
-2.  **Ray Casting Loop:** For each pixel, cast a ray through the volume. Iterate along the ray at discrete sample positions [S1].
-3.  **Point-in-Cone Test:** For each sample point $P$, determine if it lies inside the inspection cone.
-    *   Let $A$ be the apex of the cone.
-    *   Let $\vec{d}$ be the normalized axis direction of the cone.
-    *   Let $\theta$ be the aperture angle.
-    *   Calculate the vector $\vec{v} = P - A$.
-    *   Calculate the angle $\alpha$ between $\vec{v}$ and $\vec{d}$ using the dot product: $\cos(\alpha) = \frac{\vec{v} \cdot \vec{d}}{|\vec{v}|}$.
-    *   The point is inside the cone if $\alpha \le \theta$ (or equivalently $\cos(\alpha) \ge \cos(\theta)$) and the point is in the forward direction of the cone ($\vec{v} \cdot \vec{d} > 0$) [S1].
-4.  **Color Calculation:**
-    *   If the point is inside the cone, calculate the material color using the **inside** transfer function (secondary TF) [S1].
-    *   If the point is outside the cone, calculate the material color using the **outside** transfer function (primary TF) [S1].
-5.  **Shading and Compositing:** Apply Phong shading to the calculated material color and composite the result along the ray using standard volume ray casting accumulation [S1].
+The method modifies the fragment shader of a classical GPU ray casting algorithm [S1].
+
+1.  **Initialization:** Pass the transfer functions and cone geometry ($\mathbf{a}, \mathbf{d}, \alpha$) to the GPU [S1]. Initialize ray origin and direction based on screen coordinates (e.g., `gl_FragCoord`) [S1].
+2.  **Ray Casting Loop:** For each sample point $\mathbf{p}$ along the ray:
+    a.  **Sample Volume:** Retrieve scalar value $v$ from the volume texture at $\mathbf{p}$ [S1].
+    b.  **Inclusion Test:** Determine if $\mathbf{p}$ lies inside the inspection cone [S1].
+    c.  **Color Calculation:**
+        *   If inside: Calculate material color $\mathbf{c}_{in}$ using the secondary transfer function and shading style [S1].
+        *   If outside: Calculate material color $\mathbf{c}_{out}$ using the primary transfer function and shading style [S1].
+    d.  **Shading:** Apply Phong shading to the selected material color $\mathbf{c}$ [S1].
+    e.  **Compositing:** Accumulate the color and opacity using front-to-back compositing [S1].
+    f.  **Update:** Advance $\mathbf{p}$ along the ray [S1].
+
+**Point-in-Cone Test:**
+A point $\mathbf{p}$ is inside the cone defined by apex $\mathbf{a}$, axis $\mathbf{d}$, and aperture $\alpha$ if the angle between the vector $\mathbf{v} = \mathbf{p} - \mathbf{a}$ and the axis $\mathbf{d}$ is less than or equal to $\alpha$, and $\mathbf{v}$ points in the general direction of $\mathbf{d}$ (dot product positive) [S1]. Mathematically:
+$$ \frac{(\mathbf{p} - \mathbf{a}) \cdot \mathbf{d}}{\|\mathbf{p} - \mathbf{a}\|} \ge \cos(\alpha) \quad \text{and} \quad (\mathbf{p} - \mathbf{a}) \cdot \mathbf{d} > 0 $$
+[G] In practice, to avoid division by zero and improve performance, the test is often implemented as:
+$$ (\mathbf{p} - \mathbf{a}) \cdot \mathbf{d} \ge \|\mathbf{p} - \mathbf{a}\| \cos(\alpha) $$
+with a check that $(\mathbf{p} - \mathbf{a}) \cdot \mathbf{d} > 0$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Vertex Shader / Initialization
-# Inputs: gl_FragCoord, VolumeTexture, Apex, Axis, Aperture, PrimaryTF, SecondaryTF
+# Vertex/Fragment Shader Logic
+# Inputs: gl_FragCoord, VolumeTexture, Apex (a), Axis (d), Aperture (alpha), TF_inside, TF_outside
 
-# Fragment Shader
-void main() {
-    // 1. Calculate ray origin and direction for the current pixel
-    vec3 ray_origin = calculateRayOrigin(gl_FragCoord);
-    vec3 ray_direction = calculateRayDirection(gl_FragCoord);
+def render_fragment(gl_frag_coord):
+    # 1. Calculate Ray
+    ray_origin, ray_direction = calculate_origin_ray(gl_frag_coord)
     
-    // 2. Initialize accumulation variables
-    vec4 accumulated_color = vec4(0.0);
-    float accumulated_opacity = 0.0;
-    vec3 position = ray_origin;
+    # 2. Initialize Compositing
+    accumulated_color = vec4(0.0)
+    accumulated_opacity = 0.0
+    position = ray_origin
     
-    // 3. Ray casting loop
-    while (!endRayCasting(position, ray_origin, ray_direction)) {
-        // Sample volume value
-        float v = texture3D(VolumeTexture, position).a;
+    # 3. Ray Casting Loop
+    while not end_ray_casting(position):
+        # Sample Volume
+        v = texture3D(VolumeTexture, position).a
         
-        // 4. Point-in-Cone Test
-        // Vector from apex to current position
-        vec3 v_vec = position - Apex;
+        # Inclusion Test
+        vector_to_point = position - a
+        dot_product = dot(vector_to_point, d)
         
-        // Check if point is in front of the apex along the axis
-        float dot_prod = dot(v_vec, Axis);
-        bool is_forward = dot_prod > 0.0;
+        # Check if point is in front of apex and within aperture
+        if dot_product > 0:
+            # Cosine of angle between vector_to_point and axis
+            cos_angle = dot_product / length(vector_to_point)
+            is_inside = cos_angle >= cos(alpha)
+        else:
+            is_inside = False
+            
+        # 4. Determine Material Color
+        if is_inside:
+            material = calculate_inside_color(v) # Uses secondary TF
+        else:
+            material = calculate_outside_color(v) # Uses primary TF
+            
+        # 5. Shading and Compositing
+        shaded_color = calculate_phong_shading(material, position)
         
-        // Calculate angle between v_vec and Axis
-        float cos_alpha = dot(v_vec, Axis) / (length(v_vec) * length(Axis));
-        // Clamp for numerical stability
-        cos_alpha = clamp(cos_alpha, -1.0, 1.0);
+        # Front-to-back compositing
+        alpha = material.opacity
+        accumulated_color = accumulated_color + shaded_color * alpha * (1.0 - accumulated_opacity)
+        accumulated_opacity = accumulated_opacity + alpha * (1.0 - accumulated_opacity)
         
-        // Check if angle is within aperture
-        float cos_theta = cos(Aperture);
-        bool is_inside_angle = cos_alpha >= cos_theta;
+        # 6. Update Position
+        position = position + step_size * ray_direction
         
-        bool inside_cone = is_forward && is_inside_angle;
-        
-        // 5. Determine color based on inclusion
-        vec4 material_color;
-        if (inside_cone) {
-            material_color = calculateInsideColor(v); // Secondary TF
-        } else {
-            material_color = calculateOutsideColor(v); // Primary TF
-        }
-        
-        // 6. Apply Shading (Phong)
-        // Note: calculatePhongShading modifies material_color based on position and normals
-        material_color = calculatePhongShading(material_color, position);
-        
-        // 7. Composite
-        // Standard front-to-back compositing
-        float alpha = material_color.a;
-        accumulated_color.rgb += (1.0 - accumulated_opacity) * alpha * material_color.rgb;
-        accumulated_opacity += (1.0 - accumulated_opacity) * alpha;
-        
-        // Update position
-        position += ray_direction * step_size;
-    }
-    
-    gl_FragColor = accumulated_color;
-}
+    return accumulated_color
 ```
 
 **Parameters:**
-*   **Aperture Angle:** Adjustable via a joystick on the Wanda device [S1].
-*   **Apex Position:** Determined by the 3D pointer device (Wanda) [S1].
-*   **Axis Direction:** Determined by the orientation of the Wanda device [S1].
+*   **Aperture Angle:** Adjustable via joystick on the Wanda device [S1].
 *   **Resolution:** Tested on $512 \times 512 \times 512$ voxel models [S1].
 *   **Window Size:** $900 \times 900$ pixels [S1].
+*   **Samples:** Typically 1 sample per voxel for real-time performance, though 2 samples are supported [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Navigation Alignment:** When navigating through a model, the cone apex (Wanda position) may not point exactly in front of the user, causing the entire volume to be rendered with the primary transfer function if the cone misses the view frustum or the volume [S1].
-    *   *Solution:* Generate the inspection cone with the apex at the observer position while keeping the direction guided by the hand [S1].
-*   **Abrupt Region Changes:** The region pointed by the device may change more abruptly than expected if the pointed geometry is closer than supposed [S1].
-    *   *Solution:* Place the apex of the cone at some distance back from the device [S1].
-*   **Performance Penalty:** The inclusion test adds a rendering penalty compared to classical ray casting, but real-time framerates are maintained [S1].
+*   **Navigation Misalignment:** When navigating through a model, the cone apex (device position) may not point exactly in front of the user, causing the entire volume to be rendered with the primary transfer function if the cone misses the view frustum or relevant data [S1].
+    *   *Solution:* Generate the inspection cone with the apex at the observer position while keeping the direction guided by the hand/device [S1].
+*   **Abrupt Region Changes:** The pointed region may change more abruptly than expected if the geometry is closer than supposed [S1].
+    *   *Solution:* Place the apex of the cone at a fixed distance back from the device [S1].
+*   **Performance Penalty:** The inclusion test adds a rendering penalty compared to classical ray casting, but real-time framerates are maintained on the tested hardware [S1].
 
 ## Subtopics
 
 ### [Virtual Magic Window](11345-virtual-magic-window.md)
-A restricted implementation of VML where the virtual lantern aligns with the viewing direction, creating a window. It incurs no performance penalty compared to classical volume ray casting but provides less contextual information at the boundary of the ROI.
+A restricted implementation of VML where the virtual lantern aligns with the viewing direction, creating a window. It incurs no performance penalty compared to classical volume ray casting but provides less contextual information at the ROI boundary [11345-virtual-magic-window.md].
 
 ## Operating characteristics
-*   **Time Complexity:** The method adds a point-in-cone test per sample point. The complexity is $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples per ray, plus the cost of the cone test [S1].
-*   **Memory Complexity:** Requires storage for the volume texture and the cone parameters. No additional large data structures are required compared to classical ray casting [S1].
-*   **Measured Performance:** Tested on a 3.00 GHz Intel Core 2 Duo PC, 8GB RAM, GeForce 8800 GTX (768MB RAM) [S1].
-    *   *Feet Model (1 sample/voxel):* RC=32 fps, VML=17 fps, VMW=32 fps [S1].
-    *   *Feet Model (2 samples/voxel):* RC=18.5 fps, VML=9.8 fps, VMW=18.5 fps [S1].
-    *   *Manix Model (1 sample/voxel):* RC=18 fps, VML=13 fps, VMW=18 fps [S1].
-    *   *Manix Model (2 samples/voxel):* RC=10 fps, VML=6.5 fps, VMW=10 fps [S1].
-    *   *Head Model (1 sample/voxel):* RC=28 fps, VML=15.3 fps, VMW=28 fps [S1].
-    *   *Head Model (2 samples/voxel):* RC=15 fps, VML=10 fps, VMW=15 fps [S1].
-    *   *Rips Model (1 sample/voxel):* RC=32 fps, VML=14.8 fps, VMW=32 fps [S1].
-    *   *Rips Model (2 samples/voxel):* RC=18 fps, VML=8.4 fps, VMW=18 fps [S1].
-*   **Scaling:** Framerates slow down roughly 40% when the volume covers the whole viewport (close inspection) compared to viewing from outside [S1]. Disabling stereo rendering doubles framerates [S1].
-*   **Strengths:** Intuitive interaction, provides simultaneous view of ROI and context, suitable for immersive VR setups (PowerWall) [S1].
-*   **Limitations:** Performance penalty compared to classical ray casting and VMW; potential for abrupt region changes if not tuned [S1].
-*   **When to use:** Immersive stereo systems for volumetric data inspection where contextual information is critical [S1].
-*   **When not to use:** When maximum performance is required and contextual boundary information is less important (use VMW or classical RC) [S1].
+**Time and Memory Complexity:**
+*   The method adds a constant-time geometric inclusion test per sample point to the standard ray casting loop [S1].
+*   Memory usage is dominated by the volume texture and standard ray casting buffers [S1].
+
+**Measured Performance:**
+Tests were conducted on a 3.00 GHz Intel Core 2 Duo PC, 8GB RAM, GeForce 8800 GTX (768MB RAM) in a stereo PowerWall system with a $900 \times 900$ window [S1].
+
+| Model | Samples | RC (fps) | VML (fps) | VMW (fps) |
+| :--- | :--- | :--- | :--- | :--- |
+| Feet | 1 | 32 | 17 | 32 |
+| Feet | 2 | 18.5 | 9.8 | 18.5 |
+| Manix | 1 | 18 | 13 | 18 |
+| Manix | 2 | 10 | 6.5 | 10 |
+| Head | 1 | 28 | 15.3 | 28 |
+| Head | 2 | 15 | 10 | 15 |
+| Rips | 1 | 32 | 14.8 | 32 |
+| Rips | 2 | 18 | 8.4 | 18 |
+
+*   VML incurs a performance penalty compared to classical Ray Casting (RC) and Virtual Magic Window (VMW) [S1].
+*   VMW has no penalty compared to RC [S1].
+*   Framerates drop roughly 40% if the volume covers the whole viewport (close inspection) [S1].
+*   Disabling stereo rendering doubles framerates [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Intuitive interaction, provides rich contextual information at the ROI boundary, maintains interactive framerates [S1].
+*   **Limitations:** Performance penalty relative to RC, potential for abrupt region changes during navigation, requires 3D pointer device (Wanda) for optimal interaction [S1].
+
+**When to Use:**
+*   Immersive stereo systems (PowerWall) for volumetric data inspection [S1].
+*   Scenarios requiring simultaneous view of a focal region and its context (e.g., surgery planning, injury diagnosis) [S1].
+
+**When Not to Use:**
+*   When maximum performance is required and contextual boundary information is not needed (use VMW or RC) [S1].
+*   When the hardware is significantly older than the tested GeForce 8800 GTX, as the penalty may become prohibitive [S1].
 
 ## Background
-The Virtual Magic Lantern was introduced by Andujar, Fairen, and Argelaguet in 2007 [S1]. It is tailored to facilitate volumetric data inspection, particularly in Virtual Reality setups with large screens (e.g., PowerWall) [S1]. The metaphor is inspired by the historical magic lantern, using a virtual illumination cone to highlight a focal region [S1]. It is implemented as a modification of GPU-based volume ray casting [S1].
+The Virtual Magic Lantern was presented by A. Andujar, M. Fairen, and F. Argelaguet in 2007 [S1]. It is tailored to facilitate volumetric data inspection, particularly in Virtual Reality setups with large screens [S1]. The metaphor is inspired by the historical magic lantern, where a virtual illumination cone provides the focal region [S1]. The implementation builds on classical GPU ray casting [S1].
 
 ## Sources
 [S1] The virtual magic lantern, https://doi.org/10.1145/1643928.1643955, fetched 2026-10-28

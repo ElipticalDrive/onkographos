@@ -1,26 +1,19 @@
 # Memory Layout and Data Mapping
 
-Also called: Voxel Grid Indexing, Linear Indexing, Row-Major Mapping
+Also called: Voxel Grid Linearization, IJK-to-Linear Mapping
 
 ## Overview
-Memory Layout and Data Mapping defines the mechanism for mapping 3D voxel coordinates $(i, j, k)$ to contiguous 1D memory indices and physical world coordinates. It solves the problem of efficient random access to volumetric data stored in dense grids by establishing a deterministic stride-based indexing scheme. It differs from sparse representations like [Sparse Voxel Grid](8021-sparse-voxel-grid.md) by using fixed-size contiguous arrays, which simplifies indexing logic but requires explicit bounds checking and memory management by the caller [7219-volume-data-structure-and-indexing.md].
+Memory Layout and Data Mapping defines the mechanism for storing 3D voxel grids in contiguous 1D memory buffers and computing the bidirectional mapping between logical voxel coordinates (IJK) and linear array indices. It solves the problem of efficient random access and cache-friendly traversal of dense volumetric data by establishing a consistent row-major ordering where the X-dimension varies fastest, followed by Y, then Z. It differs from sparse representations by assuming a fixed, dense grid where memory is allocated for the entire bounding box, making it suitable for regular datasets [S1, unofficial].
 
 ## Shared principles
-All child methods in this family rely on a **row-major linearization** of the 3D grid. The mapping assumes a fixed grid dimensions $N_x, N_y, N_z$ (often denoted as `xLength`, `yLength`, `zLength` or `m_arraySize`).
+The family relies on a row-major linearization of the 3D grid. Let $N_x$, $N_y$, and $N_z$ be the grid dimensions along the X, Y, and Z axes respectively. The linear index $idx$ for a voxel at coordinates $(i, j, k)$ is computed as:
 
-### Forward Indexing (IJK to Linear)
-The linear index $idx$ for a voxel at coordinates $(i, j, k)$ is calculated as:
 $$
 idx(i, j, k) = i + N_x \cdot j + N_x \cdot N_y \cdot k
 $$
-Where:
-*   $i \in [0, N_x - 1]$ is the fastest-varying dimension (x-axis).
-*   $j \in [0, N_y - 1]$ is the middle dimension (y-axis).
-*   $k \in [0, N_z - 1]$ is the slowest-varying dimension (z-axis).
-*   $N_x$ is the width, $N_y$ is the height.
 
-### Reverse Indexing (Linear to IJK)
-Given a linear index $idx$, the coordinates are derived using integer division and modulo operations:
+The reverse mapping from a linear index $idx$ to coordinates $(i, j, k)$ is:
+
 $$
 k = \lfloor idx / (N_x \cdot N_y) \rfloor
 $$
@@ -31,37 +24,28 @@ $$
 i = idx \pmod{N_x}
 $$
 
-### Neighbor Access
-Face-adjacent neighbors are accessed by adding or subtracting strides from the current linear index $idx_{curr}$:
-*   **X-axis neighbors** (Left/Right): $idx_{curr} \pm 1$
-*   **Y-axis neighbors** (Back/Front): $idx_{curr} \pm N_x$
-*   **Z-axis neighbors** (Bottom/Top): $idx_{curr} \pm (N_x \cdot N_y)$
+Neighbor access for face-adjacent cells is achieved by adding or subtracting stride constants derived from the dimensions:
+*   X-axis neighbors (Left/Right): $\pm 1$
+*   Y-axis neighbors (Back/Front): $\pm N_x$
+*   Z-axis neighbors (Bottom/Top): $\pm (N_x \cdot N_y)$
 
-### Physical Coordinate Transformation
-To map a voxel index to physical space (e.g., RAS), the linear index is first converted to $(i, j, k)$. The physical position $P$ is then computed using spacing $S = [s_x, s_y, s_z]$, offset $O = [o_x, o_y, o_z]$, and optional rotation matrix $M$:
-$$
-\begin{bmatrix} x' \\ y' \\ z' \end{bmatrix} = M \begin{bmatrix} i \cdot s_x \\ j \cdot s_y \\ k \cdot s_z \end{bmatrix}
-$$
-$$
-P = \begin{bmatrix} x' \\ y' \\ z' \end{bmatrix} + \begin{bmatrix} o_x \\ o_y \\ o_z \end{bmatrix}
-$$
-For methods without rotation (e.g., [Multi-Material Cell Map Indexing & Access](4886-multi-material-cell-map-indexing-access.md)), $M$ is the identity matrix, and vertex offsets may be stored explicitly within the cell structure.
+Physical coordinate transformation from voxel indices to world space typically involves scaling by voxel spacing, applying a rotation matrix, and adding an offset, though specific implementations may embed offsets within cell structures [S1, unofficial].
 
 ## Subtopics
 
 ### [Multi-Material Cell Map Indexing & Access](4886-multi-material-cell-map-indexing-access.md)
-Uses a contiguous 1D array of `Cell` structures containing flags, material IDs, and vertex offsets. It differs by storing per-cell metadata required for surface reconstruction (SurfaceNets) rather than just scalar values. It includes specific logic for retrieving 8 corner vertex labels for flag computation.
+Multi-Material Cell Map (MMCellMap) indexing provides a row-major linearization of a 3D voxel grid to enable efficient access to cell data, flags, and material labels for multi-material surface reconstruction. It differs from standard volume rendering by storing per-cell vertex offsets and material flags rather than scalar density values, allowing the representation of complex interfaces between multiple materials within a single grid cell.
 
 ### [Volume Data Structure and Indexing](7219-volume-data-structure-and-indexing.md)
-Defines a `Volume` object wrapping a typed array buffer with explicit geometric metadata (spacing, offset, rotation matrix). It differs by providing a complete coordinate transformation pipeline from IJK to RAS space and handling threshold-based filtering. It enforces strict buffer size validation and NaN handling for min/max calculations.
+The Volume data structure stores 3D scalar data in a contiguous linear array (TypedArray) and manages the bidirectional mapping between voxel indices (IJK) and physical coordinates (RAS). It differs from sparse representations by assuming a fixed, dense grid where memory is allocated for the entire bounding box, making it suitable for regular medical or scientific datasets.
 
 ### Voxel World Map Data Layout
-*   **Definition**: Represents world geometry as a discrete 3D grid of integers where 0 denotes empty space and non-zero values denote solid voxels or texture indices [S1, unofficial].
-*   **Parameters**: Grid dimensions are defined by constants `MAP_WIDTH` (Z-axis) and `MAP_HEIGHT` (Y-axis) [S1, unofficial].
-*   **Layout**: The 3D grid is flattened to a 1D integer array using row-major order along the Z axis, then Y. The indexing formula is `y * MAP_WIDTH * MAP_HEIGHT + z * MAP_WIDTH + x` [S1, unofficial].
+**Definition**: The world geometry is represented as a discrete 3D grid of integers. A value of 0 denotes empty space; non-zero values denote solid voxels or texture indices [S1, unofficial].
+**Parameters**: `MAP_WIDTH` and `MAP_HEIGHT` are integer constants defining the grid dimensions along the Z and Y axes respectively [S1, unofficial].
+**Layout**: The 3D voxel grid is flattened to a 1D integer array. Indexing uses row-major order along the Z axis, then Y: `y * MAP_WIDTH * MAP_HEIGHT + z * MAP_WIDTH + x` [S1, unofficial].
 
 ## Background
-This family of indexing schemes is fundamental to dense volume rendering and voxel-based geometry processing. The row-major layout is standard in C/C++ and JavaScript environments for contiguous memory access. The specific implementations cited originate from open-source ray tracing engines and medical imaging visualization libraries, where efficient access to voxel data and coordinate transformation are critical for rendering and surface reconstruction.
+The specific implementations detailed in this family originate from the [DJayalath/RayTracingEngine](https://github.com/DJayalath/RayTracingEngine) repository [S1, unofficial]. The row-major indexing scheme is a standard convention in computer graphics for dense grid storage, ensuring that spatially adjacent voxels in the X-dimension are contiguous in memory, which optimizes cache locality during ray marching or volume rendering passes.
 
 ## Sources
 [S1] DJayalath/RayTracingEngine, https://github.com/DJayalath/RayTracingEngine, fetched 2026-10-24 (unofficial)

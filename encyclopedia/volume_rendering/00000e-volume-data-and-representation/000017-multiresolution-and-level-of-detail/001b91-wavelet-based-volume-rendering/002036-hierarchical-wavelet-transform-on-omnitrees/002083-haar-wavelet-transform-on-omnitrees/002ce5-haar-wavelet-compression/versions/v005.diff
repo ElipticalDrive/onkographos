@@ -1,0 +1,372 @@
+--- v004.md
++++ v005.md
+@@ -7,5 +7,5 @@
+ 
+ ## How it works
+-The method partitions the volume into independent blocks, applies a hierarchical Haar wavelet transform, thresholds and quantizes coefficients, and encodes them using a structure optimized for direct memory access [S1, unofficial][S2].
++The method partitions the volume into $16 \times 16 \times 16$ blocks, subdivides them into $4 \times 4 \times 4$ cells, applies temporal prediction and 2D Haar wavelet transforms, thresholds and quantizes coefficients, and encodes them using a flag-based structure optimized for direct memory access [S1, unofficial][S2].
+ 
+ ### Inputs and Outputs
+@@ -15,7 +15,7 @@
+ ### Data Structures
+ The compressed data is organized into two main streams and one metadata chunk per block:
+-1.  **`one-byte` array**: Stores quantized coefficients that fit in 1 byte (values $[0, 255]$) [S1, unofficial].
+-2.  **`two-byte` array**: Stores quantized coefficients requiring 2 bytes [S1, unofficial].
+-3.  **Cell Information Chunk**: A $4 \times 4 \times 4$ block of 1-bit flags and offset information. Each bit corresponds to a "cell" (a $4 \times 4 \times 4$ subblock of the original $16 \times 16 \times 16$ block). If the bit is 1, the cell contains non-zero coefficients; if 0, all coefficients in that cell are zero [S1, unofficial]. Offsets point to the location of the cell's coefficients in the `one-byte` or `two-byte` arrays [S1, unofficial].
++1. **`one-byte` array**: Stores quantized coefficients that fit in 1 byte (values $[0, 255]$) [S1, unofficial].
++2. **`two-byte` array**: Stores quantized coefficients requiring 2 bytes [S1, unofficial].
++3. **Cell Information Chunk**: A $4 \times 4 \times 4$ block of 1-bit flags and offset information [S1, unofficial]. Each bit corresponds to a "cell" (a $4 \times 4 \times 4$ subblock of the original $16 \times 16 \times 16$ block) [S1, unofficial]. If the bit is 1, the cell contains non-zero coefficients; if 0, all coefficients in that cell are zero [S1, unofficial]. Offsets point to the location of the cell's coefficients in the `one-byte` or `two-byte` arrays [S1, unofficial].
+ 
+ ### Parameters
+@@ -28,78 +28,86 @@
+ 
+ ### Steps
+-
+-1.  **Partitioning**: Divide the volume into $16 \times 16 \times 16$ blocks [S1, unofficial]. Within each block, identify $4 \times 4 \times 4$ subblocks (cells) [S1, unofficial].
+-2.  **Temporal Prediction (Inter-slice)**: Divide the volume into 2D slices along the z-direction [S2]. Apply temporal prediction to remove correlation between slices. This involves using forward and backward R-slices (reference slices) to predict I-slices (intra-coded slices) [S2]. The distance between R-slices is $F = 2^k$ [S2].
+-3.  **Spatial Wavelet Transform**: Apply a 2D Haar wavelet transform to each slice to handle spatial redundancy [S2]. The Haar wavelet is chosen for its fast reconstruction speed (2-tap filter) [S2]. Two levels of decomposition are applied [S2].
+-4.  **Thresholding**: Set wavelet coefficients below a certain threshold to zero to increase sparsity [S1, unofficial][S2].
+-    -   The threshold is determined per-slice to maintain a target Peak Signal-to-Noise Ratio (PSNR) [S2].
+-    -   Coefficients in each slice are sorted in ascending order of magnitude. Coefficients are zeroed until the desired PSNR is reached [S2].
+-    -   PSNR is calculated using the global maximum of the entire volume:
+-        $$ \text{PSNR} = 10 \log_{10} \left( \frac{\max(x_i)^2}{\text{MSE}} \right) $$
+-        where $x_i$ is the original image value [S2].
+-    -   *Note*: Global sorting is impractical for large volumes; per-slice sorting is used as a practical approximation [S2].
+-5.  **Quantization**: Quantize the remaining non-zero coefficients to the interval $[0, 255]$ using a uniform scalar quantizer [S2]. Coefficients are grouped into blocks $G$ of at most 64 coefficients [S2].
+-    -   For each block $G$, determine parameters:
+-        $$ A = \max_{c \in G}(c), \quad B = \min_{c \in G}(c) $$
+-    -   Quantize each coefficient $C \in G$ to a byte $x$:
+-        $$ x = \left\lfloor 255 \times \frac{C - B}{A - B} + 0.5 \right\rfloor $$
+-    -   Store $A$ and $B$ as 16-bit integers and $x$ as a byte [S2].
+-    -   Reconstructed value $\tilde{C}$ from quantized $x$:
+-        $$ \tilde{C} = \left\lfloor \frac{A - B}{255} \times x + 0.5 \right\rfloor + B $$
+-6.  **Encoding**:
+-    -   Enumerate cells within each $16 \times 16 \times 16$ block.
+-    -   If a cell contains any non-zero coefficients, tag it with a 1 in the Cell Information Chunk and store its coefficients in the `one-byte` or `two-byte` arrays based on size [S1, unofficial].
+-    -   If a cell contains only zero coefficients, tag it with 0 [S1, unofficial].
+-    -   Use flags and offsets in the Cell Information Chunk to map cell indices to addresses in the coefficient arrays [S1, unofficial].
++1. **Partitioning**: Divide the volume into $16 \times 16 \times 16$ blocks [S1, unofficial]. Within each block, identify $4 \times 4 \times 4$ subblocks (cells) [S1, unofficial].
++2. **Temporal Prediction**: Divide the volume into 2D slices along the z-direction [S2]. Apply temporal prediction to remove correlation between slices using forward and backward R-slices (reference slices) to predict I-slices (intra-coded slices) [S2]. The distance between R-slices is $F = 2^k$ [S2].
++3. **Spatial Wavelet Transform**: Apply a 2D Haar wavelet transform to each slice to handle spatial redundancy [S2]. The Haar wavelet is chosen for its fast reconstruction speed (2-tap filter) [S2]. Two levels of decomposition are applied [S2].
++4. **Thresholding**: Set wavelet coefficients below a certain threshold to zero to increase sparsity [S1, unofficial][S2]. The threshold is determined per-slice to maintain a target Peak Signal-to-Noise Ratio (PSNR) [S2]. Coefficients in each slice are sorted in ascending order of magnitude and zeroed until the desired PSNR is reached [S2]. PSNR is calculated using the global maximum of the entire volume [S2]. Global sorting is impractical for large volumes; per-slice sorting is used as a practical approximation [S2].
++5. **Quantization**: Quantize the remaining non-zero coefficients to the interval $[0, 255]$ using a uniform scalar quantizer [S2]. Coefficients are grouped into blocks $G$ of at most 64 coefficients [S2]. For each block $G$, determine parameters $A$ and $B$, quantize each coefficient $C$ to a byte $x$, and store $A$ and $B$ as 16-bit integers [S2].
++6. **Encoding**: Enumerate cells within each $16 \times 16 \times 16$ block [S1, unofficial]. If a cell contains any non-zero coefficients, tag it with a 1 in the Cell Information Chunk and store its coefficients in the `one-byte` or `two-byte` arrays based on size [S1, unofficial]. If a cell contains only zero coefficients, tag it with 0 [S1, unofficial]. Use flags and offsets in the Cell Information Chunk to map cell indices to addresses in the coefficient arrays [S1, unofficial].
++7. **Reconstruction**: Apply the reverse of the decomposition [S1, unofficial]. Each $4 \times 4 \times 4$ subregion of the $16 \times 16 \times 16$ blocks is considered an octree [S1, unofficial]. The root node stores the average of all voxel values in the subregion [S1, unofficial]. The seven detail coefficients in level 1 are used with values from the root to reconstruct the eight voxel values of a corresponding $2 \times 2 \times 2$ subregion [S1, unofficial].
++
++### Formulas
++- **Forward Haar Transform** (2x2x2 subregion to 8-band filter bank):
++  $$ \text{clll} = \frac{c_1 + c_2 + c_3 + c_4 + c_5 + c_6 + c_7 + c_8}{8} $$
++  $$ \text{cllh} = \frac{c_1 + c_2 + c_3 + c_4 - c_5 - c_6 - c_7 - c_8}{8} $$
++  $$ \text{clhl} = \frac{c_1 + c_2 - c_3 - c_4 + c_5 + c_6 - c_7 - c_8}{8} $$
++  $$ \text{clhh} = \frac{c_1 + c_2 - c_3 - c_4 - c_5 - c_6 + c_7 + c_8}{8} $$
++  $$ \text{chll} = \frac{c_1 - c_2 + c_3 - c_4 + c_5 - c_6 + c_7 - c_8}{8} $$
++  $$ \text{chlh} = \frac{c_1 - c_2 + c_3 - c_4 - c_5 + c_6 - c_7 + c_8}{8} $$
++  $$ \text{chhl} = \frac{c_1 - c_2 - c_3 + c_4 + c_5 - c_6 - c_7 + c_8}{8} $$
++  $$ \text{chhh} = \frac{c_1 - c_2 - c_3 + c_4 - c_5 + c_6 + c_7 - c_8}{8} $$
++  where $c_i$ represents the eight coefficients in a 2x2x2 subregion and $\text{clll}$ represents their average [S1, unofficial].
++
++- **Inverse Haar Transform** (reconstruction):
++  $$ c_1 = \text{clll} + \text{cllh} + \text{clhl} + \text{clhh} + \text{chll} + \text{chlh} + \text{chhl} + \text{chhh} $$
++  $$ c_2 = \text{clll} + \text{cllh} + \text{clhl} + \text{clhh} - \text{chll} - \text{chlh} - \text{chhl} - \text{chhh} $$
++  $$ c_3 = \text{clll} + \text{cllh} - \text{clhl} - \text{clhh} + \text{chll} + \text{chlh} - \text{chhl} - \text{chhh} $$
++  $$ c_4 = \text{clll} + \text{cllh} - \text{clhl} - \text{clhh} - \text{chll} - \text{chlh} + \text{chhl} + \text{chhh} $$
++  $$ c_5 = \text{clll} - \text{cllh} + \text{clhl} - \text{clhh} + \text{chll} - \text{chlh} + \text{chhl} - \text{chhh} $$
++  $$ c_6 = \text{clll} - \text{cllh} + \text{clhl} - \text{clhh} - \text{chll} + \text{chlh} - \text{chhl} + \text{chhh} $$
++  $$ c_7 = \text{clll} - \text{cllh} - \text{clhl} + \text{clhh} + \text{chll} - \text{chlh} - \text{chhl} + \text{chhh} $$
++  $$ c_8 = \text{clll} - \text{cllh} - \text{clhl} + \text{clhh} - \text{chll} + \text{chlh} + \text{chhl} - \text{chhh} $$
++  [S1, unofficial]
++
++- **PSNR**:
++  $$ \text{PSNR} = 10 \log_{10} \left( \frac{\max(x_i)^2}{\text{MSE}} \right) $$
++  where $x_i$ is the original image value [S2].
++
++- **Quantization**:
++  $$ A = \max_{c \in G}(c), \quad B = \min_{c \in G}(c) $$
++  $$ x = \left\lfloor 255 \times \frac{C - B}{A - B} + 0.5 \right\rfloor $$
++  $$ \tilde{C} = \left\lfloor \frac{A - B}{255} \times x + 0.5 \right\rfloor + B $$
++  where $A$ and $B$ are 16-bit integer parameters, $x$ is the quantization value (byte), $C$ is the original coefficient value, and $\tilde{C}$ is the reconstructed value [S2].
+ 
+ ### Pseudocode
+-
+ ```python
+ def haar_wavelet_compress(volume, target_psnr, k):
+     """
+     Compress a 3D volume using Haar Wavelet Compression with random access.
+-    
+     Args:
+-        volume: 3D numpy array of shape (W, H, D), dtype uint16 (12-bit values).
++        volume: 3D list of lists of lists of int, shape (W, H, D), 12-bit values.
+         target_psnr: Desired PSNR in dB.
+         k: Exponent for slice prediction distance F = 2^k.
+-        
+     Returns:
+-        compressed_data: Dictionary containing 'one_byte', 'two_byte', 'cell_info', 'block_params'.
++        one_byte_stream: list of int (0-255)
++        two_byte_stream: list of int
++        cell_info: list of dict with 'flags', 'offset_one', 'offset_two'
++        block_params: list of dict with 'A', 'B'
+     """
+-    W, H, D = volume.shape
++    W, H, D = len(volume[0][0]), len(volume[0]), len(volume)
+     block_size = 16
+     cell_size = 4
+-    
+-    # Initialize storage
++    F = 1 << k
++
+     one_byte_stream = []
+     two_byte_stream = []
+-    cell_info = [] # List of (flag, offset_to_one_byte, offset_to_two_byte)
+-    block_params = [] # Store A, B for quantization blocks
+-    
+-    # 1. Partition into blocks
++    cell_info = []
++    block_params = []
++
+     for z in range(0, D, block_size):
+         for y in range(0, H, block_size):
+             for x in range(0, W, block_size):
+-                # Extract block
+-                block = volume[z:z+block_size, y:y+block_size, x:x+block_size]
+-                
+-                # 2. Temporal Prediction (Simplified: Assume slices are processed in order)
+-                # Note: Full implementation requires managing R-slices and I-slices across blocks.
+-                # Here we assume block-level processing for clarity, but prediction happens at slice level.
+-                # For this pseudocode, we skip the complex slice prediction logic and assume 
+-                # the input 'block' is already prediction-corrected or prediction is handled externally.
+-                
+-                # 3. Spatial Wavelet Transform (2D Haar, 2 levels)
+-                # Apply 2D Haar wavelet to each slice in the block
++                block = [[volume[z+dz][y+dy][x+dx] for dx in range(block_size)] 
++                         for dy in range(block_size) for dz in range(block_size)]
++                
++                # Temporal prediction is applied slice-by-slice before transform [S2]
++                # Simplified here as block-level processing; prediction uses R/I slices [S2]
++                
++                # 2D Haar Wavelet Transform (2 levels) on each slice
+                 transformed_block = apply_2d_haar_2_levels(block)
+                 
+-                # 4. Thresholding
+-                # Determine threshold per slice to meet PSNR
+-                # This requires calculating MSE and PSNR for each slice
+-                thresholded_block = threshold_slices(transformed_block, target_psnr, volume)
+-                
+-                # 5. Quantization and Encoding
+-                # Process cells (4x4x4 subblocks)
++                # Thresholding per slice
++                thresholded_block = threshold_slices(transformed_block, target_psnr, volume, W, H, D)
++                
++                # Encoding cells
+                 cell_flags = []
+                 current_one_byte_offset = len(one_byte_stream)
+@@ -109,106 +117,126 @@
+                     for cy in range(0, block_size, cell_size):
+                         for cx in range(0, block_size, cell_size):
+-                            cell = thresholded_block[cz:cz+cell_size, cy:cy+cell_size, cx:cx+cell_size]
++                            cell = [[thresholded_block[cz+dz][cy+dy][cx+dx] 
++                                     for dx in range(cell_size)] 
++                                    for dy in range(cell_size) for dz in range(cell_size)]
+                             
+-                            # Check if cell has non-zero coefficients
+-                            if np.any(cell != 0):
++                            flat_coeffs = [v for row in cell for v in row if v != 0]
++                            
++                            if flat_coeffs:
+                                 cell_flags.append(1)
+-                                
+-                                # Group coefficients for quantization (max 64)
+-                                coeffs = cell.flatten()
+-                                coeffs = coeffs[coeffs != 0] # Remove zeros if any slipped through
+-                                
+-                                # Quantize to [0, 255]
+-                                A = np.max(coeffs)
+-                                B = np.min(coeffs)
+-                                
+-                                # Store A, B for this block (assuming one block per 64 coeffs for simplicity)
+-                                # In reality, A and B are stored per quantization group G
+-                                block_params.append({'A': A, 'B': B})
+-                                
+-                                # Quantize
+-                                quantized = np.floor(255 * (coeffs - B) / (A - B) + 0.5).astype(np.uint8)
+-                                
+-                                # Store in streams
+-                                one_byte_stream.extend(quantized)
+-                                
+-                                # Note: If coefficients required 2 bytes, they would go to two_byte_stream
+-                                # For 12-bit input and 2 levels, most fit in 1 byte after quantization
++                                # Group into blocks of at most 64 coefficients [S2]
++                                for i in range(0, len(flat_coeffs), 64):
++                                    group = flat_coeffs[i:i+64]
++                                    A = max(group)
++                                    B = min(group)
++                                    block_params.append({'A': A, 'B': B})
++                                    
++                                    quantized = []
++                                    for C in group:
++                                        if A == B:
++                                            x = 0
++                                        else:
++                                            x = int(255 * (C - B) / (A - B) + 0.5)
++                                        quantized.append(x)
++                                    
++                                    one_byte_stream.extend(quantized)
+                             else:
+                                 cell_flags.append(0)
+-                                
+-                # Store cell info
++                
+                 cell_info.append({
+                     'flags': cell_flags,
+-                    'offset_one_byte': current_one_byte_offset,
+-                    'offset_two_byte': current_two_byte_offset
++                    'offset_one': current_one_byte_offset,
++                    'offset_two': current_two_byte_offset
+                 })
+-                
+-                # Update offsets for next cell
+-                # (In a real implementation, offsets are cumulative)
+-                
+-    return {
+-        'one_byte': np.array(one_byte_stream, dtype=np.uint8),
+-        'two_byte': np.array(two_byte_stream, dtype=np.uint16),
+-        'cell_info': cell_info,
+-        'block_params': block_params
+-    }
++
++    return one_byte_stream, two_byte_stream, cell_info, block_params
+ 
+ def apply_2d_haar_2_levels(block):
+-    """
+-    Apply 2D Haar wavelet transform with 2 decomposition levels.
+-    """
+-    # Level 1
+-    # Transform rows
+-    for z in range(block.shape[0]):
+-        for y in range(block.shape[1]):
+-            row = block[z, y, :]
+-            block[z, y, :] = haar_transform_1d(row)
+-    # Transform columns
+-    for z in range(block.shape[0]):
+-        for x in range(block.shape[1]):
+-            col = block[z, :, x]
+-            block[z, :, x] = haar_transform_1d(col)
+-            
+-    # Level 2 (on the approximation subband)
+-    # This is a simplified representation; actual implementation handles subbands carefully
+-    # ...
++    """Apply 2D Haar wavelet transform with 2 decomposition levels."""
++    # Level 1: Rows
++    for z in range(len(block)):
++        for y in range(len(block[0])):
++            row = block[z][y]
++            block[z][y] = haar_1d(row)
++    # Level 1: Columns
++    for z in range(len(block)):
++        for x in range(len(block[0][0])):
++            col = [block[z][y][x] for y in range(len(block[0]))]
++            col = haar_1d(col)
++            for y in range(len(block[0])):
++                block[z][y][x] = col[y]
++    # Level 2: Rows on approximation subband
++    for z in range(len(block)):
++        for y in range(len(block[0])):
++            row = block[z][y]
++            block[z][y] = haar_1d(row)
++    # Level 2: Columns on approximation subband
++    for z in range(len(block)):
++        for x in range(len(block[0][0])):
++            col = [block[z][y][x] for y in range(len(block[0]))]
++            col = haar_1d(col)
++            for y in range(len(block[0])):
++                block[z][y][x] = col[y]
+     return block
+ 
+-def haar_transform_1d(signal):
+-    """
+-    1D Haar wavelet transform.
+-    """
++def haar_1d(signal):
++    """1D Haar wavelet transform."""
+     n = len(signal)
+     if n % 2 != 0:
+-        signal = np.append(signal, signal[-1]) # Pad if necessary
+-    n = len(signal)
+-    approx = (signal[0::2] + signal[1::2]) / 2
+-    detail = (signal[0::2] - signal[1::2]) / 2
+-    return np.concatenate([approx, detail])
+-
+-def threshold_slices(transformed_block, target_psnr, original_volume):
+-    """
+-    Threshold coefficients per slice to achieve target PSNR.
+-    """
+-    # This is a placeholder for the complex PSNR calculation logic
+-    # Iterate over each slice in the block
+-    # Sort coefficients, zero out small ones, calculate PSNR
+-    # Repeat until PSNR >= target_psnr
+-    # Use global max of original_volume for PSNR calculation
+-    pass
++        signal = signal + [signal[-1]]
++        n = len(signal)
++    approx = [(signal[i] + signal[i+1]) / 2.0 for i in range(0, n, 2)]
++    detail = [(signal[i] - signal[i+1]) / 2.0 for i in range(0, n, 2)]
++    return approx + detail
++
++def threshold_slices(transformed_block, target_psnr, original_volume, W, H, D):
++    """Threshold coefficients per slice to achieve target PSNR."""
++    # Global max for PSNR calculation [S2]
++    global_max_sq = max(v**2 for row in original_volume for slice in row for v in slice)
++    
++    for z in range(len(transformed_block)):
++        for y in range(len(transformed_block[0])):
++            slice_data = transformed_block[z][y]
++            flat = [v for row in slice_data for v in row]
++            sorted_coeffs = sorted(flat, key=abs)
++            
++            # Zero out coefficients until target PSNR is met [S2]
++            for i in range(len(sorted_coeffs)):
++                test_slice = [sorted_coeffs[j] if j >= i else 0 for j in range(len(sorted_coeffs))]
++                # Pad to original slice size if needed
++                while len(test_slice) < len(flat):
++                    test_slice.append(0)
++                mse = sum((test_slice[j] - flat[j])**2 for j in range(len(flat))) / len(flat)
++                if mse == 0:
++                    psnr = float('inf')
++                else:
++                    psnr = 10 * (global_max_sq / mse)
++                if psnr >= target_psnr:
++                    break
++            
++            # Apply threshold to actual slice structure
++            idx = 0
++            for r in range(len(slice_data)):
++                for c in range(len(slice_data[0])):
++                    if idx < len(sorted_coeffs) and idx >= i:
++                        slice_data[r][c] = sorted_coeffs[idx]
++                    else:
++                        slice_data[r][c] = 0
++                    idx += 1
++    return transformed_block
+ ```
+ 
+ ### Edge Cases and Pitfalls
+--   **Global Sorting Impracticality**: Sorting all coefficients globally for thresholding is too slow for large volumes. The method uses per-slice sorting, which is not globally optimal but provides a reasonable solution [S2].
+--   **Precision**: Original voxel values are 12-bit. Averages fall in $[0, 2^{12}]$ and details in $[-(2^{12}-1)/2, (2^{12}-1)/2]$ [S1, unofficial]. Quantization to 8-bit introduces loss, but the uniform scalar quantizer minimizes distortion [S2].
+--   **Boundaries**: The block-based approach requires volumes to be divisible by block size ($16 \times 16 \times 16$). Padding may be needed for non-divisible dimensions [G].
++- **Global Sorting Impracticality**: Sorting all coefficients globally for thresholding is too slow for large volumes; the method uses per-slice sorting, which is not globally optimal but provides a reasonable solution [S2].
++- **Precision**: Original voxel values are 12-bit; averages fall in $[0, 2^{12}]$ and details in $[-(2^{12}-1)/2, (2^{12}-1)/2]$ [S1, unofficial]. Quantization to 8-bit introduces loss, but the uniform scalar quantizer minimizes distortion [S2].
++- **Boundaries**: The block-based approach requires volumes to be divisible by block size ($16 \times 16 \times 16$); padding may be needed for non-divisible dimensions [G].
++- **Division by Zero**: Quantization assumes $A \neq B$ for non-zero coefficient blocks; a guard is required if a block contains identical values [G].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: The use of the 2-tap Haar wavelet and 2 decomposition levels ensures fast reconstruction. Data reconstruction time is imperceptible compared to rendering tasks [S1, unofficial].
+--   **Memory Complexity**: The block-based structure with flags allows random access to any voxel by decoding only the relevant cell and its parent nodes, avoiding decoding the entire volume [S1, unofficial][S2].
+--   **Compression Ratio**: Compression ratios of up to 28 were reported with good fidelity [S2]. Other methods like Laplacian Pyramid achieved ~10, and 2D wavelet subband coding achieved 20-60 but lacked fast random access [S2].
+--   **Strengths**: Fast random access, high compression ratios, interactive visualization support [S1, unofficial][S2].
+--   **Limitations**: Lossy compression; artifacts may appear at high compression factors (e.g., factor 5 showed blocking and contouring artifacts in some comparisons, though Ihm and Park reported good fidelity at factor 28) [S2]. The per-slice thresholding is not globally optimal [S2].
++- **Time Complexity**: The use of the 2-tap Haar wavelet and 2 decomposition levels ensures fast reconstruction; data reconstruction time is imperceptible compared to the time taken by rendering tasks [S1, unofficial][S2].
++- **Memory Complexity**: The block-based structure with flags allows random access to any voxel by decoding only the relevant cell and its parent nodes, avoiding decoding the entire volume [S1, unofficial][S2].
++- **Compression Ratio**: Compression ratios of up to 28 were reported with good fidelity [S2]. Other methods like Laplacian Pyramid achieved ~10, and 2D wavelet subband coding achieved 20-60 but lacked fast random access [S2].
++- **Strengths**: Fast random access, high compression ratios, interactive visualization support [S1, unofficial][S2].
++- **Limitations**: Lossy compression; artifacts may appear at high compression factors (e.g., factor 5 showed blocking and contouring artifacts in some comparisons, though Ihm and Park reported good fidelity at factor 28) [S2]. The per-slice thresholding is not globally optimal [S2].
+ 
+ ## Background

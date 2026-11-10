@@ -3,97 +3,27 @@
 Also called: Gaussian Grouping, SAM-guided Gaussian Grouping
 
 ## Overview
-This family extends 3D Gaussian Splatting by attaching high-dimensional semantic or language feature vectors to each Gaussian, enabling open-vocabulary segmentation, phrase grounding, and visual question answering via real-time alpha-blended feature maps [S2, unofficial]. It differs from sibling methods by prioritizing semantic understanding over geometric fidelity or appearance; while [3D Gaussian Splatting MVP](3410-3d-gaussian-splatting-mvp.md) focuses on minimal viable rendering and [Analytic-Splatting](8084-analytic-splatting.md) on mathematical precision, this approach leverages the rasterizer as a feature distillation pipeline for vision-language models [S2, unofficial].
+This family extends 3D Gaussian Splatting by storing high-dimensional feature vectors alongside geometric parameters, enabling semantic understanding, open-vocabulary segmentation, and language grounding in 3D scenes. It differs from standard color rendering by accumulating vector-valued data via alpha-blending rather than scalar RGB values, allowing real-time vision-language tasks [S1, unofficial][S2, unofficial].
 
 ## Shared principles
-The core mechanism involves storing a feature vector $\mathbf{f}_i$ (of dimension $D$, typically 512 or 768) alongside the standard Gaussian parameters (position $\mathbf{x}_i$, covariance $\Sigma_i$, opacity $\alpha_i$, spherical harmonics coefficients) for each Gaussian $i$ [S2, unofficial]. During rendering, these features are accumulated per pixel using alpha-blending, producing a 2D feature map $\mathbf{F}(p)$ that can be compared against text embeddings or decoded by a segmentation head [S2, unofficial].
-
-The feature blending uses the same alpha-compositing structure as standard color rendering [S2, unofficial]:
+The core mechanism involves rendering a 2D feature map $\mathbf{F}$ by alpha-blending per-Gaussian feature vectors $\mathbf{f}_i$. For a pixel $p$, the accumulated feature is computed as:
 
 $$
-\mathbf{F}(p) = \sum_{i \in \mathcal{O}} \mathbf{f}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+\mathbf{F}(p) = \sum_{i \in \mathcal{O}_p} \mathbf{f}_i \cdot \alpha_i \cdot \prod_{j=1}^{i-1} (1 - \alpha_j)
 $$
 
-where:
-- $\mathcal{O}$ is the set of Gaussians sorted by depth (front-to-back) that overlap pixel $p$ [S2, unofficial].
-- $\mathbf{f}_i$ is the feature vector of Gaussian $i$ [S2, unofficial].
-- $\alpha_i$ is the opacity of Gaussian $i$ [S2, unofficial].
-- The term $\prod_{j=1}^{i-1} (1 - \alpha_j)$ represents the accumulated transparency from all Gaussians $j$ rendered before $i$ in the sorted order [S2, unofficial].
-
-The resulting $\mathbf{F}(p)$ is a vector in $\mathbb{R}^D$ [S2, unofficial]. To enable semantic tasks, $\mathbf{F}(p)$ is compared against text embeddings $\mathbf{t}_k$ (e.g., from CLIP) using cosine similarity or dot product to determine class labels or phrase grounding scores [S2, unofficial].
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import torch
-
-def render_feature_map(gaussians, camera, image_width, image_height):
-    """
-    Render a feature map from 3D Gaussians.
-    gaussians: List of Gaussian objects with attributes:
-        - x: (N, 3) position
-        - cov2d: (N, 2, 2) 2D covariance matrix
-        - alpha: (N,) opacity
-        - f: (N, D) feature vector
-    camera: Camera object with projection and view matrices
-    """
-    # 1. Project Gaussians to 2D screen space
-    # Compute 2D mean m and covariance cov2d for each Gaussian
-    # Projection and covariance computation handled by parent rasterizer [Parent]
-    projected_gaussians = gaussians  # Placeholder for projected data structure
-
-    # 2. Initialize output feature map
-    D = gaussians.f.shape[1]
-    feature_map = torch.zeros((image_height, image_width, D), device=gaussians.f.device)
-
-    # 3. Rasterize and accumulate features
-    # For each pixel, iterate over overlapping Gaussians sorted by depth
-    for y in range(image_height):
-        for x in range(image_width):
-            # Get list of Gaussians overlapping pixel (x, y)
-            # Sort them by depth (front-to-back)
-            # Tile-based overlap retrieval handled by parent rasterizer [Parent]
-            overlapping = get_overlapping_gaussians(x, y, projected_gaussians)
-            overlapping.sort(key=lambda g: g.depth)
-
-            accumulated_transparency = 1.0
-            pixel_feature = torch.zeros(D, device=gaussians.f.device)
-
-            for g in overlapping:
-                # Compute 2D Gaussian weight at pixel (x, y)
-                dist = torch.tensor([x - g.m[0], y - g.m[1]])
-                inv_cov = torch.inverse(g.cov2d)
-                exponent = -0.5 * dist @ inv_cov @ dist
-                weight = torch.exp(exponent)
-
-                # Alpha contribution
-                alpha_contrib = g.alpha * weight
-
-                # Blend feature: F_new = F_old + f_i * alpha_i * accumulated_transparency
-                pixel_feature += g.f * alpha_contrib * accumulated_transparency
-
-                # Update accumulated transparency
-                accumulated_transparency *= (1 - alpha_contrib)
-
-                # Early exit if fully opaque
-                if accumulated_transparency < 1e-4:
-                    break
-
-            feature_map[y, x] = pixel_feature
-
-    return feature_map
-```
+where $\mathcal{O}_p$ is the set of overlapping Gaussians sorted front-to-back, $\alpha_i$ is the opacity, and $\mathbf{f}_i$ is the feature vector. The resulting 2D feature map is decoded by a segmentation head or compared against text embeddings (e.g., from CLIP) for open-vocabulary queries [S1, unofficial][S2, unofficial].
 
 ## Subtopics
 
 ### [3D Gaussian Splatting with Feature Vectors](8060-3d-gaussian-splatting-with-feature-vectors.md)
-This method extends standard 3D Gaussian Splatting by associating a high-dimensional feature vector $\mathbf{f}_i$ with each Gaussian primitive, enabling the rendering of semantic, linguistic, or visual feature maps alongside color. It solves the problem of integrating 2D vision-language models (e.g., CLIP) or segmentation heads into a 3D representation, allowing for real-time open-vocabulary semantic segmentation and phrase grounding. Unlike standard rendering which outputs RGB, this approach outputs a vector field $\mathbf{F}(p)$ per pixel, preserving semantic consistency through alpha-blending.
+This method extends 3D Gaussian Splatting by storing a high-dimensional feature vector $\mathbf{f}_i$ alongside standard geometric and appearance parameters for each Gaussian. It solves the problem of enabling semantic understanding, open-vocabulary segmentation, and language grounding in 3D scenes by rendering a 2D feature map via alpha-blending, which can then be compared against text embeddings (e.g., from CLIP) or decoded by segmentation heads [8060-3d-gaussian-splatting-with-feature-vectors]. Unlike standard color rendering, it accumulates vector-valued data rather than scalar RGB values, allowing for real-time vision-language tasks [8060-3d-gaussian-splatting-with-feature-vectors].
 
 ### [Text Embedding Generation with Directional Views](8239-text-embedding-generation-with-directional-views.md)
-Encodes text prompts into latent embeddings using a frozen CLIP text encoder, and generates directional view embeddings by appending view descriptors to prompts. Implementation details for text embedding generation are not given in the sources.
+This method generates semantic text embeddings conditioned on specific camera viewpoints to enable view-dependent semantic understanding in 3D Gaussian Splatting. It solves the problem of static text features failing to capture directional appearance variations by appending view descriptors (e.g., "front view") to text prompts before encoding [8239-text-embedding-generation-with-directional-views]. Unlike standard semantic splatting which uses a single global text embedding per Gaussian, this approach generates distinct embeddings for different viewing angles, allowing the renderer to match visual content with directional textual descriptions [8239-text-embedding-generation-with-directional-views].
 
 ### [LSeg Feature Encoding](12078-lseg-feature-encoding.md)
-Not given in the sources.
+LSeg Feature Encoding is a method for generating semantic feature maps from 3D scenes by distilling knowledge from 2D vision-and-language models, specifically LSeg, into a neural feature field [12078-lseg-feature-encoding]. It solves the problem of semantic understanding in 3D representations by leveraging pretrained CLIP-based encoders to provide zero-shot segmentation capabilities [12078-lseg-feature-encoding]. It differs from sibling methods like [3D Gaussian Splatting with Feature Vectors](8060-3d-gaussian-splatting-with-feature-vectors.md) by relying on external 2D teacher networks for feature generation rather than learning features directly from 3D Gaussian parameters during training [12078-lseg-feature-encoding].
 
 ### Language Embedded 3D Gaussians
 Expands feature blending to full scene understanding, encoding object-level embeddings for phrase grounding in addition to pixel-level features [S2, unofficial].
@@ -105,7 +35,7 @@ Pioneers open-vocabulary semantic segmentation in real time by rendering feature
 Projects vision-language models into the 3DGS framework, training a joint embedding space where rendered feature maps can be queried with natural language [S2, unofficial]. Enables tasks like 3D visual question answering and zero-shot semantic reasoning [S2, unofficial].
 
 ## Background
-The concept of attaching semantic features to 3D Gaussians emerged as a natural extension of 3D Gaussian Splatting's ability to render high-dimensional data [S2, unofficial]. Feature-3DGS and LangSplat were among the first to demonstrate that 2D vision-language models (like CLIP) could be distilled into 3D Gaussians for open-vocabulary segmentation [S2, unofficial]. Language Embedded 3D Gaussians and 3D Vision-Language GS further expanded this to support phrase grounding and visual question answering [S2, unofficial]. The "Gaussian Grouping" approach, supervised by SAM (Segment Anything Model) or video tracking, provides an alternative method for assigning per-Gaussian instance IDs, focusing on instance segmentation rather than open-vocabulary semantics [S1, unofficial].
+The speed of the 3DGS rasterizer makes it an ideal platform for distilling 2D vision-model features into a 3D representation. Feature-3DGS and LangSplat pioneer this direction by adding a high-dimensional feature vector to each Gaussian [S1, unofficial][S2, unofficial]. Gaussian Grouping assigns per-Gaussian instance IDs supervised by SAM or video tracking [S1, unofficial]. SAGA, SegAnyGaussians, and OmniSeg3D-GS lift 2D promptable segmentation to 3D [S1, unofficial]. GaussianEditor enables text-driven local edits via Hierarchical Gaussian Semantic Tracing and diffusion-guided refinement [S1, unofficial]. NG-GS uses a pretrained NeRF as a teacher to guide feature distillation [S1, unofficial]. Fast-SegSim adapts the feature rendering pipeline for robotics simulation [S1, unofficial]. LeafFit applies 3DGS to create digital plant assets, leveraging alpha blending and feature fields to accurately reconstruct translucent leaf structures [S1, unofficial]. SeqAffordSplat performs sequential affordance reasoning on the 3DGS representation [S1, unofficial].
 
 ## Sources
 [S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

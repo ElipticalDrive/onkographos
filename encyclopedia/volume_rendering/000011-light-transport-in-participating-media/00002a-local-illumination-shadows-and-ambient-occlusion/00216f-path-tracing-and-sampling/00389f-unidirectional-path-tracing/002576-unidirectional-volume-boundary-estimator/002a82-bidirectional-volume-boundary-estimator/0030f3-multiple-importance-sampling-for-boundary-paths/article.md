@@ -7,20 +7,20 @@ This method combines the unidirectional and bidirectional volume boundary estima
 
 ## How it works
 **Inputs:**
-*   Scene geometry, participating media properties (optical density, phase function), and light sources.
+*   Scene geometry, participating media properties (optical density, phase function), and light sources [G].
 *   Two independent volume boundary paths: $\tilde{\mathbf{p}}_1$ sampled by the unidirectional estimator and $\tilde{\mathbf{p}}_2$ sampled by the bidirectional estimator [S1].
 
 **Outputs:**
 *   The combined radiance estimate for the boundary path contribution [S1].
 
 **Data Structures:**
-*   Path structures containing vertices $\mathbf{p}_0, \dots, \mathbf{p}_K$, boundary vertex $\mathbf{p}_B$, and light source vertex $\mathbf{p}_{S0}$ [S1][S2, unofficial].
+*   Path structures containing vertices $\mathbf{p}_0, \dots, \mathbf{p}_K$, boundary vertex $\mathbf{p}_B$, and light source vertex $\mathbf{p}_{S0}$ [S1].
 *   Probability density values $\text{pdf}_1(\tilde{\mathbf{p}})$ and $\text{pdf}_2(\tilde{\mathbf{p}})$ associated with each path [S1].
 
 **Steps:**
-1.  **Sample Unidirectional Path:** Generate a volume boundary path $\tilde{\mathbf{p}}_1$ using the unidirectional estimator. This involves starting from the detector, building a main path, and for a vertex $\mathbf{p}_D^n$, explicitly drawing a volume boundary vertex $\mathbf{p}_B^n \in \partial BV$ and connecting it to a light source via a subpath [S1].
+1.  **Sample Unidirectional Path:** Generate a volume boundary path $\tilde{\mathbf{p}}_1$ using the unidirectional estimator. Starting from a detector vertex $\mathbf{p}_0$, build a main path, then for each vertex $\mathbf{p}_D^n$, explicitly draw a volume boundary vertex $\mathbf{p}_B^n \in \partial BV$ and connect it to a light source via a subpath $(\mathbf{p}_{S^n,0}, \dots, \mathbf{p}_{S^n,m_n})$ [S1].
 2.  **Sample Bidirectional Path:** Generate a volume boundary path $\tilde{\mathbf{p}}_2$ using the bidirectional estimator. This involves first drawing the volume boundary vertex $\mathbf{p}_B$, then constructing two subpaths to connect it to the light source and the detector [Parent].
-3.  **Compute PDFs:** Calculate the probability density $\text{pdf}_1(\tilde{\mathbf{p}}_1)$ for the unidirectional path and $\text{pdf}_2(\tilde{\mathbf{p}}_2)$ for the bidirectional path. Note that computing these PDFs is difficult when delta tracking is used to sample free-flight distances [S1].
+3.  **Compute PDFs:** Calculate the probability density $\text{pdf}_1(\tilde{\mathbf{p}}_1)$ for the unidirectional path and $\text{pdf}_2(\tilde{\mathbf{p}}_2)$ for the bidirectional path [S1]. Note that computing these PDFs is difficult when delta tracking is used to sample free-flight distances [S1].
 4.  **Apply Balanced Heuristic:** Weight the contribution of each path using the balanced heuristic formula [S1]:
 
     $$
@@ -28,8 +28,8 @@ This method combines the unidirectional and bidirectional volume boundary estima
     $$
 
     Where:
-    *   $f(\tilde{\mathbf{p}})$ is the path throughput (product of phase functions, transmittance, and emission).
-    *   $v_{\perp}(\mathbf{p}_{K})$ is the geometric term involving the perpendicular component of the boundary segment [S1].
+    *   $f(\tilde{\mathbf{p}})$ is the path throughput (product of phase functions, transmittance, and emission) [G].
+    *   $v_{\perp}(\mathbf{p}_{K})$ is the geometric term involving the perpendicular component of the boundary segment [G].
     *   $\mathbf{p}_{K1}$ and $\mathbf{p}_{K2}$ are the final vertices of the respective paths. The paths can have varying lengths, so $K_1$ does not have to equal $K_2$ [S1].
 
 **Parameters:**
@@ -45,13 +45,13 @@ This method combines the unidirectional and bidirectional volume boundary estima
 This variant combines MIS with primary-sample-space guiding to estimate the boundary segment contribution in differentiable volume rendering. It addresses the issue where light-source sampling yields invalid directions due to occlusion. It differs from a full 5D MIS sampler by applying guiding separately to two lower-dimensional mappings (light-source and direct direction), thereby avoiding the computational expense of guiding a higher-dimensional space while maintaining unbiased estimation.
 
 ## Operating characteristics
-*   **Complexity:** The method requires generating two independent paths (unidirectional and bidirectional) and computing their respective PDFs. The balancing step is $O(1)$ per path pair [S1].
-*   **Strengths:** Reduces variance by combining the strengths of unidirectional (good for deep volumes) and bidirectional (good for boundary proximity) estimators [S1].
+*   **Complexity:** The method requires generating two independent paths (unidirectional and bidirectional) and computing their respective PDFs [S1].
+*   **Strengths:** Reduces variance by combining the unidirectional and bidirectional estimators using MIS [S1].
 *   **Limitations:** Requires computing PDFs for both estimators, which is non-trivial with delta tracking [S1]. Restricted to homogeneous optical densities for the MIS combination; spatially varying albedo requires the bidirectional estimator alone [S1].
 *   **When to use:** When rendering translucent objects with homogeneous optical densities where both unidirectional and bidirectional sampling strategies are viable [S1].
 
 ## Background
-The method was introduced by Zhang et al. (2020) as part of a framework for differentiable volume rendering [S1][S2, unofficial]. It builds upon the unidirectional and bidirectional volume boundary estimators which support the full radiative transfer model including multiple scattering, anisotropic phase functions, and heterogeneity [S1]. The implementation in the source literature is based on the system developed by Yu et al. [YZN* 22] utilizing the Enzyme automatic differentiation framework [S1].
+The technique combines unidirectional and bidirectional estimators using MIS [S1]. It builds upon the unidirectional and bidirectional volume boundary estimators which support the full radiative transfer model including multiple scattering, anisotropic phase functions, and heterogeneity [S1]. The implementation in the source literature is based on the system developed by Yu et al. [YZN* 22] utilizing the Enzyme automatic differentiation framework [S1]. Zhang et al. (2020) decompose the boundary integral into direct and indirect terms using next-event estimation [S2, unofficial].
 
 ## Sources
 [S1] PDF Efficient Path-Space Differentiable Volume Rendering With Respect To Shapes, https://www.shuangz.com/projects/psdr-vol2-egsr23/psdr-vol2-egsr23.pdf, fetched 2026-10-27

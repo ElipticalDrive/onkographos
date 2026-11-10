@@ -3,7 +3,7 @@
 Also called: Chargement dynamique et mise à jour progressive
 
 ## Overview
-Dynamic Loading and Progressive Update is a strategy for visualizing massive scenes by dynamically and adaptively loading data based on viewpoint position, bounding memory usage to visible data and required resolution [S1, unofficial]. It solves the problem of navigating arbitrarily large datasets without exceeding memory limits or stalling the frame rate. It sets itself apart from its sibling [Streaming and Level-of-Detail (LOD) selection](3087-streaming-and-level-of-detail-lod-selection.md) by explicitly addressing the temporal aspect of data updates: while the parent selects the coarsest substitutive level based on projected splat footprint, this method focuses on the incremental update of the data structure (brick resolution and N3-tree subdivision) and spreading heavy loads across multiple frames to maintain real-time fluidity [S1, unofficial].
+Dynamic Loading and Progressive Update is a strategy for visualizing massive scenes by dynamically and adaptively loading data based on viewpoint position, bounding memory usage to visible data and required resolution [S1, unofficial]. It solves the problem of navigating arbitrarily large datasets without exceeding memory limits or stalling the frame rate [S1, unofficial]. It sets itself apart from its sibling [Streaming and Level-of-Detail (LOD) selection](3087-streaming-and-level-of-detail-lod-selection.md) by explicitly addressing the temporal aspect of data updates: while the parent selects the coarsest substitutive level based on projected splat footprint, this method focuses on the incremental update of the data structure (brick resolution and N3-tree subdivision) and spreading heavy loads across multiple frames to maintain real-time fluidity [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -11,7 +11,7 @@ Dynamic Loading and Progressive Update is a strategy for visualizing massive sce
 - Output: An updated in-memory data structure (N3-tree with multi-resolution bricks) containing only the necessary data for the current view, rendered at the "useful resolution" [S1, unofficial].
 
 **Data Structures:**
-- **N3-tree:** A hierarchical structure where leaves support bricks. Bricks are multi-resolution [S1, unofficial].
+- **N3-tree:** A hierarchical structure where leaves support bricks [S1, unofficial].
 - **Bricks:** Store voxel data. Sizes range from 16KB to 1MB [S1, unofficial].
 - **Tree Nodes:** Store metadata. Updates involve sparse, small data (few bytes per node) [S1, unofficial].
 - **Camera Parameter Request Bitmask:** Tracks pending reload states for point cloud variants (see Subtopics) [S3, unofficial].
@@ -30,7 +30,7 @@ Dynamic Loading and Progressive Update is a strategy for visualizing massive sce
 4. **Time-Sliced Loading (if needed):** If the amount of data to load exceeds the time available per frame (e.g., during sudden camera movements or entering unvisited zones), spread the loading operations across multiple frames, limiting the time available for loading in each frame to maintain at least 10Hz [S1, unofficial].
 5. **Progressive Refinement (Wavelet Variant):** Load the lowest detail level (highest compression) first from the beginning of the brick file. Display the dataset at the current resolution level $i$. Triggered by a timer, switch to level $i-1$, $i-2$, etc., loading subsequent detail coefficients [S2].
 6. **Adaptive Point Cloud Reload (Point Cloud Variant):**
-   - Track camera parameter changes via a timestamp.
+   - Track camera parameter changes via a timestamp [S3, unofficial].
    - If elapsed time $> WVS\_RELOAD\_DELAY[0]$ and bit 0 of `currentCameraParameterRequest` is unset, request a 1/4 resolution point cloud update and set bit 0 [S3, unofficial].
    - If elapsed time $> WVS\_RELOAD\_DELAY[1]$ and bit 1 is unset, request a full-resolution update and set bits 0 and 1 to prevent redundant reloads [S3, unofficial].
 
@@ -45,54 +45,55 @@ Dynamic Loading and Progressive Update is a strategy for visualizing massive sce
 
 ```python
 def dynamic_loading_update(viewpoint, camera_params, scene_bounds, data_variation_freq, current_tree, current_time):
-    # 1. Determine useful resolution
-    useful_lod = calculate_useful_lod(viewpoint, scene_bounds, data_variation_freq)
-    
-    # 2. Apply LOD strategies
+    # 1. Determine useful resolution based on viewpoint position and data variation frequency [S1, unofficial]
+    useful_lod = ... # Not given in the sources.
+
+    # 2. Apply LOD strategies to visible bricks [S1, unofficial]
     for brick in current_tree.get_visible_bricks():
-        lod_lower, lod_upper = get_lod_bounds(brick, scene_bounds, data_variation_freq)
-        
+        lod_lower, lod_upper = ... # Not given in the sources.
         if useful_lod > lod_upper:
             merge_bricks(brick)
         elif useful_lod < lod_lower:
             subdivide_bricks(brick)
-            
-    # 3. Incremental Update
-    # Identify bricks/nodes that need loading
-    bricks_to_load = get_bricks_needing_update(current_tree, useful_lod)
-    
-    # 4. Time-Sliced Loading
-    # If load time exceeds frame budget, spread across frames
-    load_budget = 1.0 / 10.0  # 10Hz minimum
-    load_time_per_frame = min(load_budget, available_time_per_frame())
-    
-    loaded_bricks = []
+
+    # 3. Incremental Update [S1, unofficial]
+    bricks_to_load = ... # Not given in the sources.
+
+    # 4. Time-Sliced Loading [S1, unofficial]
+    load_budget = 1.0 / 10.0  # 10Hz minimum frame rate
+    current_load_time = 0.0
     for brick in bricks_to_load:
-        if current_load_time + brick_load_cost(brick) <= load_time_per_frame:
+        brick_cost = ... # Not given in the sources.
+        if current_load_time + brick_cost <= load_budget:
             load_brick(brick)
-            current_load_time += brick_load_cost(brick)
-            loaded_bricks.append(brick)
+            current_load_time += brick_cost
         else:
             break
-            
-    # 5. Progressive Wavelet Refinement (if applicable)
-    if use_wavelet_progression:
-        current_wavelet_level = get_current_wavelet_level()
-        if timer_triggered():
-            current_wavelet_level -= 1
-            load_wavelet_coefficients(current_wavelet_level)
-            
-    # 6. Adaptive Point Cloud Reload (if applicable)
-    if use_point_cloud_reload:
-        elapsed_time = current_time - last_camera_change_time
-        if elapsed_time > WVS_RELOAD_DELAY[0] and not (currentCameraParameterRequest & 1):
-            request_point_cloud_update(resolution=1/4)
-            currentCameraParameterRequest |= 1
-        if elapsed_time > WVS_RELOAD_DELAY[1] and not (currentCameraParameterRequest & 2):
-            request_point_cloud_update(resolution=1)
-            currentCameraParameterRequest |= 3  # Set bits 0 and 1
-            
+
+    # 5. Progressive Wavelet Refinement [S2]
+    current_wavelet_level = ... # Not given in the sources.
+    if timer_triggered():
+        current_wavelet_level -= 1
+        load_wavelet_coefficients(current_wavelet_level)
+
+    # 6. Adaptive Point Cloud Reload [S3, unofficial]
+    elapsed_time = current_time - last_camera_change_time
+    if elapsed_time > WVS_RELOAD_DELAY[0] and not (currentCameraParameterRequest & 1):
+        request_point_cloud_update(resolution=1/4)
+        currentCameraParameterRequest |= 1
+    if elapsed_time > WVS_RELOAD_DELAY[1] and not (currentCameraParameterRequest & 2):
+        request_point_cloud_update(resolution=1)
+        currentCameraParameterRequest |= 3
+
     return current_tree
+
+# Helper definitions for steps not detailed in the sources
+def merge_bricks(brick): pass
+def subdivide_bricks(brick): pass
+def load_brick(brick): pass
+def load_wavelet_coefficients(level): pass
+def request_point_cloud_update(resolution): pass
+def timer_triggered(): return False
 ```
 
 ## Subtopics
@@ -114,10 +115,10 @@ A method for reloading point cloud data based on camera movement thresholds and 
 - **Strengths:** Allows navigation of massive scenes without memory overflow; maintains fluidity through incremental updates and time-slicing [S1, unofficial].
 - **Limitations:** Sudden camera movements can cause load spikes; sparse tree updates are latency-heavy [S1, unofficial].
 - **When to Use:** When visualizing massive, multi-resolution scenes with dynamic viewpoint changes [S1, unofficial].
-- **When Not to Use:** When strict real-time performance (<10Hz) is not required and simpler static loading suffices, or when data variation is uniform and does not benefit from adaptive LOD [S1, unofficial].
+- **When Not to Use:** Not given in the sources.
 
 ## Background
-Originated from research on interactive exploration of procedural volumes, specifically the work described in "Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés" [S1, unofficial]. It builds on producer/consumer models [S1, unofficial] and wavelet-based rendering techniques [S2]. The point cloud variant is associated with the iVoxel project [S3, unofficial].
+Originated from research on interactive exploration of procedural volumes, specifically the work described in "Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés" [S1, unofficial]. It builds on producer/consumer models [S1, unofficial] and wavelet-based rendering techniques [S2].
 
 ## Sources
 [S1] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)

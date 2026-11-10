@@ -1,6 +1,5 @@
 # Diffuse Octree Rendering
 
-
 ## Overview
 Diffuse Octree Rendering is an image-order raycasting technique that traverses an octree to locate the first leaf node containing data for each pixel, then computes surface lighting using a diffuse and Phong specular model with distance attenuation [S1, unofficial]. It differs from sibling methods by relying on a coarse-to-fine octree traversal to skip empty space entirely, rather than marching through a dense voxel grid [S1, unofficial].
 
@@ -21,7 +20,7 @@ The core data structure is `VoxelData`, stored in leaf nodes [S1, unofficial]. I
 6.  **Lighting Calculation:** For each active light $i$:
     *   Compute light vector: $\vec{to\_light} = \text{light}[i].\text{position} - \text{current\_position}$ [S1, unofficial].
     *   Compute half vector: $\vec{s} = \vec{to\_light} + (\text{camera\_eye} - \text{current\_position})$, then normalize $\vec{s}$ [S1, unofficial].
-    *   Compute distance attenuation: $\text{distancecut} = \frac{1.0}{\text{CONSTANT} + \text{LINEAR} \cdot \|\vec{to\_light}\| + \text{QUADRATIC} \cdot \|\vec{to\_light}\|^2}$ [S1, unofficial].
+    *   Compute distance attenuation: $\text{distancecut} = \frac{1.0}{\text{CONSTANT\_ATTENUATION} + \text{LINEAR\_ATTENUATION} \cdot \|\vec{to\_light}\| + \text{QUADRATIC\_ATTENUATION} \cdot \|\vec{to\_light}\|^2}$ [S1, unofficial].
     *   Normalize $\vec{to\_light}$ [S1, unofficial].
     *   Compute diffuse factor: $f_{diff} = \text{leaf\_normal} \cdot \vec{to\_light}$ [S1, unofficial].
     *   Accumulate diffuse color: $C_{diff} += \max(0.0, f_{diff}) \cdot \text{distancecut} \cdot \text{light}[i].\text{diffuse}$ [S1, unofficial].
@@ -44,33 +43,23 @@ class Vec3:
         self.x, self.y, self.z = x, y, z
     def __add__(self, other): return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
     def __sub__(self, other): return Vec3(self.x - other.x, self.y - other.y, self.z - other.z)
-    def __mul__(self, s): return Vec3(self.x * s, self.y * s, self.z * s)
     def dot(self, other): return self.x * other.x + self.y * other.y + self.z * other.z
     def len(self): return math.sqrt(self.x**2 + self.y**2 + self.z**2)
     def normalized(self):
         l = self.len()
         return Vec3(self.x / l, self.y / l, self.z / l) if l > 0 else Vec3(0, 0, 0)
 
-# Standard octree ray traversal logic [G]
-class TreeTraverser:
-    def __init__(self, tree, ray): self.tree, self.ray, self.pos = tree, ray, None
-    def isTerminated(self): return False # Placeholder for actual traversal state [G]
-    def getCurrentNode(self): return type('Node', (), {'isLeaf': lambda: True, 'hasData': lambda: True, 'data': 0})()
-    def getCurrentPosition(self): return self.pos
-    def step(self): pass # Placeholder for actual traversal step [G]
-
 def diffuse_octree_render(tree, rc):
-    # Initialize OpenMP threads [G]
-    # num_procs = omp_get_num_procs(); omp_set_num_threads(num_procs)
-    
+    # Initialize OpenMP threads: num_procs = omp_get_num_procs(); omp_set_num_threads(num_procs) [S1, unofficial]
     texture_array = [0] * (rc.n_x * rc.n_y * 4)
     
-    # Parallel pixel loop [G]
+    # Parallel pixel loop [S1, unofficial]
     for y in range(rc.n_y):
         for x in range(rc.n_x):
             ray = rc.getRayForPixel(x, y)
             t = TreeTraverser(tree, ray)
             
+            # The sources do not provide the internal octree traversal logic [G]
             while not t.isTerminated():
                 node = t.getCurrentNode()
                 if node.isLeaf() and node.hasData():
@@ -90,26 +79,25 @@ def diffuse_octree_render(tree, rc):
             for light in rc.lights:
                 to_light = light.position - current_pos
                 dist = to_light.len()
-                dist_sq = dist ** 2
                 
-                denom = light.CONSTANT_ATTENUATION + light.LINEAR_ATTENUATION * dist + light.QUADRATIC_ATTENUATION * dist_sq
+                # Compute half vector (computed in source but unused in final accumulation) [S1, unofficial]
+                s = to_light + (rc.camera.e_ - current_pos)
+                s = s.normalized()
+                
+                denom = light.CONSTANT_ATTENUATION + light.LINEAR_ATTENUATION * dist + light.QUADRATIC_ATTENUATION * (dist ** 2)
                 distancecut = 1.0 / denom if denom != 0 else 0.0
                 
-                to_light_norm = to_light.normalized()
+                to_light = to_light.normalized()
                 
-                diffuse_factor = normal.dot(to_light_norm)
+                diffuse_factor = normal.dot(to_light)
                 r += max(0.0, diffuse_factor) * distancecut * light.diffuse[0]
                 g += max(0.0, diffuse_factor) * distancecut * light.diffuse[1]
                 b += max(0.0, diffuse_factor) * distancecut * light.diffuse[2]
                 
-                phong_factor = max(0.0, diffuse_factor) ** light.SHININESS
-                r += phong_factor * distancecut * light.specular[0]
-                g += phong_factor * distancecut * light.specular[1]
-                b += phong_factor * distancecut * light.specular[2]
-                
-                # Half vector computation (computed in source but unused in final accumulation) [S1, unofficial]
-                s = to_light + (rc.camera.e_ - current_pos)
-                s = s.normalized()
+                phong_factor = max(0.0, normal.dot(to_light)) ** light.SHININESS
+                r += max(0.0, phong_factor) * distancecut * light.specular[0]
+                g += max(0.0, phong_factor) * distancecut * light.specular[1]
+                b += max(0.0, phong_factor) * distancecut * light.specular[2]
             
             index = (y * rc.n_x + x) * 4
             texture_array[index] = clamp(255 * (color[0] * (r + 0.25)), 0, 255)

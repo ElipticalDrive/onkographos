@@ -43,8 +43,6 @@ The method relies on a feature representation that maps 3D positions to feature 
     $$
 
 ### Pseudocode
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 def volume_feature_rendering(ray, samples, feature_grid, density_field, color_net):
     """
