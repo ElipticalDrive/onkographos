@@ -1,0 +1,97 @@
+--- v003.md
++++ v004.md
+@@ -34,43 +34,40 @@
+ 
+ ### Steps
+-1.  **Thread Identification:** Each thread processes one pair from `line_pairs` [S2, unofficial]. Calculate global thread ID `id`. If `id >= line_pairs_count`, terminate.
++1.  **Thread Identification:** Each thread processes one pair from `line_pairs` [S2, unofficial]. Calculate global thread ID `id`. If `id >= line_pairs_count`, terminate [S2, unofficial].
+ 2.  **Pair Retrieval:** Get the current pair indices: `curr_pair = line_pairs[id]` [S2, unofficial].
+-3.  **Length Check:** Calculate the minimum length of the two lines: `count = min(line_lengths[curr_pair.x], line_lengths[curr_pair.y])` [S2, unofficial]. If `count < 2`, the lines are too short to sample; terminate [S2, unofficial].
+-4.  **Divergence Test:** Sample 32 points along the two lines to find the maximum distance between them [S1, unofficial].
++3.  **Preserve Original Pair:** Allocate an output pair index and store the original pair to maintain connectivity for the next iteration [S2, unofficial].
++    *   `out_pair_index = atomic_add(out_pairs_index, 1)`
++    *   `out_line_pairs[out_pair_index] = [curr_pair.x, curr_pair.y]`
++4.  **Initialize Link Index:** Set `last_out_pair_index = out_pair_index` to track the end of the linked pair chain [S2, unofficial].
++5.  **Length Check:** Calculate the minimum length of the two lines: `count = min(line_lengths[curr_pair.x], line_lengths[curr_pair.y])` [S2, unofficial]. If `count < 2`, the lines are too short to sample; terminate [S2, unofficial].
++6.  **Divergence Test:** Sample 32 points along the two lines to find the maximum distance between them [S1, unofficial].
+     *   Initialize `max_dist = 0`.
+-    *   Iterate `i` from `0` to `count` with step `count / 32` [S2, unofficial].
++    *   Iterate `i` from `0` to `count` with step `count // 32` [S2, unofficial].
+     *   Get vertices: `v1 = line_vertices[curr_pair.x * vertices_per_line + i * vertices_per_sample]` and `v2 = line_vertices[curr_pair.y * vertices_per_line + i * vertices_per_sample]` [S2, unofficial].
+     *   Update `max_dist = max(max_dist, length(v1 - v2))` [S2, unofficial].
+-5.  **Threshold Check:** If `max_dist < max_allowed_line_dist`, the lines are sufficiently close; terminate [S2, unofficial].
+-6.  **Calculate New Lines:** Determine the number of new seeds to insert using the formula:
++7.  **Threshold Check:** If `max_dist < max_allowed_line_dist`, the lines are sufficiently close; terminate [S2, unofficial].
++8.  **Calculate New Lines:** Determine the number of new seeds to insert using the formula:
+     $$ new\_lines = \lfloor \sqrt{\frac{max\_dist}{max\_allowed\_line\_dist}} \rfloor $$
+     [S1, unofficial]
+-7.  **Allocate Output Space:** Atomically allocate space for the new lines in the output buffer:
++9.  **Allocate Output Space:** Atomically allocate space for the new lines in the output buffer:
+     *   `out_line_index = atomic_add(out_lines_index, new_lines)` [S2, unofficial].
+     *   If `out_line_index + new_lines >= lines_max_count`, rollback the allocation: `atomic_add(out_lines_index, -new_lines)` and terminate [S2, unofficial].
+-8.  **Generate Seeds:** Calculate the step vector between the parent seeds:
++10. **Generate Seeds & Update Pair Links:** Calculate the step vector between the parent seeds:
+     $$ seed\_step = \frac{seeds[curr\_pair.y] - seeds[curr\_pair.x]}{new\_lines + 1} $$
+     [S1, unofficial]
+     Loop `i` from `0` to `new_lines - 1`:
+     *   Set new seed: `seeds[out_line_index + i] = seeds[curr_pair.x] + (i + 1) * seed_step` [S2, unofficial].
+-9.  **Update Pair Links:** The algorithm maintains a linked-list-like structure of pairs to ensure all new lines are tested in subsequent iterations [S1, unofficial].
+-    *   Initialize `last_out_pair_index` with the index allocated for the original pair (see step 10) [S2, unofficial].
+-    *   For each new line `i`:
+-        *   Atomically allocate a pair index: `out_pair_index = atomic_add(out_pairs_index, 1)` [S2, unofficial].
+-        *   Link the previous pair's end to the new line: `out_line_pairs[last_out_pair_index].y = out_line_index + i`.
+-        *   Link the new line to the next pair: `out_line_pairs[out_pair_index].x = out_line_index + i`.
+-        *   Link the new line to the second parent line: `out_line_pairs[out_pair_index].y = curr_pair.y`.
+-        *   Update `last_out_pair_index = out_pair_index`.
+-10. **Preserve Original Pair:** Before subdivision, the original pair must be preserved in the output list to maintain connectivity.
+-    *   `out_pair_index = atomic_add(out_pairs_index, 1)`
+-    *   `out_line_pairs[out_pair_index].x = curr_pair.x`
+-    *   `out_line_pairs[out_pair_index].y = curr_pair.y`
+-    *   Set `last_out_pair_index = out_pair_index` (used in step 9).
++    *   Atomically allocate a pair index: `out_pair_index = atomic_add(out_pairs_index, 1)` [S2, unofficial].
++    *   Link the previous pair's end to the new line: `out_line_pairs[last_out_pair_index][1] = out_line_index + i` [S2, unofficial].
++    *   Link the new line to the next pair: `out_line_pairs[out_pair_index][0] = out_line_index + i` [S2, unofficial].
++    *   Link the new line to the second parent line: `out_line_pairs[out_pair_index][1] = curr_pair.y` [S2, unofficial].
++    *   Update `last_out_pair_index = out_pair_index` [S2, unofficial].
+ 
+ ### Pseudocode
+ ```python
+ def atomic_add(counter, value):
++    old = counter[0]
+     counter[0] += value
+-    return counter[0] - value
++    return old
+ 
+ def length(vec):
+@@ -90,5 +87,5 @@
+     # Preserve original pair in output list
+     out_pair_index = atomic_add(out_pairs_index, 1)
+-    out_line_pairs[out_pair_index] = (curr_pair[0], curr_pair[1])
++    out_line_pairs[out_pair_index] = [curr_pair[0], curr_pair[1]]
+     last_out_pair_index = out_pair_index
+ 
+@@ -127,6 +124,6 @@
+         # Insert new pair (like in linked-list).
+         out_pair_index = atomic_add(out_pairs_index, 1)
+-        out_line_pairs[last_out_pair_index] = (out_line_pairs[last_out_pair_index][0], out_line_index + i)
+-        out_line_pairs[out_pair_index] = (out_line_index + i, curr_pair[1])
++        out_line_pairs[last_out_pair_index][1] = out_line_index + i
++        out_line_pairs[out_pair_index] = [out_line_index + i, curr_pair[1]]
+ 
+         last_out_pair_index = out_pair_index
+@@ -134,6 +131,6 @@
+ 
+ ### Parameters
+-*   `max_allowed_line_dist`: The maximum Euclidean distance between corresponding points on two neighboring stream lines before subdivision is triggered. Not given in the sources.
+-*   `vertices_per_sample`: Stride between sampled points in the `line_vertices` buffer for the divergence test. Not given in the sources.
++*   `max_allowed_line_dist`: The maximum distance between neighboring stream lines before subdivision is triggered [S1, unofficial].
++*   `vertices_per_sample`: Stride between sampled points in the `line_vertices` buffer for the divergence test [S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+@@ -156,5 +153,5 @@
+ 
+ ## Background
+-The method was developed for real-time visualization of 3D vector fields using CUDA. It addresses the challenge of implementing adaptive algorithms on GPUs, where thread communication is difficult and performance costly. The approach uses two distinct CUDA kernels (control and evaluation) alternately invoked by the CPU to manage the adaptive subdivision process [S1, unofficial].
++The method was developed for real-time visualization of 3D vector fields using CUDA [S1, unofficial]. It addresses the challenge of implementing adaptive algorithms on GPUs, where thread communication is difficult and performance costly [S1, unofficial]. The approach uses two distinct CUDA kernels (control and evaluation) alternately invoked by the CPU to manage the adaptive subdivision process [S1, unofficial].
+ 
+ ## Sources

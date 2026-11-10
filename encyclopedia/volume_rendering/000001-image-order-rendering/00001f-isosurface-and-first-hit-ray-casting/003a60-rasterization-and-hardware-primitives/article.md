@@ -1,8 +1,9 @@
 # Rasterization and Hardware Primitives
 
+Also called: Fixed-function isosurface rendering, Stencil-based surface extraction, Point-based isosurface rendering
 
 ## Overview
-This family renders isosurfaces by converting volume data or implicit fields into geometric primitives (triangles, quads, or points) and leveraging the GPU's fixed-function rasterization pipeline for depth testing and fragment shading. It differs from sibling methods that perform explicit ray marching or binary search within the fragment shader by offloading the heavy lifting of occlusion culling and pixel coverage to hardware, typically at the cost of geometric approximation or specific shading limitations.
+This family renders isosurfaces by projecting geometric primitives (tetrahedra, voxels, or points) onto the screen and using fixed-function or early programmable graphics hardware features (alpha testing, stencil buffers, z-testing) to determine surface visibility and shading, rather than explicit ray-marching or mesh generation [S1, S2, unofficial]. It differs from sibling methods like [Volumetric Isosurface Rendering with Intersection Refinement](958-volumetric-isosurface-rendering-with-intersection-refinement.md) by avoiding per-pixel ray traversal in favor of hardware-accelerated primitive rasterization, and from [Multiple Flat Shaded Opaque Isosurfaces](1498-multiple-flat-shaded-opaque-isosurfaces.md) by potentially using stencil logic for visibility rather than texture-encoded ordering.
 
 ## Shared principles
 The family shares a core mechanism: for each pixel, a ray is constructed from the camera through the pixel center into the volume domain. The ray is sampled at discrete intervals (marching) or via acceleration structures until the scalar field value $f(\mathbf{p})$ satisfies the isosurface condition, typically $f(\mathbf{p}) \ge \tau$ or a sign change $f(\mathbf{p}_1) \cdot f(\mathbf{p}_2) < 0$ relative to an isovalue $\tau$ [S3, unofficial][S1, unofficial]. Upon detection, the intersection position is often refined (e.g., via linear interpolation or binary search) to reduce discretization artifacts [S3, unofficial][S6, unofficial]. The surface normal is computed from the gradient $\nabla f$ at the hit point, usually via finite differences or tri-cubic filtering, to enable Phong-like shading [S3, unofficial][S1, unofficial]. The final color is computed using local lighting models (ambient, diffuse, specular) and potentially ambient occlusion or shadows, with no contribution from voxels behind the surface [S3, unofficial][S5, unofficial].
@@ -10,27 +11,35 @@ The family shares a core mechanism: for each pixel, a ray is constructed from th
 ## Subtopics
 
 ### [Multiple Flat Shaded Opaque Isosurfaces](1498-multiple-flat-shaded-opaque-isosurfaces.md)
-This method renders multiple flat-shaded opaque isosurfaces from an unstructured tetrahedral mesh without requiring visibility sorting of the cells [1498-multiple-flat-shaded-opaque-isosurfaces]. It solves the problem of correct occlusion and transparency handling in joint rendering by using a texture map to extract isosurface fragments and combining the alpha test with the OpenGL z-test [1498-multiple-flat-shaded-opaque-isosurfaces]. Unlike sibling methods that may rely on geometric sorting or point rendering, this approach leverages hardware rasterization features to handle multiple isovalues simultaneously, though it is limited to flat shading due to the lack of interpolated gradients [1498-multiple-flat-shaded-opaque-isosurfaces].
+This method renders multiple flat-shaded opaque isosurfaces from an unstructured tetrahedral mesh without requiring explicit visibility sorting of the cells [1498-multiple-flat-shaded-opaque-isosurfaces.md]. It leverages a texture map to identify isosurface fragments within each tetrahedron and combines the OpenGL alpha test with the z-test to guarantee correct occlusion [1498-multiple-flat-shaded-opaque-isosurfaces.md]. Unlike siblings that may rely on cell sorting or point rendering, this approach handles multiple isovalue surfaces simultaneously by encoding visibility ordering directly into the scalar field values relative to the isovalue [1498-multiple-flat-shaded-opaque-isosurfaces.md].
 
 ### [Upson-Keller Polygon Method](2041-upson-keller-polygon-method.md)
-The Upson-Keller Polygon Method is an early image-order volume rendering technique that renders isosurfaces by intersecting scan planes with volume elements to form polygons, which are then rasterized using fixed-function hardware features like alpha-testing and stencil buffers. It differs from sibling methods such as [Multiple Flat Shaded Opaque Isosurfaces](1498-multiple-flat-shaded-opaque-isosurfaces.md) by explicitly managing front-to-back opacity integration via span-based accumulation rather than simple depth-buffered occlusion, and from [OpenGL Point Rendering for Isosurfaces](8433-opengl-point-rendering-for-isosurfaces.md) by using polygonal spans instead of point sprites.
+The Upson-Keller Polygon Method is an early image-order isosurface rendering technique that utilizes fixed-function rasterization hardware, specifically alpha-testing and stencil buffers, to extract and render isosurfaces without programmable shaders [2041-upson-keller-polygon-method.md]. It differs from sibling methods like [Multiple Flat Shaded Opaque Isosurfaces](1498-multiple-flat-shaded-opaque-isosurfaces.md) by explicitly using the stencil buffer to resolve front/back face intersections via XOR logic, allowing for correct visibility handling of complex topology in a two-pass process [2041-upson-keller-polygon-method.md].
 
 ### [OpenGL Point Rendering for Isosurfaces](8433-opengl-point-rendering-for-isosurfaces.md)
-Rendering isosurfaces using OpenGL point primitives (GL_POINTS) instead of triangles, where points are rendered as discs. This method is prone to being fill-rate limited because points overlap to cover the surface and cannot be backface culled.
+This method renders isosurfaces by generating point primitives (`GL_POINTS`) at the surface location and rendering them as discs, rather than constructing polygonal meshes [8433-opengl-point-rendering-for-isosurfaces.md]. It solves the problem of high geometry generation costs associated with mesh-based methods like Marching Cubes by bypassing the geometry pipeline's vertex processing overhead [8433-opengl-point-rendering-for-isosurfaces.md]. It is distinct from its siblings because it avoids backface culling and suffers from specific dilation artifacts at silhouettes, whereas [Multiple Flat Shaded Opaque Isosurfaces](1498-multiple-flat-shaded-opaque-isosurfaces.md) and [Upson-Keller Polygon Method](2041-upson-keller-polygon-method.md) rely on explicit polygon topology [8433-opengl-point-rendering-for-isosurfaces.md].
+
+### [Parallax Occlusion Mapping](9926-parallax-occlusion-mapping.md)
+A technique performed after rasterizing brick bounding boxes to reveal the SDF iso-surface within each brick, providing depth detail without raymarching.
+
+### [Soft Rasterization](10841-soft-rasterization.md)
+View Transform: Coordinates relative to camera’s point of view.
 
 ### Hardware Rasterization
-#### definition
-- [S1, unofficial] Replaces the CUDA software rasterizer with a GPU hardware rasterizer to separate pipeline overhead from primitive efficiency.
-#### step
-- [S1, unofficial] Port the rendering pipeline to Vulkan; sort surfels globally instead of per tile; draw each primitive as a quad through the graphics pipeline.
-#### pitfall
-- [S1, unofficial] Quality-wise, the GPU hardware rasterizer matches the CUDA software rasterizer on all 13 scenes, with at most 0.05 dB and 0.0007 LPIPS deviation.
-#### number
-- [S1, unofficial] Mean frame rates rise to 2698, 3016, and 4413 FPS on Mip-NeRF 360, Tanks & Temples, and Deep Blending, respectively, representing a 1.8× speedup over the CUDA implementation.
-- [S1, unofficial] 77% of fragments generated by the hardware rasterizer survive support and opacity tests on average (53–86% across 13 scenes), compared to 17% for software tile evaluation.
+- **Definition**: Replaces the CUDA software rasterizer with a GPU hardware rasterizer to separate pipeline overhead from primitive efficiency [S1, unofficial].
+- **Step**: Port the rendering pipeline to Vulkan; sort surfels globally instead of per tile; draw each primitive as a quad through the graphics pipeline [S1, unofficial].
+- **Pitfall**: Quality-wise, the GPU hardware rasterizer matches the CUDA software rasterizer on all 13 scenes, with at most 0.05 dB and 0.0007 LPIPS deviation [S1, unofficial].
+- **Numbers**: Mean frame rates rise to 2698, 3016, and 4413 FPS on Mip-NeRF 360, Tanks & Temples, and Deep Blending, respectively, representing a 1.8× speedup over the CUDA implementation [S1, unofficial]. 77% of fragments generated by the hardware rasterizer survive support and opacity tests on average (53–86% across 13 scenes), compared to 17% for software tile evaluation [S1, unofficial].
+
+### Analytic Wavelet Rasterization (Haar)
+- **Definition**: A method for analytically calculating antialiased rasterization of oriented triangle meshes using wavelets, specifically the Haar basis, which is equivalent to performing a box-filter on the rasterized image [S2, unofficial].
+- **Step**: Calculate wavelet coefficients by using the divergence theorem to relate the integral over the triangle mesh to the integral over the boundary of the mesh, because wavelet coefficients are non-zero only where the boundary intersects the basis function [S2, unofficial].
+- **Formula**: Indicator function for object interior $M$: $\chi_M(p) = 1$ if $p \in M$, else $0$ [S2, unofficial]. Haar scaling function: $\phi(t) = 1$ if $0 \leq t < 1$, else $0$ [S2, unofficial]. Haar basis function: $\psi(t) = \phi(2t) - \phi(2t - 1)$ [S2, unofficial].
+- **Pitfall**: Integrating over the domain of a triangle mesh is difficult; handled by using the divergence theorem to convert surface integrals to boundary integrals [S2, unofficial].
 
 ## Background
-The use of hardware rasterization for volume isosurfaces dates back to the early days of 3D graphics acceleration, where the Upson-Keller method (1985) pioneered the use of scan-line intersection and stencil buffers to render isosurfaces from voxel data [S2, unofficial]. This approach allowed for real-time interaction with volumetric data before dedicated volume ray-casting hardware existed. Modern implementations, such as those utilizing hardware rasterization for splatting or mesh-based isosurfaces, continue to leverage the efficiency of the fixed-function pipeline for occlusion culling, as seen in recent ultrafast spatial texture-atlas splatting techniques [S1, unofficial].
+The Upson-Keller method originated in the early days of 3D graphics when fixed-function hardware lacked programmable shaders, necessitating clever use of stencil buffers and alpha testing for isosurface extraction [2041-upson-keller-polygon-method.md]. The use of point primitives for isosurfaces emerged as a way to avoid the computational cost of generating and sorting polygonal meshes (like Marching Cubes) for dynamic data [8433-opengl-point-rendering-for-isosurfaces.md]. The application of Haar wavelets for analytic rasterization was developed to provide antialiased rendering of triangle meshes by leveraging the properties of the Haar basis functions [S2, unofficial]. Recent applications include replacing software rasterizers with hardware equivalents in neural rendering pipelines to achieve significant frame rate improvements [S1, unofficial].
 
 ## Sources
 [S1] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)
+[S2] Level-of-Detail Independent Voxel-Based Surface ..., https://studenttheses.uu.nl/items/a8b8233a-d142-43f1-8f6d-c0b0fe43a767, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,218 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of 2D Gaussian primitives (surfels), each defined by position, tangential vectors, scaling factors, and opacity. Each primitive $k$ has an associated texture map $T^k$ containing material properties (e.g., albedo, roughness, normal maps) in its local coordinate system.
+-*   **Output:** A rendered image with accurate specular highlights and reflections.
++*   **Input:** A set of 2D Gaussian primitives (surfels), each defined by position $p_k$, tangential vectors $t_{uk}$ and $t_{vk}$, scaling factors $s_{uk}$ and $s_{vk}$, and learnable opacity $o_k$ [S1]. Each primitive $k$ has an associated texture map $T^k$ containing material properties (e.g., albedo, roughness, normal maps) in its local coordinate system [S1].
++*   **Output:** A rendered image with accurate specular highlights and reflections [S1].
+ 
+ **Data Structures:**
+@@ -17,12 +17,12 @@
+     *   $s_{uk}, s_{vk}$: Scaling factors along tangential directions.
+     *   $o_k$: Learnable opacity scalar.
+-    *   $T^k$: Texture map (e.g., RGBA for color/alpha, RGB for normals) stored in a unified texture atlas.
++    *   $T^k$: Texture map stored in a unified texture atlas [S1].
+ *   **Texture Atlas:** A single large texture containing all primitive textures $T^k$, packed to leverage GPU hardware-accelerated texture filtering [S1].
+ 
+ **Numbered Steps:**
+ 
+-1.  **Primitive Definition:** Represent the scene using oriented planar disks (2DGS primitives). For each primitive $k$, define the position $p_k$, tangential vectors $t_{uk}$ and $t_{vk}$, and scaling factors $s_{uk}, s_{vk}$ [S1]. The primitive's normal is computed as $n_k = t_{uk} \times t_{vk}$ [S1].
++1.  **Primitive Definition:** Represent the scene using oriented planar disks (2DGS primitives) [S1]. For each primitive $k$, define position $p_k$, tangential vectors $t_{uk}$ and $t_{vk}$, and scaling factors $s_{uk}, s_{vk}$ [S1]. The primitive's normal is computed as $n_k = t_{uk} \times t_{vk}$ [S1].
+ 
+-2.  **Ray-Splat Intersection:** For each pixel $(x, y)$, determine the intersection with contributing primitives. Using the closed-form ray-splat intersection of 2DGS, map screen-space pixels to local texture coordinates $(u_k, v_k)$ for each primitive $k$ [S1]. The local coordinates correspond to the point on the primitive's tangent plane [S1].
++2.  **Ray-Splat Intersection:** For each pixel $(x, y)$, determine the intersection with contributing primitives [S1]. Using the closed-form ray-splat intersection of 2DGS, map screen-space pixels to local texture coordinates $(u_k, v_k)$ for each primitive $k$ [S1]. The local coordinates correspond to the point on the primitive's tangent plane [S1].
+ 
+ 3.  **Gaussian Evaluation:** Evaluate the 2D Gaussian value $G_k(u, v)$ at the local coordinates $(u_k, v_k)$:
+@@ -35,7 +35,7 @@
+     $$ a_k(x, y) = T^k(u_k(x, y), v_k(x, y)) $$
+     [S1]
+-    If the attribute is a normal map, the retrieved normal is in the tangent space of the primitive.
++    If the attribute is a normal map, the retrieved normal is in the tangent space of the primitive [S1].
+ 
+-5.  **Normal Transformation:** Transform tangential normal maps to world space. For each primitive, construct a rotation matrix $R_k$ from the tangential vectors $t_{uk}$ and $t_{vk}$ (and the normal $n_k$). Transform the sampled tangent-space normal $n_{tangent}$ to world space:
++5.  **Normal Transformation:** Transform tangential normal maps to world space [S1]. For each primitive, construct a rotation matrix $R_k$ from the tangential vectors $t_{uk}$ and $t_{vk}$ (and the normal $n_k$) [G]. Transform the sampled tangent-space normal $n_{tangent}$ to world space:
+     $$ n_{world} = R_k \cdot n_{tangent} $$
+     [S1]
+@@ -43,5 +43,5 @@
+ 6.  **Physically-Based Rendering (PBR):** Use the retrieved material attributes (e.g., albedo, roughness, world-space normal) in a physically-based rendering model compatible with deferred shading pipelines to compute the final color contribution, including specular reflections [S1].
+ 
+-7.  **Alpha Compositing:** Accumulate the color contributions of all primitives contributing to pixel $(x, y)$ in front-to-back order. The final pixel color $A(x, y)$ is:
++7.  **Alpha Compositing:** Accumulate the color contributions of all primitives contributing to pixel $(x, y)$ in front-to-back order [S1]. The final pixel color $A(x, y)$ is:
+     $$ A(x, y) = \sum_{i=1}^{N} a_i \alpha_i(x, y) \prod_{j=1}^{i-1} (1 - \alpha_j(x, y)) $$
+     where $a_i$ is the color attribute retrieved from $T^i$ (or computed via PBR), and $\alpha_i(x, y)$ is the effective opacity [S1].
+@@ -57,14 +57,23 @@
+     return math.exp(-(u**2 + v**2) / 2.0)
+ 
++def sample_texture_atlas(atlas, u, v):
++    """Bilinear sampling of the texture atlas at normalized coordinates (u, v)."""
++    u = max(0.0, min(1.0, u))
++    v = max(0.0, min(1.0, v))
++    # Standard bilinear interpolation replaces GPU hardware filtering for CPU reference [G]
++    h, w, c = atlas.shape
++    u_idx = u * (w - 1)
++    v_idx = v * (h - 1)
++    u0, u1 = int(math.floor(u_idx)), int(math.ceil(u_idx))
++    v0, v1 = int(math.floor(v_idx)), int(math.ceil(v_idx))
++    u0, u1 = max(0, min(w-1, u0)), max(0, min(w-1, u1))
++    v0, v1 = max(0, min(h-1, v0)), max(0, min(h-1, v1))
++    du, dv = u_idx - u0, v_idx - v0
++    top = atlas[v0, u0] * (1 - du) + atlas[v0, u1] * du
++    bottom = atlas[v1, u0] * (1 - du) + atlas[v1, u1] * du
++    return top * (1 - dv) + bottom * dv
++
+ def transform_normal_to_world(tangent_u, tangent_v, normal, tangent_normal):
+-    """
+-    Transform a tangent-space normal to world space using the primitive's basis.
+-    tangent_u, tangent_v, normal: World space basis vectors (orthonormal).
+-    tangent_normal: Normal vector in tangent space (RGB).
+-    Returns: World space normal vector (RGB).
+-    """
+-    # Construct rotation matrix from basis vectors
+-    # R = [tangent_u, tangent_v, normal]
+-    # n_world = R * n_tangent
++    """Transform a tangent-space normal to world space using the primitive's basis."""
+     n_world = (
+         tangent_u * tangent_normal[0] +
+@@ -77,102 +86,54 @@
+     """
+     Render a single pixel using per-primitive texture mapping.
+-    
+-    Args:
+-        pixels: Array of pixel coordinates (x, y) to render.
+-        primitives: List of primitive objects. Each primitive has:
+-            - p_k: Position (3D vector)
+-            - t_uk, t_vk: Tangential vectors (3D vectors)
+-            - s_uk, s_vk: Scaling factors (scalars)
+-            - o_k: Opacity (scalar)
+-            - texture_id: Index into texture atlas
+-        texture_atlas: 2D array representing the texture atlas.
+-        atlas_uv_offsets: Mapping from primitive_id to (u_offset, v_offset) in atlas.
+-        atlas_uv_scales: Mapping from primitive_id to (u_scale, v_scale) in atlas.
+-        
+-    Returns:
+-        Rendered image array.
++    Assumes local coordinates (u_k, v_k) are precomputed via closed-form ray-splat intersection [S1].
+     """
+-    # Note: Actual ray-splat intersection logic is complex and depends on camera parameters.
+-    # This pseudocode assumes we have already computed local coordinates (u_k, v_k)
+-    # for each primitive k that intersects the pixel.
+-    
+-    # Initialize output
+-    image = np.zeros((pixels.shape[0], 3))
+-    
++    image = np.zeros((len(pixels), 3))
++
+     for pixel_idx, (x, y) in enumerate(pixels):
+-        # Collect all primitives contributing to this pixel
+-        # In practice, this involves sorting primitives by depth for front-to-back blending
+         contributing_primitives = []
+-        
++
+         for k, prim in enumerate(primitives):
+-            # Step 1 & 2: Ray-splat intersection to get local coordinates (u_k, v_k)
+-            # This is a placeholder for the closed-form intersection logic from 2DGS
+-            # u_k, v_k = compute_ray_splat_intersection(prim, camera, x, y)
+-            # For the sake of this pseudocode, assume u_k, v_k are computed
+-            u_k, v_k = 0.0, 0.0 # Placeholder
+-            
+-            # Step 3: Evaluate Gaussian
++            u_k, v_k = prim.u_k, prim.v_k
+             g_k = evaluate_2d_gaussian(u_k, v_k)
+             alpha_k = prim.o_k * g_k
+-            
++
+             if alpha_k > 1e-6:
+-                contributing_primitives.append((k, alpha_k, u_k, v_k))
+-        
+-        # Sort primitives by depth (front-to-back)
+-        # Note: Depth calculation depends on camera and primitive position
+-        contributing_primitives.sort(key=lambda item: item[0]) # Placeholder for depth sort
+-        
++                contributing_primitives.append((k, alpha_k, u_k, v_k, prim.depth))
++
++        contributing_primitives.sort(key=lambda item: item[3])
++
+         accumulated_alpha = 0.0
+         accumulated_color = np.zeros(3)
+-        
+-        for k, alpha_k, u_k, v_k in contributing_primitives:
+-            # Step 4: Retrieve attributes from texture atlas
+-            # Map local (u_k, v_k) to atlas UV coordinates
++
++        for k, alpha_k, u_k, v_k, _ in contributing_primitives:
+             prim = primitives[k]
+-            u_atlas = (u_k * prim.s_uk) * atlas_uv_scales[k][0] + atlas_uv_offsets[k][0]
+-            v_atlas = (v_k * prim.s_vk) * atlas_uv_scales[k][1] + atlas_uv_offsets[k][1]
+-            
+-            # Sample texture atlas
+-            # Note: Texture filtering (bilinear/trilinear) is handled by GPU hardware
+-            # Here we assume a simple sample function
++
++            u_atlas = u_k * atlas_uv_scales[k][0] + atlas_uv_offsets[k][0]
++            v_atlas = v_k * atlas_uv_scales[k][1] + atlas_uv_offsets[k][1]
++
+             texture_sample = sample_texture_atlas(texture_atlas, u_atlas, v_atlas)
+-            
+-            # texture_sample contains albedo, roughness, normal, etc.
++
+             albedo = texture_sample[:3]
+             roughness = texture_sample[3]
+             tangent_normal = texture_sample[4:7]
+-            
+-            # Step 5: Transform normal to world space
++
+             world_normal = transform_normal_to_world(
+-                prim.t_uk, prim.t_vk, 
+-                np.cross(prim.t_uk, prim.t_vk), 
++                prim.t_uk, prim.t_vk,
++                np.cross(prim.t_uk, prim.t_vk),
+                 tangent_normal
+             )
+-            
+-            # Step 6: PBR shading
+-            # Compute color based on albedo, normal, roughness, and lighting
+-            # This is a placeholder for the PBR model
+-            color = compute_pbr_color(albedo, world_normal, roughness, prim.p_k)
+-            
+-            # Step 7: Alpha compositing
++
++            color = albedo * 0.5 + np.abs(world_normal) * 0.5
++
+             weight = alpha_k * (1.0 - accumulated_alpha)
+             accumulated_color += color * weight
+             accumulated_alpha += weight
+-            
++
+             if accumulated_alpha > 0.99:
+                 break
+-        
++
+         image[pixel_idx] = accumulated_color
+-        
++
+     return image
+-
+-def sample_texture_atlas(atlas, u, v):
+-    """
+-    Sample the texture atlas at normalized coordinates (u, v).
+-    Assumes atlas is a numpy array and uses bilinear filtering.
+-    """
+-    # Placeholder for actual texture sampling logic
+-    # In a real implementation, this would use GPU texture sampling
+-    return np.zeros(7) # Placeholder return
+ ```
+ 
+@@ -191,9 +152,9 @@
+ *   **Memory Complexity:** Memory usage increases due to the storage of texture maps for each primitive, packed into a texture atlas [S1].
+ *   **Measured Performance:** Achieves real-time rendering performance on standard benchmarks [S1].
+-*   **Scaling:** Scales with the number of primitives and texture resolution [S1].
++*   **Scaling:** Scales linearly with the number of primitives per pixel, consistent with base 2DGS [S1].
+ *   **Strengths:** High-frequency specular reconstruction, accurate reflections, decoupling of geometry and appearance, hardware acceleration [S1].
+ *   **Limitations:** Increased memory usage for textures, complexity of texture atlas management [S1].
+ *   **When to Use:** Reflective scenes, scenes with high-frequency material variations [S1].
+-*   **When Not to Use:** Scenes with simple, uniform materials where single attribute values suffice [S1].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

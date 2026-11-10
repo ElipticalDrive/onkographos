@@ -1,0 +1,217 @@
+# Ref-NeRF
+
+Also called: Reflective Neural Radiance Fields, Structured View-Dependent Appearance for Neural Radiance Fields
+
+## Overview
+Ref-NeRF is a neural radiance field method that improves the representation of specular reflections by replacing NeRF's parameterization of view-dependent outgoing radiance with a representation of reflected radiance, structured using spatially-varying scene properties [S2]. It builds on [Mip-NeRF](52-mip-nerf.md) and modifies the standard architecture to explicitly model diffuse and specular components, enabling accurate rendering of glossy surfaces [S3]. Unlike standard NeRF, which struggles with reflections due to foggy geometry and noisy normals, Ref-NeRF introduces a density regularizer to concentrate density around surfaces and uses Integrated Directional Encoding (IDE) to smooth the interpolation of reflected radiance [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D spatial coordinates $\mathbf{x}$ and 2D viewing direction $\mathbf{d}$.
+*   **Outputs:** Volume density $\sigma$, diffuse color $\mathbf{c}_d$, tint color $\mathbf{s}$, bottleneck feature vector $\mathbf{b}$, roughness scalar $\rho$, surface normal $\mathbf{n}'$, and specular color $\mathbf{c}_s$. The final pixel color is computed via volumetric rendering using the outgoing radiance $\mathbf{c}$.
+
+**Data Structures:**
+*   **Spatial MLP ($F_{spatial}$):** A directionless Multi-Layer Perceptron.
+    *   Input: Positional Encoding of $\mathbf{x}$, denoted $\gamma(\mathbf{x})$.
+    *   Hidden Layers: Standard MLP structure (layers with ReLU activations).
+    *   Output: A tuple $(\sigma, \mathbf{c}_d, \mathbf{s}, \mathbf{b}, \rho, \mathbf{n}')$.
+    *   $\mathbf{b}$ is a bottleneck feature vector of dimensionality 128 [S1].
+*   **Directional MLP ($F_{directional}$):**
+    *   Input: Bottleneck vector $\mathbf{b}$, Integrated Directional Encoding (IDE) of the reflection direction, and a Fresnel term derived from $\mathbf{n}'$ and $\mathbf{d}$.
+    *   Output: Specular color $\mathbf{c}_s$.
+
+**Numbered Steps:**
+
+1.  **Positional Encoding:** Encode the input 3D position $\mathbf{x}$ using sinusoidal positional encoding $\gamma(\mathbf{x})$ [S1][S3]. This maps $\mathbf{x}$ to a higher-dimensional space to mitigate spectral bias [S1].
+
+2.  **Spatial Network Forward Pass:** Pass $\gamma(\mathbf{x})$ through the Spatial MLP ($F_{spatial}$). This network outputs:
+    *   Volume density $\sigma$.
+    *   Diffuse color $\mathbf{c}_d$.
+    *   Tint color $\mathbf{s}$.
+    *   Bottleneck feature vector $\mathbf{b}$ (dim 128) [S1].
+    *   Roughness scalar $\rho$ [S1].
+    *   Surface normal $\mathbf{n}'$ [S1]. Note: $\mathbf{n}'$ is predicted directly by the network, not derived from $\sigma$ via gradients, to ensure stability [S2].
+
+3.  **Reflection Vector Calculation:** Compute the reflection vector $\mathbf{r}$ of the viewing direction $\mathbf{d}$ about the predicted normal $\mathbf{n}'$.
+    $$ \mathbf{r} = 2(\mathbf{d} \cdot \mathbf{n}')\mathbf{n}' - \mathbf{d} $$
+    This reparameterization ensures that the reflected radiance function is smoother and more consistent across the scene, as it is invariant to surface orientation changes [S2].
+
+4.  **Integrated Directional Encoding (IDE):** Compute the IDE for the reflection vector $\mathbf{r}$ and roughness $\rho$. The IDE encodes the distribution of reflection directions towards the environment using a closed-form solution of spherical harmonics convolved with the von Mises-Fisher (vMF) distribution [S1]. This allows the directional MLP to capture smooth variations in specular highlights [S2].
+
+5.  **Fresnel Term Calculation:** Compute a Fresnel term to account for viewing angle effects on reflection strength. This is typically derived from the dot product of the normal $\mathbf{n}'$ and the viewing direction $\mathbf{d}$ [S1].
+
+6.  **Directional Network Forward Pass:** Pass the bottleneck vector $\mathbf{b}$, the IDE of $\mathbf{r}$, and the Fresnel term into the Directional MLP ($F_{directional}$). The output is the specular color $\mathbf{c}_s$ [S1].
+
+7.  **Outgoing Radiance Composition:** Combine the diffuse and specular components using the tint color $\mathbf{s}$ to modulate the intensity and color of highlights. The final outgoing radiance $\mathbf{c}$ is computed as:
+    $$ \mathbf{c} = \gamma(\mathbf{c}_d + \mathbf{s} \odot \mathbf{c}_s) $$
+    where $\odot$ denotes element-wise multiplication and $\gamma$ is a predefined tone mapping function [S1].
+
+8.  **Volumetric Rendering:** Render the pixel color $C(\mathbf{r})$ using the standard volume rendering integral [S1][S3]:
+    $$ C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \text{where } \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+    Here, $\sigma_i$ is the density, $\mathbf{c}_i$ is the outgoing radiance, and $\delta_i$ is the distance between samples [S1].
+
+9.  **Regularization:** Apply a novel regularizer on the volume density $\sigma$ to encourage it to concentrate around surfaces. This improves the quality of the normal vectors $\mathbf{n}'$ (if derived or used for other purposes) and ensures accurate computation of reflection directions, mitigating the "foggy" geometry issue inherent in standard NeRF [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import math
+
+class RefNeRF:
+    def __init__(self, num_freq_bands=10, bottleneck_dim=128):
+        """
+        Initialize Ref-NeRF model.
+        :param num_freq_bands: Number of frequency bands for positional encoding.
+        :param bottleneck_dim: Dimensionality of the bottleneck feature vector b.
+        """
+        super().__init__()
+        self.num_freq_bands = num_freq_bands
+        self.bottleneck_dim = bottleneck_dim
+        
+        # Spatial MLP: Predicts sigma, cd, s, b, rho, n_prime
+        # Architecture: Input (gamma(x)) -> Hidden Layers -> Output
+        # Note: Exact layer dimensions are not specified in sources, 
+        # assuming a standard MLP structure with skip connections if applicable.
+        self.spatial_mlp = nn.Sequential(
+            nn.Linear(2 * num_freq_bands + 1, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            # Output: sigma (1), cd (3), s (3), b (128), rho (1), n_prime (3)
+            # Total output dim = 1 + 3 + 3 + 128 + 1 + 3 = 139
+            nn.Linear(256, 139)
+        )
+        
+        # Directional MLP: Predicts cs
+        # Input: b (128) + IDE features + Fresnel term
+        # IDE features dimension depends on spherical harmonics order and vMF convolution.
+        # Sources do not specify exact IDE feature dimension. 
+        # Assuming a placeholder dimension for implementation completeness.
+        ide_dim = 64 # Not given in the sources.
+        fresnel_dim = 1
+        self.directional_mlp = nn.Sequential(
+            nn.Linear(bottleneck_dim + ide_dim + fresnel_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 3) # Output: cs (3)
+        )
+
+    def positional_encoding(self, x, num_freq_bands):
+        """
+        Apply sinusoidal positional encoding.
+        gamma(x) = (sin(2^0 pi x), cos(2^0 pi x), ..., sin(2^(L-1) pi x), cos(2^(L-1) pi x))
+        """
+        x = x.unsqueeze(-1)
+        scales = torch.tensor([2**i for i in range(num_freq_bands)], dtype=x.dtype, device=x.device)
+        xb = x * (2 * math.pi * scales).reshape((1,) * x.dim() + (-1,))
+        pe = torch.cat([torch.sin(xb), torch.cos(xb)], dim=-1)
+        return torch.cat([x, pe], dim=-1)
+
+    def compute_ide(self, r, rho):
+        """
+        Compute Integrated Directional Encoding (IDE).
+        Uses closed-form spherical harmonics convolved with von Mises-Fisher distribution.
+        Note: Exact implementation details of IDE are not provided in sources.
+        This is a placeholder for the IDE computation.
+        """
+        # Placeholder: In a real implementation, this would compute the IDE features
+        # based on reflection direction r and roughness rho.
+        # Returns a tensor of shape (..., ide_dim)
+        return torch.zeros(r.shape[0], r.shape[1], 64, device=r.device) # ide_dim=64 assumed
+
+    def forward(self, x, d):
+        """
+        Forward pass of Ref-NeRF.
+        :param x: 3D spatial coordinates (B, 3)
+        :param d: Viewing directions (B, 3)
+        :return: Outgoing radiance c (B, 3)
+        """
+        # Step 1: Positional Encoding
+        x_enc = self.positional_encoding(x, self.num_freq_bands)
+        
+        # Step 2: Spatial Network Forward Pass
+        spatial_out = self.spatial_mlp(x_enc)
+        
+        # Parse spatial outputs
+        # Assuming order: sigma, cd, s, b, rho, n_prime
+        sigma = spatial_out[:, 0:1]
+        cd = spatial_out[:, 1:4]
+        s = spatial_out[:, 4:7]
+        b = spatial_out[:, 7:7+self.bottleneck_dim]
+        rho = spatial_out[:, 7+self.bottleneck_dim:7+self.bottleneck_dim+1]
+        n_prime = spatial_out[:, 7+self.bottleneck_dim+1:7+self.bottleneck_dim+4]
+        
+        # Normalize normal vector
+        n_prime = n_prime / (torch.norm(n_prime, dim=-1, keepdim=True) + 1e-8)
+        
+        # Step 3: Reflection Vector Calculation
+        # r = 2(d . n')n' - d
+        dot_product = torch.sum(d * n_prime, dim=-1, keepdim=True)
+        r = 2 * dot_product * n_prime - d
+        
+        # Step 4: Integrated Directional Encoding (IDE)
+        ide_features = self.compute_ide(r, rho)
+        
+        # Step 5: Fresnel Term
+        # Fresnel term based on dot product of n' and d
+        fresnel_term = dot_product.squeeze(-1).unsqueeze(-1)
+        
+        # Step 6: Directional Network Forward Pass
+        directional_input = torch.cat([b, ide_features, fresnel_term], dim=-1)
+        cs = self.directional_mlp(directional_input)
+        
+        # Step 7: Outgoing Radiance Composition
+        # c = gamma(cd + s * cs)
+        # Assuming gamma is identity or a simple clamp for this implementation
+        # as the source mentions "predefined tone mapping function" but doesn't specify.
+        # [G] Using a simple clamp to [0, 1] as a common tone mapping approximation.
+        c = cd + s * cs
+        c = torch.clamp(c, 0, 1)
+        
+        return sigma, c
+```
+
+**Parameters:**
+*   **Bottleneck feature vector $\mathbf{b}$:** Dimensionality 128 [S1].
+*   **Number of frequency bands ($L$):** Not given in the sources. Typical values for NeRF are 10 [S1].
+*   **Tone mapping function $\gamma$:** Predefined, but specific function not given in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Foggy Geometry:** Standard NeRF geometry is "foggy" and not tightly concentrated at surfaces, leading to noisy normal vectors. This is handled by the volume density regularizer [S2].
+*   **Specularity on Non-Specular Materials:** Ref-NeRF may erroneously assign specularity to non-specular materials (e.g., bread slices in the Toaster object), indicating incomplete comprehension of geometric properties [S1].
+*   **Normal Vector Quality:** The accuracy of reflection directions depends on the quality of normal vectors. The regularizer is crucial for this [S2].
+
+## Subtopics
+
+### NRFF (Neural Reflectance Fields)
+A method that uses an 8 × 16 × 2 REE vector in its directional MLP, contrasting with Ref-NeRF's use of roughness and IDE. NRFF also introduces a new regularization term for sparse feature representation [S1].
+
+### Mip-NeRF
+The base architecture upon which Ref-NeRF is built, designed to handle anti-aliasing and supersampling [S3].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** On the evaluated dataset, Ref-NeRF achieves 35.6dB PSNR and 11.5 degrees Mean Angular Error (MAE) for normals, compared to Mip-NeRF's 30.3dB PSNR and 59.5 degrees MAE [S2].
+*   **Scaling:** Not given in the sources.
+*   **Strengths:** Accurately models specular reflections and highlights on reflective surfaces, significantly improving realism compared to standard NeRF [S3]. The internal representation is interpretable and useful for scene editing [S2].
+*   **Limitations:** May assign specularity to non-specular materials [S1]. Performance depends on the quality of predicted normals, which requires effective regularization [S2].
+*   **When to use:** When rendering scenes with glossy or reflective surfaces is critical.
+*   **When not to use:** For scenes with predominantly diffuse materials where the overhead of modeling specular components is unnecessary, or when computational resources are limited.
+
+## Background
+Ref-NeRF was introduced by Dor Verbin, Peter Hedman, Ben Mildenhall, Todd Zickler, Jonathan T. Barron, and Pratul P. Srinivasan from Harvard University and Google Research. It was published as arXiv:2112.03907v1 on December 7, 2021 [S2]. The method addresses the limitation of NeRF in capturing glossy surfaces by reparameterizing the directional MLP and introducing structured view-dependent appearance [S2].
+
+## Sources
+[S1] Specularity in NeRFs: A Comparative Study of Ref-NeRF and NRFF, https://doi.org/10.5201/ipol.2025.562, fetched 2026-10-26
+[S2] Ref-NeRF: Structured View-Dependent Appearance for Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00541, fetched 2026-10-26
+[S3] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

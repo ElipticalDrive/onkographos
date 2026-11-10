@@ -1,45 +1,38 @@
 # Temporal and Procedural Techniques
 
-Also called: Procedural Volume Rendering, Temporal Accumulation, Volumetric Lenses
+Also called: Procedural Volume Rendering, Dynamic Volume Techniques
 
 ## Overview
-This family extends direct volume ray casting by replacing static, texture-based density lookups with procedural generation or temporal accumulation, and by modifying ray trajectories for interactive focus+context visualization. It solves the memory bottleneck of high-resolution volumetric textures and the static nature of traditional ray casting by computing density analytically (e.g., via noise functions) or dynamically (e.g., via temporal accumulation) [S1, S2, S10, S17, S2447, S6767, S8240, S10659]. Unlike standard direct volume ray casting which relies on pre-sampled 3D textures, these methods compute optical properties on-the-fly or modify the ray path itself, enabling infinite resolution, dynamic deformation, and interactive lens effects without large memory footprints [S1, S8240, S10659].
+This family extends direct volume ray casting by replacing static, pre-computed scalar fields with procedural generation or temporal adaptation mechanisms. It solves the limitations of static data storage and fixed rendering performance by enabling dynamic effects (smoke, clouds), interactive geometric manipulation (displacement), and adaptive performance scaling (multi-frame rate) [S1]. It differs from static volume rendering by computing density or geometry at runtime rather than fetching it from a fixed 3D texture, and differs from neural methods by relying on analytical noise functions or heuristic performance models rather than learned latent representations.
 
 ## Shared principles
-All methods in this family adhere to the core direct volume ray casting loop defined in [Direct volume ray casting](19-direct-volume-ray-casting.md): ray generation, sampling, classification, and compositing [S5, S10, S37]. However, they diverge in the **Sampling and Interpolation** stage. Instead of retrieving a scalar value $d_i$ from a static 3D texture via trilinear interpolation, they compute $d_i$ using:
-1.  **Procedural Functions:** Analytical noise functions (e.g., Worley noise, FBM) evaluated at the sample point $\mathbf{p}_i$ [S1, S8240].
-2.  **Temporal Accumulation:** Blending previous frame's results with current frame's data [S2080].
-3.  **Dynamic Displacement:** Mapping sample points from displaced space back to original space using inverse displacement functions [S10659].
-4.  **Ray Distortion:** Modifying the ray direction $\mathbf{d}$ or origin $\mathbf{o}$ based on lens parameters or feature-based highlighting before intersection [S6767].
+The method retains the core ray casting loop of [Direct volume ray casting](19-direct-volume-ray-casting.md) but modifies the sampling or traversal stages.
 
-The **Classification** stage may also be procedural, mapping noise values directly to density and opacity without a transfer function lookup table, or using separate light maps for scattering [S1, S2447, S8240].
+1.  **Procedural Density Evaluation**: Instead of a single texture lookup $V(\mathbf{p})$, density is computed via analytical functions (e.g., Worley noise, FBM) or dynamic simulation states [S1]. This allows for infinite resolution and animation without pre-computation overhead.
+2.  **Dynamic Ray Modification**: Ray origins or directions may be altered based on temporal state (e.g., lens effects, warping) or geometric displacement, requiring custom intersection logic that accounts for non-perspective or non-orthogonal ray trajectories [S1].
+3.  **Adaptive Sampling**: Step sizes or sample counts may vary based on procedural complexity or performance metrics, often utilizing early termination when transmittance is low or accumulated opacity is high [S1].
+4.  **Temporal Consistency**: When rendering dynamic content, techniques must manage frame-to-frame coherence, either through noise animation offsets or by blending between multi-frame rate and single-frame rate rendering strategies [S1].
 
 ## Subtopics
 
 ### [Volumetric Smoke Rendering with Worley Noise and Light Maps](2447-volumetric-smoke-rendering-with-worley-noise-and-light-maps.md)
-Uses procedural Worley noise for density and a light map for scattering/god rays. Chosen for real-time smoke with dynamic lighting effects.
+Uses 3D Worley noise for density and light maps for scattering to simulate dynamic smoke. Chosen for real-time animated smoke effects where static textures are insufficient.
 
 ### [GPU-accelerated ray casting with volumetric lenses](6767-gpu-accelerated-ray-casting-with-volumetric-lenses.md)
-Distorts ray directions for magnification or angular shifts. Chosen for interactive focus+context visualization.
+Modifies ray directions based on screen-space lens parameters for focus+context. Chosen when interactive magnification or distortion of specific volume regions is required.
 
 ### [Procedural Volumetric Cloud Rendering (GPU Shader)](8240-procedural-volumetric-cloud-rendering-gpu-shader.md)
-Computes cloud density via FBM of Worley noise and lighting via Henyey-Greenstein scattering. Chosen for infinite-resolution, dynamic clouds without texture memory.
+Evaluates Worley noise FBM and Henyey-Greenstein scattering directly in the shader. Chosen for large-scale atmospheric effects where storage of 3D cloud textures is prohibitive.
 
 ### [Displacement Mapping for Volume Rendering](10659-displacement-mapping-for-volume-rendering.md)
-Applies discontinuous geometric deformations via inverse displacement mapping. Chosen for interactive cutting/peeling of volumetric objects.
+Applies vector-based displacements to volumetric data via inverse mapping. Chosen for interactive cutting, peeling, or deforming of volumes without mesh remeshing.
+
+### [Dynamic Multi-Frame Rate Rendering](11338-dynamic-multi-frame-rate-rendering.md)
+Switches between image warping (MFR) and parallel raycasting (SFR) based on workload. Chosen to balance latency and fidelity in interactive applications with variable complexity.
 
 ## Background
-The techniques originate from the need to render complex volumetric phenomena (smoke, clouds) and interactive deformations without the memory constraints of high-resolution 3D textures. Procedural noise-based rendering was popularized for real-time graphics using GPU shaders [S1, S8240]. Volumetric lenses were introduced to provide interactive focus+context in volume visualization [S6767]. Displacement mapping for volumes was developed to allow complex geometric operations (cuts, peeling) without mesh re-tessellation [S10659].
+The techniques originate from the need to render dynamic volumetric phenomena (smoke, clouds) and interactive volume manipulation in real-time graphics. Early procedural methods used analytical noise functions to approximate density fields [S1]. The integration of GPU compute shaders enabled efficient generation of these noise fields (e.g., Worley noise) and their integration into ray marching loops [S1]. The concept of volumetric lenses and displacement mapping extended ray casting to support view-dependent distortions and geometric modifications [S1]. Dynamic multi-frame rate rendering emerged to address the performance trade-offs in interactive volume visualization, leveraging empirical performance data to select optimal rendering strategies [S1].
 
 ## Sources
-[S1] Volumetric Smoke Rendering with Worley Noise and Light Maps, https://github.com/Unity-Technologies/VolumetricSmoke, 2023-10-01
-[S2] GPU-accelerated ray casting with volumetric lenses, https://github.com/Unity-Technologies/VolumetricLenses, 2023-10-01
-[S5] Direct volume ray casting, https://github.com/Unity-Technologies/DirectVolumeRayCasting, 2023-10-01
-[S10] Direct volume ray casting, https://github.com/Unity-Technologies/DirectVolumeRayCasting, 2023-10-01
-[S17] Direct volume ray casting, https://github.com/Unity-Technologies/DirectVolumeRayCasting, 2023-10-01
-[S2080] Temporal Accumulation (Closest Hit), https://github.com/Unity-Technologies/TemporalAccumulation, 2023-10-01
-[S2447] Volumetric Smoke Rendering with Worley Noise and Light Maps, https://github.com/Unity-Technologies/VolumetricSmoke, 2023-10-01
-[S37] Direct volume ray casting, https://github.com/Unity-Technologies/DirectVolumeRayCasting, 2023-10-01
-[S6767] GPU-accelerated ray casting with volumetric lenses, https://github.com/Unity-Technologies/VolumetricLenses, 2023-10-01
-[S8240] Procedural Volumetric Cloud Rendering (GPU Shader), https://github.com/Unity-Technologies/ProceduralClouds, 2023-10-01
-[S10659] Displacement Mapping for Volume Rendering, https://github.com/Unity-Technologies/DisplacementMapping, 2023-10-01
+
+[S1] Unofficial notes on Temporal and Procedural Techniques, provided in the prompt context.

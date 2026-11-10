@@ -1,0 +1,125 @@
+--- v002.md
++++ v003.md
+@@ -6,10 +6,10 @@
+ 
+ ## How it works
+-**Inputs:** Ray position $\mathbf{rayPos}$, ray direction $\mathbf{rayDir}$, inverse ray direction $\mathbf{invRayDir}$, last voxel ID `lastVoxID`, last voxel refractive index `lastVoxRefract`, accumulated color `colorAdd`, color multiplier `colorMult`, maximum depth `maxDepth`, sun strength `sunStrength`, boolean `enableRefraction`, epsilon `EPSILON`, chunk traversal bounds, voxel fetch routine, current traversal depth, and distance to current voxel boundary `rayDist`.
+-**Outputs:** Updated ray state, accumulated color `colorAdd`, and a boolean indicating ray termination.
++**Inputs:** Ray position $\mathbf{rayPos}$, ray direction $\mathbf{rayDir}$, inverse ray direction $\mathbf{invRayDir}$, last voxel ID `lastVoxID`, last voxel refractive index `lastVoxRefract`, accumulated color `colorAdd`, color multiplier `colorMult`, maximum depth `maxDepth`, sun strength `sunStrength`, boolean `enableRefraction`, epsilon `EPSILON`, chunk traversal bounds, voxel fetch routine, current traversal depth, and distance to current voxel boundary `rayDist` [S1, unofficial].
++**Outputs:** Updated ray state, accumulated color `colorAdd`, and a boolean indicating ray termination [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Voxel Material:** Contains `opacity` (float, 0.0–1.0), `albedo` (vec3), `refractIndex` (float), and `normal` (vec3, stored or computed) [S1, unofficial].
+-*   **Traversal State:** `rayPos` (vec3), `rayDir` (vec3), `invRayDir` (vec3), `lastVoxID` (uint8, 255 for empty/unknown), `lastVoxRefract` (float, default 1.0), `colorAdd` (vec3), `colorMult` (float, initialized to 1.0) [S1, unofficial].
++*   **Voxel Material:** Contains `opacity` (float, 0.0–1.0), `albedo` (vec3), `refractIndex` (float), and `normal` (vec3) [S1, unofficial].
++*   **Traversal State:** `rayPos` (vec3), `rayDir` (vec3), `invRayDir` (vec3), `lastVoxID` (uint8, 255 for empty/unknown), `lastVoxRefract` (float, default 1.0), `colorAdd` (vec3), `colorMult` (float, initialized to 1.0), `lastSideDist` (vec3), and `rayDist` (float) [S1, unofficial].
+ 
+ **Parameters:**
+@@ -21,34 +21,33 @@
+ **Steps:**
+ 1.  **Initialize:** Set `colorAdd = (0,0,0)`, `colorMult = 1.0`, `lastVoxID = 255`, `lastVoxRefract = 1.0` [S1, unofficial].
+-2.  **Traverse Chunk:** Loop while inside current chunk bounds.
++2.  **Traverse Chunk:** Loop while inside current chunk bounds [S1, unofficial].
+ 3.  **Voxel Check:** If voxel exists and not ignoring first:
+-    *   Decompress voxel data.
+-    *   Get material properties.
++    *   Decompress voxel data and get material properties [S1, unofficial].
+     *   **Opaque Case:** If `material.opacity == 1.0`:
+         *   Update `rayPos` by adding `rayDir * (min(lastSideDist) + EPSILON)` [S1, unofficial].
+-        *   Return `true` (ray terminated).
++        *   Return `true` (ray terminated) [S1, unofficial].
+     *   **Transparent Case:** If `material.opacity < 1.0` and `lastVoxID != thisVoxID`:
+-        *   Calculate current position.
++        *   Calculate current position [S1, unofficial].
+         *   If current depth $\le$ `maxDepth`:
+             *   Add to color: `colorAdd += colorMult * material.opacity * voxel.albedo * sunStrength` [S1, unofficial].
+             *   Update multiplier: `colorMult *= (1.0 - material.opacity)` [S1, unofficial].
+         *   **Refraction Handling:** If `enableRefraction` and `rayDist > 0.0`:
+-            *   Set `refracted = true`.
+-            *   Update `rayPos` to the boundary.
+-            *   Calculate surface normal (using dot product check against voxel normal) [S1, unofficial].
++            *   Set `refracted = true` [S1, unofficial].
++            *   Update `rayPos` to the boundary [S1, unofficial].
++            *   Calculate surface normal using a dot product check against the voxel normal [S1, unofficial].
+             *   Refract `rayDir` using Snell's law: `rayDir = refract(rayDir, normal, lastVoxRefract / material.refractIndex)` [S1, unofficial].
+-            *   Update `invRayDir` based on new `rayDir`.
++            *   Update `invRayDir` based on the new `rayDir` [S1, unofficial].
+             *   Re-initialize DDA counters and reset `lastSideDist` [S1, unofficial].
+             *   Update `lastVoxID = thisVoxID` and `lastVoxRefract = material.refractIndex` [S1, unofficial].
+ 4.  **Empty/Transition Case:** If voxel does not exist and `lastVoxID != 255`:
+     *   If `enableRefraction`:
+-        *   Set `refracted = true`.
+-        *   Update `rayPos` to the boundary.
++        *   Set `refracted = true` [S1, unofficial].
++        *   Update `rayPos` to the boundary [S1, unofficial].
+         *   Calculate normal using `-voxel.normal` (assuming outward normal from previous voxel) [S1, unofficial].
+         *   Refract `rayDir` using `refract(rayDir, normal, lastVoxRefract)` (assuming exit to air/empty with index 1.0) [S1, unofficial].
+         *   Handle total internal reflection [S1, unofficial].
+-        *   Update `invRayDir`, re-init DDA, reset `lastSideDist` [S1, unofficial].
++        *   Update `invRayDir`, re-initialize DDA, and reset `lastSideDist` [S1, unofficial].
+         *   Set `lastVoxID = 255` and `lastVoxRefract = 1.0` [S1, unofficial].
+-5.  **Accumulate:** Return `colorAdd` modulated by `colorMult` (or further processed by compositing) [S1, unofficial].
++5.  **Accumulate:** Return `colorAdd` modulated by `colorMult` [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -68,15 +67,19 @@
+ 
+ def reflect(v: List[float], n: List[float]) -> List[float]:
+-    """Standard reflection."""
++    """Standard reflection fallback for TIR."""
+     dot_vn = sum(a*b for a,b in zip(v, n))
+     return [v[i] - 2.0 * dot_vn * n[i] for i in range(3)]
+ 
+-def step_chunk(ray_pos: List[float], ray_dir: List[float], inv_ray_dir: List[float], 
++def in_chunk(p: List[float], b: Tuple[float, float, float, float, float, float]) -> bool:
++    """Checks if point p is within chunk bounds [min_x, min_y, min_z, max_x, max_y, max_z]."""
++    return b[0] <= p[0] <= b[3] and b[1] <= p[1] <= b[4] and b[2] <= p[2] <= b[5]
++
++def step_chunk(ray_pos: List[float], ray_dir: List[float], inv_ray_dir: List[float],
+                last_side_dist: List[float], last_vox_id: int, last_vox_refract: float,
+                color_add: List[float], color_mult: float, max_depth: int, sun_strength: float,
+-               enable_refraction: bool, epsilon: float, chunk_bounds: Tuple, 
++               enable_refraction: bool, epsilon: float, chunk_bounds: Tuple,
+                voxel_fetch: callable, current_depth: int, ray_dist: float, ignore_first: bool) -> Tuple[bool, List[float], List[float], List[float], float]:
+-    
+-    while ray_pos inside chunk_bounds:
++
++    while in_chunk(ray_pos, chunk_bounds):
+         voxel = voxel_fetch()
+         if voxel.exists and not ignore_first:
+@@ -85,10 +88,10 @@
+                 ray_pos = [ray_pos[i] + ray_dir[i] * (min(last_side_dist) + epsilon) for i in range(3)]
+                 return True, ray_pos, ray_dir, color_add, color_mult
+-            
++
+             if material.opacity < 1.0 and last_vox_id != voxel.id:
+                 if current_depth <= max_depth:
+                     color_add = [color_add[i] + color_mult * material.opacity * voxel.albedo[i] * sun_strength for i in range(3)]
+                     color_mult *= (1.0 - material.opacity)
+-                
++
+                 if enable_refraction and ray_dist > 0.0:
+                     ray_pos = [ray_pos[i] + ray_dir[i] * ray_dist for i in range(3)]
+@@ -128,15 +131,15 @@
+ 
+ **Edge Cases:**
+-*   **Total Internal Reflection (TIR):** If the angle of incidence exceeds the critical angle, refraction fails. The implementation must handle the failure case, typically by falling back to reflection or the original direction to prevent infinite bouncing [S1, unofficial].
++*   **Total Internal Reflection (TIR):** If the angle of incidence exceeds the critical angle, refraction fails and the implementation falls back to reflection or the original direction to prevent infinite bouncing [S1, unofficial].
+ *   **Precision Errors:** `EPSILON` prevents self-intersection when updating `rayPos` [S1, unofficial].
+ *   **Boundary Transitions:** Refraction is only applied when transitioning between different voxel types (solid to transparent, transparent to solid, or transparent to empty) to avoid redundant calculations [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. The method performs linear voxel traversals per ray, with additional vector operations and trigonometric evaluations for refraction at boundaries.
+-*   **Memory Complexity:** $O(1)$ per ray, storing only traversal state and accumulated color.
+-*   **Strengths:** Accurately renders semi-transparent refractive objects; handles TIR to prevent artifacts.
+-*   **Limitations:** Refraction increases computational cost per step; TIR handling may require fallback strategies that reduce visual accuracy; performance degrades with high refraction counts.
+-*   **When to Use:** Scenes with glass, water, or other transparent refractive materials.
+-*   **When Not to Use:** Opaque-only scenes, or when performance is critical and refraction is not required.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Strengths:** Not given in the sources.
++*   **Limitations:** Not given in the sources.
++*   **When to Use:** Not given in the sources.
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

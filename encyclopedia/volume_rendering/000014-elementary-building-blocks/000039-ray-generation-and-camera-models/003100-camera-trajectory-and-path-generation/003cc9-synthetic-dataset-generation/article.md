@@ -2,127 +2,131 @@
 
 
 ## Overview
-Synthetic dataset generation creates ground-truth training data for neural surface reconstruction by rendering images and depth maps from known 3D meshes along defined camera trajectories. It solves the problem of lacking real-world paired data by providing noise-free or noise-simulated supervision signals. It differs from sibling methods like [Novel View Synthesis Rendering](6402-novel-view-synthesis-rendering.md) by focusing on generating explicit geometric supervision (depth/normal) rather than photometric consistency, and from [Synthetic Camera Trajectory Generation](7942-synthetic-camera-trajectory-generation.md) by including the rendering and augmentation pipeline rather than just the path definition.
+Synthetic dataset generation creates training data for volume rendering and 3D reconstruction models by simulating sensor observations in computer-generated environments. It solves the problem of lacking real-world labeled data by providing ground-truth geometry, semantic labels, and controlled noise characteristics [S1, S4]. Unlike methods that generate camera trajectories for active planning [S3, unofficial] or reconstruct scenes from sparse inputs [S2], this method focuses on the pipeline of rendering, augmenting, and cleaning synthetic data to match the statistical properties of real sensors. It differs from [Elongated Structure Camera Trajectory Generation](4666-elongated-structure-camera-trajectory-generation.md) by prioritizing data quality and label correctness over trajectory coverage, and from [Novel View Synthesis Rendering](6402-novel-view-synthesis-rendering.md) by providing explicit geometric and semantic ground truth rather than just photometric consistency.
 
 ## How it works
-The method consists of two distinct phases: trajectory-based rendering for general evaluation datasets [S1], and ray-based sample generation for implicit surface models [S2].
+The method consists of three main phases: trajectory definition and rendering, data augmentation for model training, and dataset curation/cleaning.
 
-### Phase 1: Trajectory Rendering (General Evaluation)
+### Inputs and Outputs
 **Inputs:**
-*   3D Mesh geometry (vertices, faces).
-*   Camera trajectory defined by control points.
-*   Rendering engine (e.g., BlenderProc) [S1].
+- 3D scene geometry (meshes, textures).
+- Sensor parameters (intrinsics, extrinsics, noise models).
+- Control points for trajectory definition.
+- Semantic label maps (optional, for supervised learning).
 
 **Outputs:**
-*   Color images.
-*   Depth maps (potentially with added noise).
+- Rendered color images.
+- Rendered depth maps (with added noise).
+- Semantic label maps.
+- Camera poses (trajectory).
+- A structured dataset $\mathcal{D}$ suitable for training neural fields (e.g., SDDF, NeRF).
 
-**Steps:**
-1.  **Trajectory Definition:** Define the camera path using Catmull-Rom spline interpolation on manually selected control points [S1].
-2.  **Rendering:** For each camera pose along the trajectory, render color and depth images using a ray-tracing or rasterization engine [S1].
-3.  **Noise Simulation:** Apply noise to the rendered depth maps to simulate real sensor noise characteristics [S1].
-    *   *Note:* For specific datasets like ICL-NUIM, pre-existing noisy depth/color data may be used instead of rendering [S1].
-4.  **Evaluation Preparation (Optional):** If evaluating reconstruction quality, cull mesh vertices not visible in any viewing frustum or occluded by other geometry. Sample the remaining geometry at a density of 1 point per $cm^2$ [S1].
+### Data Structures
+1. **Ray Measurement**: A tuple $(\mathbf{v}_i, r_{t,i})$ where $\mathbf{v}_i$ is the ray direction in sensor frame and $r_{t,i}$ is the range measurement [S2].
+2. **Dataset Sample**: A tuple $(\mathbf{p}_j, \mathbf{v}_j, f^*_j, i^*_j, s^*_j)$ where:
+   - $\mathbf{p}_j \in \mathbb{R}^3$: Ray origin (sensor position) [S2].
+   - $\mathbf{v}_j \in S^2$: Ray direction in world frame [S2].
+   - $f^*_j$: SDDF measurement (signed distance) [S2].
+   - $i^*_j \in \{-1, 1\}$: Intersection indicator [S2].
+   - $s^*_j \in \{-1, 1\}$: Sign indicator [S2].
+3. **View Space Representation**:
+   - **Hemisphere**: Defined by maximum radius $R_{max}$ and center. Viewpoint represented by spherical coordinates $(\theta, \phi, r)$ constrained to point toward the object center [S3, unofficial].
+   - **3D Bounding Box**: Defined by corners derived from raw training data. Viewpoint represented by 6DoF $SE(3)$ transformation [S3, unofficial].
 
-### Phase 2: Ray Sample Generation (Implicit Surface Training)
-**Inputs:**
-*   Sensor poses $T_t$ (position $p_t$, orientation $R_t$).
-*   Range measurements $Z_t = \{v_i, r_{t,i}\}_{i=1}^N$, where $v_i$ is the sensor's local ray direction and $r_{t,i}$ is the measured distance.
+### Steps
 
-**Outputs:**
-*   Dataset $D = \{(p_j, v_j, f^*_j, i^*_j, s^*_j)\}_j$ suitable for training Signed Directional Distance Function (SDDF) models [S2].
+#### Phase 1: Trajectory Definition and Rendering
+1. **Define Trajectory**: Select control points manually. Interpolate camera poses using a Catmull-Rom spline [S1].
+2. **Render Images**: For each pose in the trajectory, render color and depth images using a renderer (e.g., BlenderProc) [S1].
+3. **Apply Noise**: Add noise to depth maps to simulate real sensor noise (e.g., Gaussian, quantization) [S1].
+   - *Note*: For specific datasets like ICL, use provided noisy depth/color data instead of rendering [S1].
+4. **Filter Invalid Views**: Filter out images where the camera is inside geometry (e.g., furniture) [S4].
 
-**Data Structure:**
-Each sample $j$ contains:
-*   $p_j \in \mathbb{R}^3$: Ray origin (camera position).
-*   $v_j \in S^2$: Ray direction (in world coordinates).
-*   $f^*_j \in \mathbb{R}$: SDDF measurement (distance).
-*   $i^*_j \in \{-1, 1\}$: Intersection indicator.
-*   $s^*_j \in \{-1, 1\}$: Sign indicator.
+#### Phase 2: Dataset Augmentation (SDDF Specific)
+To train models like SDDF, the dataset must be balanced in sign indicators [S2].
 
-**Algorithm:**
+1. **Generate Positive Samples**: For each sensor measurement $(\mathbf{v}_i, r_{t,i})$ at pose $T_t = (\mathbf{p}_t, R_t)$:
+   - Set origin: $\mathbf{p}_j = \mathbf{p}_t$
+   - Set direction: $\mathbf{v}_j = R_t \mathbf{v}_i$
+   - Set SDDF value: $f^*_j = r_{t,i}$
+   - Set intersection indicator: $i^*_j = 1$
+   - Set sign indicator: $s^*_j = 1$
+   [S2]
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+2. **Generate Negative Samples**: For each positive sample $(\mathbf{p}_j, \mathbf{v}_j, f^*_j, i^*_j, s^*_j)$:
+   - Calculate offset point: $\mathbf{p}' = \mathbf{p}_j + (f^*_j + \epsilon) \mathbf{v}_j$, where $\epsilon > 0$ is a small constant [S2].
+   - Set origin: $\mathbf{p}'$
+   - Set direction: $\mathbf{v}_j$ (same direction)
+   - Set SDDF value: $-\epsilon$
+   - Set intersection indicator: $1$
+   - Set sign indicator: $-1$
+   [S2]
 
-```python
-def generate_dataset(sensor_poses, range_measurements):
-    """
-    Generates training samples from sensor poses and range measurements.
-    
-    Args:
-        sensor_poses: List of tuples (p_t, R_t) where p_t is position and R_t is rotation matrix.
-        range_measurements: List of lists of tuples (v_i, r_t_i) for each pose.
-        
-    Returns:
-        dataset: List of samples (p_j, v_j, f*_j, i*_j, s*_j).
-    """
-    dataset = []
-    
-    # Step 1: Generate positive samples from sensor data
-    for p_t, R_t in sensor_poses:
-        for v_i, r_t_i in range_measurements:
-            # Transform local ray direction to world coordinates
-            v_j = R_t @ v_i
-            
-            # Create sample
-            # p_j is the sensor position
-            # f*_j is the measured distance
-            # i*_j = 1 (intersecting)
-            # s*_j = 1 (positive sign)
-            sample = (p_t, v_j, r_t_i, 1, 1)
-            dataset.append(sample)
-            
-    # Step 2: Augment with negative samples to balance sign indicator
-    # The initial dataset is unbalanced: all s*_j = 1 and f*_j >= 0.
-    # Negative samples are generated by extending the ray slightly behind the surface.
-    epsilon = 0.01  # Small offset > 0, value not specified in sources [G]
-    
-    augmented_dataset = []
-    for p_j, v_j, f_star_j, i_star_j, s_star_j in dataset:
-        # Add original positive sample
-        augmented_dataset.append((p_j, v_j, f_star_j, i_star_j, s_star_j))
-        
-        # Generate negative sample
-        # p' = p_j + (f*_j + epsilon) * v_j
-        p_prime = p_j + (f_star_j + epsilon) * v_j
-        
-        # Negative sample properties:
-        # f*_j is negated (-epsilon)
-        # i*_j remains 1 (intersection indicator augmentation is not performed)
-        # s*_j is -1
-        negative_sample = (p_prime, v_j, -epsilon, 1, -1)
-        augmented_dataset.append(negative_sample)
-        
-    return augmented_dataset
-```
+3. **Skip Intersection Augmentation**: Do not generate non-intersecting rays ($i^*_j = -1$) as it is inefficient and does not improve reconstruction results [S2].
 
-**Parameters:**
-*   $\epsilon$: Small offset for negative sample generation. Value not given in the sources [G].
-*   Sampling density for evaluation: $1 \text{ point}/cm^2$ [S1].
-*   Voxel edge length for IoU evaluation: $5 \text{ cm}$ [S1].
-*   F-score threshold: $5 \text{ cm}$ [S1].
+#### Phase 3: View Space Sampling (Active Viewpoint Generation)
+For active mapping or information gain calculation [S3, unofficial]:
 
-**Edge Cases and Pitfalls:**
-*   **Sign Imbalance:** The raw sensor data produces only positive samples ($s^*_j=1, f^*_j \ge 0$). Negative samples are mandatory for training SDDF models [S2].
-*   **Intersection Indicator:** Augmenting with non-intersecting rays ($i^*_j = -1$) is inefficient and does not improve reconstruction results, so it is omitted [S2].
-*   **Occlusion:** In evaluation, geometry occluded by other surfaces or outside viewing frusta must be culled to avoid computing error in unpredictable regions [S1].
+1. **Define View Space**:
+   - **Synthetic-NeRF**: Hemisphere with $R_{max} = 4$. Viewpoint in spherical coordinates, constrained to point at object center [S3, unofficial].
+   - **Tanks & Temple**: 3D bounding box from raw training set. Viewpoint in $SE(3)$ [S3, unofficial].
+2. **Sample Waypoints**: Uniformly sample $N_{wp}$ waypoints from a Bézier trajectory [S3, unofficial].
+3. **Select Viewpoints**: Select $N_{view}$ viewpoints from waypoints for information gain calculation [S3, unofficial].
+4. **Sample 3D Points**: Instead of sampling all pixels, sample 3D points from $1/K$ of the pixels for information gain calculation [S3, unofficial].
+
+#### Phase 4: Dataset Curation and Cleaning
+1. **Filter Geometry**: Remove images rendered from inside objects [S4].
+2. **Semantic Label Correction**:
+   - Apply a segmentation model (e.g., LSeg) to predict semantic labels [S4].
+   - Compare predicted labels with ground truth.
+   - Ignore points/labels with near-zero accuracy [S4].
+   - Manually merge ambiguous labels (e.g., 'rug' and 'floor') [S4].
+
+### Parameters
+- **Trajectory Interpolation**: Catmull-Rom spline [S1].
+- **Renderer**: BlenderProc [S1].
+- **Noise Model**: Real sensor noise simulation [S1].
+- **SDDF Offset**: $\epsilon > 0$ (small constant) [S2].
+- **View Space Radius**: $R_{max} = 4$ (Synthetic-NeRF) [S3, unofficial].
+- **Waypoint Count**: $N_{wp} = 100$ [S3, unofficial].
+- **Viewpoint Count**: $N_{view} = 10$ [S3, unofficial].
+- **Pixel Sampling Ratio**: $1/100$ [S3, unofficial].
+- **Clipping Planes**: Near/Far $(0.1, 10.0)$, except office_3 $(0.1, 15.0)$ [S4].
+- **Voxelization Edge Length**: $5$ cm (for IoU evaluation) [S1].
+- **F-score Threshold**: $5$ cm [S1].
+
+### Edge Cases and Pitfalls
+- **Unbalanced Signs**: Initial dataset has $s^*_j = 1$ and $f^*_j \ge 0$. Negative samples are required for SDDF training [S2].
+- **Inefficient Augmentation**: Generating non-intersecting rays ($i^*_j = -1$) is inefficient and unnecessary [S2].
+- **Invalid Views**: Cameras inside furniture produce unrealistic data; must be filtered [S4].
+- **Label Ambiguity**: Synthetic datasets may have indistinguishable semantic classes (e.g., rug vs. floor); manual merging or ignoring is required [S4].
+- **Occlusion Culling**: Vertices occluded or outside frusta must be culled before error evaluation to avoid unpredictable network outputs [S1].
 
 ## Subtopics
 
 ### Dataset Generation and Augmentation
-A specific procedure for converting sensor poses and range measurements into a dataset $D$ for training SDDF models, with a focus on balancing the sign indicator. It sets itself apart by explicitly generating negative samples via ray extension to ensure the network learns both sides of the surface. It is chosen when training implicit surface representations that require signed distance supervision. See [S2].
+A procedure to convert sensor poses and range measurements into a dataset $\mathcal{D}$ suitable for training SDDF models, specifically addressing sign imbalance. It generates positive samples from direct measurements and negative samples by extending rays slightly behind the surface. It explicitly avoids generating non-intersecting rays due to inefficiency and lack of benefit [S2].
+
+### Synthetic-NeRF View Space and Sampling
+Defines the camera view space (hemisphere or bounding box) and sampling strategy for active viewpoint generation. It uses spherical coordinates for Synthetic-NeRF scenes and $SE(3)$ for Tanks & Temple. It samples waypoints from Bézier trajectories and reduces computational cost by sampling only a fraction of pixels for information gain calculation [S3, unofficial].
+
+### Replica Dataset Preparation
+A curation pipeline for the Replica dataset. It filters invalid camera poses (inside furniture), uses LSeg for semantic label prediction, and manually fixes label ambiguities (e.g., merging rug/floor). It uses specific near/far clipping planes depending on the scene [S4].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of camera poses and rays per pose. Rendering is the dominant cost, scaling with image resolution and scene complexity.
-*   **Memory Complexity:** Linear with respect to the number of generated samples.
-*   **Strengths:** Provides exact ground truth for depth and geometry; allows controlled noise injection; enables fair comparison across methods using standardized trajectories [S1].
-*   **Limitations:** Requires access to 3D mesh models; synthetic noise may not perfectly match real sensor characteristics; culling occluded geometry is necessary for accurate evaluation [S1].
-*   **When to use:** When training neural surface reconstruction networks that require depth or signed distance supervision, or when evaluating reconstruction accuracy against a known mesh.
-*   **When not to use:** When real-world data is available and preferred; when the goal is novel view synthesis without geometric supervision.
+- **Time Complexity**: Rendering is parallelizable per camera pose [G]. Information gain calculation is reduced by sampling $1/100$ of pixels [S3, unofficial].
+- **Memory Complexity**: Depends on scene resolution and number of samples. SDDF augmentation doubles the dataset size (positive + negative samples) [S2].
+- **Performance**: Synthetic data allows for fair comparison with initial pose estimation methods like BundleFusion [S1].
+- **Strengths**: Provides ground truth geometry and semantics; controllable noise; reproducible.
+- **Limitations**: Domain gap between synthetic and real data; requires manual curation for semantic labels [S4].
+- **When to Use**: When real labeled data is scarce or expensive; for training neural fields requiring explicit geometric supervision (SDDF); for active mapping research [S2][S3, unofficial].
+- **When Not to Use**: When domain adaptation is not feasible; when real-world sensor artifacts are critical and cannot be simulated [S1].
 
 ## Background
-The method originated in the context of neural RGB-D surface reconstruction, where synthetic datasets were used for numeric evaluation [S1]. The trajectory definition using Catmull-Rom splines on manual control points was introduced in [S1]. The specific augmentation technique for SDDF models, including negative sample generation, was introduced in [S2]. Commonly used synthetic scenes include those from ScanNet, Blendswap, and ICL-NUIM [S1].
+Synthetic dataset generation originated from the need for ground-truth data in 3D reconstruction and neural rendering research. Early works used BlenderProc to render scenes with Catmull-Rom spline trajectories [S1]. Later, methods like SDDF required specific data augmentation to handle signed distance functions [S2]. Active mapping research introduced view space sampling strategies for information gain calculation [S3, unofficial]. Recent works have focused on curating synthetic datasets like Replica to address semantic label ambiguities [S4].
 
 ## Sources
 [S1] Neural RGB-D Surface Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00619, fetched 2026-10-26
 [S2] Learning Scene-Level Signed Directional Distance Function With Ellipsoidal Priors and Neural Residuals., https://doi.org/10.1109/tpami.2026.3688658, fetched 2026-10-26
+[S3] ActiveRMAP: Radiance Field for Active Mapping And Planning, https://doi.org/10.48550/arxiv.2211.12656, fetched 2026-10-26 (unofficial)
+[S4] Decomposing NeRF for Editing Via Feature Field Distillation, https://doi.org/10.52202/068431-1694, fetched 2026-10-26

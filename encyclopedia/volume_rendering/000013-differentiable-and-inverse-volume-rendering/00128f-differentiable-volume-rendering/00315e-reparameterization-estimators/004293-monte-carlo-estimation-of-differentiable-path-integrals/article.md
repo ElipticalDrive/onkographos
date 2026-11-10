@@ -3,150 +3,137 @@
 Also called: Differentiable Path Tracing, Gradient Estimation via Path Integral
 
 ## Overview
-This method estimates the gradient of a path integral rendering equation with respect to scene parameters $\pi$ by decomposing the derivative into interior contributions (derivative of the path contribution function) and boundary contributions (derivative of the visibility boundary) [S1]. It distinguishes itself from naive gradient estimation by explicitly handling discontinuities in visibility, such as silhouette and shadow edges, which are critical for materials like BSSRDFs where opacity changes are blurred by subsurface scattering [S1]. Unlike [Reparameterized Volume Sampling](3309-reparameterized-volume-sampling.md) which focuses on volume density reparameterization, this method operates on surface path integrals with subsurface scattering.
+This method estimates the gradient of the path integral with respect to scene parameters $\pi$ by decomposing the derivative into interior contributions (derivative of the path contribution function) and boundary contributions (derivative of the visibility boundary) [S1]. It distinguishes itself from naive gradient estimation by explicitly handling discontinuities in visibility (silhouettes and shadow edges) to provide unbiased gradients for optimization, avoiding the bias introduced by minimizing the variance of an unbiased estimator [S1].
 
 ## How it works
-**Inputs:** Scene parameters $\pi$ (e.g., geometry, material properties), a reference image or target radiance $I_{ref}$, and a path contribution function $\hat{f}$ that computes the radiance of a path.
-**Outputs:** An unbiased estimate of the gradient $\nabla_\pi I(\pi)$.
+**Inputs and Outputs:**
+*   **Inputs:** Scene parameters $\pi$ (e.g., geometry positions, material properties); a reference image or target value $I_{ref}$; a rendering configuration (camera, lights, materials).
+*   **Outputs:** An unbiased estimate of the gradient $\nabla_\pi I(\pi)$ and the rendered image $I(\pi)$.
 
 **Data Structures:**
-*   **Path:** A sequence of vertices $p_0, p_1, \dots, p_k$. $p_0$ is the light source, $p_k$ is the camera. Intermediate vertices $p_1 \dots p_{k-1}$ are surface intersection points.
-*   **Sample Positions:** $y_i$ are the random variables used to sample the direction or position of the $i$-th segment.
-*   **Probability Densities:** $p(y_i)$ is the PDF of the sampling distribution for sample $y_i$.
+*   **Path Contribution Function $\hat{f}(p_0 \dots p_k)$:** A scalar value representing the radiance contribution of a path connecting light $p_0$, intermediate surface points $p_1 \dots p_{k-1}$, and camera $p_k$.
+*   **Sampling Distributions $p(y_i)$:** Probability density functions for the sample positions $y_i$ used to generate surface points $p_i$.
 
 **Numbered Steps:**
 
-1.  **Decompose the Gradient:** The total gradient is split into an interior term and boundary terms [S1]:
+1.  **Interior Gradient Estimation:**
+    Sample paths using conventional path tracing techniques. For each path, compute the derivative of the path contribution function $\hat{f}$ with respect to the parameters $\pi$. The interior term of the gradient is estimated as:
     $$
-    \frac{\partial I}{\partial \pi} = \int \frac{\partial \hat{f}(p)}{\partial \pi} d\mu(p) + \text{Boundary Terms}
+    \left\langle \frac{\partial I_3}{\partial \pi} \right\rangle = \frac{1}{N} \sum_{i=1}^N \frac{\partial \hat{f}(p_0 p_1 p_2 p_3) / \partial \pi}{p(y_1)p(y_2)}
     $$
-    The interior term involves the derivative of the path contribution function with respect to parameters, assuming the path geometry is fixed during differentiation [S1].
+    where $p_0$ is the light, $p_1, p_2$ are surface points, $p_3$ is the camera, and $y_1, y_2$ are the sample positions generating $p_1, p_2$ [S1]. This step assumes the path topology remains constant (no visibility changes) for the sampled paths.
 
-2.  **Estimate Interior Term:** Sample paths using conventional path tracing strategies [S1]. For a path with $k$ segments, the interior gradient contribution is estimated by averaging the derivative of the path contribution function weighted by the inverse PDFs of the samples [S1]:
-    $$
-    \left\langle \frac{\partial I_k}{\partial \pi} \right\rangle = \frac{1}{N} \sum_{i=1}^N \frac{\frac{\partial \hat{f}(p_0 \dots p_k)}{\partial \pi}}{\prod_{j=1}^{k-1} p(y_j)}
-    $$
-    For a 3-segment path (light $p_0$, surface $p_1$, surface $p_2$, camera $p_3$), the estimator is [S1]:
-    $$
-    \left\langle \frac{\partial I_3}{\partial \pi} \right\rangle = \frac{1}{N} \sum_{i=1}^N \frac{\frac{\partial \hat{f}(p_0 p_1 p_2 p_3)}{\partial \pi}}{p(y_1)p(y_2)}
-    $$
-    Here, $y_1$ and $y_2$ are the sample positions determining the directions of segments $p_0 \to p_1$ and $p_1 \to p_2$ respectively [S1].
+2.  **Boundary Gradient Estimation (Primary Visibility):**
+    Identify primary visibility boundaries, which correspond to silhouette edges in the image. Sample points on these boundaries. The gradient contribution arises from the movement of the boundary $v_B(p)$ (the velocity/gradient of the visibility boundary in the direction of the normal to the light ray) [S1].
 
-3.  **Estimate Boundary Terms:** Sample points on discontinuity boundaries where visibility changes abruptly [S1].
-    *   **Primary Visibility Boundary:** Corresponds to silhouette edges in the image.
-    *   **Secondary Visibility Boundary:** Corresponds to shadow edges cast on the mesh surface. Unlike opaque materials, for BSSRDFs, the shadow edge discontinuity is blurred by subsurface scattering, and its motion affects outgoing radiance at nearby surface points [S1].
-    *   **Sampling Secondary Boundaries:** To sample points on shadow edges:
+3.  **Boundary Gradient Estimation (Secondary Visibility):**
+    Identify secondary visibility boundaries, which correspond to shadow edges cast on the surface. Unlike opaque materials where shadow edges project directly to the camera, in translucent materials (e.g., BSSRDF), the discontinuity is blurred, and the motion affects outgoing radiance at points near the shadow edge [S1].
+    *   **Sampling Strategy:** To sample points on shadow edges:
         1.  Sample points on the triangle edges of the geometry.
-        2.  Connect these points to the point light source.
-        3.  Trace rays from the light through these points back against the surface.
-        4.  The resulting intersection points lie on the shadow edges [S1].
-    *   The estimator for the 2-segment boundary term (light $p_0$, surface $p_1$, camera $p_2$) is [S1]:
-        $$
-        \left\langle \frac{\partial I_2}{\partial \pi} \right\rangle = \frac{1}{N} \sum_{i=1}^N \frac{\hat{f}(p_0 p_1 p_2)}{p(y_1)}
-        $$
-        Note: The boundary terms involve the path contribution $\hat{f}$ itself, not its derivative, as they account for the movement of the integration domain [S1].
+        2.  Connect these points with the point light source.
+        3.  Trace rays back against the surface to find intersection points. These intersections lie on the shadow edges [S1].
+    *   Compute the gradient contribution from these boundary points. The general form for the boundary term involves the change in path contribution $\Delta \hat{f}$ across the boundary and the boundary velocity [S1].
 
-4.  **Combine Estimates:** Sum the interior and boundary estimates to obtain the total gradient [S1].
-
-**Parameters:**
-*   $N$: Number of samples for Monte Carlo summation. Typical values depend on desired variance reduction; larger $N$ reduces noise but increases computational cost [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Biased Gradients from Naive Loss:** Minimizing the loss on an unbiased rendering estimate $\tilde{I}(\pi)$ produces biased gradients. Specifically, minimizing $\langle (\tilde{I}(\pi) - I_{ref})^2 \rangle$ minimizes the variance of the estimator, not the true error $(\langle \tilde{I}(\pi) \rangle - I_{ref})^2$ [S1]. This requires using multiple samples or specific loss formulations to ensure unbiased gradient descent [S1].
-*   **Translucency:** Opaque material assumptions fail for translucent objects; the method must account for subsurface scattering to handle shadow edge blurring correctly [S1].
+4.  **Gradient Accumulation:**
+    Sum the interior and boundary gradient estimates to obtain the total gradient $\nabla_\pi I(\pi)$.
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def estimate_gradient(scene_params, num_samples):
+def compute_gradient(scene_params, num_samples):
     """
-    Estimates the gradient of the path integral with respect to scene_params.
-    Assumes a setup with one point light, one pinhole camera, and a BSSRDF object.
+    Computes the gradient of the path integral with respect to scene_params.
     """
-    interior_grad_sum = 0.0
-    boundary_grad_sum = 0.0
+    interior_grad = 0.0
+    boundary_grad = 0.0
     
+    # Step 1: Interior term estimation via conventional path tracing
     for i in range(num_samples):
-        # 1. Sample a path using conventional path tracing
-        # Returns path vertices p0 (light), p1, p2, p3 (camera)
+        # Sample path using standard path tracing logic
+        # Returns path points p0 (light), p1, p2, p3 (camera)
         # and sample positions y1, y2
         path, y1, y2 = sample_path(scene_params)
         
-        # 2. Compute interior term: derivative of path contribution
-        # f_hat is the path contribution function
-        f_hat = compute_path_contribution(path)
-        df_hat_dpi = compute_derivative_path_contribution(path, scene_params)
+        # Evaluate path contribution
+        f_val = evaluate_path_contribution(path)
         
-        # PDFs for the samples
-        pdf_y1 = compute_pdf(y1)
-        pdf_y2 = compute_pdf(y2)
+        # Compute derivative of path contribution w.r.t params
+        # This requires automatic differentiation or analytical derivatives
+        # of the BSDF/BSSRDF and geometry terms
+        df_dpi = compute_path_contribution_gradient(path, scene_params)
         
-        # Interior gradient contribution for 3-segment path
-        # Eq. 29: sum of (df_hat / (p(y1)*p(y2)))
-        interior_grad_sum += df_hat_dpi / (pdf_y1 * pdf_y2)
+        # Get PDFs for the sample positions
+        pdf_y1 = get_pdf(y1)
+        pdf_y2 = get_pdf(y2)
         
-        # 3. Sample boundary points for secondary visibility boundary (shadow edges)
-        # Sample points on triangle edges
-        edge_point = sample_triangle_edge(scene_params)
-        
-        # Connect to light and trace back to find shadow edge intersection
-        shadow_edge_point = trace_shadow_edge(edge_point, scene_params.light, scene_params.geometry)
-        
-        # Construct path for boundary term: Light -> Shadow Edge Point -> Camera
-        # Note: The boundary term uses the path contribution f_hat, not its derivative
-        # For a 2-segment boundary path (Light p0, Surface p1, Camera p2)
-        boundary_path = [scene_params.light, shadow_edge_point, scene_params.camera]
-        boundary_f_hat = compute_path_contribution(boundary_path)
-        
-        # PDF for the single sample y1 determining the shadow edge point
-        pdf_y1_boundary = compute_pdf_for_shadow_edge_sample(edge_point)
-        
-        # Boundary gradient contribution
-        # Eq. 28: sum of (f_hat / p(y1))
-        boundary_grad_sum += boundary_f_hat / pdf_y1_boundary
-        
-    # Average over samples
-    interior_grad = interior_grad_sum / num_samples
-    boundary_grad = boundary_grad_sum / num_samples
+        # Accumulate interior gradient
+        # Note: For a 3-segment path (2 surface points), the denominator is p(y1)p(y2)
+        if pdf_y1 > 0 and pdf_y2 > 0:
+            interior_grad += df_dpi / (pdf_y1 * pdf_y2)
+            
+    interior_grad /= num_samples
+    
+    # Step 2 & 3: Boundary term estimation
+    # Primary visibility (silhouettes)
+    primary_boundary_grad = estimate_primary_boundary_gradient(scene_params, num_samples)
+    
+    # Secondary visibility (shadow edges)
+    # Sample points on triangle edges, connect to light, trace back to surface
+    secondary_boundary_grad = estimate_secondary_boundary_gradient(scene_params, num_samples)
+    
+    boundary_grad = primary_boundary_grad + secondary_boundary_grad
     
     return interior_grad + boundary_grad
+
+def estimate_secondary_boundary_gradient(scene_params, num_samples):
+    """
+    Estimates gradient from shadow edges by sampling triangle edges.
+    """
+    grad = 0.0
+    for i in range(num_samples):
+        # 1. Sample a point on a random triangle edge
+        edge_point = sample_triangle_edge(scene_params)
+        
+        # 2. Connect edge_point to the light source
+        light_ray = Ray(origin=edge_point, direction=light_position - edge_point)
+        
+        # 3. Trace ray back against the surface to find intersection
+        # The intersection point lies on the shadow edge
+        intersection = trace_ray(light_ray, scene_params)
+        
+        if intersection.hit:
+            # Evaluate the change in path contribution across the boundary
+            # and the boundary velocity
+            delta_f = compute_boundary_contribution_change(intersection, scene_params)
+            boundary_velocity = compute_boundary_velocity(intersection, scene_params)
+            
+            # Accumulate gradient contribution
+            # Specific formula depends on the exact boundary integral formulation
+            grad += delta_f * boundary_velocity
+            
+    return grad / num_samples
 ```
 
-## Subtopics
+**Parameters:**
+*   **$N$ (Number of samples):** Used in the Monte Carlo summation for unbiased estimation of integrals and derivatives [S1]. Typical values depend on the desired noise level and computational budget.
 
-### [Reparameterized Volume Sampling](3309-reparameterized-volume-sampling.md)
-Focuses on reparameterizing volume density for differentiable volume rendering, whereas this method handles surface paths with subsurface scattering.
-
-### [Boundary Path Integral Formulation](3389-boundary-path-integral-formulation.md)
-Provides the theoretical foundation for boundary terms, which this method implements via Monte Carlo estimation.
-
-### [Reparameterized Monte Carlo Volume Rendering](4798-reparameterized-monte-carlo-volume-rendering.md)
-Another approach to differentiable volume rendering, distinct from the surface-based path tracing here.
-
-### [Differential path integral estimator with MIS and NEE](6332-differential-path-integral-estimator-with-mis-and-nee.md)
-Extends this method with Multiple Importance Sampling and Next Event Estimation for improved variance.
-
-### [Reparametrized Integral Gradients](6785-reparametrized-integral-gradients.md)
-A different approach to gradient estimation, potentially avoiding explicit boundary sampling.
-
-### [Plateau-Reduced Differentiable Path Tracing](8826-plateau-reduced-differentiable-path-tracing.md)
-Addresses specific optimization difficulties (plateaus) in differentiable rendering, complementing this gradient estimator.
-
-### [Reparameterization](11557-reparameterization.md)
-The general technique underlying the method, allowing gradients to be computed through stochastic operations.
+**Edge Cases and Pitfalls:**
+*   **Biased Gradients from Naive Loss:** Minimizing the squared difference between an unbiased rendering estimate $\tilde{I}(\pi)$ and a reference $I_{ref}$ produces biased gradients. The expected value of the loss $\langle (\tilde{I}(\pi) - I_{ref})^2 \rangle$ minimizes variance, not the true error $(\langle \tilde{I}(\pi) \rangle - I_{ref})^2$ [S1]. The gradient must be computed on the true expected value, not the noisy estimate.
+*   **Discontinuity Handling:** Failure to account for boundary terms (silhouettes and shadow edges) results in incorrect gradients, especially for translucent objects where shadow edges are blurred [S1].
+*   **Precision:** Accurate computation of the boundary velocity and the change in path contribution $\Delta \hat{f}$ is critical.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear in the number of samples $N$ and the path length. Each sample requires path tracing and potentially shadow edge tracing [S1].
-*   **Memory Complexity:** Linear in the number of samples if storing all samples, or constant if processing on the fly. Path storage is proportional to path length [S1].
-*   **Strengths:** Provides unbiased gradient estimates for complex materials like BSSRDFs by explicitly handling visibility discontinuities [S1]. Robust for translucent object reconstruction [S1].
-*   **Limitations:** High variance due to the stochastic nature of Monte Carlo estimation and the complexity of sampling boundary terms. Requires careful handling of the loss function to avoid biased gradients [S1].
-*   **When to use:** When differentiable rendering of translucent objects with subsurface scattering is required, and accurate gradient estimation is critical for optimization [S1].
-*   **When not to use:** For opaque materials where simpler differentiable rendering techniques may suffice, or when computational resources are extremely limited and high variance is unacceptable [S1].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of samples, similar to conventional path tracing, but with additional overhead for boundary sampling and gradient computation.
+*   **Memory Complexity:** $O(1)$ per sample, assuming standard path tracing memory usage.
+*   **Strengths:** Provides unbiased gradients for differentiable rendering, enabling optimization of geometry and materials for translucent objects. Handles complex visibility changes (silhouettes, shadow edges) explicitly [S1].
+*   **Limitations:** High variance due to discontinuities; requires careful handling of boundary terms. Computationally expensive due to the need for both forward and backward passes (or analytical derivatives) for each sample.
+*   **When to use:** When optimizing parameters for translucent or subsurface scattering materials where visibility boundaries significantly impact the image.
+*   **When not to use:** For opaque materials with simple visibility, or when computational resources are severely limited and approximate gradients are acceptable.
 
 ## Background
-The method originates from the work on differentiable rendering for BSSRDFs, specifically in the context of reconstructing translucent objects [S1]. It was developed to address the challenges of gradient estimation in the presence of subsurface scattering, where traditional opaque material assumptions fail [S1]. The approach builds on the general framework of differentiable path tracing, extending it to handle the blurred visibility boundaries characteristic of subsurface scattering [S1].
+This method was introduced in the context of differentiable rendering for BSSRDF (Bidirectional Scattering Surface Reflectance Distribution Function) materials [S1]. It addresses the challenge of estimating gradients for translucent objects, where traditional opaque surface assumptions fail. The work builds on the reparameterization trick and extends it to handle the complex visibility boundaries inherent in subsurface scattering [S1].
 
 ## Sources
 [S1] Reconstructing Translucent Objects using Differentiable Rendering, https://doi.org/10.1145/3528233.3530714, fetched 2026-11-03

@@ -1,174 +1,92 @@
 # Improved Tetrahedral Mesh Generation for Voxelization
-
 Also called: Robust Tetrahedral Voxelization, Tetrahedral Mesh Voxelization
 
 ## Overview
-This method is a robust voxelization framework that takes a triangular mesh as input and produces solid binary voxel data by generating a high-quality tetrahedral mesh within a user-defined error bound [S1, unofficial]. It specifically addresses the failure of existing methods to handle low-quality, non-watertight, or topologically open meshes, which constitute a large portion of internet 3D models [S1, unofficial]. Unlike state-of-the-art methods that connect every triangle facet to the model centroid (producing faulty meshes for high-face models) or standard Delaunay triangulation/grid insertion (which suffer from boundary quality issues and high cost for sparse models), this approach combines background grid insertion with mesh improvement processing to maintain quality and speed [S1, unofficial]. It achieves near 100% availability (success rate) on testing datasets like Princeton ModelNet and Thingi10k, whereas other methods achieve around 50% [S1, unofficial].
+This method is a robust voxelization framework that converts a triangular mesh into solid binary voxel data by generating a high-quality intermediate tetrahedral mesh [S1, unofficial]. It specifically addresses the failure of existing methods to handle low-quality, non-watertight, or topologically open meshes common in internet datasets [S1, unofficial]. Unlike state-of-the-art approaches that connect triangle facets to a model centroid (producing faulty meshes for high-face models) or standard Delaunay triangulation (which suffers from boundary quality issues and high cost for sparse models), this method uses background grid insertion combined with mesh improvement to maintain quality and speed [S1, unofficial]. It achieves near 100% success rate on testing datasets compared to ~50% for other methods [S1, unofficial].
 
 ## How it works
-The method generates a tetrahedral mesh that serves as an intermediate structure for voxelization. The process ensures that the resulting volume is a faithful discrete representation of the mesh's interior, adhering to the shared principles of [Mesh Topology and Robust Digitization](8496-mesh-topology-and-robust-digitization.md).
+**Inputs:**
+1.  A triangular mesh $M$.
+2.  A user-defined error tolerance parameter $\epsilon$.
 
-### Inputs and Outputs
-*   **Input:** A triangular mesh $M$ and a user-defined error tolerance parameter $\epsilon$.
-*   **Output:** A solid binary voxel representation (UniformGrid or RectilinearGrid) derived from the tetrahedral mesh.
+**Outputs:**
+1.  A valid tetrahedral mesh $T$ covering the volume of $M$.
+2.  Solid binary voxel data derived from $T$.
 
-### Data Structures
-1.  **Triangular Mesh:** Defined by vertices $V$ and triangular faces $F_{tri}$.
-2.  **Background Grid:** A structured grid aligned with the bounding box of the input mesh, serving as the base topology for insertion.
-3.  **Tetrahedral Mesh:** Defined by vertices $V'$ and tetrahedral cells $T$. The vertices $V'$ include original mesh vertices and grid intersection points.
+**Data Structures:**
+*   **Triangular Mesh $M$**: Defined by vertices $V$ and triangular faces $F_{tri}$.
+*   **Tetrahedral Mesh $T$**: Defined by vertices $V_T$ and tetrahedral cells. Each cell is defined by 4 vertices.
+*   **Background Grid**: A structured grid aligned with the bounding box of the input mesh, used as the base for insertion.
 
-### Parameters
-*   $\epsilon$ (epsilon): The user-defined tolerance for errors in the tetrahedral mesh generation. It controls the zigzag artifact on straight lines.
-    *   **Typical values:** $2 \times 10^{-3}$, $5 \times 10^{-3}$, and $1 \times 10^{-2}$ [S1, unofficial].
-    *   **Note:** Errors up to $\epsilon = 10^{-2}$ (10x the default) do not produce major differences in the final voxelized output [S1, unofficial].
+**Parameters:**
+*   $\epsilon$ (epsilon): User-defined tolerance for errors in tetrahedral mesh generation. It controls the magnitude of zigzag artifacts on straight lines. Typical tested values are $2 \times 10^{-3}$, $5 \times 10^{-3}$, and $1 \times 10^{-2}$ [S1, unofficial]. Errors up to $\epsilon = 10^{-2}$ (10x default) do not produce major differences in the final voxelized output [S1, unofficial].
 
-### Steps
-1.  **Input Validation:** Accept the triangular mesh $M$ and tolerance $\epsilon$.
-2.  **Mesh Improvement (Pre-insertion):** Perform mesh improvement processing on the input triangular mesh $M$ to enhance quality before insertion. [S1, unofficial]
-3.  **Background Mesh Insertion:** Insert the improved mesh into a background grid. This involves creating a background mesh (grid) aligned with the model's bounding box and inserting the mesh geometry into this grid structure. [S1, unofficial]
-4.  **Mesh Improvement (Post-insertion):** Perform mesh improvement processing on the resulting tetrahedral mesh to ensure validity and quality. [S1, unofficial]
-5.  **Voxelization:** Rasterize the generated tetrahedral mesh to produce the final binary voxel data. This step assumes a valid tetrahedral mesh, which the previous steps guarantee. [S1, unofficial]
+**Algorithm Steps:**
+1.  **Input Validation/Preprocessing**: Accept the triangular mesh $M$.
+2.  **Initial Mesh Improvement**: Perform mesh improvement processing on the input triangular mesh $M$ to enhance quality [S1, unofficial].
+3.  **Background Mesh Insertion**: Insert the improved triangular mesh into a background grid (background mesh insertion) [S1, unofficial]. This creates an initial tetrahedral mesh structure.
+4.  **Post-Insertion Mesh Improvement**: Perform mesh improvement processing on the resulting tetrahedral mesh to refine element quality and satisfy the error bound $\epsilon$ [S1, unofficial].
+5.  **Voxelization**: Rasterize the final tetrahedral mesh to produce solid binary voxel data. This step relies on the stronger assumption of mesh validity provided by the improved tetrahedral generation [S1, unofficial].
 
-### Pseudocode
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def improved_tetrahedral_voxelization(mesh, epsilon):
+def improved_tetrahedral_voxelization(triangular_mesh, epsilon):
     """
-    Robust voxelization using improved tetrahedral mesh generation.
+    Robust voxelization via improved tetrahedral mesh generation.
     
     Args:
-        mesh: Triangular mesh object with vertices and faces.
-        epsilon: User-defined error tolerance for mesh generation.
+        triangular_mesh: Input triangular mesh (vertices and faces).
+        epsilon: Error tolerance parameter controlling zigzag artifacts.
         
     Returns:
-        voxel_grid: Binary voxel representation of the mesh interior.
+        voxel_data: Solid binary voxel representation.
     """
-    # Step 1: Pre-insertion mesh improvement
+    # Step 1: Initial Mesh Improvement
     # Enhance the quality of the input triangular mesh to handle low-quality inputs.
-    improved_mesh = mesh_improvement(mesh)
+    improved_tri_mesh = mesh_improvement(triangular_mesh)
     
-    # Step 2: Background mesh insertion
-    # Create a background grid aligned with the bounding box and insert the mesh.
-    # This creates an initial tetrahedral mesh structure.
-    tet_mesh = background_insertion(improved_mesh)
+    # Step 2: Background Mesh Insertion
+    # Insert the improved triangular mesh into a background grid structure.
+    # This creates an initial tetrahedral mesh covering the bounding volume.
+    initial_tet_mesh = background_insertion(improved_tri_mesh)
     
-    # Step 3: Post-insertion mesh improvement
-    # Refine the tetrahedral mesh to ensure validity and reduce artifacts.
-    # The parameter epsilon controls the error bound and zigzag artifacts.
-    final_tet_mesh = tetrahedral_mesh_improvement(tet_mesh, epsilon)
+    # Step 3: Post-Insertion Mesh Improvement
+    # Refine the tetrahedral mesh to ensure quality and satisfy the error bound epsilon.
+    # This step is critical for handling non-watertight or open meshes.
+    final_tet_mesh = tet_mesh_improvement(initial_tet_mesh, epsilon)
     
     # Step 4: Voxelization
-    # Rasterize the valid tetrahedral mesh to produce binary voxel data.
-    voxel_grid = tetrahedral_rasterization(final_tet_mesh)
+    # Rasterize the final tetrahedral mesh to generate solid binary voxels.
+    # The improved mesh quality allows for a faster, more robust voxelization algorithm.
+    voxel_data = tet_mesh_to_voxels(final_tet_mesh)
     
-    return voxel_grid
-
-def mesh_improvement(mesh):
-    """
-    [G] Placeholder for mesh improvement algorithm.
-    Standard techniques include Laplacian smoothing, edge flipping, or 
-    vertex relocation to improve aspect ratios and remove slivers.
-    The specific algorithm is not detailed in the source, but it is 
-    a required preprocessing step.
-    """
-    # Implementation depends on specific mesh processing library or algorithm.
-    # Common operations:
-    # 1. Remove duplicate vertices.
-    # 2. Fix non-manifold edges.
-    # 3. Smooth vertices to improve element quality.
-    return mesh
-
-def background_insertion(mesh):
-    """
-    [G] Placeholder for background grid insertion.
-    1. Define a bounding box for the mesh.
-    2. Create a structured grid (cubes or tetrahedra) within the bounding box.
-    3. Intersect the mesh geometry with the grid cells.
-    4. Generate tetrahedra based on the intersection topology.
-    """
-    # Implementation details for grid insertion are not fully specified in the source.
-    # It involves splitting grid cells where the mesh passes through.
-    return tet_mesh
-
-def tetrahedral_mesh_improvement(tet_mesh, epsilon):
-    """
-    Refine the tetrahedral mesh.
-    
-    Args:
-        tet_mesh: Initial tetrahedral mesh from insertion.
-        epsilon: Error tolerance.
-        
-    Returns:
-        Refined tetrahedral mesh.
-    """
-    # [G] Placeholder for mesh improvement algorithm.
-    # This step likely involves:
-    # 1. Checking for invalid tetrahedra (negative volume).
-    # 2. Smoothing vertices to reduce distortion.
-    # 3. Ensuring the error bound epsilon is respected.
-    # The source notes that epsilon controls zigzag artifacts on straight lines.
-    return refined_tet_mesh
-
-def tetrahedral_rasterization(tet_mesh):
-    """
-    Convert tetrahedral mesh to binary voxel grid.
-    
-    Args:
-        tet_mesh: Valid tetrahedral mesh.
-        
-    Returns:
-        voxel_grid: Binary grid where 1 indicates interior, 0 indicates exterior.
-    """
-    # [G] Standard rasterization technique.
-    # For each voxel, determine if its center (or a sample point) is inside
-    # the tetrahedral mesh. This can be done using ray casting or winding numbers.
-    # Since the mesh is valid and watertight (guaranteed by improvement),
-    # a simple point-in-polyhedron test suffices.
-    voxel_grid = create_empty_grid(tet_mesh.bounding_box)
-    for voxel in voxel_grid:
-        if point_in_tet_mesh(voxel.center, tet_mesh):
-            voxel.value = 1
-        else:
-            voxel.value = 0
-    return voxel_grid
+    return voxel_data
 ```
 
-### Edge Cases and Pitfalls
-*   **Zigzag Artifacts:** Setting $\epsilon$ too large causes zigzag artifacts on straight lines [S1, unofficial]. However, errors up to $\epsilon=10^{-2}$ do not produce major differences in the final voxelized output [S1, unofficial].
-*   **Low-Quality Input Meshes:** The method is designed to handle low-quality, non-watertight, or topologically open meshes, which cause other methods to fail [S1, unofficial].
-*   **High-Face Models:** Standard centroid-connection methods produce faulty meshes for high-face models; this method avoids this by using background insertion and improvement [S1, unofficial].
-*   **Sparse Models:** Standard Delaunay triangulation or grid insertion can be computationally expensive for sparse models; this method combines background insertion with mesh improvement to maintain speed [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Zigzag Artifacts**: Setting $\epsilon$ too large causes visible zigzag artifacts on straight lines [S1, unofficial]. However, the impact on the final voxel output is minimal even at $\epsilon = 10^{-2}$ [S1, unofficial].
+*   **Low-Quality Input**: The method is designed to handle meshes that cause other methods to fail, including non-watertight or topologically open meshes [S1, unofficial].
+*   **Sparse Models**: Standard grid insertion is computationally expensive for sparse models; this method mitigates this by combining insertion with improvement [S1, unofficial].
 
 ## Subtopics
 
 ### Tetrahedral Mesh from Voxel Division
 A method to convert a coarse voxel representation into a tetrahedral mesh by splitting each hexahedron (voxel) into 6 tetrahedra to ensure face-to-face consistency [S2, unofficial].
-*   **Definition:** A tetrahedron is a pyramid-like polyhedron with four vertices and four triangular faces. A hexahedron has eight vertices and six quadrilateral faces [S2, unofficial].
-*   **Steps:**
-    1.  Convert the generated binary voxel tensor into a tetrahedral mesh template [S2, unofficial].
-    2.  Represent the voxel-based shape as a hexahedral mesh $H = (V, F_{quad}) = (\cup_{c} \{v_{c,i}\}_{i=1}^{8}, \cup_{c} \{f_{c,j}\}_{j=1}^{6})$, where $V$ is the vertex set, $F_{quad}$ is the quadrilateral face set, $v_{c,i}$ is the $i$-th vertex of the $c$-th cube, and $f_{c,j}$ is the $j$-th quadrilateral face of the $c$-th cube [S2, unofficial].
-    3.  Extract the tetrahedral mesh $T = (V, F_{tri}) = (\cup_{c} \cup_{k=1}^{6} \{v_{c,k,i}\}_{i=1}^{4}, \cup_{c} \cup_{k=1}^{6} \{f_{c,k,j}\}_{j=1}^{4})$, where $V$ is the same vertex set as $H$, $F_{tri}$ is the triangular face set, $v_{c,k,i}$ is the $i$-th vertex of the $k$-th tetrahedron in the $c$-th cube, and $f_{c,k,j}$ is the $j$-th triangular face of the $k$-th tetrahedron in the $c$-th cube [S2, unofficial].
-*   **Parameters:** Number of tetrahedra per cube: 6 [S2, unofficial].
-*   **When to choose:** Use this variant when you already have a coarse voxel representation and need a consistent tetrahedral mesh for further processing (e.g., in Neural Volumetric Mesh Generator), rather than generating the tetrahedral mesh directly from a triangular mesh [S2, unofficial].
+*   **Definition**: A tetrahedron is a pyramid-like polyhedron with four vertices and four triangular faces. A hexahedron has eight vertices and six quadrilateral faces [S2, unofficial].
+*   **Process**: The voxel-based shape is represented as a hexahedral mesh $H = (V, F_{quad}) = (\cup_c \{v_{c,i}\}_{i=1}^8, \cup_c \{f_{c,j}\}_{j=1}^6)$, where $V$ is the vertex set, $F_{quad}$ is the quadrilateral face set, $v_{c,i}$ is the $i$-th vertex of the $c$-th cube, and $f_{c,j}$ is the $j$-th quadrilateral face of the $c$-th cube [S2, unofficial]. This is then split into a tetrahedral mesh $T = (V, F_{tri}) = (\cup_c \cup_{k=1}^6 \{v_{c,k,i}\}_{i=1}^4, \cup_c \cup_{k=1}^6 \{f_{c,k,j}\}_{j=1}^4)$, where $V$ is the same vertex set, $F_{tri}$ is the triangular face set, $v_{c,k,i}$ is the $i$-th vertex of the $k$-th tetrahedron in the $c$-th cube, and $f_{c,k,j}$ is the $j$-th triangular face of the $k$-th tetrahedron in the $c$-th cube [S2, unofficial].
+*   **Parameter**: Number of tetrahedra per cube is 6 [S2, unofficial].
 
 ## Operating characteristics
-*   **Time and Memory Complexity:** Not given in the sources. However, the method is described as maintaining process speed compared to standard Delaunay triangulation, which can be expensive for sparse models [S1, unofficial].
-*   **Measured Performance:** Achieved near 100% availability (success rate) on testing datasets (Princeton ModelNet and Thingi10k), whereas other methods achieved around 50% [S1, unofficial].
-*   **Strengths:**
-    *   Robustness to low-quality, non-watertight, or topologically open meshes [S1, unofficial].
-    *   Higher quality tetrahedral meshes as intermediate outcome compared to state-of-the-art centroid-connection methods [S1, unofficial].
-    *   Suitable for data augmentation for 3D CNNs due to tolerance for slight errors [S1, unofficial].
-*   **Limitations:**
-    *   Requires user-defined parameter $\epsilon$, which affects artifact levels [S1, unofficial].
-    *   The specific computational cost is not quantified, but it is implied to be more efficient than standard Delaunay for sparse models [S1, unofficial].
-*   **When to use:** When input meshes are low-quality or non-watertight, and a robust, high-success-rate voxelization is required.
-*   **When not to use:** When the input mesh is already high-quality and watertight, and simpler methods (like standard ray casting) might suffice, though this method would still work.
+*   **Success Rate**: Achieved near 100% availability (success rate) on testing datasets (Princeton ModelNet and Thingi10k), whereas other methods achieved around 50% [S1, unofficial].
+*   **Performance**: Produces much higher quality tetrahedral meshes as an intermediate outcome, allowing for a faster voxelization algorithm based on stronger assumptions [S1, unofficial].
+*   **Scalability**: Combines background insertion with mesh improvement to maintain process speed, addressing the computational expense of standard grid insertion for sparse models [S1, unofficial].
+*   **Strengths**: Robustness to low-quality, non-watertight, or topologically open meshes; high success rate; ability to use $\epsilon$ as a data augmentation technique for 3D CNNs [S1, unofficial].
+*   **Limitations**: Requires careful selection of $\epsilon$ to balance zigzag artifacts and accuracy, though the method is tolerant up to $\epsilon = 10^{-2}$ [S1, unofficial].
 
 ## Background
-*   **Origin:** The method was presented in a paper by researchers from National Taiwan University [S1, unofficial].
-*   **History:** The work is inspired by previous works [32, 33] (not cited in the provided sources, but referenced in the text) which used background mesh insertion with mesh improvement processing [S1, unofficial].
-*   **Usage:** It is used for obtaining interior 3D voxel data from triangular meshes, particularly for applications requiring binary voxel representation, such as 3D graphics, simulations, and 3D CNN data augmentation [S1, unofficial].
+The method was proposed by researchers from National Taiwan University [S1, unofficial]. It is based on the work of [32] and [33] (cited in the source), which involve background mesh insertion with mesh improvement processing [S1, unofficial]. The framework was tested on various datasets including Princeton ModelNet and Thingi10k [S1, unofficial]. The work includes a proof that the algorithm performs better than the state-of-the-art method [1] (which connects every triangle facet to the model centroid) [S1, unofficial].
 
 ## Sources
 [S1] Robust Voxelization and Visualization by Improved Tetrahedral Mesh Generation, https://doi.org/10.48550/arxiv.2106.01326, fetched 2026-10-26 (unofficial)

@@ -28,12 +28,9 @@ Procedural Terrain Heightmap Generation creates voxel terrain chunks by sampling
    $$ wz = cz \times D + z $$
    [S1, S2, unofficial].
 4. **Sample Noise for Height:**
-   - **Method A (Noise Function):** Sample the 2D noise function at $(wx, wz)$ scaled by frequency. Apply fractal Brownian motion (FBM) if required. Scale the result and offset it to fit the desired height range [S1, S2, unofficial].
-     $$ h = \lfloor \text{fbm}(wx / S, wz / S) \times M \rfloor + O $$
-     Where $S$ is the scale divisor (e.g., 80), $M$ is the multiplier (e.g., 60), and $O$ is the offset (e.g., 60) [S1, unofficial].
-     Alternatively, using a normalized noise output $n \in [-1, 1]$:
-     $$ h = \lfloor (n \times \text{scale}) + \text{bias} \rfloor $$
-     Where `scale` and `bias` are tuned to fit the chunk's vertical bounds [S2, unofficial].
+   - **Method A (Noise Function):** Sample the 2D noise function at $(wx, wz)$ scaled by frequency [S1, S2, unofficial]. Apply fractal Brownian motion (FBM) if required [S1, unofficial]. Scale the result and offset it to fit the desired height range [S1, S2, unofficial].
+     $$ h = \lfloor \text{fbm}(wx / 80, wz / 80) \times 60 \rfloor + 60 $$
+     Where 80 is the scale divisor, 60 is the multiplier, and 60 is the offset [S1, unofficial]. Alternatively, using a normalized noise output $n \in [-1, 1]$, scale by 4 and add 5, then cast to int [S2, unofficial].
    - **Method B (Image Sampling):** If using image-based generation, calculate pixel indices from $(x, z)$ relative to the image grid size, extract the grayscale value, and map it to a height scale [S3, unofficial].
 5. **Fill Voxel Column:**
    - For $y$ from 0 to $h$:
@@ -43,8 +40,7 @@ Procedural Terrain Heightmap Generation creates voxel terrain chunks by sampling
    - For $y$ from $h + 1$ to $H_{water}$ (e.g., 70):
      - Set `block_data[x][y][z]` to 4 (water) [S1, unofficial].
    - For $y > H_{water}$: Leave as 0 (air) [S1, unofficial].
-6. **Edge Cases:**
-   - If using image sampling, handle CORS restrictions by falling back to mathematical terrain generation (e.g., using `Math.sin` and `Math.cos`) [S3, unofficial].
+6. **Edge Cases:** If using image sampling, handle CORS restrictions by falling back to mathematical terrain generation (e.g., using `Math.sin` and `Math.cos`) [S3, unofficial]. Clamp computed height to chunk vertical bounds to prevent out-of-bounds writes [G].
 
 **Pseudocode:**
 
@@ -54,11 +50,11 @@ Procedural Terrain Heightmap Generation creates voxel terrain chunks by sampling
 import math
 
 def noise_2d(x, y):
-    """Simple pseudo-random 2D noise using sine waves."""
-    return math.sin(x * 12.9898 + y * 78.233) * 43758.5453 % 1.0
+    """Simple pseudo-random 2D noise returning values in [-1, 1]."""
+    return (math.sin(x * 12.9898 + y * 78.233) * 43758.5453 % 1.0) * 2.0 - 1.0
 
 def fbm(x, y, octaves=3, persistence=0.5, lacunarity=2.0):
-    """Simple 3-octave fractal Brownian motion."""
+    """Simple 3-octave fractal Brownian motion returning values in [-1, 1]."""
     value = 0.0
     amplitude = 1.0
     frequency = 1.0
@@ -80,12 +76,10 @@ def generate_chunk(cx, cz, chunk_width, chunk_height, chunk_depth, water_level=7
             wz = cz * chunk_depth + z
             
             # Sample noise to get height
-            # fbm returns a value typically in [-1, 1] or similar range
-            # Adjust scaling factors (80, 60, 60) based on desired terrain scale and amplitude
             noise_val = fbm(wx / 80.0, wz / 80.0)
-            h = int(noise_val * 60) + 60
+            h = int(math.floor(noise_val * 60)) + 60
             
-            # Clamp height to chunk bounds if necessary
+            # Clamp height to chunk bounds to prevent out-of-bounds writes [G]
             h = max(0, min(h, chunk_height - 1))
             
             # Fill the column
@@ -114,7 +108,7 @@ def generate_chunk(cx, cz, chunk_width, chunk_height, chunk_depth, water_level=7
 ## Subtopics
 
 ### [Terrain Generation via Noise](2412-terrain-generation-via-noise.md)
-Terrain Generation via Noise generates a 3D voxel volume from a 2D noise heightmap, extruding terrain-like structures into voxel space. It solves the problem of creating deterministic, pseudo-random terrain geometry by leveraging the property that a fixed input yields the same output, allowing terrain data to be preserved across frames without change [G]. It sets itself apart from [Procedural Terrain Feature Generation](2572-procedural-terrain-feature-generation.md) by focusing on continuous height variation rather than discrete feature placement, and from [Heightmap generation via circular displacements](5186-heightmap-generation-via-circular-displacements.md) by using gradient-based noise functions rather than radial displacement patterns [G].
+Terrain Generation via Noise generates a 3D voxel volume from a 2D noise heightmap, extruding terrain-like structures into voxel space. It solves the problem of creating deterministic, pseudo-random terrain geometry by leveraging the property that a fixed input yields the same output, allowing terrain data to be preserved across frames without change. It sets itself apart from [Procedural Terrain Feature Generation](2572-procedural-terrain-feature-generation.md) by focusing on continuous height variation rather than discrete feature placement, and from [Heightmap generation via circular displacements](5186-heightmap-generation-via-circular-displacements.md) by using gradient-based noise functions rather than radial displacement patterns [G].
 
 ### [Procedural Terrain Feature Generation](2572-procedural-terrain-feature-generation.md)
 Procedural Terrain Feature Generation is a method for creating specific volumetric structures, primarily cliffs and overhangs, by approximating their topology as a bicubic Bézier surface combined with a parabolic plateau function. It produces local delta values (additive blending) applied directly to volumetric data, allowing for nondestructive editing where parameters can be adjusted and transformations applied before surface extraction. It differs from general noise-based terrain generation by focusing on explicit geometric primitives for sharp features rather than stochastic displacement.
@@ -134,8 +128,8 @@ Generates a terrain grid with smoothed heights using interpolation between rando
 ## Operating characteristics
 - **Time Complexity:** $O(W \times H \times D)$ per chunk, where $W, H, D$ are chunk dimensions [G]. The noise sampling is $O(1)$ per column, and filling the column is $O(H)$ [G].
 - **Memory Complexity:** $O(W \times H \times D)$ to store the voxel data [G].
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Performance scales linearly with chunk size. Larger chunks require more memory and computation but reduce overhead from chunk management [G].
+- **Measured Performance:** Not given in the sources [G].
+- **Scaling:** Performance scales linearly with chunk size [G]. Larger chunks require more memory and computation but reduce overhead from chunk management [G].
 - **Strengths:** Deterministic output, simple implementation, efficient for generating large, continuous terrains [G].
 - **Limitations:** Limited to heightmap-based terrain, may not support complex overhangs or caves without additional layers (e.g., [Procedural Cave Generation](2579-procedural-cave-generation.md)) [G].
 - **When to Use:** Ideal for open-world games or simulations requiring vast, consistent landscapes [G].

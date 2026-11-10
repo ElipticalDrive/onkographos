@@ -3,182 +3,223 @@
 Also called: Basic SVO in rust, Octree Representation, Sparse Voxel Octree (SVO) - Basic Implementation, Sparse Voxel Octrees, Voxel Octrees, pointer-based sparse octree
 
 ## Overview
-Sparse Voxel Octree (SVO) is a hierarchical data structure for representing 3D geometry as a sparse set of voxels, enabling fast raytracing and real-time rendering of complex scenes [S4][S3, unofficial]. Unlike dense grids or naive octrees, it achieves tight compression of sparsely populated spaces by storing only nodes containing geometry, using pointers to establish relationships between parent and child nodes [S4, S2]. It sets itself apart from its siblings by unifying coarse geometry and fine detail through a pointer-based layout that supports efficient traversal, making it suitable for static geometry rendering where construction speed is secondary to rendering performance [S4].
+A Sparse Voxel Octree (SVO) is a hierarchical data structure that represents the geometry of a 3D voxelized scene by recursively decomposing space only where active voxels exist, effectively eliminating empty regions [S1, S2][S6, unofficial]. It solves the memory inefficiency of dense grids by storing only the necessary nodes, enabling efficient ray-traced rendering and Level-of-Detail (LoD) management [S2][S3, unofficial][S4]. Unlike flat grid structures, it provides tight compression of sparse spaces, and unlike KD-trees, it offers uniform subdivision at every level, ensuring smoothly-degrading LoD and consistent processing cost bounds [S2]. It differs from its sibling [Sparse Voxel Octree with Bricks](2354-sparse-voxel-octree-with-bricks.md) by focusing on a compact, pointer-based node structure optimized for direct shader traversal rather than grouped bricks for cache locality [S5, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scene defined on a grid of dimensions $N^3$, where $N = 2^m$ and $m \ge 1$ [S2]. Each voxel has a geometry attribute (active or passive) [S2].
-*   **Output:** An SVO data structure consisting of a root node and a hierarchy of internal nodes (INODEs) and leaf nodes (LNODEs) [S2].
+*   **Input:** A 3D scene defined on a grid of dimensions $N^3$, where $N = 2^m$ for some integer $m \ge 1$ [S2]. Each voxel has a geometry attribute (active/passive).
+*   **Output:** A tree structure where internal nodes (INODEs) contain pointers to child nodes and a child mask, and leaf nodes (LNODEs) store voxel data or status [S2][S3, unofficial].
 
 **Data Structures:**
-The SVO is defined by the following Backus-Naur Form (BNF) [S1, S2]:
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+The SVO consists of nodes organized into $m$ layers, indexed from $0$ (root) to $m-1$ (leaves) [S2].
 
-```
-SVO ::= (n)<NODE>
-NODE ::= <INODE>|<LNODE>
-INODE ::= <CHNM>(p)<BIT><PTS>
-LNODE ::= <CHNM>(q)<BIT>
-CHNM ::= (8)<HT>
-PTS ::= (1)*(8)<PT>
-PT ::= (r)<BIT>
-HT ::= <BIT>
-BIT ::= "0" | "1"
-```
-*   **CHNM (Child Node Mask):** An 8-bit vector composed of eight 1-bit Header Tags (HTs). Each HT corresponds to one of the eight child octants. If the child octant is passive (all voxels have geometry attribute 0), the HT is 0. If active (at least one voxel has geometry attribute 1), the HT is 1 [S2].
-*   **PTS (Pointer Table Set):** An array of pointers to child nodes. The number of pointers $n$ is variable, ranging from 1 to 8, corresponding to the number of active children [S2].
-*   **PT (Pointer):** A pointer to a child node, encoded in $r$ bits [S2].
-*   **Parameters:**
-    *   $p$: Reserved bits for INODE alignment. Typical value: 24 [S2].
-    *   $q$: Reserved bits for LNODE alignment. Typical value: 24 [S2].
-    *   $r$: Bits to encode a pointer. Typical value: 32 [S2].
+1.  **Node Types:**
+    *   **Branch (Internal Node):** Contains an array of 8 child pointers and a Child Node Mask (CHNM).
+    *   **Leaf:** Contains voxel data (e.g., an index or color) or is empty [S3, unofficial].
+
+2.  **Binary Layout (Pointer-based SVO):**
+    The structure is defined by the following Backus-Naur Form (BNF) [S1, S2]:
+    ```
+    SVO ::= (n)<NODE>
+    NODE ::= <INODE>|<LNODE>
+    INODE ::= <CHNM>(p)<BIT><PTS>
+    LNODE ::= <CHNM>(q)<BIT>
+    CHNM ::= (8)<HT>
+    PTS ::= (1)*(8)<PT>
+    PT ::= (r)<BIT>
+    HT ::= <BIT>
+    BIT ::= "0" | "1"
+    ```
+    *   **CHNM (Child Node Mask):** An 8-bit vector where each bit is a Header Tag (HT). HT=1 indicates the corresponding child octant is active; HT=0 indicates it is passive [S2].
+    *   **PTS (Pointer Table Storage):** A variable-length array of pointers (PTs) to existing child nodes. The number of pointers $n$ ranges from 1 to 8, corresponding to the number of active children [S2].
+    *   **Parameters:**
+        *   $p$: Reserved bits for INODE alignment (Typical: 24) [S2].
+        *   $q$: Reserved bits for LNODE alignment (Typical: 24) [S2].
+        *   $r$: Bits per pointer (Typical: 32) [S2].
 
 **Algorithm Steps:**
-1.  **Initialization:** Create a root node. The scene dimensions must be $N^3$ where $N=2^m$ [S2].
-2.  **Decomposition:** Recursively decompose the grid associated with a node into eight child octants. For the root, child octants have $(N/2)^3$ dimensions [S2].
-3.  **Classification:** For each child octant, determine if it is passive or active [S2].
-4.  **HT Assignment:** Assign a 1-bit HT with value 0 for passive octants and 1 for active octants in the parent's CHNM [S2].
-5.  **Ordering:** Order child octants and HTs in Morton order [S2].
-6.  **Recursive Decomposition:** For each active child octant, create a separate child node stored in the next layer (ordinal number incremented by 1) and recursively apply decomposition [S2].
-7.  **Termination:** Stop recursion at layer $m-1$ (leaf nodes/LNODEs), which correspond to octants of $2 \times 2 \times 2$ voxels [S2]. Potential child nodes representing single voxels ($1 \times 1 \times 1$) are not created; their status is recorded directly in the HT of the parent LNODE [S2].
-8.  **Pointer Concatenation:** For INODEs, concatenate the binary representation of the array of pointers (PTS) after the CHNM [S2].
 
-**Pseudocode:**
-The following Python-like pseudocode implements the tree structure and traversal, based on [S3, unofficial]. It assumes a naive implementation where nodes are explicitly stored in memory, rather than the compact binary layout described in [S2].
+1.  **Initialization:**
+    Create a root node. If implementing a full pre-allocated tree (as in some basic Rust implementations), recursively create nodes down to depth 0 [S3, unofficial]. However, for a true sparse representation, the root is created, and children are allocated only when needed [S2, S4].
+
+2.  **Voxelization (Pre-processing):**
+    Convert the input geometry (e.g., triangle mesh) into a list of active voxels within the $N^3$ grid [S1, S4]. This can be done via rasterization or ray-casting [S4].
+
+3.  **Tree Construction (Bottom-Up or Top-Down):**
+    *   **Decomposition:** Divide the current volume into 8 child octants.
+    *   **Classification:** Determine if each child octant is **passive** (all voxels are empty/geometry attribute 0) or **active** (at least one voxel is active/geometry attribute 1) [S2].
+    *   **Masking:** Set the corresponding bit in the CHNM to 1 for active children and 0 for passive children [S2].
+    *   **Recursion:**
+        *   If a child is **passive**, do not create a child node. The HT remains 0.
+        *   If a child is **active**, recursively apply decomposition to that child octant. Create a new child node and store its pointer in the PTS array [S2].
+    *   **Termination:** Recursion stops at layer $m-1$. Leaf nodes (LNODEs) represent $2 \times 2 \times 2$ voxel volumes. Note: $1 \times 1 \times 1$ voxels are not represented by further child nodes; their status is recorded directly in the HT of the parent LNODE [S2].
+
+4.  **Traversal (Lookup):**
+    To find a voxel at coordinates $(x, y, z)$:
+    *   Start at the root.
+    *   Calculate the child index using Morton order (or standard bit-interleaving):
+        $$ index = ((x \ge size) \ll 0) | ((y \ge size) \ll 1) | ((z \ge size) \ll 2) $$
+        where `size` is the current node's spatial extent (initially $N/2$) [S3, unofficial].
+    *   Check the CHNM bit at `index`.
+    *   If the bit is 0, the voxel is passive (empty).
+    *   If the bit is 1, follow the corresponding pointer in the PTS array to the child node.
+    *   Update coordinates: $x \%= size$, $y \%= size$, $z \%= size$.
+    *   Update size: $size /= 2$.
+    *   Repeat until a leaf node is reached [S3, unofficial].
+
+**Pseudocode (Python-like):**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 class Voxel:
-    def __init__(self, index=0):
-        self.index = index
+    def __init__(self, data=None):
+        self.data = data
+
+class SVO:
+    def __init__(self, max_depth):
+        self.max_depth = max_depth
+        # Root node created as a Branch if depth > 0, or Leaf if depth == 0
+        # In a sparse implementation, root might be None initially or a special root
+        self.root = Node(max_depth)
+
+    def insert(self, x, y, z, voxel_data):
+        """Insert a voxel into the SVO."""
+        # Ensure coordinates are within bounds
+        if not (0 <= x < 2**self.max_depth and 
+                0 <= y < 2**self.max_depth and 
+                0 <= z < 2**self.max_depth):
+            raise ValueError("Coordinates out of bounds")
+        
+        self.root.insert(x, y, z, voxel_data, 2**(self.max_depth - 1), self.max_depth)
+
+    def get(self, x, y, z):
+        """Retrieve a voxel from the SVO."""
+        if not (0 <= x < 2**self.max_depth and 
+                0 <= y < 2**self.max_depth and 
+                0 <= z < 2**self.max_depth):
+            return None
+        
+        return self.root.get(x, y, z, 2**(self.max_depth - 1))
 
 class Node:
     def __init__(self, depth):
+        self.depth = depth
+        self.children = [None] * 8  # Pointers to child nodes
+        self.chmn = 0  # Child Node Mask (8 bits)
+
+    def _get_child_index(self, x, y, z, size):
+        """Calculate Morton-like child index."""
+        return ((x >= size) << 0) | ((y >= size) << 1) | ((z >= size) << 2)
+
+    def insert(self, x, y, z, voxel_data, size, depth):
         if depth == 0:
-            self.is_leaf = True
-            self.voxel = Voxel()
-            self.children = None
-        else:
-            self.is_leaf = False
-            self.voxel = None
-            # Initialize 8 children
+            # Leaf node: store data
+            # In a sparse tree, we might replace an existing leaf or create one
+            # Here we assume we are creating the leaf structure
+            self.chmn = 0xFF # All 8 bits active for the 2x2x2 block? 
+            # Note: The BNF suggests LNODEs store data. 
+            # For a single voxel insertion into a sparse tree, 
+            # we typically split leaves.
+            pass 
+        
+        # If this node is currently a leaf (all children None), we must split it
+        if all(c is None for c in self.children):
+            # Convert Leaf to Branch
+            # Create 8 new child nodes
             self.children = [Node(depth - 1) for _ in range(8)]
+            # If there was existing data, it needs to be distributed or overwritten
+            # For simplicity, we assume insertion into an empty or partially filled tree
+        
+        idx = self._get_child_index(x, y, z, size)
+        
+        # If child doesn't exist, create it
+        if self.children[idx] is None:
+            self.children[idx] = Node(depth - 1)
+            # Set the bit in CHMN
+            self.chmn |= (1 << idx)
+        
+        # Recurse
+        new_size = size // 2
+        self.children[idx].insert(x % size, y % size, z % size, voxel_data, new_size, depth - 1)
 
     def get(self, x, y, z, size):
-        """Iterative lookup."""
-        current = self
-        while not current.is_leaf:
-            # Calculate child index based on Morton order
-            # x, y, z are coordinates relative to current node's origin
-            # size is the side length of the current node's volume
-            index = ((x >= size) << 0) | ((y >= size) << 1) | ((z >= size) << 2)
-            current = current.children[index]
-            # Update coordinates to be relative to the child
-            x %= size
-            y %= size
-            z %= size
-            size //= 2
-        return current.voxel
-
-    def insert(self, x, y, z, new_voxel, size, depth):
-        """Insert a voxel at (x, y, z)."""
-        if depth == 0:
-            # Replace leaf with new voxel
-            self.is_leaf = True
-            self.voxel = new_voxel
-            self.children = None
-            return
-
-        if self.is_leaf:
-            # Convert leaf to branch
-            # Clone existing voxel to all 8 children to preserve data
-            old_voxel = self.voxel
-            self.is_leaf = False
-            self.voxel = None
-            self.children = [Node(depth - 1) for _ in range(8)]
-            for child in self.children:
-                child.is_leaf = True
-                child.voxel = old_voxel
-                child.children = None
-
-        # Recurse into the correct child
-        index = ((x >= size) << 0) | ((y >= size) << 1) | ((z >= size) << 2)
-        self.children[index].insert(x % size, y % size, z % size, new_voxel, size // 2, depth - 1)
-
-class SparseVoxelOctree:
-    def __init__(self, max_depth):
-        self.max_depth = max_depth
-        self.root = Node(max_depth)
-
-    def insert(self, x, y, z, voxel):
-        # Initial size is 2^max_depth
-        size = 1 << self.max_depth
-        self.root.insert(x, y, z, voxel, size, self.max_depth)
-
-    def get(self, x, y, z):
-        size = 1 << self.max_depth
-        return self.root.get(x, y, z, size)
+        idx = self._get_child_index(x, y, z, size)
+        
+        # Check if child exists (bit set in CHMN)
+        if not (self.chmn & (1 << idx)):
+            return None # Passive voxel
+        
+        child = self.children[idx]
+        if child is None:
+            return None
+            
+        new_size = size // 2
+        if new_size == 0:
+            # Leaf level
+            # Return data associated with this leaf
+            # In a real implementation, leaf nodes would store the voxel data directly
+            return child.data if hasattr(child, 'data') else None
+            
+        return child.get(x % size, y % size, z % size, new_size)
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Leaf to Branch Conversion:** When inserting into a leaf node, the existing voxel must be preserved by creating a new branch node where all 8 children are initialized with that same voxel [S3, unofficial].
-*   **Single Voxel Nodes:** Nodes representing $1 \times 1 \times 1$ voxels are not created. The status is recorded in the parent LNODE's HT [S2].
-*   **Ad-hoc Modification:** Modifying geometry in static SVOs requires computationally demanding decompression, change, and recompression [S1].
+*   **Leaf to Branch Conversion:** When inserting into a leaf node that already contains data, the existing data must be preserved. This is done by creating a new Branch node where all 8 children are initialized with the existing voxel data (or a representation of it), and then recursively inserting the new data into the appropriate child [S3, unofficial].
+*   **Memory Alignment:** The parameters $p$ and $q$ are critical for aligning nodes to word boundaries (e.g., 32-bit or 64-bit). Misalignment can lead to inefficient memory access or parsing errors [S2].
+*   **Traversal Overhead:** Tree traversal involves pointer chasing, which is significantly slower than direct array indexing in dense grids. This maps poorly to GPU texture caching [S6, S7, unofficial].
 
 ## Subtopics
 
 ### [Sparse Voxel Octree with Bricks](2354-sparse-voxel-octree-with-bricks.md)
-Sparse Voxel Octree with Bricks stores filtered lighting information in small 3x3x3 voxel volumes (bricks) attached to octree nodes. It solves the memory inefficiency of inter-brick interpolation by positioning voxel centers at node corners, allowing hardware trilinear interpolation to cover 2x2x2 nodes without expensive one-voxel borders. This method enables smooth, geometry-independent indirect illumination at real-time frame rates, differing from naive node representations by using texture volumes per node rather than single values.
+Sparse Voxel Octree with Bricks is a hierarchical scene representation that stores filtered lighting information (energy intensity, direction, occlusion, and Normal Distribution Functions) in small 3x3x3 voxel volumes, called bricks, attached to octree nodes. It solves the memory inefficiency of inter-brick interpolation in sparse octrees by positioning voxel centers at node corners, allowing hardware trilinear interpolation to cover 2x2x2 nodes without expensive one-voxel borders. This method enables smooth, geometry-independent indirect illumination at real-time frame rates, differing from naive node representations by using texture volumes per node rather than single values.
 
 ### [Naive Octree Node Representation](2445-naive-octree-node-representation.md)
-The Naive Octree Node Representation is a direct memory layout for hierarchical voxel data structures where each node explicitly stores pointers to its eight children and metadata for leaf status or voxel values. It solves the problem of implementing a standard octree with minimal abstraction overhead, serving as the baseline for more complex sparse voxel representations. Unlike compressed variants like [Bitmask Leaf Compression](3603-bitmask-leaf-compression.md) or layout-optimized structures like [Octree Data Structure Layout](4518-octree-data-structure-layout.md), this method prioritizes implementation simplicity and direct pointer access over memory efficiency.
+The Naive Octree Node Representation is a direct memory layout for hierarchical voxel data where each non-leaf node explicitly stores pointers to its eight children, and leaf nodes store voxel data. It solves the problem of implementing a standard octree structure with minimal abstraction overhead, serving as the baseline for more complex sparse voxel representations. It differs from its siblings by allocating explicit memory for every node in the hierarchy, including leaves, which results in higher memory consumption compared to compressed variants like [Bitmask Leaf Compression](3603-bitmask-leaf-compression.md) or brick-based layouts like [Sparse Voxel Octree with Bricks](2354-sparse-voxel-octree-with-bricks.md).
 
 ### [SVRaster](2464-svraster.md)
 SVRaster is a real-time, high-fidelity novel-view synthesis framework that renders adaptive sparse voxels using a custom rasterizer, avoiding neural networks, 3D Gaussians, and sparse-point priors. It distinguishes itself from Gaussian splatting by partitioning 3D space into disjoint voxels and using ray direction-dependent Morton ordering to ensure correct depth sorting, thereby eliminating the popping artifacts common in Gaussian-based methods. Unlike previous neural-free voxel models, it achieves over 4 dB PSNR improvement and more than 10x FPS speedup while maintaining compatibility with grid-based 3D processing techniques like Volume Fusion and Marching Cubes.
 
 ### [Dynamic Update Optimization](4120-dynamic-update-optimization.md)
-Dynamic Update Optimization is a set of heuristic techniques for accelerating indirect illumination calculation in sparse voxel octrees by separating static and dynamic scene components and optimizing the voxelization and cone tracing passes. It solves the performance bottleneck of recalculating global illumination for every frame in scenes with moving geometry. It differs from static-only voxelization by maintaining a persistent octree for static geometry while appending dynamic voxel fragments, and from naive full-resolution cone tracing by employing half-resolution passes with targeted re-computation.
+Dynamic Update Optimization is a set of techniques for accelerating indirect illumination calculations in dynamic scenes using Sparse Voxel Octrees (SVO). It solves the performance bottleneck of re-voxelizing and re-filtering the entire scene every frame by separating static and dynamic geometry, optimizing the voxelization process, and reducing the resolution of expensive cone tracing passes. It sets itself apart from static SVO methods by handling time-varying data without rebuilding the entire hierarchy, and from naive dynamic updates by using specific hardware primitives and resolution-adaptive shading.
 
 ### [Sparse Voxel Octree (SVO)](8749-sparse-voxel-octree-svo.md)
-The Sparse Voxel Octree (SVO) is a memory-efficient, hierarchical data structure for representing 3D geometry as a sparse set of voxels, enabling fast raytracing and real-time rendering of complex scenes. Unlike dense grids or naive octrees, it achieves tight compression of sparsely populated spaces by storing only nodes containing geometry, using bitmasks to determine child states rather than explicit pointers. It sets itself apart from its siblings by unifying coarse geometry and fine detail through a compact, pointerless node layout that supports efficient traversal via bit-flipping, making it suitable for static geometry rendering where construction speed is secondary to rendering performance.
+A Sparse Voxel Octree (SVO) is a hierarchical spatial subdivision data structure that stores voxel data sparsely by only retaining nodes containing geometry, enabling efficient ray-traced rendering and Level-of-Detail (LoD) management. It distinguishes itself from flat grid structures by providing tight compression of sparse spaces and from KD-trees by offering uniform subdivision at every level, which ensures smoothly-degrading LoD and consistent processing cost bounds. Unlike its sibling [Sparse Voxel Octree with Bricks](2354-sparse-voxel-octree-with-bricks.md) which groups voxels into fixed-size bricks for cache locality, the standard SVO focuses on a compact, pointer-based or bitmask-driven node structure optimized for direct shader traversal.
 
 ### Pointerless Sparse Voxel Octrees (PSVO)
-Pointerless Sparse Voxel Octrees (PSVO) are a variant where the relationship between a parent node's child hint (HT) and its associated child node is expressed by the location of the binary representation of the child node immediately after the binary representation of the corresponding HT of the parent node, without using pointers [S2]. The size of a data structure's binary representation in bits is $8 \times p$, where $p$ is the total number of nodes of the data structure [S2]. While compact, this representation does not allow for fast traversal of the tree [S2].
+Pointerless Sparse Voxel Octrees (PSVO) are a variant where the relationship between a parent node's child hint (HT) and its associated child node is expressed by the location of the binary representation of the child node immediately after the binary representation of the corresponding HT of the parent node, without using pointers [S2]. The binary layout is defined as:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```
+PSVO ::= <NODE>
+NODE ::= <INODE> | <LNODE>
+INODE ::= (8)<HT>
+HT ::= "0" | "1"<NODE>
+LNODE ::= (8)<BIT>
+BIT ::= "0" | "1"
+```
+The size of the binary representation is $8 \times p$ bits, where $p$ is the total number of nodes [S2]. While this representation is more compact, it does not allow for fast traversal of the tree [S2].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Memory:** SVO achieves tight compression of sparsely populated spaces [S4]. However, the binary representation of internal nodes in pointer-based SVOs is significantly larger than in PSVOs. With $p=24, q=24, r=32$, the SVO INODE size is 64b for 1 child node, growing to 288b for 8 child nodes, an 8-to-36 times increase compared to PSVO internal nodes [S2]. The SVO leaf node size is up to 4 times larger than PSVO if $q=24$ [S2].
-*   **Traversal:** Pointer-based SVOs allow for quick traversal [S2]. PSVOs do not allow for fast traversal [S2]. Lookup and insertion require tree traversal, which is less efficient than direct index access in 3D textures [S6, unofficial].
+*   **Memory:** The SVO size depends on the sparsity of the scene. For a scene with $N^3$ voxels, the memory usage is proportional to the number of active nodes. Internal node size ranges from 64 bits (1 child) to 288 bits (8 children) with typical parameters ($p=24, r=32$) [S2]. This is 8 to 36 times larger than Pointerless SVO (PSVO) internal nodes [S2]. Leaf nodes can be up to 4 times larger than PSVO leaf nodes if $q=24$ [S2].
+*   **Traversal:** Lookup and insertion require $O(m)$ steps, where $m = \log_2 N$. This is less efficient than $O(1)$ direct index access in 3D textures [S6, S7, unofficial].
 
 **Measured Performance:**
-*   Not given in the sources.
-
-**Scaling:**
-*   Not given in the sources.
+*   Performance is highly dependent on hardware. On CPUs, traversal overhead is significant [S5, S7, unofficial]. On GPUs, the structure maps poorly to texture caching and filtering hardware, leading to lower performance compared to dense grids unless optimized (e.g., using bricks or specific traversal algorithms) [S6, S7, unofficial].
+*   SVRaster achieves real-time frame rates and >10x FPS speedup over neural-free voxel models [S1].
 
 **Strengths and Limitations:**
-*   **Strengths:** Memory efficiency for sparse scenes [S4][S7, unofficial]. Quick traversal for pointer-based variants [S2].
-*   **Limitations:** Larger binary representation size for pointer-based SVOs [S2]. Poor mapping to GPU memory model, cannot benefit from GPU texture caching and filtering hardware [S6, unofficial]. Ad-hoc modification of geometry is computationally demanding [S1]. Octree encoding achieves less data compression with grey-level data than with binary data [S5, unofficial].
+*   **Strengths:** Excellent memory compression for sparse scenes. Supports efficient LoD. Enables geometry-independent indirect illumination (e.g., voxel cone tracing) [S4].
+*   **Limitations:** High traversal overhead. Poor GPU cache utilization. Difficult to update dynamically (requires decompression/recompression) [S1][S6, unofficial].
 
-**When to use it and when not:**
-*   Use for static geometry rendering where memory efficiency is critical and construction speed is secondary [S4].
-*   Do not use for scenes requiring frequent ad-hoc geometry modifications [S1].
-*   Do not use if GPU texture caching benefits are required without custom hardware support [S6, unofficial].
+**When to Use:**
+*   Use for static, sparse 3D scenes where memory is a constraint and indirect illumination is required [S4].
+*   Use when uniform LoD is needed [S2].
+*   Do not use for dense scenes or scenes requiring frequent dynamic updates [S1][S6, unofficial].
 
 ## Background
-**Origin:**
-The Sparse Voxel Octree (SVO) is a hierarchical data structure for representing the geometry of voxelized 3D scenes containing a small proportion of active voxels [S1, S2]. It is an extension of the quadtree representation of 2D images [S5, unofficial].
-
-**History and Development:**
-*   In 2013, a two-step out-of-core algorithm for SVO construction was created [S1]. Step 1: Voxelization of triangle mesh input. Step 2: Construction of SVO from the list of active voxels [S1].
-*   In 2015, an algorithm was presented enabling voxelization into SVO without an intermediate product [S1].
-*   A GPU implementation was presented by Crassin in his paper on voxel cone tracing global illumination [S6, unofficial].
-
-**Where it is used:**
-*   Real-time rendering of complex scenes [S4].
-*   Indirect illumination at geometry-independent cost [S4].
-*   Representation of time-variable 3D scenes [S1].
+The Sparse Voxel Octree was introduced as a hierarchical data structure for representing 3D voxelized scenes with a small proportion of active voxels [S1, S2]. A two-step out-of-core algorithm for SVO construction was created in 2013, involving voxelization of triangle meshes followed by SVO construction [S1]. In 2015, an algorithm was presented enabling voxelization into SVO without an intermediate product [S1]. Crassin presented a GPU implementation of an octree for voxel cone tracing global illumination, highlighting its potential for real-time rendering [S6, S7, unofficial]. The structure is an extension of the quadtree representation of 2D images [S5, unofficial].
 
 ## Sources
 [S1] Spatio-Temporal Hierarchical Data Structure Based on Sparse Voxel Octrees for Representation of the Geometry of Time-Variable Three-Dimensional Scenes, https://doi.org/10.2478/aei-2024-0004, fetched 2026-10-26

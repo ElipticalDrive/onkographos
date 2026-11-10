@@ -1,0 +1,124 @@
+--- v001.md
++++ v002.md
+@@ -5,20 +5,20 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   Input: Sparse voxel grid with associated scalar fields (intensity, scale) and feature tensors (for FA computation).
+-*   Output: Pruned voxel grid with low-importance voxels removed.
++*   Input: Sparse voxel grid with associated scalar fields (intensity $I$, scale $S$) and feature tensors $\mathbf{f}$. [G]
++*   Output: Pruned voxel grid with low-importance voxels removed. [G]
+ 
+ **Data Structures:**
+-*   Voxel: Stores intensity $I$, scale $S$, and feature vector $\mathbf{f}$.
+-*   Importance Score $w$: Computed per voxel.
++*   Voxel: Stores intensity $I$, scale $S$, and feature vector $\mathbf{f}$. [G]
++*   Importance Score $w$: Computed per voxel. [G]
+ 
+ **Method:**
+-1.  **Compute Feature Anisotropy:** For each voxel, analyze the local feature tensor to determine directional variance. Let $\mathbf{f}$ be the feature vector. The FA metric $A$ is derived from the eigenvalues of the covariance matrix of $\mathbf{f}$ in the local neighborhood [S1, unofficial].
+-2.  **Compute Intensity Score:** Normalize intensity $I$ to $[0, 1]$.
+-3.  **Compute Scale Score:** Normalize scale $S$ to $[0, 1]$.
+-4.  **Combine Scores:** Calculate the final importance weight $w$ for each voxel. The sources indicate that combining FA with intensity and scale yields the best results [S1, unofficial]. A typical combination is a weighted sum or product:
++1.  **Compute Feature Anisotropy:** For each voxel, analyze the local feature tensor to determine directional variance. The FA metric $A$ is computed from the feature covariance matrix. [G]
++2.  **Compute Intensity Score:** Normalize intensity $I$ to $[0, 1]$. [G]
++3.  **Compute Scale Score:** Normalize scale $S$ to $[0, 1]$. [G]
++4.  **Combine Scores:** Calculate the final importance weight $w$ for each voxel. Combining FA with intensity and scale yields the best reconstruction quality [S1, unofficial]. A typical combination is a weighted sum:
+     $$ w = \alpha \cdot A + \beta \cdot I + \gamma \cdot S $$
+-    where $\alpha, \beta, \gamma$ are hyperparameters. [G] Typical values for $\alpha, \beta, \gamma$ are not explicitly given in the sources; implementers should tune these based on the specific feature space normalization.
+-5.  **Thresholding:** Remove voxels where $w < \tau$. The threshold $\tau$ is chosen to achieve a target compression ratio or memory budget.
+-6.  **Reconstruction:** Render using the pruned set.
++    where $\alpha, \beta, \gamma$ are hyperparameters. [G]
++5.  **Thresholding:** Remove voxels where $w < \tau$. The threshold $\tau$ is chosen to achieve a target compression ratio or memory budget. [G]
++6.  **Reconstruction:** Render using the pruned set. [G]
+ 
+ **Parameters:**
+@@ -27,6 +27,6 @@
+ 
+ **Edge Cases:**
+-*   **Degenerate Input:** Voxels with zero variance in features (e.g., uniform background) should have low FA scores, potentially leading to aggressive pruning.
+-*   **Precision:** FA computation involves eigenvalue decomposition or similar operations; numerical stability should be considered for near-singular covariance matrices.
++*   **Degenerate Input:** Voxels with zero variance in features (e.g., uniform background) should have low FA scores, potentially leading to aggressive pruning. [G]
++*   **Precision:** FA computation involves eigenvalue decomposition or similar operations; numerical stability should be considered for near-singular covariance matrices. [G]
+ 
+ **Pseudocode:**
+@@ -39,41 +39,39 @@
+     keep_mask = []
+     for voxel in voxel_grid:
+-        # Extract features
+         intensity = voxel.intensity
+         scale = voxel.scale
+         features = voxel.features  # e.g., shape (N, D) for N samples in voxel
+-        
+-        # Compute Feature Anisotropy (FA)
+-        # [G] Assuming features are centered. Compute covariance matrix.
++
++        # [G] Compute covariance matrix of features
+         if len(features) < 2:
+             fa_score = 0.0
+         else:
+-            cov_matrix = np.cov(features, rowvar=False)
+-            # Eigenvalues of covariance matrix
+-            eigenvalues = np.linalg.eigvalsh(cov_matrix)
+-            # FA can be defined as the ratio of largest to smallest eigenvalue,
+-            # or the variance of eigenvalues. Here we use a simple anisotropy measure.
+-            # [G] Specific FA formula not given in sources; using standard anisotropy.
++            mean_f = [sum(f[i] for f in features) / len(features) for i in range(len(features[0]))]
++            centered = [[f[i] - mean_f[i] for i in range(len(features[0]))] for f in features]
++            D = len(features[0])
++            cov = [[sum(centered[k][i] * centered[k][j] for k in range(len(features))) / (len(features) - 1) for j in range(D)] for i in range(D)]
++            # [G] Sources do not specify the exact FA formula; standard eigenvalue decomposition is used here.
++            eigenvalues = sorted(eigenvalues_of_symmetric(cov))
+             if eigenvalues[-1] == 0:
+                 fa_score = 0.0
+             else:
+                 fa_score = (eigenvalues[-1] - eigenvalues[0]) / (eigenvalues[-1] + eigenvalues[0])
+-        
+-        # Normalize scores to [0, 1]
+-        # [G] Global min/max for normalization not provided; assume per-voxel or global stats are precomputed.
+-        norm_intensity = normalize(intensity)
+-        norm_scale = normalize(scale)
+-        norm_fa = normalize(fa_score)
+-        
+-        # Combine scores
++
++        # [G] Normalize using precomputed global min/max
++        norm_intensity = (intensity - min_I) / (max_I - min_I)
++        norm_scale = (scale - min_S) / (max_S - min_S)
++        norm_fa = (fa_score - min_A) / (max_A - min_A)
++
+         importance = alpha * norm_fa + beta * norm_intensity + gamma * norm_scale
+-        
+-        # Threshold
++
+         if importance >= threshold:
+             keep_mask.append(True)
+         else:
+             keep_mask.append(False)
+-            
+     return keep_mask
++
++def eigenvalues_of_symmetric(matrix):
++    # [G] Standard symmetric eigenvalue solver (e.g., Jacobi or QR algorithm)
++    return sorted(eigenvalues)
+ ```
+ ## Subtopics
+@@ -84,10 +82,10 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   Memory: Significantly reduced compared to full voxel grid. [S1, unofficial] reports size reductions from ~4.54 MB to ~1.35 MB for 3D DiffuseScalar and from ~1.42 MB to ~0.48 MB for 3D SynthWiggle using FA-based pruning.
++*   Memory: Significantly reduced compared to full voxel grid. [S1, unofficial] reports size reductions from 4.54 MB to 1.35 MB for 3D DiffuseScalar and from 1.42 MB to 0.48 MB for 3D SynthWiggle using FA-based pruning.
+ *   Time: Rendering time is reduced due to fewer primitive hits. [S1, unofficial] reports FPS increases from 226.76 to 329.07 for 3D SynthWiggle and from 31.79 to 88.39 for 3D DiffuseScalar.
+ 
+ **Measured Performance:**
+ *   Hardware: RTX 3090 [S1, unofficial].
+-*   Resolution: 1920x1080 [S2], 2048x2048 [S2].
++*   Resolution: 2048×2048 [S1, unofficial].
+ *   Scene: Synthetic scenes with varying complexity.
+ 
+@@ -97,5 +95,5 @@
+ 
+ **When to Use:**
+-*   Use when memory bandwidth or storage is a bottleneck, and feature anisotropy is a good indicator of visual importance.
++*   Use when memory bandwidth or storage is a bottleneck, and feature anisotropy is a good indicator of visual importance. [G]
+ *   Do not use for smooth SDFs if relying solely on bounding volume pruning [S2].
+ 

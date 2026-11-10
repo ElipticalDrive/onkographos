@@ -3,7 +3,7 @@
 Also called: Alpha to Weight Conversion (Backward)
 
 ## Overview
-Computes the gradient of the rendering loss with respect to the per-sample alpha values, given the gradients flowing back from the rendered weights and the final transmittance [S1, unofficial][S2, unofficial]. It is the backward pass counterpart to the Alpha-to-Weight computation, enabling differentiable volume rendering via the Adjoint Method [Parent]. It uses reverse accumulation to propagate gradients backwards through the ray samples [S1, unofficial][S2, unofficial].
+Computes the gradient of the rendering loss with respect to the per-sample alpha values, given the gradients flowing back from the rendered weights and the final transmittance [S1, unofficial][S2, unofficial]. It is the backward pass counterpart to the Alpha-to-Weight computation, enabling differentiable volume rendering via the Adjoint Method [Parent][S1, unofficial][S2, unofficial]. It uses reverse accumulation to propagate gradients backwards through the ray samples [S1, unofficial][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -56,24 +56,24 @@ def alpha2weight_backward(alpha, weight, T, alphainv_last, i_start, i_end, grad_
 *   `epsilon`: $10^{-10}$. Added to the denominator to prevent division by zero when $\alpha[i]$ is close to 1.0 [S1, unofficial][S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Division by Zero:** If $\alpha[i]$ is exactly 1.0, the term $(1 - \alpha[i])$ becomes zero. The epsilon term prevents this [S1, unofficial][S2, unofficial].
+*   **Division by Zero:** If $\alpha[i]$ is exactly 1.0, the term $(1 - \alpha[i])$ becomes zero. The epsilon term prevents this [S1, unofficial].
 
 ## Subtopics
 
 ### [Inversion Trick](964-inversion-trick.md)
-An alternative method to compute gradients by inverting the rendering equation, avoiding the explicit backward pass through samples.
+An alternative method to compute gradients by inverting the rendering equation, avoiding the explicit backward pass through samples. It is chosen when memory constraints prevent storing intermediate transmittance values.
 
 ### [Gradient Accumulation Strategy](1374-gradient-accumulation-strategy.md)
-A technique to manage memory usage during the backward pass by accumulating gradients in chunks.
+A technique to manage memory usage during the backward pass by accumulating gradients in chunks. It is chosen for high-resolution scenes where full gradient tensors exceed VRAM limits.
 
 ### [Autograd Wrapper for Volume Rendering](2158-autograd-wrapper-for-volume-rendering.md)
-A PyTorch wrapper that integrates the backward pass into the autograd engine.
+A PyTorch wrapper that integrates the backward pass into the autograd engine. It is chosen when using standard deep learning frameworks without custom CUDA kernels.
 
 ### [Variance-aware Adaptive Pixel Sampling](6389-variance-aware-adaptive-pixel-sampling.md)
-A sampling strategy that uses gradient information to adaptively select samples, potentially reducing the number of samples needed for accurate gradients.
+A sampling strategy that uses gradient information to adaptively select samples, potentially reducing the number of samples needed for accurate gradients. It is chosen when computational budget is limited and noise reduction is prioritized.
 
 ### [Path Replay Backpropagation](6780-path-replay-backpropagation.md)
-A method that replays the forward pass during the backward pass to reconstruct intermediate variables, avoiding the need to store all activations in memory.
+A method that replays the forward pass during the backward pass to reconstruct intermediate variables, avoiding the need to store all activations in memory. It is chosen when VRAM is insufficient to cache forward pass tensors.
 
 ## Operating characteristics
 Not given in the sources.

@@ -1,85 +1,146 @@
 # Hierarchical DDA
 Also called: 3-level bit pyramid traversal
 ## Overview
-Hierarchical DDA is a ray traversal technique that accelerates sparse volume rendering by navigating a 3-level occupancy-bit pyramid (chunk → tile → brick) to skip empty space [S1, unofficial]. It sets itself apart from its parent [Hierarchical Brick-Map DDA](4105-hierarchical-brick-map-dda.md) by using a fixed-depth, bit-packed hierarchy with exact cell-boundary snapping, and from its sibling [Sparse Ray Marching with Nested Axis-Aligned Distance Fields (NAADF)](6260-sparse-ray-marching-with-nested-axis-aligned-distance-fields.md) by relying on discrete occupancy masks rather than continuous distance fields for empty-space skipping.
+Hierarchical DDA is a ray traversal technique that accelerates sparse volume rendering by navigating a 3-level occupancy-bit pyramid (chunk → tile → brick) to skip empty space [S1, unofficial]. It uses a fixed-depth, bit-packed hierarchy with exact cell-boundary snapping to bypass empty regions without descending into every voxel [S1, unofficial].
 ## How it works
 **Inputs and outputs:**
-- Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, and the hierarchical voxel structure.
-- Output: Intersection point or distance to the first occupied voxel.
+- Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, and the hierarchical voxel structure [S1, unofficial].
+- Output: Intersection point or distance to the first occupied voxel [G].
 
 **Data structures:**
-The hierarchy consists of three levels, each defined by fixed dimensions and bitmasks:
-1.  **Chunk:** The top level. Each chunk covers a $64^3$ voxel volume. It contains a bitmask for $16^3$ tiles.
-2.  **Tile:** The middle level. Each tile covers a $16^3$ voxel volume. It contains a bitmask for $4^3$ bricks.
-3.  **Brick:** The leaf level. Each brick covers a $4^3$ voxel volume. It has a 64-bit occupancy mask, where each bit corresponds to a single voxel [S1, unofficial].
+The hierarchy consists of three levels, each defined by fixed dimensions and bitmasks [S1, unofficial]:
+1. **Chunk:** The top level. Each chunk covers a $64^3$ voxel volume. It contains a bitmask for $16^3$ tiles [S1, unofficial].
+2. **Tile:** The middle level. Each tile covers a $16^3$ voxel volume. It contains a bitmask for $4^3$ bricks [S1, unofficial].
+3. **Brick:** The leaf level. Each brick covers a $4^3$ voxel volume. It has a 64-bit occupancy mask, where each bit corresponds to a single voxel [S1, unofficial].
 
 **Steps:**
-1.  **Initialize:** Compute the initial step size for the ray based on the coarsest level (chunk). Determine the starting chunk index.
-2.  **Chunk Traversal:** Use DDA to step through chunks. If a chunk is empty (all tile bits are 0), skip to the next occupied chunk.
-3.  **Tile Traversal:** Upon entering an occupied chunk, descend to the tile level. Use DDA to step through tiles within the chunk. If a tile is empty (all brick bits are 0), skip to the next occupied tile.
-4.  **Brick Traversal:** Upon entering an occupied tile, descend to the brick level. Use DDA to step through bricks within the tile. If a brick is empty (occupancy mask is 0), skip to the next occupied brick.
-5.  **Voxel Traversal:** Upon entering an occupied brick, perform fine-grained DDA through the $4^3$ voxels using the 64-bit mask.
-6.  **Boundary Snapping:** At each level transition (chunk, tile, brick), use `skip_to_cell` to snap the ray position to the exact cell boundary. This ensures that empty space is skipped at 16- or 4-voxel granularity without missing thin structures [S1, unofficial].
-7.  **Termination:** If an occupied voxel is found, return the intersection. If the ray exits the volume or all levels are exhausted, return no hit.
+1. **Initialize:** Compute the initial step size for the ray based on the coarsest level (chunk). Determine the starting chunk index [G].
+2. **Chunk Traversal:** Use DDA to step through chunks. If a chunk is empty (all tile bits are 0), skip to the next occupied chunk [S1, unofficial].
+3. **Tile Traversal:** Upon entering an occupied chunk, descend to the tile level. Use DDA to step through tiles within the chunk. If a tile is empty (all brick bits are 0), skip to the next occupied tile [S1, unofficial].
+4. **Brick Traversal:** Upon entering an occupied tile, descend to the brick level. Use DDA to step through bricks within the tile. If a brick is empty (occupancy mask is 0), skip to the next occupied brick [S1, unofficial].
+5. **Voxel Traversal:** Upon entering an occupied brick, perform fine-grained DDA through the $4^3$ voxels using the 64-bit mask [S1, unofficial].
+6. **Boundary Snapping:** At each level transition (chunk, tile, brick), use `skip_to_cell` to snap the ray position to the exact cell boundary. This ensures that empty space is skipped at 16- or 4-voxel granularity without missing thin structures [S1, unofficial].
+7. **Termination:** If an occupied voxel is found, return the intersection. If the ray exits the volume or all levels are exhausted, return no hit [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hierarchical_dda(ray_origin, ray_direction, hierarchy):
-    # Initialize DDA state for the coarsest level (chunk)
-    chunk_step = compute_chunk_step(ray_direction)
-    current_chunk = get_chunk_index(ray_origin)
+def hierarchical_dda(origin, direction, chunk_masks, tile_masks, brick_masks, chunk_origin, tile_origin, brick_origin):
+    # Initialize DDA state for chunk level (64^3)
+    chunk_size = 64.0
+    inv_dir = [1.0 / d if d != 0.0 else float('inf') for d in direction]
+    t_max = [(chunk_origin[i] + (chunk_size if direction[i] > 0 else 0) - origin[i]) * inv_dir[i] for i in range(3)]
+    t_delta = [chunk_size * inv_dir[i] for i in range(3)]
+    step = [1 if direction[i] > 0 else -1 for i in range(3)]
+    current_chunk = [int((origin[i] - chunk_origin[i]) / chunk_size) for i in range(3)]
     
-    # Traverse chunks
-    while current_chunk is valid:
-        if hierarchy.chunk_is_empty(current_chunk):
-            current_chunk = next_occupied_chunk(current_chunk, chunk_step)
+    while True:
+        if not chunk_masks.get(tuple(current_chunk), 0):
+            t_min = min(t_max)
+            axis = t_max.index(t_min)
+            current_chunk[axis] += step[axis]
+            t_max[axis] += t_delta[axis]
+            if not (0 <= current_chunk[i] < 4 for i in range(3)):
+                return None
             continue
         
-        # Enter chunk, snap to boundary
-        entry_point = snap_to_cell_boundary(ray_origin, ray_direction, current_chunk)
+        t_min = min(t_max)
+        entry = [origin[i] + t_min * direction[i] for i in range(3)]
+        entry = skip_to_cell(entry, chunk_size, chunk_origin, direction)
         
-        # Traverse tiles within chunk
-        tile_step = compute_tile_step(ray_direction)
-        current_tile = get_tile_index(entry_point, current_chunk)
+        # Tile level (16^3)
+        tile_size = 16.0
+        inv_dir_t = [1.0 / direction[i] if direction[i] != 0 else float('inf') for i in range(3)]
+        t_max_t = [(tile_origin[i] + (tile_size if direction[i] > 0 else 0) - entry[i]) * inv_dir_t[i] for i in range(3)]
+        t_delta_t = [tile_size * inv_dir_t[i] for i in range(3)]
+        step_t = [1 if direction[i] > 0 else -1 for i in range(3)]
+        current_tile = [int((entry[i] - tile_origin[i]) / tile_size) for i in range(3)]
         
-        while current_tile is valid within chunk:
-            if hierarchy.tile_is_empty(current_tile):
-                current_tile = next_occupied_tile(current_tile, tile_step)
+        while True:
+            if not tile_masks.get(tuple(current_tile), 0):
+                t_min_t = min(t_max_t)
+                axis = t_max_t.index(t_min_t)
+                current_tile[axis] += step_t[axis]
+                t_max_t[axis] += t_delta_t[axis]
+                if not (0 <= current_tile[i] < 4 for i in range(3)):
+                    break
                 continue
             
-            # Enter tile, snap to boundary
-            entry_point = snap_to_cell_boundary(entry_point, ray_direction, current_tile)
+            t_min_t = min(t_max_t)
+            entry = [entry[i] + t_min_t * direction[i] for i in range(3)]
+            entry = skip_to_cell(entry, tile_size, tile_origin, direction)
             
-            # Traverse bricks within tile
-            brick_step = compute_brick_step(ray_direction)
-            current_brick = get_brick_index(entry_point, current_tile)
+            # Brick level (4^3)
+            brick_size = 4.0
+            inv_dir_b = [1.0 / direction[i] if direction[i] != 0 else float('inf') for i in range(3)]
+            t_max_b = [(brick_origin[i] + (brick_size if direction[i] > 0 else 0) - entry[i]) * inv_dir_b[i] for i in range(3)]
+            t_delta_b = [brick_size * inv_dir_b[i] for i in range(3)]
+            step_b = [1 if direction[i] > 0 else -1 for i in range(3)]
+            current_brick = [int((entry[i] - brick_origin[i]) / brick_size) for i in range(3)]
             
-            while current_brick is valid within tile:
-                if hierarchy.brick_is_empty(current_brick):
-                    current_brick = next_occupied_brick(current_brick, brick_step)
+            while True:
+                brick_idx = tuple(current_brick)
+                mask = brick_masks.get(brick_idx, 0)
+                if not mask:
+                    t_min_b = min(t_max_b)
+                    axis = t_max_b.index(t_min_b)
+                    current_brick[axis] += step_b[axis]
+                    t_max_b[axis] += t_delta_b[axis]
+                    if not (0 <= current_brick[i] < 4 for i in range(3)):
+                        break
                     continue
                 
-                # Enter brick, snap to boundary
-                entry_point = snap_to_cell_boundary(entry_point, ray_direction, current_brick)
+                t_min_b = min(t_max_b)
+                entry = [entry[i] + t_min_b * direction[i] for i in range(3)]
+                entry = skip_to_cell(entry, brick_size, brick_origin, direction)
                 
-                # Traverse voxels within brick
-                voxel_step = compute_voxel_step(ray_direction)
-                current_voxel = get_voxel_index(entry_point, current_brick)
+                # Voxel level (1^3)
+                inv_dir_v = [1.0 / direction[i] if direction[i] != 0 else float('inf') for i in range(3)]
+                t_max_v = [(brick_origin[i] + (1.0 if direction[i] > 0 else 0) - entry[i]) * inv_dir_v[i] for i in range(3)]
+                t_delta_v = [1.0 * inv_dir_v[i] for i in range(3)]
+                step_v = [1 if direction[i] > 0 else -1 for i in range(3)]
+                current_voxel = [int((entry[i] - brick_origin[i]) / 1.0) for i in range(3)]
                 
-                while current_voxel is valid within brick:
-                    if hierarchy.voxel_is_occupied(current_voxel):
-                        return intersection(ray_origin, ray_direction, current_voxel)
-                    current_voxel = next_voxel(current_voxel, voxel_step)
+                while True:
+                    voxel_local = tuple(current_voxel)
+                    bit = (mask >> (voxel_local[0] * 16 + voxel_local[1] * 4 + voxel_local[2])) & 1
+                    if bit:
+                        return entry
+                    t_min_v = min(t_max_v)
+                    axis = t_max_v.index(t_min_v)
+                    current_voxel[axis] += step_v[axis]
+                    t_max_v[axis] += t_delta_v[axis]
+                    if not (0 <= current_voxel[i] < 4 for i in range(3)):
+                        break
                 
-                current_brick = next_occupied_brick(current_brick, brick_step)
+                t_min_b = min(t_max_b)
+                axis = t_max_b.index(t_min_b)
+                current_brick[axis] += step_b[axis]
+                t_max_b[axis] += t_delta_b[axis]
+                if not (0 <= current_brick[i] < 4 for i in range(3)):
+                    break
             
-            current_tile = next_occupied_tile(current_tile, tile_step)
+            t_min_t = min(t_max_t)
+            axis = t_max_t.index(t_min_t)
+            current_tile[axis] += step_t[axis]
+            t_max_t[axis] += t_delta_t[axis]
+            if not (0 <= current_tile[i] < 4 for i in range(3)):
+                break
         
-        current_chunk = next_occupied_chunk(current_chunk, chunk_step)
+        t_min = min(t_max)
+        axis = t_max.index(t_min)
+        current_chunk[axis] += step[axis]
+        t_max[axis] += t_delta[axis]
+        if not (0 <= current_chunk[i] < 4 for i in range(3)):
+            break
     
     return None
+
+def skip_to_cell(point, cell_size, origin, direction):
+    # Snaps point to the exact cell boundary along the ray direction [G]
+    snapped = [origin[i] + round((point[i] - origin[i]) / cell_size) * cell_size for i in range(3)]
+    return snapped
 ```
 
 **Parameters:**
@@ -90,8 +151,8 @@ def hierarchical_dda(ray_origin, ray_direction, hierarchy):
 
 **Edge cases and pitfalls:**
 - Precision: Floating-point errors in ray-cell intersection can cause missed hits or double hits. Exact cell-boundary snapping mitigates this [S1, unofficial].
-- Degenerate input: Rays parallel to axes may require special handling for DDA step calculation.
-- Empty space skipping: Incorrect implementation of `skip_to_cell` may skip over thin occupied structures if the snap distance is too large.
+- Degenerate input: Rays parallel to axes may require special handling for DDA step calculation [G].
+- Empty space skipping: Incorrect implementation of `skip_to_cell` may skip over thin occupied structures if the snap distance is too large [S1, unofficial].
 
 ## Subtopics
 
@@ -99,15 +160,14 @@ def hierarchical_dda(ray_origin, ray_direction, hierarchy):
 Traces a ray through a hierarchical voxel map by stepping through chunks using a 3D DDA algorithm, detecting solid chunks, converting to local coordinates, and continuing the ray until a hit is found or bounds are exceeded. Choose this when chunk-level optimization is prioritized over tile/brick granularity.
 
 ## Operating characteristics
-- Time complexity: $O(\log N)$ for empty space skipping, where $N$ is the number of voxels, due to the hierarchical structure.
-- Memory complexity: $O(N)$ for the occupancy masks, but significantly reduced compared to dense voxel grids due to sparsity.
-- Strengths: Efficiently skips large empty regions; fixed hierarchy simplifies implementation.
-- Limitations: Fixed hierarchy may not adapt well to varying density; bit packing overhead.
-- When to use: Sparse volumes with clear hierarchical structure (e.g., voxel games, architectural models).
-- When not to use: Dense volumes or volumes with fine-grained detail that does not align with the hierarchy.
+- Efficiently skips large empty regions at 16- or 4-voxel granularity [S1, unofficial].
+- Fixed hierarchy simplifies implementation and memory layout [S1, unofficial].
+- Beam pre-pass fast-forwards rays to reduce traversal depth [S1, unofficial].
+- When to use: Sparse volumes with clear hierarchical structure [S1, unofficial].
+- When not to use: Dense volumes or volumes with fine-grained detail that does not align with the hierarchy [G].
 
 ## Background
-Hierarchical DDA was implemented in the `voxelG` project by mstampfli, built on wgpu and winit [S1, unofficial]. It is part of the evolution of sparse voxel traversal techniques, building on [Hierarchical Brick-Map DDA](4105-hierarchical-brick-map-dda.md).
+Hierarchical DDA was implemented in the `voxelG` project by mstampfli, built on wgpu and winit [S1, unofficial]. It is part of the evolution of sparse voxel traversal techniques, building on [Hierarchical Brick-Map DDA](4105-hierarchical-brick-map-dda.md) [S1, unofficial].
 
 ## Sources
 [S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)

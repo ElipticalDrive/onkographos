@@ -1,0 +1,203 @@
+--- v001.md
++++ v002.md
+@@ -4,16 +4,16 @@
+ 
+ ## Overview
+-Streamtube Rendering visualizes 3D vector fields by integrating trajectories from seed points and generating tube geometry around the path, colored by vector magnitude [S1, unofficial]. It builds on [Stream-Balls](7700-stream-balls.md) by replacing the scalar potential field extraction with explicit geometric tube primitives, offering direct visual control over the tube radius and cross-sectional shape [S1, unofficial]. Unlike stream surfaces which connect multiple streamlines, streamtubes isolate individual flow paths, making them suitable for analyzing specific trajectories without occlusion from neighboring flows [S1, unofficial].
++Streamtube Rendering visualizes 3D vector fields by integrating trajectories from seed points and generating tube geometry around the path, colored by vector magnitude [S1, unofficial]. It generates explicit pentagonal cross-sections along each streamline, offering direct visual control over the tube radius and cross-sectional shape [S1, unofficial]. Unlike stream surfaces which connect multiple streamlines, streamtubes isolate individual flow paths, making them suitable for analyzing specific trajectories without occlusion from neighboring flows [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A 3D vector field stored as a 3D texture (enabling hardware-accelerated trilinear interpolation) [S1, unofficial]. A set of seed points (`seeds`).
+-- **Output:** A vertex buffer containing pentagonal cross-sections and an index buffer defining the triangular faces connecting them [S1, unofficial].
++- **Input:** A 3D vector field stored as a 3D texture (enabling hardware-accelerated trilinear interpolation) [S1, unofficial]. An array of seed points (`seeds`).
++- **Output:** A linear vertex buffer containing pentagonal cross-sections and a linear index buffer defining the triangular faces connecting them [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Vector Field:** 3D texture (format not specified, assumed `float3` or similar for CUDA texture objects) [S1, unofficial].
++- **Vector Field:** 3D texture [S1, unofficial].
+ - **Seeds:** Array of 3D positions (`float3`) [S1, unofficial].
+-- **Output Buffer:** Linear array of vertices. Each pentagonal cross-section consists of 5 vertices. The stride between cross-sections is `maxSteps / geometrySampling + 1` sections [S1, unofficial].
+-- **Index Buffer:** Linear array of indices. Each segment between two cross-sections generates 10 indices (2 triangles per side of the pentagon, plus caps if needed, though the source specifies 10 indices for connecting 5 previous to 5 current vertices) [S1, unofficial].
++- **Output Buffer:** Linear array of vertices. Each pentagonal cross-section consists of 5 vertices [S1, unofficial]. The stride between cross-sections is `maxSteps / geometrySampling + 1` sections [S1, unofficial].
++- **Index Buffer:** Linear array of indices. Each segment between two cross-sections generates 10 indices connecting the previous 5 vertices to the current 5 vertices [S1, unofficial].
+ 
+ **Parameters:**
+@@ -29,8 +29,7 @@
+    - Initialize `position` from `seeds[id]` [S1, unofficial].
+    - Lookup vector `v` and color `c` at `position` using trilinear interpolation [S1, unofficial].
+-   - Call `createTubeBaseVertices(position, v, radius, outputPos)` to generate 5 vertices for the first pentagonal cross-section [S1, unofficial].
++   - Call `createTubeBaseVertices` to generate 5 vertices for the first pentagonal cross-section at `outputPos` [S1, unofficial].
+    - Increment `outputPos` by 5 [S1, unofficial].
+    - Initialize `geometryStep = geometrySampling` [S1, unofficial].
+-
+ 2. **Integration Loop:** Iterate `step` from 1 to `maxSteps`:
+    - Check boundary conditions. If `position` is out of bounds, terminate the streamline [S1, unofficial].
+@@ -41,6 +40,6 @@
+      - Reset `geometryStep = geometrySampling` [S1, unofficial].
+      - Lookup vector `v` and color `c` at new `position` [S1, unofficial].
+-     - Call `createTubeBaseVertices(position, v, radius, outputPos)` to generate 5 vertices for the current cross-section [S1, unofficial].
+-     - Call `createTubeIndices(previousStartIndex, outputPos)` to generate 10 triangle indices connecting the previous 5 vertices to the current 5 vertices [S1, unofficial].
++     - Call `createTubeBaseVertices` to generate 5 vertices for the current cross-section [S1, unofficial].
++     - Call `createTubeIndices` to generate 10 triangle indices connecting the previous 5 vertices to the current 5 vertices [S1, unofficial].
+      - Increment `outputPos` by 5 [S1, unofficial].
+ 
+@@ -58,47 +57,51 @@
+ **Pseudocode:**
+ ```python
+-def streamtube_render(seeds, vector_field_texture, radius, max_steps, geometry_sampling):
++import math
++
++def streamtube_render(seeds, vector_field, radius, max_steps, geometry_sampling, field_bounds):
+     seeds_count = len(seeds)
+-    # Output buffers
+     vertices = []
+     indices = []
+-    
+-    # Helper: Find perpendicular vector
++
++    def sample_vector(pos):
++        # Trilinear interpolation from 3D texture [G]
++        return vector_field[pos]
++
++    def magnitude_to_color(vec):
++        # Map vector magnitude to color [G]
++        return math.sqrt(vec.x**2 + vec.y**2 + vec.z**2)
++
++    def is_inside(pos):
++        # Check bounds [G]
++        return (field_bounds.min.x <= pos.x <= field_bounds.max.x and
++                field_bounds.min.y <= pos.y <= field_bounds.max.y and
++                field_bounds.min.z <= pos.z <= field_bounds.max.z)
++
++    def normalize(v):
++        l = math.sqrt(v.x**2 + v.y**2 + v.z**2)
++        return (v.x/l, v.y/l, v.z/l)
++
++    def cross(a, b):
++        return (a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x)
++
+     def find_perpendicular(v):
+-        # Assumes v is not parallel to Z-axis in a degenerate way
++        # Returns (-v.y, v.x, 0.0f) [S1, unofficial]
+         return (-v.y, v.x, 0.0)
+-    
+-    # Helper: Create tube base vertices
++
+     def create_tube_base_vertices(position, vector, radius, output_pos):
+-        # Normalize vector for direction
+         v_norm = normalize(vector)
+-        # Get perpendicular basis
+-        u = find_perpendicular(v_norm)
+-        u = normalize(u)
+-        # Get binormal
+-        w = cross(v_norm, u)
+-        w = normalize(w)
+-        
+-        section_vertices = []
++        u = normalize(find_perpendicular(v_norm))
++        w = normalize(cross(v_norm, u))
++        section_verts = []
+         for i in range(5):
+-            theta = 2.0 * 3.14159265 * i / 5.0
+-            # Vertex calculation
+-            vx = position.x + radius * (cos(theta) * u.x + sin(theta) * w.x)
+-            vy = position.y + radius * (cos(theta) * u.y + sin(theta) * w.y)
+-            vz = position.z + radius * (cos(theta) * u.z + sin(theta) * w.z)
+-            section_vertices.append((vx, vy, vz))
+-        
+-        # Store vertices at output_pos offset
+-        # In a real implementation, this would append to a global buffer
+-        # Here we return for clarity
+-        return section_vertices, output_pos + 5
++            theta = 2.0 * math.pi * i / 5.0
++            vx = position.x + radius * (math.cos(theta) * u.x + math.sin(theta) * w.x)
++            vy = position.y + radius * (math.cos(theta) * u.y + math.sin(theta) * w.y)
++            vz = position.z + radius * (math.cos(theta) * u.z + math.sin(theta) * w.z)
++            section_verts.append((vx, vy, vz))
++        return section_verts, output_pos + 5
+ 
+-    # Helper: Create tube indices
+     def create_tube_indices(prev_start, curr_start):
+-        # Connect 5 previous vertices to 5 current vertices
+-        # 10 indices for 2 triangles per side of pentagon
+-        # Side i connects prev[i], prev[i+1], curr[i], curr[i+1]
+-        # Triangles: (prev[i], curr[i], prev[i+1]) and (prev[i+1], curr[i], curr[i+1])
+-        # Indices are relative to start positions
++        # Generates 10 triangle indices connecting previous 5 to current 5 vertices [S1, unofficial]
+         idx = []
+         for i in range(5):
+@@ -113,48 +116,37 @@
+             idx.append(c_curr)
+             idx.append(c_next)
+-        return idx
++        return idx[:10]
+ 
+-    # Main loop
+     for id in range(seeds_count):
+         position = seeds[id]
+         output_pos = id * (max_steps // geometry_sampling + 1) * 5
+         geometry_step = geometry_sampling
+-        
+-        # Initial lookup
+-        vector = trilinear_sample(vector_field_texture, position)
+-        color = map_vector_magnitude_to_color(vector)
+-        
+-        # Create first cross-section
++
++        vector = sample_vector(position)
++        color = magnitude_to_color(vector)
++
+         section_verts, output_pos = create_tube_base_vertices(position, vector, radius, output_pos)
+         vertices.extend(section_verts)
+-        
+-        # Integration loop
++
+         for step in range(1, max_steps + 1):
+-            # Boundary check
+-            if not is_inside_volume(position):
++            if not is_inside(position):
+                 break
+-            
+-            # Integrate
+-            vector = trilinear_sample(vector_field_texture, position)
+-            # Euler integration
+-            position = position + vector
+-            
++
++            vector = sample_vector(position)
++            position = (position.x + vector.x, position.y + vector.y, position.z + vector.z)
++
+             geometry_step -= 1
+             if geometry_step == 0:
+                 geometry_step = geometry_sampling
+-                
+-                # Lookup new vector and color
+-                vector = trilinear_sample(vector_field_texture, position)
+-                color = map_vector_magnitude_to_color(vector)
+-                
+-                # Create new cross-section
++                vector = sample_vector(position)
++                color = magnitude_to_color(vector)
++
+                 prev_start = output_pos - 5
+                 section_verts, output_pos = create_tube_base_vertices(position, vector, radius, output_pos)
+                 vertices.extend(section_verts)
+-                
+-                # Create indices connecting previous and current
++
+                 idx = create_tube_indices(prev_start, prev_start + 5)
+                 indices.extend(idx)
+-    
++
+     return vertices, indices
+ ```
+@@ -177,6 +169,6 @@
+ - **Strengths:** Direct geometric representation, easy to color by magnitude, real-time capable [S1, unofficial].
+ - **Limitations:** Pentagonal cross-sections may appear faceted if radius is large or sampling is low. Perpendicular vector calculation is not robust for all vector orientations [S1, unofficial].
+-- **When to use:** When individual flow paths need to be highlighted with a consistent radius.
+-- **When not to use:** When flow bands or surfaces are more appropriate, or when robustness to vector orientation is critical.
++- **When to use:** When individual flow paths need to be highlighted with a consistent radius [S1, unofficial].
++- **When not to use:** When flow bands or surfaces are more appropriate, or when robustness to vector orientation is critical [S1, unofficial].
+ 
+ ## Background

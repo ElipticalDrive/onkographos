@@ -3,36 +3,30 @@
 Also called: Interactive Multiple Scattering with Separable Phase Function, Interactive Rendering of Multiple Scattering in Participating Media Using Separable Phase Function, SVD Factorization for Transport Equation, SVD-based phase function approximation, Separable phase function rendering
 
 ## Overview
-This method enables interactive rendering of multiple scattering in non-homogeneous participating media by approximating the scattering phase function using Singular Value Decomposition (SVD) [S1, unofficial]. It solves the discrete transport equation iteratively on GPU hardware, replacing expensive integral calculations with efficient texture lookups [S1, unofficial]. Unlike particle-based methods that require path recalculation upon movement, this grid-based approach allows for dynamic scene rendering without recomputing scattering paths [S1, unofficial].
+This method enables interactive rendering of multiple scattering in non-homogeneous participating media by approximating the scattering phase function using Singular Value Decomposition (SVD) [S1, unofficial]. It solves the discrete transport equation iteratively on GPU hardware, replacing expensive angular integrals with efficient texture lookups [S1, unofficial]. Unlike particle-based methods that require path recalculation upon movement, this grid-based approach allows for dynamic scene rendering without recomputing scattering paths [S1, unofficial].
 
 ## How it works
 
 ### Inputs and Outputs
 **Inputs:**
-*   **Density Texture:** A 3D texture storing the density values $\rho(x)$ at each point in the volume.
-*   **Emission Density:** $L_e(x, \omega_0)$, the emitted radiance at position $x$ and direction $\omega_0$.
-*   **Phase Function Parameters:** The anisotropy factor $g$ for the Henyey-Greenstein phase function.
+*   **Density Texture:** A 3D texture storing the density values $\rho(x)$ at each point in the volume [S1, unofficial].
+*   **Emission Density:** $L_e(x, \omega_0)$, the emitted radiance at position $x$ and direction $\omega_0$ [S1, unofficial].
+*   **Phase Function Parameters:** The anisotropy factor $g$ for the Henyey-Greenstein phase function [S1, unofficial].
 *   **Precomputed Textures:**
-    *   **Incident-Direction Texture:** 2D texture storing $\xi_k u_k(\omega_0)$.
-    *   **Outgoing-Direction Texture:** 2D texture storing $\xi_k v_k(\omega_i)$.
-*   **Initial Radiance:** $L_0(x, \omega_0)$, typically from single scattering or the previous frame's solution.
+    *   **Incident-Direction Texture:** 2D texture storing $\xi_k u_k(\omega_0)$ [S1, unofficial].
+    *   **Outgoing-Direction Texture:** 2D texture storing $\xi_k v_k(\omega_i)$ [S1, unofficial].
+*   **Initial Radiance:** $L_0(x, \omega_0)$, typically from single scattering or the previous frame's solution [S1, unofficial].
 
 **Outputs:**
-*   **Radiance Texture:** A 3D texture storing the converged radiance $L(x, \omega_0)$ for all positions and directions.
+*   **Radiance Texture:** A 3D texture storing the converged radiance $L(x, \omega_0)$ for all positions and directions [S1, unofficial].
 
 ### Data Structures
 The method relies on specific texture layouts to facilitate GPU-based iteration [S1, unofficial]:
 
-1.  **Incident-Direction Texture:** A 2D texture.
-    *   **Indexing:** Column $k \in \{1, \dots, N\}$ (SVD term index), Row $i \in \{1, \dots, D\}$ (direction index).
-    *   **Content:** Stores values $\xi_k u_k(\omega_0)$. Note: The source describes indexing by direction index $i$ in the row, but the value depends on $\omega_0$. In the context of the fragment program, this texture is sampled using the current outgoing direction $\omega_0$ to retrieve the appropriate coefficient for term $k$.
-2.  **Outgoing-Direction Texture:** A 2D texture.
-    *   **Indexing:** Column $k \in \{1, \dots, N\}$, Row $i \in \{1, \dots, D\}$.
-    *   **Content:** Stores values $\xi_k v_k(\omega_i)$.
-3.  **Radiance Texture:** A flat 3D texture (implemented as a 1D texture with 3D coordinates or a 3D texture object).
-    *   **Content:** Stores $L_n(x, \omega_d)$ for the current iteration $n$.
-4.  **Temporary Outgoing Texture:** A flat 3D texture.
-    *   **Content:** Accumulates $\sum_{d=1}^{D} L_{n+1}(x, \omega_d) \xi_k v_k(\omega_d)$ for each $k$.
+1.  **Incident-Direction Texture:** A 2D texture indexed by column $k \in \{1, \dots, N\}$ (SVD term index) and row $i \in \{1, \dots, D\}$ (direction index) [S1, unofficial]. It stores values $\xi_k u_k(\omega_0)$ [S1, unofficial].
+2.  **Outgoing-Direction Texture:** A 2D texture indexed by column $k \in \{1, \dots, N\}$ and row $i \in \{1, \dots, D\}$ [S1, unofficial]. It stores values $\xi_k v_k(\omega_i)$ [S1, unofficial].
+3.  **Radiance Texture:** A flat 3D texture storing $L_n(x, \omega_d)$ for the current iteration $n$ [S1, unofficial].
+4.  **Temporary Outgoing Texture:** A flat 3D texture used to accumulate $\sum_{d=1}^{D} L_{n+1}(x, \omega_d) \xi_k v_k(\omega_d)$ for each $k$ during the direction loop [S1, unofficial].
 
 ### Formulas
 The differential transport equation for radiance $L$ is [S1, unofficial]:
@@ -41,12 +35,7 @@ $$
 \frac{dL(x, \omega_0)}{dx} = \kappa_a(x)L_e(x, \omega_0) - \kappa_a(x)L(x, \omega_0) - \kappa_s(x)L(x, \omega_0) + \frac{\kappa_s(x)}{4\pi} \int_{\Omega} L(x, \omega_i)p(\omega_0, \omega_i)d\sigma_{\omega_i}
 $$
 
-Where:
-*   $\kappa_a(x)$ is the absorption coefficient.
-*   $\kappa_s(x)$ is the scattering coefficient.
-*   $\kappa_t(x) = \kappa_a(x) + \kappa_s(x)$ is the extinction coefficient.
-*   $L_e(x, \omega_0)$ is the emission density.
-*   $p(\omega_0, \omega_i)$ is the phase function.
+Where $\kappa_a(x)$ is the absorption coefficient, $\kappa_s(x)$ is the scattering coefficient, $\kappa_t(x) = \kappa_a(x) + \kappa_s(x)$ is the extinction coefficient, $L_e(x, \omega_0)$ is the emission density, and $p(\omega_0, \omega_i)$ is the phase function [S1, unofficial].
 
 The Henyey-Greenstein (HG) phase function is defined as [S1, unofficial]:
 
@@ -54,7 +43,7 @@ $$
 p(\theta) = \frac{1}{4\pi} \frac{1-g^2}{(1+g^2-2g\cos\theta)^{3/2}}
 $$
 
-Where $g \in (-1, 1)$ is the asymmetry parameter and $\theta$ is the angle between incident direction $\omega_i$ and outgoing direction $\omega_0$.
+Where $g \in (-1, 1)$ is the asymmetry parameter and $\theta$ is the angle between incident direction $\omega_i$ and outgoing direction $\omega_0$ [S1, unofficial].
 
 The SVD approximation of the phase function is [S1, unofficial]:
 
@@ -62,7 +51,7 @@ $$
 p(\omega_0, \omega_i) \approx \sum_{k=1}^{N} \xi_k u_k(\omega_0) v_k(\omega_i)
 $$
 
-Where $N$ is the number of retained terms, $\xi_k$ are the singular values, and $u_k, v_k$ are the left and right singular vectors, respectively.
+Where $N$ is the number of retained terms, $\xi_k$ are the singular values, and $u_k, v_k$ are the left and right singular vectors, respectively [S1, unofficial].
 
 The discrete transport equation, solved iteratively, is [S1, unofficial]:
 
@@ -77,15 +66,14 @@ L_{n+1}(x+dx, \omega_0) \approx L_n(x, \omega_0) + \kappa_a(x)L_e(x, \omega_0)dx
 $$
 
 ### Parameters
-*   **$N$ (SVD Terms):** Number of terms in the SVD approximation. Typical values are 8 or 24. For $g=0.5$, 24 terms yield approximately 10% RMSE [S1, unofficial]. Higher $g$ requires more terms.
+*   **$N$ (SVD Terms):** Number of terms in the SVD approximation. Typical values are 8 or 24 [S1, unofficial]. For $g=0.5$, 24 terms yield approximately 10% RMSE [S1, unofficial]. Higher $g$ requires more terms [S1, unofficial].
 *   **$D$ (Directions):** Number of discrete directions used to discretize the angular domain. Typical values are 128 or 256 [S1, unofficial].
 *   **$g$ (Anisotropy):** The asymmetry factor of the HG phase function. Typical value is 0.5 [S1, unofficial].
 *   **Albedo:** Single-scattering albedo $\kappa_s / \kappa_t$. Typical value is 0.9 [S1, unofficial].
-*   **$dx$:** Step size along the ray.
+*   **$dx$:** Step size along the ray [S1, unofficial].
 
 ### Pseudocode
-
-The implementation uses a fragment program executed $D$ times per iteration step. The following pseudocode describes the logic within the fragment program for a single direction $d$ and the accumulation logic.
+The implementation uses a fragment program executed $D$ times per iteration step [S1, unofficial]. The following pseudocode describes the logic within the fragment program for a single direction $d$ and the accumulation logic.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
