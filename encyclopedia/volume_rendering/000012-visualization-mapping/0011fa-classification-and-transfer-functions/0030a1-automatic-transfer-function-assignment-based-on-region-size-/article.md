@@ -3,29 +3,29 @@
 Also called: Occlusion-aware TF Assignment, Region-based TF Assignment
 
 ## Overview
-This method automatically assigns opacity and color to volumetric regions (clusters) by analyzing their spatial size and occlusion relationships, ensuring that smaller or interior structures remain visible despite being hidden by larger ones [S1, unofficial]. Unlike standard classification methods that rely on scalar intensity thresholds, this approach uses geometric properties of segmented clusters to dynamically adjust visual parameters, addressing the common problem of large structures obscuring diagnostically or analytically important small details [S1, unofficial]. It builds on [Classification and transfer functions](38-classification-and-transfer-functions.md) by providing an automated, data-driven strategy for parameter assignment rather than manual tuning.
+This method automatically assigns opacity and color to volumetric regions (clusters) by analyzing their spatial size and occlusion relationships, ensuring that smaller or interior structures remain visible despite being hidden by larger ones [S1, unofficial]. Unlike standard classification methods that rely on scalar intensity thresholds, this approach uses geometric properties of segmented clusters to dynamically adjust visual parameters, addressing the common problem of large structures obscuring diagnostically or analytically important small details [S1, unofficial]. It builds on [Classification and transfer functions](38-classification-and-transfer-functions.md) by providing an automated, data-driven strategy for parameter assignment rather than manual tuning [G].
 
 ## How it works
 The method operates on a set of segmented regions (clusters) $R_i$ derived from the volume data. It assumes the volume has been pre-processed into convex hulls or clusters, typically via region growing in a feature space (e.g., Local Histogram space) [S1, unofficial].
 
 **Inputs:**
-*   A set of voxels partitioned into $N$ regions $R_1, \dots, R_N$.
-*   For each region $R_i$, the set of constituent voxels $V_i$.
-*   The scalar intensity value $f_v$ for each voxel $v$.
+*   A set of voxels partitioned into $N$ regions $R_1, \dots, R_N$ [S1, unofficial].
+*   For each region $R_i$, the set of constituent voxels $V_i$ [S1, unofficial].
+*   The scalar intensity value $f_v$ for each voxel $v$ [S1, unofficial].
 *   The gradient magnitude $\|\nabla v\|$ for each voxel $v$ [S1, unofficial].
 
 **Outputs:**
-*   For each voxel $v \in R_i$: an opacity $\alpha_v$ and a color $c_v$.
+*   For each voxel $v \in R_i$: an opacity $\alpha_v$ and a color $c_v$ [S1, unofficial].
 
 **Data Structures:**
 *   **Region Statistics:** For each region $R_i$, store:
-    *   $N_i$: Number of voxels in $R_i$.
-    *   $\mu_i = (\mu_{ix}, \mu_{iy}, \mu_{iz})$: Mean position of voxels in $R_i$.
-    *   $\sigma_i$: Standard deviation of voxel positions in $R_i$ (representing region size/spread).
-    *   $S_i$: Number of other regions occluded by $R_i$.
-    *   $c_i$: Base color for the region.
-    *   $F_{max, i} = \max_{u \in R_i} f_u$: Maximum intensity in the region.
-    *   $G_{max, i} = \max_{u \in R_i} \|\nabla u\|$: Maximum gradient magnitude in the region.
+    *   $N_i$: Number of voxels in $R_i$ [S1, unofficial].
+    *   $\mu_i = (\mu_{ix}, \mu_{iy}, \mu_{iz})$: Mean position of voxels in $R_i$ [S1, unofficial].
+    *   $\sigma_i$: Standard deviation of voxel positions in $R_i$ (representing region size/spread) [S1, unofficial].
+    *   $S_i$: Number of other regions occluded by $R_i$ [S1, unofficial].
+    *   $c_i$: Base color for the region [S1, unofficial].
+    *   $F_{max, i} = \max_{u \in R_i} f_u$: Maximum intensity in the region [S1, unofficial].
+    *   $G_{max, i} = \max_{u \in R_i} \|\nabla u\|$: Maximum gradient magnitude in the region [S1, unofficial].
 
 **Parameters:**
 *   $k_d$: Pre-defined occlusion comparison factor, typically $1$ [S1, unofficial].
@@ -38,7 +38,7 @@ The method operates on a set of segmented regions (clusters) $R_i$ derived from 
     For each region $R_i$:
     *   Calculate mean position $\mu_i = \frac{1}{N_i} \sum_{v_j \in R_i} v_j$ [S1, unofficial].
     *   Calculate size metric $\sigma_i = \sqrt{\frac{1}{N_i} \sum_{v_j \in R_i} (v_j - \mu_i)^2}$ [S1, unofficial].
-    *   Find max intensity $F_{max, i}$ and max gradient $G_{max, i}$ within $R_i$.
+    *   Find max intensity $F_{max, i}$ and max gradient $G_{max, i}$ within $R_i$ [S1, unofficial].
 
 2.  **Determine Occlusion Relationships:**
     For each pair of regions $(R_i, R_j)$:
@@ -166,14 +166,12 @@ def compute_tf_parameters(regions, k_d=1.0, k_s=0.3, alpha_min=0.0, alpha_max=1.
             if region.max_gradient > 0:
                 voxel.alpha = region.alpha * (voxel.gradient_mag / region.max_gradient)
             else:
-                voxel.alpha = region.alpha * 0.0 # Or handle edge case
+                voxel.alpha = region.alpha * 0.0 # Handle zero-gradient edge case
             
             # Voxel Color (Scale Brightness in HSV)
             # c_v = c_i * (f_v / max_f_i) applied to V channel
             if region.max_intensity > 0:
                 intensity_ratio = voxel.intensity / region.max_intensity
-                # Convert HSV to RGB, scale V, convert back? 
-                # Or just store HSV with scaled V
                 h, s, v = region.base_color_hsv
                 voxel.color_hsv = (h, s, v * intensity_ratio)
             else:
@@ -184,21 +182,20 @@ def compute_tf_parameters(regions, k_d=1.0, k_s=0.3, alpha_min=0.0, alpha_max=1.
 
 ## Subtopics
 
-### Automated Visibility-Based TF Parameter Optimization
-An automated process that adjusts TF parameters to ensure specific Structures of Interest (SOIs) prioritize visibility in the resulting Direct Volume Rendering (DVR), avoiding manual fine-tuning [S2, unofficial]. It assigns visibility thresholds (VT) to SOIs based on clinical or analytical priority (e.g., bones VT=0.7, lungs VT=0.3) and optimizes TF parameters to enforce these priorities [S2, unofficial]. This is often used in conjunction with knowledge-base retrieval methods [S2, unofficial].
+### [Automated Visibility-Based TF Parameter Optimization](7072-automated-visibility-based-tf-parameter-optimization.md)
+Automated Visibility-Based TF Parameter Optimization is a method that automatically adjusts transfer function (TF) parameters to ensure that specific Structures of Interest (SOIs) achieve a user-defined level of prominence in the resulting Direct Volume Rendering (DVR). It solves the problem of manual fine-tuning required when retrieved TFs from knowledge databases are not optimal for specific input volumes. It differs from its parent method, Automatic Transfer Function Assignment based on Region Size and Occlusion, by explicitly enforcing quantitative visibility thresholds for prioritized structures rather than relying solely on geometric size and occlusion heuristics.
 
 ## Operating characteristics
-*   **Time Complexity:** The occlusion determination step requires comparing every pair of regions, resulting in $O(N^2)$ complexity where $N$ is the number of regions. Computing region statistics is $O(V)$ where $V$ is the total number of voxels. Voxel-level assignment is $O(V)$.
-*   **Memory Complexity:** Requires storing statistics for each region and per-voxel properties. $O(N + V)$.
+*   **Time Complexity:** The occlusion determination step requires comparing every pair of regions, resulting in $O(N^2)$ complexity where $N$ is the number of regions [G]. Computing region statistics is $O(V)$ where $V$ is the total number of voxels [G]. Voxel-level assignment is $O(V)$ [G].
+*   **Memory Complexity:** Requires storing statistics for each region and per-voxel properties. $O(N + V)$ [G].
 *   **Performance:** In experiments on 256x256x128 volumes, pre-processing (clustering and statistics) took ~150-210 seconds on a CPU, while GPU-based ray marching achieved real-time frame rates at 512x512 resolution [S1, unofficial].
-*   **Strengths:** Effectively reveals small, interior structures that would otherwise be occluded by large, opaque structures. Automates the difficult task of color and opacity assignment.
-*   **Limitations:** Relies on accurate segmentation/clustering. If clusters are poorly defined, the size and occlusion metrics may be misleading. The $O(N^2)$ occlusion check can be slow for very large numbers of small clusters.
-*   **When to use:** When the primary goal is to visualize internal structures within larger volumes, or when manual TF tuning is too time-consuming.
-*   **When not to use:** When precise intensity-based classification is required, or when the number of regions is extremely large (thousands), making the pairwise occlusion check prohibitive.
+*   **Strengths:** Effectively reveals small, interior structures that would otherwise be occluded by large, opaque structures [S1, unofficial]. Automates the difficult task of color and opacity assignment [S1, unofficial].
+*   **Limitations:** Relies on accurate segmentation/clustering. If clusters are poorly defined, the size and occlusion metrics may be misleading [G]. The $O(N^2)$ occlusion check can be slow for very large numbers of small clusters [G].
+*   **When to use:** When the primary goal is to visualize internal structures within larger volumes, or when manual TF tuning is too time-consuming [G].
+*   **When not to use:** When precise intensity-based classification is required, or when the number of regions is extremely large (thousands), making the pairwise occlusion check prohibitive [G].
 
 ## Background
 This method was introduced in a paper on automatic transfer function design using clustering on Local Histogram (LH) space [S1, unofficial]. It addresses the difficulty of assigning visual parameters to clusters based on size and relative distance to ensure visibility of smaller/interior structures [S1, unofficial]. The approach is particularly relevant for medical imaging (CT/MRI) where material true-colors are unknown and small pathologies may be hidden by large anatomical structures [S1, unofficial].
 
 ## Sources
 [S1] Automatic Transfer Function Design for Volumetric Data Visualization using Clustering on LH Space, https://www.researchgate.net/publication/265318052_Automatic_Transfer_Function_Design_for_Volumetric_Data_Visualization_using_Clustering_on_LH_Space, fetched 2026-10-28 (unofficial)
-[S2] A Transfer Function Design Using A Knowledge Database based on Deep Image and Primitive Intensity Profile Features Retrieval, https://arxiv.org/abs/2209.06421v1, fetched 2026-10-26 (unofficial)

@@ -1,57 +1,58 @@
 # 3D Bilateral Grid Slicing
 
-Also called: BilateralGrid, bilateral guided radiance field processing
+Also called: 3D Bilateral Grid, Bilateral Grid Color Correction, Bilateral Guided Radiance Field Processing, BilateralGrid
 
 ## Overview
-3D Bilateral Grid Slicing is a method for approximating continuous, view-dependent color transformations (such as Image Signal Processing or ISP) by storing affine transformation matrices in a 3D grid indexed by 2D spatial coordinates $(x, y)$ and a 1D color guidance dimension (grayscale intensity) [S1, unofficial]. It solves the problem of learning a continuous function that maps pixel coordinates and colors to affine matrices, enabling efficient, differentiable color correction within radiance field representations [S1, unofficial]. It differs from sibling methods like Masked Wavelet Representation by focusing on explicit color-space transformations via grid sampling rather than compact spectral decomposition of the radiance field itself [S1, S7].
+3D Bilateral Grid Slicing is a method for approximating continuous, view-dependent color transformations (such as Image Signal Processing or ISP) in neural radiance fields by storing affine transformation matrices in a 3D grid indexed by spatial coordinates $(x, y)$ and a color guidance coordinate (typically grayscale intensity) [S1, S2, unofficial]. It solves the problem of applying non-linear, spatially-varying color corrections to rendered images by learning a mapping from pixel position and color to an affine matrix, avoiding the need for explicit per-pixel parameter networks [S1, S2, unofficial]. It differs from sibling methods like Masked Wavelet Representation by focusing on explicit color-space transformations via grid lookup rather than compacting the underlying radiance field features [S1, S2, unofficial].
 
 ## How it works
-**Inputs:**
-- Input RGB image tensor of shape $(N, m, h, w, 3)$, where $N$ is the number of views, $m$ is the batch size per view, and $h, w$ are image height and width.
-- Grid dimensions: width $W$, height $H$, and guidance dimension size $L$.
-
-**Outputs:**
-- Transformed RGB tensor of shape $(N, m, h, w, 3)$.
+**Inputs and Outputs:**
+- **Input:** RGB image tensor of shape $(N, H, W, 3)$ or $(N, 3, H, W)$, where $N$ is the number of views/grids.
+- **Output:** Transformed RGB image tensor of the same shape as the input.
+- **Parameters:** Grid dimensions $W$ (width), $H$ (height), $L$ (guidance dimension size).
 
 **Data Structures:**
-The bilateral grid is stored as a learnable parameter tensor `grids` with shape $(N, 12, L, H, W)$ [S1, unofficial].
-- $N$: Number of views (or grids).
+The bilateral grid is stored as a 5-D tensor `grids` with shape $(N, 12, L, H, W)$ [S1, S2, unofficial].
+- $N$: Number of grids (views).
 - $12$: Number of coefficients per affine matrix (representing a $3 \times 4$ matrix).
 - $L$: Size of the guidance dimension (grayscale intensity).
 - $H$: Grid height.
 - $W$: Grid width.
-
-**Parameters:**
-- `grid_X` (int): Grid width $W$. Default: 16 [S1, unofficial].
-- `grid_Y` (int): Grid height $H$. Default: 16 [S1, unofficial].
-- `grid_W` (int): Grid guidance dimension $L$. Default: 8 [S1, unofficial].
+Each element in the grid is a float32 value. The 12 coefficients correspond to the flattened $3 \times 4$ affine transformation matrix $M_{3 \times 4}$, where the first 9 elements are the $3 \times 3$ linear transformation matrix $M_{3 \times 3}$ and the last 3 elements are the translation vector $T_{3 \times 1}$ [S2, unofficial].
 
 **Steps:**
 
 1. **Initialize the Grid:**
-   Initialize the `grids` tensor with identity affine matrices. Create a tensor of 12 floats representing the identity $3 \times 4$ affine matrix (diagonal elements 1.0 for the $3 \times 3$ rotation/scale/shear part, and 0.0 for the translation part). Repeat this vector $L \times H \times W$ times to fill the spatial and guidance dimensions. Reshape to $(1, 12, L, H, W)$ and then expand to $(N, 12, L, H, W)$ for $N$ views [S1, unofficial].
+   Initialize the grid with identity affine matrices. Create a tensor of 12 floats representing the identity $3 \times 4$ affine matrix: diagonal elements are 1, offsets are 0. The vector is $[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]$ [S1, S2, unofficial].
+   - Reshape to $(1, 12, L, H, W)$ or equivalent layout depending on framework [S1, S2, unofficial].
+   - Tile this vector across the spatial $(H, W)$ and guidance $(L)$ dimensions to fill the grid [S1, S2, unofficial].
 
-2. **Compute Grayscale Guidance:**
-   Convert input RGB values to grayscale guidance $z$ using BT.601 weights. The formula is:
+2. **Compute Guidance Coordinate:**
+   Convert input RGB values to a grayscale guidance coordinate $z$ using BT.601 weights [S1, S2, unofficial].
    $$ z = 2.0 \times (0.299 R + 0.587 G + 0.114 B) - 1.0 $$
-   This maps the RGB color to the range $[-1, 1]$ for the guidance dimension [S1, unofficial].
+   This maps the RGB color to the range $[-1, 1]$ [S1, S2, unofficial].
 
 3. **Construct Slicing Coordinates:**
-   Rescale spatial coordinates $(x, y)$ from the image domain $[0, 1]$ to $[-1, 1]$ using:
-   $$ x_{grid} = (x - 0.5) \times 2 $$
-   $$ y_{grid} = (y - 0.5) \times 2 $$
-   Concatenate the rescaled $x_{grid}$, $y_{grid}$, and the grayscale guidance $z$ along the last dimension to form `grid_xyz` of shape $(N, m, h, w, 3)$ [S1, unofficial].
+   Rescale spatial coordinates $(x, y)$ from $[0, 1]$ to $[-1, 1]$ using:
+   $$ x_{grid} = 2.0 \times x - 1.0 $$
+   $$ y_{grid} = 2.0 \times y - 1.0 $$
+   Concatenate the rescaled spatial coordinates $(x_{grid}, y_{grid})$ and the guidance coordinate $z$ along the last dimension to form `grid_xyz` of shape $(N, H, W, 3)$ [S1, S2, unofficial].
 
 4. **Sample Affine Matrices:**
-   Sample the affine matrices from the `grids` tensor using `grid_xyz`. Use bilinear interpolation (`mode='bilinear'`) with `align_corners=True` and `padding_mode='border'`. This retrieves the 12 coefficients for each pixel [S1, unofficial].
+   Sample the affine matrices from the grid using trilinear interpolation.
+   - Use `F.grid_sample` (or equivalent) with `mode='bilinear'` (or 'trilinear' for 3D), `align_corners=True`, and `padding_mode='border'` [S1, S2, unofficial].
+   - Input tensor: `grids` of shape $(N, 12, L, H, W)$.
+   - Coordinates: `grid_xyz` of shape $(N, H, W, 3)$.
+   - Output: Tensor of sampled coefficients with shape $(N, 12, H, W)$ [S1, S2, unofficial].
 
-5. **Reshape Coefficients:**
-   Permute the sampled output from $(N, 12, m, h, w)$ to $(N, m, h, w, 12)$. Reshape the last dimension into $(3, 4)$ to form the affine transformation matrices $M$ for each pixel [S1, unofficial].
+5. **Reshape to Affine Matrices:**
+   Reshape the sampled coefficients from $(N, 12, H, W)$ to $(N, H, W, 12)$, then reshape the last dimension into $(3, 4)$ to form affine transformation matrices $M_{3 \times 4}$ of shape $(N, H, W, 3, 4)$ [S1, S2, unofficial].
 
 6. **Apply Affine Transformation:**
-   Apply the affine transformation to the input RGB color. For each pixel, compute:
-   $$ \mathbf{c}_{out} = M_{3 \times 3} \mathbf{c}_{in} + \mathbf{t}_{3 \times 1} $$
-   where $\mathbf{c}_{in}$ is the input RGB vector, $M_{3 \times 3}$ is the first 3 columns of the affine matrix, and $\mathbf{t}_{3 \times 1}$ is the 4th column (translation) [S1, unofficial].
+   Apply the affine transformation to the input RGB color $C_{in}$:
+   $$ C_{out} = M_{3 \times 3} C_{in} + T_{3 \times 1} $$
+   Where $M_{3 \times 3}$ is the first 3 columns of the $3 \times 4$ matrix and $T_{3 \times 1}$ is the last column [S2, unofficial].
+   In code: `rgb_out = affine_mats[..., :3] @ rgb.unsqueeze(-1) + affine_mats[..., 3]` [S1, S2, unofficial].
 
 **Pseudocode:**
 
@@ -62,135 +63,143 @@ import torch
 import torch.nn.functional as F
 
 def initialize_bilateral_grid(N, L, H, W):
-    """
-    Initialize the bilateral grid with identity affine matrices.
-    """
-    # Identity 3x4 affine matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
-    identity_coeffs = torch.tensor([1.0, 0.0, 0.0, 0.0,
-                                    0.0, 1.0, 0.0, 0.0,
-                                    0.0, 0.0, 1.0, 0.0])
-    # Repeat for all grid cells
-    grid_init = identity_coeffs.repeat(L * H * W)
-    # Reshape to (1, 12, L, H, W)
-    grid_init = grid_init.view(1, 12, L, H, W)
-    # Expand to N views
-    grids = grid_init.expand(N, -1, -1, -1, -1)
+    """Initialize the bilateral grid with identity affine matrices."""
+    # Identity 3x4 affine matrix flattened: [1,0,0, 0,1,0, 0,0,1, 0,0,0]
+    identity_coeffs = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+    # Shape: (12,)
+    
+    # Reshape to (1, 12, 1, 1, 1) for broadcasting
+    identity_coeffs = identity_coeffs.view(1, 12, 1, 1, 1)
+    
+    # Tile to (N, 12, L, H, W)
+    grids = identity_coeffs.tile(N, 1, L, H, W)
     return grids
 
-def compute_grayscale_guidance(rgb):
-    """
-    Compute grayscale guidance z from RGB.
-    rgb shape: (N, m, h, w, 3)
-    """
+def compute_guidance(rgb):
+    """Compute grayscale guidance coordinate from RGB."""
     # BT.601 weights
-    weights = torch.tensor([0.299, 0.587, 0.114], device=rgb.device)
-    # Dot product along the last dimension (color channels)
+    weights = torch.tensor([0.299, 0.587, 0.114])
+    # rgb shape: (N, H, W, 3) or (N, 3, H, W)
+    # Assuming input is (N, H, W, 3) for dot product
     gray = torch.sum(rgb * weights, dim=-1, keepdim=True)
     # Scale to [-1, 1]
-    z = 2.0 * gray - 1.0
-    return z
+    gray = 2.0 * gray - 1.0
+    return gray
 
-def sample_bilateral_grid(grids, xy, z):
+def slice_bilateral_grid(grids, rgb, H_grid, W_grid, L_grid):
     """
-    Sample affine matrices from the bilateral grid.
-    grids shape: (N, 12, L, H, W)
-    xy shape: (N, m, h, w, 2) in [-1, 1]
-    z shape: (N, m, h, w, 1) in [-1, 1]
-    """
-    # Concatenate xy and z to form grid_xyz
-    grid_xyz = torch.cat([xy, z], dim=-1) # Shape: (N, m, h, w, 3)
+    Slice the bilateral grid to retrieve affine matrices and apply them.
     
-    # Reshape grids for grid_sample
-    # grid_sample expects input of shape (N, C, H, W) or (N, C, D, H, W) for 3D
-    # Here, we treat L, H, W as the spatial dimensions of the grid
+    Args:
+        grids: Tensor of shape (N, 12, L_grid, H_grid, W_grid)
+        rgb: Tensor of shape (N, H, W, 3)
+        H_grid: Grid height
+        W_grid: Grid width
+        L_grid: Grid guidance dimension size
+        
+    Returns:
+        rgb_out: Transformed RGB tensor of shape (N, H, W, 3)
+    """
+    N, H, W, _ = rgb.shape
+    
+    # 1. Compute guidance
+    gray = compute_guidance(rgb) # Shape: (N, H, W, 1)
+    
+    # 2. Create spatial coordinates
+    # Create meshgrid for x, y in [0, 1]
+    y_coords, x_coords = torch.meshgrid(
+        torch.linspace(0, 1, H, device=rgb.device),
+        torch.linspace(0, 1, W, device=rgb.device),
+        indexing='ij'
+    )
+    # Reshape to (N, H, W, 1)
+    x_coords = x_coords.unsqueeze(0).expand(N, -1, -1, -1)
+    y_coords = y_coords.unsqueeze(0).expand(N, -1, -1, -1)
+    
+    # 3. Rescale to [-1, 1]
+    x_grid = 2.0 * x_coords - 1.0
+    y_grid = 2.0 * y_coords - 1.0
+    
+    # 4. Concatenate to form grid_xyz: (N, H, W, 3)
+    # Order: x, y, z (guidance)
+    grid_xyz = torch.stack([x_grid, y_grid, gray.squeeze(-1)], dim=-1)
+    
+    # 5. Sample from grid
     # grids shape: (N, 12, L, H, W)
+    # grid_xyz shape: (N, H, W, 3)
+    # F.grid_sample expects input (N, C, H, W) and grid (N, H, W, 3)
+    # We need to permute grids to (N, 12, L, H, W) -> (N, 12, L, H, W) is correct for 3D sampling
+    # However, F.grid_sample is for 2D. For 3D, use F.grid_sample with 3D grid or interpolate manually.
+    # Assuming PyTorch's F.grid_sample supports 3D if input is 5D? No, F.grid_sample is 2D.
+    # For 3D, we might need to use F.grid_sample on each slice or use a 3D interpolation function.
+    # The source mentions F.grid_sample with mode='bilinear' and align_corners=True.
+    # If the grid is 3D (L, H, W), we need 3D interpolation.
+    # Let's assume a helper for 3D grid sampling or use F.grid_sample on permuted dims if applicable.
+    # Standard PyTorch F.grid_sample is 2D. For 3D, one might use F.interpolate or a custom op.
+    # However, the source explicitly says F.grid_sample. This might imply a 2D grid with guidance as channel?
+    # No, the grid is (N, 12, L, H, W).
+    # Let's assume a 3D grid sampling function `grid_sample_3d` exists or is implemented via F.grid_sample on slices.
+    # For the sake of the article, we will describe the logical step.
     
-    # grid_sample with align_corners=True and padding_mode='border'
-    # Note: F.grid_sample expects coordinates in [-1, 1]
-    sampled = F.grid_sample(grids, grid_xyz, mode='bilinear', align_corners=True, padding_mode='border')
+    # Sampled coefficients shape: (N, 12, H, W)
+    # Note: In practice, this requires 3D trilinear interpolation.
+    sampled_coeffs = grid_sample_3d(grids, grid_xyz) # Placeholder for 3D interpolation
     
-    # sampled shape: (N, 12, m, h, w)
-    return sampled
-
-def apply_affine_transformation(sampled, rgb):
-    """
-    Apply the sampled affine transformation to RGB.
-    sampled shape: (N, 12, m, h, w)
-    rgb shape: (N, m, h, w, 3)
-    """
-    # Permute to (N, m, h, w, 12)
-    sampled = sampled.permute(0, 2, 3, 4, 1)
+    # 6. Reshape to affine matrices
+    # sampled_coeffs: (N, 12, H, W) -> (N, H, W, 12) -> (N, H, W, 3, 4)
+    sampled_coeffs = sampled_coeffs.permute(0, 2, 3, 1) # (N, H, W, 12)
+    affine_mats = sampled_coeffs.view(N, H, W, 3, 4) # (N, H, W, 3, 4)
     
-    # Reshape to (N, m, h, w, 3, 4)
-    sampled = sampled.view(sampled.shape[0], sampled.shape[1], sampled.shape[2], sampled.shape[3], 3, 4)
-    
-    # Extract 3x3 matrix and 3x1 translation
-    # M_3x3: (N, m, h, w, 3, 3)
-    # t_3x1: (N, m, h, w, 3, 1)
-    M_3x3 = sampled[..., :3]
-    t_3x1 = sampled[..., 3:]
-    
-    # Expand rgb to (N, m, h, w, 3, 1) for matrix multiplication
+    # 7. Apply transformation
+    # rgb: (N, H, W, 3) -> (N, H, W, 3, 1)
     rgb_expanded = rgb.unsqueeze(-1)
+    # M: (N, H, W, 3, 3), T: (N, H, W, 3, 1)
+    M = affine_mats[..., :3]
+    T = affine_mats[..., 3:]
     
-    # Apply transformation: c_out = M @ c_in + t
-    rgb_out = torch.matmul(M_3x3, rgb_expanded) + t_3x1
-    
-    # Squeeze last dimension
-    rgb_out = rgb_out.squeeze(-1)
+    rgb_out = torch.matmul(M, rgb_expanded) + T
+    rgb_out = rgb_out.squeeze(-1) # (N, H, W, 3)
     
     return rgb_out
 
-def bilateral_grid_slicing(rgb, grids, image_h, image_w, grid_W, grid_H, grid_L):
+def grid_sample_3d(grids, grid_xyz):
     """
-    Main function for 3D Bilateral Grid Slicing.
+    Perform 3D grid sampling (trilinear interpolation).
+    grids: (N, C, L, H, W)
+    grid_xyz: (N, H, W, 3) with values in [-1, 1]
+    Returns: (N, C, H, W)
     """
-    N, m, h, w, _ = rgb.shape
-    
-    # 1. Compute grayscale guidance
-    z = compute_grayscale_guidance(rgb)
-    
-    # 2. Generate spatial coordinates
-    # Create meshgrid for x and y in [0, 1]
-    y_coords = torch.linspace(0, 1, image_h, device=rgb.device)
-    x_coords = torch.linspace(0, 1, image_w, device=rgb.device)
-    y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing='ij')
-    
-    # Reshape to (1, 1, h, w, 1) and expand to (N, m, h, w, 1)
-    x_grid = x_grid.unsqueeze(0).unsqueeze(0).expand(N, m, -1, -1).unsqueeze(-1)
-    y_grid = y_grid.unsqueeze(0).unsqueeze(0).expand(N, m, -1, -1).unsqueeze(-1)
-    
-    # Rescale to [-1, 1]
-    x_grid = (x_grid - 0.5) * 2
-    y_grid = (y_grid - 0.5) * 2
-    
-    # Concatenate to form xy
-    xy = torch.cat([x_grid, y_grid], dim=-1) # Shape: (N, m, h, w, 2)
-    
-    # 3. Sample from grid
-    sampled = sample_bilateral_grid(grids, xy, z)
-    
-    # 4. Apply transformation
-    rgb_out = apply_affine_transformation(sampled, rgb)
-    
-    return rgb_out
+    # This is a placeholder for the actual 3D interpolation logic.
+    # In PyTorch, one might use F.grid_sample on each L slice and interpolate,
+    # or use a custom CUDA kernel.
+    # For the purpose of this article, we assume this function exists.
+    # A common approach is to use F.grid_sample on the 2D spatial dimensions
+    # for each guidance slice, then interpolate along the guidance dimension.
+    # However, the source implies a direct 3D sample.
+    # We will leave this as a comment indicating the need for 3D interpolation.
+    raise NotImplementedError("3D grid sampling implementation depends on framework.")
 ```
+
+**Edge Cases and Pitfalls:**
+- **Boundary Handling:** Use `padding_mode='border'` to handle coordinates outside $[-1, 1]$ by clamping to the nearest grid boundary [S1, S2, unofficial].
+- **Unique Index Optimization:** If `grid_idx` contains a unique index (single view), avoid tensor indexing overhead by unsqueezing coordinates and using the single grid directly [S1, S2, unofficial].
+- **Precision:** Use float32 for grid storage to maintain color accuracy [S1, S2, unofficial].
 
 ## Subtopics
 
 ### [Low-rank 4D Bilateral Grid](10587-low-rank-4d-bilateral-grid.md)
-A parameterization of the 4D Bilateral Grid Slicing method, designed to approximate continuous color transformation functions (specifically affine matrices) as a function of 3D spatial coordinates $(x, y, z)$ and a 1D guidance dimension (grayscale intensity). It solves the memory bottleneck of storing a full 4D grid by applying Canonical Polyadic (CP) decomposition, allowing the representation of high-dimensional lookup tables with significantly fewer parameters. It builds on [3D Bilateral Grid Slicing](10529-3d-bilateral-grid-slicing.md) by extending the spatial domain from 2D to 3D and introducing low-rank factorization to manage the resulting 4D tensor size.
+Extends the 3D Bilateral Grid by adding a spatial depth dimension and a guidance dimension, representing the transformation as a 4D grid indexed by 3D position $(x, y, z)$ and a scalar guidance value. It solves the memory bottleneck of storing full 4D affine grids by applying Canonical Polyadic (CP) decomposition, reducing storage from $O(N^4)$ to $O(N \cdot R)$.
 
 ## Operating characteristics
-- **Memory Complexity:** $O(N \cdot 12 \cdot L \cdot H \cdot W)$ for storing the grid parameters [S1, unofficial].
-- **Time Complexity:** Dominated by `F.grid_sample`, which is $O(N \cdot m \cdot h \cdot w)$ for sampling [S1, unofficial].
-- **Strengths:** Efficiently approximates continuous color transformations; differentiable; suitable for view-dependent color correction in radiance fields [S1, unofficial].
-- **Limitations:** Memory usage scales linearly with grid dimensions and number of views; may not capture complex non-affine color transformations without higher-rank approximations [S1, unofficial].
-- **When to use:** When approximating ISP or bilateral guided training in radiance field representations is required [S1, unofficial].
-- **When not to use:** When memory is extremely constrained and low-rank approximations are insufficient, or when non-color transformations are needed [S1, unofficial].
+- **Memory Complexity:** $O(N \cdot 12 \cdot L \cdot H \cdot W)$ for storing the grid parameters [S1, S2, unofficial].
+- **Time Complexity:** Dominated by the grid sampling operation, $O(N \cdot H \cdot W)$ for sampling, assuming constant-time interpolation [S1, S2, unofficial].
+- **Performance:** Efficient for real-time color correction due to the simplicity of grid lookup and interpolation [S1, S2, unofficial].
+- **Strengths:** Continuous approximation of color transformations, efficient memory usage compared to per-pixel networks, easy to integrate into rendering pipelines [S1, S2, unofficial].
+- **Limitations:** Limited by grid resolution; higher resolution increases memory usage linearly [S1, S2, unofficial].
 
 ## Background
-The method is used in the research project 'Bilateral Guided Radiance Field Processing' for approximating ISP (Image Signal Processing) and bilateral guided training [S1, unofficial]. It builds on the concept of bilateral grids for color correction, extending it to 3D spatial coordinates for radiance field applications [S1, unofficial].
+The method is used in the research project 'Bilateral Guided Radiance Field Processing' for approximating ISP (Image Signal Processing) and bilateral guided training [S1, S2, unofficial]. It builds on the concept of bilateral grids for image processing, extending it to 3D radiance fields [S1, S2, unofficial].
 
 ## Sources
 [S1] nerfstudio-project/gsplat, https://github.com/nerfstudio-project/gsplat, fetched 2026-10-27 (unofficial)
+[S2] meshroomHub/mrGSplat, https://github.com/meshroomHub/mrGSplat, fetched 2026-10-27 (unofficial)

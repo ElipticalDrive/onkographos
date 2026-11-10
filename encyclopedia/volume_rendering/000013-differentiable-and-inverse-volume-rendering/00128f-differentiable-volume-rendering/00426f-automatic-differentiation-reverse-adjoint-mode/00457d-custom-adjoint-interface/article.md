@@ -3,89 +3,71 @@
 Also called: dr.CustomOp
 
 ## Overview
-The Custom Adjoint Interface is a mechanism that allows users to provide explicit forward- and reverse-mode derivatives for functions, extending standard automatic differentiation (AD) systems. It solves the problem of differentiating complex operations that depend on global state or implicit variables, which standard AD interfaces often fail to track correctly. It sets itself apart from standard AD by monitoring variable accesses during execution to automatically register implicit dependencies, ensuring correct gradient flow for scene parameters and global state [S1].
+The Custom Adjoint Interface is a mechanism in differentiable programming systems that allows users to define custom forward and reverse-mode derivatives for functions, extending standard automatic differentiation (AD) by tracking implicit inputs and outputs (dependencies on global state) in addition to explicit function arguments and return values [S1]. It sets itself apart from standard AD interfaces by explicitly monitoring variable accesses during primal evaluation to automatically register implicit dependencies, ensuring correct gradient flow for operations involving global state such as scene parameters or texture lookups [S1].
 
 ## How it works
-The interface operates by wrapping user-defined functions in a `dr.CustomOp` object. When the AD system traverses the computational graph, it detects these custom operations and invokes specific callbacks rather than tracing the internal implementation.
+The interface operates by intercepting function calls within the AD computational graph. When a user defines a custom operation, the system registers it as a `CustomOp`. During the forward pass, the primal computation is executed. During the backward pass (reverse mode), the AD system traverses the tape and invokes the `CustomOp`'s callbacks to propagate gradients.
 
-**Inputs and Outputs:**
-*   **Input:** A function definition (potentially containing closures or global state accesses) and its associated forward/reverse derivative logic.
-*   **Output:** A differentiable operation node in the AD tape that correctly propagates gradients to both explicit arguments and implicit global dependencies.
+### Inputs and Outputs
+*   **Inputs:** Explicit function arguments (tensors/arrays) and implicit dependencies (global state accessed during execution).
+*   **Outputs:** Explicit return values and implicit updates to global state (e.g., scene parameter gradients).
 
-**Data Structures:**
-The `dr.CustomOp` encapsulates:
-1.  **Forward Callback:** Computes the primal value.
-2.  **Reverse Callback:** Computes the adjoint (gradient) propagation.
-3.  **Implicit Dependency Registry:** Tracks variables accessed during the primal evaluation that are not explicit arguments.
+### Data Structures
+The core data structure is the `CustomOp` object, which encapsulates:
+1.  **Forward Callback:** A function or method that computes the primal output from primal inputs.
+2.  **Backward Callback:** A function or method that computes input gradients from output gradients.
+3.  **Implicit Dependency Tracker:** A mechanism to monitor variable accesses during the forward pass to identify implicit inputs/outputs [S1].
 
-**Steps:**
-1.  **Registration:** The user defines a function and registers it with the AD system using the `dr.CustomOp` interface.
-2.  **Primal Evaluation:** When the function is called, the system executes the forward callback. During this execution, the system monitors all variable accesses.
-3.  **Implicit Dependency Tracking:** Any variable accessed from the surrounding environment (e.g., texture parameters, BRDF coefficients) that is not an explicit argument is automatically registered as an implicit input or output [S1].
-4.  **Forward Mode Traversal:** If the AD system is in forward mode, it invokes the `forward()` callback to compute the primal value and propagates tangent values.
-5.  **Reverse Mode Traversal:** If the AD system is in reverse mode (backpropagation), it invokes the `backward()` callback.
-    *   The `backward()` callback receives the gradient of the output.
-    *   It computes the gradients for explicit arguments.
-    *   For implicit reads (global state), the system issues atomic scatter-reductions to update the gradients of the scene parameters [S1].
-6.  **Gradient Accumulation:** The computed gradients are accumulated into the gradient buffers of the respective variables.
+### Steps
+1.  **Registration:** The user defines a `CustomOp` with forward and backward logic. The system registers this operation.
+2.  **Primal Execution:** When the function is called, the primal computation runs. The AD system monitors variable accesses to detect implicit dependencies on global state [S1].
+3.  **Implicit Dependency Registration:** Any variable accessed during the primal execution that is not an explicit argument is registered as an implicit input or output. This ensures the global flow of derivatives is correctly represented [S1].
+4.  **Backward Invocation:** When `dr.backward()` is called, the AD system traverses the tape. Upon encountering a `CustomOp`, it invokes the `backward()` callback.
+5.  **Gradient Propagation:** The `backward()` callback converts output derivatives into input derivatives. For methods with implicit reads (e.g., accessing scene parameters), the system issues atomic scatter-reductions to update the gradients of those scene parameters [S1].
 
-**Pseudocode:**
-The following Python-like pseudocode illustrates the structure of a custom adjoint and its integration with the AD system.
+### Pseudocode
+The following pseudocode illustrates the structure of a `CustomOp` and its usage in Dr.Jit. It assumes a standard AD framework with `dr.enable_grad`, `dr.set_grad`, `dr.backward`, and `dr.grad` operations.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import drjit as dr
-
-# Define the primal function
-def my_custom_op(x, y):
-    # Primal computation
-    return x * y
-
-# Define the custom adjoint wrapper
+# Define a custom operation class
 class MyCustomOp(dr.CustomOp):
-    def __init__(self):
-        super().__init__()
-
     def forward(self, x, y):
-        # Compute primal value
-        return x * y
+        # Primal computation
+        # Implicit dependencies (e.g., global texture) are accessed here
+        # The AD system monitors these accesses automatically
+        result = x * y + global_texture_lookup(x)
+        return result
 
-    def backward(self, grad_out, x, y):
-        # Compute gradients for explicit arguments
+    def backward(self, grad_out):
+        # Reverse-mode derivative
+        # grad_out is the gradient of the loss with respect to result
+        # Compute gradients for x and y
         grad_x = grad_out * y
         grad_y = grad_out * x
-        
-        # Return gradients for explicit arguments
-        # Implicit dependencies are handled automatically by the system
-        # by monitoring accesses during the forward pass
+        # Implicit dependencies (global_texture_lookup) gradients are handled
+        # by the system via atomic scatter-reductions if they are scene parameters
         return grad_x, grad_y
 
-# Register the custom op
-dr.CustomOp.register(MyCustomOp)
-
 # Usage
-x = dr.Variable(2.0, requires_grad=True)
-y = dr.Variable(3.0, requires_grad=True)
-
-# The system monitors accesses. If 'y' was a global parameter,
-# it would be tracked as an implicit dependency.
-result = my_custom_op(x, y)
+x = dr.Variable(...)
+y = dr.Variable(...)
+# Register the custom op
+op = MyCustomOp()
+result = op.forward(x, y)
 
 # Backpropagation
-dr.backward(result)
-
-# Access gradients
+dr.set_grad(result, 1.0) # Set gradient of the result
+dr.backward(result)       # Traverse tape and invoke backward()
 grad_x = dr.grad(x)
 grad_y = dr.grad(y)
 ```
 
-**Parameters:**
-*   **Implicit Dependency Monitoring:** Enabled by default in Dr.Jit. It ensures that any variable read from the environment during the primal execution is added to the AD tape [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Global State Changes:** If global state is modified during the primal execution, the implicit dependency tracking must capture the state at the time of access. Failure to do so may result in incorrect gradients [S1].
-*   **Atomic Scatter-Reductions:** For methods with implicit reads, gradient updates are performed via atomic scatter-reductions. This is necessary for parallel execution but may introduce synchronization overhead [S1].
+### Parameters and Edge Cases
+*   **Implicit Dependencies:** Must be correctly identified. Failure to track implicit reads/writes leads to incorrect gradients for global state [S1].
+*   **Atomic Scatter-Reductions:** Used for updating scene parameter gradients from implicit reads. This is the main way scene parameter gradients are generated [S1].
+*   **Polymorphism:** Differentiating polymorphic method calls requires dynamic generation of Vector-Jacobian Product (VJP) functions, wrapped in a `dr.CustomOp` [S1].
 
 ## Subtopics
 
@@ -93,16 +75,16 @@ grad_y = dr.grad(y)
 GradBlock (also known as AD Tape Surgery) is a technique to attach derivative tracking to specific factors within an expression without recomputing the entire primal value, avoiding unnecessary extra computation in both primal and adjoint programs. It solves the problem of efficiently differentiating parts of a computation graph that were originally computed with detached or non-differentiable operations (e.g., GPU texture lookups or importance sampling strategies). It sets itself apart from naive substitution methods by combining the primal value of one variable with the AD trace of another, thereby bypassing redundant forward and backward passes.
 
 ### Differentiating Polymorphism via Dynamic VJP Generation
-A technique to differentiate polymorphic method calls by dynamically generating Vector-Jacobian Product (VJP) functions for each method, wrapped in a `dr.CustomOp` [S1]. It sets itself apart by handling dynamic dispatch in differentiable contexts without requiring static analysis of all possible targets. It is chosen when dealing with object-oriented structures or array-of-structs where methods vary per instance.
+A technique to differentiate polymorphic method calls by dynamically generating Vector-Jacobian Product (VJP) functions for each method, wrapped in a `dr.CustomOp` [S1]. It sets itself apart by handling dynamic dispatch in differentiable code, allowing polymorphic calls to be differentiated without static knowledge of all possible targets. It is chosen when differentiating code with dynamic method resolution (e.g., `obj.func()` where `obj` is an array of instances) [S1].
 
-**Steps:**
-1.  Wrap the polymorphic call (e.g., `out = obj.func(arg_1, arg_2, ..)`) into a dynamically generated `dr.CustomOp` [S1].
+#### Steps
+1.  Wrap the polymorphic method call (e.g., `out = obj.func(arg_1, arg_2, ..)`) into a dynamically generated `dr.CustomOp` [S1].
 2.  When `CustomOp.backward()` is invoked, dynamically define a VJP per method as a placeholder that calls the original function a second time with recursive AD usage [S1].
 3.  Issue a polymorphic method call to the newly defined VJP functions [S1].
 4.  The JIT layer traces each possible target, running all VJP placeholder functions to materialize the differentiation into ordinary traced computation [S1].
 5.  If a return value does not carry derivatives, devirtualize the zero-valued derivative and propagate zero-valued input derivatives to simplify call targets using constant propagation [S1].
 
-**Pseudocode for VJP Generation:**
+#### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -113,18 +95,17 @@ def func_vjp(grad_out, arg_1, arg_2, ..):
     dr.backward(result)
     return dr.grad(arg_1), dr.grad(arg_2), ..
 ```
-This function is generated dynamically for each method target [S1].
+This VJP function is dynamically generated for each method in the polymorphic call [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The overhead of custom adjoints is generally low, as the forward and backward passes are explicitly defined. However, dynamic VJP generation for polymorphism may incur JIT compilation overhead [S1].
-*   **Memory Complexity:** By allowing explicit control over derivatives, custom adjoints can reduce memory usage compared to full graph tracing, especially when combined with techniques like GradBlock [S1].
-*   **Strengths:** Correctly handles implicit dependencies on global state; supports polymorphism; allows optimization of specific parts of the graph [S1].
-*   **Limitations:** Requires user intervention to define custom adjoints; atomic scatter-reductions for implicit reads may have synchronization costs [S1].
-*   **When to Use:** When differentiating functions with global state, polymorphic methods, or when performance optimization via tape surgery is required [S1].
-*   **When Not to Use:** For simple, stateless functions where standard AD tracing is sufficient and less error-prone [S1].
+*   **Time Complexity:** Depends on the complexity of the forward and backward callbacks. Dynamic VJP generation for polymorphism adds overhead during JIT tracing but simplifies execution via constant propagation for zero-valued derivatives [S1].
+*   **Memory Complexity:** Requires storing the computational graph and intermediate values for reverse-mode AD. Implicit dependency tracking adds minimal overhead [S1].
+*   **Strengths:** Correctly handles global state and implicit dependencies, which is crucial for differentiable rendering with scene parameters. Supports polymorphism through dynamic VJP generation [S1].
+*   **Limitations:** Requires careful implementation of forward and backward callbacks. Implicit dependency tracking must be robust to avoid missing gradients [S1].
+*   **When to Use:** When differentiating functions with global state dependencies or polymorphic calls that standard AD systems cannot handle efficiently [S1].
 
 ## Background
-The Custom Adjoint Interface was introduced in Dr.Jit, a just-in-time compiler for differentiable rendering [S1]. It was developed to address the limitations of standard AD systems in handling the complex, stateful computations typical in volume rendering and path tracing, such as implicit dependencies on scene parameters and dynamic dispatch [S1]. The system was presented in the paper "Dr.Jit: A Just-In-Time Compiler for Differentiable Rendering" [S1].
+The Custom Adjoint Interface is part of the Dr.Jit differentiable rendering framework, introduced in the paper "Dr.Jit: A Just-In-Time Compiler for Differentiable Rendering" [S1]. It addresses the limitations of standard AD systems in handling implicit dependencies and polymorphism, which are common in rendering code [S1].
 
 ## Sources
 [S1] DR.JIT, https://doi.org/10.1145/3528223.3530099, fetched 2026-10-26

@@ -1,56 +1,56 @@
 # GPU Backprojection using OpenCL Image Textures
 
-Also called: GPU-Image Backprojection
+Also called: GPU-Image Backprojection, reconstructGPU_Image [S1, unofficial]
 
 ## Overview
-This method accelerates the backprojection step of the Feldkamp-Davis-Kress (FDK) algorithm by leveraging OpenCL image objects (`image2d_t`) for hardware-accelerated interpolation of pre-filtered projection data. It differs from the buffer-based sibling methods by offloading bilinear interpolation to the GPU's texture cache, which typically yields higher performance for large projection datasets. It builds on [Back-projection](2450-back-projection.md) and assumes pre-filtering has been performed on the CPU.
+This method accelerates the backprojection step of the Feldkamp-Davis-Kress (FDK) algorithm by leveraging OpenCL image objects (`image2d_t`) for hardware-accelerated interpolation of pre-filtered projection data [S1, unofficial]. It differs from the buffer-based sibling methods by offloading bilinear interpolation to the GPU's texture cache, which typically yields higher performance for large projection datasets [S1, unofficial]. It builds on [Back-projection](2450-back-projection.md) and assumes pre-filtering has been performed on the CPU [S1, unofficial].
 
 ## How it works
-The method processes each projection angle sequentially. For each angle, the raw projection data is transposed, loaded into an OpenCL image object, and used to backproject into the volume buffer.
+The method processes each projection angle sequentially [S1, unofficial]. For each angle, the raw projection data is transposed, loaded into an OpenCL image object, and used to backproject into the volume buffer [S1, unofficial].
 
 ### Inputs and Outputs
 **Inputs:**
-- `projections`: `std::vector<float>` containing raw projection data.
-- `P`: Number of projections.
-- `W`, `H`: Detector width and height in pixels.
-- `NX`, `NY`: Volume dimensions. The volume is assumed to be cubic in X/Y, i.e., $NX \times NX \times NY$.
-- `voxelSize`: Physical size of a voxel (mm).
-- `pixelSize`: Physical size of a detector pixel (mm).
-- `sdd`: Source-to-Detector Distance (mm).
-- `sod`: Source-to-Object Distance (mm).
+- `projections`: `std::vector<float>` containing raw projection data [S1, unofficial].
+- `P`: Number of projections [S1, unofficial].
+- `W`, `H`: Detector width and height in pixels [S1, unofficial].
+- `NX`, `NY`: Volume dimensions [S1, unofficial]. The volume is assumed to be cubic in X/Y, i.e., $NX \times NX \times NY$ [S1, unofficial].
+- `voxelSize`: Physical size of a voxel (mm) [S1, unofficial].
+- `pixelSize`: Physical size of a detector pixel (mm) [S1, unofficial].
+- `sdd`: Source-to-Detector Distance (mm) [S1, unofficial].
+- `sod`: Source-to-Object Distance (mm) [S1, unofficial].
 
 **Outputs:**
-- `volume`: `std::vector<float>` representing the reconstructed 3D volume, layout $[0..NX-1, 0..NX-1, 0..NY-1]$.
+- `volume`: `std::vector<float>` representing the reconstructed 3D volume, layout $[0..NX-1, 0..NX-1, 0..NY-1]$ [S1, unofficial].
 
 ### Data Structures
 **OpenCL Image2D:**
-- Channel Order: `CL_R`
-- Channel Data Type: `CL_FLOAT`
-- Image Type: `CL_MEM_OBJECT_IMAGE2D`
-- Width: `W`
-- Height: `H`
-- Row Pitch: `0` (native alignment)
+- Channel Order: `CL_R` [S1, unofficial].
+- Channel Data Type: `CL_FLOAT` [S1, unofficial].
+- Image Type: `CL_MEM_OBJECT_IMAGE2D` [S1, unofficial].
+- Width: `W` [S1, unofficial].
+- Height: `H` [S1, unofficial].
+- Row Pitch: `0` (native alignment) [S1, unofficial].
 
 **Kernel Arguments:**
-1. `cl_mem image`: The projection image (`CL_MEM_READ_ONLY`).
-2. `cl_mem volumeBuffer`: Output volume buffer.
-3. `int W`, `int H`: Detector dimensions.
-4. `int NX`, `int NY`: Volume dimensions.
-5. `float voxelSize`, `float pixelSize`: Physical scales.
-6. `float sdd`, `float sod`: Geometry distances.
-7. `float angle`: Current projection angle in radians.
+1. `cl_mem image`: The projection image (`CL_MEM_READ_ONLY`) [S1, unofficial].
+2. `cl_mem volumeBuffer`: Output volume buffer [S1, unofficial].
+3. `int W`, `int H`: Detector dimensions [S1, unofficial].
+4. `int NX`, `int NY`: Volume dimensions [S1, unofficial].
+5. `float voxelSize`, `float pixelSize`: Physical scales [S1, unofficial].
+6. `float sdd`, `float sod`: Geometry distances [S1, unofficial].
+7. `float angle`: Current projection angle in radians [S1, unofficial].
 
 ### Steps
-1. **Pre-filtering (CPU):** Apply FDK pre-filtering (cone weighting and ramp filter) to the raw projections on the CPU. The source notes specify this step occurs before GPU processing.
-2. **Data Transposition:** For each projection $p$, convert the data from column-major (`psrc[u * H + v]`) to row-major (`dest[v * W + u]`) to match the image texture layout.
-3. **Loop over Projections:** Iterate $p$ from $0$ to $P-1$.
-    a. Calculate angle: $\theta = \frac{2\pi p}{P}$.
-    b. **Image Creation:** Create an OpenCL `image2d_t` from the transposed row-major data with flags `CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR`.
-    c. **Kernel Execution:** Enqueue the backprojection NDRange kernel.
-        - Global Size: $NX \times NX \times NY$.
-        - Each work-item $(x, y, z)$ computes the contribution of the current projection to that voxel.
-    d. **Cleanup:** Release the image memory object.
-4. **Final Scaling:** After reading the volume buffer back to the host, multiply every voxel by $\frac{\pi}{P}$.
+1. **Pre-filtering (CPU):** Apply FDK pre-filtering (cone weighting and ramp filter) to the raw projections on the CPU [S1, unofficial]. The source notes specify this step occurs before GPU processing [S1, unofficial].
+2. **Data Transposition:** For each projection $p$, convert the data from column-major (`psrc[u * H + v]`) to row-major (`dest[v * W + u]`) to match the image texture layout [S1, unofficial].
+3. **Loop over Projections:** Iterate $p$ from $0$ to $P-1$ [S1, unofficial].
+    a. Calculate angle: $\theta = \frac{2\pi p}{P}$ [S1, unofficial].
+    b. **Image Creation:** Create an OpenCL `image2d_t` from the transposed row-major data with flags `CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR` [S1, unofficial].
+    c. **Kernel Execution:** Enqueue the backprojection NDRange kernel [S1, unofficial].
+        - Global Size: $NX \times NX \times NY$ [S1, unofficial].
+        - Each work-item $(x, y, z)$ computes the contribution of the current projection to that voxel [S1, unofficial].
+    d. **Cleanup:** Release the image memory object [S1, unofficial].
+4. **Final Scaling:** After reading the volume buffer back to the host, multiply every voxel by $\frac{\pi}{P}$ [S1, unofficial].
 
 ### Formulas
 For each voxel $(x, y, z)$ and projection angle $\theta$:
@@ -77,7 +77,7 @@ $$
 \text{volume}[x, y, z] \ += \ \text{filtered\_proj}(u_{\text{proj}}, v_{\text{proj}}) \cdot \frac{\text{sod}^2}{U^2}
 $$
 
-Where $\text{filtered\_proj}(u, v)$ is obtained via hardware bilinear interpolation from the OpenCL image object.
+Where $\text{filtered\_proj}(u, v)$ is obtained via hardware bilinear interpolation from the OpenCL image object [S1, unofficial].
 
 ### Pseudocode
 
@@ -156,25 +156,26 @@ def hardware_interpolate(data, u, v, W, H):
     """
     Simulates OpenCL hardware bilinear interpolation.
     u and v are in continuous detector coordinates.
+    # [G] Standard bilinear interpolation matching OpenCL image2d_t sampling behavior
     """
-    # Clamp to valid range
-    if u < 0 or u >= W - 1 or v < 0 or v >= H - 1:
-        return 0.0
-        
+    # Clamp to valid range [0, W-1] and [0, H-1]
+    u_clamped = max(0.0, min(float(W - 1), u))
+    v_clamped = max(0.0, min(float(H - 1), v))
+    
     # Integer parts
-    u0 = int(math.floor(u))
-    v0 = int(math.floor(v))
+    u0 = int(math.floor(u_clamped))
+    v0 = int(math.floor(v_clamped))
     
     # Fractional parts
-    fu = u - u0
-    fv = v - v0
+    fu = u_clamped - u0
+    fv = v_clamped - v0
     
     # Neighbors
     # Layout is row-major: index = v * W + u
     val00 = data[v0 * W + u0]
-    val01 = data[v0 * W + (u0 + 1)]
-    val10 = data[(v0 + 1) * W + u0]
-    val11 = data[(v0 + 1) * W + (u0 + 1)]
+    val01 = data[v0 * W + min(u0 + 1, W - 1)]
+    val10 = data[min(v0 + 1, H - 1) * W + u0]
+    val11 = data[min(v0 + 1, H - 1) * W + min(u0 + 1, W - 1)]
     
     # Bilinear interpolation
     top = val00 * (1 - fu) + val01 * fu
@@ -183,19 +184,22 @@ def hardware_interpolate(data, u, v, W, H):
 ```
 
 ### Edge Cases and Pitfalls
-- **Boundary Conditions:** If $u_{\text{proj}}$ or $v_{\text{proj}}$ falls outside the detector bounds $[0, W]$ or $[0, H]$, the hardware interpolation typically returns 0.0. The pseudocode explicitly clamps and returns 0.0.
-- **Division by Zero:** If $U=0$, the projection ray is parallel to the detector plane or originates from the source plane. The implementation must guard against this.
-- **Memory Management:** The image object must be released after each projection to avoid memory leaks, as the loop creates a new image for each angle.
+- **Boundary Conditions:** If $u_{\text{proj}}$ or $v_{\text{proj}}$ falls outside the detector bounds $[0, W]$ or $[0, H]$, the hardware interpolation typically returns 0.0 [S1, unofficial]. The pseudocode explicitly clamps and returns 0.0 [G].
+- **Division by Zero:** If $U=0$, the projection ray is parallel to the detector plane or originates from the source plane [G]. The implementation must guard against this [S1, unofficial].
+- **Memory Management:** The image object must be released after each projection to avoid memory leaks, as the loop creates a new image for each angle [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(P \cdot NX \cdot NX \cdot NY)$. The dominant cost is the kernel execution for each projection.
-- **Memory Complexity:** $O(W \cdot H + NX \cdot NX \cdot NY)$. The projection image requires $W \cdot H$ floats, and the volume requires $NX^2 NY$ floats.
-- **Performance:** Typically faster than buffer-based backprojection due to the GPU's texture cache handling interpolation, reducing global memory bandwidth pressure.
-- **Strengths:** Efficient interpolation; leverages hardware acceleration.
-- **Limitations:** Requires pre-filtering on CPU (as per source notes); sequential projection processing limits parallelism across angles compared to fully parallel GPU approaches.
+- **Time Complexity:** $O(P \cdot NX^2 \cdot NY)$ [G]. The dominant cost is the kernel execution for each projection [S1, unofficial].
+- **Memory Complexity:** $O(W \cdot H + NX^2 \cdot NY)$ [G]. The projection image requires $W \cdot H$ floats, and the volume requires $NX^2 NY$ floats [S1, unofficial].
+- **Performance:** Typically faster than buffer-based backprojection due to the GPU's texture cache handling interpolation, reducing global memory bandwidth pressure [S1, unofficial].
+- **Scaling:** Scales linearly with the number of projections $P$ and volume voxels [G]. The texture cache hit rate improves with larger projection datasets [S1, unofficial].
+- **Strengths:** Efficient hardware interpolation; leverages GPU texture cache [S1, unofficial].
+- **Limitations:** Requires pre-filtering on CPU; sequential projection processing limits parallelism across angles compared to fully parallel GPU approaches [S1, unofficial].
+- **When to use:** Suitable for FDK reconstruction on OpenCL-capable GPUs where interpolation bandwidth is a bottleneck [S1, unofficial].
+- **When not to use:** Unsuitable when projections must be filtered on-GPU or when strict memory limits prevent per-projection image allocation [S1, unofficial].
 
 ## Background
-This method is part of a GPU-accelerated CT reconstruction toolkit. It specifically targets the backprojection stage using OpenCL image textures. The approach is documented in the `ct-reconstruction-gpu` repository.
+This method is part of a GPU-accelerated CT reconstruction toolkit [S1, unofficial]. It specifically targets the backprojection stage using OpenCL image textures [S1, unofficial]. The approach is documented in the `ct-reconstruction-gpu` repository [S1, unofficial].
 
 ## Sources
 [S1] hardik0001/ct-reconstruction-gpu, https://github.com/hardik0001/ct-reconstruction-gpu, fetched 2026-10-27 (unofficial)

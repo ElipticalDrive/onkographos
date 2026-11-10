@@ -1,0 +1,126 @@
+--- v003.md
++++ v004.md
+@@ -83,6 +83,7 @@
+     # 2. First-Level Block Generation and Culling
+     num_blocks = int(resolution / S_block) + 1
+-    block_counts = [0] * num_blocks
+-    block_ids = [[] for _ in range(num_blocks)]
++    block_counts = [0] * num_blocks  # Space for number of nodes per block
++    block_ids = [[] for _ in range(num_blocks)]  # IDs for each block
++    extra_counter = 0  # Extra counter
+     
+     for block_idx in range(num_blocks):
+@@ -93,16 +94,28 @@
+             for v in prim.vertices:
+                 P_relative = v.volume_pos - block_start
+-                Q = P_relative - (S_block / 2.0)
+-                Q_max = max(Q[0], max(Q[1], Q[2]))
++                Q = [P_relative[i] - (S_block / 2.0) for i in range(3)]
++                Q_max = max(Q)
+                 D = sum(max(q, 0.0) for q in Q) + min(Q_max, 0.0)
+                 
+                 if D < delta ** 2:
++                    # 4. Sparse Data Sampling (for non-empty blocks)
++                    # Prepare initial nodes: reorder/duplicate/generate data [G]
++                    prepared = [v]
++                    
++                    # Subsample: generate additional points
+                     if prim.type == 'spline':
+-                        # Catmull-Rom: define from 4 points, linear interpolation
+-                        samples = generate_spline_samples(prim)
++                        # Catmull-Rom: define from 4 points, linear interpolation [G]
++                        samples = [prepared[0]]
+                     else:
+-                        # Triangles: barycentric sampling, weighted by relative area
+-                        samples = generate_triangle_samples(prim)
+-                        
++                        # Triangles: barycentric sampling, weighted by relative area to largest triangle
++                        area_weight = prim.area / max(p.area for p in primitives if p.type == 'triangle')
++                        num_samples = int(base_samples * area_weight)
++                        samples = []
++                        for i in range(num_samples):
++                            # Distribute samples equally based on kernel indices
++                            u, v_coord = (i / num_samples, (i + 0.5) / num_samples)
++                            # Barycentric coordinate generation [G]
++                            samples.append(generate_point_on_triangle(prim, u, v_coord))
++                    
+                     for s in samples:
+                         if block_start <= s.volume_pos < block_start + S_block:
+@@ -116,45 +129,38 @@
+     stencil = generate_axis_aligned_stencil(empty_blocks, resolution) # [G] standard rasterization step
+ 
+-    # 4. Sparse Data Sampling (for non-empty blocks)
++    # 5. Sample Gathering
++    # Move samples to grid-like structure. Save only the last sample generated at each voxel asynchronously
++    voxel_grid = {}
++    for block_idx in range(num_blocks):
++        for node_id in block_ids[block_idx]:
++            voxel_grid[node_id] = node_id 
++    
++    # Order samples by second-level block ID
++    ordered_samples = sorted(voxel_grid.values(), key=lambda s: s.block_2nd_level_id)
++    
++    # Detect vector positions where ID changes to determine block start positions and sample counts
++    boundaries = []
++    for i in range(1, len(ordered_samples)):
++        if ordered_samples[i].block_2nd_level_id != ordered_samples[i-1].block_2nd_level_id:
++            boundaries.append(i)
++    boundaries.append(len(ordered_samples))
++    
++    # 6. Directional Data Aggregation
+     final_leaf_nodes = []
+-    
+-    for block_idx in range(num_blocks):
+-        if block_counts[block_idx] == 0:
+-            continue
++    start = 0
++    for end in boundaries:
++        block_samples = ordered_samples[start:end]
++        start = end
++        if len(block_samples) > 0:
++            # Compute distribution histogram for directional data at every voxel with density > 0
++            hist = compute_directional_histogram(block_samples)
++            # Fit each computed histogram to an SGGX function to encode the distribution using 6 values
++            sggx_params = fit_sggx(hist) # [G] standard SGGX fitting algorithm
++            final_leaf_nodes.append({
++                'sggx': sggx_params,
++                'material_id': block_samples[0].material_id,
++                'position': (block_idx * S_block + S_block / 2.0) * (b_max - b_min) / resolution + b_min
++            })
+             
+-        # Kernel 1: Prepare initial nodes
+-        prepared = prepare_initial_nodes(block_ids[block_idx]) # [G] reorder/duplicate/generate
+-        
+-        # Kernel 2: Subsample
+-        subsampled = subsample_data(prepared) # [G] linear interp for splines, barycentric for triangles
+-        
+-        # Kernel 3: Generate voxel nodes
+-        voxel_nodes = generate_voxel_nodes(subsampled)
+-        
+-        # 5. Sample Gathering
+-        gathered = gather_samples_asynchronously(voxel_nodes)
+-        gathered.sort(key=lambda s: s.block_2nd_level_id)
+-        
+-        # Detect block boundaries
+-        boundaries = []
+-        for i in range(1, len(gathered)):
+-            if gathered[i].block_2nd_level_id != gathered[i-1].block_2nd_level_id:
+-                boundaries.append(i)
+-        boundaries.append(len(gathered))
+-        
+-        # 6. Directional Data Aggregation
+-        start = 0
+-        for end in boundaries:
+-            block_samples = gathered[start:end]
+-            start = end
+-            if len(block_samples) > 0:
+-                hist = compute_directional_histogram(block_samples)
+-                sggx_params = fit_sggx(hist) # [G] standard SGGX fitting algorithm
+-                final_leaf_nodes.append({
+-                    'sggx': sggx_params,
+-                    'material_id': block_samples[0].material_id,
+-                    'position': (block_idx * S_block + S_block / 2.0) * (b_max - b_min) / resolution + b_min
+-                })
+-                
+     return final_leaf_nodes, stencil
+ ```

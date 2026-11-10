@@ -1,0 +1,133 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,5 @@
+ # Cone Beam Forward Projection with Trilinear Interpolation
+ 
+-Also called: Cone Beam Forward Projection
++Also called: Cone Beam Forward Projection, ConeBeam Projector (General 3D)
+ 
+ ## Overview
+@@ -9,13 +9,15 @@
+ **Inputs:**
+ - Volume tensor in standard layout $[B, 1, Z, Y, X]$ [S1, unofficial].
+-- Cone beam geometry parameters (source positions, detector positions/orientations, pixel size) [S1, unofficial].
+-- Number of samples per ray $n$ [S1, unofficial].
++- Source positions tensor of shape `[views, 3]` [S1, unofficial].
++- Detector positions tensor of shape `[views, rows, columns, 3]` [S1, unofficial].
++- Bounding box parameters `box` defining volume dimensions and scaling factors [S1, unofficial].
++- Number of samples per ray $n$ (e.g., 192) [S1, unofficial].
+ - Number of channels $C$ (template parameter, typically 1, 2, or 4) [S1, unofficial].
+ 
+ **Outputs:**
+-- Projection tensor of shape $[B, C, \text{views}, \text{detector\_height}, \text{detector\_width}]$ [S1, unofficial].
++- Projection tensor of shape $[B, C, \text{views}, \text{rows}, \text{columns}]$ [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Layout:** Defined by volume dimensions $X, Y, Z$, detector plane stride, and bricks\_x [S1, unofficial].
++- **Layout:** Defined by volume dimensions $X, Y, Z$, detector plane stride `plane`, and `bricks_x` [S1, unofficial].
+ - **Volume Storage:** Padded with a 1-voxel zero border on all sides [S1, unofficial]. Stored in bricks of $4 \times 4 \times 4$ voxels [S1, unofficial]. The Python wrapper `_brick` converts standard tensors to this layout $[\text{bricks} \times 64, \text{group}]$ [S1, unofficial].
+ - **ConeRay:** Contains entry/exit distances, direction components, initial position, step size, and weight [S1, unofficial].
+@@ -39,8 +41,8 @@
+ 6. **Sampling Loop:** Loop $k$ from $0$ to $n-1$ [S1, unofficial].
+    - Calculate sample position:
+-     $$px = \text{fma}(k \cdot \text{step}, \text{ray.sx}, \text{ray.px})$$
+-     $$py = \text{fma}(k \cdot \text{step}, \text{ray.sy}, \text{ray.py})$$
+-     $$pz = \text{fma}(k \cdot \text{step}, \text{ray.sz}, \text{ray.pz})$$
+-     (Using `__fmaf_rn` for fused multiply-add with round-nearest) [S1, unofficial].
++     $$px = \text{ray.px} + k \cdot \text{ray.sx}$$
++     $$py = \text{ray.py} + k \cdot \text{ray.sy}$$
++     $$pz = \text{ray.pz} + k \cdot \text{ray.sz}$$
++     (Using fused multiply-add `__fmaf_rn` for precision) [S1, unofficial].
+    - Compute integer voxel coordinates:
+      $$ix = \lfloor px \rfloor, \quad iy = \lfloor py \rfloor, \quad iz = \lfloor pz \rfloor$$
+@@ -64,18 +66,86 @@
+    $$out[(size_t)c \cdot \text{plane} + \text{ray\_index}] = acc[c] \cdot \text{weight} \quad \forall c < C$$ [S1, unofficial].
+ 
++**Parameters:**
++- $C$: Number of channels (1, 2, or 4) [S1, unofficial].
++- $n$: Number of samples per ray (e.g., 192) [S1, unofficial].
++- `source_positions`: Shape `[views, 3]` [S1, unofficial].
++- `detector_positions`: Shape `[views, rows, columns, 3]` [S1, unofficial].
++- `volume_shape`: Tuple `(z, y, x)` [S1, unofficial].
++
+ **Pitfalls:**
+ - Memory access is guarded by clamping in the `cell` function: $x = \min(\max(x_0, 0), L.X)$, etc., to prevent out-of-bounds access [S1, unofficial].
+ - The volume must be padded with a 1-voxel zero border; failure to do so may cause incorrect sampling at boundaries [S1, unofficial].
++- Rays that miss the bounding box or have non-positive span must be skipped to avoid division by zero or invalid memory access [S1, unofficial].
++
++```python
++def cone_forward_kernel(projections, sources, detectors, box, volume, n_samples, C):
++    column = blockIdx.x * blockDim.x + threadIdx.x
++    row = blockIdx.y * blockDim.y + threadIdx.y
++    view = blockIdx.z
++    ray_index = ((size_t)view * R + row) * W + column
++    acc = [0.0] * C
++    weight = 0.0
++    x0, y0, z0 = -1, -1, -1
++    v = [[0.0] * C for _ in range(8)]
++
++    ray = construct_cone_ray(sources[view], detectors[view, row, column], box)
++    if ray.valid:
++        weight = ray.weight  # span / n_samples
++        first = ray.entry + 0.5 * ray.weight
++        ux, uy, uz = ray.direction
++        px = first * ux * box[6] + box[9]
++        py = first * uy * box[7] + box[10]
++        pz = first * uz * box[8] + box[11]
++        sx = ray.weight * ux * box[6]
++        sy = ray.weight * uy * box[7]
++        sz = ray.weight * uz * box[8]
++
++        for k in range(n_samples):
++            px = ray.px + k * sx
++            py = ray.py + k * sy
++            pz = ray.pz + k * sz
++            ix = floor(px)
++            iy = floor(py)
++            iz = floor(pz)
++
++            if ix != x0 or iy != y0 or iz != z0:
++                ox, oy, oz = cell_index(ix, iy, iz, box)
++                ox = clamp(ox, 0, box.X)
++                oy = clamp(oy, 0, box.Y)
++                oz = clamp(oz, 0, box.Z)
++                v = fetch_8_voxels(volume, ox, oy, oz)
++                x0, y0, z0 = ix, iy, iz
++
++            dx = px - ix
++            dy = py - iy
++            dz = pz - iz
++            wx = [1.0 - dx, dx]
++            wy = [1.0 - dy, dy]
++            wz = [1.0 - dz, dz]
++            for q in range(8):
++                w = wz[q >> 2] * wy[(q >> 1) & 1] * wx[q & 1]
++                for c in range(C):
++                    acc[c] += w * v[q][c]
++
++    for c in range(C):
++        projections[c, view, row, column] = acc[c] * weight
++```
++
++## Subtopics
++
++### Image Scanning for Tomography
++A method to generate tomographic projections (scans) from a source image by integrating pixel values along lines at various angles and offsets [S2, unofficial]. It calculates sampling steps $y\_step = 2.0 / \text{base\_width}$ and $x\_step = 2.0 / \text{base\_height}$, and pixel center offsets $y\_offset = (\text{image.height} - 1.0) / 2.0$ and $x\_offset = (\text{image.width} - 1.0) / 2.0$ [S2, unofficial]. It iterates over image pixels, computes normalized coordinates $y = (y\_idx - y\_offset) \cdot y\_step$ and $x = (x\_idx - x\_offset) \cdot x\_step$, and calls a value function `value_fn(x, y, pixel_value)` [S2, unofficial]. Typical parameters are `rays` (samples per angle, typically 35) and `angles` (typically 40) [S2, unofficial].
+ 
+ ## Operating characteristics
+ - **Time Complexity:** $O(N_{rays} \cdot n)$, where $N_{rays}$ is the number of detector pixels times views, and $n$ is samples per ray [S1, unofficial].
+ - **Memory Complexity:** $O(V)$ for volume storage, where $V$ is the number of voxels including padding and brick overhead [S1, unofficial].
+-- **Performance:** Measured on RTX 2080 Ti, 512x512, batch 4, 360 views: CUDA exact forward projection takes ~2.196 ms (Parallel Beam) or ~2.720 ms (Fan Beam) [S1, unofficial].
+-- **Strengths:** Exact discrete adjoint consistency when paired with Backward Projection; efficient GPU implementation using bricked layout [S1, unofficial].
+-- **Limitations:** Requires specific volume layout (bricked, padded); limited to float32 on CUDA backend [S1, unofficial].
++- **Performance:** Measured on RTX 2080 Ti with 256³ phantom, 360 views, 384×384 detectors: forward projection 0.26 s, adjoint 0.33 s, forward with geometry gradient 0.40 s [S1, unofficial]. The PyTorch path takes 207 s (forward), 232 s (adjoint), and OOMs on larger scenes [S1, unofficial].
++- **Strengths:** Exact discrete adjoint consistency when paired with Backward Projection; efficient GPU implementation using bricked layout and runtime-compiled CUDA kernels for float32 [S1, unofficial].
++- **Limitations:** Requires specific volume layout (bricked, padded); limited to float32 on CUDA backend; PyTorch path retains interpolation stencils for autograd but fits only small scans [S1, unofficial].
+ 
+ ## Background
+-Developed as part of the TorchTomo library by BIAI Lab [S1, unofficial]. It is designed to provide differentiable forward projection for cone beam CT reconstruction, supporting exact adjoint consistency with the backward projection operator [S1, unofficial].
++Developed by BIAI Lab as part of the TorchTomo library [S1, unofficial]. It is designed to provide differentiable forward projection for cone beam CT reconstruction, supporting exact adjoint consistency with the backward projection operator [S1, unofficial]. It supports circular and helical trajectories, flat and curved detectors, and per-view source offsets [S1, unofficial].
+ 
+ ## Sources
+-[S1] itu-biai/torchtomo, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)+[S1] itu-biai/torchtomo, https://github.com/itu-biai/torchtomo, fetched 2026-10-27 (unofficial)
++[S2] simon-frankau/rediscovering-tomography, https://github.com/simon-frankau/rediscovering-tomography, fetched 2026-10-26 (unofficial)

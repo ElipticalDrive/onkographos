@@ -1,11 +1,11 @@
 # Cumulonimbus and Cumulus Shape Generation
 Also called: Cumulus and Cumulonimbus Shape Generation
 ## Overview
-Procedural generation of non-spherical, multi-lobed cloud shapes for Cumulus (type 9) and Cumulonimbus (type 10) clouds, creating irregular tops and bases rather than simple spheres [S1, unofficial]. It differs from its parent [Finite Layer Cloud Shape Generation](8292-finite-layer-cloud-shape-generation.md) by using distinct lobe generation strategies for vertical development (Cumulonimbus) and flat, multi-lobed structures (Cumulus), whereas the parent method focuses on horizontal layering for other cloud types.
+Procedural generation of non-spherical, multi-lobed cloud shapes for Cumulus (type 9) and Cumulonimbus (type 10) clouds, creating irregular tops and bases rather than simple spheres [S1, unofficial].
 ## How it works
 ### Inputs and Outputs
-- **Inputs**: Cloud type ID (9 for Cumulus, 10 for Cumulonimbus), style offset (integer), random number generator state.
-- **Outputs**: A list of 3D ellipsoidal lobes, where each lobe is defined by center coordinates $(cx, cy, cz)$ and radii $(rx, ry, rz)$.
+- **Inputs**: Cloud type ID (9 for Cumulus, 10 for Cumulonimbus, or 1/7 for other layer clouds), `style_offset` (integer), `seed` (integer), `lobe_count` (integer, required for Cumulonimbus), random number generator state.
+- **Outputs**: A list of 3D ellipsoidal lobes, where each lobe is defined by center coordinates $(cx, cy, cz)$ and radii $(rx, ry, rz)$ [S1, unofficial].
 
 ### Data Structures
 Each lobe is represented as a tuple or struct:
@@ -17,46 +17,39 @@ Each lobe is represented as a tuple or struct:
 - `rz`: Radius along the Z-axis.
 
 ### Steps
-1. **Initialize RNG**: Set the random number generator seed using the formula:
-   $$ \text{seed} = \text{seed} + \text{type\_id} \times 1009 + \text{style\_offset} $$
-   Typical `style_offset` values are 31009 for realistic style and 41003 for cartoon style [S1, unofficial].
-
+1. **Initialize RNG**: Set the random number generator seed using the formula: $\text{seed} = \text{seed} + \text{type\_id} \times 1009 + \text{style\_offset}$ [S1, unofficial].
 2. **Generate Center**: Generate the base center coordinates $(center\_x, center\_y)$ from a uniform distribution over $[-0.12, 0.12]$ [S1, unofficial].
-
 3. **Generate Lobes based on Type**:
    - **If Type 9 (Cumulus)**:
-     a. **Base Lobes**: Generate 3 to 6 base lobes. For each lobe:
-        - $cx, cy$: Generated from a uniform distribution around the $center\_x, center\_y$.
-        - $cz$: Generated from a uniform distribution over $[-0.42, -0.16]$.
-        - $rx$: Generated from a uniform distribution over $[0.27, 0.42]$.
-        - $ry$: Generated from a uniform distribution over $[0.23, 0.37]$.
-        - $rz$: Generated from a uniform distribution over $[0.14, 0.25]$.
-     b. **Tower Lobes**: Generate 5 to 10 tower lobes. For each lobe:
-        - $direction$: Generated from a uniform distribution over $[-\pi, \pi]$.
-        - $radial$: Generated from a uniform distribution over $[0.06, 0.52]$.
-        - $cx = center\_x + radial \times \cos(direction)$.
-        - $cy = center\_y + radial \times \sin(direction)$.
-        - $cz$: Generated from a uniform distribution over $[-0.06, 0.54]$.
-        - $rx$: Generated from a uniform distribution over $[0.17, 0.34]$.
-        - $ry$: Generated from a uniform distribution over $[0.16, 0.32]$.
-        - $rz$: Generated from a uniform distribution over $[0.18, 0.36]$.
-
+     a. **Base Lobes**: Generate 3 to 6 base lobes [S1, unofficial]. For each lobe:
+        - $cx, cy$: Generated from a uniform distribution around the $center\_x, center\_y$ [S1, unofficial].
+        - $cz$: Generated from a uniform distribution over $[-0.42, -0.16]$ [S1, unofficial].
+        - $rx$: Generated from a uniform distribution over $[0.27, 0.42]$ [S1, unofficial].
+        - $ry$: Generated from a uniform distribution over $[0.23, 0.37]$ [S1, unofficial].
+        - $rz$: Generated from a uniform distribution over $[0.14, 0.25]$ [S1, unofficial].
+     b. **Tower Lobes**: Generate 5 to 10 tower lobes [S1, unofficial]. For each lobe:
+        - $direction$: Generated from a uniform distribution over $[-\pi, \pi]$ [S1, unofficial].
+        - $radial$: Generated from a uniform distribution over $[0.06, 0.52]$ [S1, unofficial].
+        - $cx = center\_x + radial \times \cos(direction)$ [S1, unofficial].
+        - $cy = center\_y + radial \times \sin(direction)$ [S1, unofficial].
+        - $cz$: Generated from a uniform distribution over $[-0.06, 0.54]$ [S1, unofficial].
+        - $rx$: Generated from a uniform distribution over $[0.17, 0.34]$ [S1, unofficial].
+        - $ry$: Generated from a uniform distribution over $[0.16, 0.32]$ [S1, unofficial].
+        - $rz$: Generated from a uniform distribution over $[0.18, 0.36]$ [S1, unofficial].
    - **If Type 10 (Cumulonimbus)**:
-     - Determine the total number of lobes (not explicitly specified, but implied by the loop structure). Let $N$ be the number of lobes.
-     - For each lobe with index $i$ from $0$ to $N-1$:
-       - Calculate progress: $progress = \frac{i}{N - 1}$.
-       - $cx, cy$: Spread increases with progress. The exact formula for the spread range is not fully detailed in the source, but the spread factor is $0.13 + progress \times 0.08$. The centers are likely generated around the base center with this spread [S1, unofficial].
-       - $cz$: Rises from -0.58 to 0.56, calculated as $cz = -0.58 + progress \times 1.14$.
-       - $rx, ry$: Increase with progress. The base value is $0.24 + progress \times 0.10$. The exact range for $rx$ and $ry$ is not fully specified, but they likely vary around this value [S1, unofficial].
-
+     - For each lobe with index $i$ from $0$ to $lobe\_count - 1$:
+       - Calculate progress: $progress = \frac{i}{lobe\_count - 1}$ [S1, unofficial].
+       - $cx, cy$: Spread increases with progress using the factor $0.13 + progress \times 0.08$ [S1, unofficial].
+       - $cz$: Rises from -0.58 to 0.56, calculated as $cz = -0.58 + progress \times 1.14$ [S1, unofficial].
+       - $rx, ry$: Increase with progress, calculated as $rx = ry = 0.24 + progress \times 0.10$ [S1, unofficial].
    - **If Other Layer Clouds (Types 1, 7)**:
-     - Generate 3 to 10 lobes. For each lobe:
-       - $radial$: Generated from a uniform distribution over $[0.03, 0.52]$.
-       - $theta$: Generated from a uniform distribution over $[-\pi, \pi]$.
-       - $cz$: Generated from a uniform distribution over $[-0.20, 0.20]$.
-       - $cx = center\_x + radial \times \cos(theta)$.
-       - $cy = center\_y + radial \times \sin(theta)$.
-       - $rx, ry, rz$: Not explicitly specified for these types in the provided notes, but typically follow similar ranges to base lobes [S1, unofficial].
+     - Generate 3 to 10 lobes [S1, unofficial]. For each lobe:
+       - $radial$: Generated from a uniform distribution over $[0.03, 0.52]$ [S1, unofficial].
+       - $theta$: Generated from a uniform distribution over $[-\pi, \pi]$ [S1, unofficial].
+       - $cz$: Generated from a uniform distribution over $[-0.20, 0.20]$ [S1, unofficial].
+       - $cx = center\_x + radial \times \cos(theta)$ [S1, unofficial].
+       - $cy = center\_y + radial \times \sin(theta)$ [S1, unofficial].
+       - $rx, ry, rz$: Not given in the sources.
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -65,7 +58,7 @@ Each lobe is represented as a tuple or struct:
 import random
 import math
 
-def generate_cumulus_cumulonimbus_lobes(type_id, style_offset, seed):
+def generate_cumulus_cumulonimbus_lobes(type_id, style_offset, seed, lobe_count):
     # Initialize RNG
     rng = random.Random(seed + type_id * 1009 + style_offset)
     
@@ -79,8 +72,8 @@ def generate_cumulus_cumulonimbus_lobes(type_id, style_offset, seed):
         # Base lobes
         num_base_lobes = rng.randint(3, 6)
         for _ in range(num_base_lobes):
-            cx = rng.uniform(center_x - 0.12, center_x + 0.12)
-            cy = rng.uniform(center_y - 0.12, center_y + 0.12)
+            cx = center_x + rng.uniform(-0.12, 0.12)
+            cy = center_y + rng.uniform(-0.12, 0.12)
             cz = rng.uniform(-0.42, -0.16)
             rx = rng.uniform(0.27, 0.42)
             ry = rng.uniform(0.23, 0.37)
@@ -101,24 +94,17 @@ def generate_cumulus_cumulonimbus_lobes(type_id, style_offset, seed):
             lobes.append((cx, cy, cz, rx, ry, rz))
             
     elif type_id == 10:  # Cumulonimbus
-        # Number of lobes is not explicitly specified, assuming a reasonable range or fixed number
-        # For implementation, let's assume a fixed number or a range. 
-        # The source mentions "progress = index / (lobe_count - 1)", implying a loop.
-        # Let's assume a range of 10-20 lobes for Cumulonimbus as a typical value.
-        num_lobes = rng.randint(10, 20)
-        for i in range(num_lobes):
-            progress = i / (num_lobes - 1)
-            # cx, cy spread
+        # Guard against division by zero [G]
+        effective_count = max(lobe_count, 2)
+        for i in range(effective_count):
+            progress = i / (effective_count - 1)
             spread = 0.13 + progress * 0.08
             cx = center_x + rng.uniform(-spread, spread)
             cy = center_y + rng.uniform(-spread, spread)
-            # cz rises
             cz = -0.58 + progress * 1.14
-            # rx, ry increase
-            base_radius = 0.24 + progress * 0.10
-            rx = rng.uniform(base_radius * 0.8, base_radius * 1.2) # [G] Assumed variation around base_radius
-            ry = rng.uniform(base_radius * 0.8, base_radius * 1.2) # [G] Assumed variation around base_radius
-            rz = rng.uniform(base_radius * 0.5, base_radius * 1.5) # [G] Assumed variation for rz
+            rx = 0.24 + progress * 0.10
+            ry = 0.24 + progress * 0.10
+            rz = 0.0  # Not given in the sources.
             lobes.append((cx, cy, cz, rx, ry, rz))
             
     elif type_id in [1, 7]:  # Other layer clouds
@@ -129,10 +115,9 @@ def generate_cumulus_cumulonimbus_lobes(type_id, style_offset, seed):
             cz = rng.uniform(-0.20, 0.20)
             cx = center_x + radial * math.cos(theta)
             cy = center_y + radial * math.sin(theta)
-            # rx, ry, rz not specified for these types in the notes
-            rx = rng.uniform(0.27, 0.42) # [G] Defaulting to base lobe radii
-            ry = rng.uniform(0.23, 0.37) # [G] Defaulting to base lobe radii
-            rz = rng.uniform(0.14, 0.25) # [G] Defaulting to base lobe radii
+            rx = 0.0  # Not given in the sources.
+            ry = 0.0  # Not given in the sources.
+            rz = 0.0  # Not given in the sources.
             lobes.append((cx, cy, cz, rx, ry, rz))
             
     return lobes
@@ -142,20 +127,15 @@ def generate_cumulus_cumulonimbus_lobes(type_id, style_offset, seed):
 - `style_offset`: 31009 for realistic style, 41003 for cartoon style [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-- **Division by Zero**: In the Cumulonimbus generation, if `lobe_count` is 1, `progress` calculation involves division by zero. Ensure `lobe_count` is at least 2 [G].
+- **Division by Zero**: In the Cumulonimbus generation, if `lobe_count` is 1, the `progress` calculation involves division by zero. Ensure `lobe_count` is at least 2 [G].
 - **Precision**: Floating-point precision issues may arise when calculating `progress` and subsequent coordinates. Use standard floating-point arithmetic [G].
 - **Boundary Conditions**: Ensure that generated coordinates and radii do not result in invalid or degenerate shapes (e.g., negative radii) [G].
 
 ## Operating characteristics
-- **Time Complexity**: Linear with respect to the number of lobes generated.
-- **Memory Complexity**: Linear with respect to the number of lobes stored.
-- **Strengths**: Efficient procedural generation of complex cloud shapes without requiring external data.
-- **Limitations**: Relies on random number generation, which may lead to inconsistent results across different runs if not seeded properly.
-- **When to Use**: Suitable for real-time rendering and procedural generation of cloud scenes where performance is critical.
-- **When Not to Use**: Not suitable for applications requiring physically accurate cloud simulations or high-fidelity static cloud models.
+Not given in the sources.
 
 ## Background
-Originating from the Noise-Cloud project by mingtu149411, this method provides a procedural approach to generating cloud shapes for Cumulus and Cumulonimbus types [S1, unofficial]. It is part of a broader effort to create realistic cloud volumes for computer graphics applications.
+Not given in the sources.
 
 ## Sources
 [S1] mingtu149411/Noise-Cloud, https://github.com/mingtu149411/Noise-Cloud, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,101 @@
+# ACORN
+
+Also called: Auxiliary Coordinate Encoder, ACORN, Adaptive Coordinate Encoder
+
+## Overview
+ACORN is a parametric feature encoding method that uses a tree subdivision of the input domain to output dense feature grids in leaf nodes, which are then linearly interpolated [S1, unofficial][S2]. It yields a greater degree of adaptivity compared with previous parametric encodings, albeit at greater computational cost [S1, unofficial][S2].
+
+## How it works
+**Inputs and outputs:**
+- Input: A coordinate vector $\mathbf{x} \in \mathbb{R}^d$ (typically $d=3$ for 3D scenes).
+- Output: A feature vector $\mathbf{f} \in \mathbb{R}^k$ representing the encoded features for $\mathbf{x}$.
+
+**Data structures:**
+- **Tree Structure:** A hierarchical subdivision of the domain $\mathbb{R}^d$. The specific tree topology (e.g., octree) is not detailed in the provided sources [G: Standard octree or k-d tree structure implied by "tree subdivision"].
+- **Leaf Node Feature Grids:** Each leaf node contains a dense feature grid. The size of these grids is on the order of 10,000 entries [S1, unofficial][S2].
+- **Neural Network (ACORN):** A large neural network trained to output the parameters for these dense feature grids.
+
+**Steps:**
+1. **Tree Traversal:** Determine the leaf node in the tree subdivision that contains the input coordinate $\mathbf{x}$.
+2. **Feature Grid Retrieval:** Retrieve the dense feature grid associated with the identified leaf node. The grid contains approximately 10,000 entries [S1, unofficial][S2].
+3. **Interpolation:** Linearly interpolate the values within the dense feature grid at the local position of $\mathbf{x}$ relative to the leaf node [S1, unofficial][S2]. This interpolation method is similar to that used in Liu et al. [2020].
+4. **Output:** The result of the interpolation is the encoded feature vector $\mathbf{f}$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def acorn_encode(x, tree, acorn_network):
+    """
+    Encode coordinate x using ACORN.
+    
+    Args:
+        x: Input coordinate vector (d-dimensional).
+        tree: The tree subdivision structure.
+        acorn_network: The neural network that outputs dense feature grids for leaf nodes.
+        
+    Returns:
+        f: Encoded feature vector.
+    """
+    # Step 1: Find the leaf node containing x
+    leaf_node = tree.find_leaf(x)
+    
+    # Step 2: Get the dense feature grid for the leaf node
+    # The ACORN network outputs the parameters for the dense feature grid.
+    # The grid has on the order of 10,000 entries.
+    feature_grid = acorn_network.get_leaf_features(leaf_node)
+    
+    # Step 3: Linearly interpolate within the feature grid at x's local position
+    # The interpolation is similar to Liu et al. [2020].
+    # Assuming feature_grid is a dense array and x_local is the normalized 
+    # position of x within the leaf node's bounds.
+    f = linear_interpolate(feature_grid, x_local)
+    
+    return f
+```
+
+**Parameters:**
+- **Tree Subdivision:** Not specified in the sources [G: Likely an octree or similar hierarchical structure].
+- **Feature Grid Size:** On the order of 10,000 entries per leaf node [S1, unofficial][S2].
+- **Neural Network Size:** Described as "large" [S1, unofficial][S2].
+
+**Edge cases and pitfalls:**
+- **Computational Cost:** ACORN has greater computational cost compared to hash or grid encodings [S1, unofficial][S2].
+- **Amortization:** The computational cost is only amortized when sufficiently many inputs $\mathbf{x}$ fall into each leaf node [S1, unofficial][S2]. If inputs are sparse, the overhead may be prohibitive.
+
+## Subtopics
+
+### [Instant-NGP](6604-instant-ngp.md)
+Uses hash grid encoding for efficient multi-resolution feature storage. Choose when memory efficiency and training speed are critical.
+
+### [Progressive Training](9142-progressive-training.md)
+A training strategy that gradually increases resolution. Choose when training stability and convergence are concerns.
+
+### [Dense Grid Encoding](9335-dense-grid-encoding.md)
+Uses a fully dense grid for features. Choose when simplicity and uniform resolution are preferred.
+
+### [Multiresolution Grid Encoding](9350-multiresolution-grid-encoding.md)
+Uses multiple grids at different resolutions. Choose when capturing both coarse and fine details is necessary.
+
+### [RHINO](10245-rhino.md)
+Uses radial basis functions for encoding. Choose when smooth, global interpolation is desired.
+
+### [HollowNeRF Saliency Grid Weighting](10745-hollownerf-saliency-grid-weighting.md)
+Uses saliency to weight grid features. Choose when focusing on visually important regions is important.
+
+## Operating characteristics
+- **Time Complexity:** Not explicitly given, but described as having "greater computational cost" than hash or grid encodings [S1, unofficial][S2].
+- **Memory Complexity:** Dense grids of trainable features consume much more memory than neural network weights [S1, unofficial][S2].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Yields a larger degree of adaptivity compared with previous parametric encodings [S1, unofficial][S2].
+- **Limitations:** Greater computational cost, which can only be amortized when sufficiently many inputs fall into each leaf node [S1, unofficial][S2]. Dense grids consume more memory than neural network weights [S1, unofficial][S2].
+- **When to use:** When adaptivity is prioritized over computational efficiency and memory usage.
+- **When not to use:** When inputs are sparse or computational resources are limited.
+
+## Background
+ACORN (Auxiliary Coordinate Encoder) was introduced by Martel et al. in 2021 [S1, unofficial][S2]. It is a parametric approach that uses a tree subdivision of the domain $\mathbb{R}^d$ [S1, unofficial][S2]. The method was motivated by the downsides of existing parametric encodings, such as high memory consumption due to dense grids of trainable features [S1, unofficial][S2]. ACORN aims to provide greater adaptivity while maintaining a parametric structure.
+
+## Sources
+[S1] Nvidia – learning representations of positions in a 3D scene [pdf], https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf, fetched 2026-10-26 (unofficial)
+[S2] Instant Neural Graphics Primitives with a Multiresolution ..., https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28

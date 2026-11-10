@@ -7,11 +7,11 @@ Sparse Voxelization with Hierarchical LoD is a voxelization pipeline designed fo
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A 3D primitive collection (triangle mesh or Catmull-Rom spline collection) with associated material properties.
-*   **Output:** A hierarchical sparse voxel structure (typically 3 levels) where leaf nodes store aggregated directional data (SGGX) and material IDs.
+*   **Input:** A 3D primitive collection (triangle mesh or Catmull-Rom spline collection) with associated material properties [S1].
+*   **Output:** A hierarchical sparse voxel structure (typically 3 levels) where leaf nodes store aggregated directional data (SGGX) and material IDs [S1].
 
 **Data Structures**
-The method uses a hierarchical block structure. The specific layout for initial sample data (used to compute leaf node information) is defined in Table 1 of [S1]:
+The method uses a hierarchical block structure [S1]. The specific layout for initial sample data (used to compute leaf node information) is defined in Table 1 of [S1]:
 
 | Field | Type | Size | Description |
 | :--- | :--- | :--- | :--- |
@@ -22,13 +22,13 @@ The method uses a hierarchical block structure. The specific layout for initial 
 | Material ID | u-integer | 4 bytes | Property identifier |
 
 Each node in the hierarchy stores:
-*   Translation $p=(x,y,z) \in \mathbb{R}^3$
-*   Normal $n=(n_x,n_y,n_z) \in \mathbb{R}^3$ with $\|n\|=1$
-*   Tangent $t=(t_x,t_y,t_z) \in \mathbb{R}^3$ with $\|t\|=1$
+*   Translation $p=(x,y,z) \in \mathbb{R}^3$ [S1]
+*   Normal $n=(n_x,n_y,n_z) \in \mathbb{R}^3$ with $\|n\|=1$ [S1]
+*   Tangent $t=(t_x,t_y,t_z) \in \mathbb{R}^3$ with $\|t\|=1$ [S1]
 *   Properties ID: a 32-bit integer $id \in \mathbb{Z}^{32}$ [S1].
 
 **Parameters**
-*   $Resolution$: The target resolution for the first two levels. The third level uses a fixed resolution (e.g., 8 voxels per axis) [S1].
+*   $Resolution$: The target resolution for the first two levels [S1].
 *   $\delta$: Maximum generation radius (e.g., max yarn radius or triangle edge length) [S1].
 *   $S_{block}$: Block size [S1].
 
@@ -56,7 +56,7 @@ Each node in the hierarchy stores:
 
 4.  **Sparse Data Sampling (for non-empty blocks)**
     Run three kernels:
-    *   **Prepare initial nodes:** Reorder, duplicate, or generate additional data to ensure continuous coverage.
+    *   **Prepare initial nodes:** Reorder, duplicate, or generate additional data to ensure continuous coverage [S1].
     *   **Subsample:** Generate additional points.
         *   For **Catmull-Rom splines**: Define the spline from 4 points and generate additional samples using linear spline interpolation [S1].
         *   For **Triangles**: Generate additional points on the surface using barycentric coordinates [S1].
@@ -73,58 +73,49 @@ Each node in the hierarchy stores:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sparse_voxelization_hierarchical_lod(mesh_or_splines, resolution, delta):
-    # 1. Bounding Box and Transformation
-    b_min, b_max = compute_global_bounding_box(mesh_or_splines)
+def sparse_voxelization_hierarchical_lod(primitives, resolution, delta, S_block):
+    # 1. Bounding Box and Coordinate Transformation
+    b_min = min(v.global_pos for prim in primitives for v in prim.vertices)
+    b_max = max(v.global_pos for prim in primitives for v in prim.vertices)
     
-    # Transform primitives to volume coordinates
-    for primitive in mesh_or_splines:
-        primitive.p_volume = (primitive.p_global - b_min) / (b_max - b_min) * resolution
+    for prim in primitives:
+        for v in prim.vertices:
+            v.volume_pos = ((v.global_pos - b_min) / (b_max - b_min)) * resolution
 
-    # 2. First-Level Block Generation
-    # Assume S_block is defined, e.g., 16 or 32
-    S_block = 16 
-    max_nodes_per_block = compute_max_nodes(resolution, S_block)
-    
-    # Initialize CPU array for counts and IDs
+    # 2. First-Level Block Generation and Culling
+    num_blocks = int(resolution / S_block) + 1
     block_counts = [0] * num_blocks
-    block_ids = [[] for _ in num_blocks]
+    block_ids = [[] for _ in range(num_blocks)]
     
-    # GPU Kernel: Generate and Cull
-    # This kernel runs in parallel for all potential block indices
-    def generate_and_cull_kernel(block_idx):
+    for block_idx in range(num_blocks):
         block_start = block_idx * S_block
-        block_end = (block_idx + 1) * S_block
-        
         valid_nodes = []
         
-        # Iterate over primitives that could influence this block
-        for primitive in mesh_or_splines:
-            # Check if primitive is within generation radius delta
-            # Compute P_relative and D as per formulas
-            P_relative = primitive.p_volume - block_start
-            Q = P_relative - (S_block / 2)
-            D = norm(max(Q, 0)) + min(max(Q_x, Q_y, Q_z), 0)
-            
-            if D < delta**2:
-                # Generate samples from primitive
-                samples = generate_samples(primitive)
-                for sample in samples:
-                    # Check if sample falls within block bounds
-                    if block_start <= sample.p_volume < block_end:
-                        valid_nodes.append(sample)
+        for prim in primitives:
+            for v in prim.vertices:
+                P_relative = v.volume_pos - block_start
+                Q = P_relative - (S_block / 2.0)
+                Q_max = max(Q[0], max(Q[1], Q[2]))
+                D = sum(max(q, 0.0) for q in Q) + min(Q_max, 0.0)
+                
+                if D < delta ** 2:
+                    if prim.type == 'spline':
+                        # Catmull-Rom: define from 4 points, linear interpolation
+                        samples = generate_spline_samples(prim)
+                    else:
+                        # Triangles: barycentric sampling, weighted by relative area
+                        samples = generate_triangle_samples(prim)
+                        
+                    for s in samples:
+                        if block_start <= s.volume_pos < block_start + S_block:
+                            valid_nodes.append(s)
         
-        # Write back to global memory (atomic operations for counts)
         block_counts[block_idx] = len(valid_nodes)
-        # Store IDs or pointers to valid nodes
-        return valid_nodes
+        block_ids[block_idx] = [id(n) for n in valid_nodes]
 
-    # Execute kernel for all blocks
-    all_valid_nodes = execute_gpu_kernel(generate_and_cull_kernel, num_blocks)
-
-    # 3. Masking and Stencil
-    empty_blocks = [i for i, count in enumerate(block_counts) if count == 0]
-    stencil = generate_axis_aligned_stencil(empty_blocks, resolution)
+    # 3. Masking and Stencil Generation
+    empty_blocks = [i for i, c in enumerate(block_counts) if c == 0]
+    stencil = generate_axis_aligned_stencil(empty_blocks, resolution) # [G] standard rasterization step
 
     # 4. Sparse Data Sampling (for non-empty blocks)
     final_leaf_nodes = []
@@ -133,45 +124,39 @@ def sparse_voxelization_hierarchical_lod(mesh_or_splines, resolution, delta):
         if block_counts[block_idx] == 0:
             continue
             
-        nodes = all_valid_nodes[block_idx]
-        
         # Kernel 1: Prepare initial nodes
-        prepared_nodes = prepare_initial_nodes(nodes)
+        prepared = prepare_initial_nodes(block_ids[block_idx]) # [G] reorder/duplicate/generate
         
         # Kernel 2: Subsample
-        # For splines: linear interpolation between 4 points
-        # For triangles: barycentric sampling
-        subsampled_nodes = subsample_data(prepared_nodes, mesh_or_splines)
+        subsampled = subsample_data(prepared) # [G] linear interp for splines, barycentric for triangles
         
         # Kernel 3: Generate voxel nodes
-        # Distribute samples equally based on kernel indices
-        voxel_nodes = generate_voxel_nodes(subsampled_nodes)
+        voxel_nodes = generate_voxel_nodes(subsampled)
         
         # 5. Sample Gathering
-        # Move to grid-like structure, save last sample per voxel
-        gathered_samples = gather_samples_asynchronously(voxel_nodes)
-        
-        # Order by 2nd level block ID
-        gathered_samples.sort(key=lambda s: s.block_2nd_level_id)
+        gathered = gather_samples_asynchronously(voxel_nodes)
+        gathered.sort(key=lambda s: s.block_2nd_level_id)
         
         # Detect block boundaries
-        block_boundaries = detect_id_changes(gathered_samples)
+        boundaries = []
+        for i in range(1, len(gathered)):
+            if gathered[i].block_2nd_level_id != gathered[i-1].block_2nd_level_id:
+                boundaries.append(i)
+        boundaries.append(len(gathered))
         
         # 6. Directional Data Aggregation
-        for block_samples in split_by_block(gathered_samples, block_boundaries):
+        start = 0
+        for end in boundaries:
+            block_samples = gathered[start:end]
+            start = end
             if len(block_samples) > 0:
-                # Compute histogram of normals/tangents
                 hist = compute_directional_histogram(block_samples)
-                # Fit to SGGX
-                sggx_params = fit_sggx(hist)
-                
-                # Create leaf node
-                leaf_node = {
-                    'sggx': sggx_params, # 6 values
+                sggx_params = fit_sggx(hist) # [G] standard SGGX fitting algorithm
+                final_leaf_nodes.append({
+                    'sggx': sggx_params,
                     'material_id': block_samples[0].material_id,
-                    'position': compute_block_center(block_idx)
-                }
-                final_leaf_nodes.append(leaf_node)
+                    'position': (block_idx * S_block + S_block / 2.0) * (b_max - b_min) / resolution + b_min
+                })
                 
     return final_leaf_nodes, stencil
 ```
@@ -182,10 +167,10 @@ def sparse_voxelization_hierarchical_lod(mesh_or_splines, resolution, delta):
 *   **Sparse Input:** For very sparse inputs, higher output resolutions require higher numbers of sub-samples to avoid discontinuities [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by the GPU kernels for sampling and aggregation. The complexity scales with the number of input primitives and the desired output resolution [S1].
-*   **Memory Complexity:** Memory usage is proportional to the number of valid samples, not the total voxel volume. Empty voxels do not consume memory [S1].
-*   **Strengths:** Efficiently handles high-frequency sparse geometry (hair, fibers) without wasting memory on empty space. The SGGX fitting allows compact storage of directional data [S1].
-*   **Limitations:** The method is specialized for microgeometry; it may not be optimal for dense, solid volumes compared to other sparse voxel methods. The reliance on GPU kernels makes CPU-only implementation difficult [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Memory usage is proportional to the number of valid samples, not the total voxel volume [S1].
+*   **Strengths:** Efficiently handles high-frequency sparse geometry (hair, fibers) without wasting memory on empty space [S1]. The SGGX fitting allows compact storage of directional data [S1].
+*   **Limitations:** The method is specialized for microgeometry rendering [S1]. Not given in the sources.
 
 ## Background
 The method was introduced by Javier Fabre et al. in "Fast Voxelization and Level of Detail for Microgeometry Rendering" [S1]. It addresses the challenge of aggregating fine sparse details into coarser blocks, a task that usually implies rasterization and fixed-size memory allocation for sub-block grids [S1]. The approach leverages SGGX functions for orientation distribution representation [S1].

@@ -33,11 +33,9 @@ $$
 
 **Algorithm Steps:**
 1.  **Partition:** Divide the image data into mutually exclusive blocks of size $blockWidth \times blockHeight$ [S1, unofficial].
-2.  **Pad:** For each block, create a padded region of size $P$ around the block boundaries. Fill this region with "ghost elements" (known pixels) from the neighboring blocks in the original image $y$ [S1, unofficial]. This ensures the convolution filter has access to neighborhood data, eliminating boundary artifacts [S1, unofficial].
+2.  **Pad:** For each block, create a padded region of size $P$ around the block boundaries [S1, unofficial]. Fill this region with "ghost elements" (known pixels) from the neighboring blocks in the original image $y$ [S1, unofficial]. This ensures the convolution filter has access to neighborhood data, eliminating boundary artifacts [S1, unofficial].
 3.  **Load:** Copy the block data (including ghost elements) into the block's shared memory [S1, unofficial].
-4.  **Solve Locally:** Run the standard Conjugate Gradient algorithm (as defined in the Global Solver) on the data within the shared memory [S1, unofficial].
-    *   Because the solver runs locally, each block maintains its own state variables.
-    *   Each block can converge independently, potentially requiring a different number of iterations [S1, unofficial].
+4.  **Solve Locally:** Run the standard Conjugate Gradient algorithm on the data within the shared memory [S1, unofficial]. Because the solver runs locally, each block maintains its own state variables [S1, unofficial]. Each block can converge independently, potentially requiring a different number of iterations [S1, unofficial].
 5.  **Reduce:** Perform block-wise vector dot product reductions using parallel reduction (complexity $O(\log n)$) to compute scalar products required by the CG algorithm [S1, unofficial].
 6.  **Merge:** Combine the reconstructed solutions from all blocks to form the final output image [S1, unofficial].
 
@@ -46,70 +44,101 @@ $$
 
 ```python
 def local_solver(image_width, image_height, sampling_matrix_S, convolution_filter_H, lambda_reg, observed_image_y):
-    # Parameters
+    # Parameters from evidence
     thread_size_x = 16
     thread_size_y = 16
     kernel_width = convolution_filter_H.width
     padding_size = kernel_width / 2
     
-    # Calculate block dimensions
-    # Note: blockWidth and blockHeight are derived from thread configuration and padding
-    # In a typical tiling scheme, the block data size processed is (threadSize + 2*Padding)
-    # However, the solver operates on the core block, using padding for convolution context.
-    block_width = thread_size_x
-    block_height = thread_size_y
+    # Calculate number of blocks using source formula
+    num_blocks_x = (image_width - padding_size) // (thread_size_x + padding_size)
+    num_blocks_y = (image_height - padding_size) // (thread_size_y + padding_size)
     
-    # Calculate number of blocks
-    num_blocks_x = (image_width - padding_size) / (thread_size_x + padding_size)
-    num_blocks_y = (image_height - padding_size) / (thread_size_y + padding_size)
-    
-    reconstructed_image = zeros((image_height, image_width))
+    # Initialize output image
+    reconstructed_image = [[0.0] * image_width for _ in range(image_height)]
     
     for block_y in range(num_blocks_y):
         for block_x in range(num_blocks_x):
-            # 1. Extract block and ghost elements
-            # Define coordinates for the padded region
+            # Calculate block start coordinates
             start_x = block_x * (thread_size_x + padding_size)
             start_y = block_y * (thread_size_y + padding_size)
             
-            # Extract the core block and surrounding ghost pixels
-            # The padded region includes the core block plus the padding on all sides
-            padded_block = extract_padded_region(observed_image_y, start_x, start_y, 
-                                                 thread_size_x, thread_size_y, padding_size)
+            # Extract padded region with ghost elements
+            y_start = max(0, start_y - padding_size)
+            y_end = min(image_height, start_y + thread_size_y + padding_size)
+            x_start = max(0, start_x - padding_size)
+            x_end = min(image_width, start_x + thread_size_x + padding_size)
             
-            # 2. Load into Shared Memory (Simulated here as local variable for logic)
-            shared_mem_data = padded_block
+            padded_block = [row[x_start:x_end] for row in observed_image_y[y_start:y_end]]
             
-            # 3. Run Local Conjugate Gradient Solver
-            # The solver operates on the reduced system for this block
-            # Inputs: Local sampling matrix S_block, Local H_block, Local y_block
-            # Note: S and H must be restricted to the block's domain including ghost effects
-            local_S = restrict_matrix(S, start_x, start_y, thread_size_x, thread_size_y)
-            local_H = restrict_matrix(H, start_x, start_y, thread_size_x, thread_size_y)
-            local_y = extract_core_block(padded_block, padding_size)
+            # Extract core block (remove padding)
+            core_block = [row[padding_size:-padding_size] for row in padded_block]
             
-            # Solve (S^T S + lambda H) x = S^T y locally
-            block_solution = conjugate_gradient_solve(local_S, local_H, lambda_reg, local_y)
+            # Restrict matrices to the block's spatial domain
+            local_S = restrict_matrix(sampling_matrix_S, start_x, start_y, thread_size_x, thread_size_y)
+            local_H = restrict_matrix(convolution_filter_H, start_x, start_y, thread_size_x, thread_size_y)
+            local_y = core_block
             
-            # 4. Merge result
-            reconstructed_image[start_y:start_y+thread_size_y, 
-                                start_x:start_x+thread_size_x] = block_solution
-
+            # Solve the local normal equation (S^T S + lambda H)x = S^T y
+            local_system_matrix = matrix_multiply_transpose(local_S, local_S)
+            local_rhs = matrix_vector_multiply_transpose(local_S, local_y)
+            local_A = add_matrices(local_system_matrix, scale_matrix(local_H, lambda_reg))
+            
+            block_solution = conjugate_gradient_solve(local_A, local_rhs)
+            
+            # Merge result into global image
+            for i in range(thread_size_y):
+                for j in range(thread_size_x):
+                    reconstructed_image[start_y + i][start_x + j] = block_solution[i][j]
+                    
     return reconstructed_image
 
-def extract_padded_region(image, start_x, start_y, width, height, padding):
-    # Extract a region larger than the block to include ghost elements
-    # Ensure bounds checking is handled by the caller or this function
-    y_start = max(0, start_y - padding)
-    y_end = min(image.height, start_y + height + padding)
-    x_start = max(0, start_x - padding)
-    x_end = min(image.width, start_x + width + padding)
-    
-    return image[y_start:y_end, x_start:x_end]
+def restrict_matrix(matrix, start_x, start_y, width, height):
+    # Extracts the submatrix corresponding to the block's spatial coordinates
+    return [row[start_x:start_x + width] for row in matrix[start_y:start_y + height]]
 
-def extract_core_block(padded_block, padding):
-    # Extract the central part of the padded block (the actual block data)
-    return padded_block[padding:-padding, padding:-padding]
+def conjugate_gradient_solve(A, b):
+    # Standard CG solver for Ax = b
+    n = len(b)
+    x = [0.0] * n
+    r = [b[i] - sum(A[i][j] * x[j] for j in range(n)) for i in range(n)]
+    p = r[:]
+    rs_old = sum(r[i] * r[i] for i in range(n))
+    for _ in range(n):
+        Ap = [sum(A[i][j] * p[j] for j in range(n)) for i in range(n)]
+        pAp = sum(p[i] * Ap[i] for i in range(n))
+        if pAp == 0: break
+        alpha = rs_old / pAp
+        for i in range(n):
+            x[i] += alpha * p[i]
+            r[i] -= alpha * Ap[i]
+        rs_new = sum(r[i] * r[i] for i in range(n))
+        if abs(rs_new - rs_old) < 1e-10: break
+        for i in range(n):
+            p[i] = r[i] + (rs_new / rs_old) * p[i]
+        rs_old = rs_new
+    return x
+
+def matrix_multiply_transpose(A, B):
+    # Computes A^T * B
+    rows_A, cols_A = len(A), len(A[0])
+    rows_B, cols_B = len(B), len(B[0])
+    result = [[0.0] * cols_B for _ in range(cols_A)]
+    for i in range(cols_A):
+        for j in range(cols_B):
+            for k in range(rows_A):
+                result[i][j] += A[k][i] * B[k][j]
+    return result
+
+def matrix_vector_multiply_transpose(A, v):
+    # Computes A^T * v
+    return [sum(A[k][i] * v[k] for k in range(len(v))) for i in range(len(A[0]))]
+
+def add_matrices(A, B):
+    return [[A[i][j] + B[i][j] for j in range(len(A[0]))] for i in range(len(A))]
+
+def scale_matrix(A, s):
+    return [[A[i][j] * s for j in range(len(A[0]))] for i in range(len(A))]
 ```
 
 **Edge Cases and Pitfalls:**
@@ -120,14 +149,14 @@ def extract_core_block(padded_block, padding):
 ## Subtopics
 
 ### [GMRES Solver](8254-gmres-solver.md)
-The GMRES Solver is an iterative Krylov subspace method used to solve the regularized normal equations arising from least-squares Computed Tomography (CT) reconstruction. It minimizes the residual between the forward-projected reconstruction and the observed sinogram data while applying Tikhonov regularization to enforce smoothness. Unlike direct solvers that explicitly construct the large, sparse system matrix $A^TA$, GMRES operates in a matrix-free manner, computing matrix-vector products on the fly to reduce memory overhead. It is distinguished from its sibling [Local Solver](4294-local-solver.md) by solving the global inverse problem rather than partitioning the image into independent blocks.
+The GMRES Solver is an iterative Krylov subspace method used to solve the regularized normal equations arising from least-squares Computed Tomography (CT) reconstruction. It minimizes the residual between the forward-projected reconstruction and the observed sinogram data while applying Tikhonov regularization to enforce smoothness. Unlike direct solvers that explicitly construct the large, sparse system matrix, GMRES operates in a matrix-free manner to reduce memory overhead. It is distinguished from its sibling [Local Solver](4294-local-solver.md) by solving the global inverse problem rather than partitioning the image into independent blocks [Parent]. Choose GMRES when global convergence properties and matrix-free scalability are prioritized over block-wise parallelism [Parent].
 
 ## Operating characteristics
-*   **Performance:** The Local Solver is significantly faster than the Global Solver. In measurements using 60% pixel coverage, the Local Solver took 5.6 milliseconds, compared to 119 milliseconds for the Global Solver, a 24-fold speedup [S1, unofficial].
+*   **Performance:** The Local Solver is significantly faster than the Global Solver [S1, unofficial]. In measurements using 60% pixel coverage, the Local Solver took 5.6 milliseconds, compared to 119 milliseconds for the Global Solver, a 24-fold speedup [S1, unofficial].
 *   **Complexity:** The computational complexity of the parallel reduction operation is $O(\log n)$, compared to $O(n)$ for sequential summation [S1, unofficial]. The reduction in matrix size from $imageWidth \times imageHeight$ to $blockWidth \times blockHeight$ significantly reduces the computational cost per iteration [S1, unofficial].
 *   **Memory:** Reduces global memory access bottlenecks by utilizing fast shared memory (48 KB per block) [S1, unofficial].
-*   **Strengths:** Enables interactive frame rates (e.g., ~10 fps) by reducing reconstruction time; allows adaptive sampling strategies where each block can have independent sampling rates (e.g., 12.5% or 32 rays per block) to reduce warp divergence [S1, unofficial].
-*   **Limitations:** Requires careful management of shared memory and synchronization; performance is sensitive to thread configuration (multiples of 16 are optimal) [S1, unofficial].
+*   **Strengths:** Enables interactive frame rates (e.g., ~10 fps) by reducing reconstruction time [S1, unofficial]. Allows adaptive sampling strategies where each block can have independent sampling rates (e.g., 12.5% or 32 rays per block) to reduce warp divergence [S1, unofficial].
+*   **Limitations:** Requires careful management of shared memory and synchronization [S1, unofficial]. Performance is sensitive to thread configuration (multiples of 16 are optimal) [S1, unofficial].
 
 ## Background
 The Local Solver was proposed as an optimization for GPU-based compressive volume rendering to address the poor performance and high data transfer costs of global reconstruction methods [S1, unofficial]. It builds on the conjugate gradient solver framework but introduces a tiling strategy to leverage CUDA's blocking scheme and shared memory [S1, unofficial]. The method was developed to achieve interactivity in volume rendering, which was previously hindered by the computational cost of solving the large global system [S1, unofficial].

@@ -1,0 +1,132 @@
+# Multiresolution Grid Encoding
+
+Also called: Multi-resolution Hash Encoding (MHE), Multiresolution Dense Grid Encoding
+
+## Overview
+Multiresolution Grid Encoding (MHE) is a feature encoding method that maps input coordinates to a concatenated vector of features stored in multiple co-located voxel grids of increasing resolution [S1, unofficial][S2, S3]. It solves the problem of efficiently representing complex natural scenes in implicit neural representations by leveraging spatial smoothness, allowing for high reconstruction quality with significantly fewer parameters than a single large dense grid [S1, unofficial][S2]. It sets itself apart from single-resolution hash encoding by providing a hierarchical frequency decomposition, and from sparse octrees by maintaining a dense, regular memory layout across all levels to simplify hardware access patterns [S1, unofficial][S2].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D coordinate $\mathbf{x} \in \mathbb{R}^3$.
+- Output: A feature vector $\mathbf{f} \in \mathbb{R}^D$, where $D$ is the sum of feature dimensions across all resolution levels.
+
+**Data Structures:**
+The method maintains $L$ voxel grids, indexed by level $l \in \{0, \dots, L-1\}$.
+- Each grid $l$ has a resolution $R_l$ (e.g., $16^3, 32^3, \dots, 173^3$) [S1, unofficial][S2].
+- Each grid cell stores a feature vector of dimension $d_l$ (commonly $d_l=2$) [S1, unofficial][S2].
+- The total number of parameters is $\sum_{l=0}^{L-1} R_l^3 \cdot d_l$ [S1, unofficial][S2].
+- Access to grid cells is performed via spatial hashing, mapping the continuous coordinate to a discrete grid index [S3].
+
+**Steps:**
+1. **Initialize Grids:** Create $L$ dense voxel grids with resolutions $R_0, \dots, R_{L-1}$. Initialize feature vectors (e.g., to zero or small random values) [S1, unofficial][S2, S3].
+2. **Query Level $l$:** For a given input coordinate $\mathbf{x}$:
+    a. Map $\mathbf{x}$ to the grid space of level $l$. This typically involves scaling $\mathbf{x}$ by $R_l$ and applying a hash function to handle boundary wrapping or coordinate mapping [S3].
+    b. Identify the 8 neighboring voxel centers in the $R_l \times R_l \times R_l$ grid surrounding $\mathbf{x}$ [S3].
+    c. Retrieve the feature vectors $\mathbf{v}_i$ from these 8 neighbors [S3].
+    d. Perform trilinear interpolation of these 8 vectors using the fractional part of the scaled coordinate to obtain the interpolated feature $\mathbf{f}_l$ for level $l$ [S3].
+3. **Concatenate:** Concatenate the interpolated features from all levels: $\mathbf{f} = [\mathbf{f}_0; \mathbf{f}_1; \dots; \mathbf{f}_{L-1}]$ [S1, unofficial][S2, S3].
+4. **Network Input:** Feed $\mathbf{f}$ into a small Multi-Layer Perceptron (MLP) to predict the target value (e.g., density, color) [S3].
+
+**Parameters:**
+- Number of levels $L$: Typically 8 or more [S1, unofficial][S2].
+- Base resolution $R_0$: Typically 16 [S1, unofficial][S2].
+- Max resolution $R_{L-1}$: Typically 173 or higher, depending on memory [S1, unofficial][S2].
+- Feature dimension per level $d_l$: Typically 2 [S1, unofficial][S2].
+
+**Edge Cases and Pitfalls:**
+- **Hash Collisions:** Since hash encoding is used, different coordinates may map to the same grid cell. Concatenating features across multiple resolutions helps mitigate the impact of collisions at any single resolution [S3].
+- **Precision:** Trilinear interpolation requires precise fractional coordinate calculation. Floating-point precision issues may arise at very high resolutions if not handled carefully [G].
+- **Memory:** The total memory usage is the sum of all grid sizes. If $R_{L-1}$ is too large, it may exceed GPU memory limits [S1, unofficial][S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multiresolution_grid_encoding(x, grids, resolutions, feature_dim):
+    """
+    x: 3D coordinate (float32, shape [3])
+    grids: List of L tensors, each of shape [R_l^3, feature_dim]
+    resolutions: List of L integers, R_0, ..., R_{L-1}
+    feature_dim: Integer, dimension of feature vector per cell (e.g., 2)
+    """
+    concatenated_features = []
+    
+    for l in range(len(grids)):
+        R = resolutions[l]
+        grid = grids[l]
+        
+        # Scale coordinate to grid space
+        # Assuming grid covers unit cube [0,1]^3
+        scaled_x = x * R
+        
+        # Get fractional part for interpolation weights
+        frac = scaled_x - torch.floor(scaled_x)
+        
+        # Get integer indices of the 8 corners
+        # Indices are 0 or 1 for each dimension
+        ix = torch.floor(scaled_x).long() % R
+        iy = torch.floor(scaled_x).long() % R
+        iz = torch.floor(scaled_x).long() % R
+        
+        # Compute 8 neighbor indices in the flattened grid
+        # Grid is flattened: index = x + y*R + z*R^2
+        # Neighbors are at (ix+dx, iy+dy, iz+dz) for dx,dy,dz in {0,1}
+        
+        features_l = torch.zeros(feature_dim)
+        
+        for dx in [0, 1]:
+            for dy in [0, 1]:
+                for dz in [0, 1]:
+                    nx = (ix + dx) % R
+                    ny = (iy + dy) % R
+                    nz = (iz + dz) % R
+                    
+                    # Calculate flattened index
+                    idx = nx + ny * R + nz * R * R
+                    
+                    # Get feature vector
+                    v = grid[idx]
+                    
+                    # Compute weight for this corner
+                    # Weight is product of distances to the opposite corner
+                    w_x = 1.0 if dx == 0 else frac[0]
+                    w_y = 1.0 if dy == 0 else frac[1]
+                    w_z = 1.0 if dz == 0 else frac[2]
+                    
+                    # If dx=1, we are at the 'high' side, so weight is frac[0]
+                    # If dx=0, we are at the 'low' side, so weight is 1-frac[0]
+                    # Correcting logic:
+                    w_x = frac[0] if dx == 1 else (1.0 - frac[0])
+                    w_y = frac[1] if dy == 1 else (1.0 - frac[1])
+                    w_z = frac[2] if dz == 1 else (1.0 - frac[2])
+                    
+                    weight = w_x * w_y * w_z
+                    
+                    features_l += weight * v
+                    
+        concatenated_features.append(features_l)
+        
+    return torch.cat(concatenated_features, dim=0)
+```
+
+## Subtopics
+
+### [Global Preconditioner for Encoder-Induced Metric](11747-global-preconditioner-for-encoder-induced-metric.md)
+A linear transformation applied to the input space to isotropize the average encoder-induced metric, ensuring all directions are treated equally and avoiding global rescaling via volume preservation.
+
+## Operating characteristics
+- **Time Complexity:** Query time is $O(L \cdot 1)$, where $L$ is the number of resolution levels, as each level requires a constant number of hash lookups and trilinear interpolations (8 neighbors) [S1, unofficial][S2, S3].
+- **Memory Complexity:** $O(\sum_{l=0}^{L-1} R_l^3 \cdot d_l)$ [S1, unofficial][S2].
+- **Measured Performance:** In the Instant-NGP context, using 8 grids from $16^3$ to $173^3$ with 2D features achieves similar reconstruction quality to a single large dense grid (e.g., $128^3$) but with less than half the number of parameters [S1, unofficial][S2].
+- **Strengths:** High approximation ability due to multi-scale representation; fast training speed due to efficient memory access patterns and reduced parameter count compared to single large grids [S3].
+- **Limitations:** Memory usage still scales with the cube of the maximum resolution; hash collisions can cause artifacts if not mitigated by multi-resolution concatenation [S3].
+- **When to use:** When training implicit neural representations (like NeRF) on consumer GPUs with limited memory but requiring high-quality reconstruction of natural scenes [S1, unofficial][S2].
+- **When not:** When the scene geometry is known a priori and sparse structures (like octrees) can be exploited to save memory [S1, unofficial][S2].
+
+## Background
+MHE was introduced by Mueller et al. in the context of Instant Neural Graphics Primitives (Instant-NGP) [S1, unofficial][S2]. It builds on the idea that natural scenes exhibit smoothness, motivating multi-resolution decomposition [S1, unofficial][S2]. The method was designed to improve the approximation ability and training speed of implicit neural representations [S3]. It is widely used in modern NeRF implementations to enable real-time training and rendering on consumer hardware [S1, unofficial][S2].
+
+## Sources
+[S1] Nvidia – learning representations of positions in a 3D scene [pdf], https://nvlabs.github.io/instant-ngp/assets/mueller2022instant.pdf, fetched 2026-10-26 (unofficial)
+[S2] Instant Neural Graphics Primitives with a Multiresolution ..., https://www.cs.jhu.edu/~misha/ReadingSeminar/Papers/Mueller22.pdf, fetched 2026-10-28
+[S3] Learning Neural Volumetric Representations of Dynamic Humans in Minutes, https://doi.org/10.1109/cvpr52729.2023.00846, fetched 2026-10-30

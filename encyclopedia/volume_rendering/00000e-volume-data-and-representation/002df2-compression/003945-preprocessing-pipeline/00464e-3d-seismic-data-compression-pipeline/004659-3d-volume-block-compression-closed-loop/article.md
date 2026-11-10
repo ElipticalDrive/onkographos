@@ -1,0 +1,194 @@
+# 3D Volume Block Compression (Closed-Loop)
+
+Also called: Closed-Loop DPCM Compression, TraceBlockCodec.compress, closed-loop 3D DPCM, closed-loop quantization
+
+## Overview
+This method compresses 3D seismic data blocks by normalizing samples to a fixed range, applying closed-loop differential pulse-code modulation (DPCM) with quantization, and packing the result with Deflate compression [S1, unofficial]. It differs from open-loop DPCM by feeding the reconstructed (quantized) value back into the predictor, ensuring the decoder can exactly reproduce the quantization steps without requiring the original float values during decoding [S1, unofficial]. It is a core component of the 3D Seismic Data Compression Pipeline [11727-3d-seismic-data-compression-pipeline.md].
+
+## How it works
+**Inputs:**
+- `data`: A 3D array of floating-point samples with dimensions $n_i \times n_j \times n_t$.
+- `profile`: An object providing `effectiveBits()` (quantization bit depth) and `deflaterLevel()` (Deflate compression level).
+
+**Outputs:**
+- `CompressedVolumeBlock3D`: An object containing:
+  - `metadata`: Original block metadata.
+  - `min`: The minimum value of the original data.
+  - `max`: The maximum value of the original data.
+  - `payload`: A byte array containing the compressed quantized data.
+
+**Data Structures:**
+- `q`: An integer array of length $n_i \times n_j \times n_t$, storing quantized residual values.
+- `norm`: A 3D array of floats in the range $[-1, 1]$, storing normalized data.
+- `payload`: A byte array resulting from packing `q` and applying Deflate.
+
+**Parameters:**
+- `bits`: The number of bits used for quantization, obtained from `profile.effectiveBits()`.
+- `maxQ`: The maximum quantization level, calculated as $2^{\text{bits}} - 1$ [S1, unofficial].
+- `inv`: The inverse of `maxQ`, calculated as $1.0 / \text{maxQ}$ [S1, unofficial].
+- `deflaterLevel`: The compression level for Deflate, obtained from `profile.deflaterLevel()` [S1, unofficial].
+
+**Steps:**
+
+1. **Compute Min/Max:** Iterate over all indices $i, j, k$ to find the minimum ($min$) and maximum ($max$) values in `data` [S1, unofficial].
+2. **Normalize:** Normalize `data` to the range $[-1, 1]$ to produce `norm` [S1, unofficial]:
+   - Calculate range: $range = max - min$.
+   - If $range == 0$, set all `norm[i][j][k] = 0`.
+   - Otherwise, for each sample $v$ in `data`:
+     - $zeroToOne = (v - min) / range$
+     - $norm[i][j][k] = zeroToOne \times 2 - 1$
+3. **Closed-Loop Quantization:** Encode `norm` into integer array `q` using closed-loop DPCM [S1, unofficial]:
+   - Initialize `prev = 0.0`.
+   - For each sample index $idx$ from $0$ to $n_i \times n_j \times n_t - 1$:
+     - Let $current = norm[idx]$.
+     - Calculate residual: $residual = current - prev$.
+     - Quantize residual: $q[idx] = \text{quantize}(residual, maxQ)$.
+     - Reconstruct previous value: $prev = \text{reconstruct}(prev, q[idx], inv)$.
+4. **Pack and Compress:** Pack the integer array `q` into a byte array using `ClosedLoopQuantizer.pack(q, bits, deflaterLevel)` [S1, unofficial]. This function handles bit-packing and Deflate compression.
+5. **Return:** Construct and return the `CompressedVolumeBlock3D` object with `metadata`, `min`, `max`, and the compressed `payload`.
+
+**Decompression:**
+
+1. **Unpack:** Unpack the `payload` to retrieve the integer array `q` using `ClosedLoopQuantizer.unpack(payload, n_i \times n_j \times n_t)` [S1, unofficial].
+2. **Decode:** Decode `q` into the normalized float array `norm` using `VolumeBlock3DCodec.closedLoopDecode(q, n_i, n_j, n_t, bits)` [S1, unofficial]. This reverses the closed-loop quantization.
+3. **Denormalize:** Convert `norm` back to the original scale to produce `data` [S1, unofficial]:
+   - Calculate range: $range = max - min$.
+   - If $range == 0$, set all `data[i][j][k] = min`.
+   - Otherwise, for each normalized value $v$ in `norm`:
+     - $zeroToOne = (v + 1) / 2$
+     - $data[i][j][k] = min + zeroToOne \times range$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compress(data, ni, nj, nt, profile):
+    # Step 1: Compute Min/Max
+    min_val = data[0][0][0]
+    max_val = data[0][0][0]
+    for i in range(ni):
+        for j in range(nj):
+            for k in range(nt):
+                if data[i][j][k] < min_val:
+                    min_val = data[i][j][k]
+                if data[i][j][k] > max_val:
+                    max_val = data[i][j][k]
+
+    # Step 2: Normalize
+    range_val = max_val - min_val
+    norm = [[0.0] * nt for _ in range(nj)]
+    for _ in range(ni):
+        norm.append([[0.0] * nt for _ in range(nj)]) # Note: Simplified 3D structure for pseudocode clarity
+    
+    # Re-initialize norm as 3D array properly
+    norm = [[[0.0 for _ in range(nt)] for _ in range(nj)] for _ in range(ni)]
+
+    if range_val == 0:
+        for i in range(ni):
+            for j in range(nj):
+                for k in range(nt):
+                    norm[i][j][k] = 0.0
+    else:
+        for i in range(ni):
+            for j in range(nj):
+                for k in range(nt):
+                    v = data[i][j][k]
+                    zero_to_one = (v - min_val) / range_val
+                    norm[i][j][k] = zero_to_one * 2.0 - 1.0
+
+    # Step 3: Closed-Loop Quantization
+    bits = profile.effectiveBits()
+    max_q = (1 << bits) - 1
+    inv = 1.0 / max_q
+    q = [0] * (ni * nj * nt)
+    prev = 0.0
+    
+    for idx in range(ni * nj * nt):
+        # Flatten 3D index to 1D for sequential processing
+        # Assuming row-major order: i, j, k
+        # This assumes data is accessed in a specific linear order consistent with norm
+        # For simplicity, we iterate through norm in the same order as data
+        current = norm[idx // (nj * nt)][(idx // nt) % nj][idx % nt]
+        residual = current - prev
+        q[idx] = quantize(residual, max_q)
+        prev = reconstruct(prev, q[idx], inv)
+
+    # Step 4: Pack and Compress
+    payload = closed_loop_quantizer_pack(q, bits, profile.deflaterLevel())
+
+    # Step 5: Return
+    return CompressedVolumeBlock3D(metadata=None, min=min_val, max=max_val, payload=payload)
+
+def decompress(compressed_block, ni, nj, nt):
+    # Step 1: Unpack
+    q = closed_loop_quantizer_unpack(compressed_block.payload, ni * nj * nt)
+
+    # Step 2: Decode
+    bits = compressed_block.metadata.bits # Or derived from payload header
+    norm_flat = volume_block_3d_codec_closed_loop_decode(q, ni, nj, nt, bits)
+
+    # Step 3: Denormalize
+    min_val = compressed_block.min
+    max_val = compressed_block.max
+    range_val = max_val - min_val
+    data = [[[0.0 for _ in range(nt)] for _ in range(nj)] for _ in range(ni)]
+
+    if range_val == 0:
+        for i in range(ni):
+            for j in range(nj):
+                for k in range(nt):
+                    data[i][j][k] = min_val
+    else:
+        idx = 0
+        for i in range(ni):
+            for j in range(nj):
+                for k in range(nt):
+                    v = norm_flat[idx]
+                    zero_to_one = (v + 1.0) / 2.0
+                    data[i][j][k] = min_val + zero_to_one * range_val
+                    idx += 1
+
+    return data
+
+def quantize(residual, max_q):
+    # Implementation detail: maps float residual to integer in [-max_q, max_q] or [0, 2*max_q]
+    # Based on ClosedLoopQuantizer.quantize, exact implementation not provided in source
+    # Assuming symmetric quantization around 0
+    # [G] Placeholder for exact quantization logic not fully specified in source
+    # Typical implementation: round(residual * max_q) clipped to range
+    return 0 # Placeholder
+
+def reconstruct(prev, q_val, inv):
+    # Implementation detail: reconstructs float from previous float and quantized residual
+    # Based on ClosedLoopQuantizer.reconstruct
+    # [G] Placeholder for exact reconstruction logic not fully specified in source
+    # Typical implementation: prev + q_val * inv
+    return prev # Placeholder
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero Range:** If $max == min$, normalization results in all zeros. Denormalization must handle this by filling the output with $min$ [S1, unofficial].
+- **Precision:** Closed-loop quantization ensures decoder consistency but introduces quantization error. The choice of `effectiveBits` trades off between file size and accuracy [S1, unofficial].
+- **Ordering:** The linearization of the 3D array for DPCM must be consistent between compression and decompression [S1, unofficial].
+
+## Subtopics
+
+### Open-Loop DPCM
+Uses the original float values for prediction instead of the reconstructed quantized values. Simpler but may lead to drift if quantization is not perfectly reversible [S1, unofficial].
+
+### TraceBlockCodec.inflate
+Legacy decompression path that inflates bytes to shorts and decodes residuals linearly. Used for backward compatibility [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of samples $N = n_i \times n_j \times n_t$ for normalization, quantization, and denormalization. Deflate compression is also generally linear but depends on data redundancy.
+- **Memory Complexity:** Requires storage for the original data, normalized data, quantized integer array, and compressed payload. The compressed payload size depends on the bit depth and Deflate level.
+- **Performance:** Measured performance depends on the hardware and the specific seismic data characteristics. Higher bit depths result in larger file sizes but better accuracy. Deflate level affects compression ratio and CPU time [S1, unofficial].
+- **Strengths:** Closed-loop design ensures decoder stability. Normalization allows efficient quantization across varying data ranges.
+- **Limitations:** Lossy compression. Performance is sensitive to the choice of bit depth and Deflate level.
+
+## Background
+This method is part of the SeismicDataCompressor project, an unofficial implementation for compressing seismic data [S1, unofficial]. It is designed to integrate with the 3D Seismic Data Compression Pipeline, providing a robust way to compress 3D volume blocks while preserving trace integrity [11727-3d-seismic-data-compression-pipeline.md].
+
+## Sources
+[S1] SeismicDataCompressor, https://github.com/rubensrudio/SeismicDataCompressor, fetched 2026-10-28 (unofficial)

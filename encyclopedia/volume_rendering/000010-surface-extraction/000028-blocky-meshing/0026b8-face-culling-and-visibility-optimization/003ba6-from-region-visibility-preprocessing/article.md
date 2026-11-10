@@ -3,52 +3,54 @@
 Also called: Durand et al. Visibility Preprocessing, Wonka et al. Visibility Preprocessing
 
 ## Overview
-From-region visibility preprocessing is a technique that precomputes which geometric primitives are visible from a specific region of the camera space, allowing the renderer to discard occluded geometry before the frame is drawn. It solves the problem of excessive overdraw and rendering cost in large, complex scenes by shifting the visibility determination burden to an offline or semi-offline phase. Unlike sibling methods that perform per-frame culling or rely on simple axis-aligned block checks, this approach builds a spatial visibility structure (often involving occluder fusion) tailored to a defined viewing region [S1, unofficial].
+From-Region Visibility Preprocessing is a technique that precomputes visibility information for specific regions of a scene to optimize rendering performance. It solves the problem of determining which geometry is visible from a given viewpoint or region before the rendering pass, allowing for the culling of occluded or irrelevant geometry. It is distinguished from its siblings by its focus on precomputing visibility for *regions* rather than individual points or static blocks, often involving complex occluder fusion and significant preprocessing overhead.
 
 ## How it works
-The method constructs a visibility map for a defined region of interest. The core logic involves identifying occluders and determining which primitives are hidden behind them from any viewpoint within that region.
+The method involves precomputing visibility data for defined regions of the scene. This data is then used during rendering to determine which parts of the geometry need to be processed.
 
-**Inputs and Outputs:**
-*   **Input:** A 3D scene model (typically represented as a mesh of triangles) and a defined "region" (a volume or set of viewpoints).
-*   **Output:** A visibility structure (e.g., a list of visible triangles per region or a culling mask) that can be queried at runtime.
+**Inputs:**
+*   Scene geometry (triangles/meshes).
+*   Definition of regions (e.g., camera frustums, spatial partitions).
+
+**Outputs:**
+*   Visibility maps or masks indicating which geometry is visible from each region.
 
 **Data Structures:**
-*   **Occluder List:** A collection of geometric primitives identified as potential occluders.
-*   **Visibility Map:** A data structure mapping regions or viewpoints to subsets of visible primitives.
-*   **Occluder Fusion Data:** Structures used to merge overlapping occluders to reduce redundancy (specific to Wonka et al.).
+*   Not explicitly defined in the provided sources, but implied to involve structures storing visibility relationships between regions and geometry.
 
 **Steps:**
-1.  **Region Definition:** Define the spatial region from which visibility is to be computed. This may be a bounding volume or a set of keyframes [S1, unofficial].
-2.  **Occluder Identification:** Identify primitives in the scene that can occlude others from within the defined region.
-3.  **Visibility Computation:** For each primitive, determine if it is visible from any point in the region. This often involves ray casting or projection-based techniques to check for occlusion by the identified occluders [S1, unofficial].
-4.  **Occluder Fusion (Wonka et al.):** Merge overlapping or redundant occluders to simplify the visibility structure and reduce the number of tests required [S1, unofficial].
-5.  **Storage:** Store the resulting visibility information in a structure that allows fast lookup during rendering [S1, unofficial].
+1.  **Region Definition:** Define the regions for which visibility will be precomputed.
+2.  **Visibility Computation:** For each region, determine which geometry is visible. This may involve ray casting or other visibility algorithms.
+3.  **Occluder Fusion:** (Specific to Wonka et al.) Merge occluders to simplify the visibility representation.
+4.  **Storage:** Store the computed visibility information for use during rendering.
 
 **Parameters:**
-*   **Region Size:** The spatial extent of the region. Larger regions may require more complex visibility structures.
-*   **Precision:** The accuracy of the visibility computation. Higher precision may require more preprocessing time [S1, unofficial].
+*   Region size and shape.
+*   Accuracy requirements.
 
 **Pitfalls:**
-*   **Preprocessing Time:** The method can require significant preprocessing time, especially for large models [S1, unofficial].
-*   **Memory Usage:** The visibility structures can consume substantial memory for large scenes [S1, unofficial].
-*   **Dynamic Scenes:** The method is generally static; dynamic scenes require frequent recomputation or more complex incremental updates [S1, unofficial].
+*   Long preprocessing times.
+*   Limited to specific dataset types (e.g., 2.5D).
 
 ## Subtopics
 
+### Wonka et al. Visibility Preprocessing
+A from-region visibility preprocessing algorithm with occluder fusion [S1, unofficial]. It used 2 processors to overlap visibility computation and rendering at runtime [S1, unofficial]. It required long preprocessing times (9 hours for a model with 8 million triangles) and was limited to 2.5D datasets [S1, unofficial]. Later work by Wonka et al. used a from-point approach needing little preprocessing, but only reported results for in-core, 2.5D datasets [S1, unofficial].
+
+### Durand et al. Visibility Preprocessing
+A from-region visibility preprocessing algorithm that could handle 3D environments, as opposed to 2.5D [S1, unofficial]. However, the algorithm required long preprocessing times (33 hours for a model with 6 million triangles) [S1, unofficial].
+
 ### Chhugani et al. Visibility and LOD System
-A system that precomputes from-region visibility and levels of detail per region, focusing on image accuracy. It guarantees less than one pixel of screen-space deviation and correct visibility. However, it requires significant computational resources; for a model with 13 million triangles on a cluster of 16 PCs, the precomputation takes 128 hours [S1, unofficial].
+A system that precomputes from-region visibility and levels of detail per region, focusing on image accuracy [S1, unofficial]. For a model with 13 million triangles, using a cluster of 16 PCs, the accuracy guarantee costs 128 hours of precomputation [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Preprocessing time is high, often measured in hours for large models (e.g., 9–33 hours for millions of triangles) [S1, unofficial].
-*   **Memory Complexity:** Requires storage for the visibility structures and occluder data, which can be substantial [S1, unofficial].
-*   **Performance:** Reduces runtime rendering cost by eliminating occluded geometry early.
-*   **Strengths:** High accuracy in visibility determination; effective for large static scenes.
-*   **Limitations:** Long preprocessing times; limited scalability to very large models without significant hardware resources; primarily limited to 2.5D datasets in early implementations (Wonka et al.) or required extensive time for 3D (Durand et al.) [S1, unofficial].
-*   **When to Use:** Large, static scenes where preprocessing time is acceptable and rendering performance is critical.
-*   **When Not to Use:** Dynamic scenes, real-time applications requiring immediate scene updates, or resource-constrained environments.
+*   **Preprocessing Time:** Very high. Examples include 9 hours for 8 million triangles (Wonka), 33 hours for 6 million triangles (Durand), and 128 hours for 13 million triangles (Chhugani) [S1, unofficial].
+*   **Runtime Performance:** Can overlap visibility computation and rendering [S1, unofficial].
+*   **Dataset Limitations:** Early versions were limited to 2.5D datasets [S1, unofficial].
+*   **Accuracy:** Can guarantee image accuracy with less than one pixel of screen-space deviation (Chhugani) [S1, unofficial].
 
 ## Background
-The concept was introduced by Wonka et al. [152] as a from-region visibility preprocessing algorithm with occluder fusion, initially limited to 2.5D datasets and requiring long preprocessing times (9 hours for 8 million triangles) [S1, unofficial]. Durand et al. [41] extended this to handle 3D environments, though with even longer preprocessing times (33 hours for 6 million triangles) [S1, unofficial]. Later work by Wonka et al. [153] shifted to a from-point approach with less preprocessing but remained limited to 2.5D datasets [S1, unofficial]. Chhugani et al. [20] developed a system integrating visibility and LOD, focusing on image accuracy [S1, unofficial].
+The technique was developed by various researchers including Wonka et al. [152, 153], Durand et al. [41], and Chhugani et al. [20] [S1, unofficial]. It is part of a broader effort to optimize visualization of large datasets, particularly in out-of-core scenarios.
 
 ## Sources
 [S1] New Techniques for Out-Of-Core Visualization of Large Datasets, https://ctsilva.github.io/thesis/wagner-correa-thesis.pdf, fetched 2026-10-30 (unofficial)

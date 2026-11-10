@@ -1,36 +1,37 @@
 # Realistic Cloud Density Slicing
 
-Also called: Cloud Type-Specific Density Slicing, Procedural Cloud Density Slicing
 
 ## Overview
-Realistic Cloud Density Slicing is a procedural volume generation method that computes cloud density by combining vertical atmospheric profiles with horizontal footprint and noise-based structural variations. It solves the problem of generating visually distinct, physically plausible cloud layers for different cloud types (e.g., Cirrus, Cumulus) within a unified framework. It differs from generic noise-based volume generation by explicitly separating vertical stratification (Gaussian profiles) from horizontal structure (footprints and clusters), modulated by type-specific noise functions.
+Realistic Cloud Density Slicing computes cloud density by combining vertical atmospheric profiles with horizontal footprints and noise-based structural variations [S1, unofficial]. It generates visually distinct cloud layers for specific types (Cirrus through Cumulonimbus) within a unified procedural framework [S1, unofficial]. The method separates vertical stratification using Gaussian profiles from horizontal structure modulated by type-specific noise functions [S1, unofficial].
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-- `z`: Normalized vertical coordinate (height), typically in range $[-1, 1]$ or similar normalized space.
-- `x, y`: Normalized horizontal coordinates.
-- `noise`: A pre-generated 3D noise field (value noise or similar), typically uniform $[0, 1]$.
-- `type_id`: Integer identifier for the cloud type (1–9, else Cumulonimbus).
-- `strength`: Scalar multiplier for overall density intensity.
-- `detail`: Scalar multiplier for fine-detail noise influence.
-- `finite_xy_boundary`: Boolean flag indicating if the cloud is bounded in the XY plane.
-- `rng`: Random number generator instance for shape variation parameters (center, radius, etc.).
+- `z`: Normalized vertical coordinate [S1, unofficial].
+- `x, y`: Normalized horizontal coordinates [S1, unofficial].
+- `noise`: Pre-generated 3D noise field, typically uniform in $[0, 1]$ [S1, unofficial].
+- `type_id`: Integer identifier for the cloud type (1–9, else Cumulonimbus) [S1, unofficial].
+- `strength`: Scalar multiplier for overall density intensity [S1, unofficial].
+- `detail`: Scalar multiplier for fine-detail noise influence [S1, unofficial].
+- `finite_xy_boundary`: Boolean flag indicating if the cloud is bounded in the XY plane [S1, unofficial].
+- `variation`: Cloud shape parameters object containing center, radius, and lobe specifications [S1, unofficial].
+- `cluster`: Pre-computed cluster density field (required for types 2, 4, 7, 9, else) [S1, unofficial].
+- `wisps`: Pre-computed wisp density field (required for type 1) [S1, unofficial].
+- `base`: Base density field (required for type 9) [S1, unofficial].
 
 **Outputs:**
-- `density`: A 3D volume (or scalar field) where each voxel contains a density value in $[0, 1]$.
+- `density`: A 3D volume where each voxel contains a density value in $[0, 1]$ [S1, unofficial].
 
 ### Data Structures
-- `_CloudShapeVariation`: A structure holding cloud shape parameters:
-  - `center_x`, `center_y`: Center coordinates of the cloud layer.
-  - `layer_radius_x`, `layer_radius_y`: Horizontal extent of the cloud.
-  - `angle`: Rotation angle of the cloud layer.
-  - `specs`: A tuple of tuples, each containing `(cx, cy, cz, rx, ry, rz, weight)` for individual cloud lobes/puffs.
-  - `finite_edge_lobes`: Parameters for edge fading if `finite_xy_boundary` is true.
+- `_CloudShapeVariation`: A structure holding cloud shape parameters [S1, unofficial].
+  - `center_x`, `center_y`: Center coordinates of the cloud layer [S1, unofficial].
+  - `layer_radius_x`, `layer_radius_y`: Horizontal extent of the cloud [S1, unofficial].
+  - `angle`: Rotation angle of the cloud layer [S1, unofficial].
+  - `specs`: A tuple of tuples, each containing `(cx, cy, cz, rx, ry, rz, weight)` for individual cloud lobes/puffs [S1, unofficial].
+  - `finite_edge_lobes`: Parameters for edge fading if `finite_xy_boundary` is true [S1, unofficial].
 
 ### Steps
-1. **Calculate Base Vertical Profiles:**
-   Compute two Gaussian vertical profiles based on normalized height `z`:
+1. **Calculate Base Vertical Profiles:** Compute two Gaussian vertical profiles based on normalized height `z` [S1, unofficial]:
    $$
    \text{thin} = \exp\left(-\left(\frac{z + 0.04}{0.13}\right)^2\right)
    $$
@@ -38,90 +39,72 @@ Realistic Cloud Density Slicing is a procedural volume generation method that co
    \text{middle} = \exp\left(-\left(\frac{z + 0.10}{0.30}\right)^2\right)
    $$
 
-2. **Generate Noise Variations:**
-   Transform the input `noise` field into two variation fields:
+2. **Generate Noise Variations:** Transform the input `noise` field into two variation fields [S1, unofficial]:
    $$
-   \text{broad\_noise} = \text{clip}\left((\text{noise} - 0.32) \times 1.65, 0.0, 1.0\right)
+   \text{broad\_noise} = \operatorname{clip}\left((\text{noise} - 0.32) \times 1.65, 0.0, 1.0\right)
    $$
    $$
-   \text{fine} = \text{clip}\left((\text{noise} - 0.48) \times 2.5, 0.0, 1.0\right)
+   \text{fine} = \operatorname{clip}\left((\text{noise} - 0.48) \times 2.5, 0.0, 1.0\right)
    $$
 
-3. **Determine Horizontal Footprint:**
-   If `finite_xy_boundary` is true, the footprint is a uniform field of ones (`np.ones_like(x)`). Otherwise, compute the footprint using a helper function `_broad_footprint(x, y, variation)`, which typically involves distance-to-center calculations and edge fading based on cloud shape parameters.
+3. **Determine Horizontal Footprint:** If `finite_xy_boundary` is true, the footprint is a uniform field of ones (`np.ones_like(x)`) [S1, unofficial]. Otherwise, compute the footprint using a helper function `_broad_footprint(x, y, variation)` [S1, unofficial].
 
-4. **Compute Density by Cloud Type:**
-   The density calculation depends on `type_id`. Let `cluster` be a pre-computed cluster density field (if applicable) and `wisps` be a wisp density field (if applicable).
-
+4. **Compute Density by Cloud Type:** The density calculation depends on `type_id` [S1, unofficial].
    - **Type 1 (Cirrus):**
      $$
-     \text{density} = \text{wisps} \times \left(0.22 + 0.78 \times \text{clip}\left((\text{noise} - 0.52) \times 2.8, 0.0, 1.0\right)\right) \times \text{thin} \times \left(0.32 + 0.68 \times \text{broad\_noise}\right)
+     \text{density} = \text{wisps} \times \left(0.22 + 0.78 \times \operatorname{clip}\left((\text{noise} - 0.52) \times 2.8, 0.0, 1.0\right)\right) \times \text{thin} \times \left(0.32 + 0.68 \times \text{broad\_noise}\right)
      $$
-
    - **Type 2 (Cirrocumulus):**
      $$
      \text{density} = \text{soft\_union}(\text{cluster}, 0.50 \times \text{footprint}) \times \text{fine}^{1.45} \times \text{thin} \times \left(0.50 + 0.50 \times \text{broad\_noise}\right)
      $$
-
    - **Type 3 (Cirrostratus):**
      $$
      \text{density} = \text{thin} \times \text{footprint} \times \left(0.50 + 0.44 \times \text{noise}\right)
      $$
-
    - **Type 4 (Altocumulus):**
      $$
      \text{density} = \text{soft\_union}(\text{cluster}, 0.62 \times \text{footprint}) \times \text{broad\_noise}^{1.20} \times \text{middle} \times \left(0.68 + 0.32 \times \text{fine}\right)
      $$
-
    - **Type 5 (Altostratus):**
      $$
      \text{density} = \exp\left(-\left(\frac{z + 0.03}{0.25}\right)^2\right) \times \text{footprint} \times \left(0.50 + 0.42 \times \text{noise}\right)
      $$
-
    - **Type 6 (Nimbostratus):**
      $$
      \text{density} = \exp\left(-\left(\frac{z + 0.03}{0.43}\right)^2\right) \times \left(0.56 + 0.34 \times \text{noise}\right)
      $$
-     Note: No footprint is used for Nimbostratus.
-
    - **Type 7 (Stratocumulus):**
      $$
      \text{density} = \text{soft\_union}(\text{cluster}, 0.58 \times \text{footprint}) \times \text{broad\_noise}^{0.85} \times \exp\left(-\left(\frac{z + 0.28}{0.23}\right)^2\right)
      $$
-
    - **Type 8 (Stratus):**
      $$
      \text{density} = \exp\left(-\left(\frac{z + 0.37}{0.16}\right)^2\right) \times \text{footprint} \times \left(0.62 + 0.25 \times \text{noise}\right)
      $$
-
-   - **Type 9 (Cumulus):**
-     Calculate puffs and surface detail:
+   - **Type 9 (Cumulus):** Calculate puffs and surface detail [S1, unofficial]:
      $$
-     \text{puffs} = \text{clip}\left(\frac{\text{noise} - 0.34}{0.46}, 0.0, 1.0\right)
+     \text{puffs} = \operatorname{clip}\left(\frac{\text{noise} - 0.34}{0.46}, 0.0, 1.0\right)
      $$
      $$
      \text{surface} = \text{smoothstep}\left(\frac{0.62 \times \text{puffs} + 0.38 \times \text{broad\_noise} - 0.20}{0.72}\right)
      $$
-     Combine cluster and base with soft union:
+     Combine cluster and base with soft union [S1, unofficial]:
      $$
      \text{density} = \text{soft\_union}\left(\text{cluster} \times (0.24 + 0.76 \times \text{puffs}), 0.50 \times \text{base} \times (0.18 + 0.82 \times \text{surface})\right)
      $$
-     Note: `base` is likely a base density field derived from the cloud shape parameters.
-
-   - **Type Else (Cumulonimbus):**
-     Calculate anvil:
+   - **Type Else (Cumulonimbus):** Calculate anvil [S1, unofficial]:
      $$
      \text{anvil} = \text{footprint} \times \exp\left(-\left(\frac{z - 0.48}{0.15}\right)^2\right)
      $$
-     Combine cluster and anvil:
+     Combine cluster and anvil [S1, unofficial]:
      $$
      \text{density} = \text{soft\_union}(\text{cluster}, 0.83 \times \text{anvil}) \times \left(0.44 + 0.56 \times \text{broad\_noise}\right)
      $$
 
-5. **Final Density Return:**
-   Apply strength, detail, and clamp to $[0, 1]$:
+5. **Final Density Return:** Apply strength, detail, and clamp to $[0, 1]$ [S1, unofficial]:
    $$
-   \text{density} = \text{clip}\left(\text{density} \times \text{strength} \times (0.92 + \text{detail} \times 0.08 \times \text{fine}), 0.0, 1.0\right)
+   \text{density} = \operatorname{clip}\left(\text{density} \times \text{strength} \times (0.92 + \text{detail} \times 0.08 \times \text{fine}), 0.0, 1.0\right)
    $$
 
 ### Pseudocode
@@ -135,90 +118,73 @@ def smoothstep(value):
     return clipped * clipped * (3.0 - 2.0 * clipped)
 
 def soft_union(a, b):
-    # Soft union approximation, e.g., using smooth min/max or alpha blending
-    # Common implementation: a + b - a * b
     return a + b - a * b
 
 def broad_footprint(x, y, variation):
-    # Placeholder for actual footprint calculation based on x, y, and variation parameters
-    # This function is not fully detailed in the sources, but it returns a 2D array
-    # representing the horizontal extent of the cloud.
-    # [G] Assuming a simple Gaussian falloff from center for implementation purposes.
-    # Replace with actual logic from _broad_footprint if available.
-    pass
+    # The sources do not provide the implementation for _broad_footprint.
+    # [G] Standard fallback: Gaussian falloff from center based on layer_radius_x/y.
+    cx, cy = variation.center_x, variation.center_y
+    rx, ry = variation.layer_radius_x, variation.layer_radius_y
+    dist = np.sqrt(((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2)
+    return np.exp(-dist ** 2)
 
-def realistic_cloud_density_slicing(z, x, y, noise, type_id, strength, detail, finite_xy_boundary, rng):
-    # Step 1: Base Vertical Profiles
+def realistic_cloud_density_slicing(z, x, y, noise, type_id, strength, detail, finite_xy_boundary, variation, cluster=None, wisps=None, base=None):
     thin = np.exp(-((z + 0.04) / 0.13) ** 2)
     middle = np.exp(-((z + 0.10) / 0.30) ** 2)
 
-    # Step 2: Noise Variations
     broad_noise = np.clip((noise - 0.32) * 1.65, 0.0, 1.0)
     fine = np.clip((noise - 0.48) * 2.5, 0.0, 1.0)
 
-    # Step 3: Footprint
     if finite_xy_boundary:
         footprint = np.ones_like(x)
     else:
-        # [G] Placeholder for _broad_footprint logic
-        footprint = broad_footprint(x, y, None)
+        footprint = broad_footprint(x, y, variation)
 
-    # Step 4: Density by Type
-    # Note: cluster, wisps, base are assumed to be pre-computed or passed in.
-    # For this example, we assume they are available as inputs or computed elsewhere.
-    # If not, this step requires additional context.
-    # [G] Assuming cluster, wisps, base are inputs for completeness.
-    # In practice, these might be derived from shape variations.
-    
-    if type_id == 1:  # Cirrus
+    if type_id == 1:
         density = wisps * (0.22 + 0.78 * np.clip((noise - 0.52) * 2.8, 0.0, 1.0)) * thin * (0.32 + 0.68 * broad_noise)
-    elif type_id == 2:  # Cirrocumulus
+    elif type_id == 2:
         density = soft_union(cluster, 0.50 * footprint) * fine**1.45 * thin * (0.50 + 0.50 * broad_noise)
-    elif type_id == 3:  # Cirrostratus
+    elif type_id == 3:
         density = thin * footprint * (0.50 + 0.44 * noise)
-    elif type_id == 4:  # Altocumulus
+    elif type_id == 4:
         density = soft_union(cluster, 0.62 * footprint) * broad_noise**1.20 * middle * (0.68 + 0.32 * fine)
-    elif type_id == 5:  # Altostratus
+    elif type_id == 5:
         density = np.exp(-((z + 0.03) / 0.25) ** 2) * footprint * (0.50 + 0.42 * noise)
-    elif type_id == 6:  # Nimbostratus
+    elif type_id == 6:
         density = np.exp(-((z + 0.03) / 0.43) ** 2) * (0.56 + 0.34 * noise)
-    elif type_id == 7:  # Stratocumulus
+    elif type_id == 7:
         density = soft_union(cluster, 0.58 * footprint) * broad_noise**0.85 * np.exp(-((z + 0.28) / 0.23) ** 2)
-    elif type_id == 8:  # Stratus
+    elif type_id == 8:
         density = np.exp(-((z + 0.37) / 0.16) ** 2) * footprint * (0.62 + 0.25 * noise)
-    elif type_id == 9:  # Cumulus
+    elif type_id == 9:
         puffs = np.clip((noise - 0.34) / 0.46, 0.0, 1.0)
         surface = smoothstep((0.62 * puffs + 0.38 * broad_noise - 0.20) / 0.72)
         density = soft_union(cluster * (0.24 + 0.76 * puffs), 0.50 * base * (0.18 + 0.82 * surface))
-    else:  # Cumulonimbus
+    else:
         anvil = footprint * np.exp(-((z - 0.48) / 0.15) ** 2)
         density = soft_union(cluster, 0.83 * anvil) * (0.44 + 0.56 * broad_noise)
 
-    # Step 5: Final Density
-    density = np.clip(density * strength * (0.92 + detail * 0.08 * fine), 0.0, 1.0)
-    return density
+    return np.clip(density * strength * (0.92 + detail * 0.08 * fine), 0.0, 1.0)
 ```
 
 ### Parameters
-- `strength`: Typical value not specified, but likely in range $[0.5, 2.0]$.
-- `detail`: Typical value not specified, but likely in range $[0.0, 1.0]$.
-- `finite_xy_boundary`: Boolean, default `False`.
+- `strength`: Not given in the sources.
+- `detail`: Not given in the sources.
+- `finite_xy_boundary`: Not given in the sources.
 
 ### Edge Cases and Pitfalls
-- **Precision:** Clamping operations are critical to prevent negative densities or values $>1$.
-- **Boundaries:** If `finite_xy_boundary` is true, ensure edge fading is smooth to avoid artifacts.
-- **Degenerate Input:** If `noise` is not in $[0, 1]$, the variations may be incorrect. Ensure `noise` is normalized.
-- **Undefined Helpers:** `cluster`, `wisps`, `base`, and `_broad_footprint` are not fully defined in the sources. Implementers must derive these from cloud shape parameters or use approximations.
+- **Precision:** Clamping operations are applied to noise variations and the final density to prevent values outside $[0, 1]$ [S1, unofficial].
+- **Undefined Helpers:** `cluster`, `wisps`, `base`, and `_broad_footprint` are not fully defined in the sources [S1, unofficial]. Implementers must derive these from cloud shape parameters or use approximations [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is computed independently.
-- **Memory Complexity:** $O(N)$ for storing the density volume.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
 - **Performance:** Not given in the sources.
-- **Strengths:** Produces visually distinct cloud types with minimal parameters.
-- **Limitations:** Relies on pre-computed or approximated `cluster`, `wisps`, and `base` fields.
+- **Strengths:** Produces visually distinct cloud types with a unified procedural framework [S1, unofficial].
+- **Limitations:** Relies on pre-computed auxiliary fields (`cluster`, `wisps`, `base`) and an undefined footprint function [S1, unofficial].
 
 ## Background
-Originated in the "Noise-Cloud" project by mingtu149411 [S1, unofficial]. It is used in procedural cloud generation for real-time rendering.
+First published in the Noise-Cloud repository [S1, unofficial]. It is used for procedural cloud generation [S1, unofficial].
 
 ## Sources
 [S1] mingtu149411/Noise-Cloud, https://github.com/mingtu149411/Noise-Cloud, fetched 2026-10-27 (unofficial)

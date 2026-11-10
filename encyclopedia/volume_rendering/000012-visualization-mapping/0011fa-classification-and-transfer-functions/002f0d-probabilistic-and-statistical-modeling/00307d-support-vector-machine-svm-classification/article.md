@@ -3,7 +3,7 @@
 Also called: Support Vector Machines (SVM)
 
 ## Overview
-Support Vector Machine (SVM) classification is a machine learning technique used to map volume data features to optical properties by finding an optimal separating hyperplane with a maximal margin between classes [S1]. It is chosen over alternatives like Neural Networks (NNs) when training data is scarce or when minimizing the structural risk (probability of misclassifying unseen data) is prioritized over minimizing empirical training error [S1]. Unlike NNs, which minimize empirical risk and may converge to local minima, SVMs guarantee a global minimum solution for the margin maximization problem [S1].
+Support Vector Machine (SVM) classification is a machine learning technique that maps volume data features to optical properties by finding an optimal separating hyperplane with a maximal margin between classes [S1]. It is chosen over alternatives like Neural Networks when training data is scarce or when minimizing structural risk (probability of misclassifying unseen data) is prioritized over minimizing empirical training error [S1]. Unlike Neural Networks, which minimize empirical risk and may converge to local minima, SVMs guarantee a global minimum solution for the margin maximization problem [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -22,7 +22,7 @@ Support Vector Machine (SVM) classification is a machine learning technique used
 **Algorithm Steps:**
 1.  **Feature Extraction:** Extract feature vectors $\mathbf{x}_i$ from the volume data. Common features include scalar intensity and derived metrics like gradient magnitude [S1].
 2.  **Kernel Mapping:** If the classes are not linearly separable in the original input space, map the data to a higher-dimensional feature space using a kernel function $K$ [S1]. The Radial Basis Function (RBF) kernel is recommended for general-purpose classification due to fewer hyperparameters [S1].
-3.  **Optimization:** Solve the constrained optimization problem to maximize the margin between classes. This is typically done using the Lagrange method [S1]. The training data points that determine the hyperplane are the support vectors, identified where the Lagrange multiplier $\alpha_i > 0$ [S1].
+3.  **Optimization:** Solve the constrained optimization problem to maximize the margin between classes using the Lagrange method [S1]. The training data points that determine the hyperplane are the support vectors, identified where the Lagrange multiplier $\alpha_i > 0$ [S1].
 4.  **Hyperplane Refinement:** Iteratively refine the hyperplane to reduce classification error on the training set until the error falls below a pre-selected threshold [S1].
 5.  **Classification:** For each sample point $\mathbf{x}_{new}$ in the volume, evaluate the decision function to assign a class label, which is then mapped to optical properties [S1].
 
@@ -33,7 +33,7 @@ where $\mathbf{w}$ is the normal vector to the hyperplane and $b$ is the bias [S
 
 The decision function for new data in the linear case is:
 $$ f(\mathbf{x}_{new}) = \text{sign}(\langle \mathbf{w}, \mathbf{x}_{new} \rangle + b) $$
-where $\text{sign}(z)$ returns $+1$ if $z \ge 0$ and $-1$ otherwise [S1].
+where $\text{sign}(z)$ returns $+1$ if $z \ge 0$ and $-1$ otherwise [G].
 
 When using support vectors, the decision function is:
 $$ f(\mathbf{x}_{new}) = \text{sign}\left( \sum_{i=1}^{\#sv} \alpha_i y_i \langle \mathbf{x}_i^{sv}, \mathbf{x}_{new} \rangle + b \right) $$
@@ -49,31 +49,33 @@ where $\|\cdot\|$ denotes the Euclidean norm [S1].
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def svm_classify_volume(training_data, training_labels, volume_features, kernel_type='rbf'):
+import math
+
+def svm_classify_volume(support_vectors, support_labels, alphas, bias, volume_features, kernel_type='rbf'):
     """
-    Classifies volume data using an SVM.
+    Classifies volume data using a trained SVM.
     
     Args:
-        training_data: List of feature vectors (numpy arrays) for training.
-        training_labels: List of class labels (+1 or -1) for training.
+        support_vectors: List of feature vectors that are support vectors.
+        support_labels: List of class labels (+1 or -1) for each support vector.
+        alphas: List of Lagrange multipliers for each support vector.
+        bias: Float bias term of the hyperplane.
         volume_features: List of feature vectors for the volume to classify.
         kernel_type: String specifying the kernel function.
         
     Returns:
         predictions: List of class labels (+1 or -1) for the volume.
     """
-    # Step 1: Solve the constrained optimization problem to find support vectors,
-    # Lagrange multipliers (alphas), and bias (b).
-    # Note: The specific optimization algorithm (e.g., SMO) is not detailed in the source.
-    # This step identifies which training points are support vectors (alpha_i > 0).
-    support_vectors, alphas, bias = solve_svm_optimization(training_data, training_labels, kernel_type)
+    # Step 1: Optimization step is not detailed in the source.
+    # The model parameters (support_vectors, support_labels, alphas, bias) are assumed trained.
     
     # Step 2: Define the kernel function
     def kernel(x1, x2):
         if kernel_type == 'rbf':
             # RBF Kernel: exp(-||x1 - x2||^2)
-            diff = x1 - x2
-            return np.exp(-np.dot(diff, diff))
+            diff = [x1[j] - x2[j] for j in range(len(x1))]
+            norm_sq = sum(d * d for d in diff)
+            return math.exp(-norm_sq)
         else:
             raise ValueError("Only RBF kernel is specified in the source.")
             
@@ -82,7 +84,7 @@ def svm_classify_volume(training_data, training_labels, volume_features, kernel_
     for x_new in volume_features:
         decision_value = bias
         for i, sv in enumerate(support_vectors):
-            decision_value += alphas[i] * training_labels[i] * kernel(sv, x_new)
+            decision_value += alphas[i] * support_labels[i] * kernel(sv, x_new)
         
         # Apply sign function
         if decision_value >= 0:

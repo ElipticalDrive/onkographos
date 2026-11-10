@@ -3,381 +3,159 @@
 Also called: ProNeRF-12, ProNeRF-32, ProNeRF-8, Projection-Aware Ray Sampling for Fine-Grained Implicit Neural Radiance Fields
 
 ## Overview
-ProNeRF is a sparse sampling method for neural radiance fields that uses a Projection-Aware Sampling (PAS) network to predict a small set of 3D sampling points and opacity adjustments, enabling high-quality rendering with significantly fewer samples than standard NeRF [S1]. It achieves faster inference than vanilla NeRF while maintaining higher quality than other sampler-based methods like HyperReel [S1]. Unlike generalizable radiance fields that store all training images for epipolar projection, ProNeRF uses a fixed, small subset of reference views, ensuring a consistent memory footprint [S1].
+ProNeRF is a few-point volumetric rendering method that uses a Projection-Aware Sampling (PAS) network to predict sparse 3D sampling points and opacity adjustments, allowing high-quality rendering with significantly fewer samples than standard NeRF [S1]. It achieves faster inference than vanilla NeRF with higher quality than HyperReel [S1]. Unlike generalizable radiance fields that store all training input images for epipolar feature projection, ProNeRF uses a fixed subset of reference views, eliminating the need for nearest-neighbor projection among all available training views [S1].
 
 ## How it works
-ProNeRF consists of three main components: a coarse sampling network ($F_{\theta_c}$), a refinement network ($F_{\theta_f}$), and a shading network ($F_{\theta_s}$) [S1]. The method operates by first predicting coarse sampling points, projecting colors from reference views onto these points to gather geometric context, refining the point locations, and finally rendering the color using the shading network with adjusted opacities [S1].
+ProNeRF performs volumetric rendering using a small number of samples $N_s$ (e.g., 8, 12, or 32) guided by a PAS network. The method consists of a PAS network (comprising MLP heads $F_{\theta_c}$ and $F_{\theta_f}$) and a shading network $F_{\theta_s}$ [S1].
 
 ### Inputs and Outputs
-*   **Input:** A target ray $\mathbf{r}$ defined by origin $\mathbf{r}_o$ and direction $\mathbf{r}_d$, and a set of $N_n$ neighboring reference views from a fixed pool of $N_t$ training views [S1].
-*   **Output:** A rendered pixel color $\hat{\mathbf{c}}(\mathbf{r})$ [S1].
+*   **Input:** Ray parameters $\mathbf{r} = (\mathbf{r}_o, \mathbf{r}_d)$ (origin and direction), a set of $N_n$ neighboring reference view colors $\{\mathbf{c}^k\}_{k=1}^{N_n}$ from a fixed pool of $N_t$ training views [S1].
+*   **Output:** Rendered pixel color $\hat{\mathbf{c}}(\mathbf{r})$ [S1].
 
-### Data Structures and Layouts
-1.  **Plücker Ray-Point Encoding ($\mathbf{r}_{pr}$):**
-    The ray is encoded using $N_{pr}$ points evenly spaced between near ($t_n$) and far ($t_f$) bounds [S1].
-    $$ \mathbf{r}_{pr} = [\mathbf{r}_d, \mathbf{r}_o + \mathbf{r}_d \odot \mathbf{t}_{nf}, (\mathbf{r}_o + \mathbf{r}_d \odot \mathbf{t}_{nf}) \odot \mathbf{r}_d] $$
-    where $\mathbf{t}_{nf}$ is a vector of $N_{pr}$ elements evenly spaced between $t_n$ and $t_f$, and $\odot$ is the Hadamard product [S1].
-    *   Typical value: $N_{pr} = 48$ [S1].
-
-2.  **Coarse Sampling Network ($F_{\theta_c}$):**
-    *   Architecture: 6 fully connected layers, 256 neurons per layer, ELU activations [S1].
-    *   Inputs: $\mathbf{r}_{pr}$ [S1].
-    *   Outputs:
-        *   Coarse distances $\mathbf{T}' = \{t'_1, \dots, t'_{N_s}\}$ [S1].
-        *   Opacity shifts $\mathbf{A}_t$ and scales $\mathbf{B}_t$ [S1].
-        *   Auxiliary coarse color $\hat{\mathbf{c}}_c$ [S1].
-        *   Auxiliary fine color $\hat{\mathbf{c}}_f$ (via AVR, see below) [S1].
-
-3.  **Refinement Network ($F_{\theta_f}$):**
-    *   Architecture: 6 fully connected layers, 256 neurons per layer, ELU activations [S1].
-    *   Inputs: $\mathbf{r}_{pr}$ concatenated with projected color features $\mathbf{f}_{p_i}$ for each coarse point [S1].
-    *   Outputs:
-        *   Refinement weights $\Delta_{\mathbf{T}}$ [S1].
-        *   Auxiliary weights $\mathbf{W}$ (softmax) and $\mathbf{M}$ (sigmoid) for Approximated Volumetric Rendering (AVR) [S1].
-
-4.  **Shading Network ($F_{\theta_s}$):**
-    *   Architecture: 8 fully connected layers, 256 neurons per layer [S1].
-    *   Inputs: 3D positions $\mathbf{x}_i = \mathbf{r}_o + \mathbf{r}_d \odot t_i$ [S1].
-    *   Outputs: Density $\sigma_i$ and color $\mathbf{c}_i$ [S1].
-
-5.  **Pruning Network ($F_{\theta_m}$) (Optional, for ProNeRF-8 prune):**
-    *   Architecture: Same complexity as $F_{\theta_c}$ [S1].
-    *   Outputs: Predicted error between $\hat{\mathbf{c}}_f$ and $\hat{\mathbf{c}}$ [S1].
+### Data Structures and Network Layout
+1.  **Plücker Ray-Point Encoding:** The ray is encoded into a vector $\mathbf{r}_{pr}$ of size 48 using $N_{pr}=48$ points evenly spaced between near $t_n$ and far $t_f$ bounds [S1]:
+    $$
+    \mathbf{r}_{pr} = [\mathbf{r}_d, \mathbf{r}_o + \mathbf{r}_d \odot \mathbf{t}_{nf}, (\mathbf{r}_o + \mathbf{r}_d \odot \mathbf{t}_{nf}) \odot \mathbf{r}_d]
+    $$
+    where $\mathbf{t}_{nf}$ is a vector of $N_{pr}$ elements, $\odot$ is the Hadamard product, and $[\cdot, \cdot]$ is concatenation [S1].
+2.  **Coarse MLP ($F_{\theta_c}$):** Consists of 6 fully connected layers with 256 neurons and ELU activations [S1]. It takes $\mathbf{r}_{pr}$ as input and outputs:
+    *   Coarse sampling distances $\mathbf{T}' = \{t'_1, \dots, t'_{N_s}\}$ [S1].
+    *   Opacity shifts $\Delta_t$ and scales $B_t$ [S1].
+    *   Auxiliary coarse color $\hat{\mathbf{c}}_c$ [S1].
+3.  **Color-to-Ray Projections:** For each coarse point $p_i = \mathbf{r}(t'_i)$, lines are traced to the camera centers of $N_n$ neighboring reference views. The colors at these intersections are collected into a projection vector $\mathbf{f}_{pi} = [\mathbf{c}^1_{pi}, \dots, \mathbf{c}^{N_n}_{pi}]$ [S1].
+4.  **Fine MLP ($F_{\theta_f}$):** Consists of 6 fully connected layers with 256 neurons and ELU activations [S1]. It takes the encoded ray $\mathbf{r}'_{pr}$ and the aggregated projections $\{\mathbf{f}_{p1}, \dots, \mathbf{f}_{pN_s}\}$ as input. It outputs:
+    *   Refinement weights $\Delta_T$ [S1].
+    *   Auxiliary weights $W \in \mathbb{R}^{N_s}$ (softmax) and $M \in \mathbb{R}^{N_n}$ (sigmoid) [S1].
+    *   Auxiliary fine color $\hat{\mathbf{c}}_f$ [S1].
+5.  **Shading Network ($F_{\theta_s}$):** Consists of 8 fully connected layers with 256 neurons [S1]. It takes the refined 3D points $\mathbf{x}_i = \mathbf{r}_o + \mathbf{r}_d \odot T_i$ as input and outputs density $\sigma_i$ and color $\mathbf{c}_i$ [S1].
 
 ### Numbered Steps
-
-1.  **Encode Ray:** Compute $\mathbf{r}_{pr}$ from $\mathbf{r}_o, \mathbf{r}_d, t_n, t_f$ [S1].
-2.  **Coarse Sampling:** Pass $\mathbf{r}_{pr}$ through $F_{\theta_c}$ to obtain coarse distances $\mathbf{T}'$, opacity adjustments $\mathbf{A}_t, \mathbf{B}_t$, and auxiliary colors $\hat{\mathbf{c}}_c, \hat{\mathbf{c}}_f$ [S1].
-3.  **Color-to-Ray Projection:** For each coarse point $p_i = \mathbf{r}(t'_i)$, trace lines to the camera centers of $N_n$ neighboring reference views. Collect the colors at the intersection points to form the projected color vector $\mathbf{f}_{p_i} = [c^1_{p_i}, \dots, c^{N_n}_{p_i}]$ [S1].
-4.  **Refinement:** Concatenate $\mathbf{r}_{pr}$ and all $\mathbf{f}_{p_i}$ ($i=1 \dots N_s$). Pass through $F_{\theta_f}$ to obtain refinement weights $\Delta_{\mathbf{T}}$, and weights $\mathbf{W}, \mathbf{M}$ [S1].
-5.  **Compute Refined Distances:** Expand the set $\dot{\mathbf{T}} = \{t_n, t'_1, \dots, t'_{N_s}, t_f\}$. Compute refined distances $\mathbf{T}$ using linear interpolation:
-    $$ T_i = \frac{1}{2} \left( (\dot{T}_i + \dot{T}_{i+1}) + \Delta_{T_i}(\dot{T}_{i+2} - \dot{T}_i) \right) \quad \text{for } i=1 \dots N_s $$
-    where $\Delta_{T_i}$ is the $i$-th element of $\Delta_{\mathbf{T}}$ [S1].
-6.  **Approximated Volumetric Rendering (AVR) for $\hat{\mathbf{c}}_f$:**
-    For each neighbor $k \in \{1, \dots, N_n\}$, compute the sub-light-field view:
-    $$ c_{avr}^k = \sum_{i=1}^{N_s} W_i c^k_{p_i} $$
-    Aggregate to get $\hat{\mathbf{c}}_f$:
-    $$ \hat{\mathbf{c}}_f = \sum_{k=1}^{N_n} M_k c_{avr}^k $$
+1.  **Encode Ray:** Compute $\mathbf{r}_{pr}$ from $\mathbf{r}_o, \mathbf{r}_d$ and $\mathbf{t}_{nf}$ [S1].
+2.  **Coarse Sampling:** Query $F_{\theta_c}(\mathbf{r}_{pr})$ to obtain $\mathbf{T}'$, $\Delta_t$, $B_t$, and $\hat{\mathbf{c}}_c$ [S1].
+3.  **Projection:** For each $t'_i \in \mathbf{T}'$, compute $p_i = \mathbf{r}(t'_i)$. Trace rays from $p_i$ to the $N_n$ reference camera centers. Interpolate colors from the reference images to get $\mathbf{f}_{pi}$ [S1].
+4.  **Refinement:** Query $F_{\theta_f}([\mathbf{r}'_{pr}, \mathbf{f}_{p1}, \dots, \mathbf{f}_{pN_s}])$ to obtain $\Delta_T$, $W$, $M$, and $\hat{\mathbf{c}}_f$ [S1].
+5.  **Compute Refined Distances:** Linearly interpolate between consecutive elements of the expanded set $\dot{\mathbf{T}} = \{t_n, t'_1, \dots, t'_{N_s}, t_f\}$ using $\Delta_T$:
+    $$
+    T_i = \frac{1}{2} \left( (\dot{T}_i + \dot{T}_{i+1}) + \Delta_{T_i}(\dot{T}_{i+2} - \dot{T}_i) \right), \quad i=1,\dots,N_s
+    $$
+    where $\dot{T}$ indices are mapped appropriately to the $N_s$ intervals [S1].
+6.  **Adjust Opacity:** Compute adjusted opacities $\hat{\alpha}_i$ using the original opacities $\alpha_i$ (derived from $\sigma_i$ and distances in $T$), shifts $\Delta_t$, and scales $B_t$:
+    $$
+    \hat{\alpha}_i = 1 - \exp(-(\sigma_i + \Delta_{t_i})(t_{i+1} - t_i) \cdot B_{t_i})
+    $$
     [S1].
-7.  **Query Shading Network:** Evaluate $F_{\theta_s}$ at the refined positions $\mathbf{x}_i = \mathbf{r}(T_i)$ to get $\sigma_i, \mathbf{c}_i$ [S1].
-8.  **Render Final Color:** Compute opacity $\alpha_i$ using adjusted parameters:
-    $$ \alpha_i = 1 - \exp(-(\sigma_i \mathbf{B}_t + \mathbf{A}_t)(T_{i+1} - T_i)) $$
-    where $T_{N_s+1} = t_f$ [S1].
-    Render color $\hat{\mathbf{c}}(\mathbf{r})$ using alpha compositing:
-    $$ \hat{\mathbf{c}}(\mathbf{r}) = \sum_{i=1}^{N_s} \left( \prod_{j=1}^{i-1} (1 - \alpha_j) \right) \alpha_i \mathbf{c}_i $$
+7.  **Render Color:** Compute final color using alpha compositing with adjusted opacities:
+    $$
+    \hat{\mathbf{c}}(\mathbf{r}) = \sum_{i=1}^{N_s} \left( \prod_{j=1}^{i-1} (1 - \hat{\alpha}_j) \right) \hat{\alpha}_i \mathbf{c}_i
+    $$
     [S1].
-
-### Training Strategy: Exploration and Exploitation
-Training alternates between two passes [S1].
-
-**Exploration Pass:**
-1.  Sample a random number of samples $N^+_s$ uniformly between $N_s$ and $N$ (max 64) [S1].
-2.  Sample $N^+_s$ distances $T^+$ evenly spaced around the estimated coarse distances $T$, add Gaussian noise [S1].
-3.  Query $F_{\theta_s}$ at positions defined by $T^+$ to get $\sigma_i, \mathbf{c}_i$ [S1].
-4.  Render $\hat{\mathbf{c}}(\mathbf{r})$ using standard VRE (Eq. 1 in [S1]) [S1].
-5.  Compute loss $l = \|\hat{\mathbf{c}}(\mathbf{r}) - \mathbf{c}(\mathbf{r})\|_2$ [S1].
-6.  Back-propagate to update $F_{\theta_s}$ only [S1].
-
-**Exploitation Pass:**
-1.  Query $F_{\theta_s}$ at the PAS-predicted refined distances $T$ to get $\sigma_i, \mathbf{c}_i$ [S1].
-2.  Render $\hat{\mathbf{c}}(\mathbf{r})$ using PAS-guided VRE with adjusted opacities (Eq. 5 in [S1]) [S1].
-3.  Compute primary loss $l = \|\hat{\mathbf{c}}(\mathbf{r}) - \mathbf{c}(\mathbf{r})\|_2$ [S1].
-4.  If iteration $< 4 \times 10^5$, add auxiliary losses:
-    $$ l_a = \|\hat{\mathbf{c}}_c - \mathbf{c}(\mathbf{r})\|_2 + \|\hat{\mathbf{c}}_f - \mathbf{c}(\mathbf{r})\|_2 $$
-    [S1].
-5.  Total loss $l_T = l + \lambda l_a$, where $\lambda=1$ for first 60% of training, then 0 [S1].
-6.  Back-propagate to update all networks ($F_{\theta_c}, F_{\theta_f}, F_{\theta_s}$) [S1].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class ProNeRF:
-    def __init__(self, N_s, N_pr=48, N_n=8, N_max_explore=64, 
-                 lr=5e-4, total_iters=700000, aux_iters=400000):
-        self.N_s = N_s
-        self.N_pr = N_pr
-        self.N_n = N_n
-        self.N_max_explore = N_max_explore
-        self.total_iters = total_iters
-        self.aux_iters = aux_iters
+def pronerf_render(ray_origin, ray_direction, ref_view_colors, ref_cameras):
+    # 1. Encode Ray
+    t_nf = linspace(t_n, t_f, N_pr)
+    r_pr = concatenate([ray_direction, 
+                        ray_origin + ray_direction * t_nf, 
+                        (ray_origin + ray_direction * t_nf) * ray_direction])
+    
+    # 2. Coarse Sampling
+    T_prime, delta_t, B_t, c_hat_c = F_theta_c(r_pr)
+    
+    # 3. Projections
+    projections = []
+    for t_prime in T_prime:
+        p = ray_origin + ray_direction * t_prime
+        view_colors = []
+        for k in range(N_n):
+            # Trace line from p to ref_cameras[k].center
+            # Interpolate color from ref_view_colors[k] at intersection
+            view_colors.append(interpolate_color(ref_view_colors[k], p, ref_cameras[k]))
+        projections.append(view_colors)
         
-        # Networks
-        self.F_c = CoarseMLP() # 6 layers, 256 units, ELU
-        self.F_f = RefineMLP() # 6 layers, 256 units, ELU
-        self.F_s = ShadingMLP() # 8 layers, 256 units
-        self.F_m = PruningMLP() # Optional, same as F_c
+    # 4. Refinement
+    # Note: r'_pr is derived from r_pr and T_prime context, assumed available
+    delta_T, W, M, c_hat_f = F_theta_f(concatenate([r_pr, projections]))
+    
+    # 5. Refined Distances
+    T_dot = [t_n] + list(T_prime) + [t_f]
+    T = []
+    for i in range(N_s):
+        # Linear interpolation with refinement weight
+        t_i = 0.5 * (T_dot[i] + T_dot[i+1] + delta_T[i] * (T_dot[i+2] - T_dot[i]))
+        T.append(t_i)
         
-        # Optimizers
-        self.opt_s = torch.optim.Adam(self.F_s.parameters(), lr=lr)
-        self.opt_cfs = torch.optim.Adam(list(self.F_c.parameters()) + 
-                                        list(self.F_f.parameters()) + 
-                                        list(self.F_s.parameters()), lr=lr)
+    # 6. Shading and Opacity Adjustment
+    alphas = []
+    colors = []
+    for t in T:
+        x = ray_origin + ray_direction * t
+        sigma, c = F_theta_s(x)
+        colors.append(c)
+        # Compute base alpha
+        delta_t_dist = T[(T.index(t)+1) % len(T)] - t if (T.index(t)+1) < len(T) else t_f - t
+        # Note: In practice, T is sorted. Assuming T is sorted for delta calculation.
+        # If T is not sorted, sort it or use adjacent indices carefully.
+        # The formula uses t_{i+1} - t_i.
+        # For the last point, delta is typically handled or ignored in sum.
+        # Assuming standard NeRF sampling logic for delta.
+        alpha = 1 - exp(-sigma * delta_t_dist)
+        # Adjust opacity
+        adj_alpha = 1 - exp(-(sigma + delta_t[i]) * delta_t_dist * B_t[i])
+        alphas.append(adj_alpha)
         
-        # Reference views colors (pre-computed or accessed via function)
-        self.ref_views_colors = None 
-
-    def encode_ray(self, r_o, r_d, t_n, t_f):
-        # t_nf: N_pr points evenly spaced between t_n and t_f
-        t_nf = torch.linspace(t_n, t_f, self.N_pr, device=r_o.device)
-        # r_pr = [r_d, r_o + r_d * t_nf, (r_o + r_d * t_nf) * r_d]
-        # Note: r_d is direction, t_nf is distance. 
-        # r_o + r_d * t_nf gives points along ray.
-        # Hadamard product with r_d for Plucker moment components? 
-        # Formula: [r_d, r_o + r_d * t_nf, (r_o + r_d * t_nf) x r_d] usually, 
-        # but source says Hadamard product for the last term? 
-        # Source: "(r_o + r_d * t_nf) * r_d". We follow source literally.
-        pts = r_o.unsqueeze(1) + r_d.unsqueeze(1) * t_nf.unsqueeze(0) # Shape: [1, N_pr, 3]
-        # r_d is [3], pts is [1, N_pr, 3]
-        # Broadcasting r_d to [1, 1, 3]
-        r_d_exp = r_d.unsqueeze(0).unsqueeze(0)
+    # 7. Compositing
+    T_transmittance = 1.0
+    c_final = zeros(3)
+    for i in range(N_s):
+        c_final += T_transmittance * alphas[i] * colors[i]
+        T_transmittance *= (1 - alphas[i])
         
-        term1 = r_d_exp # [1, 1, 3]
-        term2 = pts     # [1, N_pr, 3]
-        term3 = pts * r_d_exp # [1, N_pr, 3]
-        
-        # Concatenate along last dim? Or first? 
-        # Source: [r_d, ...]. Usually concat along feature dim.
-        # r_d is [3]. pts is [N_pr, 3].
-        # Let's assume concat along dim=-1.
-        # r_d needs to be broadcasted to [1, N_pr, 3] or similar.
-        # Actually, r_d is constant for the ray.
-        # Let's construct tensor of shape [N_pr, 9] or similar.
-        # Source: r_pr = [r_d, r_o + r_d t_nf, ...].
-        # If r_d is [3], and pts is [N_pr, 3], result is [N_pr, 9].
-        
-        r_d_rep = r_d.unsqueeze(0).repeat(self.N_pr, 1) # [N_pr, 3]
-        term1_rep = r_d_rep
-        term2_rep = pts.squeeze(0) # [N_pr, 3]
-        term3_rep = pts.squeeze(0) * r_d_rep # [N_pr, 3]
-        
-        r_pr = torch.cat([term1_rep, term2_rep, term3_rep], dim=-1) # [N_pr, 9]
-        return r_pr
-
-    def get_ref_colors(self, points, ref_cameras):
-        # Trace lines from points to ref camera centers
-        # Return colors at intersection. 
-        # Simplified: assume we have a function to get color at 3D point from ref views
-        # f_pi = [c1_pi, ..., cn_pi]
-        colors = []
-        for i, cam in enumerate(ref_cameras):
-            # Project point to image plane of cam
-            # Get color at projection
-            c = get_color_from_view(cam, points) 
-            colors.append(c)
-        return torch.stack(colors, dim=1) # [N_s, N_n, 3]
-
-    def forward(self, r_o, r_d, t_n, t_f, ref_views):
-        r_pr = self.encode_ray(r_o, r_d, t_n, t_f)
-        
-        # 1. Coarse Sampling
-        out_c = self.F_c(r_pr)
-        # out_c contains T', A_t, B_t, c_hat_c, c_hat_f
-        # Assuming specific output layout based on Eq 8
-        T_prime = out_c[:, :self.N_s] # Coarse distances
-        A_t = out_c[:, self.N_s:self.N_s+1] # Opacity shift
-        B_t = out_c[:, self.N_s+1:self.N_s+2] # Opacity scale
-        c_hat_c = out_c[:, -2] # Auxiliary coarse color
-        c_hat_f = out_c[:, -1] # Auxiliary fine color (from AVR inside F_c? Or separate?)
-        # Source says F_c yields c_hat_c and c_hat_f. 
-        # But F_f also yields W, M for AVR. 
-        # Eq 8 says F_c yields [T', A_t, B_t, c_hat_c, c_hat_f].
-        # Eq 9 says F_f yields [Delta_T, W, M].
-        # Eq 10-11 use W, M and projected colors to compute c_hat_f?
-        # Contradiction: Eq 8 says F_c outputs c_hat_f directly. 
-        # Text says "F_c yields a light-field color output c_hat_c... F_f... c_hat_f is obtained by exploiting... AVR".
-        # Likely F_c outputs c_hat_c. F_f outputs W, M. Then we compute c_hat_f externally using W, M and projected colors.
-        # Let's assume F_c outputs c_hat_c.
-        
-        # Re-interpreting based on Algorithm 1 line 5: 
-        # At, Bt, T, c_hat_c, c_hat_f <- PAS(r)
-        # This implies PAS returns all.
-        # But Algorithm 1 line 15 uses T from PAS.
-        # Let's compute c_hat_f using F_f outputs and projected colors.
-        
-        # 2. Project Colors
-        # Points p_i = r(t'_i)
-        pts_coarse = r_o.unsqueeze(1) + r_d.unsqueeze(1) * T_prime.unsqueeze(0) # [1, N_s, 3]
-        f_p = self.get_ref_colors(pts_coarse.squeeze(0), ref_views) # [N_s, N_n, 3]
-        
-        # 3. Refinement
-        # Concat r_pr and f_p
-        # r_pr is [N_pr, 9]. f_p is [N_s, N_n, 3].
-        # Need to align dimensions. 
-        # Source Eq 9: F_f([r'_pr, f_p1, ..., f_pNs])
-        # This implies r'_pr is repeated or concatenated for each point?
-        # Or r'_pr is global ray info.
-        # Let's assume input to F_f is [r_pr, f_p_i] for each i.
-        # Input shape: [N_s, 9 + 3*N_n]
-        
-        inputs_f = []
-        for i in range(self.N_s):
-            # r_pr is same for all. f_p[i] is [N_n, 3]
-            inp = torch.cat([r_pr, f_p[i]], dim=-1) # [9 + 3*N_n]
-            inputs_f.append(inp)
-        inputs_f = torch.stack(inputs_f, dim=0) # [N_s, 9 + 3*N_n]
-        
-        out_f = self.F_f(inputs_f)
-        Delta_T = out_f[:, :self.N_s] # Refinement weights
-        W = F.softmax(out_f[:, self.N_s:self.N_s+self.N_s], dim=-1) # Softmax
-        M = F.sigmoid(out_f[:, self.N_s+self.N_s:self.N_s+self.N_s+self.N_n], dim=-1) # Sigmoid
-        
-        # 4. Refined Distances
-        # Dot_T = [t_n, t'_1, ..., t'_Ns, t_f]
-        t_n_val = t_n
-        t_f_val = t_f
-        Dot_T = torch.cat([torch.tensor([t_n_val], device=r_o.device), T_prime, torch.tensor([t_f_val], device=r_o.device)]) # [N_s + 2]
-        
-        # T_i = 0.5 * ( (Dot_T[i] + Dot_T[i+1]) + Delta_T[i] * (Dot_T[i+2] - Dot_T[i]) )
-        T = []
-        for i in range(self.N_s):
-            term1 = (Dot_T[i] + Dot_T[i+1]) / 2.0
-            term2 = Delta_T[i] * (Dot_T[i+2] - Dot_T[i]) / 2.0
-            T.append(term1 + term2)
-        T = torch.stack(T, dim=0) # [N_s]
-        
-        # 5. Compute c_hat_f (AVR)
-        # c_avr_k = sum_i W_i * c^k_pi
-        # W is [N_s]. f_p is [N_s, N_n, 3].
-        # c_avr is [N_n, 3]
-        c_avr = torch.sum(W.unsqueeze(-1) * f_p, dim=0) # [N_n, 3]
-        # c_hat_f = sum_k M_k * c_avr_k
-        c_hat_f = torch.sum(M.unsqueeze(-1) * c_avr, dim=0) # [3]
-        
-        # 6. Shading
-        pts_fine = r_o.unsqueeze(1) + r_d.unsqueeze(1) * T.unsqueeze(0) # [1, N_s, 3]
-        sigma, c_fine = self.F_s(pts_fine.squeeze(0)) # [N_s, 3] each
-        
-        # 7. Render
-        # Alpha adjustment
-        # alpha_i = 1 - exp(-(sigma_i * B_t + A_t) * (T_{i+1} - T_i))
-        # T_{i+1} - T_i
-        deltas = torch.diff(torch.cat([T, torch.tensor([t_f_val], device=r_o.device)])) # [N_s]
-        alpha = 1.0 - torch.exp(-(sigma * B_t + A_t) * deltas) # [N_s]
-        
-        # Transmittance
-        # T_i = prod_{j=1}^{i-1} (1 - alpha_j)
-        # T_1 = 1
-        transmittance = torch.cumprod(1.0 - alpha, dim=0)
-        transmittance = torch.cat([torch.tensor([1.0], device=r_o.device), transmittance[:-1]])
-        
-        c_hat = torch.sum(transmittance.unsqueeze(-1) * alpha.unsqueeze(-1) * c_fine, dim=0)
-        
-        return c_hat, c_hat_c, c_hat_f, T, A_t, B_t
-
-    def train_step(self, ray, gt_color, ref_views, iteration):
-        c_hat, c_hat_c, c_hat_f, T, A_t, B_t = self.forward(ray.r_o, ray.r_d, ray.t_n, ray.t_f, ref_views)
-        
-        if iteration % 2 == 0 and iteration < self.aux_iters:
-            # Exploration Pass
-            # Sample N_s_plus between N_s and N_max_explore
-            N_s_plus = torch.randint(self.N_s, self.N_max_explore + 1, (1,)).item()
-            # Sample evenly spaced distances around T? 
-            # Source: "Randomly interpolate N_s distances in T into N_s_plus evenly-spaced distances T+"
-            # "add Gaussian noise"
-            # Simplified: Sample N_s_plus points uniformly in [t_n, t_f] with noise
-            t_range = ray.t_f - ray.t_n
-            T_plus = torch.linspace(ray.t_n, ray.t_f, N_s_plus) + torch.randn(N_s_plus) * 0.01
-            T_plus = torch.clamp(T_plus, ray.t_n, ray.t_f)
-            
-            pts_plus = ray.r_o.unsqueeze(1) + ray.r_d.unsqueeze(1) * T_plus.unsqueeze(0)
-            sigma_plus, c_plus = self.F_s(pts_plus.squeeze(0))
-            
-            # Standard VRE
-            deltas_plus = torch.diff(torch.cat([T_plus, torch.tensor([ray.t_f], device=ray.r_o.device)]))
-            alpha_plus = 1.0 - torch.exp(-sigma_plus * deltas_plus)
-            trans_plus = torch.cumprod(1.0 - alpha_plus, dim=0)
-            trans_plus = torch.cat([torch.tensor([1.0], device=ray.r_o.device), trans_plus[:-1]])
-            c_hat_exp = torch.sum(trans_plus.unsqueeze(-1) * alpha_plus.unsqueeze(-1) * c_plus, dim=0)
-            
-            loss = F.mse_loss(c_hat_exp, gt_color)
-            
-            self.opt_s.zero_grad()
-            loss.backward()
-            self.opt_s.step()
-            
-        else:
-            # Exploitation Pass
-            loss = F.mse_loss(c_hat, gt_color)
-            
-            if iteration < self.aux_iters:
-                loss_c = F.mse_loss(c_hat_c, gt_color)
-                loss_f = F.mse_loss(c_hat_f, gt_color)
-                loss = loss + loss_c + loss_f
-                
-            self.opt_cfs.zero_grad()
-            loss.backward()
-            self.opt_cfs.step()
-
-class CoarseMLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.layers = nn.ModuleList([nn.Linear(9, 256) for _ in range(6)])
-        self.out = nn.Linear(256, 3 + 1 + 1 + 1 + 1) # T(3? No, N_s), A, B, c_c, c_f
-        
-    def forward(self, x):
-        for layer in self.layers:
-            x = F.elu(layer(x))
-        return self.out(x)
-
-class RefineMLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.layers = nn.ModuleList([nn.Linear(9 + 3*8, 256) for _ in range(6)]) # Assuming N_n=8
-        self.out = nn.Linear(256, 8 + 8 + 8) # Delta(8), W(8), M(8)
-        
-    def forward(self, x):
-        for layer in self.layers:
-            x = F.elu(layer(x))
-        return self.out(x)
-
-class ShadingMLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.layers = nn.ModuleList([nn.Linear(3, 256) for _ in range(8)])
-        self.sigma_out = nn.Linear(256, 1)
-        self.color_out = nn.Linear(256, 3)
-        
-    def forward(self, x):
-        for layer in self.layers:
-            x = F.elu(layer(x))
-        sigma = self.sigma_out(x)
-        color = self.color_out(x)
-        return sigma, color
-
-class PruningMLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.layers = nn.ModuleList([nn.Linear(9, 256) for _ in range(6)])
-        self.out = nn.Linear(256, 1)
-        
-    def forward(self, x):
-        for layer in self.layers:
-            x = F.elu(layer(x))
-        return self.out(x)
+    return c_final, c_hat_c, c_hat_f
 ```
 
+### Parameters
+*   **$N_s$:** Number of samples. Typical values: 8, 12, 32 [S1].
+*   **$N_{pr}$:** Number of Plücker points. Value: 48 [S1].
+*   **$N$:** Maximum exploration samples. Value: 64 [S1].
+*   **$N_n$:** Number of neighboring reference views. Significantly smaller than total training views $N_t$ [S1].
+*   **Learning Rate:** $5 \times 10^{-4}$, exponentially decayed for 700,000 iterations [S1].
+*   **Batch Size:** 4,096 rays [S1].
+*   **$\lambda$:** Auxiliary loss weight. 1 for first 60% of training, 0 afterward [S1].
+*   **Auxiliary Loss Duration:** First $4 \times 10^5$ iterations [S1].
+
 ### Edge Cases and Pitfalls
-*   **Precision:** Use FP16 for inference (TensorRT) but FP32 for training to maintain stability [S1].
-*   **Boundary Conditions:** The refined distances $T$ must be clamped within $[t_n, t_f]$ [S1].
-*   **Auxiliary Loss:** Removing the auxiliary loss $l_a$ causes an almost 1 dB drop in PSNR [S1].
-*   **Encoding:** Removing Plücker ray-point encoding causes an almost 0.5 dB PSNR drop [S1].
+*   **Pruning:** ProNeRF-8 prune adds an MLP head $F_{\theta_m}$ (same complexity as $F_{\theta_c}$) to predict error between $\hat{\mathbf{c}}_f$ and $\hat{\mathbf{c}}$. If error is low, use $\hat{\mathbf{c}}_f$ (AVR); otherwise, run $F_{\theta_s}$ [S1]. This adds 3.3 MB memory overhead [S1].
+*   **Auxiliary Loss:** Removing auxiliary loss $l_a$ causes ~1 dB PSNR drop [S1].
+*   **Plücker Encoding:** Removing Plücker ray-point encoding causes ~0.5 dB PSNR drop [S1].
+
+## Subtopics
+
+### ProNeRF-8
+8 samples. 26.78 dB PSNR on LLFF. >20x faster than NeRF [S1].
+
+### ProNeRF-12
+12 samples. 27.15 dB PSNR on LLFF. ~15x faster than NeRF [S1].
+
+### ProNeRF-32
+32 samples. 31.92 dB PSNR on Blender. 3.2 FPS after pruning [S1].
+
+### ProNeRF-8 prune
+Pruned version of ProNeRF-8. 23% faster than standard ProNeRF-8. 26.54 dB PSNR [S1].
 
 ## Operating characteristics
-*   **Speed:** ProNeRF is 15-23× faster than vanilla NeRF [S1]. ProNeRF-8 is >20× faster; ProNeRF-12 is ~15× faster [S1]. ProNeRF-8 prune is 23% faster than standard ProNeRF-8 [S1].
-*   **Quality:** ProNeRF-12 achieves 0.65 dB higher PSNR than NeRF on LLFF [S1]. ProNeRF-8 achieves 0.28 dB higher PSNR than NeRF [S1]. ProNeRF-12 achieves 0.95 dB higher PSNR than HyperReel [S1].
-*   **Memory:** Similar to NeRF (3.8 MB for NeRF, ProNeRF-8 adds 3.3 MB for pruning network) [S1].
-*   **Scaling:** Performance scales with the number of samples $N_s$ (8, 12, 32) [S1].
-*   **Strengths:** High quality with very few samples; consistent memory footprint; fast inference [S1].
-*   **Limitations:** Requires careful tuning of exploration/exploitation balance; pruning adds complexity [S1].
+*   **Speed:** 15-23× faster than vanilla NeRF [S1]. ProNeRF-8 is >20x faster [S1]. ProNeRF-8 prune is 23% faster than ProNeRF-8 [S1].
+*   **Quality:** 0.65 dB higher PSNR than NeRF on LLFF [S1]. 0.95 dB higher PSNR than HyperReel [S1].
+*   **Memory:** Similar to NeRF. ProNeRF-8 prune adds 3.3 MB overhead [S1]. ProNeRF-32 uses 6.3 MB memory [S1].
+*   **Strengths:** High quality with few samples; consistent memory footprint via fixed reference views; fast inference [S1].
+*   **Limitations:** Requires training with auxiliary losses; pruning adds slight complexity [S1].
+*   **When to use:** When rendering speed is critical but quality must exceed sampler-based methods like HyperReel, and memory is constrained [S1].
+*   **When not to use:** When generalizable rendering across many scenes without per-scene training is required (ProNeRF is not generalizable like IBRNet) [S1].
 
 ## Background
-ProNeRF was introduced in 2024 by authors publishing in IEEE Access [S1]. It builds on the principles of sparse sampling and neural radiance fields, addressing the quality degradation of previous sampler-based methods like HyperReel and K-Planes [S1]. It is evaluated on the LLFF and Blender datasets [S1].
+ProNeRF was proposed in 2024 [S1]. It builds on the differentiable approximation of continuous radiance fields [Parent]. It addresses the quality degradation in few-point sampling methods [S1]. It is evaluated on LLFF and Blender datasets [S1].
 
 ## Sources
 [S1] ProNeRF: Learning Efficient Projection-Aware Ray Sampling for Fine-Grained Implicit Neural Radiance Fields, https://doi.org/10.1109/access.2024.3390753, fetched 2026-10-30

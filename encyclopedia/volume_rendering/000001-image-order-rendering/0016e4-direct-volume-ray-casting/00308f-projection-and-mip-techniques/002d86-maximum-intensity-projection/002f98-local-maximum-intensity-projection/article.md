@@ -11,44 +11,42 @@ Local Maximum Intensity Projection (LMIP) is a volume rendering technique that s
 *   **Output:** A single color value per pixel, derived from the intensity of the first local maximum above $T$.
 
 **Data Structures:**
-1.  **Bitmask Integer:** For acceleration, voxels are converted to a single bit per voxel indicating if density $> T$. These bits are packed into integers (e.g., 32-bit or 64-bit) corresponding to chunks of the ray [S1, unofficial].
-2.  **Lookup Table (LUT):** A table storing the position (index) of the first non-zero bit for every possible byte combination (256 entries for an 8-bit byte) [S1, unofficial].
+1.  **Bitmask Integer:** For acceleration, voxels are converted to a single bit per voxel indicating if density $> T$. These bits are packed into integers (e.g., 32-bit or 64-bit) corresponding to contiguous segments of the ray [S1, S2, unofficial].
+2.  **Lookup Table (LUT):** A table storing the position (index) of the first non-zero bit for every possible byte combination (256 entries for an 8-bit byte) [S1, S2, unofficial].
 
 **Algorithm Steps:**
 
 1.  **Ray Setup:**
-    *   Normalize the ray direction: $\mathbf{d} = \text{normalize}(\mathbf{v}_{\text{ray\_dir}})$ [S2, unofficial].
-    *   Compute entry ($t_{\text{hit}.x}$) and exit ($t_{\text{hit}.y}$) distances of the ray intersecting the unit cube $[0,1]^3$ [S2, unofficial].
-    *   If $t_{\text{hit}.x} > t_{\text{hit}.y}$, discard the ray (no intersection) [S2, unofficial].
-    *   Clamp entry distance: $t_{\text{start}} = \max(0.0, t_{\text{hit}.x})$ [S2, unofficial].
-    *   Compute step size $dt$ for marching through the volume grid [S2, unofficial].
-    *   Initialize current position $\mathbf{p} = \mathbf{o} + t_{\text{start}} \cdot \mathbf{d}$ [S2, unofficial].
+    *   Normalize the ray direction: $\mathbf{d} = \text{normalize}(\mathbf{v}_{\text{ray\_dir}})$ [S3, unofficial].
+    *   Compute entry ($t_{\text{hit}.x}$) and exit ($t_{\text{hit}.y}$) distances of the ray intersecting the unit cube $[0,1]^3$ [S3, unofficial].
+    *   If $t_{\text{hit}.x} > t_{\text{hit}.y}$, discard the ray (no intersection) [S3, unofficial].
+    *   Clamp entry distance: $t_{\text{start}} = \max(0.0, t_{\text{hit}.x})$ [S3, unofficial].
+    *   Compute step size $dt$ for marching through the volume grid: $dt = 1.0 / \max(|d_x|, |d_y|, |d_z|)$ [G].
+    *   Initialize current position $\mathbf{p} = \mathbf{o} + t_{\text{start}} \cdot \mathbf{d}$ [S3, unofficial].
+    *   Initialize `max_val` to $-1e6$ and `max_step` to $\mathbf{0}$ [S3, unofficial].
 
 2.  **Initial Search (Bitmask Acceleration):**
-    *   Iterate through the ray in chunks corresponding to the bitmask integers [S1, unofficial].
-    *   For each integer, check bytes sequentially. Use the LUT to find the index of the first non-zero bit in the first non-zero byte [S1, unofficial].
-    *   Calculate the $z$-position (or ray parameter $t$) of this first sample based on the byte offset and LUT value [S1, unofficial].
-    *   If a bit is found (density $> T$), mark this as a candidate local maximum.
-    *   If no bits are found in the entire ray, fallback to the global maximum using density interval encoding (as described in [Parent](902-maximum-intensity-projection.md)) [S1, unofficial].
+    *   Process voxels sequentially along the ray [S2, unofficial].
+    *   For each packed integer, check bytes sequentially. Use a lookup table addressing the first non-zero byte to find the position of the first non-zero bit within that byte [S2, unofficial].
+    *   Calculate the $z$-position (or ray parameter $t$) of this first sample based on the byte offset and LUT value [S2, unofficial].
+    *   Investigate further samples sequentially along the ray until the first local maximum is found [S2, unofficial].
+    *   If no bits are found in the entire ray, fallback to the global maximum using density interval encoding (as described in [Parent](902-maximum-intensity-projection.md)) [S2, unofficial].
 
 3.  **Local Maximum Verification:**
-    *   From the candidate position found via LUT, investigate further samples sequentially along the ray [S1, unofficial].
-    *   Identify the first local maximum reference opacity/intensity value [S4, unofficial].
-    *   In front-to-back order, find the first ray sample whose intensity $I$ exceeds the threshold $T$ [S4, unofficial].
-    *   Assign this value as the final color and discard all subsequent samples [S4, unofficial].
-    *   *Note:* The local maximum is often the first hit of the ray with the object's surface [S4, unofficial].
+    *   In front-to-back order, find the first ray sample whose intensity $I$ exceeds the threshold $T$ [S4, S6, unofficial].
+    *   Assign this value as the final color and discard all subsequent samples [S6, unofficial].
+    *   The local maximum is often the first hit of the ray with the object's surface [S6, unofficial].
 
-4.  **Refinement Pass (Optional/Implementation Specific):**
-    *   Initialize `max_val` to $-1e6$ and `max_step` to $\mathbf{0}$ [S2, unofficial].
-    *   Set refinement step size $dt_{\text{refine}} = dt / \text{REFINEMENT\_STEPS}$ [S2, unofficial].
-    *   Loop `REFINEMENT_STEPS` times (e.g., 4 times) [S2, unofficial]:
-        *   Update `max_val = max(max_val, sample_volume(p))` [S2, unofficial].
-        *   Advance $\mathbf{p}$ by $\mathbf{d} \cdot dt_{\text{refine}}$ [S2, unofficial].
-    *   *Correction/Clarification from [S2, unofficial]:* The pseudocode in [S2, unofficial] suggests centering refinement around the found maximum: $\mathbf{p} = \text{max\_step} - \mathbf{d} \cdot dt \cdot 0.5$. This implies a secondary high-resolution sampling pass around the coarse maximum location [S2, unofficial].
+4.  **Refinement Pass:**
+    *   Set refinement position: $\mathbf{p} = \text{max\_step} - \mathbf{d} \cdot dt \cdot 0.5$ to center the refinement around the found maximum [S3, unofficial].
+    *   Set refinement step size: $dt_{\text{refine}} = dt / \text{REFINEMENT\_STEPS}$ [S3, unofficial].
+    *   Loop `REFINEMENT_STEPS` times (0 to 3):
+        *   Update `max_val = max(max_val, sample_volume(p))` [S3, unofficial].
+        *   Advance $\mathbf{p}$ by $\mathbf{d} \cdot dt_{\text{refine}}$ [S3, unofficial].
 
 5.  **Color Mapping:**
-    *   Map the final `max_val` to color using `apply_color(max_val)` [S2, unofficial].
-    *   Output as `gl_FragColor` [S2, unofficial].
+    *   Map the final `max_val` to color using `apply_color(max_val)` [S3, unofficial].
+    *   Output as `gl_FragColor` [S3, unofficial].
 
 **Pseudocode:**
 
@@ -60,105 +58,81 @@ def lmip_render(ray_origin, ray_dir, volume, threshold, refinement_steps=4):
     d = normalize(ray_dir)
     
     # 2. Intersect Unit Cube [0,1]^3
-    # Assuming volume is normalized to unit cube for simplicity in this example
-    # t_min, t_max are entry and exit distances
     t_min, t_max = intersect_unit_cube(ray_origin, d)
     
     if t_min > t_max:
-        return None # No intersection
+        return None  # No intersection
         
     t_start = max(0.0, t_min)
+    dt = 1.0 / max(abs(d.x), abs(d.y), abs(d.z))
     p = ray_origin + t_start * d
     
-    # 3. Initial Search using Bitmask/LUT (Simplified conceptual implementation)
-    # In practice, this involves packing voxels into integers and using a LUT
-    # to find the first index where density > threshold.
-    # Let's assume we find a coarse index 'coarse_idx' and position 'p_coarse'
+    # 3. Initial Search
+    # Acceleration: Pack voxels into integers, check bytes sequentially,
+    # use LUT on first non-zero byte to find first bit position, calculate t.
+    # Direct march for correctness:
+    t = t_start
+    max_val = -float('inf')
+    max_p = None
     
-    coarse_idx, p_coarse = find_first_above_threshold_bitmask(volume, ray_origin, d, threshold)
-    
-    if coarse_idx is None:
-        # Fallback to Global MIP if no voxel exceeds threshold
-        return global_mip_render(ray_origin, ray_dir, volume)
-        
-    # 4. Sequential Verification for Local Maximum
-    # Move forward from coarse_idx to find the actual local peak
-    # LMIP selects the first local maximum above threshold.
-    # We sample sequentially until we find a peak.
-    
-    current_val = sample_volume(p_coarse)
-    max_val = current_val
-    max_p = p_coarse
-    
-    # Simple sequential march to find the first local max
-    # Note: True LMIP finds the *first* local max. 
-    # A local max is typically defined as a sample higher than its neighbors.
-    # However, [S4, unofficial] states it selects the first sample above threshold 
-    # which acts as a local maximum reference. 
-    # We will implement the "first sample above threshold" as the primary LMIP 
-    # definition from [S4, unofficial], but refine it to be a local peak if needed.
-    
-    # According to [S1, unofficial]: "investigate further samples sequentially until the first local maximum is found."
-    # According to [S4, unofficial]: "first intensity value ... that lies over the specified intensity threshold."
-    # We prioritize [S4, unofficial]'s "first above threshold" as the primary selection, 
-    # but [S1, unofficial] implies checking for local max property.
-    # Let's stick to the acceleration: find first above threshold, then verify it is a local max 
-    # or simply take it if it's the first significant hit.
-    
-    # Refined Step: Find first sample > threshold
-    p = p_coarse
-    while p is within volume bounds:
+    while t < t_max:
         val = sample_volume(p)
         if val > threshold:
             max_val = val
             max_p = p
-            break # Found first significant hit
-        p += d * step_size
+            break  # First sample above threshold found
+        t += dt
+        p = ray_origin + t * d
         
-    # 5. Refinement Pass
-    # Center refinement around the found maximum
-    dt_refine = step_size / refinement_steps
-    p_refine = max_p - d * dt_refine * 0.5 # Centering offset
+    if max_p is None:
+        # Fallback to Global MIP if no voxel exceeds threshold
+        return global_mip_render(ray_origin, ray_dir, volume)
+        
+    # 4. Refinement Pass
+    dt_refine = dt / refinement_steps
+    p_refine = max_p - d * dt_refine * 0.5  # Center around found maximum
+    max_val = -float('inf')
     
-    for i in range(refinement_steps):
+    for _ in range(refinement_steps):
         val = sample_volume(p_refine)
         if val > max_val:
             max_val = val
-            max_p = p_refine
         p_refine += d * dt_refine
         
-    # 6. Color Mapping
+    # 5. Color Mapping
     return apply_color(max_val)
 ```
 
 **Parameters:**
-*   **Intensity Threshold ($T$):** A user-defined value determining which samples are significant [S4, unofficial].
-*   **REFINEMENT_STEPS:** Constant integer, typically 4, used for secondary high-resolution sampling [S2, unofficial].
+*   **Intensity Threshold ($T$):** A user-defined value determining which samples are significant enough to be rendered [S4, S6, unofficial].
+*   **REFINEMENT_STEPS:** Constant integer, typically 4, used for a secondary high-resolution sampling pass around the maximum [S3, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Ray Direction Normalization:** The ray direction must be explicitly normalized after interpolation to ensure correct step sizes [S2, unofficial].
-*   **No Threshold Exceedance:** If no voxel along the ray exceeds the threshold, the method must fallback to global MIP to avoid black pixels [S1, unofficial].
-*   **Depth Ambiguity:** While LMIP reduces depth loss compared to MIP, it still projects a single value, potentially obscuring context [S5, unofficial].
+*   **Ray Direction Normalization:** The ray direction must be explicitly normalized after interpolation to ensure correct step sizes and unit consistency [S3, unofficial].
+*   **No Threshold Exceedance:** If no voxel along the ray exceeds the threshold, the method must fallback to global MIP to avoid rendering black or undefined pixels [S2, S4, unofficial].
+*   **Occlusion & Translucency:** The technique suffers from occlusion problems because it does not support translucent materials or standard DVR compositing mechanisms [S4, S6, unofficial].
 
 ## Subtopics
 
 ### Cylindrical MImP
-A variant of Maximum Importance Projection (MImP) that does not clearly show spatial relationships between focus and context objects. The focus object appears in front of the context object, creating a visual artifact [S5, unofficial].
+A Maximum Importance Projection variant that does not clearly show spatial relationships between focus and context objects. The focus object appears in front of the context object, creating a visual artifact [S7, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** Generally faster than traditional MIP due to early ray termination once the first local maximum above the threshold is found [S1, S4, unofficial].
 *   **Memory Complexity:** Requires additional storage for the bitmask structure and LUT if the bitmask acceleration is used [S1, unofficial].
-*   **Strengths:** Preserves spatial consistency; the local maximum often corresponds to the first hit of the ray with an object's surface, providing better depth cues than standard MIP [S4, unofficial]. It provides more precise geometric information like depth and occlusion of vessels [S1, unofficial].
+*   **Strengths:** Preserves spatial consistency; the local maximum often corresponds to the first hit of the ray with an object's surface, providing better depth cues than standard MIP [S4, S6, unofficial]. It provides more precise geometric information like depth and occlusion of vessels [S1, unofficial].
 *   **Limitations:** Cannot apply more precise density encoding than standard MIP because it discards intermediate samples [S1, unofficial]. It still loses some depth information compared to full DVR [S4, unofficial].
 *   **When to Use:** When highlighting high-intensity structures is desired, but preserving the relative depth/order of those structures is critical (e.g., medical vessel visualization) [S3, unofficial].
 *   **When Not to Use:** When precise attenuation or scattering effects are needed, or when the threshold setting is difficult to determine for the specific dataset [S1, unofficial].
 
 ## Background
-LMIP was proposed by Sato to address the depth information loss problem inherent in standard Maximum Intensity Projection (MIP) [S3, unofficial]. In medical applications, standard MIP can be confusing because a higher density blood vessel can "hide" other blood vessels that are closer to the viewpoint [S3, unofficial]. LMIP was introduced to avoid this by selecting the first local maximum above a threshold [S3, unofficial]. It is used in medical volume rendering for visualizing structures like vessels where surface approximation and depth cues are important [S1, S4, unofficial].
+LMIP was proposed by Sato to address the depth information loss problem inherent in standard Maximum Intensity Projection (MIP) [S5, unofficial]. In medical applications, standard MIP can be confusing because a higher density blood vessel can "hide" other blood vessels that are closer to the viewpoint [S5, unofficial]. LMIP was introduced to avoid this by selecting the first local maximum above a threshold [S5, unofficial]. It is used in medical volume rendering for visualizing structures like vessels where surface approximation and depth cues are important [S1, S4, unofficial].
 
 ## Sources
-[S1] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
-[S2] Masdaofdisasda/Vis1_Direct_Volume_Rendering_2022W, https://github.com/Masdaofdisasda/Vis1_Direct_Volume_Rendering_2022W, fetched 2026-10-26 (unofficial)
-[S3] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
-[S4] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
-[S5] (PDF) Importance-Driven Volume Rendering, https://www.researchgate.net/publication/220943935_Importance-Driven_Volume_Rendering, fetched 2026-11-03 (unofficial)
+[S1] Volume Ray Casting Techniques, https://www.scribd.com/document/102700078/03-raycasting, fetched 2026-10-25 (unofficial)
+[S2] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
+[S3] Masdaofdisasda/Vis1_Direct_Volume_Rendering_2022W, https://github.com/Masdaofdisasda/Vis1_Direct_Volume_Rendering_2022W, fetched 2026-10-26 (unofficial)
+[S4] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)
+[S5] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S6] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
+[S7] (PDF) Importance-Driven Volume Rendering, https://www.researchgate.net/publication/220943935_Importance-Driven_Volume_Rendering, fetched 2026-11-03 (unofficial)
