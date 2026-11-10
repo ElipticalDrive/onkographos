@@ -1,0 +1,241 @@
+# Stroke-based splatting
+
+Also called: Brush stroke rendering, SBR
+
+## Overview
+Stroke-based splatting (SBR) is a point cloud visualization technique that applies concepts of stroke-based rendering to surface-aligned splatting, shaping each object-aligned splat as a brush stroke and orienting it according to globally coherent tangent vectors to create a painterly depiction of the scanned cloud [S1]. It solves the problem of pixelized artifacts and poor shape perception in low-resolution scans or close-up interactions, where standard splats become larger than small regions of pixels [S1]. Unlike image-space non-photorealistic rendering (NPR) which applies strokes to a 2D image, SBR applies brush strokes in 3D space, avoiding shortcomings in flexible 3D interaction or noisy data [S1]. It provides clearer perception of object curvature and higher visual quality than surface-aligned elliptical splats, especially for delicate shapes like human faces [S1].
+
+## How it works
+The method is divided into two stages: a preprocessing step where parameters are extracted from the input point cloud, and a multi-pass rendering step where the stroke-based splatting technique is applied [S1].
+
+### Inputs and Outputs
+**Input:** An unstructured point cloud dataset $P = \{p_i\}$, where each point $p_i$ has position $\mathbf{x}_i$, color $\mathbf{c}_i$, and potentially normal information.
+**Output:** A 2D image frame rendered with brush stroke textures.
+
+### Data Structures
+The implementation uses OpenGL and GLSL version 4.5 for rendering [S1]. Preprocessing uses the Point Cloud Library (PCL) [S1].
+*   **Clustered Points:** Points grouped by color-based region-growing clustering. Each cluster defines a region with consistent resolution.
+*   **Splat Parameters:** For each point or cluster, the following are stored:
+    *   Local resolution $r$: Average distance to $K$ nearest neighbors.
+    *   Error value $\epsilon$: Standard deviation of distance to $K$ nearest neighbors, or user-defined.
+    *   Splat size $s = r + \epsilon$.
+    *   Normal vector $\mathbf{n}$: Estimated via least squares fitting plane to local surface.
+    *   Tangent $\mathbf{t}$ and Bitangent $\mathbf{b}$: Vectors defining the splat canvas, calculated using the Householder formula.
+
+### Preprocessing Steps
+1.  **Clustering:** Apply a color-based region-growing clustering algorithm to group points with positional and color similarities [S1]. This determines the size of each brush stroke, aiming for the least amount of overlap between neighboring patches [S1].
+2.  **Local Resolution Estimation:** For each point, calculate the local resolution $r$ as the average distance to its $K$ nearest neighbors [S1].
+3.  **Error Estimation:** Estimate the error value $\epsilon$ as the standard deviation of the distance to the $K$ nearest neighbors, or allow user selection [S1].
+4.  **Splat Sizing:** Define the splat size as $s = r + \epsilon$ [S1].
+5.  **Normal Estimation:** Estimate normal vectors $\mathbf{n}$ by finding the least squares fitting plane to a local surface $S$ for each point's neighborhood, searching in an area of radius $3r$ [S1].
+6.  **Tangent/Bitangent Calculation:** Calculate associated tangent $\mathbf{t}$ and bitangent $\mathbf{b}$ vectors together with the estimated normal $\mathbf{n}$ to define the splat canvas. Apply the Householder formula to each point to calculate locally and globally coherent tangential vectors used to orient brush strokes in space [S1].
+
+### Rendering Steps
+1.  **Transformation:** Transform points from volume space to screen space using the Model-View-Projection (MVP) matrix [S1].
+2.  **Brush Stroke Generation:** Generate brush stroke textures using a combined Gaussian function for each rendered fragment [S1]. The shape and properties of the stroke are determined by the estimated normal and tangent vectors.
+3.  **Rasterization:** Render the brush strokes. Each splat is sized $r + \epsilon$ [S1].
+4.  **Compositing:** Apply one of two blending processes between neighboring splats [S1]:
+    *   **Blur Method:** A two-pass implementation using linear filtering to minimize texture look-ups [S1].
+    *   **A-Buffer Method:** Uses bubble-sort for fragment sorting per pixel [S1].
+
+### Formulas
+*   **Local Resolution ($r$):**
+    $$ r = \frac{1}{K} \sum_{j=1}^{K} \text{dist}(p_i, p_{k_j}) $$
+    where $p_{k_j}$ are the $K$ nearest neighbors of point $p_i$.
+*   **Error Value ($\epsilon$):**
+    $$ \epsilon = \sqrt{\frac{1}{K} \sum_{j=1}^{K} (\text{dist}(p_i, p_{k_j}) - r)^2} $$
+    Or user-defined.
+*   **Splat Size ($s$):**
+    $$ s = r + \epsilon $$
+*   **Householder Formula:** Used to calculate coherent tangent vectors. Let $\mathbf{n}$ be the normal. The Householder reflection matrix $H$ can be used to align vectors. Specifically, the text states the Householder formula is applied to calculate locally and globally coherent tangential vectors [S1]. The exact implementation details for the tangent $\mathbf{t}$ and bitangent $\mathbf{b}$ derivation from $\mathbf{n}$ via Householder are not explicitly expanded in the provided text beyond the name of the formula [S1].
+*   **Brush Stroke Texture:** Generated using a combined Gaussian function. The specific combined function is not detailed in the provided text [S1].
+
+### Parameters
+*   **K:** The number of nearest neighbors used to estimate local resolution and normal vectors. Typical value not given in sources.
+*   **r:** The local resolution of a point.
+*   **$\epsilon$ (epsilon):** The error value.
+*   **Splat Size:** Calculated as $r + \epsilon$.
+*   **Clustering Parameters:** Fine-tuned to have a more fine-grained segmentation or not [S1].
+
+### Edge Cases and Pitfalls
+*   **Low-Resolution Scans:** Standard splats become larger than a small region of pixels, causing pixelized artifacts. SBR solves this by shaping splats as brush strokes [S1].
+*   **Non-Colored Point Clouds:** Fail the segmentation algorithm, leading to inadequate patch sizes. Workaround is using bigger patches for closed surfaces, which complicates A-buffer sorting [S1].
+*   **Large Brushes:** Cause neighboring patches to intersect unnaturally because fragments are sorted per pixel, not per original patch [S1].
+*   **A-Buffer Memory:** Usage can exceed available memory on complex datasets due to inefficient allocation [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Preprocessing Stage
+def preprocess_point_cloud(points, K):
+    """
+    Extracts parameters for stroke-based splatting.
+    points: List of Point objects with x, y, z, r, g, b attributes.
+    K: Number of nearest neighbors.
+    Returns: List of Splat objects with precomputed parameters.
+    """
+    splats = []
+    
+    # 1. Clustering
+    # Use color-based region-growing clustering algorithm [S1]
+    clusters = color_based_region_growing(points)
+    
+    for cluster in clusters:
+        # 2. Local Resolution and Error Estimation
+        # For each point in the cluster, estimate r and epsilon
+        for point in cluster:
+            # Find K nearest neighbors
+            neighbors = find_k_nearest_neighbors(point, points, K)
+            
+            # Calculate local resolution r (average distance)
+            distances = [distance(point, n) for n in neighbors]
+            r = sum(distances) / len(distances)
+            
+            # Calculate error value epsilon (standard deviation)
+            mean_dist = r
+            variance = sum((d - mean_dist)**2 for d in distances) / len(distances)
+            epsilon = sqrt(variance)
+            
+            # Splat size
+            size = r + epsilon
+            
+            # 3. Normal Estimation
+            # Find least square fitting plane to local surface S [S1]
+            # Search in area of radius 3r
+            local_neighbors = find_k_nearest_neighbors(point, points, K, radius=3*r)
+            normal = least_squares_plane_normal(local_neighbors)
+            
+            # 4. Tangent and Bitangent Calculation
+            # Apply Householder formula to calculate coherent tangential vectors [S1]
+            # Note: Specific Householder implementation details for t and b are not provided in sources [S1]
+            tangent, bitangent = householder_tangent_bitangent(normal)
+            
+            splat = Splat(
+                position=point.position,
+                color=point.color,
+                size=size,
+                normal=normal,
+                tangent=tangent,
+                bitangent=bitangent,
+                cluster_id=cluster.id
+            )
+            splats.append(splat)
+            
+    return splats
+
+# Rendering Stage
+def render_stroke_based_splatting(splats, camera, framebuffer, blending_method='blur'):
+    """
+    Renders the point cloud using stroke-based splatting.
+    splats: List of Splat objects.
+    camera: Camera object with MVP matrix.
+    framebuffer: Target framebuffer.
+    blending_method: 'blur' or 'a_buffer'.
+    """
+    # 1. Transformation
+    # Transform splats to screen space
+    screen_splats = []
+    for splat in splats:
+        # Apply MVP matrix to position
+        projected_pos = camera.mvp_matrix * splat.position
+        # Project normal and tangents for orientation
+        projected_normal = normalize(camera.rotation_matrix * splat.normal)
+        projected_tangent = normalize(camera.rotation_matrix * splat.tangent)
+        projected_bitangent = normalize(camera.rotation_matrix * splat.bitangent)
+        
+        screen_splats.append(ScreenSplat(
+            position=projected_pos,
+            color=splat.color,
+            size=splat.size,
+            normal=projected_normal,
+            tangent=projected_tangent,
+            bitangent=projected_bitangent
+        ))
+        
+    # 2. Rasterization and Compositing
+    if blending_method == 'blur':
+        # Two-pass blur implementation [S1]
+        # Pass 1: Render brush strokes to texture
+        render_brush_strokes_to_texture(screen_splats, framebuffer)
+        # Pass 2: Apply blur filter
+        apply_blur_filter(framebuffer)
+        
+    elif blending_method == 'a_buffer':
+        # A-buffer method with bubble-sort for fragment sorting [S1]
+        # Initialize A-buffer with empty lists for each pixel
+        a_buffer = initialize_a_buffer(framebuffer.width, framebuffer.height)
+        
+        for splat in screen_splats:
+            # Determine pixels covered by the splat
+            covered_pixels = get_covered_pixels(splat, framebuffer)
+            
+            for pixel in covered_pixels:
+                # Generate brush stroke texture for this fragment using combined Gaussian [S1]
+                fragment = generate_brush_fragment(splat, pixel)
+                
+                # Add to A-buffer
+                a_buffer[pixel].append(fragment)
+                
+        # Sort fragments per pixel using bubble-sort [S1]
+        for pixel in a_buffer:
+            bubble_sort_fragments(pixel)
+            
+        # Composite fragments
+        composite_a_buffer(a_buffer, framebuffer)
+
+def generate_brush_fragment(splat, pixel):
+    """
+    Generates a brush stroke fragment using a combined Gaussian function [S1].
+    """
+    # Note: Specific combined Gaussian formula is not provided in sources [S1]
+    # Assume a standard Gaussian falloff based on distance from center
+    dist = distance(pixel, splat.position)
+    weight = exp(-dist**2 / (2 * splat.size**2))
+    
+    return Fragment(
+        color=splat.color,
+        alpha=weight,
+        depth=splat.position.z
+    )
+```
+
+## Subtopics
+
+### Surface-Aligned Splatting (SAS)
+The base technique that SBR extends. SAS aligns splats to the local surface normal. SBR differs by shaping these splats as brush strokes and using Householder vectors for orientation, providing clearer perception of curvature [S1].
+
+### Non-Photorealistic Rendering (NPR)
+SBR is used for NPR, creating a painterly depiction. Unlike image-space NPR, it operates in 3D space, allowing for better 3D interaction [S1].
+
+## Operating characteristics
+*   **Time Complexity:**
+    *   Preprocessing: $O(n d^{k+1} \log n)$, where $n$ is points, $d$ is dimension, $k$ is neighbors, bound by KNN algorithm [S1].
+    *   Rendering: Comparable to pure point cloud rendering when using the blur method. The extra operations are Householder formula calculations and combined Gaussian function evaluations, which are atomic on the GPU [S1]. Alpha blending operations scale with the size of the output screen times the number of layers on the A-buffer (or the limit of operations placed on the bubble-sort algorithm for each frame), and the size and shape of the chosen brush strokes [S1].
+*   **Memory Complexity:**
+    *   A-buffer memory usage can exceed available memory on complex datasets due to inefficient allocation [S1].
+*   **Measured Performance:**
+    *   Dragon model (566,098 points): 418 fps (blur), 444 fps (A-buffer) [S1].
+    *   Monastery model (580,062 points): 420 fps (blur), 352 fps (A-buffer) [S1].
+    *   3 Buddhas model (1,630,572 points): 254 fps (blur), 257 fps (A-buffer) [S1].
+    *   Lucy model (14,027,872 points): 67 fps (blur), 62 fps (A-buffer) [S1].
+    *   Preprocessing times: Dragon 10 seconds, 3 Buddhas 36 seconds, Lucy 1 minute, Monastery 2 minutes 29 seconds [S1].
+*   **Strengths:**
+    *   Better shape perception at lower resolutions and close-ups [S1].
+    *   Painterly aesthetic that users perceive as higher quality [S1].
+    *   Clearer perception of object curvature than circular splats [S1].
+    *   Avoids blurring details found in mesh rendering [S1].
+    *   90% user preference rate over surface-aligned splats for delicate shapes [S1].
+*   **Limitations:**
+    *   A-buffer memory inefficiency on complex datasets [S1].
+    *   Large brushes cause unnatural intersection of neighboring patches due to per-pixel sorting [S1].
+    *   Non-colored point clouds fail segmentation, requiring larger patches and complicating sorting [S1].
+*   **When to use:** Non-photorealistic rendering, image processing, terrain modeling, and visualization of sparse or less accurate point cloud data [S1].
+*   **When not to use:** When high-fidelity photorealism is required, or when memory is severely constrained for very large datasets using the A-buffer method.
+
+## Background
+Stroke-based splatting was introduced in 2017 by dos Anjos et al. [S1]. It is based on the analogy between the Impressionist art movement and interactive visualization technology, leveraging the user's cultural training to recognize painterly metaphors as high-quality visualizations [S1]. The technique was implemented using OpenGL and GLSL 4.5, with preprocessing using the Point Cloud Library (PCL) [S1]. It addresses the shortcomings of current state-of-the-art point cloud visualization techniques when dealing with sparse and less accurate data or close-up interactions [S1].
+
+## Sources
+[S1] Stroke-based splatting: an efficient multi-resolution point cloud visualization technique, https://doi.org/10.1007/s00371-017-1420-7, fetched 2026-10-26

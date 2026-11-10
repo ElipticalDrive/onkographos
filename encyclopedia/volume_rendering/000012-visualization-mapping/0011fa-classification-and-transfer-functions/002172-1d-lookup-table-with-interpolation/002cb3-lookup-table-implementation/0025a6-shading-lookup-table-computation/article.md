@@ -3,87 +3,104 @@
 Also called: Internal texture format selection, vpShadeTable
 
 ## Overview
-Shading Lookup Table Computation generates or updates a color lookup table (LUT) that maps scalar data values to colors and opacity using current lighting, material, and view transformation parameters [S2]. It solves the problem of efficiently applying shading models to volume data by pre-computing these effects into a 1D texture, allowing the renderer to fetch shaded colors via simple texture lookups [S2]. It is distinguished from its siblings by its reliance on color index mode (storing indices and transforming them at render time) rather than pre-shaded color values, which enables interactive manipulation of visual quantities like lighting and material properties [S1, S3].
+Shading Lookup Table Computation is the process of generating a 1D lookup table (LUT) where each entry contains the final shaded color and opacity for a specific scalar value, derived from current lighting, material, and view parameters [S2]. It solves the problem of decoupling the volumetric shading calculation from the rendering loop to enable interactive manipulation of visual quantities [S1, S3]. Unlike methods that store pre-shaded colors, this approach stores color indices (or raw scalar mappings) and computes the shading dynamically during texture sampling, allowing real-time updates to lighting and material properties without regenerating the entire volume texture [S1, S3].
 
 ## How it works
-### Inputs and Outputs
-*   **Inputs**:
-    *   Current lighting parameters (ambient, diffuse, specular coefficients, light positions) [S2].
-    *   Current material parameters (diffuse, specular, shinyness, reflectivity) [S2].
-    *   Current view transformation matrix [S2].
-    *   The scalar field data values (implicitly, via the mapping function) [S1].
-    *   Sample slice distance ($\Delta$) for opacity correction [S1].
-*   **Outputs**:
-    *   A color lookup table (LUT) where each entry contains a color index and associated opacity values [S1].
-    *   The LUT is stored as color indices, not final RGB values [S1, S3].
+The method operates in **Color Index Mode**, where the LUT stores indices or unshaded values that are transformed into color values using texture lookup tables during rendering [S3]. This contrasts with pre-shaded values, which are static and lack interactivity [S3].
 
-### Data Structures
-The LUT is typically implemented as a 1D texture or an array [S1]. Each entry corresponds to a specific scalar value or color index $C_i$ [S1]. Fields include `color_index` and `opacity` [S1]. Bit packing is not specified in the sources [S2].
+**Inputs and Outputs:**
+*   **Input:** Current lighting parameters (ambient, diffuse, specular, shinyness), material properties, view transformation matrix, and the base transfer function mapping scalar values to extinction coefficients or base colors [S1, S2].
+*   **Output:** A 1D texture or buffer containing 4-component vectors $(R, G, B, \alpha)$, where $R, G, B$ are the shaded colors and $\alpha$ is the opacity [S2, S4, unofficial].
 
-### Steps
-1. Initialize shading parameters by setting ambient, diffuse, specular, and shinyness parameters for the materials [S2].
-2. Set viewing parameters to define the view transformation and camera parameters [S2].
-3. Declare the lookup shader to configure the lookup table structure and size [S2].
-4. Compute the shading table to regenerate the LUT entries based on the current lighting, material, and view parameters [S2].
-5. Apply opacity correction if the sample slice distance $\Delta$ changes [S1]. For a color index $C_i$, the initial opacity $\alpha_0$ is computed as:
-   $$ \alpha_0 = 1 - e^{-\text{map}[C_i] \Delta_0} $$
-   where $\text{map}[C_i]$ is the mapping from color index to extinction coefficient [S1]. If the distance changes to $\Delta_k$, the opacity must be corrected using the new $\Delta_k$ [S1].
+**Data Structures:**
+The LUT is a contiguous array of 4-component vectors. In VolPack, this is managed internally by the context `vpc` [S2]. The entries are typically 32-bit floats [S2, S4, unofficial].
 
-### Pseudocode
+**Steps:**
+1.  **Configure Shading Parameters:** Set ambient, diffuse, specular, and shinyness values for the material using the context [S2].
+2.  **Set View Transformation:** Define the current view matrix and lighting direction relative to the view [S2].
+3.  **Compute Table Entries:** Call the computation routine (e.g., `vpShadeTable`) to iterate over all entries in the defined color table [S2].
+    *   For each entry $i$, retrieve the base scalar value or extinction coefficient $map[C_i]$ [S1].
+    *   Apply the current lighting model to compute the RGB color components [S2].
+    *   Compute the opacity $\alpha_i$ based on the sample slice distance $\Delta$ and the extinction coefficient [S1]. The opacity is computed as:
+        $$ \alpha_i = 1 - e^{-map[C_i] \Delta} $$
+        where $\Delta$ is the sample slice distance between consecutive cutting planes [S1].
+    *   Store $(R_i, G_i, B_i, \alpha_i)$ in the LUT [S2].
+4.  **Finalize:** Ensure the table is uploaded to GPU memory if using texture lookup [S2].
+
+**Parameters:**
+*   `vpShadeTable` context pointer `vpc` [S2].
+*   Sample slice distance $\Delta$: Initially chosen with respect to the width of texture elements [S1]. If $\Delta$ changes, opacity values in the color table must be corrected [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Timing:** `vpShadeTable()` must be called after any changes to shading or viewing parameters, but *before* calling any rendering routines [S2]. Failure to do so results in stale shading data.
+*   **Precision:** Opacity correction is required when the sample slice distance changes to maintain visual consistency across different resolution levels [S1].
+*   **Boundary Errors:** Projection of adjoining voxels at boundaries between different resolution levels may result in erroneously drawn pixels; this requires opacity correction by polygon clipping [S3].
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def compute_shading_entry(color_index, extinction_map, lighting, material, view_transform):
-    """Computes the shaded color and opacity for a single color index."""
-    extinction = extinction_map(color_index)
-    # The exact shading model (e.g., Phong, Blinn-Phong) is not specified in the sources [G].
-    color = apply_shading_model(lighting, material, view_transform, extinction)
-    opacity = 1.0 - math.exp(-extinction)
-    return color, opacity
-
-def update_shading_lookup_table(lut_size, extinction_map, lighting, material, view_transform):
-    """Recomputes the color lookup table entries based on current scene parameters."""
-    new_lut = []
-    for i in range(lut_size):
-        color, opacity = compute_shading_entry(i, extinction_map, lighting, material, view_transform)
-        new_lut.append({"color_index": i, "color": color, "opacity": opacity})
-    return new_lut
-
-def correct_opacity_for_slice_distance(lut, new_delta, extinction_map):
-    """Corrects opacity values in the LUT when the sample slice distance changes."""
-    for entry in lut:
-        extinction = extinction_map(entry["color_index"])
-        entry["opacity"] = 1.0 - math.exp(-extinction * new_delta)
-    return lut
+def vpShadeTable(vpc):
+    """
+    Recomputes the color lookup table entries based on current lighting,
+    material, and view transformation parameters.
+    """
+    # 1. Retrieve current shading and view parameters from vpc [S2]
+    ambient = vpc.get_lighting(VP_AMBIENT)
+    diffuse = vpc.get_material(VP_MATERIAL0, VP_DIFFUSE)
+    specular = vpc.get_material(VP_MATERIAL0, VP_SPECULAR)
+    shinyness = vpc.get_material(VP_MATERIAL0, VP_SHINYNESS)
+    view_transform = vpc.get_view_matrix()
+    
+    # 2. Get the base transfer function mapping [S1]
+    # map[Ci] defines the mapping from color indices to extinction coefficients
+    base_map = vpc.get_transfer_function_map()
+    
+    # 3. Get the current sample slice distance [S1]
+    delta = vpc.get_sample_slice_distance()
+    
+    # 4. Iterate over all entries in the color table [S2]
+    num_entries = vpc.get_lookup_table_size()
+    for i in range(num_entries):
+        # Get the base scalar/extinction value for this index [S1]
+        extinction_coeff = base_map[i]
+        
+        # Compute opacity using Beer-Lambert law [S1]
+        # alpha = 1 - exp(-extinction_coeff * delta)
+        alpha = 1.0 - math.exp(-extinction_coeff * delta)
+        
+        # Compute shaded color based on lighting model [S2]
+        # This step involves standard Phong or similar shading calculations
+        # using ambient, diffuse, specular, and shinyness [S2]
+        color = compute_shaded_color(
+            base_color=base_map.get_color(i), # Assuming base color retrieval
+            ambient=ambient,
+            diffuse=diffuse,
+            specular=specular,
+            shinyness=shinyness,
+            view_transform=view_transform
+        )
+        
+        # Store the result in the LUT [S2]
+        vpc.set_lookup_table_entry(i, color.r, color.g, color.b, alpha)
 ```
-
-### Parameters
-*   **Color Index Mode**: The method assumes color index mode [S1].
-*   **Sample Slice Distance ($\Delta$)**: The distance between consecutive cutting planes [S1].
-
-### Edge Cases and Pitfalls
-*   **Timing of Computation**: The computation routine must be called after any changes to shading or viewing parameters, but before calling any rendering routines [S2].
-*   **Boundary Errors**: Even with opacity correction, projection of adjoining voxels at boundaries between different resolution levels might result in erroneously drawn pixels [S1].
-*   **Precision**: The sources do not specify precision requirements or floating-point handling constraints for the exponential calculation [S1].
 
 ## Subtopics
 
 ### Color Index Mode with LUT
-This variant refers to the specific implementation choice of storing textures as color indices that are transformed to color values using texture lookup tables during rendering, rather than storing pre-shaded color values [S3]. It is chosen over pre-shaded values because it allows for the interactive manipulation of visual quantities (such as lighting and material properties) [S3]. Pre-shaded values are often favored in practical applications for performance but lack this interactivity [S3]. This mode is a prerequisite for the Shading Lookup Table Computation method described above [S1, S3].
+Color Index Mode stores textures as color indices that are transformed to color values using texture lookup tables, rather than storing pre-shaded color values [S3]. This mode is chosen because it allows interactive manipulation of visual quantities (such as lighting and material changes) in real-time [S3]. In contrast, pre-shaded color values are often favored in practical applications for performance but lack this interactivity [S3]. This method builds on [Shading Lookup Table Computation](3589-shading-lookup-table-computation.md) by ensuring the LUT contains indices or unshaded data that can be dynamically shaded [G].
 
 ## Operating characteristics
-*   **Time Complexity**: The computation of the shading table is performed once per update of lighting/view parameters [S2]. The cost is proportional to the size of the LUT [S2]. Rendering time is reduced because shading is done via texture lookup [S2].
-*   **Memory Complexity**: Requires memory for the LUT [S1]. The size depends on the number of color indices [S1].
-*   **Performance**: Enables interactive manipulation of visual quantities, which is a key advantage over pre-shaded methods [S3].
-*   **Strengths**: Interactivity and efficient rendering via texture lookup [S3].
-*   **Limitations**: Requires careful management of LUT updates and potential boundary errors at resolution level transitions [S1, S3].
-*   **When to Use**: When interactive lighting and material changes are required during volume rendering [S3].
-*   **When Not to Use**: When maximum rendering performance is critical and lighting/materials are static, as pre-shaded values may be better [S3].
+*   **Time Complexity:** $O(N)$, where $N$ is the number of entries in the lookup table. The computation is performed once per shading parameter change [S2].
+*   **Memory Complexity:** $O(N)$ for storing the 4-component vector table [S2].
+*   **Performance:** Enables interactive manipulation of visual quantities, which is the primary advantage over pre-shaded methods [S3]. However, it requires recomputation of the entire table when lighting or view parameters change [S2].
+*   **Strengths:** Real-time interactivity with lighting and materials; hierarchical decomposition benefits [S1, S3].
+*   **Limitations:** Requires careful handling of opacity correction when sample slice distances change [S1]; potential boundary errors between resolution levels [S3].
+*   **When to use:** When interactive lighting and material manipulation is required during volume rendering [S3].
+*   **When not to use:** When static, pre-shaded textures are sufficient for performance and interactivity is not needed [S3].
 
 ## Background
-The method originates from the VolPack library and related research on level-of-detail volume rendering via 3D textures [S1, S2]. It was developed to support interactive volume rendering by decoupling shading from the rendering loop through the use of color index mode and lookup tables [S1, S3]. The approach is detailed in the VolPack User's Guide and the paper "Level-of-Detail Volume Rendering via 3D Textures" [S1, S2, S3].
+The concept originates from Level-of-Detail Volume Rendering via 3D Textures, which introduced the use of color index mode with texture lookup tables to allow interactive manipulation of visual quantities [S1]. The VolPack library formalized this with the `vpShadeTable` routine, which computes lookup table entries based on current lighting and view parameters [S2]. The approach was further discussed in the context of hierarchical decomposition and brick boundaries [S3].
 
 ## Sources
 [S1] Level-of-Detail Volume Rendering via 3D Textures, https://www.semanticscholar.org/paper/05e7d88387ac7484397e329456535b0c8c665a16, fetched 2026-11-03

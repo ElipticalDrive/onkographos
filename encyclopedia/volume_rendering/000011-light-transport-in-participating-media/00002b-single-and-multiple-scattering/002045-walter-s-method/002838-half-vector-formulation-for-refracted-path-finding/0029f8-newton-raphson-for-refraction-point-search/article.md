@@ -43,15 +43,15 @@ which serves to minimize the average number of convergence iterations [S1].
 
 The Newton-Raphson update rule is:
 $$ x_{i+1} = x_i - \frac{f(x_i)}{f'(x_i)} $$
-[ S1]
+[S1]
 
 ### Parameters
-Typical values for parameters are not given in the sources. The convergence tolerance $\epsilon$ and maximum iteration count are implementation-defined [G].
+Not given in the sources [S1]. The convergence tolerance $\epsilon$ and maximum iteration count are implementation-defined [G].
 
 ### Edge Cases and Pitfalls
 *   **Clamping**: The solution must lie within the triangle edge. Clamping $x$ to $[0, L_x]$ is essential to ensure physical validity [S1].
 *   **Convergence**: For the 1D case, convergence typically occurs in 2 to 4 iterations with the specified heuristic and clamping [S1].
-*   **Derivative Zero**: If $f'(x_i) = 0$, the Newton-Raphson step is undefined. Standard numerical practice requires a safeguard or step-size reduction, though the source states the method always converges with the given settings [S1, G].
+*   **Derivative Zero**: If $f'(x_i) = 0$, the Newton-Raphson step is undefined, requiring a safeguard or step-size reduction in standard numerical practice [G].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -140,7 +140,7 @@ def solve_refraction_point_1d(V_y, L_x, L_y, eta, epsilon=1e-6, max_iter=10):
 This method is described in "Single Scattering in Refractive Media with Triangle Mesh Boundaries" by Eric Heitz, Jonathan Dupuy, Stephen Hill, and David Neubelt [S1].
 
 ### History and Development
-The method is part of a broader framework for handling refraction in participating media. It addresses the specific case where the shading normal is constant, allowing for a simplified 1D search. The empirical heuristic for the initial guess was developed to minimize the average number of iterations required for convergence [S1].
+The method is part of a broader framework for handling refraction in participating media [S1]. It addresses the specific case where the shading normal is constant, allowing for a simplified 1D search [S1]. The empirical heuristic for the initial guess was developed to minimize the average number of iterations required for convergence [S1].
 
 ## Sources
 

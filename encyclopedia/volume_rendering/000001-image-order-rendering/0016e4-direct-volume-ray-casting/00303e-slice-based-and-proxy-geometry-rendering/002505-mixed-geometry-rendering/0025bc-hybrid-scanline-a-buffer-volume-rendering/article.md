@@ -1,0 +1,106 @@
+# Hybrid Scanline A-Buffer Volume Rendering
+
+Also called: Scanline A-Buffer with Volume Fragments
+
+## Overview
+Hybrid Scanline A-Buffer Volume Rendering is a method for rendering scenes containing both surface-defined objects and procedural volumetric gases by combining scanline-based surface rendering with volume rendering [S1, unofficial]. It solves the integration problem of mixed geometry by using a fast scanline a-buffer algorithm for surfaces and volume rendering for gases, merging them via Z-sorted a-buffer fragments [S1, unofficial]. Unlike pure volume ray casting which processes every pixel independently, this method leverages spatial coherence within scanlines to manage fragment lists, and unlike pure surface rendering, it handles semi-transparent volumetric media [S1, unofficial].
+
+## How it works
+The method processes a scanline by maintaining an a-buffer that tracks all fragments covering each pixel. It integrates surface fragments and volumetric sections into a single sorted list to compute final pixel colors.
+
+**Inputs and Outputs**
+*   **Inputs**: A scanline of pixels, surface-defined geometry covering the scanline, procedural volume definitions (gases) covering the scanline, a physically-based low-albedo illumination model, an atmospheric attenuation model, and three-dimensional shadow tables [S1, unofficial].
+*   **Outputs**: Final color values for each pixel in the scanline [S1, unofficial].
+
+**Data Structures**
+*   **A-Buffer Fragment List**: For each pixel in the scanline, a list of fragments. Each fragment contains coverage information and depth data. The specific internal layout of a fragment (e.g., exact fields for color, opacity, z-depth) is not given in the sources [G].
+*   **Three-Dimensional Shadow Tables**: Used to efficiently combine volumetric shadows [S1, unofficial].
+
+**Steps**
+1.  **Initialize A-Buffer**: Create an a-buffer for the current scanline. For each pixel, initialize a list to store all fragments that partially or fully cover that pixel [S1, unofficial].
+2.  **Process Surface Geometry**: Render surface-defined objects into the a-buffer fragment lists using the fast scanline a-buffer algorithm [S1, unofficial].
+3.  **Volume Rendering Loop**: For each volume covering the scanline:
+    a. Perform volume rendering to calculate the contribution of the volume [S1, unofficial].
+    b. Create a-buffer fragments representing separate sections of the volume [S1, unofficial].
+    c. Check for full coverage. If the pixel is fully covered by volume or surface-defined elements, cease volume rendering for that pixel [S1, unofficial].
+4.  **Sort Fragments**: Sort the volume a-buffer fragments into the a-buffer fragment list based on their average Z-depth values [S1, unofficial].
+5.  **Composite**: Render the a-buffer fragment list to produce the final color of the pixel [S1, unofficial].
+
+**Formulas and Models**
+*   **Illumination**: Uses a physically-based low-albedo illumination model [S1, unofficial].
+*   **Attenuation**: Uses an atmospheric attenuation model [S1, unofficial].
+*   **Shadows**: Volumetric shadows are combined using three-dimensional shadow tables [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hybrid_scanline_a_buffer_rendering(scanline, surfaces, volumes, shadow_tables):
+    # Initialize a-buffer: list of fragments per pixel
+    a_buffer = {pixel_id: [] for pixel_id in scanline.pixels}
+
+    # 1. Process surface-defined objects
+    for surface in surfaces:
+        if surface.covers(scanline):
+            fragments = render_surface_to_a_buffer(surface, scanline)
+            for frag in fragments:
+                a_buffer[frag.pixel_id].append(frag)
+
+    # 2. Process volumes
+    for volume in volumes:
+        if volume.covers(scanline):
+            # Render volume sections
+            volume_fragments = render_volume_sections(volume, scanline)
+            
+            # Check for full coverage to cease rendering
+            for frag in volume_fragments:
+                pixel_id = frag.pixel_id
+                if is_pixel_fully_covered(a_buffer[pixel_id]):
+                    continue
+                
+                # Calculate average Z-depth for sorting
+                avg_z = calculate_average_z_depth(frag)
+                frag.avg_z = avg_z
+                a_buffer[pixel_id].append(frag)
+
+    # 3. Sort fragments by average Z-depth
+    for pixel_id in a_buffer:
+        a_buffer[pixel_id].sort(key=lambda f: f.avg_z)
+
+    # 4. Composite final colors
+    final_image = {}
+    for pixel_id, fragments in a_buffer.items():
+        final_image[pixel_id] = composite_fragments(fragments, shadow_tables)
+        
+    return final_image
+
+def is_pixel_fully_covered(fragments):
+    # Check if coverage is complete by volume or surface elements
+    # Implementation detail not specified in sources [G]
+    pass
+
+def composite_fragments(fragments, shadow_tables):
+    # Composite using low-albedo illumination and atmospheric attenuation
+    # Shadows from shadow_tables are applied [S1, unofficial]
+    # Implementation detail not specified in sources [G]
+    pass
+```
+
+## Subtopics
+
+### Scanline A-buffer rendering
+A rendering algorithm for surface-defined objects in hybrid scenes. It creates an a-buffer for a scanline, containing a list for each pixel of all fragments that partially or fully cover the pixel [S2, unofficial]. It serves as the surface rendering component of the hybrid system [S1, unofficial].
+
+## Operating characteristics
+*   **Complexity**: Not given in the sources.
+*   **Performance**: Described as a "fast" scanline a-buffer algorithm for surface objects [S1, unofficial].
+*   **Strengths**: Efficiently combines surface and volume rendering; uses 3D shadow tables for efficient volumetric shadowing [S1, unofficial].
+*   **Limitations**: Requires managing fragment lists and sorting by average Z-depth; specific performance metrics are not provided [S1, unofficial].
+*   **When to use**: When rendering scenes with both surface-defined objects and procedural gases [S1, unofficial].
+
+## Background
+The method was developed by David Ebert as part of a system for procedural modeling, animation, and rendering of gases, fluids, and textures [S1, unofficial]. It builds on work in solid texturing and procedural noise functions [S1, unofficial]. The approach was presented in the context of hybrid scenes where volume rendering must be combined with surface rendering [S1, unofficial].
+
+## Sources
+[S1] Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures, https://www.researchgate.net/profile/David-Ebert-4/publication/2786953_Procedural_Modeling_Animation_and_Rendering_of_Gases_Fluids_and_Textures/links/00b7d51a73e42a3c4e000000/Procedural-Modeling-Animation-and-Rendering-of-Gases-Fluids-and-Textures.pdf, fetched 2026-10-31 (unofficial)
+[S2] PDF Volume Rendering Methods for Computational Fluid Dynamics Visualization, https://www.researchgate.net/profile/David-Ebert-4/publication/220943451_Volume_Rendering_Methods_for_Computational_Fluid_Dynamics_Visualization/links/00b7d51a73e2892e23000000/Volume_Rendering_Methods_for_Computational_Fluid_Dynamics_Visualization.pdf, fetched 2026-10-27 (unofficial)

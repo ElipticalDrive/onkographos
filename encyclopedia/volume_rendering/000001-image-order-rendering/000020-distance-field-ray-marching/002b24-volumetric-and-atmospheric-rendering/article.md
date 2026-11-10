@@ -1,52 +1,51 @@
 # Volumetric and Atmospheric Rendering
 
-Also called: Volume Ray Marching, Atmospheric Ray Marching, Single Scattering Approximation
+Also called: Standard 3ds Max atmospheric
 
 ## Overview
-Volumetric and Atmospheric Rendering is a family of image-order ray marching techniques that simulate light transport through participating media, such as clouds, smoke, fog, and planetary atmospheres, by integrating density and scattering properties along view rays [S1, unofficial][S2]. It differs from [SDF Cloud Rendering](2064-sdf-cloud-rendering.md) by treating the volume as a sampled or procedural density field rather than an implicit surface, and from [Atmospheric Ray Marching](4874-atmospheric-ray-marching.md) by focusing on localized, animated volumetric structures rather than global spherical atmospheric scattering [S1, unofficial][S2].
+Volumetric and Atmospheric Rendering is a family of techniques for visualizing participating media (such as smoke, fire, clouds, and planetary atmospheres) by integrating light transport along view rays through a density field. It solves the problem of rendering non-surface-based geometry where opacity and color vary continuously in 3D space. It is distinguished from surface-based rendering (like Isosurfaces) by not generating a mesh, thereby requiring volumetric shading models rather than standard surface materials [S1].
 
 ## Shared principles
-The family relies on the discretization of the Radiative Transfer Equation (RTE) along a ray $r(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the direction vector. The core mechanism involves marching through a 3D density field $\rho(\mathbf{p})$ and accumulating color and opacity using the Beer-Lambert law for extinction and a phase function for scattering [S1, unofficial][S2].
+The family shares the core principle of ray marching through a volumetric domain to solve the Radiative Transfer Equation (RTE) or its approximations. The fundamental operation for each pixel involves casting a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ and integrating the contribution of the medium along the path.
 
-1.  **Ray Setup**: For each pixel, a view ray is constructed from the camera position and direction [G].
-2.  **Marching Loop**: The ray is stepped through the volume with a step size $\Delta s$. At each sample point $\mathbf{p}$, the density $\rho(\mathbf{p})$ is evaluated [S1, unofficial][S2].
-3.  **Extinction**: The transmittance $T$ is updated using the extinction coefficient $\sigma_T = \sigma_S + \sigma_A$ (scattering + absorption):
-    $$ T \leftarrow T \cdot e^{-\sigma_T \rho(\mathbf{p}) \Delta s} $$
-    [S1, unofficial].
-4.  **Scattering**: If single scattering is approximated, the inscattered light $L_{in}$ from a light source is computed by marching towards the light to determine optical depth, then attenuated by the phase function $P(\theta)$ and scattering coefficient $\sigma_S$ [S1, unofficial]:
-    $$ L_{out} \leftarrow L_{out} + T \cdot \sigma_S \cdot \rho(\mathbf{p}) \cdot P(\theta) \cdot L_{in} \cdot \Delta s $$
-    [S1, unofficial].
-5.  **Accumulation**: Color is accumulated using alpha blending:
-    $$ C_{accum} \leftarrow C_{accum} + C_{sample} \cdot \alpha \cdot (1 - C_{accum}.a) $$
-    $$ \alpha \leftarrow \alpha + \alpha_{sample} \cdot (1 - C_{accum}.a) $$
-    [S1, unofficial].
+The general integration model computes the final color $C_{final}$ as the sum of in-scattered light and transmitted background light:
+$$ C_{final} = \int_{t_{near}}^{t_{far}} T(t) \sigma_s(\mathbf{p}(t)) L_{in}(\mathbf{p}(t)) dt + C_{bg} T(t_{far}) $$
+where:
+*   $T(t) = e^{-\int_{t_{near}}^{t} \sigma_t(\mathbf{p}(\tau)) d\tau}$ is the transmittance from the camera to point $\mathbf{p}(t)$, determined by the extinction coefficient $\sigma_t = \sigma_s + \sigma_a$ (scattering plus absorption).
+*   $\sigma_s$ is the scattering coefficient.
+*   $L_{in}$ is the incoming radiance at the sample point, often approximated by single-scattering from a light source.
+*   $C_{bg}$ is the background color (sky or scene) transmitted through the volume.
+
+Discretization is performed by stepping along the ray with step size $\Delta t$. The discrete accumulation for a step is typically:
+$$ C_{accum} \leftarrow C_{accum} + T(t) \cdot (1 - e^{-\sigma_t \Delta t}) \cdot L_{scattered} $$
+$$ T(t) \leftarrow T(t) \cdot e^{-\sigma_t \Delta t} $$
+Early termination is applied when transmittance $T(t)$ drops below a threshold (e.g., 0.01) or the ray exits the bounding volume [S1][S2, unofficial][S3].
 
 ## Subtopics
 
 ### [Ray Marching with Single Scattering](2057-ray-marching-with-single-scattering.md)
-A real-time technique for rendering translucent, animated volumetric clouds using procedural noise or 3D textures for density and physically-based single scattering illumination. It targets localized cloud volumes with explicit bounding or spherical boundaries and wind animation.
+A real-time technique for rendering volumetric clouds by discretizing the Radiative Transfer Equation along view rays. It combines procedural noise for density generation with a physically-based single-scattering illumination model to produce dynamic, three-dimensional cloudscapes. It is distinguished from [SDF Cloud Rendering](2064-sdf-cloud-rendering.md) by its use of explicit ray marching through a sampled density field rather than implicit SDF evaluation, and from [Atmospheric Ray Marching](4874-atmospheric-ray-marching.md) by its focus on discrete cloud layers with specific weather-map control rather than global atmospheric scattering.
 
 ### [SDF Cloud Rendering](2064-sdf-cloud-rendering.md)
-A technique for rendering volumetric clouds using Signed Distance Fields (SDFs) via ray marching, utilizing warped sphere primitives and smooth unions to create complex shapes. It represents the cloud volume as an implicit surface defined by analytic distance functions rather than a sampled density grid.
+A technique for rendering volumetric cloud-like structures using Signed Distance Fields (SDFs) via ray marching in a fragment shader. It utilizes warped sphere primitives and smooth unions to create complex, organic shapes without explicit voxel grids or texture maps. Unlike traditional volumetric methods that sample density fields, this method treats the cloud as a solid object defined by a continuous distance function, relying on geometric shading rather than radiative transfer accumulation.
 
 ### [Volume Ray Marching with Temporal Accumulation](4804-volume-ray-marching-with-temporal-accumulation.md)
-A real-time rendering technique that discretizes view rays through a 3D density field to compute color and opacity, enhanced by blending the current frame's result with a history texture to reduce noise and stabilize the image over time. It distinguishes itself by incorporating temporal feedback, allowing for higher visual fidelity with fewer spatial samples.
+A real-time rendering technique that marches rays through a 3D density field to compute volumetric lighting and opacity, stabilized over time by blending the current frame's result with a history texture. It distinguishes itself from standard ray marching by incorporating temporal reprojection and jittering to reduce noise and aliasing artifacts, making it suitable for dynamic fluid simulations where static sampling would produce flickering.
 
 ### [Atmospheric Ray Marching](4874-atmospheric-ray-marching.md)
-A real-time technique for rendering planetary atmospheres using single scattering, exponential density falloff, and the Rayleigh phase function. It solves the problem of visualizing the sky and horizon glow around a spherical planet by integrating the Radiative Transfer Equation along view rays.
+A technique for rendering planetary atmospheres by discretizing the Radiative Transfer Equation along view rays, utilizing single scattering approximation, exponential density falloff, and the Rayleigh phase function. It distinguishes itself from general volume rendering by explicitly modeling the spherical geometry of a planet and its atmosphere, and from sibling methods like [Ray Marching with Single Scattering](2057-ray-marching-with-single-scattering.md) by incorporating specific astronomical parameters such as ozone absorption and scale height.
 
 ### Wax Volume Raymarching
-*   **Step**: Raymarch the interior volume of the glass container. Compute surface normal using the gradient of the density field. Set fragment depth explicitly using `gl_FragDepth` in the opaque pass. Shading model includes: wrap lighting, soft Fresnel, fake subsurface scattering based on traversed thickness, and emission driven by temperature and proximity to the light bulb [S1, unofficial].
-*   **Number**: Artifacts: 0.00% of surface voxels cause a round-trip to the threshold, even at 60 Hz with ±30% jitter [S1, unofficial].
+Raymarches the interior volume of a glass container (wax). It computes the surface normal using the gradient of the density field and sets fragment depth explicitly using `gl_FragDepth` in the opaque pass [S2, unofficial]. The shading model includes wrap lighting, soft Fresnel, fake subsurface scattering based on traversed thickness, and emission driven by temperature and proximity to a light bulb [S2, unofficial]. Artifacts are negligible, with 0.00% of surface voxels causing a round-trip to the threshold, even at 60 Hz with ±30% jitter [S2, unofficial].
 
 ### X-Ray Visualization
-*   **Definition**: A visualization method that computes average density values along a ray cast through the data, visualizing the result as a grey scale image similar to a medical X-ray [S2].
-*   **Step**: Cast a ray through the data set in the desired viewing direction. Calculate the average density values along the ray. Visualize the average density values as a grey scale image [S2].
-*   **Parameter**: View rotation: The view of the data set can be rotated in any of the 3 directions (X, Y, Z axes) in degrees (-360 ... 0 ... 360) [S2].
+A visualization method that computes average density values along a ray cast through the data, visualizing the result as a grey scale image similar to a medical X-ray [S3]. The view of the data set can be rotated in any of the 3 directions (X, Y, Z axes) in degrees (-360 ... 0 ... 360) [S3].
 
 ## Background
-The method originates from early volume rendering applications in medical visualization, where ray casting through 3D datasets was used to generate X-ray-like visualizations and shaded 3D views [S2]. The specific implementation of wax volume raymarching with liquid simulation was developed by Nathaniel D. Dr. Lidy in the context of a lava lamp simulation, utilizing GLSL shaders for real-time rendering on the GPU [S1, unofficial].
+The term "Volumetric and Atmospheric Rendering" in the context of 3ds Max refers to the "Volumetric" mode in Phoenix FD, which visualizes grid content as a standard atmospheric volume, primarily used for fire and smoke [S1]. Unlike surface modes, this mode does not generate a mesh, so 3ds Max and V-Ray materials cannot be used for shading; instead, shading is handled by Volumetric Render Settings using color gradients and graphs [S1]. The method relies on ray marching steps controlled by parameters such as `Step %` (rendstep) and `Shadow Step %` (rendshadstep), which define the frequency of grid reads as a percentage of cell size [S1]. Artifacts may appear if `Step %` exceeds 100, as cells are skipped [S1]. The technique is also associated with "Standard 3ds Max atmospheric" effects [S1].
 
 ## Sources
-[S1] Étape 4 : surface de cire raymarchée et liquide volumique, https://github.com/nathanddrl/lava-lamp/pull/4, fetched 2026-10-27 (unofficial)
-[S2] VOLUME RENDERING Application by Thomas Lidy, https://www.cg.tuwien.ac.at/courses/Visualisierung/2001-2002/Ergebnisse/Beispiel1/LidyT/description.html, fetched 2026-10-29
+
+[S1] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27
+[S2] Étape 4 : surface de cire raymarchée et liquide volumique, https://github.com/nathanddrl/lava-lamp/pull/4, fetched 2026-10-27 (unofficial)
+[S3] VOLUME RENDERING Application by Thomas Lidy, https://www.cg.tuwien.ac.at/courses/Visualisierung/2001-2002/Ergebnisse/Beispiel1/LidyT/description.html, fetched 2026-10-29

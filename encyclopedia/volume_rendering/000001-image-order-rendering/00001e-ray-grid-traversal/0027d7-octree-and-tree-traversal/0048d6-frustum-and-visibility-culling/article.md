@@ -1,9 +1,9 @@
 # Frustum and Visibility Culling
 
-Also called: View Frustum Culling, Visibility Pruning
+Also called: Frustum Culling, Visibility Culling, Frustum-Occlusion Culling
 
 ## Overview
-Frustum and Visibility Culling is a family of techniques used in hierarchical volume rendering to prune traversal paths that do not contribute to the final image. It solves the problem of excessive computation by skipping octree nodes or splats that are outside the camera's view frustum or too small to be resolved on screen. It sets itself apart from sibling methods by focusing on geometric rejection based on camera parameters rather than data-driven ordering or specific traversal stack optimizations.
+Frustum and Visibility Culling optimizes volume rendering by discarding geometric primitives that lie outside the camera's viewing volume, thereby reducing the computational load on empty or background regions. It distinguishes itself from sibling methods by operating at the scene or subtree level to filter entire hierarchies or splat batches before traversal or rasterization, rather than performing per-ray intersection tests within the volume data.
 
 ## Shared principles
 All methods in this family share the core mechanism of hierarchical descent and ascent. The traversal begins at the root of the octree and determines which of the eight children (octants) the ray intersects. This is typically done by comparing the ray's position relative to the center of the current node's bounding box [S1][S2, unofficial][S6, S8, unofficial].
@@ -23,13 +23,13 @@ All methods in this family share the core mechanism of hierarchical descent and 
 ## Subtopics
 
 ### [Bounding-Sphere Tree Traversal with Frame-Rate Control](7227-bounding-sphere-tree-traversal-with-frame-rate-control.md)
-This method traverses hierarchical bounding-sphere tree structures (specifically Shell and Solid trees) to render point-based volumetric primitives efficiently. It solves the problem of maintaining real-time performance on large datasets by combining visibility culling tests with adaptive refinement. It is distinguished from sibling methods by its specific use of two distinct minimum splat size parameters ($\delta_r$ and $\delta_b$) to control fidelity at Shell-Solid intersections, and its reliance on hardware z-buffering for occlusion rather than hierarchical tree-based occlusion culling.
+This method renders hierarchical tree structures (specifically Shell and Solid trees) using point-based splatting primitives, solving the problem of maintaining real-time frame rates for large volumetric datasets by dynamically adjusting rendering fidelity [7227-bounding-sphere-tree-traversal-with-frame-rate-control.md]. It distinguishes itself from standard octree traversal by replacing fixed-resolution voxel stepping with adaptive bounding-sphere culling and frame-rate feedback loops that control the minimum splat size in screen space [7227-bounding-sphere-tree-traversal-with-frame-rate-control.md].
 
 ### [Frustum Culling Integration](8798-frustum-culling-integration.md)
-Frustum Culling Integration is a technique used in progressive volume rendering (specifically for Gaussian Splatting) to prioritize the loading and rendering of splats visible to the user by applying frustum culling. It is applied after global ordering is determined to refine the selection of data based on the current viewpoint. It sets itself apart from the base octree-only approach by leveraging user-specific view information to improve foreground quality, whereas the octree-only method provides a good scene representation without requiring such knowledge.
+Frustum Culling Integration is a visibility optimization technique applied during the progressive loading of volumetric splats (specifically 3D Gaussian Splatting) to prioritize data transmission and rendering of elements within the user's current view [8798-frustum-culling-integration.md]. It operates by filtering out splats that lie outside the viewing frustum, thereby reducing the computational load on background elements [8798-frustum-culling-integration.md]. Unlike the base octree-only approach, which provides a static scene representation without user-specific knowledge, this method leverages the user's initial pose to improve performance when such information is available [8798-frustum-culling-integration.md].
 
 ### [Frustum-Occlusion Culling for Octree Traversal](12324-frustum-occlusion-culling-for-octree-traversal.md)
-This method identifies a set of visible voxels from an octree hierarchy by traversing the tree and culling octants that do not intersect the camera's view frustum or whose projected screen area is smaller than a single pixel. It differs from sibling methods by combining visibility culling with automatic Level-of-Detail (LOD) selection based on screen-space size, outputting a buffer of voxel instances for subsequent hardware-accelerated rasterization.
+This method identifies a set of visible voxels by traversing an octree hierarchy and comparing each node against the camera's view frustum [12324-frustum-occlusion-culling-for-octree-traversal.md]. It serves as a visibility culling and Level-of-Detail (LOD) selection mechanism for voxel rasterization, ensuring that only octants intersecting the frustum and large enough to project onto at least one pixel are processed [12324-frustum-occlusion-culling-for-octree-traversal.md]. It differs from standard ray-marching octree traversal by operating in screen-space to cull entire subtrees based on projected area, rather than per-ray intersection tests [12324-frustum-occlusion-culling-for-octree-traversal.md].
 
 ## Background
 Origin: Not given in the sources.

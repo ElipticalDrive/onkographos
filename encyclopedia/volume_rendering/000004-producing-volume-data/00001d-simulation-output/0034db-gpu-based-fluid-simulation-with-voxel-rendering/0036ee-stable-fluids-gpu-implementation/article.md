@@ -2,15 +2,15 @@
 Also called: Jacobi Pressure Solver, Jacobi method for pressure-Poisson system, Semi-Lagrangian Advection
 
 ## Overview
-Stable Fluids (GPU Implementation) is a method for computing incompressible fluid velocity by discretizing the momentum equation on a fixed Eulerian grid and solving for velocity via advection, external forces, and pressure projection [S1, unofficial]. It solves the problem of real-time fluid simulation on graphics hardware by leveraging 3D textures and slice-based rasterization to execute computational kernels [S1, unofficial]. It differs from its parent method, [GPU-based Fluid Simulation with Voxel Rendering](7400-gpu-based-fluid-simulation-with-voxel-rendering.md), by specifically defining the numerical kernels (advection, divergence, Jacobi solve, projection) and data layouts required to perform the simulation steps on the GPU [S1, unofficial].
+A method for computing fluid velocity by discretizing the momentum equation on a fixed Eulerian grid and solving for velocity via advection, external forces, and pressure projection [S1, unofficial]. It sets itself apart from its siblings by using the Jacobi method to solve the pressure-Poisson system because it is easy to implement efficiently on the GPU, and by employing semi-Lagrangian advection which is unconditionally stable [S1, unofficial]. It builds on [GPU-based Fluid Simulation with Voxel Rendering](7400-gpu-based-fluid-simulation-with-voxel-rendering.md) by providing the specific simulation kernels required to update the fluid state on graphics hardware.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A 3D grid of cubical cells representing the simulation domain; initial velocity field $\mathbf{u}$; pressure field $p$; external forces $\mathbf{f}$ (e.g., gravity); time step $\Delta t$; number of Jacobi iterations.
-*   **Outputs:** Updated velocity field $\mathbf{u}^{n+1}$; updated pressure field $p^{n+1}$.
+*   **Inputs:** 3D textures storing velocity ($\mathbf{u}$) and pressure ($p$) at cell centers; external forces ($\mathbf{f}$); time step $\Delta t$.
+*   **Outputs:** Updated 3D textures for velocity and pressure.
 
 **Data Structures:**
-Cell attributes (velocity, pressure) are stored in 3D textures, mapping grid cells to voxels [S1, unofficial]. The geometry shader output structure for the simulation kernel is defined as follows [S1, unofficial]:
+Cell attributes are stored in 3D textures, mapping grid cells to voxels. The simulation uses a geometry shader output structure to pass neighbor indices and texture coordinates to pixel shaders.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -35,125 +35,153 @@ struct GS_OUTPUT_FLUIDSIM {
 **Numbered Steps:**
 The momentum equation solution is split into successive operations: advection, application of external forces, and pressure projection [S1, unofficial].
 
-1.  **Advection (Semi-Lagrangian):**
-    *   Trace back along the characteristic: $\mathbf{pos} = \mathbf{current\_pos} - \Delta t \cdot \mathbf{cellVelocity}$ [S1, unofficial].
-    *   Convert the resulting index to texture coordinates and sample the velocity field using linear interpolation [S1, unofficial].
-    *   Formula: $\mathbf{u}^{advected} = \text{Sample}(\mathbf{u}, \mathbf{pos})$ [S1, unofficial].
+1.  **Domain Discretization:** Subdivide a rectilinear volume into a regular grid of cubical cells. Store scalar quantities (pressure) and vector quantities (velocity) at cell centers [S1, unofficial].
+2.  **Slice Iteration:** Because GPUs render into 2D buffers, execute computational kernels once for each slice of the 3D volume by iterating over slice indices [S1, unofficial].
+3.  **Quad Rasterization:** For each slice, rasterize a single quad whose dimensions equal the width and height of the volume. Use the geometry shader to output neighbor texture coordinates and set `SV_RenderTargetArrayIndex` to the current slice [S1, unofficial].
+4.  **Advection (Semi-Lagrangian):** Trace back along the characteristic from the current cell position.
+    *   Calculate the velocity at the current cell center.
+    *   Compute the source position: $\text{pos} = \text{current\_pos} - \Delta t \times \text{cellVelocity}$.
+    *   Convert the resulting index to texture coordinates.
+    *   Sample the velocity field at the source position [S1, unofficial].
+5.  **Divergence Calculation:** Compute the divergence of the velocity field using central differences on neighboring cell velocities [S1, unofficial].
+6.  **Pressure Solve (Jacobi):** Iterate to solve the pressure-Poisson system $\nabla^2 p = \nabla \cdot \mathbf{u}^*$ [S1, unofficial].
+7.  **Projection:** Subtract the pressure gradient from the velocity to make it divergence-free [S1, unofficial].
 
-2.  **External Forces:**
-    *   Add external forces (e.g., gravity) to the advected velocity [S1, unofficial].
-    *   Formula: $\mathbf{u}^* = \mathbf{u}^{advected} + \Delta t \cdot \mathbf{f}$ [S1, unofficial].
+**Formulas:**
+*   **Semi-Lagrangian Advection:**
+    $$ \text{pos} = \text{current\_pos} - \Delta t \times \mathbf{u}(\text{current\_pos}) $$
+    $$ \mathbf{u}_{new} = \text{Sample}(\mathbf{u}, \text{TexCoord}(\text{pos})) $$
+*   **Divergence:**
+    $$ \nabla \cdot \mathbf{u} = 0.5 \times ((u_R - u_L) + (v_T - v_B) + (w_U - w_D)) $$
+    Where $u, v, w$ are the x, y, z components of velocity at the Right, Left, Top, Bottom, Up, and Down neighbors respectively [S1, unofficial].
+*   **Jacobi Pressure Solve:**
+    $$ p_{new} = \frac{(p_L + p_R + p_B + p_T + p_D + p_U) - \nabla \cdot \mathbf{u}}{6.0} $$
+    Where $p_L, p_R, \dots$ are pressure values at the Left, Right, Bottom, Top, Down, and Up neighbors [S1, unofficial].
+*   **Projection:**
+    $$ \nabla p = 0.5 \times (p_R - p_L, p_T - p_B, p_U - p_D) $$
+    $$ \mathbf{u}_{new} = \mathbf{u}_{old} - \nabla p $$
+    Where $\mathbf{u}_{old}$ is the velocity before projection [S1, unofficial].
 
-3.  **Divergence Calculation:**
-    *   Compute velocity divergence using central differences on neighboring cell velocities [S1, unofficial].
-    *   Formula: $\nabla \cdot \mathbf{u}^* = 0.5 \cdot ((u_R - u_L) + (v_T - v_B) + (w_U - w_D))$ [S1, unofficial].
+**Parameters:**
+*   **timeStep ($\Delta t$):** The duration of the time step used in semi-Lagrangian advection [S1, unofficial].
+*   **Iterations:** The number of Jacobi iterations. Can be adjusted based on available resources for smoke/fire, but liquids require more iterations to maintain volume [S1, unofficial].
 
-4.  **Pressure Solve (Jacobi Iteration):**
-    *   Solve the pressure-Poisson system $\nabla^2 p = \nabla \cdot \mathbf{u}^*$ using the Jacobi method [S1, unofficial].
-    *   Iterate $N_{iter}$ times. For each iteration, compute the new pressure at the center cell from its 6 neighbors and the divergence [S1, unofficial].
-    *   Formula: $p_{new} = \frac{p_L + p_R + p_B + p_T + p_D + p_U - \nabla \cdot \mathbf{u}^*}{6.0}$ [S1, unofficial].
-
-5.  **Projection:**
-    *   Subtract the pressure gradient from the velocity to make it divergence-free [S2, unofficial].
-    *   Compute pressure gradient: $\nabla p = 0.5 \cdot (p_R - p_L, p_T - p_B, p_U - p_D)$ [S1, unofficial].
-    *   Update velocity: $\mathbf{u}^{n+1} = \mathbf{u}^* - \nabla p$ [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **GPU 2D Limitation:** GPUs render into 2D buffers, so 3D volume kernels must be executed once per slice by iterating over slice indices [S1, unofficial].
+*   **Numerical Smoothing:** Semi-Lagrangian advection is unconditionally stable but introduces numerical smoothing, making water look viscous or smoke lose detail [S1, unofficial].
+*   **Volume Loss:** Too few Jacobi iterations for liquids cause volume loss, making water sink through the tank bottom because pressure from the floor cannot counteract gravity [S1, unofficial].
 
 **Pseudocode:**
-The following pseudocode implements the kernels described in [S1, unofficial]. It assumes a 3D texture sampling function `Sample(texture, coords)` and a coordinate conversion function `cellIndex2TexCoord(index)`.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 # Kernel: Semi-Lagrangian Advection
-def PS_ADVECT_VEL(cellIndex, velocity_texture, timeStep):
-    # Get current cell velocity
-    center_coords = cellIndex2TexCoord(cellIndex)
-    cell_velocity = velocity_texture.Sample(center_coords)
+# Input: velocity texture, timeStep
+# Output: new velocity texture
+kernel PS_ADVECT_VEL(GS_OUTPUT_FLUIDSIM in, Texture3D velocity) -> float4:
+    # Get current cell position in grid coordinates
+    pos = in.cellIndex
+    
+    # Get velocity at current cell
+    cellVelocity = velocity.Sample(samPointClamp, in.CENTERCELL).xyz
     
     # Trace back along characteristic
-    pos = cellIndex - timeStep * cell_velocity
+    pos = pos - timeStep * cellVelocity
+    
+    # Convert grid index to texture coordinates
     pos = cellIndex2TexCoord(pos)
     
-    # Sample velocity at traced position
-    return velocity_texture.Sample(pos)
+    # Sample velocity at source position
+    return velocity.Sample(samLinear, pos)
 
 # Kernel: Divergence
-def PS_DIVERGENCE(cellIndex, velocity_texture):
-    # Get velocities from neighbors
-    u_L = velocity_texture.Sample(cellIndex2TexCoord(cellIndex + (-1, 0, 0))).x
-    u_R = velocity_texture.Sample(cellIndex2TexCoord(cellIndex + (1, 0, 0))).x
-    v_B = velocity_texture.Sample(cellIndex2TexCoord(cellIndex + (0, -1, 0))).y
-    v_T = velocity_texture.Sample(cellIndex2TexCoord(cellIndex + (0, 1, 0))).y
-    w_D = velocity_texture.Sample(cellIndex2TexCoord(cellIndex + (0, 0, -1))).z
-    w_U = velocity_texture.Sample(cellIndex2TexCoord(cellIndex + (0, 0, 1))).z
+# Input: velocity texture
+# Output: divergence texture
+kernel PS_DIVERGENCE(GS_OUTPUT_FLUIDSIM in, Texture3D velocity) -> float:
+    # Get velocity values from neighboring cells
+    fieldL = velocity.Sample(samPointClamp, in.LEFTCELL)
+    fieldR = velocity.Sample(samPointClamp, in.RIGHTCELL)
+    fieldB = velocity.Sample(samPointClamp, in.BOTTOMCELL)
+    fieldT = velocity.Sample(samPointClamp, in.TOPCELL)
+    fieldD = velocity.Sample(samPointClamp, in.DOWNCELL)
+    fieldU = velocity.Sample(samPointClamp, in.UPCELL)
     
     # Compute divergence using central differences
-    divergence = 0.5 * ((u_R - u_L) + (v_T - v_B) + (w_U - w_D))
+    # divergence = 0.5 * ((fieldR.x - fieldL.x) + (fieldT.y - fieldB.y) + (fieldU.z - fieldD.z))
+    divergence = 0.5 * ((fieldR.x - fieldL.x) + (fieldT.y - fieldB.y) + (fieldU.z - fieldD.z))
+    
     return divergence
 
 # Kernel: Jacobi Pressure Solve
-def PS_JACOBI(cellIndex, pressure_texture, divergence_texture):
+# Input: pressure texture, divergence texture
+# Output: new pressure texture
+kernel PS_JACOBI(GS_OUTPUT_FLUIDSIM in, Texture3D pressure, Texture3D divergence) -> float:
     # Get divergence at current cell
-    d_C = divergence_texture.Sample(cellIndex2TexCoord(cellIndex))
+    dC = divergence.Sample(samPointClamp, in.CENTERCELL)
     
-    # Get pressures from neighbors
-    p_L = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (-1, 0, 0)))
-    p_R = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (1, 0, 0)))
-    p_B = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (0, -1, 0)))
-    p_T = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (0, 1, 0)))
-    p_D = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (0, 0, -1)))
-    p_U = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (0, 0, 1)))
+    # Get pressure values from neighboring cells
+    pL = pressure.Sample(samPointClamp, in.LEFTCELL)
+    pR = pressure.Sample(samPointClamp, in.RIGHTCELL)
+    pB = pressure.Sample(samPointClamp, in.BOTTOMCELL)
+    pT = pressure.Sample(samPointClamp, in.TOPCELL)
+    pD = pressure.Sample(samPointClamp, in.DOWNCELL)
+    pU = pressure.Sample(samPointClamp, in.UPCELL)
     
-    # Compute new pressure
-    new_pressure = (p_L + p_R + p_B + p_T + p_D + p_U - d_C) / 6.0
-    return new_pressure
+    # Compute new pressure value
+    return (pL + pR + pB + pT + pU + pD - dC) / 6.0
 
 # Kernel: Projection
-def PS_PROJECT(cellIndex, pressure_texture, velocity_texture):
-    # Compute pressure gradient
-    p_L = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (-1, 0, 0)))
-    p_R = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (1, 0, 0)))
-    p_B = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (0, -1, 0)))
-    p_T = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (0, 1, 0)))
-    p_D = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (0, 0, -1)))
-    p_U = pressure_texture.Sample(cellIndex2TexCoord(cellIndex + (0, 0, 1)))
+# Input: pressure texture, velocity texture
+# Output: new velocity texture
+kernel PS_PROJECT(GS_OUTPUT_FLUIDSIM in, Texture3D pressure, Texture3D velocity) -> float4:
+    # Get pressure values from neighboring cells
+    pL = pressure.Sample(samPointClamp, in.LEFTCELL)
+    pR = pressure.Sample(samPointClamp, in.RIGHTCELL)
+    pB = pressure.Sample(samPointClamp, in.BOTTOMCELL)
+    pT = pressure.Sample(samPointClamp, in.TOPCELL)
+    pD = pressure.Sample(samPointClamp, in.DOWNCELL)
+    pU = pressure.Sample(samPointClamp, in.UPCELL)
     
-    grad_P = 0.5 * float3(p_R - p_L, p_T - p_B, p_U - p_D)
+    # Compute gradient of pressure
+    gradP = 0.5 * float3(pR - pL, pT - pB, pU - pD)
     
     # Get old velocity
-    v_old = velocity_texture.Sample(cellIndex2TexCoord(cellIndex))
+    vOld = velocity.Sample(samPointClamp, in.CENTERCELL).xyz
     
     # Project velocity
-    v_new = v_old - grad_P
-    return v_new
+    vNew = vOld - gradP
+    
+    return float4(vNew, 0)
+
+# Helper: Convert grid index to texture coordinate
+function cellIndex2TexCoord(float3 index, float textureWidth, float textureHeight, float textureDepth) -> float3:
+    return float3(index.x / textureWidth, index.y / textureHeight, (index.z + 0.5) / textureDepth)
 ```
-
-**Parameters:**
-*   `timeStep` ($\Delta t$): The duration of the time step used in semi-Lagrangian advection [S1, unofficial].
-*   `Iterations`: The number of Jacobi iterations. For smoke/fire, this can be adjusted based on available resources; for liquids, more iterations are required to maintain volume [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **GPU Rendering Limitations:** GPUs render into 2D buffers, so 3D volume kernels must be executed once per slice by iterating over slice indices [S1, unofficial].
-*   **Numerical Smoothing:** Semi-Lagrangian advection is unconditionally stable but introduces numerical smoothing, making water look viscous or smoke lose detail [S1, unofficial].
-*   **Volume Loss:** Too few Jacobi iterations for liquids cause volume loss, making water sink through the tank bottom because pressure from the floor cannot counteract gravity [S1, unofficial].
 
 ## Subtopics
 
-### Projection Method
-A technique to enforce incompressibility (zero divergence) on a velocity field by subtracting the gradient of a pressure field [S2, unofficial]. It involves solving the Poisson equation for pressure $p$ using Jacobi iteration (typically 20-40 iterations) and then subtracting the gradient of the pressure field from the velocity field to make it divergence-free [S2, unofficial].
+### [Free-Slip Boundary Condition Enforcement](7908-free-slip-boundary-condition-enforcement.md)
+This method enforces a free-slip boundary condition for fluid simulations involving dynamic obstacles represented as voxelized solids. It ensures that fluid velocity normal to the obstacle surface matches the solid's normal velocity, allowing tangential slip, while preventing mass leakage into solid interiors. It differs from no-slip conditions by retaining tangential fluid velocity and from static boundary handling by explicitly updating obstacle velocity fields and modifying the pressure solver to ignore solid cell contributions.
+
+### [Projection Method](8336-projection-method.md)
+The Projection Method enforces incompressibility on a fluid velocity field by subtracting the gradient of a pressure field, ensuring the resulting velocity is divergence-free. It distinguishes itself from sibling methods like Free-Slip Boundary Condition Enforcement by focusing specifically on the Helmholtz-Hodge decomposition step required to satisfy the continuity equation within the Stable Fluids framework.
+
+### [Operator Splitting for Fluid Dynamics](12465-operator-splitting-for-fluid-dynamics.md)
+Operator splitting decomposes the complex dynamic equations of fluid dynamics into sequential, simpler sub-steps to facilitate numerical integration on a grid. It solves the problem of enforcing incompressibility while applying external forces and advecting the fluid state. It sets itself apart from the parent [Stable Fluids (GPU Implementation)](7906-stable-fluids-gpu-implementation.md) by explicitly structuring the time integration into three distinct, ordered phases: advection, force application, and pressure projection.
 
 ## Operating characteristics
-*   **Time Complexity:** The dominant cost is the Jacobi pressure solve, which requires $O(N \cdot I)$ operations, where $N$ is the number of cells and $I$ is the number of iterations [S1, unofficial].
-*   **Memory Complexity:** Storage is proportional to the number of cells. Table 30-1 in [S1, unofficial] indicates 9 bytes per cell for simulation (1×RGBA16 velocity, 1×R8 inside-outside, 1×RGBA16 temporary).
-*   **Performance:** The method is designed for real-time performance on GPUs [S1, unofficial]. The number of Jacobi iterations can be adjusted to balance quality and speed [S1, unofficial].
-*   **Strengths:** Easy to implement on GPU; unconditionally stable advection; real-time capable [S1, unofficial].
-*   **Limitations:** Numerical smoothing from semi-Lagrangian advection; volume loss if Jacobi iterations are insufficient for liquids [S1, unofficial].
-*   **When to Use:** Real-time fluid simulation where visual quality is prioritized over physical accuracy; smoke and fire effects [S1, unofficial].
-*   **When Not to Use:** High-quality animation requiring precise volume conservation; scenes with complex boundary conditions requiring more robust solvers [S1, unofficial].
+*   **Time Complexity:** The pressure solve step dominates, requiring $O(N)$ work per Jacobi iteration, where $N$ is the number of cells. The total time is proportional to the number of iterations.
+*   **Memory Complexity:** Requires storage for velocity, pressure, divergence, and temporary textures. Table 30-1 in [S1, unofficial] indicates 9 bytes per cell for exclusive textures (1×RGBA16 velocity, 1×R8 inside-outside) and shared textures (1×RGBA16 temporary, 1×R8 inside-outside). Rendering requires additional off-screen targets.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales well on GPUs due to the regular grid structure and simple memory access patterns of the Jacobi method.
+*   **Strengths:** Unconditionally stable advection; easy to implement on GPU; real-time performance achievable.
+*   **Limitations:** Numerical smoothing from semi-Lagrangian advection; volume loss if Jacobi iterations are insufficient for liquids; requires many iterations for high accuracy.
+*   **When to use:** Real-time fluid simulation where visual plausibility is prioritized over physical accuracy, especially for smoke and fire.
+*   **When not to use:** When strict volume conservation is required for liquids without sufficient computational budget for many Jacobi iterations, or when high-fidelity detail is needed without post-processing.
 
 ## Background
-The "stable fluids" method for computing velocity was introduced by Jos Stam in 1999 [S1, unofficial]. A GPU implementation of this method for 2D fluids was presented by Mark Harris in 2004 [S1, unofficial]. The 3D GPU implementation described here is detailed in GPU Gems 3 [S1, unofficial]. Alternatives to the Jacobi solver include the Conjugate Gradient method (Bolz et al. 2003), Multigrid (Goodnight et al. 2003), and Cyclic reduction (Kass et al. 2006) [S1, unofficial].
+The "stable fluids" method for computing velocity was introduced by Stam in 1999 [S1, unofficial]. A GPU implementation of this method for 2D fluids was presented by Harris in 2004 [S1, unofficial]. The 3D GPU implementation described here extends these concepts to volumetric grids using Direct3D geometry and pixel shaders. Alternatives to the Jacobi solver include the Conjugate Gradient method (Bolz et al. 2003), Multigrid (Goodnight et al. 2003), and Cyclic reduction (Kass et al. 2006) [S1, unofficial].
 
 ## Sources
 [S1] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
-[S2] tzhazuma/Fluid_simulation, https://github.com/tzhazuma/Fluid_simulation, fetched 2026-10-26 (unofficial)

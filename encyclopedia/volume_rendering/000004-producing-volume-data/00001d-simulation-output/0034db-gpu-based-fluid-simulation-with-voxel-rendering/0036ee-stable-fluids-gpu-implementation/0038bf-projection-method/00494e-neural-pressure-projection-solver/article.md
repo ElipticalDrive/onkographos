@@ -1,0 +1,145 @@
+# Neural Pressure Projection Solver
+
+Also called: Neural Euler Simulator
+
+## Overview
+The Neural Pressure Projection Solver is a feed-forward neural network method that predicts velocity updates ($\Delta u$) to enforce incompressibility in fluid simulation, replacing traditional iterative pressure solvers [S1, unofficial]. Unlike the Projection Method, which computes pressure via iterative linear system solving, this approach learns the mapping from advected velocity and boundary conditions directly to the divergence-free correction, enabling differentiable simulation [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs**:
+    1.  Velocity field $u^*$: The velocity field after advection and external force application.
+    2.  Volume field $V$: A scalar field representing the space distribution of materials (fluid and air).
+    3.  Boundary distance field: A scalar field where each grid cell stores the normalized distance between its center and the container boundary.
+*   **Output**:
+    *   Velocity update $\Delta u$: A vector field of the same resolution as $u^*$, used to update the velocity field.
+
+**Data Structures**
+The inputs are 3D grids (volumetric tensors). The notation for convolutional layers is `C{channels}, K{kernel_size}S{stride}`:
+*   `C`: Number of output channels.
+*   `K`: Kernel size (e.g., `K3` implies a $3 \times 3 \times 3$ kernel).
+*   `S`: Stride (e.g., `S1` implies stride 1).
+
+**Algorithm**
+The network consists of three parallel mini-networks for feature extraction, followed by a fusion and regression head.
+
+1.  **Feature Extraction**: Process each input ($u^*$, $V$, and boundary distance field) through a dedicated mini-network. Each mini-network consists of two identical blocks. Each block contains:
+    *   A 3D convolutional layer (`C32, K3S1`).
+    *   Batch Normalization.
+    *   LeakyReLU activation.
+    Let $E_u$, $E_V$, and $E_B$ be the output embeddings from the velocity, volume, and boundary mini-networks, respectively.
+
+2.  **Concatenation**: Concatenate the embeddings along the channel dimension to form a single feature tensor $F$:
+    $$ F = \text{Concat}(E_u, E_V, E_B) $$
+    The channel dimension of $F$ is $32 + 32 + 32 = 96$.
+
+3.  **Regression Head**: Process $F$ through four convolutional blocks followed by a final convolutional layer.
+    *   For $i = 1$ to $4$:
+        *   Apply 3D convolution (`C32, K3S1`).
+        *   Apply Batch Normalization.
+        *   Apply LeakyReLU activation.
+    *   Apply final 3D convolution (`C3, K3S1`) to produce $\Delta u$. Note: The final layer has no activation function.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+
+class ConvBlock(nn.Module):
+    """3D Convolution + BatchNorm + LeakyReLU"""
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1):
+        super().__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=1)
+        self.bn = nn.BatchNorm3d(out_channels)
+        self.act = nn.LeakyReLU(negative_slope=0.01) # Standard LeakyReLU
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.act(x)
+        return x
+
+class NeuralPressureSolver(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # Mini-networks for feature extraction
+        # Each mini-network: 2x [Conv32, K3S1 + BN + LeakyReLU]
+        self.mini_net_u = nn.Sequential(
+            ConvBlock(3, 32), # Input u* has 3 channels (x,y,z velocity)
+            ConvBlock(32, 32),
+        )
+        self.mini_net_v = nn.Sequential(
+            ConvBlock(1, 32), # Input V has 1 channel (scalar volume)
+            ConvBlock(32, 32),
+        )
+        self.mini_net_b = nn.Sequential(
+            ConvBlock(1, 32), # Input Boundary has 1 channel (scalar distance)
+            ConvBlock(32, 32),
+        )
+        
+        # Fusion and Regression Head
+        # Input channels: 32 (u) + 32 (v) + 32 (b) = 96
+        self.head = nn.Sequential(
+            ConvBlock(96, 32),
+            ConvBlock(32, 32),
+            ConvBlock(32, 32),
+            ConvBlock(32, 32),
+            nn.Conv3d(32, 3, kernel_size=3, stride=1, padding=1) # Final layer: no BN, no activation
+        )
+
+    def forward(self, u_star, volume_field, boundary_field):
+        # u_star: (B, 3, D, H, W)
+        # volume_field: (B, 1, D, H, W)
+        # boundary_field: (B, 1, D, H, W)
+        
+        # 1. Feature extraction
+        e_u = self.mini_net_u(u_star)
+        e_v = self.mini_net_v(volume_field)
+        e_b = self.mini_net_b(boundary_field)
+        
+        # 2. Concatenation
+        # Concatenate along channel dimension (dim=1)
+        f = torch.cat([e_u, e_v, e_b], dim=1)
+        
+        # 3. Regression
+        delta_u = self.head(f)
+        
+        return delta_u
+```
+
+**Parameters**
+*   **Kernel Size**: $3 \times 3 \times 3$ for all convolutions.
+*   **Stride**: 1 for all convolutions.
+*   **Channels**: 32 for all intermediate layers.
+*   **Activation**: LeakyReLU (slope typically 0.01, though not explicitly specified, this is standard [S1, unofficial]).
+*   **Batch Normalization**: Applied after every convolution except the final output layer.
+
+**Edge Cases and Pitfalls**
+*   **Boundary Conditions**: The boundary distance field is explicitly provided as input to handle container boundaries, avoiding the need for implicit boundary handling within the network weights [S1, unofficial].
+*   **Input Resolution**: The network assumes fixed-resolution 3D grids. Changing resolution requires retraining or interpolation of inputs [G].
+*   **Differentiability**: The method is fully differentiable, allowing gradients to flow back through the simulation step for inverse problems [S1, unofficial].
+
+## Subtopics
+
+### Volume-Augmented NeRF
+A related method that uses the volume field $V$ to regress density and color for rendering, but does not solve for velocity updates [S1, unofficial].
+
+### Traditional Projection Method
+The iterative baseline that solves the Poisson equation for pressure; slower but exact, whereas the neural solver is fast but approximate [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(1)$ per simulation step relative to grid size (constant number of operations per voxel), dominated by the forward pass of the CNN. Significantly faster than iterative solvers for high resolutions.
+*   **Memory Complexity**: $O(N)$ where $N$ is the number of voxels, for storing the input and output fields. The model weights are constant size.
+*   **Performance**: Enables real-time or near-real-time simulation on GPU hardware [S1, unofficial].
+*   **Strengths**: Differentiable, fast, avoids iterative convergence issues.
+*   **Limitations**: Approximate solution; accuracy depends on training data and generalization; requires pre-training [S1, unofficial].
+*   **When to use**: When differentiability or speed is prioritized over strict physical accuracy.
+*   **When not to use**: When exact incompressibility is required or when the flow regime is outside the training distribution.
+
+## Background
+The Neural Pressure Projection Solver, also referred to as the Neural Euler Simulator, was proposed in the paper "Inferring Fluid Dynamics via Inverse Rendering" [S1, unofficial]. It integrates fluid simulation with inverse rendering, allowing for the inference of fluid dynamics from visual data. The method replaces the traditional pressure projection step with a learned neural network, facilitating end-to-end training for inverse problems.
+
+## Sources
+[S1] Inferring Fluid Dynamics via Inverse Rendering, https://doi.org/10.48550/arxiv.2304.04446, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,283 @@
+--- v001.md
++++ v002.md
+@@ -11,5 +11,5 @@
+ 
+ **Data Structures:**
+-*   **3D Gaussian Particle:** Defined by $\boldsymbol{\mu}_i, \boldsymbol{q}_i, \boldsymbol{s}_i, \sigma_i$. The covariance matrix $\boldsymbol{\Sigma}_i$ is derived from $\boldsymbol{q}_i$ and $\boldsymbol{s}_i$ [S1].
++*   **3D Gaussian Particle:** Defined by $\boldsymbol{\mu}_i, \boldsymbol{q}_i, \boldsymbol{s}_i, \sigma_i$ [S1]. The covariance matrix $\boldsymbol{\Sigma}_i$ is constructed from the rotation matrix $\mathbf{R}_i$ (derived from $\boldsymbol{q}_i$) and diagonal scaling matrix $\mathbf{S}_i$ (derived from $\boldsymbol{s}_i$) via $\boldsymbol{\Sigma}_i = \mathbf{R}_i \mathbf{S}_i \mathbf{S}_i^T \mathbf{R}_i^T$ [S1].
+ *   **Sigma Points:** A set of $2N_{dim} + 1 = 7$ points $\mathbf{X} = \{\mathbf{x}_i\}_{i=0}^6$ for a 3D Gaussian [S1].
+ *   **Weights:** Two sets of weights, $\mathbf{w}^\mu$ for the mean and $\mathbf{w}^\Sigma$ for the covariance, each of size 7 [S1].
+@@ -18,5 +18,5 @@
+ 
+ 1.  **Covariance Decomposition:**
+-    Compute the 3D covariance matrix $\boldsymbol{\Sigma}$ from the rotation $\mathbf{R}$ (derived from quaternion $\boldsymbol{q}$) and scaling $\mathbf{S}$ (derived from vector $\boldsymbol{s}$) using:
++    Compute the 3D covariance matrix $\boldsymbol{\Sigma}$ from the rotation $\mathbf{R}$ and scaling $\mathbf{S}$ using:
+     $$ \boldsymbol{\Sigma} = \mathbf{R} \mathbf{S} \mathbf{S}^T \mathbf{R}^T $$
+     where $\mathbf{R} \in SO(3)$ and $\mathbf{S} \in \mathbb{R}^{3 \times 3}$ is a diagonal scaling matrix [S1].
+@@ -59,5 +59,5 @@
+ 
+ 9.  **Particle Response Evaluation:**
+-    For pixels within the rectangle $\mathbf{r}_i$, evaluate the Gaussian particle response in 3D space. The response function is:
++    For pixels within the rectangle $\mathbf{r}_i$, evaluate the Gaussian particle response in 3D space [S1]. The response function is:
+     $$ \rho(\mathbf{x}) = \exp\left(-\frac{1}{2}(\mathbf{x} - \boldsymbol{\mu})^T \boldsymbol{\Sigma}^{-1}(\mathbf{x} - \boldsymbol{\mu})\right) $$
+     Particles are sorted in order similar to Radl et al. to align with ray-tracing formulations, enabling secondary ray tracing for reflections and refractions [S1].
+@@ -66,84 +66,70 @@
+ 
+ ```python
++import math
++import numpy as np
++
++def quaternion_to_rotation_matrix(q):
++    # Standard conversion from quaternion (w, x, y, z) to 3x3 rotation matrix
++    w, x, y, z = q[0], q[1], q[2], q[3]
++    return np.array([
++        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
++        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
++        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)]
++    ])
++
++def scaling_vector_to_matrix(s):
++    # Creates a 3x3 diagonal scaling matrix from a 3D vector
++    return np.diag(s)
++
++def compute_extent(Sigma_prime, sigma):
++    # Computes 2D extent from covariance and opacity using standard Gaussian threshold
++    # h = sqrt(-ln(sigma) * diag(Sigma_prime))
++    diag_cov = np.diag(Sigma_prime)
++    return np.sqrt(-math.log(sigma) * diag_cov)
++
++def compute_rectangle(h, v_mu):
++    # Computes 2D AABB from center and extent
++    return [v_mu[0] - h[0], v_mu[1] - h[1], v_mu[0] + h[0], v_mu[1] + h[1]]
++
+ def estimate_2d_gaussian(mu, R, S, W, D, alpha=1.0, beta=2.0, kappa=0.0):
+-    """
+-    Estimates the 2D mean and covariance of a 3D Gaussian using the Unscented Transform.
+-    
+-    Args:
+-        mu: 3D mean position (np.array, shape (3,))
+-        R: Rotation matrix (np.array, shape (3,3))
+-        S: Scaling matrix (np.array, shape (3,3), diagonal)
+-        W: Camera extrinsic matrix (np.array, shape (3,4) or (4,4))
+-        D: Camera intrinsic matrix (np.array, shape (3,3))
+-        alpha: UT spread parameter
+-        beta: UT prior knowledge parameter
+-        kappa: UT scaling parameter
+-        
+-    Returns:
+-        v_mu: 2D mean (np.array, shape (2,))
+-        Sigma_prime: 2D covariance (np.array, shape (2,2))
+-    """
+     # Step 1: Compute Lambda
+     lambda_val = alpha**2 * (3 + kappa) - 3
+-    
++
+     # Step 2: Compute Covariance Sigma
+-    # Sigma = R * S * S^T * R^T
+     Sigma = R @ (S @ S.T) @ R.T
+-    
++
+     # Step 3: Generate Sigma Points
+-    # x_i = mu + sqrt((3 + lambda) * Sigma[i]) for i=1,2,3
+-    # x_i = mu - sqrt((3 + lambda) * Sigma[i-3]) for i=4,5,6
+-    # x_0 = mu
+-    # Note: sqrt(Sigma[i]) implies the square root of the diagonal element
+-    sqrt_term = np.sqrt(3 + lambda_val)
+-    
++    sqrt_term = math.sqrt(3 + lambda_val)
+     sigma_points = np.zeros((7, 3))
+     sigma_points[0] = mu
+-    
+     for i in range(3):
+         diag_val = Sigma[i, i]
+-        sigma_points[i+1] = mu + sqrt_term * np.sqrt(diag_val)
+-        sigma_points[i+4] = mu - sqrt_term * np.sqrt(diag_val)
+-        
++        sigma_points[i+1] = mu + sqrt_term * math.sqrt(diag_val)
++        sigma_points[i+4] = mu - sqrt_term * math.sqrt(diag_val)
++
+     # Step 4: Compute Weights
+     w_mu = np.zeros(7)
+     w_sigma = np.zeros(7)
+-    
+     w_mu[0] = lambda_val / (3 + lambda_val)
+     w_sigma[0] = lambda_val / (3 + lambda_val) + (1 - alpha**2 + beta)
+-    
+     for i in range(1, 7):
+         w_mu[i] = 1.0 / (2 * (3 + lambda_val))
+         w_sigma[i] = 1.0 / (2 * (3 + lambda_val))
+-        
++
+     # Step 5: Project Sigma Points
+-    # v_x_i = g(x_i)
+-    # g(x) involves transforming by W and projecting with D
+-    # Assuming a standard pinhole projection for g(x) if no distortion is specified
+-    # v_x = D * (W * [x; 1])
+-    # We need to handle homogeneous coordinates
+-    
+     projected_points = np.zeros((7, 2))
+     for i in range(7):
+-        # Transform to camera space
+-        # Assuming W is 3x4 or 4x4. If 4x4, take top 3 rows.
+-        # Let's assume W is 3x4 for simplicity as per standard projection
+         cam_pos = W @ np.append(sigma_points[i], 1.0)
+-        
+-        # Project using intrinsic D
+-        # cam_pos is [x, y, z]
+-        # u = D[0,0] * x/z + D[0,2]
+-        # v = D[1,1] * y/z + D[1,2]
+-        if cam_pos[2] == 0:
+-            cam_pos[2] = 1e-9 # Guard against division by zero
+-            
++        # Guard against division by zero [G]
++        if abs(cam_pos[2]) < 1e-9:
++            cam_pos[2] = 1e-9
+         projected_points[i, 0] = (D[0, 0] * cam_pos[0] / cam_pos[2]) + D[0, 2]
+         projected_points[i, 1] = (D[1, 1] * cam_pos[1] / cam_pos[2]) + D[1, 2]
+-        
++
+     # Step 6: Estimate 2D Mean
+     v_mu = np.zeros(2)
+     for i in range(7):
+         v_mu += w_mu[i] * projected_points[i]
+-        
++
+     # Step 7: Estimate 2D Covariance
+     Sigma_prime = np.zeros((2, 2))
+@@ -151,22 +137,9 @@
+         diff = projected_points[i] - v_mu
+         Sigma_prime += w_sigma[i] * np.outer(diff, diff)
+-        
++
+     return v_mu, Sigma_prime
+ 
+ def rasterize_3d_gaussians(particles, W, D, alpha=1.0, beta=2.0, kappa=0.0):
+-    """
+-    Rasterizes 3D Gaussians using 3DGUT.
+-    
+-    Args:
+-        particles: List of dicts with keys 'mu', 'q', 's', 'sigma', 'sh'
+-        W: Camera extrinsic
+-        D: Camera intrinsic
+-        alpha, beta, kappa: UT parameters
+-        
+-    Returns:
+-        List of rendered pixels or intermediate data
+-    """
+     results = []
+-    
+     for particle in particles:
+         mu = particle['mu']
+@@ -174,16 +147,13 @@
+         s = particle['s']
+         sigma_opacity = particle['sigma']
+-        
+-        # Convert quaternion and scaling to Rotation and Scaling matrices
++
+         R = quaternion_to_rotation_matrix(q)
+         S = scaling_vector_to_matrix(s)
+-        
+-        # Estimate 2D Gaussian
++
+         v_mu, Sigma_prime = estimate_2d_gaussian(mu, R, S, W, D, alpha, beta, kappa)
+-        
+-        # Compute Extent and Rectangle
++
+         h = compute_extent(Sigma_prime, sigma_opacity)
+         rect = compute_rectangle(h, v_mu)
+-        
++
+         results.append({
+             'mu_2d': v_mu,
+@@ -192,5 +162,4 @@
+             'particle': particle
+         })
+-        
+     return results
+ ```
+@@ -204,50 +173,32 @@
+ 
+ ### 3D Gaussian Splatting Differentiable Rasterizer
+-Uses EWA splatting with Jacobian linearization. Choose when camera models are simple pinhole and performance is critical. [2813-3d-gaussian-splatting-differentiable-rasterizer.md]
+-
+-### Optimal Gaussian Splatting
+-Focuses on optimal parameterization and rendering. Choose for general high-quality novel view synthesis with standard cameras. [3293-optimal-gaussian-splatting.md]
+-
+-### Hybrid Transparency
+-Combines rasterization and ray tracing. Choose when secondary rays are needed but full ray tracing is too slow. [3294-hybrid-transparency.md]
+-
+-### Perspective-Correct 3D Gaussian Splatting via Plücker Coordinates
+-Uses Plücker coordinates for perspective correction. Choose when perspective artifacts in standard splatting are problematic. [3403-perspective-correct-3d-gaussian-splatting-via-pl-cker-coordi.md]
+-
+-### 3D Gaussian Splatting Rasterization (Cone-Beam/Scanner Space)
+-Adapted for cone-beam or scanner cameras. Choose for medical or industrial scanning data. [3458-3d-gaussian-splatting-rasterization-cone-beam-scanner-space.md]
+-
+-### Analytic-Splatting Forward Shading
+-Provides analytic shading solutions. Choose for complex lighting effects. [3459-analytic-splatting-forward-shading.md]
+-
+-### Speedy-Splat Rendering Pipeline
+-Optimized for speed. Choose for real-time applications with standard cameras. [3543-speedy-splat-rendering-pipeline.md]
+-
+-### Ghost Ellipsoids for Chunked Training
+-Uses ghost ellipsoids for training. Choose for large-scale scene training. [3559-ghost-ellipsoids-for-chunked-training.md]
+-
+-### Analytic Transmittance 3DGS
+-Provides analytic transmittance. Choose for accurate alpha blending. [4440-analytic-transmittance-3dgs.md]
+-
+-### Ref-Gaussian Deferred Surfel Rendering with Split-Sum IBL
+-Deferred rendering with IBL. Choose for high-fidelity reflections. [4464-ref-gaussian-deferred-surfel-rendering-with-split-sum-ibl.md]
+-
+-### 3D Gaussian Splatting Self-Shadowing (T_light)
+-Adds self-shadowing. Choose for realistic shadows. [4487-3d-gaussian-splatting-self-shadowing-t_light.md]
+-
+-### Light Space Rasterization for T_light
+-Rasterizes in light space. Choose for efficient shadow computation. [4489-light-space-rasterization-for-t_light.md]
+-
+-### 2D Gaussian Splatting Rasterization
+-Projects 2D Gaussians. Choose for 2D image editing or specific 2D applications. [4815-2d-gaussian-splatting-rasterization.md]
+-
+-### SparseOIT Rasterizer
+-Order-Independent Transparency. Choose when transparency artifacts are unacceptable. [7562-sparseoit-rasterizer.md]
+-
+-### AdR-Gaussian
+-Adaptive Resolution. Choose for variable resolution rendering. [8365-adr-gaussian.md]
+-
+-### 3D Half-Gaussian Splatting
+-Uses half-Gaussians. Choose for specific memory constraints. [9011-3d-half-gaussian-splatting.md]
++Standard differentiable rasterizer for 3D Gaussians using EWA splatting and Jacobian linearization [S1]. It sets itself apart by using first-order approximations for projection, making it faster for simple pinhole cameras but prone to distortion errors [S1]. Choose it when rendering standard pinhole camera sequences where maximum performance is critical [S1]. [2813-3d-gaussian-splatting-differentiable-rasterizer.md]
++
++### Gaussian Splat Rasterization (Vertex Shader)
++Rasterization method implemented directly in vertex shaders for GPU acceleration [G]. It sets itself apart by leveraging fixed-function graphics pipeline stages for throughput [G]. Choose it when hardware acceleration and low CPU overhead are prioritized [G]. [3253-gaussian-splat-rasterization-vertex-shader.md]
++
++### Masked-Rasterization
++Rasterization technique that uses spatial masks to skip empty or transparent regions [G]. It sets itself apart by reducing fill-rate bottlenecks through early discard [G]. Choose it when scenes contain large transparent or empty areas [G]. [4366-masked-rasterization.md]
++
++### Differentiable Radiative Rasterization
++Rasterization method that differentiates through radiative transfer equations [G]. It sets itself apart by supporting physically based light transport during rasterization [G]. Choose it when accurate lighting simulation is required alongside rasterization [G]. [4526-differentiable-radiative-rasterization.md]
++
++### 3D/2D Hybrid Gaussian Rasterization with Fallback Sigma
++Hybrid approach combining 3D Gaussian splatting with 2D Gaussian fallbacks [G]. It sets itself apart by using 2D Gaussians to handle extreme perspective distortion or depth ambiguity [G]. Choose it when standard 3D splatting fails under extreme camera angles [G]. [4812-3d-2d-hybrid-gaussian-rasterization-with-fallback-sigma.md]
++
++### Opacity Rendering with SH Colors
++Rendering method that decouples opacity estimation from spherical harmonic color evaluation [G]. It sets itself apart by preventing color bleeding through alpha channels [G]. Choose it when accurate alpha compositing is critical for compositing [G]. [7480-opacity-rendering-with-sh-colors.md]
++
++### RoofGS Quadratic Form Expansion and Coefficient Folding
++Method that expands Gaussian quadratic forms into folded coefficients for faster evaluation [G]. It sets itself apart by reducing per-pixel computation cost through algebraic simplification [G]. Choose it when rendering performance is bottlenecked by Gaussian evaluation [G]. [10258-roofgs-quadratic-form-expansion-and-coefficient-folding.md]
++
++### Transmittance of Gaussian Splatting
++Technique that computes exact transmittance along viewing rays through Gaussian volumes [G]. It sets itself apart by replacing approximate alpha blending with physically accurate opacity accumulation [G]. Choose it when accurate transparency and depth ordering are required [G]. [10263-transmittance-of-gaussian-splatting.md]
++
++### Rendering Pipeline and Configuration
++Standard configuration framework for managing rendering parameters and pipeline stages [G]. It sets itself apart by providing a unified interface for tuning rasterization and compositing settings [G]. Choose it when reproducible and configurable rendering setups are needed [G]. [11406-rendering-pipeline-and-configuration.md]
++
++### Differentiable Backpropagation Mechanisms
++Methods for computing gradients through the rendering pipeline for optimization [G]. It sets itself apart by enabling end-to-end training of Gaussian parameters via automatic differentiation [G]. Choose it when training or optimizing scene representations [G]. [11407-differentiable-backpropagation-mechanisms.md]
+ 
+ ## Operating characteristics
+@@ -259,5 +210,5 @@
+ *   **Limitations:** Slightly higher computational cost per particle than EWA splatting. Approximation quality depends on the UT parameters [S1].
+ *   **When to Use:** When rendering scenes with distorted cameras, rolling shutter effects, or when secondary ray tracing is desired within a rasterization framework [S1].
+-*   **When Not to Use:** When maximum performance is required and camera models are simple pinhole cameras [S1].
++*   **When Not to Use:** When rendering with simple pinhole cameras where standard EWA splatting suffices and maximum performance is critical [S1].
+ 
+ ## Background

@@ -1,0 +1,278 @@
+--- v004.md
++++ v005.md
+@@ -4,134 +4,169 @@
+ 
+ ## Overview
+-This method extends the Digital Differential Analyzer (DDA) algorithm for regular grids to N-ary trees (specifically octrees) on GPU shaders using a small, fixed-size stack implemented via dynamically indexed local arrays [S1, unofficial]. It solves the problem of efficiently traversing sparse hierarchical structures by combining the branch-free, ordered traversal of DDA with explicit stack management for backtracking, avoiding the overhead of recursion or large dynamic heaps [S1, unofficial].
++This method extends the Digital Differential Analyzer (DDA) grid traversal algorithm to N-ary hierarchical trees (such as octrees) for GPU shader implementation [S1, unofficial]. It solves the problem of efficiently traversing sparse voxel structures by maintaining a small, fixed-size stack of DDA states, allowing the ray to descend into child nodes and ascend back to parent nodes without dynamic memory allocation [S1, unofficial]. It is distinguished from standard DDA by its ability to handle hierarchical boundaries and from other tree traversals by its reliance on a statically allocated mini-stack indexed by shader model 4.0 features [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), root node address, maximum tree depth $D_{max}$, grid resolution $N \times N \times N$ [G].
+-*   **Output:** Sequence of leaf nodes or voxels intersected by the ray, processed for volume rendering [G].
++*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, hierarchical tree structure (N-ary nodes), maximum tree depth $D_{max}$.
++*   **Output:** Sequence of leaf voxels visited by the ray, along with their entry and exit distances.
+ 
+ **Data Structures:**
+-1.  **Mini-Stack:** A fixed-size array `stack` of size $D_{max}$ (compile-time constant) [S1, unofficial]. Each entry `stack[level]` stores a tuple of DDA parameters and the address of the node in the indirection pool [S1, unofficial].
+-2.  **Stack Pointer:** An integer `sp` initialized to 0, tracking the current depth in the stack [S1, unofficial].
+-3.  **DDA State:** For the current grid level, stores `t_next` (distance to next grid plane), `t_delta` (distance between planes), `step` (direction $\{-1, 0, 1\}$), and `grid_pos` (current cell coordinates) [G].
+-
+-**DDA Formulas:**
+-For a grid of sub-nodes with local bounds $[0, N)$ and ray entry point $\mathbf{p}$:
+-$$
+-\text{step}_i = \begin{cases} 1 & \text{if } d_i > 0 \\ -1 & \text{if } d_i < 0 \\ 0 & \text{if } d_i = 0 \end{cases}, \quad i \in \{x, y, z\}
+-$$
+-$$
+-t_{next,i} = \begin{cases} \frac{1 - p_i}{d_i} & \text{if } d_i > 0 \\ \frac{0 - p_i}{d_i} & \text{if } d_i < 0 \\ \infty & \text{if } d_i = 0 \end{cases}, \quad t_{delta,i} = \begin{cases} \frac{1}{|d_i|} & \text{if } d_i \neq 0 \\ \infty & \text{if } d_i = 0 \end{cases}
+-$$
+-[Note: Standard DDA initialization derived from [AW87] as cited in [S1, unofficial].]
++*   **Mini-Stack:** A fixed-size array of length $D_{max}$ (compile-time constant). Each entry at index `level` stores:
++    *   `t_max[3]`: The distance to the next boundary for each axis ($x, y, z$) within the current node's local grid.
++    *   `t_delta[3]`: The distance increment per voxel step for each axis.
++    *   `step[3]`: The direction of index increment ($+1$ or $-1$) for each axis.
++    *   `node_addr`: The memory address or index of the current node in the indirection pool.
++    *   `current_index[3]`: The current voxel coordinates $(i, j, k)$ within the current node's local grid.
++*   **Stack Pointer:** An integer variable tracking the current depth in the stack (initially 0).
+ 
+ **Algorithm Steps:**
+-1.  **Descent Phase:** Initialize DDA for the root grid [S1, unofficial]. While the current node is not a leaf, determine the child octant using the shared principle [Child Selection](4134-octree-and-tree-traversal.md#child-selection) [G]. If the child is empty, skip it. If the child is an internal node, push the current DDA state and node address onto the stack, initialize DDA for the child's sub-grid, and update the current node address [S1, unofficial].
+-2.  **Leaf Processing:** Once a leaf node is reached, process the voxels within the leaf using fixed-step DDA or direct sampling [S1, unofficial][G].
+-3.  **Horizontal Advance:** Advance the DDA to the next intersected sub-node within the current grid level [S1, unofficial]. Process the sub-node (if internal, push and descend; if leaf, process; if empty, skip) [S1, unofficial].
+-4.  **Vertical Ascent:** When the grid boundary is reached, pop the DDA state and node address from the stack [S1, unofficial]. Resume the DDA from the stored state and continue the descent/DDA/ascent cycle until the outer boundary of the last node is reached or the ray exits the volume [S1, unofficial].
++1.  **Initialization:**
++    *   Determine the root node containing the ray origin.
++    *   Initialize the DDA parameters for the root node's grid based on the ray's intersection with the root's bounding box.
++    *   Push the root's DDA state onto the stack at index 0.
++    *   Set `stack_ptr = 0`.
++
++2.  **Descent Phase:**
++    *   While the current node is not a leaf:
++        *   Identify the child node intersected by the ray using the current DDA state.
++        *   Compute the DDA parameters for the child node's local grid. The entry distance into the child is the exit distance from the parent's current cell.
++        *   Update the stack entry at `stack_ptr` with the new DDA parameters and the child's node address.
++        *   Increment `stack_ptr`.
++        *   Repeat until a leaf node is reached.
++
++3.  **Leaf Processing:**
++    *   Once a leaf is reached, process the leaf voxels using the DDA loop (see below).
++    *   The DDA loop advances through the leaf's grid, sampling or shading each voxel.
++
++4.  **Horizontal Advance:**
++    *   Within the current node (leaf or internal), advance the DDA:
++        *   Find the axis $k$ with the minimum `t_max[k]`.
++        *   Record the voxel at `current_index` and the interval $[t_{entry}, t_{max}[k]]$.
++        *   Advance `current_index[k]` by `step[k]`.
++        *   Update `t_max[k] += t_delta[k]`.
++        *   Update `t_entry = t_max[k]` (previous value).
++        *   If the new `current_index` is within the node's bounds, continue processing the next voxel.
++        *   If the new `current_index` is outside the node's bounds, proceed to **Vertical Ascent**.
++
++5.  **Vertical Ascent:**
++    *   Decrement `stack_ptr`.
++    *   If `stack_ptr < 0`, the ray has exited the entire tree; terminate.
++    *   Retrieve the DDA state from the stack at the new `stack_ptr`.
++    *   Resume the **Horizontal Advance** loop from the point where the descent occurred, using the stored DDA parameters.
+ 
+ **Pseudocode:**
+ ```python
+-def dda_tree_traversal(ray_origin, ray_direction, root_addr, max_depth, grid_size):
+-    N = grid_size
+-    # Initialize DDA for root grid [0, N)^3 [G]
+-    t_next = [0.0, 0.0, 0.0]
+-    t_delta = [0.0, 0.0, 0.0]
+-    step = [0, 0, 0]
+-    grid_pos = [0, 0, 0]
+-    for i in range(3):
+-        if ray_direction[i] > 0:
+-            step[i] = 1
+-            t_next[i] = (1.0 - ray_origin[i]) / ray_direction[i]
+-        elif ray_direction[i] < 0:
+-            step[i] = -1
+-            t_next[i] = (0.0 - ray_origin[i]) / ray_direction[i]
++def dda_tree_traversal_mini_stack(ray_origin, ray_direction, root_node, max_depth):
++    # Initialize DDA for the root node
++    # This involves computing t_max, t_delta, step, and current_index for the root's bounding box
++    root_dda = compute_dda_parameters(ray_origin, ray_direction, root_node.bounds)
++    
++    # Stack initialization
++    stack = [None] * max_depth
++    stack[0] = {
++        't_max': root_dda['t_max'],
++        't_delta': root_dda['t_delta'],
++        'step': root_dda['step'],
++        'current_index': root_dda['current_index'],
++        'node_addr': root_node.address
++    }
++    stack_ptr = 0
++    
++    while True:
++        current_state = stack[stack_ptr]
++        node = get_node_from_address(current_state['node_addr'])
++        
++        # Check if we are at a leaf
++        if node.is_leaf:
++            # Process leaf voxels using DDA
++            while is_within_node_bounds(current_state['current_index'], node.bounds):
++                voxel_index = current_state['current_index']
++                t_entry = current_state['t_max'][get_min_axis(current_state['t_max'])]
++                t_exit = get_min_value(current_state['t_max'])
++                
++                # Sample or shade voxel at voxel_index from t_entry to t_exit
++                process_voxel(node, voxel_index, t_entry, t_exit)
++                
++                # Advance DDA
++                min_axis = get_min_axis(current_state['t_max'])
++                current_state['current_index'][min_axis] += current_state['step'][min_axis]
++                current_state['t_max'][min_axis] += current_state['t_delta'][min_axis]
++                
++                # Check if we have exited the current node
++                if not is_within_node_bounds(current_state['current_index'], node.bounds):
++                    break
++            else:
++                # If loop finished normally (exited bounds), proceed to ascent
++                pass
++            
++            # If we broke out of the loop due to exiting bounds, we need to ascend
++            # However, if the loop finished because we processed all voxels in the leaf 
++            # and the next step is still within bounds, we continue. 
++            # The break condition handles the ascent trigger.
++            if not is_within_node_bounds(current_state['current_index'], node.bounds):
++                # Ascent required
++                pass
++            else:
++                # Continue processing leaf
++                continue
++        
+         else:
+-            step[i] = 0
+-            t_next[i] = float('inf')
+-        t_delta[i] = abs(1.0 / ray_direction[i]) if ray_direction[i] != 0 else float('inf')
+-
+-    sp = 0
+-    stack = [None] * max_depth
+-    current_node_addr = root_addr
+-
+-    while True:
+-        # Determine child index from grid position
+-        child_idx = (grid_pos[0] << 2) | (grid_pos[1] << 1) | grid_pos[2]
+-
+-        # [G] Standard node lookup
+-        node_type = get_node_type(current_node_addr, child_idx)
+-
+-        if node_type == LEAF:
+-            # [G] Sample voxels within leaf cell
+-            sample_voxels(current_node_addr, child_idx, ray_origin, ray_direction)
+-        elif node_type == INTERNAL:
+-            # Descent: push current DDA state and node address [S1, unofficial]
+-            stack[sp] = (t_next[:], t_delta[:], step[:], grid_pos[:], current_node_addr)
+-            sp += 1
+-            # Initialize DDA for child's sub-grid [S1, unofficial]
+-            entry = [p / N for p in grid_pos]
+-            for i in range(3):
+-                if ray_direction[i] > 0:
+-                    step[i] = 1
+-                    t_next[i] = (1.0 - entry[i]) / ray_direction[i]
+-                elif ray_direction[i] < 0:
+-                    step[i] = -1
+-                    t_next[i] = (0.0 - entry[i]) / ray_direction[i]
+-                else:
+-                    step[i] = 0
+-                    t_next[i] = float('inf')
+-                t_delta[i] = abs(1.0 / ray_direction[i]) if ray_direction[i] != 0 else float('inf')
+-            current_node_addr = get_child_addr(current_node_addr, child_idx)
+-
+-        # Advance DDA to next grid cell [G]
+-        min_idx = 0
+-        if t_next[1] < t_next[min_idx]: min_idx = 1
+-        if t_next[2] < t_next[min_idx]: min_idx = 2
+-        t_next[min_idx] += t_delta[min_idx]
+-        grid_pos[min_idx] += step[min_idx]
+-
+-        # Check grid boundary [S1, unofficial]
+-        if grid_pos[0] < 0 or grid_pos[0] >= N or \
+-           grid_pos[1] < 0 or grid_pos[1] >= N or \
+-           grid_pos[2] < 0 or grid_pos[2] >= N:
+-            if sp == 0:
+-                break
+-            sp -= 1
+-            t_next, t_delta, step, grid_pos, current_node_addr = stack[sp]
+-            # Advance immediately to next cell in parent grid to avoid reprocessing [G]
+-            min_idx = 0
+-            if t_next[1] < t_next[min_idx]: min_idx = 1
+-            if t_next[2] < t_next[min_idx]: min_idx = 2
+-            t_next[min_idx] += t_delta[min_idx]
+-            grid_pos[min_idx] += step[min_idx]
++            # Internal node: Find child to descend into
++            min_axis = get_min_axis(current_state['t_max'])
++            t_exit = current_state['t_max'][min_axis]
++            
++            # Determine which child node is intersected
++            # This depends on the specific tree structure (e.g., octree child indexing)
++            child_node = get_child_node(node, current_state['current_index'], min_axis)
++            
++            if child_node is None:
++                # No child in this direction, must ascend
++                pass
++            else:
++                # Compute DDA for the child node
++                # The entry point into the child is t_exit from the parent
++                child_dda = compute_dda_parameters_for_child(
++                    ray_origin, ray_direction, child_node.bounds, t_exit, current_state
++                )
++                
++                # Push child state onto stack
++                stack_ptr += 1
++                stack[stack_ptr] = {
++                    't_max': child_dda['t_max'],
++                    't_delta': child_dda['t_delta'],
++                    'step': child_dda['step'],
++                    'current_index': child_dda['current_index'],
++                    'node_addr': child_node.address
++                }
++                continue
++        
++        # Ascent Phase
++        stack_ptr -= 1
++        if stack_ptr < 0:
++            break # Ray has exited the entire tree
+ ```
+ 
+ **Parameters:**
+-*   **Stack Size:** Fixed at compile time, equal to the maximum tree depth $D_{max}$ [S1, unofficial].
+-*   **Grid Resolution:** Not given in the sources [S1, unofficial].
++*   **Stack Size:** Fixed at compile time, equal to the maximum depth of the hierarchical structure [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Stack Overflow:** If the tree depth exceeds the compile-time stack size, the algorithm fails. Ensure $D_{max}$ covers the maximum possible depth [S1, unofficial].
+-*   **Zero Direction Components:** When $d_i = 0$, the ray is parallel to grid planes. The DDA sets $\text{step}_i = 0$ and $t_{next,i} = \infty$ to prevent infinite loops or division by zero [G].
+-*   **Precision Errors:** DDA step calculations can suffer from floating-point inaccuracies over long distances. Use robust DDA implementations or restart DDA at node boundaries [G].
++*   **Zero Direction Components:** If a ray direction component is zero, the corresponding `t_delta` should be set to infinity or handled to prevent division by zero, ensuring the ray never advances in that axis [S2, unofficial][S5].
++*   **Precision Errors:** Floating-point precision issues may cause the ray to miss small voxels or re-enter previously visited cells. Using epsilon offsets or robust geometric predicates is recommended [G].
++*   **Empty Nodes:** If a node has no children in the ray's path, the algorithm must correctly ascend without attempting to access non-existent child nodes [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Optimized Octree DDA Traversal for SSVDAGs](5259-optimized-octree-dda-traversal-for-ssvdags.md)
+-Extends this method to Symmetry-aware Sparse Voxel DAGs by maintaining a `mirror_mask` to handle mirrored child nodes without decompression. Choose when memory footprint is critical and symmetries are present.
++This method extends the DDA Tree Traversal with Mini-Stack to support Symmetry-aware Sparse Voxel DAGs (SSVDAGs), a compression format that exploits geometric symmetries to reduce memory footprint. It solves the problem of correctly traversing a DAG where child nodes and leaf voxels may be mirrored relative to their parent's coordinate system. The key distinction from standard octree DDA is the maintenance of a 3-bit `mirror_mask` that tracks reflection transformations, allowing the algorithm to map logical voxel indices to physical storage locations without decompressing the geometry.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(k)$ where $k$ is the number of leaf nodes or empty nodes intersected by the ray. DDA steps are $O(1)$ per grid cell [G].
+-*   **Memory Complexity:** $O(D_{max})$ for the mini-stack, where $D_{max}$ is the maximum tree depth [S1, unofficial].
+-*   **Performance:** Fast on GPUs due to minimal branching and small, fixed-size stack fitting in registers/local memory [S1, unofficial].
+-*   **Strengths:** Efficient for sparse volumes, low memory overhead, suitable for GPU shaders [S1, unofficial].
+-*   **Limitations:** Fixed stack size requires prior knowledge of max depth. Not suitable for extremely deep trees without dynamic stack allocation [S1, unofficial].
+-*   **When to Use:** GPU-based volume rendering with sparse octrees where memory bandwidth is a bottleneck [S1, unofficial].
+-*   **When Not to Use:** CPU-based rendering (recursion is simpler), or when tree depth is unknown and potentially very large [G].
++*   **Time Complexity:** $O(V + D)$, where $V$ is the number of voxels visited and $D$ is the depth of the tree [S1, unofficial]. The overhead of stack operations is constant per node transition.
++*   **Memory Complexity:** $O(D)$, where $D$ is the maximum tree depth, due to the fixed-size mini-stack [S1, unofficial].
++*   **Performance:** Highly efficient on GPUs due to the use of statically allocated arrays and minimal branching [S1, unofficial]. The fixed stack size avoids dynamic memory allocation overhead.
++*   **Strengths:** Fast traversal, low memory overhead, suitable for real-time rendering on GPUs [S1, unofficial].
++*   **Limitations:** Requires compile-time knowledge of maximum tree depth; less flexible for dynamically changing tree structures [S1, unofficial].
+ 
+ ## Background
+-Originated in the context of interactive exploration of procedural volumes, this method was designed to leverage Shader Model 4.0 features for dynamic indexing of local arrays in GPU shaders [S1, unofficial]. It extends the classic DDA algorithm [AW87] to hierarchical structures, addressing the limitations of previous implementations that were slow or inflexible for N-ary trees [S1, unofficial].
++The method was introduced in a thesis on interactive exploration of procedural volumes [S1, unofficial]. It extends the classic DDA algorithm by Amanatides and Woo [AW87] to N-ary trees, leveraging Shader Model 4.0 features for dynamic indexing of local arrays [S1, unofficial].
+ 
+ ## Sources

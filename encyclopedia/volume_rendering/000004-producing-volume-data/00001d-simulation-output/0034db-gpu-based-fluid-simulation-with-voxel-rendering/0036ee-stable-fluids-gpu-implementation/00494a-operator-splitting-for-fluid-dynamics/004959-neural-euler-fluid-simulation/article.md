@@ -1,0 +1,129 @@
+# Neural Euler Fluid Simulation
+Also called: Neural Pressure Projection Fluid Simulation
+## Overview
+Neural Euler Fluid Simulation replaces the traditional linear solver for the pressure projection step in incompressible fluid dynamics with a convolutional neural network (ConvNet) [S1, unofficial]. While standard methods solve a Poisson equation to enforce divergence-free velocity, this method regresses the velocity correction directly from the intermediate velocity and a volume field representation [S1, unofficial]. It is distinguished by its ability to handle free-surface flows (fluid and air) explicitly through the volume field input and by integrating differentiable rendering for inverse simulation [S1, unofficial].
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   Velocity field at previous time step: $u_{t-1}$ (3D vector field).
+*   Volume field at previous time step: $V_{t-1}$ (scalar field, range [0, 1]).
+*   Time step: $\Delta t$.
+*   Gravitational acceleration: $g$ (3D vector).
+*   Container boundary geometry (used to compute distance features).
+
+**Outputs:**
+*   Velocity field at current time step: $u_t$ (3D vector field).
+*   Volume field at current time step: $V_t$ (scalar field).
+
+### Data Structures
+*   **Grid:** The simulation domain is discretized into a 3D grid.
+*   **Velocity Field ($u$):** Stores 3-component vectors per grid cell.
+*   **Volume Field ($V$):** Stores a scalar per grid cell. $V=0$ indicates no fluid (air), $V=1.0$ indicates full fluid [S1, unofficial].
+*   **Feature Vector:** Each grid cell includes an additional input feature representing the signed distance to the container boundary [S1, unofficial].
+
+### Steps
+1.  **Advection of Volume:** Advect the volume field $V_{t-1}$ using the velocity field $u_{t-1}$ to obtain $V_t$ [S1, unofficial].
+    $$V_t = \text{advect}(u_{t-1}, \Delta t, V_{t-1})$$
+2.  **Advection of Velocity:** Advect the velocity field $u_{t-1}$ using itself to obtain the intermediate velocity $u^*$ [S1, unofficial]. The source specifies using the Maccormack method to reduce numerical viscosity [S1, unofficial].
+    $$u^* = \text{advect}(u_{t-1}, \Delta t, u_{t-1})$$
+3.  **External Force Application:** Apply gravity to $u^*$ to obtain $u^{**}$ [S1, unofficial].
+    $$u^{**} = u^* + g \Delta t$$
+4.  **Neural Pressure Projection:** Input $u^{**}$, $V_t$, and boundary distance features into the ConvNet $F_\Theta$ to regress the pressure-induced velocity difference $\Delta u$ [S1, unofficial].
+    $$\Delta u = F_\Theta(u^{**}, V_t, \text{distances})$$
+5.  **Velocity Update:** Add $\Delta u$ to $u^{**}$ to obtain the final divergence-free velocity $u_t$ [S1, unofficial].
+    $$u_t = u^{**} + \Delta u$$
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def neural_euler_step(u_prev, V_prev, dt, gravity, container_boundary, conv_net):
+    """
+    Performs one time step of Neural Euler Fluid Simulation.
+    
+    Args:
+        u_prev: 3D velocity field at t-1.
+        V_prev: 3D volume field at t-1 (0 to 1).
+        dt: Time step size.
+        gravity: 3D gravitational acceleration vector.
+        container_boundary: Geometry definition for distance computation.
+        conv_net: The trained ConvNet F_Theta.
+        
+    Returns:
+        u_curr: Updated velocity field at t.
+        V_curr: Updated volume field at t.
+    """
+    # Step 1: Advect volume field
+    # Uses semi-Lagrangian advection with Maccormack scheme to reduce numerical viscosity
+    V_curr = advect(u_prev, dt, V_prev)
+    
+    # Step 2: Advect velocity field
+    # Uses Maccormack scheme
+    u_star = advect(u_prev, dt, u_prev)
+    
+    # Step 3: Apply external force (gravity)
+    u_double_star = u_star + gravity * dt
+    
+    # Step 4: Compute boundary distance features for each grid cell
+    # This feature vector is augmented to the input of the ConvNet
+    distances = compute_distance_to_boundary(u_double_star, container_boundary)
+    
+    # Step 5: Neural Pressure Projection
+    # Input: intermediate velocity, volume field, boundary distances
+    # Output: velocity correction delta_u
+    delta_u = conv_net(u_double_star, V_curr, distances)
+    
+    # Step 6: Update velocity
+    u_curr = u_double_star + delta_u
+    
+    return u_curr, V_curr
+
+def advect(field, dt, velocity_field):
+    """
+    Performs advection using the Maccormack method.
+    Note: The specific implementation of Maccormack advection is detailed in Appendix A.3 of [S1, unofficial].
+    Standard Maccernack involves a forward pass and a backward pass interpolation.
+    """
+    # Forward step
+    field_forward = interpolate(field, velocity_field, dt)
+    
+    # Backward step
+    # Velocity field is also advected for the backward pass
+    velocity_forward = interpolate(velocity_field, velocity_field, dt)
+    field_backward = interpolate(field_forward, velocity_forward, -dt)
+    
+    # Average the results
+    return 0.5 * (field + field_backward)
+
+def interpolate(field, velocity_field, dt):
+    """
+    Backtraces particles and interpolates field values.
+    """
+    # For each grid cell, trace back along the velocity field
+    # x_back = x - velocity * dt
+    # Interpolate field value at x_back using trilinear interpolation
+    pass
+```
+
+### Parameters
+*   **Volume Field Range:** $[0, 1.0]$. $0$ represents no fluid, $1.0$ represents full fluid [S1, unofficial].
+*   **Time Step ($\Delta t$):** Not specified in the sources.
+*   **ConvNet Architecture:** Not specified in the sources (referenced as detailed in Appendix).
+
+### Edge Cases and Pitfalls
+*   **Volume Loss:** Incompressible simulation may suffer from volume loss. This is alleviated by applying regularization to the updated velocity field $u_t$ during training, specifically penalizing its divergence [S1, unofficial].
+*   **Free Surface Handling:** The explicit volume field $V_t$ is crucial for identifying the fluid-air interface, which aids both the pressure projection and the subsequent neural rendering [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The advection steps are $O(N)$ where $N$ is the number of grid cells. The ConvNet inference is also $O(N)$ but with a higher constant factor depending on the network depth and width. It avoids the iterative convergence time of traditional solvers (e.g., Conjugate Gradient), potentially offering faster per-step performance once trained [S1, unofficial].
+*   **Memory Complexity:** Requires storage for $u$, $V$, and intermediate fields. The ConvNet weights are stored in memory.
+*   **Strengths:** Handles free-surface flows naturally via the volume field; differentiable, allowing for inverse simulation (learning dynamics from visual data); avoids solving large linear systems [S1, unofficial].
+*   **Limitations:** Requires training data; generalization to unseen geometries or physical parameters may be limited compared to traditional solvers; precision depends on the ConvNet's capacity and training [S1, unofficial].
+*   **When to use:** When differentiable simulation is required for inverse rendering or parameter learning; when real-time performance is needed and a pre-trained model is acceptable [S1, unofficial].
+*   **When not to use:** When strict physical conservation laws must be guaranteed without regularization; when high precision in complex boundary interactions is required without extensive training data [S1, unofficial].
+
+## Background
+The method was introduced in the paper "Inferring Fluid Dynamics via Inverse Rendering" [S1, unofficial]. It builds on the operator splitting framework for fluid dynamics, specifically replacing the pressure projection step. The approach leverages the differentiability of neural networks to infer fluid dynamics from visual observations, bridging the gap between physical simulation and neural rendering [S1, unofficial].
+
+## Sources
+[S1] Inferring Fluid Dynamics via Inverse Rendering, https://doi.org/10.48550/arxiv.2304.04446, fetched 2026-10-26 (unofficial)

@@ -3,103 +3,111 @@
 Also called: atmospheric scattering
 
 ## Overview
-The Sky Radiance Model generates background illumination for ray-traced scenes by sampling a precomputed equirectangular sky texture and adding a direct sun disk contribution based on ray direction relative to the sun direction [S1, unofficial]. It solves the problem of providing sky lighting without performing real-time atmospheric integration per ray [S2, unofficial]. It differs from the [Sky Gradient](1262-sky-gradient.md) by using a high-resolution precomputed texture for complex atmospheric effects rather than a simple analytic gradient, and from the [Uniform Sphere Sampling](1669-uniform-sphere-sampling.md) by including directional sun intensity and atmospheric attenuation [S2, unofficial].
+The Sky Radiance Model provides the background illumination for a scene by sampling a precomputed sky view texture and adding a discrete sun disk contribution based on the ray direction relative to the sun direction [S1, unofficial]. It solves the problem of generating realistic sky lighting without performing expensive real-time atmospheric scattering integrals, instead relying on a baked LUT [S1, unofficial]. It differs from the [Sky Gradient](1262-sky-gradient.md) by using a high-resolution texture map rather than a simple parametric function, and from the [Uniform Sphere Sampling](1669-uniform-sphere-sampling.md) by including directional sun intensity and atmospheric color variation [S1, S2, unofficial].
 
 ## How it works
-**Inputs:**
-*   Ray direction $\mathbf{d}$ (normalized, in world space) [S1, unofficial].
-*   Sun direction $\mathbf{s}$ (normalized, in world space) [S1, unofficial].
-*   Sun color $\mathbf{C}_{sun}$ (RGB vector) [S1, unofficial].
-*   Sky view texture $\mathcal{T}_{sky}$ (equirectangular, width $W$, height $H$) [S1, unofficial].
-*   Solar angular radius $\theta_{sun}$ (in radians) [S1, unofficial].
+**Inputs and Outputs**
+*   **Input:** Ray direction $\mathbf{d}$ (normalized), sun direction $\mathbf{s}$ (normalized), sun color $\mathbf{C}_{sun}$, sky view texture $\mathcal{T}_{sky}$, sky view sampler state.
+*   **Output:** Radiance $\mathbf{L}_{sky}$ (RGB vector).
 
-**Outputs:**
-*   Sky radiance $\mathbf{L}_{sky}$ (RGB vector) [S1, unofficial].
+**Data Structures**
+*   **Sky View Texture ($\mathcal{T}_{sky}$):** A 2D texture of size $W \times H$ (default $400 \times 400$) storing RGB radiance values [S1, unofficial].
+*   **Sun Direction ($\mathbf{s}$):** A normalized 3D vector representing the sun's position in world space [S1, unofficial].
+*   **Sun Color ($\mathbf{C}_{sun}$):** A 4D vector `float4(100.f, 100.f, 100.f, 0.f)` where the RGB components define the sun's intensity and the W component is unused or zero [S1, unofficial].
 
-**Data Structures:**
-*   $\mathcal{T}_{sky}$: A 2D texture with dimensions $W \times H$. The sources specify $W=400$ and $H=400$ [S1, unofficial]. The texture stores precomputed single-scattered sunlight contributions from Rayleigh, Mie, and ozone scattering [S2, unofficial].
-*   $\mathbf{C}_{sun}$: Defined as `float4(100.f, 100.f, 100.f, 0.f)` in the source code [S1, unofficial].
+**Parameters**
+*   `VX_SKY_LUT_WIDTH`: 400 [S1, unofficial].
+*   `VX_SKY_LUT_HEIGHT`: 400 [S1, unofficial].
+*   `VX_SKY_SOLAR_RADIUS_RAD`: Angular radius of the sun disk in radians. Used to compute `cos_theta_max` [S1, unofficial].
+*   `VX_SKY_PLANET_RADIUS`: 6371e3f [S1, unofficial].
+*   `VX_SKY_PLANET_CENTER`: `float3(0.f, -VX_SKY_PLANET_RADIUS, 0.f)` [S1, unofficial].
+*   `VX_SKY_HEIGHT`: 100e3f [S1, unofficial].
+*   `VX_SKY_RAYLEIGH_HEIGHT`: `VX_SKY_HEIGHT * 0.08f` [S1, unofficial].
+*   `VX_SKY_MIE_HEIGHT`: `VX_SKY_HEIGHT * 0.012f` [S1, unofficial].
+*   `VX_SKY_RAYLEIGH_S`: `float3(5.802e-6f, 13.558e-6f, 33.100e-6f)` [S1, unofficial].
+*   `VX_SKY_MIE_S`: `float3(3.996e-6f, 3.996e-6f, 3.996e-6f)` [S1, unofficial].
+*   `VX_SKY_MIE_A`: `float3(4.40e-6f, 4.40e-6f, 4.40e-6f)` [S1, unofficial].
+*   `VX_SKY_OZONE_A`: `float3(0.650e-6f, 1.881e-6f, 0.085e-6f)` [S1, unofficial].
 
-**Parameters:**
-*   $W = 400$ (`VX_SKY_LUT_WIDTH`) [S1, unofficial].
-*   $H = 400$ (`VX_SKY_LUT_HEIGHT`) [S1, unofficial].
-*   $\theta_{sun}$: Solar angular radius. The code uses `cos(VX_SKY_SOLAR_RADIUS_RAD)` for comparison [S1, unofficial]. The exact value of `VX_SKY_SOLAR_RADIUS_RAD` is not given in the sources [S1, unofficial].
-*   $\mathbf{s}$: Sun direction vector [S1, unofficial].
+**Steps**
+1.  **UV Conversion:** Convert the ray direction $\mathbf{d}$ to 2D UV coordinates $(u, v)$ suitable for sampling the sky view texture. This is done via a helper function `sky_view_ray_dir_to_uv` [S1, unofficial]. The exact mapping is not specified in the sources, but it typically involves projecting the sphere onto a 2D plane (e.g., equirectangular or cube map face) [S1, unofficial].
+2.  **Texture Sampling:** Sample the sky view texture at $(u, v)$ using a linear sampler at mip level 0 to obtain the base sky radiance $\mathbf{L}_{base}$ [S1, unofficial].
+    $$ \mathbf{L}_{base} = \mathcal{T}_{sky}.SampleLevel(\mathbf{d}_{uv}, 0.0).rgb $$
+3.  **Sun Disk Check:** Calculate the dot product between the ray direction $\mathbf{d}$ and the sun direction $\mathbf{s}$ [S1, unofficial]. Compute the cosine of the solar radius:
+    $$ \cos \theta_{max} = \cos(\text{VX\_SKY\_SOLAR\_RADIUS\_RAD}) $$
+4.  **Sun Contribution:** If $\mathbf{d} \cdot \mathbf{s} \ge \cos \theta_{max}$, the ray intersects the sun disk [S1, unofficial]. Add the sun contribution to the radiance:
+    $$ \mathbf{L}_{sun} = \frac{\mathbf{C}_{sun}.rgb}{\sqrt{1.0 - \cos \theta_{max}}} $$
+    $$ \mathbf{L}_{sky} = \mathbf{L}_{base} + \mathbf{L}_{sun} $$
+    If the condition is not met, $\mathbf{L}_{sky} = \mathbf{L}_{base}$ [S1, unofficial].
 
-**Steps:**
-1.  **UV Conversion**: Convert the ray direction $\mathbf{d} = (d_x, d_y, d_z)$ to equirectangular UV coordinates $(u, v)$ [S1, unofficial].
-    *   $u = \frac{\arctan2(d_z, d_x)}{2\pi} + 0.5$ [G]
-    *   $v = \frac{\arcsin(d_y)}{\pi} + 0.5$ [G]
-    *   Clamp $u$ to $[0, 1]$ and $v$ to $[0, 1]$ to handle wrap-around and poles [G].
-2.  **Texture Sample**: Sample the sky texture at $(u, v)$ using a sampler with mip level 0 [S1, unofficial].
-    *   $\mathbf{L}_{base} = \mathcal{T}_{sky}.sample(u, v)$ [S1, unofficial]
-3.  **Sun Disk Check**: Calculate the dot product between the ray direction and the sun direction [S1, unofficial].
-    *   $\cos \theta = \mathbf{d} \cdot \mathbf{s}$ [S1, unofficial]
-    *   $\cos \theta_{max} = \cos(\theta_{sun})$ [S1, unofficial]
-4.  **Sun Contribution**: If $\cos \theta \ge \cos \theta_{max}$, the ray intersects the sun disk. Add the sun radiance using the source formula [S1, unofficial].
-    *   If $\cos \theta \ge \cos \theta_{max}$:
-        $$ \mathbf{L}_{sky} = \mathbf{L}_{base} + \frac{\mathbf{C}_{sun}}{\sqrt{1.0 - \cos \theta_{max}}} $$
-    *   Else:
-        $$ \mathbf{L}_{sky} = \mathbf{L}_{base} $$
-
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def sample_texture(tex, u, v):
-    # Standard texture sampling at normalized coordinates [G]
-    return tex.get_rgb(u, v)
-
-def compute_sky_radiance(ray_dir, sun_dir, sun_color, sky_texture, solar_radius_rad):
-    # 1. Convert ray direction to equirectangular UV
-    u = (math.atan2(ray_dir[2], ray_dir[0]) / (2.0 * math.pi)) + 0.5
-    v = (math.asin(ray_dir[1]) / math.pi) + 0.5
+def compute_sky_radiance(ray_dir: Vec3, sun_dir: Vec3, sun_color: Vec3, 
+                         sky_tex: Texture2D, solar_radius_rad: float) -> Vec3:
+    """
+    Computes sky radiance for a given ray direction.
     
-    # Clamp to texture bounds
-    u = max(0.0, min(1.0, u))
-    v = max(0.0, min(1.0, v))
+    Args:
+        ray_dir: Normalized ray direction vector.
+        sun_dir: Normalized sun direction vector.
+        sun_color: RGB vector for sun intensity.
+        sky_tex: Precomputed sky view texture (400x400).
+        solar_radius_rad: Angular radius of the sun in radians.
+        
+    Returns:
+        Radiance vector (RGB).
+    """
+    # Step 1: Convert ray direction to UV coordinates
+    # Note: Exact mapping logic for sky_view_ray_dir_to_uv is not provided in sources [S1, unofficial]
+    # Assuming a standard equirectangular or similar projection is handled by this helper
+    uv = sky_view_ray_dir_to_uv(ray_dir)
     
-    # 2. Sample precomputed sky texture
-    base_radiance = sample_texture(sky_texture, u, v)
+    # Step 2: Sample sky texture
+    # Using linear filtering at mip level 0
+    base_radiance = sky_tex.sample_level(uv, 0.0).rgb
     
-    # 3. Check for sun disk intersection
-    cos_theta = ray_dir[0]*sun_dir[0] + ray_dir[1]*sun_dir[1] + ray_dir[2]*sun_dir[2]
-    cos_theta_max = math.cos(solar_radius_rad)
+    # Step 3: Check sun disk intersection
+    cos_theta_max = cos(solar_radius_rad)
+    dot_product = dot(ray_dir, sun_dir)
     
-    # 4. Add sun contribution if inside disk
-    if cos_theta >= cos_theta_max:
-        sun_factor = 1.0 / math.sqrt(1.0 - cos_theta_max)
-        return (base_radiance[0] + sun_color[0]*sun_factor,
-                base_radiance[1] + sun_color[1]*sun_factor,
-                base_radiance[2] + sun_color[2]*sun_factor)
-    return base_radiance
+    # Step 4: Add sun contribution if ray hits sun disk
+    if dot_product >= cos_theta_max:
+        # Sun contribution formula from source [S1, unofficial]
+        # sun_color is assumed to be the RGB component of the float4 parameter
+        sun_contribution = sun_color / sqrt(1.0 - cos_theta_max)
+        final_radiance = base_radiance + sun_contribution
+    else:
+        final_radiance = base_radiance
+        
+    return final_radiance
 ```
 
-**Edge Cases:**
-*   **Ray Direction at Poles**: $\arcsin(\pm 1)$ is well-defined, but $u$ becomes ambiguous. Clamping handles this [G].
-*   **Sun Direction Alignment**: If $\mathbf{d} = \mathbf{s}$, $\cos \theta = 1$, which is $\ge \cos \theta_{max}$, correctly triggering the sun contribution [G].
-*   **Precision**: Near the sun disk boundary, floating-point precision in the dot product may cause flickering. Using a small epsilon or smoothstep for the boundary check is recommended [G].
+**Edge Cases and Pitfalls**
+*   **Precision:** The sun disk check uses a strict inequality `>=`. Rays exactly on the boundary may exhibit flickering if precision varies between passes [S1, unofficial].
+*   **Sun Radius:** The term $\sqrt{1.0 - \cos \theta_{max}}$ approaches zero as the sun radius approaches zero, potentially causing division by zero or numerical instability if `VX_SKY_SOLAR_RADIUS_RAD` is too small [S1, unofficial].
+*   **UV Mapping:** The function `sky_view_ray_dir_to_uv` is not defined in the sources. Implementers must ensure the UV mapping matches the coordinate system used to generate the sky view texture [S1, unofficial].
 
 ## Subtopics
 
-### Sky Atmosphere
-An Earth-like atmosphere model that bakes single-scattered sunlight (Rayleigh, Mie, and ozone scattering) into an equirectangular map sampled by `environment_light` [S2, unofficial]. It attenuates the sun's irradiance by the air along its direction, causing low suns to appear redder [S2, unofficial]. It is chosen when physically accurate atmospheric scattering is required [S2, unofficial].
+### [Sky Atmosphere](4899-sky-atmosphere.md)
+An Earth-like atmosphere model that bakes single-scattered sunlight (Rayleigh, Mie, and ozone scattering) into an equirectangular map sampled by `environment_light`, with sun irradiance attenuated by air along its direction [4899-sky-atmosphere.md]. It is chosen when physically accurate atmospheric scattering effects are required, as opposed to the simpler texture lookup of the base Sky Radiance Model [4899-sky-atmosphere.md].
 
 ### Uniform Sky
-A constant environment lighting term baked into a uniform sky parameter [S2, unofficial]. It is chosen for simple scenes where atmospheric effects are not needed [S2, unofficial].
+A constant environment lighting term baked into a uniform sky parameter [S2, unofficial]. It is chosen for simplicity and performance when directional sky variation is not needed, serving as a fallback or base ambient term [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(1)$ per ray. The cost is dominated by the trigonometric functions for UV conversion and a single texture lookup [G].
-*   **Memory Complexity**: $O(W \times H)$ for the sky texture. With $W=H=400$, this is a small fixed memory footprint [G].
-*   **Performance**: Extremely fast, suitable for real-time rendering and path tracing [G].
-*   **Limitations**: The sky is static and precomputed; it does not adapt to dynamic atmospheric conditions or time of day without regenerating the texture [S2, unofficial].
-*   **When to use**: When a realistic sky background is needed for ray tracing and the atmosphere can be precomputed [G].
-*   **When not to use**: For dynamic weather systems or when the sun position changes frequently and requires real-time atmospheric integration [G].
+*   **Time Complexity:** $O(1)$ per ray, dominated by texture sampling and a few arithmetic operations [S1, unofficial].
+*   **Memory Complexity:** $O(W \times H)$ for the sky view texture, where $W=400$ and $H=400$ by default, resulting in a small memory footprint [S1, unofficial].
+*   **Performance:** Very fast, suitable for real-time rendering [S1, unofficial].
+*   **Strengths:** Simple to implement, low memory usage, provides realistic sky appearance with minimal computational cost [S1, unofficial].
+*   **Limitations:** Relies on a precomputed texture, which may not adapt dynamically to changes in sun position or atmospheric conditions without regeneration [S1, unofficial]. The sun disk is a simple geometric check, not a physically accurate integration [S1, unofficial].
+*   **When to Use:** Real-time applications where performance is critical and dynamic sky changes are not required [S1, unofficial].
+*   **When Not to Use:** Offline rendering requiring high-fidelity atmospheric scattering or dynamic sky changes [S1, unofficial].
 
 ## Background
-The Sky Radiance Model is implemented in the VXRay renderer [S1, unofficial]. It was designed to provide sky lighting for voxel-based scenes by baking atmospheric scattering effects into a texture for efficiency [S1, unofficial]. The concept of baking single-scattered sunlight into equirectangular maps for Earth-like atmospheres is also present in the Milestone 13 update of MagicaVoxel, which added Rayleigh, Mie, and ozone scattering [S2, unofficial].
+The Sky Radiance Model is part of the VXRay renderer, a voxel-based path tracer [S1, unofficial]. It was developed as part of the Milestone 13 features for MagicaVoxel look, which included sun/sky support, bloom, and style voxel rendering [S2, unofficial]. The model uses precomputed sky view textures to approximate atmospheric scattering, avoiding the need for real-time integration of the radiative transfer equation [S1, unofficial].
 
 ## Sources
 [S1] Nelarius/vxray, https://github.com/Nelarius/vxray, fetched 2026-10-24 (unofficial)
