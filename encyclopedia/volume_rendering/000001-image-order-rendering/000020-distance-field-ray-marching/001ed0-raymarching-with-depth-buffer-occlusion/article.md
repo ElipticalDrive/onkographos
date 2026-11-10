@@ -6,14 +6,14 @@ Also called: Depth-buffered Raymarching, Raymarching with Mesh Interaction, Z-Bu
 Raymarching with Depth Buffer Occlusion is a technique that allows raymarched Signed Distance Field (SDF) objects to correctly occlude and be occluded by standard mesh-based geometry [S2, unofficial]. It solves the problem where raymarched objects typically float on top of all other scene elements because the raymarching loop ignores the depth of pre-rendered meshes [S2, unofficial]. By querying the scene's depth buffer to determine the distance to the nearest mesh surface, the raymarcher can terminate early if the mesh is closer, ensuring proper visual layering [S2, unofficial].
 
 ## How it works
-The method integrates the standard sphere tracing loop [Parent](21-distance-field-ray-marching.md) with a depth buffer lookup. The core modification is calculating the maximum allowable travel distance for each ray based on the nearest mesh surface and enforcing this limit within the marching loop [S2, unofficial].
+The method integrates the standard sphere tracing loop [Parent](21-distance-field-ray-marching.md) with a depth buffer lookup [S2, unofficial]. The core modification is calculating the maximum allowable travel distance for each ray based on the nearest mesh surface and enforcing this limit within the marching loop [S2, unofficial].
 
 ### Inputs and Outputs
 *   **Inputs**:
     *   Ray origin $ro$ (camera position in world space) [S2, unofficial].
     *   Ray direction $rd$ (normalized direction in world space) [S2, unofficial].
     *   UV coordinates $uv$ for depth sampling [S2, unofficial].
-    *   SDF scene definition (implicit function) [Parent, S2, unofficial].
+    *   SDF scene definition (implicit function) [Parent].
     *   Scene depth texture `_CameraDepthTexture` [S2, unofficial].
 *   **Outputs**:
     *   Final pixel color, blending the raymarched SDF result with the background (mesh) color [S2, unofficial].
@@ -35,15 +35,15 @@ The method integrates the standard sphere tracing loop [Parent](21-distance-fiel
 2.  **Fragment Shader Depth Sampling**:
     *   Sample the depth buffer texture at the current UV coordinates to get the depth value [S2, unofficial].
     *   Convert the sampled depth to linear eyespace depth $d$ using a function like `LinearEyeDepth()` [S2, unofficial]. This $d$ represents the distance along the z-axis from the camera plane to the mesh surface [S2, unofficial].
-    *   Calculate the true Euclidean distance $s$ from the camera origin to the mesh surface along the ray. This leverages similar triangles, using the length of the z-normalized ray vector $r_n$ (passed as `i.ray.xyz`):
+    *   Calculate the true Euclidean distance $s$ from the camera origin to the mesh surface along the ray [S2, unofficial]. This leverages similar triangles, using the length of the z-normalized ray vector $r_n$ (passed as `i.ray.xyz`):
         $$ s = d \times |r_n| $$
         Where $|r_n|$ is the magnitude of the vector $r_n$ computed in step 1 [S2, unofficial].
 
 3.  **Raymarching Loop**:
     *   Initialize current distance traveled $t = 0$ [S2, unofficial].
     *   Iterate up to `maxstep` (e.g., 64) [S2, unofficial]:
-        *   **Occlusion Check**: If $t \ge s$, the ray has reached or passed the mesh surface. Terminate the loop and return a transparent color to allow the mesh to show through [S2, unofficial].
-        *   **SDF Evaluation**: Evaluate the SDF at the current position $p = ro + t \cdot \hat{rd}$ (where $\hat{rd}$ is the normalized world-space ray direction) [Parent, S2, unofficial].
+        *   **Occlusion Check**: If $t \ge s$, the ray has reached or passed the mesh surface [S2, unofficial]. Terminate the loop and return a transparent color to allow the mesh to show through [S2, unofficial].
+        *   **SDF Evaluation**: Evaluate the SDF at the current position $p = ro + t \cdot \hat{rd}$ (where $\hat{rd}$ is the normalized world-space ray direction) [Parent].
         *   **Hit Check**: If the SDF value $d_{sdf} \le \text{HIT\_THRESHOLD}$, a hit is found [Parent]. Compute shading and return the color.
         *   **Step**: Advance $t$ by $d_{sdf}$ [Parent].
 
@@ -144,11 +144,11 @@ def shade(p, normal, rd):
 This variant addresses the specific case of scale-invariant integral surfaces (like skeleton-based sphere-cones) to guarantee correct occlusion in the depth buffer [S3]. It computes a scaling factor for the radii of sphere-cone primitives to ensure the SDF does not penetrate the occluding depth buffer [S3]. The worst-case configuration for this scaling is identified as two segment primitives aligned with the viewing direction $-\mathbf{v}$, both having radius $\tau$ at point $q$ [S3]. Due to surface scale invariance, the scaling factor is computed numerically for a unit radius case, representing the distance from $q$ to the isosurface in direction $\mathbf{v}$ [S3]. This worst-case configuration is independent of the actual skeleton layout, requiring no additional skeleton processing [S3].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of raymarch steps. The depth buffer lookup is $O(1)$ per pixel.
-*   **Memory Complexity**: $O(W \cdot H)$ for the depth buffer texture, where $W$ and $H$ are the screen dimensions.
-*   **Performance**: Adds minimal overhead (one depth texture sample and a few arithmetic operations) to the raymarching loop [S2, unofficial]. The primary cost remains the SDF evaluations.
+*   **Time Complexity**: $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of raymarch steps [G]. The depth buffer lookup is $O(1)$ per pixel [G].
+*   **Memory Complexity**: $O(W \cdot H)$ for the depth buffer texture, where $W$ and $H$ are the screen dimensions [G].
+*   **Performance**: Adds minimal overhead (one depth texture sample and a few arithmetic operations) to the raymarching loop [S2, unofficial]. The primary cost remains the SDF evaluations [G].
 *   **Strengths**: Enables seamless integration of SDF objects with standard rasterized meshes without complex hybrid rendering pipelines [S2, unofficial]. Simple to implement in shader languages like HLSL/GLSL [S2, unofficial].
-*   **Limitations**: Only works for opaque meshes that write to the depth buffer. Does not handle transparent meshes or SDF objects occluding each other (unless the SDF objects are also rendered to a depth buffer first, which is not described in the primary source). Precision issues may arise with very large or very small scene scales [G].
+*   **Limitations**: Only works for opaque meshes that write to the depth buffer. Does not handle transparent meshes or SDF objects occluding each other (unless the SDF objects are also rendered to a depth buffer first, which is not described in the primary source) [G].
 
 ## Background
 The technique addresses a common issue in real-time raymarching where SDF objects fail to interact with the rest of the scene's geometry [S2, unofficial]. It leverages standard graphics API features (depth buffers) to solve this interaction problem [S2, unofficial]. The radii scaling variant for sphere-cones was introduced in research on fast ray tracing of scale-invariant integral surfaces [S3].

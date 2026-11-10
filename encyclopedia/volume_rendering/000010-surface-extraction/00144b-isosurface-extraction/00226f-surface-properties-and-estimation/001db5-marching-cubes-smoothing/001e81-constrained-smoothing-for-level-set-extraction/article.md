@@ -1,69 +1,76 @@
 # Constrained Smoothing for Level-Set Extraction
-
 Also called: Lempitsky CVPR10 smoothing
 
 ## Overview
-Constrained smoothing is a method to smooth the 0.5 level-set of binary volumes to improve mesh quality while preserving fine details, implemented via constrained optimization of a discrete Laplacian energy [S1, unofficial]. It sets itself apart from Gaussian smoothing by enforcing hard constraints on the signed distance function to prevent the level-set from crossing its original position, thereby preserving thin structures that Gaussian methods often erode [S1, unofficial].
+Constrained smoothing is a method to smooth the 0.5 level-set of binary volumes to improve mesh quality while preserving fine details, implemented via constrained optimization of a discrete Laplacian energy [S1, unofficial]. Unlike Gaussian smoothing, which applies a fixed kernel and can erode thin structures, this method preserves fine details and structures by enforcing hard constraints on the signed distance function near the surface [S1, unofficial]. It is recommended for arrays smaller than (500, 500, 500) due to higher memory and computational costs compared to Gaussian smoothing [S1, unofficial].
 
 ## How it works
-**Inputs:** A binary volume array `binary_arr` (values 0 or 1), and optional parameters `band_radius` (default 4), `max_iters` (default 500), and `rel_tol` (default 1e-6) [S1, unofficial].
-**Outputs:** A smoothed signed distance function (SDF) array `distance` [S1, unofficial].
+**Inputs:**
+- `binary_array`: A 2D or 3D boolean or integer array representing the volume.
+- `band_radius`: Radius of the band around the level-set for optimization variables. Default: 4.
+- `max_iters`: Maximum number of Jacobi iterations. Default: 500.
+- `rel_tol`: Relative tolerance for stopping criterion. Default: 1e-6.
+- `weight`: Relaxation weight for Jacobi iteration. Default: 0.5.
+
+**Outputs:**
+- `smoothed_distance`: A float array of the same shape as `binary_array`, representing the smoothed signed distance function.
 
 **Data Structures:**
-1. **Distance Array:** A dense array of floats, same shape as `binary_arr`, storing the signed Euclidean distance to the 0.5 level-set [S1, unofficial].
-2. **Band Mask:** A boolean array identifying cells where `|distance| <= band_radius` [S1, unofficial].
-3. **Filter Matrix (`filterq`):** A sparse matrix representing the discrete Laplacian operator restricted to the band variables [S1, unofficial].
-4. **Bounds Arrays:** `lower_bound` and `upper_bound` arrays, same shape as the band variables, enforcing the hard constraints [S1, unofficial].
+- `distance`: Float array of shape `binary_array.shape`.
+- `band`: Boolean mask or list of indices identifying cells where `abs(distance) <= band_radius`.
+- `filterq`: Sparse matrix representing the discrete Laplacian energy operator on the band variables.
+- `x`: Vector of optimization variables corresponding to the band cells.
+- `lower_bound`, `upper_bound`: Vectors of constraints for `x`.
 
 **Steps:**
 
 1. **Compute Signed Distance Function (SDF):**
-   Calculate the Euclidean distance transform `dist_func` for the binary array [S1, unofficial]. The SDF is computed as:
+   Compute the Euclidean distance transform of the binary array. Let `dist_func(arr)` be the distance transform of `arr`.
    $$
-   \text{distance}[v] = \begin{cases} 
-   \text{dist\_func}(\text{binary\_arr}[v]) - 0.5 & \text{if } \text{binary\_arr}[v] = 1 \\
-   -\text{dist\_func}(1 - \text{binary\_arr}[v]) + 0.5 & \text{if } \text{binary\_arr}[v] = 0 
+   \text{distance} = \begin{cases} 
+   \text{dist\_func}(\text{binary\_array}) - 0.5 & \text{if } \text{binary\_array} \\
+   -\text{dist\_func}(1 - \text{binary\_array}) + 0.5 & \text{otherwise}
    \end{cases}
    $$
    [S1, unofficial]
 
 2. **Define Band and Border:**
-   Identify the optimization band as cells where `|distance| <= band_radius` [S1, unofficial]. The border is implicitly defined by the constraint logic where `|distance| < 1` [S1, unofficial].
+   Identify the 'band' as cells where `abs(distance) <= band_radius`. The 'border' is implicitly handled by the constraints where `abs(distance) < 1`. [S1, unofficial]
 
-3. **Build Filter Matrix:**
-   Construct the sparse filter matrix `filterq` for the band variables [S1, unofficial].
-   * Let `variable_indices` be a grid mapping each band cell to a unique integer index `0..N-1` [S1, unofficial].
-   * Pad `variable_indices` with -1 to handle boundary checks [S1, unofficial].
-   * For each band cell `c` at coordinates `(i,j,k)` with index `count`:
-     * Initialize diagonal entry `filterq[3*count, count] = -2` (for 3D; -2 for 2D) [S1, unofficial].
-     * For each of the 6 (3D) or 4 (2D) neighbors:
-       * If the neighbor is in the band (index `>= 0`), set `filterq[row, neighbor_index] = 1` [S1, unofficial].
-       * If the neighbor is out of bounds or not in the band, increment `filterq[row, count]` by 1 [S1, unofficial].
-     * Repeat for the 3 (or 2) directional components per cell [S1, unofficial].
-   * Convert to CSR format and compute `filterq = filterq.T.dot(filterq)` [S1, unofficial].
+3. **Build Filter Matrix (`filterq`):**
+   Construct a sparse matrix `filterq` representing the discrete Laplacian energy on the band variables.
+   - Let `variable_indices` be a grid of indices mapping each band cell to a unique integer `count`.
+   - For each band cell `(i, j, k)` with index `count`:
+     - Initialize diagonal entries for each axis (x, y, z) to -2.
+     - For each neighbor in the 6-connected neighborhood (or 4-connected for 2D):
+       - If the neighbor is in the band, set the corresponding off-diagonal entry to 1.
+       - If the neighbor is out of bounds or not in the band, add 1 to the diagonal entry for that axis.
+   - The final `filterq` is computed as $Q^T Q$, where $Q$ is the matrix constructed from these neighbor relationships. [S1, unofficial]
 
-4. **Initialize Variables:**
-   Set the initial optimization vector `x` to the SDF values of the band cells: `x = distance[band]` [S1, unofficial].
+4. **Initialize Optimization Variables:**
+   Initialize `x` with the distance values for the band cells:
+   $$ x = \text{distance}[\text{band}] $$
+   [S1, unofficial]
 
 5. **Set Hard Constraints:**
-   Compute `upper_bound` and `lower_bound` for each cell in the band [S1, unofficial]:
-   * `upper_bound[v] = x[v]` if `x[v] < 0`, else `inf` [S1, unofficial]. If `|upper_bound[v]| < 1`, clamp to 0.
-   * `lower_bound[v] = x[v]` if `x[v] > 0`, else `-inf` [S1, unofficial]. If `|lower_bound[v]| < 1`, clamp to 0.
-   This ensures the smoothed distance does not cross zero within the band, preserving the topology [S1, unofficial].
+   Define `upper_bound` and `lower_bound` for `x` to preserve the sign and magnitude near the surface:
+   - `upper_bound[i] = x[i]` if `x[i] < 0`, else `inf`. If `abs(upper_bound[i]) < 1`, clamp to 0.
+   - `lower_bound[i] = x[i]` if `x[i] > 0`, else `-inf`. If `abs(lower_bound[i]) < 1`, clamp to 0.
+   [S1, unofficial]
 
 6. **Solve Constrained Minimization:**
-   Minimize the energy $E = \frac{1}{2} x^T \text{filterq} x$ using Jacobi iteration with relaxation weight 0.5 [S1, unofficial].
-   * Precompute Jacobi preconditioner: `jacobi_d = 1.0 / filterq.diagonal()`, `jacobi_r = filterq` with diagonal zeroed out [S1, unofficial].
-   * Iterate up to `max_iters`:
-     1. Compute residual update: `x_1 = - jacobi_d * (jacobi_r.dot(x))` [S1, unofficial].
-     2. Apply relaxation: `x = 0.5 * x_1 + 0.5 * x` [S1, unofficial].
-     3. Apply constraints: `x = np.maximum(x, lower_bound)`; `x = np.minimum(x, upper_bound)` [S1, unofficial].
-     4. Check stopping criterion every 10 iterations:
-        * Calculate `energy_now = 0.5 * x.dot(filterq.dot(x))` [S1, unofficial].
-        * If `(energy_before - energy_now) / energy_before < 1 - (1 - rel_tol)^{10}`, break [S1, unofficial].
+   Minimize the energy $E = \frac{1}{2} x^T \text{filterq} x$ using Jacobi iteration with relaxation.
+   - Decompose `filterq` into diagonal `jacobi_d` and off-diagonal `jacobi_r`.
+   - Iterate up to `max_iters`:
+     $$ x_1 = - \text{jacobi\_d} \cdot (\text{jacobi\_r} \cdot x) $$
+     $$ x = \text{weight} \cdot x_1 + (1 - \text{weight}) \cdot x $$
+     Apply constraints:
+     $$ x = \max(x, \text{lower\_bound}) $$
+     $$ x = \min(x, \text{upper\_bound}) $$
+   - Check stopping criterion every 10 iterations: if relative energy improvement is less than `cum_rel_tol = 1 - (1 - rel_tol)^10`, break. [S1, unofficial]
 
-7. **Update Distance Array:**
-   Write the optimized `x` values back to the `distance` array at the band positions [S1, unofficial].
+7. **Update Distance Field:**
+   Write the optimized `x` values back to the `distance` array at the band positions.
 
 **Pseudocode:**
 
@@ -71,90 +78,197 @@ Constrained smoothing is a method to smooth the 0.5 level-set of binary volumes 
 
 ```python
 import numpy as np
-from scipy import sparse, ndimage
+from scipy import ndimage, sparse
 
-def constrained_smoothing(binary_arr, band_radius=4, max_iters=500, rel_tol=1e-6):
+def compute_sdf(binary_array):
+    """Compute signed distance function."""
+    # dist_func is assumed to be a function that computes Euclidean distance transform
+    # For implementation, use scipy.ndimage.distance_transform_edt
+    dist_pos = ndimage.distance_transform_edt(binary_array)
+    dist_neg = ndimage.distance_transform_edt(~binary_array)
+    
+    distance = np.where(
+        binary_array,
+        dist_pos - 0.5,
+        -dist_neg + 0.5
+    )
+    return distance
+
+def build_filterq(variable_indices):
+    """Build the sparse filterq matrix for the given variables."""
+    ndim = variable_indices.ndim
+    if ndim == 2:
+        return _buildq2d(variable_indices)
+    elif ndim == 3:
+        return _buildq3d(variable_indices)
+    else:
+        raise ValueError("Only 2D and 3D arrays are supported")
+
+def _buildq3d(variable_indices):
+    num_variables = variable_indices.max() + 1
+    filterq = sparse.lil_matrix((3 * num_variables, num_variables))
+    
+    # Pad variable_indices to simplify out-of-bounds accesses
+    variable_indices_padded = np.pad(
+        variable_indices,
+        [(0, 1), (0, 1), (0, 1)],
+        mode='constant',
+        constant_values=-1
+    )
+    
+    coords = np.nonzero(variable_indices_padded >= 0)
+    for count, (i, j, k) in enumerate(zip(*coords)):
+        assert variable_indices_padded[i, j, k] == count
+        
+        # X-axis neighbors
+        filterq[3 * count, count] = -2
+        neighbor = variable_indices_padded[i - 1, j, k]
+        if neighbor >= 0:
+            filterq[3 * count, neighbor] = 1
+        else:
+            filterq[3 * count, count] += 1
+            
+        neighbor = variable_indices_padded[i + 1, j, k]
+        if neighbor >= 0:
+            filterq[3 * count, neighbor] = 1
+        else:
+            filterq[3 * count, count] += 1
+            
+        # Y-axis neighbors
+        filterq[3 * count + 1, count] = -2
+        neighbor = variable_indices_padded[i, j - 1, k]
+        if neighbor >= 0:
+            filterq[3 * count + 1, neighbor] = 1
+        else:
+            filterq[3 * count + 1, count] += 1
+            
+        neighbor = variable_indices_padded[i, j + 1, k]
+        if neighbor >= 0:
+            filterq[3 * count + 1, neighbor] = 1
+        else:
+            filterq[3 * count + 1, count] += 1
+            
+        # Z-axis neighbors
+        filterq[3 * count + 2, count] = -2
+        neighbor = variable_indices_padded[i, j, k - 1]
+        if neighbor >= 0:
+            filterq[3 * count + 2, neighbor] = 1
+        else:
+            filterq[3 * count + 2, count] += 1
+            
+        neighbor = variable_indices_padded[i, j, k + 1]
+        if neighbor >= 0:
+            filterq[3 * count + 2, neighbor] = 1
+        else:
+            filterq[3 * count + 2, count] += 1
+            
+    filterq = filterq.tocsr()
+    return filterq.T.dot(filterq)
+
+def _buildq2d(variable_indices):
+    num_variables = variable_indices.max() + 1
+    filterq = sparse.lil_matrix((2 * num_variables, num_variables))
+    
+    variable_indices_padded = np.pad(
+        variable_indices,
+        [(0, 1), (0, 1)],
+        mode='constant',
+        constant_values=-1
+    )
+    
+    coords = np.nonzero(variable_indices_padded >= 0)
+    for count, (i, j) in enumerate(zip(*coords)):
+        assert variable_indices_padded[i, j] == count
+        
+        # X-axis neighbors
+        filterq[2 * count, count] = -2
+        neighbor = variable_indices_padded[i - 1, j]
+        if neighbor >= 0:
+            filterq[2 * count, neighbor] = 1
+        else:
+            filterq[2 * count, count] += 1
+            
+        neighbor = variable_indices_padded[i + 1, j]
+        if neighbor >= 0:
+            filterq[2 * count, neighbor] = 1
+        else:
+            filterq[2 * count, count] += 1
+            
+        # Y-axis neighbors
+        filterq[2 * count + 1, count] = -2
+        neighbor = variable_indices_padded[i, j - 1]
+        if neighbor >= 0:
+            filterq[2 * count + 1, neighbor] = 1
+        else:
+            filterq[2 * count + 1, count] += 1
+            
+        neighbor = variable_indices_padded[i, j + 1]
+        if neighbor >= 0:
+            filterq[2 * count + 1, neighbor] = 1
+        else:
+            filterq[2 * count + 1, count] += 1
+            
+    filterq = filterq.tocsr()
+    return filterq.T.dot(filterq)
+
+def solve_constrained_smoothing(binary_array, band_radius=4, max_iters=500, rel_tol=1e-6, weight=0.5):
+    """
+    Perform constrained smoothing on a binary volume.
+    """
     # Step 1: Compute SDF
-    dist_inside = ndimage.distance_transform_edt(binary_arr)
-    dist_outside = ndimage.distance_transform_edt(1 - binary_arr)
-    distance = np.where(binary_arr, dist_inside - 0.5, -dist_outside + 0.5)
-
+    distance = compute_sdf(binary_array)
+    
     # Step 2: Define Band
     band_mask = np.abs(distance) <= band_radius
-    band_indices = np.argwhere(band_mask)
-    N = len(band_indices)
-    if N == 0:
-        return distance
-
-    # Map band cells to 0..N-1
-    variable_indices = np.full(binary_arr.shape, -1, dtype=int)
-    for idx, (i, j, k) in enumerate(band_indices):
-        variable_indices[i, j, k] = idx
-
-    # Step 3: Build Filter Matrix
-    filterq = sparse.lil_matrix((3 * N, N))
-    padded_indices = np.pad(variable_indices, 1, mode='constant', constant_values=-1)
+    band_indices = np.where(band_mask)
     
-    for count, (i, j, k) in enumerate(band_indices):
-        pi, pj, pk = i + 1, j + 1, k + 1
-        
-        for dim_offset in range(3):
-            row = 3 * count + dim_offset
-            filterq[row, count] = -2.0
-            
-            if dim_offset == 0:
-                n_list = [(pi-1, pj, pk), (pi+1, pj, pk)]
-            elif dim_offset == 1:
-                n_list = [(pi, pj-1, pk), (pi, pj+1, pk)]
-            else:
-                n_list = [(pi, pj, pk-1), (pi, pj, pk+1)]
-                
-            for ni, nj, nk in n_list:
-                neighbor_idx = padded_indices[ni, nj, nk]
-                if neighbor_idx >= 0:
-                    filterq[row, neighbor_idx] = 1.0
-                else:
-                    filterq[row, count] += 1.0
-
-    filterq = filterq.tocsr()
-    filterq = filterq.T.dot(filterq)
-
-    # Step 4: Initialize
+    # Create a mapping from spatial coordinates to variable index
+    num_band_cells = band_mask.sum()
+    variable_indices = np.full(distance.shape, -1, dtype=int)
+    variable_indices[band_mask] = np.arange(num_band_cells)
+    
+    # Step 3: Build Filter Matrix
+    filterq = build_filterq(variable_indices)
+    
+    # Step 4: Initialize Variables
     x = distance[band_mask]
     
-    # Step 5: Bounds
+    # Step 5: Set Constraints
     upper_bound = np.where(x < 0, x, np.inf)
     lower_bound = np.where(x > 0, x, -np.inf)
+    
+    # Clamp constraints near the surface
     upper_bound = np.where(np.abs(upper_bound) < 1, 0, upper_bound)
     lower_bound = np.where(np.abs(lower_bound) < 1, 0, lower_bound)
-
-    # Step 6: Jacobi Iteration
+    
+    # Step 6: Solve
     jacobi_d = 1.0 / filterq.diagonal()
-    jacobi_r = sparse.lil_matrix(filterq)
+    jacobi_r = filterq.copy()
     jacobi_r.setdiag(0)
     jacobi_r = jacobi_r.tocsr()
     
-    weight = 0.5
+    energy_now = np.dot(x, filterq.dot(x)) / 2
     check_each = 10
     cum_rel_tol = 1 - (1 - rel_tol)**check_each
-    
-    energy_now = 0.5 * x.dot(filterq.dot(x))
     
     for i in range(max_iters):
         x_1 = - jacobi_d * jacobi_r.dot(x)
         x = weight * x_1 + (1 - weight) * x
         
+        # Apply constraints
         x = np.maximum(x, lower_bound)
         x = np.minimum(x, upper_bound)
         
+        # Check stopping criterion
         if (i + 1) % check_each == 0:
             energy_before = energy_now
-            energy_now = 0.5 * x.dot(filterq.dot(x))
-            rel_improvement = (energy_before - energy_now) / energy_before
-            if rel_improvement < cum_rel_tol:
-                break
-
-    # Step 7: Update Distance
+            energy_now = np.dot(x, filterq.dot(x)) / 2
+            if energy_before > 0:
+                rel_improvement = (energy_before - energy_now) / energy_before
+                if rel_improvement < cum_rel_tol:
+                    break
+    
+    # Step 7: Update Distance Field
     distance[band_mask] = x
     return distance
 ```
@@ -162,16 +276,19 @@ def constrained_smoothing(binary_arr, band_radius=4, max_iters=500, rel_tol=1e-6
 ## Subtopics
 
 ### [Laplacian Smoothing](3736-laplacian-smoothing.md)
-A mesh smoothing technique applied to vertex positions to reduce noise or jaggedness, distinct from level-set smoothing as it operates on the extracted mesh rather than the volume embedding.
+Laplacian Smoothing is a mesh smoothing technique applied to vertex positions to reduce noise or jaggedness, specifically addressing the stairstepping artifacts common in isosurface extraction. It moves each vertex towards the average position of its immediate neighbors in the mesh graph. Unlike constrained methods that preserve specific features or boundaries, this basic form prioritizes geometric regularity, often at the cost of slight volume loss or feature blurring.
 
 ## Operating characteristics
-**Time and Memory Complexity:** The method requires constructing a sparse matrix proportional to the number of band cells, making it memory-intensive for large volumes [S1, unofficial].
-**Performance:** Compared to Gaussian smoothing, constrained smoothing is slower and requires more memory [S1, unofficial]. It is recommended for arrays smaller than (500, 500, 500) [S1, unofficial].
-**Strengths:** Preserves fine details and thin structures that are often eroded by other smoothing methods like Gaussian smoothing [S1, unofficial].
-**Limitations:** Slower convergence and higher memory usage limit scalability to very large volumes [S1, unofficial].
+- **Time Complexity:** The method involves solving a large sparse linear system using Jacobi iteration. The complexity per iteration is proportional to the number of non-zeros in `filterq`, which is $O(N)$ where $N$ is the number of band cells. The total time depends on the number of iterations required for convergence, which is influenced by `rel_tol` and `max_iters`.
+- **Memory Complexity:** The method requires storing the `filterq` matrix, which is sparse but can be large for high-resolution volumes. The memory usage is $O(N)$ for the band cells and their neighbors.
+- **Measured Performance:** Recommended for arrays smaller than (500, 500, 500) [S1, unofficial]. It is slower and requires more memory than Gaussian smoothing [S1, unofficial].
+- **Strengths:** Preserves fine details and thin structures that are often eroded by other smoothing methods [S1, unofficial].
+- **Limitations:** Computationally expensive and memory-intensive for large volumes.
+- **When to Use:** When mesh quality is critical and the volume size is manageable, and fine details must be preserved.
+- **When Not to Use:** For very large volumes or when computational resources are limited.
 
 ## Background
-The method is based on "Surface Extraction from Binary Volumes with Higher-Order Smoothness" by Victor Lempitsky, presented at CVPR 2010 [S1, unofficial]. It is implemented in the PyMCubes library as an alternative to simpler smoothing techniques for improving the quality of extracted meshes from binary volumes [S1, unofficial].
+The method is based on 'Surface Extraction from Binary Volumes with Higher-Order Smoothness' by Victor Lempitsky, CVPR 2010 [S1, unofficial]. It was implemented in the PyMCubes library [S1, unofficial].
 
 ## Sources
 [S1] pmneila/PyMCubes, https://github.com/pmneila/PyMCubes, fetched 2026-10-26 (unofficial)

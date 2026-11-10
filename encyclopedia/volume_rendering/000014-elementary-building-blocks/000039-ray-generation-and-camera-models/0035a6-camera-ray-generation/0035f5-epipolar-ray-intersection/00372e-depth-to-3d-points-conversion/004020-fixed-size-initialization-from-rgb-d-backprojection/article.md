@@ -1,0 +1,150 @@
+# Fixed-size initialization from RGB-D backprojection
+
+Also called: Explicit Geometry Recovery, RGB-D backprojection initialization, RGBD Backprojection
+
+## Overview
+This method generates a fixed-size, colored 3D point cloud initialization for volume rendering primitives (specifically 3D Gaussians) by backprojecting RGB-D data. It solves the problem of determining the initial spatial distribution and density of primitives in a scene. It differs from its parent [Depth to 3D Points Conversion](7929-depth-to-3d-points-conversion.md) by explicitly incorporating color information and applying specific downsampling strategies to control point count, and from its sibling [Point Cloud Generation and Refinement](8042-point-cloud-generation-and-refinement.md) by relying on explicit geometric backprojection rather than implicit field refinement for initialization.
+
+## How it works
+**Inputs:**
+*   A set of training images with associated depth maps (RGB-D).
+*   Camera intrinsics (focal lengths, principal point) and extrinsics (rotation, translation) for each view.
+*   Downsampling factor $ds$ and stride ratio for subsampling.
+
+**Outputs:**
+*   A colored point cloud with a specific number of points (e.g., $\sim 1$ billion, $\sim 102$ million, or $\sim 25$ million).
+
+**Data Structures:**
+*   **Point Cloud:** A list of points $P = \{p_i\}$, where each $p_i$ contains 3D coordinates $(x, y, z)$ and color $(r, g, b)$.
+*   **Depth Map:** A 2D array of depth values $D(u, v)$ corresponding to image coordinates $(u, v)$.
+
+**Steps:**
+1.  **Image Downsampling:** Downsample the input RGB-D images by a factor $ds$ during the projection step to reduce point density [S1, unofficial].
+2.  **Backprojection:** For each downsampled image, backproject valid depth points into 3D space using the camera intrinsics and extrinsics to form a colored point cloud [S1, unofficial].
+3.  **Uniform Subsampling:** Uniformly subsample the valid depth points from the backprojected cloud using a stride ratio to further control the point count [S1, unofficial].
+4.  **Scale Derivation (Optional):** To create smaller initializations (e.g., 102M or 25M points), uniformly downsample the largest generated cloud (e.g., 1B points). This ensures all scales share the same underlying geometry distribution [S1, unofficial].
+
+**Parameters:**
+*   $ds$: Image downsampling factor. Typical value: Not given in the sources.
+*   Stride ratio: Uniform subsampling stride. Typical value: Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fixed_size_initialization(rgb_d_images, intrinsics, extrinsics, ds, stride_ratio):
+    """
+    Generate a fixed-size colored point cloud from RGB-D data.
+    
+    Args:
+        rgb_d_images: List of tuples (RGB_image, Depth_map, camera_pose)
+        intrinsics: Camera intrinsic matrix K
+        extrinsics: List of camera extrinsic matrices E_i
+        ds: Downsampling factor for images
+        stride_ratio: Stride for uniform subsampling
+        
+    Returns:
+        points: Array of shape (N, 3) for 3D coordinates
+        colors: Array of shape (N, 3) for RGB colors
+    """
+    all_points = []
+    all_colors = []
+    
+    for i, (rgb_img, depth_img, pose) in enumerate(rgb_d_images):
+        # Step 1: Downsample images
+        # [G] Assuming standard nearest-neighbor or bilinear downsampling
+        rgb_down = downsample(rgb_img, factor=ds)
+        depth_down = downsample(depth_img, factor=ds)
+        
+        # Get image dimensions after downsampling
+        h, w = rgb_down.shape[:2]
+        
+        # Step 2: Backproject valid depth points
+        # Create grid of pixel coordinates
+        u, v = np.meshgrid(np.arange(w), np.arange(h))
+        u = u.flatten()
+        v = v.flatten()
+        
+        # Get depth values
+        depths = depth_down.flatten()
+        
+        # Filter valid depth points (e.g., depth > 0)
+        valid_mask = depths > 0
+        u_valid = u[valid_mask]
+        v_valid = v[valid_mask]
+        depths_valid = depths[valid_mask]
+        
+        # Backproject to 3D using intrinsics and extrinsics
+        # [G] Standard pinhole camera model backprojection
+        # x = (u - cx) * z / fx
+        # y = (v - cy) * z / fy
+        fx = intrinsics[0, 0]
+        fy = intrinsics[1, 1]
+        cx = intrinsics[0, 2]
+        cy = intrinsics[1, 2]
+        
+        x = (u_valid - cx) * depths_valid / fx
+        y = (v_valid - cy) * depths_valid / fy
+        z = depths_valid
+        
+        # Apply extrinsic transformation
+        # [G] Assuming pose is [R|t]
+        R = pose[:3, :3]
+        t = pose[:3, 3]
+        
+        points_local = np.vstack([x, y, z])
+        points_world = R @ points_local + t
+        points_world = points_world.T
+        
+        # Get corresponding colors
+        # [G] Assuming rgb_down is (H, W, 3)
+        colors_valid = rgb_down[v_valid, u_valid]
+        
+        all_points.append(points_world)
+        all_colors.append(colors_valid)
+        
+    # Concatenate all points and colors
+    points = np.vstack(all_points)
+    colors = np.vstack(all_colors)
+    
+    # Step 3: Uniform subsampling with stride ratio
+    # [G] Assuming stride_ratio is an integer stride
+    indices = np.arange(0, len(points), stride_ratio)
+    points = points[indices]
+    colors = colors[indices]
+    
+    return points, colors
+
+def derive_smaller_scale(points, colors, target_count):
+    """
+    Derive a smaller point cloud by uniform downsampling.
+    
+    Args:
+        points: Array of shape (N, 3)
+        colors: Array of shape (N, 3)
+        target_count: Desired number of points
+        
+    Returns:
+        points: Array of shape (target_count, 3)
+        colors: Array of shape (target_count, 3)
+    """
+    # [G] Uniform random sampling or regular stride to match target count
+    # Assuming uniform random sampling for simplicity
+    indices = np.random.choice(len(points), target_count, replace=False)
+    return points[indices], colors[indices]
+```
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of input images and pixels, $O(N_{img} \cdot H \cdot W)$, where $H$ and $W$ are image dimensions. Subsampling is linear with respect to the number of points.
+*   **Memory Complexity:** Linear with respect to the number of points in the output point cloud.
+*   **Strengths:** Provides a geometrically consistent initialization across different scales by deriving smaller clouds from a larger one. Simple and explicit.
+*   **Limitations:** Relies on the accuracy of the input depth maps. Noise in depth maps can lead to noisy point clouds. The quality of initialization depends on the coverage of the input views.
+*   **When to use:** When explicit geometric initialization is required for 3D Gaussian Splatting or similar volumetric representations, especially when scaling to large scenes with billions of primitives.
+*   **When not to use:** When depth maps are unreliable or unavailable. When implicit initialization is preferred for simplicity.
+
+## Background
+This method is used in the context of scalable training of 3D Gaussian Splatting, specifically in the TideGS paper [S1, unofficial]. It addresses the challenge of initializing a large number of Gaussian primitives (up to 1 billion) in a consistent manner. The method is also referenced in the context of neural rendering for stereo 3D reconstruction of deformable tissues in robotic surgery [S2], where it is used to recover explicit geometry from implicit radiance fields.
+
+## Sources
+[S1] TideGS: Scalable Training of Over One Billion 3D Gaussian Splatting Primitives via Out-of-Core Optimization, https://doi.org/10.48550/arxiv.2605.20150, fetched 2026-10-26 (unofficial)
+[S2] Neural Rendering for Stereo 3D Reconstruction of Deformable Tissues in Robotic Surgery, https://doi.org/10.1007/978-3-031-16449-1_41, fetched 2026-10-26

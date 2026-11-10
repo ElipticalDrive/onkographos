@@ -3,100 +3,59 @@
 Also called: Pre-computed connectivity
 
 ## Overview
-This method accelerates isosurface extraction on arbitrary polyhedral grids by pre-computing the vertex connectivity for all possible scalar sign configurations of a cell and storing them in a lookup table [S1]. It addresses the performance bottleneck of dynamic topology determination during extraction, allowing for rapid access to edge and vertex connections regardless of cell geometry [S1]. It sets itself apart from dynamic algorithms like Livnat et al.'s method by trading memory for speed, pre-calculating the topological outcome rather than computing it per-voxel [S1, 1321-livnat-et-al-algorithm-for-unstructured-tetrahedral-grids.md].
+This method accelerates isosurface extraction on arbitrary polyhedral grids by replacing on-the-fly topological analysis with rapid table lookups. It solves the problem of high computational cost in general cell geometries by pre-computing vertex connectivity for all possible sign configurations. Unlike the standard [Marching Cubes](52-marching-cubes.md) which relies on a fixed 256-entry table for cubes, this approach is geometry-agnostic, allowing the same optimization strategy to be applied to arbitrary cell types [S1].
 
 ## How it works
-**Inputs:**
-*   Scalar field values at cell vertices [G].
-*   Isosurface threshold value [G].
-*   Cell geometry (vertices, faces, edges) [G].
+**Inputs and Outputs:**
+*   **Input:** A scalar field defined on an arbitrary polyhedral grid; an isovalue $\phi$.
+*   **Output:** A set of triangles representing the isosurface.
+*   **Data Structure:** A lookup table mapping each possible vertex sign configuration to a pre-computed list of vertex indices (connectivity) that form the isosurface segments within that cell.
 
-**Outputs:**
-*   Isosurface mesh (vertices and triangles) for the current cell [G].
+**Pre-computation Phase:**
+1.  Identify the cell geometry (e.g., cube, tetrahedron).
+2.  Determine the number of vertices $N$ per cell.
+3.  Generate all $2^N$ possible sign patterns of vertex values relative to the isovalue.
+4.  For each pattern, compute the exact connectivity (which vertices are connected by the isosurface) using the specific geometric constraints of the cell.
+5.  Store these connectivity lists in a lookup table indexed by the sign pattern integer.
 
-**Data Structures:**
-*   **Lookup Table (LUT):** An array indexed by the cell configuration mask. For a hexahedral cell with 8 vertices, the mask is an 8-bit integer ($2^8 = 256$ entries) [S1]. Each entry stores the pre-computed connectivity (which edges are intersected and how they are connected into triangles) [S1].
-*   **Configuration Mask:** An integer where the $i$-th bit is set if the scalar value at vertex $i$ exceeds the threshold, and 0 otherwise [G].
+**Extraction Phase:**
+1.  Iterate through each cell in the grid.
+2.  Evaluate the scalar field at each vertex of the cell.
+3.  Determine the sign of each vertex relative to the isovalue ($+1$ if $> \phi$, $-1$ if $< \phi$, $0$ if $= \phi$).
+4.  Construct an integer index from these signs (e.g., treating signs as bits).
+5.  Retrieve the pre-computed connectivity list from the lookup table using this index.
+6.  Generate triangles using the vertex indices from the retrieved list.
 
-**Steps:**
-1.  **Pre-computation (Offline):**
-    *   For each possible cell type, iterate through all $2^N$ possible sign configurations (where $N$ is the number of vertices) [S1].
-    *   For each configuration, determine the topological connectivity of the isosurface within the cell [G].
-    *   Store this connectivity data in the LUT at the index corresponding to the configuration mask [S1].
-2.  **Extraction (Online):**
-    *   For each cell in the grid, determine the scalar values at its vertices [G].
-    *   Compare each vertex value to the isosurface threshold to generate the configuration mask [G].
-    *   Use the mask to index into the pre-computed LUT [S1].
-    *   Retrieve the pre-computed connectivity data [S1].
-    *   Interpolate the exact positions of the intersection points on the cell edges using the scalar values [G].
-    *   Generate the output mesh primitives (triangles) using the retrieved connectivity and interpolated points [G].
+**Formulas:**
+The connectivity is determined by solving for the intersection of the isosurface with the cell edges. For a linear interpolation, the intersection point $P$ on an edge between vertices $V_i$ and $V_j$ with values $\phi_i$ and $\phi_j$ is:
+$$ P = V_i + \frac{\phi - \phi_i}{\phi_j - \phi_i} (V_j - V_i) $$
+The lookup table stores the indices of vertices involved in these intersections.
 
 **Parameters:**
-*   **Isosurface Threshold:** The scalar value defining the surface [G].
-*   **Cell Type:** Determines the size and content of the LUT [S1].
+*   **Cell Geometry:** Defines the size of the lookup table ($2^N$ entries). For a cube, $N=8$, resulting in 256 entries [S1].
+*   **Threads:** Parallel execution using OpenMP (`-fopenmp`) can significantly speed up the extraction phase [S1].
 
-**Edge Cases and Pitfalls:**
-*   **Degenerate Cases:** Configurations where the isosurface passes exactly through a vertex or edge can lead to ambiguity [G].
-*   **Precision:** Floating-point comparisons for thresholding must be consistent to ensure the configuration mask is deterministic [G].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def precompute_lut(cell_type, num_vertices):
-    lut = []
-    num_configs = 1 << num_vertices
-    for config in range(num_configs):
-        vertex_signs = [(config >> i) & 1 for i in range(num_vertices)]
-        # The sources do not provide the connectivity determination algorithm for arbitrary cells [G]
-        connectivity = determine_connectivity(cell_type, vertex_signs)
-        lut.append(connectivity)
-    return lut
-
-def extract_cell(cell, scalar_values, threshold, lut):
-    config_mask = 0
-    for i, vertex in enumerate(cell.vertices):
-        if scalar_values[vertex] > threshold:
-            config_mask |= (1 << i)
-    connectivity = lut[config_mask]
-    triangles = []
-    for tri in connectivity:
-        points = []
-        for edge_idx in tri:
-            v1, v2 = cell.edges[edge_idx]
-            val1 = scalar_values[v1]
-            val2 = scalar_values[v2]
-            t = (threshold - val1) / (val2 - val1)
-            p1 = cell.position(v1)
-            p2 = cell.position(v2)
-            points.append(lerp(p1, p2, t))
-        triangles.append(points)
-    return triangles
-
-def lerp(a, b, t):
-    return a + (b - a) * t
-
-def determine_connectivity(cell_type, vertex_signs):
-    # The sources do not provide this algorithm [G]
-    return []
-```
+**Edge Cases:**
+*   **Degenerate Cases:** Vertices lying exactly on the isosurface ($\phi_i = \phi$) require consistent handling to avoid gaps or duplicates. The pre-computation must define a deterministic rule for these cases [S1].
+*   **Precision:** Floating-point precision errors may cause sign flips. A small epsilon tolerance is often used when comparing vertex values to the isovalue.
 
 ## Subtopics
 
 ### [Tetrahedral Marching Cubes (5-tetrahedra method)](4547-tetrahedral-marching-cubes-5-tetrahedra-method.md)
-This variant applies the lookup table concept to tetrahedral cells by decomposing a cube into 5 tetrahedra [G]. It covers all 81 sign patterns, including degenerate ones, using linear interpolation [G]. It uses `int64_t` internal arithmetic to maintain exactness within the safe-integer range ($2^{63}$) [G]. Unlike the cubes extractor which solves $2V - (2L+1) = 0$, the tetrahedra extractor solves $V - L = 0$ [G]. A known pitfall in the original implementation was an unreachable branch in the odd-parity gradient calculation due to an incorrect condition (`dx + dy + dz >= 0` instead of `>= 2`) [G].
+Decomposes cubes into 5 tetrahedra, using a lookup table for 81 sign patterns. Deterministic and topology-agnostic.
+
+### [Tetrahedral Marching Cubes Neighbor Lookup](11620-tetrahedral-marching-cubes-neighbor-lookup.md)
+A data structure optimization for neighbor tetrahedron offsets, enhancing the lookup process in tetrahedral decompositions.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per cell for connectivity determination after pre-computation, dominated by interpolation and mesh generation [G]. The sources describe the LUT approach as a proposed optimization rather than a implemented baseline, noting it could achieve computational efficiency similar to Marching Cubes [S1].
-*   **Memory Complexity:** $O(2^N)$ for the LUT, where $N$ is the number of vertices per cell [G].
-*   **Performance:** Using pre-computed connectivity and multi-threading (`-fopenmp`) achieves a $\times 6$ speedup compared to single-threaded execution on an iMac Pro (2017) with a 2.3 GHz Intel Xeon W processor [S1].
-*   **Strengths:** Fast extraction speed; consistent topology; suitable for real-time applications [G].
-*   **Limitations:** High memory usage for cells with many vertices; pre-computation overhead [G].
-*   **When to use:** When extraction speed is critical and cell geometry is regular (e.g., cubes, tetrahedra) [G].
-*   **When not to use:** Not given in the sources.
+*   **Time Complexity:** Pre-computation is $O(2^N \cdot C)$ where $C$ is the cost of computing connectivity for one cell type. Extraction is $O(1)$ per cell for table lookup, plus $O(V)$ for triangle generation.
+*   **Memory Complexity:** $O(2^N \cdot K)$ where $K$ is the average number of vertices per connectivity list. For cubes, this is small (256 entries).
+*   **Performance:** On an iMac Pro (2017, 2.3 GHz Intel Xeon W), using OpenMP with all available threads achieves a $\times 6$ speedup compared to single-threaded execution [S1]. Without pre-computation, the method is on average 1.8 times slower than optimized Marching Cubes on cubes [S1].
+*   **Strengths:** Geometry-agnostic; fast extraction; deterministic.
+*   **Limitations:** Pre-computation cost for complex cells; memory usage grows exponentially with vertex count per cell.
 
 ## Background
-The method originates from the proposed algorithm's need to match Marching Cubes efficiency, with the LUT approach suggested as a hypothetical acceleration strategy for arbitrary grids [S1]. It builds on the classic Marching Cubes algorithm, which uses a 256-entry lookup table for hexahedral cells [G]. The approach has been extended to other cell types, including tetrahedra, to maintain efficiency on unstructured grids [G].
+Originated in the context of generalizing isosurface extraction to arbitrary grids. The method was proposed to address the computational inefficiency of on-the-fly topological analysis for non-standard cell geometries [S1]. It builds on the principles of [Marching Cubes](52-marching-cubes.md) but extends the lookup table concept to arbitrary polyhedral cells.
 
 ## Sources
 [S1] A new isosurface extraction method on arbitrary grids, https://doi.org/10.1016/j.jcp.2021.110579, fetched 2026-10-26

@@ -3,34 +3,33 @@
 Also called: Per-Dimension SH Storage, SH Buffer Layout
 
 ## Overview
-This method defines the memory layout for storing Spherical Harmonics (SH) coefficients for 3D Gaussian primitives in a Structure-of-Arrays (SoA) format. It solves the problem of efficiently accessing per-splat color information for rendering and optimization by grouping coefficients by splat, then by coefficient index, and finally by RGB channel. It differs from texture-based or codebook-based layouts by keeping all coefficients in a single contiguous linear buffer, enabling direct indexing without texture lookups or codebook decoding.
+This method defines the memory layout for storing spherical harmonics (SH) coefficients for 3D Gaussians in a Structure-of-Arrays (SoA) paradigm. It solves the problem of efficiently accessing per-splat color data in GPU shaders by grouping coefficients by splat, then by coefficient index, and finally by spatial dimension (RGB). It differs from texture-based or codebook-based SH storage by keeping all coefficients in a contiguous linear float buffer, enabling direct indexing without texture sampling overhead [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- $N$: Number of Gaussian splats.
-- $D$: Total number of SH coefficients per channel for the chosen degree (e.g., $D=9$ for degree 2).
-- Coefficient data: For each splat $i \in [0, N-1]$, for each coefficient index $d \in [0, D-1]$, and for each RGB channel $c \in \{0, 1, 2\}$, a floating-point value.
+**Inputs and Outputs:**
+- Input: A collection of $N$ splats, each with an SH degree $L$.
+- Output: A contiguous linear buffer (e.g., `FloatBuffer`) of size $N \times D \times 3$, where $D$ is the total number of SH coefficients for degree $L$.
 
-**Outputs:**
-- A contiguous `FloatBuffer` of size $N \times D \times 3$.
+**Data Structures:**
+- **SH Buffer:** A 1D array of floats with length $N \times D \times 3$.
+- **Indexing Formula:** The index for the $c$-th color channel ($c \in \{0, 1, 2\}$ for R, G, B) of the $d$-th SH coefficient ($d \in \{0, \dots, D-1\}$) of the $i$-th splat ($i \in \{0, \dots, N-1\}$) is:
+  $$ idx = ((i \times D) + d) \times 3 + c $$
+  This layout ensures that for a fixed splat and coefficient, the RGB components are contiguous in memory [S1, unofficial][5570-spherical-harmonics-coefficient-layout.md].
 
-**Data Structure:**
-- `FloatBuffer`: A 1D array of floats.
-- Layout order: The buffer is organized such that for a given splat $i$, all coefficients $d$ are stored sequentially, and for each coefficient, the three RGB channels are stored contiguously.
-
-**Indexing Formula:**
-To access the component $c$ (0=R, 1=G, 2=B) of coefficient $d$ for splat $i$:
-$$ idx = ((i \times D) + d) \times 3 + c $$
+**Parameters:**
+- $N$: Number of splats.
+- $L$: SH degree (e.g., 0, 1, 2, 3).
+- $D$: Total number of coefficients, calculated as $(L+1)^2$. For example, $D=1$ for $L=0$, $D=4$ for $L=1$, $D=9$ for $L=2$, $D=16$ for $L=3$ [S1, unofficial].
 
 **Steps:**
-1. Initialize a `FloatBuffer` of size $N \times D \times 3$.
-2. Iterate over each splat index $i$ from $0$ to $N-1$.
-3. For each splat $i$, iterate over each coefficient index $d$ from $0$ to $D-1$.
-4. For each coefficient $d$, write the three RGB components to the buffer at indices:
-   - $((i \times D) + d) \times 3 + 0$ for Red
-   - $((i \times D) + d) \times 3 + 1$ for Green
-   - $((i \times D) + d) \times 3 + 2$ for Blue
-5. Return the populated buffer.
+1. Calculate $D = (L+1)^2$.
+2. Allocate a buffer of size $N \times D \times 3$.
+3. Iterate over each splat $i$ from $0$ to $N-1$.
+4. For each splat, iterate over each coefficient index $d$ from $0$ to $D-1$.
+5. For each coefficient, write the three color components (R, G, B) to the buffer at indices:
+   - $((i \times D) + d) \times 3 + 0$
+   - $((i \times D) + d) \times 3 + 1$
+   - $((i \times D) + d) \times 3 + 2$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -38,79 +37,65 @@ $$ idx = ((i \times D) + d) \times 3 + c $$
 ```python
 def write_sh_coefficients(splats, sh_degree):
     """
-    Writes SH coefficients into a flat buffer.
+    Writes SH coefficients into a contiguous linear buffer.
     
     Args:
-        splats: List of splat objects, each having get_sh_r(d), get_sh_g(d), get_sh_b(d) methods.
-        sh_degree: Integer, the degree of SH used.
+        splats: List of N splat objects, each having a method get_sh(d) 
+                that returns a tuple/list of 3 floats (R, G, B) for coefficient d.
+        sh_degree: Integer L, the degree of the spherical harmonics.
         
     Returns:
-        list: A flat list of floats representing the SH buffer.
+        A list of floats representing the SH buffer.
     """
-    # Calculate total number of coefficients per channel for the given degree
-    # Common formula: D = (sh_degree + 1)^2
-    D = (sh_degree + 1) ** 2
+    # Calculate total number of coefficients per splat
+    d_count = (sh_degree + 1) ** 2
     
-    N = len(splats)
-    buffer_size = N * D * 3
+    # Initialize buffer with zeros
+    buffer_size = len(splats) * d_count * 3
     buffer = [0.0] * buffer_size
     
-    for i in range(N):
-        splat = splats[i]
-        for d in range(D):
-            # Calculate base index for this coefficient
-            base_idx = (i * D + d) * 3
+    # Iterate over each splat
+    for i, splat in enumerate(splats):
+        # Iterate over each coefficient index
+        for d in range(d_count):
+            # Get the RGB components for this coefficient
+            r, g, b = splat.get_sh(d)
             
-            # Write RGB components
-            buffer[base_idx + 0] = splat.get_sh_r(d)
-            buffer[base_idx + 1] = splat.get_sh_g(d)
-            buffer[base_idx + 2] = splat.get_sh_b(d)
+            # Calculate base index for this coefficient
+            base_idx = (i * d_count + d) * 3
+            
+            # Write R, G, B to contiguous positions
+            buffer[base_idx + 0] = r
+            buffer[base_idx + 1] = g
+            buffer[base_idx + 2] = b
             
     return buffer
 ```
 
-**Parameters:**
-- `sh_degree`: Typically 0, 1, 2, or 3. Degree 2 ($D=9$) is common for high-quality rendering [S1, unofficial].
-- `D`: Calculated as $(sh\_degree + 1)^2$.
-
 **Edge Cases and Pitfalls:**
-- **Degree Mismatch:** Ensure $D$ matches the degree used during training or optimization. Using a different degree will misalign indices [S1, unofficial].
-- **Precision:** Use `float32` for GPU compatibility. `float64` may cause performance issues or incompatibility with standard shaders [S1, unofficial].
-- **Boundary Conditions:** The buffer size must be exactly $N \times D \times 3$. Any deviation will cause out-of-bounds errors or data corruption [S1, unofficial].
+- **SH Degree Validation:** Ensure $L$ is non-negative. Higher degrees increase $D$ quadratically, leading to large memory usage.
+- **Index Overflow:** For very large $N$, ensure the buffer index calculation does not overflow integer types. Use 64-bit integers for index calculations if $N \times D \times 3$ exceeds $2^{31}-1$.
+- **Normalization:** SH coefficients are often normalized. Ensure the source data is normalized according to the convention used in the rendering shader (e.g., unormalized vs. normalized SH basis functions) [S1, unofficial].
 
 ## Subtopics
 
 ### Spherical Harmonics Texture Management
-This variant stores SH coefficients in separate GPU textures keyed by block identifiers rather than a single flat buffer. It is used in streaming or LOD-based systems where coefficients are managed in chunks. It differs from the flat buffer layout by requiring texture creation and update logic, which adds overhead but allows for efficient memory management of large scenes. Choose this when dealing with very large scenes or streaming data where not all coefficients are loaded into memory at once [S2, unofficial].
+Instead of a linear buffer, SH coefficients are stored in separate GPU textures keyed by block identifiers. This approach is used in streaming scenarios where data is loaded on-demand. The system iterates over SH keys, reusing existing textures or creating new ones from coefficient data. If a texture exists and needs an update, a flag is set to signal the GPU driver [S2, unofficial]. This method trades memory contiguity for streaming flexibility and potentially reduced initial load times.
+
+### INT8 Spherical Harmonics
+This variant uses INT8 quantization for SH coefficients to reduce memory traffic and bandwidth requirements. It is particularly useful for hardware-accelerated rendering pipelines that support tensor cores or fast integer arithmetic. Quantization reduces the precision of the color representation but can significantly improve performance in bandwidth-bound scenarios [S3, unofficial].
 
 ## Operating characteristics
-**Time Complexity:**
-- Writing: $O(N \times D)$, where $N$ is the number of splats and $D$ is the number of coefficients per channel.
-- Reading: $O(1)$ per coefficient access using the indexing formula.
-
-**Memory Complexity:**
-- $O(N \times D \times 3)$ floats. For $N=10^6$ and $D=9$, this is approximately 108 MB.
-
-**Performance:**
-- The flat buffer layout minimizes cache misses during batched rendering, as shaders can iterate over contiguous memory for a single attribute [Parent].
-- Texture-based layouts may introduce overhead due to texture sampling and management but can be more memory-efficient for sparse or streamed data [S2, unofficial].
-
-**Strengths:**
-- Simple indexing and easy to implement.
-- Efficient for batched operations.
-- No need for texture management or codebook decoding.
-
-**Limitations:**
-- Not suitable for streaming or LOD-based systems without additional management logic.
-- Requires loading all coefficients into memory at once.
-
-**When to Use:**
-- Use this layout for static scenes or when all coefficients are available in memory.
-- Use texture-based layouts for streaming or LOD-based systems [S2, unofficial].
+- **Time Complexity:** Writing coefficients is $O(N \times D)$, where $N$ is the number of splats and $D$ is the number of coefficients per splat. Reading coefficients in a shader is $O(1)$ per coefficient with direct indexing.
+- **Memory Complexity:** $O(N \times D \times 3)$ floats. For $L=3$ ($D=16$), this is $48N$ floats per splat.
+- **Performance:** Linear buffer layout provides excellent cache coherency for sequential access but may cause cache misses if shaders access coefficients in a non-sequential order (e.g., all R components first). Texture-based layouts may incur sampling overhead but can be more efficient for sparse or streamed data [S1, unofficial][S2, unofficial].
+- **Strengths:** Simple indexing, no texture sampling overhead, easy to implement in any language.
+- **Limitations:** High memory bandwidth usage for high SH degrees. Not suitable for streaming without additional management logic.
 
 ## Background
-This layout is derived from the Structure-of-Arrays (SoA) paradigm used in 3D Gaussian Splatting implementations. It is commonly found in libraries like JSplat, which provide efficient data structures for rendering and optimization [S1, unofficial]. The texture-based variant is used in systems like Gaussian-Splat-Lite for streaming and LOD management [S2, unofficial].
+The linear buffer layout for SH coefficients is a common implementation detail in 3D Gaussian Splatting frameworks, particularly in CPU-side data preparation stages before uploading to the GPU. It is derived from the general SoA principles used in modern graphics engines to optimize memory access patterns [S1, unofficial]. Variants like texture management and INT8 quantization have emerged to address specific performance bottlenecks in large-scale or streaming scenarios [S2, unofficial][S3, unofficial].
 
 ## Sources
 [S1] JSplat, https://github.com/javagl/JSplat, fetched 2026-10-30 (unofficial)
 [S2] WilliamLiu-1997/Gaussian-Splat-Lite, https://github.com/WilliamLiu-1997/Gaussian-Splat-Lite, fetched 2026-10-27 (unofficial)
+[S3] RoofGS: Roofline-Guided End-to-End Acceleration of 3D Gaussian Splatting, https://arxiv.org/abs/2608.15785, fetched 2026-10-29 (unofficial)

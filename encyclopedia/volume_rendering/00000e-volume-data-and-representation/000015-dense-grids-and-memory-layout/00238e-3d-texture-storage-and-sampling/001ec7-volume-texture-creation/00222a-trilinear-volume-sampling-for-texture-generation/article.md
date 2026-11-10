@@ -1,136 +1,133 @@
 # Trilinear Volume Sampling for Texture Generation
 
-Also called: Trilinear Texture Sampling, Trilinear Volume Sampling
+Also called: Surface query interpolation, TexF Feature Interpolation, Trilinear Texture Sampling, Trilinear Volume Sampling, Trilinear interpolation in TexF
 
 ## Overview
-Trilinear volume sampling retrieves attribute values (such as color or material properties) from a 3D texture by interpolating between the eight nearest grid points using normalized coordinates [S1, S2, unofficial]. It solves the problem of mapping continuous world-space positions to discrete volumetric data, enabling the generation of smooth attribute volumes from mesh or point cloud inputs [S2, unofficial].
+Trilinear Volume Sampling retrieves scalar or vector attributes from a 3D voxel grid at continuous surface positions by interpolating values from the surrounding 2x2x2 neighborhood of active grid points [S1, unofficial]. It enables spatially coherent attribute coding and direct surface queries without UV mapping, serving as the fundamental data retrieval primitive for direct volume rendering, isosurface extraction, or maximum intensity projection [S1, unofficial]. Unlike its parent method, which handles coordinate transformation and buffer construction, this method focuses strictly on the interpolation operation itself [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- `dataTex`: A 3D CUDA texture object storing volume data. The underlying storage type is `ushort` (unsigned 16-bit integer), but the read mode is configured as `cudaReadModeNormalizedFloat`, mapping values to the $[0, 1]$ range [S1, unofficial].
-- `coords` / `valid_pos`: A tensor of 3D positions in world space or grid space [S2, unofficial].
-- `attr_volume`: The source 3D attribute data (e.g., color, density) to be sampled [S2, unofficial].
-- `grid_size`: The dimensions of the target volume grid $(W, H, D)$ [S2, unofficial].
-- `aabb`: The axis-aligned bounding box of the volume [S2, unofficial].
-- `voxel_size`: The physical size of a single voxel [S2, unofficial].
-
-**Outputs:**
-- `attrs`: A tensor containing the interpolated attribute values at the specified coordinates [S2, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D attribute volume (e.g., color, material properties) stored in a texture or tensor, and a query position $p$ in world or grid space.
+*   **Output:** The interpolated attribute value $c(p)$ at position $p$.
 
 **Data Structures:**
-- `cudaArray *dataArray`: The CUDA array backing the 3D texture `dataTex` [S1, unofficial].
-- `texture<ushort, 3, cudaReadModeNormalizedFloat> dataTex`: The texture reference object [S1, unofficial].
-- `torch.Tensor attrs`: Initialized as `torch.zeros(texture_size, texture_size, attr_volume.shape[1], device='cuda')` [S2, unofficial].
+*   **3D Texture/Tensor:** Stores attribute values. In CUDA implementations, the underlying storage may be `ushort` but accessed with `cudaReadModeNormalizedFloat` to treat values as normalized floats in $[0, 1]$ [S2, unofficial].
+*   **Grid Points:** The 8 vertices of the voxel cell containing $p$.
 
 **Steps:**
-1. **Coordinate Normalization (CUDA Context):** Convert world-space or grid-space coordinates $(x, y, z)$ to normalized texture coordinates in the range $[0, 1]$ [S1, unofficial].
-2. **Coordinate Transformation (PyTorch Context):** If mapping from world space, transform coordinates to grid space using the bounding box and voxel size:
-   $$
-   \text{grid\_coords} = \frac{\text{valid\_pos} - \text{aabb}[0]}{\text{voxel\_size}}
-   $$
-   where `valid_pos` are the world-space positions [S2, unofficial].
-3. **Interpolation:** Perform trilinear interpolation [S2, unofficial].
-   - In CUDA, call the built-in texture fetch function:
-     $$
-     \text{value} = \text{tex3D}(\text{dataTex}, x, y, z)
-     $$
-     where $x, y, z \in [0, 1]$ [S1, unofficial].
-   - In PyTorch, use `grid_sample_3d` with `mode='trilinear'` [S2, unofficial]. The input grid tensor is constructed by concatenating a batch dimension of zeros with the coordinates [S2, unofficial].
+1.  **Coordinate Transformation:** Map the query position $p$ from world space to normalized texture coordinates $(x, y, z) \in [0, 1]$ or grid indices. This involves subtracting the AABB origin and dividing by voxel size [S3, unofficial].
+2.  **Neighborhood Identification:** Identify the 2x2x2 neighborhood of active grid points $q_i$ surrounding the query position $p$ [S1, unofficial].
+3.  **Weight Calculation:** Compute trilinear weights $\omega_i$ for each of the 8 neighbors based on the relative position of $p$ within the grid cell.
+4.  **Interpolation:** Compute the weighted sum of the attribute values $t(q_i)$ at the grid points.
+
+**Formula:**
+The interpolated attribute $c(p)$ is calculated as [S1, unofficial]:
+
+$$
+c(p) = \sum_{i \in N(p)} \omega_i t(q_i)
+$$
+
+Where:
+*   $N(p)$ is the set of 8 active grid points within the 2x2x2 neighborhood of $p$.
+*   $t(q_i)$ is the attribute value at grid point $q_i$.
+*   $\omega_i$ are the trilinear weights determined by the query position within the grid cell. For a position $(x, y, z)$ within a unit cube, the weight for a corner $(x_c, y_c, z_c)$ is $(1 - |x - x_c|)(1 - |y - y_c|)(1 - |z - z_c|)$, normalized such that $\sum \omega_i = 1$.
+
+**Parameters:**
+*   **Sampling Mode:** 'trilinear' [S3, unofficial].
+*   **Texture Read Mode:** `cudaReadModeNormalizedFloat` if the underlying type is `ushort` [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
-import math
-
-def trilinear_sample_cuda_style(dataTex, x_norm, y_norm, z_norm, W, H, D):
-    # Map normalized [0,1] to grid indices [0, dim-1]
-    x_float = x_norm * (W - 1)
-    y_float = y_norm * (H - 1)
-    z_float = z_norm * (D - 1)
-
-    x0 = int(math.floor(x_float))
-    y0 = int(math.floor(y_float))
-    z0 = int(math.floor(z_float))
-
-    x1 = min(x0 + 1, W - 1)
-    y1 = min(y0 + 1, H - 1)
-    z1 = min(z0 + 1, D - 1)
-
-    wx = x_float - x0
-    wy = y_float - y0
-    wz = z_float - z0
-
-    # Fetch 8 surrounding values (simulated dataTex access)
-    v000 = dataTex[x0, y0, z0]
-    v100 = dataTex[x1, y0, z0]
-    v010 = dataTex[x0, y1, z0]
-    v110 = dataTex[x1, y1, z0]
-    v001 = dataTex[x0, y0, z1]
-    v101 = dataTex[x1, y0, z1]
-    v011 = dataTex[x0, y1, z1]
-    v111 = dataTex[x1, y1, z1]
-
-    # Interpolate along X
-    v00 = v000 * (1.0 - wx) + v100 * wx
-    v01 = v001 * (1.0 - wx) + v101 * wx
-    v10 = v010 * (1.0 - wx) + v110 * wx
-    v11 = v011 * (1.0 - wx) + v111 * wx
-
-    # Interpolate along Y
-    v0 = v00 * (1.0 - wy) + v10 * wy
-    v1 = v01 * (1.0 - wy) + v11 * wy
-
-    # Interpolate along Z
-    return v0 * (1.0 - wz) + v1 * wz
-
-def trilinear_sample_pytorch(attr_volume, valid_pos, grid_size, aabb, voxel_size):
-    # 1. Initialize output tensor
-    attrs = torch.zeros(grid_size[0], grid_size[1], attr_volume.shape[1], device='cuda')
-
-    # 2. Transform world coordinates to grid coordinates
-    grid_coords = (valid_pos - aabb[0]) / voxel_size
-
-    # 3. Construct grid tensor for grid_sample_3d
-    grid_tensor = torch.cat([torch.zeros_like(valid_pos[:, :1]), valid_pos], dim=-1)
-
-    # 4. Sample using trilinear mode
-    # Note: grid_sample_3d expects input shape (N, C, H, W, D)
-    # The source passes shape explicitly
-    attrs = grid_sample_3d(attr_volume, grid_tensor, shape=torch.Size([1, attr_volume.shape[1], *grid_size]), grid=grid_coords.reshape(1, -1, 3), mode='trilinear')
-    return attrs
+def trilinear_sample_3d(attr_volume, query_pos, grid_size, aabb_origin, voxel_size):
+    """
+    Samples a 3D attribute volume at a continuous position using trilinear interpolation.
+    
+    Args:
+        attr_volume: 3D tensor/array of shape (D, H, W) or (D, H, W, C) containing attribute values.
+        query_pos: float3, world-space query position.
+        grid_size: tuple (D, H, W), dimensions of the voxel grid.
+        aabb_origin: float3, origin of the voxel grid in world space.
+        voxel_size: float, size of each voxel.
+        
+    Returns:
+        float or float3: Interpolated attribute value(s).
+    """
+    # 1. Transform world position to grid coordinates
+    # grid_pos = (query_pos - aabb_origin) / voxel_size
+    grid_x = (query_pos.x - aabb_origin.x) / voxel_size
+    grid_y = (query_pos.y - aabb_origin.y) / voxel_size
+    grid_z = (query_pos.z - aabb_origin.z) / voxel_size
+    
+    # 2. Identify the 2x2x2 neighborhood
+    # Floor to get the lower corner of the cell
+    ix = int(grid_x)
+    iy = int(grid_y)
+    iz = int(grid_z)
+    
+    # Clamp indices to valid range [0, size-1] to handle boundary cases
+    ix = max(0, min(ix, grid_size[0] - 1))
+    iy = max(0, min(iy, grid_size[1] - 1))
+    iz = max(0, min(iz, grid_size[2] - 1))
+    
+    # 3. Calculate fractional offsets (weights)
+    fx = grid_x - ix
+    fy = grid_y - iy
+    fz = grid_z - iz
+    
+    # 4. Retrieve values from the 8 neighbors
+    # Note: attr_volume is assumed to be indexed as [z, y, x] or [x, y, z] depending on layout.
+    # Assuming standard (x, y, z) indexing for clarity, adjust for actual memory layout.
+    v000 = attr_volume[ix, iy, iz]
+    v100 = attr_volume[ix + 1, iy, iz] if ix + 1 < grid_size[0] else v000
+    v010 = attr_volume[ix, iy + 1, iz] if iy + 1 < grid_size[1] else v000
+    v110 = attr_volume[ix + 1, iy + 1, iz] if (ix + 1 < grid_size[0] and iy + 1 < grid_size[1]) else v010
+    v001 = attr_volume[ix, iy, iz + 1] if iz + 1 < grid_size[2] else v000
+    v101 = attr_volume[ix + 1, iy, iz + 1] if (ix + 1 < grid_size[0] and iz + 1 < grid_size[2]) else v001
+    v011 = attr_volume[ix, iy + 1, iz + 1] if (iy + 1 < grid_size[1] and iz + 1 < grid_size[2]) else v001
+    v111 = attr_volume[ix + 1, iy + 1, iz + 1] if (ix + 1 < grid_size[0] and iy + 1 < grid_size[1] and iz + 1 < grid_size[2]) else v011
+    
+    # 5. Compute trilinear weights
+    # Weight for corner (x_c, y_c, z_c) is product of (1 - frac) or frac
+    w000 = (1 - fx) * (1 - fy) * (1 - fz)
+    w100 = fx * (1 - fy) * (1 - fz)
+    w010 = (1 - fx) * fy * (1 - fz)
+    w110 = fx * fy * (1 - fz)
+    w001 = (1 - fx) * (1 - fy) * fz
+    w101 = fx * (1 - fy) * fz
+    w011 = (1 - fx) * fy * fz
+    w111 = fx * fy * fz
+    
+    # 6. Interpolate
+    result = (w000 * v000 + w100 * v100 + w010 * v010 + w110 * v110 +
+              w001 * v001 + w101 * v101 + w011 * v011 + w111 * v111)
+              
+    return result
 ```
 
-**Parameters:**
-- `mode`: 'trilinear' [S2, unofficial].
-- `cudaReadMode`: `cudaReadModeNormalizedFloat` [S1, unofficial].
-
-**Edge Cases:**
-- **Boundary Conditions:** The CUDA texture sampler handles coordinates outside $[0, 1]$ based on the address mode [S1, unofficial].
-- **Precision:** Using `ushort` storage with normalized float read mode provides 16-bit precision [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** If the query position lies outside the grid, indices must be clamped or the query rejected. The pseudocode clamps to the nearest valid voxel [G].
+*   **Precision:** Using `ushort` storage with normalized float read mode can introduce quantization artifacts if the attribute range is not $[0, 1]$ or if high precision is required [S2, unofficial].
+*   **Active Grid Points:** In sparse representations, only "active" grid points should be considered. The formula assumes a dense grid; for sparse grids, a lookup mechanism for active neighbors is required [S1, unofficial].
 
 ## Subtopics
 
-### [GPU Data Layout](2469-gpu-data-layout.md)
-Defines how the volume data is organized in memory (e.g., linear, Z-order) before being bound to a texture.
-
-### [ClearView Unified Buffer Construction](2475-clearview-unified-buffer-construction.md)
-Describes the buffer management strategy for transferring volume data to the GPU.
-
-### [Volume Texture Setup](4055-volume-texture-setup.md)
-Details the creation of the `cudaArray` and binding it to the `texture` object.
+### [Volume Sampling](7111-volume-sampling.md)
+Retrieves the scalar density value from a 3D texture at specified normalized texture coordinates. It serves as the fundamental data retrieval primitive for direct volume rendering, providing the raw intensity values required for ray marching, isosurface extraction, or maximum intensity projection. Unlike its parent method, which handles coordinate transformation and interpolation, this method focuses strictly on the texture fetch operation itself.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per sample, as trilinear interpolation involves a fixed number of arithmetic operations [G].
-- **Memory Complexity:** $O(N)$ where $N$ is the number of voxels, determined by the texture size [S1, unofficial].
-- **Performance:** Hardware-accelerated in CUDA via `tex3D`, which is efficient for random access patterns [S1, unofficial].
-- **Strengths:** Smooth interpolation reduces aliasing; hardware acceleration in CUDA [S1, unofficial].
-- **Limitations:** 16-bit storage limits precision; requires careful coordinate normalization [S1, S2, unofficial].
+*   **Time Complexity:** $O(1)$ per query, as it involves a fixed number of memory accesses (8) and arithmetic operations.
+*   **Memory Complexity:** Depends on the size of the 3D attribute volume.
+*   **Strengths:** Provides smooth, continuous attribute values from discrete voxel data; enables direct surface queries without UV mapping; spatially coherent.
+*   **Limitations:** Requires the query position to be mapped to the grid; boundary handling can introduce artifacts if not managed; quantization errors if low-bit storage is used.
+*   **When to Use:** When continuous attribute interpolation is needed from a voxel grid, especially for surface-based rendering or implicit geometry.
+*   **When Not to Use:** When exact discrete values are required, or when the grid is extremely sparse and a sparse data structure (like a tree) is more efficient.
 
 ## Background
-The method originates from CUDA volume rendering techniques, where 3D textures are used to store volumetric data for ray casting [S1, unofficial]. The PyTorch implementation extends this to attribute volume generation from meshes, leveraging `grid_sample_3d` for differentiable sampling [S2, unofficial].
+The method is central to Texture Fields (TexF), a representation that preserves local 3D spatial relationships among texture attributes, supporting direct surface queries and spatially coherent attribute coding [S1, unofficial]. It is mathematically analogous to bilinear sampling in UV rendering but operates in 3D [S1, unofficial]. The approach allows attributes to be shared with grid-based implicit geometry, such as an SDF, for joint geometry–appearance modeling [S1, unofficial].
 
 ## Sources
-[S1] ojaisnielsen/dtu-2010-cuda-volume-rendering, https://github.com/ojaisnielsen/dtu-2010-cuda-volume-rendering, fetched 2026-10-27 (unofficial)
-[S2] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)
+[S1] Beyond UV Mapping: Mesh Texture Compression via Surface-Aligned Texture Fields, https://doi.org/10.48550/arxiv.2609.23606, fetched 2026-10-26 (unofficial)
+[S2] ojaisnielsen/dtu-2010-cuda-volume-rendering, https://github.com/ojaisnielsen/dtu-2010-cuda-volume-rendering, fetched 2026-10-27 (unofficial)
+[S3] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)

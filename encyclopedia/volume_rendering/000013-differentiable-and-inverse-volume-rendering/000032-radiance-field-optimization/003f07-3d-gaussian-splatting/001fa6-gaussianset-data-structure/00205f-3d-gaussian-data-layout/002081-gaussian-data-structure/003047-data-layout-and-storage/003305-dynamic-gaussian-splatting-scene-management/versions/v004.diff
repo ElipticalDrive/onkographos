@@ -1,0 +1,513 @@
+--- v003.md
++++ v004.md
+@@ -1,125 +1,129 @@
+ # Dynamic Gaussian Splatting Scene Management
+ 
+-Also called: Spirula Scene Management, ROSplat Dynamic Scene API
++Also called: Spirula Scene Management, ROSplat Dynamic Buffer Management
+ 
+ ## Overview
+-Dynamic Gaussian Splatting Scene Management provides the runtime infrastructure for continuously updating a 3D Gaussian Splatting (3DGS) scene on the GPU without full re-initialization. It solves the problem of real-time scene evolution by managing the lifecycle of splat data structures, handling capacity growth, and batching incoming Gaussian updates from external sources (such as ROS2 sensors or simulation pipelines) into the renderer's state. It differs from static loading methods by supporting incremental `append` operations and dynamic buffer resizing, enabling the scene to grow or refresh while maintaining rendering continuity [S1, unofficial].
++Dynamic Gaussian Splatting Scene Management handles the runtime lifecycle of 3D Gaussian splats within a rendering engine, specifically addressing the need for continuous, batched updates in dynamic scenes [S1, unofficial]. Unlike static loading methods that require full re-initialization, this method supports incremental `append` operations and dynamic buffer resizing, allowing the scene to grow or refresh without restarting the renderer [S1, unofficial]. It differs from sibling methods like [Splat Data Buffer Layout](5568-splat-data-buffer-layout.md) by managing the host-to-device transfer and capacity growth logic, rather than just the internal memory layout.
+ 
+ ## How it works
+-The method manages a device-resident `DeviceScene` structure that acts as the bridge between host-side data ingestion and the GPU rendering engine. It operates through a sequence of initialization, capacity management, data appending, and rendering steps.
++The method operates on a Structure-of-Arrays (SoA) paradigm, maintaining device-resident buffers for splat attributes and metadata [S1, unofficial]. It manages the transition from host memory (where incoming batches arrive) to device memory (where the renderer reads data) through a series of validated steps.
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   `sh_degree`: Integer in $[0, 4]$ defining spherical harmonic complexity.
+-    *   `initial_capacity`: Integer $\ge 0$ for initial buffer reservation.
+-    *   `batch_count`: Number of splats to append.
+-    *   `means_xyz`: Host array of $N \times 3$ floats.
+-    *   `quaternions_wxyz`: Host array of $N \times 4$ floats (scalar-last order).
+-    *   `log_scales_xyz`: Host array of $N \times 3$ floats (log-space scales).
+-    *   `opacity_logits`: Host array of $N$ floats (logit-space opacity).
+-    *   `features_dc_rgb`: Host array of $N \times 3$ floats (DC coefficients).
+-    *   `features_sh_rgb`: Host array of $N \times D \times 3$ floats (SH coefficients), where $D = (\text{sh\_degree} + 1)^2 - 1$.
+-    *   `width`, `height`: Camera resolution.
+-    *   `view_matrix_4x4`: $4 \times 4$ row-major float array (world-to-camera).
+-    *   `intrinsics_fx_fy_cx_cy`: Array of 4 floats.
+-    *   `modifier`: Positive finite float for global scale adjustment.
++    *   `sh_degree`: Integer in $[0, 4]$ determining spherical harmonic complexity [S1, unofficial].
++    *   `initial_capacity`: Integer $\ge 0$ for the initial buffer size [S1, unofficial].
++    *   `batch_count`: Number of splats to append [S1, unofficial].
++    *   `means_xyz`: $N \times 3$ float array of positions [S1, unofficial].
++    *   `quaternions_wxyz`: $N \times 4$ float array of rotations (scalar-last) [S1, unofficial].
++    *   `log_scales_xyz`: $N \times 3$ float array of log-scales [S1, unofficial].
++    *   `opacity_logits`: $N$ float array of opacity logits [S1, unofficial].
++    *   `features_dc_rgb`: $N \times 3$ float array of DC spherical harmonic coefficients [S1, unofficial].
++    *   `features_sh_rgb`: $N \times D \times 3$ float array of higher-order SH coefficients, where $D = (sh\_degree + 1)^2 - 1$ [S1, unofficial].
++    *   `camera_params`: Width, height, view matrix ($4 \times 4$), and intrinsics ($fx, fy, cx, cy$) [S1, unofficial].
++    *   `scale_modifier`: Positive finite float for global scale adjustment [S1, unofficial].
+ *   **Outputs:**
+-    *   Rendered images (RGBA8, Depth, or Opacity) in host memory.
+-    *   Updated scene state on the GPU.
++    *   Rendered image buffers (RGBA8, Depth, or Opacity) [S1, unofficial].
++    *   Updated scene state (count, capacity, device buffers) [S1, unofficial].
+ 
+ ### Data Structures
+-The core state is held in `DeviceScene` on the GPU device:
+-*   `means`: `float3*` array of size `capacity`.
+-*   `quats`: `float4*` array of size `capacity`.
+-*   `scales`: `float3*` array of size `capacity`.
+-*   `opacities`: `float*` array of size `capacity`.
+-*   `features_dc`: `float3*` array of size `capacity`.
+-*   `features_sh`: `float3*` array of size `capacity * num_sh`.
+-*   `count`: `int64_t` current number of splats.
+-*   `capacity`: `int64_t` current buffer capacity.
+-*   `sh_degree`: `int`.
+-*   `num_sh`: `int`, calculated as $(\text{sh\_degree} + 1)^2 - 1$.
+-
+-Host-side readback buffers (`HostRender`) store results in pinned memory:
+-*   `rgb`: `float3*` array of size `rgb_pixels`.
+-*   `scalar`: `float*` array of size `scalar_pixels`.
+-
+-### Numbered Steps
+-
+-1.  **Initialize Renderer:**
+-    *   Validate `sh_degree` $\in [0, 4]$ and `initial_capacity` $\ge 0$.
+-    *   Reset the engine and release existing scene data.
+-    *   Set `scene.sh_degree` and calculate `scene.num_sh = (sh_degree + 1)^2 - 1`.
+-    *   Reserve memory for `initial_capacity` and bind the scene to the engine.
+-
+-2.  **Reserve Scene Capacity:**
+-    *   If the requested capacity exceeds the current `scene.capacity`:
+-        *   Calculate `next_capacity = max(requested, max(4096, current_capacity * 2))`.
+-        *   Grow all device buffers (`means`, `quats`, `scales`, `opacities`, `features_dc`) to `next_count`.
+-        *   If `num_sh > 0`, grow `features_sh` to `next_count * num_sh`.
+-        *   Update `scene.capacity` and rebind the scene.
+-
+-3.  **Bind Scene to Engine:**
+-    *   Set `state.cur_num_splats = scene.count`.
+-    *   Set `state.max_num_splats = scene.capacity`.
+-    *   Set `state.num_sh` and `state.sh_degree`.
+-    *   Create `DeviceVector` views for `means`, `quats`, `scales`, `opacities`, `features_dc` with size `capacity`.
+-    *   If `num_sh > 0`, create a `DeviceTensor2D` view for `features_sh` with dimensions `(capacity, num_sh, 3)`; otherwise, create an empty tensor.
+-    *   Set `state.world.initialized = true` if `capacity > 0`.
+-
+-4.  **Append Splats:**
+-    *   Validate `batch_count` $\ge 0$ and that all input arrays are non-null.
+-    *   Calculate `offset = scene.count`.
+-    *   Check for integer overflow: if `scene.count > numeric_limits<int64_t>::max() - batch_count`, throw `std::overflow_error`.
+-    *   Reserve space for `offset + batch_count` (triggering growth if necessary).
+-    *   Copy `means`, `quats`, `scales`, `opacities`, `features_dc` from host to device starting at `offset`.
+-    *   If `num_sh > 0`, copy `features_sh` from host to device starting at `offset * num_sh`.
+-    *   Increment `scene.count` and rebind the scene.
+-
+-5.  **Set Camera:**
+-    *   Validate `width > 0`, `height > 0`, and that `view_matrix` and `intrinsics` are non-null.
+-    *   Initialize `dist_coeffs[8]` to zero.
+-    *   Call `set_camera_params` with `width`, `height`, projection type `"PINHOLE"`, distortion type `"NONE"`, `view_matrix` (1x4x4 float), `intrinsics` (1x4 float), and `dist_coeffs` (1x8 float).
+-    *   Set `width`, `height`, and `camera_ready = true`.
+-
+-6.  **Set Scale Modifier:**
+-    *   Validate `modifier > 0` and is finite.
+-    *   If `modifier` equals the current `scale_modifier`, return.
+-    *   Calculate `log_delta = log(requested_modifier / scale_modifier)`.
+-    *   Calculate `numel = scene.count * 3`.
+-    *   Allocate a device scratch buffer of size `max_chunk` (typically $1 \ll 20$).
++The core state is held in `DeviceScene` and `HostRender` structures [S1, unofficial].
++
++**DeviceScene** (Device Memory):
++*   `means`: `float3*` pointer, size $capacity \times 3$ [S1, unofficial].
++*   `quats`: `float4*` pointer, size $capacity \times 4$ [S1, unofficial].
++*   `scales`: `float3*` pointer, size $capacity \times 3$ [S1, unofficial].
++*   `opacities`: `float*` pointer, size $capacity$ [S1, unofficial].
++*   `features_dc`: `float3*` pointer, size $capacity \times 3$ [S1, unofficial].
++*   `features_sh`: `float3*` pointer, size $capacity \times num\_sh$ [S1, unofficial].
++*   `count`: `int64_t`, current number of splats [S1, unofficial].
++*   `capacity`: `int64_t`, current buffer capacity [S1, unofficial].
++*   `sh_degree`: `int`, current SH degree [S1, unofficial].
++*   `num_sh`: `int`, number of SH coefficients per splat [S1, unofficial].
++
++**HostRender** (Pinned Host Memory):
++*   `rgb`: `float3*` pointer, size $rgb\_pixels$ [S1, unofficial].
++*   `scalar`: `float*` pointer, size $scalar\_pixels$ [S1, unofficial].
++*   `rgb_pixels`: `size_t` [S1, unofficial].
++*   `scalar_pixels`: `size_t` [S1, unofficial].
++
++### Steps
++
++1.  **Initialize Renderer**:
++    *   Validate `sh_degree` in $[0, 4]$ and `initial_capacity` $\ge 0$ [S1, unofficial].
++    *   Reset engine state and release existing scene data [S1, unofficial].
++    *   Set `scene.sh_degree` to `sh_degree` [S1, unofficial].
++    *   Calculate `scene.num_sh` as $(sh\_degree + 1)^2 - 1$ [S1, unofficial].
++    *   Reserve memory for `initial_capacity` [S1, unofficial].
++    *   Bind scene to engine [S1, unofficial].
++
++2.  **Reserve Scene Capacity**:
++    *   If `requested_capacity` > `current_capacity`:
++        *   Calculate `next_capacity` as $\max(requested, \max(4096, current\_capacity \times 2))$ [S1, unofficial].
++        *   Grow all device buffers (`means`, `quats`, `scales`, `opacities`, `features_dc`) to `next_count` [S1, unofficial].
++        *   If `num_sh` > 0, grow `features_sh` to `next_count * num_sh` [S1, unofficial].
++        *   Update `scene.capacity` and bind scene [S1, unofficial].
++
++3.  **Bind Scene to Engine**:
++    *   Set `state.cur_num_splats` to `scene.count` [S1, unofficial].
++    *   Set `state.max_num_splats` to `scene.capacity` [S1, unofficial].
++    *   Set `state.num_sh` to `scene.num_sh` and `state.sh_degree` to `scene.sh_degree` [S1, unofficial].
++    *   Create `DeviceVector` views for `means`, `quats`, `scales`, `opacities`, `features_dc` with size `capacity` [S1, unofficial].
++    *   If `num_sh` > 0, create `DeviceTensor2D` view for `features_sh` with dimensions `(capacity, num_sh, 3)`; else empty tensor [S1, unofficial].
++    *   Set `state.world.initialized` to `true` if `capacity` > 0 [S1, unofficial].
++
++4.  **Append Splats**:
++    *   Validate `batch_count` $\ge 0$ and input arrays are non-null [S1, unofficial].
++    *   Check for integer overflow: if `scene.count` > `numeric_limits<int64_t>::max() - batch_count`, throw `std::overflow_error` [S1, unofficial].
++    *   Calculate `offset` = `scene.count` [S1, unofficial].
++    *   Reserve space for `offset + batch_count` (triggering capacity growth if needed) [S1, unofficial].
++    *   Copy `means`, `quats`, `scales`, `opacities`, `features_dc` from host to device at `offset` [S1, unofficial].
++    *   If `num_sh` > 0, copy `features_sh` from host to device at `offset * num_sh` [S1, unofficial].
++    *   Increment `scene.count` and bind scene [S1, unofficial].
++
++5.  **Set Camera**:
++    *   Validate `width`/`height` > 0 and `view_matrix`/`intrinsics` non-null [S1, unofficial].
++    *   Initialize `dist_coeffs[8]` to zero [S1, unofficial].
++    *   Call `set_camera_params` with `width`, `height`, "PINHOLE", "NONE", `view_matrix` ($1 \times 4 \times 4$ float), `intrinsics` ($1 \times 4$ float), `dist_coeffs` ($1 \times 8$ float) [S1, unofficial].
++    *   Set `width`, `height`, and `camera_ready` = `true` [S1, unofficial].
++
++6.  **Set Scale Modifier**:
++    *   Validate `modifier` > 0 and finite [S1, unofficial].
++    *   If `modifier` equals current `scale_modifier`, return [S1, unofficial].
++    *   Calculate `log_delta` = $\log(requested\_modifier / scale\_modifier)$ [S1, unofficial].
++    *   Calculate `numel` = `scene.count` $\times 3$ [S1, unofficial].
++    *   Allocate device scratch buffer of size `max_chunk` ($1 \ll 20$) [S1, unofficial].
+     *   Loop over `numel` in chunks:
+-        *   Copy `log_delta` to the device chunk.
+-        *   Call `float_add_into` on the `scales` chunk and the device `delta` chunk.
+-    *   Free the scratch buffer.
+-    *   Update `scale_modifier`.
+-
+-7.  **Render Color:**
+-    *   Validate output buffer size $\ge$ `pixel_count * 4`.
+-    *   If `scene.count == 0`, fill output with black (RGB 0,0,0) and alpha 255.
+-    *   Determine `render_sh_degree = min(requested_sh_degree, scene.sh_degree)` if `requested >= 0`, else `scene.sh_degree`.
+-    *   Call `forward_3dgs("3dgs", render_sh_degree, true)`.
+-    *   Get the RGB buffer from `state.fwd.renders`.
+-    *   Resize `host.rgb` if needed.
+-    *   Copy RGB from device to host.
+-    *   Write RGB to the output buffer using `write_gray_or_rgb`.
+-
+-8.  **Render Depth:**
+-    *   Validate output.
+-    *   If `scene.count == 0`, fill with black/alpha 255.
+-    *   Call `forward_3dgs`.
+-    *   Get the depth buffer from `state.fwd.renders` (index 1).
+-    *   Resize `host.scalar`.
+-    *   Copy depth from device to host.
+-    *   Call `write_depth(output, pixel_count)`.
+-
+-9.  **Render Opacity:**
+-    *   Validate output.
+-    *   If `scene.count == 0`, fill with black/alpha 255.
+-    *   Call `forward_3dgs`.
+-    *   Get the transmittance buffer from `state.fwd.render_Ts`.
+-    *   Resize `host.scalar`.
+-    *   Copy transmittance from device to host.
+-    *   Loop over pixels to write opacity (implementation mirrors color/depth rendering logic).
++        *   Copy `log_delta` to device chunk [S1, unofficial].
++        *   Call `float_add_into` on `scales` chunk and device `delta` chunk [S1, unofficial].
++    *   Free scratch buffer [S1, unofficial].
++    *   Update `scale_modifier` [S1, unofficial].
++
++7.  **Render Color**:
++    *   Validate output buffer size $\ge$ `pixel_count` $\times 4$ [S1, unofficial].
++    *   If `scene.count` == 0, fill output with black (RGB 0,0,0) and alpha 255 [S1, unofficial].
++    *   Determine `render_sh_degree` as $\min(requested\_sh\_degree, scene.sh\_degree)$ if `requested` $\ge 0$, else `scene.sh_degree` [S1, unofficial].
++    *   Call `forward_3dgs("3dgs", render_sh_degree, true)` [S1, unofficial].
++    *   Get RGB buffer from `state.fwd.renders` [S1, unofficial].
++    *   Resize `host.rgb` if needed [S1, unofficial].
++    *   Copy RGB from device to host [S1, unofficial].
++    *   Write RGB to output buffer using `write_gray_or_rgb` [S1, unofficial].
++
++8.  **Render Depth**:
++    *   Validate output [S1, unofficial].
++    *   If `scene.count` == 0, fill black/alpha 255 [S1, unofficial].
++    *   Call `forward_3dgs` [S1, unofficial].
++    *   Get depth buffer from `state.fwd.renders` (index 1) [S1, unofficial].
++    *   Resize `host.scalar` if needed [S1, unofficial].
++    *   Copy depth from device to host [S1, unofficial].
++    *   Call `write_depth(output, pixel_count)` [S1, unofficial].
++
++9.  **Render Opacity**:
++    *   Validate output [S1, unofficial].
++    *   If `scene.count` == 0, fill black/alpha 255 [S1, unofficial].
++    *   Call `forward_3dgs` [S1, unofficial].
++    *   Get transmittance buffer from `state.fwd.render_Ts` [S1, unofficial].
++    *   Resize `host.scalar` if needed [S1, unofficial].
++    *   Copy transmittance from device to host [S1, unofficial].
++    *   Loop over pixels to write opacity (implementation mirrors color/depth rendering) [S1, unofficial].
+ 
+ ### Pseudocode
+@@ -129,149 +133,121 @@
+ import numpy as np
+ 
+-class DynamicSceneManager:
+-    def __init__(self):
+-        self.scene = {
+-            'means': None, 'quats': None, 'scales': None,
+-            'opacities': None, 'features_dc': None, 'features_sh': None,
+-            'count': 0, 'capacity': 0, 'sh_degree': 0, 'num_sh': 0
+-        }
+-        self.state = {
+-            'cur_num_splats': 0, 'max_num_splats': 0,
+-            'num_sh': 0, 'sh_degree': 0, 'initialized': False
+-        }
++class DynamicGaussianScene:
++    def __init__(self, sh_degree: int, initial_capacity: int):
++        self.sh_degree = sh_degree
++        self.num_sh = (sh_degree + 1) ** 2 - 1
++        self.count = 0
++        self.capacity = 0
+         self.scale_modifier = 1.0
+-        self.camera_ready = False
+-
+-    def reset_scene(self, sh_degree: int, initial_capacity: int):
+-        if not (0 <= sh_degree <= 4):
+-            raise ValueError("sh_degree must be in [0, 4]")
+-        if initial_capacity < 0:
+-            raise ValueError("initial_capacity must be >= 0")
+-        
+-        self.scene['sh_degree'] = sh_degree
+-        self.scene['num_sh'] = (sh_degree + 1)**2 - 1
+-        self._reserve_capacity(initial_capacity)
+-        self._bind_scene()
+-
+-    def _reserve_capacity(self, requested: int):
+-        current = self.scene['capacity']
+-        if requested > current:
+-            next_cap = max(requested, max(4096, current * 2))
+-            # In a real implementation, this would allocate GPU memory
+-            # For pseudocode, we assume buffer growth logic exists
+-            self.scene['capacity'] = next_cap
+-            # Grow buffers: means, quats, scales, opacities, features_dc
+-            if self.scene['num_sh'] > 0:
+-                # Grow features_sh to next_cap * num_sh
+-                pass
+-
+-    def _bind_scene(self):
+-        self.state['cur_num_splats'] = self.scene['count']
+-        self.state['max_num_splats'] = self.scene['capacity']
+-        self.state['num_sh'] = self.scene['num_sh']
+-        self.state['sh_degree'] = self.scene['sh_degree']
+-        # Create DeviceVector views for means, quats, scales, opacities, features_dc
+-        if self.scene['num_sh'] > 0:
+-            # Create DeviceTensor2D for features_sh (capacity, num_sh, 3)
+-            pass
++        
++        # Device buffers (simulated as numpy arrays for clarity)
++        self.means = None
++        self.quats = None
++        self.scales = None
++        self.opacities = None
++        self.features_dc = None
++        self.features_sh = None
++        
++        self._resize(initial_capacity)
++
++    def _resize(self, new_capacity: int):
++        """Grow buffers to new_capacity."""
++        # Growth logic: max(requested, max(4096, current_capacity * 2))
++        if new_capacity > self.capacity:
++            next_capacity = max(new_capacity, max(4096, self.capacity * 2))
+         else:
+-            # Empty tensor
+-            pass
+-        if self.scene['capacity'] > 0:
+-            self.state['initialized'] = True
+-
+-    def append_splats(self, count: int, means: np.ndarray, quats: np.ndarray,
+-                      log_scales: np.ndarray, opacity_logits: np.ndarray,
+-                      features_dc: np.ndarray, features_sh: np.ndarray):
++            next_capacity = self.capacity
++            
++        if next_capacity == self.capacity:
++            return
++
++        # Grow buffers
++        self.means = np.resize(self.means, (next_capacity, 3))
++        self.quats = np.resize(self.quats, (next_capacity, 4))
++        self.scales = np.resize(self.scales, (next_capacity, 3))
++        self.opacities = np.resize(self.opacities, (next_capacity,))
++        self.features_dc = np.resize(self.features_dc, (next_capacity, 3))
++        
++        if self.num_sh > 0:
++            self.features_sh = np.resize(self.features_sh, (next_capacity, self.num_sh, 3))
++            
++        self.capacity = next_capacity
++
++    def append(self, count: int, means: np.ndarray, quats: np.ndarray, 
++               log_scales: np.ndarray, opacities: np.ndarray, 
++               features_dc: np.ndarray, features_sh: np.ndarray):
++        """Append a batch of splats."""
+         if count < 0:
+-            raise ValueError("batch_count must be >= 0")
+-        
+-        offset = self.scene['count']
+-        if offset > np.iinfo(np.int64).max - count:
+-            raise OverflowError("Integer overflow in scene count")
+-        
+-        self._reserve_capacity(offset + count)
+-        
+-        # Copy data to device at offset
+-        # means, quats, scales, opacities, features_dc copied directly
+-        # features_sh copied at offset * num_sh
+-        self.scene['count'] += count
+-        self._bind_scene()
+-
+-    def set_camera(self, width: int, height: int, view_matrix: np.ndarray, intrinsics: np.ndarray):
+-        if width <= 0 or height <= 0:
+-            raise ValueError("Width and height must be > 0")
+-        
+-        dist_coeffs = np.zeros(8)
+-        # Call set_camera_params with PINHOLE, NONE, view_matrix, intrinsics, dist_coeffs
+-        self.width = width
+-        self.height = height
+-        self.camera_ready = True
++            raise ValueError("Batch count must be >= 0")
++        
++        # Overflow check
++        if self.count > np.iinfo(np.int64).max - count:
++            raise OverflowError("Scene count overflow")
++            
++        offset = self.count
++        self._resize(offset + count)
++        
++        # Copy data to device (simulated by numpy slice assignment)
++        end = offset + count
++        self.means[offset:end] = means
++        self.quats[offset:end] = quats
++        self.scales[offset:end] = log_scales
++        self.opacities[offset:end] = opacities
++        self.features_dc[offset:end] = features_dc
++        
++        if self.num_sh > 0:
++            # features_sh is N x D x 3
++            self.features_sh[offset:end] = features_sh
++            
++        self.count = end
+ 
+     def set_scale_modifier(self, modifier: float):
++        """Apply global scale modifier."""
+         if modifier <= 0 or not math.isfinite(modifier):
+             raise ValueError("Modifier must be positive and finite")
+-        
+         if modifier == self.scale_modifier:
+             return
+-        
++            
+         log_delta = math.log(modifier / self.scale_modifier)
+-        numel = self.scene['count'] * 3
+-        
+-        # Allocate scratch buffer of size max_chunk (1<<20)
+-        # Loop over numel in chunks
+-        # float_add_into(scales_chunk, delta_chunk)
+-        
+         self.scale_modifier = modifier
+-
+-    def render_color(self, output_buffer: np.ndarray, requested_sh_degree: int = -1):
+-        pixel_count = self.width * self.height
+-        if len(output_buffer) < pixel_count * 4:
+-            raise ValueError("Output buffer too small")
+-        
+-        if self.scene['count'] == 0:
+-            output_buffer[:] = 0
+-            output_buffer[3::4] = 255 # Alpha 255
+-            return
+-
+-        if requested_sh_degree >= 0:
+-            render_sh_degree = min(requested_sh_degree, self.scene['sh_degree'])
++        
++        # Apply to existing scales in log space
++        # Scales are stored as log(scales), so we add log_delta
++        if self.count > 0:
++            self.scales[:, :] += log_delta
++
++    def render(self, width: int, height: int, view_matrix: np.ndarray, 
++               intrinsics: np.ndarray, output_mode: int):
++        """Render the scene."""
++        pixel_count = width * height
++        
++        if self.count == 0:
++            # Fill black/alpha 255
++            return np.zeros((pixel_count, 4), dtype=np.uint8)
++            
++        # Determine SH degree
++        # In a real implementation, this calls forward_3dgs
++        # Here we simulate the result based on mode
++        if output_mode == 0: # Color
++            # Simulate RGB output
++            return np.random.randint(0, 255, (pixel_count, 3), dtype=np.uint8)
++        elif output_mode == 1: # Depth
++            # Simulate Depth output
++            return np.random.rand(pixel_count).astype(np.float32)
++        elif output_mode == 2: # Opacity
++            # Simulate Opacity output
++            return np.random.rand(pixel_count).astype(np.float32)
+         else:
+-            render_sh_degree = self.scene['sh_degree']
+-            
+-        # forward_3dgs("3dgs", render_sh_degree, true)
+-        # Get RGB from state.fwd.renders
+-        # Copy to host and write to output
+-        pass
+-
+-    def render_depth(self, output_buffer: np.ndarray):
+-        if self.scene['count'] == 0:
+-            output_buffer[:] = 0
+-            return
+-        
+-        # forward_3dgs
+-        # Get depth from state.fwd.renders[1]
+-        # Copy to host and write
+-        pass
+-
+-    def render_opacity(self, output_buffer: np.ndarray):
+-        if self.scene['count'] == 0:
+-            output_buffer[:] = 0
+-            return
+-        
+-        # forward_3dgs
+-        # Get transmittance from state.fwd.render_Ts
+-        # Loop over pixels to write opacity
+-        pass
++            raise ValueError("Unknown output mode")
+ ```
+ 
+ ### Parameters
+-*   **SH Degree:** Integer, range $[0, 4]$. Determines spherical harmonic complexity. `num_sh` is calculated as $(\text{sh\_degree} + 1)^2 - 1$.
+-*   **Scale Modifier:** Float, must be positive and finite. Applied multiplicatively to splat scales via log-space addition to avoid precision issues and allow dynamic adjustment.
++*   `sh_degree`: Integer, range $[0, 4]$. Determines spherical harmonic complexity. `num_sh` is calculated as $(sh\_degree + 1)^2 - 1$ [S1, unofficial].
++*   `scale_modifier`: Float, must be positive and finite. Applied multiplicatively to splat scales via log-space addition to avoid precision issues and allow dynamic adjustment [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Empty Scene:** If `scene.count == 0` during rendering, the renderer outputs a black image (RGB 0,0,0) with full alpha (255) instead of crashing or rendering nothing [S1, unofficial].
+-*   **Buffer Overflow:** The append operation checks for integer overflow when adding `batch_count` to `scene.count`. If `scene.count > numeric_limits<int64_t>::max() - batch_count`, it throws `std::overflow_error` [S1, unofficial].
+-*   **Precision:** Scales are stored in log-space to ensure positivity and improve optimization stability. Linear scales are recovered via $s_{linear} = \exp(s_{log})$ [S1, unofficial].
++*   **Empty Scene**: If `scene.count` == 0 during render, the renderer outputs a black image (RGB 0,0,0) with full alpha (255) instead of crashing or rendering nothing [S1, unofficial].
++*   **Buffer Overflow**: Append checks for integer overflow when adding `batch_count` to `scene.count`. Throws `std::overflow_error` if `scene.count` > `numeric_limits<int64_t>::max() - batch_count` [S1, unofficial].
++*   **Precision**: Scales are stored in log-space to ensure positivity during optimization. Linear scales are recovered via $s_{linear} = \exp(s_{log})$ for covariance calculation [S1, unofficial].
+ 
+ ## Subtopics
+@@ -281,14 +257,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Appending splats is $O(N)$ where $N$ is the batch size, plus $O(C)$ for buffer growth if capacity is exceeded, where $C$ is the new capacity. Rendering is $O(P \cdot N)$ where $P$ is the number of pixels and $N$ is the number of splats, typical for rasterization-based splatting.
+-*   **Memory Complexity:** $O(C \cdot D)$ where $C$ is the capacity and $D$ is the dimensionality of attributes (including SH coefficients).
+-*   **Scaling:** The doubling strategy for capacity growth ensures amortized $O(1)$ cost for appends, but large jumps can cause temporary memory spikes.
+-*   **Strengths:** Supports dynamic scene updates without full re-initialization; efficient buffer management; handles empty scenes gracefully.
+-*   **Limitations:** Requires careful management of buffer growth to avoid fragmentation; log-space storage adds a small computational overhead for scale adjustments.
+-*   **When to Use:** Real-time applications with evolving scenes, such as SLAM or dynamic object insertion.
+-*   **When Not to Use:** Static scenes where pre-allocation of exact size is known and fixed.
++*   **Time Complexity**: Append operations are $O(N)$ for data copy, where $N$ is the batch size. Capacity growth involves reallocation and copy, which is amortized $O(1)$ per splat if doubling strategy is used. Rendering is $O(P \cdot N)$ where $P$ is pixel count and $N$ is splat count, typical for Gaussian Splatting.
++*   **Memory Complexity**: $O(N \cdot C)$ where $N$ is capacity and $C$ is the number of attributes per splat (means, quats, scales, opacities, features). The doubling strategy ensures memory usage is at most $2 \times$ the required capacity.
++*   **Performance**: The method uses pinned host memory for readback and device buffers for storage, optimizing data transfer [S1, unofficial]. The use of log-space for scales and opacities avoids precision issues during optimization [S1, unofficial].
++*   **Strengths**: Supports dynamic scenes with incremental updates. Efficient buffer management with minimum capacity of 4096 and doubling strategy.
++*   **Limitations**: Requires careful management of buffer sizes to avoid excessive reallocation. Integer overflow checks are necessary for large scenes.
+ 
+ ## Background
+-The method originates from the ROSplat project, which integrates 3D Gaussian Splatting with ROS2 for robotic applications. It was developed to enable real-time scene updates in dynamic environments, leveraging a Vulkan-based backend for efficient GPU rendering [S1, unofficial].
++The method originates from the ROSplat project, which integrates 3D Gaussian Splatting with ROS2 for dynamic scene management [S1, unofficial]. It builds on the principles of Structure-of-Arrays (SoA) data layout for cache coherency [S1, unofficial]. The specific implementation details, such as the buffer growth logic and log-space storage, are derived from the Spirula renderer bridge [S1, unofficial].
+ 
+ ## Sources

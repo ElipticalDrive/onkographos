@@ -3,69 +3,74 @@
 Also called: CSMain
 
 ## Overview
-A GPU compute shader kernel is a parallel execution primitive that maps computational work to threads using thread IDs [S1, unofficial]. In the provided example, it generates a gradient texture by computing normalized coordinates per thread and writing them to a 2D output texture [S1, unofficial].
+A Compute Shader Kernel is a GPU compute shader entry point that executes a user-defined function in parallel across a grid of threads [S1, unofficial]. It serves as a fundamental building block for general-purpose GPU (GPGPU) computations, such as generating gradient textures or processing raw data buffers [S1, unofficial]. Unlike fragment shaders which are tied to rasterization, compute shaders operate on arbitrary data structures and memory buffers, providing direct access to global memory without the implicit pipeline stages of rendering [G].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Thread IDs (implicit in the GPU execution context).
-- Output: A writable 2D texture `RWTexture2D<float4> Result` [S1, unofficial].
+The kernel receives a dispatch grid defined by the host application. It writes results to writable resources, typically `RWTexture2D` or `RWBuffer` types [S1, unofficial].
 
 **Data Structures:**
-- `Result`: A 2D texture of 4-component floats. Each element stores the normalized x and y coordinates in the RGB channels and `0.0` in the alpha channel [S1, unofficial].
+*   **Output Buffer:** `RWTexture2D<float4> Result`, a writable 2D texture with 4-component floating-point values [S1, unofficial].
+*   **Thread ID:** Accessed via built-in variables (e.g., `DispatchThreadID` in HLSL) representing the global thread index within the dispatch grid [S1, unofficial].
 
 **Parameters:**
-- `Resolution`: A float variable used to normalize thread IDs to the [0, 1] range [S1, unofficial].
-- Thread Group Size: 8x8x1 threads per group [S1, unofficial].
+*   **Resolution:** A scalar value used to normalize thread coordinates to the $[0, 1]$ range [S1, unofficial].
+*   **Thread Group Size:** The local execution block size, specified as $8 \times 8 \times 1$ threads per group in the reference implementation [S1, unofficial].
 
 **Steps:**
-1. Retrieve the global thread ID `id` from the shader execution context [S1, unofficial].
-2. Calculate the normalized x coordinate: $x = \frac{id.x}{\text{Resolution}}$ [S1, unofficial].
-3. Calculate the normalized y coordinate: $y = \frac{id.y}{\text{Resolution}}$ [S1, unofficial].
-4. Write the result to `Result[id.xy]` with values $(x, y, 0.0, 0.0)$ [S1, unofficial].
+1.  Retrieve the global thread ID `id` from the hardware thread index registers [S1, unofficial].
+2.  Calculate the normalized x-coordinate: $x = \frac{id.x}{\text{Resolution}}$ [S1, unofficial].
+3.  Calculate the normalized y-coordinate: $y = \frac{id.y}{\text{Resolution}}$ [S1, unofficial].
+4.  Write the computed values to the output texture at coordinate `id.xy` with RGB values $(x, y, 0.0)$ and alpha $0.0$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-class float4:
-    def __init__(self, r, g, b, a):
-        self.r, self.g, self.b, self.a = r, g, b, a
+# Pseudocode representing the logic of a Compute Shader Kernel
+# Note: Actual implementation requires HLSL/CUDA syntax; this is a logical representation.
 
-def compute_shader_kernel(thread_id, resolution, output_texture):
-    # Step 1: Retrieve global thread ID (implicit in GPU execution context)
-    id_x, id_y = thread_id
+struct ThreadID:
+    x: int
+    y: int
+    z: int
 
+struct Texture2D:
+    width: int
+    height: int
+    data: array<float4>
+
+function ComputeKernel(thread_id: ThreadID, resolution: float, output_texture: Texture2D):
+    # Step 1: Get global thread ID (provided by hardware/runtime)
+    id = thread_id
+    
     # Step 2: Calculate normalized x coordinate
-    x = id_x / resolution
-
+    x = id.x / resolution
+    
     # Step 3: Calculate normalized y coordinate
-    y = id_y / resolution
-
-    # Step 4: Write result to output texture
-    result_color = float4(x, y, 0.0, 0.0)
-    output_texture[id_y][id_x] = result_color
+    y = id.y / resolution
+    
+    # Step 4: Write result to texture
+    # RGB values are (x, y, 0.0), Alpha is 0.0
+    color = float4(x, y, 0.0, 0.0)
+    output_texture.data[id.y * output_texture.width + id.x] = color
 ```
 
 **Edge Cases and Pitfalls:**
-- Division by zero: If `Resolution` is zero, normalization fails [G]. Ensure `Resolution > 0` before execution.
-- Boundary conditions: Thread IDs must be within the output texture dimensions to avoid out-of-bounds memory access [G]. Check `id.x < Resolution` and `id.y < Resolution`.
+*   **Boundary Checks:** If the dispatch grid size does not match the texture dimensions exactly, threads may access out-of-bounds memory. A guard clause checking `id.x < width` and `id.y < height` is required for robustness [G].
+*   **Precision:** Division by `Resolution` should be performed in floating-point arithmetic to avoid integer truncation [S1, unofficial].
 
 ## Subtopics
 
-### [Register-form kernels with staged shell data](2611-register-form-kernels-with-staged-shell-data.md)
-Optimizes GPU compute shader kernels for volume rendering by staging shell metadata and coefficient data into groupshared memory, eliminating dependent global memory loads during inner loop evaluation. Chosen when atomic orbital evaluations require reduced latency and higher occupancy.
-
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per thread, $O(N)$ total for $N$ threads [G].
-- **Memory Complexity:** $O(N)$ for the output texture, where $N$ is the number of threads [G].
-- **Performance:** Limited by memory bandwidth and texture write throughput [G].
-- **Strengths:** Embarrassingly parallel execution with minimal overhead [G].
-- **Limitations:** Requires manual thread indexing and lacks built-in synchronization for complex data structures [G].
-- **When to use:** Basic data generation, preprocessing, or simple parallel computations [G].
-- **When not to use:** Algorithms requiring heavy synchronization, atomic operations, or hierarchical data structures [G].
+*   **Time Complexity:** $O(1)$ per thread, as each thread performs a constant number of arithmetic operations and a single memory write. Total time scales linearly with the number of threads dispatched.
+*   **Memory Complexity:** $O(N)$ where $N$ is the size of the output texture/buffer. The kernel itself has negligible memory overhead beyond registers for local variables [S1, unofficial].
+*   **Performance:** Performance is limited by memory bandwidth when writing to global memory. Occupancy is influenced by the thread group size ($8 \times 8$) and register usage [S1, unofficial].
+*   **Strengths:** High parallelism for embarrassingly parallel tasks; direct memory access; no rasterization overhead.
+*   **Limitations:** Requires explicit synchronization if threads share data; not suitable for tasks requiring hierarchical data structures without additional support (e.g., tree traversal).
 
 ## Background
-Not given in the sources.
+The concept of compute shaders was introduced with DirectX 11 and OpenGL 4.3, allowing developers to use GPU shaders for general-purpose computation [G]. The specific example of writing a gradient texture based on thread IDs is a common introductory example for GPU parallel execution, often found in educational repositories and unofficial tutorials [S1, unofficial].
 
 ## Sources
 [S1] AshMagorian/RayMarching, https://github.com/AshMagorian/RayMarching, fetched 2026-10-27 (unofficial)

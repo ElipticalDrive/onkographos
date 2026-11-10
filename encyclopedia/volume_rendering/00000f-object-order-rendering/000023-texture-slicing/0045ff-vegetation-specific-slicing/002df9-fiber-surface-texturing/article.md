@@ -1,0 +1,142 @@
+# Fiber Surface Texturing
+
+Also called: Fiber Surface Texture Mapping
+
+## Overview
+Fiber Surface Texturing is a method for visualizing fiber fields on tetrahedral meshes by mapping fiber path parameters to 1D textures. It solves the problem of rendering sparse, directional data (fibers) within volumetric elements by treating the fiber surface as a textured polygon rather than explicit geometry. It sets itself apart from sibling methods like [Regular Texcell Slicing with Non-Linear Pre-filtering](9823-regular-texcell-slicing-with-non-linear-pre-filtering.md) by using 1D texture lookups driven by global fiber path length rather than 2D alpha-blended slices, allowing for efficient representation of continuous fiber trajectories across complex mesh boundaries.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A tetrahedral mesh containing a Fiber Surface Curve Path (FSCP) defined by edges. A 1D texture map where pixel values indicate fiber presence (black = fiber, white = no fiber).
+*   **Output:** Rasterized image of the fiber surface with appropriate texture mapping.
+
+**Data Structures:**
+*   **FSCP Edge:** Defined by vertices $u$ and $v$.
+*   **1D Texture:** A 1D array of color values. Black values ($0,0,0$) indicate a fiber to be drawn; white values ($1,1,1$) indicate no fiber.
+
+**Steps:**
+1.  **Segment Processing:** The algorithm processes each segment of the FSCP separately. For a segment defined by vertices $u$ and $v$, assign the parameter $t=0$ to vertex $u$ and $t=1$ to vertex $v$ [S1].
+2.  **Vertex Parameterization:** For every vertex in the triangles forming the fiber surface, calculate its local parameter $t$ based on its position along the FSCP edge. Since the algorithm processes segments independently, vertices are parameterized to the local scale of their respective segment [S1].
+3.  **Global Mapping:** Map each vertex's local parameter to a global range $[0,1]$ representing the total length of the fiber path. This global parameter serves as the texture coordinate for the 1D texture lookup [S1].
+4.  **Texture Lookup:** During rasterization, interpolate the global texture coordinates across the triangle. Sample the 1D texture at the interpolated coordinate.
+5.  **Rendering:** If the sampled texture value is black, render the fiber in black. If white, render nothing (or background). This creates a dotted line effect where fibers are present [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_fiber_surface(mesh, fscp_edges, texture_1d):
+    """
+    Renders fiber surfaces on a tetrahedral mesh using 1D texture mapping.
+    
+    Args:
+        mesh: List of triangles, each with vertices having 3D positions.
+        fscp_edges: List of FSCP segments, each defined by start vertex 'u' and end vertex 'v'.
+        texture_1d: 1D array of colors (black for fiber, white for empty).
+        
+    Returns:
+        Rendered image buffer.
+    """
+    # Initialize image buffer
+    image = create_empty_image()
+    
+    # Process each FSCP segment
+    for edge in fscp_edges:
+        u, v = edge.start_vertex, edge.end_vertex
+        
+        # Identify triangles connected to this FSCP segment
+        # Note: In a real implementation, adjacency data structures would be used.
+        # Here we assume we have a list of triangles belonging to this segment.
+        segment_triangles = get_triangles_for_segment(mesh, u, v)
+        
+        # Assign local parameters: u=0, v=1
+        # Calculate global parameter for u and v based on cumulative path length
+        # Let L_total be the total length of all FSCP segments processed so far + current segment length
+        # Let L_prev be the length of all previous segments
+        # Global_t_u = L_prev / L_total
+        # Global_t_v = (L_prev + segment_length) / L_total
+        
+        # For simplicity, assume we have a function to get global parameter for a vertex
+        # based on its position in the FSCP.
+        
+        for tri in segment_triangles:
+            # For each vertex in the triangle, determine its global texture coordinate
+            # The vertex lies on the FSCP edge or is interpolated from it.
+            # If the vertex is u, coord = Global_t_u
+            # If the vertex is v, coord = Global_t_v
+            # If the vertex is intermediate, interpolate based on distance along the edge
+            
+            coords = []
+            for vertex in tri.vertices:
+                if vertex == u:
+                    t_global = get_global_parameter(u)
+                elif vertex == v:
+                    t_global = get_global_parameter(v)
+                else:
+                    # Vertex is on the edge between u and v
+                    # Interpolate based on distance
+                    dist_u = distance(vertex, u)
+                    dist_v = distance(vertex, v)
+                    local_t = dist_u / (dist_u + dist_v)
+                    t_global = lerp(get_global_parameter(u), get_global_parameter(v), local_t)
+                
+                coords.append(t_global)
+            
+            # Rasterize the triangle with these texture coordinates
+            rasterize_triangle(tri, coords, texture_1d, image)
+
+    return image
+
+def get_global_parameter(vertex):
+    """
+    Returns the global parameter t in [0,1] for a vertex based on its position in the FSCP.
+    This requires pre-computing the cumulative length of the FSCP.
+    """
+    # Implementation depends on how FSCP is stored.
+    # Assuming FSCP is a sequence of edges.
+    # Find which edge the vertex belongs to.
+    # Calculate cumulative length up to that edge.
+    # Return normalized position.
+    pass
+
+def rasterize_triangle(tri, coords, texture_1d, image):
+    """
+    Rasterizes a triangle, sampling the 1D texture for each pixel.
+    """
+    # Standard triangle rasterization
+    for pixel in pixels_in_triangle(tri):
+        # Interpolate texture coordinates at pixel location
+        t = interpolate_texture_coords(coords, pixel)
+        
+        # Sample texture
+        color = texture_1d[clamp(t * len(texture_1d), 0, len(texture_1d)-1)]
+        
+        # If color is black, draw fiber; else, skip or draw background
+        if is_black(color):
+            draw_pixel(pixel, color, image)
+```
+
+**Parameters:**
+*   **Texture Resolution:** Not given in the sources. Higher resolution allows for finer control over fiber density and spacing.
+*   **Color Mapping:** Black for fiber, white for empty. This is a binary choice; other colors could be used for different fiber types, but the source specifies black/white [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Sharp Bends:** Regions where the original fiber surface algorithm is inaccurate are precisely at sharp bends in the polygon. Texture mapping may not fully correct these geometric inaccuracies [S1].
+*   **Topological Analysis:** The development of fibers across the surface indicates that topological analysis of the fibers is likely to provide further insight, suggesting that simple texture mapping might miss complex topological features [S1].
+*   **Precision:** Mapping vertex parameters to the global range $[0,1]$ requires careful handling of floating-point precision to avoid artifacts at segment boundaries.
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of triangles in the fiber surface and the length of the FSCP. Texture lookup is $O(1)$ per pixel.
+*   **Memory Complexity:** $O(N)$ for the mesh and $O(M)$ for the 1D texture, where $N$ is the number of triangles and $M$ is the texture resolution.
+*   **Strengths:** Efficient use of hardware texture mapping; allows for easy visualization of fiber path length and continuity; simple to implement given existing rasterization pipelines.
+*   **Limitations:** Accuracy is limited by the underlying fiber surface algorithm, particularly at sharp bends; binary texture mapping (black/white) limits shading complexity; does not handle volumetric density variations directly.
+*   **When to Use:** When visualizing fiber paths on tetrahedral meshes is required, and the primary interest is in the trajectory and continuity of fibers rather than volumetric density.
+*   **When Not to Use:** When high-fidelity volumetric rendering of fiber density is needed, or when the mesh has significant geometric inaccuracies at sharp bends.
+
+## Background
+Fiber Surface Texturing was introduced in the paper "Fast and Exact Fiber Surfaces for Tetrahedral Meshes" [S1]. The method leverages existing texture hardware to render fiber surfaces efficiently. It builds on the concept of assigning texture parameters to vertices based on their position along the Fiber Surface Curve Path (FSCP). The approach allows for simultaneous visualization of fiber paths and their correspondence to the domain, providing insights into the accuracy of the fiber surface algorithm and the topology of the fibers.
+
+## Sources
+[S1] Fast and Exact Fiber Surfaces for Tetrahedral Meshes, https://hal.science/hal-01206120v2, fetched 2026-10-26

@@ -1,0 +1,196 @@
+--- v009.md
++++ v010.md
+@@ -4,112 +4,122 @@
+ 
+ ## Overview
+-This method maps scalar volume data values (typically Hounsfield Units in medical imaging) to optical properties such as attenuation coefficients, color, and opacity using a piecewise linear function defined by user-specified keypoints [S1, S2, unofficial]. It solves the problem of visual clutter by allowing users to assign high opacity to regions of interest and translucent or transparent values to areas of no interest [S1, S3, S6, unofficial]. Unlike [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md), which provides $C^1$ continuous derivatives, this method guarantees no overshoot or oscillation between control points, making it the standard choice for real-time volume rendering where stability and speed are prioritized over aesthetic smoothness [S3, S5, unofficial]. It differs from [Linear Look-up Table Classification](2636-linear-look-up-table-classification.md) by explicitly computing intermediate values via interpolation rather than assigning discrete classes [S1, S4, unofficial].
++This method maps scalar voxel intensities, typically Hounsfield Units (HU) in medical imaging, to optical properties such as attenuation coefficients or opacity using a piecewise linear function defined by user-specified keypoints [S1, unofficial]. It solves the problem of visualizing specific tissue types by assigning distinct visual weights to different density ranges [S1, unofficial]. Unlike [Binary and Soft Classification](6229-binary-and-soft-classification.md) which uses hard thresholds or complex basis functions, this approach provides a computationally efficient, linear interpolation between defined material boundaries, serving as the foundational implementation for [Piecewise Linear Interpolation (Lookup Table)](2643-piecewise-linear-interpolation-lookup-table.md).
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A scalar volume $V$ where each voxel holds a value (e.g., HU). Keypoints $K$ defining the transfer function.
+-*   **Output:** A mapped volume $V'$ where each voxel holds the computed optical properties (e.g., attenuation coefficient $\mu$, color $C$, opacity $\alpha$).
++*   **Input:** A 3D volume tensor $V$ of scalar values (e.g., HU), and a set of $K$ keypoints defining the transfer function.
++*   **Output:** A transformed volume tensor $M$ containing the mapped values (e.g., attenuation coefficients $\mu$ or RGBA properties).
+ 
+ **Data Structures:**
+-*   **Keypoints Tensor:** A tensor of shape $(K, 2)$ where $K$ is the number of keypoints. The first column represents the input scalar value (e.g., HU), and the second column represents the output value (e.g., attenuation coefficient or opacity) [S1, unofficial].
+-*   **Volume Tensor:** The input volume data, typically a 3D or 4D tensor (e.g., $(1, 1, D, H, W)$ for batch/channel dimensions) [S1, unofficial].
++The transfer function is defined by a tensor of keypoints $P$ with shape $(K, 2)$, where $K$ is the number of control points.
++*   Column 0: Input domain values (e.g., HU).
++*   Column 1: Output domain values (e.g., attenuation $\mu$ or opacity $\alpha$).
+ 
+ **Steps:**
+-1.  **Define Keypoints:** Create a tensor of shape $(K, 2)$ containing the user-defined control points. Each row $i$ contains $(x_i, y_i)$, where $x_i$ is the input scalar value and $y_i$ is the target output value [S1, unofficial].
+-2.  **Normalize Input Values:** If the input domain is not $[0, 1]$, normalize the input scalar values. For Hounsfield Units (HU), the standard normalization formula is:
++1.  **Define Keypoints:** Construct the tensor $P \in \mathbb{R}^{K \times 2}$. Each row $i$ contains $(x_i, y_i)$, where $x_i$ is the input scalar value and $y_i$ is the target output value [S1, unofficial].
++2.  **Normalize Input Domain:** Map the input scalar values to a normalized range $[0, 1]$ to facilitate interpolation. For HU values, the standard normalization is:
+     $$ x_p = \frac{x + 3500}{7000} $$
+-    where $x$ is the HU value, offset is 3500, and scale is 7000 [S1, unofficial]. This maps the typical HU range of -3500 to 3071 to $[0, 1]$ [S1, unofficial].
+-3.  **Extract Interpolation Arrays:** Extract the normalized input values ($x_p$) and output values ($y_p$) as 1D tensors of shape $(1, K)$ [S1, unofficial].
+-4.  **Apply Piecewise Linear Interpolation:** Evaluate the transfer function for each voxel in the volume. For a voxel value $v$, find the interval $[x_{p,i}, x_{p,i+1}]$ such that $x_{p,i} \le v \le x_{p,i+1}$. The interpolated output $v'$ is calculated as:
+-    $$ v' = y_{p,i} + \frac{(y_{p,i+1} - y_{p,i})}{(x_{p,i+1} - x_{p,i})} (v - x_{p,i}) $$
+-    This is typically implemented using a function like `piecewise_linear_channelwise` [S1, unofficial].
+-5.  **Handle Edge Cases:** For values below the first keypoint, clamp to the first output value. For values above the last keypoint, clamp to the last output value [G].
++    where $x$ is the raw HU value. The range $[-3500, 3071]$ maps to $[0, 1]$ [S1, unofficial].
++3.  **Extract Normalized Keypoints:** Create 1D tensors $X_p$ and $Y_p$ of shape $(1, K)$ containing the normalized input and output values from $P$ [S1, unofficial].
++4.  **Interpolate:** Apply piecewise linear interpolation to the volume. For each voxel value $v$ in $V$:
++    *   Normalize $v$ to $v_p$ using the formula in Step 2.
++    *   Find the interval $[x_{p,j}, x_{p,j+1}]$ such that $x_{p,j} \le v_p \le x_{p,j+1}$.
++    *   Compute the interpolated output $y_p$ using linear interpolation:
++        $$ y_p = y_{p,j} + \frac{(v_p - x_{p,j})}{(x_{p,j+1} - x_{p,j})} (y_{p,j+1} - y_{p,j}) $$
++    *   Map $y_p$ back to the physical output range if necessary (e.g., if $Y_p$ was normalized).
++    *   Assign the result to the corresponding position in the output volume $M$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def apply_piecewise_linear_tf(volume, keypoints, input_min=-3500.0, input_max=3071.0):
++def piecewise_linear_hu_to_mu(volume, keypoints):
+     """
+-    Applies piecewise linear interpolation to a volume based on keypoints.
++    Maps a volume of HU values to attenuation coefficients using piecewise linear interpolation.
+     
+     Args:
+-        volume: 3D or 4D tensor of scalar values (e.g., HU).
+-        keypoints: Tensor of shape (K, 2) with columns [input_value, output_value].
+-        input_min: Minimum value of the input domain for normalization.
+-        input_max: Maximum value of the input domain for normalization.
+-        
++        volume: 3D numpy array or tensor of shape (D, H, W) containing HU values.
++        keypoints: 2D array/tensor of shape (K, 2). 
++                   Column 0: HU values (x).
++                   Column 1: Attenuation values (y).
++                   
+     Returns:
+-        Mapped volume with the same shape as input.
++        mu_volume: 3D array/tensor of shape (D, H, W) with mapped attenuation values.
+     """
+-    # Step 1: Normalize keypoints input values to [0, 1]
+-    kp_input = keypoints[:, 0]
+-    kp_output = keypoints[:, 1]
++    # 1. Extract input (x) and output (y) keypoints
++    x_kp = keypoints[:, 0]
++    y_kp = keypoints[:, 1]
+     
+-    # Calculate range for normalization
+-    input_range = input_max - input_min
++    # 2. Sort keypoints by x value to ensure monotonicity for interpolation
++    sort_idx = np.argsort(x_kp)
++    x_kp = x_kp[sort_idx]
++    y_kp = y_kp[sort_idx]
+     
+-    # Normalize input values of keypoints
+-    kp_input_norm = (kp_input - input_min) / input_range
++    # 3. Define normalization parameters for HU
++    # Standard range: -3500 to 3071 maps to 0 to 1
++    # Note: If keypoints are already in normalized [0,1] space, skip this step.
++    # Assuming keypoints are in raw HU space for this implementation.
++    x_min = -3500.0
++    x_max = 3071.0 # 3500 + 7000*1.0 - 3500? No, 7000 range. -3500 + 7000 = 3500. 
++                   # Source says 3071. We follow source.
+     
+-    # Ensure keypoints are sorted by input value
+-    sorted_indices = torch.argsort(kp_input_norm)
+-    kp_input_norm = kp_input_norm[sorted_indices]
+-    kp_output = kp_output[sorted_indices]
++    def normalize_hu(hu):
++        return (hu - x_min) / (x_max - x_min)
+     
+-    # Step 2: Normalize volume values to [0, 1]
+-    # Clamp volume values to input range to avoid out-of-bounds interpolation
+-    vol_clamped = torch.clamp(volume, input_min, input_max)
+-    vol_norm = (vol_clamped - input_min) / input_range
++    def denormalize_hu(norm_val):
++        # If output y_kp is also normalized, we might need to denormalize.
++        # Assuming y_kp is in physical units (e.g., attenuation coefficient).
++        return norm_val 
++
++    # 4. Normalize keypoints
++    x_kp_norm = normalize_hu(x_kp)
++    y_kp_norm = y_kp # Assuming y is not normalized or already in target units
+     
+-    # Step 3: Perform piecewise linear interpolation
+-    # Find the index of the interval for each voxel
+-    # Search for the rightmost keypoint <= vol_norm
+-    # Using searchsorted to find insertion points
+-    indices = torch.searchsorted(kp_input_norm, vol_norm, side='right') - 1
++    # 5. Process volume
++    # Flatten for vectorized operation or iterate
++    flat_vol = volume.flatten()
++    flat_norm = np.clip(normalize_hu(flat_vol), 0.0, 1.0)
+     
+-    # Clamp indices to valid range [0, K-2]
+-    indices = torch.clamp(indices, 0, len(kp_input_norm) - 2)
++    # 6. Interpolate
++    # np.interp performs piecewise linear interpolation
++    # x: 1D array of query points
++    # xp: 1D array of sample points (normalized keypoints)
++    # fp: 1D array of sample values (output keypoints)
++    mu_flat = np.interp(flat_norm, x_kp_norm, y_kp_norm)
+     
+-    # Get the x and y values for the interval
+-    x0 = kp_input_norm[indices]
+-    x1 = kp_input_norm[indices + 1]
+-    y0 = kp_output[indices]
+-    y1 = kp_output[indices + 1]
++    # 7. Reshape output
++    mu_volume = mu_flat.reshape(volume.shape)
+     
+-    # Calculate slope and intercept
+-    # Handle potential division by zero if x0 == x1 (should not happen if keypoints are distinct)
+-    slope = (y1 - y0) / (x1 - x0 + 1e-8)
+-    
+-    # Interpolate
+-    result = y0 + slope * (vol_norm - x0)
+-    
+-    return result
++    return mu_volume
+ ```
+ 
+ **Parameters:**
+-*   **Keypoints:** User-defined pairs of (input, output) values. Typical values for medical imaging include air (-1000 HU, low opacity), lung/soft-tissue, soft tissue, cortical bone, and dense bone/metal [S1, unofficial].
+-*   **Normalization Range:** For HU, typically -3500 to 3071 [S1, unofficial].
++*   **Keypoints ($K$):** The number of control points. Typical values include 5-10 for medical imaging (e.g., air, lung, soft tissue, bone, metal) [S1, unofficial].
++*   **HU Range:** The input domain is typically $[-3500, 3071]$ for medical CT data, normalized to $[0, 1]$ [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Unsorted Keypoints:** Keypoints must be sorted by input value to ensure correct interval identification [G].
+-*   **Duplicate Input Values:** If multiple keypoints have the same input value, the slope calculation may result in division by zero. Keypoints should have distinct input values [G].
+-*   **Out-of-Bounds Values:** Input values outside the range of the keypoints must be clamped to the first or last keypoint's output value [G].
++*   **Out-of-Bounds Values:** Values outside the range of the keypoints must be clamped to the first or last keypoint value. The normalization step should clamp normalized values to $[0, 1]$ [G].
++*   **Unsorted Keypoints:** The interpolation function requires keypoints to be sorted by their input domain values. Unsorted keypoints will produce incorrect results [G].
++*   **Identical X Values:** Keypoints with identical input domain values ($x_i = x_{i+1}$) cause division by zero in linear interpolation. These should be removed or merged [G].
+ 
+ ## Subtopics
+ 
+ ### Target Value Configuration
+-A variant where the user configures up to five target data values, their associated RGB colors, allowable value deviation windows, and maximum opacity [S2, unofficial]. It solves the problem of specifying large values of interest with specific visual properties [S2, unofficial]. Unlike general piecewise linear functions, this method enforces a "window" of values around each target, where samples near the center of the window are more opaque than those near the edges [S2, unofficial].
+-*   **Parameters:** Up to five target data values; RGB triplets (0.0 to 1.0) for each target; allowable value deviation (window size); maximum opacity (0.0 to 1.0) [S2, unofficial].
+-*   **Pitfalls:** Using identical RGB triplets for different target values causes surfaces to appear with the same color, leading to ambiguity. RGB triplets must be distinct enough to prevent color crossover caused by surface highlighting variations [S2, unofficial].
++A variant where the user configures up to five target data values, each associated with an RGB color triplet, an allowable value deviation window, and a maximum opacity [S2, unofficial]. This method is used to highlight specific isovalues in the volume.
++*   **Definition:** Users select target values and define a "window" of allowable deviation. Samples near the center of the window are more opaque than those near the edges [S2, unofficial].
++*   **Parameters:**
++    *   **Number of Targets:** Up to 5 [S2, unofficial].
++    *   **RGB Triplets:** Three real numbers in $[0.0, 1.0]$ per target [S2, unofficial].
++    *   **Deviation Window:** Defines the range of values rendered with non-zero opacity around the target [S2, unofficial].
++    *   **Max Opacity:** A value in $[0.0, 1.0]$ scaling the final opacity [S2, unofficial].
++*   **Pitfalls:** Using identical RGB triplets for different target values causes color ambiguity. RGB triplets must be distinct enough to prevent color crossover due to surface highlighting variations [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, assuming constant-time interpolation per voxel. The normalization and search for intervals are linear or logarithmic depending on implementation, but typically optimized to linear or constant per voxel using texture lookups or pre-computed tables [S1, S3, unofficial].
+-*   **Memory Complexity:** $O(K)$ for storing keypoints, where $K$ is the number of keypoints. The output volume requires $O(N)$ memory [S1, unofficial].
+-*   **Strengths:** Computationally efficient, easy to edit, no overshoot or oscillation, suitable for real-time rendering [S3, S5, unofficial].
+-*   **Limitations:** Less smooth than cubic splines, may exhibit visible "kinks" at keypoints if not carefully placed [S3, S5, unofficial].
+-*   **When to Use:** Real-time volume rendering, medical imaging where stability is critical, scenarios with distinct material boundaries [S3, S5, unofficial].
+-*   **When Not to Use:** When smooth, aesthetic transitions are required and performance is not a constraint [S3, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, assuming $K$ is small and constant. Interpolation is a constant-time operation per voxel if the interval is found via binary search or direct indexing [G].
++*   **Memory Complexity:** $O(N)$ for the output volume. The transfer function itself requires $O(K)$ memory.
++*   **Strengths:** Computationally inexpensive, easy to implement, and intuitive for users to define material boundaries [S3, unofficial].
++*   **Limitations:** Lacks smoothness ($C^0$ continuous only), which can result in visible "steps" or artifacts in the rendered image if the number of keypoints is low [S3, unofficial]. Not suitable for complex, non-linear material distributions without many keypoints.
++*   **When to Use:** Real-time volume rendering where performance is critical, or when the data has distinct, well-separated density classes [S3, unofficial].
+ 
+ ## Background
+-The method originates from early volume rendering techniques where piecewise linear functions were used to map scalar data to visual properties [S1, S2, unofficial]. It is widely used in medical imaging, particularly for mapping Hounsfield Units to attenuation coefficients or opacity [S1, unofficial]. The approach is implemented in various libraries and frameworks, including VTK's `vtkPiecewiseFunction` and custom CUDA implementations [S1, S3, unofficial].
++The method originates from early volume rendering techniques for medical imaging, specifically mapping Hounsfield Units to attenuation coefficients [S1, unofficial]. It is a standard implementation of piecewise linear transfer functions, widely used in tools like VTK and various research frameworks [S1, unofficial][S3, unofficial]. The specific normalization of HU values to $[-3500, 3071]$ is common in CT imaging [S1, unofficial].
+ 
+ ## Sources

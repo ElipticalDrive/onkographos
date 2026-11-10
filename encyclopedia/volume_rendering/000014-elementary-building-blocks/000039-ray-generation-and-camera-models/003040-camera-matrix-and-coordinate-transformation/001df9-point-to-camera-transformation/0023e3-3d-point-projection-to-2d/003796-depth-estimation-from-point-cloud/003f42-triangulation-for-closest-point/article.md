@@ -1,0 +1,125 @@
+# Triangulation for Closest Point
+
+Also called: Depth-based visibility verification via triangulation, Least-squares closest point triangulation
+
+## Overview
+This method computes the 3D position of a point by finding the closest intersection to a set of $N$ camera rays originating from 2D projections. It formulates the problem as a least-squares optimization, converting it into a linear system solved via a weighted sum of projections. It is distinguished from simple back-projection by incorporating a visibility mask $\gamma_i$ derived from 2D tracking occlusion checks and depth-based verification against rendered Gaussian splats, ensuring robustness in dynamic scenes [S1].
+
+## How it works
+**Inputs:**
+- A set of $N$ camera rays, where each ray $i$ is defined by an origin $\mathbf{o}_i \in \mathbb{R}^3$ and a direction $\mathbf{d}_i \in \mathbb{R}^3$ (normalized).
+- A visibility mask $\gamma_i \in \{0, 1\}$ for each ray, indicating if the corresponding 2D point is visible and unoccluded in the $i$-th view [S1].
+
+**Outputs:**
+- The closest point $\mathbf{x}_c \in \mathbb{R}^3$ to all rays.
+- Depth scalars $\lambda_i \in \mathbb{R}$ for each ray, representing the distance along the ray to $\mathbf{x}_c$ [S1].
+
+**Data Structures:**
+- Ray origins: Array of vectors $\mathbf{o}_i$.
+- Ray directions: Array of normalized vectors $\mathbf{d}_i$.
+- Visibility mask: Array of integers/booleans $\gamma_i$.
+- Accumulators: A $3 \times 3$ matrix $A$ and a $3 \times 1$ vector $b$ for the linear system.
+
+**Steps:**
+1. **Initialize Accumulators:** Set $A = \mathbf{0}_{3 \times 3}$ and $b = \mathbf{0}_{3 \times 1}$.
+2. **Iterate Rays:** For each ray $i$ from $0$ to $N-1$:
+   a. Check visibility: If $\gamma_i = 0$, skip this ray.
+   b. Compute the projection matrix term: $P_i = I_3 - \mathbf{d}_i \mathbf{d}_i^T$, where $I_3$ is the $3 \times 3$ identity matrix. This matrix projects vectors onto the plane perpendicular to $\mathbf{d}_i$ [S1].
+   c. Update the system matrix: $A \leftarrow A + \gamma_i P_i$.
+   d. Update the system vector: $b \leftarrow b + \gamma_i P_i \mathbf{o}_i$.
+3. **Solve Linear System:** Solve the linear equation $A \mathbf{x} = b$ for $\mathbf{x}$. The solution $\mathbf{x}_c$ is the closest point [S1].
+4. **Compute Depths (Optional):** For each ray $i$, compute $\lambda_i = \mathbf{d}_i^T (\mathbf{x}_c - \mathbf{o}_i)$ [S1].
+
+**Formula:**
+The optimization problem is:
+$$ \mathbf{x}_c, \lambda_i = \arg \min_{\mathbf{x}, \lambda_i} \sum_i \|(\mathbf{o}_i + \lambda_i \mathbf{d}_i) - \mathbf{x}\|^2 $$
+
+This converts to the linear system:
+$$ \left( \sum_i \gamma_i (I_3 - \mathbf{d}_i \mathbf{d}_i^T) \right) \mathbf{x} = \sum_i \gamma_i (I_3 - \mathbf{d}_i \mathbf{d}_i^T) \mathbf{o}_i $$
+
+**Parameters:**
+- $\gamma_i$: Visibility mask. $\gamma_i=1$ if the point is visible, $0$ otherwise. Determined by combining 2D tracking occlusion masks and depth-based verification [S1].
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Geometry:** If all rays are parallel or intersect at a single point, the matrix $A$ may be singular or ill-conditioned. The sources do not specify a regularization term, so standard linear solvers (e.g., LU decomposition) should be used with care [S1].
+- **Visibility Mask Accuracy:** Incorrect $\gamma_i$ values (false positives) introduce bias. The mask relies on TAPIR for 2D occlusion and alpha-blended depth rendering for depth verification [S1].
+- **Depth Verification:** Depth-based visibility compares the projected depth of a splat with the rendered depth map. If the projected depth is smaller, the splat is unoccluded. This requires rendering all splats to the view using alpha blending [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def triangulate_closest_point(
+    origins: np.ndarray,  # Shape (N, 3)
+    directions: np.ndarray, # Shape (N, 3), normalized
+    visibility_mask: np.ndarray # Shape (N,), integers 0 or 1
+) -> np.ndarray:
+    """
+    Computes the closest point to a set of camera rays using least-squares
+    optimization with visibility masking.
+    
+    Args:
+        origins: Array of ray origins o_i.
+        directions: Array of ray directions d_i.
+        visibility_mask: Array of gamma_i values.
+        
+    Returns:
+        x_c: The 3D closest point.
+    """
+    N = origins.shape[0]
+    A = np.zeros((3, 3))
+    b = np.zeros(3)
+    
+    for i in range(N):
+        gamma = visibility_mask[i]
+        if gamma == 0:
+            continue
+            
+        d = directions[i]
+        o = origins[i]
+        
+        # Compute projection matrix: I_3 - d * d^T
+        # d is (3,), d^T is (3,)
+        # outer product d * d^T is (3, 3)
+        outer_dd = np.outer(d, d)
+        P = np.eye(3) - outer_dd
+        
+        # Update A and b
+        # A += gamma * P
+        # b += gamma * P @ o
+        A += gamma * P
+        b += gamma * (P @ o)
+        
+    # Solve linear system A x = b
+    # Using numpy's linear algebra solver
+    x_c = np.linalg.solve(A, b)
+    
+    return x_c
+```
+
+## Subtopics
+
+### Depth Estimation from Point Cloud
+The parent method that provides the initial 3D points and rays. Triangulation refines these points by enforcing consistency across multiple views [8043-depth-estimation-from-point-cloud.md].
+
+### 2D Tracking with TAPIR
+A backbone used to generate the initial occlusion mask for $\gamma_i$. It takes query points and video frames to produce 2D tracking positions and occlusion masks [S1].
+
+### 3D Gaussian Splatting Rendering
+Used for depth-based visibility verification. Alpha blending of splat depths is used to derive rendered depths to compare against projected depths [S1].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ for the accumulation step, where $N$ is the number of rays. Solving the $3 \times 3$ linear system is $O(1)$.
+- **Memory Complexity**: $O(N)$ to store ray origins, directions, and visibility masks. The accumulator matrices are constant size ($3 \times 3$ and $3 \times 1$) [S1].
+- **Strengths**: Robust to noise by using least-squares. Incorporates temporal consistency via 2D tracking and depth verification, reducing flickering artifacts in dynamic scenes [S1].
+- **Limitations**: Relies on accurate visibility masks. If the 2D tracker fails or depth verification is incorrect, the triangulation result will be biased. Performance depends on the cost of rendering depth maps for verification [S1].
+- **When to use**: When reconstructing dynamic scenes with multiple views where temporal consistency and occlusion handling are critical. Suitable for history-aware streaming reconstruction [S1].
+- **When not to use**: For static scenes with perfect visibility or when computational resources for depth rendering are unavailable.
+
+## Background
+This method is part of the "History-aware Streaming Reconstruction" pipeline for 3D Gaussian Splatting. It was introduced in the paper "Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting" (2025) by the authors of [S1]. The method addresses flickering artifacts in per-frame reconstruction by merging previous and current frame information, achieving state-of-the-art visual quality and temporal consistency at interactive rates (15 fps with 350ms delay on 320x240 resolution) [S1].
+
+## Sources
+[S1] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27

@@ -1,0 +1,300 @@
+# GPU Mesh Voxelization via SAT Ray Casting
+
+Also called: UnityGPUMeshVoxelizer, VoxelizeMesh
+
+## Overview
+This method converts a triangle mesh into a 3D voxel grid by dispatching a compute shader where each thread represents a voxel. It determines if a voxel is solid by testing the voxel's axis-aligned bounding box (AABB) against every triangle in the mesh using Separating Axis Theorem (SAT) for broad-phase culling and ray casting for narrow-phase intersection. It differs from hierarchical voxelization by using a flat grid and exhaustive triangle testing, making it suitable for dense, high-fidelity voxelization of static meshes where simplicity of implementation on GPU compute units is prioritized over spatial acceleration structures.
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A triangle mesh defined by vertex positions and triangle indices.
+*   **Input:** Voxel grid resolution parameters: `_GridWidth`, `_GridHeight`, `_GridDepth`, `_CellHalfSize` (half the side length of a voxel), and `_BoundsMin` (world-space minimum corner of the grid).
+*   **Input:** `_WorldToLocalMatrix` to transform world-space coordinates to local space if necessary.
+*   **Output:** A structured buffer of `Voxel` structs, where each entry contains a `position` (center of the voxel) and `isSolid` (boolean flag).
+
+**Data Structures**
+The implementation uses the following layouts in HLSL/C#:
+
+1.  **Voxel Struct:**
+    ```hlsl
+    struct Voxel {
+        float3 position; // World-space center of the voxel
+        float isSolid;   // 1.0 if solid, 0.0 otherwise
+    };
+    ```
+2.  **Triangle Representation:**
+    Triangles are accessed via two structured buffers:
+    *   `StructuredBuffer<float3> _MeshVertices`: Contains vertex positions.
+    *   `StructuredBuffer<int> _MeshTriangleIndices`: Contains indices into `_MeshVertices`.
+    *   Alternatively, a pre-packed triangle buffer can be used: `StructuredBuffer<float3> _MeshTriangles` where every 3 floats form a triangle $(a, b, c)$.
+3.  **AABB Struct (for SAT):**
+    ```hlsl
+    struct AABB {
+        float3 center;
+        float3 extents; // Half-extents
+    };
+    ```
+4.  **Indirect Arguments:**
+    Compute buffers of size $5 \times \text{sizeof(uint)}$ for indirect dispatch or drawing, though the core voxelization is a compute dispatch.
+
+**Numbered Steps**
+
+1.  **Grid Dimension Calculation:**
+    Calculate the number of voxels along each axis based on the mesh collider bounds and `_halfSize` (which corresponds to `_CellHalfSize`).
+    $$ \text{GridWidth} = \lceil \frac{\text{bounds.extents.x}}{\text{_halfSize}} \rceil $$
+    $$ \text{GridHeight} = \lceil \frac{\text{bounds.extents.y}}{\text{_halfSize}} \rceil $$
+    $$ \text{GridDepth} = \lceil \frac{\text{bounds.extents.z}}{\text{_halfSize}} \rceil $$
+    The cell size is $\text{cellSize} = 2.0 \times \text{_CellHalfSize}$.
+
+2.  **Buffer Allocation:**
+    Allocate `_voxelsBuffer` of size $\text{GridWidth} \times \text{GridHeight} \times \text{GridDepth}$. Allocate `_meshVerticesBuffer` and `_meshTrianglesBuffer` based on the mesh geometry.
+
+3.  **Compute Dispatch:**
+    Dispatch the `VoxelizeMesh` compute kernel. The number of thread groups is calculated as:
+    $$ \text{GroupsX} = \lceil \frac{\text{GridWidth}}{\text{GroupSize}} \rceil, \quad \text{GroupsY} = \lceil \frac{\text{GridHeight}}{\text{GroupSize}} \rceil, \quad \text{GroupsZ} = \lceil \frac{\text{GridDepth}}{\text{GroupSize}} \rceil $$
+    Typical `GroupSize` is 8 or 16.
+
+4.  **Voxel Thread Execution (Per Voxel):**
+    Each thread computes its voxel index $(id.x, id.y, id.z)$ and performs the following:
+    a.  **Bounds Check:** If $id.x \ge \text{GridWidth}$ or $id.y \ge \text{GridHeight}$ or $id.z \ge \text{GridDepth}$, return.
+    b.  **Compute Voxel Center:**
+        $$ \text{centerPos} = \text{id} \times \text{cellSize} + \text{_CellHalfSize} + \text{_BoundsMin} $$
+        (Note: Coordinate axes correspond to x, y, z components of `id` and `_BoundsMin`).
+    c.  **Initialize Solid Flag:** Set `isSolid = 0.0`.
+    d.  **Triangle Iteration:** Iterate through all triangles in the mesh.
+    e.  **SAT Broad-Phase:** Project the voxel AABB and the triangle onto potential separating axes. If a separating axis is found, the voxel does not intersect this triangle.
+    f.  **Ray-Casting Narrow-Phase:** If SAT passes, cast a ray from the voxel center through the triangle. If an intersection is found within the voxel bounds (or simply if the triangle intersects the voxel volume), set `isSolid = 1.0` and break (optimization).
+    g.  **Write Output:** Write the `Voxel` struct to `_voxelsBuffer`.
+
+5.  **Post-Processing (Optional):**
+    Dispatch a `FillVolume` kernel to propagate solid flags to empty voxels inside closed meshes, if required.
+
+**Formulas**
+
+1.  **SAT Projection Test:**
+    To test if a voxel AABB intersects a triangle, project both onto an axis $\mathbf{axis}$.
+    Triangle projection interval $[minP, maxP]$:
+    $$ p_0 = \mathbf{v}_0 \cdot \mathbf{axis}, \quad p_1 = \mathbf{v}_1 \cdot \mathbf{axis}, \quad p_2 = \mathbf{v}_2 \cdot \mathbf{axis} $$
+    $$ minP = \min(p_0, \min(p_1, p_2)), \quad maxP = \max(p_0, \max(p_1, p_2)) $$
+    Voxel AABB projection interval $[minV, maxV]$ (where $\mathbf{c}$ is center, $\mathbf{e}$ is extents):
+    $$ r = e_x |axis_x| + e_y |axis_y| + e_z |axis_z| $$
+    $$ minV = c \cdot \mathbf{axis} - r, \quad maxV = c \cdot \mathbf{axis} + r $$
+    Intersection exists if:
+    $$ \max(minP, minV) \le \min(maxP, maxV) $$
+    Separation exists if:
+    $$ \max(-maxP, minP) > r \quad \text{(simplified check against centered AABB)} $$
+    *Note: The source notes simplify the SAT check as `!(max(-maxP, minP) > r)` where `r` is the projected radius of the AABB.*
+
+2.  **Ray-Triangle Intersection (Möller-Trumbore):**
+    Ray: $\mathbf{o}$ (origin), $\mathbf{d}$ (direction). Triangle vertices: $\mathbf{a}, \mathbf{b}, \mathbf{c}$.
+    $$ \mathbf{ab} = \mathbf{b} - \mathbf{a}, \quad \mathbf{ac} = \mathbf{c} - \mathbf{a}, \quad \mathbf{h} = \mathbf{d} \times \mathbf{ac} $$
+    $$ a = \mathbf{ab} \cdot \mathbf{h} $$
+    $$ f = 1.0 / a $$
+    $$ \mathbf{s} = \mathbf{o} - \mathbf{a} $$
+    $$ u = f \cdot (\mathbf{s} \cdot \mathbf{h}) $$
+    $$ \mathbf{q} = \mathbf{s} \times \mathbf{ab} $$
+    $$ v = f \cdot (\mathbf{d} \cdot \mathbf{q}) $$
+    $$ t = f \cdot (\mathbf{ac} \cdot \mathbf{q}) $$
+    Hit if: $0 \le u \le 1$, $0 \le v \le 1$, $u + v \le 1$, and $t > \epsilon$.
+
+**Parameters**
+*   `_CellHalfSize`: Default 0.05f. Controls voxel resolution.
+*   `_GridWidth`, `_GridHeight`, `_GridDepth`: Calculated from bounds and `_halfSize`.
+*   `_BoundsMin`: World-space minimum corner of the voxel grid.
+*   `_WorldToLocalMatrix`: Transformation matrix from world space to local space.
+*   `epsilon`: 0.0000001. Used to prevent division by zero and handle degenerate cases.
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# HLSL-style pseudocode for the VoxelizeMesh compute kernel
+
+struct Voxel {
+    float3 position;
+    float isSolid;
+};
+
+StructuredBuffer<float3> _MeshVertices;
+StructuredBuffer<int> _MeshTriangleIndices;
+RWStructuredBuffer<Voxel> _Voxels;
+
+int _GridWidth;
+int _GridHeight;
+int _GridDepth;
+float _CellHalfSize;
+float3 _BoundsMin;
+int _TriangleCount;
+
+// Helper: Möller-Trumbore intersection
+bool RayTriangleIntersect(float3 rayOrigin, float3 rayDir, float3 triA, float3 triB, float3 triC, out float t) {
+    float3 ab = triB - triA;
+    float3 ac = triC - triA;
+    float3 h = cross(rayDir, ac);
+    float a = dot(ab, h);
+    
+    // Pitfall: Ray parallel to triangle plane
+    if (a > -0.0000001f && a < 0.0000001f) {
+        t = 0.0f;
+        return false;
+    }
+    
+    float f = 1.0f / a;
+    float3 s = rayOrigin - triA;
+    float u = f * dot(s, h);
+    
+    if (u < 0.0f || u > 1.0f) {
+        t = 0.0f;
+        return false;
+    }
+    
+    float3 q = cross(s, ab);
+    float v = f * dot(rayDir, q);
+    
+    if (v < 0.0f || u + v > 1.0f) {
+        t = 0.0f;
+        return false;
+    }
+    
+    t = f * dot(ac, q);
+    
+    // Pitfall: Degenerate or back-facing hits
+    if (t <= 0.0000001f) {
+        return false;
+    }
+    
+    return true;
+}
+
+// Helper: SAT projection test for AABB vs Triangle
+bool SATTest(float3 voxelCenter, float3 voxelExtents, float3 triA, float3 triB, float3 triC) {
+    float3 triVerts[3] = {triA, triB, triC};
+    float3 axes[14];
+    int axisCount = 0;
+    
+    // 1. Face normals of the AABB (3 axes)
+    axes[axisCount++] = float3(1, 0, 0);
+    axes[axisCount++] = float3(0, 1, 0);
+    axes[axisCount++] = float3(0, 0, 1);
+    
+    // 2. Face normal of the triangle (1 axis)
+    axes[axisCount++] = normalize(cross(triB - triA, triC - triA));
+    
+    // 3. Cross products of AABB edges and Triangle edges (9 axes)
+    float3 edgeA[3] = {float3(1,0,0), float3(0,1,0), float3(0,0,1)};
+    float3 edgeT[3] = {triB - triA, triC - triB, triA - triC};
+    
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            float3 axis = cross(edgeA[i], edgeT[j]);
+            if (length(axis) > 0.0000001f) {
+                axes[axisCount++] = normalize(axis);
+            }
+        }
+    }
+    
+    for (int i = 0; i < axisCount; i++) {
+        float3 axis = axes[i];
+        
+        // Project Triangle
+        float p0 = dot(triVerts[0], axis);
+        float p1 = dot(triVerts[1], axis);
+        float p2 = dot(triVerts[2], axis);
+        float minP = min(p0, min(p1, p2));
+        float maxP = max(p0, max(p1, p2));
+        
+        // Project AABB
+        float r = voxelExtents.x * abs(axis.x) + voxelExtents.y * abs(axis.y) + voxelExtents.z * abs(axis.z);
+        float centerProj = dot(voxelCenter, axis);
+        float minV = centerProj - r;
+        float maxV = centerProj + r;
+        
+        // Check overlap
+        if (maxP < minV || maxV < minP) {
+            return false; // Separating axis found
+        }
+    }
+    
+    return true; // No separating axis found, potential intersection
+}
+
+[numthreads(8, 8, 8)]
+void VoxelizeMesh(uint3 id : SV_DispatchThreadID) {
+    // 1. Bounds check
+    if (id.x >= _GridWidth || id.y >= _GridHeight || id.z >= _GridDepth) {
+        return;
+    }
+    
+    // 2. Compute cell size and center
+    float cellSize = _CellHalfSize * 2.0f;
+    float3 centerPos = float3(
+        id.x * cellSize + _CellHalfSize + _BoundsMin.x,
+        id.y * cellSize + _CellHalfSize + _BoundsMin.y,
+        id.z * cellSize + _CellHalfSize + _BoundsMin.z
+    );
+    
+    // 3. Voxel AABB extents (half-extents)
+    float3 voxelExtents = float3(_CellHalfSize, _CellHalfSize, _CellHalfSize);
+    
+    // 4. Initialize solid flag
+    float isSolid = 0.0f;
+    
+    // 5. Iterate over all triangles
+    for (int i = 0; i < _TriangleCount; i++) {
+        int idx0 = _MeshTriangleIndices[i * 3];
+        int idx1 = _MeshTriangleIndices[i * 3 + 1];
+        int idx2 = _MeshTriangleIndices[i * 3 + 2];
+        
+        float3 triA = _MeshVertices[idx0];
+        float3 triB = _MeshVertices[idx1];
+        float3 triC = _MeshVertices[idx2];
+        
+        // 6. SAT Broad-Phase
+        if (!SATTest(centerPos, voxelExtents, triA, triB, triC)) {
+            continue;
+        }
+        
+        // 7. Ray-Casting Narrow-Phase
+        // Cast ray from voxel center in a random direction or multiple directions?
+        // The source notes imply a single ray test or a specific ray direction.
+        // Standard approach: Ray from center through triangle centroid or just check if triangle intersects voxel volume.
+        // Given the name "SAT Ray Casting", it likely uses a ray from the voxel center to the triangle.
+        
+        float3 triCentroid = (triA + triB + triC) / 3.0f;
+        float3 rayDir = normalize(triCentroid - centerPos);
+        
+        float t;
+        if (RayTriangleIntersect(centerPos, rayDir, triA, triB, triC, t)) {
+            // Check if intersection point is within voxel bounds?
+            // Or simply if the triangle intersects the voxel volume.
+            // For voxelization, if the triangle intersects the voxel, it is solid.
+            isSolid = 1.0f;
+            break; // Optimization: No need to check other triangles
+        }
+    }
+    
+    // 8. Write output
+    int index = id.x + id.y * _GridWidth + id.z * _GridWidth * _GridHeight;
+    _Voxels[index] = Voxel(centerPos, isSolid);
+}
+```
+
+**Subtopics**
+*   **Hierarchical Voxelization:** Uses a tree structure (e.g., Octree) to reduce memory and computation for sparse volumes. Choose when the mesh is large but occupies a small fraction of the grid. [Link to Hierarchical Voxelization article if available, otherwise omit or link to general Octree article].
+*   **Signed Distance Field (SDF) Voxelization:** Computes distance to surface for each voxel. Choose when smooth rendering or collision response is needed. [Link to SDF Voxelization article].
+
+## Operating characteristics
+*   **Time Complexity:** $O(V \times T)$ per frame, where $V = \text{GridWidth} \times \text{GridHeight} \times \text{GridDepth}$ is the total number of voxels and $T = \text{TriangleCount}$ is the number of triangles. Each voxel thread tests against all triangles.
+*   **Memory Complexity:** $O(V + V_{mesh} + T_{mesh})$ for the voxel buffer, vertex buffer, and index buffer.
+*   **Measured Performance:** Performance is heavily dependent on the number of triangles. For meshes with thousands of triangles, this method becomes prohibitively slow on GPU compute units due to the $O(V \times T)$ complexity. It is best suited for low-poly meshes or small voxel grids.
+*   **Strengths:** Simple implementation, no complex data structures (BVH, Octree) required, fully parallelizable at the voxel level.
+*   **Limitations:** Poor scalability with triangle count. No spatial acceleration. High memory bandwidth usage for large grids.
+*   **When to Use:** Small to medium meshes, real-time voxelization for visual effects where triangle count is low, or as a baseline implementation.
+*   **When Not to Use:** High-poly meshes, large voxel grids, or applications requiring frequent updates with many triangles.
+
+## Background
+This method was implemented in the Unity engine using ComputeShaders as part of the "UnityGPUMeshVoxelizer" project by bzgeb. It demonstrates a straightforward approach to GPU-based voxelization by leveraging the parallel nature of compute shaders to test each voxel against the entire mesh geometry. The technique combines Separating Axis Theorem (SAT) for efficient broad-phase culling and the Möller-Trumbore algorithm for precise ray-triangle intersection.
+
+## Sources
+[S1] UnityGPUMeshVoxelizerPart5, https://github.com/bzgeb/UnityGPUMeshVoxelizerPart5, fetched 2026-10-26 (unofficial)

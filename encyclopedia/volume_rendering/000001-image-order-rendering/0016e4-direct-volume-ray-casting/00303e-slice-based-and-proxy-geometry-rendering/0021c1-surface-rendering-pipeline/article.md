@@ -1,91 +1,86 @@
 # Surface Rendering Pipeline
 
-Also called: Surface Rendering from Volume
+Also called: Surface Rendering (R_so, Surface Rendering from Volume
+
 ## Overview
-Surface rendering is a volume rendering mode that stops at the first voxel inside a specified threshold and shades it with a normal taken from the value gradient [S1, unofficial]. It generates no mesh or triangles, avoiding invented shapes between voxels [S1, unofficial]. Unlike volume rendering which integrates over slice spacing, surface rendering exposes the slice spacing as terracing artifacts [S1, unofficial].
+Surface rendering is a volume rendering mode that stops at the first voxel inside a threshold and shades it with a normal taken from the value gradient [S1, unofficial]. It generates no mesh or triangles, avoiding invented shapes between voxels [S1, unofficial]. Unlike volume rendering which integrates over slice spacing, surface rendering exposes the slice spacing as terracing artifacts [S1, unofficial].
+
 ## How it works
-**Inputs and Outputs:**
-- Input: A 3D scalar volume field, a threshold value, camera parameters (origin, direction), and image dimensions [S1, S2, unofficial].
-- Output: A 2D image where each pixel contains the color of the first surface hit [S1, S2, unofficial].
+**Inputs and Outputs**:
+- Input: Volume data $V$, threshold $T$, camera parameters (origin $\mathbf{o}$, direction $\mathbf{d}$, image size), implicit function definition (optional, for smooth surfaces) [S1, S2, unofficial].
+- Output: Rendered image (color buffer) [S1, S2, unofficial].
 
-**Data Structures:**
-- `RayBundle`: Contains `origins` (N, 3), `directions` (N, 3), `sample_points` (N, K, 3), and `sample_lengths` (N, K, 3) [S2, unofficial].
-- `SurfaceModel`: Contains `implicit_fn`, `sampler`, and `renderer` modules initialized from configuration dictionaries [S2, unofficial].
+**Data Structures**:
+- `RayBundle`: Contains origins, directions, sample points, and sample lengths [S2, unofficial].
+- `BaseModel`: Contains `implicit_fn`, `sampler`, and `renderer` modules initialized from config dictionaries [S2, unofficial].
 
-**Steps:**
-1. Initialize the `SurfaceModel` with configuration dictionaries for `implicit_fn`, `sampler`, and `renderer` [S2, unofficial].
-2. For each camera, generate normalized image plane coordinates in the range $[-1, 1]$ for width $W$ and height $H$ [S2, unofficial].
-3. Unproject the normalized coordinates to world space to determine ray origins and directions [S2, unofficial].
-4. Evaluate the scalar field along each ray until the first sample point satisfies the threshold condition [S1, unofficial].
-5. Compute the surface normal at the hit point using the gradient of the scalar field [S1, unofficial].
-6. Shade the hit point, accumulate the color, and reshape the result to $(H, W, 3)$ [S2, unofficial].
+**Steps**:
+1. **Ray Generation**: For each pixel, generate a ray $r(t) = \mathbf{o} + t\mathbf{d}$ intersecting the volume domain [S2, unofficial].
+2. **Sampling**: Sample the volume along the ray. If using an implicit function, evaluate the function at sample points [S2, unofficial].
+3. **Classification**: Identify the first sample point where the volume value exceeds the threshold $T$ [S1, unofficial].
+4. **Normal Estimation**: Compute the surface normal $\mathbf{n}$ at the hit point using the value gradient $\nabla V$ [S1, unofficial].
+5. **Shading**: Shade the hit point using the normal and lighting information [S1, unofficial].
+6. **Compositing**: Since it stops at the first hit, no front-to-back compositing is needed for the surface itself, but the hit color is written to the image buffer [S1, unofficial].
 
-**Formulas:**
-- Ray definition: $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the normalized direction [S1, S2, unofficial].
-- Threshold condition: Stop at the first sample $i$ where $V(\mathbf{r}(t_i)) \ge \tau$ [S1, unofficial].
-- Normal computation: $\mathbf{n} = \nabla V(\mathbf{r}(t_i)) / \|\nabla V(\mathbf{r}(t_i))\|$ [S1, unofficial].
-- Shading: $\mathbf{c} = \text{Shading}(\mathbf{n}, \mathbf{l})$, where $\mathbf{l}$ is the light direction [S1, unofficial].
+**Formulas**:
+- Ray: $r(t) = \mathbf{o} + t\mathbf{d}$ [S2, unofficial]
+- Threshold Check: $V(\mathbf{p}) > T$ [S1, unofficial]
+- Normal: $\mathbf{n} = \frac{\nabla V(\mathbf{p})}{\|\nabla V(\mathbf{p})\|}$ [S1, unofficial]
 
-**Parameters:**
-- Threshold $\tau$: Determines the surface isovalue [S1, unofficial].
-- Image dimensions $(W, H)$: Width and height of the output image [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-- Terracing: Visible when slice spacing is large, as surface rendering does not integrate over it [S1, unofficial].
-- No Hit: If no voxel exceeds the threshold, the pixel remains background color [G].
-- Precision: Gradient estimation at threshold crossings can be sensitive to interpolation artifacts [G].
-
-**Pseudocode:**
+**Pseudocode**:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_surface(volume, threshold, cameras, image_size):
-    H, W = image_size
-    all_images = []
-    for camera in cameras:
-        # 1. Generate normalized image plane coordinates in [-1, 1]
-        x = torch.linspace(-1, 1, steps=W)
-        y = torch.linspace(-1, 1, steps=H)
-        grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
-        xy_grid = torch.stack((grid_x, grid_y), dim=-1).view(W * H, 2)
-        xy_grid = -xy_grid  # Source convention [S2, unofficial]
-
-        # 2. Unproject NDC points to world space for ray origins and directions
-        ndc_pts = torch.cat([xy_grid, torch.ones(W * H, 1)], dim=-1)
-        origins, directions = standard_camera_unprojection(ndc_pts, camera)  # [G] inverse projection
-
-        # 3. Forward pass: evaluate implicit function, sample, and render
-        # Assume fixed ray length and sample count for demonstration
-        t = torch.linspace(0, 10.0, 100)  # [G] typical integration range
-        points = origins[:, None, :] + directions[:, None, :] * t[None, :, None]
-        scalar_values = volume.evaluate(points)  # [G] trilinear interpolation of volume data
-
-        # 4. Stop at first voxel inside threshold
-        hit_mask = scalar_values >= threshold
-        hit_idx = torch.argmax(hit_mask.int(), dim=1)
-        hit_points = points[torch.arange(len(origins)), hit_idx]
-
-        # 5. Shade with normal from value gradient
-        normals = volume.compute_gradient(hit_points)
-        normals = normals / torch.norm(normals, dim=-1, keepdim=True)
-        colors = shade_phong(normals, light_dir=None)  # [G] standard illumination model
-
-        # 6. Reshape and convert to numpy array
-        image = colors.view(H, W, 3).detach().cpu().numpy()
-        all_images.append(image)
-    return all_images
+def surface_render_pipeline(volume, threshold, camera, image_size):
+    # 1. Generate rays
+    xy_grid = get_normalized_image_plane_coordinates(image_size)
+    ray_bundle = get_rays_from_pixels(xy_grid, camera)
+    
+    # 2. Sample volume along rays
+    # Assuming a simple voxel grid for this example
+    sample_points = ray_bundle.sample_points
+    values = sample_volume(volume, sample_points)
+    
+    # 3. Find first hit
+    hit_mask = values > threshold
+    hit_indices = find_first_true(hit_mask)
+    
+    # 4. Compute normals for hits
+    hit_points = gather(sample_points, hit_indices)
+    normals = compute_gradient_normal(volume, hit_points)
+    
+    # 5. Shade
+    colors = shade(normals, light_dir)
+    
+    # 6. Write to image
+    image = create_image_from_colors(colors, hit_indices, image_size)
+    return image
 ```
+
+**Parameters**:
+- Threshold $T$: Typical value depends on data, e.g., 390 HU for body exposure [S1, unofficial].
+- Image Size: e.g., 390x844 [S1, unofficial].
+
+**Edge Cases**:
+- No hit: If no voxel exceeds the threshold, the pixel is background [S1, unofficial].
+- Terracing: Visible at 3 mm slice spacing in surface mode [S1, unofficial].
+
 ## Subtopics
 
 ### [Real Time Cutting Operations](3494-real-time-cutting-operations.md)
 Real Time Cutting Operations is a technique for clipping volume surfaces using cutting planes by maintaining near and far depth buffers per pixel, avoiding full re-rendering when planes change. It differs from static cutting methods by maintaining the full volume dataset and using a halfspace check to dynamically filter voxels per frame, whereas static methods pre-filter and discard cut voxels.
 
 ## Operating characteristics
-- Performance: Measured at 390x844 on a synthetic 700 HU sphere, surface rendering exposed terracing artifacts due to 3 mm slice spacing [S1, unofficial].
-- Strengths: No mesh generation overhead; direct shading from volume data [S1, unofficial].
-- Limitations: Terracing artifacts at low resolution or large slice spacing [S1, unofficial].
+- **Time Complexity**: Linear with respect to the number of pixels and samples per ray [S2, unofficial].
+- **Memory Complexity**: Linear with respect to the volume size and image size [S2, unofficial].
+- **Performance**: Measured at 390x844 on a synthetic 700 HU sphere: Volume lights 9.3% of the canvas at peak 238, Surface 9.8% at 255, Both 9.8% at 245 [S1, unofficial].
+- **Strengths**: No mesh generation, avoids invented shapes between voxels [S1, unofficial].
+- **Limitations**: Terracing artifacts due to slice spacing [S1, unofficial].
+
 ## Background
-Surface rendering is a mode in volume visualization that contrasts with volume rendering by stopping at the first threshold crossing [S1, unofficial].
+Surface rendering is a method for rendering surfaces from volume data. It is classified as scene space, object space, or view space depending on the normal estimation technique used [S3]. The method combines an implicit function, a sampler, and a renderer to compute color from rays [S2, unofficial].
+
 ## Sources
 [S1] feat(body-exposure): render a DICOM series in 3D, not a description of one, https://github.com/rizkyazhar486/Panacea/pull/1585, fetched 2026-10-26 (unofficial)
 [S2] Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, https://github.com/Fhz2346/Neural-Volume-Rendering-and-Surface-Rendering, fetched 2026-10-27 (unofficial)
+[S3] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29

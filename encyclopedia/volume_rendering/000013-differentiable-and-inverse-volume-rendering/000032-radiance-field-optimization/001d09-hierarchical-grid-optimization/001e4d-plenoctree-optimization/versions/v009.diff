@@ -1,0 +1,103 @@
+--- v008.md
++++ v009.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-PlenOctree Optimization is a post-training refinement process that finetunes a converted PlenOctree on original training images using Stochastic Gradient Descent (SGD) to improve image quality [S1, unofficial]. It solves the residual approximation errors introduced during the conversion from a neural network to a sparse voxel grid [S1, unofficial]. It builds on the differentiable volume rendering operator and analytic derivatives of the rendering equation to update leaf attributes directly [S1360].
++PlenOctree Optimization is a post-training refinement process that finetunes a converted PlenOctree on original training images using Stochastic Gradient Descent (SGD) to improve image quality [S1, unofficial]. It solves the residual approximation errors introduced during the conversion from a neural network to a sparse voxel grid [S1, unofficial]. It builds on the differentiable volume rendering operator and analytic derivatives of the rendering equation to update leaf attributes directly [S1, unofficial].
+ 
+ ## How it works
+@@ -53,5 +53,4 @@
+         lr = 1.5e6
+         max_epochs = 40
+-        # Hold out 10% for validation
+         split_idx = int(len(training_data) * 0.9)
+         train_set = training_data[:split_idx]
+@@ -60,56 +59,35 @@
+         raise ValueError("Unknown dataset type")
+ 
+-    best_psnr = -1.0
++    best_mse = float('inf')
+     for epoch in range(max_epochs):
+         # Sample rays from training set
+         rays = [(ray, gt_color) for ray, gt_color in train_set]
+-        
++
+         # Render using current PlenOctree attributes
+-        # Uses analytic derivatives implemented in custom CUDA kernels [S1, unofficial]
+-        rendered_colors = [render_ray(plenoctree, ray) for ray, _ in rays]
+-        
+-        # Compute loss
++        # Standard volume rendering integration along ray [G]
++        rendered_colors = [volume_render(sample_along_ray(ray, plenoctree)) for ray, _ in rays]
++
++        # Compute loss: L_RGB = sum ||C(r) - C_hat(r)||_2^2
+         loss = sum((gt - pred)**2 for gt, pred in zip([gt for _, gt in rays], rendered_colors))
+-        
+-        # Compute gradients and update attributes (SGD)
+-        gradients = compute_gradients(loss, plenoctree.attributes)
++
++        # Compute gradients of L_RGB w.r.t. leaf attributes using analytic derivatives [S1, unofficial]
++        # Update attributes using SGD with specified learning rate [S1, unofficial]
+         for attr in plenoctree.attributes:
+-            attr -= lr * gradients[attr]
+-        
++            attr -= lr * gradient(loss, attr)
++
+         # Early stopping check
+         if val_set is not None:
+             val_rays = [(ray, gt_color) for ray, gt_color in val_set]
+-            val_rendered = [render_ray(plenoctree, ray) for ray, _ in val_rays]
++            val_rendered = [volume_render(sample_along_ray(ray, plenoctree)) for ray, _ in val_rays]
+             val_loss = sum((gt - pred)**2 for gt, pred in zip([gt for _, gt in val_rays], val_rendered))
+-            val_psnr = compute_psnr(val_loss, len(val_rays))
+-            if val_psnr > best_psnr:
+-                best_psnr = val_psnr
+-                save_checkpoint(plenoctree)
++            if val_loss < best_mse:
++                best_mse = val_loss
++                # Save checkpoint [G]
+             else:
+                 break
+ 
+     # Convert to Float16 for storage
+-    plenoctree.attributes = convert_to_float16(plenoctree.attributes)
++    plenoctree.attributes = {k: v.float16() for k, v in plenoctree.attributes.items()}
+     return plenoctree
+-
+-def render_ray(plenoctree, ray):
+-    # Standard volume rendering integration along ray
+-    samples = sample_along_ray(ray, plenoctree)
+-    return volume_render(samples)
+-
+-def compute_gradients(loss, attributes):
+-    # Standard backpropagation through the rendering graph
+-    return {attr: grad(loss, attr) for attr in attributes}
+-
+-def compute_psnr(mse, num_samples):
+-    return 10 * (1.0 / mse) ** 0.5
+-
+-def save_checkpoint(plenoctree):
+-    # Store current attributes
+-    pass
+-
+-def convert_to_float16(attributes):
+-    # Cast attribute tensors to float16
+-    return {attr: attr.float16() for attr in attributes}
+ ```
+ 
+@@ -121,11 +99,11 @@
+ 
+ ### [PlenOctree Conversion](1359-plenoctree-conversion.md)
+-PlenOctree Conversion is a pipeline that transforms a trained NeRF-SH model into a sparse octree representation for real-time volume rendering. It solves the performance bottleneck of conventional NeRFs, which require dense sampling and neural network inference for every ray step dependent on viewing direction. Unlike [Analytic Derivatives of PlenOctree Rendering](1360-analytic-derivatives-of-plenoctree-rendering.md), which focuses on differentiable optimization of the octree structure, this method focuses on the construction and tabulation of the view-dependent volume from a pre-trained network.
++PlenOctree Conversion transforms a trained NeRF-SH model into a sparse octree for real-time rendering. It sets itself apart from [Analytic Derivatives of PlenOctree Rendering](1360-analytic-derivatives-of-plenoctree-rendering.md) by focusing on construction and tabulation rather than differentiable structure optimization. Choose when converting pre-trained networks to sparse representations.
+ 
+ ### [Analytic Derivatives of PlenOctree Rendering](1360-analytic-derivatives-of-plenoctree-rendering.md)
+-This method provides the closed-form gradients of the NeRF piecewise constant volume rendering equation with respect to the density ($\boldsymbol{\sigma}$) and color ($\mathbf{c}$) parameters. It enables direct optimization of PlenOctree attributes using gradient-based methods (e.g., SGD) to refine image quality.
++Analytic Derivatives of PlenOctree Rendering provides closed-form gradients of the volume rendering equation with respect to density and color parameters. It sets itself apart by enabling direct gradient-based optimization of octree attributes. Choose when refining image quality via SGD.
+ 
+ ### PlenOctree Fine-tuning
+-PlenOctree Fine-tuning is a variant where training of the initial NeRF model is stopped early, converted into a PlenOctree, and then trained significantly faster as it no longer involves neural networks [S1, unofficial]. This approach accelerates NeRF-based rendering by 5 orders of magnitude without loss in image quality [S1, unofficial].
++PlenOctree Fine-tuning stops initial NeRF training early, converts to a PlenOctree, and trains it without neural networks. It accelerates rendering by 5 orders of magnitude without quality loss. Choose when prioritizing training speed over full convergence.
+ 
+ ## Operating characteristics

@@ -3,85 +3,92 @@
 Also called: Heterogeneous Volume Density Generation, Procedural Density Generation via Noise and Thresholding, getDensity
 
 ## Overview
-Volumetric Density Generation creates a patchy, heterogeneous volumetric density field from procedural noise by applying a power function and a threshold to sparse regions [S1, unofficial]. It differs from its siblings by relying on a simple power-law remapping and hard thresholding on a single FBM noise field, whereas [Sine-based procedural voxel generation](2477-sine-based-procedural-voxel-generation.md) uses trigonometric interference, [Spherical Density Ramp with Noise](2610-spherical-density-ramp-with-noise.md) adds geometric confinement, and [Mandelbulb Fractal Generation](3327-mandelbulb-fractal-generation.md) uses iterative coordinate transformations.
+Generates a patchy volumetric density field from procedural noise by applying a power function and a threshold to create sparse, organic structures [S1, unofficial]. It differs from its parent [Specific Procedural Patterns and Applications](7615-specific-procedural-patterns-and-applications.md) by explicitly combining Fractal Brownian Motion (FBM) with non-linear remapping and hard cutoffs, rather than relying on raw noise values or simple linear blending [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `pos`: 3D spatial coordinate ($\mathbb{R}^3$).
-- `base_density`: Scalar multiplier for the final density (default 0.8).
-- `fbm_scale`: Frequency scale for the FBM noise (default 3.0).
-- `fbm_octaves`: Number of octaves for the FBM noise (default 2).
-- `power_exponent`: Exponent for the power function (default 2.5).
-- `threshold`: Density cutoff value (default 0.15).
+- `pos`: 3D query position vector $\mathbf{P}$.
+- `base_density`: Scalar multiplier for the final density (default 0.8) [S1, unofficial].
+- `fbm_scale`: Frequency scale for the noise function (default 3.0) [S1, unofficial].
+- `fbm_octaves`: Number of octaves for FBM (default 2) [S1, unofficial].
+- `power_exponent`: Exponent for the power function (default 2.5) [S1, unofficial].
+- `threshold`: Density cutoff value (default 0.15) [S1, unofficial].
 
 **Outputs:**
-- `density`: Clamped scalar density value in $[0, 1]$.
+- `density`: Clamped scalar density value in $[0, 1]$ [S1, unofficial].
 
 **Data Structures:**
-- `Vector3D`: A 3-component vector $(x, y, z)$ of floating-point values.
-- `FBM`: A function returning a scalar value in $[-1, 1]$ given a position, scale, and octaves.
+- The noise function `fbm(pos, scale, octaves)` returns a value in $[-1, 1]$ [S1, unofficial]. It utilizes the shared principles of gradient assignment, dot product contributions, fade functions, interpolation, and hashing defined in the parent article [S1, unofficial][S2, unofficial].
 
 **Steps:**
-1.  **Compute Noise:** Evaluate the fractal Brownian motion (FBM) noise at `pos` with `fbm_scale` and `fbm_octaves`. Let the result be $n \in [-1, 1]$.
-    $$ n = \text{FBM}(\text{pos}, \text{fbm\_scale}, \text{fbm\_octaves}) $$
-2.  **Remap:** Map the noise value from $[-1, 1]$ to $[0, 1]$.
-    $$ n' = n \cdot 0.5 + 0.5 $$
-3.  **Power Function:** Apply a power function with exponent `power_exponent` to create sparse regions near 0.
-    $$ d = (n')^{\text{power\_exponent}} $$
-4.  **Threshold:** If $d$ is less than `threshold`, set $d$ to 0.0.
+1.  **Compute Noise:** Evaluate the FBM noise at the query position with the specified scale and octaves:
+    $$ n = \text{fbm}(\mathbf{P}, \text{fbm\_scale}, \text{fbm\_octaves}) $$
+    The result $n$ is in the range $[-1, 1]$ [S1, unofficial].
+
+2.  **Remap:** Map the noise value from $[-1, 1]$ to $[0, 1]$:
+    $$ n_{\text{remapped}} = n \cdot 0.5 + 0.5 $$
+    [S1, unofficial]
+
+3.  **Power Function:** Apply a power function to suppress low values and create sparse regions near zero:
+    $$ d = n_{\text{remapped}}^{\text{power\_exponent}} $$
+    [S1, unofficial]
+
+4.  **Threshold:** If the density is below the threshold, set it to zero:
     $$ \text{if } d < \text{threshold}: d = 0.0 $$
-5.  **Scale:** Multiply by `base_density`.
+    [S1, unofficial]
+
+5.  **Scale:** Multiply by the base density:
     $$ d = d \cdot \text{base\_density} $$
-6.  **Clamp:** Clamp the result to $[0, 1]$.
+    [S1, unofficial]
+
+6.  **Clamp:** Clamp the result to $[0, 1]$:
     $$ \text{density} = \max(0.0, \min(1.0, d)) $$
+    [S1, unofficial]
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def get_density(pos, base_density=0.8, fbm_scale=3.0, fbm_octaves=2, power_exponent=2.5, threshold=0.15):
-    # Step 1: Compute FBM noise in [-1, 1]
+    # 1. Compute FBM noise in [-1, 1]
     noise = fbm(pos, fbm_scale, fbm_octaves)
     
-    # Step 2: Remap to [0, 1]
+    # 2. Remap to [0, 1]
     noise = noise * 0.5 + 0.5
     
-    # Step 3: Apply power function
+    # 3. Apply power function
     density = pow(noise, power_exponent)
     
-    # Step 4: Threshold
+    # 4. Threshold
     if density < threshold:
         density = 0.0
-        
-    # Step 5: Scale
+    
+    # 5. Scale
     density *= base_density
     
-    # Step 6: Clamp
-    density = max(0.0, min(1.0, density))
-    
-    return density
+    # 6. Clamp
+    return max(0.0, min(1.0, density))
 ```
 
-**Edge Cases:**
-- If `base_density` is 0, the output is always 0.
-- If `power_exponent` is 1, the distribution is linear after remapping.
-- Precision issues may arise if `noise` is exactly -1.0 before remapping, resulting in 0.0 density, which is handled correctly by the threshold step.
+**Edge Cases and Pitfalls:**
+-   **Precision:** The power function with exponent > 1 amplifies differences near 1 but compresses values near 0. Combined with thresholding, this can lead to sharp, aliased edges if the noise frequency is too high relative to the sampling rate [S1, unofficial].
+-   **Boundaries:** The method assumes the noise function handles boundary conditions appropriately. The thresholding creates hard discontinuities in density, which may cause artifacts in ray marching if not handled with appropriate step sizes or anti-aliasing [S1, unofficial].
 
 ## Subtopics
 
 ### [Volume Cloud Generation Pipeline](8286-volume-cloud-generation-pipeline.md)
-Generates patchy cloud density using multi-scale fractal noise, domain warping, and explicit boundary handling. Choose this when organic texture and vertical structure are required. It differs from the parent by incorporating domain warping and boundary envelopes rather than simple power/threshold remapping.
+Generates 3D volumetric density fields for clouds using multi-scale domain warping and boundary envelopes. It differs from this method by incorporating style-specific shaping and vertical structure control, rather than relying solely on a power function and threshold on a single noise field.
 
 ## Operating characteristics
-- **Time Complexity:** $O(O)$ where $O$ is the number of octaves in the FBM evaluation. Each octave requires a texture lookup or interpolation.
-- **Memory Complexity:** $O(1)$ as the method is stateless and computes values on-the-fly.
-- **Strengths:** Simple to implement, computationally cheap, effective for creating sparse, patchy volumes like smoke or clouds.
-- **Limitations:** Lacks geometric confinement (unlike [Spherical Density Ramp with Noise](2610-spherical-density-ramp-with-noise.md)) and organic warping (unlike [Volume Cloud Generation Pipeline](8286-volume-cloud-generation-pipeline.md)). The hard threshold can create sharp edges if not smoothed.
-- **When to use:** When a simple, sparse procedural density field is needed without complex geometric constraints or warping.
-- **When not to use:** When realistic cloud structures with domain warping are required, or when the volume needs to be confined to a specific shape.
+-   **Time Complexity:** $O(O \cdot N)$, where $O$ is the number of FBM octaves and $N$ is the cost of the base noise function per octave [S1, unofficial].
+-   **Memory Complexity:** $O(1)$ per query, assuming the noise function is stateless or uses a fixed permutation table [S1, unofficial].
+-   **Strengths:** Simple to implement; effective at creating sparse, organic-looking structures with controlled density falloff [S1, unofficial].
+-   **Limitations:** The hard threshold can create visible artifacts; lacks spatial coherence control beyond the base noise function [S1, unofficial].
+-   **When to use:** When generating sparse, patchy volumes like smoke, clouds, or nebulae where low-density regions should be completely transparent [S1, unofficial].
+-   **When not to use:** When smooth, continuous density transitions are required without hard cutoffs [S1, unofficial].
 
 ## Background
-Originated in the context of volumetric path tracing, this method is described in the repository [ainagutierrez01/Volumetric-Path-Tracing-](https://github.com/ainagutierrez01/Volumetric-Path-Tracing-) [S1, unofficial]. It is a common technique in procedural volume rendering for generating heterogeneous media.
+Originated from practical implementations in volumetric path tracing, specifically in the repository `ainagutierrez01/Volumetric-Path-Tracing-` [S1, unofficial]. It is a common technique in procedural volume generation to create heterogeneous media [S1, unofficial].
 
 ## Sources
 [S1] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)

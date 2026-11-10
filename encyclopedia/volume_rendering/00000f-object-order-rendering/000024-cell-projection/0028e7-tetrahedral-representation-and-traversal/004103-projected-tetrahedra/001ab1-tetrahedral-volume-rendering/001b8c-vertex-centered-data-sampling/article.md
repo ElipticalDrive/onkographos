@@ -1,100 +1,113 @@
 # Vertex-centered Data Sampling
 
+Also called: Vertex interpolation
 
 ## Overview
-Vertex-centered Data Sampling reconstructs scalar field values at arbitrary points within a tetrahedron by interpolating the scalar values stored at the tetrahedron's four vertices using the sample point's barycentric coordinates [S1, unofficial]. It is used when the underlying dataset provides scalar data associated with mesh vertices rather than cell centers [S1, unofficial].
+Vertex-centered Data Sampling reconstructs scalar field values within a tetrahedral element by interpolating the scalar data stored at the element's four vertices using the sample point's barycentric coordinates [S1, unofficial]. It is distinguished from its sibling [Cell-centered Data Sampling](974-approximate-cell-sampling.md) by relying on vertex-local data rather than averaging cell-centered values from face neighbors, thereby avoiding the complexity of locating neighbor centroids for non-coarse elements [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- The current tetrahedral element $T$ with vertices $V_0, V_1, V_2, V_3$ [G].
-- The sample point $P$ inside $T$ [G].
-- Vertex-centered scalar values $S_i$ associated with $V_i$ for $i \in \{0, 1, 2, 3\}$ [S1, unofficial].
+*   `element_id`: Integer identifier for the current tetrahedral element.
+*   `p`: The 3D sample point $(x, y, z)$ inside the tetrahedron.
+*   `tet_vertices`: Array of 4 vertex positions $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3$ associated with `element_id`.
+*   `vertex_scalars`: Array of 4 scalar values $s_0, s_1, s_2, s_3$ associated with the vertices of `element_id`.
 
 **Outputs:**
-- The interpolated scalar value $S_P$ at point $P$ [G].
+*   `sample_value`: The interpolated scalar value at point $p$.
 
 **Data Structures:**
-- Vertex-centered data is stored duplicated per element during the TET-AMR construction process [S1, unofficial]. This allows direct access to the four vertex scalars via the element ID, without requiring global vertex lookups or neighbor traversal [S1, unofficial].
+*   Vertex-centered data is stored duplicated per element during the TET-AMR construction process [S1, unofficial]. This allows direct access to the four vertex scalars via the `element_id` without requiring global vertex lookups or neighbor traversal.
 
 **Steps:**
-1. Compute the barycentric coordinates $(\lambda_0, \lambda_1, \lambda_2, \lambda_3)$ of the sample point $P$ relative to the tetrahedron $T$ [G].
-2. Retrieve the four vertex scalar values directly from the element's local data structure using the element ID [S1, unofficial].
-3. Calculate the interpolated scalar value $S_P$ using the linear combination of vertex scalars weighted by their respective barycentric coordinates [S1, unofficial].
+1.  Retrieve the four vertex positions $\mathbf{v}_i$ and their corresponding scalar values $s_i$ for $i \in \{0, 1, 2, 3\}$ using `element_id` [S1, unofficial].
+2.  Compute the barycentric coordinates $\lambda_0, \lambda_1, \lambda_2, \lambda_3$ of the sample point $p$ with respect to the tetrahedron defined by $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3$.
+3.  Calculate the interpolated value using the weighted sum:
+    $$ s(p) = \sum_{i=0}^{3} \lambda_i s_i $$
+4.  Return $s(p)$.
 
-**Formula:**
-$$ S_P = \sum_{i=0}^{3} \lambda_i S_i $$
-where:
-- $\lambda_i$ is the barycentric coordinate corresponding to vertex $V_i$ [G].
-- $S_i$ is the scalar value at vertex $V_i$ [G].
-- $\sum_{i=0}^{3} \lambda_i = 1$ and $\lambda_i \ge 0$ for $P$ inside $T$ [G].
-
-**Parameters:**
-- Not given in the sources.
-
-**Edge cases and pitfalls:**
-- If the sample point lies exactly on a face, edge, or vertex, some barycentric coordinates will be zero [G]. The formula remains valid, but precision issues may arise if coordinates are computed via floating-point arithmetic near boundaries [G].
-- The method assumes the scalar data is strictly vertex-centered [S1, unofficial]. For cell-centered data, a different sampling strategy is required [S1, unofficial].
+**Formulas:**
+The barycentric coordinates $\lambda_i$ are defined such that:
+$$ p = \sum_{i=0}^{3} \lambda_i \mathbf{v}_i $$
+subject to the constraint:
+$$ \sum_{i=0}^{3} \lambda_i = 1 $$
+and $\lambda_i \ge 0$ for $p$ inside the tetrahedron [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dot(a, b):
-    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
-
-def vertex_centered_sampling(element_id, sample_point, tetrahedron_vertices, element_scalars):
+def vertex_centered_sample(element_id, p, tet_vertices, vertex_scalars):
     """
-    Interpolates scalar value at sample_point inside a tetrahedron
-    using vertex-centered data stored per element.
+    Interpolate scalar value at point p inside a tetrahedron using vertex-centered data.
+    
+    Args:
+        element_id: ID of the tetrahedron.
+        p: 3D point (x, y, z).
+        tet_vertices: List of 4 vertices [(x0,y0,z0), ..., (x3,y3,z3)].
+        vertex_scalars: List of 4 scalars [s0, ..., s3].
+        
+    Returns:
+        Interpolated scalar value.
     """
-    V0, V1, V2, V3 = tetrahedron_vertices
-    v0 = V1 - V0
-    v1 = V2 - V0
-    v2 = V3 - V0
-    v3 = sample_point - V0
+    # Step 1: Retrieve data (assumed available via element_id lookup)
+    # v0, v1, v2, v3 = tet_vertices
+    # s0, s1, s2, s3 = vertex_scalars
+    
+    # Step 2: Compute barycentric coordinates
+    # lambda_i are computed such that p = sum(lambda_i * v_i) and sum(lambda_i) = 1
+    lambdas = compute_barycentric_coordinates(p, tet_vertices)
+    
+    # Step 3: Interpolate
+    sample_value = 0.0
+    for i in range(4):
+        sample_value += lambdas[i] * vertex_scalars[i]
+        
+    return sample_value
 
-    d00 = dot(v0, v0); d01 = dot(v0, v1); d02 = dot(v0, v2)
-    d11 = dot(v1, v1); d12 = dot(v1, v2); d22 = dot(v2, v2)
-    d30 = dot(v3, v0); d31 = dot(v3, v1); d32 = dot(v3, v2)
+def compute_barycentric_coordinates(p, vertices):
+    """
+    Compute barycentric coordinates of point p relative to tetrahedron vertices.
+    Uses the volume ratio method.
+    """
+    v0, v1, v2, v3 = vertices
+    
+    # Volume of the tetrahedron
+    # V = (1/6) * |det(v1-v0, v2-v0, v3-v0)|
+    # We can use signed volume for consistent orientation
+    def signed_volume(a, b, c, d):
+        return dot(cross(b-a, c-a), d-a) / 6.0
 
-    det = d00 * (d11 * d22 - d12 * d12) + \
-          d01 * (d02 * d12 - d01 * d22) + \
-          d02 * (d01 * d12 - d02 * d11)
-
-    inv_det = 1.0 / det
-    lambda1 = ((d11 * d22 - d12 * d12) * d30 +
-               (d02 * d12 - d01 * d22) * d31 +
-               (d01 * d12 - d02 * d11) * d32) * inv_det
-    lambda2 = ((d22 * d00 - d02 * d02) * d31 +
-               (d02 * d01 - d00 * d12) * d32 +
-               (d00 * d12 - d01 * d02) * d30) * inv_det
-    lambda3 = ((d00 * d11 - d01 * d01) * d32 +
-               (d01 * d12 - d00 * d11) * d30 +
-               (d00 * d12 - d01 * d02) * d31) * inv_det
-    lambda0 = 1.0 - lambda1 - lambda2 - lambda3
-
-    # Direct access to duplicated vertex data via element ID [S1, unofficial]
-    S = element_scalars[element_id]
-    S0, S1, S2, S3 = S[0], S[1], S[2], S[3]
-
-    return lambda0 * S0 + lambda1 * S1 + lambda2 * S2 + lambda3 * S3
+    total_volume = signed_volume(v0, v1, v2, v3)
+    
+    # Barycentric coordinate for v0 is volume of sub-tetrahedron p,v1,v2,v3 / total_volume
+    # lambda_0 = Vol(p, v1, v2, v3) / Vol(v0, v1, v2, v3)
+    lambda_0 = signed_volume(p, v1, v2, v3) / total_volume
+    lambda_1 = signed_volume(v0, p, v2, v3) / total_volume
+    lambda_2 = signed_volume(v0, v1, p, v3) / total_volume
+    lambda_3 = signed_volume(v0, v1, v2, p) / total_volume
+    
+    return [lambda_0, lambda_1, lambda_2, lambda_3]
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Tetrahedra:** If the tetrahedron volume is zero (coplanar vertices), the division in `compute_barycentric_coordinates` results in undefined behavior. [G] Implementers should check for near-zero volume and handle it as a degenerate case (e.g., fallback to 0 or error).
+*   **Precision:** Barycentric coordinate computation involves determinant calculations which can suffer from floating-point precision errors for very small or very large tetrahedra.
 
 ## Subtopics
 
 ### [Barycentric Interpolation on Tetrahedra](1843-barycentric-interpolation-on-tetrahedra.md)
-Barycentric interpolation on tetrahedra computes the scalar value at an arbitrary point inside a tetrahedron by weighting the values at its four vertices according to the point's barycentric coordinates. It solves the problem of accurately sampling vertex-centered data within a tetrahedral mesh, extending the well-known 2D barycentric coordinate system to 3D by relating four tetrahedral subvolumes. Unlike linear interpolation on hexahedral cells which requires solving a system or using trilinear blending, tetrahedral barycentric interpolation provides a direct, geometrically intuitive linear blend based on volume ratios [G].
+Details the specific geometric computation of the barycentric weights and their affine property within a single element.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per sample, as it involves a fixed number of arithmetic operations and direct memory access [G].
-- **Memory Complexity:** $O(1)$ auxiliary memory per sample, assuming vertex data is pre-duplicated in the element structure [S1, unofficial].
-- **Strengths:** Direct access to vertex data without neighbor lookups; linear continuity across tetrahedra; simple implementation [G].
-- **Limitations:** Requires vertex-centered data; accuracy depends on the quality of the tetrahedral mesh and the linearity of the underlying field; may exhibit artifacts if the field is highly non-linear within the element [G].
-- **When to use:** When the dataset provides vertex-associated scalar values and linear interpolation is sufficient [S1, unofficial].
-- **When not to use:** When the data is cell-centered (use [Approximate Cell Sampling](974-approximate-cell-sampling.md) or [Cell-centered Data Sampling](974-approximate-cell-sampling.md#cell-centered-data-sampling)) or when higher-order accuracy is required [G].
+*   **Time Complexity:** $O(1)$ per sample, assuming barycentric coordinate computation is constant time.
+*   **Memory Complexity:** $O(1)$ additional memory per sample, as data is accessed directly via element ID.
+*   **Strengths:** Simple implementation; no need to access neighbor elements or compute neighbor centroids; efficient data access due to duplication during TET-AMR construction.
+*   **Limitations:** Only C0 continuity across element boundaries; less accurate than higher-order methods for complex fields.
+*   **When to use:** When vertex-centered data is available and high-order continuity is not required.
+*   **When not to use:** When cell-centered data is the primary representation and neighbor averaging is preferred, or when higher-order continuity is needed.
 
 ## Background
-Originating from the work on direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, this method is described in the context of the TET-AMR framework [S1, unofficial]. It leverages the duplication of vertex data during mesh construction to avoid complex global lookups, optimizing performance for rendering [S1, unofficial].
+Originating from the work on direct volume rendering of tree-based tetrahedral adaptive mesh refinement (TET-AMR) data, this method leverages the duplicated vertex data structure to simplify sampling [S1, unofficial]. It is part of the broader family of tetrahedral volume rendering techniques that utilize unstructured grids.
 
 ## Sources
 [S1] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)

@@ -3,117 +3,116 @@
 Also called: CovSplat Data Layout and Reading, CovSplat struct, ReadCovSplat, gsplat texture storage, readCovArrays
 
 ## Overview
-Covariance Splat Reading is a method for decoding a single 3D Gaussian Splat from compressed texture storage into a structured representation suitable for rendering. It solves the problem of efficiently retrieving Gaussian properties (position, color, opacity, and covariance) from a GPU-friendly texture array format. It differs from raw buffer access by utilizing two `usampler2DArray` textures to store packed integer data, requiring specific unpacking logic to reconstruct the continuous covariance matrix components from their discrete storage format [S1, unofficial].
+Covariance Splat Reading is a method for decoding a single 3D Gaussian Splat from a compressed texture-based storage format into a runtime-friendly `CovSplat` structure. It solves the problem of efficiently retrieving splat properties (position, color, opacity, and covariance) from GPU textures during rendering. It differs from raw buffer access by using two `usampler2DArray` textures to store packed data, requiring specific unpacking logic to reconstruct the covariance matrix components from scale and quaternion representations.
 
 ## How it works
-**Inputs:**
-*   `index`: Integer index of the splat to read.
-*   `numSplats`: Total number of splats in the scene.
-*   `texture1`: First `usampler2DArray` containing packed Gaussian data.
-*   `texture2`: Second `usampler2DArray` containing packed Gaussian data.
-*   `splatTexCoord(index)`: Helper function returning the `ivec3` coordinate for a given splat index in the texture arrays.
-
-**Outputs:**
-*   `covsplat`: A `CovSplat` struct instance populated with the splat's properties.
+**Inputs and Outputs:**
+- **Inputs:**
+  - `index`: Integer index of the splat to read.
+  - `numSplats`: Total number of active splats.
+  - `texture1`: First `usampler2DArray` containing packed splat data.
+  - `texture2`: Second `usampler2DArray` containing packed splat data.
+  - `splatTexCoord(index)`: Helper function returning an `ivec3` coordinate for the splat in the texture arrays.
+- **Output:**
+  - `covsplat`: A `CovSplat` struct containing the decoded properties.
 
 **Data Structures:**
 The `CovSplat` struct layout is defined as follows [S1, unofficial]:
-*   `center`: `vec3` (x, y, z position).
-*   `flags`: `uint` (status flags, e.g., active/inactive).
-*   `rgba`: `vec4` (color and opacity).
-*   `xxyyzz`: `vec3` (diagonal elements of the covariance matrix).
-*   `xyxzyz`: `vec3` (off-diagonal elements of the covariance matrix).
-*   `index`: `int` (original index).
+- `flags`: `uint` (32-bit unsigned integer).
+- `index`: `int` (32-bit signed integer).
+- `rgba`: `vec4` (4-component float vector for color and opacity).
+- `center`: `vec3` (3-component float vector for position).
+- `xxyyzz`: `vec3` (3-component float vector storing diagonal elements of the covariance matrix).
+- `xyxzyz`: `vec3` (3-component float vector storing off-diagonal elements of the covariance matrix).
+
+The covariance data is stored in two textures. Each splat's data is accessed via `splatTexCoord(index)`, which returns an `ivec3` coordinate. The data is fetched as two `uvec4` values (`packed1` and `packed2`) [S1, unofficial].
 
 **Steps:**
-1.  Initialize `covsplat.flags` to `0u`.
-2.  Validate `index`: If `index < 0` or `index >= numSplats`, set `covsplat.flags` to `0u` and return [S1, unofficial].
-3.  Compute texture coordinate: `coord = splatTexCoord(index)`.
-4.  Fetch packed data:
-    *   `packed1 = texelFetch(texture1, coord, 0)`
-    *   `packed2 = texelFetch(texture2, coord, 0)`
-5.  Unpack data: Call `unpackSplatExtCov(packed1, packed2, covsplat.center, covsplat.rgba, covsplat.xxyyzz, covsplat.xyxzyz)`. Note: The exact bit-packing and decoding logic for `unpackSplatExtCov` is not provided in the source excerpts [S1, unofficial].
-6.  Set active flag: If `covsplat.xxyyzz` and `covsplat.xyxzyz` are not all zero, set `covsplat.flags = GSPLAT_FLAG_ACTIVE`; otherwise, set `covsplat.flags = 0u` [S1, unofficial].
-7.  Set `covsplat.index = index`.
+1. Initialize `covsplat.flags` to `0u`.
+2. Check if `index` is valid: `index >= 0` and `index < numSplats`.
+3. If valid, compute `coord = splatTexCoord(index)`.
+4. Fetch `packed1 = texelFetch(texture1, coord, 0)`.
+5. Fetch `packed2 = texelFetch(texture2, coord, 0)`.
+6. Call `unpackSplatExtCov(packed1, packed2, covsplat.center, covsplat.rgba, covsplat.xxyyzz, covsplat.xyxzyz)` to decode the properties [S1, unofficial].
+7. Set `covsplat.flags` to `GSPLAT_FLAG_ACTIVE` if `covsplat.xxyyzz` and `covsplat.xyxzyz` are not all zero; otherwise set to `0u`.
+8. Set `covsplat.index = index`.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def read_covariance_splat(index, num_splats, texture1, texture2, splat_tex_coord):
+def read_cov_splat(index, num_splats, texture1, texture2, splat_tex_coord):
     """
-    Reads a single Gaussian splat from texture arrays into a CovSplat struct.
+    Reads a single 3D Gaussian Splat from covariance texture storage.
     
     Args:
         index (int): Index of the splat.
         num_splats (int): Total number of splats.
         texture1 (Texture2DArray): First texture array.
         texture2 (Texture2DArray): Second texture array.
-        splat_tex_coord (function): Returns ivec3 coordinate for index.
+        splat_tex_coord (function): Returns ivec3 coordinate for a given index.
         
     Returns:
-        dict: CovSplat struct with fields: center, flags, rgba, xxyyzz, xyxzyz, index.
+        dict: CovSplat struct with fields: flags, index, rgba, center, xxyyzz, xyxzyz.
     """
     covsplat = {
-        'center': [0.0, 0.0, 0.0],
         'flags': 0,
+        'index': index,
         'rgba': [0.0, 0.0, 0.0, 0.0],
+        'center': [0.0, 0.0, 0.0],
         'xxyyzz': [0.0, 0.0, 0.0],
-        'xyxzyz': [0.0, 0.0, 0.0],
-        'index': index
+        'xyxzyz': [0.0, 0.0, 0.0]
     }
     
-    # Step 2: Validate index
+    # Check if index is valid
     if index < 0 or index >= num_splats:
         covsplat['flags'] = 0
         return covsplat
-        
-    # Step 3: Compute coordinate
+    
+    # Compute texture coordinate
     coord = splat_tex_coord(index)
     
-    # Step 4: Fetch packed data
-    # Note: texelFetch returns uvec4 (uint4)
+    # Fetch packed data from textures
+    # Note: texelFetch returns uvec4, unpacking logic is abstracted
     packed1 = texture1.fetch(coord, 0)
     packed2 = texture2.fetch(coord, 0)
     
-    # Step 5: Unpack data
-    # The specific unpacking logic is not provided in the source.
-    # This step reconstructs center, rgba, xxyyzz, and xyxzyz from packed1 and packed2.
+    # Unpack splat data
+    # This function decodes packed1 and packed2 into center, rgba, xxyyzz, xyxzyz
+    # The exact bit-packing scheme is not detailed in the source, but it derives
+    # covariance components from scale-quaternion representation [S1, unofficial].
     unpack_splat_ext_cov(packed1, packed2, covsplat['center'], covsplat['rgba'], 
                          covsplat['xxyyzz'], covsplat['xyxzyz'])
     
-    # Step 6: Set active flag
-    # Check if covariance components are non-zero
+    # Set flags based on covariance validity
     if (covsplat['xxyyzz'][0] != 0 or covsplat['xxyyzz'][1] != 0 or covsplat['xxyyzz'][2] != 0 or
         covsplat['xyxzyz'][0] != 0 or covsplat['xyxzyz'][1] != 0 or covsplat['xyxzyz'][2] != 0):
         covsplat['flags'] = GSPLAT_FLAG_ACTIVE
     else:
         covsplat['flags'] = 0
         
-    # Step 7: Set index
-    covsplat['index'] = index
-    
     return covsplat
 ```
 
 **Parameters:**
-*   `GSPLAT_FLAG_ACTIVE`: Constant indicating an active splat. Value not specified in sources [S1, unofficial].
+- `GSPLAT_FLAG_ACTIVE`: A constant indicating an active splat. Value not given in the sources.
+- `unpackSplatExtCov`: A helper function that decodes the packed textures into the `CovSplat` fields. The internal bit-packing logic is not provided in the sources [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Out of Bounds:** If `index` is invalid, the function returns an inactive splat with `flags=0` [S1, unofficial].
-*   **Null Inputs:** If `covSplats` or `index` are null/missing in the JS wrapper, `covsplat.flags` is explicitly set to `0u` [S1, unofficial].
-*   **Missing Unpack Logic:** The source code excerpt ends abruptly after fetching `packed2`, implying the decoding step (`unpackSplatExtCov`) is missing or external [S1, unofficial]. Implementers must derive or locate the specific bit-packing format used for `packed1` and `packed2`.
+- If the index is out of bounds or invalid, the `CovSplat` flags are set to `0u`, marking it as inactive [S1, unofficial].
+- If `covSplats` or `index` inputs are missing/null in the JS wrapper, the output `covsplat.flags` is explicitly set to `0u` [S1, unofficial].
+- The code snippet in the source ends abruptly after fetching `packed2`, implying the decoding step is missing from the excerpt [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** O(1) per splat read, assuming texture fetch and unpacking are constant time operations.
-*   **Memory Complexity:** O(1) auxiliary memory for the `CovSplat` struct.
-*   **Strengths:** Efficient GPU-side decoding from compressed texture storage; avoids CPU-GPU synchronization for individual splat reads.
-*   **Limitations:** Requires custom unpacking logic not provided in the source; dependent on specific texture coordinate mapping (`splatTexCoord`).
-*   **When to Use:** When rendering 3D Gaussian Splats from texture-based storage formats (e.g., SPZ or custom compressed formats) on the GPU.
-*   **When Not to Use:** When using raw buffer layouts (SoA) directly accessible in memory without texture indirection.
+- **Time Complexity:** O(1) per splat read, assuming texture fetch and unpacking are constant time operations.
+- **Memory Complexity:** O(1) additional memory for the `CovSplat` struct.
+- **Strengths:** Efficient GPU-based retrieval of splat properties using texture arrays, suitable for real-time rendering.
+- **Limitations:** Requires specific unpacking logic that is not fully detailed in the sources. The exact bit-packing scheme is not provided.
+- **When to use:** When rendering 3D Gaussian Splats from texture-based storage on the GPU.
+- **When not to use:** When direct buffer access is preferred or when the unpacking logic is not available.
 
 ## Background
-The method is part of the `sparkjsdev/spark` project, an unofficial implementation of 3D Gaussian Splatting tools [S1, unofficial]. It is designed to work with compressed splat formats (e.g., SPZ) and integrates with WebAssembly (WASM) and Rust-based rendering pipelines. The `CovSplat` struct is a specific data layout optimized for reading covariance representations from texture arrays, differing from the standard SoA buffer layout by using packed integer textures for storage [S1, unofficial].
+The method is part of the `sparkjsdev/spark` project, which provides tools for compressing and viewing Gaussian Splats [S1, unofficial]. The specific implementation details are from an unofficial source [S1, unofficial].
 
 ## Sources
 [S1] sparkjsdev/spark, https://github.com/sparkjsdev/spark, fetched 2026-10-27 (unofficial)

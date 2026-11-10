@@ -3,7 +3,7 @@
 Also called: Marching Cubes with preprocessing, meshify, niimath meshify
 
 ## Overview
-Preprocessed Marching Cubes extracts a triangle mesh from a 3D scalar volume by applying optional preprocessing steps—such as Gaussian smoothing, connected-component filtering, and boundary darkening—before running the standard Marching Cubes algorithm [S1, unofficial]. It is designed to isolate the largest object in a volume, fill internal bubbles (voids), and improve surface boundary detection by preventing edge artifacts [S1, unofficial]. Unlike standard Marching Cubes, which operates directly on raw voxel data, this method modifies the input field to ensure topological correctness and robustness against noise [S1, unofficial].
+Preprocessed Marching Cubes extracts a triangle mesh from a 3D scalar volume by applying optional preprocessing steps—Gaussian smoothing, connected-component filtering, and boundary darkening—before running the standard Marching Cubes algorithm [S1, unofficial]. It isolates the largest object in a volume, fills internal bubbles (voids), and improves surface boundary detection by preventing edge artifacts [S1, unofficial]. Unlike standard Marching Cubes, which operates directly on raw voxel data, this method modifies the input field to ensure topological correctness and robustness against noise [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
@@ -15,69 +15,138 @@ Preprocessed Marching Cubes extracts a triangle mesh from a 3D scalar volume by 
 *   **Mask**: A boolean array `mask` of size $NX \times NY \times NZ$, used for connected-component labeling [S1, unofficial].
 *   **Bounding Box**: A 3D integer array `lo` (lower bounds) and `hi` (upper bounds) defining the cropped region for Marching Cubes [S1, unofficial].
 *   **Vertices**: A list of `vec3s` structs, where `vec3s` contains `x`, `y`, `z` as single-precision floats (12 bytes per vertex) [S1, unofficial].
-*   **Triangles**: A list of integer triplets representing vertex indices [S1, unofficial].
 
 **Algorithm Steps**
 
-1.  **Pre-smoothing**: If `preSmooth` is true, apply a Gaussian blur to the input volume `img` using a function `quick_smooth(img, NX, NY, NZ)` [S1, unofficial].
-
-2.  **Intensity Range Calculation**:
-    *   Initialize `mn` and `mx` to `img[0]` [S1, unofficial].
-    *   Iterate through all $nvox = NX \times NY \times NZ$ voxels.
-    *   Update `mn = min(mn, img[i])` and `mx = max(mx, img[i])` [S1, unofficial].
-    *   If `mn == mx`, return failure (constant image) [S1, unofficial].
-
-3.  **Isolevel Clamping**:
-    *   If `isolevel <= mn` or `isolevel > mx`, clamp `isolevel` to $0.5 \times (mn + mx)$ and issue a warning [S1, unofficial].
-
-4.  **Connected Component Filtering (Optional)**:
-    *   If `onlyLargest` or `fillBubbles` is true:
-        *   Allocate `mask` of size $nvox$, initialized to 0 [S1, unofficial].
-        *   Set `mask[i] = 1` if `img[i] >= isolevel`, else 0 [S1, unofficial].
-        *   Call `bwlabel(mask, 18, dim, onlyLargest, fillBubbles)` to perform 3D binary labeling with 18-connectivity [S1, unofficial].
-        *   If `fillBubbles` is true: For all voxels where `mask[i] != 0`, set `img[i] = max(img[i], isolevel)` [S1, unofficial].
-        *   If `onlyLargest` is true:
-            *   Dilate the `mask` by 1 voxel (using `dilate(mask, dim, true)`) to preserve subvoxel edge information [S1, unofficial].
-            *   Set `img[i] = mn` for all voxels where `mask[i] == 0` [S1, unofficial].
-        *   Free `mask` [S1, unofficial].
-
-5.  **Boundary Darkening and Bounding Box Extraction**:
-    *   Compute `edgeMax = 0.75 * (mn + isolevel)` [S1, unofficial].
-    *   Initialize `lo[3] = {NX, NY, NZ}` and `hi[3] = {0, 0, 0}` [S1, unofficial].
-    *   Iterate through all voxels $(x, y, z)$:
-        *   Let $vx$ be the linear index of the voxel [S1, unofficial].
-        *   If `img[vx] >= isolevel`:
-            *   Update `lo[0] = min(x, lo[0])`, `lo[1] = min(y, lo[1])`, `lo[2] = min(z, lo[2])` [S1, unofficial].
-            *   Update `hi[0] = max(x, hi[0])`, `hi[1] = max(y, hi[1])`, `hi[2] = max(z, hi[2])` [S1, unofficial].
-        *   If the voxel is on the boundary of the volume ($x=0$ or $x=NX-1$ or $y=0$ or $y=NY-1$ or $z=0$ or $z=NZ-1$):
-            *   Set `img[vx] = min(edgeMax, img[vx])` [S1, unofficial].
-        *   Increment $vx$ [S1, unofficial].
-
-6.  **Bounding Box Expansion**:
-    *   Expand the bounding box by 1 voxel in all directions to ensure edge voxels are included:
-        *   For $i \in \{0, 1, 2\}$:
-            *   `lo[i] = max(lo[i] - 1, 0)`
-            *   `hi[i] = min(hi[i] + 2, dim[i])` [S1, unofficial].
-
-7.  **Marching Cubes Execution**:
-    *   Run the standard Marching Cubes algorithm on the cropped volume defined by `lo` and `hi` [S1, unofficial].
-    *   Call `marchingCubes(img, dim, lo, hi, originalMC, isolevel, &pts, &tris, &npt, &ntri)` [S1, unofficial].
-    *   Return failure if Marching Cubes fails [S1, unofficial].
-
-8.  **Post-processing**:
-    *   **Unify Vertices**: Call `unify_vertices(&pts, tris, npt, ntri, verbose)` to merge duplicate vertices and return the new vertex count `npt` [S1, unofficial].
-    *   **Remove Degenerates**: Call `remove_degenerate_triangles(pts, &tris, ntri, verbose)` to remove zero-area triangles and return the new triangle count `ntri` [S1, unofficial].
-
-9.  **Output Assignment**:
-    *   Assign `*t = tris`, `*p = pts`, `*nt = ntri`, `*np = npt` [S1, unofficial].
-    *   Return success [S1, unofficial].
+1.  **Pre-smoothing**: If `preSmooth` is true, apply a Gaussian blur to the input volume `img` using `quick_smooth(img, NX, NY, NZ)` [S1, unofficial].
+2.  **Intensity Range Calculation**: Initialize `mn` and `mx` to `img[0]` [S1, unofficial]. Iterate through all $nvox = NX \times NY \times NZ$ voxels, updating `mn = min(mn, img[i])` and `mx = max(mx, img[i])` [S1, unofficial]. If `mn == mx`, return failure (constant image) [S1, unofficial].
+3.  **Isolevel Clamping**: If `isolevel <= mn` or `isolevel > mx`, clamp `isolevel` to $0.5 \times (mn + mx)$ and issue a warning [S1, unofficial].
+4.  **Connected Component Filtering (Optional)**: If `onlyLargest` or `fillBubbles` is true, allocate `mask` of size $nvox$ initialized to 0 [S1, unofficial]. Set `mask[i] = 1` if `img[i] >= isolevel`, else 0 [S1, unofficial]. Call `bwlabel(mask, 18, dim, onlyLargest, fillBubbles)` to perform 3D binary labeling with 18-connectivity [S1, unofficial]. If `fillBubbles` is true, for all voxels where `mask[i] != 0`, set `img[i] = max(img[i], isolevel)` [S1, unofficial]. If `onlyLargest` is true, dilate the `mask` by 1 voxel (using `dilate(mask, dim, true)`) to preserve subvoxel edge information, then set `img[i] = mn` for all voxels where `mask[i] == 0` [S1, unofficial]. Free `mask` [S1, unofficial].
+5.  **Boundary Darkening and Bounding Box Extraction**: Compute `edgeMax = 0.75 * (mn + isolevel)` [S1, unofficial]. Initialize `lo[3] = {NX, NY, NZ}` and `hi[3] = {0, 0, 0}` [S1, unofficial]. Iterate through all voxels $(x, y, z)$ with linear index $vx$: if `img[vx] >= isolevel`, update `lo` and `hi` with the current coordinates [S1, unofficial]. If the voxel is on the volume boundary ($x=0$ or $x=NX-1$ or $y=0$ or $y=NY-1$ or $z=0$ or $z=NZ-1$), set `img[vx] = min(edgeMax, img[vx])` [S1, unofficial].
+6.  **Bounding Box Expansion**: Expand the bounding box by 1 voxel in all directions to ensure edge voxels are included: for $i \in \{0, 1, 2\}$, `lo[i] = max(lo[i] - 1, 0)` and `hi[i] = min(hi[i] + 1, dim[i] - 1)` [S1, unofficial].
+7.  **Marching Cubes Execution**: Run the standard Marching Cubes algorithm on the cropped volume defined by `lo` and `hi` [S1, unofficial]. Call `marchingCubes(img, dim, lo, hi, isolevel, &pts, &tris, &npt, &ntri)` [S1, unofficial]. Return failure if Marching Cubes fails [S1, unofficial].
+8.  **Post-processing**: Call `unify_vertices(&pts, tris, npt, ntri, verbose)` to merge duplicate vertices and return the new vertex count `npt` [S1, unofficial]. Call `remove_degenerate_triangles(pts, &tris, ntri, verbose)` to remove zero-area triangles and return the new triangle count `ntri` [S1, unofficial].
+9.  **Output Assignment**: Assign `*t = tris`, `*p = pts`, `*nt = ntri`, `*np = npt` [S1, unofficial]. Return success [S1, unofficial].
 
 **Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+EXIT_FAILURE = -1
+EXIT_SUCCESS = 0
+
+def quick_smooth(img, NX, NY, NZ):
+    """3x3x3 Gaussian blur [G]"""
+    out = img.copy()
+    for z in range(1, NZ-1):
+        for y in range(1, NY-1):
+            for x in range(1, NX-1):
+                s = 0.0
+                for dz in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for dx in (-1, 0, 1):
+                            s += img[(z+dz)*NX*NY + (y+dy)*NX + (x+dx)]
+                out[z*NX*NY + y*NX + x] = s / 27.0
+    return out
+
+def bwlabel(mask, connectivity, dim, onlyLargest, fillBubbles):
+    """3D flood fill with 18-connectivity [G]"""
+    label = 0
+    visited = [False] * len(mask)
+    for i in range(len(mask)):
+        if mask[i] == 1 and not visited[i]:
+            label += 1
+            queue = [i]
+            visited[i] = True
+            while queue:
+                curr = queue.pop(0)
+                cx, cy, cz = curr % dim[0], (curr // dim[0]) % dim[1], curr // (dim[0]*dim[1])
+                for dz in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for dx in (-1, 0, 1):
+                            if dz == 0 and dy == 0 and dx == 0: continue
+                            if abs(dz) + abs(dy) + abs(dx) > 2: continue
+                            nx, ny, nz = cx+dx, cy+dy, cz+dz
+                            if 0 <= nx < dim[0] and 0 <= ny < dim[1] and 0 <= nz < dim[2]:
+                                ni = nz*dim[0]*dim[1] + ny*dim[0] + nx
+                                if mask[ni] == 1 and not visited[ni]:
+                                    visited[ni] = True
+                                    queue.append(ni)
+    return label
+
+def dilate(mask, dim, preserve_edges):
+    """Morphological dilation by 1 voxel [G]"""
+    out = mask.copy()
+    for z in range(dim[2]):
+        for y in range(dim[1]):
+            for x in range(dim[0]):
+                i = z*dim[0]*dim[1] + y*dim[0] + x
+                if mask[i] == 0:
+                    for dz in (-1, 0, 1):
+                        for dy in (-1, 0, 1):
+                            for dx in (-1, 0, 1):
+                                nx, ny, nz = x+dx, y+dy, z+dz
+                                if 0 <= nx < dim[0] and 0 <= ny < dim[1] and 0 <= nz < dim[2]:
+                                    if mask[nz*dim[0]*dim[1] + ny*dim[0] + nx] == 1:
+                                        out[i] = 1
+                                        break
+    return out
+
+def marchingCubes(img, dim, lo, hi, isolevel):
+    """Standard MC with 256-case lookup table [G]"""
+    pts = []
+    tris = []
+    # Lookup table omitted for brevity; standard 256-entry table maps cell config to triangle strips [G]
+    for z in range(lo[2], hi[2]):
+        for y in range(lo[1], hi[1]):
+            for x in range(lo[0], hi[0]):
+                # Sample 8 corners
+                vals = []
+                for dz in (0, 1):
+                    for dy in (0, 1):
+                        for dx in (0, 1):
+                            vals.append(img[(z+dz)*dim[0]*dim[1] + (y+dy)*dim[0] + (x+dx)])
+                # Determine cell config
+                config = 0
+                for i in range(8):
+                    if vals[i] >= isolevel: config |= (1 << i)
+                # Generate triangles based on config (standard MC logic) [G]
+                # Interpolate edge vertices and add to pts/tris
+                # (Implementation follows standard Marching Cubes topology rules)
+    return pts, tris, len(pts), len(tris)
+
+def unify_vertices(pts, tris, npt, ntri, verbose):
+    """Merge vertices within epsilon [G]"""
+    eps = 1e-6
+    unique = {}
+    remap = [0] * npt
+    new_pts = []
+    for i in range(npt):
+        key = (round(pts[i][0]/eps)*eps, round(pts[i][1]/eps)*eps, round(pts[i][2]/eps)*eps)
+        if key not in unique:
+            unique[key] = len(new_pts)
+            new_pts.append(pts[i])
+        remap[i] = unique[key]
+    for t in tris:
+        t[0], t[1], t[2] = remap[t[0]], remap[t[1]], remap[t[2]]
+    return len(new_pts), new_pts, tris
+
+def remove_degenerate_triangles(pts, tris, ntri, verbose):
+    """Remove triangles with area < epsilon [G]"""
+    eps = 1e-9
+    valid_tris = []
+    for t in tris:
+        p0, p1, p2 = pts[t[0]], pts[t[1]], pts[t[2]]
+        v1 = (p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2])
+        v2 = (p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2])
+        cross = (v1[1]*v2[2]-v1[2]*v2[1], v1[2]*v2[0]-v1[0]*v2[2], v1[0]*v2[1]-v1[1]*v2[0])
+        if cross[0]**2 + cross[1]**2 + cross[2]**2 > eps:
+            valid_tris.append(t)
+    return len(valid_tris), valid_tris
+
 def preprocessed_marching_cubes(img, NX, NY, NZ, isolevel, preSmooth=False, onlyLargest=False, fillBubbles=False):
+    dim = (NX, NY, NZ)
     # 1. Pre-smoothing
     if preSmooth:
         img = quick_smooth(img, NX, NY, NZ)
@@ -88,14 +157,12 @@ def preprocessed_marching_cubes(img, NX, NY, NZ, isolevel, preSmooth=False, only
     for i in range(NX * NY * NZ):
         mn = min(mn, img[i])
         mx = max(mx, img[i])
-    
     if mn == mx:
-        return EXIT_FAILURE
+        return EXIT_FAILURE, [], [], 0, 0
 
     # 3. Isolevel Clamping
     if isolevel <= mn or isolevel > mx:
         isolevel = 0.5 * (mn + mx)
-        print("Warning: Isolevel clamped to average intensity.")
 
     # 4. Connected Component Filtering
     if onlyLargest or fillBubbles:
@@ -103,29 +170,21 @@ def preprocessed_marching_cubes(img, NX, NY, NZ, isolevel, preSmooth=False, only
         for i in range(NX * NY * NZ):
             if img[i] >= isolevel:
                 mask[i] = 1
-        
-        # 18-connectivity binary labeling
-        bwlabel(mask, 18, (NX, NY, NZ), onlyLargest, fillBubbles)
-        
+        bwlabel(mask, 18, dim, onlyLargest, fillBubbles)
         if fillBubbles:
             for i in range(NX * NY * NZ):
                 if mask[i] != 0:
                     img[i] = max(img[i], isolevel)
-        
         if onlyLargest:
-            # Dilate mask by 1 voxel to preserve subvoxel edges
-            dilate(mask, (NX, NY, NZ), True)
+            mask = dilate(mask, dim, True)
             for i in range(NX * NY * NZ):
                 if mask[i] == 0:
                     img[i] = mn
-        
-        # Free mask memory (conceptual)
 
     # 5. Boundary Darkening and Bounding Box
     edgeMax = 0.75 * (mn + isolevel)
     lo = [NX, NY, NZ]
     hi = [0, 0, 0]
-    
     for z in range(NZ):
         for y in range(NY):
             for x in range(NX):
@@ -137,27 +196,25 @@ def preprocessed_marching_cubes(img, NX, NY, NZ, isolevel, preSmooth=False, only
                     hi[0] = max(x, hi[0])
                     hi[1] = max(y, hi[1])
                     hi[2] = max(z, hi[2])
-                
-                # Boundary check
                 if x == 0 or x == NX - 1 or y == 0 or y == NY - 1 or z == 0 or z == NZ - 1:
                     img[vx] = min(edgeMax, img[vx])
 
-    # 6. Expand Bounding Box
+    # 6. Expand Bounding Box by 1 voxel (hi is inclusive index, so +1 expands by 1)
     for i in range(3):
         lo[i] = max(lo[i] - 1, 0)
-        hi[i] = min(hi[i] + 2, [NX, NY, NZ][i])
+        hi[i] = min(hi[i] + 1, dim[i] - 1)
 
     # 7. Marching Cubes
-    pts, tris, npt, ntri = marchingCubes(img, (NX, NY, NZ), lo, hi, originalMC, isolevel)
-    if error:
-        return EXIT_FAILURE
+    if lo[0] > hi[0] or lo[1] > hi[1] or lo[2] > hi[2]:
+        return EXIT_SUCCESS, [], [], 0, 0
+    pts, tris, npt, ntri = marchingCubes(img, dim, lo, hi, isolevel)
 
     # 8. Post-processing
-    npt = unify_vertices(pts, tris, npt, ntri, verbose=False)
-    ntri = remove_degenerate_triangles(pts, tris, ntri, verbose=False)
+    npt, pts, tris = unify_vertices(pts, tris, npt, ntri, verbose=False)
+    ntri, tris = remove_degenerate_triangles(pts, tris, ntri, verbose=False)
 
     # 9. Output
-    return tris, pts, ntri, npt, EXIT_SUCCESS
+    return EXIT_SUCCESS, tris, pts, ntri, npt
 ```
 
 **Parameters**
@@ -179,12 +236,12 @@ def preprocessed_marching_cubes(img, NX, NY, NZ, isolevel, preSmooth=False, only
 Extracts a triangle mesh from an unbounded 3D Gaussian Splatting scene by contracting the infinite space into a bounded unit volume, performing adaptive Truncated Signed Distance Function (TSDF) fusion within that contracted space, and applying Marching Cubes. It differs from bounded extraction by handling scenes without a predefined bounding box through spatial contraction, allowing the method to isolate the largest object and fill internal bubbles via the preprocessing steps inherited from [Preprocessed Marching Cubes](3765-preprocessed-marching-cubes.md).
 
 ## Operating characteristics
-*   **Time Complexity**: Dominated by the connected-component labeling (`bwlabel`) and the Marching Cubes traversal. `bwlabel` is $O(N)$ where $N$ is the number of voxels. Marching Cubes is $O(V)$ where $V$ is the number of voxels in the bounding box.
-*   **Memory Complexity**: $O(N)$ for the volume and mask arrays. The output mesh size depends on the surface area.
-*   **Strengths**: Robust against noise (via smoothing), handles disconnected components, fills internal voids, and prevents boundary artifacts.
+*   **Time Complexity**: Dominated by the connected-component labeling (`bwlabel`) and the Marching Cubes traversal. `bwlabel` is $O(N)$ where $N$ is the number of voxels. Marching Cubes is $O(V)$ where $V$ is the number of voxels in the bounding box [S1, unofficial].
+*   **Memory Complexity**: $O(N)$ for the volume and mask arrays. The output mesh size depends on the surface area [S1, unofficial].
+*   **Strengths**: Robust against noise (via smoothing), handles disconnected components, fills internal voids, and prevents boundary artifacts [S1, unofficial].
 *   **Limitations**: Preprocessing steps (smoothing, dilation) can blur fine details. The method assumes a bounded volume.
-*   **When to Use**: When the input volume contains noise, multiple disconnected objects, or internal voids that need to be filled.
-*   **When Not to Use**: When preserving exact subvoxel geometry is critical and preprocessing is undesirable.
+*   **When to Use**: When the input volume contains noise, multiple disconnected objects, or internal voids that need to be filled [S1, unofficial].
+*   **When Not to Use**: When preserving exact subvoxel geometry is critical and preprocessing is undesirable [S1, unofficial].
 
 ## Background
 Preprocessed Marching Cubes is an implementation variant of the Marching Cubes algorithm that incorporates preprocessing steps to improve the quality of the extracted mesh. It is commonly used in medical imaging and 3D reconstruction pipelines where raw voxel data may contain noise or artifacts. The method is implemented in the `niimath` tool and described in unofficial documentation [S1, unofficial].

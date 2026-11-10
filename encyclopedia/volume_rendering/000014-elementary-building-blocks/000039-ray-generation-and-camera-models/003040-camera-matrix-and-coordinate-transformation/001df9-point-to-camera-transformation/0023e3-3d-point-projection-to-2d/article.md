@@ -3,30 +3,52 @@
 Also called: Point Projection
 
 ## Overview
-Projects 3D points into multiple camera views to compute 2D pixel locations and visibility masks [S1, unofficial]. It differs from orthographic projection by introducing depth-dependent scaling (perspective division), which is essential for realistic camera models and visibility computation in volume rendering pipelines [G].
+Projects 3D points into multiple camera views to compute 2D pixel locations and visibility masks [S1, unofficial]. It differs from [Perspective Projection of Points](4037-perspective-projection-of-points.md) by explicitly handling batched multi-view projection and visibility masking for rendering pipelines, and from [Depth Estimation from Point Cloud](8043-depth-estimation-from-point-cloud.md) by focusing on coordinate mapping rather than depth map generation or occlusion resolution.
 
 ## How it works
 **Inputs:**
-- `xyz`: Tensor of 3D points with shape $[N, 3]$ in world coordinates [S1, unofficial].
-- `train_cameras`: Tensor of shape $[V, 34]$ containing camera parameters for $V$ views [S1, unofficial]. The 34 values are structured as 2 values for image size, 16 values for intrinsic matrix parameters, and 16 values for extrinsic matrix parameters [S1, unofficial].
+- `xyz`: Tensor of 3D points, shape $[N, 3]$.
+- `train_cameras`: Tensor of camera parameters, shape $[V, 34]$, where $V$ is the number of views. The 34 values consist of 2 image size dimensions, 16 intrinsic parameters, and 16 extrinsic parameters [S1, unofficial].
 
 **Outputs:**
-- `pixel_locations`: Tensor of shape $[V, N, 2]$ containing the 2D pixel coordinates $(u, v)$ for each point in each view [S1, unofficial].
-- `visibility_mask`: Boolean tensor of shape $[V, N]$ indicating if points are in front of the camera [S1, unofficial].
+- `pixel_locations`: Tensor of 2D pixel coordinates, shape $[V, N, 2]$.
+- `visibility_mask`: Boolean tensor, shape $[V, N]$, indicating if points are in front of the camera.
 
 **Data Structures:**
-- **Homogeneous Coordinates**: 3D points are converted to 4D homogeneous vectors by appending a 1.0 [S1, unofficial].
-- **Projection Matrix ($P$)**: Computed as $P = K \cdot C^{-1}$, where $K$ is the intrinsic matrix and $C$ is the camera-to-world extrinsic matrix [S1, unofficial].
+- Intrinsics matrix $K$: $3 \times 3$ matrix.
+- Extrinsics matrix $W$: $4 \times 4$ matrix (camera-to-world pose).
+- Projection matrix $P$: $3 \times 4$ matrix.
+- Homogeneous point $x_h$: $4 \times 1$ vector.
 
 **Steps:**
-1. **Parse Camera Parameters**: Reshape the `train_cameras` tensor to extract intrinsic and extrinsic matrices. The intrinsics occupy indices 2 to 18 (16 values) and are reshaped into $[V, 4, 4]$ matrices $K$. The extrinsics occupy the last 16 values and are reshaped into $[V, 4, 4]$ matrices $C$ (camera-to-world) [S1, unofficial].
-2. **Homogenize Points**: Append a column of 1s to `xyz` to create homogeneous coordinates $X_h$ of shape $[N, 4]$ [S1, unofficial].
-3. **Compute Projection Matrix**: Calculate $P = K \cdot C^{-1}$ for each view [S1, unofficial].
-4. **Project Points**: Multiply the projection matrix by the homogeneous points. The operation is performed as $P \cdot X_h^T$, repeated across views and permuted, resulting in projected coordinates $X_p$ of shape $[V, 4, N]$ [S1, unofficial].
-5. **Perspective Division**: Compute pixel coordinates by dividing the x and y components by the z component (depth). The z component is clamped to a minimum value of $10^{-8}$ to prevent division by zero [S1, unofficial].
-   $$ u = \frac{X_p[:, 0, :]}{\max(X_p[:, 2, :], 10^{-8})} $$
-   $$ v = \frac{X_p[:, 1, :]}{\max(X_p[:, 2, :], 10^{-8})} $$
-6. **Visibility Mask**: A point is considered visible (in front of the camera) if its projected z-coordinate is positive ($X_p[:, 2, :] > 0$) [S1, unofficial].
+1. **Parse Camera Parameters:** Split `train_cameras` into intrinsics and poses.
+   - Reshape the middle 16 values (indices 2 to 18) into $V \times 4 \times 4$ matrices. The first $3 \times 3$ elements of each matrix form the intrinsic matrix $K$. The remaining elements are ignored or treated as padding depending on implementation, but typically the intrinsic matrix is extracted from the top-left $3 \times 3$ of this block [S1, unofficial].
+   - Reshape the last 16 values (indices -16 to end) into $V \times 4 \times 4$ matrices. These represent the camera-to-world pose matrices $W$ [S1, unofficial].
+
+2. **Homogenize Points:** Convert 3D points to homogeneous coordinates.
+   - Append a column of ones to `xyz`.
+   - $x_h = [x, y, z, 1]^T$. Shape becomes $[N, 4]$.
+
+3. **Compute Projection Matrix:**
+   - Invert the pose matrices to get world-to-camera transformations: $W^{-1}$.
+   - Compute $P = K \cdot W^{-1}$. Shape: $[V, 3, 4]$ [S1, unofficial].
+
+4. **Apply Projection:**
+   - Transpose $x_h$ to $[4, N]$.
+   - Repeat $x_h$ for each view: shape $[V, 4, N]$.
+   - Matrix multiply $P$ by the repeated points: $proj = P \cdot x_h$. Shape: $[V, 3, N]$.
+   - Transpose result to $[V, N, 3]$ for easier indexing [S1, unofficial].
+
+5. **Perspective Division:**
+   - Extract $x, y$ (first two channels) and $z$ (third channel).
+   - Clamp $z$ to a minimum value (e.g., $10^{-8}$) to avoid division by zero.
+   - $pixel\_x = x / z$.
+   - $pixel\_y = y / z$.
+   - Result shape: $[V, N, 2]$ [S1, unofficial].
+
+6. **Visibility Mask:**
+   - A point is visible if its depth $z > 0$ (in front of the camera plane).
+   - $mask = (z > 0)$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -34,73 +56,114 @@ Projects 3D points into multiple camera views to compute 2D pixel locations and 
 ```python
 import torch
 
-def project_points_to_2d(xyz: torch.Tensor, train_cameras: torch.Tensor) -> tuple:
+def project_points_to_2d(xyz, train_cameras):
     """
     Projects 3D points to 2D pixel coordinates for multiple camera views.
     
     Args:
-        xyz: Tensor of shape [N, 3] containing 3D world coordinates.
+        xyz: Tensor of shape [N, 3] containing 3D points.
         train_cameras: Tensor of shape [V, 34] containing camera parameters.
-                       Format: [img_w, img_h, 16 intrinsic params, 16 extrinsic params].
+                       Format: [img_w, img_h, 16 intrinsics, 16 extrinsics].
     
     Returns:
-        pixel_locations: Tensor of shape [V, N, 2] with (u, v) coordinates.
-        visibility_mask: Tensor of shape [V, N] with boolean values.
+        pixel_locations: Tensor of shape [V, N, 2] with (x, y) coordinates.
+        visibility_mask: Tensor of shape [V, N] with boolean visibility flags.
     """
-    # 1. Parse camera parameters
-    train_intrinsics = train_cameras[:, 2:18].reshape(-1, 4, 4)
-    train_poses = train_cameras[:, -16:].reshape(-1, 4, 4)
+    # 1. Parse Camera Parameters
+    # Extract intrinsics and poses based on the 34-element layout
+    # Indices 2:18 are intrinsics (16 values)
+    # Indices -16: are poses (16 values)
     
-    # 2. Convert 3D points to homogeneous coordinates [N, 4]
-    xyz_h = torch.cat([xyz, torch.ones_like(xyz[:, :1])], dim=-1)
+    intrinsics_raw = train_cameras[:, 2:18]  # [V, 16]
+    poses_raw = train_cameras[:, -16:]       # [V, 16]
     
-    # 3. Compute projection matrix P = K @ C^-1
-    inv_poses = torch.inverse(train_poses)
-    P = torch.bmm(train_intrinsics, inv_poses)
+    # Reshape to 4x4 matrices
+    intrinsics_4x4 = intrinsics_raw.view(-1, 4, 4) # [V, 4, 4]
+    poses_4x4 = poses_raw.view(-1, 4, 4)           # [V, 4, 4]
     
-    # 4. Apply projection
-    # xyz_h is [N, 4]. Transpose to [4, N], repeat for V views to [V, 4, N],
-    # then permute to [V, N, 4] for batch matrix multiplication with P [V, 4, 4].
-    xyz_h_t = xyz_h.t().repeat(P.shape[0], 1, 1).permute(0, 2, 1)
-    projections = torch.bmm(P, xyz_h_t)  # [V, 4, N]
+    # Extract 3x3 intrinsic matrix K from the top-left of the 4x4 block
+    K = intrinsics_4x4[:, :3, :3] # [V, 3, 3]
     
-    # 5. Compute pixel coordinates (perspective division)
-    x = projections[:, 0, :]  # [V, N]
-    y = projections[:, 1, :]  # [V, N]
-    z = projections[:, 2, :]  # [V, N]
+    # The pose matrix W is the 4x4 camera-to-world matrix
+    W = poses_4x4 # [V, 4, 4]
     
+    # 2. Homogenize Points
+    # Append 1s to xyz to make it [N, 4]
+    ones = torch.ones_like(xyz[:, :1])
+    xyz_h = torch.cat([xyz, ones], dim=-1) # [N, 4]
+    
+    # Transpose to [4, N] for matrix multiplication
+    xyz_h_T = xyz_h.t() # [4, N]
+    
+    # 3. Compute Projection Matrix P = K * W^-1
+    # Invert the pose matrices (camera-to-world -> world-to-camera)
+    W_inv = torch.inverse(W) # [V, 4, 4]
+    
+    # Multiply K [V, 3, 3] by W_inv [V, 4, 4] -> P [V, 3, 4]
+    P = torch.bmm(K, W_inv)
+    
+    # 4. Apply Projection
+    # Repeat xyz_h_T for each view to match batch size V
+    # xyz_h_T is [4, N], we need [V, 4, N]
+    xyz_h_batch = xyz_h_T.unsqueeze(0).repeat(P.shape[0], 1, 1) # [V, 4, N]
+    
+    # Matrix multiply P [V, 3, 4] by xyz_h_batch [V, 4, N] -> proj [V, 3, N]
+    proj = torch.bmm(P, xyz_h_batch)
+    
+    # Transpose to [V, N, 3]
+    proj = proj.permute(0, 2, 1) # [V, N, 3]
+    
+    # 5. Perspective Division
+    # Extract x, y, z
+    x = proj[:, :, 0] # [V, N]
+    y = proj[:, :, 1] # [V, N]
+    z = proj[:, :, 2] # [V, N]
+    
+    # Clamp z to avoid division by zero
     z_clamped = torch.clamp(z, min=1e-8)
-    pixel_locations = torch.stack([x / z_clamped, y / z_clamped], dim=-1)  # [V, N, 2]
     
-    # 6. Determine visibility mask
+    # Compute pixel coordinates
+    pixel_x = x / z_clamped
+    pixel_y = y / z_clamped
+    
+    pixel_locations = torch.stack([pixel_x, pixel_y], dim=-1) # [V, N, 2]
+    
+    # 6. Visibility Mask
+    # Points are valid if they are in front of the camera (z > 0)
     visibility_mask = z > 0
     
     return pixel_locations, visibility_mask
 ```
 
 **Parameters:**
-- `train_cameras`: Tensor of shape $[V, 34]$ [S1, unofficial].
-- `min_depth_clamp`: $10^{-8}$ [S1, unofficial].
+- `train_cameras`: Tensor of shape $[V, 34]$. The first two values are image width and height. The next 16 values encode the intrinsic matrix (typically stored as a flattened $4 \times 4$ matrix where the bottom row is $[0,0,0,1]$). The last 16 values encode the extrinsic pose matrix (camera-to-world, flattened $4 \times 4$) [S1, unofficial].
 
 **Edge Cases:**
-- **Division by Zero**: Handled by clamping the projected depth $z$ to a minimum of $10^{-8}$ [S1, unofficial].
-- **Back-facing Points**: Points with a projected depth $z \le 0$ are marked as invisible [S1, unofficial].
+- **Division by Zero:** If $z=0$, the point is on the camera plane. Clamping $z$ to $10^{-8}$ prevents NaNs but produces large coordinate values [S1, unofficial].
+- **Negative Depth:** Points behind the camera ($z < 0$) are marked invisible. They are not clamped, so they do not affect pixel coordinates if masked out [S1, unofficial].
 
 ## Subtopics
 
-### Depth Estimation from Point Cloud
-Projects a generated 3D point cloud to the image plane of a novel viewpoint [S2]. If multiple 3D points project to the same pixel, the closest 3D point to the camera location is used for distance calculation [S2].
+### [Perspective Projection of Points](4037-perspective-projection-of-points.md)
+Perspective projection maps 3D world points to 2D image coordinates using a pinhole camera model, where a line joining the 3D point to the center of projection intersects the image plane. It differs from orthographic projection by accounting for depth-dependent scaling (perspective division) and from general projective transformations by explicitly decomposing the camera matrix into intrinsic calibration and extrinsic pose parameters.
+
+### [Depth Estimation from Point Cloud](8043-depth-estimation-from-point-cloud.md)
+This method generates a depth image at a novel viewpoint by projecting a pre-existing 3D point cloud onto the camera's image plane. It solves the problem of converting sparse or dense geometric samples into a per-pixel depth map, handling occlusions by selecting the nearest surface point for each pixel. It differs from direct projection methods by explicitly resolving multiple points per pixel via distance minimization, and from volumetric methods by operating directly on discrete points rather than a voxel grid.
 
 ### Reprojection of 2D Features to 3D Space
-Retrieves 2D pixel features for a query 3D point $p$ from an observed view $I_m$ using camera pose $\xi_m$ and intrinsics $K_m$ [S3]. If the projected point lies inside the image boundaries, the nearest pixel's features are duplicated to the 3D point using nearest neighbor interpolation [S3]. If it lies outside, a zero vector is assigned to indicate no observed information [S3]. Advanced techniques like bilinear interpolation or kernel functions may address discretization issues, but nearest neighbor is simpler and empirically effective for small-scale structures [S3].
+For a query 3D point $p$, an observed 2D view $I_m$, camera pose $\xi_m$, and intrinsics $K_m$, the corresponding 2D pixel features $F^m_p$ are retrieved using the reprojection function $P$. If the projected 3D point lies inside the image boundaries, the nearest pixel's features are selected and duplicated to the 3D point. If the point lies outside the image boundaries, a zero vector is assigned to the 3D point, indicating no observed information. Nearest neighbor interpolation is used instead of bilinear interpolation or kernel functions; nearest neighbor is simpler, though advanced techniques may address discretization issues [S2].
 
 ## Operating characteristics
-Time and memory complexity: Not given in the sources.
+**Time Complexity:** $O(V \cdot N)$, where $V$ is the number of views and $N$ is the number of points. The dominant operation is the batched matrix multiplication and element-wise division.
+**Memory Complexity:** $O(V \cdot N)$ to store the output pixel locations and visibility masks. Intermediate tensors for projection also scale linearly.
+**Strengths:** Efficient batched computation suitable for GPU acceleration. Simple visibility masking handles front/back face culling implicitly.
+**Limitations:** Does not handle occlusion between points (multiple points may project to the same pixel). Does not interpolate features; uses nearest neighbor which may cause aliasing.
+**When to use:** When projecting a static set of 3D points to multiple camera views for rendering or feature retrieval.
+**When not to use:** When depth ordering or occlusion resolution is required (use [Depth Estimation from Point Cloud](8043-depth-estimation-from-point-cloud.md)). When smooth feature interpolation is needed (use bilinear interpolation variants).
 
 ## Background
-This method is used in the context of rendering images from a dataset by projecting points to compute pixel locations and visibility [S1, unofficial].
+Originated in computer graphics and multi-view geometry for rendering and feature extraction. The specific implementation details (tensor shapes, parameter layout) are derived from neural rendering pipelines like VF-NeRF [S1, unofficial]. The concept of reprojection for feature aggregation is discussed in General Radiance Field (GRF) literature [S2].
 
 ## Sources
 [S1] albertgassol1/vf-nerf, https://github.com/albertgassol1/vf-nerf, fetched 2026-10-26 (unofficial)
-[S2] Improving Neural Radiance Fields Using Near-Surface Sampling with Point Cloud Generation, https://link.springer.com/article/10.1007/s11063-024-11654-5, fetched 2026-10-30
-[S3] GRF: Learning a General Radiance Field for 3D Representation and Rendering, https://doi.org/10.1109/iccv48922.2021.01490, fetched 2026-10-26
+[S2] GRF: Learning a General Radiance Field for 3D Representation and Rendering, https://doi.org/10.1109/iccv48922.2021.01490, fetched 2026-10-26

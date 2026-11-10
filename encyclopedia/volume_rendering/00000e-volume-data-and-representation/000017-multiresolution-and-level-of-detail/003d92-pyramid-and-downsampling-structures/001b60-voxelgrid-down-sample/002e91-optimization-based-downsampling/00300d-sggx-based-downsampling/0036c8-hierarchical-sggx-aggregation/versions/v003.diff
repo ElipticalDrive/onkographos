@@ -1,0 +1,239 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # Hierarchical SGGX Aggregation
+ 
+-Also called: SGG-H, SGGX-H
++Also called: Hierarchical SGGX clustering, SGG-H, SGGX-H
+ 
+ ## Overview
+@@ -8,20 +8,20 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of SGGX distributions $D_L = \{S_1, \dots, S_L\}$ for a specific LoD level $L$.
+-*   **Output:** A reduced set of SGGX distributions $D_{L-1}$ for the next lower resolution level, containing $L-1$ distributions (or fewer, depending on the stopping condition).
++*   **Input:** A set of SGGX distributions $D_L = \{S_1, \dots, S_L\}$ for a specific LoD level $L$ [S1].
++*   **Output:** A reduced set of SGGX distributions $D_{L-1}$ for the next lower resolution level, containing $L-1$ distributions [S1].
+ 
+ **Data Structures:**
+-*   **SGGX Distribution ($S_i$):** Defined by a rotation matrix $O$ and a diagonal scaling matrix $\Sigma$ (derived from eigenvalues/eigenvectors of the covariance matrix). The distribution is parameterized by eigenvectors $(\omega_1, \omega_2, \omega_3)$ and standard deviations $\sigma(\omega_k)$ [S1].
+-*   **Histogram ($H(S_i)$):** A 3D histogram representing the probability distribution of samples drawn from $S_i$.
++*   **SGGX Distribution ($S_i$):** Defined by a rotation matrix $O$ and a diagonal scaling matrix $\Sigma$ (derived from eigenvalues/eigenvectors of the covariance matrix) [S1]. The distribution is parameterized by eigenvectors $(\omega_1, \omega_2, \omega_3)$ and standard deviations $\sigma(\omega_k)$ [S1].
++*   **Histogram ($H(S_i)$):** A 3D histogram representing the probability distribution of samples drawn from $S_i$ [S1].
+     *   **Bins:** 5 bins in each spatial dimension ($5 \times 5 \times 5 = 125$ bins total) [S1].
+-*   **Distance Matrix:** A symmetric matrix storing the Wasserstein distance between all pairs of histograms in the current level.
++*   **Distance Matrix:** A symmetric matrix storing the Wasserstein distance between all pairs of histograms in the current level [S1].
+ 
+ **Parameters:**
+ *   **Samples per SGGX ($N$):** 5000 samples drawn from each SGGX distribution to generate the histogram [S1].
+ *   **Maximum distributions per LoD block:** 3 [S1].
+-*   **Distance Metric:** $\chi^2$ Wasserstein distance (denoted as $\chi W$ in sources, referred to as xWasserstein) [S1].
++*   **Distance Metric:** $\chi$Wasserstein distance (denoted as xWasserstein in sources) [S1].
+ 
+ **Steps:**
+-1.  **Sampling:** For each SGGX distribution $S_i$ in the current set $D_L$, draw $N=5000$ samples from the distribution. The sampling process generates uniform samples in the whole sphere, which are projected from the whole space to the underlying ellipsoid to ensure distribution in the whole Normal Distribution Function (NDF) [S1].
++1.  **Sampling:** For each SGGX distribution $S_i$ in the current set $D_L$, draw $N=5000$ samples from the distribution [S1]. The sampling process generates uniform samples in the whole sphere, which are projected from the whole space to the underlying ellipsoid to ensure distribution in the whole Normal Distribution Function (NDF) [S1].
+ 2.  **Histogramming:** Bin the $N$ samples for each $S_i$ into a 3D histogram $H(S_i)$ with 5 bins per dimension [S1].
+ 3.  **Distance Calculation:** Compute the distance between every pair of distinct SGGXs $(S_i, S_j)$ using the Wasserstein distance between their histograms:
+@@ -31,5 +31,5 @@
+     $$ (i, j) = \arg \min_{i \neq j; S_i, S_j \in D_L} \text{dist}(H(S_i), H(S_j)) $$
+     [S1]
+-5.  **Aggregation:** Aggregate the samples of the selected $S_i$ and $S_j$. This involves concatenating the $N$ samples from $S_i$ and the $N$ samples from $S_j$ into a single set of $2N$ samples [S1].
++5.  **Aggregation:** Aggregate the samples of the selected $S_i$ and $S_j$ by concatenating their sample sets [S1].
+ 6.  **Re-fitting:** Fit the resulting histogram of the aggregated samples into a new SGGX distribution $S_n$ using the SGGX Distribution Fitting method [S1].
+     *   *Corner Case Handling:* If all input orientations align to almost the exact same orientation, the SGGX becomes ill-defined. In this case, a uniform distribution is used to introduce a small deviation to the original data, yielding a noisier but unbiased SGGX [S1].
+@@ -44,22 +44,17 @@
+ import numpy as np
+ 
+-def sample_sggx(sggx, n_samples):
+-    """
+-    Samples directions from an SGGX distribution.
+-    Uses uniform sampling in the whole sphere projected to the ellipsoid.
+-    Returns an array of shape (n_samples, 3).
+-    """
+-    # Implementation details for SGGX sampling are based on Heitz et al. [18]
+-    # Modified to sample the whole sphere rather than just the VNDF hemisphere.
+-    # [G] Specific sampling algorithm for SGGX is assumed to be available 
+-    # from the parent article [SGGX-based Downsampling].
+-    return np.random.randn(n_samples, 3) # Placeholder for actual SGGX sampling logic
++def sample_sggx(O, Sigma, n_samples):
++    # [G] Standard SGGX sampling: generate uniform points on a sphere,
++    # transform by O, scale by Sigma, and normalize to unit length.
++    u = np.random.uniform(-1, 1, (n_samples, 3))
++    norms = np.linalg.norm(u, axis=1, keepdims=True)
++    u = u / norms
++    v = u @ O.T
++    v = v * Sigma
++    v = v / np.linalg.norm(v, axis=1, keepdims=True)
++    return v
+ 
+ def compute_histogram(samples, bins_per_dim=5):
+-    """
+-    Bins 3D samples into a histogram.
+-    Returns a flattened array of bin counts.
+-    """
+-    # Normalize samples to [-1, 1] range for binning
++    # Normalize samples from [-1, 1] to [0, 1] for binning
+     samples_norm = (samples + 1.0) / 2.0
+     hist, _ = np.histogramdd(samples_norm, bins=bins_per_dim, range=[[0,1], [0,1], [0,1]])
+@@ -67,11 +62,6 @@
+ 
+ def wasserstein_distance_1d(p, q):
+-    """
+-    Computes the 1D Wasserstein distance between two probability distributions.
+-    Assumes p and q are normalized histograms.
+-    """
+     p = p / np.sum(p)
+     q = q / np.sum(q)
+-    # Cumulative distribution functions
+     cp = np.cumsum(p)
+     cq = np.cumsum(q)
+@@ -79,81 +69,39 @@
+ 
+ def wasserstein_distance_3d(h1, h2, bins_per_dim=5):
+-    """
+-    Computes the 3D Wasserstein distance by summing 1D distances along each axis.
+-    """
+-    # Reshape to 3D
+     h1_3d = h1.reshape(bins_per_dim, bins_per_dim, bins_per_dim)
+     h2_3d = h2.reshape(bins_per_dim, bins_per_dim, bins_per_dim)
+-    
+-    # Marginalize to 1D for each axis
+     p1_x = np.sum(h1_3d, axis=(1, 2))
+     p2_x = np.sum(h2_3d, axis=(1, 2))
+-    
+     p1_y = np.sum(h1_3d, axis=(0, 2))
+     p2_y = np.sum(h2_3d, axis=(0, 2))
+-    
+     p1_z = np.sum(h1_3d, axis=(0, 1))
+     p2_z = np.sum(h2_3d, axis=(0, 1))
+-    
+-    return (wasserstein_distance_1d(p1_x, p2_x) + 
+-            wasserstein_distance_1d(p1_y, p2_y) + 
++    return (wasserstein_distance_1d(p1_x, p2_x) +
++            wasserstein_distance_1d(p1_y, p2_y) +
+             wasserstein_distance_1d(p1_z, p2_z))
+ 
+ def fit_sggx(samples):
+-    """
+-    Fits an SGGX distribution to a set of 3D samples.
+-    Returns the SGGX parameters (O, Sigma).
+-    """
+-    # Compute covariance matrix E
+     mean = np.mean(samples, axis=0)
+     centered = samples - mean
+     E = np.dot(centered.T, centered) / len(samples)
+-    
+-    # Eigendecomposition
+     eigenvalues, eigenvectors = np.linalg.eigh(E)
+-    
+-    # Handle ill-defined case: if orientations are too aligned
+-    # [G] Check for near-zero eigenvalues or high correlation.
+-    # If ill-defined, add small uniform noise to samples before refitting.
+-    
+-    # Extract standard deviations
++    # [G] Handle ill-defined case: if eigenvalues are near zero,
++    # add small uniform noise to samples before recomputing covariance.
+     sigmas = np.sqrt(eigenvalues)
+-    
+-    # Construct SGGX matrix S
+-    # S = (w1, w2, w3) * diag(sigma1, sigma2, sigma3)
+-    # O is the rotation matrix formed by eigenvectors
+-    O = eigenvectors.T # Shape (3, 3)
++    O = eigenvectors.T
+     Sigma = np.diag(sigmas)
+-    
+     return O, Sigma
+ 
+ def hierarchical_sggx_aggregation(D_L, max_dists=3, N_samples=5000, bins_per_dim=5):
+-    """
+-    Performs hierarchical aggregation of SGGX distributions.
+-    
+-    Args:
+-        D_L: List of SGGX distributions (tuples of O, Sigma) for level L.
+-        max_dists: Maximum number of distributions to keep per block.
+-        N_samples: Number of samples to draw for histogramming.
+-        bins_per_dim: Number of bins per dimension for histograms.
+-        
+-    Returns:
+-        D_final: List of aggregated SGGX distributions.
+-    """
+     current_level = list(D_L)
+-    
+     while len(current_level) > max_dists:
+         n = len(current_level)
+         min_dist = float('inf')
+         best_pair = None
+-        
+-        # Precompute histograms
+         histograms = []
+         for sggx in current_level:
+-            samples = sample_sggx(sggx, N_samples)
++            samples = sample_sggx(sggx[0], sggx[1], N_samples)
+             hist = compute_histogram(samples, bins_per_dim)
+             histograms.append(hist)
+-            
+-        # Compute pairwise distances
+         for i in range(n):
+             for j in range(i + 1, n):
+@@ -162,28 +110,22 @@
+                     min_dist = dist
+                     best_pair = (i, j)
+-        
+         if best_pair is None:
+             break
+-            
+         i, j = best_pair
+-        
+-        # Aggregate samples
+-        samples_i = sample_sggx(current_level[i], N_samples)
+-        samples_j = sample_sggx(current_level[j], N_samples)
++        samples_i = sample_sggx(current_level[i][0], current_level[i][1], N_samples)
++        samples_j = sample_sggx(current_level[j][0], current_level[j][1], N_samples)
+         aggregated_samples = np.vstack((samples_i, samples_j))
+-        
+-        # Fit new SGGX
+         new_sggx = fit_sggx(aggregated_samples)
+-        
+-        # Update list
+-        # Remove j first, then i (to preserve indices)
++        # Remove j first to preserve index i
+         current_level.pop(j)
+         current_level.pop(i)
+         current_level.append(new_sggx)
+-        
+     return current_level
+ ```
+ 
+ ## Subtopics
++
++### [GPU-CPU Data Flow for SGGX-H](7839-gpu-cpu-data-flow-for-sggx-h.md)
++This method defines the data transfer and processing pipeline required to construct the SGGX-H representation from GPU-computed leaf node data. It addresses the problem of converting GPU-resident SGGX distributions into a CPU-accessible hierarchical structure suitable for aggregation. It is distinguished from pure GPU implementations by the explicit requirement to move leaf node histograms to the CPU to enable the generation of aggregated SGGX distributions, a step necessary for the hierarchical clustering logic described in Hierarchical SGGX Aggregation.
+ 
+ ### SGGX Distribution Fitting
+@@ -196,5 +138,5 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-The method requires computing pairwise distances between all distributions in a block. For $L$ distributions, this is $O(L^2)$ distance computations per aggregation step. Each distance computation involves sampling $N$ points and computing a histogram, followed by a Wasserstein distance calculation. The total complexity depends on the number of aggregation steps required to reach the target LoD.
++The method requires computing pairwise distances between all distributions in a block [S1]. Each distance computation involves sampling $N$ points and computing a histogram, followed by a Wasserstein distance calculation [S1]. The method is computationally more expensive than naive averaging due to sampling and histogramming [S1].
+ 
+ **Measured Performance:**
+@@ -203,14 +145,14 @@
+ **Strengths and Limitations:**
+ *   **Strengths:** Preserves high-frequency details and anisotropy better than naive averaging. Consistently outperforms naive SGGX fitting across all LoD levels [S1].
+-*   **Limitations:** Requires re-fitting SGGX distributions during aggregation, which may reduce the accuracy of the orientation distribution for that node [S1]. Voxelizing complex fabrics can produce artifacts due to limited per-voxel accuracy with complex geometries in density data [S1]. The method is computationally more expensive than naive averaging due to sampling and histogramming.
++*   **Limitations:** Requires re-fitting SGGX distributions during aggregation, which may reduce the accuracy of the orientation distribution for that node [S1]. Voxelizing complex fabrics can produce artifacts due to limited per-voxel accuracy with complex geometries in density data [S1].
+ 
+ **When to use:**
+-Use when accurate representation of complex orientation data (normals/tangents) is required at lower resolutions, and computational resources allow for the overhead of sampling and clustering.
++Use when accurate representation of complex orientation data (normals/tangents) is required at lower resolutions [S1].
+ 
+ **When not to use:**
+-Avoid when real-time performance is critical and naive averaging provides sufficient visual quality, or when the input data is simple enough that a single representative SGGX is adequate.
++Avoid when real-time performance is critical and naive averaging provides sufficient visual quality, or when the input data is simple enough that a single representative SGGX is adequate [S1].
+ 
+ ## Background
+-Hierarchical SGGX Aggregation was introduced in the paper "Fast Voxelization and Level of Detail for Microgeometry Rendering" [S1]. It builds on the SGGX-based Downsampling method introduced by Heitz et al. [HDCD15] [S1]. The method draws inspiration from classical unsupervised learning algorithms in machine learning, specifically hierarchical clustering, to build a dendrogram of LoDs [S1]. It is used in volumetric path tracing with Multiple Importance Sampling (MIS) and Woodcock’s Delta Tracking for transmittance estimation [S1].
++Hierarchical SGGX Aggregation was introduced in the paper "Fast Voxelization and Level of Detail for Microgeometry Rendering" [S1]. It builds on the SGGX-based Downsampling method introduced by Heitz et al. [HDCD15] [S1]. The method draws inspiration from classical unsupervised learning algorithms in machine learning, specifically hierarchical clustering, to build a dendrogram of LoDs [S1]. The method's evaluation employs a CPU-based volumetric path tracer using Multiple Importance Sampling (MIS) and Woodcock’s Delta Tracking for transmittance estimation [S1].
+ 
+ ## Sources

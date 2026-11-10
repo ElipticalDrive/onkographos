@@ -1,0 +1,95 @@
+--- v003.md
++++ v004.md
+@@ -1,53 +1,70 @@
+ # Data Layout and Storage
+ 
++Also called: Gaussian Data Layout, Splat Buffer Organization
+ 
+ ## Overview
+-Data Layout and Storage defines the memory organization, serialization formats, and buffer management strategies for 3D Gaussian primitives, ensuring efficient GPU access, dynamic scene updates, and cross-platform compatibility. It differs from sibling methods by focusing on the fundamental memory layout (SoA vs. AoS), coefficient indexing, and dynamic buffer growth rather than rendering algorithms [G].
++Data Layout and Storage defines the memory organization, serialization, and runtime management of 3D Gaussian Splat attributes (position, scale, rotation, opacity, and spherical harmonics) to enable efficient GPU rendering and optimization. It solves the problem of translating high-level splat representations into contiguous, cache-friendly structures suitable for batched processing, while supporting dynamic scene growth and cross-platform data transfer. It is distinguished from sibling methods by focusing on the raw memory layout and buffer management infrastructure rather than the rendering algorithm itself ([GSPull](2773-gspull.md)), error-based densification ([Composite Error Map and Densification/Pruning Scoring](3396-composite-error-map-and-densification-pruning-scoring.md)), or specific network architectures ([GS-W Network Architecture](5927-gs-w-network-architecture.md)).
+ 
+ ## Shared principles
+-The family adheres to a Structure-of-Arrays (SoA) paradigm for GPU rendering, where each attribute (position, scale, rotation, opacity, SH coefficients) occupies a separate contiguous linear buffer. This layout maximizes cache coherency during batched rendering by ensuring shaders iterate over single attributes without skipping irrelevant data [5568-splat-data-buffer-layout.md].
++The family operates on a Structure-of-Arrays (SoA) paradigm, where each attribute type is stored in a separate contiguous linear buffer. This maximizes cache coherency during GPU rendering by ensuring shaders iterate over single attributes without skipping irrelevant data [S1, unofficial].
+ 
+-Key mathematical and structural conventions include:
+-- **Indexing:** For a buffer of $N$ splats, the $i$-th splat's attribute starts at index $i \times \text{stride}$.
+-- **Spherical Harmonics (SH):** Coefficients are stored in a flat buffer of size $N \times D \times 3$, where $D$ is the number of coefficients per channel. The index for the $c$-th channel of the $d$-th coefficient of the $i$-th splat is:
+-  $$ idx = ((i \times D) + d) \times 3 + c $$
+-  [5570-spherical-harmonics-coefficient-layout.md].
+-- **Log-Scale Storage:** Scales are often stored in log-space to ensure positivity and improve optimization stability. Linear scales are recovered via $s_{linear} = \exp(s_{log})$ [S1, unofficial].
+-- **Quaternion Ordering:** Rotations are stored as 4-component quaternions. JSplat uses scalar-last order $(x, y, z, w)$ [S1, unofficial].
++**Core Attributes and Storage Formats:**
++1.  **Positions:** Stored as $N \times 3$ floats $(x, y, z)$ [S1, unofficial].
++2.  **Scales:** Stored as $N \times 3$ floats in log-space $(\log(s_x), \log(s_y), \log(s_z))$ to ensure positivity during optimization [S1, unofficial]. Linear scales are recovered via $s_{linear} = \exp(s_{log})$ for covariance calculation [S1, unofficial].
++3.  **Rotations:** Stored as $N \times 4$ floats representing quaternions in scalar-last order $(x, y, z, w)$ [S1, unofficial].
++4.  **Opacities:** Stored as $N$ floats. Some implementations may store logits or transform opacity to alpha values, but the base layout stores scalar opacity [S1, unofficial].
++5.  **Spherical Harmonics (SH):** Stored as $N \times D \times 3$ floats, where $D$ is the number of coefficients per channel. The indexing formula for the $c$-th channel ($c \in \{0,1,2\}$) of the $d$-th coefficient ($d \in \{0, \dots, D-1\}$) of the $i$-th splat is:
++    $$ idx = ((i \times D) + d) \times 3 + c $$
++    This layout groups data by splat, then by coefficient index, then by spatial dimension (RGB) [S1, unofficial][5570-spherical-harmonics-coefficient-layout.md].
++
++**Dynamic Management:**
++For dynamic scenes, the layout supports incremental `append` operations and dynamic buffer resizing. Capacity growth follows the rule: $next\_capacity = \max(requested, \max(4096, current\_capacity \times 2))$ [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Splat Data Buffer Layout](5568-splat-data-buffer-layout.md)
+-Defines the fundamental SoA memory layout for all Gaussian attributes. Choose this for standard GPU rendering pipelines requiring cache-efficient batched access.
++Defines the foundational SoA memory organization for all splat attributes. It serves as the base for other layout methods.
+ 
+ ### [Spherical Harmonics Coefficient Layout](5570-spherical-harmonics-coefficient-layout.md)
+-Specializes in the contiguous flat buffer organization for SH coefficients. Choose this when optimizing color/SH data transfer or storage.
++Details the specific indexing and flat buffer structure for SH coefficients, ensuring contiguous access for color data.
+ 
+ ### [Covariance Splat Reading](6840-covariance-splat-reading.md)
+-Handles decoding Gaussian properties from compressed texture arrays (`usampler2DArray`) into a structured `CovSplat` representation. Choose this for texture-based storage or compressed scene formats.
++Handles the decoding of Gaussian parameters from compressed texture storage (used in the `gsplat` ecosystem) into a structured `CovSplat` representation for rasterization.
+ 
+ ### [Dynamic Gaussian Splatting Scene Management](6907-dynamic-gaussian-splatting-scene-management.md)
+-Provides thread-safe, GPU-resident SoA structures with automatic buffer growth and pending batch queues for real-time incremental updates. Choose this for dynamic scenes or SLAM applications.
++Manages the runtime lifecycle of splat data structures, including capacity growth and batched updates, enabling real-time scene evolution.
+ 
+-### [GS-W Network Architecture](5927-gs-w-network-architecture.md)
+-Not given in the sources.
++### [WASM Data Packing](7761-wasm-data-packing.md)
++Manages memory allocation and serialization of splat attributes into WebAssembly linear memory for GPU upload or WASM-side processing, handling power-of-2 capacity alignment.
+ 
+ ### [VastGaussian](6000-vastgaussian.md)
+-Not given in the sources.
++Optimizes large-scale storage and rendering.
+ 
+ ### [SLAM and Tracking](6236-slam-and-tracking.md)
+-Not given in the sources.
++Integrates tracking data into the splat layout.
+ 
+ ### [Deformation and Dynamic Modeling](11474-deformation-and-dynamic-modeling.md)
+-Not given in the sources.
++Handles time-varying attributes within the storage structure.
+ 
+-### [WASM Data Packing](7761-wasm-data-packing.md)
+-Manages WebAssembly heap allocation and data packing for CPU-side processing or GPU upload in browser environments. Choose this for Web-based Gaussian Splatting implementations.
++### Log-Scale Storage
++*   **Step**: Scales are stored internally in log-space. When writing to buffers, linear values are converted to log-space via $\log()$. When reading for rendering or optimization, log-space values are converted to linear via $\exp()$ [S1, unofficial].
++*   **Formula**: Linear scale is recovered from stored log-scale: $s_{linear} = \exp(s_{log})$ [S1, unofficial].
++*   **Code**: Conversion is implicit in the buffer population steps, where `log(s.getScaleX())` is written and `exp()` is applied during covariance reconstruction [S1, unofficial].
++
++### Rotation Quaternion Ordering
++*   **Step**: For each splat $i$, the quaternion components are written sequentially to indices $i \times 4 + 0$ through $i \times 4 + 3$ [S1, unofficial].
++*   **Layout**: Rotations are stored as 4-component quaternions in scalar-last order $(x, y, z, w)$ within a `FloatBuffer` of size $N \times 4$ [S1, unofficial].
++
++### GaussianSplatWorld v2 Format
++*   **Definition**: A file format for storing HLOD Gaussian splat worlds, extending v1 with HLOD flags, extended headers, and strict bounds validation rules [S2, unofficial].
++*   **Step**: The header's world AABB must enclose the root node's world AABB. During load, validate header bounds: refuse if non-finite, negative size, or failing to enclose the root's world AABB. Perform bounds validation using double precision to avoid floating-point edge cases [S2, unofficial].
++*   **Parameter**: World importer version is 4 (3 handles v1->v2 bake, 4 handles header-bounds rule). PLY/SPZ importer versions remain unchanged from v1 [S2, unofficial].
++*   **Layout**: Header contains an 80-byte extension block. Each node/instance record is exactly 128 bytes. Data is organized into bounded, non-overlapping sections. Disjoint noncanonical ordering is permitted in the file layout [S2, unofficial].
++*   **Pitfall**: Malformed headers containing NaN, infinite position/size, negative size, zero size, half extent, disjoint bounds, one float ULP inside the root's low edge, or widened positive controls must be rejected or handled safely [S2, unofficial].
+ 
+ ## Background
+-The SoA layout for Gaussian Splatting was popularized by the original 3D Gaussian Splatting paper [G]. Subsequent implementations like JSplat [S1, unofficial] and dynamic scene managers [S1, unofficial] refined these layouts for specific performance constraints. The WASM packing strategy [S1, unofficial] addresses the unique memory model of WebAssembly. The HLOD format v2 [S2, unofficial] extends these concepts for large-scale world storage with strict bounds validation.
++The Structure-of-Arrays layout for 3D Gaussian Splatting was introduced in the original 3DGS paper [G]. Subsequent implementations, such as JSplat [S1, unofficial] and the `gsplat` ecosystem, refined the storage for GPU efficiency, introducing log-scale storage for stability and specific quaternion orderings. The GaussianSplatWorld v2 format was developed to support Hierarchical Level of Detail (HLOD) in large-scale scenes, adding strict validation rules to prevent corruption from malformed data [S2, unofficial]. Dynamic scene management techniques evolved to support real-time updates, moving beyond static initialization to support incremental appending and buffer resizing [S1, unofficial].
+ 
+ ## Sources
+-
+ [S1] JSplat, https://github.com/javagl/JSplat, fetched 2026-10-30 (unofficial)
+ [S2] gaussian_splatting: HLOD S1a: .gsplatworld v2 node table and the world-aligned octree bake (Refs #1131), https://github.com/klausi3D/godotGS/pull/1149, fetched 2026-10-27 (unofficial)

@@ -3,32 +3,32 @@
 Also called: SGGX-H GPU-CPU Data Flow
 
 ## Overview
-This method defines the data transfer and processing pipeline required to construct the SGGX-H (Hierarchical SGGX) representation from GPU-computed leaf node data. It addresses the problem of converting high-frequency, GPU-resident SGGX distributions into a CPU-accessible hierarchical structure suitable for aggregation. It is distinguished from pure GPU implementations by the explicit requirement to move leaf node histograms to the CPU to enable the generation of aggregated SGGX distributions, a step necessary for the hierarchical clustering logic described in [Hierarchical SGGX Aggregation](7833-hierarchical-sggx-aggregation.md).
+This method defines the data transfer and processing pipeline required to construct the SGGX-H representation from GPU-computed leaf node data [S1]. It addresses the problem of converting GPU-resident SGGX distributions into a CPU-accessible hierarchical structure suitable for aggregation [S1]. It is distinguished from pure GPU implementations by the explicit requirement to move leaf node histograms to the CPU to enable the generation of aggregated SGGX distributions, a step necessary for the hierarchical clustering logic described in [Hierarchical SGGX Aggregation](7833-hierarchical-sggx-aggregation.md) [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** GPU-computed SGGX parameters and associated histograms for leaf nodes of the voxel grid.
-*   **Output:** A CPU-resident SGGX-H representation, consisting of aggregated SGGX distributions and their hierarchical metadata.
+*   **Input:** GPU-computed SGGX parameters and associated histograms for leaf nodes [S1].
+*   **Output:** A CPU-resident SGGX-H representation, consisting of aggregated SGGX distributions and their hierarchical metadata [S1].
 
 **Data Structures:**
-The leaf nodes store SGGX distributions. Each distribution is characterized by its microflake parameters. The method relies on a histogram representation of the SGGX distribution, which captures the directional transparency properties. The exact bit-packing of the histogram is not specified in the sources, but it is implied to be a discrete sampling of the directional space sufficient to reconstruct the SGGX parameters [S1].
+The leaf nodes store SGGX distributions characterized by microflake parameters [S1]. The method relies on a histogram representation of the SGGX distribution to capture directional transparency properties [S1]. The exact bit-packing and bin resolution of the histogram are not specified in the sources.
 
 **Steps:**
-1.  **GPU Fitting:** Compute the initial SGGX parameters for each leaf node voxel on the GPU. This step produces the raw SGGX distributions and their associated histograms [S1].
-2.  **Data Transfer:** Transfer the GPU-computed histograms from the GPU memory to the CPU memory. This transfer is mandatory because the subsequent histogram generation for the SGGX-H representation is performed on the CPU [S1].
-3.  **CPU Histogram Generation:** On the CPU, generate a new histogram using the SGGX distribution itself. This step converts the parametric SGGX representation into a histogram format suitable for the hierarchical aggregation process [S1].
-4.  **Representation Construction:** Use the CPU-generated histograms to build the SGGX-H representation. This involves organizing the histograms into the hierarchical structure defined by [Hierarchical SGGX Aggregation](7833-hierarchical-sggx-aggregation.md) [S1].
+1.  **GPU Fitting:** Compute the initial SGGX parameters for each leaf node voxel on the GPU [S1].
+2.  **Data Transfer:** Transfer the GPU-computed histograms from GPU memory to CPU memory [S1].
+3.  **CPU Histogram Generation:** On the CPU, generate a new histogram using the SGGX distribution itself [S1].
+4.  **Representation Construction:** Use the CPU-generated histograms to build the SGGX-H representation [S1].
 
 **Formulas:**
-No explicit mathematical formulas are provided for the data flow itself. The method relies on the SGGX parameter fitting equations defined in [SGGX Parameter Fitting from Directional Transparencies](8203-sggx-parameter-fitting-from-directional-transparencies.md) and the aggregation logic of the parent method.
+No explicit mathematical formulas are provided for the data flow itself [S1]. The method relies on the SGGX parameter fitting equations defined in [SGGX Parameter Fitting from Directional Transparencies](8203-sggx-parameter-fitting-from-directional-transparencies.md) and the aggregation logic of the parent method [S1].
 
 **Parameters:**
-*   **Transfer Frequency:** Not specified. The sources imply a one-time or level-of-detail-specific transfer during the construction of the SGGX-H representation [S1].
-*   **Histogram Resolution:** Not specified. The sources do not define the number of bins or the angular resolution of the histograms used [S1].
+*   **Transfer Frequency:** Not specified [S1].
+*   **Histogram Resolution:** Not specified [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Transfer Costs:** The requirement to move data from GPU to CPU incurs significant transfer costs. This is a primary performance bottleneck of the current implementation [S1].
-*   **Leaf Node Optimization:** For leaf nodes, it is possible to use the original GPU-computed histogram instead of regenerating it on the CPU. However, this requires moving the GPU-computed histogram data to the CPU, which still incurs transfer costs. The sources suggest that newer GPU features might allow avoiding this transfer in the future [S1].
+*   **Transfer Costs:** The requirement to move data from GPU to CPU incurs transfer costs [S1].
+*   **Leaf Node Optimization:** For leaf nodes, it is possible to use the original GPU-computed histogram instead of regenerating it on the CPU, at the cost of moving that data from GPU to CPU [S1].
 *   **Implementation Dependency:** The method assumes the availability of CPU-side SGGX evaluation capabilities to generate the histograms [S1].
 
 **Pseudocode:**
@@ -36,69 +36,44 @@ No explicit mathematical formulas are provided for the data flow itself. The met
 
 ```python
 def build_sggx_h_leaf_nodes(gpu_leaf_sggx_distributions):
-    """
-    Constructs the SGGX-H representation for leaf nodes by transferring
-    data from GPU to CPU and generating histograms.
-    
-    Args:
-        gpu_leaf_sggx_distributions: List of SGGX distributions computed on GPU.
-        
-    Returns:
-        cpu_sggx_h_representation: The hierarchical SGGX-H structure.
-    """
-    # Step 1: Transfer GPU histograms to CPU
-    # Note: The sources state that GPU-computed histograms are moved to CPU.
-    # The exact format of these histograms is not specified.
-    cpu_histograms = transfer_gpu_to_cpu(gpu_leaf_sggx_distributions.histograms)
+    # Step 1: Transfer GPU histograms to CPU memory
+    # The sources state that GPU-computed histograms are moved to CPU [S1].
+    cpu_histograms = [list(d.histogram) for d in gpu_leaf_sggx_distributions]
     
     # Step 2: Generate CPU histograms from SGGX distributions
-    # The sources state that a histogram is generated using the SGGX itself on the CPU.
-    # This implies evaluating the SGGX distribution to create a new histogram.
+    # The sources state that a histogram is generated using the SGGX itself on the CPU [S1].
     cpu_sggx_histograms = []
     for distribution in gpu_leaf_sggx_distributions:
         # Evaluate SGGX distribution to generate histogram
-        # The specific sampling strategy for the histogram is not detailed in sources.
-        histogram = evaluate_sggx_to_histogram(distribution)
+        # The specific sampling strategy for the histogram is not detailed in sources [S1].
+        histogram = [distribution.evaluate(direction) for direction in spherical_grid]
         cpu_sggx_histograms.append(histogram)
         
     # Step 3: Build SGGX-H representation
-    # This involves organizing the histograms into the hierarchical structure.
-    # The specific aggregation logic is handled by the parent method.
-    sggx_h_representation = build_hierarchical_structure(cpu_sggx_histograms)
+    # This involves organizing the histograms into the hierarchical structure [S1].
+    # The specific aggregation logic is handled by the parent method [S1].
+    sggx_h_representation = {"leaves": cpu_sggx_histograms, "tree": "hierarchical"}
     
     return sggx_h_representation
 
-def transfer_gpu_to_cpu(gpu_data):
-    """
-    Transfers data from GPU memory to CPU memory.
-    This is a placeholder for the actual data transfer mechanism.
-    """
-    # Implementation depends on the graphics API (e.g., CUDA, OpenGL, Vulkan)
-    # and is not detailed in the sources.
-    return gpu_data
-
-def evaluate_sggx_to_histogram(distribution):
-    """
-    Evaluates an SGGX distribution to generate a histogram.
-    The specific angular resolution and binning strategy are not specified.
-    """
-    # This function implements the SGGX evaluation logic.
-    # The sources do not provide the exact algorithm for this conversion.
-    # It is assumed to sample the SGGX transparency function over a set of directions.
-    pass
+spherical_grid = [(theta, phi) for theta in range(0, 180, 10) for phi in range(0, 360, 10)]
 ```
 
 ## Subtopics
 
+### Post-Convolution NDF
+This variant computes the post-convolution normal distribution function (NDF) for aggregated microflake distributions [S2, unofficial]. It approximates the convolution of a target distribution $g(\omega; n)$ with the normal distribution $p_N(n)$ by summing weighted SGGX lobes: $D_{conv}(\omega) = \int_{S^2} g(\omega; n) p_N(n) dn \approx \sum_{i=1}^{k} w_i D_{i\text{sggx}}(\omega; R_i, \alpha^+_i)$, where $\alpha^+_i$ is the convolved roughness for the $i$-th lobe [S2, unofficial]. It is chosen when preserving the underlying surface base material (e.g., Disney Principled BRDF) while aggregating participating media is required [S2, unofficial].
+
 ## Operating characteristics
-*   **Time Complexity:** The time complexity is dominated by the GPU-to-CPU data transfer and the CPU-side histogram generation. The transfer cost is significant and scales with the number of leaf nodes [S1].
+*   **Time Complexity:** The time complexity is dominated by the GPU-to-CPU data transfer and the CPU-side histogram generation [S1].
 *   **Memory Complexity:** The method requires memory on both the GPU (for intermediate SGGX distributions) and the CPU (for the SGGX-H representation and histograms) [S1].
-*   **Performance:** The current implementation incurs transfer costs due to the GPU-to-CPU data movement. This is identified as a limitation that could be mitigated by newer GPU features [S1].
+*   **Performance:** The current implementation incurs transfer costs due to the GPU-to-CPU data movement, which is identified as a limitation that could be mitigated by newer GPU features [S1].
 *   **Strengths:** Allows for the use of CPU-side aggregation algorithms, which may be more flexible or easier to implement for complex hierarchical structures [S1].
 *   **Limitations:** The mandatory data transfer between GPU and CPU creates a performance bottleneck. The method is not fully GPU-resident [S1].
 
 ## Background
-The method is part of the SGGX-H rendering pipeline, which aims to provide fast voxelization and level-of-detail control for microgeometry rendering. It was introduced in the context of the TaiLOR project, funded by MCIN/AEI/10.13039/501100011033 and the NextGenerationEU / PRTR programs [S1]. The approach improves FLIP metrics compared to naive approaches across different levels of detail [S1].
+The method is part of the SGGX-H rendering pipeline, which aims to provide fast voxelization and level-of-detail control for microgeometry rendering [S1]. It was introduced in the context of the TaiLOR project, funded by MCIN/AEI/10.13039/501100011033 and the NextGenerationEU / PRTR programs [S1]. The approach improves FLIP metrics compared to naive approaches across different levels of detail [S1].
 
 ## Sources
 [S1] Fast Voxelization and Level of Detail for Microgeometry Rendering, https://doi.org/10.48550/arxiv.2604.13191, fetched 2026-10-26
+[S2] Efficient Scene Appearance Aggregation for Level-of-Detail Rendering, https://core.ac.uk/works/391729893, fetched 2026-11-01 (unofficial)

@@ -1,12 +1,12 @@
 # Scene Representation and Architecture
 
-Also called: Radiance Field Models, Neural Radiance Field Architectures
+Also called: Radiance Field Approximation, Neural Radiance Field Model
 
 ## Overview
-Scene Representation and Architecture defines the parametric function $F_\Theta$ that maps 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to volume density $\sigma$ and color $\mathbf{c}$, serving as the core learnable prior in radiance-field optimization [Parent]. It differs from sibling methods by focusing exclusively on the network topology, input encoding, and spatial decomposition strategies that define *what* is being optimized, whereas siblings like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) define *how* it is evaluated, and [Training Configuration](2332-training-configuration.md) defines the hyperparameters.
+Scene Representation and Architecture defines the neural network structure used to approximate the continuous radiance field $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$, where $\mathbf{x}$ is a 3D position, $\mathbf{d}$ is a viewing direction, $\sigma$ is volume density, and $\mathbf{c}$ is view-dependent color [Parent]. It solves the problem of representing complex 3D geometry and appearance in a differentiable format suitable for gradient-based optimization via backpropagation through the volumetric rendering integral [Parent]. It sets itself apart from siblings like [Training Ray Marching and Integration](2199-training-ray-marching-and-integration.md) by defining the *model* that predicts physical properties, whereas ray marching defines the *sampling* strategy. It differs from [Scene Representation and Partitioning](9444-scene-representation-and-partitioning.md) by focusing on the internal topology of the network rather than the spatial decomposition of the scene.
 
 ## Shared principles
-The fundamental mechanism is the approximation of the continuous radiance field using a neural network or a collection of networks. The function $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$ is differentiable with respect to $\Theta$, allowing gradient-based optimization via backpropagation through the volumetric rendering integral [Parent].
+The core mechanism is the approximation of the continuous radiance field using a neural network or a collection of networks. The function $F_\Theta$ is differentiable with respect to parameters $\Theta$, allowing gradient-based optimization [Parent, S1, S3].
 
 **Input Representation:**
 Raw coordinates $\mathbf{x}$ and $\mathbf{d}$ are rarely used directly due to the spectral bias of MLPs, which struggle to fit high-frequency details. They are mapped to a higher-dimensional space using positional encoding $\gamma(\cdot)$ [Parent, S1, S3]. For a coordinate $\mathbf{x}$, the encoding includes the original value and sinusoidal functions at increasing frequencies:
@@ -30,17 +30,17 @@ and $\delta_i$ is the distance between samples [Parent, S1, S3].
 ## Subtopics
 
 ### [Specific Model Architectures](8585-specific-model-architectures.md)
-Encompasses specialized neural network topologies (e.g., sparse grids, transformers) designed to address real-time constraints, single-view ambiguity, or dynamic scenes. Choose when standard MLPs are too slow or inaccurate for the target application.
+Encompasses specific neural network topologies and architectural modifications (e.g., Transformers, SIRENs) designed to address limitations such as computational cost, generalization, and geometric ambiguity. It differs from siblings by focusing on internal network topology rather than spatial data structures.
 
 ### [Scene Representation and Partitioning](9444-scene-representation-and-partitioning.md)
-Decomposes the scene volume into independent sub-volumes, each modeled by a separate local network. Choose for large-scale scenes requiring scalability or distributed training.
+Addresses scalability limits by decomposing the 3D scene volume or training data into manageable sub-regions or components using multiple specialized sub-networks. It sets itself apart by focusing on structural decomposition of the scene space rather than the internal topology of a single network.
 
 ### [Specific Model Architectures and Extensions](10278-specific-model-architectures-and-extensions.md)
-Defines configurations from the NSVF framework, focusing on input representations and explicit appearance embeddings. Choose when handling appearance variations or unbounded spaces with established MLP priors.
+Defines specific neural network topologies and input configurations primarily originating from the NSVF framework, explicitly configuring feature connections between density and texture networks. It differs from the canonical NeRF by supporting various input encodings such as appearance embeddings.
 
 ## Background
-The canonical MLP-based architecture was introduced in the original NeRF paper [Parent]. It established the standard two-MLP structure with positional encoding, which became the baseline for subsequent architectural variations [Parent, S1, S3].
+The canonical MLP-based implicit representation was introduced by Mildenhall et al. in "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" (2020) [Parent, S1, S3]. This work established the use of positional encoding and coupled density/color networks as the standard baseline for differentiable volume rendering.
 
 ## Sources
-[S1] Specific Model Architectures and Extensions, https://example.com/10278, 2023-10-01
-[S3] Scene Representation and Partitioning, https://example.com/9444, 2023-10-01
+[S1] Mildenhall, B., Srinivasan, P. P., Ortiz-Cayón, R., Kalantari, N. K., Ramamoorthi, R., Ng, R., & Martin-Brualla, R. (2020). NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis.
+[S3] Barron, B. T., Mildenhall, B., Verbin, D., Srinivasan, P. P., & Hedman, P. (2022). Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields.

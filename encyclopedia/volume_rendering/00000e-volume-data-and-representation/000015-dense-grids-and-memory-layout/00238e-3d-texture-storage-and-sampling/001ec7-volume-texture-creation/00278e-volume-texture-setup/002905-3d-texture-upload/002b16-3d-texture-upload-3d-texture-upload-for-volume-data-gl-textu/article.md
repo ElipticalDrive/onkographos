@@ -3,96 +3,108 @@
 Also called: stackImages
 
 ## Overview
-This method converts a 3D image stack from a nested array structure into a flat 1D `Uint8Array` buffer for GPU upload into an OpenGL `GL_TEXTURE_3D` texture [S1, unofficial]. It is distinct from [Volume Atlas Texture Update](7157-volume-atlas-texture-update.md), which manages multiple smaller textures in an atlas layout, whereas this method focuses on a single monolithic 3D texture upload [G].
+This method handles the transfer of preprocessed scalar field data from CPU memory to GPU memory via an OpenGL `GL_TEXTURE_3D` object. It solves the problem of bridging the gap between host-side data structures (often nested arrays or raw buffers) and the GPU's texture sampling hardware. It is distinct from [Volume Texture Generation](7099-volume-texture-generation.md), which prepares the data format, and [3D Texture Upload](4419-3d-texture-upload.md), which manages the final RGBA classified data upload with specific filtering parameters.
 
 ## How it works
-**Inputs:** A 3D image stack represented as a nested array structure and the texture dimensions [S1, unofficial].
-**Outputs:** A `Uint8Array` buffer of length $W \times H \times D$ ready for GPU upload [S1, unofficial].
+**Inputs and Outputs:**
+- Input: A 3D image stack represented as a nested array structure `stack[x][y][z]` containing scalar values, or a sequence of 3D timesteps.
+- Output: An OpenGL `GL_TEXTURE_3D` object populated with data, ready for sampling in shaders.
 
 **Data Structures:**
-*   **Memory Layout:** The buffer uses x-fastest, y-middle, z-slowest ordering [S1, unofficial].
-    *   Stride Y ($S_y$) = $W$
-    *   Stride Z ($S_z$) = $W \times H$
-    *   Offset for element $(x, y, z)$ = $x + y \cdot W + z \cdot W \cdot H$ [S1, unofficial].
-*   **Data Type:** The method assumes 8-bit unsigned integers (`Uint8`) [S1, unofficial].
+- `stack`: A nested array where `stack[x]` is a 2D plane, `stack[x][y]` is a 1D line, and `stack[x][y][z]` is the scalar value.
+- `stackBuffer`: A flat `Uint8Array` (or equivalent byte buffer) of size `sizeX * sizeY * sizeZ`.
+- `texID`: The OpenGL texture object ID.
 
-**Parameters:**
-*   $W$: Width (size of X dimension)
-*   $H$: Height (size of Y dimension)
-*   $D$: Depth (size of Z dimension)
+**Numbered Steps:**
 
-**Steps:**
-1.  Determine dimensions: $W = \text{stack.length}$, $H = \text{stack}[0].\text{length}$, $D = \text{stack}[0][0].\text{length}$ [S1, unofficial].
-2.  Allocate a `Uint8Array` of size $W \times H \times D$ [S1, unofficial].
-3.  Iterate through the stack and flatten it into the buffer, respecting the x-fastest memory layout [S1, unofficial].
-4.  Bind the texture object and call `glTexImage3D` (or `glTexSubImage3D`) with the flattened buffer [G].
+1. **Calculate Dimensions:**
+   Determine the dimensions of the volume:
+   $$sizeX = stack.length$$
+   $$sizeY = stack[0].length$$
+   $$sizeZ = stack[0][0].length$$
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+2. **Allocate Buffer:**
+   Allocate a flat buffer `stackBuffer` of length `sizeX * sizeY * sizeZ`.
 
-```python
-def flatten_volume_stack(stack, width, height, depth):
-    """
-    Converts a nested 3D stack into a flat 1D Uint8Array buffer.
-    stack: list of lists of lists, indexed as stack[x][y][z] per source notes.
-    """
-    size_x = width
-    size_y = height
-    size_z = depth
-    
-    # Allocate stackBuffer of size sizeX * sizeY * sizeZ
-    stack_buffer = bytearray(size_x * size_y * size_z)
-    
-    # Iterate z from 0 to sizeZ, y from 0 to sizeY, x from 0 to sizeX
-    i = 0
-    for z in range(size_z):
-        for y in range(size_y):
-            for x in range(size_x):
-                # Assign stack[x][y][z] to stackBuffer[i] and increment i
-                stack_buffer[i] = stack[x][y][z]
-                i += 1
-                
-    return stack_buffer
-```
+3. **Flatten and Pack Data:**
+   Iterate through the nested array and copy values into the flat buffer. The memory order is x-fastest, y-middle, z-slowest.
+   $$stride_y = sizeX$$
+   $$stride_z = sizeX \times sizeY$$
+   
+   Pseudocode for flattening:
+   ```python
+   i = 0
+   for z in range(sizeZ):
+       for y in range(sizeY):
+           for x in range(sizeX):
+               stackBuffer[i] = stack[x][y][z]
+               i += 1
+   ```
+   [G] Ensure scalar values are normalized to the `Uint8` range [0, 255] if the source data is floating-point, as `GL_UNSIGNED_BYTE` is used in the upload call.
+
+4. **Create and Bind Texture:**
+   Generate an OpenGL texture object and bind it to `GL_TEXTURE_3D`.
+   ```python
+   texID = glGenTextures(1)
+   glBindTexture(GL_TEXTURE_3D, texID)
+   ```
+
+5. **Set Texture Parameters:**
+   Configure wrapping and filtering. For volume rendering, linear filtering is common for smooth interpolation.
+   ```python
+   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE)
+   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+   glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+   ```
+
+6. **Upload Data:**
+   Use `glTexImage3D` to allocate storage and copy the data.
+   ```python
+   glTexImage3D(
+       GL_TEXTURE_3D,      # target
+       0,                  # miplevel
+       GL_INTENSITY,       # internalformat (or GL_LUMINANCE)
+       sizeX,              # width
+       sizeY,              # height
+       sizeZ,              # depth
+       0,                  # border
+       GL_LUMINANCE,       # format
+       GL_UNSIGNED_BYTE,   # type
+       stackBuffer         # data
+   )
+   ```
+   [S1, unofficial] The internal format `GL_INTENSITY` and format `GL_LUMINANCE` are used for single-channel scalar data.
 
 **Edge Cases and Pitfalls:**
-*   **Data Type:** The method assumes 8-bit unsigned integers (`Uint8`). If the source data is 16-bit or floating point, it must be scaled and cast to 8-bit before upload, or a different `internalFormat` (e.g., `GL_RGBA16F`) and `type` must be used [G].
-*   **Memory Limits:** `GL_TEXTURE_3D` has maximum size limits defined by `GL_MAX_3D_TEXTURE_SIZE`. If $W \times H \times D$ exceeds hardware limits, the upload will fail [G].
+- **Precision:** If source data is not `Uint8`, explicit normalization is required before upload to avoid overflow or truncation errors [G].
+- **Memory Order:** The flattening loop must strictly follow the x-fastest, y-middle, z-slowest order to match OpenGL's expected layout for `GL_TEXTURE_3D` with these parameters.
+- **Boundaries:** `GL_CLAMP_TO_EDGE` wrapping is recommended to prevent sampling artifacts at volume boundaries.
 
 ## Subtopics
 
-### Volume Texture Generation
-This variant describes the preprocessing pipeline required before upload, specifically for data derived from JSON files [S2, unofficial]. It involves organizing raw data into a 3D array, normalizing values, and converting to RAW format [S2, unofficial].
-*   **Definition:** The process of converting preprocessed data into 3D textures for efficient shader access [S2, unofficial].
-*   **Steps:**
-    1.  Organize data from JSON files into a 3D array with shape $(N_{\text{longitude}}, N_{\text{latitude}}, N_{\text{depth}})$ [S2, unofficial].
-    2.  Map data values to the range $[0, 255]$ using linear normalization:
-        $$ v' = \frac{(v - v_{\min}) \cdot 255}{v_{\max} - v_{\min}} $$
-        where $v$ is the original value, $v'$ is the mapped value, and $v_{\min}/v_{\max}$ are the minimum and maximum data values [S2, unofficial].
-    3.  Convert the mapped data into a RAW file format, which is commonly used for volume texture file formats [S2, unofficial].
-*   **When to choose:** Use this when the source data is not already in a normalized 8-bit 3D array format, such as when loading scientific data from JSON or CSV files [S2, unofficial].
-
 ### Texture Streaming
-This variant manages time-varying volume data by cycling through timesteps using a single 3D texture [S3, unofficial].
-*   **Steps:**
-    1.  Allocate one 3D texture ID and bind it [S3, unofficial].
-    2.  Set texture parameters (wrap, filter) and upload the first timestep's data using `glTexImage3D` with target `GL_TEXTURE_3D` and internal format `GL_INTENSITY` [S3, unofficial].
-    3.  Initialize `curTimeStep` to 0 [S3, unofficial].
-    4.  During each draw call, increment `curTimeStep` modulo `numTimesteps`, bind the texture, and update it with the current timestep's data using `glTexSubImage3D` [S3, unofficial].
-*   **Comparison:** Compared to caching all timesteps, this method uses less graphics memory but involves CPU `memcpy` and `glTexSubImage3D` calls for each frame, causing a download bottleneck [S3, unofficial].
+A variant for handling 4D data (3D volume + time) when graphics memory is insufficient to hold all timesteps. It allocates a single `GL_TEXTURE_3D` and updates it frame-by-frame using `glTexSubImage3D` [S2, unofficial].
+- **Steps:**
+  1. Allocate one texture ID and bind it.
+  2. Upload the first timestep using `glTexImage3D`.
+  3. Initialize `curTimeStep = 0`.
+  4. In the draw loop, increment `curTimeStep` modulo `numTimesteps`.
+  5. Bind the texture and call `glTexSubImage3D` with the current timestep's data.
+- **Parameters:** Target `GL_TEXTURE_3D`, Internal Format `GL_INTENSITY` [S2, unofficial].
+- **Comparison:** Uses less graphics memory than caching all timesteps but involves CPU `memcpy` and `glTexSubImage3D` calls per frame, causing a download bottleneck [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(W \times H \times D)$ for the flattening step [G]. The GPU upload time depends on the PCIe bandwidth and the size of the buffer [G].
-*   **Memory Complexity:** $O(W \times H \times D)$ bytes for the CPU-side buffer [G]. The GPU consumes an additional $O(W \times H \times D)$ bytes for the texture storage [G].
-*   **Strengths:** Simple implementation; direct mapping to OpenGL's native 3D texture storage; efficient for direct volume rendering (ray casting) where 3D texture sampling is required [G].
-*   **Limitations:** Requires contiguous memory allocation on the CPU; large volumes may exceed VRAM limits or cause long upload stalls; does not handle compression or sparse data efficiently [G].
-*   **When to use:** For dense volume data that fits in VRAM and requires direct 3D texture sampling in shaders [G].
-*   **When not to use:** For extremely large datasets that exceed VRAM (use texture arrays or streaming), or for sparse data (use sparse voxel octrees) [G].
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, for the flattening and upload phase.
+- **Memory Complexity:** $O(N)$ for the host buffer and GPU texture storage.
+- **Performance:** Upload speed is limited by PCIe bandwidth. For large volumes, this can be a bottleneck. Texture streaming reduces GPU memory usage but adds per-frame upload overhead [S2, unofficial].
+- **Strengths:** Simple implementation; leverages standard OpenGL texture sampling hardware.
+- **Limitations:** Requires data conversion on CPU; single-channel upload limits direct RGBA classification support without additional steps [S1, unofficial].
 
 ## Background
-The method relies on OpenGL's `GL_TEXTURE_3D` primitive, which is a logical extension of traditional 2D textures designed to store three-dimensional spatial data [S2, unofficial]. It is commonly used in web-based and desktop volume renderers to transfer classified volume data from CPU memory to GPU memory [G].
+Originated from standard OpenGL volume rendering techniques. The specific flattening algorithm is documented in community implementations [S1, unofficial]. Texture streaming for 4D data is described in NVIDIA GTC presentations [S2, unofficial].
 
 ## Sources
 [S1] arisetiawan4601/dicom-volume-renderer, https://github.com/arisetiawan4601/dicom-volume-renderer, fetched 2026-10-27 (unofficial)
-[S2] The Implementation of a WebGPU-Based Volume Rendering Framework ... - MDPI, https://www.mdpi.com/2076-3417/15/5/2782, fetched 2026-10-29 (unofficial)
-[S3] PDF Slide 1, https://www.nvidia.com/content/GTC/documents/1102_GTC09.pdf, fetched 2026-10-29 (unofficial)
+[S2] PDF Slide 1, https://www.nvidia.com/content/GTC/documents/1102_GTC09.pdf, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,196 @@
+--- v008.md
++++ v009.md
+@@ -20,12 +20,12 @@
+ 
+ 1.  **Pre-smoothing**: If `preSmooth` is true, apply a Gaussian blur to the input volume `img` using `quick_smooth(img, NX, NY, NZ)` [S1, unofficial].
+-2.  **Intensity Range Calculation**: Initialize `mn` and `mx` to `img[0]` [S1, unofficial]. Iterate through all $nvox = NX \times NY \times NZ$ voxels, updating `mn = min(mn, img[i])` and `mx = max(mx, img[i])` [S1, unofficial]. If `mn == mx`, return failure (constant image) [S1, unofficial].
++2.  **Intensity Range Calculation**: Initialize `mn` and `mx` to `img[0]` [S1, unofficial]. Iterate through all $nvox = NX \times NY \times NZ$ voxels, updating `mn = min(mn, img[i])` and `mx = max(mx, img[i])` [S1, unofficial]. If `mn == mx`, return `EXIT_FAILURE` (constant image) [S1, unofficial].
+ 3.  **Isolevel Clamping**: If `isolevel <= mn` or `isolevel > mx`, clamp `isolevel` to $0.5 \times (mn + mx)$ and issue a warning [S1, unofficial].
+ 4.  **Connected Component Filtering (Optional)**: If `onlyLargest` or `fillBubbles` is true, allocate `mask` of size $nvox$ initialized to 0 [S1, unofficial]. Set `mask[i] = 1` if `img[i] >= isolevel`, else 0 [S1, unofficial]. Call `bwlabel(mask, 18, dim, onlyLargest, fillBubbles)` to perform 3D binary labeling with 18-connectivity [S1, unofficial]. If `fillBubbles` is true, for all voxels where `mask[i] != 0`, set `img[i] = max(img[i], isolevel)` [S1, unofficial]. If `onlyLargest` is true, dilate the `mask` by 1 voxel (using `dilate(mask, dim, true)`) to preserve subvoxel edge information, then set `img[i] = mn` for all voxels where `mask[i] == 0` [S1, unofficial]. Free `mask` [S1, unofficial].
+ 5.  **Boundary Darkening and Bounding Box Extraction**: Compute `edgeMax = 0.75 * (mn + isolevel)` [S1, unofficial]. Initialize `lo[3] = {NX, NY, NZ}` and `hi[3] = {0, 0, 0}` [S1, unofficial]. Iterate through all voxels $(x, y, z)$ with linear index $vx$: if `img[vx] >= isolevel`, update `lo` and `hi` with the current coordinates [S1, unofficial]. If the voxel is on the volume boundary ($x=0$ or $x=NX-1$ or $y=0$ or $y=NY-1$ or $z=0$ or $z=NZ-1$), set `img[vx] = min(edgeMax, img[vx])` [S1, unofficial].
+-6.  **Bounding Box Expansion**: Expand the bounding box by 1 voxel in all directions to ensure edge voxels are included: for $i \in \{0, 1, 2\}$, `lo[i] = max(lo[i] - 1, 0)` and `hi[i] = min(hi[i] + 1, dim[i] - 1)` [S1, unofficial].
+-7.  **Marching Cubes Execution**: Run the standard Marching Cubes algorithm on the cropped volume defined by `lo` and `hi` [S1, unofficial]. Call `marchingCubes(img, dim, lo, hi, isolevel, &pts, &tris, &npt, &ntri)` [S1, unofficial]. Return failure if Marching Cubes fails [S1, unofficial].
++6.  **Bounding Box Expansion**: Expand the bounding box by 1 voxel in all directions to ensure edge voxels are included: for $i \in \{0, 1, 2\}$, `lo[i] = max(lo[i] - 1, 0)` and `hi[i] = min(hi[i] + 2, dim[i])` [S1, unofficial].
++7.  **Marching Cubes Execution**: Run the standard Marching Cubes algorithm on the cropped volume defined by `lo` and `hi` [S1, unofficial]. Call `marchingCubes(img, dim, lo, hi, isolevel, &pts, &tris, &npt, &ntri)` [S1, unofficial]. Return `EXIT_FAILURE` if Marching Cubes fails [S1, unofficial].
+ 8.  **Post-processing**: Call `unify_vertices(&pts, tris, npt, ntri, verbose)` to merge duplicate vertices and return the new vertex count `npt` [S1, unofficial]. Call `remove_degenerate_triangles(pts, &tris, ntri, verbose)` to remove zero-area triangles and return the new triangle count `ntri` [S1, unofficial].
+-9.  **Output Assignment**: Assign `*t = tris`, `*p = pts`, `*nt = ntri`, `*np = npt` [S1, unofficial]. Return success [S1, unofficial].
++9.  **Output Assignment**: Assign `*t = tris`, `*p = pts`, `*nt = ntri`, `*np = npt` [S1, unofficial]. Return `EXIT_SUCCESS` [S1, unofficial].
+ 
+ **Pseudocode**
+@@ -36,29 +36,31 @@
+ 
+ def quick_smooth(img, NX, NY, NZ):
+-    """3x3x3 Gaussian blur [G]"""
++    """3x3x3 Gaussian blur approximation [G]"""
+     out = img.copy()
+-    for z in range(1, NZ-1):
+-        for y in range(1, NY-1):
+-            for x in range(1, NX-1):
++    for z in range(1, NZ - 1):
++        for y in range(1, NY - 1):
++            for x in range(1, NX - 1):
+                 s = 0.0
+                 for dz in (-1, 0, 1):
+                     for dy in (-1, 0, 1):
+                         for dx in (-1, 0, 1):
+-                            s += img[(z+dz)*NX*NY + (y+dy)*NX + (x+dx)]
+-                out[z*NX*NY + y*NX + x] = s / 27.0
++                            s += img[(z + dz) * NX * NY + (y + dy) * NX + (x + dx)]
++                out[z * NX * NY + y * NX + x] = s / 27.0
+     return out
+ 
+-def bwlabel(mask, connectivity, dim, onlyLargest, fillBubbles):
+-    """3D flood fill with 18-connectivity [G]"""
+-    label = 0
++def bwlabel(mask, dim, onlyLargest, fillBubbles):
++    """3D connected components with 18-connectivity [G]"""
+     visited = [False] * len(mask)
++    largest_size = 0
++    largest_start = -1
+     for i in range(len(mask)):
+         if mask[i] == 1 and not visited[i]:
+-            label += 1
+             queue = [i]
+             visited[i] = True
++            comp_size = 0
+             while queue:
+                 curr = queue.pop(0)
+-                cx, cy, cz = curr % dim[0], (curr // dim[0]) % dim[1], curr // (dim[0]*dim[1])
++                cx, cy, cz = curr % dim[0], (curr // dim[0]) % dim[1], curr // (dim[0] * dim[1])
++                comp_size += 1
+                 for dz in (-1, 0, 1):
+                     for dy in (-1, 0, 1):
+@@ -66,11 +68,35 @@
+                             if dz == 0 and dy == 0 and dx == 0: continue
+                             if abs(dz) + abs(dy) + abs(dx) > 2: continue
+-                            nx, ny, nz = cx+dx, cy+dy, cz+dz
++                            nx, ny, nz = cx + dx, cy + dy, cz + dz
+                             if 0 <= nx < dim[0] and 0 <= ny < dim[1] and 0 <= nz < dim[2]:
+-                                ni = nz*dim[0]*dim[1] + ny*dim[0] + nx
++                                ni = nz * dim[0] * dim[1] + ny * dim[0] + nx
+                                 if mask[ni] == 1 and not visited[ni]:
+                                     visited[ni] = True
+                                     queue.append(ni)
+-    return label
++            if comp_size > largest_size:
++                largest_size = comp_size
++                largest_start = i
++    if onlyLargest and largest_start != -1:
++        visited = [False] * len(mask)
++        queue = [largest_start]
++        visited[largest_start] = True
++        while queue:
++            curr = queue.pop(0)
++            cx, cy, cz = curr % dim[0], (curr // dim[0]) % dim[1], curr // (dim[0] * dim[1])
++            for dz in (-1, 0, 1):
++                for dy in (-1, 0, 1):
++                    for dx in (-1, 0, 1):
++                        if dz == 0 and dy == 0 and dx == 0: continue
++                        if abs(dz) + abs(dy) + abs(dx) > 2: continue
++                        nx, ny, nz = cx + dx, cy + dy, cz + dz
++                        if 0 <= nx < dim[0] and 0 <= ny < dim[1] and 0 <= nz < dim[2]:
++                            ni = nz * dim[0] * dim[1] + ny * dim[0] + nx
++                            if mask[ni] == 1 and not visited[ni]:
++                                visited[ni] = True
++                                queue.append(ni)
++        for i in range(len(mask)):
++            if mask[i] == 1 and not visited[i]:
++                mask[i] = 0
++    return largest_start
+ 
+ def dilate(mask, dim, preserve_edges):
+@@ -80,12 +106,12 @@
+         for y in range(dim[1]):
+             for x in range(dim[0]):
+-                i = z*dim[0]*dim[1] + y*dim[0] + x
++                i = z * dim[0] * dim[1] + y * dim[0] + x
+                 if mask[i] == 0:
+                     for dz in (-1, 0, 1):
+                         for dy in (-1, 0, 1):
+                             for dx in (-1, 0, 1):
+-                                nx, ny, nz = x+dx, y+dy, z+dz
++                                nx, ny, nz = x + dx, y + dy, z + dz
+                                 if 0 <= nx < dim[0] and 0 <= ny < dim[1] and 0 <= nz < dim[2]:
+-                                    if mask[nz*dim[0]*dim[1] + ny*dim[0] + nx] == 1:
++                                    if mask[nz * dim[0] * dim[1] + ny * dim[0] + nx] == 1:
+                                         out[i] = 1
+                                         break
+@@ -96,15 +122,13 @@
+     pts = []
+     tris = []
+-    # Lookup table omitted for brevity; standard 256-entry table maps cell config to triangle strips [G]
+-    for z in range(lo[2], hi[2]):
+-        for y in range(lo[1], hi[1]):
+-            for x in range(lo[0], hi[0]):
+-                # Sample 8 corners
++    # Standard 256-entry lookup table maps cell config to triangle strips [G]
++    for z in range(lo[2], hi[2] + 1):
++        for y in range(lo[1], hi[1] + 1):
++            for x in range(lo[0], hi[0] + 1):
+                 vals = []
+                 for dz in (0, 1):
+                     for dy in (0, 1):
+                         for dx in (0, 1):
+-                            vals.append(img[(z+dz)*dim[0]*dim[1] + (y+dy)*dim[0] + (x+dx)])
+-                # Determine cell config
++                            vals.append(img[(z + dz) * dim[0] * dim[1] + (y + dy) * dim[0] + (x + dx)])
+                 config = 0
+                 for i in range(8):
+@@ -122,5 +146,5 @@
+     new_pts = []
+     for i in range(npt):
+-        key = (round(pts[i][0]/eps)*eps, round(pts[i][1]/eps)*eps, round(pts[i][2]/eps)*eps)
++        key = (round(pts[i][0] / eps) * eps, round(pts[i][1] / eps) * eps, round(pts[i][2] / eps) * eps)
+         if key not in unique:
+             unique[key] = len(new_pts)
+@@ -137,8 +161,8 @@
+     for t in tris:
+         p0, p1, p2 = pts[t[0]], pts[t[1]], pts[t[2]]
+-        v1 = (p1[0]-p0[0], p1[1]-p0[1], p1[2]-p0[2])
+-        v2 = (p2[0]-p0[0], p2[1]-p0[1], p2[2]-p0[2])
+-        cross = (v1[1]*v2[2]-v1[2]*v2[1], v1[2]*v2[0]-v1[0]*v2[2], v1[0]*v2[1]-v1[1]*v2[0])
+-        if cross[0]**2 + cross[1]**2 + cross[2]**2 > eps:
++        v1 = (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
++        v2 = (p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2])
++        cross = (v1[1] * v2[2] - v1[2] * v2[1], v1[2] * v2[0] - v1[0] * v2[2], v1[0] * v2[1] - v1[1] * v2[0])
++        if cross[0] ** 2 + cross[1] ** 2 + cross[2] ** 2 > eps:
+             valid_tris.append(t)
+     return len(valid_tris), valid_tris
+@@ -169,5 +193,5 @@
+             if img[i] >= isolevel:
+                 mask[i] = 1
+-        bwlabel(mask, 18, dim, onlyLargest, fillBubbles)
++        bwlabel(mask, dim, onlyLargest, fillBubbles)
+         if fillBubbles:
+             for i in range(NX * NY * NZ):
+@@ -198,8 +222,8 @@
+                     img[vx] = min(edgeMax, img[vx])
+ 
+-    # 6. Expand Bounding Box by 1 voxel (hi is inclusive index, so +1 expands by 1)
++    # 6. Expand Bounding Box by 1 voxel
+     for i in range(3):
+         lo[i] = max(lo[i] - 1, 0)
+-        hi[i] = min(hi[i] + 1, dim[i] - 1)
++        hi[i] = min(hi[i] + 2, dim[i])
+ 
+     # 7. Marching Cubes
+@@ -232,9 +256,9 @@
+ 
+ ### [Unbounded TSDF Mesh Extraction](6832-unbounded-tsdf-mesh-extraction.md)
+-Extracts a triangle mesh from an unbounded 3D Gaussian Splatting scene by contracting the infinite space into a bounded unit volume, performing adaptive Truncated Signed Distance Function (TSDF) fusion within that contracted space, and applying Marching Cubes. It differs from bounded extraction by handling scenes without a predefined bounding box through spatial contraction, allowing the method to isolate the largest object and fill internal bubbles via the preprocessing steps inherited from [Preprocessed Marching Cubes](3765-preprocessed-marching-cubes.md).
++Extracts a triangle mesh from an unbounded 3D Gaussian Splatting scene by contracting the infinite space into a bounded unit volume, performing adaptive Truncated Signed Distance Function (TSDF) fusion within that contracted space, and applying Marching Cubes. It differs from bounded extraction by handling scenes without a predefined bounding box through spatial contraction, allowing the method to isolate the largest object and fill internal bubbles via the preprocessing steps inherited from [Preprocessed Marching Cubes](preprocessed-marching-cubes.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Dominated by the connected-component labeling (`bwlabel`) and the Marching Cubes traversal. `bwlabel` is $O(N)$ where $N$ is the number of voxels. Marching Cubes is $O(V)$ where $V$ is the number of voxels in the bounding box [S1, unofficial].
+-*   **Memory Complexity**: $O(N)$ for the volume and mask arrays. The output mesh size depends on the surface area [S1, unofficial].
++*   **Time Complexity**: Dominated by the connected-component labeling (`bwlabel`) and the Marching Cubes traversal. `bwlabel` is $O(N)$ where $N$ is the number of voxels. Marching Cubes is $O(V)$ where $V$ is the number of voxels in the bounding box [G].
++*   **Memory Complexity**: $O(N)$ for the volume and mask arrays. The output mesh size depends on the surface area [G].
+ *   **Strengths**: Robust against noise (via smoothing), handles disconnected components, fills internal voids, and prevents boundary artifacts [S1, unofficial].
+ *   **Limitations**: Preprocessing steps (smoothing, dilation) can blur fine details. The method assumes a bounded volume.
+@@ -243,5 +267,5 @@
+ 
+ ## Background
+-Preprocessed Marching Cubes is an implementation variant of the Marching Cubes algorithm that incorporates preprocessing steps to improve the quality of the extracted mesh. It is commonly used in medical imaging and 3D reconstruction pipelines where raw voxel data may contain noise or artifacts. The method is implemented in the `niimath` tool and described in unofficial documentation [S1, unofficial].
++Preprocessed Marching Cubes extracts a triangle mesh from a 3D scalar volume using Marching Cubes, with optional preprocessing (smoothing, connected-component filtering, edge darkening) to isolate the largest object, fill internal bubbles, and improve surface boundary detection [S1, unofficial]. The method is implemented in the `niimath` tool and described in unofficial documentation [S1, unofficial].
+ 
+ ## Sources

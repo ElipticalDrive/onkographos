@@ -3,168 +3,111 @@
 Also called: 2D Slice Compositing, Direct Volume Rendering (DVR), Slice Projection, Slice-Based Volume Rendering (Back-to-Front), matRad_rayTracing Function
 
 ## Overview
-This method generates a 2D projection of a 3D scalar volume by treating the volume as a series of 2D slices, applying a transfer function to each slice, and compositing them into a final 2D image using the over operator [S4, unofficial]. It solves the problem of visualizing medical or scientific 3D data (such as CT scans or dose distributions) without extracting surface geometry [S3, unofficial]. It is distinguished from its siblings by its explicit reliance on a CPU-side or software-based iterative slice processing loop, often involving specific data transformations (like logarithmic scaling) and direct array manipulation, rather than optimized GPU rasterization pipelines or hybrid ray-tracing techniques [S1][S4, unofficial]. Unlike [View-Aligned Slicing](6530-view-aligned-slicing.md), which optimizes slice orientation for cache coherence, this method may process slices in a fixed or arbitrary order defined by the camera grid structure [S4, unofficial].
+This method generates a 2D projection of a 3D scalar volume by processing the data as a series of 2D slices, applying a transfer function to each slice, and compositing them into a 2D image using the over operator [S4, S3, unofficial]. It solves the problem of visualizing medical, scientific, and natural volumetric data (such as fluids, smoke, or fire) without extracting surface geometry [S3, unofficial]. It is distinguished from its siblings, such as [Neural volume rendering](1576-neural-volume-rendering.md) and [Hardware-Accelerated and GPU Implementations](9525-hardware-accelerated-and-gpu-implementations.md), by its explicit, often CPU-based or software-simulated iteration over slices or rays, lacking the hardware acceleration or learned representations of its faster counterparts [S1][S2, S4, unofficial].
 
 ## How it works
-The method implements the emission-absorption optical model, building on the shared principles of [Slice-based and Proxy Geometry Rendering](6225-slice-based-and-proxy-geometry-rendering.md). It processes the volume data as a series of 2D slices, applying a transfer function and compositing them into a 2D image [S4, unofficial].
+The method operates on the fundamental loop structure of [Image-order rendering](16-image-order-rendering.md): for each pixel, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, intersected with the volume domain, and sampled/composited along its path [G]. The traversal order is determined by the pixel's position in the image plane [G].
 
 ### Inputs and Outputs
-**Inputs:**
-1.  **Scalar Volume ($V$):** A 3D grid of scalar values (e.g., density, CT numbers, dose). In specific implementations like matRad, this is a CT cube [S1].
-2.  **Camera/Grid Configuration:** Defines the viewing angle, resolution, and the order of slices. This includes rotation coordinates and camera parameters [S1][S4, unofficial].
-3.  **Transfer Function ($T$):** Maps scalar values to RGBA color and opacity. A specific implementation uses Gaussian mixtures on the logarithm of the data [S4, unofficial].
-
-**Outputs:**
-1.  **2D Image:** A 2D array of RGB values (and optionally alpha), typically normalized to $[0.0, 1.0]$ or converted to uint8 [S4, unofficial].
+*   **Input**: A scalar volume $s: \mathbb{R}^3 \rightarrow \mathbb{R}$, discretely sampled on a regular 3D grid where each voxel contains one or more constant data values (scalars like density/opacity) [S3, unofficial]. In specific implementations (e.g., matRad), inputs may also include steering information, linear voxel indices, and rotation coordinates [S1].
+*   **Output**: A 2D image array (e.g., shape $H \times W \times 3$) representing the projected view [S4, unofficial].
 
 ### Data Structures
-*   **Volume Grid:** A 3D array where each voxel contains a scalar value.
-*   **Camera Grid:** A list or array of slice definitions. Each element represents a 2D slice extracted or projected from the 3D volume. The order of elements in `camera_grid` determines the compositing order (front-to-back or back-to-front) [S4, unofficial].
-*   **Output Image:** A 2D array `image` with shape `(height, width, 3)` initialized to zeros [S4, unofficial].
+*   **Volume Grid**: A 3D array of scalar values.
+*   **Camera Grid**: A data structure defining the viewing geometry, often represented as a set of rays or slice positions [S4, unofficial].
+*   **Transfer Function**: A mapping from scalar values to RGBA components, often implemented as a sum of Gaussian mixtures [S4, unofficial].
 
 ### Steps
-1.  **Initialization:** Initialize the output image to zeros with dimensions matching the camera grid resolution:
-    $$ \text{image} = \mathbf{0} \in \mathbb{R}^{H \times W \times 3} $$
-    [S4, unofficial]
-
-2.  **Ray/Slice Sampling:** Determine the path through the volume. In the specific "slow" implementation, this involves iterating through a `camera_grid`. Each element `dataslice` represents the data values along a ray or a slice plane [S4, unofficial]. If using ray sampling (as in related implementations), rays are sampled at equidistant intervals [S2, unofficial].
-
-3.  **Data Transformation:** Apply a logarithmic transformation to the slice data before classification:
-    $$ x = \log(\text{dataslice}) $$
-    [S4, unofficial]
-    *Note: This step is specific to the cited implementation [S4, unofficial]. Other standard methods may use raw scalar values.*
-
-4.  **Classification (Transfer Function):** Map the transformed scalar value $x$ to RGBA components $(r, g, b, a)$ using a Gaussian mixture model. The specific formulas are:
-    $$
-    \begin{aligned}
-    r &= 1.0 \cdot e^{-\frac{(x - 9.0)^2}{1.0}} + 0.1 \cdot e^{-\frac{(x - 3.0)^2}{0.1}} + 0.1 \cdot e^{-\frac{(x + 3.0)^2}{0.5}} \\
-    g &= 1.0 \cdot e^{-\frac{(x - 9.0)^2}{1.0}} + 1.0 \cdot e^{-\frac{(x - 3.0)^2}{0.1}} + 0.1 \cdot e^{-\frac{(x + 3.0)^2}{0.5}} \\
-    b &= 0.1 \cdot e^{-\frac{(x - 9.0)^2}{1.0}} + 0.1 \cdot e^{-\frac{(x - 3.0)^2}{0.1}} + 1.0 \cdot e^{-\frac{(x + 3.0)^2}{0.5}} \\
-    a &= 0.6 \cdot e^{-\frac{(x - 9.0)^2}{1.0}} + 0.1 \cdot e^{-\frac{(x - 3.0)^2}{0.1}} + 0.01 \cdot e^{-\frac{(x + 3.0)^2}{0.5}}
-    \end{aligned}
-    $$
-    [S4, unofficial]
-    *Note: In other contexts, the transfer function $T(d_i)$ maps scalar $d_i$ to $C_i$ and $\alpha_i$ [S2, S5, unofficial].*
-
-5.  **Compositing:** Composite the current slice's RGBA values onto the accumulated image using the over operator. For each pixel in the slice:
-    $$
-    \begin{aligned}
-    C'_{new} &= a \cdot C_{slice} + (1 - a) \cdot C'_{old} \\
-    \alpha'_{new} &= a + (1 - a) \cdot \alpha'_{old}
-    \end{aligned}
-    $$
-    Where $C'_{old}$ and $\alpha'_{old}$ are the accumulated color and opacity from previous slices, and $C_{slice}$ is the color from the current slice. The implementation iterates through channels explicitly:
-    ```python
-    image[:,:,0] = a*r + (1-a)*image[:,:,0]
-    image[:,:,1] = a*g + (1-a)*image[:,:,1]
-    image[:,:,2] = a*b + (1-a)*image[:,:,2]
-    ```
-    [S4, unofficial]
-    *Pitfall: The order of compositing depends on the order of `camera_grid`. If `camera_grid` is ordered from back to front relative to the viewer, this implements front-to-back compositing. If ordered front-to-back, it implements back-to-front. The code does not explicitly sort slices by depth [S4, unofficial].*
-
-6.  **Clipping and Output:** Clip the final image values to the range $[0.0, 1.0]$ and optionally convert to uint8 for display [S4, unofficial].
+1.  **Initialization**: Initialize the output image to zeros with shape matching the camera grid dimensions: `image = np.zeros((camera_grid.shape[1], camera_grid.shape[2], 3))` [S4, unofficial].
+2.  **Ray/Slice Generation**: Define the viewing geometry. This can be done by generating a camera grid or by iterating through slices of the volume [S4, unofficial]. If using a camera grid, rays are sampled using parameters such as `transform_matrices`, `camera_angle_x`, `num_samples`, and `delta_step` [S2, unofficial].
+3.  **Iteration**: Iterate through each slice or ray in the camera grid. The order of iteration determines the compositing direction (front-to-back or back-to-front) [S4, unofficial].
+4.  **Transfer Function Application**: For each slice or sample, apply the transfer function to map the scalar value to color and opacity.
+    *   In some implementations, the input data is transformed using `np.log()` before applying the transfer function [S4, unofficial].
+    *   The transfer function may be defined by Gaussian mixtures. For an input $x$, the components are calculated as:
+        $$ r = 1.0 \cdot e^{-\frac{(x - 9.0)^2}{1.0}} + 0.1 \cdot e^{-\frac{(x - 3.0)^2}{0.1}} + 0.1 \cdot e^{-\frac{(x + 3.0)^2}{0.5}} $$
+        $$ g = 1.0 \cdot e^{-\frac{(x - 9.0)^2}{1.0}} + 1.0 \cdot e^{-\frac{(x - 3.0)^2}{0.1}} + 0.1 \cdot e^{-\frac{(x + 3.0)^2}{0.5}} $$
+        $$ b = 0.1 \cdot e^{-\frac{(x - 9.0)^2}{1.0}} + 0.1 \cdot e^{-\frac{(x - 3.0)^2}{0.1}} + 1.0 \cdot e^{-\frac{(x + 3.0)^2}{0.5}} $$
+        $$ a = 0.6 \cdot e^{-\frac{(x - 9.0)^2}{1.0}} + 0.1 \cdot e^{-\frac{(x - 3.0)^2}{0.1}} + 0.01 \cdot e^{-\frac{(x + 3.0)^2}{0.5}} $$
+        [S4, unofficial]
+5.  **Compositing**: Composite the slice onto the accumulated image using the over operator for each RGB channel:
+    $$ \text{image}[:,:,0] = a \cdot r + (1 - a) \cdot \text{image}[:,:,0] $$
+    (and similarly for channels 1 and 2) [S4, unofficial].
+6.  **Clipping**: Clip the final image values to the range $[0.0, 1.0]$ [S4, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_2d_from_3d_grid(volume, camera_grid, transfer_function):
+def visualize_3d_in_2d(volume, camera_grid, transfer_function):
     """
-    Renders a 2D image from a 3D volume by compositing slices.
+    Visualize a 3D volume as a 2D image using slice compositing.
     
     Args:
-        volume: 3D array of scalar values.
-        camera_grid: List of slice data arrays, ordered according to viewing depth.
-        transfer_function: Function that takes a scalar (log-transformed) and returns (r, g, b, a).
+        volume: 3D numpy array of scalar values.
+        camera_grid: List or array of slice positions or ray definitions.
+        transfer_function: Function that maps scalar value to (r, g, b, a).
         
     Returns:
         2D numpy array of shape (H, W, 3) with values in [0.0, 1.0].
     """
     # Initialize output image
-    # Assuming all slices have the same dimensions (H, W)
-    H, W = camera_grid[0].shape
+    # Assuming camera_grid defines the output dimensions H, W
+    H, W = camera_grid.shape[1], camera_grid.shape[2]
     image = np.zeros((H, W, 3))
     
-    # Iterate through slices
-    # Note: The order of camera_grid determines the compositing direction.
-    # Standard front-to-back compositing requires slices to be ordered from 
-    # closest to farthest relative to the camera.
+    # Iterate through slices/rays
+    # Note: The order of iteration determines compositing direction.
+    # Assuming camera_grid is ordered from front to back relative to viewer.
     for dataslice in camera_grid:
-        # Step 1: Logarithmic transformation (specific to cited implementation)
-        # [G] Handle potential log(0) or negative values if present in volume
-        x = np.log(np.clip(dataslice, 1e-9, None))
+        # Extract scalar values for the current slice/ray
+        # In a full ray-casting implementation, this involves sampling along the ray.
+        # Here, we assume dataslice contains the relevant scalar values for the pixel.
+        scalar_values = extract_scalar_values(volume, dataslice)
         
-        # Step 2: Apply Transfer Function
-        # [G] The specific Gaussian mixture formulas are hardcoded in the source [S4, unofficial]
-        # For a general implementation, this would be: r, g, b, a = transfer_function(x)
-        r, g, b, a = apply_gaussian_tf(x)
+        # Apply transfer function
+        # Some implementations use log-transformed input
+        r, g, b, a = transfer_function(np.log(scalar_values))
         
-        # Step 3: Composite using Over Operator
-        # Update Red channel
+        # Composite using over operator
+        # image[:,:,0] is the Red channel
         image[:,:,0] = a * r + (1 - a) * image[:,:,0]
-        # Update Green channel
         image[:,:,1] = a * g + (1 - a) * image[:,:,1]
-        # Update Blue channel
         image[:,:,2] = a * b + (1 - a) * image[:,:,2]
         
-        # Note: Accumulated opacity is implicitly handled by the (1-a) term 
-        # in the color update, but explicit alpha accumulation is not stored 
-        # in the output image in this specific RGB-only implementation.
-        
-    # Step 4: Clip and Return
+    # Clip to valid range
     image = np.clip(image, 0.0, 1.0)
+    
     return image
-
-def apply_gaussian_tf(x):
-    """
-    Applies the specific Gaussian mixture transfer function from [S4, unofficial].
-    """
-    # Red
-    r = (1.0 * np.exp(-((x - 9.0)**2) / 1.0) + 
-         0.1 * np.exp(-((x - 3.0)**2) / 0.1) + 
-         0.1 * np.exp(-((x + 3.0)**2) / 0.5))
-    # Green
-    g = (1.0 * np.exp(-((x - 9.0)**2) / 1.0) + 
-         1.0 * np.exp(-((x - 3.0)**2) / 0.1) + 
-         0.1 * np.exp(-((x + 3.0)**2) / 0.5))
-    # Blue
-    b = (0.1 * np.exp(-((x - 9.0)**2) / 1.0) + 
-         0.1 * np.exp(-((x - 3.0)**2) / 0.1) + 
-         1.0 * np.exp(-((x + 3.0)**2) / 0.5))
-    # Alpha
-    a = (0.6 * np.exp(-((x - 9.0)**2) / 1.0) + 
-         0.1 * np.exp(-((x - 3.0)**2) / 0.1) + 
-         0.01 * np.exp(-((x + 3.0)**2) / 0.5))
-    return r, g, b, a
 ```
 
 ### Parameters
-*   **Logarithmic Scaling:** The input data is transformed using `np.log()` before applying the transfer function [S4, unofficial].
-*   **Viewing Angle:** The camera view can be rotated by an angle $\theta = \frac{\pi}{2} \cdot \frac{i}{N_{angles}}$ around the Y/Z axis using rotation matrices [S4, unofficial].
-*   **Lateral Cutoff:** An optional parameter used for ray tracing to limit the lateral extent of rays [S1].
+*   **Transfer Function**: Defined by Gaussian mixture parameters (mean, variance, weight) for each color channel and opacity [S4, unofficial].
+*   **Viewing Angle**: The camera view can be rotated by an angle $\theta = \frac{\pi}{2} \cdot \frac{i}{N_{angles}}$ around the Y/Z axis using rotation matrices [S4, unofficial].
+*   **Lateral Cutoff**: An optional parameter for ray tracing to limit the lateral extent of rays [S1].
 
 ### Edge Cases and Pitfalls
-*   **Compositing Order:** The loop order in `camera_grid` is critical. If the slices are not ordered from front to back (relative to the viewer), the compositing will be incorrect (back-to-front instead of front-to-back), leading to visual artifacts where distant objects occlude near objects [S4, unofficial].
-*   **Logarithm of Zero/Negative:** Applying `np.log()` to zero or negative voxel values will result in `-inf` or `NaN`. The implementation must clip or offset these values [S4, unofficial].
-*   **Performance:** This method is described as "Slow" because it iterates through slices and performs per-pixel operations in software (or without GPU acceleration optimizations like pre-integration tables) [S4, unofficial].
+*   **Compositing Order**: The order of compositing is critical. If the `camera_grid` is ordered from back to front relative to the viewer, the loop implements front-to-back compositing. If ordered front-to-back, it implements back-to-front. The code does not explicitly sort slices by depth, relying on the data structure order [S4, unofficial].
+*   **Precision**: Using `np.log()` on scalar values can lead to issues if values are zero or negative. A small epsilon or clamping may be required [S4, G, unofficial].
+*   **Boundary Conditions**: Samples outside the grid must be handled, typically by masking them out or assigning zero opacity [S2, unofficial].
 
 ## Subtopics
 
 ### [Grid Visualization with Thresholding](1515-grid-visualization-with-thresholding.md)
-Visualizes a 3D scalar grid by filtering cells based on opacity and gradient magnitude thresholds, then rendering the surviving cells as a 3D scatter plot. It differs by applying explicit thresholding and cleaning steps before plotting, operating on a CPU-side scatter plot representation rather than a GPU-based ray-casting table.
+Filters a 3D scalar grid based on opacity and gradient magnitude thresholds, rendering surviving cells as a 3D scatter plot. Chosen when visualizing sparse structures without full ray casting overhead.
 
 ### [3D Table Computation on GPU](2083-3d-table-computation-on-gpu.md)
-Computes a 3D pre-integration table for volume rendering by rasterizing 2D slices on the GPU. It accelerates the evaluation of the volume rendering equation by pre-computing integration results into a texture, distinguishing it from the per-ray sampling in software or on the CPU used in the parent method.
+Computes a 3D pre-integration table for volume rendering by rasterizing 2D slices on the GPU. Chosen for accelerating transfer function evaluation on 8-bit scalar domains.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N_s \cdot N_p)$, where $N_s$ is the number of slices and $N_p$ is the number of pixels per slice. The logarithmic and Gaussian computations are constant time per pixel but add overhead compared to linear transfer functions.
-*   **Memory Complexity:** $O(N_v)$ for the volume data and $O(N_p)$ for the output image. No large pre-computed tables are required, unlike [3D Table Computation on GPU](2083-3d-table-computation-on-gpu.md).
-*   **Performance:** The method is computationally expensive for high-resolution volumes because it processes every slice and pixel in a loop without hardware acceleration (e.g., GPU texture sampling or shader-based compositing) [S4, unofficial]. It is suitable for low-resolution previews or specific scientific visualizations where the logarithmic transfer function is required [S1][S4, unofficial].
-*   **Strengths:** Simple implementation; allows for custom, non-linear transfer functions (like the Gaussian mixtures) that are difficult to pre-compute in a table; flexible slice ordering.
-*   **Limitations:** Slow performance; sensitive to compositing order; potential numerical instability with logarithmic transformations; no early ray termination optimization mentioned in the basic loop [S4, unofficial].
+*   **Time Complexity**: $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of samples per ray/slice. This is considered slow compared to hardware-accelerated methods [S1][S4, unofficial].
+*   **Memory Complexity**: $O(V)$ for the volume data, plus $O(H \cdot W)$ for the output image [S4, unofficial].
+*   **Strengths**: Simple to implement, flexible transfer function definition, suitable for CPU-based prototyping [S4, unofficial].
+*   **Limitations**: Computationally expensive for large volumes or high resolutions, lacks hardware acceleration [S1][S4, unofficial].
+*   **When to Use**: Prototyping, educational purposes, or when hardware acceleration is not available [S4, unofficial].
+*   **When Not to Use**: Real-time applications, large-scale medical imaging, or interactive visualization [S1][S4, unofficial].
 
 ## Background
-The method originates from the matRad project, specifically the `matRad_rayTracing` function, which is used for the visualization of two-dimensional dose distributions on CT data including segmentation [S1]. It is also referenced in the context of general volume visualization techniques that generate 2D projections of 3D data sets without extracting surface geometry [S3, unofficial]. The specific implementation using logarithmic transformation and Gaussian mixtures is documented in a parallel volume rendering repository [S4, unofficial]. The underlying principles of direct volume rendering (DVR) and slice-based compositing are well-established in scientific visualization [S3, S4, unofficial].
+The method originates from early direct volume rendering techniques, where volumes were visualized by projecting 2D slices [S3, unofficial]. It is commonly used in medical imaging (e.g., matRad for dose distribution visualization) and scientific visualization [S1][S3, unofficial]. The specific implementation details, such as the Gaussian transfer function and log-transform, are found in various open-source projects and educational materials [S2, S4, unofficial].
 
 ## Sources
 [S1] rayTracing — matRad 3.2.3 documentation, https://matrad.readthedocs.io/en/stable/api/raytracing.html, fetched 2026-10-25
