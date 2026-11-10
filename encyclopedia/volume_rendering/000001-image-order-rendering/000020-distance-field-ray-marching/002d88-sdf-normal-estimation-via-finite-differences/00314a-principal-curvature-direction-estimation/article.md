@@ -3,37 +3,30 @@
 Also called: Discrete Curvature Estimation (Monga et al.), Monga's algorithm
 
 ## Overview
-Principal Curvature Direction Estimation computes the principal directions of curvature for a 3D scalar field (such as a Signed Distance Field) by solving for an angle $\theta$ in a local orthonormal basis, offering a faster alternative to extremal value quadratic forms [S1, unofficial]. It sets itself apart from sibling methods like [SDF Normal Estimation via Finite Differences](4619-sdf-normal-estimation-via-finite-differences.md) by providing directional curvature information rather than just surface normals, and from [Gradient-Based Surface Normal Estimation](4261-gradient-based-surface-normal-estimation.md) by explicitly handling the 2D subspace orthogonal to the gradient.
+Principal Curvature Direction Estimation computes the principal directions of curvature for a 3D scalar field by solving for an angle $\theta$ in a local orthonormal basis, offering a considerably faster alternative to extremal value quadratic forms [S1, unofficial]. It provides directional curvature information rather than just surface normals, explicitly handling the 2D subspace orthogonal to the gradient [S1, unofficial].
 
 ## How it works
-**Inputs:** A scalar field $F$, its gradient $G = \nabla F$, and its Hessian matrix $D^2 F$ (second derivatives).
-**Outputs:** The principal curvature direction angle $\theta$ in the plane orthogonal to $G$.
+**Inputs:** A scalar field $F$, its gradient $G = \nabla F$, and its Hessian matrix $D^2 F$ [S1, unofficial].
+**Outputs:** The principal curvature direction angle $\theta$ in the plane orthogonal to $G$ [S1, unofficial].
 
 **Data Structures:**
-*   $G$: 3D vector $(g_0, g_1, g_2)^T$.
-*   $\gamma$: Scalar $\sqrt{g_0^2 + g_1^2}$.
-*   $P$: $3 \times 3$ orthonormal matrix.
-*   $h, f$: 3D basis vectors in $\{G\}^\perp$.
+*   $G$: 3D vector $(g_0, g_1, g_2)^T$ [S1, unofficial].
+*   $\gamma$: Scalar $\sqrt{g_0^2 + g_1^2}$ [S1, unofficial].
+*   $P$: $3 \times 3$ orthonormal matrix [S1, unofficial].
+*   $h, f$: 3D basis vectors in $\{G\}^\perp$ [S1, unofficial].
 
 **Steps:**
-1.  Compute the gradient $G = (g_0, g_1, g_2)^T$ and $\gamma = \sqrt{g_0^2 + g_1^2}$.
-2.  Handle the singularity where $\gamma = 0$ (e.g., along the z-axis). If $\gamma = 0$, use a standard basis or a fallback orthonormal set [S1, unofficial].
-3.  Construct the orthonormal matrix $P$ whose columns are the normalized gradient, $h$, and $f$. This matrix rotates the first basis vector into the direction of $G$:
-    $$
-    P = \begin{pmatrix} \frac{g_0}{\|G\|} & \frac{g_1}{\gamma} & \frac{g_2 g_0}{\gamma \|G\|} \\ \frac{g_1}{\|G\|} & -\frac{g_0}{\gamma} & \frac{g_2 g_1}{\gamma \|G\|} \\ \frac{g_2}{\|G\|} & 0 & \frac{\gamma}{\|G\|} \end{pmatrix}
-    $$
-    The columns are defined as:
-    *   $G/\|G\|$ (first column)
-    *   $h = (g_1/\gamma, -g_0/\gamma, 0)^T$ (second column)
-    *   $f = (g_2 g_0 / (\gamma \|G\|), g_2 g_1 / (\gamma \|G\|), \gamma / \|G\|)^T$ (third column) [S1, unofficial].
-4.  Express any vector $v$ in the orthogonal complement of $G$ as $v = h \cos \theta + f \sin \theta$.
-5.  Solve for $\theta$ using the derivative of the curvature $\kappa_v$ with respect to $\theta$. The condition $\frac{d\kappa_v}{d\theta} = 0$ yields:
-    $$
-    \tan(2\theta) = \frac{2 h^T (D^2 F) f}{h^T (D^2 F) h - f^T (D^2 F) f}
-    $$
+1.  Compute the gradient $G = (g_0, g_1, g_2)^T$ and $\gamma = \sqrt{g_0^2 + g_1^2}$ [S1, unofficial].
+2.  Handle the singularity where $\gamma = 0$ (e.g., along the z-axis) by using a standard basis [S1, unofficial].
+3.  Construct the orthonormal matrix $P$ whose columns are the normalized gradient, $h$, and $f$ [S1, unofficial]. This matrix rotates the first basis vector into the direction of $G$:
+    $$P = \begin{pmatrix} \frac{g_0}{\|G\|} & \frac{g_1}{\gamma} & \frac{g_2 g_0}{\gamma \|G\|} \\ \frac{g_1}{\|G\|} & -\frac{g_0}{\gamma} & \frac{g_2 g_1}{\gamma \|G\|} \\ \frac{g_2}{\|G\|} & 0 & \frac{\gamma}{\|G\|} \end{pmatrix}$$
+    The columns are defined as: $G/\|G\|$ (first column), $h = (g_1/\gamma, -g_0/\gamma, 0)^T$ (second column), and $f = (g_2 g_0 / (\gamma \|G\|), g_2 g_1 / (\gamma \|G\|), \gamma / \|G\|)^T$ (third column) [S1, unofficial].
+4.  Express any vector $v$ in the orthogonal complement of $G$ as $v = h \cos \theta + f \sin \theta$ [S1, unofficial].
+5.  Solve for $\theta$ using the derivative of the curvature $\kappa_v$ with respect to $\theta$ [S1, unofficial]. The condition $\frac{d\kappa_v}{d\theta} = 0$ yields:
+    $$\tan(2\theta) = \frac{2 h^T (D^2 F) f}{h^T (D^2 F) h - f^T (D^2 F) f}$$
     where $h^T (D^2 F) h$ denotes the second derivative of $F$ in the direction $h$ [S1, unofficial].
-6.  Compute $\theta = \frac{1}{2} \arctan\left( \frac{2 h^T (D^2 F) f}{h^T (D^2 F) h - f^T (D^2 F) f} \right)$. Note that $\arctan$ returns values in $(-\pi/2, \pi/2)$, so $\theta \in (-\pi/4, \pi/4)$ [S1, unofficial].
-7.  **Orientation Consistency:** Since the solution is local and ambiguous up to $180^\circ$ flips, use a heuristic with a globally defined reference field (e.g., cylindrical) to align directions consistently during path tracing [S1, unofficial].
+6.  Compute $\theta = \frac{1}{2} \arctan\left( \frac{2 h^T (D^2 F) f}{h^T (D^2 F) h - f^T (D^2 F) f} \right)$ [S1, unofficial]. The algorithm solves for $\theta \in (-\pi/2, \pi/2)$ [S1, unofficial].
+7.  Resolve orientation flips during path line tracing using a heuristic with a globally defined reference field (e.g., cylindrical) to align directions consistently [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -54,22 +47,15 @@ def estimate_principal_curvature_direction(F_grad, F_hessian):
     """
     g0, g1, g2 = F_grad
     norm_G = math.sqrt(g0**2 + g1**2 + g2**2)
-    
-    # Handle singularity where gamma is 0
     gamma = math.sqrt(g0**2 + g1**2)
     
+    # Handle singularity where gamma is 0 by using a standard basis [S1, unofficial]
     if gamma < 1e-9:
-        # Fallback to standard basis if gamma is near zero
-        # This is a simplification; specific fallback basis depends on context
-        # For implementation, one might swap axes or use a default
         h = (1.0, 0.0, 0.0)
         f = (0.0, 1.0, 0.0)
     else:
-        # Construct basis vectors h and f
-        # h = (g1/gamma, -g0/gamma, 0)
+        # Construct basis vectors h and f [S1, unofficial]
         h = (g1 / gamma, -g0 / gamma, 0.0)
-        
-        # f = (g2*g0/(gamma*norm_G), g2*g1/(gamma*norm_G), gamma/norm_G)
         f = (
             (g2 * g0) / (gamma * norm_G),
             (g2 * g1) / (gamma * norm_G),
@@ -79,29 +65,20 @@ def estimate_principal_curvature_direction(F_grad, F_hessian):
     # Helper to compute v^T * Hessian * v
     def quadratic_form(v):
         vx, vy, vz = v
-        # Hessian is 3x3
         h00, h01, h02 = F_hessian[0]
         h10, h11, h12 = F_hessian[1]
         h20, h21, h22 = F_hessian[2]
-        
-        # H * v
         hv0 = h00 * vx + h01 * vy + h02 * vz
         hv1 = h10 * vx + h11 * vy + h12 * vz
         hv2 = h20 * vx + h21 * vy + h22 * vz
-        
-        # v . (H * v)
         return vx * hv0 + vy * hv1 + vz * hv2
 
-    # Compute terms for tan(2*theta)
+    # Compute terms for tan(2*theta) [S1, unofficial]
     # Numerator: 2 * h^T * D^2F * f
-    hT_D2F_f = 0.0
-    # Manual expansion for clarity and performance
-    # h^T * H * f
     hf0 = F_hessian[0][0]*h[0] + F_hessian[0][1]*h[1] + F_hessian[0][2]*h[2]
     hf1 = F_hessian[1][0]*h[0] + F_hessian[1][1]*h[1] + F_hessian[1][2]*h[2]
     hf2 = F_hessian[2][0]*h[0] + F_hessian[2][1]*h[1] + F_hessian[2][2]*h[2]
     hT_D2F_f = hf0*f[0] + hf1*f[1] + hf2*f[2]
-    
     numerator = 2.0 * hT_D2F_f
     
     # Denominator: h^T * D^2F * h - f^T * D^2F * f
@@ -109,13 +86,12 @@ def estimate_principal_curvature_direction(F_grad, F_hessian):
     fT_D2F_f = quadratic_form(f)
     denominator = hT_D2F_h - fT_D2F_f
     
-    # Handle umbilical points where denominator vanishes
+    # Handle umbilical points where denominator vanishes [S1, unofficial]
     if abs(denominator) < 1e-9:
-        # Umbilical point: curvature is isotropic.
-        # Return 0 or handle via filter width increase (not implemented here)
         return 0.0
         
-    theta = 0.5 * math.atan2(numerator, denominator)
+    # Compute theta in (-pi/2, pi/2) [S1, unofficial]
+    theta = 0.5 * math.atan(numerator / denominator)
     return theta
 ```
 
@@ -130,18 +106,18 @@ def estimate_principal_curvature_direction(F_grad, F_hessian):
 ## Subtopics
 
 ### Reference Field Alignment
-A heuristic method to align curvature directions consistently during path tracing using a global reference field (e.g., cylindrical) [S1, unofficial]. It sets itself apart by addressing the orientation ambiguity inherent in local estimation. Choose it when rendering oriented strokes or hatches. See [Reference Field Alignment](link).
+A heuristic method to align curvature directions consistently during path tracing using a global reference field (e.g., cylindrical) [S1, unofficial]. It addresses the orientation ambiguity inherent in local estimation [S1, unofficial]. Choose it when rendering oriented strokes or hatches [S1, unofficial]. See [Reference Field Alignment](link).
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per voxel, as it involves fixed-size matrix operations and trigonometric functions. It is significantly faster than extremal value quadratic forms [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ auxiliary memory per voxel.
-*   **Strengths:** Fast computation; works with any suitable method to estimate partial derivatives [S1, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Considerably faster than extremal value quadratic forms; works with any suitable method to estimate partial derivatives [S1, unofficial].
 *   **Limitations:** Ambiguous orientation ($\pm 180^\circ$); singularities at $\gamma=0$ and umbilical points; requires a heuristic for global consistency [S1, unofficial].
-*   **When to use:** When fast principal curvature directions are needed for volume illustration or hatching.
-*   **When not to use:** When global orientation consistency is required without additional heuristics, or at umbilical points without smoothing.
+*   **When to use:** When fast principal curvature directions are needed for volume illustration or hatching [S1, unofficial].
+*   **When not to use:** When global orientation consistency is required without additional heuristics, or at umbilical points without smoothing [S1, unofficial].
 
 ## Background
-The method was derived by Monga et al. [26] as a considerably faster alternative to deriving principal curvature directions from the extremal values of a quadratic form [6] [S1, unofficial]. It is used in interactive volume illustration and surface hatching [S1, unofficial].
+The method was derived by Monga et al. [26] as a considerably faster alternative to deriving principal curvature directions from the extremal values of a quadratic form [6] [S1, unofficial]. It is applied in interactive volume illustration and surface hatching [S1, unofficial].
 
 ## Sources
 [S1] Interactive volume illustration, https://openalex.org/W2147354080, fetched 2026-10-27 (unofficial)

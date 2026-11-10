@@ -3,116 +3,129 @@
 Also called: depthSlice render passes, generateMipChain3d
 
 ## Overview
-`generateMipChain3d` is a GPU primitive that fills a 3D texture's mip chain by generating each level via per-(level, z-slice) render passes, using `GPURenderPassColorAttachment.depthSlice` to target specific Z-slices [S1, unofficial]. It builds on [Mipmap Generation](2602-mipmap-generation.md) by extending the 2D slice-based approach to 3D volumes, enabling efficient downsampling for acceleration structures like transfer-function-adaptive skipping pyramids [S1, unofficial]. It differs from [Atlas Mipmapping](2639-atlas-mipmapping.md) by operating on contiguous 3D volumes rather than 2D atlases, and from [Voxel Pre-integration](2956-voxel-pre-integration.md) by focusing on spatial resolution reduction rather than radiometric integration [S1, unofficial].
+`generateMipChain3d` is a GPU primitive that fills a 3D texture's mip chain by generating each level via per-(level, z-slice) render passes, using `GPURenderPassColorAttachment.depthSlice` to target specific Z-slices [S1, unofficial]. It builds on [Mipmap Generation](2602-mipmap-generation.md) by extending the 2D slice-based approach to 3D volumes, enabling efficient downsampling for acceleration structures like transfer-function-adaptive skipping pyramids [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Source 3D texture (e.g., raw volume cube or display mips).
-- Output: Destination 3D texture with a complete mip chain.
-- Parameters: Filter type (e.g., 'box' for display, 'max' for deviation space), contrast center, half range.
+- Input: Source 3D texture (e.g., raw volume cube or display mips) [S1, unofficial].
+- Output: Destination 3D texture with a complete mip chain [S1, unofficial].
+- Parameters: Filter type ('box' for display, 'max' for deviation space), `contrastCenter`, `halfRange` [S1, unofficial].
 
 **Data Structures:**
-- `MipBlit3dUniforms`: A uniform buffer structure containing:
-  - `boxZ`: Z-slice index for the current render pass.
-  - `dstZ`: Destination Z-slice index.
-  - `center`: Contrast center value (used in deviation space calculations).
-  - `halfRange`: Half of the contrast range (used in deviation space calculations).
-  - Total size: 16 bytes, unpadded [S1, unofficial].
+- `MipBlit3dUniforms`: A uniform buffer structure containing `boxZ`, `dstZ`, `center`, and `halfRange`, totaling 16 bytes, unpadded [S1, unofficial].
 
 **Steps:**
-1. Iterate through each mip level $l$ from 0 to $N-1$ (where $N$ is the number of mip levels).
-2. For each mip level $l$, iterate through each Z-slice $z$ of the source texture.
-3. Configure a `GPURenderPassColorAttachment` with `depthSlice` set to $z$ to target the specific Z-slice.
-4. Execute a render pass that downsamples the source Z-slice into the destination mip level $l$.
-   - For 'box' filtering: Use a box filter kernel.
-   - For 'max' filtering (deviation space): Use a max filter kernel. If $l=0$, convert raw values to normalized deviation using $\text{deviation} = \frac{|value - \text{center}|}{\text{halfRange}}$. For $l>0$, compose via plain max since deviation is non-negative [S1, unofficial].
-5. Handle odd dimensions by using a `tapRange(d, parentDim)` helper. This helper widens the footprint to 3-wide $(2d, 2d+1, \text{parentDim}-1)$ at the last destination index on an odd axis. This is applied uniformly to x, y, and z via three nested dynamic loops [S1, unofficial].
-6. Repeat for all mip levels and Z-slices.
+1. Iterate through each mip level $l$ and each Z-slice $z$ of the source texture [S1, unofficial].
+2. Configure a `GPURenderPassColorAttachment` with `depthSlice` set to $z$ to target the specific Z-slice [S1, unofficial].
+3. Execute a render pass that downsamples the source Z-slice into the destination mip level $l$ [S1, unofficial].
+4. For 'max' filtering in deviation space, apply the first reduction using $\text{deviation} = \frac{|value - \text{center}|}{\text{halfRange}}$, then compose subsequent reductions via plain max since deviation is non-negative by construction [S1, unofficial].
+5. Handle odd dimensions by using a `tapRange(d, parentDim)` helper that widens the footprint to 3-wide $(2d, 2d+1, \text{parentDim}-1)$ at the last destination index on an odd axis, applied uniformly to x, y, and z via three nested dynamic loops [S1, unofficial].
+6. Repeat for all mip levels and Z-slices [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_mip_chain_3d(src_tex, dst_tex, filter_type='box', center=0.0, half_range=1.0):
-    src_dims = texture_dimensions(src_tex) # (width, height, depth)
+from dataclasses import dataclass
+from typing import Tuple, List
+
+@dataclass
+class MipBlit3dUniforms:
+    boxZ: int
+    dstZ: int
+    center: float
+    halfRange: float
+
+def generate_mip_chain_3d(src_tex, dst_tex, filter_type: str = 'box', center: float = 0.0, half_range: float = 1.0) -> None:
+    src_dims = texture_dimensions(src_tex)
     dst_dims = texture_dimensions(dst_tex)
-    num_mip_levels = dst_dims[2] # Assuming square base, depth is mip count for simplicity in this context, or use mipLevelCount3d
-    
-    # Iterate through mip levels
+    num_mip_levels = len(dst_dims)
+
     for l in range(num_mip_levels):
-        # Determine source and destination dimensions for this level
-        src_w, src_h, src_d = src_dims[l] if l < len(src_dims) else src_dims[0] // (2**l)
-        dst_w, dst_h, dst_d = dst_dims[l] if l < len(dst_dims) else dst_dims[0] // (2**l)
-        
-        # Iterate through Z-slices of the source texture for this mip level
+        src_w, src_h, src_d = src_dims[l]
+        dst_w, dst_h, dst_d = dst_dims[l]
+
         for z in range(src_d):
-            # Configure render pass with depthSlice
-            render_pass = begin_render_pass(
-                color_attachment=dst_tex,
-                depth_slice=z,
-                mip_level=l
-            )
-            
-            # Set uniforms
-            uniforms = MipBlit3dUniforms(
-                boxZ=z,
-                dstZ=z, # Assuming 1:1 Z mapping for simplicity, adjust as needed
-                center=center,
-                halfRange=half_range
-            )
+            render_pass = begin_render_pass(color_attachment=dst_tex, mip_level=l, depth_slice=z)
+            uniforms = MipBlit3dUniforms(boxZ=z, dstZ=z, center=center, halfRange=half_range)
             set_uniforms(uniforms)
-            
-            # Execute downsampling pass
+
             if filter_type == 'box':
                 execute_box_downsample(render_pass, src_tex, l)
             elif filter_type == 'max':
                 execute_max_downsample(render_pass, src_tex, l, center, half_range)
-            
+
             end_render_pass(render_pass)
 
-def tap_range(d, parent_dim):
-    """
-    Helper to determine the tap range for an axis.
-    Widens to 3-wide at the last destination index on an odd axis.
-    """
-    if d == parent_dim - 1: # Last destination index
-        # Widens to 3-wide: 2d, 2d+1, parentDim-1
-        # This logic is illustrative; actual implementation depends on shader specifics
-        return [2*d, 2*d+1, parent_dim-1]
-    else:
-        return [2*d, 2*d+1] # Standard 2-wide footprint
+def tap_range(d: int, parent_dim: int) -> List[int]:
+    if d == parent_dim - 1:
+        return [2 * d, 2 * d + 1, parent_dim - 1]
+    return [2 * d, 2 * d + 1]
 
-def execute_max_downsample(render_pass, src_tex, mip_level, center, half_range):
-    # Shader logic for max reduction
-    # For mip_level 0, convert to deviation
-    # For mip_level > 0, use plain max
+def execute_box_downsample(render_pass, src_tex, mip_level: int) -> None:
+    # Applies a box filter kernel across the active render pass viewport
+    # Not given in the sources.
     pass
 
-def execute_box_downsample(render_pass, src_tex, mip_level):
-    # Shader logic for box filter
+def execute_max_downsample(render_pass, src_tex, mip_level: int, center: float, half_range: float) -> None:
+    # Applies a max filter kernel using tapRange for footprint
+    for y in range(render_pass.height):
+        for x in range(render_pass.width):
+            x_taps = tap_range(x, render_pass.src_width)
+            y_taps = tap_range(y, render_pass.src_height)
+            z_taps = tap_range(render_pass.dst_z, render_pass.src_depth)
+            
+            max_val = -float('inf')
+            for dz in z_taps:
+                for dy in y_taps:
+                    for dx in x_taps:
+                        val = texture_load(src_tex, mip_level, (dx, dy, dz))
+                        if mip_level == 0:
+                            val = abs(val - center) / half_range
+                        if val > max_val:
+                            max_val = val
+            render_pass.write_pixel(x, y, max_val)
+
+def texture_dimensions(tex) -> List[Tuple[int, int, int]]:
+    # Returns list of (width, height, depth) for each mip level
+    pass
+
+def begin_render_pass(color_attachment, mip_level, depth_slice):
+    # Returns a render pass object targeting the specified slice
+    pass
+
+def set_uniforms(uniforms):
+    # Binds uniforms to the current shader
+    pass
+
+def end_render_pass(render_pass):
+    # Completes and submits the render pass
+    pass
+
+def texture_load(tex, mip_level, coords):
+    # Returns the texel value at the given coordinates and mip level
     pass
 ```
 
 **Edge Cases and Pitfalls:**
-- **Odd Dimensions:** A fixed 2-wide per-axis footprint in the max-reduction shader (`fs_max`) silently dropped the last parent slice/row/column when a parent dimension was odd. This occurred because floor-sizing made the destination edge unreachable by the old `min(2d+1, dim-1)` clamp. For example, on MCPM's real dims (178x300x182), this dropped z=90 and x=88 on level1->level2 [S1, unofficial]. The `tapRange(d, parentDim)` helper fixes this by widening the footprint at the last destination index on an odd axis [S1, unofficial].
-- **Precision:** Ensure that the deviation calculation does not underflow or overflow, especially for values near the contrast center or range boundaries.
+- **Odd Dimensions:** A fixed 2-wide per-axis footprint in the max-reduction shader (`fs_max`) silently dropped the last parent slice/row/column when a parent dimension was odd [S1, unofficial]. This occurred because floor-sizing made the destination edge unreachable by the old `min(2d+1, dim-1)` clamp [S1, unofficial]. For example, on MCPM's real dims (178x300x182), this dropped z=90 and x=88 on level1->level2 [S1, unofficial]. The `tapRange(d, parentDim)` helper fixes this by widening the footprint at the last destination index on an odd axis [S1, unofficial].
 
 ## Subtopics
 
 ### Per-Field Max Pyramid in Deviation Space
-A max-value pyramid stored in deviation space (normalized distance from contrast center) used for TF-adaptive skipping [S1, unofficial]. It is built from the raw volume cube, not the display mips, to avoid hiding thin bright filaments [S1, unofficial]. It reduces the raw cube through three chained 2x max-reductions via two upload-time scratch textures, then fills the pyramid's own chain via `generateMipChain3d` [S1, unofficial]. Only the first reduction converts raw values to normalized deviation using $\text{deviation} = \frac{|value - \text{contrastCenter}|}{\text{halfRange}}$; subsequent reductions compose via plain max since deviation is non-negative by construction [S1, unofficial]. The `FieldEntry` struct contains a new field `maxPyramidTexture`, and binding 5 is added to the shared `@group(0)` bind-group layout. The texture is `textureLoad`-only, with no sampler [S1, unofficial].
+A max-value pyramid stored in deviation space (normalized distance from contrast center) used for TF-adaptive skipping [S1, unofficial]. It is built from the raw volume cube, not the display mips, to avoid hiding thin bright filaments [S1, unofficial]. It reduces the raw cube through three chained 2x max-reductions via two upload-time scratch textures, then fills the pyramid's own chain via `generateMipChain3d` [S1, unofficial]. Only the first reduction converts raw values to normalized deviation using $\text{deviation} = \frac{|value - \text{contrastCenter}|}{\text{halfRange}}$; subsequent reductions compose via plain max since deviation is non-negative by construction [S1, unofficial]. The `FieldEntry` struct contains a new field `maxPyramidTexture`, and binding 5 is added to the shared `@group(0)` bind-group layout [S1, unofficial]. The texture is `textureLoad`-only, with no sampler [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot D)$, where $N$ is the number of mip levels and $D$ is the depth of the volume. Each mip level requires $D$ render passes.
-- **Memory Complexity:** $O(V)$, where $V$ is the volume of the texture, for storing the mip chain. Additional scratch textures are used for intermediate reductions in the Per-Field Max Pyramid variant.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
 - **Measured Performance:** The pass is cheap today only because it runs at 1/3 resolution with a hard 128-step cap [S1, unofficial].
-- **Strengths:** Efficiently generates 3D mip chains using standard GPU render passes. The deviation space pyramid allows for adaptive skipping based on transfer function parameters without rebuilding the pyramid.
-- **Limitations:** Requires multiple render passes, one per Z-slice per mip level. Odd dimensions require special handling to avoid data loss.
-- **When to Use:** When generating mip chains for 3D volumes, especially for acceleration structures like transfer-function-adaptive skipping pyramids.
-- **When Not to Use:** When memory bandwidth is a critical bottleneck and the volume is small, as the overhead of multiple render passes may outweigh the benefits.
+- **Strengths:** Efficiently generates 3D mip chains using standard GPU render passes [S1, unofficial]. The deviation space pyramid allows for adaptive skipping based on transfer function parameters without rebuilding the pyramid [S1, unofficial].
+- **Limitations:** Requires multiple render passes, one per Z-slice per mip level [S1, unofficial]. Odd dimensions require special handling to avoid data loss [S1, unofficial].
+- **When to Use:** When generating mip chains for 3D volumes, especially for acceleration structures like transfer-function-adaptive skipping pyramids [S1, unofficial].
+- **When Not to Use:** Not given in the sources [S1, unofficial].
 
 ## Background
-`generateMipChain3d` was introduced as part of the volume raymarch acceleration plan, specifically in Task 3, to support TF-adaptive skipping and cone-LOD [S1, unofficial]. It mirrors the 2D `generateMipChain` approach, extending it to 3D volumes. The fix for odd dimensions was added in a subsequent commit to address data loss in the max-reduction shader [S1, unofficial]. The Per-Field Max Pyramid in Deviation Space was also introduced in Task 3 to enable dynamic skipping based on live contrast/trim uniforms [S1, unofficial].
+`generateMipChain3d` was introduced as part of the volume raymarch acceleration plan, specifically in Task 3, to support TF-adaptive skipping and cone-LOD [S1, unofficial]. It mirrors the 2D `generateMipChain` approach, extending it to 3D volumes [S1, unofficial]. The fix for odd dimensions was added in a subsequent commit to address data loss in the max-reduction shader [S1, unofficial]. The Per-Field Max Pyramid in Deviation Space was also introduced in Task 3 to enable dynamic skipping based on live contrast/trim uniforms [S1, unofficial].
 
 ## Sources
 [S1] feat(volumes): raymarch acceleration — GPU pyramids, TF-adaptive skipping, cone LOD, https://github.com/rulkens/skymap/pull/556, fetched 2026-10-28 (unofficial)

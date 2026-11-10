@@ -2,13 +2,14 @@
 
 
 ## Overview
-Voxel Grid Optimization encompasses techniques to reduce the computational and memory overhead of converting geometric primitives into a 3D voxel grid, a critical bottleneck in real-time volume rendering and global illumination pipelines [S2, unofficial]. It distinguishes itself from general volume rendering methods by focusing on the *production* phase: minimizing draw calls, caching intermediate geometric states, and adapting data structures to the sparsity of the scene [S2, unofficial]. While [Voxelization](12-voxelization.md) defines the basic rasterization-to-grid mapping, this method family addresses the performance costs of dynamic scenes, large resolutions, and redundant computations [S2, unofficial].
+Voxel Grid Optimization encompasses techniques to reduce the computational and memory cost of generating and processing voxel grids without altering the fundamental geometric representation defined by [Voxelization](12-voxelization.md) [S1, unofficial][S2, unofficial]. It addresses the high cost of repeated rasterization and storage by employing spatial culling, data caching, structural adaptation, and encoding [S1, unofficial][S2, unofficial]. Unlike its siblings, which focus on specific data structures like RLE or occupancy grids, this method focuses on the *process* of voxelization itself, optimizing the transformation, culling, and storage phases [S1, unofficial][S2, unofficial].
 
 ## Shared principles
-All methods in this family share the goal of reducing the cost of voxel grid generation or traversal without altering the fundamental geometric representation defined by [Voxelization](12-voxelization.md). The core mechanisms involve:
-1.  **Spatial Culling**: Eliminating empty space or non-contributing geometry from the active computation domain, either by adapting the voxel array dimensions [S1, unofficial] or by culling primitives using bounding volumes [S2, unofficial].
-2.  **Data Caching and Reuse**: Storing intermediate results (such as transformed vertices or heightmaps) to avoid redundant calculations for static or semi-static data [S2, unofficial].
-3.  **Structural Adaptation**: Modifying the storage format (e.g., run-length encoding, bucket-based BVHs) or resolution calculation to better fit the data distribution [S1, unofficial][S2, unofficial].
+All methods in this family operate on the discrete voxel grid produced by [Voxelization](12-voxelization.md) to improve efficiency. The core mechanisms include:
+1.  **Spatial Culling**: Eliminating empty space or non-contributing geometry from the active computation domain, often by resizing the voxel array to the minimal bounding box of the data or using bounding volumes to skip SDF evaluations [S1, unofficial][S2, unofficial].
+2.  **Structural Adaptation**: Modifying the grid's internal representation to reduce redundancy, such as converting dense density matrices into sparse occupancy masks of 2x2x2 blocks or using run-length encoding for binary data [S1, unofficial][S2, unofficial].
+3.  **Computational Optimization**: Reducing the cost of voxel generation through pre-computation (e.g., caching transformed vertices for deforming meshes), instanced rendering of slices, and heightmap-based column skipping [S1, unofficial][S3, unofficial].
+4.  **Data Fusion and Smoothing**: Applying post-processing operations like 3D convolution to smooth scalar fields or fusing multi-pass results using specific blending operations (e.g., MAX for scalar data) to ensure continuity and reduce aliasing [S1, unofficial].
 
 ## Subtopics
 
@@ -25,48 +26,55 @@ Coordinate Grid Generation produces a regular lattice of sample points within a 
 Occupancy Voxel Creation converts a continuous density matrix into a sparse boolean occupancy mask by identifying fully occupied 2x2x2 voxel blocks. It solves the problem of high memory usage in dense voxel grids by collapsing contiguous solid regions into single representative blocks, thereby reducing the number of primitives processed during rendering. Unlike [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) which modifies density values, or [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) which compresses the final grid, this method performs a structural reduction based on local block occupancy. It builds on [Voxel Grid Optimization](4131-voxel-grid-optimization.md) by implementing spatial culling through block detection.
 
 ### [Grid Resolution Calculation](2908-grid-resolution-calculation.md)
-This method determines the discrete dimensions $(N_x, N_y, N_z)$ of a uniform 3D voxel grid by anchoring the resolution on the Y-axis and scaling the X and Z axes according to the aspect ratios of the scene's spatial domain. It solves the problem of maintaining geometric fidelity across non-cubic bounding boxes without requiring manual tuning of all three dimensions, ensuring the voxel density remains consistent with the scene's proportions. It differs from [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) by relying solely on spatial aspect ratios rather than primitive counts, and from [Adaptive Voxel Spacing](3270-grid-resolution-selection-via-lambda.md#adaptive-voxel-spacing) by producing a fixed uniform grid rather than a quality-dependent variable spacing.
+This method calculates the dimensions of a uniform 3D voxel grid by fixing the resolution along one axis (typically Y) and deriving the other axes (X, Z) based on the aspect ratios of the scene's bounding box. It ensures the grid maintains the geometric proportions of the scene while allowing the user to control the total voxel count via a single parameter. It differs from [Grid Resolution Selection via Lambda](3270-grid-resolution-selection-via-lambda.md) by relying on spatial aspect ratios rather than primitive counts, and from [Adaptive Voxel Spacing](#adaptive-voxel-spacing) by producing a uniform grid rather than variable-sized cells.
 
 ### [Voxelization Optimization](3191-voxelization-optimization.md)
-Voxelization Optimization encompasses techniques to reduce the computational and memory overhead of converting geometric primitives into a 3D voxel grid, a critical bottleneck in real-time volume rendering and global illumination pipelines. It distinguishes itself from general volume rendering methods by focusing on the *production* phase: minimizing draw calls, caching intermediate geometric states, and adapting data structures to the sparsity of the scene. While [Voxelization](12-voxelization.md) defines the basic rasterization-to-grid mapping, this method family addresses the performance costs of dynamic scenes, large resolutions, and redundant computations.
+Voxelization Optimization encompasses techniques to reduce the computational and memory cost of generating voxel grids without altering the fundamental geometric representation defined by [Voxelization](12-voxelization.md). It addresses the high cost of repeated rasterization by employing spatial culling, data caching, and structural adaptation. Unlike its siblings, which focus on specific data structures like RLE or occupancy grids, this method focuses on the *process* of voxelization itself, optimizing the transformation, culling, and storage phases.
 
 ### [Bounding Volume Optimization](3583-bounding-volume-optimization.md)
-Bounding Volume Optimization reduces the computational cost of volume rendering by eliminating unnecessary evaluations of empty space or non-contributing geometry. It achieves this by adapting the spatial domain of the voxel array to the actual extent of the data or by culling Signed Distance Field (SDF) primitives using bounding volumes. Unlike sibling methods that focus on data compression or smoothing, this method specifically targets traversal efficiency by restricting the active rendering domain to tight bounds, thereby reducing false positives and memory bandwidth usage.
+Bounding Volume Optimization reduces the computational cost of voxel grid generation and ray marching by eliminating empty space and non-contributing geometry from the active computation domain. It achieves this by either adapting the 3D voxel array dimensions to the actual extent of the data or by culling primitives using bounding volumes before evaluating expensive Signed Distance Fields (SDFs). Unlike sibling methods that focus on data encoding or smoothing, this method specifically targets the reduction of false positives and redundant map evaluations by restricting the active volume.
 
 ### [Bucket-based LBVH construction](5163-bucket-based-lbvh-construction.md)
-Bucket-based LBVH construction builds a Bounding Volume Hierarchy (BVH) for sparse voxel grids by grouping voxels into dynamic buckets rather than a fixed uniform grid. This approach reduces empty-space traversal overhead compared to fixed uniform grids. It sets itself apart from siblings like Zellmann et al.'s fixed brick size method by adapting to local voxel density.
+Bucket-based LBVH construction builds a Bounding Volume Hierarchy (BVH) from a voxel model by grouping voxels into buckets rather than using a uniform grid with a fixed brick size. This approach is designed to handle sparse volumes more efficiently than fixed-brick methods. It sets itself apart from siblings like [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) by focusing on hierarchical spatial partitioning via bucketing, and from [Bounding Volume Optimization](3583-bounding-volume-optimization.md) by using a specific bucket-based construction strategy rather than general bounding volume adjustments.
 
-### Volume Buffer
-#### definition
+#### Volume Buffer
+**Definition**
 - [S1, unofficial] A volume data caching structure that encapsulates functionality, storage, and access similar to a Frame Buffer Object (FBO), but for 3D scalar data. It rasterizes primitives in 3D space and accumulates up to 1024 bits of arbitrary data per voxel.
-#### step
+
+**Steps**
 - [S1, unofficial] Generate the final volume by fusing three intermediate passes (one for each perpendicular sweep axis) into a single multi-buffer using the MAX blending operation.
 - [S1, unofficial] Disable face culling and z-test, and do not attach a z-buffer to the frame buffer object.
-- [S1, unofficial] Use the OpenGL extension for layered rendering, writing to gl_Layer in the geometry shader to render primitives to arbitrary volume texture layers.
-#### parameter
+- [S1, unofficial] Use the OpenGL extension for layered rendering, writing to `gl_Layer` in the geometry shader to render primitives to arbitrary volume texture layers.
+
+**Parameters**
 - [S1, unofficial] Max bits per voxel: 1024 bits.
 - [S1, unofficial] Max render targets: 8 floating point render targets (MRTs), as 8 is the current maximum available number of MRTs.
-#### comparison
+
+**Comparison**
 - [S1, unofficial] Uses MAX blending for scalar data fusion instead of the OR operation used in binary voxelization.
 
-### Voxelization Projection Culling
-#### definition
+#### Voxelization Projection Culling
+**Definition**
 - [S2, unofficial] Optimizes multi-pass voxelization by skipping primitives whose precomputed dominant axis does not match the current projection direction, preventing redundant voxel writes.
-#### step
-- [S2, unofficial] In the vertex shader, compute world position. If multi-pass mode is active, read the primitive's dominant axis from triDominantAxis[vid / 3]. Compare with projDir.direction. If they mismatch, skip the primitive (early return/continue implied).
-#### parameter
-- [S2, unofficial] kVoxelizationMultiPass = !kVoxelizationSinglePass (compile-time flag controlling pass strategy)
-#### layout
-- [S2, unofficial] VoxelProjectionDir struct: uint direction; (bound to buffer 2). triDominantAxis buffer: bound to buffer index 10 (TRI_DOMINANT_BUFFER_BINDING_IDX).
-#### pitfall
-- [S2, unofficial] Vertex ID to triangle ID mapping uses integer division vid / 3, assuming contiguous triangle strips/arrays.
 
-### Significant Voxel Extraction
-#### step
+**Steps**
+- [S2, unofficial] In the vertex shader, compute world position. If multi-pass mode is active, read the primitive's dominant axis from `triDominantAxis[vid / 3]`. Compare with `projDir.direction`. If they mismatch, skip the primitive (early return/continue implied).
+
+**Parameters**
+- [S2, unofficial] `kVoxelizationMultiPass = !kVoxelizationSinglePass` (compile-time flag controlling pass strategy)
+
+**Layout**
+- [S2, unofficial] `VoxelProjectionDir` struct: `uint direction;` (bound to buffer 2). `triDominantAxis` buffer: bound to buffer index 10 (`TRI_DOMINANT_BUFFER_BINDING_IDX`).
+
+**Pitfall**
+- [S2, unofficial] Vertex ID to triangle ID mapping uses integer division `vid / 3`, assuming contiguous triangle strips/arrays.
+
+#### Significant Voxel Extraction
+**Steps**
 - [S3, unofficial] Extract and store only the most visually significant voxels to accelerate rendering by preventing traversal of the entire volume raster.
 
 ## Background
-The need for voxel grid optimization arises from the high computational cost of converting polygonal models into volumetric representations for applications such as smoke/fluid simulations, visibility information, and global illumination effects [S1, unofficial]. Early methods focused on simple surface voxelization algorithms that were easy to implement and integrate with existing frameworks [S1, unofficial]. As real-time rendering requirements grew, techniques like the Volume Buffer were introduced to allow multi-channel attribute computation in a single pass using GPU geometry shaders [S1, unofficial]. Subsequent developments included spatial culling strategies, such as bounding volume optimization for SDF raymarching [S2, unofficial], and structural optimizations like bucket-based BVH construction for sparse voxels [S2, unofficial]. The field continues to evolve with neural rendering pipelines requiring efficient coordinate grid generation [S1, S2, unofficial] and occupancy creation [S2, unofficial].
+The concept of optimizing voxel grids emerged alongside the need for real-time volume rendering and efficient storage of volumetric data. Early work focused on reducing the computational overhead of rasterizing polygons into volume textures. Notable contributions include the development of the "Volume Buffer" for multi-channel surface voxelization, which allowed for real-time generation of volume data from dynamic scenes using GPU geometry shaders [S1, unofficial]. Other optimizations involved culling techniques, such as extracting visually significant voxels to accelerate splatting rendering [S3, unofficial], and bounding volume optimizations to reduce false positives in ray marching [S2, unofficial]. The family has evolved to include sparse structures, hierarchical BVHs for voxel models, and neural rendering-specific coordinate grid generation [S1, S2, S3, unofficial].
 
 ## Sources
 [S1] Two Simple Single-pass GPU methods for Multi-channel Surface Voxelization of Dynamic Scenes, https://doi.org/10.2312/pe/pg/pg2011short/031-036, fetched 2026-10-26 (unofficial)

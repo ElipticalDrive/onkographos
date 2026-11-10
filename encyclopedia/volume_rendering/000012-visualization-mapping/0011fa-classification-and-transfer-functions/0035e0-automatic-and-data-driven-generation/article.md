@@ -1,38 +1,83 @@
 # Automatic and Data-Driven Generation
+
+Also called: Automatic Transfer Function Design, Data-Driven TF Generation, Automated Classification
+
 ## Overview
-This family encompasses methods that generate or assign transfer functions (TFs) algorithmically, removing or reducing the need for manual user interaction [G]. Unlike [Classification and transfer functions](38-classification-and-transfer-functions.md) which provides the general framework for mapping data to optical properties, these methods automate the selection of mapping parameters [G]. They differ from [Transfer Function Optimization and Learning](5933-transfer-function-optimization-and-learning.md) by often focusing on initial generation or retrieval rather than iterative feedback loops, and from [Default 3D Transfer Function](5647-default-3d-transfer-function.md) by employing diverse strategies such as statistical modeling, generative adversarial networks, or knowledge-base retrieval [G].
+Automatic and Data-Driven Generation methods eliminate or reduce manual user interaction in volume rendering by algorithmically deriving transfer functions (TFs) from the statistical properties, structural features, or learned representations of the input volume data [S1, S2, S3, unofficial]. Unlike interactive methods that rely on user-defined keypoints or sliders, these approaches solve the labor-intensive and subjective process of TF design by leveraging data statistics, optimization loops, or generative models to map scalar values and derived features to optical properties [S1, unofficial][S2, unofficial]. What sets this family apart from its siblings, such as [Histogram-Based Transfer Function Generation](6182-histogram-based-transfer-function-generation.md) or [Transfer Function Optimization and Learning](5933-transfer-function-optimization-and-learning.md), is the breadth of algorithmic strategies employed, ranging from simple statistical heuristics and topological clustering to complex deep learning architectures like GANs and Diffusion Models, often targeting specific goals such as style transfer, boundary emphasis, or training data synthesis [S1, S2, S3, unofficial].
+
 ## Shared principles
 All methods in this family share the core mechanism of evaluating a classification function $C(\mathbf{x})$ for each sample point $\mathbf{x}$ in the volume to produce optical properties [G].
+
+**Input Domain:**
+The input to the classification function is typically a scalar value $v = f(\mathbf{x})$ representing the voxel intensity or density at position $\mathbf{x}$ [S1, S2, S3, unofficial][S4]. Advanced methods extend this domain to include derived features such as gradient magnitude $\|\nabla f(\mathbf{x})\|$, curvature, or texture metrics [S2, S5, unofficial].
+
+**Output Range:**
+The output is a set of optical properties, most commonly:
+*   **Opacity ($\alpha$):** A value in $[0, 1]$ representing the probability of absorption or the inverse of transparency. $\alpha=0$ is fully transparent; $\alpha=1$ is fully opaque [S5, unofficial].
+*   **Color ($C$):** A vector $(r, g, b)$ representing the emitted or reflected light color [S2, unofficial][S4].
+*   **Weight:** In some emission-only models, a weight $w$ is assigned to modulate the contribution of samples during accumulation [S6, unofficial].
+
+**Classification Types:**
+1.  **Binary Classification:** Uses hard thresholds to include or exclude data [6229-binary-and-soft-classification.md]. Values below a threshold are assigned $\alpha=0$, and values above are assigned $\alpha=1$ (or a constant high value) [G].
+2.  **Soft Classification:** Uses smooth transitions (e.g., piecewise linear ramps, Gaussian bumps, or power functions) to assign intermediate opacity values [S3, unofficial][S8, unofficial].
+
+**Evaluation Order:**
+The timing of classification relative to sampling interpolation defines two main approaches [S2, unofficial][S5, unofficial]:
+*   **Pre-classification:** The transfer function is applied to scalar values at the grid points (voxels) before sampling. Colors and opacities are interpolated during ray casting. Pre-classification produces blurred images when the image resolution is higher than the volume resolution, but prevents color bleeding if color interpolation is done with opacity-weighted colors [S2, unofficial].
+*   **Post-classification:** Scalar values are interpolated from the volume texture during ray casting, and the transfer function is applied to these continuous sample values. Post-classification produces images with defined edges but is prone to aliasing because high-frequency details may be missed [S2, unofficial].
+
+**Implementation Structures:**
+Transfer functions are commonly implemented as piecewise linear functions defined by user-specified keypoints [S3, unofficial], lookup tables (LUTs) stored as 1D, 2D, or 3D textures for fast GPU sampling [S3, unofficial][S6, unofficial], or shader functions evaluated dynamically during ray casting [S5, unofficial].
+
 ## Subtopics
 
 ### [Default 3D Transfer Function](5647-default-3d-transfer-function.md)
-Generates a starting-point visualization without user interaction by prioritizing edge detection over statistical clustering. It is chosen when a geometrically grounded baseline for manual refinement is needed, distinguishing materials with overlapping intensity ranges via gradient and curvature.
+An automatic method for generating an initial classification function for volume rendering without user interaction. It solves the problem of visualizing material boundaries in scalar volumes by assigning opacity based on gradient magnitude and second derivatives, rather than data values alone. Unlike 1D transfer functions which assign opacity based solely on data values—causing erroneous coloring at boundaries where value ranges overlap (e.g., soft tissue and bone)—this method emphasizes edges and surfaces regardless of the underlying scalar value. It serves as a starting point for further modification using interactive widgets.
+
+### [Transfer Function Optimization and Learning](5933-transfer-function-optimization-and-learning.md)
+This family of methods automatically derives volume rendering transfer functions (TFs) by optimizing parameters to match target visual appearances, visibility metrics, or user intents, rather than relying on manual user interaction. It solves the labor-intensive and subjective process of manually tuning opacity and color mappings for complex volumetric data. What sets this family apart from its siblings (such as histogram-based or clustering-based generation) is the use of iterative optimization loops—often involving gradient descent, simplex methods, or neural networks—to minimize a specific loss function (e.g., image reconstruction error, visibility discrepancy) between the rendered output and a target state.
 
 ### [Histogram-Based Transfer Function Generation](6182-histogram-based-transfer-function-generation.md)
-Automatically derives opacity and color mappings by analyzing statistical distributions of volumetric data values and derivatives. It is chosen to identify critical intensity thresholds directly from histogram peaks, reducing user interaction compared to manual design.
+Histogram-Based Transfer Function Generation is a family of methods that automatically or semi-automatically derive opacity and color mappings for volume rendering by analyzing the statistical distribution of scalar values, gradients, or derivatives in the input data. It solves the problem of manual transfer function design by leveraging the fact that transfer functions are volume-position invariant, allowing histograms to "project out" spatial information and reveal material boundaries or intensity clusters. Unlike optimization-based methods that search for a global optimum, these methods typically rely on explicit statistical features (such as means, peaks, or variance) or interactive bin manipulation to define the mapping.
+
+### [Color Transfer via Gaussian Clustering and Mapping](6905-color-transfer-via-gaussian-clustering-and-mapping.md)
+This method automatically transfers chromatic and luminance characteristics from a 2D example image (illustration or photograph) to a 3D source volume (scalar or color), solving the problem of synthesizing illustrative 3D textures without tedious manual region matching. It sets itself apart from sibling methods like [Gaussian Mixture Model Transfer Function Generation](7676-gaussian-mixture-model-transfer-function-generation.md) by explicitly enforcing area-proportion constraints during clustering and using a multiple-to-one mapping strategy to handle distribution mismatches between the 2D example and 3D source.
 
 ### [Valley Cell-Based Clustering Transfer Function Design](7418-valley-cell-based-clustering-transfer-function-design.md)
-Automatically generates 2D opacity transfer functions by decomposing feature density plots into topological "valley cells" and mapping them to Gaussian functions. It is chosen to automatically determine feature counts and hierarchically simplify classification, removing noise while preserving significant structures.
+This method automatically generates opacity transfer functions for volume rendering by clustering 2D density plots (value vs. gradient magnitude) into "valley cells" using topological persistence, and mapping these clusters to Gaussian transfer functions with depth-aware opacity. It solves the problem of manual transfer function design by determining the number and shape of features without user-specified bin counts, while providing a hierarchical structure for interactive refinement. Unlike [Histogram-Based Transfer Function Generation](6182-histogram-based-transfer-function-generation.md) which requires fixed bins and lacks simplification guidelines, this method uses cell persistence to automatically simplify the parameter space and remove noise.
 
 ### [Opacity GAN](7664-opacity-gan.md)
-A generative model that synthesizes a 64×64 opacity image from viewpoint and opacity transfer function inputs. It is chosen to capture general shape and silhouette, enabling introspection on inputs for analysis of the latent space.
+The Opacity GAN is a generative adversarial network that synthesizes a 64×64 opacity image from a specified viewpoint and an opacity transfer function (TF). It solves the difficulty of training GANs on high-dimensional volume rendering data by decomposing the problem into two stages, where this first stage captures general shape and silhouette. It differs from sibling methods by explicitly designing the generator to enable introspection on its inputs for analysis, rather than treating the network as a black box.
 
 ### [Opacity-to-Color Translation GAN](7665-opacity-to-color-translation-gan.md)
-A conditional generative adversarial network that synthesizes a high-resolution color image conditioned on viewpoint, color TF, opacity TF, and an opacity image. It is chosen to solve automatic color mapping by treating the task as an image-to-image translation problem.
+The Opacity-to-Color Translation GAN is a conditional generative model that synthesizes a high-resolution (256×256) volume-rendered color image from a low-resolution (64×64) opacity image, conditioned on viewpoint, color transfer function (TF), and opacity TF. It solves the problem of automatic color mapping in volume visualization by treating the task as an image-to-image translation problem, where the structural information from the opacity image is preserved while color and texture are generated based on the specified transfer functions. It differs from sibling methods like [Opacity GAN](7664-opacity-gan.md) by explicitly conditioning on both color and opacity TFs and using skip connections to enforce spatial consistency between the input opacity structure and the output color image.
 
 ### [Gaussian Mixture Model Transfer Function Generation](7676-gaussian-mixture-model-transfer-function-generation.md)
-Generates diverse training data or initial TFs by sampling parameters from a prior distribution using a Gaussian Mixture Model. It is chosen to provide a broad initial exploration of the rendering space without user interaction, differing from histogram-based methods by being data-independent.
+An automated method to initialize transfer functions by modeling the data value space using the Gaussian mixture model and rendering the extracted volume with preintegrated volume rendering. It generates random opacity and color transfer functions to create a diverse set of volume renderings, primarily used for generating training data for generative models. Unlike [Histogram-Based Transfer Function Generation](6182-histogram-based-transfer-function-generation.md) which derives parameters from data statistics, this method is data-independent, imposing few limitations on the space of possible volume renderings to show generality.
 
-### SOI Label-Based Knowledge Database Construction
-Builds a retrieval database using raw image volumes and SOI labels instead of expert-designed TFs. It is chosen to rapidly retrieve and adapt existing visualizations based on structural similarity, requiring less effort than manual TF collection.
+#### SOI Label-Based Knowledge Database Construction
+- [S1, unofficial] A pipeline to build a retrieval database using raw image volumes and SOI labels instead of expert-designed TFs.
+- [S1, unofficial] Automatically extract rays from raw volumes.
+- [S1, unofficial] Generate TIQ (Two-Image Query) representations from the rays.
+- [S1, unofficial] Store TIQs and associated SOI labels in the knowledge database.
+- [S1, unofficial] Differs from expert TF collection by relying on SOI labels, which requires less effort and time to generate.
 
-### Probability-Intensity Renderer
-Assigns optical properties based on predicted ROI-wise class probabilities via a weighted sum, incorporating voxel intensity into TF design. It is chosen to allow intuitive assignment of optical properties based on confidence levels, though it may suppress fine details due to intensity variation within ROIs.
+#### Probability-Intensity Renderer
+- [S2, unofficial] A volume renderer that assigns optical properties based on predicted ROI-wise class probabilities via a weighted sum of all N ROI classes.
+- [S2, unofficial] A volume renderer that incorporates voxel intensity I(v) into TF design, using predicted probabilities as visibility weights and applying a threshold to suppress low-confidence contributions.
+- [S2, unofficial] Calculate total weight W(v) = Σ_{n: pn(v)≥τn} pn(v), summing probabilities of classes above threshold τn.
+- [S2, unofficial] C(v) = (1/W(v)) Σ_{n: pn(v)≥τn} TFc,n(I(v)) · pn(v) and α(v) = (1/W(v)) Σ_{n: pn(v)≥τn} TFα,n(I(v)) · pn(v), where TFc,n and TFα,n are functions of intensity I(v).
+- [S2, unofficial] Threshold τn: A predefined threshold applied to suppress low-confidence contributions. Value not specified in text.
+- [S2, unofficial] Suppresses fine details (e.g., small vessels, lung bronchus) because intensity variation within the same ROI is not considered.
+
+#### Diffusion Models (DDPMs)
+- [S3, unofficial] DDPMs generate data by learning to reverse a gradual noising process, iteratively denoising from pure noise to a data distribution sample.
+- [S3, unofficial] Diffusion models have applications spanning volume generation, Transfer Function (TF) design, and visualization synthesis.
 
 ## Background
-Automatic and data-driven generation methods emerged to address the labor-intensive nature of manual transfer function design [G]. Early approaches focused on histogram-based analysis to identify material boundaries [6182-histogram-based-transfer-function-generation.md]. More recent developments leverage machine learning, including generative models like GANs for synthesizing plausible visualizations [7664-opacity-gan.md], [7665-opacity-to-color-translation-gan.md] and probabilistic models for integrating semantic information [S3, unofficial]. Knowledge-base retrieval approaches have also been developed to reuse existing visualizations based on structural similarity [S2, unofficial]. Diffusion models have also been applied to TF design and visualization synthesis [S4, unofficial].
+The need for automatic transfer function generation arises from the complexity and subjectivity of manual TF design, particularly for large-scale or multi-variate datasets where visual exploration is time-consuming [S1, S2, unofficial]. Early approaches focused on statistical heuristics, such as histogram analysis, to identify dominant material classes [S2, S4, unofficial]. More recent developments leverage machine learning, including clustering algorithms for feature extraction [S1, unofficial] and deep generative models (GANs, Diffusion Models) for style transfer and synthesis [S1, S3, unofficial]. These methods are widely used in medical imaging, scientific visualization, and computer graphics to accelerate exploration, standardize visualization styles, and generate training data for downstream tasks [S1, S2, S3, unofficial].
+
 ## Sources
-[S1] GO-NeRF: Generating Objects in Neural Radiance Fields for Virtual Reality Content Creation, https://doi.org/10.1109/tvcg.2025.3549558, fetched 2026-10-29
-[S2] A Transfer Function Design Using A Knowledge Database based on Deep Image and Primitive Intensity Profile Features Retrieval, https://arxiv.org/abs/2209.06421v1, fetched 2026-10-26 (unofficial)
-[S3] NeuVolEx: Implicit Neural Features for Volume Exploration, https://doi.org/10.48550/arxiv.2604.11172, fetched 2026-10-26 (unofficial)
-[S4] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S1] A Transfer Function Design Using A Knowledge Database based on Deep Image and Primitive Intensity Profile Features Retrieval, https://arxiv.org/abs/2209.06421v1, fetched 2026-10-26 (unofficial)
+[S2] NeuVolEx: Implicit Neural Features for Volume Exploration, https://doi.org/10.48550/arxiv.2604.11172, fetched 2026-10-26 (unofficial)
+[S3] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

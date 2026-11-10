@@ -3,7 +3,7 @@
 Also called: Line Stream Surface, Stream Surface Generation from Line Pairs, Stream Surface Triangulation, Stream line pair triangulation, Streamlines Surface Rendering, computeStreamSurfaceKernel
 
 ## Overview
-Stream surface rendering visualizes 3D vector fields by seeding stream lines along a curve and triangulating the space between neighboring pairs of lines to form a continuous surface [S1, unofficial]. Unlike individual stream lines, which can be difficult to perceive in 3D space, stream surfaces provide shaded, occlusion-friendly geometry that clearly indicates flow direction and structure [S1, unofficial]. The method distinguishes itself by processing line pairs independently (often in parallel on GPUs) and dynamically adapting the triangulation topology to handle streamline divergence, preventing overlapping or degenerate triangles [S1, unofficial]. It builds on [Triangular Mesh Scene Rendering](4644-triangular-mesh-scene-rendering.md) by providing the mesh generation logic for these specific flow-based surfaces.
+Stream surface rendering visualizes 3D vector fields by seeding stream lines along a curve and triangulating the space between neighboring pairs of lines to form a continuous surface [S1, unofficial]. Unlike individual stream lines, which can be difficult to perceive in 3D space, stream surfaces provide shaded geometry that is easily seen in 3D [S1, unofficial]. The method distinguishes itself by processing line pairs independently (often in parallel on GPUs) and dynamically adapting the triangulation topology to handle streamline divergence, preventing overlapping or degenerate triangles [S1, unofficial]. It builds on [Triangular Mesh Scene Rendering](4644-triangular-mesh-scene-rendering.md) by providing the mesh generation logic for these specific flow-based surfaces [S2, unofficial].
 
 ## How it works
 ### Inputs and Outputs
@@ -21,13 +21,13 @@ Stream surface rendering visualizes 3D vector fields by seeding stream lines alo
 
 ### Data Structures
 *   **`linePairs`**: `uint2` array. Layout: `[index_line_A, index_line_B]`.
-*   **`lineVertices`**: `float3` array. Layout: Contiguous storage for all lines. Line $i$ starts at offset $i \times \text{verticesPerLine}$.
+*   **`lineVertices`**: `float3` array. Layout: Contiguous storage for all lines. Line $i$ starts at offset $i \times \text{verticesPerLine}$ [S1, unofficial].
 *   **`lineLengths`**: `uint` array. Layout: Index $i$ stores the valid vertex count for line $i$.
-*   **`outFaces`**: `uint3` array. Layout: Contiguous blocks per line pair. Block $k$ starts at $k \times \text{maxFaces}$.
+*   **`outFaces`**: `uint3` array. Layout: Contiguous blocks per line pair. Block $k$ starts at $k \times \text{maxFaces}$ [S1, unofficial].
 *   **`outNormals`**: `float3` array. Layout: Same layout as `lineVertices`, shared between paired lines.
 
 ### Algorithm Steps
-The triangulation is performed per pair of lines. In a GPU implementation, each CUDA thread handles one line pair [S1, unofficial].
+The triangulation is performed per pair of lines [S1, unofficial]. In a GPU implementation, each CUDA thread handles one line pair [S1, unofficial].
 
 1.  **Initialization**:
     *   Calculate global thread ID: $id = \text{blockIdx.x} \times \text{blockDim.x} + \text{threadIdx.x}$ [S1, unofficial].
@@ -38,10 +38,17 @@ The triangulation is performed per pair of lines. In a GPU implementation, each 
     *   Calculate base offsets: $\text{line1Offset} = \text{currPair}.x \times \text{verticesPerLine}$, $\text{line2Offset} = \text{currPair}.y \times \text{verticesPerLine}$ [S1, unofficial].
     *   Initialize current indices: $\text{currIndex} = (0, 0)$ [S1, unofficial].
     *   Calculate maximum possible faces: $\text{maxFaces} = \text{verticesPerLine} \times 2 - 2$ [S1, unofficial].
+    *   Initialize divergence tracking: $\text{minDist} = \|\mathbf{v}_{1,0} - \mathbf{v}_{2,0}\|$, $\text{lastMinDist} = \text{minDist}$ [S2, unofficial].
 
 2.  **Triangulation Loop**:
     *   Iterate $\text{faceId}$ from $0$ to $\text{maxFaces} - 1$ [S1, unofficial].
     *   **Boundary Check**: If $\text{currIndex}.x + 1 \ge \text{lengths}.x$ or $\text{currIndex}.y + 1 \ge \text{lengths}.y$, break loop (end of stream line reached) [S1, unofficial].
+    *   **Divergence Check**:
+        *   Calculate direct distance: $\text{lenDirect} = \|\mathbf{v}_{1, i} - \mathbf{v}_{2, j}\|$ [S2, unofficial].
+        *   Update minimum distance: $\text{minDist} = \min(\text{minDist}, \text{lenDirect})$ [S2, unofficial].
+        *   Calculate ratio: $\text{distRatio} = \frac{\text{minDist}}{\text{lastMinDist}}$ [S2, unofficial].
+        *   If $\text{distRatio} > 1.5$, break loop to prevent degenerate triangles from rapid streamline divergence [S2, unofficial].
+        *   Update exponential moving average: $\text{lastMinDist} = \frac{3 \cdot \text{lastMinDist} + \text{minDist}}{4}$ [S2, unofficial].
     *   **Distance Calculation**:
         *   Calculate distance to next vertex on Line 1:
             $$ \text{dist1} = \begin{cases} \|\mathbf{v}_{1, i+1} - \mathbf{v}_{2, j}\| & \text{if } i+1 < \text{lengths}.x \\ \infty & \text{otherwise} \end{cases} $$
@@ -64,11 +71,6 @@ The triangulation is performed per pair of lines. In a GPU implementation, each 
         *   Compute edge vectors: $\vec{e_1} = \mathbf{v}_{1, i} - \mathbf{v}_{2, j}$ and $\vec{e_2} = \mathbf{v}_{\text{new}} - \mathbf{v}_{2, j}$ [S2, unofficial].
         *   Compute normal: $\mathbf{n} = \text{normalize}(\text{cross}(\vec{e_1}, \vec{e_2}))$ [S1, unofficial].
         *   Assign $\mathbf{n}$ to both $\text{outNormals}[\text{line1Offset} + \text{currIndex}.x]$ and $\text{outNormals}[\text{line2Offset} + \text{currIndex}.y]$ [S1, unofficial].
-    *   **Divergence Check (Optional/Implementation Specific)**:
-        *   Some implementations track the direct distance between corresponding points: $\text{lenDirect} = \|\mathbf{v}_{1, i} - \mathbf{v}_{2, j}\|$ [S2, unofficial].
-        *   Maintain an exponential moving average of minimum distance: $\text{lastMinDist}_{\text{new}} = \frac{3 \cdot \text{lastMinDist}_{\text{old}} + \text{minDist}}{4}$ [S2, unofficial].
-        *   Calculate ratio: $\text{distRatio} = \frac{\text{minDist}}{\text{lastMinDist}}$ [S2, unofficial].
-        *   If $\text{distRatio} > 1.5$, break the loop to prevent degenerate triangles from rapid streamline divergence [S2, unofficial].
     *   **Update Indices**:
         *   $\text{currIndex} = \text{nextIndex}$ [S1, unofficial].
 
@@ -81,9 +83,10 @@ The triangulation is performed per pair of lines. In a GPU implementation, each 
 ```python
 def compute_stream_surface_kernel(line_pairs, line_pairs_count, line_vertices, 
                                   vertices_per_line, line_lengths, out_faces, 
-                                  out_faces_counts, out_normals):
+                                  out_faces_counts, out_normals, 
+                                  block_idx, block_dim, thread_idx):
     # Global thread ID calculation
-    thread_id = blockIdx.x * blockDim.x + threadIdx.x
+    thread_id = block_idx * block_dim + thread_idx
     
     if thread_id >= line_pairs_count:
         return
@@ -116,10 +119,22 @@ def compute_stream_surface_kernel(line_pairs, line_pairs_count, line_vertices,
     curr_index_y = 0
     face_id = 0
     
+    # Initialize divergence tracking
+    min_dist = length(line1[0] - line2[0])
+    last_min_dist = min_dist
+    
     while face_id < max_faces:
         # Boundary check
         if curr_index_x + 1 >= lengths_x or curr_index_y + 1 >= lengths_y:
             break
+            
+        # Divergence check
+        len_direct = length(line1[curr_index_x] - line2[curr_index_y])
+        min_dist = min(min_dist, len_direct)
+        dist_ratio = min_dist / last_min_dist
+        if dist_ratio > 1.5:
+            break
+        last_min_dist = (3.0 * last_min_dist + min_dist) / 4.0
             
         # Distance calculations
         # dist1: distance from next vertex on line 1 to current vertex on line 2

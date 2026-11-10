@@ -1,0 +1,119 @@
+# Loss-based Adaptive Sampling
+
+Also called: Grid-based Loss Sampling
+
+## Overview
+Loss-based Adaptive Sampling is a ray sampling strategy that allocates more samples to image regions with higher rendering loss, identified by partitioning the image into a grid and computing mean loss per region [S2]. It differs from random ray sampling, which captures global structures, by prioritizing local structures and areas of inadequate convergence [S1, unofficial][S2].
+
+## How it works
+**Inputs:**
+*   Current network parameters.
+*   Source views (images).
+*   Total sample count per image $n_i$.
+*   Grid dimensions (typically $8 \times 8$, resulting in 64 regions) [S2].
+
+**Outputs:**
+*   A set of sampled pixels for the next iteration, weighted by region loss.
+
+**Data Structures:**
+*   **Region Loss Map:** A 1D array or 2D grid of size $N_{regions}$ (e.g., 64) storing $\mathcal{H}_i[j]$.
+*   **Probability Distribution:** A 1D array of size $N_{regions}$ storing $f_i[j]$.
+
+**Steps:**
+1.  **Uniform Sampling:** Randomly sample a uniform distribution of pixels $s_i$ from the input source views [S2].
+2.  **Grid Partitioning:** Partition the image into a grid of $N_{regions}$ square regions $R_j$ (where $j=1 \dots N_{regions}$) [S2].
+3.  **Loss Computation:** For each region $R_j$, compute the mean loss $\mathcal{H}_i[j]$ using the pixels $r_j$ sampled from that region ($r_j = s_i \cap R_j$) [S2]:
+    $$ \mathcal{H}_i[j] = \frac{1}{|r_j|} \sum_{(u,v) \in r_j} e_i^g[u, v] + e_i^p[u, v] $$
+    where $e_i^g$ is gradient loss and $e_i^p$ is pixel loss [S2].
+4.  **Normalization:** Normalize the region losses into a probability distribution $f_i[j]$:
+    $$ f_i[j] = \frac{\mathcal{H}_i[j]}{\sum_{m=1}^{N_{regions}} \mathcal{H}_i[m]} $$
+    [S2].
+5.  **Resampling:** Allocate $n_i \cdot f_i[j]$ samples to each region $R_j$ for the next iteration [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def loss_based_adaptive_sampling(image, network, n_i, grid_size=8):
+    # Step 1: Uniform sampling
+    # Randomly sample pixels s_i from the image
+    s_i = random_uniform_samples(image, count=n_i)
+    
+    # Step 2: Partition into grid
+    # Define regions R_j
+    regions = partition_image(image, grid_size) # e.g., 8x8 grid
+    
+    # Step 3: Compute region losses
+    region_losses = []
+    for j, region in enumerate(regions):
+        # Get pixels in this region from the uniform sample
+        r_j = [p for p in s_i if p in region]
+        
+        if len(r_j) == 0:
+            region_losses.append(0.0)
+            continue
+            
+        # Compute mean loss (gradient + pixel)
+        total_loss = 0.0
+        for pixel in r_j:
+            # Compute losses for this pixel
+            e_g = compute_gradient_loss(network, pixel)
+            e_p = compute_pixel_loss(network, pixel)
+            total_loss += e_g + e_p
+            
+        mean_loss = total_loss / len(r_j)
+        region_losses.append(mean_loss)
+        
+    # Step 4: Normalize to probability distribution
+    total_loss_sum = sum(region_losses)
+    if total_loss_sum == 0:
+        # Fallback to uniform if no loss
+        probs = [1.0 / len(region_losses)] * len(region_losses)
+    else:
+        probs = [loss / total_loss_sum for loss in region_losses]
+        
+    # Step 5: Resample based on probabilities
+    # Allocate n_i * f_i[j] samples to each region
+    next_samples = []
+    for j, region in enumerate(regions):
+        # Calculate number of samples for this region
+        # Note: n_i * probs[j] might be fractional; implementation details for rounding
+        # are not specified in sources [G: use round() or floor() to ensure integer counts]
+        num_samples = round(n_i * probs[j])
+        
+        # Sample uniformly from this region
+        region_samples = random_uniform_samples(region, count=num_samples)
+        next_samples.extend(region_samples)
+        
+    return next_samples
+```
+
+**Parameters:**
+*   **Grid Size:** $8 \times 8$ (64 regions) [S2].
+*   **Total Samples ($n_i$):** Not given in the sources.
+*   **Loss Types:** Gradient loss ($e^g$) and Pixel loss ($e^p$) [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Empty Regions:** If a region $R_j$ contains no sampled pixels $r_j$, the loss is undefined. The pseudocode handles this by skipping or assigning 0 loss [G].
+*   **Zero Total Loss:** If all region losses are zero, the probability distribution is undefined. The pseudocode falls back to uniform sampling [G].
+*   **Precision:** Floating point errors in loss summation should be handled to avoid division by zero or negative probabilities [G].
+
+## Subtopics
+
+### Patch-based Rendering
+Uses patch-based ray sampling for DW loss to capture local structures, contrasting with random ray sampling for MSE loss. [Patch-based Rendering](52-patch-based-rendering.md)
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of regions and the cost of loss computation per pixel. The normalization step is $O(N_{regions})$. Resampling is $O(n_i)$.
+*   **Memory Complexity:** $O(N_{regions})$ to store loss statistics and probabilities.
+*   **Strengths:** Allocates more samples to areas with high error, improving convergence in complex regions [S2].
+*   **Limitations:** Requires computing loss for all regions before resampling, which may add overhead [S2].
+*   **When to Use:** When rendering accuracy is critical in specific regions, and computational resources allow for adaptive sampling overhead [S2].
+*   **When Not to Use:** When real-time performance is required and adaptive sampling overhead is prohibitive [S2].
+
+## Background
+Loss-based Adaptive Sampling is used in neural radiance field reconstruction to improve training efficiency by focusing on regions with high rendering error [S2]. It is analogous to sample mining in deep learning [S2]. The method was proposed in "Efficient ray sampling for radiance fields reconstruction" [S2].
+
+## Sources
+[S1] DWTNeRF: Boosting Few-shot Neural Radiance Fields via Discrete Wavelet Transform, https://arxiv.org/abs/2501.12637v3, fetched 2026-10-27 (unofficial)
+[S2] Efficient ray sampling for radiance fields reconstruction, https://doi.org/10.1016/j.cag.2023.11.005, fetched 2026-10-27

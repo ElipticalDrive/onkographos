@@ -3,150 +3,178 @@
 Also called: GLSL Subgroup Histogram Sort, Subgroup Radix Sort
 
 ## Overview
-This method performs a single pass of a radix sort for a partition of elements (typically 4096) using GPU subgroup ballot operations to compute local offsets, thereby minimizing atomic contention on shared memory. It builds on [8-bit Radix Sort](2599-8-bit-radix-sort.md) by replacing per-element atomic updates with subgroup-level exclusive scans, making it suitable for high-throughput sorting in compute shaders where subgroup size is known and fixed.
+This method performs a single pass of a radix sort for a partition of elements (typically 4096) using GPU subgroup ballot operations to compute local offsets, thereby minimizing atomic contention on shared memory [S1, unofficial]. It builds on [8-bit Radix Sort](2599-8-bit-radix-sort.md) by replacing per-element atomic updates with subgroup-level exclusive scans, making it suitable for high-throughput sorting in compute shaders where subgroup size is known and fixed [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `keys`: Array of 32-bit unsigned integers to sort.
-- `values`: Array of 32-bit unsigned integers (or other data) to be permuted with keys.
-- `element_count`: Total number of valid elements in the partition.
-- `pass`: Current radix pass index (0–3 for 32-bit keys).
-- `local_keys`, `local_values`: Shared memory buffers for keys and values.
-- `local_histogram`: Shared memory buffer for histogram counts.
-- `local_histogram_sum`: Shared memory buffer for reduced histogram sums.
-- `global_histogram`: Global memory array storing cumulative histogram sums across partitions.
-- `partition_histogram`: Global memory array storing histogram sums for the current partition.
+- `keys`: Array of 32-bit unsigned integers to sort [S1, unofficial].
+- `values`: Array of 32-bit unsigned integers (or other data) to be permuted with keys [S1, unofficial].
+- `element_count`: Total number of valid elements in the partition [S1, unofficial].
+- `pass`: Current radix pass index (0–3 for 32-bit keys) [S1, unofficial].
+- `in_offset`: Offset into the input arrays for the current workgroup [S1, unofficial].
+- `out_offset`: Offset into the output arrays for the current workgroup [S1, unofficial].
+- `global_histogram`: Global memory array storing cumulative histogram sums across partitions [S1, unofficial].
+- `partition_histogram`: Global memory array storing histogram sums for the current partition [S1, unofficial].
 
 **Outputs:**
-- `keys`: Sorted keys written to global memory.
-- `values`: Corresponding values written to global memory.
+- `keys`: Sorted keys written to global memory [S1, unofficial].
+- `values`: Corresponding values written to global memory [S1, unofficial].
 
 **Data Structures:**
-- `local_histogram`: `uint` array of size `SHMEM_SIZE` (4096). Layout: `local_histogram[gl_NumSubgroups * radix + subgroup_index]`. Stores per-subgroup, per-radix bin counts.
-- `local_histogram_sum`: `uint` array of size `RADIX` (256). Stores the sum of bin counts across subgroups for a specific radix.
-- `local_keys`: `uint` array of size `PARTITION_SIZE` (4096).
-- `local_values`: `uint` array of size `PARTITION_SIZE` (4096).
-- `local_offsets`: `uint` array of size `PARTITION_SIZE` (4096). Stores local destination offsets for each element.
-- `subgroup_histogram`: `uint` array of size `gl_NumSubgroups`. Stores per-subgroup histogram sums.
+- `local_histogram`: `uint` array of size `SHMEM_SIZE` (4096) [S1, unofficial]. Layout: `local_histogram[gl_NumSubgroups * radix + subgroup_index]` [S1, unofficial]. Stores per-subgroup, per-radix bin counts [S1, unofficial].
+- `local_histogram_sum`: `uint` array of size `RADIX` (256) [S1, unofficial]. Stores the sum of bin counts across subgroups for a specific radix [S1, unofficial].
+- `local_keys`: `uint` array of size `PARTITION_SIZE` (4096) [S1, unofficial].
+- `local_values`: `uint` array of size `PARTITION_SIZE` (4096) [S1, unofficial].
+- `local_offsets`: `uint` array of size `PARTITION_SIZE` (4096) [S1, unofficial]. Stores local destination offsets for each element [S1, unofficial].
+- `subgroup_histogram`: `uint` array of size `gl_NumSubgroups` [S1, unofficial]. Stores per-subgroup histogram sums [S1, unofficial].
 
 **Parameters:**
-- `PARTITION_SIZE`: 4096.
-- `RADIX`: 256 ($2^8$).
-- `pass`: 0, 1, 2, or 3.
+- `PARTITION_SIZE`: 4096 [S1, unofficial].
+- `RADIX`: 256 ($2^8$) [S1, unofficial].
+- `pass`: 0, 1, 2, or 3 [S1, unofficial].
 
 **Steps:**
+1. **Initialize Local Histograms:** For each radix index $i$ from 0 to `RADIX`-1, iterate over all subgroups and set `local_histogram[gl_NumSubgroups * i + subgroup_index] = 0` [S1, unofficial].
+2. **Load Keys and Values:** For each element $i$ in the partition, calculate global index: `global_index = gl_GlobalInvocationID.x + in_offset` [S1, unofficial]. If `global_index < element_count`, load `local_keys[i] = keys[key_index + in_offset]` and `local_values[i] = values[key_index + in_offset]` [S1, unofficial]. Else, load `0xffffffff` for keys and `0` for values [S1, unofficial].
+3. **Extract Radix Digit:** For each element $i$, compute `digit = bitfieldExtract(local_keys[i], pass * 8, 8)` [S1, unofficial].
+4. **Compute Subgroup Ballot Masks:** For each element $i$, initialize `mask = subgroupBallot(true)` [S1, unofficial]. For each bit $j$ from 0 to 7, compute `ballot = subgroupBallot(digit == (1 << j))` and update `mask &= uvec4(digit - 1) ^ ballot` [S1, unofficial]. This creates a mask where bits are set if the corresponding radix digit matches the current element's digit [S1, unofficial].
+5. **Compute Subgroup Offset and Count:** For each element $i$, compute `subgroup_offset = subgroupBallotExclusiveBitCount(mask)` and `radix_count = subgroupBallotBitCount(mask)` [S1, unofficial].
+6. **Reduce Local Histogram Across Subgroups:** For each index $i$ in `local_histogram` with stride `WORKGROUP_SIZE`, compute `sum = subgroupAdd(v)` and `excl = subgroupExclusiveAdd(v)` [S1, unofficial]. Store `excl` in `local_histogram[i]` [S1, unofficial]. If `thread_index == 0`, store `sum` in `local_histogram_sum[i / gl_SubgroupSize]` [S1, unofficial].
+7. **Reduce `local_histogram_sum` Across Subgroups (128 elements):** For each index $i$ from 0 to `intermediate_offset`-1 (where `intermediate_offset = RADIX * gl_NumSubgroups / gl_SubgroupSize`), compute `sum` and `excl` [S1, unofficial]. Store `excl` in `local_histogram_sum[index]` [S1, unofficial]. If `thread_index == 0`, store `sum` in `local_histogram_sum[intermediate_offset + index / gl_SubgroupSize]` [S1, unofficial].
+8. **Reduce `local_histogram_sum` Further (4 or 1 elements):** For each index $i$ from 0 to `intermediate_size`-1, compute `excl = subgroupExclusiveAdd(v)` and store in `local_histogram_sum[intermediate_offset + index]` [S1, unofficial].
+9. **Add Reduced Sums Back to `local_histogram_sum`:** For each index $i$ from 0 to `intermediate_offset`-1, add `local_histogram_sum[intermediate_offset + index / gl_SubgroupSize]` to `local_histogram_sum[index]` [S1, unofficial].
+10. **Add Reduced Sums to `local_histogram`:** For each index $i$ in `local_histogram` with stride `WORKGROUP_SIZE`, add `local_histogram_sum[i / gl_SubgroupSize]` to `local_histogram[i]` [S1, unofficial].
+11. **Post-Scan Stage: Update Local Offsets:** For each element $i$, add `local_histogram[gl_NumSubgroups * radix + subgroup_index]` to `local_offsets[i]` [S1, unofficial]. Then, if `subgroup_histogram[i] > 0`, `atomicAdd` `subgroup_histogram[i]` to `local_histogram[gl_NumSubgroups * radix + subgroup_index]` [S1, unofficial].
+12. **Compute Global Offsets:** For each index $i$ from 0 to `RADIX`-1, compute `v = index == 0 ? 0 : local_histogram[gl_NumSubgroups * index - 1]` [S1, unofficial]. Set `local_histogram_sum[index] = global_histogram[RADIX * pass + index] + partition_histogram[RADIX * partition_index + index] - v` [S1, unofficial].
+13. **Rearrange Keys into `local_histogram` (Aliasing Memory):** For each element $i$, set `local_histogram[local_offsets[i]] = local_keys[i]` [S1, unofficial].
+14. **Binning: Write Keys to Global Memory:** For each element $i$, extract radix from `local_histogram[i]`, compute `dst_offset = local_histogram_sum[radix] + i` [S1, unofficial]. If `dst_offset < element_count`, write `keys[dst_offset + out_offset] = key` [S1, unofficial]. Store `dst_offset` in `local_keys[i / WORKGROUP_SIZE]` [S1, unofficial].
+15. **Rearrange Values into `local_histogram`:** For each element $i$, set `local_histogram[local_offsets[i]] = local_values[i]` [S1, unofficial].
+16. **Binning: Write Values to Global Memory:** For each element $i$, get value from `local_histogram[i]`, get `dst_offset` from `local_keys[i / WORKGROUP_SIZE]` [S1, unofficial]. If `dst_offset < element_count`, write `values[dst_offset + out_offset] = value` [S1, unofficial].
 
-1. **Initialize Local Histograms:**
-   For each radix index $i$ from 0 to `RADIX`-1, iterate over all subgroups and set `local_histogram[gl_NumSubgroups * i + subgroup_index] = 0`.
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-2. **Load Keys and Values:**
-   For each element $i$ in the partition:
-   - Calculate global index: `global_index = gl_GlobalInvocationID.x + in_offset`.
-   - If `global_index < element_count`:
-     - `local_keys[i] = keys[key_index + in_offset]`
-     - `local_values[i] = values[key_index + in_offset]`
-   - Else:
-     - `local_keys[i] = 0xffffffff`
-     - `local_values[i] = 0`
+```python
+def subgroup_radix_sort_partition(keys, values, element_count, pass_idx, in_offset, out_offset,
+                                  global_histogram, partition_histogram, partition_index,
+                                  local_histogram, local_histogram_sum, local_keys, local_values,
+                                  local_offsets, subgroup_histogram, WORKGROUP_SIZE, gl_SubgroupSize,
+                                  gl_NumSubgroups, RADIX=256, PARTITION_SIZE=4096):
+    # 1. Initialize Local Histograms
+    for radix in range(RADIX):
+        for sg in range(gl_NumSubgroups):
+            local_histogram[gl_NumSubgroups * radix + sg] = 0
 
-3. **Extract Radix Digit:**
-   For each element $i$:
-   - `digit = bitfieldExtract(local_keys[i], pass * 8, 8)`
+    # 2. Load Keys and Values
+    for i in range(PARTITION_SIZE):
+        global_index = gl_GlobalInvocationID_x + in_offset
+        if global_index < element_count:
+            local_keys[i] = keys[global_index]
+            local_values[i] = values[global_index]
+        else:
+            local_keys[i] = 0xFFFFFFFF
+            local_values[i] = 0
 
-4. **Compute Subgroup Ballot Masks:**
-   For each element $i$:
-   - `mask = subgroupBallot(true)`
-   - For each bit $j$ from 0 to 7:
-     - `ballot = subgroupBallot(digit == (1 << j))`
-     - `mask &= uvec4(digit - 1) ^ ballot`
-   - This creates a mask where bits are set if the corresponding radix digit matches the current element's digit.
+    # 3. Extract Radix Digit
+    digit = bitfield_extract(local_keys[i], pass_idx * 8, 8)
 
-5. **Compute Subgroup Offset and Count:**
-   For each element $i$:
-   - `subgroup_offset = subgroupBallotExclusiveBitCount(mask)`
-   - `radix_count = subgroupBallotBitCount(mask)`
+    # 4. Compute Subgroup Ballot Masks
+    mask = subgroup_ballot(True)
+    for j in range(8):
+        ballot = subgroup_ballot(digit == (1 << j))
+        mask &= (digit - 1) ^ ballot
 
-6. **Reduce Local Histogram Across Subgroups:**
-   For each index $i$ in `local_histogram` with stride `WORKGROUP_SIZE`:
-   - `v = local_histogram[i]`
-   - `sum = subgroupAdd(v)`
-   - `excl = subgroupExclusiveAdd(v)`
-   - `local_histogram[i] = excl`
-   - If `thread_index == 0`:
-     - `local_histogram_sum[i / gl_SubgroupSize] = sum`
+    # 5. Compute Subgroup Offset and Count
+    subgroup_offset = subgroup_ballot_exclusive_bit_count(mask)
+    radix_count = subgroup_ballot_bit_count(mask)
 
-7. **Reduce `local_histogram_sum` Across Subgroups (128 elements):**
-   For each index $i$ from 0 to `intermediate_offset`-1 (where `intermediate_offset = RADIX * gl_NumSubgroups / gl_SubgroupSize`):
-   - `v = local_histogram_sum[i]`
-   - `sum = subgroupAdd(v)`
-   - `excl = subgroupExclusiveAdd(v)`
-   - `local_histogram_sum[i] = excl`
-   - If `thread_index == 0`:
-     - `local_histogram_sum[intermediate_offset + i / gl_SubgroupSize] = sum`
+    # 6. Reduce Local Histogram Across Subgroups
+    for i in range(0, PARTITION_SIZE, WORKGROUP_SIZE):
+        v = local_histogram[i]
+        sum_val = subgroup_add(v)
+        excl = subgroup_exclusive_add(v)
+        local_histogram[i] = excl
+        if thread_index == 0:
+            local_histogram_sum[i // gl_SubgroupSize] = sum_val
 
-8. **Reduce `local_histogram_sum` Further (4 or 1 elements):**
-   For each index $i$ from 0 to `intermediate_size`-1:
-   - `v = local_histogram_sum[intermediate_offset + i]`
-   - `excl = subgroupExclusiveAdd(v)`
-   - `local_histogram_sum[intermediate_offset + i] = excl`
+    # 7. Reduce local_histogram_sum Across Subgroups
+    intermediate_offset = RADIX * gl_NumSubgroups // gl_SubgroupSize
+    for i in range(intermediate_offset):
+        v = local_histogram_sum[i]
+        sum_val = subgroup_add(v)
+        excl = subgroup_exclusive_add(v)
+        local_histogram_sum[i] = excl
+        if thread_index == 0:
+            local_histogram_sum[intermediate_offset + i // gl_SubgroupSize] = sum_val
 
-9. **Add Reduced Sums Back to `local_histogram_sum`:**
-   For each index $i$ from 0 to `intermediate_offset`-1:
-   - `local_histogram_sum[i] += local_histogram_sum[intermediate_offset + i / gl_SubgroupSize]`
+    # 8. Reduce local_histogram_sum Further
+    intermediate_size = intermediate_offset // gl_SubgroupSize
+    for i in range(intermediate_size):
+        v = local_histogram_sum[intermediate_offset + i]
+        excl = subgroup_exclusive_add(v)
+        local_histogram_sum[intermediate_offset + i] = excl
 
-10. **Add Reduced Sums to `local_histogram`:**
-    For each index $i$ in `local_histogram` with stride `WORKGROUP_SIZE`:
-    - `local_histogram[i] += local_histogram_sum[i / gl_SubgroupSize]`
+    # 9. Add Reduced Sums Back to local_histogram_sum
+    for i in range(intermediate_offset):
+        local_histogram_sum[i] += local_histogram_sum[intermediate_offset + i // gl_SubgroupSize]
 
-11. **Post-Scan Stage: Update Local Offsets:**
-    For each element $i$:
-    - `local_offsets[i] = local_histogram[gl_NumSubgroups * radix + subgroup_index]`
-    - If `subgroup_histogram[subgroup_index] > 0`:
-      - `atomicAdd(local_histogram[gl_NumSubgroups * radix + subgroup_index], subgroup_histogram[subgroup_index])`
+    # 10. Add Reduced Sums to local_histogram
+    for i in range(0, PARTITION_SIZE, WORKGROUP_SIZE):
+        local_histogram[i] += local_histogram_sum[i // gl_SubgroupSize]
 
-12. **Compute Global Offsets:**
-    For each index $i$ from 0 to `RADIX`-1:
-    - `v = (i == 0) ? 0 : local_histogram[gl_NumSubgroups * i - 1]`
-    - `local_histogram_sum[i] = global_histogram[RADIX * pass + i] + partition_histogram[RADIX * partition_index + i] - v`
+    # 11. Post-Scan Stage: Update Local Offsets
+    for i in range(PARTITION_SIZE):
+        local_offsets[i] += local_histogram[gl_NumSubgroups * pass_idx + subgroup_index]
+        if subgroup_histogram[subgroup_index] > 0:
+            atomic_add(local_histogram[gl_NumSubgroups * pass_idx + subgroup_index],
+                       subgroup_histogram[subgroup_index])
 
-13. **Rearrange Keys into `local_histogram` (Aliasing Memory):**
-    For each element $i$:
-    - `local_histogram[local_offsets[i]] = local_keys[i]`
-    - *Note: A barrier is required here to ensure all histogram data is consumed before overwriting.*
+    # 12. Compute Global Offsets
+    for i in range(RADIX):
+        v = 0 if i == 0 else local_histogram[gl_NumSubgroups * i - 1]
+        local_histogram_sum[i] = global_histogram[RADIX * pass_idx + i] + \
+                                 partition_histogram[RADIX * partition_index + i] - v
 
-14. **Binning: Write Keys to Global Memory:**
-    For each element $i$:
-    - `radix = bitfieldExtract(local_histogram[i], pass * 8, 8)`
-    - `dst_offset = local_histogram_sum[radix] + i`
-    - If `dst_offset < element_count`:
-      - `keys[dst_offset + out_offset] = local_histogram[i]`
-    - `local_keys[i / WORKGROUP_SIZE] = dst_offset`
+    # 13. Rearrange Keys into local_histogram (Aliasing Memory)
+    for i in range(PARTITION_SIZE):
+        local_histogram[local_offsets[i]] = local_keys[i]
+    barrier() # Ensure histogram data is consumed before overwriting [G]
 
-15. **Rearrange Values into `local_histogram`:**
-    For each element $i$:
-    - `local_histogram[local_offsets[i]] = local_values[i]`
+    # 14. Binning: Write Keys to Global Memory
+    for i in range(PARTITION_SIZE):
+        radix = bitfield_extract(local_histogram[i], pass_idx * 8, 8)
+        dst_offset = local_histogram_sum[radix] + i
+        if dst_offset < element_count:
+            keys[dst_offset + out_offset] = local_histogram[i]
+        local_keys[i // WORKGROUP_SIZE] = dst_offset
 
-16. **Binning: Write Values to Global Memory:**
-    For each element $i$:
-    - `value = local_histogram[i]`
-    - `dst_offset = local_keys[i / WORKGROUP_SIZE]`
-    - If `dst_offset < element_count`:
-      - `values[dst_offset + out_offset] = value`
+    # 15. Rearrange Values into local_histogram
+    for i in range(PARTITION_SIZE):
+        local_histogram[local_offsets[i]] = local_values[i]
+
+    # 16. Binning: Write Values to Global Memory
+    for i in range(PARTITION_SIZE):
+        value = local_histogram[i]
+        dst_offset = local_keys[i // WORKGROUP_SIZE]
+        if dst_offset < element_count:
+            values[dst_offset + out_offset] = value
+```
+*Note: `subgroup_ballot`, `subgroup_add`, `subgroup_exclusive_add`, `subgroup_ballot_exclusive_bit_count`, `subgroup_ballot_bit_count`, `bitfield_extract`, `atomic_add`, and `barrier()` are standard GLSL subgroup and memory operations [G].*
 
 **Pitfalls:**
-- **Boundary Check:** When loading keys/values, if `key_index >= element_count`, load `0xffffffff` for keys and `0` for values to prevent out-of-bounds access and ensure invalid elements are sorted to the end.
-- **Memory Aliasing:** `local_histogram` is reused for storing keys after the histogram reduction phase to save shared memory. This requires barriers to ensure all histogram data is consumed before overwriting.
+- **Boundary Check:** When loading keys/values, if `key_index >= element_count`, load `0xffffffff` for keys and `0` for values to prevent out-of-bounds access and ensure invalid elements are sorted to the end [S1, unofficial].
+- **Memory Aliasing:** `local_histogram` is reused for storing keys after the histogram reduction phase to save shared memory [S1, unofficial]. This requires barriers to ensure all histogram data is consumed before overwriting [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ per radix pass, where $N$ is the partition size. The use of subgroup ballot operations reduces the constant factor compared to atomic-based approaches.
-- **Memory Complexity:** $O(PARTITION_SIZE)$ shared memory for keys, values, and histogram buffers.
-- **Strengths:** Minimizes atomic contention by using subgroup-level exclusive scans. Efficient for small to medium partition sizes where subgroup operations are fast.
-- **Limitations:** Requires fixed subgroup size. Performance may degrade if subgroup size is not a power of two or if the hardware does not support efficient ballot operations.
-- **When to Use:** High-throughput sorting in compute shaders where subgroup size is known and fixed, and atomic contention is a bottleneck.
-- **When Not to Use:** When subgroup size is variable or unknown, or when sorting very large partitions where global memory bandwidth becomes the bottleneck.
+- **Time Complexity:** $O(N)$ per radix pass, where $N$ is the partition size [S1, unofficial]. The use of subgroup ballot operations reduces the constant factor compared to atomic-based approaches [S1, unofficial].
+- **Memory Complexity:** $O(PARTITION_SIZE)$ shared memory for keys, values, and histogram buffers [S1, unofficial].
+- **Strengths:** Minimizes atomic contention by using subgroup-level exclusive scans [S1, unofficial]. Efficient for small to medium partition sizes where subgroup operations are fast [S1, unofficial].
+- **Limitations:** Requires fixed subgroup size [S1, unofficial]. Performance may degrade if subgroup size is not a power of two or if the hardware does not support efficient ballot operations [S1, unofficial].
+- **When to Use:** High-throughput sorting in compute shaders where subgroup size is known and fixed, and atomic contention is a bottleneck [S1, unofficial].
+- **When Not to Use:** When subgroup size is variable or unknown, or when sorting very large partitions where global memory bandwidth becomes the bottleneck [S1, unofficial].
 
 ## Background
-This method is derived from the implementation in the Godot Gaussian Splatting project, which uses subgroup ballot operations to optimize radix sort partitions. It is an adaptation of parallel radix sort techniques to leverage GPU subgroup primitives for improved performance.
+This method is derived from the implementation in the Godot Gaussian Splatting project, which uses subgroup ballot operations to optimize radix sort partitions [S1, unofficial]. It is an adaptation of parallel radix sort techniques to leverage GPU subgroup primitives for improved performance [S1, unofficial].
 
 ## Sources
 [S1] ReconWorldLab/godot-gaussian-splatting, https://github.com/ReconWorldLab/godot-gaussian-splatting, fetched 2026-10-27 (unofficial)

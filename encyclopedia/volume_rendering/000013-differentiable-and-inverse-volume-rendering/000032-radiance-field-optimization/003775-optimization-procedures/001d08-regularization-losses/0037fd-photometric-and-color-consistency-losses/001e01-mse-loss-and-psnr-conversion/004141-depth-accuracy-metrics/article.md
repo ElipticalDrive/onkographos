@@ -1,0 +1,112 @@
+# Depth Accuracy Metrics
+
+Also called: AbsRel, Depth Evaluation Metrics, Depth error metrics, RMSE, RMSE log, SqRel
+
+## Overview
+Depth Accuracy Metrics quantify the pixel-wise discrepancy between a predicted depth map $\hat{d}$ and a ground truth depth map $d$ [S1, S2]. They serve as the primary evaluation standard for depth prior quality in differentiable volume rendering and inverse rendering pipelines [S2]. Unlike photometric metrics such as MSE or PSNR which evaluate color fidelity, these metrics assess geometric accuracy [S1]. They are distinguished from sibling metrics like SSIM (structural similarity) and Normal-L2 (surface orientation error) by focusing strictly on scalar depth value errors rather than structural coherence or surface normals [S1, S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** Ground truth depth map $d$, predicted depth map $\hat{d}$.
+*   **Input:** $K$, the count of pixels with valid ground truth depth [S1].
+*   **Output:** Scalar metric values (RMSE, RMSE log, AbsRel, SqRel).
+
+**Data Structures**
+The depth maps are treated as 2D arrays or vectors of size $K$ containing valid depth values. No specific bit-packing is required; standard floating-point precision is assumed for the calculations [S1].
+
+**Formulas**
+Let $k=1, \dots, K$ be the indices of pixels with valid ground truth depth [S1].
+
+1.  **Root Mean Squared Error (RMSE):**
+    $$RMSE(d, \hat{d}) = \sqrt{\frac{1}{K} \sum_{k=1,...,K} (d_k - \hat{d}_k)^2}$$
+    [S1]
+
+2.  **Root Mean Squared Error (Log Scale) (RMSE log):**
+    $$RMSE_{log}(d, \hat{d}) = \sqrt{\frac{1}{K} \sum_{k=1,...,K} (\log d_k - \log \hat{d}_k)^2}$$
+    [S1]
+
+3.  **Absolute Relative Error (AbsRel):**
+    $$AbsRel(d, \hat{d}) = \frac{1}{K} \sum_{k=1,...,K} \frac{|d_k - \hat{d}_k|}{d_k}$$
+    [S1]
+
+4.  **Squared Relative Error (SqRel):**
+    $$SqRel(d, \hat{d}) = \frac{1}{K} \sum_{k=1,...,K} \frac{(d_k - \hat{d}_k)^2}{d_k}$$
+    [S1]
+
+**Parameters**
+*   $K$: Number of pixels with valid ground truth depth [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_depth_metrics(d, d_hat, valid_mask):
+    """
+    Computes RMSE, RMSE_log, AbsRel, and SqRel.
+    
+    Args:
+        d: Array of ground truth depth values.
+        d_hat: Array of predicted depth values.
+        valid_mask: Boolean array indicating valid pixels (True/False).
+        
+    Returns:
+        dict: Dictionary containing RMSE, RMSE_log, AbsRel, SqRel.
+    """
+    # Filter valid pixels
+    d_valid = [d[i] for i, valid in enumerate(valid_mask) if valid]
+    d_hat_valid = [d_hat[i] for i, valid in enumerate(valid_mask) if valid]
+    
+    K = len(d_valid)
+    
+    if K == 0:
+        return {"RMSE": 0.0, "RMSE_log": 0.0, "AbsRel": 0.0, "SqRel": 0.0}
+
+    # RMSE
+    sum_sq_err = sum((d_valid[i] - d_hat_valid[i])**2 for i in range(K))
+    rmse = math.sqrt(sum_sq_err / K)
+    
+    # RMSE_log
+    # Note: log is natural logarithm or base 10; sources do not specify base, 
+    # but consistency is key. Standard implementation usually uses natural log or base 10.
+    # We use natural log as per standard mathematical notation in many CV papers, 
+    # though base 10 is also common. The formula structure remains identical.
+    sum_log_sq_err = sum((math.log(d_valid[i]) - math.log(d_hat_valid[i]))**2 for i in range(K))
+    rmse_log = math.sqrt(sum_log_sq_err / K)
+    
+    # AbsRel
+    sum_abs_rel = sum(abs(d_valid[i] - d_hat_valid[i]) / d_valid[i] for i in range(K))
+    abs_rel = sum_abs_rel / K
+    
+    # SqRel
+    sum_sq_rel = sum((d_valid[i] - d_hat_valid[i])**2 / d_valid[i] for i in range(K))
+    sq_rel = sum_sq_rel / K
+    
+    return {
+        "RMSE": rmse,
+        "RMSE_log": rmse_log,
+        "AbsRel": abs_rel,
+        "SqRel": sq_rel
+    }
+```
+
+**Edge Cases and Pitfalls**
+*   **Division by Zero:** In AbsRel and SqRel, if $d_k = 0$, the metric is undefined. The sources specify using pixels with "valid ground truth depth," implying $d_k > 0$ for valid pixels [S1]. Implementers must ensure invalid or zero-depth pixels are excluded from the valid set $K$.
+*   **Logarithm Domain:** For RMSE log, $d_k$ and $\hat{d}_k$ must be strictly positive. Negative depth predictions should be handled or clipped before applying the logarithm.
+*   **Scale Sensitivity:** AbsRel and SqRel are scale-invariant relative to the ground truth magnitude, making them robust for scenes with varying depth scales, whereas RMSE is scale-dependent [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(K)$ for each metric, where $K$ is the number of valid pixels. The operations are simple arithmetic reductions.
+*   **Memory Complexity:** $O(K)$ to store the filtered valid depth values.
+*   **Strengths:** RMSE provides a global error measure in depth units. AbsRel and SqRel are robust to scale differences and emphasize relative errors, which is critical for large-scale scenes [S1, S2]. RMSE log emphasizes errors in closer objects (smaller depths) due to the logarithmic compression [S1].
+*   **Limitations:** They do not account for structural similarity (addressed by SSIM) or surface normal consistency (addressed by Normal-L2) [S1, S2]. They are sensitive to outliers in RMSE.
+*   **When to use:** Standard evaluation for depth estimation quality in NeRF and inverse rendering [S1, S2].
+*   **When not to use:** When structural coherence is more important than pixel-wise accuracy (use SSIM) or when surface geometry orientation is the primary concern (use Normal-L2).
+
+## Background
+These metrics are standard in computer vision for evaluating depth estimation and completion tasks [S2]. They were adopted in the context of Neural Radiance Fields (NeRF) and differentiable rendering to evaluate the quality of depth priors and predicted depth maps [S1, S2]. The specific formulas for RMSE, RMSE log, AbsRel, and SqRel are cited from standard depth evaluation literature [S1]. The sources indicate their use in comparing methods like DäRF and DiffDP on datasets such as Tanks and Temples and ScanNet [S1, S2].
+
+## Sources
+[S1] Depth-Guided NeRF Training via Earth Mover’s Distance, https://link.springer.com/chapter/10.1007/978-3-031-73039-9_1, fetched 2026-10-27
+[S2] Digging into Depth Priors for Outdoor Neural Radiance Fields, https://doi.org/10.1145/3581783.3612306, fetched 2026-10-30

@@ -10,14 +10,14 @@ The 3-Sphere Intersection method computes the geometric points where the surface
 **Outputs:** A set of intersection points $\mathbf{p}$ [S1]. Typically, there are zero, one, or two solutions [G].
 
 **Data Structures:**
-The algorithm operates on 3D vectors. Exact data structure layouts, fields, sizes, and bit packing are Not given in the sources. No persistent data structures are required beyond the input sphere parameters [G].
+The algorithm operates on 3D vectors. Exact data structure layouts, fields, sizes, and bit packing are Not given in the sources [G]. No persistent data structures are required beyond the input sphere parameters [G].
 
 **Steps:**
 1. **Construct Local Frame:** Define an orthonormal basis $(\mathbf{e}_x, \mathbf{e}_y, \mathbf{e}_z)$ aligned with the plane passing through the sphere centers [S1].
-   * Compute the normal to the plane: $\mathbf{n} = (\mathbf{p}_1 - \mathbf{p}_0) \times (\mathbf{p}_2 - \mathbf{p}_0)$.
+   * Compute the normal to the plane: $\mathbf{n} = (\mathbf{p}_1 - \mathbf{p}_0) \times (\mathbf{p}_2 - \mathbf{p}_0)$ [S1].
    * Set $\mathbf{e}_z = \frac{\mathbf{n}}{\|\mathbf{n}\|}$ [S1].
    * Set $\mathbf{e}_x = \frac{\mathbf{p}_1 - \mathbf{p}_0}{\|\mathbf{p}_1 - \mathbf{p}_0\|}$ [S1].
-   * Set $\mathbf{e}_y$ to complete the right-handed orthonormal basis. The source text contains a typo ($e_y = e_x \times e_x$); geometrically, this must be $\mathbf{e}_y = \mathbf{e}_z \times \mathbf{e}_x$ to ensure orthogonality [S1, G].
+   * Set $\mathbf{e}_y$ to complete the right-handed orthonormal basis [S1]. The source text contains a typo ($e_y = e_x \times e_x$); geometrically, this must be $\mathbf{e}_y = \mathbf{e}_z \times \mathbf{e}_x$ to ensure orthogonality [S1, G].
 2. **Compute Local Coordinates of Centers:** Project the relative positions of the centers onto the local frame to determine parameters $a, b, c$ [S1].
    * $a = \|\mathbf{p}_1 - \mathbf{p}_0\|$ [S1].
    * $\mathbf{v}_{20} = \mathbf{p}_2 - \mathbf{p}_0$ [S1].
@@ -111,7 +111,7 @@ def sphere_trilateration(p0, r0, p1, r1, p2, r2):
     pt1 = vec_add(p0, vec_add(vec_scale(e_x, x), vec_add(vec_scale(e_y, y), vec_scale(e_z, z))))
     pt2 = vec_add(p0, vec_add(vec_scale(e_x, x), vec_add(vec_scale(e_y, y), vec_scale(e_z, -z))))
     
-    if rad == 0:
+    if rad <= 1e-9:
         return [pt1]
     else:
         return [pt1, pt2]
@@ -121,7 +121,7 @@ def sphere_trilateration(p0, r0, p1, r1, p2, r2):
 *   $a = \|\mathbf{p}_1 - \mathbf{p}_0\|$ [S1].
 *   $b = (\mathbf{p}_2 - \mathbf{p}_0) \cdot \mathbf{e}_x$ [S1].
 *   $c = (\mathbf{p}_2 - \mathbf{p}_0) \cdot \mathbf{e}_y$ [S1].
-*   Typical values: Not given in the sources.
+*   Typical values: Not given in the sources [S1].
 
 **Edge Cases and Pitfalls:**
 *   **Collinear Centers:** If $\mathbf{p}_0, \mathbf{p}_1, \mathbf{p}_2$ are collinear, $\mathbf{n}$ is zero and $\mathbf{e}_z$ is undefined [S1].
@@ -132,10 +132,10 @@ def sphere_trilateration(p0, r0, p1, r1, p2, r2):
 ## Operating characteristics
 *   **Time Complexity:** $O(1)$ per triplet of spheres [G].
 *   **Memory Complexity:** $O(1)$ auxiliary space [G].
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources [S1].
+*   **Scaling:** Not given in the sources [S1].
 *   **Strengths:** Deterministic analytical solution; no iterative convergence required; efficient for generating dense point clouds on implicit surfaces [S1, G].
-*   **Limitations:** Only works for exactly three spheres. Requires the spheres to actually intersect. Degenerate configurations (collinear centers) must be handled [S1].
+*   **Limitations:** Only works for exactly three spheres. Requires the spheres to actually intersect [S1]. Degenerate configurations (collinear centers) must be handled [S1].
 *   **When to Use:** Sphere carving algorithms for generating signed distance fields from point clouds or meshes [S1].
 *   **When Not to Use:** When fewer than three spheres are available, when sphere centers are collinear, or when an approximate/iterative solution is preferred over an exact analytical one [G].
 

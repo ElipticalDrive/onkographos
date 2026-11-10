@@ -1,121 +1,128 @@
 # Reparametrized Integral Gradients
 
-Also called: Loubet et al. method, Moving visibility discontinuities, Reparameterization for Discontinuous Integrands, Reparameterized Differentiable Path Tracing
+Also called: Bias Removal via Reparameterization, Loubet et al. method, Moving visibility discontinuities, Path Space Sampling, Reparameterization for Discontinuous Integrands, Reparameterized Differentiable Path Tracing
 
 ## Overview
-Reparametrized Integral Gradients is a technique for differentiating rendering integrals with discontinuous integrands by applying changes of variables that remove the dependence of discontinuity locations on scene parameters [S1][S2, S3, unofficial]. Unlike methods that explicitly sample edges or decompose integrals into interior and boundary terms, this approach warps the integration domain so that moving discontinuities become stationary in the transformed space, allowing differentiation under the integral sign without explicit boundary sampling [S1][S3, unofficial]. It sets itself apart from [Reparameterized Volume Sampling](3309-reparameterized-volume-sampling.md) by focusing on general visibility discontinuities (edges) rather than just volume density variations, and from [Boundary Path Integral Formulation](3389-boundary-path-integral-formulation.md) by avoiding the explicit estimation of boundary terms [S2, unofficial].
+Reparametrized Integral Gradients is a technique for differentiable rendering that eliminates bias in gradients caused by visibility discontinuities moving with scene parameters [S1, S3]. Unlike explicit edge sampling methods that require detecting and sampling geometric boundaries, this method applies a change of variables to transform the integration domain such that discontinuities become static (parameter-independent) [S1][S2, unofficial]. This allows the gradient to be computed by differentiating under the integral sign without explicitly handling boundary terms [S5, unofficial]. It sets itself apart from siblings like [Reparameterized Volume Sampling](3309-reparameterized-volume-sampling.md) by focusing on spherical and path-space reparameterizations to handle visibility changes, rather than volume density variations.
 
 ## How it works
-The method relies on the principle that if a discontinuity in an integrand $f(\omega, \pi)$ depends on a scene parameter $\pi$, one can define a transformation $T$ such that the new integrand has a discontinuity at a location independent of $\pi$.
+The method addresses the failure of naive differentiation when the support of the integrand or the location of discontinuities depends on parameters $\theta$ [S1, S3]. Naive differentiation of path tracers with visibility-affecting parameters produces incorrect silhouette gradients and reflections [S3].
 
-**Inputs and Outputs:**
-- Input: Scene parameters $\pi$ (e.g., object positions, rotations, material properties), integrand $f(\omega, \pi)$ defined over a domain (e.g., spherical domain $S^2$ for light sampling or pixel domain for visibility).
-- Output: Gradient $\frac{\partial I}{\partial \pi}$ where $I = \int f(\omega, \pi) d\omega$.
+### Inputs and Outputs
+- **Inputs:** Scene parameters $\theta$ (e.g., object position, shape, material properties); random samples $u$ from a parameter-independent distribution $p(u)$ (e.g., uniform on sphere or path space).
+- **Outputs:** Gradient estimate $\nabla_\theta I(\theta)$ of the rendering integral $I(\theta)$.
 
-**Data Structures:**
-- Transformation function $R(\omega, \pi)$: A mapping from the original domain to a warped domain. For spherical domains, this is a rotation matrix or quaternion representation.
-- Discontinuity locator $T(\pi)$: A function identifying the location of the discontinuity in the original domain for a given $\pi$.
+### Data Structures
+The method operates on standard rendering data structures (ray bundles, path states). No special data structures for discontinuity tracking are required, as the discontinuities are handled implicitly by the coordinate transformation [S1].
 
-**Steps:**
-1. **Identify Discontinuities:** Locate points $\omega$ where the integrand $f(\omega, \pi)$ is discontinuous and determine how this location $T(\pi)$ changes with respect to the parameter $\pi$ [S2, unofficial].
-2. **Construct Transformation:** Define a transformation $R(\cdot, \pi)$ that maps the integration domain to a new domain. The transformation must satisfy the condition that the derivative of the transformation with respect to $\pi$ approximates the derivative of the discontinuity location: $\frac{\partial R}{\partial \pi} \approx \frac{\partial T}{\partial \pi}$ [S4, unofficial].
-3. **Reparameterize Integral:** Substitute $\omega' = R(\omega, \pi)$ into the integral. The integral becomes:
-   $$
-   I(\pi) = \int_{D} f(R(\omega, \pi), \pi) \left| \frac{\partial R}{\partial \omega} \right| d\omega
-   $$
-   where $D$ is the transformed domain. If $R$ is an isometry (like a rotation), the Jacobian determinant is 1 [S4, unofficial].
-4. **Differentiate:** Since the discontinuity in the new integrand $g(\omega, \pi) = f(R(\omega, \pi), \pi)$ is located at $\omega_0$ such that $R(\omega_0, \pi) = T(\pi)$, and $\frac{\partial R}{\partial \pi} \approx \frac{\partial T}{\partial \pi}$, the location $\omega_0$ becomes approximately independent of $\pi$. Thus, the gradient can be computed by differentiating under the integral sign:
-   $$
-   \frac{\partial I}{\partial \pi} = \int_{D} \frac{\partial}{\partial \pi} g(\omega, \pi) d\omega
-   $$
-   This avoids the boundary term that would otherwise arise from the moving discontinuity [S4, unofficial].
+### Steps
+1.  **Identify Discontinuities:** Determine points in the integration domain where the integrand $f$ is discontinuous and where the location of these discontinuities $T(\theta)$ depends on the parameters $\theta$ [S2, unofficial].
+2.  **Construct Reparameterization Map:** Define a deterministic, differentiable mapping $g(u, \theta)$ (or a transformation $R$) such that the transformed integrand $f(g(u, \theta), \theta)$ has discontinuities that are independent of $\theta$ [S1][S5, unofficial].
+    - For spherical integrals (e.g., light sampling), this often involves a spherical rotation $R(\omega, \theta)$ [S5, unofficial].
+    - The rotation $R$ is chosen such that the discontinuity point $\omega_0$ in the transformed domain satisfies $R(\omega_0, \theta) = T(\theta)$, where $T(\theta)$ is the discontinuity in the original domain [S5, unofficial].
+    - Ideally, the motion of the discontinuity is approximated: $\frac{\partial R}{\partial \theta} \approx \frac{\partial T}{\partial \theta}$ [S5, unofficial].
+3.  **Transform Integral:** Rewrite the integral $I(\theta) = \int f(\omega) d\sigma(\omega)$ as $I(\theta) = \int f(R(\omega, \theta)) d\sigma(\omega)$ [S5, unofficial]. The domain of integration remains the same (e.g., $S^2$), but the integrand's discontinuity is now fixed at $\omega_0$ [S5, unofficial].
+4.  **Differentiate:** Compute the gradient by differentiating the transformed integrand with respect to $\theta$ [S1][S5, unofficial]:
+    $$
+    \nabla_\theta I(\theta) = \int \nabla_\theta \left[ f(R(\omega, \theta)) \right] d\sigma(\omega)
+    $$
+    Since the discontinuity $\omega_0$ is independent of $\theta$, the derivative can be taken inside the integral without boundary terms [S5, unofficial].
+5.  **Estimate:** Use Monte Carlo sampling with $u \sim p(u)$ to estimate the integral [S1].
 
-**Pseudocode:**
+### Formulas
+- **Spherical Reparameterization:**
+  $$
+  I = \int_{S^2} f(\omega_i) d\sigma(\omega_i) = \int_{S^2} f(R(\omega, \pi)) d\sigma(\omega)
+  $$
+  where $R$ is a spherical rotation transforming unit direction $\omega$ to $\omega' = R(\omega, \pi)$ by a fixed angle [S5, unofficial].
+- **Gradient Condition:**
+  If $R$ is chosen such that $\frac{\partial R}{\partial \pi} = \frac{\partial T}{\partial \pi}$, then the discontinuity point $\omega_0$ (where $R(\omega_0, \pi) = T(\pi)$) is independent of $\pi$ [S5, unofficial].
+  $$
+  \frac{\partial I}{\partial \pi} = \int_{S^2} \frac{\partial}{\partial \pi} g(\omega) d\sigma(\omega)
+  $$
+  where $g(\omega) = f(R(\omega, \pi))$ [S5, unofficial].
+
+### Parameters
+- **Rotation Angle:** Determined by the geometry of the discontinuity. For a sphere, this is the angle between the current view/light direction and the discontinuity boundary [S5, unofficial].
+- **Not given in the sources.**
+
+### Edge Cases and Pitfalls
+- **Specular Materials:** Does not support perfectly specular materials [S2, unofficial].
+- **Dirac Delta Sources:** Does not support degenerate light sources containing Dirac delta functions [S2, unofficial].
+- **Multiple Discontinuities:** Does not support multiple discontinuities within the support of the integrand [S2, unofficial].
+- **Approximation Error:** The gradients are approximated and may not always be accurate, particularly if the rotation $R$ does not perfectly track the motion of the discontinuity $T$ [S2, S5, unofficial].
+- **Precision:** Numerical precision in computing the rotation and its derivative can affect gradient accuracy [G].
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_reparameterized_gradient(f, pi, sample_domain, discontinuity_locator):
+def reparameterized_gradient(scene_params, samples):
     """
-    Computes the gradient of an integral with a moving discontinuity.
+    Compute gradient using reparameterization trick for spherical integrals.
     
     Args:
-        f: Integrand function f(omega, pi).
-        pi: Scene parameters.
-        sample_domain: Domain of integration (e.g., sphere).
-        discontinuity_locator: Function T(pi) returning the discontinuity location.
+        scene_params: Parameters theta affecting visibility/discontinuities.
+        samples: Random samples u from parameter-independent distribution (e.g., uniform on sphere).
         
     Returns:
-        Gradient dI/dpi.
+        Gradient estimate.
     """
-    # 1. Identify the discontinuity location and its derivative
-    T_pi = discontinuity_locator(pi)
-    # Note: In practice, the derivative dT/dpi might be approximated or computed via AD
-    dT_dpi = compute_derivative(T_pi, pi) 
+    grad_sum = 0.0
+    n_samples = len(samples)
     
-    # 2. Construct the transformation R(omega, pi)
-    # For spherical rotations, R is chosen such that dR/dpi approximates dT/dpi
-    # This often involves tracing auxiliary rays to find the discontinuity direction
-    # and constructing a rotation that aligns the sample space with this motion.
-    R = construct_rotation_approximating_motion(dT_dpi, pi)
-    
-    # 3. Sample from the transformed domain
-    # Samples u are drawn from a distribution p(u) independent of pi
-    samples = sample_uniform(sample_domain)
-    
-    # 4. Evaluate the transformed integrand and its gradient
-    # The transformed integrand is g(omega, pi) = f(R(omega, pi), pi)
-    # We need the gradient of g with respect to pi
-    
-    gradient_sum = 0
     for omega in samples:
-        # Map sample to original domain
-        omega_prime = R(omega, pi)
+        # 1. Identify discontinuity location T in original domain
+        # T depends on scene_params
+        T = compute_discontinuity_location(omega, scene_params)
         
-        # Evaluate integrand
-        f_val = f(omega_prime, pi)
+        # 2. Construct rotation R that maps omega to a domain where discontinuity is static
+        # R is chosen such that R(omega_0, params) = T(params)
+        # omega_0 is the fixed discontinuity point in the transformed domain
+        R = construct_spherical_rotation(omega, T, scene_params)
         
-        # Compute gradient of the transformed integrand
-        # This involves chain rule: d/dpi f(R(omega, pi), pi)
-        # = (df/domega_prime) * (dR/dpi) + (df/dpi)
+        # 3. Transform the direction
+        omega_prime = apply_rotation(omega, R)
         
-        # Compute dR/dpi numerically or via AD
-        dR_dpi = compute_rotation_derivative(R, pi)
+        # 4. Evaluate integrand at transformed direction
+        # f is the original integrand (e.g., Li * fs)
+        f_val = evaluate_integrand(omega_prime, scene_params)
         
-        # Compute df/domega_prime (radiance gradient w.r.t direction)
-        df_domega = compute_radiance_gradient(omega_prime, pi)
+        # 5. Compute derivative of the transformed integrand w.r.t params
+        # This involves chain rule through R
+        # d/dtheta f(R(omega, theta)) = df/domega_prime * domega_prime/dtheta
+        df_domega_prime = compute_integrand_gradient(omega_prime, scene_params)
+        dR_dtheta = compute_rotation_derivative(R, scene_params)
+        domega_prime_dtheta = apply_rotation_derivative(omega, dR_dtheta)
         
-        # Chain rule application
-        # Note: The Jacobian of the transformation is 1 for rotations
-        grad_g = dot(df_domega, dR_dpi) + compute_radiance_gradient_direct(pi)
+        integrand_grad = dot_product(df_domega_prime, domega_prime_dtheta)
         
-        gradient_sum += grad_g
+        grad_sum += integrand_grad
         
-    return gradient_sum / len(samples)
+    return grad_sum / n_samples
 ```
-
-**Edge Cases and Pitfalls:**
-- The method does not support perfectly specular materials, degenerate light sources with Dirac delta functions, or multiple discontinuities within the support of the integrand [S2, unofficial].
-- Gradients are approximated because the transformation $R$ only approximates the motion of the discontinuity; thus, accuracy may vary [S2, unofficial].
-- Constructing the correct rotation $R$ requires tracing auxiliary rays to determine the discontinuity direction, which adds computational overhead [S4, unofficial].
 
 ## Subtopics
 
 ### Spherical Rotation Reparameterization
-Spherical Rotation Reparameterization is a specific instance of the reparametrized integral gradients method applied to spherical integrals, such as those in light sampling or visibility [S4, unofficial]. It uses spherical rotations to reparameterize the integral, making the discontinuity point parameter-independent [S4, unofficial]. It is chosen when the discontinuity lies on a sphere (e.g., visibility edges from a point light) and explicit edge sampling is too expensive [S4, unofficial]. The transformation $R$ rotates the unit direction $\omega$ to $\omega' = R(\omega, \pi)$ by a fixed angle, and is chosen such that $\frac{\partial R}{\partial \pi} = \frac{\partial T}{\partial \pi}$, where $T(\pi)$ is the discontinuous point dependent on $\pi$ [S4, unofficial]. The integral is transformed as $I = \int_{S^2} f(\omega_i) d\sigma(\omega_i) = \int_{S^2} f(R(\omega, \pi)) d\sigma(\omega)$ [S4, unofficial].
+Spherical Rotation Reparameterization is a specific instance of the method introduced by Loubet et al. [S5, unofficial]. It reparameterizes spherical integrals using spherical rotations to avoid explicit sampling of discontinuities by making the discontinuity point parameter-independent [S5, unofficial]. It is chosen when the primary source of bias is visibility changes on spherical domains (e.g., light sampling or view direction changes) [S5, unofficial]. It differs from other variants by using rigid rotations rather than general warping fields [S5, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the cost of constructing the transformation $R$, which may require auxiliary ray tracing. The gradient estimation itself is a standard Monte Carlo integration over the transformed domain.
-- **Memory Complexity:** Low, as it does not require storing edge lists or boundary terms.
-- **Strengths:** Eliminates the need for explicit edge sampling, which can be complex and high-variance for geometrically complex scenes [S1]. It is computationally efficient compared to edge sampling methods [S2, unofficial].
-- **Limitations:** Approximate gradients; does not handle specularities or multiple discontinuities well [S2, unofficial]. The construction of the warp field can be non-trivial [S4, unofficial].
-- **When to use:** When differentiating integrals with moving visibility discontinuities where explicit edge sampling is prohibitive.
-- **When not to use:** For scenes with specular materials, Dirac delta light sources, or multiple overlapping discontinuities [S2, unofficial].
+- **Time Complexity:** Similar to standard path tracing, as it avoids the overhead of explicit edge detection and sampling [S2, unofficial]. However, computing the rotation and its derivative adds constant overhead per sample [S5, unofficial].
+- **Memory Complexity:** No additional memory for discontinuity tracking [S1].
+- **Measured Performance:** Computationally efficient compared to explicit edge sampling, which requires many samples to find edges [S2, unofficial].
+- **Scaling:** Performance degrades with geometric complexity if multiple discontinuities are present, as the method does not support multiple discontinuities within the support of the integrand [S2, unofficial].
+- **Strengths:** Eliminates bias from moving discontinuities without explicit edge sampling; simple to implement using ordinary ray tracing operations [S1].
+- **Limitations:** Approximate gradients; does not support specular materials or Dirac delta sources; inaccurate if rotation does not perfectly track discontinuity motion [S2, S5, unofficial].
+- **When to use:** When gradients are needed for parameters affecting visibility, and explicit edge sampling is too costly or complex [S1][S2, unofficial].
+- **When not to use:** For scenes with perfectly specular materials, degenerate light sources, or multiple discontinuities [S2, unofficial].
 
 ## Background
-Reparametrized Integral Gradients was introduced by Loubet et al. in "Reparameterizing Discontinuous Integrands for Differentiable Rendering" at SIGGRAPH Asia 2019 [S3, unofficial]. It was developed as an alternative to explicit edge sampling methods, such as those by Li et al. (SIGGRAPH Asia 2018), which sample discontinuity edges explicitly [S3, unofficial]. The method is part of a broader family of techniques that warp or reparameterize samples to make moving discontinuities stationary, thereby making differentiation tractable [S3, unofficial]. It is implemented in differentiable rendering systems like Mitsuba 3 [S3, unofficial].
+Reparametrized Integral Gradients was introduced by Loubet et al. in "Reparameterizing Discontinuous Integrands for Differentiable Rendering" at SIGGRAPH Asia 2019 [S4, S5, unofficial]. It was developed to address the bias in derivatives when differentiated parameters affect visibility and the position of discontinuities [S3]. The method is part of a broader family of techniques including edge sampling and path space sampling [S3]. It is used in differentiable rendering systems to enable gradient-based inverse rendering [S4, unofficial].
 
 ## Sources
 [S1] Physics-based differentiable rendering, https://doi.org/10.1145/3388769.3407454, fetched 2026-10-29
 [S2] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
-[S3] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)
-[S4] A Survey on Physics-based Differentiable Rendering - arXiv.org, https://arxiv.org/pdf/2504.01402, fetched 2026-10-29 (unofficial)
+[S3] DR.JIT, https://doi.org/10.1145/3528223.3530099, fetched 2026-10-26
+[S4] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)
+[S5] A Survey on Physics-based Differentiable Rendering - arXiv.org, https://arxiv.org/pdf/2504.01402, fetched 2026-10-29 (unofficial)

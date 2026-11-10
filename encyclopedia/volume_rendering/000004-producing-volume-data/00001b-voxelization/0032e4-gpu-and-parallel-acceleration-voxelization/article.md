@@ -1,9 +1,9 @@
 # GPU and Parallel Acceleration Voxelization
 
-Also called: GPU Voxelization, Parallel Voxelization, CUDA Voxelization
+Also called: GPU Voxelization, Parallel Voxelization
 
 ## Overview
-This family encompasses methods that accelerate the conversion of geometric primitives (meshes, point clouds, lines) into discrete volumetric representations by leveraging parallel processing units, primarily GPUs via CUDA or OpenGL/Vulkan, and multi-threaded CPUs. It solves the performance bottleneck of traditional single-threaded voxelization algorithms, enabling real-time or near-real-time voxel generation for complex scenes. What sets this family apart is the exploitation of massive parallelism—either by assigning one thread per primitive (triangle-parallel), one thread per voxel (voxel-parallel), or by utilizing hardware rasterization pipelines (rasterization-based)—to compute occupancy, depth, or attributes simultaneously, often requiring specialized data structures like atomic buffers, sparse hashmaps, or bit-packed tables to handle concurrent writes.
+This family encompasses methods that accelerate the conversion of geometric sources (meshes, point clouds) into discrete volumetric representations by leveraging parallel processing units, primarily GPUs via CUDA or OpenGL/Vulkan, and multi-threaded CPUs. It solves the performance bottleneck of naive, single-threaded voxelization algorithms, enabling real-time or near-real-time processing for complex models. It differs from its siblings by explicitly utilizing hardware parallelism (thread-per-triangle, thread-per-voxel, or rasterization pipelines) and specialized memory structures (atomic counters, bit-packed tables, MSAA coverage) to handle the massive concurrency inherent in volumetric data generation.
 
 ## Shared principles
 All methods in this family map a conceptual or physical source into a discrete or analytic volumetric representation suitable for rendering [G]. The core mechanism involves:
@@ -14,10 +14,7 @@ All methods in this family map a conceptual or physical source into a discrete o
 ## Subtopics
 
 ### [Per-Pixel Linked List Voxelization](1187-per-pixel-linked-list-voxelization.md)
-Per-Pixel Linked List Voxelization is a GPU-based technique that constructs a linked list of fragment depths per pixel using atomic counters and shader storage buffers, allowing for subsequent sorting and processing of depth-sorted voxels. It solves the problem of variable-depth fragment accumulation in rasterization by deferring the resolution of depth conflicts to a post-processing sort phase, enabling accurate solid voxelization without fixed-depth buffers. It differs from [MSAA Voxelization](7412-msaa-voxelization.md) by using explicit linked lists and atomic operations rather than multisample coverage masks, and from [Atomic Color Averaging in Voxelization](3529-atomic-color-averaging-in-voxelization.md) by preserving individual fragment depths for sorting rather than averaging them immediately.
-
-### [Vessel Voxelizer](2321-vessel-voxelizer.md)
-Vessel Voxelizer is a CUDA-accelerated method that converts vascular structures, defined as line segments with associated radii, into a 3D "fuzzy" voxel volume where each voxel's value represents the fraction of its volume occupied by the vessels. It differs from binary voxelization methods by outputting continuous occupancy values via supersampling, and from general mesh voxelization by operating directly on parametric tube primitives (line segments) rather than polygonal surfaces.
+A GPU-based technique that constructs a linked list of fragment depths per pixel using atomic counters and shader storage buffers, allowing for subsequent sorting and processing of depth-sorted voxels. It solves the problem of variable-depth fragment accumulation in rasterization by deferring the resolution of depth conflicts to a post-processing sort phase, enabling accurate solid voxelization without fixed-depth buffers. It differs from [MSAA Voxelization](7412-msaa-voxelization.md) by using explicit linked lists and atomic operations rather than multisample coverage masks, and from [Atomic Color Averaging in Voxelization](3529-atomic-color-averaging-in-voxelization.md) by preserving individual fragment depths for sorting rather than averaging them immediately.
 
 ### [Flexible Dual Grid Mesh Voxelization](2640-flexible-dual-grid-mesh-voxelization.md)
 Flexible Dual Grid Mesh Voxelization maps a triangle mesh into a sparse voxel representation by determining active voxel occupancy and solving a Quadratic Error Function (QEF) to compute dual vertex positions within those voxels. It differs from its sibling [Per-Pixel Linked List Voxelization](1187-per-pixel-linked-list-voxelization.md) by explicitly constructing a dual-grid topology (vertices and edges) rather than just rasterizing depth, and from [Triangle-Parallel Solid Voxelization](9770-triangle-parallel-solid-voxelization.md) by focusing on the QEF-based surface approximation suitable for non-manifold geometry rather than binary solid occupancy. It serves as the foundational geometry stage for [O-Voxel](3835-o-voxel.md).
@@ -40,23 +37,28 @@ Triangle-Parallel Solid Voxelization is a data-parallel algorithm that maps a tr
 ### [GPU-based Voxel Query via Conditional Histogram Computation](10393-gpu-based-voxel-query-via-conditional-histogram-computation.md)
 This method accelerates voxel queries in multivariate volumes by computing joint conditional histograms via GPU volume traversal, avoiding the high memory overhead of spatial hierarchy structures like octrees for data with uniformly high variance. It differs from sibling methods that rely on spatial partitioning or linked lists by projecting multivariate attribute distributions into 2D histogram bins conditioned on a transfer function, enabling efficient statistical exploration of the volume data.
 
-### Low-Detail Obstacle Voxelization
+#### Low-Detail Obstacle Voxelization
 - **Definition**: Using simplified meshes for obstacles to allow voxelization at every frame with little performance cost [S1, unofficial].
 - **Parameter**: Mesh LOD: Use a low level of detail mesh for each obstacle [S1, unofficial].
 
-### Voxelization Engine Workload Distribution
+#### Voxelization Engine Workload Distribution
 - **Definition**: A pipeline architecture distributing voxelization tasks between CPU and GPU to handle ROI computation, classification, and rasterization efficiently [S2, unofficial].
-- **Step**: CPU: Compute Region of Interest (ROI) by updating index buffer dynamically. Perform normal-based classification and bucket sorting for polygonal models. Transfer updated data through AGP port. GPU: Rasterize classified primitives in streaming mode. Encode and store results as 2D textures in three directional sheet buffers. Create proxy rectangles to texture map patches for rendering/access [S2, unofficial].
+- **Steps**:
+    - **CPU**: Compute Region of Interest (ROI) by updating index buffer dynamically. Perform normal-based classification and bucket sorting for polygonal models. Transfer updated data through AGP port [S2, unofficial].
+    - **GPU**: Rasterize classified primitives in streaming mode. Encode and store results as 2D textures in three directional sheet buffers. Create proxy rectangles to texture map patches for rendering/access [S2, unofficial].
 
-### Crack-Free Voxelization via Axis Swizzling
+#### Crack-Free Voxelization via Axis Swizzling
 - **Definition**: A technique to fix 'cracks' (holes/slots) in voxelization caused by steep primitive slopes relative to the view direction. It selects the projection direction (X, Y, or Z axis) based on the face normal to present the largest face area, avoiding high depth gradients [S3, unofficial].
-- **Step**: In the Geometry Shader (GS), per primitive, select the projection direction from the X, Y, and Z axes according to the face normal. Swizzle the X, Y, and Z components of the vertex positions in the Geometry Shader to change the projection direction. This allows rendering from 3 directions without 3 separate render passes. In the Pixel Shader, restore the coordinate components according to the information passed from the Geometry Shader [S3, unofficial].
+- **Steps**:
+    - In the Geometry Shader (GS), per primitive, select the projection direction from the X, Y, and Z axes according to the face normal [S3, unofficial].
+    - Swizzle the X, Y, and Z components of the vertex positions in the Geometry Shader to change the projection direction. This allows rendering from 3 directions without 3 separate render passes [S3, unofficial].
+    - In the Pixel Shader, restore the coordinate components according to the information passed from the Geometry Shader [S3, unofficial].
 - **Formula**: Crack Condition: If $|ddx(depth)| > 1.0$ or $|ddy(depth)| > 1.0$, cracks occur perpendicular to the depth direction. Calculated in the pixel shader [S3, unofficial].
 
 ## Background
-The need for efficient voxelization arose with the demand for real-time fluid simulation and collision detection in 3D games and scientific visualization. Early methods were CPU-bound and too slow for dynamic scenes. The introduction of GPU computing (CUDA) and advanced graphics APIs (OpenGL/Vulkan) enabled parallel processing of geometric primitives. Key developments include the use of conservative rasterization to approximate solid voxelization [S3, unofficial], the use of atomic operations for concurrent writes [S1, unofficial], and hybrid CPU-GPU pipelines for handling large-scale models [S2, unofficial]. These methods are widely used in real-time fluid simulation [S1, unofficial], medical imaging (vessel voxelization) [S1, unofficial], and collision detection in physics engines [S2, unofficial].
+The acceleration of voxelization has been driven by the need for real-time simulation and rendering of complex phenomena, such as fluids and deformable objects. Early approaches relied on CPU-based parallelization or simple rasterization techniques. The introduction of GPU-based methods, particularly those utilizing CUDA and advanced OpenGL/Vulkan features like MSAA and atomic operations, allowed for significant performance gains. Key developments include the use of conservative rasterization approximations via MSAA [S1, unofficial], the implementation of solid voxelization via parallel triangle processing [S1, unofficial], and the optimization of memory access patterns through bit-packed tables and atomic contention mitigation strategies [S1, S3, unofficial]. The distribution of workload between CPU and GPU for ROI computation and rasterization has also been explored to handle complex models efficiently [S2, unofficial].
 
 ## Sources
-[S1] PDF Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
-[S2] (PDF) Real-time Voxelization for Complex Models, https://www.researchgate.net/publication/252533918_Real-time_Voxelization_for_Complex_Models, fetched 2026-11-03 (unofficial)
-[S3] https://developer.nvidia.com/content/basics-gpu-voxelization, https://developer.nvidia.com/content/basics-gpu-voxelization, fetched 2026-10-28 (unofficial)
+[S1] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+[S2] Real-time Voxelization for Complex Models, https://www.researchgate.net/publication/252533918_Real-time_Voxelization_for_Complex_Models, fetched 2026-11-03 (unofficial)
+[S3] Basics of GPU Voxelization, https://developer.nvidia.com/content/basics-gpu-voxelization, fetched 2026-10-28 (unofficial)

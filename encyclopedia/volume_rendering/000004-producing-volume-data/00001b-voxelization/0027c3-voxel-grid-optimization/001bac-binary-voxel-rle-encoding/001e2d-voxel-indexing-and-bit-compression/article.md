@@ -3,44 +3,41 @@
 Also called: Binary Voxel Bit Packing, Bit-packed Voxel Array
 
 ## Overview
-Voxel Indexing and Bit Compression maps 3D voxel coordinates to a 1D binary bitstream and packs these bits into fixed-width integers (typically 64-bit) to minimize memory footprint and enable efficient parallel processing. It differs from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by storing explicit occupancy bits for every possible voxel in the bounding box rather than run-length encoding sparse data, making it suitable for dense grids or scenarios requiring direct random access to occupancy status via atomic operations.
+Voxel Indexing and Bit Compression maps 3D voxel coordinates to a 1D binary bitstream and packs these bits into fixed-width integers (typically 64-bit) to minimize memory footprint and enable efficient parallel processing [S1, unofficial]. It differs from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by storing explicit occupancy bits for every possible voxel in the bounding box rather than run-length encoding sparse data, making it suitable for dense grids or scenarios requiring direct random access to occupancy status via atomic operations [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Voxel grid dimensions: $size_x, size_y, size_z$ (integers).
-- Set of occupied voxel coordinates: $\{(x_i, y_i, z_i)\}$.
+- Voxel grid dimensions: $size_x, size_y, size_z$ (integers) [S1, unofficial].
+- Set of occupied voxel coordinates: $\{(x_i, y_i, z_i)\}$ [S1, unofficial].
 
 **Outputs:**
-- A compressed bit-packed array of 64-bit unsigned integers representing the occupancy grid.
+- A compressed bit-packed array of 64-bit unsigned integers representing the occupancy grid [S1, unofficial].
 
 **Data Structures:**
-1. **Index Mapping:** A 1D integer index for each voxel.
-2. **Bit Array:** A conceptual binary string where the bit at position $k$ is 1 if the voxel with index $k$ is occupied, 0 otherwise.
-3. **Storage:** An array of `uint64_t` (or equivalent 64-bit unsigned integer) where each element stores 64 consecutive bits of the occupancy grid.
+1. **Index Mapping:** A 1D integer index for each voxel [S1, unofficial].
+2. **Bit Array:** A conceptual binary string where the bit at position $k$ is 1 if the voxel with index $k$ is occupied, and 0 otherwise [S1, unofficial].
+3. **Storage:** An array of `uint64_t` (or equivalent 64-bit unsigned integer) where each element stores 64 consecutive bits of the occupancy grid [S1, unofficial].
 
 **Steps:**
 1. **Calculate 1D Index:** For each occupied voxel $(x, y, z)$, compute its linear index $I$ using row-major ordering:
    $$ I = x \cdot size_y \cdot size_z + y \cdot size_z + z $$
    where $size_{x,y,z}$ are the dimensions of the voxel grid [S1, unofficial].
-
-2. **Initialize Storage:** Allocate an array of 64-bit unsigned integers large enough to hold $I_{max} + 1$ bits. The size of the array is $\lceil (size_x \cdot size_y \cdot size_z) / 64 \rceil$. Initialize all bits to 0.
-
+2. **Initialize Storage:** Allocate an array of 64-bit unsigned integers large enough to hold $I_{max} + 1$ bits. The size of the array is $\lceil (size_x \cdot size_y \cdot size_z) / 64 \rceil$. Initialize all bits to 0 [G].
 3. **Set Occupancy Bits:** For each occupied voxel with index $I$:
-   - Determine the target integer slot: $slot = \lfloor I / 64 \rfloor$.
-   - Determine the bit position within the slot: $bit\_pos = I \pmod{64}$.
-   - Set the bit at $bit\_pos$ in $slot$ to 1.
-   - **Parallel Implementation:** When using multiple threads, use atomic operations (e.g., `atomicOr` or `atomic` on the integer array) to safely set the bit concurrently without race conditions [S1, unofficial].
-
-4. **Compression:** The resulting array of 64-bit integers constitutes the compressed bit-packed representation. No further compression (like RLE) is applied in this specific method, though the bit-packing itself reduces memory usage by a factor of 64 compared to byte-per-voxel storage.
+   - Determine the target integer slot: $slot = \lfloor I / 64 \rfloor$ [G].
+   - Determine the bit position within the slot: $bit\_pos = I \pmod{64}$ [G].
+   - Set the bit at $bit\_pos$ in $slot$ to 1 [G].
+   - **Parallel Implementation:** When using multiple threads, use atomic operations (e.g., `atomic<unsigned int>` on the integer array) to safely set the bit concurrently without race conditions [S1, unofficial].
+4. **Compression:** The resulting array of 64-bit integers constitutes the compressed bit-packed representation [S1, unofficial]. No further compression (like RLE) is applied in this specific method, though the bit-packing itself reduces memory usage by a factor of 64 compared to byte-per-voxel storage [G].
 
 **Parameters:**
 - **Bit Width:** 64 bits per integer is standard for alignment and performance [S1, unofficial].
 - **Ordering:** Row-major (Z varies fastest, then Y, then X) is implied by the formula in [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Grid Size Limits:** The maximum index must fit within the addressable range of the integer type used for indexing. For 32-bit indices, the total number of voxels is limited to $2^{32}$.
+- **Grid Size Limits:** The maximum index must fit within the addressable range of the integer type used for indexing. For 32-bit indices, the total number of voxels is limited to $2^{32}$ [G].
 - **Atomic Contention:** In highly parallel implementations, many threads writing to the same 64-bit word can cause lock contention. Randomly permuting the order of voxel processing can reduce this possibility [S1, unofficial].
-- **Precision:** Ensure that the multiplication $x \cdot size_y \cdot size_z$ does not overflow the integer type used for index calculation.
+- **Precision:** Ensure that the multiplication $x \cdot size_y \cdot size_z$ does not overflow the integer type used for index calculation [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -86,15 +83,15 @@ This method packs dual vertices and intersected flags into compact formats for s
 
 ## Operating characteristics
 - **Time Complexity:** $O(n)$, where $n$ is the number of voxels in the bounding box of the mesh [S1, unofficial].
-- **Memory Complexity:** $O(V/64)$, where $V$ is the total number of voxels in the grid, assuming 64-bit packing [S1, unofficial].
-- **Performance:** Provides better parallel performance when using atomic operations on the bit array compared to non-atomic writes [S1, unofficial]. The bit-packing reduces memory bandwidth requirements significantly compared to byte-per-voxel storage.
-- **Strengths:** Simple implementation, efficient for dense grids, enables fast parallel voxelization.
-- **Limitations:** Memory usage scales with the bounding box volume, not the number of occupied voxels. Inefficient for very sparse data compared to RLE-based methods.
-- **When to Use:** When the voxel grid is dense or when direct random access to occupancy bits is required.
-- **When Not to Use:** For very sparse data where RLE or other sparse representations would be more memory-efficient.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Provides better parallel performance when using atomic operations on the bit array compared to non-atomic writes [S1, unofficial]. The bit-packing reduces memory bandwidth requirements significantly compared to byte-per-voxel storage [G].
+- **Strengths:** Simple implementation, efficient for dense grids, enables fast parallel voxelization [S1, unofficial].
+- **Limitations:** Memory usage scales with the bounding box volume, not the number of occupied voxels. Inefficient for very sparse data compared to RLE-based methods [G].
+- **When to Use:** When the voxel grid is dense or when direct random access to occupancy bits is required [S1, unofficial].
+- **When Not to Use:** For very sparse data where RLE or other sparse representations would be more memory-efficient [G].
 
 ## Background
-The method originates from optimizations proposed for voxelization algorithms to handle heavy and time-consuming processes [S1, unofficial]. The use of atomic operations for parallel bit setting and the specific 1D indexing formula are detailed in the unofficial repository [S1, unofficial]. The detail coefficient representation variant is described in the context of multiresolution MIP rendering on graphics hardware [S2]. The O-Voxel packing is part of the O-Voxel GPU library for efficient voxel serialization [S3, unofficial].
+The method originates from optimizations proposed for voxelization algorithms to handle heavy and time-consuming processes [S1, unofficial]. The use of atomic operations for parallel bit setting and the specific 1D indexing formula are detailed in the unofficial repository [S1, unofficial]. The coordinate packing variant is discussed in the context of multiresolution MIP rendering of large volumetric data accelerated on graphics hardware [S2]. The O-Voxel packing is part of the O-Voxel GPU library for efficient voxel serialization [S3, unofficial].
 
 ## Sources
 [S1] topskychen/voxelizer, https://github.com/topskychen/voxelizer, fetched 2026-10-27 (unofficial)

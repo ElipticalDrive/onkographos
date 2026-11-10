@@ -1,30 +1,30 @@
 # Photometric and Color Consistency Losses
 
-Also called: Photometric Losses, Color Consistency Regularization
+Also called: Photometric Losses, Color Consistency Losses
 
 ## Overview
-This family of losses enforces that rendered images match ground-truth reference views in color and intensity, serving as the primary supervisory signal for differentiable volume rendering [S2, S4, unofficial]. Unlike structural metrics (e.g., SSIM) or geometric regularizers, these methods focus strictly on pixel-wise or view-consistent color fidelity [S1]. They are distinguished from sibling regularization methods by their direct comparison of rendered radiance against observed data, rather than imposing smoothness or sparsity constraints on the scene parameters themselves.
+Photometric and Color Consistency Losses enforce fidelity between rendered images and ground-truth observations by minimizing pixel-wise intensity differences or structural similarities. They are distinct from geometric regularizers (e.g., [Total Variation Regularization](860-total-variation-regularization.md)) by focusing on radiometric accuracy rather than field smoothness, and from visibility-based losses by their direct supervision of color values.
 
 ## Shared principles
-All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses).
+All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps [44-radiance-field-optimization.md]. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses) [44-radiance-field-optimization.md].
 
-The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [S1][S5, unofficial]:
+The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [44-radiance-field-optimization.md]:
 
 $$
 \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
 $$
 
-where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [S1][S5, unofficial].
+where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [44-radiance-field-optimization.md].
 
-Differentiation strategies fall into three main categories:
-1.  **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [S5, unofficial].
-2.  **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [S1][S3].
-3.  **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [S5, unofficial].
+Differentiation strategies fall into three main categories [44-radiance-field-optimization.md]:
+1. **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [44-radiance-field-optimization.md].
+2. **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [44-radiance-field-optimization.md].
+3. **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [44-radiance-field-optimization.md].
 
 ## Subtopics
 
 ### [MSE Loss and PSNR Conversion](1651-mse-loss-and-psnr-conversion.md)
-The Mean Squared Error (MSE) loss computes the average of the squared differences between predicted and target RGB values, serving as the primary photometric consistency objective for training differentiable volume rendering models. It is often accompanied by the Peak Signal-to-Noise Ratio (PSNR), a logarithmic metric derived from the MSE that quantifies reconstruction fidelity in decibels (dB) for logging and benchmarking. Unlike structural metrics such as SSIM, MSE focuses strictly on pixel-wise intensity differences, making it sensitive to large smooth regions but less responsive to high-frequency features.
+The Mean Squared Error (MSE) loss computes the average of the squared differences between predicted and target RGB values, serving as the primary photometric optimization objective in differentiable volume rendering. It is distinct from structural metrics like SSIM and geometric losses like IoU by focusing strictly on pixel-wise intensity fidelity. The method often includes a conversion to Peak Signal-to-Noise Ratio (PSNR) for logging, providing a logarithmic scale of reconstruction quality.
 
 ### [L1+SSIM Loss](2890-l1-ssim-loss.md)
 L1+SSIM Loss is a composite photometric objective used to optimize radiance fields and 3D Gaussian splats by minimizing the difference between rendered images and ground-truth reference views. It combines a pixel-wise L1 error term with a Structural Similarity (SSIM) term to preserve local structures and edges while maintaining color accuracy. It is distinguished from pure MSE-based methods by its robustness to outliers and its ability to produce sharper details, and from visibility-based losses by its direct comparison of rendered and target pixel values without explicit occlusion reasoning.
@@ -39,17 +39,22 @@ Adaptive Photometric Loss with Thresholding is a composite regularization loss d
 Closed-Form Color Estimation (CF) Loss is a regularization technique for explicit radiance fields (such as Plenoxels and DVGO) that breaks the entanglement between density and color fields to reduce shape-radiance ambiguity. Unlike standard photometric losses that supervise the final rendered image directly, CF loss estimates a "closed-form" color field given the current density field and posed training images, then computes a photometric loss between this estimated color and the ground truth to supervise the density field. It is distinct from distortion loss in that it is sensitive to specific geometric errors and can distinguish objects from background where distortion loss fails.
 
 ### Consistency Filter Function
-- [S1] A filtering function applied during training to maintain consistency, removed in ablation experiments.
-- [S1] On the Blender dataset, removing the consistency filter ('w/o filter') reduces PSNR from 30.3 dB to 29.1 dB, SSIM from 0.945 to 0.941, and increases LPIPS from 0.078 to 0.103.
-- [S1] Using the consistency filter function yields better rendering quality than not using it.
+- **Definition:** A filtering function applied during training to maintain consistency, removed in ablation experiments [S1].
+- **Performance:** On the Blender dataset, removing the consistency filter ('w/o filter') reduces PSNR from 30.3 dB to 29.1 dB, SSIM from 0.945 to 0.941, and increases LPIPS from 0.078 to 0.103 [S1].
+- **Comparison:** Using the consistency filter function yields better rendering quality than not using it [S1].
 
 ### Temporal Consistency Loss
-- [S2] $L_{time} = \frac{1}{T-1} \sum_{t=1}^{T-1} |F(x, t+1) - F(x, t)|_1$, where $T$ is the length of the dynamic sequence (e.g., 30 frames), $F(x,t)$ is the radiation field at time $t$, and $|\cdot|_1$ denotes L1 norm.
-- [S2] Performance: After adding temporal consistency loss, SSIM of dynamic scene increases by 0.04, with no obvious jump in subjective vision.
+- **Formula:** $L_{time} = \frac{1}{T-1} \sum_{t=1}^{T-1} |F(x, t+1) - F(x, t)|_1$, where $T$ is the length of the dynamic sequence (e.g., 30 frames), $F(x,t)$ is the radiation field at time $t$, and $|\cdot|_1$ denotes L1 norm [S2].
+- **Performance:** After adding temporal consistency loss, SSIM of the dynamic scene increases by 0.04, with no obvious jump in subjective vision [S2].
+
+### Color-Geometry Dependency Assumption
+- **Definition:** Assumes surface texture correlates with geometry and normals, using shading cues to refine reconstruction [S3, unofficial].
+- **Step:** Alleviate texture-induced artifacts by enforcing multi-view consistency during joint training of geometry and color fields with sufficient input views [S3, unofficial].
 
 ## Background
-Photometric loss is the foundational supervision signal for NeRF [S1] and subsequent radiance field methods. The standard MSE loss was introduced in the original NeRF paper [S1]. The combination with SSIM was popularized by subsequent works to address the blurriness of MSE [S1][S2]. Visibility-based losses emerged in multi-view stereo and SLAM contexts to handle occlusions [S1]. Adaptive thresholding and closed-form color estimation were developed in explicit radiance field methods (like Plenoxels and DVGO) to resolve density-color ambiguity [S1]. Temporal consistency losses are used in dynamic scene reconstruction [S2].
+Photometric losses are foundational to differentiable volume rendering, originating with the introduction of Neural Radiance Fields (NeRF) [44-radiance-field-optimization.md]. Early implementations relied heavily on MSE loss [1651-mse-loss-and-psnr-conversion.md], later augmented by SSIM to address structural blurring [2890-l1-ssim-loss.md]. Subsequent developments introduced visibility constraints to handle multi-view consistency [2917-visibility-based-photometric-loss.md] and adaptive thresholding to resolve density-color ambiguity [9354-adaptive-photometric-loss-with-thresholding.md]. Closed-form color estimation was developed for explicit representations like Plenoxels to decouple density and color optimization [10570-closed-form-color-estimation-cf-loss.md].
 
 ## Sources
 [S1] Differentiable Point-Based Radiance Fields for Efficient View Synthesis, https://doi.org/10.1145/3550469.3555413, fetched 2026-10-26
 [S2] Efficient Sparse Input Scene Reconstruction and Real-Time Rendering for VR Advertising Using Optimized NeRF Framework, https://www.informatica.si/index.php/informatica/article/download/12804/6562, fetched 2026-10-29
+[S3] Voxurf: Voxel-based Efficient and Accurate Neural Surface Reconstruction, https://doi.org/10.48550/arxiv.2208.12697, fetched 2026-10-26 (unofficial)

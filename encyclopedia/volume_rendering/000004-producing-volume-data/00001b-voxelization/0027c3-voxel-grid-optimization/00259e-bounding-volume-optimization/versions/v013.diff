@@ -1,0 +1,188 @@
+--- v012.md
++++ v013.md
+@@ -4,105 +4,101 @@
+ 
+ ## Overview
+-Bounding Volume Optimization reduces the computational cost of voxel grid generation and ray marching by eliminating empty space and non-contributing geometry from the active computation domain [S1, unofficial][S2]. It achieves this by either adapting the 3D voxel array dimensions to the actual extent of the data or by culling primitives using bounding volumes before evaluating expensive Signed Distance Fields (SDFs) [S1, unofficial][S2]. Unlike sibling methods that focus on data encoding or smoothing, this method specifically targets the reduction of false positives and redundant map evaluations by restricting the active volume [S1, unofficial][S2].
++Bounding Volume Optimization reduces the computational cost of volume rendering by eliminating empty space or non-contributing geometry from the active computation domain [S1, unofficial][S2]. It achieves this by either resizing the voxel array to the minimal bounding box of the data or using bounding volumes to skip Signed Distance Field (SDF) evaluations for objects that do not contribute to the minimal distance field [S1, unofficial][S2]. Unlike sibling methods that focus on data compression or smoothing, this method specifically targets traversal efficiency and evaluation cost by localizing expensive computations to areas with complex geometry [S2].
+ 
+ ## How it works
+-The method operates in two distinct modes depending on the rendering pipeline: spatial culling via array resizing and geometric culling via bounding volume testing.
++**Inputs and Outputs:**
++*   **Input:** A discrete voxel grid produced by [Voxelization](12-voxelization.md), a set of scene primitives (e.g., SDF objects), and their associated bounding volumes (typically Axis-Aligned Bounding Boxes, AABBs).
++*   **Output:** An optimized rendering state where empty regions are culled or SDF evaluations are skipped, resulting in reduced frame duration.
+ 
+-### Inputs and Outputs
+-*   **Inputs**:
+-    *   Voxel data extent (min/max coordinates or dimensions) [S1, unofficial].
+-    *   Scene primitives with associated SDF map functions [S2].
+-    *   Bounding volumes (typically Axis-Aligned Bounding Boxes, AABBs) for each primitive [S1, unofficial][S2].
+-*   **Outputs**:
+-    *   A resized voxel texture/array matching the data extent [S1, unofficial].
+-    *   A culling mask or early-out decision for ray-primitive intersections [S2].
++**Data Structures:**
++1.  **Voxel Array:** A 3D texture or buffer. The dimensions $(W, H, D)$ are dynamically adjusted to the minimal bounding box of the active voxel data. For example, if a landscape occupies $512 \times 321 \times 512$ voxels within a potential $512^3$ space, the array is resized to $512 \times 321 \times 512$ [S1, unofficial].
++2.  **Bounding Volumes:** A list of AABBs, one per primitive or object group. Each AABB is defined by a minimum corner $(x_{min}, y_{min}, z_{min})$ and a maximum corner $(x_{max}, y_{max}, z_{max})$ [S2].
+ 
+-### Data Structures
+-1.  **Voxel Array**: A 3D texture or buffer. The dimensions $(D_x, D_y, D_z)$ are set to the minimal bounding box of the active voxel data, rather than a fixed power-of-two size [S1, unofficial].
+-2.  **Bounding Volume List**: An array of AABBs, where each AABB is defined by two 3D vectors: $\mathbf{min} = (x_{min}, y_{min}, z_{min})$ and $\mathbf{max} = (x_{max}, y_{max}, z_{max})$ [S2].
++**Steps:**
++1.  **Determine Active Bounds:** Calculate the minimal bounding box that encloses all non-empty voxels or relevant scene geometry. Resize the voxel array to these dimensions to eliminate unused memory and traversal steps [S1, unofficial].
++2.  **Construct Bounding Volumes:** For each primitive in the scene, compute or retrieve its AABB. These volumes define the spatial extent of the primitive [S2].
++3.  **Traversal/Culling:** During ray marching or voxel traversal:
++    *   Check if the current ray segment or voxel coordinate intersects the bounding volume of a primitive.
++    *   If the ray is outside the bounding volume, skip the evaluation of the primitive's SDF map function [S2].
++    *   If the ray is inside, evaluate the SDF to determine the distance to the surface [S2].
++4.  **Accumulate Distance:** Compute the minimum distance from the ray origin to all primitives whose bounding volumes were intersected. Empty regions contribute no distance (or infinite distance) and are skipped [S2].
+ 
+-### Steps
+-1.  **Determine Data Extent**: Calculate the minimum and maximum coordinates occupied by the voxel data [S1, unofficial].
+-2.  **Resize Array**: Allocate the voxel texture with dimensions equal to the data extent. For example, if the landscape height is 321 voxels within a 512x512 footprint, use dimensions $512 \times 321 \times 512$ instead of a fixed $512^3$ [S1, unofficial].
+-3.  **Construct Bounding Volumes**: For each scene primitive, compute its AABB [S2].
+-4.  **Ray-Volume Intersection Test**: For each ray (or pixel), test intersection against the bounding volumes before evaluating the SDF [S2].
+-5.  **Early Out**: If a ray does not intersect a primitive's bounding volume, skip the evaluation of that primitive's SDF map function [S2].
+-6.  **Traverse**: Perform ray marching only within the resized array bounds [S1, unofficial].
++**Formulas:**
++*   **AABB Intersection Test:** A ray with origin $\mathbf{o}$ and direction $\mathbf{d}$ intersects an AABB defined by $\mathbf{min}$ and $\mathbf{max}$ if:
++    $$ t_{min} = \max \left( \frac{min_x - o_x}{d_x}, \frac{min_y - o_y}{d_y}, \frac{min_z - o_z}{d_z} \right) $$
++    $$ t_{max} = \min \left( \frac{max_x - o_x}{d_x}, \frac{max_y - o_y}{d_y}, \frac{max_z - o_z}{d_z} \right) $$
++    Intersection occurs if $t_{min} \le t_{max}$ and $t_{max} \ge 0$. [G: Standard ray-AABB intersection logic].
++*   **Array Indexing:** For a resized array of dimensions $W \times H \times D$, a voxel at logical coordinates $(i, j, k)$ is accessed at index $i + j \cdot W + k \cdot W \cdot H$ [G: Standard 3D array indexing].
+ 
+-### Pseudocode
++**Parameters:**
++*   **Bounding Volume Type:** AABBs are standard due to fast intersection tests [S1, unofficial].
++*   **Resolution:** The voxel resolution must be sufficient to capture the geometry within the bounding box. [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **False Positives:** Using a fixed, oversized array (e.g., $512^3$ for a $512 \times 321 \times 512$ scene) loads unnecessary data into GPU memory and causes false positives during traversal [S1, unofficial].
++*   **Lighting Artifacts:** Using AABBs for normal estimation can result in hard, non-physically plausible lighting because the normals of the cube faces do not match the curved surface of the primitive [S1, unofficial].
++*   **GPU Architecture:** Modern GPUs are MIMD (Multiple Instruction, Multiple Data) rather than pure SIMD. Different Streaming Multiprocessors (SMs) can process different instruction streams simultaneously. This allows the GPU to finish computation of cheaper parts of the frame (where bounding volumes are skipped) early and distribute more expensive threads (where SDFs are evaluated) across available SMs [S2].
++
++**Pseudocode:**
+ ```python
+-def bounding_volume_optimization(ray_origin, ray_direction, scene_primitives, voxel_array):
+-    """
+-    ray_origin: vec3
+-    ray_direction: vec3
+-    scene_primitives: list of objects, each having .aabb (min, max) and .sdf_function()
+-    voxel_array: 3D array with dimensions matching the data extent
+-    """
+-    # Step 1: Initialize minimum distance found so far
+-    min_dist = float('inf')
++def render_frame(ray_origin, ray_direction, voxel_array, bounding_volumes):
++    # 1. Determine if ray intersects any bounding volume
++    hit_any = False
++    min_dist = INFINITY
+     
+-    # Step 2: Cull primitives using bounding volumes
+-    for primitive in scene_primitives:
+-        # Test ray against AABB
+-        if ray_intersects_aabb(ray_origin, ray_direction, primitive.aabb):
+-            # Step 3: Evaluate SDF only if bounding volume is hit
+-            # This skips expensive SDF evaluations for non-contributing objects
+-            dist = primitive.sdf_function(ray_origin, ray_direction)
++    for bv in bounding_volumes:
++        # Check intersection with AABB
++        t_min, t_max = intersect_aabb(ray_origin, ray_direction, bv.min, bv.max)
++        
++        if t_min <= t_max and t_max >= 0:
++            hit_any = True
++            # 2. If intersected, evaluate SDF to get precise distance
++            # This is the expensive operation, skipped if bv is not intersected
++            dist = evaluate_sdf(ray_origin, ray_direction, bv.primitive)
+             if dist < min_dist:
+                 min_dist = dist
+-        else:
+-            # Skip this primitive
+-            continue
+-            
+-    # Step 4: March within the resized voxel array bounds
+-    # The array dimensions are already set to the minimal extent
+-    # to avoid false positives from empty space [S1, unofficial]
+-    current_pos = ray_origin
+-    for step in range(MAX_STEPS):
+-        if current_pos is out_of_bounds(voxel_array):
+-            break
+-            
+-        # Sample voxel data or use SDF result
+-        # ...
++                
++    if not hit_any:
++        return BACKGROUND_COLOR
+         
+-        current_pos += ray_direction * step_size
+-        
+-    return min_dist
+-
+-def ray_intersects_aabb(origin, direction, aabb):
+-    """
+-    Standard ray-AABB intersection test.
+-    aabb.min and aabb.max are vec3.
+-    """
+-    inv_dir = 1.0 / direction
+-    t_min = (aabb.min - origin) * inv_dir
+-    t_max = (aabb.max - origin) * inv_dir
+-    
+-    t1 = min(t_min)
+-    t2 = max(t_max)
+-    
+-    if t1 > t2:
+-        return False
+-        
+-    # Check if the intersection is within the bounding box range
+-    if t2 < 0:
+-        return False
+-        
+-    return True
++    # 3. Proceed with raymarching using min_dist
++    # ... (standard raymarching loop)
++    return final_color
+ ```
+ 
+-### Parameters and Edge Cases
+-*   **Array Dimensions**: Must be calculated dynamically based on the scene content to avoid loading unused data into GPU memory [S1, unofficial].
+-*   **AABB Normal Limitations**: Using AABBs for lighting can result in hard, physically implausible lighting because the normals of the cube faces do not provide smooth gradients [S1, unofficial].
+-*   **GPU Architecture**: Modern GPUs are MIMD (Multiple Instruction, Multiple Data) rather than pure SIMD. This allows different Streaming Multiprocessors (SMs) to process different instruction streams, helping distribute expensive threads after cheaper parts finish early [S2].
++## Subtopics
++
++### 3D Voxel Grid Smoothing
++Applies post-processing to smooth scalar fields. Choose when visual continuity is more important than traversal speed. [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md)
++
++### Binary Voxel RLE Encoding
++Compresses binary voxel data. Choose when memory bandwidth is the bottleneck and data is binary. [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md)
++
++### Coordinate Grid Generation
++Generates the spatial coordinates for voxels. Choose when mapping voxel indices to world space is required. [Coordinate Grid Generation](1273-coordinate-grid-generation.md)
++
++### Occupancy Voxel Creation
++Creates binary occupancy masks. Choose when only presence/absence of geometry is needed. [Occupancy Voxel Creation](2628-occupancy-voxel-creation.md)
++
++### Grid Resolution Calculation
++Determines the optimal voxel size. Choose when balancing detail and performance. [Grid Resolution Calculation](2908-grid-resolution-calculation.md)
++
++### Voxelization Optimization
++Optimizes the generation of the voxel grid. Choose when the voxelization step is the bottleneck. [Voxelization Optimization](3191-voxelization-optimization.md)
++
++### Bucket-based LBVH construction
++Builds a Linear Bounding Volume Hierarchy. Choose when accelerating ray-primitive intersection for complex scenes. [Bucket-based LBVH construction](5163-bucket-based-lbvh-construction.md)
+ 
+ ## Operating characteristics
+-*   **Performance**: In a scene with 20 expensive primitives at 720p, enabling BV optimization reduced average frame duration from 41 ms (24 fps) to 21 ms (48 fps) [S2].
+-*   **Memory**: Reduces memory bandwidth and cache pressure by loading only the necessary voxel data (e.g., $512 \times 321 \times 512$ instead of $512^3$) [S1, unofficial].
+-*   **Complexity**: The cost of bounding volume tests is negligible compared to SDF evaluations, leading to a net performance gain in complex scenes [S2].
+-*   **Limitations**: AABBs do not provide visually appealing lighting due to flat normals [S1, unofficial].
++*   **Time Complexity:** Reduces the number of SDF evaluations from $O(N \cdot M)$ to $O(N \cdot K)$, where $N$ is the number of rays, $M$ is the total number of primitives, and $K$ is the number of primitives intersecting the ray's bounding volume ($K \ll M$) [S2].
++*   **Memory Complexity:** Reduces memory usage by resizing the voxel array to the minimal bounding box. For example, reducing from $512^3$ to $512 \times 321 \times 512$ saves approximately 37% of memory [S1, unofficial].
++*   **Measured Performance:** In a scene with 20 expensive primitives at 720p, enabling BV optimization reduced average frame duration from 41 ms (24 fps) to 21 ms (48 fps) [S2].
++*   **Strengths:** Localizes expensive computations to areas with complex geometry; reduces false positives; separates game world and entities for physics simulation [S1, unofficial][S2].
++*   **Limitations:** AABBs can cause visually unappealing lighting if used for normal estimation; requires pre-computation of bounding volumes [S1, unofficial].
++*   **When to Use:** When the scene contains many primitives, most of which are empty or far from the camera.
++*   **When Not to Use:** When the scene is uniformly dense or when lighting artifacts from AABB normals are unacceptable.
+ 
+ ## Background
+-The concept of adapting voxel array sizes to reduce false positives and memory usage was discussed in the context of voxel landscapes [S1, unofficial]. The application of bounding volume optimization to SDF ray marching to minimize map function evaluation costs was explored in CUDA-based raymarching research [S2].
++Bounding Volume Optimization originated in the context of raymarching and voxel rendering to address the high computational cost of evaluating Signed Distance Fields (SDFs) for every primitive in a scene [S2]. It was notably discussed in the context of optimizing CUDA-based raymarchers and voxel-based game engines [S1, unofficial][S2]. The technique leverages the MIMD nature of modern GPUs to distribute workload efficiently by skipping unnecessary calculations [S2].
+ 
+ ## Sources

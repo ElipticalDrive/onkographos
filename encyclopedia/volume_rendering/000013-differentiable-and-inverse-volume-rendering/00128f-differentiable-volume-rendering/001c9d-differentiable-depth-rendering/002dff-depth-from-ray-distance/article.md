@@ -1,41 +1,40 @@
 # Depth from Ray Distance
 
-Also called: Camera-space depth rendering, $z_c$ rendering
+Also called: Camera-space depth, Z-depth, Ray distance to depth conversion
 
 ## Overview
-Depth from Ray Distance computes the camera-space depth $z_c$ of a ray by converting the accumulated ray distance $d$ (the path length along the ray) into the orthogonal depth relative to the camera plane [S1]. It solves the problem of obtaining metric depth maps from volumetric rendering where the raw output is often the Euclidean distance along the viewing ray, which varies with viewing angle [S1]. Unlike [Expected Depth Rendering](8816-expected-depth-rendering.md), which calculates the weighted mean of sample depths, this method provides a single depth value derived from the total ray distance and the ray's direction, serving as a foundational differentiable primitive for [Differentiable Depth Rendering](1332-differentiable-depth-rendering.md).
+Depth from Ray Distance converts the scalar ray distance $d$ (the Euclidean distance from the camera center to the accumulated volume along a ray) into camera-space depth $z_c$ (the distance along the camera's optical axis). This conversion is necessary because standard depth maps represent the $z$-coordinate in the camera frame, not the arc length along the ray. It differs from sibling methods like [Median Depth Rendering](8815-median-depth-rendering.md) or [Sigma-Threshold Depth Rendering](5955-sigma-threshold-depth-rendering.md) by providing a continuous, differentiable geometric metric derived directly from the ray integration distance, rather than a discrete sample index or threshold crossing point.
 
 ## How it works
-**Inputs:**
-*   Ray distance $d$: The accumulated distance along the ray from the camera origin to the termination point (or the end of the volume), obtained from the differentiable volume rendering process [S1].
-*   Pixel coordinates $(x, y)$: The integer coordinates of the pixel in the image plane [S1].
-*   Camera intrinsics $K$: The $3 \times 3$ camera matrix [S1].
-
-**Outputs:**
-*   Camera-space depth $z_c$: The depth value along the camera's optical axis (z-axis) [S1].
+**Inputs and Outputs:**
+- Input: Ray distance $d$ (scalar, output of differentiable volume rendering), pixel coordinates $(x, y)$, camera intrinsic matrix $K$.
+- Output: Camera-space depth $z_c$ (scalar).
 
 **Data Structures:**
-*   $K$: $3 \times 3$ matrix.
-*   $(x, y)$: Integers.
-*   $d$: Float.
-*   $z_c$: Float.
+- $K$: $3 \times 3$ camera intrinsic matrix.
+- $(x, y)$: Integer pixel coordinates.
+- $d$: Float32 ray distance.
 
 **Steps:**
-1.  Compute the normalized homogeneous coordinate vector $\tilde{\mathbf{v}} = (\tilde{x}, \tilde{y}, 1)^T$ by applying the inverse camera intrinsics to the pixel coordinates:
-    $$
-    \begin{bmatrix} \tilde{x} \\ \tilde{y} \\ 1 \end{bmatrix} = K^{-1} \begin{bmatrix} x \\ y \\ 1 \end{bmatrix}
-    $$
-    [S1]
-2.  Calculate the norm of the normalized direction vector:
-    $$
-    \|\tilde{\mathbf{v}}\| = \sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}
-    $$
-    [S1]
-3.  Compute the camera-space depth $z_c$ by dividing the ray distance $d$ by this norm:
-    $$
-    z_c = \frac{d}{\sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}}
-    $$
-    [S1]
+1. Compute the normalized homogeneous coordinate vector $\mathbf{v}_{norm}$ by applying the inverse camera intrinsics to the pixel coordinates:
+   $$ \begin{bmatrix} \tilde{x} \\ \tilde{y} \\ 1 \end{bmatrix} = K^{-1} \begin{bmatrix} x \\ y \\ 1 \end{bmatrix} $$
+   where $(\tilde{x}, \tilde{y})$ are the normalized coordinates.
+2. Calculate the norm of the normalized direction vector:
+   $$ \|\mathbf{v}_{norm}\| = \sqrt{\tilde{x}^2 + \tilde{y}^2 + 1} $$
+3. Compute the camera-space depth $z_c$ by dividing the ray distance $d$ by this norm:
+   $$ z_c = \frac{d}{\|\mathbf{v}_{norm}\|} = \frac{d}{\sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}} $$
+
+**Formulas:**
+- $z_c = d / \sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}$ [S1]
+- $\begin{bmatrix} \tilde{x} \\ \tilde{y} \\ 1 \end{bmatrix} = K^{-1} \begin{bmatrix} x \\ y \\ 1 \end{bmatrix}$ [S1]
+
+**Parameters:**
+- $K$: Camera intrinsic matrix. Not given in the sources.
+- $d$: Ray distance from the parent method [Differentiable Depth Rendering](1332-differentiable-depth-rendering.md).
+
+**Edge Cases and Pitfalls:**
+- Division by zero: The term $\sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}$ is always $\ge 1$ for valid pixel coordinates, so division by zero is not possible.
+- Precision: Ensure $K^{-1}$ is computed with sufficient precision.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -45,94 +44,73 @@ import torch
 
 def depth_from_ray_distance(d: torch.Tensor, x: torch.Tensor, y: torch.Tensor, K: torch.Tensor) -> torch.Tensor:
     """
-    Compute camera-space depth z_c from ray distance d and pixel coordinates.
+    Convert ray distance d to camera-space depth z_c.
     
     Args:
-        d: Ray distance tensor of shape (N,).
-        x: Pixel x-coordinates tensor of shape (N,).
-        y: Pixel y-coordinates tensor of shape (N,).
+        d: Ray distance tensor of shape (N,) or (H, W).
+        x: Pixel x-coordinates tensor of shape (N,) or (H, W).
+        y: Pixel y-coordinates tensor of shape (N,) or (H, W).
         K: Camera intrinsic matrix of shape (3, 3).
         
     Returns:
-        z_c: Camera-space depth tensor of shape (N,).
+        z_c: Camera-space depth tensor of the same shape as d.
     """
-    # Step 1: Compute normalized homogeneous coordinates
-    # (x_tilde, y_tilde, 1)^T = K^{-1} * (x, y, 1)^T
-    # We construct the homogeneous pixel coordinates
+    # Ensure inputs are on the same device and have the same shape
+    device = d.device
+    dtype = d.dtype
+    
+    # Create homogeneous pixel coordinates
+    # Shape: (N, 3) or (H, W, 3)
     ones = torch.ones_like(x)
-    pixel_homo = torch.stack([x, y, ones], dim=-1) # Shape (N, 3)
+    pixel_coords = torch.stack([x, y, ones], dim=-1)
     
-    # Apply inverse intrinsics
+    # Compute normalized homogeneous coordinates
+    # K_inv is (3, 3), pixel_coords is (..., 3)
+    # Result v_norm is (..., 3)
     K_inv = torch.inverse(K)
-    # Matrix multiplication: (N, 3) @ (3, 3)^T -> (N, 3)
-    # Note: K_inv is (3,3). We need to multiply each pixel vector by K_inv.
-    # torch.matmul handles (N, 3) @ (3, 3) if we transpose K_inv or use einsum.
-    # Standard matmul: (N, 3) @ (3, 3) is not valid directly for vector-matrix.
-    # We treat pixel_homo as row vectors, so we do pixel_homo @ K_inv.T
-    v_tilde = torch.matmul(pixel_homo, K_inv.T) # Shape (N, 3)
+    v_norm = torch.matmul(pixel_coords, K_inv.T) # Broadcasting handles batch dims
     
-    x_tilde = v_tilde[:, 0]
-    y_tilde = v_tilde[:, 1]
+    # Extract tilde_x and tilde_y
+    tilde_x = v_norm[..., 0]
+    tilde_y = v_norm[..., 1]
     
-    # Step 2: Calculate norm of normalized direction vector
-    norm = torch.sqrt(x_tilde**2 + y_tilde**2 + 1.0)
+    # Calculate norm of normalized direction vector
+    # norm = sqrt(tilde_x^2 + tilde_y^2 + 1)
+    norm = torch.sqrt(tilde_x**2 + tilde_y**2 + 1.0)
     
-    # Step 3: Compute depth
+    # Compute camera-space depth
     z_c = d / norm
     
     return z_c
 ```
 
-**Parameters:**
-*   Not given in the sources.
-
-**Edge Cases and Pitfalls:**
-*   **Division by Zero:** The denominator $\sqrt{\tilde{x}^2 + \tilde{y}^2 + 1}$ is always $\ge 1$ because the third component is 1. Thus, division by zero is impossible [S1].
-*   **Precision:** The calculation relies on the accuracy of $K^{-1}$. If $K$ is singular or ill-conditioned, the result will be unstable [S1].
-*   **Ray Distance Definition:** The correctness of $z_c$ depends entirely on $d$ being the true Euclidean distance from the camera center to the point on the ray. If $d$ is an approximation or normalized value, $z_c$ will be incorrect [S1].
-
 ## Subtopics
 
+### [Sigma-Threshold Depth Rendering](5955-sigma-threshold-depth-rendering.md)
+Sigma-Threshold Depth Rendering computes a binary mask indicating the sample index along a ray where the cumulative accumulated weight exceeds a specified threshold, effectively identifying the "surface" location for depth estimation. It renders a binary or thresholded output based on whether the volume density ($\sigma$) exceeds a given threshold along the ray. This method is distinct from expected depth rendering (which computes a weighted average) and median depth rendering (which finds the median distance) by providing a hard segmentation of the ray's occupied volume. It is primarily used in differentiable volume rendering pipelines, such as those in Dex-NeRF, to provide gradient-friendly surface cues.
+
 ### [Median Depth Rendering](8815-median-depth-rendering.md)
-Median Depth Rendering computes the depth of a ray by determining the weighted median of sample depths, where weights are derived from sample opacities. Unlike Expected Depth Rendering, which calculates the weighted mean (center of mass) of depths, Median Depth Rendering is robust to outliers and discontinuities in the volume, providing a stable depth estimate that is less sensitive to noise or sparse sampling artifacts [8816-expected-depth-rendering.md]. It serves as a differentiable depth estimation method, though its differentiability properties differ from the smooth gradient continuity of the expected value approach [8816-expected-depth-rendering.md].
+Median Depth Rendering computes the geometric depth of a ray by identifying the sample point where the accumulated opacity crosses a specific threshold, typically 0.5. Unlike Expected Depth Rendering, which integrates the entire ray's contribution to produce a weighted average, Median Depth Rendering selects a single representative sample index based on cumulative weight. This method provides a stable geometric signal for pseudo-normal supervision and ray-tracing initialization, offering superior reconstruction quality and downstream stability compared to inverse-depth variants.
 
 ### [Robust Depth-Range Estimation](10825-robust-depth-range-estimation.md)
-Estimates a robust clipped depth range $[z_{min}, z_{max}]$ for binning by sampling visible Gaussians, applying a near-depth shift, and selecting percentiles via exact order statistics. It sets itself apart from sibling methods like Median Depth Rendering by using percentile-based range estimation with exact order statistics rather than a single median value, ensuring the binning range covers the majority of contributing geometry while excluding outliers.
+Robust Depth-Range Estimation estimates a robust clipped depth range $[z_{min}, z_{max}]$ for binning by sampling visible Gaussians, applying a near-depth shift, and selecting percentiles via exact order statistics. It sets itself apart from sibling methods like Median Depth Rendering by using percentile-based range estimation with exact order statistics rather than a single median value, ensuring the binning range covers the majority of contributing geometry while excluding outliers.
 
 ### Expected Term Rendering
-Renders the expected term (likely related to expected depth or similar metric) for each ray by tracing through the volume [S2, unofficial]. It computes the expected termination distance (depth) along each ray, typically used for depth map rendering [S2, unofficial]. Implementation involves getting the ray ID, creating a `SingleRaySpec`, finding bounds, and calling `trace_ray_expected_term` [S2, unofficial]. A result tensor of dtype and device matching `rays.origins` with size `{rays.origins.size(0)}` and `requires_grad=false` is created [S2, unofficial]. The kernel `device::render_ray_expected_term_kernel` is launched with blocks calculated by `CUDA_N_BLOCKS_NEEDED(Q, TRACE_RAY_CUDA_THREADS)`, passing `grid`, `rays`, `opt`, and `results.data_ptr<float>()` [S2, unofficial].
-
-### Sigma-Threshold Depth Rendering
-Renders a binary or thresholded output based on whether the volume density ($\sigma$) exceeds a given threshold along the ray [S2, unofficial]. It computes depth based on a sigma threshold, referencing the method used in Dex-NeRF [S2, unofficial]. Implementation involves getting the ray ID, creating a `SingleRaySpec`, finding bounds, and calling `trace_ray_sigma_thresh` with `sigma_thresh` [S2, unofficial]. A result tensor of dtype and device matching `rays.origins` with size `{rays.origins.size(0)}` and `requires_grad=false` is created [S2, unofficial]. The kernel `device::render_sigma_thresh_kernel` is launched with blocks calculated by `CUDA_N_BLOCKS_NEEDED(Q, TRACE_RAY_CUDA_THREADS)`, passing `grid`, `rays`, `opt`, `sigma_thresh`, and `results.data_ptr<float>()` [S2, unofficial].
-*   Parameter: `sigma_thresh`: A float threshold value for density comparison [S2, unofficial].
-
-### RGB-D Mapping Optimization
-Uses differentiable depth rendering for optimization by combining photometric and geometric losses [S3].
-*   Formula: Photometric loss $L_p$ is the mean squared error between rendered color $\hat{C}$ and input color $C$: $L_p(\hat{C}(\sigma, c)) = \frac{1}{M} \sum_{i=1}^{M} ||\hat{C}(\sigma_i, c_i) - C||^2$ [S3]. Geometric depth loss $L_g$ is the mean squared error between rendered depth $\hat{D}$ and input depth $D$: $L_g(\hat{D}(\sigma)) = \frac{1}{M} \sum_{i=1}^{M} ||\hat{D}(\sigma) - D||^2$ [S3]. Total loss is $L = L_p + \lambda_d L_g$, where $\lambda_d$ is the scaling factor of the geometric loss [S3].
-*   Derivatives: Partial derivative of rendered color $\hat{C}$ w.r.t. color $c_i$ is $\frac{\partial \hat{C}}{\partial c_i} = w_i(\sigma) = T_i (1 - \exp(-\sigma_i \delta_i))$ [S3]. Partial derivative of rendered depth $\hat{D}$ w.r.t. density $\sigma_i$ is $\frac{\partial \hat{D}}{\partial \sigma_i} = \delta_i [ t_i T_{i+1}(\sigma) - \hat{D} + \sum_{j=0}^{i} t_j w_j(\sigma) ]$, derived by interpreting distance $t_i$ as color $c_i$ [S3].
-*   Parameter: $\lambda_d$: Scaling factor for the geometric loss term in the total loss function [S3].
-*   Code: The derivatives are implemented directly in a custom CUDA kernel, building on code developed for Plenoxel to boost computational speed [S3].
-
-### Camera Pose Tracking via Differentiable Rendering
-Estimates camera pose by treating pose as the variable and radiance field parameters ($\vec{\sigma}, \vec{c}$) as static, performing image-to-model alignment using RGB-D input [S3].
-*   Formula: Derivative of rendered depth $\hat{D}$ w.r.t. ray $\vec{r}$ is $\frac{\partial \hat{D}}{\partial \vec{r}} = \sum_{i=1}^{N} \frac{\partial \hat{D}}{\partial \sigma_i} \frac{\partial \sigma_i}{\partial \vec{p}_i} \frac{\partial \vec{p}_i}{\partial \vec{r}}$ [S3]. Derivative of sample point $\vec{p}_i$ w.r.t. ray $\vec{r}$ is decomposed as $\frac{\partial \vec{p}_i}{\partial \vec{r}} = [\frac{\partial \vec{p}_i}{\partial \vec{o}}, \frac{\partial \vec{p}_i}{\partial \vec{d}}] = [1, t_i]$ [S3].
-*   Parameter: Optimizer: Adam [17] is used for tracking (mapping uses RMSProp) [S3].
-*   Pitfall: The partial derivatives $\frac{\partial \sigma_i}{\partial \vec{p}_i}$, $\frac{\partial c_i}{\partial \vec{p}_i}$, and $\frac{\partial \vec{p}_i}{\partial \vec{r}}$ are model-specific and produce messy functions for trilinear interpolation; complete analytical equations are reserved for Appendix A [S3].
+Expected Term Rendering renders the expected term (likely related to expected depth or similar metric) for each ray by tracing through the volume [S2, unofficial]. It computes the expected termination distance (depth) along each ray, typically used for depth map rendering [S2, unofficial]. The implementation involves getting the ray ID, creating a `SingleRaySpec`, finding bounds, and calling `trace_ray_expected_term`. A result tensor of dtype and device matching `rays.origins` is created with size `{rays.origins.size(0)}` and `requires_grad=false`. The kernel `device::render_ray_expected_term_kernel` is launched with blocks calculated by `CUDA_N_BLOCKS_NEEDED(Q, TRACE_RAY_CUDA_THREADS)`, passing `grid`, `rays`, `opt`, and `results.data_ptr<float>()` [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The conversion from ray distance to camera-space depth is $O(1)$ per ray, involving a few arithmetic operations and a square root [S1]. The overall cost is dominated by the ray distance calculation itself, which depends on the number of samples per ray and the volume representation [S1].
-*   **Memory Complexity:** $O(1)$ additional memory per ray for storing intermediate coordinates and norms [S1].
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Scales linearly with the number of rays, as each ray's depth is computed independently [S1].
-*   **Strengths:** Provides a direct, differentiable mapping from ray distance to metric depth, enabling end-to-end training with depth supervision [S1, S3]. It is computationally efficient [S1].
-*   **Limitations:** Relies on the accuracy of the ray distance $d$. If $d$ is inaccurate (e.g., due to coarse sampling or approximation in sphere tracing), $z_c$ will be biased [S1]. It does not handle occlusion or transparency in the same way as expected depth, as it assumes a single termination point or accumulated distance [S1].
-*   **When to use:** When metric depth is required from a volumetric renderer that outputs ray distances, and when differentiable optimization of camera pose or scene parameters is needed [S1, S3].
-*   **When not to use:** When the scene has significant transparency and a single depth value is insufficient to represent the geometry, in which case expected depth or depth distributions might be more appropriate [S1].
+- **Time Complexity:** $O(1)$ per pixel after ray distance $d$ is computed. The conversion involves basic arithmetic operations.
+- **Memory Complexity:** $O(1)$ auxiliary memory.
+- **Strengths:** Provides a physically meaningful depth metric (camera-space Z) that is differentiable with respect to the ray distance $d$. It is computationally inexpensive.
+- **Limitations:** It does not handle occlusion or surface ambiguity directly; it simply converts the integrated distance. If the ray distance $d$ is noisy or inaccurate, $z_c$ will be equally noisy. It assumes the ray distance $d$ represents the correct geometric depth, which may not be true for transparent or volumetric scenes without proper weighting.
+- **When to use:** When camera-space depth is required for downstream tasks like RGB-D mapping, pose tracking, or comparison with sensor depth data.
+- **When not to use:** When a discrete surface estimate is needed (use Median or Sigma-Threshold) or when robust range estimation is required (use Robust Depth-Range Estimation).
 
 ## Background
-The method originates from the need to render differentiable depth from implicit signed distance functions (SDFs) using sphere tracing [S1]. It was introduced in the context of "DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing" [S1]. The approach leverages the geometric relationship between the ray direction and the camera coordinate system to convert the path length into orthogonal depth [S1]. It is used in applications such as RGB-D mapping and tracking, where differentiable rendering is employed for optimization [S3].
+The method originates from the need to convert ray-based rendering outputs into standard depth map formats for integration with RGB-D sensors and SLAM systems. It is used in RGB-D Mapping and Tracking in a Plenoxel Radiance Field [S3] and DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing [S1]. The conversion is a standard geometric operation in computer vision, relating ray space to camera space.
 
 ## Sources
 [S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26
 [S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)
 [S3] RGB-D Mapping and Tracking in a Plenoxel Radiance Field, https://doi.org/10.1109/wacv57701.2024.00331, fetched 2026-10-26
+[S4] GenDR: A Generalized Differentiable Renderer, https://doi.org/10.1109/cvpr52688.2022.00397, fetched 2026-10-26

@@ -3,54 +3,114 @@
 Also called: Anisotropic MIP-mapping, Directional Voxel Representation
 
 ## Overview
-Anisotropic Voxel Representation is a data storage format for voxel cone tracing that stores directional pre-integration values to prevent color mixing and opacity under-estimation during MIP-mapping [S1]. It solves the "two red-green wall problem" and light leaking artifacts that occur when averaging opaque voxels with different colors or mixed opacity in upper octree levels [S1]. Unlike standard isotropic MIP-mapping which averages all neighbors uniformly, this method preserves directional coherence by integrating values along specific axes, allowing for accurate interpolation of lighting at render time [S1].
+Anisotropic Voxel Representation is a storage format for non-leaf octree nodes in voxel cone tracing that replaces the single scalar value with six directional values corresponding to the major axes ($+X, -X, +Y, -Y, +Z, -Z$) [S1]. It solves the "two red-green wall problem" and opacity under-estimation caused by isotropic averaging, which incorrectly mixes opaque surfaces with different colors or under-estimates opacity in half-filled voxel clusters, leading to light leaking during large cone traces [S1]. It differs from isotropic MIP-mapping by preserving directional coherence during pre-integration, allowing accurate interpolation at render time without the artifacts of simple averaging [S1].
 
 ## How it works
-**Inputs:** Irradiance or visibility values for voxels at the finest resolution (leaf nodes of the octree).
-**Outputs:** An octree where non-leaf nodes store 6 directional values per voxel instead of a single scalar value.
+**Inputs:** Irradiance or color values for leaf voxels; octree structure.
+**Outputs:** An octree where non-leaf nodes store 6 directional values per property, and leaf nodes store 1 scalar value.
 
 **Data Structures:**
-*   **Voxel:**
-    *   `values[6]`: Array of 6 directional values.
-    *   The 6 directions correspond to the major axes: $+X, -X, +Y, -Y, +Z, -Z$.
-    *   Memory layout: The 6 values are stored contiguously. For non-leaf nodes, this increases memory usage by 1.5x compared to a single value [S1]. Leaf nodes (full resolution) store only the standard single value [S1].
+*   **Leaf Node:** Stores a single scalar value (e.g., irradiance, color) per property.
+*   **Non-Leaf Node:** Stores an array of 6 values per property, indexed by direction $d \in \{+X, -X, +Y, -Y, +Z, -Z\}$.
+*   **Memory Layout:** The directional values are stored contiguously or in separate textures (bricks) to allow efficient sampling. The base level (full resolution) is shared across all directions to reduce overhead [S1, S5].
 
-**Algorithm:**
+**Mipmap Generation (Pre-Integration):**
+The representation is constructed during the MIP-mapping process when building or updating the octree [S1]. For each non-leaf voxel and for each of the 6 major directions:
+1.  Perform a step of volumetric integration in depth along that specific direction [S1].
+2.  This involves compositing the 8 child voxels front-to-back along the axis [S3, S4].
+3.  Average the resulting integrated values to produce the final directional value for the parent voxel [S1, S4].
 
-1.  **Construction Phase (MIP-mapping):**
-    When building or updating the octree, for each non-leaf voxel, compute the 6 directional values. For each of the 6 major directions $d \in \{+X, -X, +Y, -Y, +Z, -Z\}$:
-    a. Perform a step of volumetric integration in depth along direction $d$. This involves integrating the values of the child voxels along that axis.
-    b. Average the 4 directional values obtained from the integration steps to get the resulting value for direction $d$.
-    c. Store this averaged value in `values[d]` [S1].
-
-    *Note: The source describes "averaging the 4 directional values" but does not specify the exact geometric configuration of these 4 values. It is implied that this refers to the integration result over the 2x2x2 child block projected along the axis.*
-
-2.  **Render Phase (Sampling):**
-    When tracing a cone and sampling a voxel at a specific view direction $\vec{v}$:
-    a. Identify the 3 major directions from the 6 stored directions that are closest to $\vec{v}$.
-    b. Retrieve the corresponding values from `values[6]`.
-    c. Linearly interpolate these 3 values based on the angular proximity to $\vec{v}$ to obtain the final voxel value [S1].
+**Runtime Sampling:**
+During cone tracing, the voxel value is retrieved by linearly interpolating the values from the three closest directions with respect to the view direction $\vec{v}$ [S1, S4].
+1.  Identify the three major axes whose directions have the highest squared dot product with the trace direction $\vec{d}$ [S3, S4].
+2.  Compute weights for these three directions:
+    $$ w_i = \text{dot}(\vec{d}, \vec{a}_i)^2 $$
+    where $\vec{a}_i$ is the unit vector of the $i$-th major axis.
+3.  Normalize the weights and linearly interpolate the stored directional values using these weights [S1, S4].
 
 **Parameters:**
 *   Number of directional channels: 6 [S1].
 *   Number of directions interpolated at render time: 3 [S1].
-*   Memory overhead: 1.5x increase for non-leaf nodes [S1].
+*   Scope: Directional values are only computed and used for voxels not located in the last octree level (not at full resolution) [S1, S4].
 
 **Edge Cases and Pitfalls:**
-*   **Two Red-Green Wall Problem:** Averaging opaque voxels with different colors in upper octree levels mixes them as if semi-transparent, causing light leaking [S1]. This representation prevents this by maintaining directional separation.
-*   **Opacity Under-estimation:** If a 2x2x2 set of voxels is half opaque and half transparent, standard averaging results in a half-transparent voxel, causing light leaking for large cones. Directional pre-integration mitigates this [S1].
-*   **Leaf Nodes:** Directional values are not stored for voxels in the last octree level (full resolution) to save memory [S1].
+*   **Two Red-Green Wall Problem:** Averaging opaque voxels with different colors in upper octree levels mixes them as if semi-transparent, causing light leaking [S1].
+*   **Opacity Under-estimation:** If a 2x2x2 set of voxels is half opaque and half transparent, the averaged voxel becomes half-transparent, causing light leaking for large cones [S1].
+*   **Memory Overhead:** Storing directional values for all properties increases memory consumption by 1.5x compared to isotropic if only non-leaf levels are stored [S1, S4]. Some contexts cite a total storage overhead of 1.75x [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_directional_value(child_voxels, direction_axis):
+    """
+    Computes the directional value for a parent voxel by integrating
+    along the specified axis.
+    child_voxels: list of 8 child voxel values (front-to-back order along axis)
+    direction_axis: unit vector indicating the integration direction
+    """
+    # Perform front-to-back compositing along the axis
+    # This is a standard volumetric integration step
+    accumulated = composite_front_to_back(child_voxels, direction_axis)
+    return accumulated
+
+def build_anisotropic_octree(leaf_voxels):
+    """
+    Builds the anisotropic octree from leaf nodes.
+    """
+    directions = [+X, -X, +Y, -Y, +Z, -Z]
+    non_leaf_nodes = []
+    
+    for parent in non_leaf_octree_levels:
+        parent_values = {}
+        for d in directions:
+            # Get 8 children for this parent
+            children = get_children(parent, d)
+            # Compute directional value via integration
+            val = compute_directional_value(children, d)
+            parent_values[d] = val
+        non_leaf_nodes.append(parent_values)
+        
+    return non_leaf_nodes, leaf_voxels
+
+def sample_anisotropic_voxel(directional_values, trace_direction):
+    """
+    Samples the voxel value for a given trace direction.
+    directional_values: dict mapping direction axis to value
+    trace_direction: unit vector of the cone trace
+    """
+    # Calculate squared dot products for all 6 directions
+    scores = {}
+    for d, val in directional_values.items():
+        scores[d] = dot(trace_direction, d) ** 2
+        
+    # Select the 3 directions with the highest scores
+    top_3 = get_top_3(scores)
+    
+    # Linear interpolation using the selected directions
+    total_weight = sum(scores[d] for d in top_3)
+    result = 0
+    for d in top_3:
+        weight = scores[d] / total_weight
+        result += weight * directional_values[d]
+        
+    return result
+```
+
+## Subtopics
+
+### [Voxel Cone Tracing Anisotropic Filtering](2552-voxel-cone-tracing-anisotropic-filtering.md)
+A sibling method that applies anisotropic filtering techniques to cone tracing, differing in implementation details but sharing the goal of reducing artifacts.
 
 ## Operating characteristics
-*   **Time Complexity:** Construction time increases due to the need to compute 6 directional integrations per non-leaf voxel. Render time involves finding the 3 closest directions and performing linear interpolation, which is constant time relative to voxel size but adds overhead per sample [S1].
-*   **Memory Complexity:** Increases memory consumption by 1.5x for non-leaf nodes. Leaf nodes remain unchanged [S1].
-*   **Strengths:** Fully interpolatable; easily stored in bricks; effectively prevents light leaking from color/opacity mixing [S1].
-*   **Limitations:** Increased memory usage; more complex construction logic compared to isotropic MIP-mapping [S1].
-*   **When to use:** When high-quality indirect illumination is required and light leaking artifacts from standard voxel MIP-mapping are unacceptable, particularly in scenes with distinct colored surfaces or sharp opacity transitions [S1].
-*   **When not to use:** When memory is extremely constrained and the visual impact of light leaking is tolerable, or for leaf-level sampling where directional coherence is less critical [S1].
+*   **Time Complexity:** Mipmap generation requires 6 integration passes per non-leaf node, increasing build time compared to isotropic MIP-mapping. Runtime sampling involves computing dot products and interpolating 3 values, which is slightly more expensive than single-value lookup but remains efficient.
+*   **Memory Complexity:** Increases memory consumption by 1.5x for non-leaf levels compared to isotropic storage [S1, S4]. The base level is shared, reducing the theoretical maximum overhead from 6x to 1.5x [S5]. Some sources cite a total overhead of 1.75x [S1].
+*   **Performance:** Delivers interactive to real-time framerates on complex scenes (e.g., Sponza, 280K triangles, 9-level octree) on hardware such as NVIDIA GTX 480 and Intel Core 2 Duo E6850 [S1].
+*   **Strengths:** Prevents light leaking and color mixing artifacts; simple to implement and store in bricks; fully interpolatable [S1].
+*   **Limitations:** Increased memory usage; requires careful handling of the last octree level (leaf nodes remain isotropic) [S1].
 
 ## Background
-Anisotropic Voxel Representation was introduced in the context of Interactive Indirect Illumination Using Voxel Cone Tracing [S1]. It was developed to address quality issues in real-time global illumination approximations using voxel cone tracing, specifically the artifacts caused by isotropic averaging in MIP-mapped voxel structures [S1]. The method was chosen over more complicated representations because it balances quality with implementation simplicity and storage efficiency in brick-based octrees [S1].
+The method was introduced in the context of Interactive Indirect Illumination Using Voxel Cone Tracing [S1]. It was chosen over more complicated representations because it can be fully interpolated and easily stored in bricks [S1]. The approach addresses specific quality problems in voxel cone tracing, such as the two red-green wall problem, which were not adequately solved by isotropic MIP-mapping [S1].
 
 ## Sources
 [S1] Interactive Indirect Illumination Using Voxel Cone Tracing, https://doi.org/10.1111/j.1467-8659.2011.02063.x, fetched 2026-10-26

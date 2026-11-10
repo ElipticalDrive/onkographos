@@ -1,171 +1,168 @@
 # Mesh Finalization
-
 Also called: VTK Mesh Finalization
 
 ## Overview
-Mesh Finalization prepares a raw geometric representation (typically from a CFD or unstructured grid solver) for rendering by validating data integrity, extrapolating cell-centered fields to vertices, and computing derived attributes like normals and bounds [S1, unofficial]. It differs from blocky meshing assembly, which aggregates pre-computed quads into buffers, by operating on topological cell definitions to generate the actual vertex positions, connectivity, and scalar/vector data structures required by the rendering pipeline [S1, unofficial].
+Mesh Finalization prepares a raw geometric `RenderMesh` for visualization by validating data integrity, extrapolating cell-centered fields to vertices, flattening vector buffers, and computing derived attributes like normals and bounds [S1, unofficial]. It differs from [Chunk Mesh Assembly](4100-chunk-mesh-assembly.md) by operating on general unstructured meshes (e.g., CFD data) rather than blocky voxel chunks, and from [Mesh Plugin Architecture](4921-mesh-plugin-architecture.md) by performing the actual data transformation rather than defining the interface.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A solver mesh object `m` containing vertices, cells, faces, and neighbor relationships.
-*   **Output:** A `RenderMesh` structure containing flattened vertex arrays, index buffers, cell connectivity, cell centers, and computed normals/bounds.
+**Inputs:** A `RenderMesh` structure containing raw vertices, indices, cell connectivity, and optional scalar/vector fields.
+**Outputs:** A finalized `RenderMesh` with validated indices, flattened vector buffers, computed normals, bounds, and active scalar/vector selections.
 
 **Data Structures:**
-The `RenderMesh` structure includes:
-*   `vertices`: `std::vector<float>` (3 floats per vertex: x, y, z).
-*   `indices`: `std::vector<std::uint32_t>` (triangular indices).
-*   `cellConnectivity`: `std::vector<std::uint32_t>` (vertex indices per cell).
-*   `cellTypes`: `std::vector<std::uint8_t>` (topology type per cell).
-*   `cellOffsets`: `std::vector<std::uint32_t>` (start index in `cellConnectivity` for each cell).
-*   `cellCenters`: `std::vector<Vec3>` (x, y, z per cell).
-*   `normals`: `std::vector<float>` (3 floats per vertex).
-*   `bounds`: Computed bounding box.
-*   `pointScalars`, `cellScalars`, `pointVectors`, `cellVectors`: Field data containers.
+*   `vertices`: `Float32` array, size $3 \times N_{verts}$ [S1, unofficial].
+*   `indices`: `Uint32` array, size $3 \times N_{tris}$ [S1, unofficial].
+*   `normals`: `Float32` array, size $3 \times N_{verts}$ [S1, unofficial].
+*   `cellCenters`: `Float32` array, size $3 \times N_{cells}$ [S1, unofficial].
+*   `pointScalars`: Map of field names to `Float32` arrays of size $N_{verts}$ [S1, unofficial].
+*   `cellScalars`: Map of field names to `Float32` arrays of size $N_{cells}$ [S1, unofficial].
+*   `pointVectors`: Map of field names to `Float32` arrays of size $3 \times N_{verts}$ [S1, unofficial].
+*   `cellVectors`: Map of field names to `Float32` arrays of size $3 \times N_{cells}$ [S1, unofficial].
+*   `pointVectorOffset`: Map of field names to integer offsets in the flattened `pointVectorsData` buffer [S1, unofficial].
+*   `cellVectorOffset`: Map of field names to integer offsets in the flattened `cellVectorsData` buffer [S1, unofficial].
+*   `pointVectorsData`: Contiguous `Float32` buffer [S1, unofficial].
+*   `cellVectorsData`: Contiguous `Float32` buffer [S1, unofficial].
 
 **Steps:**
-1.  **Validation:** If `mesh.vertices` is empty, log an error and return [S1, unofficial]. If `mesh.indices` is empty and the mesh is not `POLYDATA` and not `renderAsPoints`, log an error and return [S1, unofficial].
-2.  **Index Validation:** Validate that all indices are `< vertexCount`. If any index is out of range, log an error, clear indices, and return to prevent GPU out-of-range fetches [S1, unofficial].
-3.  **Vertex Extraction:** Iterate over solver vertices `m.vertices()`. For each vertex `v`, push `v[0]`, `v[1]`, and `v[2]` (or `0.0f` for 2D) into `rm.vertices` [S1, unofficial].
-4.  **Index Generation:**
-    *   **2D Case:** For each cell, fan-triangulate the polygon. For a cell with vertices `c[0...n]`, add indices `(c[0], c[i], c[i+1])` for `i` from 1 to `n-2` [S1, unofficial].
-    *   **3D Case:** Identify external faces (faces where `m.neighbor(f) == kNoNeighbor`). For each external face loop, fan-triangulate using `loop[0]`, `loop[i]`, `loop[i+1]`. Collect unique edges for `cellEdgeIndices` [S1, unofficial].
-5.  **Cell Topology & Connectivity:** For each cell:
-    *   Determine canonical vertex order and type using `cell_topology::canonicalize` [S1, unofficial].
-    *   Push canonical vertex indices to `rm.cellConnectivity`.
-    *   Push type to `rm.cellTypes`.
-    *   Push current `cellConnectivity.size()` to `rm.cellOffsets` [S1, unofficial].
-6.  **Cell Centers:** Compute `m.cellCenter(c)` for each cell `c` and store in `rm.cellCenters` [S1, unofficial].
-7.  **Field Extrapolation:** Call `mesh_utils::extrapolateCellDataToPoints` to move cell-centered data to vertices [S1, unofficial].
-8.  **Vector Flattening:**
-    *   Flatten point vectors into `mesh.pointVectorsData` with offsets `mesh.pointVectorOffset`. Set `mesh.pointVectorCount` to `perVertex` [S1, unofficial].
-    *   Flatten cell vectors into `mesh.cellVectorsData`. Set `mesh.cellVectorCount` to `cellCount`. Record available cell vector names [S1, unofficial].
-    *   If no `cellVectorName` is set, default to the first available cell vector name [S1, unofficial].
-9.  **Scalar Selection:**
-    *   If `scalarName` is empty or not in `pointScalars`, default to the first point scalar [S1, unofficial].
-    *   Validate scalar size matches vertex count; if not, clear scalars [S1, unofficial].
-10. **UI Population:** Sort available scalar and vector names alphabetically for UI display [S1, unofficial].
-11. **Vector Name Default:** If no `vectorName` is set, default to the first available vector name [S1, unofficial].
-12. **Normals & Bounds:** Compute normals and bounds using `mesh_utils::computeNormals` and `mesh_utils::computeBounds` [S1, unofficial]. If normals are empty but vertices exist, assign default normals [S1, unofficial].
+
+1.  **Validation:**
+    *   If `vertices` is empty, log an error and return [S1, unofficial].
+    *   If `indices` is empty and the mesh is not `POLYDATA` and not `renderAsPoints`, log an error and return [S1, unofficial].
+    *   Validate indices: if any index value $\ge N_{verts}$, log an error, clear `indices`, and return to prevent GPU out-of-range fetches [S1, unofficial].
+
+2.  **Extrapolate Cell Data to Points:**
+    *   For each scalar field in `cellScalars`, extrapolate values to `pointScalars` using `mesh_utils::extrapolateCellDataToPoints` [S1, unofficial].
+    *   For each vector field in `cellVectors`, extrapolate values to `pointVectors` using the same utility [S1, unofficial].
+
+3.  **Flatten Vector Buffers:**
+    *   Create `pointVectorsData` by concatenating all `pointVectors` fields.
+    *   Set `pointVectorOffset[field]` to the byte offset of each field within `pointVectorsData`.
+    *   Set `pointVectorCount` to $N_{verts}$ [S1, unofficial].
+    *   Create `cellVectorsData` by concatenating all `cellVectors` fields.
+    *   Set `cellVectorOffset[field]` to the byte offset of each field within `cellVectorsData`.
+    *   Set `cellVectorCount` to $N_{cells}$ [S1, unofficial].
+    *   Record available cell vector names [S1, unofficial].
+
+4.  **Compute Cell Centers:**
+    *   For each cell, compute the center as the average of its vertex positions:
+        $$ \mathbf{c}_j = \frac{1}{V_j} \sum_{i=1}^{V_j} \mathbf{v}_{j,i} $$
+        where $\mathbf{c}_j$ is the center of cell $j$, $V_j$ is the number of vertices in cell $j$, and $\mathbf{v}_{j,i}$ is the position of the $i$-th vertex of cell $j$ [S1, unofficial].
+
+5.  **Select Active Scalar:**
+    *   If `scalarName` is empty or not in `pointScalars`, default to the first available point scalar [S1, unofficial].
+    *   Validate that the selected scalar's size matches $N_{verts}$. If not, clear scalars [S1, unofficial].
+
+6.  **Select Active Vector:**
+    *   If `vectorName` is empty, default to the first available cell vector name [S1, unofficial].
+
+7.  **Compute Normals and Bounds:**
+    *   Compute vertex normals using `mesh_utils::computeNormals` [S1, unofficial].
+    *   Compute bounding box using `mesh_utils::computeBounds` [S1, unofficial].
+    *   If `normals` is empty but `vertices` is not, assign default normals (e.g., zero or uniform) [S1, unofficial].
+
+8.  **Populate UI Data:**
+    *   Sort available scalar and vector names alphabetically for UI display [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def finalize_mesh(solver_mesh):
-    rm = RenderMesh()
-    rm.datasetType = "CFD MESH"
-    rm.fileFormat = "MSH"
-    
+def finalize_mesh(mesh):
     # 1. Validation
-    if len(solver_mesh.vertices) == 0:
+    if len(mesh.vertices) == 0:
         log_error("Empty vertices")
-        return None
+        return
     
-    # 2. Index Validation (if indices exist)
-    if solver_mesh.indices and len(solver_mesh.indices) > 0:
-        for idx in solver_mesh.indices:
-            if idx >= len(solver_mesh.vertices):
-                log_error("Index out of range")
-                rm.indices = []
-                return None
+    if len(mesh.indices) == 0 and not mesh.is_polydata and not mesh.render_as_points:
+        log_error("Empty indices")
+        return
     
-    # 3. Vertex Extraction
-    for v in solver_mesh.vertices:
-        rm.vertices.append(v[0])
-        rm.vertices.append(v[1])
-        if solver_mesh.dim == 3:
-            rm.vertices.append(v[2])
+    for idx in mesh.indices:
+        if idx >= len(mesh.vertices) // 3:
+            log_error("Index out of range")
+            mesh.indices = []
+            return
+
+    # 2. Extrapolate Cell Data to Points
+    # Assumes mesh_utils.extrapolateCellDataToPoints exists
+    extrapolate_cell_data_to_points(mesh)
+
+    # 3. Flatten Vector Buffers
+    point_vectors_data = []
+    mesh.point_vector_offset = {}
+    offset = 0
+    for field_name, field_data in mesh.point_vectors.items():
+        mesh.point_vector_offset[field_name] = offset
+        point_vectors_data.extend(field_data)
+        offset += len(field_data)
+    mesh.point_vectors_data = point_vectors_data
+    mesh.point_vector_count = len(mesh.vertices) // 3
+
+    cell_vectors_data = []
+    mesh.cell_vector_offset = {}
+    offset = 0
+    for field_name, field_data in mesh.cell_vectors.items():
+        mesh.cell_vector_offset[field_name] = offset
+        cell_vectors_data.extend(field_data)
+        offset += len(field_data)
+    mesh.cell_vectors_data = cell_vectors_data
+    mesh.cell_vector_count = len(mesh.cell_centers)
+    mesh.available_cell_vector_names = sorted(mesh.cell_vectors.keys())
+
+    # 4. Compute Cell Centers
+    # Assumes mesh.cell_connectivity and mesh.vertices are available
+    # cell_connectivity is a list of lists of vertex indices
+    mesh.cell_centers = []
+    for cell_indices in mesh.cell_connectivity:
+        center = [0.0, 0.0, 0.0]
+        for vi in cell_indices:
+            center[0] += mesh.vertices[vi * 3]
+            center[1] += mesh.vertices[vi * 3 + 1]
+            center[2] += mesh.vertices[vi * 3 + 2]
+        num_verts = len(cell_indices)
+        mesh.cell_centers.append([c / num_verts for c in center])
+
+    # 5. Select Active Scalar
+    if not mesh.scalar_name or mesh.scalar_name not in mesh.point_scalars:
+        if mesh.point_scalars:
+            mesh.scalar_name = sorted(mesh.point_scalars.keys())[0]
         else:
-            rm.vertices.append(0.0)
-            
-    # 4. Index Generation
-    if solver_mesh.dim == 2:
-        for cell in solver_mesh.cells:
-            if len(cell) < 3: continue
-            for i in range(1, len(cell) - 1):
-                rm.indices.append(cell[0])
-                rm.indices.append(cell[i])
-                rm.indices.append(cell[i + 1])
-    else:
-        seen_edges = set()
-        edges = []
-        for f in range(solver_mesh.nFaces()):
-            if solver_mesh.neighbor(f) != kNoNeighbor: continue
-            loop = solver_mesh.faceVertices(f)
-            if len(loop) < 3: continue
-            for i in range(1, len(loop) - 1):
-                rm.indices.append(loop[0])
-                rm.indices.append(loop[i])
-                rm.indices.append(loop[i + 1])
-            for i in range(len(loop)):
-                a = loop[i]
-                b = loop[(i + 1) % len(loop)]
-                edge_key = min(a, b) * 100000 + max(a, b) # Simplified key
-                if edge_key not in seen_edges:
-                    seen_edges.add(edge_key)
-                    edges.append(a)
-                    edges.append(b)
-        rm.cellEdgeIndices = edges
+            mesh.scalar_name = None
+    
+    if mesh.scalar_name:
+        if len(mesh.point_scalars[mesh.scalar_name]) != len(mesh.vertices) // 3:
+            mesh.point_scalars = {}
+            mesh.scalar_name = None
 
-    # 5. Cell Topology
-    cell_index = 0
-    for cell in solver_mesh.cells:
-        canonical = []
-        type_code = kPolyhedron
-        canonical_cell(solver_mesh, cell_index, canonical, type_code)
-        for vi in canonical:
-            rm.cellConnectivity.append(vi)
-        rm.cellTypes.append(type_code)
-        rm.cellOffsets.append(len(rm.cellConnectivity))
-        cell_index += 1
+    # 6. Select Active Vector
+    if not mesh.vector_name:
+        if mesh.available_cell_vector_names:
+            mesh.vector_name = mesh.available_cell_vector_names[0]
+        else:
+            mesh.vector_name = None
 
-    # 6. Cell Centers
-    for c in range(solver_mesh.nCells()):
-        cc = solver_mesh.cellCenter(c)
-        rm.cellCenters.append(cc)
-    rm.cellVectorCount = solver_mesh.nCells()
+    # 7. Compute Normals and Bounds
+    compute_normals(mesh)
+    compute_bounds(mesh)
+    
+    if not mesh.normals and len(mesh.vertices) > 0:
+        # Assign default normals, e.g., zero
+        mesh.normals = [0.0] * len(mesh.vertices)
 
-    # 7. Field Extrapolation
-    extrapolate_cell_data_to_points(solver_mesh, rm)
-
-    # 8. Vector Flattening
-    flatten_point_vectors(solver_mesh, rm)
-    flatten_cell_vectors(solver_mesh, rm)
-    if not rm.cellVectorName:
-        rm.cellVectorName = get_first_available_cell_vector(solver_mesh)
-
-    # 9. Scalar Selection
-    if not rm.scalarName or rm.scalarName not in rm.pointScalars:
-        rm.scalarName = get_first_point_scalar(solver_mesh)
-    if len(rm.pointScalars[rm.scalarName]) != len(rm.vertices) / 3:
-        rm.pointScalars.clear()
-
-    # 10. UI Population
-    rm.available_scalars = sort_alphabetically(get_scalar_names(solver_mesh))
-    rm.available_vectors = sort_alphabetically(get_vector_names(solver_mesh))
-
-    # 11. Vector Name Default
-    if not rm.vectorName:
-        rm.vectorName = get_first_available_vector(solver_mesh)
-
-    # 12. Normals & Bounds
-    compute_bounds(rm)
-    compute_normals(rm)
-    if not rm.normals and rm.vertices:
-        rm.normals = assign_default_normals(rm.vertices)
-        
-    return rm
+    # 8. Populate UI Data
+    mesh.available_scalar_names = sorted(mesh.point_scalars.keys())
+    mesh.available_vector_names = sorted(mesh.cell_vectors.keys())
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of vertices, cells, and faces. Topology canonicalization and neighbor checks are constant per cell/face.
-*   **Memory Complexity:** Proportional to the size of the mesh data. Flattening vectors adds overhead proportional to the number of vector fields.
-*   **Strengths:** Handles arbitrary unstructured cell types (polyhedra, polygons). Ensures data consistency for rendering by validating indices and extrapolating fields.
-*   **Limitations:** Requires solver to provide valid topology. 2D meshes are treated as surface polygons.
-*   **When to use:** When converting solver output (CFD, FEM) to a renderable format. Not suitable for blocky voxel meshes which use assembly.
+*   **Time Complexity:** Dominated by extrapolation ($O(N_{cells} \times V_{avg})$) and normal computation ($O(N_{tris})$). Flattening is linear in the number of vector fields.
+*   **Memory Complexity:** Increases by the size of flattened vector buffers and computed normals/bounds.
+*   **Strengths:** Ensures data consistency for rendering; handles general unstructured meshes.
+*   **Limitations:** Extrapolation can be expensive for large meshes; requires valid connectivity.
+*   **When to use:** After mesh construction, before rendering.
+*   **When not to use:** If data is already finalized or if memory is extremely constrained.
 
 ## Background
-Originated in the SciRender project (thermeng/SciRender) for visualizing CFD meshes [S1, unofficial]. It adapts VTK-like concepts (cell data extrapolation, unstructured grid handling) to a custom C++ rendering pipeline.
+Originated in the SciRender project (thermeng/SciRender) for visualizing CFD meshes [S1, unofficial]. It adapts VTK-like concepts for custom rendering pipelines.
 
 ## Sources
 [S1] thermeng/SciRender, https://github.com/thermeng/SciRender, fetched 2026-10-26 (unofficial)

@@ -1,85 +1,78 @@
 # Bayesian Uncertainty Quantification for SeaThru-NeRF
 
-Also called: Fisher Information Approximation for Spatial Uncertainty, Laplace Approximation for NeRF Uncertainty
+Also called: Bayesian Uncertainty Analysis for Underwater NeRF, Fisher Information Approximation for Spatial Uncertainty, Laplace Approximation Uncertainty Rendering, Laplace Approximation for NeRF Uncertainty, Spatial Perturbation Field $D_\omega$
 
 ## Overview
-This method quantifies the spatial uncertainty of a trained SeaThru-NeRF model by approximating the posterior distribution of model perturbations using a Laplace approximation centered at the maximum a posteriori (MAP) estimate. It solves the problem of assessing confidence in 3D reconstruction by producing a continuous spatial uncertainty field $U(x)$ that indicates regions where the geometry or radiance is poorly constrained. It differs from standard NeRF variants by explicitly modeling parameter variance via the Hessian of the negative log-likelihood, approximated through Fisher Information, rather than just optimizing for photometric accuracy.
+This method quantifies the spatial uncertainty of underwater 3D reconstructions represented by Neural Radiance Fields (NeRF) by approximating the posterior distribution of perturbation parameters using the Laplace approximation [S1]. It distinguishes itself from standard NeRF variants by explicitly modeling the sensitivity of the radiance field to coordinate perturbations, rendering the resulting uncertainty as a volumetric field to identify and remove artifacts [S1]. Unlike sibling methods that focus on view synthesis quality or compression, this approach provides a confidence metric for downstream tasks such as underwater navigation and infrastructure inspection [S1].
 
 ## How it works
 
 ### Inputs and Outputs
 **Inputs:**
-*   A trained SeaThru-NeRF model with base parameters $\phi^*$.
-*   A set of $R$ sampled rays $\mathcal{R} = \{r_1, \dots, r_R\}$ from the training dataset.
-*   Ground truth colors $C_{ngt}(r)$ for these rays.
-*   Grid size dimension $M$ (typically 256).
-*   Regularization constant $\lambda$.
+*   A trained SeaThru-NeRF model (or SeaThru-NeRF-lite) with base parameters $\phi^*$ [S1].
+*   A set of training rays $R$ sampled from the training dataset [S1].
+*   Ground truth colors $C_{ngt}(r)$ for the sampled rays [S1].
+*   Grid size dimension $M$ (typically 256) [S1].
+*   Regularization constant $\lambda$ [S1].
 
 **Outputs:**
-*   A spatial uncertainty field $U: \mathbb{R}^3 \to \mathbb{R}^+$, represented as a 3D grid of scalar values.
+*   A spatial uncertainty field $U(x): \mathbb{R}^3 \to \mathbb{R}^+$ [S1].
+*   A thresholded clean image where high-uncertainty regions (artifacts) are removed [S1].
 
 ### Data Structures
-*   **Perturbation Parameters $\omega$**: A vector where each element corresponds to a vertex in a 3D grid of size $M \times M \times M$. The total dimension is $M^3$.
-*   **Covariance Matrix $\Sigma$**: An approximation of the posterior covariance. In implementation, only the diagonal elements are stored due to sparsity assumptions.
-*   **Variance Vector $\sigma$**: A vector of length $M^3$ containing the diagonal entries of $\Sigma$. $\sigma = (\sigma_x, \sigma_y, \sigma_z)$ conceptually, but stored as a flat vector corresponding to grid vertices.
-*   **Uncertainty Field $U$**: A 3D texture or grid where values are obtained by trilinear interpolation of $\sigma$.
+*   **Covariance Matrix $\Sigma$**: A diagonal matrix approximating the posterior covariance of the perturbation parameters $\omega$. The diagonal elements represent the marginal variance $\sigma$ [S1].
+*   **Spatial Uncertainty Field $U(x)$**: A volumetric data field rendered from the diagonal elements of $\Sigma$. It is stored as an additional color channel alongside the rendered RGB image [S1].
+*   **Perturbation Parameters $\omega$**: A vector of parameters added to the base model, assumed to follow a Gaussian prior $\omega \sim \mathcal{N}(0, \lambda^{-1})$ [S1].
 
-### Algorithm Steps
+### Method Steps
 
-1.  **Initialization**:
-    Set the perturbation parameters $\omega = 0$. At this point, the perturbed model $\tilde{C}_\omega(r)$ equals the base model $C_{\phi^*}(r)$. This minimizes the reconstruction error and serves as the mode of the posterior distribution [S1].
+1.  **Initialize Perturbation Parameters**: Set $\omega = 0$. At this state, the perturbed model equals the base model ($\tilde{C}_0(r) = C_{\phi^*}(r)$), which minimizes reconstruction error and serves as the mode of the posterior distribution [S1].
 
-2.  **Define Negative Log-Likelihood**:
-    The objective function $h(\omega)$ is defined as the negative log-likelihood of the posterior distribution, combining reconstruction error and a Gaussian prior on $\omega$ [S1]:
+2.  **Define Negative Log-Likelihood**: Define the negative log-likelihood of the posterior distribution $p(\omega|I)$ as [S1]:
     $$
     h(\omega) = \mathbb{E}_n \mathbb{E}_{r \sim I_n} \|\tilde{C}_\omega(r) - C_{ngt}(r)\|_2^2 + \lambda \|\omega\|_2^2
     $$
-    where $\tilde{C}_\omega(r)$ is the predicted color with perturbations, $C_{ngt}(r)$ is the ground truth color, and $\lambda \|\omega\|_2^2$ is the regularization term enforcing $\omega \sim \mathcal{N}(0, \lambda^{-1})$ [S1].
+    where $\tilde{C}_\omega(r)$ is the predicted color with perturbations, $C_{ngt}(r)$ is the ground truth color, and $\lambda \|\omega\|_2^2$ is the regularization term [S1].
 
-3.  **Approximate the Hessian via Fisher Information**:
-    Direct computation of the Hessian $H(\omega) = \nabla^2 h(\omega)$ is expensive. Using the Laplace approximation, the posterior covariance is $\Sigma = -H(0)^{-1}$ [S1]. The Hessian is approximated using the Fisher Information Matrix $I(\omega)$:
+3.  **Approximate Hessian via Fisher Information**: Directly computing the Hessian $H(\omega)$ of $h(\omega)$ is expensive. Instead, approximate it using the Fisher Information matrix $I(\omega)$, related by $I(\omega) \approx -H(\omega)$ [S1]. The Fisher information is defined as [S1]:
     $$
     I(\omega) = \mathbb{E}_{(r,y)} \left[ 4\epsilon_\omega(r) J_\omega(r)^\top J_\omega(r) + 2\lambda I \right]
     $$
     where $\epsilon_\omega(r) = \|\tilde{C}_\omega(r) - C_{ngt}(r)\|_2^2$ and $J_\omega(r) = \frac{\partial \tilde{C}_\omega(r)}{\partial \omega}$ is the Jacobian of the predicted color with respect to $\omega$ [S1].
 
-4.  **Simplify Expectation**:
-    The conditional expectation $\mathbb{E}_{y|r}[\epsilon_\omega(r)]$ is approximated as $1/2$ based on the likelihood assumption $\mathcal{N}(C_{ngt}, 1/2)$ [S1]. This simplifies the Fisher Information to:
+4.  **Simplify Expectation**: Approximate the conditional expectation $\mathbb{E}_{y|r}[\epsilon_\omega(r)]$ as $1/2$ based on the likelihood $\mathcal{N}(C_{ngt}, 1/2)$ [S1]. This simplifies the Fisher Information to [S1]:
     $$
     I(\omega) = \mathbb{E}_r \left[ 2 J_\omega(r)^\top J_\omega(r) + 2\lambda I \right]
     $$
-    Since $H(\omega) \approx -I(\omega)$, we have:
+
+5.  **Estimate Fisher Information**: Approximate the expectation $\mathbb{E}_r$ by sampling $R$ rays [S1]:
     $$
-    H(\omega) \approx - \left( \mathbb{E}_r \left[ 2 J_\omega(r)^\top J_\omega(r) \right] + 2\lambda I \right)
+    I(\omega) \approx \frac{2}{R} \sum_{r} J_\omega(r)^\top J_\omega(r) + 2\lambda I
+    $$
+    Consequently, the Hessian approximation is [S1]:
+    $$
+    H(\omega) \approx -\left( \frac{2}{R} \sum_{r} J_\omega(r)^\top J_\omega(r) + 2\lambda I \right)
     $$
 
-5.  **Monte Carlo Approximation**:
-    Approximate the expectation $\mathbb{E}_r$ by sampling $R$ rays:
+6.  **Compute Covariance Matrix**: Using the Laplace approximation, the covariance matrix $\Sigma$ is the inverse of the negative Hessian evaluated at the mode $\omega=0$ [S1]:
     $$
-    H(\omega) \approx - \left( \frac{2}{R} \sum_{r \in \mathcal{R}} J_\omega(r)^\top J_\omega(r) + 2\lambda I \right)
+    \Sigma = -H(0)^{-1}
     $$
-    Evaluated at $\omega=0$ [S1].
+    Exploiting the sparsity of $H(\omega)$ due to local vertex influence, approximate $\Sigma$ by considering only the diagonal elements [S1]:
+    $$
+    \Sigma \approx \text{diag}\left( \left( \frac{2}{R} \sum_{r} J_\omega(r)^\top J_\omega(r) + 2\lambda I \right)^{-1} \right)
+    $$
+    *Note: The source text presents Eq. (44) as $\Sigma \approx \text{diag}\left( \frac{2}{R} \sum_{r} J_\omega(r)^\top J_\omega(r) + 2\lambda I \right)^{-1}$. Given the definition $\Sigma = -H(0)^{-1}$ and $H(0) \approx -I(0)$, this implies $\Sigma \approx I(0)^{-1}$. The inverse is applied to the sum.*
 
-6.  **Diagonal Covariance Approximation**:
-    Exploiting the sparsity of $H(\omega)$ (due to local vertex influence), approximate $\Sigma$ by considering only the diagonal elements of $-H(0)^{-1}$ [S1]:
-    $$
-    \Sigma \approx \text{diag} \left( \left( \frac{2}{R} \sum_{r \in \mathcal{R}} J_0(r)^\top J_0(r) + 2\lambda I \right)^{-1} \right)
-    $$
-    Note: The sources describe computing the inverse of the diagonal approximation or taking the diagonal of the inverse. Specifically, Eq. (44) in [S1] shows:
-    $$
-    \Sigma \approx \text{diag} \left( \frac{2}{R} \sum_{r \in \mathcal{R}} J_\omega(r)^\top J_\omega(r) + 2\lambda I \right)^{-1}
-    $$
-    Since the term inside is diagonal-dominant or treated as such, the inverse of the diagonal elements is computed [S1].
+7.  **Extract Marginal Variance**: Extract the diagonal elements of $\Sigma$ to form the marginal variance vector $\sigma = (\sigma_x, \sigma_y, \sigma_z)$ [S1]. The norm $\|\sigma\|_2$ measures the local spatial uncertainty at each grid vertex [S1].
 
-7.  **Compute Variance Vector**:
-    Extract the marginal variance vector $\sigma$ from the diagonal entries of $\Sigma$. The norm $\|\sigma\|_2$ measures local spatial uncertainty at each grid vertex [S1].
-
-8.  **Construct Uncertainty Field**:
-    Define the spatial uncertainty field $U(x)$ by trilinearly interpolating $\sigma$ at grid vertices:
+8.  **Render Uncertainty Field**: Define the spatial uncertainty field $U(x)$ by trilinearly interpolating the variance vector $\sigma$ at grid vertices [S1]:
     $$
     U(x) = \text{Trilinear}(x, \sigma)
     $$
-    This maps $\mathbb{R}^3 \to \mathbb{R}^+$ [S1].
+    Strictly, $U(x)$ measures uncertainty at $(1+D_\omega^*)^{-1}(x)$, but for a trained SeaThru-NeRF where $D_\omega^* = 0$, these points are effectively identical [S1].
+
+9.  **Artifact Removal**: Apply a threshold to $U(x)$ to identify regions with high uncertainty (artifacts) and remove them to yield a clean target object image [S1].
 
 ### Pseudocode
 
@@ -88,164 +81,168 @@ This method quantifies the spatial uncertainty of a trained SeaThru-NeRF model b
 ```python
 import numpy as np
 
-def compute_uncertainty_field(base_model, rays, ground_truth_colors, M, lambda_reg, num_samples):
+def compute_uncertainty_field(base_model, rays, ground_truth_colors, M, lambda_reg):
     """
-    Computes the spatial uncertainty field for SeaThru-NeRF.
+    Computes the spatial uncertainty field U(x) for SeaThru-NeRF using Laplace approximation.
     
     Args:
-        base_model: The trained SeaThru-NeRF model (parameters phi*).
-        rays: List of R rays, each ray is a function or data structure allowing 
-              evaluation of the model and computation of Jacobians.
+        base_model: Trained SeaThru-NeRF network.
+        rays: List of R rays sampled from training data.
         ground_truth_colors: Array of shape (R, 3) containing C_ngt(r).
         M: Grid size dimension (e.g., 256).
-        lambda_reg: Regularization constant lambda.
-        num_samples: Number of rays R to sample for approximation.
+        lambda_reg: Regularization constant, typically 10^-4 / M^3.
         
     Returns:
-        uncertainty_field: 3D numpy array of shape (M, M, M) containing U(x).
+        U: Volumetric uncertainty field (trilinearly interpolated from grid vertices).
     """
+    R = len(rays)
     
-    # 1. Initialize perturbation parameters omega = 0
-    # The dimension is M^3. In practice, we don't store the full vector if M is large,
-    # but we need to compute the diagonal of the inverse Hessian.
-    # We compute the diagonal elements of the Fisher Information matrix directly.
+    # Step 1: Initialize omega = 0. 
+    # The Jacobian J_omega(r) is computed with respect to perturbation parameters omega.
+    # In practice, this involves backpropagating through the model with respect to 
+    # the input coordinates or specific perturbation parameters if defined.
+    # Here we assume J_omega(r) is the sensitivity of the output color to the 
+    # perturbation parameters which are initialized to zero.
     
-    # Initialize accumulator for the diagonal of the sum of Jacobian products
-    # Shape: (M^3,)
-    fisher_diag_accumulator = np.zeros(M**3)
+    # Step 2-5: Compute Fisher Information Approximation
+    # I(omega) approx (2/R) * sum(J^T J) + 2*lambda*I
     
-    # Sample R rays
-    # Note: In practice, rays are sampled from the training dataset.
-    # For implementation, we iterate over a subset of the provided rays.
-    sampled_indices = np.random.choice(len(rays), size=num_samples, replace=False)
-    sampled_rays = [rays[i] for i in sampled_indices]
-    sampled_gt_colors = ground_truth_colors[sampled_indices]
+    # Initialize sum of outer products of Jacobians
+    # The dimension of omega corresponds to the number of grid vertices or parameters.
+    # For efficiency, we only compute the diagonal elements of the inverse later.
+    # However, the source suggests computing the sum of J^T J first.
     
-    R = len(sampled_rays)
+    # Note: The source implies J_omega(r) is the Jacobian of predicted color w.r.t omega.
+    # If omega represents coordinate perturbations, J is a matrix of shape (3, dim_omega).
+    # We need to accumulate J^T J.
     
-    # 2. Compute Jacobian contributions
-    # For each ray, compute J_0(r)^T J_0(r) and add to accumulator.
-    # J_0(r) is the Jacobian of the predicted color w.r.t omega at omega=0.
-    # Since omega corresponds to grid vertices, J is sparse.
-    # We only need the diagonal of J^T J, which is sum_k (dC/domega_k)^2 for each output channel?
-    # Actually, J is (3, M^3) for RGB output. J^T J is (M^3, M^3).
-    # The diagonal element i is sum_{c=1 to 3} (dC_c / domega_i)^2.
+    # To avoid storing the full Hessian/Fisher matrix which may be large,
+    # we rely on the diagonal approximation.
+    # The source states: "approximate Sigma by considering only the diagonal elements of H".
+    # And Sigma = -H(0)^-1.
+    # If H is approximated as diagonal, H_ii = - (2/R * sum_j (J_ij)^2 + 2*lambda).
+    # Then Sigma_ii = 1 / (2/R * sum_j (J_ij)^2 + 2*lambda).
     
-    for r, y in zip(sampled_rays, sampled_gt_colors):
-        # Evaluate model at omega=0 (base model)
-        # predicted_color is shape (3,)
-        predicted_color = base_model.evaluate(r) 
+    # Let's assume we can compute the squared Jacobian norms per parameter.
+    # In a real implementation, one would iterate over rays and accumulate gradients.
+    
+    # Placeholder for accumulated squared Jacobian norms per parameter dimension
+    # dim_omega is the number of perturbation parameters (e.g., grid vertices)
+    dim_omega = get_num_perturbation_params(base_model) 
+    accumulated_jacobian_norms = np.zeros(dim_omega)
+    
+    for r in rays:
+        # Get predicted color with omega=0 (base model)
+        pred_color = base_model(r)
         
-        # Compute Jacobian J_0(r) w.r.t omega
-        # This requires backpropagation through the model with respect to the perturbation parameters.
-        # In SeaThru-NeRF, perturbations are added to grid vertices.
-        # We need the gradient of the output color w.r.t each grid vertex parameter.
-        # Let's assume a function get_jacobian_diagonal(r) that returns a vector of shape (M^3,)
-        # where element i is sum_c (dC_c / domega_i)^2.
+        # Compute error epsilon
+        # epsilon = ||C_tilde - C_ngt||^2
+        # But for Jacobian, we need d(C_tilde)/d(omega)
+        # This requires backpropagation through the model w.r.t omega.
+        # Since omega=0, we compute the gradient of the output w.r.t the perturbation inputs.
         
-        jacobian_sq_diag = compute_jacobian_squared_diagonal(base_model, r)
+        # Compute Jacobian J_omega(r) = d(C_tilde)/d(omega)
+        # This is typically done via automatic differentiation.
+        J = compute_jacobian_wrt_perturbations(base_model, r) # Shape: (3, dim_omega)
         
-        # Accumulate: 2 * J^T J
-        # Eq 42: I(omega) approx (2/R) sum J^T J + 2 lambda I
-        # We are accumulating the sum part.
-        fisher_diag_accumulator += jacobian_sq_diag
+        # Accumulate J^T J. We only need the diagonal of the sum for the final inverse.
+        # (J^T J)_kk = sum_i (J_ik)^2
+        accumulated_jacobian_norms += np.sum(J**2, axis=0)
         
-    # 3. Compute the diagonal of the Hessian approximation
-    # H(0) approx - [ (2/R) * Sum(J^T J) + 2 lambda I ]
-    # Let S = (2/R) * Sum(J^T J) + 2 lambda I
-    # The diagonal of S is:
-    # diag_S = (2/R) * fisher_diag_accumulator + 2 * lambda_reg
+    # Step 5: Finalize Fisher Information Diagonal
+    # I_diag_k = (2/R) * accumulated_jacobian_norms_k + 2*lambda
+    fisher_diag = (2.0 / R) * accumulated_jacobian_norms + 2.0 * lambda_reg
     
-    diag_S = (2.0 / R) * fisher_diag_accumulator + 2.0 * lambda_reg
+    # Step 6: Compute Covariance Diagonal
+    # Sigma_diag = 1 / fisher_diag
+    sigma_diag = 1.0 / fisher_diag
     
-    # 4. Compute Covariance Sigma diagonal
-    # Sigma approx diag(S)^(-1)
-    # Element-wise inverse
-    sigma_diag = 1.0 / diag_S
+    # Step 7: Extract Marginal Variance
+    # sigma = (sigma_x, sigma_y, sigma_z) is the marginal variance vector.
+    # The source says "sigma = (sigma_x, sigma_y, sigma_z) ... norm ||sigma||_2 measures local spatial uncertainty".
+    # And "U(x) = Trilinear(x, sigma)".
+    # This implies sigma is a vector field at grid vertices.
+    # The diagonal elements of Sigma correspond to the variance of each parameter.
+    # If each parameter corresponds to a vertex, then sigma_diag is the variance at each vertex.
     
-    # 5. Construct Uncertainty Field
-    # sigma_diag is a vector of length M^3.
-    # Reshape to 3D grid (M, M, M)
-    # Note: The mapping from vector index to 3D coordinates depends on the grid layout (e.g., row-major).
-    sigma_grid = sigma_diag.reshape((M, M, M))
+    # Map sigma_diag to grid vertices
+    grid_sigma = map_to_grid_vertices(sigma_diag, M)
     
-    # The uncertainty field U(x) is defined by trilinear interpolation of sigma.
-    # If we want the field values at the grid vertices, it is just sigma_grid.
-    # If we want a continuous field, we use trilinear interpolation.
-    # For storage, we return the grid values.
+    # Step 8: Render Uncertainty Field
+    # U(x) = Trilinear(x, sigma)
+    # This creates a continuous field from the discrete vertex values.
+    U = create_trilinear_field(grid_sigma)
     
-    return sigma_grid
+    return U
 
-def compute_jacobian_squared_diagonal(model, ray):
+def compute_jacobian_wrt_perturbations(model, ray):
     """
-    Computes the diagonal of J^T J for a single ray.
-    J is the Jacobian of the predicted color (3,) w.r.t omega (M^3,).
-    Returns a vector of shape (M^3,) where v[i] = sum_c (dC_c / domega_i)^2.
+    Computes the Jacobian of the predicted color with respect to the perturbation parameters omega.
+    This requires the model to accept perturbation parameters or for the perturbations 
+    to be applied to the input coordinates.
     """
-    # This function requires access to the internal perturbation parameters of the model.
-    # In PyTorch/TensorFlow, this involves setting up the computation graph.
-    
-    # 1. Get the perturbation parameters omega (initialized to 0)
-    # 2. Forward pass to get predicted color C_tilde_0(r)
-    # 3. Backward pass to get gradients dC/domega
-    
-    # Pseudocode for framework-specific implementation:
-    # omega = torch.zeros(M**3, requires_grad=True)
-    # C_pred = model(ray, omega) # Shape (3,)
-    # loss = C_pred # We want gradients of output w.r.t omega
-    # loss.backward(gradient=torch.ones(3), retain_graph=True)
-    # grad = omega.grad # Shape (M^3,)
-    
-    # The diagonal of J^T J is sum over output channels of (grad_channel)^2.
-    # If model outputs RGB, we need gradients for R, G, B separately or jointly.
-    # If using a single backward pass with gradient=[1,1,1], we get sum of gradients? 
-    # No, we need element-wise square of each channel's gradient.
-    
-    # Correct approach:
-    # grads = []
-    # for c in range(3):
-    #     model.zero_grad()
-    #     C_pred = model(ray, omega)
-    #     C_pred[c].backward(retain_graph=True)
-    #     grads.append(omega.grad.clone())
-    # 
-    # j_sq_diag = sum(g**2 for g in grads)
-    
-    # [G] Implementation detail: The Jacobian is sparse. Most entries are zero because
-    # a ray only passes through a few voxels. The implementation should only compute
-    # gradients for vertices influencing the ray's path to save memory/time.
-    
-    # Returning placeholder for the actual framework-dependent logic
-    raise NotImplementedError("Framework-specific Jacobian computation required")
+    # Implementation detail: [G]
+    # The source mentions "Spatial perturbation field D_omega based on Bayes' rays".
+    # And "Perturb input coordinates using D_omega".
+    # So J is d(Color)/d(Coordinate_Perturbation).
+    # This is computed via backpropagation through the NeRF network.
+    pass
+
+def map_to_grid_vertices(variances, M):
+    """
+    Maps the scalar variances (one per parameter/vertex) to a 3D grid of size MxMxM.
+    """
+    # Implementation detail: [G]
+    # The source states "each entry of the parameter vector omega corresponds to a vertex in the grid".
+    # So we reshape or scatter the variances into the grid.
+    pass
+
+def create_trilinear_field(grid_sigma):
+    """
+    Creates a continuous volumetric field U(x) by trilinear interpolation of grid_sigma.
+    """
+    # Implementation detail: [G]
+    pass
 ```
 
 ### Parameters
-*   **$\omega$**: Perturbation parameters added to the base model. Assumed to follow a Gaussian prior $\omega \sim \mathcal{N}(0, \lambda^{-1})$ [S1].
-*   **$\lambda$**: Regularization constant. Set to $\lambda = 10^{-4} / M^3$, where $M$ is the grid size dimension [S1].
-*   **$M$**: Grid size dimension. Typical value is 256. Tested values include 16, 32, 64, 128, 256, 512 [S1].
-*   **$R$**: Number of rays sampled for the Monte Carlo approximation. In experiments, 1000 iterations were used, but the specific number of rays per iteration is not explicitly defined as a fixed constant other than "sampling R rays" [S1].
+*   **$\omega$**: Perturbation parameters added to the base model, assumed to follow a Gaussian prior $\omega \sim \mathcal{N}(0, \lambda^{-1})$ [S1].
+*   **$\lambda$**: Regularization constant. In experiments, set to $\lambda = 10^{-4} / M^3$, where $M$ is the grid size dimension [S1].
+*   **$M$**: Grid size dimension determining the granularity of spatial segmentation. Typical value 256; tested values include 16, 32, 64, 128, 256, 512 [S1].
+*   **Threshold**: A scalar value applied to $U(x)$ to separate artifacts from valid geometry. Value not specified, adjusted incrementally to clean floating objects [S1].
 
 ### Edge Cases and Pitfalls
-*   **Grid Size $M$**:
-    *   **Low $M$ (e.g., 16)**: Leads to insufficient uncertainty estimates and overconfidence. Coarse spatial segmentation loses high-frequency details, preventing the model from capturing complex features [S1].
-    *   **High $M$ (e.g., 512)**: Diminishes benefits due to substantial increases in computational resources and time. Beyond a certain point, increased precision does not yield corresponding performance gains in uncertainty accuracy [S1].
-    *   **Optimal $M$**: 256 provides an optimal balance between performance and efficiency [S1].
-*   **Evaluation Point**: Technically, $U(x)$ measures uncertainty at $(I + D_{\omega^*})^{-1}(x)$, not $x$. However, for a trained SeaThru-NeRF where $D_{\omega^*} = 0$, these points are effectively identical [S1].
-*   **Model Variants**: SeaThru-NeRF-lite uses a smaller architecture (~7GB VRAM) vs SeaThru-NeRF (~23GB VRAM). While image quality is slightly lower, it still produces clear results [S1].
+*   **Grid Size Sensitivity**: Low grid sizes (e.g., $M=16$) lead to insufficient uncertainty estimates and overconfidence due to coarse spatial segmentation losing high-frequency details [S1]. High grid sizes (e.g., $M=512$) diminish benefits due to substantial increases in computational resources and time, with optimal balance found at $M=256$ [S1].
+*   **Lighting Assumptions**: The method assumes the light source is only natural ambient light; it fails in deep-sea regions where artificial lighting and multiple scattering occur [S1].
+*   **Synthetic Data Overfitting**: Synthetic datasets may cause model overfitting due to simplified assumptions, leading to artificially high uncertainty estimation values [S1].
+*   **Coordinate Mapping**: $U(x)$ technically measures uncertainty at $(1+D_\omega^*)^{-1}(x)$, not $x$. However, for trained SeaThru-NeRF where $D_\omega^* = 0$, these points are effectively identical [S1].
 
 ## Operating characteristics
 
-*   **Time Complexity**: The method requires computing Jacobians for $R$ rays. Jacobian computation via backpropagation is $O(N_{params} \cdot R)$ in the worst case, but sparsity reduces this. The inversion of the diagonal matrix is $O(M^3)$.
-*   **Memory Complexity**: Requires storing the grid of size $M^3$ for $\sigma$. For $M=256$, this is $16.7$ million entries. The Hessian approximation is diagonal, so $O(M^3)$ space.
-*   **Performance**: The method provides well-calibrated uncertainty estimates, evaluated using Area Under Sparsification Error (AUSE). Lower AUSE indicates better calibration [S1].
-*   **Strengths**: Provides spatially varying uncertainty; computationally feasible via diagonal approximation; integrates with existing NeRF training pipelines.
-*   **Limitations**: Computationally expensive for large $M$; relies on the validity of the Laplace approximation and Gaussian prior; uncertainty is relative to the reconstruction error, not absolute geometric truth.
+### Time and Memory Complexity
+*   **Memory**: The method requires storing the covariance matrix $\Sigma$ or its diagonal approximation. The source notes that SeaThru-NeRF (larger model) uses approximately 23GB VRAM, while SeaThru-NeRF-lite uses ~7GB VRAM [S1]. The uncertainty field $U(x)$ is rendered as an additional color channel [S1].
+*   **Time**: Computing the Fisher Information requires sampling $R$ rays and computing Jacobians via backpropagation for each ray. The complexity scales with the number of rays $R$ and the dimension of $\omega$ (grid vertices). High grid sizes ($M=512$) significantly increase computational time [S1].
+
+### Measured Performance
+*   **Evaluation Metric**: Area Under Sparsification Error (AUSE) [S1]. Lower AUSE indicates better-calibrated uncertainty estimates [S1].
+*   **Model Comparison**: SeaThru-NeRF (larger model) provides higher capacity and better generalization for uncertainty estimation compared to SeaThru-NeRF-lite, which struggles with complex data and high precision tasks [S1]. SeaThru-NeRF-lite has slightly lower image quality but excellent clarity [S1].
+*   **Dataset Performance**: The method performs well on both synthetic and real datasets, though synthetic datasets may lead to overfitting and higher uncertainty values due to simplified assumptions [S1].
+
+### Strengths and Limitations
+*   **Strengths**: Explicitly infers spatial uncertainty, allowing for artifact removal via thresholding. Benefits downstream tasks like underwater navigation and infrastructure inspection [S1].
+*   **Limitations**: Assumes natural ambient light only. Computationally expensive for high grid sizes. Synthetic data may skew uncertainty estimates [S1].
+
+### When to Use
+*   Use for underwater 3D reconstruction, ocean exploration, underwater reconnaissance, security surveillance, underwater navigation, localization, and infrastructure inspection [S1].
+*   Choose SeaThru-NeRF over SeaThru-NeRF-lite when high precision and generalization are required and sufficient VRAM is available [S1].
 
 ## Background
 
-*   **Origin**: Proposed in "Bayesian uncertainty analysis for underwater 3D reconstruction with neural radiance fields" (2024) [S1].
-*   **Development**: Builds on the Laplace approximation for posterior inference in neural networks [S1]. Adapts Fisher Information Matrix approximations for uncertainty quantification in volumetric rendering [S1].
-*   **Usage**: Applied to underwater 3D reconstruction using SeaThru-NeRF, evaluated on real-world marine datasets (Curasao, IUI3, Panama, Japanese Gardens) and synthetic underwater data [S1].
+### Origin and History
+The method was introduced in the paper "Bayesian uncertainty analysis for underwater 3D reconstruction with neural radiance fields" [S1]. It builds upon the SeaThru-NeRF framework, which models underwater scenes with scattering media [S1]. The approach applies the Laplace approximation to quantify the posterior distribution of perturbation parameters, extending standard NeRF optimization to include uncertainty quantification [S1].
+
+### Applications
+The method is designed for applications in ocean exploration, underwater navigation, localization, and infrastructure inspection, where knowing the confidence of the reconstruction is critical for decision-making [S1].
 
 ## Sources
 

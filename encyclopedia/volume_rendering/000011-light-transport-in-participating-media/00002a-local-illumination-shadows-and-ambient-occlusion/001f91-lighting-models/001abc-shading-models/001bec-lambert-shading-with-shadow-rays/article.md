@@ -38,7 +38,7 @@ The scalar field is accessed via a function `sampleDensityWorld(p)` which return
     *   Initialize distance $t = 2.0 \times uStepSize$ [S1, unofficial].
     *   Iterate while the point $p_{test} = p + t \cdot L$ is within the domain bounds ($uDomainMin \le p_{test} \le uDomainMax$) [S1, unofficial]:
         *   Sample the density at $p_{test}$ [S1, unofficial].
-        *   If $\text{sampleDensityWorld}(p_{test}) \ge uIsovalue$, the ray has hit the isosurface before reaching the light. Return shadow factor $shadow = 0.0$ [S1, unofficial].
+        *   If $\text{sampleDensityWorld}(p_{test}) \ge uIsovalue$, the ray has hit the isosurface before reaching the light [S1, unofficial].
         *   Increment $t$ by $uStepSize$ [S1, unofficial].
     *   If the loop completes without hitting the isosurface, return shadow factor $shadow = 1.0$ [S1, unofficial].
     *   If shadows are disabled, $shadow = 1.0$ [S1, unofficial].
@@ -56,25 +56,39 @@ The scalar field is accessed via a function `sampleDensityWorld(p)` which return
 
 **Edge Cases and Pitfalls:**
 *   **Boundary Conditions:** The shadow ray traversal must check domain boundaries to prevent out-of-bounds memory access [S1, unofficial].
-*   **Initial Offset:** The shadow ray origin is exactly at the surface. The reference implementation uses a fixed initial offset of $2.0 \times uStepSize$ before the first sample to step away from the surface [S1, unofficial].
+*   **Initial Offset:** The shadow ray origin is exactly at the surface, but the reference implementation uses a fixed initial offset of $2.0 \times uStepSize$ before the first sample to step away from the surface [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+class Vector3:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+    def __add__(self, other): return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __sub__(self, other): return Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
+    def __mul__(self, s): return Vector3(self.x * s, self.y * s, self.z * s)
+    def dot(self, other): return self.x * other.x + self.y * other.y + self.z * other.z
+    def length(self): return math.sqrt(self.x**2 + self.y**2 + self.z**2)
+    def normalized(self):
+        l = self.length()
+        return Vector3(self.x / l, self.y / l, self.z / l) if l > 0 else Vector3(0, 0, 0)
+
 def compute_normal(p, step_size, sample_density_world):
     h = step_size
-    dx = sample_density_world(p + vec3(h, 0.0, 0.0)) - sample_density_world(p - vec3(h, 0.0, 0.0))
-    dy = sample_density_world(p + vec3(0.0, h, 0.0)) - sample_density_world(p - vec3(0.0, h, 0.0))
-    dz = sample_density_world(p + vec3(0.0, 0.0, h)) - sample_density_world(p - vec3(0.0, 0.0, h))
-    grad = vec3(dx, dy, dz)
-    return normalize(-grad)
+    dx = sample_density_world(p + Vector3(h, 0.0, 0.0)) - sample_density_world(p - Vector3(h, 0.0, 0.0))
+    dy = sample_density_world(p + Vector3(0.0, h, 0.0)) - sample_density_world(p - Vector3(0.0, h, 0.0))
+    dz = sample_density_world(p + Vector3(0.0, 0.0, h)) - sample_density_world(p - Vector3(0.0, 0.0, h))
+    grad = Vector3(dx, dy, dz)
+    return grad.normalized()
 
 def trace_shadow_ray(origin, dir, step_size, isovalue, domain_min, domain_max, sample_density_world):
     t = 2.0 * step_size
     while True:
-        p_test = origin + t * dir
+        p_test = origin + dir * t
         if p_test.x < domain_min.x or p_test.y < domain_min.y or p_test.z < domain_min.z:
             break
         if p_test.x > domain_max.x or p_test.y > domain_max.y or p_test.z > domain_max.z:
@@ -86,8 +100,9 @@ def trace_shadow_ray(origin, dir, step_size, isovalue, domain_min, domain_max, s
 
 def shade_isopoint(p_hit, light_dir, step_size, isovalue, domain_min, domain_max, 
                    sample_density_world, enable_shadows, ambient_color, material_color):
+    # Light direction derivation from uLightAngle not provided in sources [G]
     normal = compute_normal(p_hit, step_size, sample_density_world)
-    diffuse = max(dot(normal, light_dir), 0.0)
+    diffuse = max(normal.dot(light_dir), 0.0)
     
     shadow = 1.0
     if enable_shadows:

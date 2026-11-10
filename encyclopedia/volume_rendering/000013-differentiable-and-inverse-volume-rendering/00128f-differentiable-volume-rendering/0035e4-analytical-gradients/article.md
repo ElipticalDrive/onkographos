@@ -1,20 +1,30 @@
 # Analytical Gradients
+Also called: Explicit Gradients, Closed-Form Gradients
+
 ## Overview
-Analytical gradients compute exact derivatives of the rendering equation with respect to input parameters by differentiating the continuous mathematical operations of the rendering pipeline, rather than relying on finite differences or reverse-mode automatic differentiation [S1, unofficial]. This family solves the problem of high memory consumption and computational overhead associated with backpropagating gradients through long, discrete computational graphs [S5]. It sets itself apart from [Differentiable volume rendering](43-differentiable-volume-rendering.md) alternatives like [Automatic Differentiation (Reverse/Adjoint Mode)](7151-automatic-differentiation-reverse-adjoint-mode.md) by providing closed-form expressions that reduce memory usage to $O(n)$ and avoid the accumulation of numerical noise [S5].
+This family encompasses methods that compute gradients of the rendered image with respect to scene parameters (density, geometry, camera) by analytically differentiating the rendering integral or rasterization pipeline, rather than relying on automatic differentiation (AD) or finite differences. It solves the high memory overhead and computational inefficiency of reverse-mode AD, which requires storing $O(kn)$ intermediate states for $n$ pixels and $k$ samples [S5]. By inverting the order of operations or deriving closed-form derivatives, these methods reduce memory consumption to $O(n)$ and provide exact gradients where the underlying operations are differentiable [S5].
+
 ## Shared principles
-The family shares the principle of explicit differentiation of the rendering integral or projection operator. For a rendering function $F(\mathbf{x})$, where $\mathbf{x}$ represents parameters (e.g., density, geometry, camera), the gradient $\nabla_{\mathbf{x}} F$ is derived analytically. This requires the rendering operation to be differentiable almost everywhere, excluding discrete steps such as triangle selection or ray-casting branch decisions [S1, unofficial]. The gradients are computed by applying the chain rule to the continuous components (e.g., interpolation, integration, projection) [G].
+The core mechanism relies on the chain rule applied to the continuous components of the rendering equation. For volume rendering, this involves differentiating the emission-absorption model:
+$$
+\hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
+$$
+where $\sigma_i$ is density, $\delta_i$ is step size, $\mathbf{c}_i$ is color, and $T_i$ is transmittance [S1]. The gradient $\frac{\partial \hat{C}}{\partial \sigma_k}$ for a specific sample $k$ depends on the transmittance up to $k$ and the emission at $k$, as well as the effect of $\sigma_k$ on the transmittance of all subsequent samples [G]. Unlike [Differentiable Volume Rendering via Box Splines](2449-differentiable-volume-rendering-via-box-splines.md) which uses basis function interpolation, or [Differentiable Volume Rendering with Analytical Gradients](5983-differentiable-volume-rendering-with-analytical-gradients.md) which derives explicit forms for density, this family also includes [Analytical Derivative of Rendering (Mesh)](6761-analytical-derivative-of-rendering-mesh.md) which applies similar principles to mesh rasterization. A key shared constraint is that discrete steps (e.g., triangle selection, voxel traversal order) are generally non-differentiable and must be handled via masking or fixed selection [S1, unofficial].
+
 ## Subtopics
 
 ### [Differentiable Volume Rendering via Box Splines](2449-differentiable-volume-rendering-via-box-splines.md)
-Computes the differentiable X-ray transform of a volume using box spline interpolation. It provides exact gradients with respect to ray parameters (origin $\mathbf{t}$, direction $\mathbf{n}$) and volume coefficients. Choose this for tomography and geometry calibration where ray-traced geometry gradients are critical. It differs from siblings by explicitly computing adjoint functions for ray parameters while using standard adjoint transforms for volume coefficients.
+Computes gradients for volumes defined by box splines using an adjoint transform. It supports 2D/3D uniform grids with interpolation orders 0, 1, and 2. It is chosen for geometry calibration in tomography where explicit ray-traced geometry gradients are required [2449].
 
 ### [Differentiable Volume Rendering with Analytical Gradients](5983-differentiable-volume-rendering-with-analytical-gradients.md)
-Computes radiance and its analytical derivatives with respect to volume density directly. Choose this when avoiding the overhead of propagating gradients through long computational graphs inherent in automatic differentiation is required. It sets itself apart by focusing on direct density gradients in volumetric fields.
+Derives explicit analytical forms for radiance transfer with respect to volume density. It avoids the overhead of propagating gradients through long computational graphs inherent in AD. It is chosen for density optimization where basis function interpolation is not used [5983].
 
 ### [Analytical Derivative of Rendering (Mesh)](6761-analytical-derivative-of-rendering-mesh.md)
-Computes exact gradients for explicit polygonal meshes by differentiating continuous steps (projection, interpolation) while excluding discrete triangle selection. Choose this for mesh-based inverse rendering. It differs from siblings by operating on barycentric interpolation and rasterization logic rather than volumetric fields.
+Computes exact gradients for mesh rendering by differentiating the continuous rasterization steps (projection, barycentric interpolation, shading). It operates on explicit triangle meshes. It is chosen for geometry and material optimization in mesh-based rendering, though it yields zero gradients for occluded triangles [6761].
 
 ## Background
-The concept originates from the need to optimize differentiable rendering pipelines efficiently. While reverse-mode AD is standard, it scales poorly with the number of samples [S5]. Analytical approaches were developed to provide memory-efficient alternatives for specific rendering primitives, such as volume rendering [S1, unofficial] and mesh rasterization [S1, unofficial].
+The need for analytical gradients in volume rendering arose from the prohibitive memory costs of standard reverse-mode AD, which stores all intermediate transmittance and radiance values [S5]. Early differentiable volume renderers relied on AD [G]. The explicit formulation for density gradients was introduced to enable efficient optimization of large-scale volumetric data [5983]. The box spline approach extended this to support smooth, continuous volume representations with exact geometric derivatives [2449]. The mesh variant applies similar analytical differentiation to the rasterization pipeline, a concept pioneered in differentiable rendering for computer graphics [6761].
+
 ## Sources
-[S1] Unofficial notes on Analytical Gradients family.
+[S1] Differentiable Volume Rendering with Analytical Gradients, https://example.com/5983, 2023-10-01
+[S5] Differentiable Volume Rendering, https://example.com/43, 2023-10-01

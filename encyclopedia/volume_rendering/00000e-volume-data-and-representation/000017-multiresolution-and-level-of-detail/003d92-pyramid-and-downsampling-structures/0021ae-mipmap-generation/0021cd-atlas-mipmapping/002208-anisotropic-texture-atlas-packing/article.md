@@ -6,7 +6,7 @@ Anisotropic Texture Atlas Packing is a method to pack surfel textures into a fix
 
 ## How it works
 **Inputs:**
-- Set of surfels $g$, each with center $\mathbf{p}_g$, tangent frame $R$, scales $s_{g,u}, s_{g,v}$, and UV half-extent $e$ [S1, unofficial].
+- Set of surfels $g$, each with center $\mathbf{p}_g$, tangent frame columns $\mathbf{R}_{\cdot,0}$ and $\mathbf{R}_{\cdot,1}$, scales $s_{g,u}, s_{g,v}$, and UV half-extent $e$ [S1, unofficial].
 - Hash grid finest voxel size $\delta$ [S1, unofficial].
 - Atlas width constraint $W$ (default 4096) [S1, unofficial].
 - Resolution bounds $r_{\min}=4, r_{\max}=64$ [S1, unofficial].
@@ -25,7 +25,7 @@ Anisotropic Texture Atlas Packing is a method to pack surfel textures into a fix
    $$r_{g,a} = \text{clamp} \left( 2^{\lceil \log_2(4es_{g,a}/\delta) \rceil}, r_{\min}, r_{\max} \right)$$
    where $s_{g,a}$ is the surfel scale on axis $a$, $e$ is the UV half-extent in units of that scale, and $\delta$ is the finest hash voxel size [S1, unofficial]. The factor 4 combines the $2e$ span with Nyquist sampling requirements [S1, unofficial].
 2. **Sort Surfels:** Sort the surfels in descending order of height $r_y$, then by width $r_x$ [S1, unofficial].
-3. **Pack into Atlas (Shelf-First-Fit-Decreasing):** Initialize atlas height $H = 0$. Initialize a list of open shelves. For each surfel $g$ in sorted order, place its rectangular tile into the first available shelf [S1, unofficial].
+3. **Pack into Atlas (Shelf-First-Fit-Decreasing):** Initialize atlas height $H = 0$ [S1, unofficial]. Initialize a list of open shelves. For each surfel $g$ in sorted order, place its rectangular tile into the first available shelf [S1, unofficial].
 4. **Evaluate and Bake:** For each surfel $g$ and each texel $(i, j)$ in its assigned tile ($0 \le i < r_{g,u}, 0 \le j < r_{g,v}$), compute local coordinates, lift to world space, evaluate the hash grid and MLP decoder to get RGB value $\rho(\mathbf{x})$, and write $\rho(\mathbf{x})$ to the atlas at the calculated position [S1, unofficial].
 5. **Handle Atlas Limits:** Round $H$ to the next multiple of 64 after placing all surfels [S1, unofficial]. If $H$ approaches 65,536 rows (the `cudaArray` limit), increase $W$ (e.g., double it) and repack [S1, unofficial].
 
@@ -55,28 +55,34 @@ def pack_anisotropic_atlas(surfels, delta, W=4096, r_min=4, r_max=64, e=4):
         placed = False
         for shelf in shelves:
             if shelf.w_rem >= w:
-                g.offset = (shelf.x_offset, shelf.y_start)
+                g.offset = (W - shelf.w_rem, shelf.y_start)
                 shelf.w_rem -= w
                 shelf.height = max(shelf.height, h)
                 placed = True
                 break
         if not placed:
-            new_shelf = {'y_start': H, 'height': h, 'w_rem': W - w, 'x_offset': 0}
+            new_shelf = {'y_start': H, 'height': h, 'w_rem': W - w}
             shelves.append(new_shelf)
             g.offset = (0, H)
             H += h
     H = math.ceil(H / 64) * 64  # Round to multiple of 64
 
     # 4. Evaluate and bake
-    atlas = [[None for _ in range(H)] for _ in range(W)]
+    atlas = [[None] * H for _ in range(W)]
     for g in surfels:
         u_off, v_off = g.offset
         for i in range(g.r_x):
             for j in range(g.r_y):
                 u = (i + 0.5) / g.r_x * 2 * e - e
                 v = (j + 0.5) / g.r_y * 2 * e - e
-                x = g.p + u * g.s_u * g.R[:, 0] + v * g.s_v * g.R[:, 1]
-                rgb = evaluate_hash_and_mlp(x)
+                # Lift local coordinates to world space via tangent frame columns
+                x = [
+                    g.p[0] + u * g.s_u * g.R_col0[0] + v * g.s_v * g.R_col1[0],
+                    g.p[1] + u * g.s_u * g.R_col0[1] + v * g.s_v * g.R_col1[1],
+                    g.p[2] + u * g.s_u * g.R_col0[2] + v * g.s_v * g.R_col1[2]
+                ]
+                # Evaluate hash grid and fused MLP decoder at x to obtain RGB value [S1, unofficial]
+                rgb = ... # Implementation depends on specific hash grid and MLP architecture [G]
                 atlas[u_off + i][v_off + j] = rgb
     return atlas
 ```
@@ -93,14 +99,14 @@ def pack_anisotropic_atlas(surfels, delta, W=4096, r_min=4, r_max=64, e=4):
 - **Wasted Memory:** With $e=4$, a significant portion of texels (e.g., 50.5% in indoor scenes) may lie outside the kernel support and are never fetched, wasting memory [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Performance:** Not given in the sources [S1, unofficial].
 - **Strengths:** Efficient packing for non-square surfels. Simple algorithm.
-- **Limitations:** Wasted space for large $e$ values. Fixed width may require repacking if height limit is reached.
+- **Limitations:** Wasted space for large $e$ values. Fixed width may require repacking if height limit is reached [S1, unofficial].
 
 ## Background
-Originated in "Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting" [S1, unofficial]. It builds on the concept of atlas mipmapping [2639-atlas-mipmapping] to address undersampling issues by pre-computing textures at appropriate resolutions.
+Originated in "Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting" [S1, unofficial]. The method addresses mipmapping considerations in its appendix [S1, unofficial].
 
 ## Sources
 [S1] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)

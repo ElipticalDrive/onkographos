@@ -55,11 +55,11 @@ def lens_shift(x_lens, r_base, r_target):
 Shutter time shift reuses the base shutter time sampled within the camera shutter interval for the target camera [S1]. The transformation is $x'_{\text{time}} = x_{\text{time}}$ [S1]. The Jacobian of the shift is 1: $\left| S'_{i \rightarrow j}(x_{\text{time}}) \right| = 1$ [S1]. Paths are constructed at fixed time because dealing with object motion would require re-evaluating occlusions and shading on the complete path due to moving geometry, making the cost of the time shift equivalent to constructing a full path [S1].
 
 ## Operating characteristics
-**Time and memory complexity:** Not given in the sources.
-**Measured performance:** Not given in the sources.
-**Scaling:** Not given in the sources.
-**Strengths and limitations:** Not given in the sources.
-**When to use it and when not:** Not given in the sources.
+**Time and memory complexity:** Not given in the sources [S1].
+**Measured performance:** Not given in the sources [S1].
+**Scaling:** Not given in the sources [S1].
+**Strengths and limitations:** Not given in the sources [S1].
+**When to use it and when not:** Not given in the sources [S1].
 
 ## Background
 Lens shift was introduced in the context of volumetric multi-view rendering [S1]. The method reuses random numbers that sampled the base lens interaction, a technique used similarly in earlier work [KSKAC02, HGP∗ 19], and applied by Schwarzhaupt [Sch19] and Fraboni et al. [FINB19] [S1].

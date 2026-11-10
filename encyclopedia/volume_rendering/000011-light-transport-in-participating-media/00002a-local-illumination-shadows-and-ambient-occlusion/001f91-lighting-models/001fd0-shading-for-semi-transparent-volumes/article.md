@@ -8,102 +8,100 @@ This method enables local diffuse illumination for semi-transparent volume rende
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-1.  **Gradient Texture (Texture 0):** An RGB texture storing the voxel gradient vectors $\nabla V$. The RGB channels encode the normal components.
-2.  **Color/Opacity Texture (Texture 1):** An RGB texture (or paletted texture) storing the ambient color $C_{ambient}$ in RGB and opacity $\alpha$ in the Alpha channel for each voxel.
-3.  **Light Direction:** A uniform vector $\mathbf{l}$ representing the direction to the light source.
-4.  **Diffuse Color:** A uniform color $C_{diffuse}$ (e.g., white or light source color).
-5.  **Ambient Color:** A uniform color $C_{global\_ambient}$ (used if per-voxel ambient is not enabled, though this method targets per-voxel).
+1.  **Gradient Texture (Texture 0):** An RGB texture storing the voxel gradient vectors $\nabla V$ [S1, unofficial]. The RGB channels encode the normal components [S1, unofficial].
+2.  **Color/Opacity Texture (Texture 1):** An RGB texture (or paletted texture) storing the ambient color $C_{ambient}$ in RGB and opacity $\alpha$ in the Alpha channel for each voxel [S1, unofficial].
+3.  **Light Direction:** A uniform vector $\mathbf{l}$ representing the direction to the light source [S1, unofficial].
+4.  **Diffuse Color:** A uniform color $C_{diffuse}$ (e.g., white or light source color) [S1, unofficial].
+5.  **Ambient Color:** A uniform color $C_{global\_ambient}$ (used if per-voxel ambient is not enabled, though this method targets per-voxel) [S1, unofficial].
 
 **Outputs:**
-*   A rendered image with semi-transparent shading, where each fragment's color includes ambient and diffuse contributions based on the local gradient.
+*   A rendered image with semi-transparent shading, where each fragment's color includes ambient and diffuse contributions based on the local gradient [S2].
 
 ### Data Structures
-The method requires two distinct texture units bound to 2D textures (simulating 3D slices or using multi-texturing to bypass 3D texture limitations of the target hardware).
+The method requires two distinct texture units bound to 2D textures (simulating 3D slices or using multi-texturing to bypass 3D texture limitations of the target hardware) [S1, unofficial].
 
 *   **Texture 0 (Gradient):**
     *   Format: RGB (8-bit per channel typically).
     *   Content: $\nabla V_x, \nabla V_y, \nabla V_z$.
-    *   Interpolation: Hardware trilinear interpolation is **not** performed on this texture in the combined sense because it is separate from the color texture. The source notes that "real trilinear interpolation is not possible" because hardware limits input textures to two at a time, and the gradient must be sampled separately from the color/opacity [S1, unofficial][S2].
+    *   Interpolation: Hardware trilinear interpolation is **not** performed on this texture in the combined sense because it is separate from the color texture [S1, unofficial]. The source notes that "real trilinear interpolation is not possible" because hardware limits input textures to two at a time, and the gradient must be sampled separately from the color/opacity [S1, unofficial][S2].
 *   **Texture 1 (Color/Opacity):**
     *   Format: RGBA (8-bit per channel) or Paletted RGB + Alpha.
     *   Content: $C_{ambient}$ (RGB), $\alpha$ (Alpha).
     *   Note: If paletted, the RGB channels act as indices into a color lookup table, allowing per-voxel ambient color specification without consuming extra texture memory bandwidth for the color data itself [S1, unofficial][S2].
 
 ### Numbered Steps
-1.  **Texture Binding:** Bind the gradient data to Texture Unit 0 and the color/opacity data to Texture Unit 1.
-2.  **Combiner Stage 0 (Dot Product):** Configure the first register combiner stage to compute the dot product between the light direction and the gradient.
-    *   Input A: Texture 0 (Gradient $\nabla V$).
-    *   Input B: Light Direction $\mathbf{l}$ (passed as a constant or varying).
-    *   Input C: Zero.
-    *   Operation: $P = \nabla V \cdot \mathbf{l}$.
-    *   Output: $P$ is passed to the next stage.
-3.  **Final Combiner (Shading):** Configure the final combiner to mix the ambient color and the diffuse contribution.
-    *   Input A: Dot Product $P$ from Stage 0.
-    *   Input B: Diffuse Color $C_{diffuse}$ (passed as a constant).
-    *   Input C: Zero.
-    *   Input D: Texture 1 (Ambient Color $C_{ambient}$).
-    *   Operation: $C_{final} = P \cdot C_{diffuse} + C_{ambient}$.
+1.  **Texture Binding:** Bind the gradient data to Texture Unit 0 and the color/opacity data to Texture Unit 1 [S1, unofficial].
+2.  **Combiner Stage 0 (Dot Product):** Configure the first register combiner stage to compute the dot product between the light direction and the gradient [S2].
+    *   Input A: Texture 0 (Gradient $\nabla V$) [S1, unofficial].
+    *   Input B: Light Direction $\mathbf{l}$ (passed as a constant or varying) [S1, unofficial].
+    *   Input C: Zero [S1, unofficial].
+    *   Operation: $P = \nabla V \cdot \mathbf{l}$ [S1, unofficial].
+    *   Output: $P$ is passed to the next stage [S1, unofficial].
+3.  **Final Combiner (Shading):** Configure the final combiner to mix the ambient color and the diffuse contribution [S1, unofficial].
+    *   Input A: Dot Product $P$ from Stage 0 [S1, unofficial].
+    *   Input B: Diffuse Color $C_{diffuse}$ (passed as a constant) [S1, unofficial].
+    *   Input C: Zero [S1, unofficial].
+    *   Input D: Texture 1 (Ambient Color $C_{ambient}$) [S1, unofficial].
+    *   Operation: $C_{final} = P \cdot C_{diffuse} + C_{ambient}$ [S1, unofficial].
     *   *Note on Hardware Specifics:* The source describes the final combiner output as $AB + (1-A)C + D$ [S1, unofficial]. In this specific configuration:
         *   $A$ is the dot product $P$.
         *   $B$ is $C_{diffuse}$.
         *   $C$ is Zero.
         *   $D$ is $C_{ambient}$.
-        *   Result: $P \cdot C_{diffuse} + 0 + C_{ambient}$.
-4.  **Alpha Blending:** Enable alpha blending using the alpha channel from Texture 1. The fragment shader/combiner output color is blended into the frame buffer based on the sampled $\alpha$.
-5.  **Rendering:** Render the volume slices (or ray-casted fragments) using the configured pipeline.
+        *   Result: $P \cdot C_{diffuse} + 0 + C_{ambient}$ [S1, unofficial].
+4.  **Alpha Blending:** Enable alpha blending using the alpha channel from Texture 1 [S1, unofficial]. The fragment shader/combiner output color is blended into the frame buffer based on the sampled $\alpha$ [S1, unofficial].
+5.  **Rendering:** Render the volume slices (or ray-casted fragments) using the configured pipeline [S1, unofficial].
 
 ### Pseudocode
-The following pseudocode represents the register combiner configuration and rendering logic, adapted for a generic fixed-function pipeline context described in the sources.
+The following pseudocode represents the register combiner configuration and rendering logic, adapted for a generic fixed-function pipeline context described in the sources. All constants and operations are defined inline.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def setup_shading_pipeline():
-    # Bind textures
-    bind_texture(UNIT_0, gradient_texture) # RGB: Gradient vector
-    bind_texture(UNIT_1, color_opacity_texture) # RGBA: Ambient color + Alpha
+# Fixed constants for the pipeline
+ZERO_VECTOR = (0.0, 0.0, 0.0)
+LIGHT_DIRECTION = (0.0, 0.0, 1.0)  # Uniform light direction
+DIFFUSE_COLOR = (1.0, 1.0, 1.0)    # Uniform diffuse color
 
-    # Configure Combiner Stage 0: Compute Dot Product
-    # A = Gradient from Texture 0
-    # B = Light Direction (Uniform)
-    # C = Zero
-    # Output = A . B
-    combiner_stage_0.input_a = TEXTURE_0
-    combiner_stage_0.input_b = LIGHT_DIRECTION
-    combiner_stage_0.input_c = ZERO
-    combiner_stage_0.operation = DOT_PRODUCT
+def setup_combiners(gradient_texture, color_opacity_texture):
+    # Combiner Stage 0: Compute dot product
+    # Input A: gradient_texture (RGB gradient)
+    # Input B: LIGHT_DIRECTION
+    # Input C: ZERO_VECTOR
+    # Operation: dot_product
+    stage0_output = dot_product(gradient_texture, LIGHT_DIRECTION)
 
-    # Configure Final Combiner: Compute Shaded Color
-    # A = Dot Product from Stage 0
-    # B = Diffuse Color (Uniform)
-    # C = Zero
-    # D = Ambient Color from Texture 1
-    # Output = A * B + (1 - A) * C + D
-    # Since C is Zero, Output = A * B + D
-    final_combiner.input_a = COMBINER_STAGE_0_OUTPUT
-    final_combiner.input_b = DIFFUSE_COLOR
-    final_combiner.input_c = ZERO
-    final_combiner.input_d = TEXTURE_1
+    # Final Combiner: Compute shaded color
+    # Input A: stage0_output
+    # Input B: DIFFUSE_COLOR
+    # Input C: ZERO_VECTOR
+    # Input D: color_opacity_texture (RGB ambient color)
+    # Operation: combine_rgb -> A * B + (1 - A) * C + D
+    # Since C is ZERO_VECTOR, Output = A * B + D
+    final_color = stage0_output * DIFFUSE_COLOR + color_opacity_texture
+    return final_color
+
+def render_volume_slice(gradient_texture, color_opacity_texture):
+    # Bind textures to hardware units
+    bind_texture_unit(0, gradient_texture)
+    bind_texture_unit(1, color_opacity_texture)
     
-    # Note: The source specifies the formula AB + (1-A)C + D.
-    # With C=0, this simplifies to AB + D.
-    final_combiner.operation = COMBINE_RGB
-
-    # Enable Alpha Blending
+    # Configure combiners
+    final_color = setup_combiners(gradient_texture, color_opacity_texture)
+    
+    # Enable alpha blending for semi-transparency
     enable_alpha_blending()
-    set_blend_func(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
-
-def render_volume_slice():
-    # For each slice or ray segment:
-    # The hardware automatically samples textures and runs combiners
+    set_blend_function(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+    
+    # Draw volume slices/fragments
     draw_primitives(VOLUME_SLICE_GEOMETRY)
 ```
 
 ### Parameters and Typical Values
-*   **Light Direction $\mathbf{l}$:** Typically normalized.
-*   **Diffuse Color $C_{diffuse}$:** Often white $(1,1,1)$ or the color of the light source.
-*   **Ambient Color $C_{ambient}$:** Per-voxel, stored in Texture 1.
-*   **Opacity $\alpha$:** Per-voxel, stored in Texture 1 Alpha channel.
+*   **Light Direction $\mathbf{l}$:** Typically normalized [S1, unofficial].
+*   **Diffuse Color $C_{diffuse}$:** Often white $(1,1,1)$ or the color of the light source [S1, unofficial].
+*   **Ambient Color $C_{ambient}$:** Per-voxel, stored in Texture 1 [S1, unofficial].
+*   **Opacity $\alpha$:** Per-voxel, stored in Texture 1 Alpha channel [S1, unofficial].
 
 ### Edge Cases and Pitfalls
 1.  **Loss of Trilinear Interpolation:** The primary limitation is that real trilinear interpolation of the volume data is not possible because the gradient and color/opacity data must reside in separate textures, and the hardware only supports two input textures at a time [S1, unofficial][S2]. This results in limited image quality compared to methods using 3D textures or multi-pass techniques [S1, unofficial][S2].
@@ -120,8 +118,8 @@ def render_volume_slice():
     *   256x256x256: 2.0 fps [S1, unofficial].
 *   **Strengths:** Interactive frame rates achieved via single-pass rendering; hardware-supported dot products; no large-scale workarounds for signed vectors [S1, unofficial][S2].
 *   **Limitations:** Limited image quality due to missing real trilinear interpolation; limited to one primary diffuse light source in the basic configuration; hardware-dependent (relies on register combiners) [S1, unofficial][S2].
-*   **When to Use:** When interactive performance is required on hardware with register combiners and limited texture units, and high-fidelity interpolation is secondary.
-*   **When Not to Use:** When high-quality trilinear interpolation is critical, or when multiple complex light sources are needed without multi-pass rendering.
+*   **When to Use:** When interactive performance is required on hardware with register combiners and limited texture units, and high-fidelity interpolation is secondary [S1, unofficial][S2].
+*   **When Not to Use:** When high-quality trilinear interpolation is critical, or when multiple complex light sources are needed without multi-pass rendering [S1, unofficial][S2].
 
 ## Background
 This technique was developed for interactive volume rendering on standard PC graphics hardware in the early 2000s [S1, unofficial][S2]. It builds on the fast algorithm for displaying isosurfaces, adapting it for semi-transparent volumes by replacing alpha testing with alpha blending [S1, unofficial][S2]. The method was proposed as an alternative to implementations that required multi-pass rendering or complex workarounds for signed vectors [S1, unofficial][S2]. It anticipates future hardware improvements such as higher numbers of texturing units or native 3D-texturing capabilities [S1, unofficial][S2].

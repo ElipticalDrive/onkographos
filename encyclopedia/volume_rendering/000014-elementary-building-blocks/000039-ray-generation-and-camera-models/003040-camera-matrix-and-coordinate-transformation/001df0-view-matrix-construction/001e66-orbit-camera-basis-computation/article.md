@@ -21,7 +21,7 @@ Computes an orthonormal camera basis (eye position, forward, right, and up vecto
 
 **Steps:**
 
-1.  **Clamp Pitch:** Clamp the `pitch` angle to the range `[-PITCH_LIMIT, PITCH_LIMIT]` to prevent gimbal lock or inversion artifacts. The standard limit is approximately 1.5533430342749535 radians (~89 degrees) [S1, unofficial].
+1.  **Clamp Pitch:** Clamp the `pitch` angle to the range `[-PITCH_LIMIT, PITCH_LIMIT]` where `PITCH_LIMIT` is approximately 1.5533430342749535 radians (~89 degrees) [S1, unofficial].
     $$ p = \text{clamp}(\text{pitch}, -1.5533430342749535, 1.5533430342749535) $$
 
 2.  **Calculate Offset Vector:** Compute the offset from the target to the eye position using spherical coordinates [S1, unofficial].
@@ -41,7 +41,7 @@ Computes an orthonormal camera basis (eye position, forward, right, and up vecto
     $$ \text{worldUp} = [0, 1, 0] $$
     $$ \text{right} = \text{cross}(\text{forward}, \text{worldUp}) $$
     
-    **Pitfall Handling:** If the forward vector is parallel to the world up vector, the cross product magnitude becomes zero. Check if `length(right) < 1e-6`. If so, set `right = [1, 0, 0]` [S1, unofficial]. Otherwise, normalize `right`.
+    If the forward vector is parallel to the world up vector, the cross product magnitude becomes zero. Check if `length(right) < 1e-6`. If so, set `right = [1, 0, 0]` [S1, unofficial]. Otherwise, normalize `right`.
     $$ \text{right} = \text{normalize}(\text{right}) $$
 
 6.  **Calculate Up Vector:** Compute the true up vector by crossing the right and forward vectors [S1, unofficial].
@@ -57,7 +57,7 @@ Computes an orthonormal camera basis (eye position, forward, right, and up vecto
 import math
 
 def orbit_camera_basis(target, yaw, pitch, distance):
-    # Step 1: Clamp pitch to prevent gimbal lock
+    # Step 1: Clamp pitch to the specified limit
     PITCH_LIMIT = 1.5533430342749535  # ~89 degrees
     p = max(-PITCH_LIMIT, min(PITCH_LIMIT, pitch))
     
@@ -83,8 +83,8 @@ def orbit_camera_basis(target, yaw, pitch, distance):
     
     fwd_len = math.sqrt(fwd_x**2 + fwd_y**2 + fwd_z**2)
     if fwd_len == 0:
-        # Degenerate case: eye is at target
-        forward = [0, 0, -1] # Arbitrary default forward
+        # Degenerate case: eye is at target; arbitrary default forward [G]
+        forward = [0, 0, -1]
     else:
         forward = [fwd_x / fwd_len, fwd_y / fwd_len, fwd_z / fwd_len]
         
@@ -97,7 +97,7 @@ def orbit_camera_basis(target, yaw, pitch, distance):
     right_len = math.sqrt(right_x**2 + right_y**2 + right_z**2)
     
     if right_len < 1e-6:
-        # Forward is parallel to world up; use arbitrary stable right vector
+        # Forward is parallel to world up; use arbitrary stable right vector [S1, unofficial]
         right = [1, 0, 0]
     else:
         right = [right_x / right_len, right_y / right_len, right_z / right_len]
@@ -109,7 +109,8 @@ def orbit_camera_basis(target, yaw, pitch, distance):
     
     up_len = math.sqrt(up_x**2 + up_y**2 + up_z**2)
     if up_len == 0:
-        up = [0, 1, 0] # Fallback
+        # Fallback for degenerate case [G]
+        up = [0, 1, 0]
     else:
         up = [up_x / up_len, up_y / up_len, up_z / up_len]
         
@@ -123,14 +124,11 @@ def orbit_camera_basis(target, yaw, pitch, distance):
 
 **Parameters:**
 - `PITCH_LIMIT`: 1.5533430342749535 radians (~89 degrees) [S1, unofficial].
-- `distance`: Not given in the sources.
-- `yaw`: Not given in the sources.
-- `pitch`: Not given in the sources.
-- `target`: Not given in the sources.
+- `distance`, `yaw`, `pitch`, `target`: Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Gimbal Lock / Pitch Limiting:** If pitch exceeds ~89 degrees, the camera may invert. Clamping to `[-1.5533430342749535, 1.5533430342749535]` prevents this [S1, unofficial].
-- **Parallel Vectors:** If the forward vector is parallel to the world up vector `[0, 1, 0]`, the cross product for the right vector becomes zero. This is handled by checking if the magnitude of the right vector is less than `1e-6` and setting it to `[1, 0, 0]` [S1, unofficial].
+- Clamping to `[-1.5533430342749535, 1.5533430342749535]` prevents extreme pitch angles [S1, unofficial].
+- If the forward vector is parallel to the world up vector `[0, 1, 0]`, the cross product for the right vector becomes zero. This is handled by checking if the magnitude of the right vector is less than `1e-6` and setting it to `[1, 0, 0]` [S1, unofficial].
 
 ## Subtopics
 
