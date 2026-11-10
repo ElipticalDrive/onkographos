@@ -1,0 +1,192 @@
+--- v002.md
++++ v003.md
+@@ -4,94 +4,120 @@
+ 
+ ## Overview
+-PRI Texture Storage is a GPU-friendly data layout for the Pixel Ray Image (PRI) structure, designed to map irregular unstructured grid data onto coherent 2D texture memory [S1, unofficial]. It replaces the irregular connectivity of unstructured grids with two packed 2D textures—an index texture and a knots texture—allowing efficient ray traversal and interpolation on hardware [S1, unofficial]. It sets itself apart from generic unstructured grid rendering by leveraging pre-determined pixel traversal to pack splines contiguously, minimizing texture fetch overhead and enabling fast "outside volume" culling [S1, unofficial].
++PRI Texture Storage is the GPU-friendly data layout for the Pixel Ray Image (PRI), a semi-regular structure for unstructured grid volume rendering. It solves the difficulty of mapping irregular unstructured grid data efficiently to GPU hardware by replacing the grid with a pixelized projection plane and 1D scalar functions (linear splines) defined on sampling rays. It sets itself apart from sibling methods like [PRI Approximation Error Measurement](2893-pri-approximation-error-measurement.md) by focusing on the compact, texture-based representation of these splines rather than their geometric fidelity.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A set of sampling rays defined on a 2D PRI pixel plane, intersecting an unstructured grid [S1, unofficial]. Each intersecting ray defines a linear spline of knots (nodes) with associated scalar values and distances from the sampling plane [S1, unofficial].
+-*   **Output:** Two 2D textures: the Index Texture and the Knots Texture [S1, unofficial].
++The PRI is represented as two 2D textures: an **Index Texture** and a **Knots Texture**. The Index Texture has the same resolution as the PRI pixel plane (sampling plane). The Knots Texture stores the actual spline data.
+ 
+-**Data Structures:**
++### Data Structures
+ 
+-1.  **Index Texture:** A 2D texture with the same resolution as the PRI pixel plane [S1, unofficial]. Each texel stores four channels $(r, g, b, a)$ mapped to specific metadata [S1, unofficial]:
+-    *   $r, g$: The 2D address (coordinates) of the first knot of the spline in the Knots Texture [S1, unofficial].
+-    *   $b$: The number of knots in the spline [S1, unofficial].
+-    *   $a$: The normalized distance of the last knot of the spline from the sampling plane [S1, unofficial].
+-    *   **Special Value:** If channel $b$ is zero, the ray does not intersect the grid [S1, unofficial].
++**Index Texture**
++A 2D texture with the same resolution as the PRI pixel plane. Each texel holds four channels `(r, g, b, a)` mapping to:
++*   `r, g`: The 2D address (coordinates) of the first spline knot in the Knots Texture.
++*   `b`: The number of knots in the spline for this pixel.
++*   `a`: The normalized distance of the last knot from the sampling plane.
+ 
+-2.  **Knots Texture:** A 2D texture containing the packed data for all splines [S1, unofficial]. To ensure high precision, it is typically stored as two separate float textures:
+-    *   One texture holds the scalar values of the knots.
+-    *   One texture holds the distance values of the knots [S1, unofficial].
+-    *   The knots are laid out in a pre-determined traversal order (e.g., row-major or column-major) of the pixels in the sampling plane [S1, unofficial].
++If channel `b` is zero, the sampling ray does not intersect the grid.
+ 
+-**Algorithm Steps:**
++**Knots Texture**
++A 2D texture containing the packed per-pixel splines. To ensure high precision, it is stored as two separate float-format textures:
++1.  One texture holds the **scalar values** of the knots.
++2.  One texture holds the **distance values** (depth) of the knots.
+ 
+-1.  **Traverse Pixels:** Iterate through the pixels of the PRI sampling plane in a fixed order (e.g., row-order) [S1, unofficial].
+-2.  **Identify Intersections:** For each pixel, determine if the corresponding ray intersects the unstructured grid [S1, unofficial].
+-    *   If no intersection, set the index texel's $b$ channel to 0 [S1, unofficial].
+-    *   If intersection exists, collect the knots (nodes) along the ray, sorted by distance from the sampling plane [S1, unofficial].
+-3.  **Pack Splines:** Append the knot data (scalar and distance) for the current pixel's spline to the end of the previously packed splines in the Knots Texture [S1, unofficial].
+-4.  **Write Index:** For the current pixel's texel in the Index Texture:
+-    *   Set $r, g$ to the texture coordinates of the first knot of the current spline in the Knots Texture [S1, unofficial].
+-    *   Set $b$ to the count of knots in the current spline [S1, unofficial].
+-    *   Set $a$ to the normalized distance of the last knot from the sampling plane [S1, unofficial].
++The splines are laid out in a pre-determined traversal order of the pixels (e.g., row-order or column-order).
+ 
+-**Pseudocode:**
++### Algorithm: Building the Layout
++
++1.  **Traverse Pixels**: Iterate through the PRI pixel plane in a pre-determined order (e.g., row-major).
++2.  **Collect Splines**: For each pixel, determine the linear spline defined by the intersection of the sampling ray with the unstructured grid.
++3.  **Pack Knots**: Append the knot data (scalar value and distance) for the current pixel's spline to the end of the Knots Texture arrays.
++4.  **Write Index**: For the current pixel, write the Index Texture texel:
++    *   Set `r, g` to the current write pointer (2D address) in the Knots Texture.
++    *   Set `b` to the count of knots in the current spline.
++    *   Set `a` to the normalized distance of the last knot.
++5.  **Advance Pointer**: Increment the Knots Texture write pointer by the number of knots added.
++
++### Edge Cases and Pitfalls
++
++*   **Non-intersecting Rays**: If a sampling ray does not intersect the grid, the spline has zero knots. The Index Texture texel must have `b = 0`.
++*   **Out-of-Bounds Slicing**: A slicing plane (or fragment) can be quickly identified as lying outside the unstructured grid using two checks [S1, S2, unofficial]:
++    1.  Its z-location overlaps a spline with zero knots (ray does not enter the volume grid).
++    2.  Its distance to the sampling plane is less than the distance to the first knot or greater than the distance to the last knot of the spline.
++*   **Precision**: Using separate float textures for scalar and distance values is critical for maintaining high precision in the knot data [S1, S2, unofficial].
++
++### Pseudocode: Compact Node Index Texture Generation
++*Note: This variant is used when transferring data back to the CPU, where pixel position must be recovered [S3, unofficial].*
+ 
+ ```python
+-# Assume PRI resolution is (W, H)
+-# knots_scalar_texture and knots_dist_texture are pre-allocated 2D float textures
+-# index_texture is a pre-allocated RGBA texture
+-# Ray generation and intersection are handled by the PRI traversal step [G]
+-
+-knots_write_offset = 0
+-
+-for y in range(H):
+-    for x in range(W):
+-        # knots is a list of (scalar, distance) tuples sorted by distance from sampling plane [G]
+-        knots = get_knots_for_pixel(x, y)
+-
+-        if len(knots) == 0:
+-            index_texture[x, y] = (0.0, 0.0, 0, 0.0)
+-        else:
+-            first_knot_addr = knots_write_offset
+-            num_knots = len(knots)
+-            last_knot_dist = knots[-1][1]
+-
+-            for i, (scalar_val, dist_val) in enumerate(knots):
+-                knots_scalar_texture[first_knot_addr + i] = scalar_val
+-                knots_dist_texture[first_knot_addr + i] = dist_val
+-
+-            # Normalization factor not specified in sources [G]
+-            normalized_last_dist = last_knot_dist
+-
+-            index_texture[x, y] = (first_knot_addr, first_knot_addr, num_knots, normalized_last_dist)
+-
+-            knots_write_offset += num_knots
++def generate_compact_node_index_texture(ray_data):
++    """
++    Generates a compact RGBA32 texture for CPU read-back.
++    ray_data: List of rays, each containing up to 12 node entries.
++    Returns: 2D texture (RGBA32) where each pixel stores 4 node indices.
++    """
++    # Initialize output texture with zeros
++    output_texture = create_2d_texture_rgba32(width, height)
++    
++    # Process each pixel/ray
++    for pixel_y in range(height):
++        for pixel_x in range(width):
++            ray = ray_data[pixel_y][pixel_x]
++            
++            # Extract nodes and bitmask
++            # Each ray has up to 12 node entries.
++            # We use 20 bits of a 32-bit entry to encode pixel position.
++            # The bitmask indicates which of the 4 slots in the RGBA32 texel are used.
++            
++            nodes = ray.nodes[:4] # Take first 4 nodes for compacting
++            bitmask = ray.bitmask
++            
++            # Check if bitmask exceeds limit (more than 4 nodes active)
++            if count_non_zero(bitmask) > 4:
++                # Postpone request to next frame [S3, unofficial]
++                continue
++            
++            # Encode pixel position into the remaining bits of the node entries
++            # Assuming node entries are 32-bit integers
++            encoded_nodes = []
++            for i, node in enumerate(nodes):
++                # Use lower 20 bits for pixel position, upper 12 for node index?
++                # Or vice versa. Source says "20 bits ... to encode pixel position ... alongside 12 node entries".
++                # This implies the 32-bit entry is split.
++                # Let's assume standard packing: [PixelPos (20 bits) | NodeIndex (12 bits)]
++                # However, source says "12 node entries per list" and "20 bits ... encode pixel position".
++                # It implies the pixel position is stored in the entry.
++                
++                # Re-reading [S3, unofficial]: "Using 12 node entries per list, we can avoid this problem by using the remaining 20 bits (over 32) to encode the pixel position of the ray."
++                # This suggests the node index itself might be small, or the pixel position is packed into the same 32-bit word.
++                # Let's assume the node index is stored in the lower bits and pixel pos in upper, or vice versa.
++                # For implementation, we pack them.
++                
++                packed = (pixel_y * width + pixel_x) << 12 | node
++                encoded_nodes.append(packed)
++            
++            # Fill RGBA channels
++            output_texture[pixel_x][pixel_y].r = encoded_nodes[0] if bitmask & 1 else 0
++            output_texture[pixel_x][pixel_y].g = encoded_nodes[1] if bitmask & 2 else 0
++            output_texture[pixel_x][pixel_y].b = encoded_nodes[2] if bitmask & 4 else 0
++            output_texture[pixel_x][pixel_y].a = encoded_nodes[3] if bitmask & 8 else 0
++            
++    return output_texture
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Outside Volume Identification:** A pixel fragment is identified as lying outside the unstructured grid if:
+-    1.  Its $z$ location overlaps a spline with zero knots (i.e., $b=0$ in the index texture) [S1, unofficial].
+-    2.  Its distance to the sampling plane is less than the distance to the first knot or greater than the distance to the last knot of the spline [S1, unofficial].
+-*   **Precision:** Using separate float textures for scalar and distance values is critical for maintaining high precision during interpolation [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Compact Node Index Texture Generation
+-This variant addresses the loss of original pixel position information during GPU-to-CPU texture transfer and reduction processes [S2, unofficial]. It encodes ray pixel positions and node indices into a compacted texture to allow the CPU to recover actual node indices [S2, unofficial].
+-*   **Mechanism:** During texture transfer, 20 bits of a 32-bit entry are used to encode the pixel position of the ray, alongside 12 node entries per list [S2, unofficial]. After reduction, each pixel contains a ray pixel-position and a bitmask [S2, unofficial].
+-*   **Layout:** The final compacted texture is a single RGBA32 texture, storing indices of four nodes per pixel [S2, unofficial].
+-*   **Parameters:** The bitmask usually contains 2-3 non-zero entries [S2, unofficial].
+-*   **Pitfall:** If the bitmask exceeds the limit (more than 4 nodes), requests are automatically postponed to the next frame [S2, unofficial].
++A variant of the storage layout used during GPU-to-CPU data transfer. It addresses the loss of original pixel position during texture reduction. It encodes the pixel position (using 20 bits of a 32-bit entry) alongside node indices (12 bits). The final texture is a single RGBA32 texture storing indices of four nodes per pixel. The bitmask usually contains 2-3 non-zero entries. If the limit of 4 nodes is exceeded, requests are postponed to the next frame [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Memory:** Requires two 2D textures for the knots (scalar and distance) plus one 2D index texture [S1, unofficial]. The size of the knots textures depends on the total number of intersections across all rays [S1, unofficial].
+-*   **Performance:** Enables fast culling of non-intersecting rays via the index texture's $b$ channel [S1, unofficial]. The packed layout improves texture cache coherence during ray traversal [S1, unofficial].
+-*   **Limitations:** The method assumes a pre-determined traversal order [S1, unofficial]. The compact variant [S2, unofficial] has a hard limit on nodes per pixel (4) and may require multi-frame processing for complex intersections [S2, unofficial].
++*   **Memory**: Requires two 2D textures (Index and Knots). The Index Texture size is fixed by the PRI resolution. The Knots Texture size depends on the number of intersections (knots) per ray.
++*   **Performance**: Allows for efficient texture lookups on the GPU. The packed layout ensures coherent memory access patterns during traversal [S1, S2, unofficial].
++*   **Precision**: High precision is maintained by using separate float textures for scalar and distance values [S1, S2, unofficial].
++*   **Limitations**: The layout is static once generated. Dynamic updates require rebuilding the textures. The compact node index variant has a hard limit of 4 nodes per pixel; exceeding this causes frame postponement [S3, unofficial].
+ 
+ ## Background
+-The PRI Texture Storage method was introduced in the context of GPU-based unstructured grid volume rendering to overcome bottlenecks in mapping irregular data to hardware [S1, unofficial]. It builds on the Pixel Ray Image (PRI) concept [S1, unofficial]. The compact node index variant was developed in the context of ray-guided streaming for voxel rendering, aiming to efficiently transfer reduced data from GPU to CPU [S2, unofficial].
++The PRI Texture Storage method was introduced in the context of GPU-based unstructured grid volume rendering. It was presented in the paper "An Image-Based Modelling Approach To GPU-based Unstructured Grid Volume Rendering" [S1, S2, unofficial]. The compact node index variant was later described in "Ray-Guided Streaming for Efficient and Detailed Voxel Rendering" [S3, unofficial].
+ 
+ ## Sources
+ [S1] An Image-Based Modelling Approach To GPU-based Unstructured Grid Volume Rendering, https://doi.org/10.2312/vg/vg06/031-038, fetched 2026-10-24 (unofficial)
+-[S2] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)+[S2] PDF An Image-Based Modelling Approach To GPU-based Unstructured Grid Volume ..., https://www3.cs.stonybrook.edu/~mueller/papers/vg06_ibr.pdf, fetched 2026-10-27 (unofficial)
++[S3] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)

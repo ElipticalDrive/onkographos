@@ -3,85 +3,40 @@
 Also called: 3D Texture Layout for Transfer Functions, Separable 3D Transfer Function Layout
 
 ## Overview
-This method defines the memory layout and storage requirements for hardware-based volume rendering using multi-dimensional transfer functions (MTFs). It addresses the problem that graphics hardware cannot compute transfer function variables (such as gradient magnitude) on the fly during ray casting, requiring all necessary classification variables to be pre-computed and stored at each voxel sample point [S1, book]. It is distinguished from standard scalar volume rendering by the explicit inclusion of auxiliary data volumes (e.g., normals) to support surface-based classification widgets, which imposes specific alignment constraints on the texture memory layout [S1, book].
+This method defines the memory layout and storage overhead for hardware-based volume rendering using multi-dimensional transfer functions (MTFs). It addresses the problem that hardware renderers cannot compute transfer function variables on the fly, requiring all variables to be stored at each voxel sample point [S1, book]. It is distinguished from standard scalar volume rendering by the explicit inclusion of a quantized normal volume to support surface-based classification widgets, which imposes specific alignment constraints on the texture memory layout [S1, book].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Scalar volume data $V$ and auxiliary data volumes (e.g., gradient magnitude $G$, second derivative $D$).
-*   **Output:** A 3D texture object suitable for GPU sampling, where each texel contains the transfer function output (color/opacity) for a specific combination of input variables.
+*   **Input:** A set of scalar field variables (e.g., data value, gradient magnitude, second derivative) and a desired transfer function mapping.
+*   **Output:** A 3D texture object suitable for GPU sampling, adhering to hardware alignment constraints.
 
 **Data Structures:**
-The transfer function is stored as a 3D texture. The dimensions of this texture correspond to the quantized ranges of the input variables.
-*   **Standard 3D Layout:** For scalar data, the primary data value is the most important, followed by gradient magnitude, then second derivative. A typical layout uses dimensions $256 \times 128 \times 8$ for data value, gradient magnitude, and second derivative, respectively [S1, book].
-*   **Separable Layout:** A separable 3D transfer function is composed of a 2D texture and a 1D texture. The total size is calculated as $256^2 + 256$ texels [S1, book]. This reduces expressivity because the unique combination of all three data values cannot be specified, but it remains powerful for boundary emphasis [S1, book].
+The transfer function is stored in a 3D texture. The dimensions of this texture correspond to the quantized ranges of the input variables.
+*   **Standard Layout:** For scalar data, the primary data value is the most important, followed by gradient magnitude, then the second derivative [S1, book].
+*   **Typical Dimensions:** A common layout is $256 \times 128 \times 8$ for data value, gradient magnitude, and second derivative, respectively [S1, book].
+*   **Texel Format:** Graphics hardware requires volumes to have one, two, or four values per texel due to memory alignment restrictions [S1, book]. If the required number of values is three, a four-value texture must be used, ignoring the fourth value [S1, book]. For more than four values, multiple textures are constructed [S1, book].
 
-**Hardware Constraints and Pitfalls:**
-Graphics hardware memory alignment restrictions require volumes to store one, two, or four values per texel [S1, book].
-*   If the transfer function requires three values per sample, a four-value texture must be utilized, and the fourth value is ignored [S1, book].
-*   Volumes with more than four values per sample must be constructed using multiple textures [S1, book].
+**Separable Layout:**
+A separable 3D transfer function is composed of a 2D transfer function and a 1D transfer function [S1, book].
+*   **Size Calculation:** The total size is the sum of the 2D and 1D components. For example, with dimensions $256 \times 256$ for the 2D part and $256$ for the 1D part, the total size is $256^2 + 256$ [S1, book].
+*   **Trade-off:** This reduces expressivity because the unique combination of all three data values cannot be specified, but it remains powerful for boundary emphasis [S1, book].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def create_3d_transfer_function_texture(data_values, gradient_magnitudes, second_derivatives):
-    """
-    Creates a 3D texture for a multi-dimensional transfer function.
-    Assumes quantization of input ranges to texture dimensions.
-    """
-    # Define dimensions based on importance and hardware constraints
-    # Typical: 256 for data value, 128 for gradient, 8 for second derivative
-    dim_x = 256
-    dim_y = 128
-    dim_z = 8
-    
-    # Check if separable layout is preferred for performance/expressivity trade-off
-    # Separable size: 256^2 (2D part) + 256 (1D part)
-    use_separable = False 
-    
-    if use_separable:
-        # Create 2D texture for primary and secondary variables
-        tex_2d = allocate_texture(dim_x, dim_y, format=RGBA)
-        # Create 1D texture for tertiary variable
-        tex_1d = allocate_texture(dim_z, format=RGBA)
-        return (tex_2d, tex_1d)
-    else:
-        # Standard 3D texture
-        # Hardware requires 1, 2, or 4 values per texel.
-        # If 3 values are needed, use 4-value format and ignore the 4th.
-        tex_3d = allocate_texture(dim_x, dim_y, dim_z, format=RGBA)
-        
-        for x in range(dim_x):
-            for y in range(dim_y):
-                for z in range(dim_z):
-                    # Map texture coordinates to data ranges
-                    val = quantize(data_values, x, dim_x)
-                    grad = quantize(gradient_magnitudes, y, dim_y)
-                    deriv = quantize(second_derivatives, z, dim_z)
-                    
-                    # Evaluate transfer function T(val, grad, deriv)
-                    # This step depends on the specific TF definition, not the layout
-                    color = evaluate_transfer_function(val, grad, deriv)
-                    
-                    # Write to texture. If format is RGBA and only 3 values needed,
-                    # set alpha to 0 or ignore it.
-                    tex_3d[x, y, z] = color
-                    
-        return tex_3d
-```
+**Pitfalls:**
+*   **Memory Alignment:** Ignoring hardware restrictions (1, 2, or 4 values per texel) will cause rendering failures or incorrect sampling [S1, book].
+*   **Expressivity Loss:** Separable layouts cannot model complex interactions between all three variables simultaneously [S1, book].
 
 ## Subtopics
 
 ### [Multi-Dimensional Transfer Function Memory Layout](5649-multi-dimensional-transfer-function-memory-layout.md)
-This method defines the memory layout and storage overhead for hardware-based volume rendering using multi-dimensional transfer functions (MTFs). It addresses the problem that hardware renderers cannot compute transfer function variables on the fly, requiring all variables to be stored at each voxel sample point. It is distinguished from standard scalar volume rendering by the explicit inclusion of a quantized normal volume to support surface-based classification widgets, which imposes specific alignment constraints on the texture memory layout.
+Defines the memory layout for MTFs, distinguishing itself by the inclusion of a quantized normal volume for surface-based classification widgets.
 
 ## Operating characteristics
-*   **Memory Complexity:** The memory usage is proportional to the product of the texture dimensions. For a standard 3D layout ($256 \times 128 \times 8$), the size is $262,144$ texels. For a separable layout ($256^2 + 256$), the size is $65,792$ texels [S1, book].
-*   **Performance:** Separable transfer functions reduce the lookup complexity and memory bandwidth requirements compared to full 3D lookups, at the cost of expressivity [S1, book].
-*   **Limitations:** Hardware alignment restrictions force padding for 3-value textures, wasting 25% of the memory for the fourth channel [S1, book]. Multi-texture approaches for >4 values increase complexity [S1, book].
+*   **Memory Usage:** Determined by the product of the quantized dimensions. Standard 3D layout ($256 \times 128 \times 8$) consumes significant VRAM. Separable layout ($256^2 + 256$) is more compact but less expressive.
+*   **Hardware Constraints:** Strictly limited to 1, 2, or 4 values per texel. 3-value cases waste 25% of the texel capacity [S1, book].
+*   **Performance:** Dependent texture reads are used to sample these textures, which are efficient hardware extensions [S1, book].
 
 ## Background
-This method originates from the work on multi-dimensional transfer functions for volume rendering, specifically detailed in the chapter "Multi-Dimensional Transfer Functions for Volume Rendering" by Kniss et al. [S1, book]. It was developed to support interactive volumetric shading and shadows by allowing the GPU to sample pre-computed classification data directly from textures [S1, book].
+Originated in the context of multi-dimensional transfer functions for volume rendering, as described in *The Visualization Handbook* [S1, book]. It builds on the principles of dense grids and memory layout, specifically leveraging 3D texture representations [2393-3d-texture-representation-cpu-gpu-indexing.md].
 
 ## Sources
 [S1] Multi-Dimensional Transfer Functions for Volume Rendering, https://people.cs.uchicago.edu/~glk/pubs/pdf/Kniss-MultidimensionalTransferFunctions-VH-2005.pdf, fetched 2026-10-27 (book)

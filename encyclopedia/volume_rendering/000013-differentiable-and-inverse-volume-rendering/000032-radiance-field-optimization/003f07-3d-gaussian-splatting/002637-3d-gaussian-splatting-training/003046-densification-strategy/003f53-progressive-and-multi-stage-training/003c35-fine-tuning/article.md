@@ -2,87 +2,95 @@
 Also called: 3DGS Fine-tuning, Gaussian Splatting Fine-tuning
 
 ## Overview
-Fine-tuning is a training phase in 3D Gaussian Splatting (3DGS) that refines an initial set of Gaussian primitives to achieve high-fidelity reconstruction while managing memory efficiency. It solves the problem of redundant initializations and slow convergence by optimizing geometry and color attributes directly, often leveraging pretrained priors. It sets itself apart from standard initialization-only approaches by actively enabling growing and pruning during the optimization loop, significantly reducing the final Gaussian count compared to the initial feed-forward prediction [S1].
+Fine-tuning is the optimization phase in 3D Gaussian Splatting (3DGS) where the initial set of 3D Gaussian primitives is refined to reconstruct a scene. It solves the problem of initializing a sparse or inaccurate point cloud by optimizing geometry and color attributes through differentiable rasterization. It sets itself apart from its siblings by often leveraging pretrained weights or feed-forward initialization to accelerate convergence and reduce memory consumption compared to training from scratch [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** An initial set of 3D Gaussian primitives $\mathcal{G}_{init}$ predicted by a feed-forward network, including geometry (mean $\mu$, covariance $\Sigma$, scale $s$, rotation $r$) and color attributes (Spherical Harmonics coefficients).
-*   **Output:** A refined set of Gaussians $\mathcal{G}_{final}$ with optimized attributes and reduced cardinality.
+*   **Input:** An initial set of 3D Gaussian primitives $\mathcal{G}_i$, each defined by mean position $\mu_i$, covariance matrix $\Sigma_i$ (or scale/rotation parameters), opacity $\alpha_i$, and spherical harmonic coefficients for color $c_i$. These are typically generated via a feed-forward process or Structure-from-Motion (SfM) [S1, S2].
+*   **Output:** Optimized parameters $\{\mu_i, \Sigma_i, \alpha_i, c_i\}$ that minimize the rendering loss against input images.
 
 **Data Structures:**
-*   **Gaussian Buffer:** GPU-resident arrays storing mean, covariance (or scale/rotation), opacity, and SH coefficients.
-*   **Optimizer State:** Adam optimizer state for all learnable parameters [S1].
+*   **Gaussian Buffer:** A GPU buffer storing attributes for $N$ Gaussians.
+    *   `means`: $N \times 3$ float32 tensor.
+    *   `scales`: $N \times 3$ float32 tensor (log-scale).
+    *   `rotations`: $N \times 4$ float32 tensor (quaternions).
+    *   `opacities`: $N \times 1$ float32 tensor (logit).
+    *   `colors`: $N \times C$ float32 tensor (SH coefficients).
+*   **Sparse Convolution Structure:** If using sparse representations (e.g., for urban scenes), a sparse tensor structure maps 3D coordinates to active Gaussians [S1].
 
 **Steps:**
-1.  **Initialization:** Predict initial 3D Gaussian primitives via a direct feed-forward process. Both geometry and color attributes are generated simultaneously [S1].
-2.  **Optimization Loop:** Optimize all geometry and color attributes directly using the vanilla 3DGS differentiable rendering pipeline [S1].
-    *   **Loss Function:** The total loss $\mathcal{L}$ typically combines reconstruction loss (e.g., SSIM, L1) and entropy regularization:
-        $$ \mathcal{L} = \mathcal{L}_{ssim} + \lambda_e \mathcal{L}_{\text{entropy}} $$
-        where $\lambda_e$ is a weighting factor [S1].
-    *   **Optimizer:** Adam optimizer is used with a learning rate of $1 \times 10^{-3}$ [S1].
-3.  **Densification Control:** Enable growing (splitting/cloning) and pruning of 3D primitives during the fine-tuning phase [S1]. This step is critical for removing redundant primitives predicted by the initial feed-forward model.
-4.  **Pruning:** Remove Gaussians that do not contribute significantly to the reconstruction, significantly reducing the number of Gaussians compared to the initial prediction [S1].
+1.  **Initialization:** Generate initial 3D Gaussians. In methods like EVolSplat, this is done via a direct feed-forward process predicting geometry and color [S1]. In deblurring contexts, this may involve KNN interpolation on sparse SfM points [S2].
+2.  **Differentiable Rasterization:** Render the scene to 2D images using the current Gaussian parameters. The rendering equation for a pixel $p$ is:
+    $$
+    C_p = \sum_{i \in \mathcal{N}_p} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+    $$
+    where $\mathcal{N}_p$ is the set of Gaussians covering pixel $p$, sorted by depth [Parent].
+3.  **Loss Computation:** Calculate the loss $\mathcal{L}$ between the rendered image and the ground truth image. Common losses include L1 loss and SSIM [S2].
+4.  **Gradient Update:** Compute gradients $\nabla \mathcal{L}$ with respect to all Gaussian parameters. Update parameters using an optimizer (e.g., Adam) [S1]:
+    $$
+    \theta_{t+1} = \theta_t - \eta \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}
+    $$
+    where $\eta$ is the learning rate (typically $1 \times 10^{-3}$) [S1].
+5.  **Densification and Pruning:** Periodically (e.g., every `refineEvery` steps), apply adaptive density control:
+    *   **Split/Clone:** Based on gradient norms and screen size [Parent].
+    *   **Prune:** Remove Gaussians with low opacity or high depth [Parent].
+    *   **Supplementary Points:** In blurry scenes, add new points if SfM is sparse (see Subtopics) [S2].
+6.  **Opacity Reset:** Initialize opacities of new Gaussians to a low value (e.g., logit -1.386) to prevent immediate dominance [Parent].
 
 **Parameters:**
 *   **Learning Rate:** $1 \times 10^{-3}$ [S1].
-*   **Library:** `gsplat` for Gaussian rasterization [S1].
-*   **Sparse Convolution:** `torchsparse` may be used for the initial prediction or auxiliary features [S1].
+*   **Optimizer:** Adam [S1].
+*   **Iteration Count:** Varies by scene; e.g., 20,000 for deblurring benchmarks [S2].
+*   **Densification Interval:** Defined by parent method's `refineEvery` [Parent].
 
 **Edge Cases and Pitfalls:**
-*   **Redundancy:** The initial feed-forward prediction often contains redundant Gaussians. Failure to prune effectively leads to high memory consumption without quality gains [S1].
-*   **Convergence:** Pretrained priors accelerate training; disabling fine-tuning may result in slower convergence or lower photorealism [S1].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-# Initialize Gaussians from feed-forward network
-gaussians = feed_forward_predict(scene_data)
-
-# Setup Adam optimizer for all Gaussian attributes
-optimizer = Adam(gaussians.parameters(), lr=1e-3)
-
-# Fine-tuning loop
-for step in range(num_fine_tuning_steps):
-    # Render image from current Gaussians
-    rendered_image = gaussian_rasterize(gaussians, camera_params)
-    
-    # Compute loss
-    loss = compute_ssim_loss(rendered_image, target_image) + \
-           lambda_e * compute_entropy_loss(gaussians)
-    
-    # Backpropagate and update
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    
-    # Periodic densification: grow and prune
-    if step % refine_every == 0:
-        gaussians = densify_and_prune(gaussians, threshold=threshold_value)
-```
+*   **Sparse Initialization:** In defocus blurry scenes, SfM may fail to extract points at far distances, leading to reconstruction holes [S2].
+*   **Redundancy:** Feed-forward initialization may produce redundant Gaussians, requiring aggressive pruning to manage memory [S1].
+*   **Blur Artifacts:** Standard 3DGS optimization may not handle motion or defocus blur well without specific covariance manipulation or supplementary point addition [S2].
 
 ## Subtopics
 
 ### [Exponentially Ascending Gradient Threshold](9684-exponentially-ascending-gradient-threshold.md)
-Dynamically adjusts densification sensitivity based on training progress.
+A densification control mechanism that uses an exponentially ascending gradient threshold to regulate splitting and cloning. It allows aggressive densification when few Gaussians exist and restricts it as the scene becomes dense, solving the trade-off between early-stage convergence speed and late-stage overfitting. Choose this when static thresholds lead to over-densification or slow convergence.
 
 ### [Hard Gaussian Splatting](10590-hard-gaussian-splatting.md)
-Identifies and grows defective primitives causing artifacts.
+Identifies "hard Gaussians"—defective primitives causing blurring or needle-like artifacts—and grows them to recover missing details. Unlike standard 3DGS, it uses multi-view significant positional gradients and rendering error analysis to detect high-error regions. Choose this when standard adaptive density control fails to resolve local artifacts.
 
 ### [SplatFormer Training Objective & Refinement](11745-splatformer-training-objective-refinement.md)
-Uses a point transformer to refine attributes for out-of-distribution views.
+A learning-based, feed-forward module that refines initial 3DGS representations to enable robust novel view synthesis from out-of-distribution (OOD) camera angles. It predicts attribute residuals using a point transformer network, ensuring geometric consistency while recovering details lost in OOD views. Choose this when standard 3DGS overfits to input views and fails to generalize to unseen high-elevation perspectives.
 
 ### [MCMC-based 3DGS / SGLD for 3DGS](11917-mcmc-based-3dgs-sgld-for-3dgs.md)
-Reformulates updates as SGLD to remove manual densification heuristics.
+Reformulates 3DGS by treating Gaussians as MCMC samples from an underlying probability distribution. It converts updates into Stochastic Gradient Langevin Dynamics (SGLD) by adding noise, removing the need for manual densification heuristics like cloning and splitting. Choose this when manual densification parameters are difficult to tune or when probabilistic modeling is preferred.
+
+### [Deblurring 3D Gaussian Splatting](12318-deblurring-3d-gaussian-splatting.md)
+A real-time deblurring framework that reconstructs sharp scenes from blurry inputs by manipulating covariance matrices and means using a small MLP. It handles defocus and camera motion blur via differentiable rasterization and KNN interpolation for sparse point clouds. Choose this when input images are blurry and standard 3DGS produces sparse or artifact-ridden reconstructions.
+
+### Supplementary Point Addition for Sparse Point Clouds
+A densification technique to compensate for the sparsity of 3D Gaussians at the far end of the scene in defocus blurry scenes where SfM extraction is poor [S2]. It adds points sampled from a uniform distribution and prunes those too far from existing points [S2]. Choose this when SfM fails to capture distant geometry in blurry scenes.
+
+**Steps:**
+1.  After $N_{st}$ iterations, sample $N_p$ points from a uniform distribution $U(\alpha, \beta)$, where $\alpha$ and $\beta$ are the minimum and maximum position values of the existing point cloud [S2].
+2.  Assign color $p_c$ to each new point $p$ by interpolating colors from the $K$-Nearest-Neighbors ($P_{knn}$) among existing points [S2].
+3.  Discard new points if their distance to the nearest neighbor exceeds the threshold $t_d$ [S2].
+
+**Parameters:**
+*   $N_{st}$: Start iteration. Value: 2,500 [S2].
+*   $N_p$: Number of points. Value: Proportional to extent, max 200,000 [S2].
+*   $K$: Neighbors for KNN. Value: 4 [S2].
+*   $t_d$: Distance threshold. Value: 2 [S2].
 
 ## Operating characteristics
-*   **Memory:** Significantly reduces memory consumption compared to the initial feed-forward prediction by pruning redundant primitives [S1].
-*   **Speed:** Pretrained priors accelerate network training and enable faster convergence compared to test-time optimization methods without priors [S1].
-*   **Quality:** Achieves photorealism on par with or surpassing other methods by leveraging powerful pretrained weights [S1].
-*   **Limitations:** Relies on the quality of the initial feed-forward prediction; poor initialization may require more aggressive pruning or longer fine-tuning [S1].
+*   **Time Complexity:** Linear in the number of Gaussians $N$ and pixels $P$ per iteration, $O(N \cdot P)$ for rasterization, plus overhead for densification [Parent].
+*   **Memory Complexity:** $O(N)$ for storing Gaussian attributes. Pre-allocated buffers often require $3\times$ initial count to handle densification [Parent].
+*   **Performance:** Fine-tuning with pretrained weights (e.g., EVolSplat) accelerates convergence and reduces memory consumption compared to training from scratch [S1].
+*   **Strengths:** High photorealism, fast convergence with priors, real-time inference after training [S1, S3].
+*   **Limitations:** Sensitive to initialization quality; blurry inputs may require supplementary methods [S2].
+*   **When to Use:** When high-fidelity reconstruction is needed and initialization is available (SfM or feed-forward).
+*   **When Not to Use:** When no initialization is available and training from scratch is too slow, or when real-time training is required without densification overhead.
 
 ## Background
-Fine-tuning in the context of 3D Gaussian Splatting, specifically as implemented in EVolSplat, was introduced to address the inefficiencies of direct feed-forward Gaussian prediction. The method was proposed in the paper "EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis" [S1]. It builds on the standard 3DGS optimization framework [15] but integrates it with a pretrained feed-forward model to accelerate convergence and improve efficiency in urban view synthesis scenarios.
+Fine-tuning in 3DGS originated from the original 3D Gaussian Splatting paper [Parent], which introduced adaptive density control. Variants like EVolSplat [S1] and Deblurring 3DGS [S2] extended this to handle specific challenges like urban scale and image blur. The method builds on the differentiable rasterization framework established in [Parent].
 
 ## Sources
 [S1] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
+[S2] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26

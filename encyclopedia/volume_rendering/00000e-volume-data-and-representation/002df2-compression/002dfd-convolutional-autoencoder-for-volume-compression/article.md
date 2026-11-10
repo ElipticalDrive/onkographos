@@ -3,7 +3,7 @@
 Also called: Autoencoder-based volume rendering, CNN Autoencoder, Compressed Volume Rendering using Deep Learning, Data-driven compressed volume rendering, Deep Learning Compression
 
 ## Overview
-This method obtains a data-driven compact representation of multivariate time-varying volumetric data using a deep convolutional autoencoder network, enabling interactive rendering and navigation by decompressing the representation on the GPU [S1, unofficial]. It sets itself apart from traditional transform-based siblings like [Wavelet and Transform-based Compression](6879-wavelet-and-transform-based-compression.md) by learning hierarchical features directly from the data distribution rather than relying on fixed mathematical bases, resulting in significantly lower reconstruction error and fewer visual artifacts at equivalent storage ratios [S1, unofficial].
+This method obtains a data-driven compact representation of multivariate time-varying volumetric data using a deep convolutional autoencoder network, enabling interactive rendering and navigation by decompressing the representation on the GPU [S1, unofficial]. It solves the problem of storing and transmitting large scientific datasets by learning high-level hierarchical features that allow the compressed representation to fit in GPU memory, while the decoder reconstructs the volume on the fly [S1, unofficial]. It differs from its parent, [Compression](4-compression.md), by replacing hand-crafted transforms (like wavelets) with learned non-linear feature hierarchies, achieving significantly lower reconstruction error (higher PSNR) at the same storage ratio [S1, unofficial]. It is distinct from [Sparse structures](5-sparse-structures.md) and [Wavelet and Transform-based Compression](6879-wavelet-and-transform-based-compression.md) because it does not rely on fixed basis functions or sparsity assumptions, but rather on statistical regularities learned from the specific data distribution [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -11,97 +11,347 @@ This method obtains a data-driven compact representation of multivariate time-va
 *   **Output:** A compressed representation (latent code) for each time step, and a reconstructed volume slice during rendering [S1, unofficial].
 
 **Data Structures and Layout:**
-The network architecture is a stacked convolutional autoencoder. The encoder path compresses the input, and the decoder path reconstructs it. The specific layer configuration is defined below [S1, unofficial].
+The network architecture is a stacked convolutional autoencoder. The encoder path downsamples the input, and the decoder path upsamples it. The specific layer configuration is defined below [S1, unofficial].
 
 *   **Encoder Path:**
-    1.  Convolutional Layer: Input Channels 1 $\to$ Output Channels 64, Filter Size $3 \times 3$, Stride 1.
-    2.  Convolutional Layer: Input Channels 64 $\to$ Output Channels 64, Filter Size $3 \times 3$, Stride 1.
-    3.  Max Pooling Layer: Input Channels 64, Kernel $2 \times 2$, Stride 2.
-    4.  Convolutional Layer: Input Channels 64 $\to$ Output Channels 64, Filter Size $3 \times 3$, Stride 1.
-    5.  Convolutional Layer: Input Channels 64 $\to$ Output Channels 32, Filter Size $3 \times 3$, Stride 1.
-    6.  Max Pooling Layer: Input Channels 32, Kernel $2 \times 2$, Stride 2.
-    7.  Convolutional Layer: Input Channels 32 $\to$ Output Channels 16, Filter Size $3 \times 3$, Stride 1.
-    8.  Convolutional Layer: Input Channels 16 $\to$ Output Channels 8, Filter Size $3 \times 3$, Stride 1.
-    9.  Max Pooling Layer: Input Channels 8, Kernel $2 \times 2$, Stride 2.
-    10. Convolutional Layer (Encoder Output): Input Channels 8 $\to$ Output Channels 4, Filter Size $3 \times 3$, Stride 1. This output is the compressed representation.
+    1.  Convolutional: Input Channels 1 $\to$ Output Channels 64, Stride 1, Filter Size $3 \times 3$.
+    2.  Convolutional: Input Channels 64 $\to$ Output Channels 64, Stride 1, Filter Size $3 \times 3$.
+    3.  Max Pooling: Input Channels 64 $\to$ Output Channels 64, Stride 2, Filter Size $2 \times 2$.
+    4.  Convolutional: Input Channels 64 $\to$ Output Channels 64, Stride 1, Filter Size $3 \times 3$.
+    5.  Convolutional: Input Channels 64 $\to$ Output Channels 32, Stride 1, Filter Size $3 \times 3$.
+    6.  Max Pooling: Input Channels 32 $\to$ Output Channels 32, Stride 2, Filter Size $2 \times 2$.
+    7.  Convolutional: Input Channels 32 $\to$ Output Channels 16, Stride 1, Filter Size $3 \times 3$.
+    8.  Convolutional: Input Channels 16 $\to$ Output Channels 8, Stride 1, Filter Size $3 \times 3$.
+    9.  Max Pooling: Input Channels 8 $\to$ Output Channels 8, Stride 2, Filter Size $2 \times 2$.
+    10. ConvolutionalE (Encoder Output): Input Channels 8 $\to$ Output Channels 4, Stride 1, Filter Size $3 \times 3$.
 
 *   **Decoder Path:**
-    1.  Convolutional Layer: Input Channels 4 $\to$ Output Channels 8, Filter Size $3 \times 3$, Stride 1.
-    2.  Convolutional Layer: Input Channels 8 $\to$ Output Channels 16, Filter Size $3 \times 3$, Stride 1.
-    3.  Convolutional Layer: Input Channels 16 $\to$ Output Channels 32, Filter Size $3 \times 3$, Stride 1.
-    4.  Upsampling Layer: Input Channels 32, Kernel $2 \times 2$, Stride 2.
-    5.  Convolutional Layer: Input Channels 32 $\to$ Output Channels 64, Filter Size $3 \times 3$, Stride 1.
-    6.  Convolutional Layer: Input Channels 64 $\to$ Output Channels 64, Filter Size $3 \times 3$, Stride 1.
-    7.  Upsampling Layer: Input Channels 64, Kernel $2 \times 2$, Stride 2.
-    8.  Convolutional Layer: Input Channels 64 $\to$ Output Channels 64, Filter Size $3 \times 3$, Stride 1.
-    9.  Convolutional Layer: Input Channels 64 $\to$ Output Channels 64, Filter Size $3 \times 3$, Stride 1.
-    10. Upsampling Layer: Input Channels 64, Kernel $2 \times 2$, Stride 2.
-    11. Convolutional Layer (Decoder Output): Input Channels 64 $\to$ Output Channels 1, Filter Size $3 \times 3$, Stride 1.
-
-**Numbered Steps:**
-
-1.  **Preprocessing:** Normalize the input volume data between 0 and 1 for each multivariate dimension across all time steps. Arrange the data as multivariate slices along the z-axis so that the multivariate field acts as a channel to the network [S1, unofficial].
-2.  **Training:**
-    *   Randomly sample multivariate slices from all time steps.
-    *   Feed slices through the autoencoder.
-    *   Update weights using the ADADELTA solver with momentum 0.95 to minimize cross-entropy loss between the input slice and the reconstructed slice.
-    *   Training stops when the mean squared error (MSE) between the input volume and the reconstructed volume stops decreasing [S1, unofficial].
-3.  **Splitting:** Separate the trained autoencoder into distinct encoding and decoding networks [S1, unofficial].
-4.  **Compression:** The encoder outputs a compressed representation computed as a nonlinear combination of input data and learned hierarchical features. This representation is stored on GPU memory [S1, unofficial].
-5.  **Decompression (On-the-fly):** During rendering, feed the compressed slice through the decoder network (Convolutional and Upsampling layers) to reconstruct the original resolution slice on the fly [S1, unofficial].
-6.  **Rendering:**
-    *   For a required time step, decompress subsampled slices along the z-axis to create a coarser volume.
-    *   Render this coarser volume.
-    *   Continuously refine by decompressing remaining slices while rendering.
-    *   Switch to finer volume rendering once decompression is complete [S1, unofficial].
-    *   Apply a user-defined transfer function to map voxel intensity (0-255) to color and opacity using linear interpolation between adjacent control points [S1, unofficial].
-
-**Formulas:**
-*   **Convolution Operation:** The $i$-th channel $V_i$ of the output volume is calculated as [S1, unofficial]:
-    $$V_i = \sum_{j=1}^p W_{j,q} * U_j + b_i$$
-    Where $W_{j,q}$ are trainable filters, $U_j$ are input channels, and $b_i$ is the trainable bias.
-*   **Activation Functions:**
-    *   Hidden layers use Rectified Linear Units (ReLU): $f(v_i) = \max(0, v_i)$ [S1, unofficial].
-    *   Output layer uses Sigmoid to map output to range [0, 1]:
-        $$f(v_i) = \frac{1}{1 + e^{-v_i}}$$
-        [S1, unofficial]
+    1.  Convolutional: Input Channels 4 $\to$ Output Channels 8, Stride 1, Filter Size $3 \times 3$.
+    2.  Convolutional: Input Channels 8 $\to$ Output Channels 16, Stride 1, Filter Size $3 \times 3$.
+    3.  Convolutional: Input Channels 16 $\to$ Output Channels 32, Stride 1, Filter Size $3 \times 3$.
+    4.  UpSampling: Input Channels 32 $\to$ Output Channels 32, Stride 2, Filter Size $2 \times 2$.
+    5.  Convolutional: Input Channels 32 $\to$ Output Channels 64, Stride 1, Filter Size $3 \times 3$.
+    6.  Convolutional: Input Channels 64 $\to$ Output Channels 64, Stride 1, Filter Size $3 \times 3$.
+    7.  UpSampling: Input Channels 64 $\to$ Output Channels 64, Stride 2, Filter Size $2 \times 2$.
+    8.  Convolutional: Input Channels 64 $\to$ Output Channels 64, Stride 1, Filter Size $3 \times 3$.
+    9.  Convolutional: Input Channels 64 $\to$ Output Channels 64, Stride 1, Filter Size $3 \times 3$.
+    10. UpSampling: Input Channels 64 $\to$ Output Channels 64, Stride 2, Filter Size $2 \times 2$.
+    11. ConvolutionalD (Decoder Output): Input Channels 64 $\to$ Output Channels 1, Stride 1, Filter Size $3 \times 3$.
 
 **Parameters:**
 *   **Filter Size:** $3 \times 3$ for all convolutional layers [S1, unofficial].
-*   **Optimizer:** ADADELTA with momentum 0.95 [S1, unofficial].
-*   **Loss Function:** Cross-entropy between input and reconstructed slice [S1, unofficial].
+*   **Optimizer:** ADADELTA solver with momentum of 0.95 [S1, unofficial].
+*   **Loss Function:** Cross entropy between the input slice and the reconstructed slice. Training stops when the mean squared error (MSE) between the input volume and the reconstructed volume stops decreasing [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Memory Constraints:** The compressed representation must be small enough to reside in GPU memory. The method enforces this by design, requiring only additional memory for one reconstructed slice at full resolution during decompression [S1, unofficial].
-*   **Training Convergence:** The number of iterations depends on dataset complexity. Training must monitor MSE to prevent underfitting or overfitting [S1, unofficial].
+**Steps:**
+
+1.  **Preprocessing:**
+    *   Normalize the input data between 0 and 1 for each multivariate dimension across all time steps [S1, unofficial].
+    *   Arrange the data as multivariate slices along the z-axis. The multivariate field acts as a channel to the network. For a volume $X \times Y \times Z \times K \times T$, this results in input slices of size $X \times Y \times K$ [S1, unofficial].
+
+2.  **Training:**
+    *   Randomly sample multivariate slices from all time steps [S1, unofficial].
+    *   Feed slices through the autoencoder.
+    *   The encoder produces a compressed representation. The decoder produces a reconstruction.
+    *   Apply Rectified Linear Units (ReLU) for intermediate layers: $f(v_i) = \max(0, v_i)$ [S1, unofficial].
+    *   Apply sigmoid activation to the final output layer to map values to $[0, 1]$:
+        $$f(v_i) = \frac{1}{1 + e^{-v_i}}$$
+    *   Update weights using backpropagation to minimize cross-entropy loss [S1, unofficial].
+
+3.  **Splitting:**
+    *   Split the trained network into separate Encoder and Decoder networks [S1, unofficial].
+    *   The Encoder outputs the compressed representation (latent code).
+    *   The Decoder takes the compressed representation and generates a lossy reconstruction [S1, unofficial].
+
+4.  **Decompression (On-the-fly):**
+    *   During rendering, for a required time step, feed the compressed slice through the Decoder network [S1, unofficial].
+    *   The Decoder consists of convolutional and upsampling layers to reconstruct the original resolution slice [S1, unofficial].
+    *   Decompression is performed per slice on the fly, requiring additional memory for only one reconstructed slice at full resolution [S1, unofficial].
+
+5.  **Rendering:**
+    *   Visualize the reconstructed volume using ray casting [S1, unofficial].
+    *   **Coarse-to-Fine Strategy:**
+        1.  Decompress subsampled slices along the z-axis to create a coarser volume [S1, unofficial].
+        2.  Render this coarser volume [S1, unofficial].
+        3.  Continuously refine by decompressing remaining slices while rendering [S1, unofficial].
+        4.  Switch to finer volume rendering once decompression is complete [S1, unofficial].
+    *   **Transfer Function:** Map voxel intensity (0-255) to color and opacity using a user-defined transfer function. Opacity and color are linearly interpolated between adjacent control points [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def preprocess_volume(volume_data, num_time_steps, num_channels):
+    """
+    Preprocesses multivariate time-varying volumetric data.
+    volume_data: array of shape (X, Y, Z, K, T)
+    Returns: list of slices, each of shape (X, Y, K), normalized to [0, 1]
+    """
+    # Normalize data between 0 and 1 for each multivariate dimension across all time steps
+    # Assuming min-max normalization per channel across all timesteps
+    normalized_data = np.zeros_like(volume_data)
+    for k in range(num_channels):
+        channel_data = volume_data[:, :, :, k, :]
+        min_val = np.min(channel_data)
+        max_val = np.max(channel_data)
+        if max_val - min_val > 0:
+            normalized_data[:, :, :, k, :] = (channel_data - min_val) / (max_val - min_val)
+        else:
+            normalized_data[:, :, :, k, :] = 0.0
+            
+    # Arrange data as multivariate slices along the z-axis
+    # This effectively reshapes the data so that each input to the network is an (X, Y, K) slice
+    # The exact indexing depends on how 'slices along z-axis' is implemented in the specific framework,
+    # but conceptually it iterates over Z and extracts the (X, Y, K) block.
+    slices = []
+    for t in range(num_time_steps):
+        for z in range(volume_data.shape[2]):
+            slice_data = normalized_data[:, :, z, :, t] # Shape (X, Y, K)
+            slices.append(slice_data)
+    return slices
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+def relu(x):
+    return np.maximum(0, x)
+
+def convolve(input_vol, weights, bias, stride=1, filter_size=3):
+    """
+    Simple 3D convolution (spatial only, assuming channel mixing is handled by weight shape).
+    input_vol: (H, W, C_in)
+    weights: (H_f, W_f, C_in, C_out)
+    bias: (C_out,)
+    Returns: (H_out, W_out, C_out)
+    """
+    H, W, C_in = input_vol.shape
+    H_f, W_f, _, C_out = weights.shape
+    
+    H_out = (H - H_f) // stride + 1
+    W_out = (W - W_f) // stride + 1
+    
+    output = np.zeros((H_out, W_out, C_out))
+    
+    for i in range(H_out):
+        for j in range(W_out):
+            for c_out in range(C_out):
+                val = bias[c_out]
+                for i_f in range(H_f):
+                    for j_f in range(W_f):
+                        for c_in in range(C_in):
+                            h_start = i * stride + i_f
+                            w_start = j * stride + j_f
+                            val += input_vol[h_start, w_start, c_in] * weights[i_f, j_f, c_in, c_out]
+                output[i, j, c_out] = val
+    return output
+
+def max_pool(input_vol, pool_size=2, stride=2):
+    """
+    Max pooling.
+    input_vol: (H, W, C)
+    Returns: (H_out, W_out, C)
+    """
+    H, W, C = input_vol.shape
+    H_out = H // stride
+    W_out = W // stride
+    output = np.zeros((H_out, W_out, C))
+    
+    for i in range(H_out):
+        for j in range(W_out):
+            for c in range(C):
+                h_start = i * stride
+                w_start = j * stride
+                region = input_vol[h_start:h_start+pool_size, w_start:w_start+pool_size, c]
+                output[i, j, c] = np.max(region)
+    return output
+
+def upsample(input_vol, scale=2):
+    """
+    Simple nearest-neighbor upsampling.
+    input_vol: (H, W, C)
+    Returns: (H*scale, W*scale, C)
+    """
+    H, W, C = input_vol.shape
+    output = np.zeros((H * scale, W * scale, C))
+    for i in range(H):
+        for j in range(W):
+            for c in range(C):
+                output[i*scale:(i+1)*scale, j*scale:(j+1)*scale, c] = input_vol[i, j, c]
+    return output
+
+def encoder_forward(input_slice, encoder_weights, encoder_biases):
+    """
+    Forward pass through the Encoder network.
+    input_slice: (X, Y, K)
+    Returns: compressed representation (latent code)
+    """
+    x = input_slice
+    # Conv(1->64, 3x3, stride 1) - Note: Input channels K might need to be 1 or handled via 1x1 conv if K>1. 
+    # The source specifies Input Channels 1 for the first layer. 
+    # If K > 1, the preprocessing or initial layer must handle channel reduction or the source implies K=1 for this specific architecture description.
+    # Assuming K=1 for the base architecture described in Table 1, or K is concatenated/reshaped.
+    # For general implementation, if K > 1, the first conv layer input channels should be K.
+    # We follow the source Table 1 strictly: Input Channels 1.
+    
+    # Layer 1
+    x = convolve(x, encoder_weights[0], encoder_biases[0])
+    x = relu(x)
+    
+    # Layer 2
+    x = convolve(x, encoder_weights[1], encoder_biases[1])
+    x = relu(x)
+    
+    # Layer 3: MaxPool
+    x = max_pool(x, pool_size=2, stride=2)
+    
+    # Layer 4
+    x = convolve(x, encoder_weights[2], encoder_biases[2])
+    x = relu(x)
+    
+    # Layer 5
+    x = convolve(x, encoder_weights[3], encoder_biases[3])
+    x = relu(x)
+    
+    # Layer 6: MaxPool
+    x = max_pool(x, pool_size=2, stride=2)
+    
+    # Layer 7
+    x = convolve(x, encoder_weights[4], encoder_biases[4])
+    x = relu(x)
+    
+    # Layer 8
+    x = convolve(x, encoder_weights[5], encoder_biases[5])
+    x = relu(x)
+    
+    # Layer 9: MaxPool
+    x = max_pool(x, pool_size=2, stride=2)
+    
+    # Layer 10: ConvE (Encoder Output)
+    x = convolve(x, encoder_weights[6], encoder_biases[6])
+    # No activation specified for the latent code itself, but typically it's continuous.
+    return x
+
+def decoder_forward(latent_code, decoder_weights, decoder_biases):
+    """
+    Forward pass through the Decoder network.
+    latent_code: compressed representation
+    Returns: reconstructed slice
+    """
+    x = latent_code
+    
+    # Layer 1
+    x = convolve(x, decoder_weights[0], decoder_biases[0])
+    x = relu(x)
+    
+    # Layer 2
+    x = convolve(x, decoder_weights[1], decoder_biases[1])
+    x = relu(x)
+    
+    # Layer 3
+    x = convolve(x, decoder_weights[2], decoder_biases[2])
+    x = relu(x)
+    
+    # Layer 4: UpSample
+    x = upsample(x, scale=2)
+    
+    # Layer 5
+    x = convolve(x, decoder_weights[3], decoder_biases[3])
+    x = relu(x)
+    
+    # Layer 6
+    x = convolve(x, decoder_weights[4], decoder_biases[4])
+    x = relu(x)
+    
+    # Layer 7: UpSample
+    x = upsample(x, scale=2)
+    
+    # Layer 8
+    x = convolve(x, decoder_weights[5], decoder_biases[5])
+    x = relu(x)
+    
+    # Layer 9
+    x = convolve(x, decoder_weights[6], decoder_biases[6])
+    x = relu(x)
+    
+    # Layer 10: UpSample
+    x = upsample(x, scale=2)
+    
+    # Layer 11: ConvD (Decoder Output)
+    x = convolve(x, decoder_weights[7], decoder_biases[7])
+    
+    # Apply sigmoid activation to map to [0, 1]
+    x = sigmoid(x)
+    
+    return x
+
+def train_autoencoder(slices, encoder_weights, decoder_weights, encoder_biases, decoder_biases, learning_rate=0.001):
+    """
+    Placeholder for training loop using ADADELTA.
+    In practice, this involves backpropagation to minimize cross-entropy loss.
+    """
+    # Implementation details of ADADELTA and backpropagation are omitted as they are standard optimization algorithms.
+    # The source specifies minimizing cross entropy between input slice and reconstructed slice.
+    pass
+
+def render_volume(compressed_representations, decoder_weights, decoder_biases, transfer_function):
+    """
+    Renders the volume using a coarse-to-fine strategy.
+    compressed_representations: list of latent codes for all time steps and z-slices
+    """
+    # 1. Decompress subsampled slices along the z-axis to create a coarser volume
+    coarse_slices = []
+    for t in range(num_time_steps):
+        for z in range(0, Z, 2): # Subsampled
+            latent = compressed_representations[t][z]
+            recon = decoder_forward(latent, decoder_weights, decoder_biases)
+            coarse_slices.append((t, z, recon))
+            
+    # 2. Render coarse volume
+    ray_cast(coarse_slices, transfer_function)
+    
+    # 3. Continuously refine by decompressing remaining slices
+    for t in range(num_time_steps):
+        for z in range(1, Z, 2): # Remaining slices
+            latent = compressed_representations[t][z]
+            recon = decoder_forward(latent, decoder_weights, decoder_biases)
+            # Update volume with new slice
+            update_volume_slice(t, z, recon)
+            ray_cast(current_volume, transfer_function)
+```
 
 ## Subtopics
 
-### [Deep Implicit Volume Compression](6807-deep-implicit-volume-compression.md)
-Deep Implicit Volume Compression is a block-based neural network architecture trained end-to-end to compress Truncated Signed Distance Fields (TSDF) stored in 3D voxel grids, achieving state-of-the-art rate-distortion trade-offs. It differs from standard convolutional autoencoders by employing a dual-output decoder head, lossless compression of topological signs via conditional entropy modeling, and a topology-aware distortion loss, ensuring the reconstructed mesh remains homeomorphic to the ground truth.
+### [3D Shape Autoencoder](6689-3d-shape-autoencoder.md)
+The 3D Shape Autoencoder is a convolutional autoencoder architecture designed to learn a compact prior distribution of 3D shapes. It solves the problem of reconstructing complex 3D geometry from limited input data by encoding spatial structures into a low-dimensional latent vector and decoding them back into volumetric representations. It differs from its parent, the Convolutional Autoencoder for Volume Compression, by focusing specifically on learning a generalizable shape prior for geometric reconstruction tasks (such as novel-view synthesis and relighting) rather than compressing time-varying multivariate scientific data. It is distinct from Deep Implicit Volume Compression, which uses implicit neural representations (INRs) rather than explicit voxel-based convolutional encoding/decoding [6807-deep-implicit-volume-compression.md].
 
-### 3D Shape Autoencoder
-An autoencoder trained to learn a prior of 3D shapes using 3D convolutions [S2, unofficial].
-*   **Architecture:**
-    *   **Encoder:** Series of 3D convolutions with channels {64, 128, 256, 512}, kernel sizes {5, 5, 2, 2}, and strides {2, 2, 2, 2}.
-    *   **Middle:** Fully-connected layer mapping last conv output to a 200-dimensional vector, followed by a sigmoid activation.
-    *   **Decoder Input:** Fully-connected layer mapping 200-dim vector to a $(4 \times 4 \times 512)$-dimensional vector, reshaped to tensor size $4 \times 4 \times 512$.
-    *   **Decoder:** Series of 3D up-convolutions with channels {256, 128, 64, 32, 1}, kernel sizes {4, 4, 4, 4, 4}, and strides {2, 2, 2, 2, 1}.
-*   **Activation:** ELU for all layers except the last convolution layer in the encoder and decoder, which uses Sigmoid [S2, unofficial].
+### [Deep Implicit Volume Compression](6807-deep-implicit-volume-compression.md)
+Deep Implicit Volume Compression is a block-based neural network architecture trained end-to-end to compress Truncated Signed Distance Fields (TSDF) stored in 3D voxel grids, achieving state-of-the-art rate-distortion trade-offs. It solves the problem of topological errors in reconstructed surfaces caused by quantization noise in magnitude values by losslessly compressing the sign configuration separately from the geometric magnitude. Unlike standard convolutional autoencoders that minimize only reconstruction error, this method employs dual-output heads and conditional entropy coding to minimize bit rate while guaranteeing that the reconstructed surface is homeomorphic to the ground truth.
+
+### Conditional Diffusion Model for Volume Compression
+A conditional diffusion model that compresses tensor blocks, with post-processing that corrects blocks exceeding the user-specified error bound [S2, unofficial]. The iterative denoising process imposes a severe decoding bottleneck, making data-space diffusion impractical for interactive use (e.g., 978 seconds decoding time vs. 2 seconds for a standard autoencoder) [S2, unofficial]. On E3SM climate data, it achieved at least 2× larger compression ratios than SZ3 above NRMSE $10^{-4}$ [S2, unofficial].
+
+### FlowNet
+The first deep learning framework for clustering and selecting representative streamlines/stream surfaces, which voxelizes flow structures into binary volumes and trains a 3D CNN autoencoder to produce feature descriptors [S2, unofficial]. Steps: 1. Voxelize each flow structure into a binary volume. 2. Train a 3D CNN autoencoder to produce a 1024-dimensional feature descriptor per structure. 3. Perform dimensionality reduction via t-SNE to project descriptors into 2D space. 4. Use DBSCAN clustering to identify groups for filtering and selection [S2, unofficial]. Across eleven flow field datasets, it achieved training F1 scores of 0.72–0.96 and test F1 scores of 0.57–0.86 [S2, unofficial].
+
+### Temporal Selection via Autoencoder Descriptors
+An extension of the autoencoder paradigm for selecting representative timesteps from long time-varying simulations by producing multivariate temporal descriptors [S2, unofficial]. Steps: 1. Train an encoder-decoder network accepting multichannel volumes (one channel per scalar variable). 2. Produce a 1024-dimensional descriptor per timestep. 3. Project descriptors via t-SNE. 4. Select representatives by arc-length or angular criteria [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Decompression is performed on the fly per slice using basic convolution and upsampling operations, enabling interactive speeds [S1, unofficial].
-*   **Memory Complexity:** Stores only the compressed representation for all time steps on GPU memory. Decompression requires additional memory for only one reconstructed slice at full resolution [S1, unofficial].
-*   **Measured Performance:**
+*   **Memory:** Stores only the compressed representation for all time steps on GPU memory. Decompression requires additional memory for only one reconstructed slice at full resolution [S1, unofficial].
+*   **Compression Ratio:** Achieved a compression ratio of 14.28:1 (compressed representation takes 7% of total memory) [S1, unofficial].
+*   **Performance:**
     *   **Dataset 1** (52x52x37, 88 timesteps, 2.56GB): CNN Autoencoder MSE=0.000061, PSNR=42.125. Best Wavelet (Discrete Mayer) MSE=0.0015, PSNR=28.239 [S1, unofficial].
     *   **Dataset 2** (100x100x100, 20 timesteps, 5.81GB): CNN Autoencoder MSE=0.0049, PSNR=23.098. Best Wavelet (Biorthogonal 9/3) MSE=0.0219, PSNR=16.588 [S1, unofficial].
-    *   **Compression Ratio:** 14.28:1 (compressed representation takes 7% of total memory) [S1, unofficial].
-*   **Strengths:** Significantly lower MSE and higher PSNR compared to wavelet compression at the same storage usage. Provides close approximation with no visible artifacts, whereas wavelets result in coarse reconstruction with artifacts [S1, unofficial].
-*   **Limitations:** Requires offline training. Performance depends on the complexity of the dataset and desired quality [S1, unofficial].
+*   **Comparison:** Compared to Wavelet compression (Daubechies, Mayer, Biorthogonal), the CNN Autoencoder achieves significantly lower MSE and higher PSNR at the same 7% storage usage (14.28:1 compression ratio). Wavelets result in coarse reconstruction with artifacts; Autoencoder provides close approximation with no visible artifacts [S1, unofficial].
+*   **Strengths:** Low storage requirements, enables interactive rendering speeds on GPU, high reconstruction quality (PSNR) compared to traditional transforms [S1, unofficial].
+*   **Limitations:** Requires training data and offline training time. Reconstruction is lossy. The quality depends on the complexity of the dataset and the desired quality of reconstruction [S1, unofficial].
 
 ## Background
-This method was proposed to address the challenge of visualizing large amounts of multivariate time-varying volumetric data generated by scientific simulations, which are essential for understanding underlying processes but difficult to store and transmit [S1, unofficial]. It builds on the principle that deep neural networks correspond to hierarchical Tucker decomposition, offering richer representational capacity than traditional Tensor Approximation [S1, unofficial]. The approach enables the compact representation to fit on GPU memory, facilitating interactive rendering and navigation [S1, unofficial].
+This method was proposed to address the challenge of visualizing large amounts of multivariate time-varying volumetric data generated by simulations, which are essential for understanding underlying scientific processes [S1, unofficial]. The approach leverages the power of deep learning models, noting that a deep neural network corresponds to a Hierarchical Tucker decomposition, providing richer representational capacity than Tensor Approximation (TA) [S1, unofficial]. The specific implementation uses a stacked convolutional autoencoder trained with backpropagation to learn high-level hierarchical features [S1, unofficial]. The method was demonstrated on datasets related to portland cement hydration simulations [S1, unofficial].
 
 ## Sources
 [S1] Compressed volume rendering using deep learning, https://www.cs.umd.edu/sites/default/files/scholarly_papers/Jain.pdf, fetched 2026-10-26 (unofficial)
-[S2] RenderNet: A deep convolutional network for differentiable rendering from 3D shapes, https://doi.org/10.48550/arxiv.1806.06575, fetched 2026-10-26 (unofficial)
+[S2] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,687 @@
+# Physics-Aware Cone Beam CT Reconstruction
+
+A GPU-accelerated, physics-informed CT reconstruction pipeline combining:
+- Classical filtered backprojection (FDK)
+- Iterative reconstruction (SIRT via autodiff)
+- Deep learning enhancement (U-Net)
+- Synthetic CT simulation pipeline
+- ImageJ-compatible export
+
+## Motivation
+Industrial imaging systems (X-ray CT, NDE) require high-quality reconstruction under noise, sparse views, and physics constraints. This project explores hybrid reconstruction combining physics and learning.
+
+## Features
+- Cone-beam style forward projector
+- FDK implementation from scratch
+- Iterative reconstruction using PyTorch autodiff
+- Synthetic phantom generation
+- DL-based post reconstruction enhancement
+- Export to ImageJ raw volumes
+
+## Example Results
+| Ground Truth | FDK | FDK + DL | Iterative |
+|--------------|-----|-----------|-------|
+<img width="1716" height="427" alt="image" src="https://github.com/user-attachments/assets/5796d786-fb98-48ec-8a02-bd7b6251467f" />
+
+
+
+
+## How to Run
+```bash
+pip install -r requirements.txt
+python generate_data.py
+python reconstruct.py
+python export_imagej.py
+
+### enhance_volume.py
+```
+import numpy as np
+import torch
+from models.unet import UNet
+from src.utils import normalize, save_volume, get_device
+
+MODEL_PATH = "denoiser.pt"
+INPUT_VOLUME = "recon.npy"
+OUTPUT_VOLUME = "results/enhanced.npy"
+
+def enhance():
+    device = get_device()
+    print(f"Using device: {device}")
+
+    # Load model
+    model = UNet().to(device)
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.eval()
+
+    # Load volume
+    volume = np.load(INPUT_VOLUME)
+    volume = normalize(volume)
+
+    enhanced = np.zeros_like(volume)
+
+    # Slice-wise inference (axial)
+    with torch.no_grad():
+        for i in range(volume.shape[0]):
+            slice_img = volume[i]
+            inp = torch.tensor(slice_img).unsqueeze(0).unsqueeze(0).float().to(device)
+
+            out = model(inp)
+            enhanced[i] = out.squeeze().cpu().numpy()
+
+            if i % 20 == 0:
+                print(f"Processed slice {i}/{volume.shape[0]}")
+
+    # Normalize and save
+    enhanced = normalize(enhanced)
+    save_volume(enhanced, OUTPUT_VOLUME)
+
+    print(f"Enhanced volume saved to {OUTPUT_VOLUME}")
+
+if __name__ == "__main__":
+    enhance()
+```
+
+### export_imagej.py
+```
+##File → Import → Raw → 128×128×128 uint16
+
+
+import numpy as np
+
+vol = np.load("recon.npy")
+vol = (vol-vol.min())/(vol.max()-vol.min())
+vol = (vol*65535).astype(np.uint16)
+vol.tofile("recon.raw")
+```
+
+### generate_data.py
+```
+from src.phantom import generate_sphere_phantom
+from src.projector import forward_project
+from src.geometry import ConeBeamGeometry
+import torch, numpy as np
+
+geom = ConeBeamGeometry()
+phantom = generate_sphere_phantom(128)
+vol = torch.tensor(phantom).float().cuda()
+
+projs = forward_project(vol, geom.angles)
+np.save("data_projections.npy", projs.cpu().numpy())
+np.save("gt_volume.npy", phantom)
+```
+
+### reconstruct.py
+```
+import numpy as np, torch
+from src.fdk import fdk
+from src.geometry import ConeBeamGeometry
+
+geom = ConeBeamGeometry()
+projs = torch.tensor(np.load("data_projections.npy")).float().cuda()
+
+recon = fdk(projs, geom.angles)
+np.save("recon.npy", recon.cpu().numpy())
+```
+
+### train_denoiser.py
+```
+import torch, numpy as np
+from models.unet import UNet
+
+x = torch.tensor(np.load("recon.npy")).float().unsqueeze(1)
+y = torch.tensor(np.load("gt_volume.npy")).float().unsqueeze(1)
+
+model = UNet().cuda()
+opt = torch.optim.Adam(model.parameters(),1e-3)
+
+for e in range(50):
+    pred = model(x.cuda())
+    loss = ((pred-y.cuda())**2).mean()
+    opt.zero_grad(); loss.backward(); opt.step()
+    print(e, loss.item())
+
+torch.save(model.state_dict(),"denoiser.pt")
+```
+
+### models/unet.py
+```
+import torch.nn as nn
+
+class UNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.enc = nn.Sequential(
+            nn.Conv2d(1,32,3,1,1), nn.ReLU(),
+            nn.Conv2d(32,64,3,2,1), nn.ReLU()
+        )
+        self.dec = nn.Sequential(
+            nn.ConvTranspose2d(64,32,2,2), nn.ReLU(),
+            nn.Conv2d(32,1,1)
+        )
+
+    def forward(self,x):
+        return self.dec(self.enc(x))
+```
+
+### mps/enhance_volume.py
+```
+import numpy as np
+import torch
+from models.unet import UNet
+from src.utils import normalize, save_volume, get_device
+
+device = get_device()
+print("Using device:", device)
+
+model = UNet().to(device)
+model.load_state_dict(torch.load("denoiser.pt", map_location=device))
+model.eval()
+
+volume = normalize(np.load("recon.npy"))
+enhanced = np.zeros_like(volume)
+
+with torch.no_grad():
+    for i in range(volume.shape[0]):
+        inp = torch.tensor(volume[i], dtype=torch.float32).unsqueeze(0).unsqueeze(0).to(device)
+        out = model(inp)
+        enhanced[i] = out.squeeze().cpu().numpy()
+
+        if i % 10 == 0:
+            print(f"Processed slice {i}")
+
+enhanced = normalize(enhanced)
+save_volume(enhanced, "results/enhanced.npy")
+```
+
+### mps/export_imagej.py
+```
+import numpy as np
+
+vol = np.load("results/enhanced.npy")
+vol = (vol - vol.min()) / (vol.max() - vol.min())
+vol = (vol * 65535).astype(np.uint16)
+
+vol.tofile("results/enhanced.raw")
+print("Saved results/enhanced.raw (Import in ImageJ as uint16, size 96x96x96)")
+```
+
+### mps/generate_data.py
+```
+# from src.phantom import generate_sphere_phantom
+# from src.projector import forward_project
+# from src.geometry import ConeBeamGeometry
+# import torch, numpy as np
+
+# geom = ConeBeamGeometry()
+# phantom = generate_sphere_phantom(128)
+# vol = torch.tensor(phantom).float().cuda()
+
+# projs = forward_project(vol, geom.angles)
+# np.save("data_projections.npy", projs.cpu().numpy())
+# np.save("gt_volume.npy", phantom)
+
+
+
+import numpy as np
+from src.phantom import generate_sphere_phantom
+from src.projector import forward_project
+from src.geometry import ConeBeamGeometry
+from src.utils import get_device, to_tensor
+
+device = get_device()
+print("Using device:", device)
+
+geom = ConeBeamGeometry()
+phantom = generate_sphere_phantom(size=96)
+
+vol = to_tensor(phantom, device)
+projs = forward_project(vol, geom.angles)
+
+np.save("data_projections.npy", projs.cpu().numpy())
+np.save("gt_volume.npy", phantom)
+```
+
+### mps/reconstruct.py
+```
+import numpy as np
+from src.fdk import fdk
+from src.iterative import sirt
+from src.geometry import ConeBeamGeometry
+from src.utils import get_device, to_tensor
+
+device = get_device()
+print("Using device:", device)
+
+# Load geometry and projections
+geom = ConeBeamGeometry()
+projs = np.load("data_projections.npy")
+projs_t = to_tensor(projs, device)
+
+# -------- FDK Reconstruction --------
+print("Running FDK reconstruction...")
+recon_fdk = fdk(projs_t, geom.angles)
+np.save("recon_fdk.npy", recon_fdk.cpu().numpy())
+print("Saved recon_fdk.npy")
+
+# -------- Iterative Reconstruction (SIRT) --------
+print("Running iterative reconstruction (SIRT)...")
+recon_sirt = sirt(projs_t, geom.angles, vol_shape = (96, 96, 96), iters=30, step_size=1e-2)
+np.save("recon_sirt.npy", recon_sirt.cpu().numpy())
+print("Saved recon_sirt.npy")
+```
+
+### src/fdk.py
+```
+import torch
+
+def ramp_filter(p):
+    freq = torch.fft.fftfreq(p.shape[-1], device=p.device)
+    return torch.real(torch.fft.ifft(torch.fft.fft(p) * torch.abs(freq)))
+
+def fdk(projections, angles):
+    filtered = torch.stack([ramp_filter(p) for p in projections])
+    D = projections.shape[-1]
+    volume = torch.zeros((D,D,D), device=projections.device)
+
+    for i, a in enumerate(angles):
+        back = filtered[i].unsqueeze(0).repeat(D,1,1)
+        volume += torch.rot90(back, k=int(-a*180/3.14/90)%4, dims=(1,2))
+
+    return volume / len(angles)
+```
+
+### src/geometry.py
+```
+import numpy as np
+
+class ConeBeamGeometry:
+    def __init__(self, DSO=500, DSD=800, det_pixels=256, pixel_size=1.0, n_angles=180):
+        self.DSO = DSO
+        self.DSD = DSD
+        self.det_pixels = det_pixels
+        self.pixel_size = pixel_size
+        self.angles = np.linspace(0, 2*np.pi, n_angles, endpoint=False)
+```
+
+### src/iterative.py
+```
+import torch
+from .projector import forward_project
+
+def sirt(projections, angles, iters=50, lr=1e-2):
+    D = projections.shape[-1]
+    vol = torch.zeros((D,D,D), device=projections.device, requires_grad=True)
+    opt = torch.optim.Adam([vol], lr=lr)
+
+    for i in range(iters):
+        opt.zero_grad()
+        loss = ((forward_project(vol, angles)-projections)**2).mean()
+        loss.backward()
+        opt.step()
+        if i%10==0:
+            print(f"Iter {i} loss {loss.item():.5f}")
+    return vol.detach()
+```
+
+### src/metrics.py
+```
+import numpy as np
+
+def psnr(x,y):
+    mse = ((x-y)**2).mean()
+    return 20*np.log10(1.0/np.sqrt(mse))
+```
+
+### src/phantom.py
+```
+##Synthetic 3D data generator
+
+import numpy as np
+
+def generate_sphere_phantom(size=128):
+    vol = np.zeros((size,size,size))
+    cx = cy = cz = size//2
+    for x in range(size):
+        for y in range(size):
+            for z in range(size):
+                if (x-cx)**2 + (y-cy)**2 + (z-cz)**2 < (size//4)**2:
+                    vol[x,y,z] = 1.0
+    return vol
+```
+
+### src/projector.py
+```
+#Differentiable GPU ray projector
+
+import torch
+import torch.nn.functional as F
+
+def rotate_volume(vol, theta):
+    grid = F.affine_grid(
+        torch.tensor([[[
+            [torch.cos(theta), -torch.sin(theta), 0],
+            [torch.sin(theta),  torch.cos(theta), 0]
+        ]]], device=vol.device),
+        vol.unsqueeze(0).unsqueeze(0).shape,
+        align_corners=False
+    )
+    return F.grid_sample(vol.unsqueeze(0).unsqueeze(0), grid, align_corners=False)[0,0]
+
+def forward_project(volume, angles):
+    projections = []
+    for a in angles:
+        rot = rotate_volume(volume, torch.tensor(a, device=volume.device))
+        proj = rot.sum(dim=0)
+        projections.append(proj)
+    return torch.stack(projections)
+```
+
+### src/utils.py
+```
+import numpy as np
+import torch
+import random
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+def get_device():
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def normalize(volume):
+    vmin, vmax = volume.min(), volume.max()
+    return (volume - vmin) / (vmax - vmin + 1e-8)
+
+def save_volume(volume, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, volume)
+
+def load_volume(path):
+    return np.load(path)
+
+def show_slices(volume, title="Slices"):
+    """Visualize central axial/coronal/sagittal slices"""
+    z, y, x = np.array(volume.shape) // 2
+
+    fig, axs = plt.subplots(1, 3, figsize=(10, 4))
+    axs[0].imshow(volume[z], cmap="gray")
+    axs[0].set_title("Axial")
+
+    axs[1].imshow(volume[:, y, :], cmap="gray")
+    axs[1].set_title("Coronal")
+
+    axs[2].imshow(volume[:, :, x], cmap="gray")
+    axs[2].set_title("Sagittal")
+
+    fig.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+
+def to_tensor(volume, device=None):
+    device = device or get_device()
+    return torch.tensor(volume, dtype=torch.float32, device=device)
+
+def to_numpy(tensor):
+    return tensor.detach().cpu().numpy()
+```
+
+### mps/src/fdk.py
+```
+import torch
+
+def ramp_filter(p):
+    freq = torch.fft.fftfreq(p.shape[-1], device=p.device)
+    return torch.real(torch.fft.ifft(torch.fft.fft(p) * torch.abs(freq)))
+
+def fdk(projections, angles):
+    filtered = torch.stack([ramp_filter(p) for p in projections])
+
+    D = projections.shape[-1]
+    volume = torch.zeros((D, D, D), device=projections.device, dtype=torch.float32)
+
+    for i, a in enumerate(angles):
+        back = filtered[i].unsqueeze(0).repeat(D, 1, 1)
+        k = int(-a * 180 / 3.1416 / 90) % 4
+        volume += torch.rot90(back, k=k, dims=(1, 2))
+
+    return volume / len(angles)
+```
+
+### mps/src/geometry.py
+```
+import numpy as np
+
+class ConeBeamGeometry:
+    def __init__(self, DSO=500, DSD=800, det_pixels=256, pixel_size=1.0, n_angles=180):
+        self.DSO = DSO
+        self.DSD = DSD
+        self.det_pixels = det_pixels
+        self.pixel_size = pixel_size
+        self.angles = np.linspace(0, 2*np.pi, n_angles, endpoint=False)
+```
+
+### mps/src/iterative.py
+```
+import torch
+from src.projector import forward_project
+
+
+def backproject(projections, angles, vol_shape):
+    """
+    Simple adjoint of forward projector (approximate backprojection)
+    projections: [num_angles, H, W]
+    returns: volume [D, H, W]
+    """
+    device = projections.device
+    D, H, W = vol_shape
+
+    volume = torch.zeros((D, H, W), device=device)
+
+    for i, angle in enumerate(angles):
+        proj = projections[i]  # [H, W]
+
+        # Expand projection back into volume
+        expanded = proj.unsqueeze(0).repeat(D, 1, 1)
+
+        # Rotate each slice back
+        rotated_slices = []
+        for z in range(D):
+            rotated = rotate_slice(expanded[z], -angle, device)
+            rotated_slices.append(rotated)
+
+        volume += torch.stack(rotated_slices)
+
+    return volume / len(angles)
+
+
+def rotate_slice(slice2d, angle, device):
+    """
+    Safe 2D rotation using affine_grid + grid_sample (forward only, no grad)
+    """
+    import torch.nn.functional as F
+
+    theta = torch.tensor(angle, device=device, dtype=torch.float32)
+    cos_t = torch.cos(theta)
+    sin_t = torch.sin(theta)
+
+    affine = torch.tensor([
+        [cos_t, -sin_t, 0],
+        [sin_t,  cos_t, 0]
+    ], device=device).unsqueeze(0)
+
+    grid = F.affine_grid(
+        affine,
+        size=(1, 1, slice2d.shape[0], slice2d.shape[1]),
+        align_corners=False
+    )
+
+    out = F.grid_sample(
+        slice2d.unsqueeze(0).unsqueeze(0),
+        grid,
+        align_corners=False
+    )
+
+    return out[0, 0]
+
+
+def sirt(projections, angles, vol_shape=(96, 96, 96), iters=20, step_size=1e-2):
+    """
+    Classical SIRT iterative reconstruction.
+    No autograd. Fully MPS-safe.
+    """
+    device = projections.device
+    volume = torch.zeros(vol_shape, device=device)
+
+    print(f"Starting SIRT on device: {device}")
+    print(f"Iterations: {iters}")
+
+    for it in range(iters):
+
+        # Forward projection
+        sim_proj = forward_project(volume, angles)
+
+        # Residual
+        error = projections - sim_proj
+        loss = torch.mean(error ** 2).item()
+
+        # Backprojection of residual
+        correction = backproject(error, angles, vol_shape)
+
+        # Update
+        volume = volume + step_size * correction
+
+        if it % 5 == 0 or it == iters - 1:
+            print(f"Iter {it:03d} | MSE: {loss:.6f}")
+
+    return volume
+```
+
+### mps/src/metrics.py
+```
+import numpy as np
+
+def psnr(x,y):
+    mse = ((x-y)**2).mean()
+    return 20*np.log10(1.0/np.sqrt(mse))
+```
+
+### mps/src/phantom.py
+```
+##Synthetic 3D data generator
+
+import numpy as np
+
+def generate_sphere_phantom(size=128):
+    vol = np.zeros((size,size,size))
+    cx = cy = cz = size//2
+    for x in range(size):
+        for y in range(size):
+            for z in range(size):
+                if (x-cx)**2 + (y-cy)**2 + (z-cz)**2 < (size//4)**2:
+                    vol[x,y,z] = 1.0
+    return vol
+```
+
+### mps/src/projector.py
+```
+import torch
+import torch.nn.functional as F
+
+def rotate_slice(slice2d, theta):
+    device = slice2d.device
+
+    cos_t = torch.cos(theta)
+    sin_t = torch.sin(theta)
+
+    affine = torch.tensor([
+        [cos_t, -sin_t, 0],
+        [sin_t,  cos_t, 0]
+    ], device=device, dtype=torch.float32).unsqueeze(0)
+
+    grid = F.affine_grid(
+        affine,
+        size=(1, 1, slice2d.shape[0], slice2d.shape[1]),
+        align_corners=False
+    )
+
+    out = F.grid_sample(
+        slice2d.unsqueeze(0).unsqueeze(0),
+        grid,
+        align_corners=False
+    )
+
+    return out[0, 0]
+
+def forward_project(volume, angles):
+    projections = []
+
+    for a in angles:
+        rotated_slices = []
+        theta = torch.tensor(a, device=volume.device, dtype=torch.float32)
+
+        for z in range(volume.shape[0]):
+            rotated = rotate_slice(volume[z], theta)
+            rotated_slices.append(rotated)
+
+        rotated_volume = torch.stack(rotated_slices)
+        proj = rotated_volume.sum(dim=0)
+        projections.append(proj)
+
+    return torch.stack(projections)
+```
+
+### mps/src/utils.py
+```
+import numpy as np
+import torch
+import random
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+def get_device():
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
+
+def normalize(volume):
+    vmin, vmax = volume.min(), volume.max()
+    return (volume - vmin) / (vmax - vmin + 1e-8)
+
+def save_volume(volume, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, volume)
+
+def load_volume(path):
+    return np.load(path)
+
+def to_tensor(x, device):
+    return torch.tensor(x, dtype=torch.float32, device=device)
+
+def to_numpy(x):
+    return x.detach().cpu().numpy()
+
+def show_slices(volume, title="Slices"):
+    z, y, x = np.array(volume.shape) // 2
+    fig, axs = plt.subplots(1, 3, figsize=(10, 4))
+    axs[0].imshow(volume[z], cmap="gray"); axs[0].set_title("Axial")
+    axs[1].imshow(volume[:, y, :], cmap="gray"); axs[1].set_title("Coronal")
+    axs[2].imshow(volume[:, :, x], cmap="gray"); axs[2].set_title("Sagittal")
+    plt.suptitle(title)
+    plt.tight_layout()
+    plt.show()
+```

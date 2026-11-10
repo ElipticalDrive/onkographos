@@ -3,157 +3,179 @@
 Also called: Prior/Posterior Probability Sampling, Quadtree Subdivision
 
 ## Overview
-A training-stage sampling strategy that partitions image space using a quadtree to allocate more rays to nontrivial areas (high color change or high rendering error) and fewer to trivial areas, thereby reducing training burden while preserving detail [S1]. It distinguishes itself from sibling methods like [Adaptive Ray Shooting & Quadtree Subdivision](8158-adaptive-ray-shooting-quadtree-subdivision.md) by explicitly defining prior and posterior probability distributions to guide subdivision and pruning, and from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by operating continuously throughout training epochs rather than as a distinct pre/post-processing phase [S1].
+A training-stage sampling strategy that partitions the image space into a quadtree hierarchy to allocate ray sampling density based on local rendering error, thereby reducing computational burden in trivial areas while preserving detail in complex regions [S1]. Unlike sibling methods that may use fixed thresholds or temporal coherence, this method explicitly maintains two probability distributions: a prior distribution to guide initial ray placement within leaf nodes and a posterior distribution to determine which leaf nodes (blocks) are redundant and should be discarded from further training [S1]. It sets itself apart from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by operating on the image-space quadtree structure rather than a separate coarse-to-fine network pass, and from [Random Pixel Subsampling](1668-random-pixel-subsampling.md) by using error-driven hierarchical subdivision rather than random selection.
 
 ## How it works
 **Inputs:**
-*   Current epoch index.
-*   Rendering error of rays sampled from each leaf node of the quadtree.
-*   Subdivision threshold (e.g., $10^{-3}$) [S1].
-*   Random sampling ratio (e.g., 0.5) [S1].
+*   Current epoch number $E$.
+*   Image dimensions $W \times H$.
+*   Rendering error metric $E_{render}$ (e.g., MSE between rendered and ground truth pixel values).
+*   Subdivision threshold $\tau$ (default $10^{-3}$) [S1].
+*   Subdivision frequency $F_{sub}$ (default 3 epochs) [S1].
+*   Random sampling ratio $\rho$ (default 0.5 or 50%) [S1].
+*   Initial quadtree depth $D_{init}$ (default 2 or 3) [S1].
 
 **Outputs:**
-*   Updated quadtree structure (subdivided or pruned leaf nodes).
-*   Ray sampling distribution for the next epoch.
+*   A set of active leaf nodes (blocks) defining the sampling mask for the next epoch.
+*   A list of rays to be sampled for training the radiance field.
 
 **Data Structures:**
-*   **Quadtree:** Hierarchical partition of the image plane. Each node represents a rectangular region.
-    *   **Leaf Node:** Contains a list of sampled rays and their associated rendering errors.
-    *   **Internal Node:** Contains children nodes.
-    *   **Initialization:** Quadtrees are initialized to a depth of 2 or 3 at the start of training to accelerate the distinction between trivial and nontrivial areas [S1].
+*   **Quadtree:** A hierarchical tree structure representing the image. Each node has four children (unless it is a leaf). Each node stores:
+    *   `error_sum`: Accumulated rendering error of rays sampled within this node's spatial extent.
+    *   `ray_count`: Number of rays sampled within this node.
+    *   `is_leaf`: Boolean flag indicating if the node is a leaf in the current subdivision level.
+*   **Prior Distribution:** A probability map derived from the current error state, used to bias ray sampling within active leaf nodes.
+*   **Posterior Distribution:** A probability map derived from the accumulated error, used to prune leaf nodes.
 
-**Algorithm Steps:**
+**Steps:**
 
 1.  **Initialization:**
-    *   Create a quadtree for the image space.
-    *   Set initial depth to $D_{init} \in \{2, 3\}$ [S1].
-    *   Set subdivision frequency to $F_{sub}$ (e.g., every 3 epochs) [S1].
-    *   Set subdivision threshold $\tau$ (e.g., $10^{-3}$) [S1].
+    *   At the start of training ($E=0$), initialize the quadtree to depth $D_{init}$ [S1]. This creates $4^{D_{init}}$ leaf nodes covering the image.
+    *   Initialize `error_sum` and `ray_count` for all nodes to 0.
 
 2.  **Ray Sampling (Per Epoch):**
-    *   For each leaf node $L$ in the current quadtree:
-        *   Calculate the **Prior Probability Distribution** for rays within $L$. This distribution guides how rays are sampled on each leaf node [S1].
-        *   Sample rays based on this prior distribution.
-        *   Apply **Random Sampling**: A fraction $R$ (e.g., 50%) of the rays sampled from $L$ are selected randomly to ensure coverage and prevent local optima [S1].
-        *   Render the scene using these rays to obtain color values.
-        *   Compute the **Rendering Error** for each ray (difference between rendered color and ground truth, or estimated error if ground truth is unavailable during training, though the text implies using error to guide subdivision, suggesting ground truth or a proxy is used for the metric) [S1].
-        *   Store the rendering error for each ray in leaf node $L$.
+    *   For each active leaf node $L$:
+        *   Determine the number of rays $N_L$ to sample from this node. This is typically proportional to the node's area or a fixed budget per node.
+        *   Sample $\rho \cdot N_L$ rays uniformly at random within the spatial bounds of $L$ [S1].
+        *   Sample $(1-\rho) \cdot N_L$ rays according to the **Prior Distribution**. The prior distribution biases sampling towards areas with higher historical error or gradient magnitude within the leaf node [S1].
+        *   Render the sampled rays to obtain pixel values.
+        *   Compute the rendering error for each sampled ray.
+        *   Accumulate the error sum and ray count for the leaf node $L$ and all its ancestors up to the root.
 
-3.  **Error Aggregation (End of Epoch):**
-    *   For each leaf node $L$:
-        *   Calculate the average rendering error $E_L$ of all rays sampled from $L$ during the epoch [S1].
+3.  **Error Aggregation:**
+    *   At the end of the epoch, compute the average rendering error for each leaf node $L$:
+        $$ \bar{E}_L = \frac{\text{error\_sum}_L}{\text{ray\_count}_L} $$
+    *   If `ray_count_L` is 0, $\bar{E}_L$ is set to 0 or a small epsilon to avoid division by zero.
 
-4.  **Quadtree Subdivision and Pruning (Every $F_{sub}$ Epochs):**
-    *   If current epoch is a multiple of $F_{sub}$:
-        *   **Subdivision:** For each leaf node $L$:
-            *   If $E_L > \tau$:
-                *   Subdivide $L$ into four child nodes (standard quadtree split) [S1].
-                *   The children inherit the spatial bounds of $L$.
-        *   **Pruning (Posterior Probability):**
-            *   Calculate the **Posterior Probability Distribution** based on the errors $E_L$ of all leaf nodes [S1].
-            *   Identify redundant blocks (leaf nodes) with low error (trivial areas) based on this posterior distribution.
-            *   Discard these redundant blocks. The text states "discard redundant blocks... based on a posterior probability distribution determined by the error" [S1]. This implies merging or removing nodes that are deemed unnecessary, effectively reducing the number of active leaf nodes [S1].
-            *   *Note:* The exact mathematical formula for the posterior probability is not provided in the sources, but it is derived from the error metrics [S1].
+4.  **Quadtree Subdivision (Conditional):**
+    *   If $E \pmod{F_{sub}} == 0$ (i.e., every $F_{sub}$ epochs):
+        *   For each leaf node $L$:
+            *   If $\bar{E}_L > \tau$:
+                *   Subdivide $L$ into four children.
+                *   Reset `error_sum` and `ray_count` for the new children to 0.
+                *   Mark $L$ as non-leaf.
+            *   Else:
+                *   Keep $L$ as a leaf.
 
-5.  **Finetuning (Last Epoch):**
-    *   At the final epoch of training:
-        *   Randomly sample rays across the *whole* image (ignoring the quadtree structure) [S1].
-        *   Train the radiance field on these rays to finetune the model, as rays pruned by the quadtree have already reached local optimum [S1].
+5.  **Redundant Block Discarding (Posterior Probability):**
+    *   Calculate the **Posterior Probability** for each leaf node. This determines if a node is "redundant" (trivial) and can be discarded from training [S1].
+    *   A node $L$ is discarded if its error $\bar{E}_L$ is below a certain threshold relative to the global error distribution, or if it has converged. The paper states that redundant blocks are discarded based on the posterior distribution determined by the error [S1]. Specifically, nodes with very low error are considered to have reached local optimum and are pruned from the active sampling set for subsequent epochs, though they may be revisited in a final fine-tuning phase [S1].
+    *   *Note:* The exact formula for the posterior probability threshold is not explicitly given in the sources, but it is distinct from the subdivision threshold $\tau$. The subdivision threshold $\tau$ controls *refinement*, while the posterior distribution controls *pruning* [S1].
+
+6.  **Final Fine-Tuning (Last Epoch):**
+    *   At the last epoch of training, randomly sample rays across the *entire* image (ignoring the quadtree mask) to finetune the radiance field [S1]. This ensures that areas pruned by the quadtree are still updated, leveraging the fact that pruned areas have already converged [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_with_quadtree_sampling(model, dataset, epochs, subdivision_freq=3, threshold=1e-3, random_ratio=0.5, init_depth=2):
+def train_with_quadtree_adaptive_sampling(model, dataset, epochs, tau=1e-3, F_sub=3, rho=0.5, D_init=2):
     # Initialize quadtree
-    quadtree = Quadtree(image_width, image_height, depth=init_depth)
+    quadtree = Quadtree(width=dataset.W, height=dataset.H, max_depth=D_init)
     
-    for epoch in range(1, epochs + 1):
-        # 1. Ray Sampling
-        rays_to_sample = []
-        leaf_errors = {} # Map leaf_node_id -> list of errors
+    for epoch in range(epochs):
+        active_leaves = []
         
-        for leaf in quadtree.get_leaves():
-            # Prior distribution guides sampling within the leaf
-            # Specific prior formula not given, but implies non-uniform sampling based on context
-            prior_probs = calculate_prior_distribution(leaf)
+        # 1. Sample rays based on current quadtree structure
+        for leaf in quadtree.get_active_leaves():
+            # Determine number of rays for this leaf (e.g., proportional to area)
+            num_rays = calculate_rays_for_leaf(leaf)
             
-            # Sample rays based on prior
-            num_rays = leaf.estimate_rays_needed()
-            sampled_rays = sample_rays_from_leaf(leaf, num_rays, prior_probs)
+            # Sample rho fraction randomly
+            random_rays = sample_random_rays(leaf, num_rays * rho)
             
-            # Apply random sampling ratio
-            num_random = int(num_rays * random_ratio)
-            num_prior = num_rays - num_random
-            rays_prior = sampled_rays[:num_prior]
-            rays_random = random.sample(sampled_rays, num_random)
-            final_rays = rays_prior + rays_random
+            # Sample (1-rho) fraction based on prior distribution (error-biased)
+            # The prior distribution is implicitly maintained by the error accumulation
+            # and the subdivision history. In practice, this might involve sampling
+            # more rays in sub-regions of the leaf with higher historical error.
+            prior_rays = sample_prior_rays(leaf, num_rays * (1 - rho))
+            
+            all_rays = random_rays + prior_rays
             
             # Render and compute error
-            rendered_colors = model.render(final_rays)
-            ground_truth_colors = get_ground_truth(final_rays)
-            errors = compute_error(rendered_colors, ground_truth_colors)
+            rendered_images = model.render(all_rays)
+            ground_truth = dataset.get_gt_images(all_rays)
+            errors = compute_error(rendered_images, ground_truth)
             
-            rays_to_sample.extend(final_rays)
-            leaf_errors[leaf.id] = errors
-            
-        # Train model on sampled rays
-        model.train_step(rays_to_sample, leaf_errors)
+            # Accumulate error for subdivision and pruning
+            leaf.accumulate_error(errors)
+            active_leaves.append(leaf)
         
-        # 2. End of Epoch Processing
-        if epoch % subdivision_freq == 0:
-            # Subdivision and Pruning
-            new_leaves = []
-            for leaf in quadtree.get_leaves():
-                avg_error = mean(leaf_errors[leaf.id])
-                
-                if avg_error > threshold:
-                    # Subdivide
-                    children = leaf.subdivide()
-                    new_leaves.extend(children)
-                else:
-                    # Check posterior probability for pruning
-                    # If posterior prob indicates redundancy, discard (do not add to new_leaves)
-                    # Otherwise, keep as leaf
-                    if is_redundant(leaf, leaf_errors, quadtree):
-                        pass # Discard
-                    else:
-                        new_leaves.append(leaf)
-            
-            quadtree.update_leaves(new_leaves)
-            
-    # 3. Finetuning at last epoch
-    if epoch == epochs:
-        final_rays = random_sample_whole_image(dataset.image_width, dataset.image_height)
-        model.train_step(final_rays)
+        # 2. Subdivide if necessary
+        if epoch % F_sub == 0:
+            for leaf in active_leaves:
+                avg_error = leaf.get_average_error()
+                if avg_error > tau:
+                    leaf.subdivide()
+        
+        # 3. Prune redundant blocks (Posterior Probability)
+        # Nodes with very low error are marked as inactive/pruned
+        for leaf in active_leaves:
+            if is_redundant(leaf): # Based on posterior probability
+                leaf.mark_inactive()
+        
+        # 4. Final fine-tuning at last epoch
+        if epoch == epochs - 1:
+            # Sample rays uniformly across the entire image
+            global_rays = sample_random_rays_global(dataset.W, dataset.H)
+            model.render(global_rays) # Finetune step
+
+class Quadtree:
+    def __init__(self, width, height, max_depth):
+        self.root = Node(0, 0, width, height, 0)
+        self.max_depth = max_depth
+        # Initialize to D_init depth
+        self.initialize_depth(2) # Default D_init
+
+    def initialize_depth(self, depth):
+        # Recursively subdivide root to given depth
+        pass
+
+    def get_active_leaves(self):
+        # Return all leaf nodes that are not marked inactive
+        pass
+
+    def accumulate_error(self, leaf, errors):
+        leaf.error_sum += sum(errors)
+        leaf.ray_count += len(errors)
+        # Propagate to parents
+        parent = leaf.parent
+        while parent:
+            parent.error_sum += sum(errors)
+            parent.ray_count += len(errors)
+            parent = parent.parent
+
+    def get_average_error(self, leaf):
+        if leaf.ray_count == 0:
+            return 0
+        return leaf.error_sum / leaf.ray_count
+
+    def subdivide(self, leaf):
+        if leaf.depth < self.max_depth:
+            leaf.subdivide_into_children()
+            # Reset children stats
+            for child in leaf.children:
+                child.error_sum = 0
+                child.ray_count = 0
 ```
-
-**Parameters:**
-*   **Subdivision Frequency:** Every 3 epochs [S1].
-*   **Random Sampling Ratio:** 50% of rays per leaf node sampled randomly [S1].
-*   **Initial Quadtree Depth:** 2 or 3 [S1].
-*   **Subdivision Threshold:** $10^{-3}$ [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Test Stage:** The method is only applicable during training. During testing, the number of rays equals the number of pixels, so acceleration via quadtree subdivision is not possible [S1].
-*   **Local Optima:** Pruned rays may reach local optima; hence, finetuning with random global sampling at the last epoch is recommended [S1].
-*   **Precision:** Rendering error calculation must be precise enough to distinguish trivial from nontrivial areas. The threshold $\tau$ is critical [S1].
 
 ## Subtopics
 
 ### [Hierarchical Viewing Cube Sampling](10010-hierarchical-viewing-cube-sampling.md)
-Uses a hierarchical structure in viewing space rather than image space for sampling, differing in the domain of partitioning.
+A method for computing scattering convolutions in volume rendering by adaptively placing viewing cubes along rays to balance accuracy and performance. It sets itself apart from uniform sampling by using a quadtree hierarchy to determine where new cubes are needed, and from pure interpolation by computing exact values at sparse vertices to guide the interpolation.
 
 ## Operating characteristics
-*   **Time Complexity:** Reduces training time by sampling fewer rays in trivial areas. On Realistic Synthetic 360° dataset, saves 23% training time for NeRF (22.0h to 16.9h) and 23% for Plenoxels (25.6min to 19.6min) [S1]. On Instant-NGP, saves 18% training time (264s to 217s) [S1].
-*   **Memory Complexity:** Not explicitly given, but quadtree structure adds minimal overhead compared to the ray buffer savings [S1].
-*   **Performance:** Achieves better or comparable PSNR. On Instant-NGP, PSNR improves from 32.04 to 32.44 [S1]. On NeRF, PSNR increases slightly from 31.14 to 31.21 [S1].
-*   **Strengths:** Captures detailed information in nontrivial areas while reducing training burden in trivial areas [S1]. Effective for various radiance field methods (NeRF, NeRF++, Plenoxels, Instant-NGP, Mip-NeRF 360, NeuS) [S1].
-*   **Limitations:** Only applicable during training; cannot accelerate rendering at test time [S1]. Requires careful tuning of subdivision threshold and frequency [S1].
+*   **Time Complexity:** Reduces training time by 18-23% compared to uniform sampling baselines [S1]. The overhead of quadtree management is minimal compared to the savings from reduced ray sampling in trivial areas.
+*   **Memory Complexity:** Requires storing the quadtree structure and error statistics for each node. This is negligible compared to the memory required for the radiance field model itself.
+*   **Performance:** On the Realistic Synthetic 360° dataset, it saves 23% training time for NeRF (22.0h to 16.9h) and 23% for Plenoxels (25.6min to 19.6min) [S1]. On Instant-NGP, it saves 18% training time (264s to 217s) and improves PSNR from 32.04 to 32.44 [S1].
+*   **Strengths:** Effectively reduces training burden in trivial areas while capturing details in nontrivial areas. Improves final rendering quality (PSNR/SSIM) in some cases [S1].
+*   **Limitations:** Only applicable during the training stage; rendering time is not accelerated as all pixels must be sampled during inference [S1]. Performance gain depends on the scene complexity; scenes with uniform color may see less benefit.
+*   **When to use:** When training neural radiance fields (NeRF, Plenoxels, etc.) and computational budget is limited. Particularly effective for scenes with complex geometry and realistic materials [S1].
+*   **When not to use:** During inference/testing, as the method does not accelerate rendering [S1]. For scenes where uniform sampling is already efficient and the overhead of quadtree management outweighs the savings.
 
 ## Background
-Originated in the paper "Fast Learning Radiance Fields by Shooting Much Fewer Rays" [S1]. The method is applied to NeRF, NeRF++, Plenoxels, Instant-NGP, Mip-NeRF 360, and NeuS [S1]. It is distinct from iMap, which uses rendering loss for point sampling in a different manner [S1].
+The method was introduced in "Fast Learning Radiance Fields by Shooting Much Fewer Rays" [S1]. It addresses the high computational cost of training neural radiance fields by adaptively sampling rays. The approach is inspired by the observation that rendering error is not uniformly distributed across the image, with some areas requiring more samples than others. The method has been applied to various radiance field methods including NeRF, NeRF++, Plenoxels, Instant-NGP, Mip-NeRF 360, and NeuS [S1]. It differs from iMap, which uses rendering loss for point sampling, by using rendering error for quadtree subdivision and having different applications of rendering loss, point numbers, and sampling strategies [S1].
 
 ## Sources
 [S1] Fast Learning Radiance Fields by Shooting Much Fewer Rays, https://doi.org/10.1109/tip.2023.3267049, fetched 2026-10-26

@@ -1,137 +1,120 @@
 # K-D Tree Hierarchy Construction
+
 Also called: Polygon distribution in k-d tree, Spatial partitioning with k-d trees
+
 ## Overview
-K-D Tree Hierarchy Construction is a method for building a spatial partitioning structure to accelerate volume rendering by grouping polygons (or data cells) into regions, thereby avoiding explicit clipping and enabling efficient visibility culling. It sets itself apart from its sibling [Orthogonal BSP Tree Construction](1134-orthogonal-bsp-tree-construction.md) by using a binary tree that splits regions in one dimension at a time, storing polygons in a common array in prefix-order traversal, which allows all objects associated with a subtree to be passed in one operation without linked lists [S1].
+K-D Tree Hierarchy Construction is a method for building a spatial partitioning structure to accelerate volume rendering by grouping polygons (or volumetric primitives) into a binary tree. It solves the problem of efficiently determining which primitives contribute to a pixel without explicit clipping, by storing polygon IDs in a prefix-order traversal array [S1]. It sets itself apart from its parent method, [Orthogonal BSP Tree Construction](1134-orthogonal-bsp-tree-construction.md), by using a standard k-d tree structure where splitting planes are orthogonal to coordinate axes, enabling trivial visibility sorting for 3D texture rendering [S1]. Unlike fixed viewpoint partitioning, this method is view-independent, making it suitable for animation sequences where the viewpoint changes [S1].
+
 ## How it works
-**Inputs:** A set of polygons (or data cells) with vertex coordinates; a user-defined leaf threshold $N_{leaf}$.
-**Outputs:** A k-d tree structure where each node $v$ contains a list of polygon IDs, and a global array `Tid` storing polygon IDs in prefix-order traversal sequence.
+**Inputs:** A set of polygons (or volumetric primitives) defined by their vertices in 3D space. A user-defined threshold $N_{leaf}$ for the maximum number of polygons per leaf node.
+
+**Outputs:** A k-d tree structure where each node $v$ contains a splitting dimension $i$, a splitting value $X_i$, and a list of polygon IDs. The polygons are stored in a common array `Tid` arranged in prefix-order traversal order [S1].
 
 **Data Structures:**
-- **Tree Node $v$:** Contains a splitting dimension $i$, a splitting value $X_i$, and pointers/indices to left and right children. It also holds a local list of polygon IDs that span the splitting plane (see below).
-- **Array `Tid`:** A flat array of polygon IDs. The order of IDs in `Tid` corresponds to the prefix-order (pre-order) traversal of the k-d tree. This layout allows efficient memory access for all polygons in a subtree by using start and end indices in `Tid` [S1].
+*   **Node:** Contains `split_dim` (integer, axis index 0, 1, or 2), `split_val` (float, position along axis), `left_child` (index or pointer), `right_child` (index or pointer), and `poly_ids` (list of integers).
+*   **Tid Array:** A flat array storing polygon IDs. The position of a polygon in `Tid` corresponds to its visitation order during a prefix-order traversal of the tree. This allows all polygons associated with a subtree to be passed in one operation, avoiding linked lists [S1].
 
 **Algorithm Steps:**
-1. **Initialization:** Start with the root node $v$ containing all input polygons.
-2. **Leaf Check:** If the number of polygons passed to node $v$ is less than or equal to $N_{leaf}$, mark $v$ as a leaf node. Store the polygon IDs in the appropriate position in `Tid` (based on a traversal counter) and terminate recursion for this branch [S1].
-3. **Splitting Plane Selection:** Choose a splitting dimension $i$ (e.g., round-robin $x, y, z$ or variance-based) and a splitting value $X_i$ (e.g., midpoint of the bounding box along $i$) [S1].
-4. **Polygon Classification:** For each polygon $p$ in the current node's set:
-   - Let $min_i(p)$ and $max_i(p)$ be the minimum and maximum coordinates of $p$'s vertices along dimension $i$.
-   - If $max_i(p) < X_i$, place $p$ in the set for the left subtree.
-   - If $min_i(p) > X_i$, place $p$ in the set for the right subtree.
-   - Otherwise (the polygon intersects or touches the splitting plane), retain $p$ in the set stored at node $v$ [S1].
-5. **Recursion:** Recursively construct the left and right subtrees using the respective polygon sets [S1].
-6. **Storage:** As polygons are assigned to leaf nodes or retained at internal nodes, their IDs are appended to the global `Tid` array in prefix-order. Internal nodes store indices into `Tid` that define the range of polygons associated with their subtree [S1].
-
-**Parameters:**
-- $N_{leaf}$: User-defined threshold for leaf node creation. Typical values are not specified in the primary source, but it controls the trade-off between tree depth and leaf complexity [S1].
-- Splitting Policy: The primary source describes a round-robin dimension selection and midpoint splitting [S1]. Variants may use variance-based axis selection [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-- **Polygon Association:** Polygons are associated with the smallest node region that completely contains them. This avoids subdividing polygons, ensuring that each polygon is stored only once in the hierarchy (either at an internal node if it spans the split, or in a leaf if it is fully contained) [S1].
-- **Precision:** Floating-point comparisons for $min_i(p)$ and $max_i(p)$ against $X_i$ must handle boundary cases (equality) consistently to avoid ambiguity [S1].
-- **Empty Regions:** If a split results in an empty left or right set, the corresponding child node may be omitted or marked as null, depending on implementation [G].
+1.  **Initialize:** Start with the root node containing all input polygons.
+2.  **Check Leaf Condition:** If the number of polygons in the current node $v$ is less than or equal to $N_{leaf}$, mark $v$ as a leaf node and store the polygon IDs in `Tid` according to the current traversal index. Return.
+3.  **Select Splitting Dimension:** Choose a dimension $i$ to split on. The implementation described uses a round-robin fashion (alternating dimensions $x, y, z$) [S1].
+4.  **Determine Splitting Value:** Choose a value $X_i$ for the splitting hyperplane. The implementation bisects the region (median or midpoint) [S1]. The hyperplane is orthogonal to the $x_i$-axis.
+5.  **Partition Polygons:** For each polygon $p$ in the current node:
+    *   Let $V_p$ be the set of vertices of $p$.
+    *   If $\forall v \in V_p, v.x_i < X_i$, place $p$ in the set for the left subtree.
+    *   If $\forall v \in V_p, v.x_i > X_i$, place $p$ in the set for the right subtree.
+    *   Otherwise, retain $p$ in the set stored at node $v$ (the node itself) [S1].
+    *   *Note:* Polygons are associated with the smallest node region that completely contains them, avoiding subdivision of polygons [S1].
+6.  **Recurse:** Recursively construct the left and right subtrees using the respective polygon sets.
+7.  **Store IDs:** As nodes are visited in prefix order, append the polygon IDs stored at each node to the `Tid` array [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def build_kd_tree(polygons, threshold, depth=0):
+def build_kd_tree(polygons, depth=0, threshold=10):
     """
     Recursively builds a k-d tree.
-    polygons: list of polygon objects, each with vertices and get_min_max(dim) method.
-    threshold: N_leaf, the minimum number of polygons to split.
+    polygons: list of polygon objects, each having a list of vertices.
     depth: current tree depth, used for round-robin axis selection.
-    Returns:
-        node: dict with 'left', 'right', 'spanning_polygons', 'split_dim', 'split_val'
-        tid_offset: starting index in the global Tid array for this subtree
+    threshold: minimum number of polygons to split.
+    Returns: a Node object.
     """
-    global_tid_counter = 0 # Assumed global state for Tid array
-
-    # Leaf check
+    node = Node()
+    node.poly_ids = []
+    
+    # Base case: leaf node
     if len(polygons) <= threshold:
-        # Store polygon IDs in Tid
-        for p in polygons:
-            global_tid_counter += 1
-            tid_array.append(p.id)
-        return {
-            'type': 'leaf',
-            'polygons': polygons,
-            'tid_start': global_tid_counter - len(polygons),
-            'tid_end': global_tid_counter
-        }, global_tid_counter
+        # Store polygon IDs in the node
+        node.poly_ids = [p.id for p in polygons]
+        return node
 
-    # Splitting plane selection
-    # Round-robin axis selection based on depth
-    split_dim = depth % 3  # 0, 1, 2 for x, y, z
+    # Step 1: Select splitting dimension (round-robin)
+    split_dim = depth % 3
     
-    # Calculate bounding box of all polygons to determine split value
-    min_val = infinity
-    max_val = -infinity
-    for p in polygons:
-        p_min, p_max = p.get_min_max(split_dim)
-        if p_min < min_val: min_val = p_min
-        if p_max > max_val: max_val = p_max
-    
-    # Midpoint splitting
+    # Step 2: Determine splitting value (bisect region)
+    # Find min and max extent along split_dim
+    min_val = min(v.coords[split_dim] for p in polygons for v in p.vertices)
+    max_val = max(v.coords[split_dim] for p in polygons for v in p.vertices)
     split_val = (min_val + max_val) / 2.0
-
-    # Polygon classification
+    
+    node.split_dim = split_dim
+    node.split_val = split_val
+    
+    # Step 3: Partition polygons
     left_polygons = []
     right_polygons = []
-    spanning_polygons = []
-
+    node_polygons = []
+    
     for p in polygons:
-        p_min, p_max = p.get_min_max(split_dim)
-        if p_max < split_val:
+        all_less = True
+        all_greater = True
+        
+        for v in p.vertices:
+            coord = v.coords[split_dim]
+            if coord >= split_val:
+                all_less = False
+            if coord <= split_val:
+                all_greater = False
+                
+        if all_less:
             left_polygons.append(p)
-        elif p_min > split_val:
+        elif all_greater:
             right_polygons.append(p)
         else:
-            spanning_polygons.append(p)
+            # Polygon straddles the plane or lies on it; keep at node
+            node_polygons.append(p)
+            
+    # Step 4: Recurse
+    node.left_child = build_kd_tree(left_polygons, depth + 1, threshold)
+    node.right_child = build_kd_tree(right_polygons, depth + 1, threshold)
+    
+    return node
 
-    # Recursion
-    left_node, left_tid_end = build_kd_tree(left_polygons, threshold, depth + 1)
-    right_node, right_tid_end = build_kd_tree(right_polygons, threshold, depth + 1)
-
-    # Store spanning polygons in Tid after children? 
-    # Note: Prefix-order means root (spanning) comes before children.
-    # However, the source says "prefix-order traversal of the k-d tree" and 
-    # "polygons stored in one common array Tid". 
-    # Standard prefix order: Visit Node, then Left, then Right.
-    # So spanning polygons should be added first.
-    
-    # Re-evaluating based on "prefix-order":
-    # 1. Add spanning polygons to Tid
-    # 2. Recurse Left
-    # 3. Recurse Right
-    
-    # Let's adjust the logic to match prefix-order storage
-    # We need to return the tid range for the entire subtree
-    
-    # Add spanning polygons to Tid
-    tid_start = global_tid_counter
-    for p in spanning_polygons:
-        global_tid_counter += 1
-        tid_array.append(p.id)
-    
-    # Recurse
-    # Note: The recursive calls will append to tid_array and update global_tid_counter
-    left_node, _ = build_kd_tree(left_polygons, threshold, depth + 1)
-    right_node, _ = build_kd_tree(right_polygons, threshold, depth + 1)
-    
-    tid_end = global_tid_counter
-
-    return {
-        'type': 'internal',
-        'split_dim': split_dim,
-        'split_val': split_val,
-        'left': left_node,
-        'right': right_node,
-        'tid_start': tid_start,
-        'tid_end': tid_end
-    }, global_tid_counter
+def flatten_tree(node, tid_array, index_ref):
+    """
+    Flattens the k-d tree into a prefix-order traversal array of IDs.
+    """
+    if node is None:
+        return
+        
+    # Append current node's polygons
+    for pid in node.poly_ids:
+        tid_array[index_ref[0]] = pid
+        index_ref[0] += 1
+        
+    # Recurse left then right
+    flatten_tree(node.left_child, tid_array, index_ref)
+    flatten_tree(node.right_child, tid_array, index_ref)
 ```
-*Note: The pseudocode above assumes a global `tid_array` and `global_tid_counter`. In a real implementation, these would be passed by reference or managed via a class. The key is that spanning polygons are added to `Tid` before their children's polygons, adhering to prefix-order [S1].*
+
+**Parameters:**
+*   $N_{leaf}$: User-defined threshold for leaf node creation. Typical values are not specified in the sources, but it controls the granularity of the partitioning [S1].
+*   Splitting Policy: Round-robin axis selection is used in the cited implementation [S1]. More sophisticated policies based on object locations are possible but not detailed [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Polygon Association:** Polygons are associated with the smallest node region that completely contains them. This avoids subdividing polygons but means some polygons may be stored at internal nodes if they straddle multiple split planes [S1].
+*   **Precision:** The sources do not specify floating-point precision issues, but bisecting regions requires careful handling of vertices lying exactly on the split plane (handled by retaining them at the node) [S1].
 
 ## Subtopics
 
@@ -145,21 +128,26 @@ GPU K-D Tree Ray Traversal accelerates ray tracing on graphics hardware by inter
 Parallel K-d Tree Construction is a cooperative parallel partitioning process that uses a k-d tree to group data cells into local regions, restoring spatial ordering to allow early ray merging and efficient rendering in distributed-memory systems. It sets itself apart from static partitioning methods by dynamically determining split planes via global consensus and managing neighbor links to handle boundary conditions, ensuring that processors render cells in the same neighborhood at approximately the same time.
 
 ### [K-D Tree Subdivision](8148-k-d-tree-subdivision.md)
-A data partitioning method using a k-D tree structure with alternating binary subdivision of coordinate planes at each level, used when the viewpoint is unknown or perspective projection is used.
+K-D Tree Subdivision partitions a volumetric dataset into subvolumes using a k-D tree structure with alternating binary subdivision of coordinate planes, enabling unambiguous front-to-back ordering for compositing. Unlike fixed viewpoint partitioning which minimizes overlap by slicing orthogonal to the view, k-D tree partitioning is view-independent and suitable for animation sequences where the viewpoint changes.
 
 ### Axis Selection via Variance
-Axis Selection via Variance selects the splitting axis for a K-D tree node by analyzing the variance of the QEF (Quadratic Error Function) solution along each dimension, scaled by the box size [S2, unofficial]. The steps are: 1. Solve QEF to get an approximate solution and error. 2. Calculate variance for each axis: $variance[i] = qef.getVariance(approximate) \times size[i]$. 3. Find $maxVarDir$ (index of max variance) and $minVarDir$ (index of min variance). 4. Set $dir = maxVarDir$. If $size[maxVarDir] < 2$, fallback to $3 - maxVarDir - minVarDir$. If that size $< 2$, fallback to $minVarDir$ [S2, unofficial].
+**Definition:** A variant method for selecting the splitting axis for a K-D tree node by analyzing the variance of the QEF (Quadratic Error Function) solution along each dimension, scaled by the box size [S2, unofficial].
+
+**Steps:**
+1.  Solve QEF to get an approximate solution and error [S2, unofficial].
+2.  Calculate variance for each axis: $variance = qef.getVariance(approximate)$. Scale variance by box size: $variance[i] *= size[i]$ [S2, unofficial].
+3.  Find $maxVarDir$ (index of max variance) and $minVarDir$ (index of min variance) [S2, unofficial].
+4.  Set $dir = maxVarDir$. If $size[maxVarDir] < 2$, fallback to $3 - maxVarDir - minVarDir$. If that size $< 2$, fallback to $minVarDir$ [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources. Standard k-d tree construction is $O(N \log N)$ on average, but the source does not specify this for the volume rendering context [S1].
-- **Memory Complexity:** The use of a flat `Tid` array and prefix-order storage avoids the overhead of linked lists, reducing memory usage compared to naive implementations [S1].
-- **Strengths:** Avoids explicit polygon clipping; efficient subtree traversal via contiguous memory access in `Tid`; scalable to multiple processors (up to ~16 before contention becomes a drawback) [S1].
-- **Limitations:** Round-robin splitting may not be optimal for all data distributions; variance-based selection adds computational cost [S1][S2, unofficial].
-- **When to use:** When rendering irregular grids or multiple grids where spatial locality is important and explicit clipping is expensive [S1].
-- **When not to use:** When real-time construction is required on GPU without parallel algorithms [S1].
+*   **Time Complexity:** Not given in the sources. Standard k-d tree construction is $O(N \log N)$ for balanced trees, but the sources do not specify the complexity for this specific implementation [S1].
+*   **Memory Complexity:** The use of a common array `Tid` avoids the extra space of linked lists, storing polygon IDs in prefix-order traversal order [S1].
+*   **Performance:** The implementation suggests scalability up to about 16 processors before contention becomes a serious drawback [S1].
+*   **Strengths:** Avoids explicit clipping of polygons; polygons are associated with the smallest node region that completely contains them, avoiding subdivision [S1].
+*   **Limitations:** The round-robin splitting policy may not be optimal for all scenes; more sophisticated policies based on object locations are possible but not implemented in the cited work [S1].
 
 ## Background
-The k-d tree was introduced by Jon Bentley [1]. The method described in the primary source is part of a hierarchical and parallelizable direct volume rendering approach for irregular and multiple grids [S1]. It was developed to address the need for efficient spatial partitioning in volume rendering, specifically to avoid the complexity of scanline-based polygon grouping [S1].
+The k-d tree was introduced by Jon Bentley [S1]. The specific implementation described in the sources is from a 1996 paper on hierarchical and parallelizable direct volume rendering for irregular and multiple grids [S1]. The method builds on earlier work by Greene [S1] regarding polygon association with node regions.
 
 ## Sources
 [S1] Hierarchical and parallelizable direct volume rendering for irregular and multiple grids, https://doi.org/10.1109/visual.1996.567606, fetched 2026-10-24

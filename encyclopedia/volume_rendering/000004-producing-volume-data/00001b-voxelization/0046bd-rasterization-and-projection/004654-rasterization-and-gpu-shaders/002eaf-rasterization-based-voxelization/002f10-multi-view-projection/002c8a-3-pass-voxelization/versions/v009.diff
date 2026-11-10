@@ -1,0 +1,190 @@
+--- v008.md
++++ v009.md
+@@ -4,114 +4,93 @@
+ 
+ ## Overview
+-3-Pass Voxelization is a rasterization-based technique that eliminates cracks and missing data in the voxel grid by projecting 3D geometry from three orthogonal directions (X, Y, and Z axes) [S1, S2, unofficial]. Unlike single-view methods, it ensures complete volumetric coverage by aggregating fragments from all three principal axes, addressing the geometric distortion inherent in 2D projections [S2, unofficial]. It builds on [Multi-view projection](5937-multi-view-projection.md) by restricting views to the three cardinal axes.
++3-Pass Voxelization is a rasterization-based technique that eliminates geometric cracks and missing data in the voxel grid by rendering the scene from three orthogonal directions (along the X, Y, and Z axes) [S1, S2, unofficial]. Unlike single-view projection methods which suffer from occlusion gaps and perspective distortion, this method ensures complete volumetric coverage by aggregating fragments from all three principal axes [S2, unofficial]. It is chosen when high-fidelity occupancy is required for static or semi-static geometry, accepting the cost of three draw calls per object [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** 3D mesh geometry (vertices, normals, indices); scene bounding box ($bb_{min}, bb_{max}$); voxel grid resolution $R = (R_x, R_y, R_z)$.
+-**Outputs:** Occupancy voxel grid (or density/normal buffers).
++**Inputs:**
++- Triangle mesh geometry (vertices, normals, attributes).
++- Scene Axis-Aligned Bounding Box (AABB) defined by $bb_{min}$ and $bb_{max}$.
++- Target voxel grid resolution $R = (R_x, R_y, R_z)$.
++- Voxel grid data structure (e.g., 3D texture or atomic buffer).
++
++**Outputs:**
++- A populated 3D voxel grid where occupied voxels indicate the presence of geometry.
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** 3D array of size $R_x \times R_y \times R_z$. Each voxel stores occupancy (bit), depth, or attributes.
+-*   **Matrices:**
+-    *   $P_{clip}$: Clip-space projection matrix (orthographic, unit cube or AABB-mapped).
+-    *   $R_x, R_y, R_z$: Rotation matrices aligning the camera with the respective axis.
+-    *   $M_{voxel}$: Voxel-space transformation matrix mapping clip-space coordinates to voxel indices.
++- **Voxel Grid:** A 3D array or texture of size $R_x \times R_y \times R_z$. Each voxel stores occupancy (bit/bool) or attributes (floats).
++- **Projection Matrices:**
++  - $M_{clip}$: Standard clip-space projection matrix (orthographic).
++  - $M_{voxel}$: A matrix mapping clip-space coordinates directly to voxel indices. As noted in [S1, unofficial], this matrix already handles the scaling and offset required for voxel indexing and does *not* require rotation multiplication.
++  - $R_x, R_y, R_z$: Rotation matrices aligning the camera with the respective axes.
++
++**Parameters:**
++- **Frustum Expansion:** The orthographic frustum should be expanded slightly (e.g., factor 1.02 or fixed offset) to ensure corners of the AABB are covered [Parent].
++- **Depth Testing:** Disabled or configured for write-through to capture all intersecting fragments, not just the nearest surface [Parent].
+ 
+ **Steps:**
+-1.  **Initialize Grid:** Clear the voxel grid. If using separate dynamic/static grids, clear only the dynamic grid [S1, unofficial].
+-2.  **Pass 1 (Axis 1):**
+-    *   Compute view matrix $V_1$ looking along Axis 1 (e.g., +Z).
+-    *   Compute model-view-projection: $MVP_1 = P_{clip} \times R_1 \times V_{world}$ [S1, unofficial].
+-    *   Render scene. In fragment shader, convert clip-space position $p_{clip}$ to voxel index $i$:
+-        $$ i = \text{floor}\left( \frac{p_{clip}.xyz - bb_{min}}{bb_{max} - bb_{min}} \times R \right) $$
+-        [S1, S2, unofficial]. Note: $M_{voxel}$ handles this mapping directly if pre-computed [S1, unofficial].
+-    *   Write to voxel grid using atomic operations if multiple fragments hit the same voxel [Parent, G].
+-3.  **Pass 2 (Axis 2):**
+-    *   Compute view matrix $V_2$ looking along Axis 2 (e.g., +X).
+-    *   Compute $MVP_2 = P_{clip} \times R_2 \times V_{world}$ [S1, unofficial].
+-    *   Render scene. Map fragments to voxel indices.
+-    *   Aggregate into grid (OR for occupancy, min for depth) [Parent, G].
+-4.  **Pass 3 (Axis 3):**
+-    *   Compute view matrix $V_3$ looking along Axis 3 (e.g., +Y).
+-    *   Compute $MVP_3 = P_{clip} \times R_3 \times V_{world}$ [S1, unofficial].
+-    *   Render scene. Map fragments to voxel indices.
+-    *   Aggregate into grid [Parent, G].
+-
+-**Parameters:**
+-*   Resolution $R$: Determined by hardware capabilities and scene size [S1, unofficial].
+-*   Bounding Box: Must tightly enclose the scene to minimize wasted voxels [Parent].
+-
+-**Edge Cases:**
+-*   **Dynamic Objects:** If separating dynamic/static objects, dynamic grids must be cleared every frame [S1, unofficial].
+-*   **Precision:** Floating-point precision in clip-space conversion may cause off-by-one errors at boundaries [G]. Use epsilon or floor/ceil guards.
+-*   **Empty Voxels:** Voxels not hit by any pass remain empty.
++1. **Coordinate System Setup:** Place the coordinate system at the center of the voxel grid, ensuring axes are parallel to the grid edges [S2, unofficial].
++2. **Pass 1 (Axis 1):**
++   - Construct the view matrix for the first axis (e.g., +Z).
++   - Multiply $M_{clip}$ by the rotation matrix for this axis to generate fragments [S1, unofficial].
++   - Render the scene into a 2D buffer or directly into the voxel grid layer corresponding to this view.
++3. **Pass 2 (Axis 2):**
++   - Construct the view matrix for the second axis (e.g., +X).
++   - Multiply $M_{clip}$ by the rotation matrix for this axis [S1, unofficial].
++   - Render the scene.
++4. **Pass 3 (Axis 3):**
++   - Construct the view matrix for the third axis (e.g., +Y).
++   - Multiply $M_{clip}$ by the rotation matrix for this axis [S1, unofficial].
++   - Render the scene.
++5. **Aggregation:**
++   - For each voxel hit by any of the three passes, mark it as occupied. This is typically an atomic "OR" operation for occupancy [Parent, G].
+ 
+ **Pseudocode:**
+ ```python
+-def voxelize_3_pass(mesh, bb_min, bb_max, R):
+-    grid = empty_3d_array(R)
+-    # Precompute voxel-space matrix M_voxel
+-    # M_voxel maps clip-space [-1,1]^3 to voxel indices [0, R-1]
+-    # Assuming orthographic projection to unit cube
+-    scale = R / (bb_max - bb_min)
+-    offset = -bb_min * scale
+-    
+-    for axis_idx in [0, 1, 2]:
+-        # Define rotation for current axis
+-        if axis_idx == 0: # X-axis view
+-            rot = rotation_matrix_x()
+-            view_dir = [1, 0, 0]
+-        elif axis_idx == 1: # Y-axis view
+-            rot = rotation_matrix_y()
+-            view_dir = [0, 1, 0]
+-        else: # Z-axis view
+-            rot = rotation_matrix_z()
+-            view_dir = [0, 0, 1]
+-            
+-        # Compute MVP
+-        # Note: In practice, V_world is identity if mesh is in world space
+-        # MVP = P_clip * rot * V_world
+-        mvp = compute_mvp(rot) 
++def voxelize_3_pass(mesh, bb_min, bb_max, resolution, voxel_grid):
++    """
++    Voxelize a mesh using 3 orthogonal passes.
++    """
++    # Define rotation matrices for X, Y, Z axes
++    # Note: Exact rotation matrices depend on coordinate system handedness.
++    # Assuming standard right-handed system where views look along -Z, -X, -Y respectively.
++    rot_x = rotation_matrix(axis='x', angle=0) # View along X
++    rot_y = rotation_matrix(axis='y', angle=0) # View along Y
++    rot_z = rotation_matrix(axis='z', angle=0) # View along Z
++
++    # Pre-calculate voxel-space matrix (maps clip space to voxel indices)
++    # This matrix includes scale and offset based on bb_min, bb_max, and resolution.
++    # It does NOT include rotation [S1, unofficial].
++    m_voxel = compute_voxel_matrix(bb_min, bb_max, resolution)
++
++    # List of rotations for the 3 passes
++    rotations = [rot_x, rot_y, rot_z]
++
++    for rot in rotations:
++        # Multiply clip-space projection matrix by rotation to align view
++        # The rotation ensures fragments are generated from this specific axis
++        m_view_proj = rot @ m_voxel # Or appropriate matrix multiplication order
+         
+-        # Render mesh with MVP
+-        fragments = rasterize(mesh, mvp)
+-        
+-        for frag in fragments:
+-            # Convert clip-space position to voxel index
+-            # frag.pos is in clip space [-1, 1]
+-            # Assuming orthographic projection covers the AABB
+-            # Map [-1, 1] to [0, 1] then to [0, R]
+-            normalized = (frag.pos.xyz + 1.0) / 2.0
+-            voxel_idx = floor(normalized * R)
+-            
+-            # Boundary check
+-            if all(0 <= voxel_idx[i] < R[i] for i in range(3)):
+-                # Atomic write to grid
+-                atomic_or(grid, voxel_idx, 1) # For occupancy
+-                
+-    return grid
++        # Render scene with this view matrix
++        # Depth testing disabled to capture all intersections
++        render_scene(mesh, m_view_proj, voxel_grid, depth_test=False)
++
++    # Aggregation is handled during render via atomic OR or direct write
++    # If using separate buffers, merge them here:
++    # voxel_grid = voxel_grid | buffer_x | buffer_y | buffer_z
+ ```
+ 
+-## Subtopics
+-
+-### Single 2D Projection Voxelization
+-Uses only one view. Cheaper but prone to cracks. [Single 2D Projection Voxelization](3482-single-2d-projection-voxelization.md)
+-
+-### Orthographic Multi-View Voxelization
+-Uses more than 3 views for higher accuracy. More expensive. [Orthographic Multi-View Voxelization](3892-orthographic-multi-view-voxelization.md)
+-
+-### Volumetric Representation via Depth Map Registration
+-Uses depth maps from arbitrary views. Different aggregation strategy. [Volumetric Representation via Depth Map Registration](6435-volumetric-representation-via-depth-map-registration.md)
++**Edge Cases and Pitfalls:**
++- **Performance:** Requires 3 render calls per object. Cost grows with mesh complexity [S1, unofficial].
++- **Dynamic Objects:** If separating dynamic and static objects, dynamic voxel grids must be cleared every frame, requiring separate grids [S1, unofficial].
++- **Precision:** Ensure the voxel-space matrix correctly handles the coordinate mapping to avoid off-by-one errors at boundaries [Parent].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot R^2)$ per pass, where $N$ is triangle count. Total $3 \times$ cost of single pass [S1, unofficial].
+-*   **Memory Complexity:** $O(R_x R_y R_z)$ for the grid [S1, unofficial].
+-*   **Performance:** 3 render calls per object. Expensive for complex models [S1, unofficial].
+-*   **Strengths:** Eliminates cracks from single-view projection [S1, S2, unofficial]. Simple to implement [S1, unofficial].
+-*   **Limitations:** High computational cost. Requires separate grids for dynamic/static objects if optimized [S1, unofficial].
+-*   **When to Use:** When visual fidelity (no cracks) is critical and performance allows.
+-*   **When Not to Use:** Real-time applications with very high triangle counts and limited GPU bandwidth.
++- **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of triangles and $P=3$ is the number of passes. Each pass is a standard rasterization operation.
++- **Memory Complexity:** $O(R_x \cdot R_y \cdot R_z)$ for the voxel grid. No additional large buffers if rendering directly to the grid.
++- **Performance:** Slower than single-pass methods due to 3x draw calls. Suitable for static or infrequently updated geometry. Can be optimized by LOD interleaving or resolution scaling [S1, unofficial].
++- **Strengths:** Eliminates cracks and gaps inherent in single-view projection; robust against orientation.
++- **Limitations:** High computational cost for complex dynamic scenes; requires separate handling for dynamic/static splits.
+ 
+ ## Background
+-Originated in real-time ray-traced voxel global illumination research [S1, unofficial]. Developed as a simple fix for cracks in voxel grids generated by single-axis projection [S1, unofficial]. Implemented in open-source projects like 3D-Mesh-Voxelizer [S2, unofficial].
++3-Pass Voxelization was introduced as a solution to the "cracks and missing data" problem in single-direction voxelization [S1, unofficial]. It is a foundational technique in real-time ray-traced voxel global illumination pipelines, where accurate occupancy is critical for light transport [S1, unofficial]. The method is widely used in GPU-based voxelizers where multiple render targets or atomic operations are available.
+ 
+ ## Sources

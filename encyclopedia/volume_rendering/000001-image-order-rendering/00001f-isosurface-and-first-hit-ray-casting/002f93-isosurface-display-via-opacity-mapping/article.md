@@ -3,154 +3,140 @@
 Also called: Isosurface Transfer Function, IsosurfaceClassifier, Opacity Mapping, Thresholding for Isosurfaces
 
 ## Overview
-Isosurface Display via Opacity Mapping is a volume rendering technique that visualizes specific internal surfaces by mapping scalar data values to opacity weights, effectively classing the volume into "surface" and "background" regions [S1, unofficial][S2, unofficial]. Unlike methods that extract explicit polygonal meshes or rely on strict binary thresholding, this approach uses a continuous transfer function (typically Gaussian) to create a semi-transparent shell around the isovalue, allowing for smooth visual integration with interior volume data [S1, unofficial][S2, unofficial]. It distinguishes itself from sibling methods like [Volumetric Isosurface Rendering with Intersection Refinement](958-volumetric-isosurface-rendering-with-intersection-refinement.md) by avoiding discrete intersection detection and refinement steps, instead relying on the accumulation of opacity along the ray to define the surface appearance.
+Isosurface Display via Opacity Mapping is a volume rendering technique that visualizes specific scalar surfaces by mapping data values to opacity, effectively acting as a soft threshold classifier [S1, unofficial][S2, unofficial]. Unlike hard geometric extraction methods, it retains the volumetric context by allowing semi-transparent rendering of the isosurface, which can be enhanced with local shading to improve surface perception [S1, unofficial]. It is distinguished from sibling methods like [Volumetric Isosurface Rendering with Intersection Refinement](958-volumetric-isosurface-rendering-with-intersection-refinement.md) by its reliance on a continuous transfer function (typically Gaussian) rather than discrete intersection detection and refinement steps.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar volume $V$ of dimensions $D_x \times D_y \times D_z$, a camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ for each pixel, and transfer function parameters: isovalue $\mu$ and standard deviation $\sigma$.
+*   **Input:** A 3D scalar volume dataset $V$, a target isovalue $\mu$, a width parameter $\sigma$, and a camera ray $r(t) = \mathbf{o} + t\mathbf{d}$.
 *   **Output:** A final pixel color $C_{final}$ and opacity $\alpha_{final}$.
 
 **Data Structures:**
-*   **Volume Texture:** 3D texture or linear array storing scalar values. Interpolation mode is typically tri-linear or tri-cubic to compute $f(\mathbf{p})$ at arbitrary ray positions.
-*   **Ray Parameters:** Origin $\mathbf{o}$, direction $\mathbf{d}$, and step size $\Delta t$ (or adaptive step size).
+*   **Volume Data:** Stored as a 3D array or texture. Access is performed via tri-linear or tri-cubic interpolation to obtain $f(\mathbf{p})$ at arbitrary positions $\mathbf{p}$ [S3][S1, unofficial].
+*   **Transfer Function:** A Gaussian function defined by $\mu$ and $\sigma$.
 
-**Transfer Function:**
-The core of the method is the opacity classifier. For a scalar value $v$ at a sample point, the opacity contribution $\alpha(v)$ is determined by a Gaussian function centered at the isovalue $\mu$ [S2, unofficial]:
+**Algorithm Steps:**
+1.  **Ray Casting:** For each pixel, cast a ray through the volume.
+2.  **Sampling:** Sample the scalar field $f(\mathbf{p})$ at discrete points along the ray.
+3.  **Classification:** Compute the opacity $\alpha$ for each sample using the Gaussian transfer function. The opacity is highest when the scalar value $v$ is close to the isovalue $\mu$ [S2, unofficial]:
+    $$ \alpha(v) = e^{-\frac{(v - \mu)^2}{2\sigma^2}} $$
+    Note: In some implementations, the exponent may be scaled or normalized, but the core dependency is the squared distance from the isovalue [S2, unofficial]. The value $\alpha$ ranges from 0 (transparent) to 1 (opaque).
+4.  **Shading (Optional but Recommended):** To improve surface appearance, compute the surface normal $\mathbf{n}$ at the hit point (where $\alpha$ is significant) using the gradient $\nabla f(\mathbf{p})$ [S1, unofficial]. The gradient is estimated via finite differences or derivative filters on the volume data. Apply a lighting model (e.g., Phong) to compute the color contribution $C_{local}$ [S1, unofficial].
+5.  **Compositing:** Use front-to-back compositing to blend the samples. For each sample $i$ with opacity $\alpha_i$ and color $C_i$:
+    $$ C_{final} = \sum_{i} C_i \alpha_i \prod_{j < i} (1 - \alpha_j) $$
+    $$ \alpha_{final} = 1 - \prod_{i} (1 - \alpha_i) $$
+    If shading is used, $C_i$ includes the lighting calculation; otherwise, it may be a constant color or mapped from the scalar value.
 
-$$
-\alpha(v) = e^{-\frac{(v - \mu)^2}{2\sigma^2}}
-$$
+**Parameters:**
+*   **Isovalue ($\mu$):** The target scalar value for the isosurface. Default is 0. It is often clamped to a valid range [S2, unofficial].
+*   **Sigma ($\sigma$):** The standard deviation of the Gaussian. Controls the thickness and smoothness of the isosurface visualization. A smaller $\sigma$ yields a sharper, thinner surface; a larger $\sigma$ yields a thicker, more translucent surface. Default is 0.01. It is often clamped to a valid range [S2, unofficial].
 
-Where:
-*   $\mu$ is the target isovalue (default 0).
-*   $\sigma$ controls the thickness of the visible surface layer (default 0.01).
-*   $v$ is the interpolated scalar value $f(\mathbf{p})$ at the current ray position $\mathbf{p}$.
-
-*Note: In some implementations, the Gaussian is normalized or scaled to fit the [0, 1] range, or clamped to a maximum opacity [S2, unofficial].*
-
-**Numbered Steps:**
-1.  **Ray Initialization:** For each pixel, construct the ray $\mathbf{r}(t)$ entering the volume bounding box. Determine the entry and exit points $t_{start}$ and $t_{end}$.
-2.  **Sampling Loop:** March along the ray from $t_{start}$ to $t_{end}$ with step size $\Delta t$. Let current position be $\mathbf{p} = \mathbf{r}(t)$.
-3.  **Scalar Interpolation:** Sample the volume at $\mathbf{p}$ to get scalar value $v = f(\mathbf{p})$.
-4.  **Opacity Calculation:** Compute the local opacity weight $\alpha_i$ using the Gaussian transfer function:
-    $$ \alpha_i = e^{-\frac{(v - \mu)^2}{2\sigma^2}} $$
-    [S2, unofficial]
-5.  **Color Calculation:** Determine the color $c_i$ associated with this sample. In basic isosurface mapping, this is often a constant color or derived from the gradient $\nabla f(\mathbf{p})$ for shading [S1, unofficial]. If shading is used, compute the normal $\mathbf{n} = \nabla f(\mathbf{p})$ via finite differences or texture gradient sampling.
-6.  **Compositing:** Apply front-to-back alpha compositing. Let $C_{out}$ and $\alpha_{out}$ be the accumulated color and opacity.
-    $$ \alpha_{out}^{new} = \alpha_{out} + (1 - \alpha_{out}) \alpha_i $$
-    $$ C_{out}^{new} = C_{out} + (1 - \alpha_{out}) \alpha_i c_i $$
-    [S1, unofficial]
-7.  **Termination:** If $\alpha_{out}$ exceeds a threshold (e.g., 0.99) or the ray exits the volume, stop.
-8.  **Final Color:** The pixel color is $C_{out}$.
+**Edge Cases and Pitfalls:**
+*   **Precision:** If $\sigma$ is too small, the surface may appear aliased or broken due to insufficient sampling density relative to the surface thickness [S2, unofficial].
+*   **Boundary Conditions:** Gradient estimation for shading requires handling volume boundaries carefully to avoid artifacts [S1, unofficial].
+*   **Degenerate Input:** If the volume data does not contain values near $\mu$, the surface will be invisible.
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def isosurface_opacity_mapping(volume, ray_origin, ray_direction, mu, sigma, step_size):
+def isosurface_opacity_mapping(volume, ray_origin, ray_direction, mu, sigma, num_samples):
     """
-    Renders an isosurface using opacity mapping via Gaussian transfer function.
+    Renders an isosurface using opacity mapping with Gaussian transfer function.
     
     Args:
-        volume: 3D array or texture object with method sample(x, y, z) returning scalar.
+        volume: 3D array or texture object supporting interpolation.
         ray_origin: (x, y, z) tuple.
         ray_direction: (dx, dy, dz) tuple, normalized.
-        mu: float, isovalue center.
-        sigma: float, standard deviation of Gaussian.
-        step_size: float, distance between samples.
+        mu: float, isovalue.
+        sigma: float, Gaussian width.
+        num_samples: int, number of samples along the ray.
         
     Returns:
-        (r, g, b, alpha): final pixel color and opacity.
+        (color, opacity): tuple of floats (R, G, B, A).
     """
-    # 1. Ray-Bounding Box Intersection (Simplified)
-    # Determine t_min and t_max where ray enters/exits volume bounds [0,1]^3
-    t_min, t_max = intersect_box(ray_origin, ray_direction, volume_bounds)
+    # Initialize compositing variables
+    accumulated_color = [0.0, 0.0, 0.0]
+    accumulated_opacity = 0.0
     
-    if t_max < t_min:
-        return (0.0, 0.0, 0.0, 0.0) # Background
-
-    # 2. Initialize Accumulators
-    acc_color = (0.0, 0.0, 0.0)
-    acc_alpha = 0.0
+    # Ray parameters
+    t_start = 0.0
+    t_end = volume.get_bounding_box_depth(ray_origin, ray_direction)
+    if t_end is None or t_end <= 0:
+        return [0.0, 0.0, 0.0], 0.0
+        
+    step_size = t_end / num_samples
     
-    # 3. Marching Loop
-    t = t_min
-    while t <= t_max:
-        # Current position
-        p_x = ray_origin.x + t * ray_direction.x
-        p_y = ray_origin.y + t * ray_direction.y
-        p_z = ray_origin.z + t * ray_direction.z
+    for i in range(num_samples):
+        t = t_start + i * step_size
+        p = ray_origin + ray_direction * t
         
-        # Clamp to volume bounds for sampling
-        p_x = clamp(p_x, 0.0, 1.0)
-        p_y = clamp(p_y, 0.0, 1.0)
-        p_z = clamp(p_z, 0.0, 1.0)
-        
-        # Sample scalar value
-        v = volume.sample(p_x, p_y, p_z)
-        
-        # 4. Compute Opacity via Gaussian
-        # alpha = exp( - (v - mu)^2 / (2 * sigma^2) )
-        exponent = -((v - mu) ** 2) / (2.0 * sigma ** 2)
-        alpha_i = exp(exponent)
-        
-        # 5. Compute Color
-        # Basic implementation: constant color or gradient-based shading
-        # For simplicity, assume a constant surface color c_surf
-        c_surf = (1.0, 1.0, 1.0) 
-        
-        # Optional: Compute normal for shading [S1, unofficial]
-        # normal = compute_gradient(volume, p_x, p_y, p_z)
-        # c_surf = phong_shading(normal, light_direction)
-        
-        # 6. Front-to-Back Compositing
-        # alpha_out_new = alpha_out + (1 - alpha_out) * alpha_i
-        # color_out_new = color_out + (1 - alpha_out) * alpha_i * c_surf
-        
-        weight = (1.0 - acc_alpha) * alpha_i
-        acc_color = (
-            acc_color[0] + weight * c_surf[0],
-            acc_color[1] + weight * c_surf[1],
-            acc_color[2] + weight * c_surf[2]
-        )
-        acc_alpha = acc_alpha + weight
-        
-        # Early termination if fully opaque
-        if acc_alpha >= 0.99:
+        # Check if point is within volume bounds
+        if not volume.contains(p):
             break
             
-        t += step_size
+        # Sample scalar value
+        v = volume.interpolate(p)
         
-    return (acc_color[0], acc_color[1], acc_color[2], acc_alpha)
+        # Compute opacity using Gaussian transfer function
+        # alpha = exp(-(v - mu)^2 / (2 * sigma^2))
+        exponent = -((v - mu) ** 2) / (2 * sigma ** 2)
+        alpha = math.exp(exponent)
+        
+        # Skip samples with negligible opacity to save computation
+        if alpha < 1e-6:
+            continue
+            
+        # Compute color
+        # Option 1: Constant color (e.g., white)
+        # color = [1.0, 1.0, 1.0]
+        
+        # Option 2: Shaded color using gradient
+        # Compute gradient for normal
+        grad = volume.compute_gradient(p)
+        normal = normalize(grad)
+        
+        # Simple lighting model (e.g., diffuse)
+        # light_dir = normalize([0.0, 1.0, 0.5]) # Example light direction
+        # diffuse = max(dot(normal, light_dir), 0.0)
+        # color = [diffuse, diffuse, diffuse] # Grayscale shading
+        
+        # For this implementation, we use a constant color for simplicity
+        # as shading details vary by implementation [S1, unofficial]
+        color = [1.0, 1.0, 1.0]
+        
+        # Front-to-back compositing
+        # C_out = C_in + C_sample * alpha_sample * (1 - alpha_in)
+        # A_out = A_in + alpha_sample * (1 - A_in)
+        
+        weight = alpha * (1.0 - accumulated_opacity)
+        accumulated_color[0] += color[0] * weight
+        accumulated_color[1] += color[1] * weight
+        accumulated_color[2] += color[2] * weight
+        accumulated_opacity += weight
+        
+        # Early termination if fully opaque
+        if accumulated_opacity > 0.99:
+            break
+            
+    return accumulated_color, accumulated_opacity
 ```
-
-**Parameters:**
-*   **Isovalue ($\mu$):** The target scalar value. Default 0. Clamped to `ISOSURFACE_CLASSIFIER_ISOVALUE_RANGE` [S2, unofficial].
-*   **Sigma ($\sigma$):** Standard deviation of the Gaussian. Controls surface thickness. Default 0.01. Range `ISOSURFACE_CLASSIFIER_SIGMA_RANGE` [S2, unofficial].
-*   **Step Size:** Determines sampling density. Smaller steps reduce aliasing but increase cost.
-
-**Edge Cases and Pitfalls:**
-*   **Precision:** If $\sigma$ is very small, the Gaussian becomes a narrow spike. Floating-point precision issues may cause the surface to disappear if samples miss the exact isovalue. [S2, unofficial]
-*   **Boundary Artifacts:** Sampling near volume boundaries requires careful clamping or reflection to avoid artifacts.
-*   **Interior Visibility:** Because the method uses opacity mapping, interior structures with values close to $\mu$ will also contribute to the image, potentially obscuring the isosurface. This is a trade-off for the "cloudy interior" effect [S1, unofficial].
 
 ## Subtopics
 
 ### Multi-Texture Isosurface Mapping
-A variant where different groups of textures are assigned to different selected iso-surfaces or regions of the volume [S3]. It uses spatial or semantic constraints (e.g., splitting the volume into top/bottom halves) to index onto specific texture images based on the 3D position on the tracing ray [S3]. Unlike surface methods requiring external geometric constraints, this leverages volume data for direct texturing control [S3].
+A variant that assigns different texture groups to different selected iso-surfaces or portions of a single iso-surface [S3]. It uses spatial or semantic constraints (e.g., splitting the volume into top/bottom halves) to index onto different texture images during ray traversal [S3]. Unlike surface methods requiring external geometric constraints, this leverages the volume data itself for direct texturing control [S3]. It can generate intermediate templates to map multiple iso-surfaces with a single texture image if constraints allow [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of samples per ray. The Gaussian evaluation is constant time per sample.
-*   **Memory Complexity:** $O(V)$ for the volume data. No additional geometric structures (like meshes or trees) are required.
-*   **Performance:** Generally slower than binary thresholding because it requires evaluating the Gaussian and compositing semi-transparent layers. However, it is faster than explicit mesh extraction (Marching Cubes) followed by rasterization for complex volumes, as it avoids mesh generation overhead.
-*   **Strengths:** Smooth visual appearance; easy to tune surface thickness via $\sigma$; allows viewing interior data simultaneously; simple implementation.
-*   **Limitations:** No sharp geometric definition; "ghosting" from interior structures; performance sensitive to $\sigma$ (small $\sigma$ requires finer sampling to avoid aliasing).
-*   **When to Use:** When a smooth, semi-transparent visualization of a specific density range is desired, or when interior context is important.
-*   **When Not to Use:** When precise geometric boundaries are required, or when performance is critical and the volume is simple enough for binary thresholding.
+*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples per ray. The Gaussian evaluation is constant time per sample.
+*   **Memory Complexity:** $O(V)$ for the volume data. No additional geometric structures are required.
+*   **Performance:** Generally slower than hard isosurface extraction (like Marching Cubes) because it requires sampling the entire volume along the ray, even for transparent regions. However, it provides richer visual information by preserving interior data [S1, unofficial].
+*   **Strengths:** Smooth visualization of isosurfaces; ability to see interior structures; easy adjustment of surface thickness via $\sigma$ [S2, unofficial].
+*   **Limitations:** Aliasing artifacts if $\sigma$ is too small relative to sampling rate; computational cost of shading and gradient computation [S1, unofficial].
+*   **When to Use:** When the user needs to visualize a specific surface while retaining context of the surrounding volume, or when the surface is not well-defined by a single threshold.
+*   **When Not to Use:** When real-time performance is critical and the surface is well-defined, or when precise geometric intersection is required.
 
 ## Background
-The method originates from early volume rendering techniques that emphasized the classification of data via transfer functions [S1, unofficial]. The Gaussian classifier is a standard choice in medical and scientific visualization for isolating specific tissue densities or material properties [S2, unofficial]. The extension to multi-texturing and spatial constraints was explored in the context of character animation and texture mapping for volume data [S3].
+The method originates from early volume rendering techniques that emphasized the use of transfer functions for classification [S1, unofficial]. The Gaussian transfer function for isosurface visualization is a common implementation choice in interactive volume renderers, allowing for smooth, adjustable surface rendering [S2, unofficial]. It is widely used in medical imaging and scientific visualization for its ability to balance surface clarity with volumetric context [S1, unofficial].
 
 ## Sources
 [S1] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)

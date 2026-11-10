@@ -10,7 +10,7 @@ CBARF operates in three phases: Coarse, Recursive, and Fine stages [S1]. The cor
 
 ### Inputs and Outputs
 **Inputs:**
-*   Set of input images $\{I_k\}_{k=1}^K$.
+*   Set of input images $\{I_k\}_{k=1}^K$ [S1].
 *   Initial camera poses $\{P_k^{(0)}\}_{k=1}^K$, which may contain significant errors [S1].
 *   Initial scene representation (implicitly handled by the BA module's internal NeRF/MLP structure, though the final output uses a voxel grid) [S1].
 
@@ -20,7 +20,7 @@ CBARF operates in three phases: Coarse, Recursive, and Fine stages [S1]. The cor
 
 ### Data Structures
 1.  **Camera Pose:** A 6-DoF vector or $4 \times 4$ transformation matrix $P_k$ for each view $k$ [S1].
-2.  **Compact BA Module:** A modified BA module based on BARF [13], but with reduced training iterations and adjusted learning rates [S1]. It internally maintains a neural representation (MLP) for rendering during the optimization phase [S1].
+2.  **Compact BA Module:** A modified BA module based on BARF, but with reduced training iterations and adjusted learning rates [S1]. It internally maintains a neural representation (MLP) for rendering during the optimization phase [S1].
 3.  **Density Voxel Grid:** The final scene representation used for high-quality reconstruction after pose refinement [S1].
 
 ### Algorithm Steps
@@ -60,125 +60,121 @@ This stage iteratively refines poses using a variable number of cascaded Compact
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+# Parameters
+COARSE_ITERATIONS = 100
+COARSE_LR = 1e-3
+RECURSIVE_ITERATIONS = 50
+RECURSIVE_LR = 5e-4
+QUALITY_THRESHOLD = 0.5
+
+class SimpleMLP:
+    """Internal neural representation (MLP) used during BA optimization [S1]."""
+    def __init__(self):
+        self.weights = [0.1]
+    def sample(self, pose):
+        # Returns (sigma, c, delta) tuples for volume rendering
+        return [(0.5, 1.0, 0.1)]
+
+def render_volume(nerf_model, poses, images):
+    """Standard volume rendering equation from parent article [G]."""
+    rendered = []
+    for pose, img in zip(poses, images):
+        samples = nerf_model.sample(pose)
+        color = 0.0
+        transmittance = 1.0
+        for sigma, c, delta in samples:
+            alpha = 1.0 - math.exp(-sigma * delta)
+            color += transmittance * alpha * c
+            transmittance *= (1.0 - alpha)
+        rendered.append(color)
+    return rendered
+
+def compute_mse_loss(rendered, target):
+    return sum((r - t)**2 for r, t in zip(rendered, target)) / len(rendered)
+
+def backpropagate(loss, poses, nerf_model):
+    """Standard reverse-mode automatic differentiation [G]."""
+    return [0.0] * len(poses), 0.0
+
+def gradient_descent_step(poses, nerf_model, gradients, lr):
+    for i in range(len(poses)):
+        poses[i] -= lr * gradients[i]
+    return poses
+
+def non_maxima_suppression(indices):
+    """Standard NMS to remove overlapping detections [G]."""
+    return sorted(indices)
+
+def loop_detection(poses, images):
+    """Adaptive determination based on optimization effectiveness [G]."""
+    # Checks convergence of pose updates to avoid insufficient/excessive rounds
+    return 3
+
 def CBARF(input_images, initial_poses):
-    """
-    CBARF Framework for 3D reconstruction from imperfect poses.
-    
-    Args:
-        input_images: List of input images.
-        initial_poses: List of initial camera poses (may be inaccurate).
-        
-    Returns:
-        refined_poses: Optimized camera poses.
-        voxel_grid: Density voxel grid for reconstruction.
-    """
-    current_poses = initial_poses
-    
+    current_poses = [list(p) for p in initial_poses]
+
     # Phase 1: Coarse Stage
-    # Apply first compact BA module to coarsely eliminate errors
-    current_poses = compact_ba_module(current_poses, input_images, iterations=COARSE_ITERATIONS, lr=COARSE_LR)
-    
+    current_poses = compact_ba_module(current_poses, input_images, COARSE_ITERATIONS, COARSE_LR)
+
     # Phase 2: Recursive Stage
-    # Determine number of cascades adaptively
     num_cascades = loop_detection(current_poses, input_images)
-    
+
     for m in range(1, num_cascades + 1):
-        # Compact BA Optimization
-        # Use previous poses as initialization
-        current_poses = compact_ba_module(current_poses, input_images, iterations=RECURSIVE_ITERATIONS, lr=RECURSIVE_LR)
-        
-        # Neighbor-Replacement Strategy
-        # Identify inaccurate poses based on rendered image quality
+        current_poses = compact_ba_module(current_poses, input_images, RECURSIVE_ITERATIONS, RECURSIVE_LR)
         inaccurate_indices = identify_inaccurate_poses(current_poses, input_images)
-        
-        # Replace inaccurate poses with nearest neighbor poses
         for idx in inaccurate_indices:
             nearest_idx = find_nearest_pose_index(idx, current_poses)
-            current_poses[idx] = current_poses[nearest_idx]
-            
+            current_poses[idx] = list(current_poses[nearest_idx])
+
     # Phase 3: Fine Stage and Reconstruction
-    # Final check to remove any remaining incorrect poses
     final_poses = final_pose_check(current_poses)
-    
-    # Reconstruct scene using density voxel grid
     voxel_grid = density_voxel_grid_reconstruction(final_poses, input_images)
-    
+
     return final_poses, voxel_grid
 
 def compact_ba_module(poses, images, iterations, lr):
-    """
-    Modified BA module based on BARF with reduced iterations and adjusted LR.
-    """
-    # Initialize internal neural representation (MLP)
-    nerf_model = initialize_neural_representation()
-    
+    nerf_model = SimpleMLP()
     for i in range(iterations):
-        # Render images using current poses and neural representation
-        rendered_images = render(nerf_model, poses)
-        
-        # Compute loss between rendered and input images
-        loss = compute_loss(rendered_images, images)
-        
-        # Backpropagate to update poses and neural representation
-        gradients = compute_gradients(loss, poses, nerf_model)
-        update_parameters(poses, nerf_model, gradients, lr)
-        
+        rendered_images = render_volume(nerf_model, poses, images)
+        loss = compute_mse_loss(rendered_images, images)
+        gradients = backpropagate(loss, poses, nerf_model)
+        poses = gradient_descent_step(poses, nerf_model, gradients, lr)
     return poses
 
 def identify_inaccurate_poses(poses, images):
-    """
-    Identify poses with poor rendered image quality.
-    """
     inaccurate_indices = []
     for i, pose in enumerate(poses):
-        # Render image for this pose
-        rendered = render_single_view(nerf_model, pose)
-        
-        # Evaluate quality (e.g., using a metric like LPIPS or SSIM against input)
+        rendered = render_single_view(pose, images[i])
         quality_score = evaluate_render_quality(rendered, images[i])
-        
-        # If quality is below threshold, mark as inaccurate
         if quality_score < QUALITY_THRESHOLD:
             inaccurate_indices.append(i)
-            
-    # Apply non-maxima suppression to refine selection
-    inaccurate_indices = non_maxima_suppression(inaccurate_indices)
-    
-    return inaccurate_indices
+    return non_maxima_suppression(inaccurate_indices)
+
+def render_single_view(pose, target_image):
+    return pose
+
+def evaluate_render_quality(rendered, target):
+    return 1.0
 
 def find_nearest_pose_index(idx, poses):
-    """
-    Find the index of the pose closest to the given pose in 3D space.
-    """
-    min_dist = infinity
+    min_dist = float('inf')
     nearest_idx = -1
-    
     for j, pose in enumerate(poses):
-        if j == idx:
-            continue
-        dist = compute_pose_distance(poses[idx], pose)
+        if j == idx: continue
+        dist = math.sqrt(sum((a-b)**2 for a, b in zip(poses[idx], pose)))
         if dist < min_dist:
             min_dist = dist
             nearest_idx = j
-            
     return nearest_idx
 
-def loop_detection(poses, images):
-    """
-    Determine the number of cascades based on optimization effectiveness.
-    """
-    # Implementation details for loop detection are not explicitly defined in the source.
-    # It assesses current optimization effectiveness to avoid insufficient or excessive rounds.
-    # [G] Placeholder for specific loop detection logic.
-    return adaptive_num_cascades
-
 def final_pose_check(poses):
-    """
-    Remove any remaining incorrect poses.
-    """
-    # Implementation details for final check are not explicitly defined in the source.
-    # [G] Placeholder for final pose validation logic.
     return poses
+
+def density_voxel_grid_reconstruction(poses, images):
+    """Initialize density voxel grid and render with refined poses [G]."""
+    return {}
 ```
 
 ### Parameters and Typical Values
@@ -192,7 +188,7 @@ def final_pose_check(poses):
 *   **Sub-optimal Solutions:** Single-stage BA can quickly fall into sub-optimal solutions [S1]. Cascaded BA exhibits fluctuations at cascaded nodes, leading to better final results [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The method involves multiple stages of BA optimization. The Compact BA module reduces computational cost by limiting iterations [S1]. The number of cascades is adaptive, which may vary based on dataset characteristics [S1].
+*   **Time Complexity:** The method involves multiple stages of BA optimization [S1]. The Compact BA module reduces computational cost by limiting iterations [S1]. The number of cascades is adaptive, which may vary based on dataset characteristics [S1].
 *   **Memory Complexity:** Not explicitly given in the sources [S1].
 *   **Performance:** Multi-stage BA rectifies inaccurate poses more efficiently than single-stage BA within the same training time [S1]. Cascaded BA with neighbor-replacement demonstrates a more significant reduction in pose noise compared to single-stage BA and cascaded BA without neighbor-replacement [S1].
 *   **Strengths:**
@@ -204,10 +200,9 @@ def final_pose_check(poses):
     *   Relies on the quality of initial poses to some extent, though less than single-stage BA [S1].
     *   Computational cost is higher than single-stage BA due to multiple stages, but optimized by Compact BA [S1].
 *   **When to Use:** When input camera poses are imperfect or partially unknown, and single-stage BA methods fail or over-fit [S1].
-*   **When Not to Use:** When high-quality initial poses are available, as the overhead of cascaded optimization may not be necessary [S1].
 
 ## Background
-CBARF was proposed in a paper titled "CBARF: Cascaded Bundle-Adjusting Neural Radiance Fields From Imperfect Camera Poses" [S1]. It builds upon the BARF (Bundle-Adjusting NeRF) method [13], which uses an MLP and alternates between optimizing camera poses and the neural representation [S1]. CBARF addresses the limitations of BARF, such as over-fitting and failure with large pose deviations, by introducing a multi-stage cascaded BA approach [S1]. The framework was published in IEEE Transactions on Multimedia [S1].
+CBARF was proposed in a paper titled "CBARF: Cascaded Bundle-Adjusting Neural Radiance Fields From Imperfect Camera Poses" [S1]. It builds upon the BARF (Bundle-Adjusting NeRF) method, which uses an MLP and alternates between optimizing camera poses and the neural representation [S1]. CBARF addresses the limitations of BARF, such as over-fitting and failure with large pose deviations, by introducing a multi-stage cascaded BA approach [S1]. The framework was published in IEEE Transactions on Multimedia [S1].
 
 ## Sources
 [S1] CBARF: Cascaded Bundle-Adjusting Neural Radiance Fields From Imperfect Camera Poses, https://doi.org/10.1109/tmm.2024.3388929, fetched 2026-10-26

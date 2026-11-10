@@ -1,142 +1,87 @@
 # 3D Texture Storage and Sampling
 
-Also called: GPU 3D Texture Mapping, Hardware Volume Rendering via 3D Textures
+Also called: GPU 3D Texture Volume Storage, Hardware 3D Texture Sampling
 
 ## Overview
-This method stores volumetric data directly in GPU 3D texture resources, leveraging hardware-optimized memory layouts and sampling units to accelerate volume rendering [S1, unofficial][S2, unofficial]. It solves the problem of inefficient CPU-side or naive GPU-side memory access patterns by utilizing sophisticated hardware caching and interpolation mechanisms that are superior to software-implemented Z-order curves [S1, unofficial]. Unlike [Dense grids and memory layout](3-dense-grids-and-memory-layout.md), which focuses on logical indexing schemes like Morton codes, this method relies on the graphics API's native 3D texture implementation to handle data locality and tri-linear interpolation [S1, unofficial][S2, unofficial]. It differs from [Sparse Volume Texture (SVT)](7011-sparse-volume-texture-svt.md) by operating on dense grids without page-table indirection, and from [Hardware Volume Rendering Pipeline with Pixel Textures](5641-hardware-volume-rendering-pipeline-with-pixel-textures.md) by being the foundational storage mechanism upon which such pipelines are built [S1, unofficial][S2, unofficial][S3, unofficial].
+3D Texture Storage and Sampling is a method for storing volumetric voxel data in GPU-accessible 3D image resources and retrieving values via hardware-accelerated interpolation [S1, unofficial]. It solves the problem of inefficient memory access patterns in CPU-side or naive GPU array storage by leveraging hardware caches optimized for spatial locality [S1, unofficial]. Unlike [Dense grids and memory layout](3-dense-grids-and-memory-layout.md), which focuses on CPU-side linear indexing and Z-order curves, this method relies on the GPU's internal texture unit optimizations, which use sophisticated locality structures beyond simple Z-order curves [S1, unofficial]. It differs from [Sparse Volume Texture (SVT)](7011-sparse-volume-texture-svt.md) by operating on dense grids without page tables or masking [S7154-memory-organization-and-layout.md].
 
 ## How it works
 **Inputs:**
-- Volumetric data array (scalar or vector fields) on the host (CPU).
-- Texture dimensions $(D_x, D_y, D_z)$ matching the logical volume resolution.
-- Sampling parameters: filtering mode (typically tri-linear), wrap mode, and internal format (e.g., `GL_RGBA8`, `R16UI`) [S1, unofficial][S3, unofficial][S4, unofficial].
+- Volumetric data array $V$ of dimensions $D_x \times D_y \times D_z$.
+- Texture target: `GL_TEXTURE_3D` (or equivalent hardware resource) [S3, unofficial][S4, unofficial].
+- Internal format: e.g., `R16UI`, `R8UI`, or `GL_RGB` [S3, unofficial][S4, unofficial].
+- Data type: e.g., `GL_UNSIGNED_BYTE`, `GL_UNSIGNED_SHORT` [S3, unofficial][S4, unofficial].
 
 **Outputs:**
-- GPU-accessible 3D texture object bound to a texture unit.
-- Rendered image or intermediate buffers sampled from this texture.
+- A GPU texture object containing the voxel data.
+- Sampled values $V(\mathbf{p})$ at arbitrary 3D coordinates $\mathbf{p} = (x, y, z)$ using tri-linear interpolation [S2, unofficial].
 
 **Data Structures:**
-The core data structure is the GPU 3D texture object. Its layout is managed by the graphics driver and hardware, typically optimized for cache locality using methods more sophisticated than Z-order curves [S1, unofficial]. The logical coordinate space $(x, y, z)$ maps to physical memory addresses such that neighboring voxels are likely to reside in the same cache line or memory transaction [S1, unofficial].
+- The 3D texture is stored as a contiguous block of memory. The hardware manages the mapping from logical 3D coordinates to physical memory addresses, typically using hardware-specific interleaving to ensure cache efficiency [S7154-memory-organization-and-layout.md].
+- For cube-tiling variants, cube textures are grouped into a grid of $4C \times 4C \times MC$, where $M$ is the number of cube sets and $C$ is the cube side length [S2, unofficial].
 
 **Steps:**
-1. **Allocation:** Allocate a 3D texture object on the GPU with dimensions $(D_x, D_y, D_z)$ and the specified internal format [S1, unofficial][S3, unofficial][S4, unofficial].
-2. **Data Upload:** Transfer the host-side volumetric data array to the GPU texture memory. This is typically done via a single bulk copy operation (e.g., `glTexImage3D` or `glTexSubImage3D`) [S1, unofficial][S3, unofficial].
-3. **Configuration:** Set texture parameters:
-   - Minification/Magnification filters to `GL_LINEAR` for tri-linear interpolation [S3, unofficial].
-   - Wrap mode to `GL_CLAMP_TO_EDGE` to handle boundary conditions [S1, unofficial][S3, unofficial].
-4. **Sampling:** In the fragment shader, compute the world-to-volume coordinate transformation. Sample the texture using the transformed coordinates. The hardware performs tri-linear interpolation automatically if filters are set to linear [S2, unofficial][S3, unofficial].
-5. **Rendering:** Use the sampled values (color, opacity, gradient) for shading, transfer function application, and compositing [S2, unofficial].
-
-**Formulas:**
-- **Tri-linear Interpolation:** For a sample point $\mathbf{p} = (x, y, z)$ within a voxel defined by corners $\mathbf{v}_{ijk}$, the interpolated value $V(\mathbf{p})$ is computed by linearly interpolating along each axis. Let $\alpha = x - \lfloor x \rfloor$, $\beta = y - \lfloor y \rfloor$, $\gamma = z - \lfloor z \rfloor$. The hardware performs this efficiently [S3, unofficial].
-- **Coordinate Transformation:** $\mathbf{p}_{tex} = \frac{\mathbf{p}_{world} - \mathbf{p}_{origin}}{\mathbf{p}_{scale}}$, where $\mathbf{p}_{origin}$ is the volume's lower-left-back corner and $\mathbf{p}_{scale}$ is the voxel size [S2, unofficial][S3, unofficial].
+1. **Texture Creation:** Allocate a 3D texture object on the GPU with dimensions matching the volume data $D_x \times D_y \times D_z$ [S4, unofficial].
+2. **Data Upload:** Transfer the voxel data from host memory to the GPU texture memory. The data is stored in the specified internal format (e.g., `R16UI`) and type (e.g., `UNSIGNED_SHORT`) [S4, unofficial].
+3. **Sampling Configuration:** Set texture filtering modes to enable tri-linear interpolation. This ensures that values at non-integer coordinates are interpolated from the 8 nearest neighbors [S3, unofficial][S7154-memory-organization-and-layout.md].
+4. **Coordinate Transformation:** During rendering, transform world coordinates $\mathbf{p}_{world}$ to texture coordinates $\mathbf{p}_{tex} \in [0, 1]^3$. For cube-tiling methods, calculate the cube index from the voxel center position and a render scale parameter, then retrieve the relative position within the cube [S2, unofficial].
+5. **Hardware Sampling:** The GPU texture unit performs the tri-linear interpolation:
+   $$ V(\mathbf{p}) = \sum_{i,j,k \in \{0,1\}} w_i w_j w_k V_{ijk} $$
+   where $V_{ijk}$ are the 8 neighboring voxel values and $w_i, w_j, w_k$ are the interpolation weights based on the fractional part of $\mathbf{p}$ [G].
+6. **Post-Sampling Processing:** Apply transfer functions, lighting effects, and silhouette enhancement to the sampled values to compute the final color [S2, unofficial].
 
 **Parameters:**
-- **Filtering:** `GL_LINEAR` (tri-linear) is standard for smooth rendering; `GL_NEAREST` for discrete voxel visualization [S3, unofficial].
-- **Internal Format:** Must match the data type (e.g., `GL_RGBA8` for 8-bit RGBA, `R16UI` for 16-bit unsigned integer) [S4, unofficial].
-- **Rendering Scale:** In some illustrative systems, a scale parameter $S$ is used to map cube textures to voxel numbers, allowing for stylistic exaggeration [S2, unofficial].
+- **Rendering Scale:** A parameter for each cube set corresponding to the voxel numbers in each direction, used to scale the cube textures [S2, unofficial].
+- **Texture Format:** `GL_RGB` with `GL_UNSIGNED_BYTE` texels is used for output textures in some implementations [S3, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Boundary Conditions:** Without `GL_CLAMP_TO_EDGE`, sampling at the volume edges may return undefined or wrapped values, causing artifacts [S3, unofficial].
-- **Memory Limits:** 3D textures have maximum dimension limits (e.g., 2048 or 4096 per axis depending on hardware). Large volumes require tiling, bricking, or sparse techniques [S1, unofficial][S7154-memory-organization-and-layout.md].
-- **Precision:** Floating-point textures (e.g., `GL_RGBA32F`) offer higher precision but consume more memory and bandwidth. Integer formats are faster but limited in dynamic range [S4, unofficial].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-# Pseudocode for setting up and sampling a 3D texture in OpenGL-like API
-def setup_3d_texture(volume_data, dimensions, internal_format):
-    """
-    volume_data: numpy array or buffer of shape (Dx, Dy, Dz)
-    dimensions: tuple (Dx, Dy, Dz)
-    internal_format: e.g., 'GL_RGBA8', 'R16UI'
-    """
-    # 1. Generate texture ID
-    tex_id = glCreateTexture(GL_TEXTURE_3D)
-    
-    # 2. Allocate and upload data
-    # Note: Actual API call depends on language binding, conceptually:
-    glTexImage3D(
-        target=GL_TEXTURE_3D,
-        level=0,
-        internalFormat=internal_format,
-        width=dimensions[0],
-        height=dimensions[1],
-        depth=dimensions[2],
-        border=0,
-        format=GL_RGBA, # or GL_RED, etc.
-        type=GL_UNSIGNED_BYTE, # or GL_FLOAT, GL_UNSIGNED_SHORT
-        data=volume_data
-    )
-    
-    # 3. Set parameters
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE)
-    
-    return tex_id
-
-def sample_volume(tex_id, world_position, volume_origin, voxel_size):
-    """
-    Sample the 3D texture at a given world position.
-    """
-    # Transform world position to texture coordinates
-    tex_coords = (world_position - volume_origin) / voxel_size
-    
-    # Clamp to [0, 1] range for normalized device coordinates
-    # Note: glSample3D or equivalent shader function handles normalization
-    # and interpolation.
-    color = texture(tex_id, tex_coords)
-    
-    return color
-```
+- **Memory Limits:** Standard 3D textures have maximum dimension limits (e.g., 2048 voxels per dimension). Datasets exceeding these limits require sparse techniques like [Sparse Volume Texture (SVT)](7011-sparse-volume-texture-svt.md) [S7154-memory-organization-and-layout.md].
+- **Precision:** Using 8-bit or 16-bit formats may introduce quantization artifacts. 32-bit floats are recommended for high-precision data [G].
+- **Boundary Conditions:** Hardware sampling may clamp or wrap coordinates. Ensure texture coordinates are correctly normalized to $[0, 1]$ to avoid sampling out-of-bounds data [G].
 
 ## Subtopics
 
 ### [Volume Texture Creation](1857-volume-texture-creation.md)
-Allocates GPU memory and loads volumetric data into GPU-accessible texture resources. It handles high-level allocation, data transfer, and object lifecycle, differing from [Volume Texture Setup](4055-volume-texture-setup.md) which configures sampling states. It operates on dense grids, unlike [Sparse Volume Texture (SVT)](7011-sparse-volume-texture-svt.md).
+Volume Texture Creation allocates GPU memory and loads volumetric data, transfer functions, or auxiliary fields into GPU-accessible texture resources for subsequent rendering. It solves the problem of translating abstract host-side volumetric representations (dense grids, scalar fields, label maps) into hardware-ready texture objects with correct memory layouts, filtering modes, and resource flags. Unlike [Volume Texture Setup](4055-volume-texture-setup.md), which configures sampling states and format flags, this method handles the high-level allocation, data transfer, and object lifecycle. It differs from [Sparse Volume Texture (SVT)](7011-sparse-volume-texture-svt.md) by operating on dense grids.
 
 ### [PixelFlow Volume Rendering](3443-pixelflow-volume-rendering.md)
-A polygon resampling method for the PixelFlow system that allows pixel processors to manipulate 3D texture values directly. It replaces precomputed shading coefficients with on-the-fly Phong lighting calculations derived from interpolated volume gradients, enabling general image-space lighting.
+PixelFlow Volume Rendering is a polygon resampling method designed for the PixelFlow graphics system that overcomes the lighting and data size limitations of the RealityEngine by allowing pixel processors to manipulate 3D texture values directly. It differs from its siblings by replacing precomputed shading coefficients with on-the-fly Phong lighting calculations derived from interpolated volume gradients, enabling general image-space lighting.
 
 ### [Texture Array Sampling with Alpha Discard](3993-texture-array-sampling-with-alpha-discard.md)
-Implements a fragment shader that samples a 3D texture array to retrieve voxel color and opacity. It discards fragments with alpha below a threshold to avoid rendering transparent regions, relying on hardware texture sampling rather than proxy geometry.
+This method implements a fragment shader that samples a 3D texture array to retrieve voxel color and opacity. It discards fragments with alpha below a specific threshold to avoid rendering transparent regions. It relies on hardware texture sampling to retrieve voxel data rather than generating proxy geometry for occupied voxels.
 
 ### [Ambient Occlusion Volume](4341-ambient-occlusion-volume.md)
-Stores precomputed near-field ambient occlusion factors directly in a 3D texture, optionally alongside bent normals. It approximates occlusion by computing an analytic shadow-volume-like enclosure around each polygon and applying a tunable occlusion function, eliminating runtime reconstruction costs.
+Ambient Occlusion Volume (AOV) is a method for storing precomputed near-field ambient occlusion factors directly in a 3D texture, optionally alongside bent normals, to avoid runtime reconstruction computation. It approximates the near-field ambient occlusion problem by computing an analytic shadow-volume-like enclosure around each polygon and applying a tunable occlusion function within that region. Unlike Kontkanen and Laine’s approach, which requires runtime reconstruction of occlusion factors, AOV eliminates this cost by baking the factors into the texture. It differs from disk-based methods (e.g., Bunnell, Hoberock/Jia) and Shopf et al.’s bounding cube method by using tight dynamic bounding volumes and partial coverage to avoid over-estimating occlusion and double-occlusion artifacts.
 
 ### [Hardware Volume Rendering Pipeline with Pixel Textures](5641-hardware-volume-rendering-pipeline-with-pixel-textures.md)
-Implements direct volume rendering on hardware supporting 3D texture mapping by using pixel textures (dependent textures) for classification and shading lookups. It rasterizes slabs of parallel planes and uses hardware texture interpolation, differing from [3D Texture Proxy Geometry](870-3d-proxy-geometry.md) which rasterizes geometry.
+This method implements direct volume rendering on hardware supporting 3D texture mapping (e.g., SGI V-series, NVIDIA GeForce3) by using pixel textures (dependent textures) to perform classification and shading lookups. It solves the problem of applying complex, multi-dimensional transfer functions and lighting models efficiently by decoupling data storage from shading computation. Unlike [3D Texture Proxy Geometry](870-3d-proxy-geometry.md), which rasterizes geometry, this method rasterizes slabs of parallel planes and uses hardware texture interpolation to sample pre-computed color/opacity values. It differs from [PixelFlow Volume Rendering](3443-pixelflow-volume-rendering.md) by relying on fixed-function pixel texture extensions rather than custom fragment shaders.
 
 ### [Sparse Volume Texture (SVT)](7011-sparse-volume-texture-svt.md)
-Trades rendering speed for data compression by chunking voxel data into 3D tiles and storing only non-empty tiles in a physical texture, using a second volume texture as a page table. It circumvents API limits for large logical coordinate spaces but incurs overhead from padding and mipmap hierarchies.
+Sparse Volume Texture (SVT) is a technique that trades rendering speed for data compression by chunking voxel data into 3D tiles and storing only non-empty tiles in a physical texture, using a second volume texture as a page table for lookup. It solves the problem of rendering large volume datasets that exceed the maximum dimension limits of standard 3D textures (e.g., 2048 voxels per dimension) while managing memory footprint. Unlike dense grids, SVT circumvents API limits by mapping a large logical coordinate space onto a smaller physical texture containing only active tiles, though it incurs overhead from padding and mipmap hierarchies.
 
 ### [Memory Organization and Layout](7154-memory-organization-and-layout.md)
-Defines memory organization strategies for storing dense voxel grids in GPU texture resources, focusing on mapping linear voxel coordinates to physical memory addresses to optimize cache locality. It distinguishes between standard row-major storage and hardware-specific interleaving schemes.
+This article defines the memory organization strategies for storing dense voxel grids in GPU texture resources, focusing on how linear voxel coordinates map to physical memory addresses to optimize cache locality and bandwidth. It distinguishes between standard row-major storage, which relies on hardware caching for spatial coherence, and hardware-specific interleaving schemes designed to ensure that all voxels required for a single tri-linear interpolation fetch reside in distinct memory modules, allowing the entire cell to be retrieved in a single memory transaction.
 
 ### [Texture Packing and Atlas Organization](11925-texture-packing-and-atlas-organization.md)
-Encompasses techniques for consolidating multiple volumetric data sources or channels into fewer, larger texture resources to optimize memory bandwidth and reduce GPU state changes. It focuses on logical layout and allocation rather than low-level storage format.
+Texture Packing and Atlas Organization encompasses techniques for consolidating multiple volumetric data sources or channels into fewer, larger texture resources to optimize memory bandwidth, reduce GPU state changes, and emulate 3D texture support on hardware lacking native capabilities. It differs from [3D Texture Storage and Sampling](3064-3d-texture-storage-and-sampling.md) by focusing on the logical layout and allocation strategy of the texture data rather than the low-level storage format or sampling hardware.
 
 ### OpenGL Texture Output
-A method to output rendering results using OpenGL texture objects for efficiency. It initializes texture objects with format `GL_RGB` and texel format `GL_UNSIGNED_BYTE`, mapping them to a screen display plane via a `GL_QUAD` polygon [S3, unofficial].
+A method to output rendering results using OpenGL texture objects for efficiency [S3, unofficial]. It initializes texture objects in the `DrawModel` class with format `GL_RGB` and texel format `GL_UNSIGNED_BYTE` [S3, unofficial]. A polygon (`GL_QUAD`) is defined to map the texture onto the screen display plane [S3, unofficial].
 
 ### Original Volume Rendering
-A rendering mode that loads the entire volume dataset into a single 3D texture, bypassing page tables and masking. It uses internal formats like `R16UI` or `R8UI` and simplifies shader logic but requires the entire volume to fit in GPU memory, unlike compact mode [S4, unofficial].
+A rendering mode that loads the entire volume dataset into a single 3D texture, bypassing page tables and masking, used for comparison or when the volume fits within memory constraints [S4, unofficial]. It loads original file data into an array, creates a `TEXTURE_3D` with dimensions `source.dimensions_xyz`, internal format `R16UI` or `R8UI`, and type `UNSIGNED_SHORT` or `UNSIGNED_BYTE` [S4, unofficial]. Unlike compact mode, it does not use page tables or masks, simplifying shader logic but requiring the entire volume to fit in GPU memory [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Sampling is $O(1)$ per voxel access due to hardware interpolation and caching [S1, unofficial]. The overall rendering time depends on the number of samples per ray and the resolution [S3, unofficial].
-- **Memory Complexity:** $O(D_x \times D_y \times D_z)$, where $D_x, D_y, D_z$ are the volume dimensions. Memory usage is proportional to the internal format size (e.g., 4 bytes per voxel for RGBA8) [S1, unofficial][S3, unofficial].
-- **Measured Performance:** Storing voxels in a 3D texture can achieve 121 FPS at a $2048^3$ grid resolution and $1000 \times 1000$ screen resolution, a 10x improvement over the original 12 FPS achieved with Z-order curves [S1, unofficial].
-- **Strengths:** High data locality, hardware-accelerated tri-linear interpolation, efficient memory bandwidth utilization [S1, unofficial][S3, unofficial].
-- **Limitations:** Limited by maximum texture dimensions (e.g., 2048 or 4096 per axis), making it unsuitable for very large volumes without tiling or sparsity techniques [S1, unofficial][S7154-memory-organization-and-layout.md].
-- **When to Use:** When the volume fits within GPU memory limits and high-performance rendering is required [S1, unofficial][S4, unofficial].
-- **When Not to Use:** For volumes exceeding hardware texture limits or when memory efficiency is critical for sparse data [S1, unofficial][S7011-sparse-volume-texture-svt.md].
+- **Time Complexity:** Sampling is $O(1)$ per voxel access due to hardware interpolation [S1, unofficial].
+- **Memory Complexity:** $O(D_x \cdot D_y \cdot D_z)$ for dense storage [S7154-memory-organization-and-layout.md].
+- **Performance:** Storing voxels in a 3D texture can yield a 10x improvement over CPU-side or naive GPU array storage, achieving 121 FPS at $2048^3$ grid resolution and 1000x1000 screen resolution, compared to 12 FPS [S1, unofficial].
+- **Strengths:** High data locality, hardware-accelerated interpolation, efficient cache usage [S1, unofficial][S7154-memory-organization-and-layout.md].
+- **Limitations:** Limited by maximum texture dimensions (e.g., 2048 voxels per dimension) [S7154-memory-organization-and-layout.md]. Not suitable for very large datasets without sparse techniques [S7154-memory-organization-and-layout.md].
+- **When to Use:** When the volume fits within GPU memory limits and high-performance sampling is required [S4, unofficial].
+- **When Not to Use:** For datasets exceeding texture dimension limits or when memory efficiency is critical for sparse data [S7154-memory-organization-and-layout.md].
 
 ## Background
-The method originated with the advent of GPU-based volume rendering in the late 1990s and early 2000s, leveraging 3D texture mapping extensions in OpenGL and Direct3D. Early systems like those on SGI V-series and NVIDIA GeForce3 used 3D textures for direct volume rendering [S1, unofficial][S2, unofficial][S3, unofficial]. The approach has been widely adopted in scientific visualization and medical imaging due to its simplicity and performance [S1, unofficial][S2, unofficial]. Recent developments focus on optimizing memory organization and handling larger datasets through sparse or tiled approaches [S1, unofficial][S7154-memory-organization-and-layout.md].
+The method originated with the need to accelerate volume rendering on GPUs by leveraging hardware texture units [S1, unofficial]. Early implementations used CPU-side storage with Z-order curves, but switching to GPU 3D textures provided significant performance gains [S1, unofficial]. The technique is widely used in direct volume rendering pipelines, particularly in systems supporting 3D texture mapping (e.g., SGI V-series, NVIDIA GeForce3) [S1, unofficial][S2, unofficial][S3, unofficial]. It is also used in example-based volume illustrations and importance-driven volume rendering [S2, unofficial][S3, unofficial].
 
 ## Sources
 [S1] This Tiny Algorithm Can Render BILLIONS of Voxels in Real Time, https://www.youtube.com/watch?v=ztkh1r1ioZo, fetched 2026-10-25 (unofficial)

@@ -2,94 +2,109 @@
 Also called: Divergence of Gradient, Laplacian Field Transformation, Laplacian of Gaussian (LoG) Scale Detection, Normalized Laplacian Detection, Second Derivative Field
 
 ## Overview
-Laplacian Grid Computation transforms a scalar field $f(x,y,z)$ into a new scalar field representing the Laplacian $\nabla^2 f$, which is the divergence of the gradient [S1]. This operation highlights boundaries and suppresses homogeneous interiors by detecting regions where the gradient changes [S1]. It differs from sibling methods like [Mean Curvature Grid Computation](3126-mean-curvature-grid-computation.md) by computing the trace of the Hessian (sum of second derivatives) rather than the mean curvature, and from [Divergence Grid Computation](3151-divergence-grid-computation.md) by operating on a scalar field's gradient rather than a general vector field [G].
+Laplacian Grid Computation transforms a scalar field $f(x,y,z)$ into a new scalar field $\nabla^2 f$ by applying the Laplace operator, which is defined as the divergence of the gradient [S1]. This operation highlights boundaries and structural features while suppressing homogeneous interiors, as areas with constant gradient change yield a Laplacian value of zero [S1]. It differs from sibling methods like [Mean Curvature Grid Computation](3126-mean-curvature-grid-computation.md) by not requiring normalization by gradient magnitude, and from [Divergence Grid Computation](3151-divergence-grid-computation.md) by operating on a scalar field's second derivatives rather than a vector field's first derivatives.
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A scalar volume grid $f$ with active voxels [S2, unofficial].
-- Output: A scalar volume grid $L$ containing $\nabla^2 f$ at each active voxel [S2, unofficial].
+- Input: A scalar grid $f$ defined on a discrete domain with active voxels.
+- Output: A scalar grid $L$ where each active voxel contains the Laplacian $\nabla^2 f$.
 
 **Data Structures:**
-- `GridTree`: The spatial index structure (e.g., octree or sparse hash map) defining the domain of active voxels [G].
-- `Stencil`: A temporary structure holding the values of the center voxel and its 6 immediate neighbors (up, down, left, right, front, back) in index space [G].
+- `Grid`: Contains voxel values, topology, and voxel spacing $(\Delta x, \Delta y, \Delta z)$.
+- `Stencil`: A mechanism to access neighbor values at integer offsets relative to a center coordinate $c$ [G].
 
 **Steps:**
-1. Initialize a result grid $L$ with the same topology as the input grid $f$, initialized to a background value of zero [S2, unofficial].
-2. Iterate over all active coordinates $c = (x, y, z)$ in the input grid's `GridTree` [S2, unofficial].
-3. For each coordinate $c$, construct a local stencil by fetching the value $f(c)$ and its immediate neighbors along the three axes: $f(x\pm1, y, z)$, $f(x, y\pm1, z)$, $f(x, y, z\pm1)$ [G].
-   - *Boundary Handling*: If a neighbor is inactive or out of bounds, apply clamping (repeat edge value), zero-padding, or obstacle velocity substitution as defined by the parent method's boundary rules [G].
-4. Compute the Laplacian value using the 6-point central difference stencil [S2, unofficial]:
-   $$ \nabla^2 f(x, y, z) \approx f(x+1, y, z) + f(x-1, y, z) + f(x, y+1, z) + f(x, y-1, z) + f(x, y, z+1) + f(x, y, z-1) - 6f(x, y, z) $$
-   This corresponds to the discrete approximation of $\frac{\partial^2 f}{\partial x^2} + \frac{\partial^2 f}{\partial y^2} + \frac{\partial^2 f}{\partial z^2}$ with unit spacing [S1].
-5. Store the computed value in $L$ at coordinate $c$ [S2, unofficial].
-6. Build the final result grid using the computed data, the original voxel size, and the zero background [S2, unofficial].
+1. Initialize a `GradStencil` with the input grid's topology [S2, unofficial].
+2. Iterate over all active voxels $c$ in the grid tree [S2, unofficial].
+3. Move the stencil to the current coordinate $c$ [S2, unofficial].
+4. Compute the Laplacian scalar using the 6-point stencil (pure second derivatives along axes) [S2, unofficial].
+5. Store the result in a dictionary or output grid keyed by coordinate [S2, unofficial].
+6. Build the result grid using the computed data, a background value of zero, and the original grid's voxel size [S2, unofficial].
+
+**Formulas:**
+The Laplacian is the sum of the pure second partial derivatives [S1]:
+$$ \nabla^2 f(x, y, z) = \frac{\partial^2 f}{\partial x^2} + \frac{\partial^2 f}{\partial y^2} + \frac{\partial^2 f}{\partial z^2} $$
+
+Using central differences with unit spacing ($\Delta x = \Delta y = \Delta z = 1$) for the pure second derivative [G]:
+$$ \frac{\partial^2 f}{\partial x^2} \approx f(x+1, y, z) - 2f(x, y, z) + f(x-1, y, z) $$
+
+If physical voxel spacing is not unity, the differences must be divided by the squared spacing terms [G]:
+$$ \frac{\partial^2 f}{\partial x^2} \approx \frac{f(x+\Delta x) - 2f(x) + f(x-\Delta x)}{\Delta x^2} $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_laplacian_grid(input_grid, grid_tree, spacing=(1.0, 1.0, 1.0)):
+def compute_laplacian_grid(grid):
     """
-    Computes the Laplacian grid from a scalar volume using a 6-point stencil.
-    input_grid: dict mapping (x,y,z) -> float value
-    grid_tree: object providing iteration over active coordinates
-    spacing: tuple (dx, dy, dz) for physical voxel dimensions [G]
+    Computes the Laplacian grid for a scalar volume.
+    grid: Object with .values (dict or array), .spacing (tuple dx, dy, dz), 
+          and .active_voxels (iterable of coordinates).
+    Returns: A new grid object containing the Laplacian values.
     """
-    output_grid = {}
-    dx, dy, dz = spacing
+    dx, dy, dz = grid.spacing
+    result_values = {}
     
-    # 6-point stencil offsets in index space
-    offsets = [
-        (1, 0, 0), (-1, 0, 0),
-        (0, 1, 0), (0, -1, 0),
-        (0, 0, 1), (0, 0, -1)
-    ]
+    # Precompute inverse squared spacings for normalization
+    inv_dx2 = 1.0 / (dx * dx)
+    inv_dy2 = 1.0 / (dy * dy)
+    inv_dz2 = 1.0 / (dz * dz)
     
-    for c in grid_tree.active_coordinates():
+    for c in grid.active_voxels:
         x, y, z = c
-        center_val = input_grid.get(c, 0.0) # [G] Zero-padding default
         
-        # Sum of neighbors minus 6*center, scaled by squared spacing [G]
-        laplacian_sum = -6.0 * center_val / (dx*dx + dy*dy + dz*dz)
+        # Access neighbors using a helper that handles boundary conditions
+        # (e.g., clamping, zero-padding, or exclusion as per parent principles)
+        f_center = grid.value_at(x, y, z)
+        f_xp = grid.value_at(x + dx, y, z)
+        f_xm = grid.value_at(x - dx, y, z)
+        f_yp = grid.value_at(x, y + dy, z)
+        f_ym = grid.value_at(x, y - dy, z)
+        f_zp = grid.value_at(x, y, z + dz)
+        f_zm = grid.value_at(x, y, z - dz)
         
-        for dxi, dyi, dzi in offsets:
-            neighbor_coord = (x + dxi, y + dyi, z + dzi)
-            # [G] Boundary handling: fetch neighbor value, apply clamping/zero-padding per parent rules
-            neighbor_val = input_grid.get(neighbor_coord, 0.0)
-            laplacian_sum += neighbor_val / (dx*dx + dy*dy + dz*dz)
-            
-        output_grid[c] = laplacian_sum
+        # Compute second derivatives
+        d2f_dx2 = (f_xp - 2.0 * f_center + f_xm) * inv_dx2
+        d2f_dy2 = (f_yp - 2.0 * f_center + f_ym) * inv_dy2
+        d2f_dz2 = (f_zp - 2.0 * f_center + f_zm) * inv_dz2
         
-    return output_grid
+        # Sum for Laplacian
+        laplacian = d2f_dx2 + d2f_dy2 + d2f_dz2
+        
+        result_values[c] = laplacian
+        
+    # Build result grid
+    return Grid(values=result_values, background=0.0, spacing=grid.spacing)
 ```
 
-**Parameters:**
-- Voxel spacing: Assumed to be unit spacing in index space [G]. If physical spacing $\Delta x, \Delta y, \Delta z$ is used, the formula must be divided by the respective squared spacing terms [G]. Not given in the sources for the basic index-space implementation [G].
-
-**Edge Cases and Pitfalls:**
-- **Homogeneous Regions**: In areas where the gradient is constant, $\nabla^2 f$ is zero, transforming these areas to homogeneous values [S1].
-- **Noise Sensitivity**: The Laplacian is sensitive to noise [G]. Using the first derivative field as input is less appropriate for general cases because extrema are not clear boundary indicators and fail to distinguish objects with similar intensities [S1].
-- **Boundary Artifacts**: Inactive neighbors or grid edges must be resolved carefully [G]. Incorrect boundary handling can introduce artificial boundaries or suppress real ones [G].
+**Parameters and Edge Cases:**
+- **Voxel Spacing**: Must be provided to normalize derivatives correctly [G].
+- **Boundary Handling**: Neighbors outside the active domain require specific handling (clamping, zero-padding, or exclusion) as defined in the parent [Second Derivative Computation](6353-second-derivative-computation.md).
+- **Homogeneity**: Areas where the gradient changes constantly yield $\nabla^2 f = 0$, effectively suppressing homogeneous regions [S1].
 
 ## Subtopics
 
 ### [GPU Laplacian Scale-Space Maxima Detection](5852-gpu-laplacian-scale-space-maxima-detection.md)
-Detects local maxima of the Laplacian across a scale space to identify blob-like structures. It merges scale-space diffusion and maxima detection into a single pass, avoiding full scale-space pyramid storage. Choose when memory is constrained and blob detection is required.
+Detects local maxima of the Laplacian across a scale space to identify blob-like structures, merging diffusion and detection into a single pass to save GPU memory.
 
 ### [Scale Field Computation](6538-scale-field-computation.md)
-Estimates a 3D scalar field encoding local feature size using iterative non-linear diffusion. Choose when sub-voxel scale detection and continuous scale representation are needed for size-based transfer functions.
+Estimates a 3D scalar field encoding local feature size using iterative non-linear diffusion, allowing sub-voxel scale detection without subsampling artifacts.
+
+### [Scale Space Construction](8275-scale-space-construction.md)
+Generates a continuous multi-scale representation by solving the linear diffusion equation, extending the Laplacian operator into a temporal process.
 
 ## Operating characteristics
-- **Time Complexity**: $O(N)$, where $N$ is the number of active voxels, as each voxel requires a constant number of neighbor lookups and arithmetic operations [G].
-- **Memory Complexity**: $O(N)$ for the output grid, plus $O(1)$ auxiliary space per voxel during iteration [G].
-- **Performance**: The 6-point stencil is computationally inexpensive and highly parallelizable [G]. Performance is limited by memory bandwidth when accessing neighbor values in sparse structures [G].
-- **Strengths**: Simple implementation, effective for boundary detection, suppresses homogeneous regions [G].
-- **Limitations**: Sensitive to noise [G]; linear diffusion can cause nearby objects to merge into a single blob before detection, leading to inaccurate scale maxima localization [S3, unofficial]. Non-linear conductivity filters can mitigate this but add complexity [S3, unofficial].
-- **When to use**: When boundary structure is the primary feature of interest, or as a component in scale-space analysis [G].
-- **When not to use**: When noise is significant and not pre-filtered, or when preserving homogeneous internal structure is critical [G].
+- **Time Complexity**: $O(N)$ where $N$ is the number of active voxels, as each voxel requires a constant number of neighbor accesses and arithmetic operations.
+- **Memory Complexity**: $O(N)$ to store the output grid.
+- **Strengths**: Effectively highlights boundaries and structural features while suppressing homogeneous interiors [S1]. Simple to implement using standard finite difference stencils.
+- **Limitations**: Sensitive to noise, as second derivatives amplify high-frequency components. Linear diffusion can cause nearby objects to merge into a single blob before detection, leading to inaccurate scale localization if used in scale-space contexts [S3, unofficial].
+- **When to use**: When boundary detection or structural feature extraction is required, or as a component in scale-space analysis.
+- **When not to use**: When noise robustness is critical without prior smoothing, or when vector field divergence is needed instead of scalar Laplacian.
 
 ## Background
-The Laplacian operator, defined as the divergence of the gradient, has origins in vector calculus and partial differential equations [G]. In volume rendering, it is used to extract boundary structures and classify materials based on their second-order derivative properties [S1]. The concept of using the Laplacian for blob detection and scale-space analysis was formalized in the context of computer vision and scientific visualization, particularly in the work on Size-based Transfer Functions [S3, unofficial]. The method is a fundamental tool in volume data analysis for identifying features based on their local curvature properties [G].
+The Laplacian operator is defined as the divergence of the gradient [S1]. The divergence of a vector field $F$ was originally defined by a limit of the surface integral:
+$$ \nabla \cdot F \equiv \lim_{V \to 0} \frac{\oint_S F \cdot ds}{V} $$
+where $S$ is the closed infinitesimal boundary surface surrounding volume $V$ [S1]. In the context of scalar fields, this becomes the sum of second partial derivatives [S1]. The method is foundational for scale-space analysis, where the normalized Laplacian $t\nabla^2 L$ is used to detect blobs at multiple scales [S3, unofficial].
 
 ## Sources
 [S1] Boundary-structure-aware transfer functions for volume classification, https://doi.org/10.1145/3139295.3139306, fetched 2026-10-31

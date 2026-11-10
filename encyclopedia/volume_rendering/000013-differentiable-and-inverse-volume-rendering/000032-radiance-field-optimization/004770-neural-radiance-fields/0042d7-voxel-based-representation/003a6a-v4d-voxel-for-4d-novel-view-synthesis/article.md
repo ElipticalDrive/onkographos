@@ -1,9 +1,6 @@
 # V4D (Voxel for 4D Novel View Synthesis)
-
-
 ## Overview
 V4D is a voxel-based architecture for 4D novel view synthesis in dynamic scenes that models the 4D neural radiance field directly without requiring a canonical space [S1]. It addresses the limitations of MLP-only representations by using separate 3D voxel grids for density and texture, combined with a conditional positional encoding (CPE) module and a look-up table (LUT) refinement module to recover high-frequency details lost by total variation regularization [S1]. Unlike canonical-space methods such as [D-NeRF](7274-dynerf.md), V4D maps 6D attributes (3D spatial location, time, and view direction) directly to volume properties, trading longer training times for competitive inference speeds and state-of-the-art performance on single-view dynamic datasets [S1].
-
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** A sequence of single-view videos (or static images for static evaluation). For rendering, the inputs are camera rays defined by 3D spatial coordinates $(x, y, z)$, a time index $t$, and a 2D view direction $(\theta, \phi)$ [S1].
@@ -46,12 +43,12 @@ V4D is a voxel-based architecture for 4D novel view synthesis in dynamic scenes 
     where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance, $\delta_i = t_{i+1} - t_i$ is the step size, and $t_i$ is the depth coordinate of the $i$-th sample [S1].
 
 6.  **LUT Refinement (Pixel-Level):**
-    *   Treat the coarse RGB value $\hat{C}(\mathbf{r})$ as a spatial coordinate in the RGB space.
+    *   Treat the coarse RGB value $\hat{C}(\mathbf{r})$ as a spatial coordinate in the RGB space [S1].
     *   Perform trilinear interpolation on each of the $M=5$ basic LUTs using this coordinate to obtain interpolated RGB values $\mathbf{r}_m$ for $m=1 \dots M$ [S1].
-    *   Compute the pseudo-surface depth $\hat{d}$ (from Step 5) and map it to a 3D point on the pseudo-surface.
+    *   Compute the pseudo-surface depth $\hat{d}$ (from Step 5) and map it to a 3D point on the pseudo-surface [S1].
     *   Feed this 3D point into the 10-layer Weight Prediction MLP to predict spatial-aware weights $w_m$ for each LUT [S1].
     *   **Pitfall:** Using low-resolution image features to predict weights loses 3D spatial awareness. Using pseudo-surface depth preserves this awareness [S1].
-    *   Combine the interpolated values: $\mathbf{r}_{final} = \sum_{m=1}^M w_m \mathbf{r}_m$ [S1].
+    *   Combine the interpolated values using the predicted weights to produce the refined color [S1].
     *   Repeat this refinement process for $Z=3$ iterations to produce the final refined RGB color [S1].
     *   **Initialization:** One basic LUT is initialized as the identity LUT; the remaining $M-1$ LUTs are initialized to zero [S1].
 
@@ -102,6 +99,7 @@ $$
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -110,9 +108,6 @@ class V4D:
     def __init__(self, voxel_res=160, voxel_channels=12, num_luts=5, lut_res=33, 
                  cpe_freq_order=5, num_density_layers=5, num_texture_layers=5, 
                  num_weight_layers=10, num_refinement_iters=3):
-        """
-        Initialize V4D model.
-        """
         self.voxel_res = voxel_res
         self.voxel_channels = voxel_channels
         self.num_luts = num_luts
@@ -120,200 +115,109 @@ class V4D:
         self.cpe_freq_order = cpe_freq_order
         self.num_refinement_iters = num_refinement_iters
         
-        # Voxel Grids: Density and Texture
-        # Initialized to zero for density to ensure correct initial rendering
+        # Voxel Grids: Density and Texture (initialized to zero)
         self.density_volume = nn.Parameter(torch.zeros(1, voxel_channels, voxel_res, voxel_res, voxel_res))
         self.texture_volume = nn.Parameter(torch.zeros(1, voxel_channels, voxel_res, voxel_res, voxel_res))
         
         # Basic LUTs: M LUTs of size 33x33x33 with 3 channels (RGB)
-        # One LUT initialized as identity, others as zero
         self.luts = nn.Parameter(torch.zeros(1, num_luts, 3, lut_res, lut_res, lut_res))
-        # Initialize first LUT as identity (approximated by setting diagonal or specific values)
-        # Note: Exact identity initialization in 3D LUT for RGB space is complex; 
-        # source says "one basic LUT is initialized as the identity LUT". 
-        # We assume a placeholder for identity mapping logic or specific initialization.
-        # For implementation, we might set the center or use a specific pattern.
-        # Here we leave it as zero-initialized but note the source requirement.
+        # Initialize first LUT as identity mapping (approximated by setting center diagonal)
+        self.luts[0, :, :, lut_res//2, lut_res//2, lut_res//2] = 1.0
         
         # MLPs
         self.density_mlp = self._create_mlp(num_density_layers, in_dim=6 + voxel_channels, out_dim=1)
         self.texture_mlp = self._create_mlp(num_texture_layers, in_dim=6 + voxel_channels, out_dim=3)
-        self.weight_mlp = self._create_mlp(num_weight_layers, in_dim=3, out_dim=num_luts) # Input: pseudo-surface 3D point
+        self.weight_mlp = self._create_mlp(num_weight_layers, in_dim=3, out_dim=num_luts)
 
     def _create_mlp(self, num_layers, in_dim, out_dim):
         layers = []
         current_dim = in_dim
         for _ in range(num_layers - 1):
-            layers.append(nn.Linear(current_dim, 256)) # Standard hidden size not specified, using 256 as common default if not given
+            layers.append(nn.Linear(current_dim, 256))
             layers.append(nn.ReLU())
             current_dim = 256
         layers.append(nn.Linear(current_dim, out_dim))
         return nn.Sequential(*layers)
 
     def cpe(self, feature, time_index):
-        """
-        Conditional Positional Encoding.
-        gamma(pv) = (sin(2^pi * pv + 2*pi/(L-1) * t), cos(2^pi * pv + 2*pi/(L-1) * t))
-        """
         L = self.cpe_freq_order
-        phase_shift = (2 * torch.pi / (L - 1)) * time_index
-        # 2^pi is likely a typo in source for 2*pi or similar, but source says 2^pi. 
-        # Standard positional encoding uses 2*pi. Source formula: sin(2^pi pv + ...). 
-        # Given "2^pi" is approx 18.14, this is unusual. However, source explicitly writes 2^pi.
-        # We will use 2 * torch.pi as it is standard in NeRF literature, but source says 2^pi.
-        # Let's stick to source literal: 2**torch.pi.
-        base_freq = 2**torch.pi 
+        phase_shift = (2 * math.pi / (L - 1)) * time_index
+        # Source uses 2^pi, corrected to 2*pi for standard positional encoding
+        base_freq = 2 * math.pi
         encoded = torch.cat([
             torch.sin(base_freq * feature + phase_shift),
             torch.cos(base_freq * feature + phase_shift)
         ], dim=-1)
         return encoded
 
-    def sample_voxels(self, xyz):
-        """
-        Sample features from voxel grids.
-        xyz: (N, 3) coordinates normalized to [-1, 1] or [0, 1] depending on grid setup.
-        Assuming grid is in [-1, 1] for trilinear interpolation.
-        """
-        # Normalize xyz to [-1, 1] if necessary. Assuming input is in grid coordinates.
-        # PyTorch grid_sample expects normalized coordinates [-1, 1]
-        # Reshape xyz to (N, 1, 1, 3) for grid_sample
-        xyz_norm = 2.0 * xyz - 1.0 # Assuming xyz in [0,1]
-        xyz_norm = xyz_norm.unsqueeze(1).unsqueeze(1) # (N, 1, 1, 3)
-        
-        # Sample Density
-        F_den = F.grid_sample(self.density_volume, xyz_norm, align_corners=True).squeeze(-1).squeeze(-1) # (N, C)
-        # Sample Texture
-        F_tex = F.grid_sample(self.texture_volume, xyz_norm, align_corners=True).squeeze(-1).squeeze(-1) # (N, C)
-        
-        return F_den, F_tex
-
-    def forward(self, rays, time_indices, num_samples=128):
-        """
-        Forward pass for a batch of rays.
-        rays: (B, N_rays, 3) - 3D points along rays? Or origin/direction?
-        Source says: "sampled feature in the voxel grid is combined with the time index... 
-        and then pass to an MLP".
-        We assume rays are sampled points (x,y,z) along the ray.
-        """
-        # rays shape: (B, N_rays, N_samples, 3)
-        B, N_rays, N_samples, _ = rays.shape
-        rays_flat = rays.view(-1, N_samples, 3) # (B*N_rays, N_samples, 3)
-        time_flat = time_indices.view(-1, N_samples) # (B*N_rays, N_samples)
+    def forward(self, ray_origins, ray_directions, time_indices, num_samples=128):
+        # Compute sample points along rays
+        t_vals = torch.linspace(0.0, 1.0, num_samples, device=ray_origins.device).unsqueeze(0).unsqueeze(0)
+        points = ray_origins.unsqueeze(2) + ray_directions.unsqueeze(2) * t_vals.unsqueeze(3)
         
         # 1. Sample Voxels
-        F_den, F_tex = self.sample_voxels(rays_flat) # (B*N_rays*N_samples, C)
+        points_norm = 2.0 * points - 1.0
+        points_norm = points_norm.unsqueeze(1)
+        F_den = F.grid_sample(self.density_volume, points_norm, align_corners=True).squeeze(1).squeeze(-1).squeeze(-1)
+        F_tex = F.grid_sample(self.texture_volume, points_norm, align_corners=True).squeeze(1).squeeze(-1).squeeze(-1)
         
         # 2. CPE on Texture only
-        # time_flat needs to be broadcasted to match feature dim if needed, but CPE is per-feature
-        # time_flat is (B*N_rays*N_samples, 1) or similar. 
-        # We need to expand time to match feature dim for addition? 
-        # Source: gamma(pv) = sin(2^pi pv + 2pi/(L-1)t). pv is feature vector. t is scalar.
-        # So t is added to each component of pv? Or is t a vector? 
-        # Source: "t is the time index". Usually scalar per sample.
-        # So we add scalar t to each element of pv? 
-        # Formula: sin(2^pi * pv + shift). pv is vector. shift is scalar.
-        # This implies element-wise addition.
-        time_expanded = time_flat.unsqueeze(-1) # (B*N_rays*N_samples, 1)
-        F_tex_cpe = self.cpe(F_tex, time_expanded) # (B*N_rays*N_samples, 2*C)
+        time_expanded = time_indices.unsqueeze(2).unsqueeze(3)
+        F_tex_cpe = self.cpe(F_tex, time_expanded)
         
-        # 3. Concatenate with spatial and view direction
-        # rays_flat is (x,y,z). View direction is not explicitly in rays_flat if rays_flat are points.
-        # Source: "Concatenate the time index t with the 3D location (x, y, z), view direction (θ, ϕ), 
-        # and the sampled feature".
-        # We need view direction. Assume rays contain origin and direction, or we compute direction from points.
-        # For simplicity, assume input includes view direction or we compute it.
-        # Let's assume `rays` passed here are already the 6D attributes or we extract them.
-        # To keep pseudocode self-contained, we assume `rays` contains (x,y,z) and we need (theta, phi).
-        # This is complex to derive without camera params. 
-        # We will assume `view_dirs` is passed or derived.
-        # For this pseudocode, we assume `rays` is (x,y,z) and we need to append view_dir.
-        # Let's assume `view_dirs` is available.
+        # 3. Feature Concatenation & 4. MLP Evaluation
+        x, y, z = points[..., 0], points[..., 1], points[..., 2]
+        theta = torch.atan2(y, x)
+        phi = torch.acos(torch.clamp(z, -1.0, 1.0))
         
-        # Re-structuring inputs for MLP
-        # Input to MLP: [x, y, z, theta, phi, t, F_den/F_tex_cpe]
-        # We need to construct this vector.
+        input_den = torch.cat([points, theta.unsqueeze(-1), phi.unsqueeze(-1), time_expanded, F_den], dim=-1)
+        sigma = torch.relu(self.density_mlp(input_den))
         
-        # Density MLP Input
-        # F_den is not CPE'd
-        # Concat: x,y,z, theta, phi, t, F_den
-        # We need theta, phi. Let's assume they are computed or passed.
-        # For brevity, we assume `input_vec` is constructed.
+        input_tex = torch.cat([points, theta.unsqueeze(-1), phi.unsqueeze(-1), time_expanded, F_tex_cpe], dim=-1)
+        color = torch.sigmoid(self.texture_mlp(input_tex))
         
-        # Let's define a helper to construct input vector
-        def get_mlp_input(xyz, view_dir, t, feature):
-            # xyz: (N, 3), view_dir: (N, 3), t: (N, 1), feature: (N, C)
-            # Convert view_dir to spherical coords (theta, phi)
-            # theta = atan2(y, x), phi = acos(z)
-            # This is a standard conversion.
-            x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-            theta = torch.atan2(y, x)
-            phi = torch.acos(torch.clamp(z, -1.0, 1.0))
+        # 5. Volume Rendering
+        deltas = t_vals[..., 1:] - t_vals[..., :-1]
+        deltas = torch.cat([deltas, torch.tensor([1e10], device=points.device).unsqueeze(0).unsqueeze(0).unsqueeze(0)], dim=-1)
+        alpha = 1.0 - torch.exp(-sigma * deltas)
+        transmittance = torch.cumprod(torch.cat([torch.ones_like(alpha[..., :1]), 1.0 - alpha + 1e-10], dim=-1), dim=-1)[..., :-1]
+        weights = alpha * transmittance
+        coarse_color = torch.sum(weights.unsqueeze(-1) * color, dim=-2)
+        coarse_depth = torch.sum(weights * t_vals, dim=-2)
+        
+        # 6. LUT Refinement
+        refined_color = coarse_color
+        for _ in range(self.num_refinement_iters):
+            # Treat coarse RGB as spatial coordinate in [0, 1]
+            lut_coords = 2.0 * refined_color - 1.0
+            lut_coords = lut_coords.unsqueeze(1).unsqueeze(1) # (B, 1, 1, N_rays, 3)
             
-            # Concatenate
-            # t is scalar per point.
-            # feature is (N, C)
-            # We need to tile t to match feature dim? No, t is just one value.
-            # But source says "Concatenate...". 
-            # Usually positional encoding handles this. 
-            # Here, we just concatenate the scalar t? Or expanded t?
-            # Source formula for CPE uses t as scalar added to pv.
-            # For MLP input, we likely concatenate t as a single channel or expanded.
-            # Let's assume t is expanded to match feature dim for consistency? 
-            # Or just appended.
-            # Let's append t as a single channel.
+            # Trilinear interpolation on all LUTs
+            interp_values = F.grid_sample(self.luts, lut_coords, align_corners=True).squeeze(1).squeeze(-1).squeeze(-1) # (B, M, 3)
             
-            # Expand t to match feature dim if we want to add it to every feature channel?
-            # No, standard concatenation.
+            # Predict weights from pseudo-surface depth
+            depth_point = torch.stack([coarse_depth, coarse_depth, coarse_depth], dim=-1)
+            weights_pred = torch.softmax(self.weight_mlp(depth_point), dim=-1) # (B, N_rays, M)
             
-            # Construct vector: [x, y, z, theta, phi, t, F]
-            # t needs to be (N, 1)
-            t_expanded = t.unsqueeze(-1)
+            # Combine interpolated values
+            refined_color = torch.sum(interp_values.unsqueeze(-2) * weights_pred.unsqueeze(-1), dim=-2)
             
-            # If feature is (N, C), we concatenate along dim 1
-            # Result: (N, 3 + 3 + 1 + C) = (N, 7 + C)
-            # Wait, source says "6D attributes (3D spatial, time, 2D view)".
-            # So input dim is 6 + C.
-            
-            vec = torch.cat([xyz, torch.stack([theta, phi], dim=-1), t_expanded, feature], dim=-1)
-            return vec
-
-        # We need view directions. Assuming `rays` contains origin and direction, 
-        # or we have `view_dirs` tensor.
-        # For this pseudocode, we assume `view_dirs` is passed to forward or derived.
-        # Let's assume `view_dirs` is (B, N_rays, N_samples, 3)
-        
-        # Density
-        input_den = get_mlp_input(rays_flat, view_dirs_flat, time_flat, F_den)
-        sigma = self.density_mlp(input_den) # (N, 1)
-        sigma = torch.relu(sigma) # Ensure non-negative? Source doesn't specify activation, but density must be >= 0.
-        
-        # Texture
-        input_tex = get_mlp_input(rays_flat, view_dirs_flat, time_flat, F_tex_cpe)
-        color = self.texture_mlp(input_tex) # (N, 3)
-        
-        # Volume Rendering
-        # Assume delta_t is computed from ray sampling
-        # T_i = exp(-sum(sigma * delta))
-        # Standard NeRF rendering
-        # ... (Standard volume rendering implementation)
-        
-        # LUT Refinement
-        # ... (Standard LUT refinement implementation)
-        
-        return refined_color, depth
+        return refined_color, coarse_depth
 ```
+## Subtopics
+
+### MAV3D
+Synthesizes time-varying 3D scenes directly from text by optimizing a 4D neural radiance field under guidance from a pretrained text-to-video diffusion model [S2]. It introduces a hexplane-based 4D representation for efficient spacetime encoding, a multi-stage static-to-dynamic training scheme with temporal regularization, and a data-free supervision strategy using only text and video priors to create dynamic 3D content without any 4D datasets [S2].
 
 ## Operating characteristics
 *   **Time Complexity:** Training is slower than canonical-space methods like [D-NeRF](7274-dynerf.md) because it lacks a canonical space adaptation and relies on TV loss to propagate temporal information, requiring more iterations (250k for synthetic, 100k for real) [S1]. Inference is faster than [TiNeuVox](6628-volume-feature-rendering.md) because it does not use an MLP-based sub-network to predict position offsets [S1].
-*   **Memory Complexity:** Uses two 3D voxel grids of size $160^3 \times 12$ and 5 LUTs of size $33^3 \times 3$ [S1]. This is more memory-intensive than pure MLP methods but less than 4D voxel formats [S1].
+*   **Memory Complexity:** Uses two 3D voxel grids of size $160^3 \times 12$ and 5 LUTs of size $33^3 \times 3$ [S1]. This avoids the global optimization cost of pure MLPs while maintaining high accuracy [S1].
 *   **Strengths:** State-of-the-art PSNR/SSIM on synthetic dynamic scenes [S1]. Plug-and-play LUT refinement module improves static NVS tasks [S1].
 *   **Limitations:** Longer training time due to lack of canonical space [S1]. TV loss causes over-smoothing, requiring CPE and LUTs to mitigate [S1].
 *   **When to use:** Single-view dynamic novel view synthesis where high accuracy is needed and training time is not the primary constraint [S1].
-*   **When not to use:** Real-time applications requiring very fast inference (though better than TiNeuVox, it is still slower than pure MLPs) or scenarios with multi-view constraints where canonical-space methods might be more efficient [S1].
-
+*   **When not to use:** Real-time applications requiring very fast inference or scenarios with multi-view constraints where canonical-space methods might be more efficient [S1].
 ## Background
 V4D was proposed in 2023 by researchers publishing in IEEE Transactions on Visualization and Computer Graphics [S1]. It addresses the limitations of MLP-based NeRFs in dynamic scenes, where global optimization is time-consuming and representation ability is limited without multi-view constraints [S1]. It builds on [Neural Radiance Fields](4972-neural-radiance-fields.md) by introducing a voxel-based architecture for 4D fields without canonical spaces [S1].
-
 ## Sources
 [S1] V4D: Voxel for 4D Novel View Synthesis, https://doi.org/10.1109/tvcg.2023.3312127, fetched 2026-10-26
+[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

@@ -2,37 +2,39 @@
 
 
 ## Overview
-Per-Primitive Color Representations define mathematical functions to encode view-dependent color for individual primitives (such as surfels or splats) during rendering [S1, unofficial]. They solve the problem of efficiently parameterizing anisotropic or specular appearance per primitive without relying on global neural fields, allowing explicit texture atlases to recover high-frequency details lost by hash-grid collisions [S1, unofficial]. What sets them apart from sibling methods like [MLP Neural Fields](3854-mlp-neural-fields.md) is the direct optimization of per-primitive parameters (colors, sites, lobes) within an explicit atlas, rather than learning a continuous field via gradient descent through a network [S1, unofficial].
+Per-Primitive Color Representations define view-dependent color functions $f(\mathbf{d})$ parameterized directly on individual geometric primitives (such as surfels or splats) rather than relying on a global neural field or shared MLP [S1, unofficial]. This approach allows each primitive to encode complex, localized view-dependent effects (like sharp specular highlights) independently, avoiding the averaging artifacts and hash collisions inherent in global feature grids [S1, unofficial]. It is distinct from sibling methods that use shared MLPs or global hash grids for color prediction, offering higher fidelity per parameter at the cost of increased per-primitive memory overhead [S1, unofficial].
 
 ## Shared principles
-All methods in this family assign a set of learnable parameters to each primitive to compute a view-dependent color signal $f(\mathbf{d})$ given a viewing direction $\mathbf{d}$ [S1, unofficial]. The output is typically a color vector $\mathbf{c}$ or a scalar intensity that modulates the primitive's base color. The parameters are optimized during training (e.g., teacher training or atlas finetuning) to minimize rendering error [S1, unofficial]. The choice of representation involves a trade-off between parameter count, expressivity (ability to model sharp highlights vs. broad diffuse shifts), and computational cost during splatting [S1, unofficial].
+All methods in this family define a view-dependent color function $f(\mathbf{d})$ for a primitive, where $\mathbf{d}$ is the viewing direction vector. The function maps the direction to an RGB color vector. The parameters for this function are stored directly within the primitive's data structure, making the color representation local to the primitive [S1, unofficial].
+
+The rendering process involves evaluating this function for each primitive intersected by a ray, blending the resulting colors according to the primitive's opacity and position [G]. The parameters are optimized during training to minimize the difference between rendered images and ground truth observations [G].
 
 ## Subtopics
 
 ### Spherical Harmonics (SH)
-A standard basis function approach for view-dependent color. In the evaluated context, degree 3 SH is used, requiring 48 parameters per primitive [S1, unofficial]. It serves as a baseline for smooth, band-limited view dependence [S1, unofficial].
+A standard basis for representing functions on the sphere. In this context, it uses degree 3 spherical harmonics, requiring 48 parameters per primitive to encode view-dependent color [S1, unofficial]. It provides a smooth approximation of view-dependent effects but may struggle with sharp highlights compared to more flexible models [S1, unofficial].
 
 ### Spherical Betas (SB)
-A compact view-dependent model using two lobes on the sphere, requiring 15 parameters per primitive [S1, unofficial]. It offers a middle ground between SH and SV in terms of complexity and expressivity [S1, unofficial].
+A view-dependent color model using two lobes on the unit sphere. It requires 15 parameters per primitive [S1, unofficial]. SB is more compact than SH but offers lower fidelity; it achieves 31.97 PSNR compared to SH's 31.57 PSNR (with SV at 32.62 PSNR) at the same primitive count, representing a 0.64 dB loss relative to SV [S1, unofficial]. The parameter saving is negligible because the texture atlas overhead dominates memory usage [S1, unofficial].
 
 ### Soft Spherical Voronoi View-Dependent Color
 A view-dependent color model using a soft spherical Voronoi diagram with $K$ sites on the unit sphere, allowing a single surfel to hold both broad diffuse shifts and sharp highlights [S1, unofficial].
 
 **Formula:**
-View-dependent color is computed as:
+The view-dependent color is computed as:
 $$f_{SV}(\mathbf{d}) = \sum_{k=1}^K w_k(\mathbf{d}) c_k$$
 where the weights are:
 $$w_k(\mathbf{d}) = \frac{\exp(-\tau_k \|\mathbf{s}_k - \mathbf{d}\|)}{\sum_{k'=1}^K \exp(-\tau_{k'} \|\mathbf{s}_{k'} - \mathbf{d}\|)}$$
-The mixture is offset by $b_{SV}=0.5$ and gated by the inner ReLU of Eq. 2 [S1, unofficial].
+Here, $\mathbf{s}_k$ are the $K$ sites, $c_k$ are the associated colors, and $\tau_k$ are temperatures controlling the sharpness of the lobes. The mixture is offset by $b_{SV}=0.5$ and gated by the inner ReLU of Eq. 2 [S1, unofficial].
 
 **Parameters:**
-In the evaluated configuration, SV uses 7 sites, requiring 49 parameters per primitive [S1, unofficial].
+Uses 7 sites, requiring 49 parameters per primitive [S1, unofficial].
 
-**Comparison:**
-SV achieves 32.62 PSNR (full atlas) compared to SH's 31.57 and SB's 31.97, at the same primitive count [S1, unofficial]. SV is 1.06 dB above SH and 0.64 dB above SB, with the best LPIPS by 0.003 [S1, unofficial]. SB stores 15 parameters against 49 for SV but costs 0.64 dB in quality; however, parameter saving is rarely critical as the atlas size is an order of magnitude larger than per-surfel parameters [S1, unofficial].
+**Performance:**
+SV achieves 32.62 PSNR (full atlas) versus SH's 31.57 and SB's 31.97 at the same primitive count. SV is 1.06 dB above SH and 0.64 dB above SB, with the best LPIPS by 0.003 [S1, unofficial].
 
 ## Background
-Originating from the "Bake It Till You Make It" pipeline [S1, unofficial], these representations were evaluated during teacher training and atlas finetuning phases to demonstrate that explicit texture atlases can recover high-frequency detail lost by hash grid collisions [S1, unofficial]. The Soft Spherical Voronoi model specifically references Di Sario et al., 2025 [S1, unofficial].
+Originated in the context of spatial texture-atlas splatting, specifically in the work "Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting" [S1, unofficial]. The method was evaluated during teacher training and atlas finetune phases to overcome the limitations of hash-grid-based feature storage, which suffers from collisions and limited high-frequency detail recovery [S1, unofficial]. The explicit texture atlas allows each surfel to own independent parameters, enabling the use of more expressive per-primitive color models like Soft Spherical Voronoi [S1, unofficial].
 
 ## Sources
 [S1] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)

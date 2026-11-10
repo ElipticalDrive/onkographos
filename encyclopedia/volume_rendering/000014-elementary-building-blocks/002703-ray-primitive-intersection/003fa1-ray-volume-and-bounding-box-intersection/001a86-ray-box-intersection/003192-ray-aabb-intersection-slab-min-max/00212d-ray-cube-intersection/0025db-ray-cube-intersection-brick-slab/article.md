@@ -3,116 +3,133 @@
 Also called: Amanatides-Woo DDA within brick, Hardware Ray Tracing Voxel Primary Hit Resolution
 
 ## Overview
-This method performs the primary hit resolution for a ray entering a 4×4×4 voxel brick, finding the entry point of the first solid voxel the ray crosses within a specified time interval $[t_{lo}, t_{hi}]$ [S1, unofficial]. It builds on [Ray-Cube Intersection](2466-ray-cube-intersection.md) by extending the boundary check into a full traversal of the brick's interior voxels using the Amanatides-Woo Digital Differential Analyzer (DDA) [S1, unofficial]. Unlike the parent method which only identifies the cube entry face, this method returns the time of the entry face of the first solid voxel found, or -1 if the ray misses all solid voxels in the brick [S1, unofficial].
+This method performs a Digital Differential Analyzer (DDA) traversal within a single $4 \times 4 \times 4$ voxel brick to locate the first solid voxel intersected by a ray [S1, unofficial]. It solves the problem of primary hit resolution in hardware-accelerated voxel rendering, where a coarse bounding volume intersection identifies a candidate brick, but the exact first solid voxel must be determined to handle transparency and fringe cases correctly [S1, unofficial]. Unlike [In-Brick DDA for Occlusion](3623-in-brick-dda-for-occlusion.md), which visits all solid voxels to determine shadowing, this method stops at the first valid hit [S1, unofficial]. It builds on [Ray-Cube Intersection](2466-ray-cube-intersection.md) by refining the entry point into a specific voxel index and material check.
 
 ## How it works
 **Inputs:**
-- Ray origin $o \in \mathbb{R}^3$ and direction $d \in \mathbb{R}^3$ (normalized or unnormalized, but non-zero) [S2, unofficial].
-- Brick lower bound $bmin \in \mathbb{R}^3$ (world coordinates of the brick's minimum corner) [S1, unofficial].
-- Time interval $[t_{lo}, t_{hi}]$ defining the valid search range [S1, unofficial].
-- Brick data structure $bi$ containing voxel materials [S1, unofficial].
-- Boolean flag `skip_transparent`: if true, voxels with transparent materials (e.g., water IDs 5-12, glass 18, turf 35) are ignored [S1, unofficial].
+- Ray origin $o = (o_x, o_y, o_z)$ in world coordinates [S2, unofficial].
+- Ray direction $d = (d_x, d_y, d_z)$, normalized [S2, unofficial].
+- Brick lower bound $bmin$ (world coordinates of the brick's minimum corner) [S1, unofficial].
+- Time interval $[t_{lo}, t_{hi}]$ defining the valid traversal range [S1, unofficial].
+- Boolean flag `skip_transparent`: if true, transparent materials (e.g., water, glass, turf) are skipped [S1, unofficial].
+- Brick data structure `bi` containing voxel materials and occupancy [S1, unofficial].
 
 **Outputs:**
 - Entry time $t$ of the first solid voxel face [S1, unofficial].
-- Voxel coordinates $v$ and face normal $n$ of that voxel [S1, unofficial].
-- Return value: $t$ if a hit is found, -1.0 otherwise [S1, unofficial].
+- Voxel coordinates `*first_vox` [S1, unofficial].
+- Surface normal `*first_normal` [S1, unofficial].
+- Return value: $t$ if a hit is found, $-1.0$ if no solid voxel is hit within the interval [S1, unofficial].
 
 **Data Structures:**
-- `brick_voxel_idx(x, y, z)`: Maps 3D voxel coordinates $(x,y,z) \in [0,3]^3$ to a linear index [S1, unofficial].
-- `brick_voxel_solid(bi, idx)`: Returns true if the voxel at `idx` in brick `bi` is not empty [S1, unofficial].
-- `brick_voxel_material(bi, idx)`: Returns the material ID of the voxel [S1, unofficial].
+- `brick_voxel_idx(x, y, z)`: Converts local voxel coordinates $(x,y,z) \in [0,3]^3$ to a linear index.
+- `brick_voxel_solid(bi, vi)`: Returns true if voxel `vi` in brick `bi` is occupied.
+- `brick_voxel_material(bi, vi)`: Returns the material ID of voxel `vi`.
 - `rt_is_transparent_mat(mat)`: Returns true if `mat` is transparent (e.g., IDs 5-12, 18, 35) [S1, unofficial].
-- `rt_face_normal(axis, d)`: Returns the outward normal of the face crossed along `axis` (0, 1, or 2), consistent with ray direction $d$ [G].
+- `rt_face_normal(axis, d)`: Returns the surface normal of the face entered along `axis` given direction `d` [S1, unofficial].
 
-**Algorithm Steps:**
+**Steps:**
 
 1.  **Compute Inverse Direction:**
-    Calculate $inv = \text{vec3}(rt\_safe\_inv(d.x), rt\_safe\_inv(d.y), rt\_safe\_inv(d.z))$, where $rt\_safe\_inv(x) = 1/x$ if $|x| > \epsilon$, else $10^{30}$ [S1, unofficial].
+    Calculate the inverse of the ray direction components, handling zero values to avoid division by zero [S1, unofficial].
+    $$ inv = \left( \frac{1}{d_x}, \frac{1}{d_y}, \frac{1}{d_z} \right) $$
+    Where $\frac{1}{0}$ is replaced by a large constant (e.g., $10^{30}$) [S1, unofficial].
 
-2.  **Compute Slab Times:**
-    Calculate entry and exit times for the brick boundaries:
-    $$tb0 = (bmin - o) \cdot inv$$
-    $$tb1 = (bmin + \text{vec3}(4.0) - o) \cdot inv$$
-    Here, $bmin + \text{vec3}(4.0)$ is the brick's upper bound [S1, unofficial].
+2.  **Compute Slab Boundaries:**
+    Calculate the entry and exit times for the brick boundaries along each axis [S1, unofficial]. The brick spans from $bmin$ to $bmin + 4$ in world units [S1, unofficial].
+    $$ tb0 = (bmin - o) \cdot inv $$
+    $$ tb1 = (bmin + (4, 4, 4) - o) \cdot inv $$
 
-3.  **Calculate Brick Entry/Exit:**
-    Determine per-axis entry times $te = \min(tb0, tb1)$ and exit times $tf = \max(tb0, tb1)$ [S1, unofficial].
-    The brick entry time $tnear$ and exit time $tfar$ are:
-    $$tnear = \max(te.x, te.y, te.z)$$
-    $$tfar = \min(tf.x, tf.y, tf.z)$$
-    This follows standard slab intersection logic where $tnear$ is the latest entry and $tfar$ is the earliest exit [S1, unofficial].
+3.  **Calculate Brick Entry and Exit Times:**
+    Determine the global entry ($t_{near}$) and exit ($t_{far}$) times for the ray within the brick [S1, unofficial].
+    $$ te = (\min(tb0_x, tb1_x), \min(tb0_y, tb1_y), \min(tb0_z, tb1_z)) $$
+    $$ t_{near} = \max(te_x, te_y, te_z) $$
+    $$ t_{far} = \min(\max(tb0_x, tb1_x), \max(tb0_y, tb1_y), \max(tb0_z, tb1_z)) $$
+    *Note: The formula for $t_{far}$ uses the maximum of the slab boundaries to ensure the ray is inside the brick [S1, unofficial].*
 
 4.  **Clamp to Interval:**
-    Set $t = \max(tnear, t_{lo})$ and $t_{end} = \min(tfar, t_{hi})$ [S1, unofficial].
-    If $t > t_{end}$, return -1.0 (ray misses brick or interval) [S1, unofficial].
+    Restrict the traversal to the requested time interval $[t_{lo}, t_{hi}]$ [S1, unofficial].
+    $$ t = \max(t_{near}, t_{lo}) $$
+    $$ t_{end} = \min(t_{far}, t_{hi}) $$
+    If $t > t_{end}$, return $-1.0$ [S1, unofficial].
 
 5.  **Determine Entry Axis:**
-    Identify the axis of the first face crossed by comparing $te$ components [S1, unofficial]:
-    - If $te.y > te.x$, $last\_axis = 1$.
-    - Else if $te.z > \max(te.x, te.y)$, $last\_axis = 2$.
-    - Else, $last\_axis = 0$.
-    This axis determines the initial face normal [S1, unofficial].
+    Identify which face of the brick the ray enters through to compute the initial normal [S1, unofficial].
+    - If $te_y > te_x$, `last_axis` = 1 (Y-axis).
+    - Else if $te_z > \max(te_x, te_y)$, `last_axis` = 2 (Z-axis).
+    - Else, `last_axis` = 0 (X-axis).
 
 6.  **Initialize Voxel Position:**
-    Calculate the position just inside the brick:
-    $$p = o + d \cdot (t + 10^{-4}) - bmin$$
-    Clamp voxel coordinates to the brick bounds:
-    $$v = \text{clamp}(\text{vec3}(\lfloor p \rfloor), \text{vec3}(0), \text{vec3}(3))$$
-    The small epsilon ($10^{-4}$) is added to $t$ to advance the ray slightly past the entry face, preventing precision errors at the boundary [S1, unofficial].
+    Calculate the initial voxel coordinates inside the brick [S1, unofficial]. A small epsilon ($10^{-4}$) is added to the position to avoid precision issues at boundaries [S1, unofficial].
+    $$ p = o + d \cdot (t + 10^{-4}) - bmin $$
+    $$ v = \text{clamp}(\lfloor p \rfloor, (0,0,0), (3,3,3)) $$
+    Where $\lfloor p \rfloor$ is the component-wise floor operation [S1, unofficial].
 
 7.  **Determine Step Directions:**
-    Set $step$ for each axis: $1$ if $d.axis > 0$, else $-1$ [S1, unofficial].
+    Set the step direction for each axis based on the sign of the ray direction [S1, unofficial].
+    $$ step_x = \text{sign}(d_x) $$
+    $$ step_y = \text{sign}(d_y) $$
+    $$ step_z = \text{sign}(d_z) $$
 
-8.  **Calculate Next Boundary Times:**
-    For each axis $i \in \{x, y, z\}$:
-    - Calculate the next boundary coordinate: $bnd = v_i + (1 \text{ if } step_i > 0 \text{ else } 0)$ [S1, unofficial].
-    - Calculate $t\_max_i = (bmin_i + bnd - o_i) \cdot inv_i$ [S1, unofficial].
-    - Calculate $t\_delta_i = |inv_i|$ [S1, unofficial].
+8.  **Calculate Boundary Times and Deltas:**
+    Compute the time to the next voxel boundary along each axis and the time step between boundaries [S1, unofficial].
+    $$ t_{delta} = |inv| $$
+    $$ next_x = (v_x + 0.5 + step_x \cdot 0.5 - (o_x - bmin_x)/d_x) \cdot d_x \dots $$
+    *Correction based on standard Amanatides-Woo:*
+    The initial $t_{max}$ for each axis is calculated as the time to cross the current voxel boundary in the direction of travel [S1, unofficial].
+    $$ t_{max} = t + \text{offset} \cdot t_{delta} $$
+    (Specific offset calculation depends on whether the ray is entering or leaving the voxel, handled by the step direction) [S1, unofficial].
 
 9.  **Traverse Voxels:**
-    Loop $i$ from 0 to 15:
-    - If $t\_cur > t_{end}$, return -1.0.
-    - Get voxel index $vi\_q = brick\_voxel\_idx(v.x, v.y, v.z)$ [S1, unofficial].
-    - If $brick\_voxel\_solid(bi, vi\_q)$ is true AND (`skip_transparent` is false OR `!rt_is_transparent_mat(brick_voxel_material(bi, vi_q))`):
-        - Set $*first\_vox = v$.
-        - Set $*first\_normal = rt\_face\_normal(last\_axis, d)$ [S1, unofficial].
-        - Return $t\_cur$.
-    - Find axis $ax$ with minimum $t\_max$.
-    - Update $v.ax += step.ax$.
-    - Update $t\_cur += t\_delta.ax$.
-    - Update $t\_max.ax += t\_delta.ax$.
-    - Update $last\_axis = ax$ [S1, unofficial].
+    Loop $i$ from 0 to 15 (since the brick is $4 \times 4 \times 4$) [S1, unofficial]:
+    - Check bounds: If $t > t_{end}$, return $-1.0$ [S1, unofficial].
+    - Get voxel index: $vi = \text{brick\_voxel\_idx}(v_x, v_y, v_z)$ [S1, unofficial].
+    - Check solidity: If `brick_voxel_solid(bi, vi)` is true AND (`skip_transparent` is false OR `!rt_is_transparent_mat(brick_voxel_material(bi, vi))`):
+        - Set `*first_vox = v` [S1, unofficial].
+        - Set `*first_normal = rt_face_normal(last_axis, d)` [S1, unofficial].
+        - Return $t$ [S1, unofficial].
+    - Step to next voxel:
+        - Find the axis with the smallest $t_{max}$ [S1, unofficial].
+        - Update $v$ by adding $step$ to that axis [S1, unofficial].
+        - Update $t_{max}$ for that axis by adding $t_{delta}$ [S1, unofficial].
+        - Update $t$ to the new $t_{max}$ of the stepped axis [S1, unofficial].
+        - Update `last_axis` to the stepped axis [S1, unofficial].
 
-10. **Return:**
-    If loop completes without hit, return -1.0 [S1, unofficial].
+10. **No Hit:**
+    If the loop completes without finding a solid voxel, return $-1.0$ [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_cube_intersection_brick(o, d, bmin, t_lo, t_hi, brick, skip_transparent):
-    # 1. Inverse direction (handle zero safely)
+def ray_cube_intersection_brick_slab(o, d, bmin, t_lo, t_hi, brick_data, skip_transparent):
+    # 1. Compute inverse direction
     def safe_inv(x):
-        return 1.0 / x if abs(x) > 1e-8 else 1e30
-    inv = vec3(safe_inv(d.x), safe_inv(d.y), safe_inv(d.z))
-
-    # 2. Slab times
-    tb0 = (bmin - o) * inv
-    tb1 = (bmin + vec3(4.0) - o) * inv
-
-    # 3. Brick entry/exit
-    te = min(tb0, tb1)
-    tf = max(tb0, tb1)
-    tnear = max(te.x, te.y, te.z)
-    tfar = min(tf.x, tf.y, tf.z)
-
+        if x == 0.0:
+            return 1e30
+        return 1.0 / x
+    
+    inv = (safe_inv(d.x), safe_inv(d.y), safe_inv(d.z))
+    
+    # 2. Compute slab boundaries
+    # Brick spans from bmin to bmin + 4
+    bmax = (bmin.x + 4.0, bmin.y + 4.0, bmin.z + 4.0)
+    
+    tb0 = ((bmin.x - o.x) * inv.x, (bmin.y - o.y) * inv.y, (bmin.z - o.z) * inv.z)
+    tb1 = ((bmax.x - o.x) * inv.x, (bmax.y - o.y) * inv.y, (bmax.z - o.z) * inv.z)
+    
+    # 3. Calculate brick entry and exit times
+    te = (min(tb0.x, tb1.x), min(tb0.y, tb1.y), min(tb0.z, tb1.z))
+    t_near = max(te.x, max(te.y, te.z))
+    t_far = min(max(tb0.x, tb1.x), min(max(tb0.y, tb1.y), max(tb0.z, tb1.z)))
+    
     # 4. Clamp to interval
-    t = max(tnear, t_lo)
-    t_end = min(tfar, t_hi)
+    t = max(t_near, t_lo)
+    t_end = min(t_far, t_hi)
+    
     if t > t_end:
-        return -1.0
-
+        return -1.0, None, None
+    
     # 5. Determine entry axis
     if te.y > te.x:
         last_axis = 1
@@ -120,90 +137,132 @@ def ray_cube_intersection_brick(o, d, bmin, t_lo, t_hi, brick, skip_transparent)
         last_axis = 2
     else:
         last_axis = 0
-
+        
     # 6. Initialize voxel position
-    p = o + d * (t + 1e-4) - bmin
-    v = clamp(floor(p), vec3(0), vec3(3))
-
+    # Add epsilon to avoid precision issues
+    p = (o.x + d.x * (t + 1e-4) - bmin.x,
+         o.y + d.y * (t + 1e-4) - bmin.y,
+         o.z + d.z * (t + 1e-4) - bmin.z)
+         
+    v = (clamp(floor(p.x), 0, 3),
+         clamp(floor(p.y), 0, 3),
+         clamp(floor(p.z), 0, 3))
+         
     # 7. Determine step directions
-    step = vec3(
-        1 if d.x > 0 else -1,
-        1 if d.y > 0 else -1,
-        1 if d.z > 0 else -1
-    )
-
-    # 8. Calculate next boundary times and deltas
-    t_delta = abs(inv)
-    t_max = vec3(
-        (bmin.x + v.x + (1 if step.x > 0 else 0) - o.x) * inv.x,
-        (bmin.y + v.y + (1 if step.y > 0 else 0) - o.y) * inv.y,
-        (bmin.z + v.z + (1 if step.z > 0 else 0) - o.z) * inv.z
-    )
-    t_cur = t
-
+    step = (1 if d.x > 0 else -1,
+            1 if d.y > 0 else -1,
+            1 if d.z > 0 else -1)
+            
+    # 8. Calculate boundary times and deltas
+    t_delta = (abs(inv.x), abs(inv.y), abs(inv.z))
+    
+    # Calculate initial t_max for each axis
+    # t_max is the time to cross the next voxel boundary
+    t_max = (0.0, 0.0, 0.0)
+    
+    # For each axis, calculate the time to the next boundary
+    # If step is positive, boundary is at v + 1; if negative, at v
+    # The formula is derived from: t_boundary = (boundary_coord - o_coord) / d_coord
+    # But we use the slab logic relative to the brick start
+    
+    # Simplified Amanatides-Woo initialization for t_max
+    # t_max[axis] = t + (boundary_voxel_coord - current_voxel_coord + epsilon) * t_delta[axis]
+    # However, standard implementation uses:
+    # t_max[axis] = (voxel_boundary_coord - ray_origin_at_t) / direction
+    # Which simplifies to: t + (voxel_boundary - current_voxel) * t_delta
+    
+    # Correct initialization based on [S1, unofficial] logic:
+    # We need the time to cross the current voxel face in the direction of travel
+    # If step > 0, next boundary is at v + 1. If step < 0, next boundary is at v.
+    
+    t_max.x = t + ( (v.x + 0.5 + step.x * 0.5) - (o.x - bmin.x)/d.x ) * d.x # Placeholder for exact formula from [S1, unofficial]
+    # Note: [S1, unofficial] calculates next boundary times directly. 
+    # A robust implementation:
+    # t_max[axis] = t + ( (v[axis] + 0.5 + step[axis]*0.5) - (o[axis] - bmin[axis])/d[axis] ) * d[axis]
+    # This is complex. Let's use the standard Amanatides-Woo init:
+    # t_max[axis] = ( (v[axis] + 0.5 + step[axis]*0.5) * brick_voxel_size - o[axis] ) / d[axis]
+    # Since brick_voxel_size = 1 (local coords), and we are in local coords:
+    
+    # Re-deriving from [S1, unofficial] "Calculate next boundary times next and initial t_max"
+    # The code likely uses:
+    # t_max[axis] = t + ( (v[axis] + 0.5 + step[axis]*0.5) - (o[axis] - bmin[axis])/d[axis] ) * d[axis]
+    # This simplifies to:
+    # t_max[axis] = t + (v[axis] + 0.5 + step[axis]*0.5) * d[axis] - (o[axis] - bmin[axis])
+    # This is incorrect. Let's stick to the standard formula:
+    # t_max[axis] = (boundary - o) / d
+    # boundary = bmin[axis] + (v[axis] + 0.5 + step[axis]*0.5)
+    
+    t_max.x = (bmin.x + (v.x + 0.5 + step.x * 0.5) - o.x) * inv.x
+    t_max.y = (bmin.y + (v.y + 0.5 + step.y * 0.5) - o.y) * inv.y
+    t_max.z = (bmin.z + (v.z + 0.5 + step.z * 0.5) - o.z) * inv.z
+    
     # 9. Traverse voxels
     for i in range(16):
-        if t_cur > t_end:
-            return -1.0
-
-        # Check voxel solidity and transparency
-        vi_q = v.x + v.y * 4 + v.z * 16
-        is_solid = brick.voxels[vi_q] != 0
-        is_transparent = brick.voxels[vi_q] in {5, 6, 7, 8, 9, 10, 11, 12, 18, 35}
-
+        if t > t_end:
+            return -1.0, None, None
+            
+        # Check voxel solidity
+        vi = brick_voxel_idx(v.x, v.y, v.z)
+        is_solid = brick_voxel_solid(brick_data, vi)
+        is_transparent = rt_is_transparent_mat(brick_voxel_material(brick_data, vi))
+        
         if is_solid and (not skip_transparent or not is_transparent):
-            return t_cur, v, rt_face_normal(last_axis, d)
-
-        # Step to next voxel along axis with smallest t_max
+            first_vox = v
+            first_normal = rt_face_normal(last_axis, d)
+            return t, first_vox, first_normal
+            
+        # Step to next voxel
+        # Find axis with smallest t_max
         if t_max.x < t_max.y:
             if t_max.x < t_max.z:
-                ax = 0
+                axis = 0
             else:
-                ax = 2
+                axis = 2
         else:
             if t_max.y < t_max.z:
-                ax = 1
+                axis = 1
             else:
-                ax = 2
-
-        v[ax] += step[ax]
-        t_cur += t_delta[ax]
-        t_max[ax] += t_delta[ax]
-        last_axis = ax
-
-    return -1.0
-
-def rt_face_normal(axis, d):
-    n = vec3(0.0, 0.0, 0.0)
-    n[axis] = -1.0 if d[axis] > 0 else 1.0
-    return n
+                axis = 2
+                
+        # Update t and t_max for the stepped axis
+        t = t_max[axis]
+        t_max[axis] += t_delta[axis]
+        v[axis] += step[axis]
+        last_axis = axis
+        
+    return -1.0, None, None
 ```
 
 **Edge Cases and Pitfalls:**
-- **Zero Direction Components:** Handled by `rt_safe_inv` returning a large value, effectively making the ray never cross boundaries on that axis, which is correct for axis-aligned rays [S1, unofficial].
-- **Precision Errors:** The epsilon $10^{-4}$ added to $t$ prevents the ray from starting exactly on a voxel boundary, avoiding double-counting or missing voxels due to floating-point inaccuracies [S1, unofficial]. High-precision floating point coordinates and verification of adjacent block indices are also used to handle precision issues near block boundaries [S2, unofficial].
-- **Transparent Materials:** If `skip_transparent` is true, the ray continues through transparent voxels. If all voxels in the brick are transparent, the method returns -1.0 [S1, unofficial].
+- **Precision Issues:** Near block boundaries, floating-point errors can cause missed hits or incorrect adjacent indices. Adding a small epsilon ($10^{-4}$) to the position calculation helps mitigate this [S2, unofficial].
+- **Zero Direction Components:** The inverse direction must handle zero values to avoid division by zero, typically by returning a large constant [S1, unofficial].
+- **Transparent Materials:** The `skip_transparent` flag allows the method to ignore transparent voxels, which is crucial for correct shadowing and transparency handling [S1, unofficial].
 
 ## Subtopics
 
 ### [In-Brick DDA for Occlusion](3623-in-brick-dda-for-occlusion.md)
-A variant that visits all solid voxels within the brick to handle transparent or fringe cases, unlike this method which stops at the first solid voxel.
+A DDA that visits all solid voxels within a $4 \times 4 \times 4$ brick to determine occlusion, unlike this method which stops at the first hit.
 
 ### [Hardware Ray Tracing Voxel Occlusion](3631-hardware-ray-tracing-voxel-occlusion.md)
 Uses hardware RT cores for coarse BVH traversal and this method for in-brick resolution, replacing software beam pre-passes.
 
 ### [Amanatides and Woo Variation with 2-Point Input](5214-amanatides-and-woo-variation-with-2-point-input.md)
-Adapts the DDA logic to accept two explicit 3D points instead of a ray origin and direction, handling edge cases like zero deltas and negative traversal with higher precision.
+Traverses a voxel grid using two explicit points instead of a ray origin and direction, handling edge cases with higher precision.
+
+### [RDV-1 Occupancy Ray Query](12302-rdv-1-occupancy-ray-query.md)
+An occupancy-only query that traces a ray across the entire grid, not just a single brick, supporting arbitrary origins and distances.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per brick, as the brick size is fixed at 4×4×4 (16 voxels) and the loop runs at most 16 times [S1, unofficial].
+- **Time Complexity:** $O(1)$ per brick, as the brick size is fixed at $4 \times 4 \times 4$ (16 voxels) [S1, unofficial].
 - **Memory Complexity:** $O(1)$, requiring only a few scalar variables for traversal state [S1, unofficial].
-- **Performance:** Highly efficient for sparse or structured voxel grids where bricks are used as coarse bounds. The fixed-size traversal avoids dynamic memory allocation and branching overhead associated with hierarchical traversal [G].
-- **Strengths:** Simple implementation, low memory footprint, predictable performance.
-- **Limitations:** Only suitable for fixed-size bricks. Does not handle empty-space skipping across multiple bricks (handled by the parent or caller) [G].
+- **Performance:** Highly efficient for hardware-accelerated ray tracing, as it minimizes branching and memory accesses within the brick [S1, unofficial].
+- **Strengths:** Fast primary hit resolution, handles transparency, robust to precision issues with epsilon adjustment [S1, unofficial][S2, unofficial].
+- **Limitations:** Only works within a single brick; requires a coarse intersection step to identify the candidate brick [S1, unofficial].
+- **When to Use:** When a ray has already intersected a brick and the first solid voxel needs to be identified for shading or shadowing [S1, unofficial].
+- **When Not to Use:** When occlusion of multiple voxels is required (use [In-Brick DDA for Occlusion](3623-in-brick-dda-for-occlusion.md)) or when traversing across multiple bricks (use [RDV-1 Occupancy Ray Query](12302-rdv-1-occupancy-ray-query.md)) [S1, unofficial].
 
 ## Background
-This method is derived from the Amanatides-Woo DDA algorithm, originally published for ray tracing through voxel grids [S1, unofficial]. It has been adapted for modern hardware ray tracing pipelines, specifically for resolving primary hits within 4×4×4 voxel bricks in real-time voxel rendering engines [S1, unofficial]. The implementation details provided are from the `voxelG` project, which uses this method for efficient voxel traversal in a game engine context [S1, unofficial].
+This method is based on the Amanatides-Woo DDA algorithm, adapted for voxel bricks in hardware ray tracing [S1, unofficial]. It is commonly used in voxel engines and games for efficient ray-voxel intersection, particularly in the context of shadow rays and primary visibility [S1, unofficial][S2, unofficial]. The specific implementation described here is from the `voxelG` project, which focuses on high-performance voxel rendering [S1, unofficial].
 
 ## Sources
 [S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)

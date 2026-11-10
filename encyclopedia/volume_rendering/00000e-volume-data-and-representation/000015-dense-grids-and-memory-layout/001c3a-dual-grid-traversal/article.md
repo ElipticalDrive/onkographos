@@ -1,152 +1,79 @@
 # Dual Grid Traversal
 
+Also called: Dual Grid Method, Cell-Center Grid Construction
 
 ## Overview
-Dual Grid Traversal is a method for generating isosurfaces from volumetric data by constructing a mesh on a grid shifted relative to the input data. It solves the problem of vertex alignment by placing dual grid vertices at the centers of primal grid cells, ensuring that the resulting mesh vertices correspond directly to data values without interpolation [S1, unofficial]. It differs from standard marching cubes by operating on a shifted lattice where each dual vertex is influenced by a 3x3x3 neighborhood in the primal grid, and it differs from adaptive octree variants by assuming a uniform primal grid structure [S1, unofficial].
+Dual Grid Traversal generates a manifold mesh from volumetric data by constructing a "dual" lattice where vertices are placed at the centers of primal grid cells. It solves the problem of creating a continuous isosurface representation that aligns with the data values at cell centers rather than grid nodes. It differs from node-based marching cubes by avoiding the need to interpolate values at grid intersections, instead using the original data values directly at the dual vertices [S2].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A 3D primal grid of scalar values with dimension $N \times N \times N$.
-- Output: A set of vertices and indices forming the isosurface mesh.
+- Input: A primal grid of dimensions $N \times N \times N$ containing scalar values $V_{ijk}$ at cell centers $(i,j,k)$ for $i,j,k \in \{0, \dots, N-1\}$.
+- Output: A set of dual vertices and the connectivity (faces/edges) defining the dual grid structure.
 
 **Data Structures:**
-The method uses a `DualGrid` structure.
-- `size`: The dimension of the primal grid ($N$).
-- `primal_grid`: The input data array of size $N^3$.
-- `duals`: An array of two vectors, each of length $(N-1) \times (N-1)$. Each element is a tuple `(Vec3, D)`, where `Vec3` is the spatial position and `D` is the dual value (scalar). Note: The source code snippet implies a 2D projection or a specific storage layout for the duals vector, but the definition states the dual grid spans the volume. The dual grid dimension is $(N-1)$ along each axis.
+The dual grid is defined by vertices located at the center of each primal cell.
+- **Dual Vertices:** A list of 3D coordinates. The $k$-th dual vertex corresponds to the primal cell $(i,j,k)$.
+- **Dual Grid Dimensions:** The dual grid has dimensions $(N-1) \times (N-1) \times (N-1)$ if considering the intervals between centers, or more commonly, the dual structure is defined by the $N^3$ centers themselves, with connectivity defined by adjacency. However, standard dual grid traversal for isosurfaces often refers to the grid formed by connecting these centers.
+- **Primal Grid:** The source data array of size $N^3$.
 
 **Steps:**
-1. Initialize the `DualGrid` with the input `size` ($N$).
-2. Calculate `size_minus_one` = $N - 1$.
-3. Initialize the `primal_grid` with the input data of size $N$.
-4. Initialize the `duals` array. Create two vectors, each of length `size_minus_one` * `size_minus_one` (interpreted as a flattened 2D representation or specific axis projection in the source implementation, though conceptually 3D). Fill with `(Vec3::zero(), D::zero())`.
-5. Traverse the primal grid to populate the dual grid. For each cell in the dual grid (defined by indices $i, j, k$ where $0 \le i, j, k < N-1$):
-   - The dual vertex position is at the center of the corresponding primal cell.
-   - The dual value is derived from the primal data in the surrounding 3x3x3 region. The source notes that "Each 2x2x2 cube in the dual grid spans a 3x3x3 region in the primal grid" [S1, unofficial]. This implies the value at a dual vertex is a function of the 27 primal cells surrounding the dual vertex center.
-   - [G] Typically, this involves averaging or sampling the primal values at the dual vertex location. If the primal grid is dense, the value at the center of a primal cell $(i+0.5, j+0.5, k+0.5)$ is used.
-6. Generate the mesh by traversing the dual grid and applying an isosurface extraction algorithm (e.g., Marching Cubes) on the dual grid values.
+1. **Initialize Dual Grid:** Create a structure to hold dual vertices. The number of dual vertices is equal to the number of primal cells, $N^3$.
+2. **Calculate Vertex Positions:** For each primal cell $(i,j,k)$, the dual vertex position $\mathbf{p}_{ijk}$ is the center of that cell. If the primal grid spans $[0, N] \times [0, N] \times [0, N]$ with unit spacing, $\mathbf{p}_{ijk} = (i + 0.5, j + 0.5, k + 0.5)$.
+3. **Construct Connectivity:** Connect adjacent dual vertices to form the dual grid cells. A dual cell is formed by connecting the centers of 8 adjacent primal cells. Specifically, for each primal cell $(i,j,k)$, it shares faces with neighbors $(i\pm1,j,k)$, $(i,j\pm1,k)$, and $(i,j,k\pm1)$. The dual grid is a lattice of cubes where each cube's vertices are the centers of the 8 surrounding primal cells.
+4. **Traverse for Isosurface:** Apply a marching algorithm (e.g., Marching Cubes) on the dual grid. However, since the values are at the vertices of the dual grid cells, the standard Marching Cubes algorithm can be applied directly to the dual grid vertices and their associated values $V_{ijk}$.
+
+**Formulas:**
+- Dual Vertex Position: $\mathbf{p}_{ijk} = \mathbf{x}_0 + (i + 0.5)\Delta x \hat{i} + (j + 0.5)\Delta y \hat{j} + (k + 0.5)\Delta z \hat{k}$
+- Dual Grid Cell: A cube defined by vertices $\mathbf{p}_{i,j,k}, \mathbf{p}_{i+1,j,k}, \mathbf{p}_{i,j+1,k}, \mathbf{p}_{i,j,k+1}, \dots, \mathbf{p}_{i+1,j+1,k+1}$.
 
 **Parameters:**
-- `size`: The dimension of the primal grid. Typical values depend on the resolution of the input volume.
+- $N$: The dimension of the primal grid. The dual grid has $N^3$ vertices.
 
 **Edge Cases and Pitfalls:**
-- Boundary conditions: The dual grid has dimension $N-1$. The traversal must handle indices carefully to avoid out-of-bounds access on the primal grid.
-- Precision: Floating-point precision issues may arise when calculating vertex positions if the grid spacing is not uniform.
+- **Boundary Conditions:** The dual grid vertices are strictly inside the primal domain. The dual grid cells are defined for $i,j,k \in \{0, \dots, N-2\}$ if considering the cubes formed by 8 cells.
+- **Precision:** Using cell centers avoids interpolation errors at grid nodes but may introduce artifacts if the data is not smooth.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dual_grid_traversal(primal_grid: List[List[List[float]]], size: int, isovalue: float):
-    """
-    Generates an isosurface mesh using dual grid traversal.
+def dual_grid_traversal(primal_grid, N):
+    # primal_grid is a 3D array of size N x N x N
+    # dual_vertices will store the positions of the dual vertices
+    dual_vertices = []
+    for k in range(N):
+        for j in range(N):
+            for i in range(N):
+                # Position of the center of the primal cell (i, j, k)
+                x = i + 0.5
+                y = j + 0.5
+                z = k + 0.5
+                dual_vertices.append((x, y, z))
     
-    Args:
-        primal_grid: 3D array of size size x size x size.
-        size: Dimension N of the primal grid.
-        isovalue: The threshold value for isosurface extraction.
-        
-    Returns:
-        vertices: List of 3D coordinates.
-        indices: List of triangle indices.
-    """
-    size_minus_one = size - 1
+    # dual_values will store the values at the dual vertices
+    dual_values = primal_grid.flatten()
     
-    # Initialize dual grid storage
-    # Note: Source indicates duals is a list of 2 vectors of length (size-1)*(size-1).
-    # This likely represents a specific implementation detail or 2D slice.
-    # For a general 3D implementation, we assume a 3D structure.
-    dual_values = [[[0.0 for _ in range(size_minus_one)] 
-                    for _ in range(size_minus_one)] 
-                   for _ in range(size_minus_one)]
-    dual_positions = [[[None for _ in range(size_minus_one)] 
-                       for _ in range(size_minus_one)] 
-                      for _ in range(size_minus_one)]
+    # Construct dual grid cells (cubes)
+    # Each dual cell is defined by 8 vertices
+    dual_cells = []
+    for k in range(N - 1):
+        for j in range(N - 1):
+            for i in range(N - 1):
+                # Indices of the 8 vertices of the dual cell
+                v0 = i + j * N + k * N * N
+                v1 = (i + 1) + j * N + k * N * N
+                v2 = i + (j + 1) * N + k * N * N
+                v3 = (i + 1) + (j + 1) * N + k * N * N
+                v4 = i + j * N + (k + 1) * N * N
+                v5 = (i + 1) + j * N + (k + 1) * N * N
+                v6 = i + (j + 1) * N + (k + 1) * N * N
+                v7 = (i + 1) + (j + 1) * N + (k + 1) * N * N
+                
+                dual_cells.append([v0, v1, v2, v3, v4, v5, v6, v7])
     
-    # Populate dual grid
-    for i in range(size_minus_one):
-        for j in range(size_minus_one):
-            for k in range(size_minus_one):
-                # Position at center of primal cell (i, j, k)
-                # Assuming unit spacing for simplicity
-                pos = (i + 0.5, j + 0.5, k + 0.5)
-                dual_positions[i][j][k] = pos
-                
-                # Value calculation: Average of surrounding 3x3x3 primal cells
-                # The source states: "Each 2x2x2 cube in the dual grid spans a 3x3x3 region in the primal grid"
-                # This implies the dual vertex at (i,j,k) is influenced by primal cells 
-                # from i-1 to i+1, j-1 to j+1, k-1 to k+1.
-                # However, standard dual grid methods often just sample the primal cell center.
-                # Given the ambiguity, we use the primal cell center value as the dual value.
-                # If the source implies a specific averaging, it is not detailed.
-                # We assume the dual value is the primal value at the center of the cell.
-                # But primal grid is indexed 0..N-1. The center of cell (i,j,k) is not a grid point.
-                # Standard approach: Dual vertex at (i+0.5, j+0.5, k+0.5) takes value from 
-                # primal grid if it represents cell-centered data.
-                # If primal grid is node-centered, interpolation is needed.
-                # Source [S1, unofficial] says "placing a vertex in the center of each cube in a primal grid".
-                # This suggests primal_grid contains values for cubes (cell-centered).
-                dual_values[i][j][k] = primal_grid[i][j][k]
-
-    # Generate mesh using Marching Cubes on dual grid
-    vertices = []
-    indices = []
-    
-    for i in range(size_minus_one - 1):
-        for j in range(size_minus_one - 1):
-            for k in range(size_minus_one - 1):
-                # Get 8 corners of the dual cell
-                # Note: Marching Cubes operates on cubes. The dual grid forms cubes.
-                # The vertices of the dual cube at (i,j,k) are the dual vertices at 
-                # (i,j,k), (i+1,j,k), (i,j+1,k), etc.
-                corners = [
-                    dual_values[i][j][k],
-                    dual_values[i+1][j][k],
-                    dual_values[i][j+1][k],
-                    dual_values[i+1][j+1][k],
-                    dual_values[i][j][k+1],
-                    dual_values[i+1][j][k+1],
-                    dual_values[i][j+1][k+1],
-                    dual_values[i+1][j+1][k+1]
-                ]
-                positions = [
-                    dual_positions[i][j][k],
-                    dual_positions[i+1][j][k],
-                    dual_positions[i][j+1][k],
-                    dual_positions[i+1][j+1][k],
-                    dual_positions[i][j][k+1],
-                    dual_positions[i+1][j][k+1],
-                    dual_positions[i][j+1][k+1],
-                    dual_positions[i+1][j+1][k+1]
-                ]
-                
-                # Apply Marching Cubes algorithm
-                # This is a standard algorithm, not detailed in source, but required for implementation.
-                # We assume a standard implementation of Marching Cubes is available.
-                mc_vertices, mc_indices = marching_cubes(corners, positions, isovalue)
-                
-                # Add to global lists
-                # Adjust indices for global vertex offset
-                offset = len(vertices)
-                vertices.extend(mc_vertices)
-                indices.extend([idx + offset for idx in mc_indices])
-                
-    return vertices, indices
-
-def marching_cubes(corners: List[float], positions: List[Tuple[float, float, float]], isovalue: float):
-    """
-    Standard Marching Cubes implementation.
-    Returns vertices and indices for the triangles.
-    """
-    # Implementation of Marching Cubes algorithm
-    # This is a standard algorithm, details omitted for brevity but required for implementation.
-    # The source does not provide this code, so we assume it is a known standard.
-    # [G] Standard Marching Cubes logic:
-    # 1. Determine cube case based on corner signs relative to isovalue.
-    # 2. Look up triangle configuration.
-    # 3. Interpolate edge vertices.
-    # 4. Generate triangles.
-    pass
+    # Apply Marching Cubes on dual_vertices, dual_values, dual_cells
+    # This step is not detailed here as it is a standard algorithm
+    return dual_vertices, dual_values, dual_cells
 ```
 
 ## Subtopics
@@ -158,15 +85,13 @@ This method recursively traverses an adaptive octree to generate the vertices, e
 A standard approach to bridging cracks across AMR levels by constructing a grid by connecting cell centers instead of re-sampling, using original data values [S2]. It constructs the grid by connecting cell centers using the original data values, mitigating conflicts like dangling nodes [S2]. However, it introduces gaps between hierarchy levels [S2]. It also amplifies compression artifacts, especially block-wise artifacts from SZ-L/R, when the error bound is relatively large [S2].
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of dual grid cells, $O((N-1)^3)$.
-- **Memory Complexity:** $O((N-1)^3)$ for storing dual values and positions.
-- **Strengths:** Eliminates cracks between different AMR levels by using original data values [S2]. Mitigates conflicts like dangling nodes [S2].
-- **Limitations:** Introduces gaps between hierarchy levels [S2]. Amplifies compression artifacts [S2].
-- **When to use:** When visualizing AMR data and avoiding cracks is critical, and compression artifacts are acceptable or mitigated by other means.
-- **When not to use:** When high visual fidelity is required in the presence of compressed data, as artifacts are amplified [S2].
+- **Time Complexity:** $O(N^3)$ for uniform grids, where $N$ is the grid dimension. For adaptive octrees, it depends on the number of nodes.
+- **Memory Complexity:** $O(N^3)$ for storing dual vertices and values.
+- **Strengths:** Avoids interpolation errors at grid nodes; uses original data values; effective for bridging cracks in AMR data [S2].
+- **Limitations:** Introduces gaps between hierarchy levels in AMR data [S2]; amplifies compression artifacts [S2].
 
 ## Background
-The dual grid traversal method is used in isosurface extraction from volumetric data. The dual-cell method is a standard approach for bridging cracks across AMR levels [S2]. It is used in visualization of AMR applications, such as in the WarpX framework [S2].
+The dual grid method is a standard approach in volume visualization, particularly for Adaptive Mesh Refinement (AMR) data, to bridge cracks between different resolution levels [S2]. It was discussed in the context of the AMReX framework and data reduction techniques [S2]. The implementation details in [S1, unofficial] provide a basic structure for dual grid traversal in a uniform grid context.
 
 ## Sources
 [S1] https://github.com/swiftcoder/isosurface, https://github.com/swiftcoder/isosurface, fetched 2026-10-26 (unofficial)

@@ -1,89 +1,155 @@
 # Volume Texture Generation
 
-Also called: 3D Texture Creation, Volume Texture Setup
+Also called: Raw Data to 3D Texture Conversion, Volume data preprocessing
 
 ## Overview
-Volume Texture Generation is the process of converting preprocessed scalar field data into a 3D texture format suitable for efficient access in GPU shaders during volume rendering [S1, unofficial]. It solves the problem of preparing raw numerical data for hardware-accelerated visualization by organizing it into a structured 3D array, normalizing values to the standard 8-bit range, and serializing it into a raw binary format [S1, unofficial]. This method differs from sparse storage techniques (like linked lists or AMR) by maintaining a dense grid structure, which avoids pointer overhead but requires uniform dimensions for all texture slices [S1, unofficial].
+Volume Texture Generation converts raw volumetric data arrays into GPU-accessible 3D textures (volume textures) suitable for direct volume rendering [S1, S2, unofficial]. It solves the problem of mapping discrete scalar field data into a format that graphics hardware can sample efficiently via shaders [S2, unofficial]. Unlike sparse storage methods that suffer from pointer overhead or out-of-core streaming that incurs decoding latency, this method packs data into dense 3D texture slices, trading memory efficiency for hardware compatibility and sampling speed [S1, S2, unofficial]. It differs from its parent [3D Texture Upload](4890-3d-texture-upload-3d-texture-upload-for-volume-data-gl-textu.md) by handling the data transformation (format conversion, normalization) prior to the final buffer upload step.
 
 ## How it works
 **Inputs:**
-- Raw scalar data stored in JSON files.
-- Data dimensions: $N_{longitude}$, $N_{latitude}$, $N_{depth}$.
-- Grid resolution: Typically $300 \times 300$ per depth layer after interpolation [S1, unofficial].
+- Raw volumetric data values (scalar field).
+- Data dimensions: Width ($W$), Height ($H$), Depth ($D$) [S1, S2, unofficial].
+- Minimum value ($v_{min}$) and Maximum value ($v_{max}$) of the dataset [S2, unofficial].
 
 **Outputs:**
-- A RAW file containing the serialized 3D texture data.
+- A GPU 3D texture object bound to `GL_TEXTURE_3D` with `GL_RGBA` internal format and `GL_UNSIGNED_BYTE` data type [S1, unofficial].
 
 **Data Structures:**
-- **3D Array:** A dense grid with shape $(N_{longitude}, N_{latitude}, N_{depth})$.
-- **RAW Format:** A flat binary stream of unsigned 8-bit integers (uint8), representing the normalized voxel values.
+1.  **Raw Buffer:** A contiguous 1D array of size $W \times H \times D$ storing the original data values [S1, unofficial]. In some implementations, this is organized as a 3D array with shape $(N_{longitude}, N_{latitude}, N_{depth})$ [S2, unofficial].
+2.  **RGBA Buffer:** A contiguous 1D array of size $W \times H \times D \times 4$ storing the normalized, packed texture data [S1, unofficial].
 
 **Steps:**
-1. **Organization:** Load data from JSON files and organize it into a three-dimensional array with dimensions $(N_{longitude}, N_{latitude}, N_{depth})$ [S1, unofficial].
-2. **Normalization:** Map the original data values to the range $[0, 255]$ using linear scaling [S1, unofficial].
-3. **Serialization:** Convert the normalized 3D array into a RAW file format [S1, unofficial].
 
-**Formula:**
-The value mapping is defined as:
-$$ v' = \frac{(v - v_{min}) \cdot 255}{v_{max} - v_{min}} $$
-Where:
-- $v$: Original data value.
-- $v'$: Mapped data value in $[0, 255]$.
-- $v_{min}$: Minimum value in the dataset.
-- $v_{max}$: Maximum value in the dataset.
+1.  **Data Organization:** Load raw data into a buffer. If the source is structured (e.g., JSON), organize it into a 3D array matching the spatial dimensions $(N_{longitude}, N_{latitude}, N_{depth})$ [S2, unofficial]. For raw binary files, read directly into a 1D buffer of size $W \times H \times D$ [S1, unofficial].
+
+2.  **Normalization (Value Mapping):** Map the original data values $v$ to the unsigned byte range $[0, 255]$ using linear scaling [S2, unofficial]:
+    $$
+    v' = \frac{(v - v_{min}) \cdot 255}{v_{max} - v_{min}}
+    $$
+    Where:
+    - $v$ is the original data value.
+    - $v'$ is the mapped value.
+    - $v_{min}$ is the minimum value in the dataset.
+    - $v_{max}$ is the maximum value in the dataset.
+
+3.  **RGBA Expansion:** Pack the normalized scalar values into an RGBA buffer. For each voxel index $n$ from $0$ to $W \times H \times D - 1$:
+    - Set Red channel: $buffer_{RGBA}[n \cdot 4 + 0] = v'_n$
+    - Set Green channel: $buffer_{RGBA}[n \cdot 4 + 1] = v'_n$
+    - Set Blue channel: $buffer_{RGBA}[n \cdot 4 + 2] = v'_n$
+    - Set Alpha channel: $buffer_{RGBA}[n \cdot 4 + 3] = v'_n$
+    
+    *Note:* The alpha channel is set equal to the intensity value, tying transparency directly to the data magnitude rather than using a separate transfer function [S1, unofficial].
+
+4.  **Texture Creation:**
+    - If a previous texture exists (ID $\neq 0$), delete it using `glDeleteTextures` [S1, unofficial].
+    - Generate a new texture ID using `glGenTextures` [S1, unofficial].
+    - Bind the texture to `GL_TEXTURE_3D` [S1, unofficial].
+
+5.  **Texture Configuration:**
+    - Set environment mode to `GL_REPLACE` [S1, unofficial].
+    - Set wrap modes to `GL_CLAMP_TO_BORDER` [S1, unofficial].
+    - Set minification and magnification filters to `GL_LINEAR` [S1, unofficial].
+
+6.  **Upload:** Upload the RGBA buffer to the GPU using `glTexImage3D` with:
+    - Internal format: `GL_RGBA`
+    - Data type: `GL_UNSIGNED_BYTE`
+    - Pointer: Address of the RGBA buffer [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def generate_volume_texture(json_data, dimensions):
+def generate_volume_texture(raw_data, width, height, depth, v_min, v_max):
     """
-    json_data: List of arrays or nested structure containing raw scalar values.
-    dimensions: Tuple (N_longitude, N_latitude, N_depth).
-    Returns: bytes object representing the RAW file content.
-    """
-    # Step 1: Organize data into 3D array
-    # Note: Assumes json_data is already structured or can be reshaped
-    # to match (N_longitude, N_latitude, N_depth).
-    # If json_data is a list of layers, stack them.
-    volume_array = organize_into_3d_array(json_data, dimensions)
+    Converts raw volumetric data to a GPU 3D texture buffer.
     
-    # Step 2: Determine min and max for normalization
-    v_min = volume_array.min()
-    v_max = volume_array.max()
-    
-    # Handle edge case where all values are identical to avoid division by zero
-    if v_max == v_min:
-        normalized_array = np.zeros_like(volume_array, dtype=np.uint8)
-    else:
-        # Step 3: Normalize values to [0, 255]
-        # Formula: v' = ((v - vmin) * 255) / (vmax - vmin)
-        normalized_array = ((volume_array - v_min) * 255.0 / (v_max - v_min)).astype(np.uint8)
+    Args:
+        raw_data: List or array of scalar values, length W*H*D.
+        width, height, depth: Dimensions of the volume.
+        v_min, v_max: Min and max values for normalization.
         
-    # Step 4: Convert to RAW format
-    # RAW format is typically a flat byte stream of the array data
-    raw_data = normalized_array.tobytes()
+    Returns:
+        rgba_buffer: List of integers (0-255) representing the RGBA texture data.
+    """
+    total_voxels = width * height * depth
     
-    return raw_data
+    # Step 1 & 2: Normalize data to [0, 255]
+    # Handle division by zero if v_min == v_max
+    if v_max == v_min:
+        scale = 0.0
+    else:
+        scale = 255.0 / (v_max - v_min)
+        
+    normalized_values = []
+    for v in raw_data:
+        # Clamp to ensure valid byte range, though formula usually suffices
+        v_prime = (v - v_min) * scale
+        # Round to nearest integer and clamp to 0-255
+        v_byte = max(0, min(255, int(round(v_prime))))
+        normalized_values.append(v_byte)
+        
+    # Step 3: Expand to RGBA
+    rgba_buffer = []
+    for v_byte in normalized_values:
+        rgba_buffer.append(v_byte) # R
+        rgba_buffer.append(v_byte) # G
+        rgba_buffer.append(v_byte) # B
+        rgba_buffer.append(v_byte) # A
+        
+    return rgba_buffer
+
+def upload_to_gpu(rgba_buffer, width, height, depth):
+    """
+    Simulates the OpenGL texture upload steps.
+    """
+    # Step 4: Delete old texture if exists
+    # glDeleteTextures(1, &texture_id)
+    
+    # Step 4: Generate new texture
+    texture_id = glGenTextures(1)
+    
+    # Step 5: Bind and Configure
+    glBindTexture(GL_TEXTURE_3D, texture_id)
+    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE)
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER)
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER)
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER)
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    
+    # Step 6: Upload
+    # glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, width, height, depth, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba_buffer)
+    pass
 ```
 
 **Parameters:**
-- **Normalization Range:** Fixed to $[0, 255]$ for 8-bit unsigned integer representation [S1, unofficial].
-- **Grid Size:** Example resolution is $300 \times 300$ per layer, totaling 90,000 points per layer [S1, unofficial].
+- **Internal Format:** `GL_RGBA` [S1, unofficial].
+- **Data Type:** `GL_UNSIGNED_BYTE` [S1, unofficial].
+- **Filtering:** `GL_LINEAR` for both minification and magnification [S1, unofficial].
+- **Wrapping:** `GL_CLAMP_TO_BORDER` [S1, unofficial].
 
-**Edge Cases:**
-- **Constant Data:** If $v_{max} = v_{min}$, the denominator becomes zero. The implementation must handle this, typically by setting all values to 0 or 255 [G].
-- **Data Type:** The output is strictly 8-bit unsigned integers. Higher precision data must be quantized, potentially losing detail [S1, unofficial].
+**Edge Cases and Pitfalls:**
+- **Alpha/Intensity Coupling:** Setting $A=R=G=B$ means transparency is directly tied to data value. This prevents independent control of opacity via a transfer function [S1, unofficial].
+- **Performance:** Deleting and recreating the texture on every data load is inefficient. For updates, `glTexSubImage3D` is recommended [S1, unofficial].
+- **Precision:** Linear mapping assumes uniform data distribution. If data is highly skewed, normalization may result in loss of contrast in certain ranges.
 
 ## Subtopics
 
+### [CPU-GPU Hybrid Pipeline with Post-Packing Optimization](11667-cpu-gpu-hybrid-pipeline-with-post-packing-optimization.md)
+Mitigates GPU memory bottlenecks by packing non-empty voxels into optimized 2D slices on the CPU before upload. Chosen when memory efficiency is critical and data is sparse, avoiding the padding waste of uniform 3D textures.
+
 ## Operating characteristics
-- **Memory:** Requires dense storage for the entire volume. Memory usage is $N_{longitude} \times N_{latitude} \times N_{depth}$ bytes. For a $300^3$ volume, this is ~27 MB [S1, unofficial].
-- **Performance:** Efficient for direct shader access due to contiguous memory layout and hardware texture sampling units [S1, unofficial].
-- **Limitations:** Not suitable for highly sparse data where most voxels are empty, as it wastes memory on empty space compared to sparse methods [S1, unofficial].
+- **Time Complexity:** $O(W \cdot H \cdot D)$ for the RGBA expansion and normalization loop [S1, unofficial].
+- **Memory Complexity:** $O(W \cdot H \cdot D)$ for the raw buffer and $O(W \cdot H \cdot D \cdot 4)$ for the RGBA buffer [S1, unofficial].
+- **Performance:** Efficient for dense data and fixed-function rendering pipelines. The 4x memory expansion (scalar to RGBA) can be significant for large volumes [S1, unofficial].
+- **Strengths:** Simple implementation, compatible with legacy OpenGL fixed-function or basic shader pipelines, efficient hardware sampling [S1, S2, unofficial].
+- **Limitations:** High memory usage due to RGBA packing and lack of sparsity support. Alpha channel limitation restricts advanced transfer function usage [S1, unofficial].
+- **Usage:** Legacy OpenGL volume rendering applications, particularly for medical or scientific imaging data where simplicity is prioritized over memory optimization [S1, unofficial].
 
 ## Background
-Volume textures are a logical extension of 2D textures, grouping multiple 2D textures to describe 3D spatial data [S1, unofficial]. They are particularly well-suited for shader programming, enabling efficient access and manipulation while conserving memory resources [S1, unofficial]. This approach is commonly used in direct volume rendering algorithms such as ray casting, shear-warp, texture slicing, and splatting [S1, unofficial]. The specific implementation described here utilizes WebGPU-based frameworks for visualization [S1, unofficial].
+Originating from early OpenGL volume rendering implementations, this method was popularized in sample code for direct volume rendering using ray casting [S1, unofficial]. It is based on the principle that volume textures are a logical extension of 2D textures, grouping 2D slices to describe 3D spatial data [S2, unofficial]. The specific normalization formula and RGBA packing strategy are documented in recent implementations for WebGPU and OpenGL frameworks [S2, unofficial]. It is often used in conjunction with ray casting algorithms that benefit from efficient 3D texture sampling [S2, unofficial].
 
 ## Sources
-[S1] The Implementation of a WebGPU-Based Volume Rendering Framework ..., https://www.mdpi.com/2076-3417/15/5/2782, fetched 2026-10-29 (unofficial)
+[S1] GitHub - divineaugustine/VolumeRendering_OGL: Supporting sample code for OpenGL volume rendering, https://github.com/divineaugustine/VolumeRendering_OGL, fetched 2026-10-28 (unofficial)
+[S2] The Implementation of a WebGPU-Based Volume Rendering Framework, https://www.mdpi.com/2076-3417/15/5/2782, fetched 2026-10-29 (unofficial)

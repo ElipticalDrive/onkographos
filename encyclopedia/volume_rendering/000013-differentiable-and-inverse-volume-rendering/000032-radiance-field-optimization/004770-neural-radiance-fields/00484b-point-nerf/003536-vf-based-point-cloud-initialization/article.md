@@ -3,37 +3,32 @@
 Also called: VF + FPFH + RANSAC initialization, VF Point Cloud Init, VF-to-PC Registration
 
 ## Overview
-VF-based Point Cloud Initialization converts a Neural Radiance Field (NeRF) representation into a sparse 3D point cloud using Viewshed Fields (VF) to guide sampling, then employs standard global point cloud registration algorithms (specifically FPFH descriptors with RANSAC) to compute an initial rigid transformation between two scenes [S1]. It differs from photometric initialization methods by avoiding iterative gradient-based alignment of camera poses directly; instead, it leverages the robustness of geometric point cloud registration to provide a coarse alignment that serves as a starting point for subsequent optimization [S1].
+VF-based Point Cloud Initialization converts a trained Neural Radiance Field (NeRF) representation into a sparse 3D point cloud using Viewshed Fields (VF) to guide sampling, then applies standard global point cloud registration algorithms to compute an initial rigid transformation between two scenes [S1]. It differs from photometric initialization by avoiding iterative gradient-based alignment of camera poses directly; instead, it leverages geometric point cloud registration to provide a coarse alignment that serves as a starting point for subsequent optimization [S1].
 
 ## How it works
 **Inputs:**
-1.  Two trained NeRF models (Scene A and Scene B) representing the same physical scene under different camera poses.
-2.  A density threshold $\tau$ for filtering points (default $\tau = 10$) [S1].
-3.  A number of samples $M$ for the latent distribution (value not specified in sources) [S1].
+1. Two trained NeRF models representing the same physical scene under different camera poses [S1].
+2. A density threshold for filtering points (default value 10) [S1].
+3. A sample count $M$ for the latent distribution (value not specified in the sources) [S1].
 
 **Outputs:**
-1.  An initial rigid transformation matrix $T$ (rotation $R$ and translation $t$) aligning Scene B to Scene A.
+1. An initial rigid transformation matrix $T$ (rotation and translation) aligning the second scene to the first [S1].
 
 **Data Structures:**
-*   **NeRF Model:** A neural network mapping 3D coordinates and viewing directions to volume density $\sigma$ and RGB color $C$.
-*   **Viewshed Field (VF):** A scalar field derived from the NeRF that indicates the reliability or "visibility" of points in the scene, used to guide sampling [S1].
-*   **Point Cloud:** A set of 3D points $P = \{p_i\}$ with associated features (for FPFH).
+*   **NeRF Model:** A neural network mapping 3D coordinates and viewing directions to volume density and RGB color [S1].
+*   **Viewshed Field (VF):** A scalar field derived from the NeRF that indicates the reliability of points in the scene, used to guide sampling [S1].
+*   **Point Cloud:** A set of 3D positions $P = \{p_i\}$ extracted from the filtered NeRF samples [S1].
 
 **Steps:**
-
-1.  **Sample Latent Points:** Sample $M$ points $z_j$ from a 6-dimensional Gaussian distribution $\mathcal{N}(0, I)$, which represents the latent space of the Normalizing Flow (NF) used in the VF-NeRF formulation [S1].
-2.  **Reconstruct Oriented Points:** Apply the inverse Normalizing Flow function $f^{-1}$ to each latent point $z_j$ to reconstruct $M$ oriented points $p_j = (x_j, d_j)$, where $x_j$ is the 3D position and $d_j$ is the viewing direction [S1].
-    *   Formula: $p_j = f^{-1}(z_j)$ [S1].
-3.  **Query NeRF:** For each oriented point $p_j$, query the NeRF model to obtain the volume density $\sigma_j$ and RGB color $C_j$ [S1].
-4.  **Filter Points:** Retain only points where the density $\sigma_j$ exceeds the threshold $\tau$. The sources specify $\tau = 10$ [S1].
-    *   Condition: $\sigma_j > \tau$ [S1].
-    *   Note: Colors are explicitly not used for the registration process, only density [S1].
-5.  **Generate Point Clouds:** Repeat steps 1-4 for both Scene A and Scene B to generate two filtered point clouds, $P_A$ and $P_B$ [S1].
-6.  **Compute Descriptors:** Compute Fast Point Feature Histograms (FPFH) descriptors for all points in $P_A$ and $P_B$ [S1].
-7.  **Register Point Clouds:** Apply Random Sample Consensus (RANSAC) using the FPFH descriptors to find the initial rigid transformation $T$ that aligns $P_B$ to $P_A$ [S1].
+1. **Sample Latent Points:** Sample $M$ points $z_j$ from a 6-dimensional Gaussian distribution $\mathcal{N}(0, I)$, which represents the latent space of the Normalizing Flow (NF) used in the VF-NeRF formulation [S1].
+2. **Reconstruct Oriented Points:** Apply the inverse Normalizing Flow function $f^{-1}$ (Equation 4 in the source) to each latent point $z_j$ to reconstruct $M$ oriented points $p_j = (x_j, d_j)$, where $x_j$ is the 3D position and $d_j$ is the viewing direction [S1].
+3. **Query NeRF:** For each oriented point $p_j$, query the NeRF model to obtain the volume density $\rho_j$ and RGB color $C_j$ [S1].
+4. **Filter Points:** Retain only points where the density $\rho_j$ exceeds the threshold value of 10 [S1]. Colors are explicitly excluded from the registration process [S1].
+5. **Generate Point Clouds:** Repeat steps 1–4 for both Scene A and Scene B to generate two filtered point clouds, $P_A$ and $P_B$ [S1].
+6. **Compute Descriptors:** Compute Fast Point Feature Histograms (FPFH) descriptors for all points in $P_A$ and $P_B$ [S1].
+7. **Register Point Clouds:** Apply Random Sample Consensus (RANSAC) using the FPFH descriptors to find the initial rigid transformation $T$ that aligns $P_B$ to $P_A$ [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -44,80 +39,72 @@ def vf_based_point_cloud_initialization(nerf_a, nerf_b, threshold=10, num_sample
     Args:
         nerf_a: NeRF model for Scene A.
         nerf_b: NeRF model for Scene B.
-        threshold: Density threshold for filtering points (default 10).
-        num_samples: Number of points to sample from the latent distribution.
+        threshold: Density threshold for filtering points (default 10) [S1].
+        num_samples: Number of points to sample from the latent distribution [S1].
         
     Returns:
-        T: Initial rigid transformation matrix (4x4) aligning B to A.
+        T: Initial rigid transformation matrix (4x4) aligning B to A [S1].
     """
-    # Step 1: Sample from 6D Gaussian latent distribution
-    # Note: The specific dimensionality (6D) and distribution (Gaussian) are from [S1]
-    latent_points = sample_gaussian_6d(num_samples)
+    import numpy as np
+    
+    # Step 1: Sample M points from 6D Gaussian latent distribution
+    latent_points = np.random.randn(num_samples, 6)
     
     # Step 2: Reconstruct oriented points using inverse Normalizing Flow
-    # f_inv is the inverse of the Normalizing Flow defined in the VF-NeRF paper
+    # f_inv corresponds to Equation 4 in the source [S1]
     oriented_points_a = nerf_a.inverse_normalizing_flow(latent_points)
     oriented_points_b = nerf_b.inverse_normalizing_flow(latent_points)
     
     # Step 3 & 4: Query NeRF and filter by density
     points_a = []
     for p in oriented_points_a:
-        sigma, _ = nerf_a.query(p) # Returns density and color
-        if sigma > threshold:
+        density, _ = nerf_a.query(p) # Returns density and color [S1]
+        if density > threshold:
             points_a.append(p.position)
             
     points_b = []
     for p in oriented_points_b:
-        sigma, _ = nerf_b.query(p)
-        if sigma > threshold:
+        density, _ = nerf_b.query(p)
+        if density > threshold:
             points_b.append(p.position)
             
-    # Step 5: Point clouds are now points_a and points_b
-    
     # Step 6: Compute FPFH descriptors
-    # Note: Standard FPFH implementation required
+    # Standard FPFH computation. Sources do not provide implementation details [G].
     descriptors_a = compute_fpfh(points_a)
     descriptors_b = compute_fpfh(points_b)
     
     # Step 7: RANSAC registration
-    # Note: Standard RANSAC implementation required
+    # Standard RANSAC registration. Sources do not provide implementation details [G].
     T = ransac_registration(points_a, points_b, descriptors_a, descriptors_b)
     
     return T
 
-def sample_gaussian_6d(n):
-    """Samples n points from a 6-dimensional standard normal distribution."""
-    import numpy as np
-    return np.random.randn(n, 6)
-
 def compute_fpfh(points):
     """Computes FPFH descriptors for a set of 3D points."""
-    # Implementation depends on external library (e.g., Open3D, PCL)
-    # This is a placeholder for the algorithmic step described in [S1]
+    # Standard FPFH algorithm implementation required [G]
     raise NotImplementedError("FPFH computation requires external library")
 
 def ransac_registration(points_src, points_tgt, desc_src, desc_tgt):
     """Finds rigid transformation using RANSAC and FPFH descriptors."""
-    # Implementation depends on external library
+    # Standard RANSAC algorithm implementation required [G]
     raise NotImplementedError("RANSAC registration requires external library")
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Density Threshold:** The choice of threshold $\tau$ is critical. Too high a threshold may result in an empty point cloud if the NeRF density values are scaled differently. The source specifies $\tau=10$ [S1].
-*   **Color Usage:** Colors are explicitly excluded from the registration process to avoid ambiguity in textureless regions or color mismatches [S1].
-*   **Latent Sampling:** The number of samples $M$ is not specified in the sources. Insufficient sampling may lead to sparse point clouds and registration failure.
-*   **NeRF Quality:** The method relies on the NeRF being reasonably well-trained. Poorly trained NeRFs may produce unreliable density values, leading to incorrect point cloud generation.
+*   **Density Threshold:** The threshold is fixed at 10 in the source [S1].
+*   **Color Usage:** Colors are explicitly excluded from the registration process [S1].
+*   **Latent Sampling:** The number of samples $M$ is not specified in the sources [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by the NeRF queries ($O(M)$) and the FPFH/RANSAC registration ($O(N \log N)$ or similar, depending on implementation). $M$ is the number of latent samples, $N$ is the number of filtered points.
-*   **Memory Complexity:** $O(M)$ to store latent points and NeRF query results, $O(N)$ for the point clouds and descriptors.
-*   **Strengths:** Leverages robust, well-established point cloud registration algorithms. Avoids the need for photometric initialization which can be sensitive to lighting and texture.
-*   **Limitations:** Requires a trained NeRF first. Performance depends on the quality of the VF and the density threshold. The source does not provide specific timing measurements or hardware details.
-*   **When to Use:** When a coarse initial alignment is needed for NeRF registration, especially in scenarios where photometric initialization is unreliable.
-*   **When Not to Use:** When computational resources are extremely limited and a trained NeRF is not available.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Leverages robust, well-established point cloud registration algorithms [S1].
+*   **Limitations:** Requires a trained NeRF first [S1].
+*   **When to Use:** Not given in the sources.
+*   **When Not to Use:** Not given in the sources.
 
 ## Background
-VF-based Point Cloud Initialization was introduced in the VF-NeRF paper by Segre and Avidan [S1]. It is part of a broader effort to improve the robustness of NeRF registration by leveraging Viewshed Fields to guide sampling and registration. The method builds on the idea that VF can identify reliable regions in the scene, which can then be converted into a point cloud for geometric registration.
+VF-based Point Cloud Initialization was introduced by Segre and Avidan in the VF-NeRF paper [S1]. The method converts NeRF representations into point clouds using Viewshed Fields to guide sampling, then uses standard point cloud registration algorithms (specifically FPFH with RANSAC) to find the initial transformation [S1].
 
 ## Sources
 [S1] VF-NeRF: Viewshed Fields for Rigid NeRF Registration, https://doi.org/10.1007/978-3-031-73027-6_10, fetched 2026-10-26

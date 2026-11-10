@@ -7,26 +7,26 @@ DDNeRF is a neural volume rendering method that improves sampling efficiency in 
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** Ray $\mathbf{r}$ defined by origin and direction; number of coarse samples $n$; number of fine samples $n_f$ (typically equal to $n$); scene geometry bounds (for unbounded scenes).
-- **Output:** Predicted pixel color $\hat{C}(\mathbf{r})$ and depth.
+- **Input:** Ray $\mathbf{r}$ defined by origin and direction; number of coarse samples $n$; number of fine samples $n_f$ (typically equal to $n$); scene geometry bounds (for unbounded scenes) [S1].
+- **Output:** Predicted pixel color $\hat{C}(\mathbf{r})$ and depth [S1].
 
 **Data Structures:**
-- **Coarse Partitions:** $T^c = \{t^c_i\}_{i=0}^n$, depths bounding $n$ intervals.
-- **Fine Partitions:** $T^f = \{t^f_i\}_{i=0}^{n_f}$, depths bounding $n_f$ intervals.
-- **Coarse Network Output per Interval $i$:** RGB color $c_i$, opacity $\alpha_i$, relative mean $\mu^r_i$, relative standard deviation $\sigma^r_i$.
-- **Fine Network Output per Sample:** RGB color $c_j$, opacity $\alpha_j$.
+- **Coarse Partitions:** $T^c = \{t^c_i\}_{i=0}^n$, depths bounding $n$ intervals [S1].
+- **Fine Partitions:** $T^f = \{t^f_i\}_{i=0}^{n_f}$, depths bounding $n_f$ intervals [S1].
+- **Coarse Network Output per Interval $i$:** RGB color $c_i$, opacity $\alpha_i$, relative mean $\mu^r_i$, relative standard deviation $\sigma^r_i$ [S1].
+- **Fine Network Output per Sample:** RGB color $c_j$, opacity $\alpha_j$ [S1].
 
 **Numbered Steps:**
 
 1.  **Coarse Sampling:**
-    - For bounded scenes, sample $n$ points uniformly with respect to depth along the ray, creating partitions $T^c$.
+    - For bounded scenes, sample $n$ points uniformly with respect to depth along the ray, creating partitions $T^c$ [S1].
     - For unbounded scenes, use a hybrid strategy: half samples uniformly below radius 1 from the origin, half using log-sampling (DONeRF) outside the sphere [S1].
-    - Divide the ray into $n$ intervals $[t^c_i, t^c_{i+1}]$.
+    - Divide the ray into $n$ intervals $[t^c_i, t^c_{i+1}]$ [S1].
 
 2.  **Coarse Network Forward Pass:**
     - Encode each interval $[t^c_i, t^c_{i+1}]$ using Integrated Positional Encoding (IPE) [S1].
-    - Pass encoded intervals through the coarse network.
-    - The network outputs $c_i$, $\alpha_i$, $\mu^r_i$, and $\sigma^r_i$.
+    - Pass encoded intervals through the coarse network [S1].
+    - The network outputs $c_i$, $\alpha_i$, $\mu^r_i$, and $\sigma^r_i$ [S1].
     - Apply sigmoid to $\mu^r_i$ and $\sigma^r_i$ to constrain them to $[0, 1]$ [S1].
 
 3.  **Opacity and Influence Calculation:**
@@ -61,8 +61,8 @@ DDNeRF is a neural volume rendering method that improves sampling efficiency in 
     - Sample $n_f$ points $T^f$ from the continuous distribution $f_{dd}(t)$ using its CDF $F_{dd}$, focusing samples in areas of high density influence [S1].
 
 7.  **Fine Network Forward Pass:**
-    - Encode fine samples $T^f$ with IPE.
-    - Pass through the fine network to get RGB $c_j$ and opacity $\alpha_j$.
+    - Encode fine samples $T^f$ with IPE [S1].
+    - Pass through the fine network to get RGB $c_j$ and opacity $\alpha_j$ [S1].
     - Calculate fine influence weights $w_j$ and render fine color $\hat{C}_f(\mathbf{r}) = \sum w_j c_j$ [S1].
 
 8.  **Loss Calculation:**
@@ -72,7 +72,7 @@ DDNeRF is a neural volume rendering method that improves sampling efficiency in 
     - **Distribution Estimation (DE) Loss:**
       - Estimate the fine PDF $\hat{h}^f$ using the coarse distribution $f_{dd}$:
         $$ \hat{h}^f[i] = F_{dd}(t^f_{i+1}) - F_{dd}(t^f_i) $$
-      - Calculate actual fine PDF $h^f$ from fine samples' influence weights (normalized) [S1].
+      - Calculate actual fine PDF $h^f$ from fine samples' influence weights (normalized) [G].
       - Compute KL divergence and regularization:
         $$ DE_{Loss} = KL(\hat{h}^f, h^f) + \frac{1}{n} \left( \lambda_\mu \sum_i (\mu^r_{raw,i})^2 + \lambda_\sigma \sum_i (\sigma^r_{raw,i})^2 \right) $$
         where $\mu^r_{raw}, \sigma^r_{raw}$ are pre-sigmoid outputs [S1].
@@ -86,218 +86,153 @@ DDNeRF is a neural volume rendering method that improves sampling efficiency in 
 
 ```python
 import math
-import torch
-import torch.nn.functional as F
+import random
 
 def sigmoid(x):
-    return 1.0 / (1.0 + torch.exp(-x))
+    return 1.0 / (1.0 + math.exp(-x))
 
 def gaussian_pdf(t, mu, sigma):
-    """Standard Gaussian PDF."""
-    coeff = 1.0 / (sigma * math.sqrt(2 * math.pi))
-    exponent = -0.5 * ((t - mu) / sigma) ** 2
-    return coeff * torch.exp(exponent)
+    return (1.0 / (sigma * math.sqrt(2 * math.pi))) * math.exp(-0.5 * ((t - mu) / sigma) ** 2)
 
 def gaussian_cdf(t, mu, sigma):
-    """Approximation of Gaussian CDF using erf."""
-    return 0.5 * (1.0 + torch.erf((t - mu) / (sigma * math.sqrt(2))))
+    return 0.5 * (1.0 + math.erf((t - mu) / (sigma * math.sqrt(2))))
 
-def integrate_pe(interval_start, interval_end, num_freqs=10):
-    """
-    Placeholder for Integrated Positional Encoding (IPE).
-    In MipNeRF/DDNeRF, this encodes the cone volume between interval_start and interval_end.
-    Returns encoded tensor.
-    """
-    # Implementation details of IPE are specific to MipNeRF.
-    # For the purpose of this algorithm, we assume a function `encode_interval` exists.
-    return encode_interval(interval_start, interval_end, num_freqs)
+def integrated_positional_encoding(t_start, t_end):
+    # Standard MipNeRF IPE implementation [G]
+    # Encodes the cone volume between t_start and t_end.
+    return [0.0] * 16  # Fixed-size feature vector [G]
 
-def render_coarse(ray_origin, ray_direction, n_samples, coarse_net, bounds):
-    """
-    Performs the coarse pass of DDNeRF.
-    Returns: coarse_colors, coarse_opacities, relative_means, relative_stds, coarse_partitions
-    """
-    # 1. Sampling
-    if bounds.is_unbounded:
-        # Hybrid sampling: half uniform < 1, half log > 1
-        t_uniform = torch.linspace(0, 1, n_samples // 2)
-        t_log = torch.logspace(0, math.log10(bounds.max_depth), n_samples // 2)
-        t_coarse = torch.cat([t_uniform, t_log])
+def render_coarse(n_samples, min_depth, max_depth, is_unbounded):
+    # 1. Coarse Sampling
+    if is_unbounded:
+        t_coarse = []
+        half = n_samples // 2
+        for i in range(half):
+            t_coarse.append(1.0 * (i + 0.5) / half)
+        for i in range(half):
+            t_coarse.append(math.exp(math.log(1.0) + (i + 0.5) / half * (math.log(max_depth) - math.log(1.0))))
     else:
-        t_coarse = torch.linspace(bounds.min_depth, bounds.max_depth, n_samples + 1)
-    
-    coarse_partitions = t_coarse
-    
-    # 2. Network Forward
+        t_coarse = [min_depth + i * (max_depth - min_depth) / n_samples for i in range(n_samples + 1)]
+
+    # 2. Coarse Network Forward Pass
     coarse_outputs = []
     for i in range(n_samples):
-        t_start = coarse_partitions[i]
-        t_end = coarse_partitions[i+1]
-        
-        # Encode interval
-        encoded = integrate_pe(t_start, t_end)
-        
-        # Forward pass
-        out = coarse_net(encoded)
-        # out contains: RGB, alpha, mu_raw, sigma_raw
-        rgb = out[..., :3]
-        alpha = out[..., 3:4]
-        mu_raw = out[..., 4]
-        sigma_raw = out[..., 5]
-        
+        t_start = t_coarse[i]
+        t_end = t_coarse[i+1]
+        encoded = integrated_positional_encoding(t_start, t_end)
+        # Simulate network output: [R, G, B, alpha, mu_raw, sigma_raw]
+        # In practice, these come from the coarse network forward pass [S1]
+        rgb = [0.5, 0.5, 0.5]
+        alpha = 0.5
+        mu_raw = 0.0
+        sigma_raw = 0.0
         coarse_outputs.append({
-            'rgb': rgb,
-            'alpha': alpha,
-            'mu_raw': mu_raw,
-            'sigma_raw': sigma_raw,
-            't_start': t_start,
-            't_end': t_end
+            'rgb': rgb, 'alpha': alpha, 'mu_raw': mu_raw, 'sigma_raw': sigma_raw,
+            't_start': t_start, 't_end': t_end
         })
-        
-    return coarse_outputs, coarse_partitions
+    return coarse_outputs, t_coarse
 
-def compute_pdf_and_distribution(coarse_outputs, n_samples, uncertainty_factor=1.5):
-    """
-    Computes the discrete PDF h^c and the continuous distribution f_dd from coarse outputs.
-    """
-    # Calculate weights w_i
+def compute_distribution(coarse_outputs, n_samples, uncertainty_factor):
+    # 3. Opacity and Influence Calculation
     weights = []
-    for i in range(n_samples):
-        out = coarse_outputs[i]
-        alpha = out['alpha']
-        # delta is distance along ray for this interval
-        delta = out['t_end'] - out['t_start']
-        # Opacity calculation: alpha_i = 1 - exp(-sigma_density * delta)
-        # Note: The source uses 'alpha' directly from network as opacity proxy or derived from density.
-        # Assuming network output 'alpha' is the opacity alpha_i.
-        # Influence w_i = alpha_i * product(1 - alpha_j)
-        pass 
-        
-    # Simplified weight calculation assuming alpha is opacity
-    alphas = [out['alpha'] for out in coarse_outputs]
-    ws = []
-    transmittance = 1.0
-    for i, alpha in enumerate(alphas):
-        w = alpha * transmittance
-        ws.append(w)
-        transmittance *= (1.0 - alpha)
-        
-    # Normalize to get discrete PDF h^c
-    sum_w = sum(ws)
-    h_c = [w / sum_w for w in ws]
-    
-    # Smoothing h_c
-    # 2-tap max filter then 2-tap blur (or 1D blur [0.1, 0.8, 0.1] for small n)
-    if n_samples <= 16:
-        smoothed_h_c = []
-        for i in range(n_samples):
-            val = 0.0
-            if i > 0: val += 0.1 * h_c[i-1]
-            val += 0.8 * h_c[i]
-            if i < n_samples - 1: val += 0.1 * h_c[i+1]
-            smoothed_h_c.append(val)
-        h_c = smoothed_h_c
-    else:
-        # Apply 2-tap max and 2-tap blur (implementation omitted for brevity, standard convolution)
-        pass
-
-    # Construct Continuous Distribution f_dd
-    # For each interval, define truncated Gaussian
-    gaussians = []
-    for i in range(n_samples):
-        out = coarse_outputs[i]
-        t_start = out['t_start']
-        t_end = out['t_end']
-        
-        # Convert relative to absolute
-        mu_r = sigmoid(out['mu_raw'])
-        sigma_r = sigmoid(out['sigma_raw'])
-        
-        mu = t_start + mu_r * (t_end - t_start)
-        sigma = sigma_r * (t_end - t_start)
-        
-        # Apply uncertainty factor
-        sigma_smoothed = uncertainty_factor * sigma
-        
-        # Truncated Gaussian parameters
-        # k_i = F(t_end) - F(t_start)
-        f_start = gaussian_cdf(t_start, mu, sigma_smoothed)
-        f_end = gaussian_cdf(t_end, mu, sigma_smoothed)
-        k = f_end - f_start
-        
-        gaussians.append({
-            'mu': mu,
-            'sigma': sigma_smoothed,
-            'k': k,
-            'weight': h_c[i],
-            't_start': t_start,
-            't_end': t_end
-        })
-        
-    return h_c, gaussians
-
-def sample_fine(gaussians, n_fine_samples):
-    """
-    Samples fine points from the mixture of truncated Gaussians.
-    """
-    # Construct CDF of the mixture
-    # f_dd(t) = sum( h_c[i] * f'_i(t) )
-    # F_dd(t) = integral of f_dd
-    
-    # To sample, we can use inverse transform sampling or rejection sampling.
-    # Given the complexity, we assume a function `sample_from_mixture_truncated_gaussians`
-    # that takes the list of truncated Gaussians and their weights.
-    
-    fine_samples = sample_from_mixture_truncated_gaussians(gaussians, n_fine_samples)
-    return fine_samples
-
-def render_fine(fine_samples, fine_net):
-    """
-    Renders the final image using fine samples.
-    """
-    fine_outputs = []
-    for t in fine_samples:
-        encoded = integrate_pe(t, t) # Point encoding or small interval
-        out = fine_net(encoded)
-        fine_outputs.append({
-            'rgb': out[..., :3],
-            'alpha': out[..., 3:4],
-            't': t
-        })
-        
-    # Render
-    alphas = [out['alpha'] for out in fine_outputs]
-    rgbs = [out['rgb'] for out in fine_outputs]
-    ts = [out['t'] for out in fine_outputs]
-    
-    color = torch.zeros(3)
-    transmittance = 1.0
-    for i, (alpha, rgb) in enumerate(zip(alphas, rgbs)):
-        w = alpha * transmittance
-        color += w * rgb
-        transmittance *= (1.0 - alpha)
-        
-    return color, transmittance
-
-def compute_loss(coarse_outputs, fine_color, gt_color, n_samples):
-    """
-    Computes the total loss including NeRF loss and DE Loss.
-    """
-    # NeRF Loss
-    # Coarse color prediction
-    coarse_color = torch.zeros(3)
     transmittance = 1.0
     for out in coarse_outputs:
         w = out['alpha'] * transmittance
-        coarse_color += w * out['rgb']
+        weights.append(w)
+        transmittance *= (1.0 - out['alpha'])
+    sum_w = sum(weights)
+    h_c = [w / sum_w for w in weights]
+
+    # 4. Smoothing Coarse PDF
+    if n_samples <= 16:
+        smoothed = []
+        for i in range(n_samples):
+            val = 0.8 * h_c[i]
+            if i > 0: val += 0.1 * h_c[i-1]
+            if i < n_samples - 1: val += 0.1 * h_c[i+1]
+            smoothed.append(val)
+        h_c = smoothed
+    else:
+        # 2-tap max filter followed by 2-tap blur filter [S1]
+        pass
+
+    # 5. Distribution Estimation (Gaussian Parameters)
+    gaussians = []
+    for i in range(n_samples):
+        out = coarse_outputs[i]
+        mu_r = sigmoid(out['mu_raw'])
+        sigma_r = sigmoid(out['sigma_raw'])
+        mu = out['t_start'] + mu_r * (out['t_end'] - out['t_start'])
+        sigma = sigma_r * (out['t_end'] - out['t_start'])
+        sigma_smoothed = uncertainty_factor * sigma
+        k = gaussian_cdf(out['t_end'], mu, sigma_smoothed) - gaussian_cdf(out['t_start'], mu, sigma_smoothed)
+        gaussians.append({
+            'mu': mu, 'sigma': sigma_smoothed, 'k': k, 'weight': h_c[i],
+            't_start': out['t_start'], 't_end': out['t_end']
+        })
+    return h_c, gaussians
+
+def sample_fine(gaussians, n_fine_samples):
+    # 6. Fine Sampling
+    # Sample from mixture of truncated Gaussians using inverse CDF [G]
+    fine_samples = []
+    for _ in range(n_fine_samples):
+        u = random.uniform(0, 1)
+        # Find which interval the CDF crosses u
+        cdf_val = 0.0
+        for g in gaussians:
+            cdf_end = cdf_val + g['weight'] * (gaussian_cdf(g['t_end'], g['mu'], g['sigma']) - gaussian_cdf(g['t_start'], g['mu'], g['sigma'])) / g['k']
+            if u <= cdf_end:
+                # Sample within this interval using truncated Gaussian inverse CDF
+                t_start = g['t_start']
+                t_end = g['t_end']
+                mu = g['mu']
+                sigma = g['sigma']
+                k = g['k']
+                u_local = (u - cdf_val) * k / g['weight']
+                t_sample = mu + sigma * math.sqrt(2) * math.erfinv(2 * u_local * k + math.erf((t_start - mu) / (sigma * math.sqrt(2))) - math.erf((t_start - mu) / (sigma * math.sqrt(2))))
+                # Simplified inverse CDF for truncated Gaussian [G]
+                fine_samples.append(t_sample)
+                break
+            cdf_val = cdf_end
+    return fine_samples
+
+def render_fine(fine_samples, fine_net):
+    # 7. Fine Network Forward Pass
+    fine_outputs = []
+    for t in fine_samples:
+        encoded = integrated_positional_encoding(t, t)
+        # Simulate network output: [R, G, B, alpha]
+        rgb = [0.5, 0.5, 0.5]
+        alpha = 0.5
+        fine_outputs.append({'rgb': rgb, 'alpha': alpha, 't': t})
+        
+    # Render
+    color = [0.0, 0.0, 0.0]
+    transmittance = 1.0
+    for out in fine_outputs:
+        w = out['alpha'] * transmittance
+        for k in range(3):
+            color[k] += w * out['rgb'][k]
+        transmittance *= (1.0 - out['alpha'])
+    return color, transmittance
+
+def compute_loss(coarse_outputs, fine_color, gt_color, n_samples):
+    # 8. Loss Calculation
+    # NeRF Loss
+    coarse_color = [0.0, 0.0, 0.0]
+    transmittance = 1.0
+    for out in coarse_outputs:
+        w = out['alpha'] * transmittance
+        for k in range(3):
+            coarse_color[k] += w * out['rgb'][k]
         transmittance *= (1.0 - out['alpha'])
         
-    l_nerf = F.mse_loss(coarse_color, gt_color) + F.mse_loss(fine_color, gt_color)
+    l_nerf = sum((c - g)**2 for c, g in zip(coarse_color, gt_color)) + sum((f - g)**2 for f, g in zip(fine_color, gt_color))
     
     # DE Loss
     # 1. Estimate h^f from fine samples
-    # Calculate weights for fine samples
-    fine_alphas = [out['alpha'] for out in fine_outputs] # Assuming fine_outputs available
+    fine_alphas = [out['alpha'] for out in fine_outputs]
     fine_ws = []
     transmittance = 1.0
     for alpha in fine_alphas:
@@ -308,25 +243,16 @@ def compute_loss(coarse_outputs, fine_color, gt_color, n_samples):
     h_f = [w / sum_fine_w for w in fine_ws]
     
     # 2. Estimate h^f_hat from coarse distribution
-    # This requires integrating f_dd over fine intervals.
-    # Assuming fine_partitions are derived from fine_samples
-    fine_partitions = [0] + [s['t'] for s in fine_outputs] + [max_depth] # Approximate
+    fine_partitions = [0] + [s['t'] for s in fine_outputs] + [max_depth]
     h_f_hat = []
     for i in range(len(fine_partitions)-1):
         t_start = fine_partitions[i]
         t_end = fine_partitions[i+1]
-        # Integrate f_dd from t_start to t_end
-        # f_dd(t) = sum( h_c[j] * f'_j(t) )
         prob = 0.0
         for g in gaussians:
-            # Integral of truncated Gaussian from t_start to t_end
-            # F'_j(t) = (F_j(t) - F_j(t_start_j)) / k_j
-            # This is complex. Simplified: use CDF of mixture.
-            pass
-        # Placeholder for integration logic
-        h_f_hat.append(0.0) 
+            prob += g['weight'] * (gaussian_cdf(min(t_end, g['t_end']), g['mu'], g['sigma']) - gaussian_cdf(max(t_start, g['t_start']), g['mu'], g['sigma'])) / g['k']
+        h_f_hat.append(prob)
         
-    # Normalize h_f_hat
     sum_h_f_hat = sum(h_f_hat)
     h_f_hat = [x / sum_h_f_hat for x in h_f_hat]
     

@@ -1,196 +1,159 @@
 # Metropolis Light Transport for Participating Media
 
-Also called: MLT for Participating Media, Metropolis Light Transport (MLT), Metropolis Sampling for Light Transport
+Also called: MLT, MLT for Participating Media, Metropolis Light Transport (Pauly et al.), Metropolis Sampling for Light Transport
 
 ## Overview
-Metropolis Light Transport (MLT) for participating media is a stochastic rendering algorithm that samples light transport paths in scenes with heterogeneous participating media by using Metropolis-Hastings Markov Chain Monte Carlo (MCMC) methods [S1, S3]. It solves the problem of efficiently exploring high-dimensional path space in complex volumetric scenes where standard importance sampling (e.g., Bidirectional Path Tracing) fails due to low probability of connecting light sources to the camera through multiple scattering events [S1, S3]. Unlike standard path tracing, which treats each path independently, MLT generates paths by locally mutating a "current" path, favoring mutations that increase the path's contribution to the image [S1]. It is distinguished from its siblings by its ability to handle general geometric models and inhomogeneous media with multiple scattering while using little storage, though it is view-dependent [S1]. It differs from [Surrounding Path Contribution (WKB Expansion)](1300-surrounding-path-contribution-wkb-expansion.md) and [Null-Scattering Path Integral Framework](3070-null-scattering-path-integral-framework.md) by relying on MCMC mutations in path space (or primary sample space) rather than integral equation expansions or null-collision tracking for sampling [S3].
+Metropolis Light Transport (MLT) for participating media is a stochastic rendering algorithm that samples light transport paths in scenes with heterogeneous participating media by using Markov Chain Monte Carlo (MCMC) to target the measurement contribution function directly [S1, S3]. Unlike standard importance sampling methods that only consider factors of the contribution function, MLT generates paths proportional to their actual contribution to the image, allowing it to efficiently handle complex lighting effects such as caustics and multiple scattering in inhomogeneous media [S1, S3]. It distinguishes itself from its siblings by being an unbiased method that handles general geometric models and inhomogeneous media with multiple scattering while using little storage, though it is view-dependent [S1].
 
 ## How it works
-The method extends the original MLT algorithm [VG97] to participating media, originally proposed by Pauly et al. [S1, S3]. A critical advancement, introduced by Kronander et al. [S3], is the use of **Pseudo-Marginal MLT**, which replaces the intractable exact transmittance calculation with an unbiased estimator, ensuring the Markov chain targets the exact desired density despite the approximation [S3].
+MLT extends the Metropolis-Hastings algorithm to the space of light transport paths. The core challenge in participating media is that the transmittance along a path in heterogeneous media is analytically intractable, making the exact evaluation of the path contribution function $f(\bar{x})$ impossible [S4]. Pauly et al. [67] proposed using MLT for this purpose, relying on the ability to evaluate the contribution function (or a proxy) to guide the random walk [S1].
 
 ### Inputs and Outputs
-*   **Inputs:** Scene geometry, heterogeneous medium properties (extinction $\sigma_t$, scattering coefficient $\sigma_s$, phase function $p$), light source definitions, camera parameters, and an initial set of paths (or a single path for standard MLT).
-*   **Outputs:** An unbiased estimate of the radiance at each pixel.
+- **Inputs**: Scene geometry, material properties (scattering coefficients $\sigma_s$, absorption coefficients $\sigma_a$, phase function $p$), light source definitions, camera parameters, and an initial set of seed paths.
+- **Outputs**: An unbiased estimate of the pixel values (radiance) for the rendered image.
 
 ### Data Structures
-*   **Light Path $\bar{x}$:** A sequence of vertices $x_0, x_1, \dots, x_k$, where $x_0$ is on the camera or light, and intermediate vertices are in the medium or on surfaces.
-*   **Auxiliary Variable $u$:** Represents the random quantities generated to construct the unbiased estimator $\hat{L}(\bar{x})$ [S3].
-*   **State Pair:** The MCMC state is defined as $(\bar{x}, u)$ [S3].
+The algorithm operates on paths $\bar{x}$ in the path space $\mathcal{P}$. A path $\bar{x}$ consists of a sequence of vertices $x_0, x_1, \dots, x_k$.
+- Vertices $x_0$ (camera) and $x_{k+1}$ (light) are fixed or sampled from distributions.
+- Intermediate vertices $x_i$ can be on surfaces (area integration, $d\mu(x_i) = dA(x_i)$) or in media (volume integration, $d\mu(x_i) = dV(x_i)$) [S4].
+- The path probability density $p(\bar{x})$ is defined as:
+  $$ p(\bar{x}) = \frac{f(\bar{x})}{b} $$
+  where $b = \int_{\mathcal{P}} f(\bar{y}) d\mu(\bar{y})$ is the integral of the measurement contribution function over the path space [S3].
 
-### Initialization
-1.  **Estimate Total Brightness ($b$):** Perform a low-sample rendering (e.g., Bidirectional Path Tracing) to estimate $b = \int_{\mathcal{P}} f(\bar{y}) d\mu(\bar{y})$, where $f$ is the measurement contribution function [S4]. Typically $10^4$–$10^5$ samples are sufficient [S4].
-2.  **Select Initial Path:** Generate a set of approximation samples. Select one sample $\bar{x}_0$ as the initial state with probability proportional to $f(\bar{x})/p(\bar{x})$ [S4]. This avoids start-up bias [S4].
-3.  **Estimate Contribution:** Compute the unbiased estimator $\hat{L}(\bar{x}_0)$ and its associated auxiliary variable $u_0$ [S3].
+### Steps
+1. **Initialization**:
+   - Estimate the total image brightness (the constant $b$) using a suitable rendering algorithm (e.g., Bidirectional Path Tracing) with a low number of samples ($10^4$–$10^5$) [S3].
+   - Generate a set of seed paths using standard path tracing techniques [S4].
+   - Select one of the approximation samples as the initial state $\bar{x}_0$ for the Metropolis phase with probability proportional to $f(\bar{x})/p(\bar{x})$ [S3]. This sample is expected to be distributed according to the stationary density, avoiding start-up bias without discarding samples [S3].
 
-### Mutation and Proposal
-The algorithm iteratively generates new paths $\bar{x}_{i+1}$ from the current path $\bar{x}_i$ using a proposal distribution $q(\bar{x}_{i+1} | \bar{x}_i)$ [S3].
+2. **Mutation Loop**:
+   - For each new state, generate a tentative sample $\bar{y}$ from the current sample $\bar{x}$ using a tentative transition function $T(\bar{x} \rightarrow \bar{y})$ [S3].
+   - Common mutations include adding a new vertex to the path (e.g., inserting a scattering event in the medium) or perturbing existing vertices [S1].
+   - Calculate the acceptance probability:
+     $$ a(\bar{x} \rightarrow \bar{y}) := \min \left\{ 1, \frac{f(\bar{y})T(\bar{y} \rightarrow \bar{x})}{f(\bar{x})T(\bar{x} \rightarrow \bar{y})} \right\} $$
+   - Accept or reject the proposal $\bar{y}$ based on this value [S3]. If accepted, $\bar{y}$ becomes the new current path; otherwise, the current path $\bar{x}$ is repeated.
 
-**Vertex Perturbation in Media:**
-To update a medium vertex $x_i$, perturb it forward or backward along the current edge with uniform probability [S3]. The perturbation distance $d$ is sampled from a distribution proportional to $\gamma \sigma_t(x_i) \exp(-\gamma \sigma_t(x_i))$, where $\gamma$ is a scale parameter [S3].
-*   Typical values for $\gamma$ are 50 and 100, mixed with uniform probability [S3].
-*   For bidirectional path mutation, delta tracking is used to propose new vertices in media [S3].
-
-**Primary Sample Space Mutation (PSSMLT variant):**
-Alternatively, mutations can be applied to the random number vectors in primary sample space, which are then used to generate light paths via traditional path tracing [S3]. This is limited to the underlying path tracing techniques [S3].
-
-### Pseudo-Marginal Acceptance
-Because the exact contribution $L(\bar{x})$ is intractable in heterogeneous media, an unbiased estimator $\hat{L}(\bar{x})$ is used [S3]. The algorithm samples an auxiliary variable $u_{i+1}$ from $g(u_{i+1} | \bar{x}_{i+1})$ to generate a new independent estimate $\hat{L}(\bar{x}_{i+1})$ [S3].
-
-The acceptance probability $\alpha$ for the new sample pair $(\bar{x}_{i+1}, u_{i+1})$ given the current state $(\bar{x}_i, u_i)$ is:
-
-$$
-\alpha = \min \left( 1, \frac{\hat{L}(\bar{x}_{i+1})}{u_{i+1}} \frac{q(\bar{x}_i | \bar{x}_{i+1})}{q(\bar{x}_{i+1} | \bar{x}_i)} \frac{u_i}{\hat{L}(\bar{x}_i)} \right)
-$$
-
-Note: If delta tracking is used with respect to the luminance of transmission, the proposal densities $q$ cancel out in the acceptance ratio [S3].
-
-**Unbiased Estimator for Heterogeneous Media:**
-The estimator $\hat{L}_u(\bar{x}_j)$ for a path with vertices $x_0, \dots, x_k$ is:
-
-$$
-\hat{L}_u(\bar{x}_j) = L_e \prod_{i=0}^{k-1} G(x_i, x_{i+1}) \hat{T}_i(x_i, x_{i+1}) \rho(x_i) \prod_{j=1}^{k-1} \hat{T}_j(x_j, x_{j+1})
-$$
-
-Where:
-*   $L_e$ is the source luminance.
-*   $G(x_i, x_{i+1})$ is the geometry term.
-*   $\rho(x_i)$ is the scattering albedo or phase function term.
-*   $\hat{T}_i$ are independent unbiased estimators of transmission obtained via ratio tracking [S3].
-
-### Rendering Loop
-1.  **Propose:** Generate tentative path $\bar{y}$ from $\bar{x}$ using $T(\bar{x} \rightarrow \bar{y})$ [S4].
-2.  **Estimate:** Compute $\hat{L}(\bar{y})$ and auxiliary $u_y$ [S3].
-3.  **Accept/Reject:** Accept $\bar{y}$ with probability $\alpha$. If accepted, $\bar{x} \leftarrow \bar{y}$.
-4.  **Deposit:** Deposit energy to the pixel corresponding to the path's contribution [S1].
-5.  **Ergodicity:** To prevent getting stuck in isolated areas, generate independent paths at random intervals by feeding fresh uniform random numbers into the algorithm [S4].
+3. **Rendering**:
+   - Deposit a certain amount of energy to the pixel each path passes through, updating the image [S1].
+   - The paths are distributed proportionally to their contribution to the final image [S1].
+   - The measurement contribution function $f_j(\bar{x})$ is split into a pixel filter function $h_j(\bar{x})$ and a remainder $f(\bar{x})$ common to every pixel [S3]. The estimator for pixel $j$ is:
+     $$ F_{j,N} = \frac{1}{N} \sum_{i=1}^N h_j(\bar{X}_i) b $$
+     where $N$ is the number of samples [S3].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def metropolis_light_transport_media(scene, camera, num_iterations):
-    """
-    Implements Pseudo-Marginal MLT for participating media.
-    """
+def metropolis_light_transport(scene, camera, num_chains, steps_per_chain):
     # 1. Initialization
-    # Estimate total brightness b using a low-sample method (e.g., BDPT)
-    b = estimate_total_brightness(scene, camera, num_samples=10000)
+    # Estimate b using a low-sample BDPT or similar method
+    b_estimate = estimate_total_brightness(scene, camera, num_samples=10000)
     
-    # Generate initial path x_0 using standard path tracing
-    x_current = generate_initial_path(scene, camera)
+    # Generate seed paths using standard path tracing
+    seed_paths = generate_seed_paths(scene, camera, num_samples=num_chains)
     
-    # Compute unbiased estimate of contribution for x_current
-    # This involves ratio tracking for transmittance in heterogeneous media
-    u_current, L_hat_current = compute_unbiased_contribution(x_current, scene)
+    # Select initial paths with probability proportional to f/p
+    # Note: In practice, f is approximated or evaluated via unbiased estimators
+    initial_paths = select_initial_paths(seed_paths, b_estimate)
     
-    # Accumulate image
-    image = zeros_like(camera.resolution)
+    image_buffer = zeros(camera.resolution)
     
-    for i in range(num_iterations):
-        # 2. Ergodicity Step: Occasionally restart with a fresh path
-        if random() < restart_probability:
-            x_current = generate_initial_path(scene, camera)
-            u_current, L_hat_current = compute_unbiased_contribution(x_current, scene)
-            continue
+    for path in initial_paths:
+        current_path = path
+        for step in range(steps_per_chain):
+            # 2. Mutation
+            # Choose mutation type (e.g., add vertex, perturb vertex)
+            mutation_type = random_choice(['add_vertex', 'perturb_vertex'])
             
-        # 3. Mutation Step
-        # Propose new path y from x_current
-        # Perturb vertices in media or primary sample space
-        y = mutate_path(x_current, scene)
-        
-        # 4. Estimate Contribution for Proposed Path
-        # Generate new auxiliary variable u_y independently
-        u_y, L_hat_y = compute_unbiased_contribution(y, scene)
-        
-        # 5. Acceptance Probability
-        # Calculate proposal density ratio q(x|y)/q(y|x)
-        # If using delta tracking w.r.t luminance, this ratio is 1
-        proposal_ratio = compute_proposal_ratio(x_current, y, scene)
-        
-        alpha = min(1.0, 
-                    (L_hat_y / u_y) * 
-                    (u_current / L_hat_current) * 
-                    proposal_ratio)
-        
-        if random() < alpha:
-            x_current = y
-            u_current = u_y
-            L_hat_current = L_hat_y
+            if mutation_type == 'add_vertex':
+                tentative_path = add_scattering_vertex(current_path, scene)
+            elif mutation_type == 'perturb_vertex':
+                tentative_path = perturb_vertex(current_path, scene)
             
-        # 6. Deposit Energy
-        deposit_path_contribution(x_current, L_hat_current, image, camera)
-        
-    return image
+            # 3. Acceptance Test
+            # Calculate f(current_path) and f(tentative_path)
+            # In heterogeneous media, this requires unbiased estimation (e.g., PSSMLT)
+            f_current = evaluate_contribution(current_path, scene)
+            f_tentative = evaluate_contribution(tentative_path, scene)
+            
+            # Calculate transition probabilities T(x->y) and T(y->x)
+            # For symmetric perturbations, T(x->y) = T(y->x)
+            T_current_to_tentative = calculate_transition_prob(current_path, tentative_path, mutation_type)
+            T_tentative_to_current = calculate_transition_prob(tentative_path, current_path, mutation_type)
+            
+            # Acceptance probability
+            acceptance_ratio = (f_tentative * T_tentative_to_current) / (f_current * T_current_to_tentative)
+            acceptance_prob = min(1.0, acceptance_ratio)
+            
+            if random_uniform() < acceptance_prob:
+                current_path = tentative_path
+            
+            # 4. Deposit Energy
+            pixel = get_pixel_from_path(current_path, camera)
+            image_buffer[pixel] += evaluate_pixel_contribution(current_path, camera) / b_estimate
+            
+    return image_buffer
 
-def compute_unbiased_contribution(path, scene):
+def evaluate_contribution(path, scene):
     """
-    Computes unbiased estimator L_hat and auxiliary variable u
-    using ratio tracking for transmittance in heterogeneous media.
+    Evaluates the measurement contribution function f(x).
+    For participating media, this involves computing transmittance.
+    In standard MLT, this is intractable for heterogeneous media.
+    [G] In a full implementation, this would use an unbiased estimator like PSSMLT.
     """
-    L_hat = 1.0
-    u = [] # Stores random quantities used for estimation
-    
-    for i in range(len(path) - 1):
-        # Geometry term
-        G = geometry_term(path[i], path[i+1])
-        L_hat *= G
-        
-        # Scattering term
-        rho = scattering_albedo(path[i], scene)
-        L_hat *= rho
-        
-        # Transmittance estimation using Ratio Tracking
-        # Returns unbiased estimate and the random numbers used
-        T_hat, u_segment = ratio_tracking_transmittance(path[i], path[i+1], scene)
-        L_hat *= T_hat
-        u.extend(u_segment)
-        
-    # Source luminance
-    L_hat *= scene.source_luminance()
-    
-    return u, L_hat
+    # Simplified for demonstration: assumes homogeneous or pre-computed transmittance
+    transmittance = compute_transmittance(path, scene)
+    scattering_weights = compute_scattering_weights(path, scene)
+    return transmittance * scattering_weights
 
-def mutate_path(x, scene):
+def calculate_transition_prob(x, y, mutation_type):
     """
-    Mutates path x by perturbing medium vertices.
+    Calculates the probability of transitioning from x to y.
+    For symmetric mutations (e.g., Gaussian perturbation), this is equal to T(y->x).
     """
-    y = copy(x)
-    for i in range(1, len(y) - 1): # Skip camera and light vertices
-        if is_medium_vertex(y[i], scene):
-            # Perturb forward or backward
-            direction = random_choice([-1, 1])
-            # Distance proportional to gamma * sigma_t * exp(-gamma * sigma_t)
-            sigma_t = extinction_coefficient(y[i], scene)
-            gamma = random_choice([50, 100])
-            distance = sample_perturbation_distance(gamma, sigma_t)
-            
-            y[i] = y[i] + direction * distance * edge_direction(y, i)
-            
-    return y
+    # [G] Specific implementation depends on the mutation kernel.
+    # For adding a vertex, it involves the probability of choosing to add a vertex
+    # and the probability of sampling the new vertex position.
+    return 1.0 # Placeholder for symmetric case
 ```
 
+### Parameters
+- **Number of chains**: Determined by the number of seed paths.
+- **Steps per chain**: Number of mutations per chain. Longer chains improve correlation but increase computation time.
+- **Mutation types**: Typically include adding a vertex (inserting a scattering event) and perturbing existing vertices. A good proposal strategy exploits coherence in the scene and maintains low correlation between subsequent samples [S3].
+
 ### Edge Cases and Pitfalls
-*   **Mixing Quality:** If the number of samples $M$ used in ratio tracking is too low, the mixing of the marginal subchain can be poor, causing the chain to get stuck due to overestimation of the exact quantity [S3]. A rule of thumb is to choose $M$ such that the variance of $\log(\hat{L}(\bar{x}))$ is approximately one, but in practice, $M=1$ is often beneficial for complex scenes to allow longer chains [S3].
-*   **Bias:** Using a biased estimate of transmission (e.g., ray-marching) causes the Markov chain to not necessarily target the desired density [S3]. Unbiased estimators (ratio tracking) are required [S3].
-*   **Ergodicity:** Mutation alone cannot ensure ergodicity; independent paths must be generated at random intervals to explore the entire space [S4].
-*   **PSSMLT Limitations:** PSSMLT is limited to the underlying path tracing techniques, restricting path space exploration compared to direct path space mutations [S3].
+- **Ergodicity**: The mutation alone cannot ensure ergodicity and may get stuck in isolated areas. Independent paths must be generated at random intervals by the underlying path tracer (feeding fresh uniform random numbers) to guarantee the algorithm explores the entire space [S3].
+- **Intractable Transmittance**: In scenes with heterogeneous participating media, computing the transmittance along a path is analytically intractable, making the MH acceptance probability impossible to evaluate in closed form [S4]. This requires the use of unbiased estimators (e.g., PSSMLT) or biased approximations (which break the theoretical guarantees of MLT) [S4].
+- **View Dependency**: MLT is a view-dependent method, meaning it must be re-run for each camera position [S1].
+
+## Subtopics
+
+### [Pseudo-marginal Metropolis Light Transport (PSSMLT)](12276-pseudo-marginal-metropolis-light-transport-pssmlt.md)
+PSSMLT is a variant that enables MLT in scenes with heterogeneous participating media by replacing the intractable exact light path contribution function with a non-negative, unbiased estimator. Unlike methods that use biased approximations (such as deterministic ray-marching) which fail to target the correct density, PSSMLT constructs an extended target distribution in an auxiliary space to ensure the marginal distribution of sampled paths remains exact. It distinguishes itself from standard PSSMLT implementations that rely on delta tracking by utilizing ratio tracking, which is significantly faster and allows for longer Markov chains and better path space exploration.
+
+### Primary Sample Space Metropolis Light Transport (PSSMLT)
+Primary Sample Space Metropolis Light Transport (PSSMLT) is an MCMC method where mutations are applied to random number vectors in primary sample space, which are then used to generate light paths via traditional path tracing methods, rather than sampling directly in path space [S4]. While easy to implement, it is limited to the underlying path tracing techniques, restricting the possible exploration of the path space [S4].
+
+### Metropolis Light Transport
+Metropolis Light Transport (MLT) is a global illumination rendering method based on Monte Carlo methods that uses Markov chain Monte Carlo (MCMC) to sample light paths $\bar{x}_i$ according to a target distribution $\pi(\bar{x})$ proportional to the image contribution of the paths [S4]. Given a current path $\bar{x}_i$, a new path $\bar{x}_{i+1}$ is proposed using a conditional proposal density $q(\bar{x}_{i+1}|\bar{x}_i)$, and accepted with probability $\min(1, \frac{L(\bar{x}_{i+1}) q(\bar{x}_i|\bar{x}_{i+1})}{L(\bar{x}_i) q(\bar{x}_{i+1}|\bar{x}_i)})$ [S4]. The path integral is estimated by the average $\hat{I}_j = \frac{1}{N} \sum_{i=1}^N W_j f(\bar{x}_i)$, where $Z = \int_\Omega L(\bar{x})d\mu(\bar{x})$ is an unknown normalizing constant [S4].
+
+### Energy Redistribution Path Tracing
+Energy Redistribution Path Tracing (ERPT) is an extension to the original MLT algorithm that samples a large set of paths with standard path tracing methods and then runs many short MCMC chains starting from each initial sample [S4]. The main benefit of ERPT over original MLT is that a well stratified initial sample set can be preserved, e.g., using one path per pixel [S4].
 
 ## Operating characteristics
-*   **Time Complexity:** The cost per iteration is dominated by the unbiased transmittance estimation (ratio tracking) and the mutation step. Ratio tracking is significantly faster than ray-marching [S3].
-*   **Memory Complexity:** Low storage requirements, as it does not need to store large data structures like photon maps [S1].
-*   **Performance:** In heterogeneous media, PSSMLT with ratio tracking produces less image noise than ERPT with Simpson quadrature ray-marching by enabling longer Markov chains [S3]. It is more efficient than delta tracking-based PSSMLT when ratio tracking is used [S3].
-*   **Strengths:** Unbiased, handles general geometry and inhomogeneous media, accounts for multiple scattering, efficient in complex light paths [S1, S3].
-*   **Limitations:** View-dependent, requires careful tuning of mutation parameters ($\gamma$), mixing can be poor if $M$ is too high or low [S1, S3].
+- **Time Complexity**: The convergence rate of MLT is generally slower than importance sampling for simple scenes but superior for complex lighting scenarios involving caustics or multiple scattering in media. The cost is dominated by the evaluation of the contribution function and the transition probabilities.
+- **Memory Complexity**: MLT uses little storage as it only needs to store the current path and a few auxiliary variables [S1].
+- **Strengths**: Unbiased results, handles general geometric models and inhomogeneous media, accounts for multiple scattering, and efficiently explores path space for difficult lighting situations [S1].
+- **Limitations**: View-dependent, requires careful tuning of mutation strategies, and suffers from ergodicity issues if not combined with independent resampling [S3]. The intractability of transmittance in heterogeneous media requires additional techniques like PSSMLT [S4].
+- **When to use**: Scenes with complex lighting, multiple scattering in participating media, or caustics where importance sampling fails.
+- **When not to use**: Simple scenes with homogeneous media or direct illumination, where standard path tracing or BDPT is more efficient.
 
 ## Background
-*   **Origin:** MLT was first presented by Veach and Guibas in 1997 [VG97] and strongly modified by Kelemen et al. in 2002 [KSKAC02].
-*   **Extension to Media:** Pauly et al. extended MLT to incorporate volumetric scattering [S1, S3].
-*   **Pseudo-Marginal Advancement:** Kronander et al. introduced the use of unbiased estimators (ratio tracking) within the MLT framework for heterogeneous media, solving the bias issue of previous ray-marching approaches [S3].
-*   **Usage:** Implemented in the Mitsuba renderer [S3]. Applied to MLT, ERPT, and PSSMLT [S3].
+MLT was first presented by Veach and Guibas in 1997 [VG97] and strongly modified by Kelemen et al. in 2002 [KSKAC02]. Pauly et al. [67] extended MLT to incorporate volumetric scattering, producing unbiased results for general geometric models and inhomogeneous media with multiple scattering [S1]. The method is based on the Metropolis sampling technique for handling difficult sampling problems in computational physics [S1]. It is used in research and high-end rendering for simulating light transport in complex participating media.
 
 ## Sources
 [S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
 [S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26
-[S3] Pseudo-marginal metropolis light transport, https://doi.org/10.1145/2820903.2820922, fetched 2026-10-30
-[S4] Unbiased Global Illumination with Participating Media, http://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/ugiwpm.pdf, fetched 2026-10-30
+[S3] Unbiased Global Illumination with Participating Media, http://www.uni-ulm.de/fileadmin/website_uni_ulm/iui.inst.100/institut/Papers/ugiwpm.pdf, fetched 2026-10-30
+[S4] Pseudo-marginal metropolis light transport, https://doi.org/10.1145/2820903.2820922, fetched 2026-10-30

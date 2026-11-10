@@ -1,0 +1,263 @@
+# Reflective Gaussian Splatting
+
+Also called: Ref-Gaussian
+
+## Overview
+Reflective Gaussian Splatting (Ref-Gaussian) is a framework for the real-time, high-quality rendering of reflective objects with inter-reflection effects, addressing the limitations of standard 3D Gaussian Splatting in modeling complex surfaces and multi-view inconsistencies. It distinguishes itself from sibling methods like [3D Gaussian Splatting Rasterization](2812-3d-gaussian-splatting-rasterization.md) by utilizing 2D Gaussian primitives for view-consistent geometry and employing physically based deferred rendering with split-sum approximation to stabilize optimization and enable efficient inter-reflection modeling without heavy Monte Carlo sampling.
+
+## How it works
+Ref-Gaussian extends the Gaussian splatting framework by replacing 3D ellipsoids with 2D oriented planar Gaussian disks and applying deferred shading on pixel-level feature maps.
+
+### Inputs and Outputs
+**Inputs:**
+- Camera parameters (view and projection matrices).
+- Scene representation: A set of $N$ 2D Gaussian primitives, each defined by position $\mathbf{p}$, tangential vectors $\mathbf{t}_u, \mathbf{t}_v$, scaling factors $s_u, s_v$, and material properties.
+- Environment map or light sources for illumination.
+
+**Outputs:**
+- Final pixel radiance $L(\omega_o)$.
+
+### Data Structures
+Each 2D Gaussian primitive $i$ stores:
+- Position: $\mathbf{p}_i \in \mathbb{R}^3$.
+- Tangential vectors: $\mathbf{t}_{u,i}, \mathbf{t}_{v,i} \in \mathbb{R}^3$.
+- Scaling factors: $s_{u,i}, s_{v,i} \in \mathbb{R}$.
+- Material properties:
+  - Albedo: $\lambda_i \in [0, 1]^3$.
+  - Metallic: $m_i \in [0, 1]$.
+  - Roughness: $r_i \in [0, 1]$.
+- Derived normal: $\mathbf{n}_i = \mathbf{t}_{u,i} \times \mathbf{t}_{v,i}$ (normalized).
+
+Pixel-level feature maps $\mathbf{X}$ are accumulated during rasterization:
+- $\mathbf{X} = [\mathbf{\Lambda}, M, R, N]^T$, where $\mathbf{\Lambda}$ is the albedo map, $M$ is the metallic map, $R$ is the roughness map, and $N$ is the normal map.
+
+### Steps
+
+1. **Primitive Definition**:
+   Represent the scene using 2D Gaussian primitives to capture detailed geometry and avoid multi-view inconsistencies inherent in 3D Gaussians. The influence of a 2D Gaussian in its local tangent space is defined as [S1, unofficial]:
+   $$
+   \mathcal{G}(u, v) = \exp\left(-\frac{u^2 + v^2}{2}\right)
+   $$
+   where $(u, v)$ are coordinates in the local tangent space.
+
+2. **Ray-Splat Intersection**:
+   Compute the intersection of a ray with a Gaussian splat in homogeneous coordinates. The intersection point $\mathbf{x}$ is calculated as [S1, unofficial]:
+   $$
+   \mathbf{x} = (xz, yz, z, 1)^T = WH(u, v, 1, 1)^T
+   $$
+   where $H$ is the $4 \times 4$ transformation matrix for the Gaussian:
+   $$
+   H = \begin{bmatrix} s_u \mathbf{t}_u & s_v \mathbf{t}_v & \mathbf{0} & \mathbf{p} \end{bmatrix} \in \mathbb{R}^{4 \times 4}
+   $$
+   Here, $\mathbf{p}$ is the position, $\mathbf{t}_u, \mathbf{t}_v$ are the tangential vectors, and $s_u, s_v$ are the scaling factors.
+
+3. **Alpha Blending for Feature Maps**:
+   Perform alpha-blending of Gaussian features to create pixel-level feature maps $\mathbf{X}$, treating alpha-blending as a smoothing filter to stabilize optimization [S1, unofficial]. For each pixel, accumulate the features $\mathbf{x}_i$ weighted by opacity $\alpha_i$:
+   $$
+   \mathbf{X} = \sum_{i=1}^N \mathbf{x}_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j)
+   $$
+   where $\mathbf{x}_i = [\lambda_i, m_i, r_i, \mathbf{n}_i]^T$ and $\mathbf{X} = [\mathbf{\Lambda}, M, R, N]^T$. The opacity $\alpha_i$ is calculated by multiplying the Gaussian's intrinsic opacity $o_i$ with the Gaussian weight determined by the 2D covariance matrix $\Sigma'_i$ [S1, unofficial].
+
+4. **Deferred Shading with Split-Sum Approximation**:
+   Apply the rendering equation on the aggregated feature maps $\mathbf{X}$ rather than shading individual Gaussians before blending. The outgoing radiance $L(\omega_o)$ in direction $\omega_o$ is given by [S1, unofficial]:
+   $$
+   L(\omega_o) = \int_{\Omega} L_i(\omega_i) f(\omega_i, \omega_o) (\omega_i \cdot \mathbf{N}) \, d\omega_i
+   $$
+   where $f(\omega_i, \omega_o)$ is the Bidirectional Reflectance Distribution Function (BRDF), and $\mathbf{N}$ is the normal from the feature map. To model inter-reflection effects efficiently, use the split-sum approximation of the rendering equation, avoiding heavy Monte Carlo sampling.
+
+5. **Visibility Computation**:
+   Compute visibility for the specular component by performing ray tracing on an extracted mesh. This approach provides accurate visibility for specular terms, unlike methods that trace rays across Gaussians which can be noisy and slow [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reflective_gaussian_splatting(gaussians, camera, environment_map):
+    """
+    Render a scene using Reflective Gaussian Splatting.
+    
+    Args:
+        gaussians: List of Gaussian primitives, each with:
+            - p: position (3,)
+            - tu, tv: tangential vectors (3,)
+            - su, sv: scaling factors (float)
+            - lambda: albedo (3,)
+            - m: metallic (float)
+            - r: roughness (float)
+            - opacity: intrinsic opacity (float)
+        camera: Camera object with view and projection matrices.
+        environment_map: Environment map for illumination.
+        
+    Returns:
+        image: Rendered image (H, W, 3)
+    """
+    H, W = camera.resolution
+    
+    # Initialize feature maps
+    # Lambda: Albedo map (H, W, 3)
+    # M: Metallic map (H, W)
+    # R: Roughness map (H, W)
+    # N: Normal map (H, W, 3)
+    # Alpha map for accumulation
+    Lambda = np.zeros((H, W, 3))
+    M = np.zeros((H, W))
+    R = np.zeros((H, W))
+    N = np.zeros((H, W, 3))
+    Alpha = np.zeros((H, W))
+    
+    # Sort Gaussians by depth or process in arbitrary order (alpha blending handles order)
+    # Note: Standard 3DGS sorts by depth. Ref-Gaussian uses 2D Gaussians.
+    # Assuming gaussians are sorted by depth for correct alpha blending.
+    
+    for i, g in enumerate(gaussians):
+        # Compute 2D covariance matrix Sigma' from p, tu, tv, su, sv, and camera projection
+        # This step involves projecting the 3D Gaussian to 2D screen space.
+        # For 2D Gaussians, the covariance is derived from the tangential vectors and scaling.
+        Sigma_prime = compute_2d_covariance(g.p, g.tu, g.tv, g.su, g.sv, camera)
+        
+        # Compute opacity alpha_i
+        # alpha_i = o_i * weight(Sigma')
+        alpha_i = g.opacity * gaussian_weight(Sigma_prime)
+        
+        # Compute normal n = tu x tv
+        n = np.cross(g.tu, g.tv)
+        n = n / np.linalg.norm(n)
+        
+        # Rasterize this Gaussian to the feature maps
+        # Determine bounding box of the Gaussian in screen space
+        bbox = get_bounding_box(Sigma_prime, camera)
+        
+        for y in range(max(0, bbox.y_min), min(H, bbox.y_max)):
+            for x in range(max(0, bbox.x_min), min(W, bbox.x_max)):
+                # Compute distance in screen space for Gaussian weight
+                # This is a simplified representation; actual implementation uses efficient rasterization
+                dist_sq = compute_distance_sq(x, y, Sigma_prime, camera)
+                weight = np.exp(-0.5 * dist_sq)
+                
+                contribution_alpha = alpha_i * weight
+                
+                # Alpha blending
+                # X_new = X_old * (1 - contribution_alpha) + x_i * contribution_alpha
+                # But the formula is: X = sum(x_i * alpha_i * prod(1 - alpha_j))
+                # This implies we accumulate weighted contributions.
+                
+                # Current accumulated alpha at this pixel
+                current_alpha = Alpha[y, x]
+                
+                # Weight for this Gaussian's contribution
+                w = contribution_alpha * (1 - current_alpha)
+                
+                # Update feature maps
+                Lambda[y, x] += g.lambda_ * w
+                M[y, x] += g.m * w
+                R[y, x] += g.r * w
+                N[y, x] += n * w
+                
+                # Update accumulated alpha
+                Alpha[y, x] += w
+                
+    # Normalize feature maps by total accumulated alpha to get final values
+    # Avoid division by zero
+    safe_alpha = np.maximum(Alpha, 1e-6)
+    Lambda /= safe_alpha[:, :, np.newaxis]
+    M /= safe_alpha
+    R /= safe_alpha
+    N /= safe_alpha[:, :, np.newaxis]
+    
+    # Apply deferred shading
+    # Compute outgoing radiance L(wo) using BRDF and environment map
+    image = np.zeros((H, W, 3))
+    
+    for y in range(H):
+        for x in range(W):
+            albedo = Lambda[y, x]
+            metallic = M[y, x]
+            roughness = R[y, x]
+            normal = N[y, x]
+            
+            # Compute outgoing radiance
+            # L(wo) = integral Li(wi) * f(wi, wo) * (wi . N) dwi
+            # Using split-sum approximation and environment map
+            radiance = compute_brdf_radiance(albedo, metallic, roughness, normal, environment_map)
+            
+            image[y, x] = radiance
+            
+    return image
+
+def compute_2d_covariance(p, tu, tv, su, sv, camera):
+    """
+    Compute the 2D covariance matrix Sigma' for a 2D Gaussian.
+    This is a placeholder for the specific projection math.
+    """
+    # In 2D Gaussian Splatting, the covariance is derived from the tangential vectors
+    # and scaling factors, projected into screen space.
+    # The exact formula depends on the camera projection matrix.
+    # For simplicity, we assume a standard projection.
+    # Sigma' = J * W * Sigma_3D * W^T * J^T
+    # Where J is the Jacobian of the projection, W is the rotation from tangent space to world space.
+    # For 2D Gaussians, Sigma_3D is degenerate (rank 2).
+    pass
+
+def gaussian_weight(Sigma_prime):
+    """
+    Compute the Gaussian weight based on the 2D covariance matrix.
+    """
+    # This is typically 1 for the center, but depends on the specific implementation.
+    # In standard 3DGS, the weight is exp(-0.5 * x^T Sigma^-1 x).
+    # For 2D Gaussians, it's similar but in 2D.
+    return 1.0
+
+def compute_distance_sq(x, y, Sigma_prime, camera):
+    """
+    Compute the squared distance in screen space for a pixel.
+    """
+    # This involves transforming the pixel coordinate to the Gaussian's local space
+    # and computing the Mahalanobis distance.
+    pass
+
+def get_bounding_box(Sigma_prime, camera):
+    """
+    Compute the bounding box of the Gaussian in screen space.
+    """
+    # Typically 3 sigma in each direction.
+    pass
+
+def compute_brdf_radiance(albedo, metallic, roughness, normal, environment_map):
+    """
+    Compute the outgoing radiance using the split-sum approximation.
+    """
+    # Split-sum approximation:
+    # L(wo) = L_diffuse + L_specular
+    # L_diffuse = albedo * integral Li(wi) * (wi . N) dwi / pi
+    # L_specular = integral Li(wi) * D(wi, wo, h) * F(wi, wo) * G(wi, wo, h) / (4 * (wo . N) * (wi . N)) * (wi . N) dwi
+    
+    # This is a simplified representation.
+    # The actual implementation uses precomputed look-up tables or importance sampling.
+    pass
+```
+
+### Parameters
+- **Albedo ($\lambda$)**: Material color property, range $[0, 1]^3$ [S1, unofficial].
+- **Metallic ($m$)**: Material metallic property, range $[0, 1]$ [S1, unofficial].
+- **Roughness ($r$)**: Material roughness property, range $[0, 1]$ [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Multi-view inconsistencies**: Standard 3D Gaussians struggle with detailed geometry due to multi-view inconsistencies. Ref-Gaussian uses 2D Gaussians to mitigate this [S1, unofficial].
+- **Optimization stability**: Shading directly on Gaussians before alpha-blending can lead to noise in geometry and material. Ref-Gaussian uses deferred shading on pixel-level feature maps to stabilize optimization [S1, unofficial].
+- **Visibility accuracy**: Using Monte Carlo sampling across Gaussians for visibility can be slow and noisy. Ref-Gaussian uses ray tracing on an extracted mesh for specular visibility, providing more accurate results [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Real-time rendering is achieved by using the split-sum approximation to avoid heavy Monte Carlo sampling and by using efficient rasterization of 2D Gaussians.
+- **Memory Complexity**: Requires storage for 2D Gaussian primitives and pixel-level feature maps. The extracted mesh for visibility computation also adds memory overhead.
+- **Performance**: Ref-Gaussian maintains fast rendering speeds while modeling inter-reflection effects. It is faster than methods using Monte Carlo sampling for visibility [S1, unofficial].
+- **Strengths**: High-quality rendering of reflective objects, accurate inter-reflection modeling, stable optimization, real-time performance.
+- **Limitations**: Requires an extracted mesh for visibility computation, which may add complexity to the pipeline. 2D Gaussians may have limitations in representing complex 3D structures compared to 3D Gaussians in some scenarios.
+- **When to use**: When rendering reflective objects with complex inter-reflection effects is required, and real-time performance is necessary.
+- **When not to use**: When the scene does not have significant reflective properties or inter-reflection effects, standard 3D Gaussian Splatting may be sufficient and simpler.
+
+## Background
+Reflective Gaussian Splatting (Ref-Gaussian) was proposed to address the limitations of existing Gaussian splatting methods in rendering reflective objects with inter-reflection effects. It builds on the work of 3D Gaussian Splatting (Kerbl et al., 2023) and 2D Gaussian Splatting (Huang et al., 2024). The method was introduced in a paper by Ye et al. (2024) [S1, unofficial]. It differs from GShader (Jiang et al., 2024) by using deferred shading and from RelightableGaussian (Gao et al., 2023) by using ray tracing on an extracted mesh for visibility.
+
+## Sources
+[S1] Reflective Gaussian Splatting, https://doi.org/10.48550/arxiv.2412.19282, fetched 2026-10-26 (unofficial)

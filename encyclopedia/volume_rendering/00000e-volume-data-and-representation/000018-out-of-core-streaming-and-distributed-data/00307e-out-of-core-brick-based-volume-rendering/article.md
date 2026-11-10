@@ -3,219 +3,91 @@
 Also called: Brick pyramid rendering, Volume virtualization
 
 ## Overview
-Out-of-core brick-based volume rendering is a technique that streams multi-GB volumetric datasets over HTTP and renders them interactively with a fixed VRAM budget by decoupling logical 3D grid coordinates from physical GPU memory using a brick pyramid and indirection texture [S1, unofficial]. It solves the problem of rendering datasets too large to fit in memory or download entirely before the first frame [S1, unofficial]. It sets itself apart from monolithic download approaches by streaming only visible bricks via HTTP range reads, avoiding the need to download the entire dataset before rendering a single pixel [S1, unofficial]. Unlike [I/O-Conscious Volume Rendering](6929-i-o-conscious-volume-rendering.md), which tightly integrates algorithm-specific prefetching with the ray casting traversal using a dedicated prefetch thread, this method relies on general-purpose disk prefetching and fixed memory budgets managed by a page cache [S1, unofficial].
+Out-of-core brick-based volume rendering is a technique that streams multi-GB volumetric datasets over HTTP and renders them interactively with a fixed VRAM budget by decoupling logical 3D grid coordinates from physical GPU memory using a brick pyramid and indirection texture [S1, unofficial]. It solves the problem of rendering datasets too large to fit in memory or download monolithically by fetching only the visible bricks via HTTP range reads [S1, unofficial]. It sets itself apart from [Sectioning](1636-sectioning.md) by using fixed-size spatial chunks (bricks) rather than view-dependent slabs, and from [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) by relying on a software-managed page cache and indirection texture rather than hardware texture streaming features [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A source volumetric dataset (e.g., raw 16-bit data, OME-Zarr) and a camera view (position, orientation, field of view).
-- **Output:** A rendered 2D image frame.
+*   **Input:** A source volumetric dataset (e.g., 16-bit raw, OME-Zarr) and a camera view (position, orientation, field of view).
+*   **Output:** A rendered 2D image (framebuffer) and a fixed-size GPU page cache containing active bricks.
 
 **Data Structures:**
-1.  **Brick Pyramid:** A multi-resolution hierarchy where each level is a downsampled version of the previous one. All levels are split into fixed-size chunks called bricks [S1, unofficial].
-    -   **Logical Brick Size:** $64^3$ voxels.
-    -   **Physical Brick Size:** $66^3$ voxels to facilitate interpolation during sampling [S1, unofficial].
-    -   **Storage:** Compressed bricks stored server-side in structured binary blobs [S1, unofficial].
-2.  **GPU Page Cache (Atlas):** A fixed-size cache of slots on the GPU holding decompressed bricks.
-    -   **Default Size:** 512 slots.
-    -   **Scalable Size:** Up to $768^3$ or $1024^3$ slots for larger volumes or high-DPI screens [S1, unofficial].
-    -   **VRAM Footprint:** Approximately 300 MB at 512 slots for 16-bit data, remaining fixed regardless of total dataset size [S1, unofficial].
-3.  **Indirection Texture:** A compact 2D/3D texture storing cache slot indices. Each texel corresponds to a logical brick coordinate in the pyramid and points to its current physical location in the GPU page cache [S1, unofficial].
+1.  **Brick Pyramid:** A multi-resolution hierarchy. The finest level contains the full-resolution data. Coarser levels are downsampled versions of the previous level. All levels are split into fixed-size chunks called bricks [S1, unofficial].
+    *   **Logical Brick Size:** $64^3$ voxels.
+    *   **Physical Brick Size:** $66^3$ voxels (to facilitate interpolation during sampling) [S1, unofficial].
+    *   **Storage:** Compressed, stored server-side in structured binary blobs [S1, unofficial].
+2.  **Indirection Texture:** A compact 2D or 3D texture storing cache slot indices. Each texel corresponds to a logical brick coordinate in the pyramid and points to its current physical location (slot index) in the GPU page cache [S1, unofficial].
+3.  **GPU Page Cache (Atlas):** A fixed-size array of slots holding decompressed bricks.
+    *   **Default Size:** 512 slots.
+    *   **Scalable Size:** Up to $768^3$ or $1024^3$ slots for larger volumes or high-DPI screens [S1, unofficial].
+    *   **VRAM Footprint:** Approximately 300 MB at 512 slots for 16-bit data, remaining fixed regardless of total dataset size [S1, unofficial].
 
 **Algorithm Steps:**
-1.  **Pre-processing:** Split the source dataset into fixed-size chunks. Generate downsampled LOD levels for the brick pyramid. Compress the bricks. Store them server-side [S1, unofficial].
-2.  **View Frustum Culling:** Identify bricks relevant to the current camera view. Determine the appropriate LOD level for each brick based on distance from the camera (coarse LOD for far bricks, fine LOD for close bricks) [S1, unofficial].
-3.  **Fetching:** Fetch the identified bricks from the server using HTTP range-reads [S1, unofficial].
-4.  **Decompression:** Decompress the fetched bricks asynchronously in dedicated worker threads [S1, unofficial].
-5.  **Upload:** Upload the decompressed data to the GPU page cache [S1, unofficial].
-6.  **Indirection Update:** Update the compact indirection texture to map each logical brick coordinate to its current cache slot index [S1, unofficial].
-7.  **Ray Marching:** During compute shader ray marching, for each sample along a ray:
-    a.  Resolve the indirection texture to locate the correct brick in the cache using normalized box coordinates [S1, unofficial].
-    b.  Perform the density lookup using local brick coordinates within the located brick [S1, unofficial].
-8.  **Cache Management:** As the camera moves, update the cache by streaming new bricks over HTTP and evicting old ones using a Least Recently Used (LRU) strategy [S1, unofficial].
 
-**Pseudocode:**
+1.  **Pre-processing:**
+    *   Split the source dataset into fixed-size bricks ($64^3$ logical, $66^3$ physical).
+    *   Generate downsampled LOD levels to create the brick pyramid.
+    *   Compress the bricks.
+    *   Store the pyramid server-side [S1, unofficial].
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+2.  **Runtime Initialization:**
+    *   Initialize the GPU page cache with empty slots.
+    *   Initialize the indirection texture (mapping logical coordinates to cache slots, initially invalid/null) [S1, unofficial].
 
-```python
-# Constants
-BRICK_LOGICAL_SIZE = 64
-BRICK_PHYSICAL_SIZE = 66
-CACHE_SIZE = 512
-LOD_LEVELS = 4  # Example number of LOD levels
+3.  **View Update and Fetching:**
+    *   Identify bricks relevant to the current camera view.
+    *   For each relevant brick not currently in the cache:
+        *   Fetch the compressed brick data from the server using HTTP range reads [S1, unofficial].
+        *   Decompress the brick asynchronously in dedicated worker threads [S1, unofficial].
+        *   Upload the decompressed brick to the GPU page cache.
+        *   Update the indirection texture: map the logical brick coordinate to the new cache slot index [S1, unofficial].
+    *   **Cache Eviction:** If the cache is full, evict the Least Recently Used (LRU) brick. Update the indirection texture to mark the old logical coordinate as unmapped or pointing to a new slot if re-fetched [S1, unofficial].
 
-# Data Structures
-class Brick:
-    logical_coords: tuple[int, int, int]
-    lod_level: int
-    data: list[float]  # Physical size BRICK_PHYSICAL_SIZE^3
-    cache_slot: int = -1
-
-class IndirectionTexture:
-    # Maps logical brick coords to cache slot index
-    # Dimensions depend on volume size and brick size
-    slots: dict[tuple[int, int, int], int]
-
-class PageCache:
-    slots: list[Brick | None]  # Size CACHE_SIZE
-
-def pre_process_volume(source_data: list[float], resolution: tuple[int, int, int]) -> list[Brick]:
-    """
-    Split source data into bricks, generate LODs, compress.
-    Returns a list of bricks organized by LOD level.
-    """
-    bricks = []
-    # Step 1: Split into finest level bricks
-    finest_bricks = split_into_bricks(source_data, resolution, BRICK_LOGICAL_SIZE)
-    
-    # Step 2: Generate LODs
-    current_bricks = finest_bricks
-    for lod in range(LOD_LEVELS):
-        for brick in current_bricks:
-            brick.lod_level = lod
-            bricks.append(brick)
-        
-        # Downsample for next LOD
-        if lod < LOD_LEVELS - 1:
-            current_bricks = downsample_bricks(current_bricks, BRICK_LOGICAL_SIZE)
-            
-    # Step 3: Compress and store (simulated)
-    for brick in bricks:
-        brick.data = compress(brick.data)
-        
-    return bricks
-
-def get_visible_bricks(camera: Camera, volume_bounds: BoundingBox, bricks: list[Brick]) -> list[Brick]:
-    """
-    Identify bricks relevant to the current camera view.
-    """
-    visible = []
-    for brick in bricks:
-        if is_brick_in_frustum(brick, camera, volume_bounds):
-            visible.append(brick)
-    return visible
-
-def fetch_and_cache(visible_bricks: list[Brick], cache: PageCache, indirection: IndirectionTexture) -> None:
-    """
-    Fetch, decompress, upload, and update indirection.
-    """
-    # Step 1: Fetch bricks via HTTP range reads
-    fetched_bricks = []
-    for brick in visible_bricks:
-        raw_data = http_range_read(brick.server_url, brick.lod_level)
-        decompressed_data = decompress(raw_data)
-        fetched_bricks.append(Brick(
-            logical_coords=brick.logical_coords,
-            lod_level=brick.lod_level,
-            data=decompressed_data,
-            cache_slot=-1
-        ))
-        
-    # Step 2: Evict old bricks using LRU
-    # (Implementation detail: track access time for each slot)
-    evicted_slots = evict_lru(cache, len(fetched_bricks))
-    for slot in evicted_slots:
-        cache.slots[slot] = None
-        # Remove from indirection
-        if cache.slots[slot] is not None:
-            old_brick = cache.slots[slot]
-            if old_brick is not None:
-                indirection.slots[old_brick.logical_coords] = -1
-
-    # Step 3: Upload new bricks to cache
-    for brick in fetched_bricks:
-        # Find an empty slot
-        slot_index = find_empty_slot(cache)
-        if slot_index is None:
-            raise Exception("Cache full and eviction failed")
-        
-        cache.slots[slot_index] = brick
-        brick.cache_slot = slot_index
-        indirection.slots[brick.logical_coords] = slot_index
-
-def render_frame(camera: Camera, cache: PageCache, indirection: IndirectionTexture, resolution: tuple[int, int]) -> list[float]:
-    """
-    Compute shader ray marching.
-    """
-    image = []
-    for y in range(resolution[1]):
-        for x in range(resolution[0]):
-            ray = generate_ray(camera, x, y)
-            color = ray_march(ray, cache, indirection)
-            image.append(color)
-    return image
-
-def ray_march(ray: Ray, cache: PageCache, indirection: IndirectionTexture) -> float:
-    """
-    March along ray, sampling density from cached bricks.
-    """
-    t = ray.origin
-    density_sum = 0.0
-    alpha_sum = 0.0
-    
-    while t < ray.end:
-        # Resolve indirection
-        logical_brick_coords = get_logical_brick_coords(t, BRICK_LOGICAL_SIZE)
-        cache_slot = indirection.slots.get(logical_brick_coords, -1)
-        
-        if cache_slot == -1:
-            # Brick not in cache, skip or fetch (simplified: skip)
-            t += BRICK_LOGICAL_SIZE
-            continue
-            
-        brick = cache.slots[cache_slot]
-        if brick is None:
-            t += BRICK_LOGICAL_SIZE
-            continue
-            
-        # Local coordinates within brick
-        local_coords = get_local_coords(t, logical_brick_coords, BRICK_LOGICAL_SIZE)
-        
-        # Sample density
-        density = sample_brick(brick.data, local_coords, BRICK_PHYSICAL_SIZE)
-        
-        # Accumulate (simplified volume rendering equation)
-        density_sum += density
-        alpha_sum += density * (1 - alpha_sum)
-        
-        t += STEP_SIZE
-        
-    return density_sum
-```
+4.  **Rendering (Compute Shader Ray Marching):**
+    *   For each pixel in the output image:
+        *   Cast a ray through the volume.
+        *   For each sample point along the ray:
+            *   Calculate the logical brick coordinate $(B_x, B_y, B_z)$ containing the sample point.
+            *   Sample the **Indirection Texture** at $(B_x, B_y, B_z)$ to retrieve the cache slot index $S$ [S1, unofficial].
+            *   If $S$ is valid:
+                *   Calculate the local coordinates $(L_x, L_y, L_z)$ within the brick.
+                *   Perform density lookup and compositing using the data in cache slot $S$ at local coordinates $(L_x, L_y, L_z)$ [S1, unofficial].
+            *   If $S$ is invalid (brick not in cache):
+                *   Trigger a fetch for the brick (if not already pending) and skip compositing for this sample or use a placeholder/coarse LOD value [G]. *Note: The source implies the system handles availability, but does not specify the exact fallback for a cache miss during the critical path other than the indirection lookup. A robust implementation would stall or use a coarse proxy.*
+        *   Composite the accumulated color and opacity for the pixel [S1, unofficial].
 
 **Parameters:**
--   **Brick Size:** $64^3$ logical voxels, $66^3$ physical voxels [S1, unofficial].
--   **GPU Cache Size:** 512 slots (default), scalable to $768^3$ or $1024^3$ [S1, unofficial].
--   **VRAM Footprint:** ~300 MB at 512 slots for 16-bit data [S1, unofficial].
+*   **Brick Logical Size:** $64^3$ voxels [S1, unofficial].
+*   **Brick Physical Size:** $66^3$ voxels [S1, unofficial].
+*   **Cache Slots:** 512 (default), scalable to $768^3$ or $1024^3$ [S1, unofficial].
+*   **Render Scale:** May need reduction (e.g., 0.25) on older/mobile GPUs to maintain 60 FPS [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
--   **Precision:** Volume ray marching is texture bandwidth intensive. Older or mobile GPUs may drop below 60 FPS at full resolution, requiring render scale reduction (e.g., 0.25 on GTX 1050) [S1, unofficial].
--   **Boundaries:** The architecture is tested up to ~$2048^3$ voxels (at $64^3$ brick size). Larger datasets require manual adjustment of indirection table dimensions and page cache size [S1, unofficial].
--   **Degenerate Input:** Cannot render raw volume files directly; datasets must be pre-processed and compressed, adding an offline ingestion step and increasing total storage requirements by ~15–20% [S1, unofficial].
--   **Network Dependency:** User experience is directly tied to internet connection quality due to on-demand fetching. Currently lacks smart pre-fetching or offline capabilities [S1, unofficial].
+*   **Bandwidth Limitation:** Volume ray marching is texture bandwidth intensive. Older or mobile GPUs may drop below 60 FPS at full resolution [S1, unofficial].
+*   **Pre-processing Requirement:** Raw volume files cannot be rendered directly; they must be pre-processed and compressed, adding an offline ingestion step and increasing total storage requirements by ~15–20% [S1, unofficial].
+*   **Network Dependency:** User experience is tied to internet connection quality. Lack of smart prefetching or offline capabilities means performance degrades with poor connectivity [S1, unofficial].
+*   **Scalability Limit:** Tested up to ~$2048^3$ voxels. Larger datasets require manual adjustment of indirection table dimensions and page cache size [S1, unofficial].
 
 ## Subtopics
 
 ### [I/O-Conscious Volume Rendering](6929-i-o-conscious-volume-rendering.md)
-I/O-Conscious Volume Rendering is an out-of-core rendering technique that minimizes end-to-end rendering time by overlapping disk I/O with rendering computation using a data-driven execution model where data blocks are accessed as indivisible units. It sets itself apart from its siblings, such as [Out-of-core brick-based volume rendering](6288-out-of-core-brick-based-volume-rendering.md), by tightly integrating algorithm-specific prefetching with the ray casting traversal to ensure data is available exactly when needed, rather than relying on general-purpose disk prefetching or fixed memory budgets. Unlike program-driven approaches where the renderer controls the I/O, this method uses a dedicated prefetch thread that mirrors the ray caster's traversal logic to hide latency.
+I/O-Conscious Volume Rendering is an out-of-core rendering technique that minimizes end-to-end rendering time by overlapping disk I/O with rendering computation using a data-driven execution model where data blocks are accessed as indivisible units. It sets itself apart from Out-of-core brick-based volume rendering by tightly integrating algorithm-specific prefetching with the ray casting traversal to ensure data is available exactly when needed, rather than relying on general-purpose disk prefetching or fixed memory budgets. Unlike program-driven approaches where the renderer controls the I/O, this method uses a dedicated prefetch thread that mirrors the ray caster's traversal logic to hide latency.
 
 ### Out-of-core bricking
 Out-of-core bricking is a technique to create bricks of volumetric data along with a directed acyclic graph (DAG) of the relative distance of each brick along a single view direction. Bricks are aligned with cropped subvolumes [S2, unofficial]. A heuristic is used to evaluate the coherency of a series of data slices, which are parsed into a set of bricks sized for rendering hardware [S2, unofficial].
 
 ## Operating characteristics
--   **Time Complexity:** Not given in the sources.
--   **Memory Complexity:** Fixed $O(1)$ VRAM usage determined by cache slot count, independent of the total volumetric dataset size [S1, unofficial].
--   **Measured Performance:**
-    -   **Chameleon Dataset (1024×1024×1080, 2160 MB):** First Render on M2: 544 ms, Zenfone: 655 ms; Data Streamed: M2 0.73 MB, Zenfone 0.77 MB; Atlas Occupancy: 2/512 (0.4%) [S1, unofficial].
-    -   **Beechnut Dataset (1024×1024×1546, 3092 MB):** First Render on M2: 1079 ms, Zenfone: 2162 ms; Data Streamed: M2 1.10 MB, Zenfone 2.19 MB; Atlas Occupancy: 18/512 (4%) [S1, unofficial].
--   **Scaling:** The atlas can be scaled to $768^3$ (1728 slots) or $1024^3$ (4096 slots) for larger volumes or high-DPI screens [S1, unofficial].
--   **Strengths:** Fixed VRAM footprint regardless of dataset size; avoids monolithic download bottleneck; supports multiple data formats (custom binary, OME-Zarr) [S1, unofficial].
--   **Limitations:** Requires pre-processing and compression; user experience tied to internet quality; no smart pre-fetching or offline capabilities; limited to ~$2048^3$ voxels without manual adjustment [S1, unofficial].
--   **When to Use:** Interactive rendering of large volumetric datasets in browser environments with limited VRAM and reliable internet connectivity [S1, unofficial].
--   **When Not to Use:** Offline scenarios, poor network conditions, or when raw volume files must be rendered without pre-processing [S1, unofficial].
+*   **Time Complexity:** Not explicitly given in the sources. Performance depends on network latency, decompression speed, and GPU texture bandwidth. First render times for 2-3 GB datasets range from 544 ms to 2162 ms depending on hardware and dataset density [S1, unofficial].
+*   **Memory Complexity:** Fixed $O(1)$ VRAM usage determined by cache slot count, independent of the total volumetric dataset size [S1, unofficial].
+*   **Measured Performance:**
+    *   **Chameleon Dataset (1024×1024×1080, 2160 MB):** First render on M2: 544 ms, Zenfone: 655 ms. Data streamed: M2 0.73 MB, Zenfone 0.77 MB. Atlas occupancy: 2/512 (0.4%) [S1, unofficial].
+    *   **Beechnut Dataset (1024×1024×1546, 3092 MB):** First render on M2: 1079 ms, Zenfone: 2162 ms. Data streamed: M2 1.10 MB, Zenfone 2.19 MB. Atlas occupancy: 18/512 (4%) [S1, unofficial].
+*   **Strengths:** Fixed VRAM footprint; interactive frame rates for multi-GB datasets; leverages standard HTTP range reads; decouples logical and physical memory.
+*   **Limitations:** Requires pre-processing; storage overhead ~15-20%; dependent on network quality; no smart prefetching; limited tested scale (~2048³); texture bandwidth bound on GPUs.
+*   **When to use:** Interactive web-based visualization of large bioimaging or scientific datasets where VRAM is constrained and network bandwidth is sufficient.
+*   **When not to use:** Offline scenarios; datasets requiring immediate full-volume access without streaming latency; environments with very low-end GPUs lacking WebGPU support.
 
 ## Background
-Out-of-core brick-based volume rendering is implemented in the Kiln project (WebGPU-native), integrated into the OME-NGFF ecosystem (v0.2.1+), and tested on Chameleon and Beechnut datasets [S1, unofficial]. The project was accepted to the official OME-NGFF tools registry, making it a recognized viewer for real-world OME-Zarr datasets alongside other established tools from this domain [S1, unofficial]. The technique is inspired by out-of-core techniques used in scientific visualization, geospatial applications, and game engines for terrain and virtual textures [S1, unofficial].
+The method is implemented in the **Kiln** project, a WebGPU-native out-of-core rendering system for large virtualized volumetric data [S1, unofficial]. Kiln was developed by Martin Panknin and the Paleoanthropology group and Visualization and MultiMedia Lab, University of Zurich [S1, unofficial]. It was accepted into the OME-NGFF ecosystem (v0.2.1+) as a recognized viewer for OME-Zarr datasets [S1, unofficial]. The technique adapts out-of-core principles from geospatial applications and game engines (virtual textures) to volumetric data in browser environments [S1, unofficial].
 
 ## Sources
 [S1] Kiln: WebGPU-Native Out-of-Core Volume Rendering for Multi-GB Datasets, https://dev.to/mpanknin/kiln-webgpu-native-out-of-core-volume-rendering-for-multi-gb-datasets-2alb, fetched 2026-10-26 (unofficial)

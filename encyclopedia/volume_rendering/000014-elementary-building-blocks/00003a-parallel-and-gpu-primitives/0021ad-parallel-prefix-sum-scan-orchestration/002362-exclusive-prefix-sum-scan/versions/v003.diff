@@ -1,0 +1,199 @@
+--- v002.md
++++ v003.md
+@@ -1,81 +1,146 @@
+ # Exclusive Prefix Sum (Scan)
+ 
+-Also called: Exclusive Sum, Parallel Prefix Sum Scan for Voxel Compaction, exclusive scan, prefix sum scan
++Also called: CPU Exclusive Prefix Sum (Scan), Exclusive Sum, StreamCompaction::CPU::scan, exclusive scan
+ 
+ ## Overview
+-The Exclusive Prefix Sum (Scan) is a parallel primitive that maps an input list of values to an output list where each element at index $i$ is the sum of all input elements at indices strictly less than $i$ [S2]. In volume rendering, it is primarily used for voxel compaction: given a list of boolean culling decisions, it computes the sequential indices for kept voxels, allowing culled voxels to be removed in parallel without race conditions [S2]. It differs from inclusive scans by excluding the current element from the sum, and from standard sequential scans by providing a parallel algorithmic structure suitable for GPU execution [S1, S2].
++The Exclusive Prefix Sum (Scan) computes an output array where each element at index $i$ is the sum of all input elements preceding it, i.e., $O[i] = \sum_{j=0}^{i-1} I[j]$, with $O[0]=0$ [S3, unofficial][S4]. In volume rendering, this primitive maps a list of boolean voxel culling decisions to sequential indices for kept voxels, enabling parallel stream compaction by providing conflict-free write locations for scattered data [S2]. It differs from [Naive Parallel Prefix Sum (Scan)](10348-naive-parallel-prefix-sum-scan.md) by explicitly handling non-power-of-two inputs via padding and offering both naive iterative and work-efficient tree-based implementations on the GPU, while [CPU Exclusive Prefix Sum (Scan)](10375-cpu-stream-compaction-with-scan.md) provides a sequential baseline for verification [S3, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A list $D$ of $N$ elements (typically integers or booleans representing culling decisions or weights) [S2].
+-- Output: A list $S$ of $N$ elements, where $S_i$ is the exclusive prefix sum of $D$ [S1].
++- Input: Array $I$ of $n$ integers (typically 0/1 for culling decisions) [S3, unofficial][S4].
++- Output: Array $O$ of $n$ integers where $O[i] = \sum_{j=0}^{i-1} I[j]$ [S3, unofficial][S4].
+ 
+ **Data Structures:**
+-- $D$: Array of size $N$. Elements $D_j$ are the input values [S2].
+-- $S$: Array of size $N$. Elements $S_i$ are the output values [S1].
+-- Temporary storage: Additional arrays of size $N$ are required for intermediate tree levels during the parallel reduction phases [G].
++- Global memory buffers `dev_data1` and `dev_data2` (ping-pong buffers) for GPU implementations [S3, unofficial].
++- For tree-based methods, input is zero-padded to size $N = 2^{\lceil \log_2 n \rceil}$ [S3, unofficial].
+ 
+-**Formula:**
+-The value at index $i$ in the output list $S$ is defined as [S1]:
+-$$S_i = \begin{cases} 0 & \text{if } i = 0 \\ \sum_{j=0}^{i-1} D_j & \text{otherwise} \end{cases}$$
++**Algorithm Steps (Work-Efficient GPU Implementation):**
++1. **Padding:** If $n$ is not a power of two, compute $N = 2^{\lceil \log_2 n \rceil}$. Allocate buffer of size $N$. Copy $I$ to buffer and zero-pad indices $n$ to $N-1$ [S3, unofficial].
++2. **Up-Sweep (Reduce):** Perform a parallel reduction to compute inclusive sums in a tree structure. Loop $d$ from $0$ to $\lceil \log_2 N \rceil - 1$. For each step, threads update nodes at distance $2^d$ [S3, unofficial].
++3. **Root Zeroing:** Set the root element (index $N-1$) to 0 to convert inclusive sums to exclusive sums [S3, unofficial].
++4. **Down-Sweep (Scan):** Perform a parallel scan to distribute sums. Loop $d$ from $\lceil \log_2 N \rceil - 1$ down to $0$. Threads update nodes based on sibling values [S3, unofficial].
++5. **Result Extraction:** Copy the first $n$ elements of the buffer to the output array $O$ [S3, unofficial].
+ 
+-**Algorithm Steps:**
+-The efficient parallel implementation treats the problem as a series of parallel reductions [S1]. It typically follows a two-phase tree-based approach [G]:
+-1. **Upsweep (Reduction):** Initialize leaves with input values $D$. Iteratively compute sums of pairs of elements, moving up the tree levels until a single root value representing the total sum is reached [G].
+-2. **Downsweep (Scan):** Initialize the root with $0$. Iteratively propagate values down the tree, where each node's left child receives the current node's value and the right child receives the current node's value plus the left child's original value [G]. This phase distributes the partial sums back to the leaves [G].
+-3. **Final Output:** The values at the leaves of the downsweep tree correspond to $S_i$ [G].
++**Algorithm Steps (CPU Sequential Implementation):**
++1. Set $O[0] = 0$ [S3, unofficial][S4].
++2. Loop $i$ from $1$ to $n-1$: $O[i] = O[i-1] + I[i-1]$ [S3, unofficial][S4].
+ 
+-**Pseudocode:**
+-The following pseudocode implements the exclusive scan for an array of size $N$ using a standard parallel reduction approach [G]. It assumes a parallel environment where threads can synchronize, and handles arbitrary $N$ by padding to the next power of two internally [G].
++**Pseudocode (Work-Efficient GPU Kernel Logic):**
+ ```python
+-def exclusive_scan(D, N):
+-    # Pad to next power of two for standard tree reduction [G]
+-    M = 1
+-    while M < N:
+-        M *= 2
+-    T = [0] * (2 * M)
+-    T[M:2*M] = D + [0] * (M - N)
++# Kernel for Up-Sweep (d is current level, 0-indexed)
++def kern_up_sweep(index, d, data, n_power_of_2):
++    if index >= n_power_of_2:
++        return
++    # Calculate indices based on tree structure
++    # For ThreadReduction == 0 (full grid):
++    d1 = 1 << d
++    d2 = 1 << (d + 1)
++    if index % d2 == 0:
++        data[index + d2 - 1] += data[index + d1 - 1]
++    # For ThreadReduction == 1 (reduced threads):
++    # stride1 = (index + 1) * (1 << (d + 1)) - 1
++    # stride2 = index * (1 << (d + 1)) + (1 << d) - 1
++    # data[stride1] += data[stride2]
++
++# Kernel for Down-Sweep (d is current level)
++def kern_down_sweep(index, d, data, n_power_of_2):
++    if index >= n_power_of_2:
++        return
++    # Calculate indices
++    d1 = 1 << d
++    d2 = 1 << (d + 1)
++    if index % d2 == 0:
++        temp = data[index + d1 - 1]
++        data[index + d1 - 1] = data[index + d2 - 1]
++        data[index + d2 - 1] += temp
++    # For ThreadReduction == 1:
++    # stride1 = (index + 1) * (1 << (d + 1)) - 1
++    # stride2 = index * (1 << (d + 1)) + (1 << d) - 1
++    # temp = data[stride2]
++    # data[stride2] = data[stride1]
++    # data[stride1] += temp
++
++# Main Host Logic
++def exclusive_scan_gpu(idata, n):
++    if n <= 0:
++        return []
+     
+-    # Upsweep phase: compute inclusive sums up the tree
+-    for stride in range(1, M):
+-        for i in range(0, 2 * M, 2 * stride):
+-            if i + stride < 2 * M:
+-                T[i + stride] += T[i]
+-                
+-    # Downsweep phase: compute exclusive sums down the tree
+-    T[2 * M - 1] = 0
+-    for stride in range(M, 0, -1):
+-        for i in range(0, 2 * M, 2 * stride):
+-            left = T[i]
+-            right = T[i + stride]
+-            T[i + stride] = left + right
+-            T[i] = 0
+-    return T[M:2*M][:N]
++    # 1. Pad to power of two
++    n_power_of_2 = 1
++    while n_power_of_2 < n:
++        n_power_of_2 *= 2
++    
++    # Allocate and copy data (pseudo-code for memory ops)
++    dev_data = allocate(n_power_of_2)
++    copy(idata, dev_data, n)
++    zero_fill(dev_data, n, n_power_of_2)
++    
++    # 2. Up-Sweep
++    for d in range(0, int(log2(n_power_of_2))):
++        launch_kernel(kern_up_sweep, n_power_of_2, d, dev_data)
++        
++    # 3. Zero Root
++    dev_data[n_power_of_2 - 1] = 0
++    
++    # 4. Down-Sweep
++    for d in range(int(log2(n_power_of_2)) - 1, -1, -1):
++        launch_kernel(kern_down_sweep, n_power_of_2, d, dev_data)
++        
++    # 5. Copy result
++    odata = allocate(n)
++    copy(dev_data, odata, n)
++    return odata
+ ```
+ 
+ **Parameters:**
+-- $N$: Size of the input list [S2].
+-- Reference implementation details for GPU optimization are provided in [Harris et al. 2007] [S2].
++- $n$: Number of input elements [S3, unofficial].
++- `ThreadReduction`: Compile-time flag (0 or 1) controlling kernel launch strategy; 0 uses full grid with modulo checks, 1 reduces thread count by stride factor [S3, unofficial].
++- `blockSize`: CUDA block size (e.g., 256) [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Summing many small values can lead to floating-point precision loss [S1].
+-- **Empty or single-element lists:** The algorithm handles $N=0$ or $N=1$ trivially, returning zeros or the input respectively [G].
+-- **Synchronization:** Parallel implementations require careful synchronization between threads to ensure correct tree traversal [G].
++- Non-power-of-two sizes require zero-padding to the next power of two to maintain tree structure alignment [S3, unofficial].
++- The root element must be explicitly zeroed after the up-sweep to ensure the down-sweep produces exclusive sums [S3, unofficial].
++- Precision issues may arise if input values are large, but for culling decisions (0/1), overflow is not a concern [S2].
+ 
+ ## Subtopics
+ 
+ ### [Log-space Exclusive Cumulative Sum for Transmittance](4819-log-space-exclusive-cumulative-sum-for-transmittance.md)
+-This method computes the exclusive cumulative sum of transmittance values in logarithmic space to prevent numerical underflow during alpha compositing and to enable efficient parallel scatter-add operations for weight calculation. It differs from standard linear-space exclusive scans by operating on $\log(1-\alpha)$, which preserves precision for small alpha values, and by explicitly handling ray-segment boundaries to reset cumulative state between independent rays. It builds on [Exclusive Prefix Sum (Scan)](3007-exclusive-prefix-sum-scan.md).
++This method computes the exclusive cumulative sum of transmittance values in logarithmic space to avoid underflow and enable efficient scatter-add operations for alpha compositing weights. It differs from standard linear-space exclusive scans by operating on $\log(1-\alpha)$, which preserves precision for small alpha values, and by explicitly handling ray-segment boundaries to reset cumulative state between independent rays. It builds on [Exclusive Prefix Sum (Scan)](3007-exclusive-prefix-sum-scan.md) [G].
++
++### [CPU Stream Compaction with Scan](10375-cpu-stream-compaction-with-scan.md)
++CPU Stream Compaction with Scan removes zero-valued elements from an integer array on the CPU by mapping input data to a binary mask, computing an exclusive prefix sum on that mask, and scattering the retained elements to their computed output indices. It sets itself apart from [CPU Stream Compaction without Scan](10532-cpu-stream-compaction-without-scan.md) by using a parallel prefix sum (scan) to determine output positions, which allows for potential parallelization of the scatter phase, whereas the without-scan variant uses a sequential counter. It differs from [GPU Stream Compaction with Scan](10376-gpu-stream-compaction-with-scan.md) by executing these steps on the CPU, typically resulting in lower performance for large arrays due to the lack of massive parallelism.
++
++### [Thrust Scan](10648-thrust-scan.md)
++A wrapper around the Thrust library's exclusive scan function for GPU execution.
++
++### Exclusive Cumulative Product (for Transmittance)
++A cumulative product function that computes the product of elements up to but not including the current element, used for calculating transmission (opacity accumulation) in DVR [S5, unofficial]. It is implemented via `cumprod_exclusive` utilities in Python-based DVR pipelines [S5, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(\log N)$ parallel time with $O(N)$ processors [S1, S2].
+-- **Memory Complexity:** $O(N)$ for input, output, and temporary tree storage [S2].
+-- **Strengths:** Enables parallel compaction of sparse data structures (e.g., voxels) without race conditions [S2].
+-- **Limitations:** Requires significant temporary memory for the tree structure. Precision issues can arise with large sums of small floating-point values [S1].
++**Time and Memory Complexity:**
++- **CPU (Naive):** Time $O(n)$, Memory $O(1)$ auxiliary space [S3, unofficial][S4].
++- **GPU (Work-Efficient):** Time $O(\log n)$ parallel steps, $O(n)$ total work. Memory $O(n)$ device memory for buffers [S3, unofficial].
++- **GPU (Naive):** Time $O(n)$ parallel steps, $O(n)$ total work. Memory $O(n)$ device memory [S3, unofficial].
++
++**Measured Performance:**
++- On an array size of $2^{27}$, CPU scan took ~190ms, Naive GPU scan ~35ms, and Work-Efficient GPU scan ~26ms [S3, unofficial].
++- Thrust consistently outperforms custom naive and work-efficient implementations across block sizes [S3, unofficial].
++
++**Strengths and Limitations:**
++- **Strengths:** Enables parallel stream compaction; work-efficient GPU version minimizes redundant computations [S2][S3, unofficial].
++- **Limitations:** Naive GPU version suffers from low resource utilization; non-power-of-two inputs require padding overhead [S3, unofficial].
++
++**When to Use:**
++- Use for parallel stream compaction in volume rendering voxel lists [S2].
++- Use Thrust for production GPU code due to stability and performance [S3, unofficial].
++- Use CPU version for verification and small datasets [S3, unofficial].
+ 
+ ## Background
+-The theoretical foundation for efficient parallel prefix sums was laid by Blelloch [S2]. In volume rendering, it is used for voxel compaction, as described in [S2] for sparse voxelization and in [S1] for neural geometric level of detail rendering. The method is widely implemented on GPUs, with detailed descriptions available in [Harris et al. 2007] [S2].
++The exclusive prefix sum is a fundamental parallel primitive described by Blelloch [1990] [S2]. Efficient GPU implementations were detailed by Harris et al. [2007] [S2]. It is widely used in volume rendering for sparse voxelization and stream compaction to map culling decisions to compacted indices [S2, S1].
+ 
+ ## Sources
+ [S1] Neural Geometric Level of Detail: Real-time Rendering with Implicit 3D Shapes, https://doi.org/10.1109/cvpr46437.2021.01120, fetched 2026-10-26
+-[S2] Real-time high-resolution sparse voxelization with application to image-based modeling, https://doi.org/10.1145/2492045.2492053, fetched 2026-11-01+[S2] Real-time high-resolution sparse voxelization with application to image-based modeling, https://doi.org/10.1145/2492045.2492053, fetched 2026-11-01
++[S3] GitHub - jichumao/Stream-Compaction, https://github.com/jichumao/Stream-Compaction, fetched 2026-10-29 (unofficial)
++[S4] Project2-Stream-Compaction/INSTRUCTION.md at main, https://github.com/CIS565-Fall-2022/Project2-Stream-Compaction/blob/main/INSTRUCTION.md, fetched 2026-10-29
++[S5] asheibanifard/Direct_Volume_Rendering-DVR-, https://github.com/asheibanifard/Direct_Volume_Rendering-DVR-, fetched 2026-10-26 (unofficial)

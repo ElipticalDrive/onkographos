@@ -1,0 +1,101 @@
+# Scanned AOM Holographic Display
+Also called: MIT holovideo display, Scanned Acousto-Optic Modulator (AOM) Holographic Display, Scanned-AOM, Synthetic aperture holography
+
+## Overview
+The Scanned AOM Holographic Display is a time-multiplexed volumetric display technique that generates large apparent holographic fringes by rapidly scanning a phase-modulated light beam across the viewer's eye [S1]. It solves the problem of limited spatial resolution in single-shot acousto-optic modulators (AOMs), which can only phase-modulate a small number of samples (~1000) at any instant, by using mechanical scanning to integrate these small segments into a coherent, high-resolution image over the integration time of the human visual system [S1]. Unlike static SLM-based methods, it relies on high-speed analog signal processing and synchronized optical scanning rather than digital pixel addressing [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Digitally computed holographic fringes (complex amplitude data).
+*   **Output:** A time-integrated 3D holographic image visible to the observer.
+
+**Data Structures:**
+*   **Fringe Data:** A sequence of phase values corresponding to the hologram plane. The data is structured to be fed into the AOM's RF driver.
+*   **Framebuffer:** A high-speed, synchronized digital-to-analog conversion buffer. The sources specify a 16-channel system was used at MIT to handle the data rate [S1].
+
+**Parameters:**
+*   **Human Visual Latency:** Typically 20 ms [S1].
+*   **AOM Instantaneous Capacity:** ~1000 phase-modulated samples at any one instant [S1].
+*   **Scaling:** Early systems produced 50 ml volumes from 2 MB fringes; scaled systems with 18 parallel channels produced >1 liter volumes from 36 MB fringes [S1].
+
+**Steps:**
+1.  **Fringe Computation:** Compute the holographic fringes for the desired 3D scene. This involves calculating the complex wavefield superposition for the hologram plane [S3].
+2.  **Digital-to-Analog Conversion:** Convert the computed digital fringes into high-frequency analog electrical signals. This requires specialized hardware, such as the 16-channel synchronized high-speed framebuffer developed at MIT [S1].
+3.  **Acoustic Wave Generation:** Drive the AOM with the analog signals. An acoustic wave propagates through the AOM crystal, creating a phase grating that modulates the phase of a passing laser beam [S1].
+4.  **Optical Modulation:** The laser beam passes through the AOM. The acoustic wave phase-modulates the light, creating a small, flat holographic image segment (instantaneous fringe) [S1].
+5.  **Beam Scanning:** A rapidly moving mirror scans the image of the modulated light across the viewing area. This scanning multiplexes the small instantaneous fringes spatially [S1].
+6.  **Time Integration:** The human eye integrates the scanned fringes over its latency period (typically 20 ms) to perceive a single, large, coherent holographic image [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def scanned_aom_display(computed_fringes, laser_wavelength, scene_depth):
+    """
+    Simulates the logical flow of a Scanned AOM Holographic Display.
+    Note: This is a logical representation; actual implementation requires
+    specialized high-speed analog hardware and optical scanning mechanisms.
+    """
+    # 1. Prepare fringe data for AOM input
+    # The AOM can only handle ~1000 samples at once.
+    # The fringe data must be segmented or formatted for the RF driver.
+    aom_input_buffer = prepare_analog_signal(computed_fringes)
+    
+    # 2. Drive the AOM
+    # The acoustic wave propagates through the crystal, phase-modulating the laser.
+    # This creates a small instantaneous holographic segment.
+    instantaneous_segment = aom_phase_modulate(laser_wavelength, aom_input_buffer)
+    
+    # 3. Scan the segment
+    # A mirror scans the modulated light beam across the viewer's eye.
+    # The scan speed must be synchronized with the fringe data stream.
+    scanned_image = optical_scan(instantaneous_segment, scan_mirror_speed)
+    
+    # 4. Human Visual Integration
+    # The eye integrates the scanned segments over ~20ms.
+    perceived_image = human_visual_integration(scanned_image, integration_time=0.020)
+    
+    return perceived_image
+
+def prepare_analog_signal(digital_fringes):
+    """
+    Converts digital fringe data to high-frequency analog signals.
+    Requires a specialized 16-channel synchronized high-speed framebuffer.
+    """
+    # This step is a major practical obstacle in this approach [S1].
+    # It involves DAC conversion and RF amplification.
+    analog_signals = digital_to_analog_conversion(digital_fringes, channels=16)
+    return analog_signals
+```
+
+**Edge Cases and Pitfalls:**
+*   **Signal Conversion:** Converting digitally computed fringes into high-frequency analog signals is a significant engineering challenge, requiring specialized hardware not typically found in standard digital computers [S1].
+*   **Synchronization:** The scanning mirrors must be precisely synchronized with the fringe data stream. Misalignment results in image distortion or failure to integrate [S1].
+*   **Hardware Complexity:** The need for state-of-the-art scanning mirrors and analog RF processing adds complexity compared to LCD-based displays [S1].
+
+## Subtopics
+
+### [Acousto-Optic Random Access Scanning with Parallel Channels](8508-acousto-optic-random-access-scanning-with-parallel-channels.md)
+Acousto-Optic Random Access Scanning with Parallel Channels is a volumetric display technique that uses multiple acousto-optic (AO) deflectors operating in parallel to address voxels in a display volume, thereby increasing the total voxel count and maintaining image intensity. It solves the bottleneck of finite acoustic wave travel time ("access time") in single-channel scanners, which limits the number of addressable voxels per frame at a fixed refresh rate. Unlike single-channel scanners, which suffer from intensity drop-off as voxel density increases due to reduced on-time, this method couples several scanners to distribute the workload. It differs from [Four-Channel Scanner Convergence Correction](11734-four-channel-scanner-convergence-correction.md) by defining the parallel architecture itself, whereas the sibling method addresses the geometric alignment errors inherent in that architecture.
+
+### Surface Acoustic Wave (SAW) AOM Holographic Display
+An AOM device variant using multiple ultrasonic transducers (electrodes) fed a complex pattern to launch surface acoustic waves (SAWs) across the device aperture, diffracting light to form a holographic image without time multiplexing [S1].
+1.  Feed a complex pattern to multiple electrodes on the AOM device.
+2.  Launch surface acoustic waves (SAWs) across the device aperture.
+3.  Diffracted light forms a holographic image directly, eliminating the need for time multiplexing and scanning mirrors [S1].
+Pitfall: Large number of electrodes may be prohibitively expensive. Requires an additional numerical inversion transformation for the array of SAW electrodes, making rapid computation difficult [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The computational complexity is dominated by the initial fringe generation, which is $O(M \cdot N)$ for $M$ scene elements and $N$ hologram pixels [S3]. The display itself is real-time, limited by the AOM's acoustic wave propagation speed and the mirror scanning rate [S1].
+*   **Memory Complexity:** The system requires high-speed framebuffers. Early systems used 2 MB fringes for 50 ml volumes; scaled systems used 36 MB fringes for >1 liter volumes [S1].
+*   **Performance:** Produced the largest holovideo images at the time of its development [S1].
+*   **Strengths:** Can be scaled to produce large images; produces realistic 3D imagery [S1].
+*   **Limitations:** Requires specialized high-speed analog hardware and synchronized scanning mirrors; difficult to interface with standard digital electronics compared to LCDs/DMDs [S1].
+*   **When to use:** When large, high-quality 3D holographic imagery is required and hardware complexity is acceptable.
+*   **When not to use:** When cost, simplicity, or standard digital interfacing is a priority.
+
+## Background
+The Scanned AOM Holographic Display was invented and exploited by researchers at the MIT Media Laboratory to produce the world's first real-time 3D holographic display in 1989 [S1]. It was a significant advancement in the field of computer-generated holography, demonstrating the feasibility of real-time volumetric displays using time-multiplexed acousto-optic modulation [S1].
+
+## Sources
+[S1] Interactive three-dimensional holographic displays, https://doi.org/10.1145/271283.271312, fetched 2026-11-05

@@ -1,0 +1,679 @@
+# Direct_Volume_Rendering(DVR)
+
+## Description
+
+This repository provides a set of tools and scripts for processing volumetric medical images using Python. The project includes:
+- **Data Loading**: Functions to load and preprocess volumetric data.
+- **Filtering**: Applying HU windowing filters to the data.
+- **Direct Volume Rendering (DVR)**: Techniques for rendering 3D data into 2D images.
+- **Visualization**: Tools for visualizing the processed data using Matplotlib.
+
+## Installation
+
+To get started, you need to set up the environment with the required dependencies. Follow these steps:
+
+**Clone the Repository:**
+   ```bash
+   git clone https://github.com/asheibanifard/Direct_Volume_Rendering-DVR-.git
+   cd Direct_Volume_Rendering-DVR-
+   ```
+## Dataset
+
+You can download datasets for this project from the following site:
+
+- **Open SciVis Datasets**: [klacansky.com/open-scivis-datasets](https://klacansky.com/open-scivis-datasets/)
+
+Ensure you download the volumetric data files compatible with the expected format for use in this project.
+
+### camera.py
+```
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.ndimage import affine_transform
+import torch
+from data_utils import process_volume
+from utils import dvr, cumprod_exclusive
+# Rotation Matrices
+def process_dvr(volume, vol_depth, cumprod_func, device, dim):
+    """
+    Perform Direct Volume Rendering (DVR) on the input tensor.
+
+    Args:
+    - volume (torch.Tensor): The input volume as a tensor.
+    - vol_depth (int): The depth of the volume.
+    - cumprod_func (Callable): The cumulative product function.
+    - device (str): The device to perform the rendering on (CPU/GPU).
+    - dim (int): The dimension along which to sum the DVR result.
+
+    Returns:
+    - depth_map (torch.Tensor): The depth map resulting from DVR.
+    - rgb_map (torch.Tensor): The RGB map resulting from DVR.
+    - acc_map (torch.Tensor): The accumulated opacity map resulting from DVR.
+    """
+    return dvr(volume.cpu().detach().numpy(), vol_depth, cumprod_func, device, dim)
+
+def visualize_rgb_map(rgb_map):
+    """
+    Visualize the RGB map resulting from DVR.
+
+    Args:
+    - rgb_map (torch.Tensor): The RGB map resulting from DVR.
+
+    Returns:
+    - None
+    """
+    plt.imshow(rgb_map, cmap='gray')
+    plt.title('RGB Map Visualization')
+    plt.show()
+    os.makedirs('./results', exist_ok=True)
+    plt.savefig('./results/rendered.png')
+
+# Set the Matplotlib style to grayscale
+plt.style.use('grayscale')
+def rotation_matrix_x(theta):
+    return np.array([
+        [1, 0, 0],
+        [0, np.cos(theta), -np.sin(theta)],
+        [0, np.sin(theta), np.cos(theta)]
+    ])
+
+def rotation_matrix_y(theta):
+    return np.array([
+        [np.cos(theta), 0, np.sin(theta)],
+        [0, 1, 0],
+        [-np.sin(theta), 0, np.cos(theta)]
+    ])
+
+def rotation_matrix_z(theta):
+    return np.array([
+        [np.cos(theta), -np.sin(theta), 0],
+        [np.sin(theta), np.cos(theta), 0],
+        [0, 0, 1]
+    ])
+
+def combined_rotation_matrix(phi, theta, psi):
+    """
+    Combine rotations around X, Y, and Z axes.
+    :param phi: Rotation angle around the X-axis (in radians).
+    :param theta: Rotation angle around the Y-axis (in radians).
+    :param psi: Rotation angle around the Z-axis (in radians).
+    :return: Combined rotation matrix.
+    """
+    rx = rotation_matrix_x(phi)
+    ry = rotation_matrix_y(theta)
+    rz = rotation_matrix_z(psi)
+    return rz @ ry @ rx  # Matrix multiplication in Z-Y-X order
+
+# Compute camera view matrix
+def compute_view_matrix(camera_position, target, up_vector, rotation_matrix):
+    """
+    Compute the camera's view matrix after applying a rotation.
+    """
+    forward = target - camera_position
+    forward = forward / np.linalg.norm(forward)
+
+    right = np.cross(forward, up_vector)
+    right = right / np.linalg.norm(right)
+
+    up = np.cross(right, forward)
+
+    # Apply rotation to camera axes
+    rotated_forward = rotation_matrix @ forward
+    rotated_up = rotation_matrix @ up
+    rotated_right = rotation_matrix @ right
+
+    # View matrix
+    view_matrix = np.array([
+        [rotated_right[0], rotated_up[0], -rotated_forward[0], 0],
+        [rotated_right[1], rotated_up[1], -rotated_forward[1], 0],
+        [rotated_right[2], rotated_up[2], -rotated_forward[2], 0],
+        [-np.dot(rotated_right, camera_position),
+         -np.dot(rotated_up, camera_position),
+         np.dot(rotated_forward, camera_position), 1]
+    ])
+    return view_matrix
+
+# Generate a random 3D volume
+def generate_volume(shape=(64, 64, 64)):
+    """
+    Generate a random 3D volume with values between 0 and 1.
+    """
+    return np.random.random(shape)
+
+# Rotate the volume
+def rotate_volume(volume, rotation_matrix):
+    """
+    Rotate the volume using an affine transformation.
+    """
+    center = np.array(volume.shape) / 2
+    offset = center - np.dot(rotation_matrix, center)
+    rotated_volume = affine_transform(volume, rotation_matrix, offset=offset, order=1)
+    return rotated_volume
+
+# Visualize slices of the volume
+def visualize_volume_slices(volume, title="Volume Slices"):
+    """
+    Visualize slices of the volume along three axes.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    axes[0].imshow(volume[volume.shape[0] // 2, :, :], cmap='gray')
+    axes[0].set_title('Slice along X-axis')
+    axes[1].imshow(volume[:, volume.shape[1] // 2, :], cmap='gray')
+    axes[1].set_title('Slice along Y-axis')
+    axes[2].imshow(volume[:, :, volume.shape[2] // 2], cmap='gray')
+    axes[2].set_title('Slice along Z-axis')
+    for ax in axes:
+        ax.axis('off')
+    plt.suptitle(title)
+    plt.show()
+
+# Main execution
+if __name__ == "__main__":
+    # Initial camera setup
+    camera_position = np.array([0, 0, 5])  # Camera position
+    target = np.array([0, 0, 0])           # Target point
+    up_vector = np.array([0, 1, 0])        # Up direction
+
+    # Generate a random 3D volume
+    volume = torch.load('./data/preprocessed/target_volume.pth').cpu().detach().numpy()
+    visualize_volume_slices(volume, title="Original Volume")
+
+    # Define rotation (e.g., rotate 45 degrees around Y-axis)
+    theta_x = np.radians(45)
+    theta_y = np.radians(0)
+    theta_z = np.radians(45)
+    rotation_matrix = combined_rotation_matrix(theta_x, theta_y, theta_z)
+    
+    # Compute the new view matrix
+    view_matrix = compute_view_matrix(camera_position, target, up_vector, rotation_matrix)
+    print("View Matrix After Rotation:\n", view_matrix)
+
+    # Rotate the volume
+    rotated_volume = rotate_volume(volume, rotation_matrix)
+    load_vol = process_volume(rotated_volume,
+                          device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+
+    # Visualize a specific slice of the volume
+
+    # Assuming `volume` is already loaded in the previous code
+    data = load_vol
+
+    # Apply the HU filter to the data
+    # HU = apply_hu_filter(data, 218, 254)
+
+    # Perform Direct Volume Rendering (DVR)
+    depth, rgb, acc = process_dvr(data, 64, cumprod_exclusive, 'cuda:0', 1)
+
+    # Visualize the RGB map
+    visualize_rgb_map(rgb.cpu().detach())
+    visualize_volume_slices(rotated_volume, title="Rotated Volume")
+```
+
+### data_utils.py
+```
+# Module Docstring
+"""
+This module reads a volumetric data file, processes it into a 3D array, converts
+it to a PyTorch tensor, and visualizes a slice of the volume using Matplotlib.
+
+The code handles the following tasks:
+- Loading a raw binary file into a 3D numpy array.
+- Processing and reshaping the array.
+- Converting the numpy array to a PyTorch tensor for further computations.
+- Visualizing a slice of the 3D volume using Matplotlib.
+
+Decorators:
+- `input_output_decorator`: Logs the input arguments and output of a function.
+- `device_check_decorator`: Ensures the device (CPU/GPU) is correctly selected
+  based on availability.
+"""
+from functools import wraps
+import numpy as np
+import torch
+import matplotlib.pyplot as plt
+
+
+# Decorator to log input arguments and output
+def input_output_decorator(func):
+    """
+    A decorator that logs the input arguments and output of the function it wraps.
+
+    Args:
+    - func (Callable): The function to be wrapped.
+
+    Returns:
+    - wrapper (Callable): The wrapped function with logging.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Log the input arguments
+        print(f"Input arguments: {args}, {kwargs}")
+        # Call the original function and store the result
+        result = func(*args, **kwargs)
+        # Log the output
+        print(f"Output: {result}")
+        # Return the original function's result
+        return result
+    return wrapper
+
+# Decorator to ensure proper device selection (CPU/GPU)
+def device_check_decorator(func):
+    """
+    A decorator that checks and adjusts the device (CPU/GPU) for the function it wraps.
+
+    Args:
+    - func (Callable): The function to be wrapped.
+
+    Returns:
+    - wrapper (Callable): The wrapped function with device checking.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Get the device from the function's arguments (defaults to CPU if not provided)
+        device = kwargs.get('device', torch.device('cpu'))
+        # Check if CUDA is requested but not available
+        if not torch.cuda.is_available() and device.type == 'cuda':
+            print("CUDA not available, switching to CPU")
+            # Switch to CPU if CUDA is unavailable
+            kwargs['device'] = torch.device('cpu')
+        # Call the original function with possibly modified arguments
+        return func(*args, **kwargs)
+    return wrapper
+
+# Function to read and process the volumetric data
+@input_output_decorator
+def load_volume(vol_path, vol_dims, vol_dtype):
+    """
+    Loads a volumetric data file into a numpy array and reshapes it.
+
+    Args:
+    - path (str): Path to the raw volumetric data file.
+    - dims (tuple): Dimensions of the volume (width, height, depth).
+    - dtype (np.dtype): Data type of the volume.
+
+    Returns:
+    - volume (np.ndarray): Loaded and reshaped 3D numpy array.
+    """
+    with open(vol_path, 'rb') as f:
+        # Read the binary file and reshape it into the specified dimensions
+        vol = np.frombuffer(f.read(), dtype=vol_dtype).reshape(vol_dims)
+    return vol
+
+# Function to convert numpy array to PyTorch tensor and process it
+@input_output_decorator
+@device_check_decorator
+def process_volume(vol, device=torch.device('cpu')):
+    """
+    Converts a numpy array volume to a PyTorch tensor and processes it.
+
+    Args:
+    - vol (np.ndarray): The input volume as a 3D numpy array.
+    - device (torch.device): The device to process the tensor on (CPU/GPU).
+
+    Returns:
+    - vol (torch.Tensor): The processed volume as a PyTorch tensor.
+    """
+    # Crop the volume to a smaller region (e.g., select the first 128x128 pixels in the last two
+    # dimensions)
+    volume = vol[:, :128, :128]
+
+    # Convert the numpy array to a PyTorch tensor and cast it to float32
+    volume = torch.from_numpy(volume).to(torch.float32).to(device)
+
+    # Permute the tensor dimensions (if necessary)
+    # Note: This line is a placeholder; typically, you would specify how to permute dimensions.
+    volume = volume.permute(0, 1, 2)  # No change in dimensions, but maintaining the line for
+    # completeness.
+    return volume
+
+# Function to visualize a slice of the volume
+@input_output_decorator
+def visualize_slice(vol, slice_idx=70):
+    """
+    Visualizes a specific slice of the 3D volume using Matplotlib.
+
+    Args:
+    - vol (torch.Tensor): The 3D volume tensor.
+    - slice_idx (int): The index of the slice to visualize.
+
+    Returns:
+    - None
+    """
+    plt.imshow(vol[slice_idx].cpu(), cmap='gray')
+    plt.title(f'Slice {slice_idx} of the Volume')
+    plt.xlabel('X axis')
+    plt.ylabel('Y axis')
+    plt.show()
+```
+
+### main.py
+```
+# Module Docstring
+"""
+This module processes volumetric data by applying an HU filter, performing Direct Volume Rendering
+(DVR), and visualizing the result using Matplotlib. The module includes decorators to log input
+and output, check device compatibility, and inspect the outer scope for debugging purposes.
+"""
+import functools
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from data_utils import load_volume, process_volume
+from utils import hu_filter, dvr, cumprod_exclusive
+
+# Decorator to log input arguments, output, and outer scope variables
+def input_output_decorator(func):
+    """
+    A decorator that logs the input arguments, output of the function it wraps,
+    and variables in the outer scope.
+
+    Args:
+    - func (Callable): The function to be wrapped.
+
+    Returns:
+    - wrapper (Callable): The wrapped function with logging.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Log the input arguments
+        print(f"Input arguments for {func.__name__}: {args}, {kwargs}")
+
+        # Log outer scope variables
+        outer_scope_vars = {key: value for key, value in func.__globals__.items() if not
+                            key.startswith('__')}
+        print(f"Outer scope variables before {func.__name__}: {outer_scope_vars}")
+
+        # Call the original function and store the result
+        result = func(*args, **kwargs)
+
+        # Log the output
+        print(f"Output from {func.__name__}: {result}")
+
+        # Log outer scope variables again (in case of modifications)
+        outer_scope_vars_after = {key: value for key, value in func.__globals__.items() if not
+                                  key.startswith('__')}
+        print(f"Outer scope variables after {func.__name__}: {outer_scope_vars_after}")
+
+        return result
+    return wrapper
+
+# Decorator to ensure proper device selection (CPU/GPU)
+def device_check_decorator(func):
+    """
+    A decorator that checks and adjusts the device (CPU/GPU) for the function it wraps.
+
+    Args:
+    - func (Callable): The function to be wrapped.
+
+    Returns:
+    - wrapper (Callable): The wrapped function with device checking.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # Get the device from the function's arguments (defaults to CPU if not provided)
+        device = kwargs.get('device', torch.device('cpu'))
+        # Check if CUDA is requested but not available
+        if not torch.cuda.is_available() and device == 'cuda:0':
+            print("CUDA not available, switching to CPU")
+            # Switch to CPU if CUDA is unavailable
+            kwargs['device'] = torch.device('cpu')
+        # Call the original function with possibly modified arguments
+        return func(*args, **kwargs)
+    return wrapper
+
+@input_output_decorator
+def apply_hu_filter(vol, window_center, window_width):
+    """
+    Apply the HU filter to the input data.
+
+    Args:
+    - vol (np.ndarray): The input volume data.
+    - window_center (int): The center of the HU window.
+    - window_width (int): The width of the HU window.
+
+    Returns:
+    - filtered_data (np.ndarray): The data after applying the HU filter.
+    """
+    return hu_filter(vol, window_center, window_width)
+
+@input_output_decorator
+@device_check_decorator
+def process_dvr(volume, vol_depth, cumprod_func, device, dim):
+    """
+    Perform Direct Volume Rendering (DVR) on the input tensor.
+
+    Args:
+    - volume (torch.Tensor): The input volume as a tensor.
+    - vol_depth (int): The depth of the volume.
+    - cumprod_func (Callable): The cumulative product function.
+    - device (str): The device to perform the rendering on (CPU/GPU).
+    - dim (int): The dimension along which to sum the DVR result.
+
+    Returns:
+    - depth_map (torch.Tensor): The depth map resulting from DVR.
+    - rgb_map (torch.Tensor): The RGB map resulting from DVR.
+    - acc_map (torch.Tensor): The accumulated opacity map resulting from DVR.
+    """
+    return dvr(volume.cpu().detach().numpy(), vol_depth, cumprod_func, device, dim)
+
+@input_output_decorator
+def visualize_rgb_map(rgb_map):
+    """
+    Visualize the RGB map resulting from DVR.
+
+    Args:
+    - rgb_map (torch.Tensor): The RGB map resulting from DVR.
+
+    Returns:
+    - None
+    """
+    plt.imshow(rgb_map, cmap='gray')
+    plt.title('RGB Map Visualization')
+    plt.show()
+
+# Set the Matplotlib style to grayscale
+plt.style.use('grayscale')
+
+# Define the path to your volumetric data file
+PATH = '/home/armin/Downloads/vis_male_128x256x256_uint8.raw'
+
+# Define the dimensions of the volume
+dims = (128, 256, 256)  # Assuming the volume is 128x256x256
+
+# Define the data type of the volume
+DType = np.uint8  # Assuming the data is 8-bit unsigned integers
+
+# Load the volume data
+load_vol = load_volume(PATH, dims, DType)
+
+# Process the volume to convert it to a PyTorch tensor
+load_vol = process_volume(load_vol,
+                          device=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+
+# Visualize a specific slice of the volume
+
+# Assuming `volume` is already loaded in the previous code
+data = load_vol
+
+# Apply the HU filter to the data
+HU = apply_hu_filter(data, 218, 254)
+
+# Perform Direct Volume Rendering (DVR)
+depth, rgb, acc = process_dvr(HU, 128, cumprod_exclusive, 'cuda:0', 1)
+
+# Visualize the RGB map
+visualize_rgb_map(rgb.cpu().detach())
+```
+
+### utils.py
+```
+# Module Docstring
+"""
+This module contains three main functions: hu_filter, cumprod_exclusive, and dvr.
+These functions perform operations on images and tensors, with utility decorators
+to log inputs/outputs and check for device compatibility.
+
+Decorators:
+- `input_output_decorator`: Logs the input arguments and output of a function.
+- `device_check_decorator`: Ensures the device (CPU/GPU) is correctly selected
+  based on availability.
+
+Functions:
+- `hu_filter`: Applies a window filter to an image based on specified center and width.
+- `cumprod_exclusive`: Computes the cumulative product of a tensor with exclusive mode.
+- `dvr`: Implements a simple direct volume rendering function.
+"""
+from functools import wraps
+import torch
+
+# Decorator to log input arguments and output
+def input_output_decorator(func):
+    """
+    A decorator that logs the input arguments and output of the function it wraps.
+
+    Args:
+    - func (Callable): The function to be wrapped.
+
+    Returns:
+    - wrapper (Callable): The wrapped function with logging.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Log the input arguments
+        print(f"Input arguments: {args}, {kwargs}")
+        # Call the original function and store the result
+        result = func(*args, **kwargs)
+        # Log the output
+        print(f"Output: {result}")
+        # Return the original function's result
+        return result
+    return wrapper
+
+# Decorator to ensure proper device selection (CPU/GPU)
+def device_check_decorator(func):
+    """
+    A decorator that checks and adjusts the device (CPU/GPU) for the function it wraps.
+
+    Args:
+    - func (Callable): The function to be wrapped.
+
+    Returns:
+    - wrapper (Callable): The wrapped function with device checking.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Get the device from the function's arguments (defaults to CPU if not provided)
+        device = kwargs.get('device', torch.device('cpu'))
+        # Check if CUDA is requested but not available
+        if not torch.cuda.is_available() and device.type == 'cuda':
+            print("CUDA not available, switching to CPU")
+            # Switch to CPU if CUDA is unavailable
+            kwargs['device'] = torch.device('cpu')
+        # Call the original function with possibly modified arguments
+        return func(*args, **kwargs)
+    return wrapper
+
+# Function to apply a window filter to an image
+@input_output_decorator
+def hu_filter(image, window_center, window_width):
+    """
+    Applies a Hounsfield Unit (HU) window filter to an image, clipping its values
+    to a specified range based on the window center and width.
+
+    Args:
+    - image (np.ndarray): The input image to be filtered.
+    - window_center (int/float): The center of the window range.
+    - window_width (int/float): The width of the window range.
+
+    Returns:
+    - window_image (np.ndarray): The filtered image with values clipped to the specified range.
+    """
+    # Calculate the minimum value of the window range
+    img_min = window_center - window_width // 2
+    # Calculate the maximum value of the window range
+    img_max = window_center + window_width // 2
+    # Create a copy of the input image to avoid modifying the original
+    window_image = image.clone()
+    # Clip the image values below the minimum to the minimum value
+    window_image[window_image < img_min] = img_min
+    # Clip the image values above the maximum to the maximum value
+    window_image[window_image > img_max] = img_max
+    # Return the filtered image
+    return window_image
+
+# Function to compute cumulative product with exclusive mode
+@input_output_decorator
+def cumprod_exclusive(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Mimics the functionality of TensorFlow's tf.math.cumprod with exclusive mode,
+    computing the cumulative product of a tensor along the last dimension.
+
+    Args:
+    - tensor (torch.Tensor): The input tensor for which the cumprod is computed.
+
+    Returns:
+    - cumprod (torch.Tensor): The cumulative product tensor with exclusive mode.
+    """
+    # Set the dimension along which to compute the cumulative product (fixed at 1)
+    dim = 1
+    # Compute the cumulative product of the tensor along the specified dimension
+    cumprod = torch.cumprod(tensor, dim)
+    # Shift the computed values by 1 position along the specified dimension
+    cumprod = torch.roll(cumprod, 1, dim)
+    # Set the first value in the rolled dimension to 0, mimicking exclusive mode
+    cumprod[..., 0] = 0.
+    # Return the modified cumulative product tensor
+    return cumprod
+
+# Function for direct volume rendering
+@device_check_decorator
+@input_output_decorator
+def dvr(data, depth, cumprod_func, device, dim):
+    """
+    Implements a simple Direct Volume Rendering (dvr) algorithm using PyTorch.
+
+    Args:
+    - data (np.ndarray): The input 3D volume data to be rendered.
+    - depth (int): The number of depth samples to use in the rendering process.
+    - cumprod_func (Callable): A function to compute the cumulative product, typically
+    'cumprod_exclusive.
+    - device (torch.device): The device (CPU/GPU) to perform the computations on.
+    - dim (int): The dimension along which the rendering is performed.
+
+    Returns:
+    - depth_map (torch.Tensor): The rendered depth map.
+    - rgb_map (torch.Tensor): The rendered RGB map.
+    - acc_map (torch.Tensor): The accumulated weights map.
+    """
+    # Normalize the data to be between 0 and 1
+    dense_grid = (data - data.min()) / (data.max() - data.min())
+    # Create a tensor of depth values, evenly spaced between 0 and depth-1
+    depth_values = torch.linspace(0, depth-1, depth).to(device)
+    # Create a large constant tensor to represent an "infinite" distance
+    one_e_10 = torch.tensor([1e10], dtype=torch.float32, device=device)
+    # Convert the input data into a torch tensor and move it to the specified device
+    intensity_grid = torch.from_numpy(data).to(device)
+
+    # Calculate the distances between consecutive depth values and append a large distance
+    dists = torch.cat((depth_values[..., 1:] - depth_values[..., :-1],
+                       one_e_10.expand(depth_values[..., :1].shape)), dim=-1)
+
+    # Convert the normalized grid to a torch tensor and move it to the specified device
+    density = torch.from_numpy(dense_grid).to(device)
+    del dense_grid  # Free memory by deleting the original dense_grid
+    # Compute the alpha values (opacity) based on the density and distances
+    alpha = 1. - torch.exp(-density * dists)
+    del density  # Free memory by deleting the original density tensor
+    # Compute the weights for each sample by multiplying alpha with the cumulative product
+    weights = alpha * cumprod_func(1. - alpha + 1e-10)
+    # Compute the RGB map by summing the weighted intensities along the specified dimension
+    rgb_map = (weights * intensity_grid).sum(dim=dim)
+    # Compute the accumulated weights map
+    acc_map = weights.sum(dim=dim)
+    # Compute the depth map by summing the weighted depth values
+    depth_map = (weights * depth_values).sum(dim=dim)
+    del weights  # Free memory by deleting the weights tensor
+    # Return the depth map, RGB map, and accumulated weights map
+    return depth_map, rgb_map, acc_map
+```

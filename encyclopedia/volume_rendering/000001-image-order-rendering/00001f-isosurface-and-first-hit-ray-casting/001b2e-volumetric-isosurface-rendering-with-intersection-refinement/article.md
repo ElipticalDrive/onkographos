@@ -3,246 +3,321 @@
 Also called: 1st ray of raytracing, First Hit Compositing, First Hit Shader, First-Hit Rendering, Isosurface Ray Marching (VPT), Volumetric Isosurface Rendering, iso surface/volume rendering by volume raycasting
 
 ## Overview
-Volumetric Isosurface Rendering with Intersection Refinement is a technique that renders an implicit surface defined by a scalar field $f(\mathbf{p}) = \tau$ directly from voxel data without extracting an explicit polygon mesh (e.g., via Marching Cubes) [S1, unofficial][S2, unofficial][S5, unofficial]. It solves the problem of visualizing specific structures within a volume by finding the first intersection along a ray where the scalar value equals or crosses a user-defined isovalue $\tau$ [S1, unofficial][S4, unofficial]. Unlike standard volume rendering which composites all samples, this method stops at the first hit, allowing for larger step sizes and avoiding the computational cost of full volume compositing [S8, unofficial]. It is distinguished from its siblings by its reliance on discrete ray marching followed by analytical or iterative refinement to mitigate discretization artifacts inherent in the marching phase [S3, unofficial][S8, unofficial].
+Volumetric Isosurface Rendering with Intersection Refinement is an image-order technique that renders an implicit surface defined by a scalar threshold $\tau$ directly from volumetric data, avoiding explicit polygon mesh extraction [S1, S4, unofficial][S7, S9]. It differs from full volume integration (e.g., [Direct Volume Rendering](10-direct-volume-rendering.md)) by stopping the ray traversal at the first detected isosurface intersection, and from [Marching Cubes](11-marching-cubes.md) by performing surface detection and shading in a single pass without generating geometry [S7, S10]. The method distinguishes itself from basic ray marching by applying intersection refinement (typically bisection) to the detected crossing point, reducing discretization artifacts caused by fixed step sizes [S10][S4, unofficial].
 
 ## How it works
-### Inputs and Outputs
 **Inputs:**
-*   **Volume Data:** A 3D scalar field $f(\mathbf{p})$ stored in a texture (e.g., `sampler3D`) [S2, unofficial][S7].
-*   **Isovalue ($\tau$):** The scalar threshold defining the surface [S1, unofficial][S2, unofficial].
-*   **Ray Parameters:** Origin $\mathbf{o}$, direction $\mathbf{d}$, and domain bounds $[\mathbf{u}_{min}, \mathbf{u}_{max}]$ [S2, unofficial][S3, unofficial].
-*   **Step Size ($h$):** The distance between discrete samples during the marching phase [S2, unofficial].
-*   **Refinement Iterations ($N$):** The number of bisection steps to refine the hit position [S2, unofficial][S8, unofficial].
-*   **Lighting Parameters:** Light direction, material coefficients (ambient $k_a$, diffuse $k_d$, specular $k_s$, power $p$) [S9].
+*   Scalar volume data $f(\mathbf{p})$ stored in a 3D texture [S3, S4, unofficial].
+*   Camera parameters: origin $\mathbf{o}$, direction $\mathbf{d}$, view/projection matrices [S4, unofficial].
+*   Volume domain bounds $[\mathbf{u}_{min}, \mathbf{u}_{max}]$ [S4, unofficial].
+*   Parameters: isovalue $\tau$, ray step size $h$, refinement iteration count $N_{ref}$ [S4, unofficial][S10].
 
 **Outputs:**
-*   **Pixel Color:** The shaded color of the isosurface at the hit point [S2, unofficial][S7].
-*   **Hit Status:** Boolean indicating if the isosurface was found [S2, unofficial].
+*   Pixel color $\mathbf{C}$ and hit status [S4, unofficial].
 
-### Data Structures
-The implementation uses Uniform Buffer Objects (UBOs) to pass parameters to the shader [S4, unofficial]. A standard layout (std140) includes:
+**Data Structures:**
+*   **Volume Texture:** 3D texture sampling $f(\mathbf{p})$. Typically `sampler3D` with linear filtering [S3, S4, unofficial].
+*   **Uniform Buffer Object (UBO):** Contains domain bounds, step size, isovalue, and flags [S4, unofficial].
+    *   `vec3 uDomainMin`, `vec3 uDomainMax`
+    *   `float uStepSize`
+    *   `float uIsovalue`
+    *   `int uRefinementIterations`
+    *   `int uEnableShadows`
 
-**CameraUBO (binding=0):**
-*   `mat4 uView`: View matrix.
-*   `mat4 uProj`: Projection matrix.
-*   `vec3 uCameraPos`: Camera position.
-*   `float _pad0`: Padding.
+**Algorithm Steps:**
 
-**VolumeUBO (binding=1):**
-*   `vec3 uDomainMin`: Minimum bounds of the volume domain.
-*   `float uStepSize`: Ray marching step size.
-*   `vec3 uDomainMax`: Maximum bounds of the volume domain.
-*   `float uIsovalue`: The isovalue $\tau$.
-*   `float uLightAngle`: Angle for light direction calculation.
-*   `int uEnableShadows`: Flag (0 or 1) to enable shadow rays.
-*   `int uRefinementIterations`: Number of bisection iterations.
-*   `float _pad1`: Padding.
+1.  **Ray-Box Intersection:** Compute the entry ($t_{min}$) and exit ($t_{max}$) parameters of the ray with the volume bounding box. If $t_{max} \le t_{min}$, the ray misses the volume [S4, S5, unofficial].
+    $$ t_{start} = \max(t_{min}, 0.0) $$
+    $$ t_{end} = t_{max} $$
 
-**Volume Texture:**
-*   `sampler3D volumeTex`: Sampled with trilinear interpolation [S2, unofficial].
+2.  **Ray Marching (Coarse Detection):** Iterate $t$ from $t_{start}$ to $t_{end}$ with step size $h$. Sample the scalar field $g(t) = f(\mathbf{o} + t\mathbf{d}) - \tau$. Detect the first interval $[t_a, t_b]$ where the sign of $g(t)$ changes, indicating a crossing of the isosurface [S4, S11, unofficial].
+    $$ \text{Sign Change} \iff g(t_{prev}) \cdot g(t_{curr}) < 0 $$
+    *Note: Some implementations check for $f(\mathbf{p}) \ge \tau$ directly [S2, S6, unofficial], but sign change is more robust for general scalar fields [S4, unofficial].*
 
-### Algorithm Steps
+3.  **Intersection Refinement:** If a sign change is detected at $[t_a, t_b]$, refine the hit position using bisection for $N_{ref}$ iterations [S4, unofficial][S10].
+    *   Set $t_{mid} = (t_a + t_b) / 2$.
+    *   Evaluate $g(t_{mid})$.
+    *   If $g(t_a) \cdot g(t_{mid}) \le 0$, set $t_b = t_{mid}$.
+    *   Else, set $t_a = t_{mid}$.
+    *   Final hit parameter: $t_{hit} = (t_a + t_b) / 2$ [S4, unofficial].
+    *   *Alternative Linear Refinement:* Some sources use linear interpolation between the previous and next points to estimate the new intersection $X_{new}$ [S10]:
+        $$ X_{new} = X_{prev} + (X_{next} - X_{prev}) \frac{\tau - f_{prev}}{f_{next} - f_{prev}} $$
+        This is repeated until convergence or a fixed iteration count [S10].
 
-1.  **Ray-Box Intersection:** Compute the entry ($t_{min}$) and exit ($t_{max}$) parameters of the ray with the volume bounding box. If $t_{max} \le t_{min}$, the ray misses the volume; return empty/no hit [S4, unofficial][S5, unofficial].
-2.  **Ray Marching:** Iterate from $t_{start} = \max(t_{min}, 0.0)$ to $t_{end} = t_{max}$ with step size $h$. At each step $t_i$, sample the scalar field $g(t_i) = f(\mathbf{o} + t_i \mathbf{d}) - \tau$ [S4, unofficial].
-3.  **Sign Change Detection:** Detect the first interval $[t_{prev}, t_{curr}]$ where the sign of $g(t)$ changes, i.e., $g(t_{prev}) \cdot g(t_{curr}) < 0$ (or $g(t_{prev}) \le 0$ and $g(t_{curr}) > 0$) [S4, unofficial][S7]. If no sign change is found within the domain, return no hit [S4, unofficial].
-4.  **Intersection Refinement:** Refine the hit position $t_{hit}$ within the interval $[t_{prev}, t_{curr}]$ using bisection or linear interpolation to reduce discretization artifacts [S4, unofficial][S8, unofficial].
-5.  **Normal Computation:** Compute the surface normal $\mathbf{n}$ at the refined hit point $\mathbf{p}_{hit}$ using central differences on the scalar field [S4, unofficial][S7].
-6.  **Shading:** Compute the color using a local lighting model (e.g., Blinn-Phong or Lambertian) at $\mathbf{p}_{hit}$ [S4, unofficial][S7][S9].
-7.  **Shadow Ray Traversal (Optional):** Cast a shadow ray from $\mathbf{p}_{hit}$ towards the light source to determine occlusion [S4, unofficial].
+4.  **Hit Position:** Compute the 3D position of the intersection:
+    $$ \mathbf{p}_{hit} = \mathbf{o} + t_{hit} \mathbf{d} $$
 
-### Formulas
+5.  **Normal Computation:** Estimate the surface normal $\mathbf{n}$ using central differences with step size $h$ (or a dedicated gradient step) [S4, S11, unofficial].
+    $$ n_x = f(\mathbf{p}_{hit} + h\mathbf{e}_x) - f(\mathbf{p}_{hit} - h\mathbf{e}_x) $$
+    $$ n_y = f(\mathbf{p}_{hit} + h\mathbf{e}_y) - f(\mathbf{p}_{hit} - h\mathbf{e}_y) $$
+    $$ n_z = f(\mathbf{p}_{hit} + h\mathbf{e}_z) - f(\mathbf{p}_{hit} - h\mathbf{e}_z) $$
+    $$ \mathbf{n} = -\frac{\nabla f}{\|\nabla f\|} $$
+    The negative gradient is used so the normal points outward toward the viewer/light [S4, unofficial].
 
-**Ray Marching Sample:**
-$$ g(t) = f(\mathbf{o} + t \mathbf{d}) - \tau $$
-where $f$ is the scalar field, $\mathbf{o}$ is ray origin, $\mathbf{d}$ is ray direction, and $\tau$ is the isovalue [S4, unofficial].
+6.  **Shading:** Compute the color using a local lighting model (e.g., Blinn-Phong or Lambertian) [S4, S11, unofficial].
+    *   **Lambertian:** $\mathbf{C} = \mathbf{C}_{base} \cdot \max(0, \mathbf{n} \cdot \mathbf{l}) \cdot \mathbf{S}$, where $\mathbf{l}$ is the light direction and $\mathbf{S}$ is the shadow factor [S4, unofficial].
+    *   **Blinn-Phong:** Includes ambient, diffuse, and specular components using half-vector $\mathbf{h} = \text{normalize}(\mathbf{l} + \mathbf{v})$ [S11, unofficial].
 
-**Bisection Refinement:**
-Given interval $[t_a, t_b]$ with values $d_a = g(t_a)$ and $d_b = g(t_b)$:
-1.  Compute midpoint: $t_m = (t_a + t_b) / 2$.
-2.  Evaluate: $d_m = g(t_m)$.
-3.  Update interval:
-    $$ \text{if } d_a \cdot d_m \le 0: \quad t_b = t_m, \quad d_b = d_m $$
-    $$ \text{else}: \quad t_a = t_m, \quad d_a = d_m $$
-4.  Repeat for $N$ iterations. Final hit: $t_{hit} = (t_a + t_b) / 2$ [S4, unofficial].
+7.  **Shadow Ray Traversal (Optional):** If enabled, cast a shadow ray from $\mathbf{p}_{hit}$ in direction $\mathbf{l}$. Start at $t = 2h$ to avoid self-intersection artifacts [S4, S11, unofficial]. If the isosurface is encountered before leaving the volume, $\mathbf{S} = 0$; otherwise $\mathbf{S} = 1$ [S4, unofficial].
 
-*Note: Some implementations use linear interpolation instead of bisection:*
-$$ X_{new} = X_{prev} + (X_{next} - X_{prev}) \frac{\tau - f_{prev}}{f_{next} - f_{prev}} $$
-where $X_{prev}, X_{next}$ are positions and $f_{prev}, f_{next}$ are field values [S10].
-
-**Normal Computation (Central Differences):**
-Using step size $h$ (often equal to `uStepSize`):
-$$ \nabla f \approx \begin{bmatrix} f(x+h, y, z) - f(x-h, y, z) \\ f(x, y+h, z) - f(x, y-h, z) \\ f(x, y, z+h) - f(x, y, z-h) \end{bmatrix} $$
-$$ \mathbf{n} = -\frac{\nabla f}{\|\nabla f\|} $$
-The negative gradient is used so the normal points outward toward the lighter medium [S4, unofficial].
-
-**Blinn-Phong Shading:**
-$$ \mathbf{L} = \text{normalize}(\mathbf{l}_{pos} - \mathbf{p}_{hit}) $$
-$$ \mathbf{V} = -\text{normalize}(\mathbf{d}) $$
-$$ \mathbf{H} = \text{normalize}(\mathbf{L} + \mathbf{V}) $$
-$$ I_{diffuse} = k_d \max(0, \mathbf{n} \cdot \mathbf{L}) $$
-$$ I_{specular} = k_s \max(0, \mathbf{n} \cdot \mathbf{H})^p $$
-$$ \text{Color} = (k_a + I_{diffuse}) \mathbf{C}_{mat} + I_{specular} \mathbf{C}_{spec} $$
-where $k_a, k_d, k_s$ are material coefficients, $p$ is specular power, and $\mathbf{C}_{mat}$ is the base color (often derived from the isovalue or a second field) [S7][S9].
-
-**Lambertian Shading (Simpler Alternative):**
-$$ \text{Color} = \mathbf{C}_{base} \cdot \max(0, \mathbf{n} \cdot \mathbf{L}) \cdot \text{shadow} $$
-[ S4, unofficial]
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_isosurface_ray(origin, direction, domain_min, domain_max, 
-                          volume_texture, isovalue, step_size, 
-                          refinement_iterations, enable_shadows, light_angle,
-                          ka, kd, ks, specular_power, C_mat, C_spec):
-    # 1. Ray-Box Intersection (slab method)
-    inv_dir = 1.0 / direction
-    t_min = max((domain_min - origin) * inv_dir)
-    t_max = min((domain_max - origin) * inv_dir)
+def render_isosurface_ray(o, d, domain_min, domain_max, volume_tex, tau, step_size, num_refinements, enable_shadows):
+    # 1. Ray-Box Intersection
+    t_min, t_max = intersect_box(o, d, domain_min, domain_max)
     if t_max <= t_min:
         return None, False
+    
     t_start = max(t_min, 0.0)
     t_end = t_max
     
     # 2. Ray Marching
     t_prev = t_start
-    val_prev = sample_volume(origin, direction, t_prev, volume_texture) - isovalue
+    g_prev = sample_volume(o + t_prev * d, volume_tex) - tau
     
-    t_curr = t_prev + step_size
-    while t_curr <= t_end:
-        val_curr = sample_volume(origin, direction, t_curr, volume_texture) - isovalue
+    for t_curr in range(t_start + step_size, t_end + step_size, step_size):
+        p_curr = o + t_curr * d
+        g_curr = sample_volume(p_curr, volume_tex) - tau
         
-        # 3. Sign Change Detection
-        if val_prev * val_curr <= 0:
-            # 4. Intersection Refinement (Bisection)
-            t_a, t_b = t_prev, t_curr
-            d_a, d_b = val_prev, val_curr
+        # Check for sign change
+        if g_prev * g_curr < 0:
+            # 3. Refinement (Bisection)
+            t_a = t_prev
+            t_b = t_curr
+            g_a = g_prev
+            g_b = g_curr
             
-            for _ in range(refinement_iterations):
-                t_m = (t_a + t_b) / 2.0
-                d_m = sample_volume(origin, direction, t_m, volume_texture) - isovalue
+            for _ in range(num_refinements):
+                t_mid = (t_a + t_b) / 2.0
+                p_mid = o + t_mid * d
+                g_mid = sample_volume(p_mid, volume_tex) - tau
                 
-                if d_a * d_m <= 0:
-                    t_b = t_m
-                    d_b = d_m
+                if g_a * g_mid <= 0:
+                    t_b = t_mid
+                    g_b = g_mid
                 else:
-                    t_a = t_m
-                    d_a = d_m
+                    t_a = t_mid
+                    g_a = g_mid
             
             t_hit = (t_a + t_b) / 2.0
-            p_hit = origin + t_hit * direction
+            p_hit = o + t_hit * d
             break
-        t_prev = t_curr
-        val_prev = val_curr
-        t_curr += step_size
+        else:
+            t_prev = t_curr
+            g_prev = g_curr
     else:
+        # No intersection found
         return None, False
 
-    # 5. Normal Computation
-    normal = compute_normal(p_hit, volume_texture, step_size)
+    # 4. Normal Computation
+    h = step_size
+    n_x = sample_volume(p_hit + vec3(h, 0, 0), volume_tex) - sample_volume(p_hit - vec3(h, 0, 0), volume_tex)
+    n_y = sample_volume(p_hit + vec3(0, h, 0), volume_tex) - sample_volume(p_hit - vec3(0, h, 0), volume_tex)
+    n_z = sample_volume(p_hit + vec3(0, 0, h), volume_tex) - sample_volume(p_hit - vec3(0, 0, h), volume_tex)
     
-    # 6. Shading
-    light_dir = compute_light_direction(light_angle)
+    normal = normalize(vec3(-n_x, -n_y, -n_z)) # Negative gradient
+    
+    # 5. Shading
+    light_dir = normalize(vec3(1.0, 1.0, -1.0)) # Example light direction
     shadow = 1.0
-    if enable_shadows:
-        shadow = trace_shadow_ray(p_hit, light_dir, volume_texture, domain_min, domain_max, step_size, isovalue)
-        
-    color = shade_blinn_phong(normal, light_dir, direction, shadow, ka, kd, ks, specular_power, C_mat, C_spec)
     
-    return color, True
+    if enable_shadows:
+        # 7. Shadow Ray
+        shadow = trace_shadow(p_hit, light_dir, domain_min, domain_max, volume_tex, tau, step_size)
+        
+    # Lambertian Shading
+    diffuse = max(0.0, dot(normal, light_dir))
+    color = vec3(1.0) * diffuse * shadow # Base color white
+    
+    return p_hit, True
 
-def sample_volume(origin, direction, t, volume_texture):
-    pos = origin + t * direction
-    tex_coords = (pos - volume_texture.min_coord) / (volume_texture.max_coord - volume_texture.min_coord)
-    return textureLod(volume_texture, tex_coords, 0.0)
-
-def compute_normal(p_hit, volume_texture, step_size):
-    d = step_size
-    fx = sample_volume(p_hit + vec3(d, 0, 0), vec3(0,0,0), 0, volume_texture) - \
-         sample_volume(p_hit - vec3(d, 0, 0), vec3(0,0,0), 0, volume_texture)
-    fy = sample_volume(p_hit + vec3(0, d, 0), vec3(0,0,0), 0, volume_texture) - \
-         sample_volume(p_hit - vec3(0, d, 0), vec3(0,0,0), 0, volume_texture)
-    fz = sample_volume(p_hit + vec3(0, 0, d), vec3(0,0,0), 0, volume_texture) - \
-         sample_volume(p_hit - vec3(0, 0, d), vec3(0,0,0), 0, volume_texture)
-    grad = vec3(fx, fy, fz)
-    return normalize(-grad)
-
-def trace_shadow_ray(origin, light_dir, volume_texture, domain_min, domain_max, step_size, isovalue):
-    t = 2.0 * step_size
+def trace_shadow(origin, light_dir, domain_min, domain_max, volume_tex, tau, step_size):
+    t = 2.0 * step_size # Avoid self-intersection
     while True:
         p = origin + t * light_dir
         if not in_box(p, domain_min, domain_max):
             return 1.0
-        val = sample_volume(p, vec3(0,0,0), 0, volume_texture)
-        if val >= isovalue: 
+        if sample_volume(p, volume_tex) >= tau:
             return 0.0
         t += step_size
-
-def compute_light_direction(light_angle):
-    a = light_angle * 2.0 * 3.14159265
-    return normalize(vec3(cos(a), sin(a), -1.0))
-
-def shade_blinn_phong(normal, light_dir, view_dir, shadow, ka, kd, ks, specular_power, C_mat, C_spec):
-    L = normalize(light_dir)
-    V = normalize(-view_dir)
-    H = normalize(L + V)
-    Id = kd * max(0.0, dot(normal, L))
-    Is = ks * pow(max(0.0, dot(normal, H)), specular_power)
-    return (ka + Id) * C_mat + Is * C_spec
-
-def in_box(p, domain_min, domain_max):
-    return domain_min.x <= p.x <= domain_max.x and \
-           domain_min.y <= p.y <= domain_max.y and \
-           domain_min.z <= p.z <= domain_max.z
+    return 1.0
 ```
 
-### Edge Cases and Pitfalls
-*   **Self-Intersection in Shadow Rays:** Shadow rays must start at $t = 2 \cdot \text{stepSize}$ (or a small epsilon) to avoid immediately intersecting the surface they originated from due to numerical precision [S4, unofficial].
-*   **Discretization Artifacts:** Without refinement, the intersection point is limited to the marching step size, causing "stair-stepping" or jagged edges [S8, unofficial].
-*   **Missed Intersections:** If the step size is too large relative to the thickness of the structure, the sign change may be missed entirely. Smaller step sizes increase accuracy but cost [S4, unofficial].
-*   **Ray-Box Order:** If `tbounds.x >= tbounds.y`, the ray does not intersect the volume in the correct order; output `vec4(-1)` and return [S5, unofficial].
-*   **Gradient Boundary:** Central difference normal computation requires sampling outside the hit point. Ensure the hit point is not too close to the volume boundary to avoid out-of-bounds texture access [S4, unofficial].
+**Parameters:**
+*   `tau` (Isovalue): User-defined threshold. Typical values depend on data normalization (e.g., 0.333 for normalized [0,1] data) [S4, unofficial].
+*   `step_size`: Controls sampling density. Smaller steps increase accuracy but cost more. Typical range: 0.001 to 0.01 in normalized domain [S4, unofficial].
+*   `num_refinements`: Number of bisection iterations. Typical value: 5-10 [S4, unofficial][S10].
+*   `enable_shadows`: Boolean flag for shadow ray computation [S4, unofficial].
 
-### Subtopics
-*   [Deferred Shading for Isosurfaces](867-deferred-shading-for-isosurfaces.md): Decouples surface detection from shading, allowing multiple lighting passes. Choose when complex lighting or post-processing is required.
-*   [Cell-Based First-Hit Ray Casting](1039-cell-based-first-hit-ray-casting.md): Uses cell-based acceleration to skip empty space. Choose for large, sparse volumes.
-*   [Robust Iso-surface Rendering via Bisection and Newton Refinement](1309-robust-iso-surface-rendering-via-bisection-and-newton-refine.md): Uses Newton's method for faster convergence than bisection. Choose when higher precision is needed with fewer iterations.
-*   [Average Intensity Projection with IsoSurface Detection](1337-average-intensity-projection-with-isosurface-detection.md): Combines AIP with isosurface detection. Choose for semi-transparent isosurface visualization.
-*   [Terrain Raymarching](1357-terrain-raymarching.md): Optimized for height-field-like volumes. Choose for terrain rendering.
-*   [Multiple Flat Shaded Opaque Isosurfaces](1498-multiple-flat-shaded-opaque-isosurfaces.md): Renders multiple distinct isosurfaces with flat shading. Choose for categorical data visualization.
-*   [Differential Sampling and Peak Finding](1533-differential-sampling-and-peak-finding.md): Uses differential sampling to find peaks. Choose for finding local maxima/minima.
-*   [Algebraic Surface Raycasting](1601-algebraic-surface-raycasting.md): Uses algebraic equations for surfaces. Choose when the volume is defined by implicit algebraic functions.
-*   [Exact Projection First Contact](1897-exact-projection-first-contact.md): Aims for exact first contact without marching. Choose for high-precision requirements.
-*   [Upson-Keller Polygon Method](2041-upson-keller-polygon-method.md): Projects polygons onto the screen. Choose for specific artistic styles or hardware acceleration.
-*   [Multi-Mode Rendering with Iso-surfaces and Meshes](2165-multi-mode-rendering-with-iso-surfaces-and-meshes.md): Combines isosurfaces with explicit meshes. Choose for hybrid scenes.
-*   [GVDB Raycasting with Binary Search Surface Tracing](2189-gvdb-raycasting-with-binary-search-surface-tracing.md): Uses GVDB acceleration structure. Choose for dynamic, large-scale volumes.
-*   [Direct Surface Rendering with Intersection Buffer](2211-direct-surface-rendering-with-intersection-buffer.md): Uses an intersection buffer for deferred shading. Choose for complex lighting scenarios.
-*   [Hybrid Strategy for Interactive High Resolution Isosurface Ray Tracing](3697-hybrid-strategy-for-interactive-high-resolution-isosurface-ray-tracing.md): Combines coarse and fine marching. Choose for interactive high-res rendering.
-*   [iso_categorical](4049-iso-categorical.md): Specialized for categorical data. Choose for label-based visualization.
-*   [Direct Multifield Volume Ray Casting of Fiber Surfaces](4078-direct-multifield-volume-ray-casting-of-fiber-surfaces.md): Renders fiber surfaces from multiple fields. Choose for vector field visualization.
-*   [GPU Isosurface Raycasting of FCC Datasets](4085-gpu-isosurface-raycasting-of-fcc-datasets.md): Optimized for FCC grids. Choose for FCC grid data.
-*   [Interactive High Resolution Isosurface Ray Tracing](4093-interactive-high-resolution-isosurface-ray-tracing.md): Focuses on interactivity. Choose for real-time applications.
-*   [Coherent Multiresolution Isosurface Ray Tracing](4095-coherent-multiresolution-isosurface-ray-tracing.md): Uses multiresolution data. Choose for LOD support.
-*   [Triangular Mesh Scene Rendering](4644-triangular-mesh-scene-rendering.md): Renders meshes, not volumes. Choose for mesh-based scenes.
-*   [Isosurface Display via Opacity Mapping](6053-isosurface-display-via-opacity-mapping.md): Uses opacity mapping. Choose for soft isosurface effects.
-*   [Real-Time Raycasting for Implicit Isosurfaces](6203-real-time-raycasting-for-implicit-isosurfaces.md): Optimized for real-time implicit surfaces. Choose for real-time implicit rendering.
+**Edge Cases and Pitfalls:**
+*   **Self-Intersection:** Shadow rays must start at $t > 0$ (e.g., $2h$) to prevent the shadow ray from immediately hitting the surface it originated from due to numerical precision [S4, unofficial].
+*   **Missed Intersections:** If `step_size` is too large, the ray may jump over thin structures or sign changes. This requires smaller steps or acceleration structures [S4, unofficial][S9].
+*   **Discretization Artifacts:** Without refinement, the hit position is quantized to the grid, causing "staircasing" or aliasing [S10].
+*   **Normal Accuracy:** Central differences require sampling outside the hit point, which may be expensive or invalid at boundaries [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Performance scales with the number of samples taken; optimizations reduce this number [S7].
-*   **Memory Complexity:** $O(V)$ for the volume texture, where $V$ is the number of voxels [S7].
-*   **Measured Performance:** On a 256^3 voxel volume, performance depends heavily on step size and refinement iterations. Typical refinement iterations range from 0 to 10, with 10 providing a good balance [S8, unofficial]. Empty-space skipping can significantly reduce the number of samples [S7].
-*   **Scaling:** Performance scales linearly with resolution and inversely with step size.
-*   **Strengths:** No mesh extraction required; dynamic isovalue adjustment; avoids artifacts of transfer function opacity mapping; allows larger step sizes than full volume rendering [S8, unofficial].
-*   **Limitations:** Discretization artifacts if refinement is insufficient; missed intersections if step size is too large; no contribution from behind the surface [S3, unofficial][S8, unofficial].
+*   **Time Complexity:** $O(N \cdot N_{ref})$ per pixel, where $N$ is the number of marching steps to the surface and $N_{ref}$ is the refinement count. Shadow rays add a secondary traversal cost [S4, unofficial][S9].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per pixel, plus the volume texture storage [S4, unofficial].
+*   **Performance:** Faster than full volume rendering because it terminates early [S10]. Performance scales with volume resolution and isovalue density. Empty-space skipping (using acceleration structures like uniform grids) can significantly reduce $N$ by skipping regions where the isovalue cannot exist [S7, S9].
+*   **Strengths:** Real-time capable on GPUs; no preprocessing (mesh extraction) required; dynamic isovalue adjustment [S4, unofficial][S9].
+*   **Limitations:** Sensitive to step size; may miss thin features; normals are approximate [S4, unofficial]. Not suitable for transparent or multi-layered volume visualization without modification [S10].
 
 ## Background
-Volumetric isosurface rendering originated as an alternative to explicit mesh extraction methods like Marching Cubes, which require preprocessing and memory for mesh storage [S5, unofficial][S8, unofficial]. Early implementations used simple ray marching with fixed step sizes [S1, unofficial]. The introduction of bisection refinement allowed for higher accuracy without reducing the marching step size, improving performance [S4, unofficial]. The method has been widely adopted in scientific visualization for virtual endoscopy and interactive exploration of medical and scientific data [S1, unofficial][S2, unofficial]. Modern implementations leverage GPU parallelism and acceleration structures like uniform grids for empty-space skipping [S5, unofficial][S7].
+*   **Origin:** The method is a fundamental technique in volume visualization, often referred to as "first-hit" rendering [S2, S3, unofficial]. It was formalized in early volume ray tracing literature as a way to render implicit surfaces directly from voxel data [S1, unofficial].
+*   **Development:** Early implementations used simple thresholding [S2, unofficial]. Refinement techniques (bisection, Newton) were added to improve geometric accuracy [S4, unofficial][S10]. Modern implementations leverage GPU shaders for real-time performance [S4, unofficial][S9].
+*   **Usage:** Commonly used in medical imaging (virtual endoscopy, bone rendering) and scientific visualization where explicit mesh extraction is undesirable or too slow [S1, S4, unofficial].
+
+## Subtopics
+
+### Robust Iso-surface Rendering via Bisection and Newton Refinement
+*   **What it is:** Uses Newton's method in addition to bisection for faster convergence of the intersection point.
+*   **Difference:** Newton's method converges quadratically but requires derivative evaluation and can be unstable; bisection is slower but robust.
+*   **When to choose:** When high precision is needed and the scalar field is smooth and differentiable.
+*   **Link:** [Robust Iso-surface Rendering via Bisection and Newton Refinement](1309-robust-iso-surface-rendering-via-bisection-and-newton-refine.md)
+
+### Average Intensity Projection with IsoSurface Detection
+*   **What it is:** Combines average intensity projection with isosurface detection.
+*   **Difference:** Averages values along the ray but highlights the isosurface.
+*   **When to choose:** When both internal structure and surface boundaries are important.
+*   **Link:** [Average Intensity Projection with IsoSurface Detection](1337-average-intensity-projection-with-isosurface-detection.md)
+
+### Differential Sampling and Peak Finding
+*   **What it is:** Uses differential sampling to find peaks in the scalar field.
+*   **Difference:** Focuses on local maxima rather than a specific threshold crossing.
+*   **When to choose:** For rendering features defined by intensity peaks rather than boundaries.
+*   **Link:** [Differential Sampling and Peak Finding](1533-differential-sampling-and-peak-finding.md)
+
+### Algebraic Surface Raycasting
+*   **What it is:** Solves algebraic equations for the intersection.
+*   **Difference:** Exact solution for polynomial fields, avoiding iterative marching.
+*   **When to choose:** For implicit surfaces defined by low-degree polynomials.
+*   **Link:** [Algebraic Surface Raycasting](1601-algebraic-surface-raycasting.md)
+
+### Exact Projection First Contact
+*   **What it is:** Computes the exact first contact point.
+*   **Difference:** Higher precision than bisection, potentially more expensive.
+*   **When to choose:** When geometric accuracy is critical.
+*   **Link:** [Exact Projection First Contact](1897-exact-projection-first-contact.md)
+
+### GVDB Raycasting with Binary Search Surface Tracing
+*   **What it is:** Uses GVDB acceleration structures with binary search.
+*   **Difference:** Optimized for sparse volumes and large datasets.
+*   **When to choose:** For very large, sparse volumetric data.
+*   **Link:** [GVDB Raycasting with Binary Search Surface Tracing](2189-gvdb-raycasting-with-binary-search-surface-tracing.md)
+
+### Direct Surface Rendering with Intersection Buffer
+*   **What it is:** Uses an intersection buffer to store hit points.
+*   **Difference:** Decouples surface detection from shading, allowing for post-processing.
+*   **When to choose:** When complex shading or multi-pass effects are needed.
+*   **Link:** [Direct Surface Rendering with Intersection Buffer](2211-direct-surface-rendering-with-intersection-buffer.md)
+
+### iso_categorical
+*   **What it is:** Renders categorical volume data.
+*   **Difference:** Handles discrete labels rather than continuous scalar fields.
+*   **When to choose:** For segmentations or labeled volumes.
+*   **Link:** [iso_categorical](4049-iso-categorical.md)
+
+### Direct Multifield Volume Ray Casting of Fiber Surfaces
+*   **What it is:** Renders surfaces from multiple scalar fields.
+*   **Difference:** Combines information from multiple datasets.
+*   **When to choose:** For multifield visualization.
+*   **Link:** [Direct Multifield Volume Ray Casting of Fiber Surfaces](4078-direct-multifield-volume-ray-casting-of-fiber-surfaces.md)
+
+### GPU Isosurface Raycasting of FCC Datasets
+*   **What it is:** Optimized for Face-Centered Cubic grids.
+*   **Difference:** Uses FCC grid topology for better sampling efficiency.
+*   **When to choose:** For data stored on FCC grids.
+*   **Link:** [GPU Isosurface Raycasting of FCC Datasets](4085-gpu-isosurface-raycasting-of-fcc-datasets.md)
+
+### Isosurface Display via Opacity Mapping
+*   **What it is:** Uses opacity mapping to control visibility.
+*   **Difference:** Allows for semi-transparent isosurfaces.
+*   **When to choose:** When blending with background or other surfaces is needed.
+*   **Link:** [Isosurface Display via Opacity Mapping](6053-isosurface-display-via-opacity-mapping.md)
+
+### Real-Time Raycasting for Implicit Isosurfaces
+*   **What it is:** Focuses on real-time performance for implicit surfaces.
+*   **Difference:** Optimized for interactive frame rates.
+*   **When to choose:** For interactive applications.
+*   **Link:** [Real-Time Raycasting for Implicit Isosurfaces](6203-real-time-raycasting-for-implicit-isosurfaces.md)
+
+### Adaptive Auxiliary Texture Resolution for Isosurface Raycasting
+*   **What it is:** Uses variable resolution textures.
+*   **Difference:** Reduces memory and bandwidth usage.
+*   **When to choose:** For large volumes with varying detail requirements.
+*   **Link:** [Adaptive Auxiliary Texture Resolution for Isosurface Raycasting](6735-adaptive-auxiliary-texture-resolution-for-isosurface-raycast.md)
+
+### Per-Frame Multi-Kernel Isosurface Ray-Tracing Pipeline
+*   **What it is:** Uses multiple GPU kernels per frame.
+*   **Difference:** Parallelizes different stages of the rendering pipeline.
+*   **When to choose:** For high-performance computing environments.
+*   **Link:** [Per-Frame Multi-Kernel Isosurface Ray-Tracing Pipeline](6945-per-frame-multi-kernel-isosurface-ray-tracing-pipeline.md)
+
+### Shading and Material Representation
+*   **What it is:** Focuses on shading models for isosurfaces.
+*   **Difference:** Provides advanced material effects.
+*   **When to choose:** When realistic rendering is required.
+*   **Link:** [Shading and Material Representation](7915-shading-and-material-representation.md)
+
+### Interaction and Selection Techniques
+*   **What it is:** Techniques for interacting with isosurfaces.
+*   **Difference:** Adds user interaction capabilities.
+*   **When to choose:** For interactive visualization tools.
+*   **Link:** [Interaction and Selection Techniques](8127-interaction-and-selection-techniques.md)
+
+### Rasterization and Hardware Primitives
+*   **What it is:** Uses rasterization for isosurface rendering.
+*   **Difference:** Alternative to raycasting, using hardware primitives.
+*   **When to choose:** When raycasting is too slow or unsupported.
+*   **Link:** [Rasterization and Hardware Primitives](8726-rasterization-and-hardware-primitives.md)
+
+### Cell Rasterisation with Tesselation Shader
+*   **What it is:** Uses tessellation shaders for cell-based rendering.
+*   **Difference:** Generates geometry on the GPU.
+*   **When to choose:** For hybrid rasterization/raycasting approaches.
+*   **Link:** [Cell Rasterisation with Tesselation Shader](9236-cell-rasterisation-with-tesselation-shader.md)
+
+### Ray Traversal and Coherency
+*   **What it is:** Optimizes ray traversal using coherency.
+*   **Difference:** Reduces redundant computations.
+*   **When to choose:** For scenes with high ray coherency.
+*   **Link:** [Ray Traversal and Coherency](9272-ray-traversal-and-coherency.md)
+
+### GPU-based Fast Ray Casting for Metaballs
+*   **What it is:** Optimized for metaball rendering.
+*   **Difference:** Specialized for metaball fields.
+*   **When to choose:** For metaball visualization.
+*   **Link:** [GPU-based Fast Ray Casting for Metaballs](9502-gpu-based-fast-ray-casting-for-metaballs.md)
+
+### Hybrid and Multi-mode Rendering
+*   **What it is:** Combines multiple rendering modes.
+*   **Difference:** Switches between volume and surface rendering.
+*   **When to choose:** For versatile visualization tools.
+*   **Link:** [Hybrid and multi-mode rendering](11199-hybrid-and-multi-mode-rendering.md)
+
+### Surface Painting Mode with Normal Map Guidance
+*   **What it is:** Uses normal maps for surface painting.
+*   **Difference:** Adds artistic control.
+*   **When to choose:** For artistic or educational visualizations.
+*   **Link:** [Surface Painting Mode with Normal Map Guidance](11220-surface-painting-mode-with-normal-map-guidance.md)
+
+### Interactive Isocontouring of High-Order Surfaces (iHOS)
+*   **What it is:** Handles high-order polynomial surfaces.
+*   **Difference:** Supports complex implicit surfaces.
+*   **When to choose:** For high-order mathematical models.
+*   **Link:** [Interactive Isocontouring of High-Order Surfaces (iHOS)](11927-interactive-isocontouring-of-high-order-surfaces-ihos.md)
+
+### Front-to-Back Surface Extraction
+*   **What it is:** Extracts surfaces from front to back.
+*   **Difference:** Optimizes for early termination.
+*   **When to choose:** When the front surface is the primary interest.
+*   **Link:** [Front-to-Back Surface Extraction](12182-front-to-back-surface-extraction.md)
 
 ## Sources
-[S1] Interactive volume ray tracing, https://doi.org/10.22021/d291-25931, fetched 2026-10-26 (unofficial)
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
 [S2] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
 [S3] Konstiu/VolumeVisualization, https://github.com/Konstiu/VolumeVisualization, fetched 2026-10-26 (unofficial)
 [S4] shalu-007-git/isosurface-ray-casting, https://github.com/shalu-007-git/isosurface-ray-casting, fetched 2026-10-26 (unofficial)

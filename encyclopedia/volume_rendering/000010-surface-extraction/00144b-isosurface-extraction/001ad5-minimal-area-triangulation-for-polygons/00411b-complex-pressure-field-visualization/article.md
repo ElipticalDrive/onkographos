@@ -1,0 +1,160 @@
+# Complex Pressure Field Visualization
+
+Also called: Acoustic valley surface visualization, Sound pressure amplitude visualization
+
+## Overview
+Complex Pressure Field Visualization is a technique for visualizing simulated acoustics by rendering "valley surfaces" to represent node regions (areas of sound cancellation) in complex-valued sound pressure fields obtained from Finite Element Method (FEM) simulations [S1, unofficial]. It solves the problem of analyzing wave behavior and sound properties in rooms by highlighting minima that persist over time or allowing selective slicing-plane based visualizations [S1, unofficial]. It sets itself apart from general isosurface methods by specifically targeting the complex-valued nature of acoustic eigenmodes, using mesh voxelization and boolean operations to accumulate and intersect node structures across time steps [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A complex-valued sound pressure field encoding amplitude and phase shift values at points of an irregularly sampled data set for a given low-frequency wave, obtained from FEM simulation [S1, unofficial]. The data is typically virtually noise-free and requires no pre-smoothing [S1, unofficial].
+*   **Output:** Visualized valley surfaces representing node regions, potentially accumulated over time or intersected to show persistent minima [S1, unofficial].
+
+**Data Structures:**
+*   **Complex Pressure Field:** A set of points $x$ with associated complex values $p(x) = \text{re}(x) + i \cdot \text{im}(x)$ [S1, unofficial].
+*   **Valley Surface Mesh:** A triangulated mesh representing the isosurface where amplitude is minimal [S1, unofficial].
+*   **Voxel Set:** A binary voxel grid representation of the valley surface mesh, used for boolean operations [S1, unofficial].
+
+**Formulas:**
+1.  **Amplitude Calculation:** The amplitude $A(x)$ at a point $x$ corresponds to the maximal amplitude of the oscillating system at that position [S1, unofficial]:
+    $$ A(x) = \sqrt{\text{im}(x)^2 + \text{re}(x)^2} $$
+2.  **Time-Dependent Pressure Field:** The pressure $p(x, \phi)$ at phase $\phi \in [0, 2\pi]$ is given by [S1, unofficial]:
+    $$ p(x, \phi) = \text{re}(x) \cdot \cos(\phi) + \text{im}(x) \cdot \sin(\phi) $$
+3.  **Phase Shift:** The phase shift $\Delta \phi$ is calculated as [S1, unofficial]:
+    $$ \Delta \phi = \cos^{-1} \left( \frac{\text{im}(x)}{A(x)} \right) = \sin^{-1} \left( \frac{\text{re}(x)}{A(x)} \right) $$
+4.  **Sine Wave Form:** The pressure equation can be rewritten as [S1, unofficial]:
+    $$ p(x, \phi) = A(x) \cdot \sin(\phi + \Delta \phi) $$
+    The maximum absolute pressure is $|p(x, \cdot)| = A(x)$ [S1, unofficial].
+
+**Steps:**
+1.  **Extract Valley Surfaces:** Identify the isosurfaces corresponding to minimal amplitude values (nodes) in the complex pressure field. For stationary waves, these node structures do not change over time; for instationary waves, they move [S1, unofficial].
+2.  **Mesh Voxelization:** Perform mesh voxelization on all individual valley surface meshes to convert them into voxel sets [S1, unofficial]. This allows for volume-rendering and facilitates different operations on the surface set for multi-field visualization [S1, unofficial].
+3.  **Color Mapping:** Map scalar quantities (such as amplitude or phase) for color mapping purposes to hue in HSV space [S1, unofficial].
+4.  **Boolean Operations (Optional for Multi-Field/Time-Accumulation):** Apply boolean operations on the voxel sets. Specifically, use intersection operators to define multi-field features by highlighting minima that persist over time or for selective slicing-plane based visualizations [S1, unofficial]. This allows the accumulation of nodes at different time steps to provide spatio-temporal insight [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def complex_pressure_visualization(fem_data, time_steps=None):
+    """
+    Visualize complex pressure field using valley surfaces.
+    
+    Args:
+        fem_data: List of (x, re_p, im_p) tuples representing the complex pressure field.
+        time_steps: Optional list of phase angles phi in [0, 2pi] to animate or accumulate.
+                    If None, uses stationary amplitude view.
+    
+    Returns:
+        Visual representation (e.g., voxel sets or meshes).
+    """
+    # Step 1: Calculate Amplitude and Phase for each point
+    points = []
+    for x, re_p, im_p in fem_data:
+        # Amplitude A(x) = sqrt(im(x)^2 + re(x)^2)
+        A = (im_p**2 + re_p**2)**0.5
+        # Phase shift Delta_phi
+        # Handle division by zero if A is 0
+        if A == 0:
+            delta_phi = 0
+        else:
+            # Delta_phi = acos(im(x)/A(x))
+            # Note: acos domain is [-1, 1], ensure clamping if necessary due to precision
+            ratio = im_p / A
+            ratio = max(-1.0, min(1.0, ratio))
+            delta_phi = math.acos(ratio)
+        
+        points.append({
+            'x': x,
+            'A': A,
+            're': re_p,
+            'im': im_p,
+            'delta_phi': delta_phi
+        })
+
+    # Step 2: Extract Valley Surfaces (Minimal Amplitude)
+    # In practice, this involves isosurface extraction (e.g., Marching Cubes)
+    # on the scalar field A(x) at a low threshold.
+    # Here we assume a function extract_valley_surface(points, threshold) exists.
+    # The threshold is typically near zero for node regions.
+    valley_meshes = []
+    for t in time_steps if time_steps else [0]:
+        # If animating, we might shift the phase, but valley surfaces are often
+        # defined by the amplitude minima which are stationary for standing waves.
+        # For moving waves, the location of minimal amplitude changes.
+        # The source implies valley surfaces are extracted from the complex field.
+        # We extract the surface where A(x) is minimal.
+        mesh = extract_valley_surface(points, threshold=0.01) # [G] Threshold value is illustrative
+        valley_meshes.append(mesh)
+
+    # Step 3: Mesh Voxelization
+    voxel_sets = []
+    for mesh in valley_meshes:
+        # Convert mesh to voxel grid
+        voxels = mesh_to_voxel_grid(mesh)
+        voxel_sets.append(voxels)
+
+    # Step 4: Boolean Operations for Multi-Field/Time Accumulation
+    if len(voxel_sets) > 1:
+        # Intersection to find persistent minima
+        persistent_voxels = voxel_sets[0]
+        for voxels in voxel_sets[1:]:
+            persistent_voxels = boolean_intersection(persistent_voxels, voxels)
+        return persistent_voxels
+    else:
+        return voxel_sets[0]
+
+def extract_valley_surface(points, threshold):
+    """
+    Extract isosurface where amplitude is below threshold.
+    [G] Placeholder for specific isosurface extraction algorithm (e.g., Marching Cubes).
+    """
+    # Create scalar field from points
+    scalar_field = create_scalar_field(points, key='A')
+    # Extract isosurface at threshold
+    mesh = marching_cubes(scalar_field, threshold)
+    return mesh
+
+def mesh_to_voxel_grid(mesh, resolution=128):
+    """
+    Voxelize a mesh into a binary grid.
+    """
+    # [G] Placeholder for mesh voxelization logic
+    voxels = np.zeros((resolution, resolution, resolution), dtype=bool)
+    # Rasterize mesh triangles into voxels
+    rasterize_mesh(mesh, voxels)
+    return voxels
+
+def boolean_intersection(voxels_a, voxels_b):
+    """
+    Compute intersection of two voxel sets.
+    """
+    return voxels_a & voxels_b
+```
+
+**Parameters:**
+*   **Threshold for Valley Extraction:** Not explicitly given, but typically near zero for node regions [S1, unofficial].
+*   **Voxel Resolution:** Not given in the sources [S1, unofficial].
+*   **Frequency:** Example uses 169 Hz [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Zero Amplitude:** If $A(x) = 0$, the phase shift $\Delta \phi$ is undefined. The pseudocode handles this by setting $\Delta \phi = 0$ [G].
+*   **Precision in acos:** The argument to $\cos^{-1}$ must be clamped to $[-1, 1]$ to avoid numerical errors [G].
+*   **Noise:** The source notes that the data is virtually noise-free and requires no pre-smoothing [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Measured Performance:** The method was applied to a room geometry with approximately 210,000 sample points [S1, unofficial].
+*   **Strengths:** Allows detailed inspection of inner wave structures, reduces visual clutter and data prevalent in direct scalar- or gradient-based visualizations, and provides spatio-temporal insight through accumulation [S1, unofficial].
+*   **Limitations:** Requires FEM simulation data, which can be computationally expensive to generate. The method is specific to acoustic fields [S1, unofficial].
+*   **When to Use:** When analyzing wave propagation and node structures in simulated acoustic environments, especially for low-frequency waves [S1, unofficial].
+*   **When Not to Use:** For real-time visualization of high-frequency waves or when FEM data is not available [S1, unofficial].
+
+## Background
+*   **Origin:** The method is described in the context of multi-field visualization for simulated acoustics [S1, unofficial].
+*   **History:** The technique was applied to visualize sound pressure fields in a small completely tiled reference room with two doors and a radiator [S1, unofficial].
+*   **Usage:** Used for scientific analysis and optimization of acoustic room properties [S1, unofficial].
+
+## Sources
+[S1] Multi-Field Visualization, https://kluedo.ub.rptu.de/files/2291/_diss.pdf, fetched 2026-10-27 (unofficial)

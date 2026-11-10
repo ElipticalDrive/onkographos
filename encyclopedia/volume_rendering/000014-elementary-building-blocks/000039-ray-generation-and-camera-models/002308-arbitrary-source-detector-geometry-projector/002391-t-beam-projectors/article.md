@@ -6,30 +6,27 @@ Also called: t-beam
 t-beam projectors integrate the source-to-pixel segment along a ray for volume rendering or projection in arbitrary source-detector geometries [S1, unofficial]. They differ from standard fixed-camera models by allowing explicit definition of every source-detector pair, supporting complex trajectories (circular, spiral, saddle) and parameterized detector surfaces while maintaining exact cell-constant integration [S1, unofficial].
 
 ## How it works
-**Inputs:** Source positions $S$, detector centers $C$, detector axes $e_u, e_v$, volume grid $x$, and optional trajectory parameters $\Theta$.
-**Outputs:** Projection values $p$ (forward) or gradients (backward).
+**Inputs:** Source positions $S$, detector centers $C$, detector axes $e_u, e_v$, volume grid $x$, and optional trajectory parameters $\Theta$ [S1, unofficial].
+**Outputs:** Projection values $p$ (forward) or gradients (backward) [S1, unofficial].
 
 **Data Structures:**
-*   **Ray:** Defined by origin $o$ and direction $d$.
-*   **Grid Face Crossings:** Ordered list $t^*_0 < \dots < t^*_M$ where the ray intersects volume boundaries.
-*   **Surface Offsets:** $(a_u, a_v, a_n)$ mapping pixel indices to world coordinates.
+*   **Ray:** Defined by origin $o$ and direction $d$ [S1, unofficial].
+*   **Grid Face Crossings:** Ordered list $t^*_0 < \dots < t^*_M$ where the ray intersects volume boundaries [S1, unofficial].
+*   **Surface Offsets:** $(a_u, a_v, a_n)$ mapping pixel indices to world coordinates [S1, unofficial].
 
 **Steps:**
-1.  **Geometry Setup:** Define source $S(\beta)$ and detector frame based on trajectory. For circular cone-beam:
+1.  **Geometry Setup:** Define source $S(\beta)$ and detector frame based on trajectory [S1, unofficial]. For circular cone-beam:
     $$S(\beta) = (-\text{sid} \sin \beta, \text{sid} \cos \beta, 0)$$
     $$C(\beta) = ((\text{sdd} - \text{sid}) \sin \beta, -(\text{sdd} - \text{sid}) \cos \beta, 0)$$
     $$e_u(\beta) = (\cos \beta, \sin \beta, 0), \quad e_v = (0, 0, 1)$$
     where $\text{sid}$ is source-to-isocenter distance and $\text{sdd}$ is source-to-detector distance [S1, unofficial].
 2.  **Detector Point Calculation:** For a pixel with offsets $(a_u, a_v, a_n)$, the world point $D$ is:
     $$D = C + a_u e_u + a_v e_v + a_n (e_u \times e_v)$$
-    For flat surfaces, $(a_u, a_v, a_n) = (u, v, 0)$. For cylindrical offsets of radius $r$: $(a_u, a_v, a_n) = (r \sin(u/r), v, r[\cos(u/r) - 1])$ [S1, unofficial].
-3.  **Ray Definition:** The ray direction is $\hat{a} = (D - S)/\|D - S\|_2$. The segment is clipped to the volume box. Rays must not extend through the detector or behind the source [S1, unofficial].
-4.  **Siddon Integration:** Find axis-$q$ grid face crossings at $t = (b - o_q)/d_q$. Order crossings $t^*_0 < \dots < t^*_M$. The projection is:
+    For flat surfaces, $(a_u, a_v, a_n) = (u, v, 0)$ [S1, unofficial]. For cylindrical offsets of radius $r$: $(a_u, a_v, a_n) = (r \sin(u/r), v, r[\cos(u/r) - 1])$ [S1, unofficial].
+3.  **Ray Definition:** The ray direction is $\hat{a} = (D - S)/\|D - S\|_2$ [S1, unofficial]. The segment is clipped to the volume box [S1, unofficial]. Rays must not extend through the detector or behind the source [S1, unofficial].
+4.  **Siddon Integration:** Find axis-$q$ grid face crossings at $t = (b - o_q)/d_q$ [S1, unofficial]. Order crossings $t^*_0 < \dots < t^*_M$ [S1, unofficial]. The projection is:
     $$(A_{\Theta} x)_j = \sum_{m=0}^{M-1} x_{\text{cell}(m)} (t_{m+1} - t_m)$$
     This is exact integration of the cell-constant representation [S1, unofficial].
-5.  **Analytical Reconstruction (Optional):** Apply cosine weights for flat detectors:
-    $$w_{\text{cos}}^{\text{fan}}(u) = \frac{\text{sdd}}{\sqrt{\text{sdd}^2 + u^2}}, \quad w_{\text{cos}}^{\text{cone}}(u, v) = \frac{\text{sdd}}{\sqrt{\text{sdd}^2 + u^2 + v^2}}$$
-    Filter using Ram–Lak impulse response $h[0] = \pi/2, h[k] = -2/(\pi k^2)$ for odd $k$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -42,13 +39,15 @@ def t_beam_forward(S, C, e_u, e_v, a_u, a_v, a_n, volume, grid_bounds):
     
     # 2. Define ray
     D_vec = D - S
-    L = norm(D_vec)
-    if L == 0: raise Error("Source and detector coincide")
-    d_hat = D_vec / L
+    L = sqrt(sum(d**2 for d in D_vec))
+    if L == 0:
+        raise ValueError("Source and detector coincide")
+    d_hat = tuple(d / L for d in D_vec)
     
     # 3. Clip to volume box
     t_min, t_max = clip_ray_to_box(S, d_hat, grid_bounds)
-    if t_min >= t_max: return 0.0
+    if t_min >= t_max:
+        return 0.0
     
     # 4. Siddon Integration
     projection = 0.0
@@ -60,27 +59,90 @@ def t_beam_forward(S, C, e_u, e_v, a_u, a_v, a_n, volume, grid_bounds):
         t_current = t_next
         
     return projection
+
+def cross(a, b):
+    return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
+
+def clip_ray_to_box(origin, direction, bounds):
+    t_min = -float('inf')
+    t_max = float('inf')
+    for i in range(3):
+        if direction[i] == 0:
+            if origin[i] < bounds[i][0] or origin[i] > bounds[i][1]:
+                return (1.0, 0.0)
+        else:
+            t1 = (bounds[i][0] - origin[i]) / direction[i]
+            t2 = (bounds[i][1] - origin[i]) / direction[i]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+    return (t_min, t_max)
+
+def traverse_grid(origin, direction, bounds, t_start, t_end):
+    # Amanatides & Woo 3D grid traversal [G]
+    step_x = 1 if direction[0] > 0 else -1
+    step_y = 1 if direction[1] > 0 else -1
+    step_z = 1 if direction[2] > 0 else -1
+    cell_x = int(origin[0])
+    cell_y = int(origin[1])
+    cell_z = int(origin[2])
+    t_max_x = ((cell_x + (1 if step_x > 0 else 0)) - origin[0]) / direction[0] if direction[0] != 0 else float('inf')
+    t_max_y = ((cell_y + (1 if step_y > 0 else 0)) - origin[1]) / direction[1] if direction[1] != 0 else float('inf')
+    t_max_z = ((cell_z + (1 if step_z > 0 else 0)) - origin[2]) / direction[2] if direction[2] != 0 else float('inf')
+    dt_x = step_x / direction[0] if direction[0] != 0 else float('inf')
+    dt_y = step_y / direction[1] if direction[1] != 0 else float('inf')
+    dt_z = step_z / direction[2] if direction[2] != 0 else float('inf')
+    
+    while t_start < t_end:
+        yield (cell_x, cell_y, cell_z)
+        if t_max_x < t_max_y:
+            if t_max_x < t_max_z:
+                cell_x += step_x
+                t_max_x += dt_x
+            else:
+                cell_z += step_z
+                t_max_z += dt_z
+        else:
+            if t_max_y < t_max_z:
+                cell_y += step_y
+                t_max_y += dt_y
+            else:
+                cell_z += step_z
+                t_max_z += dt_z
+        t_start = max(t_max_x, t_max_y, t_max_z)
+
+def next_face_crossing(origin, direction, cell, t_current):
+    min_x, max_x = cell[0], cell[0] + 1
+    min_y, max_y = cell[1], cell[1] + 1
+    min_z, max_z = cell[2], cell[2] + 1
+    t_exit = float('inf')
+    if direction[0] != 0:
+        t_exit = min(t_exit, (max_x if direction[0] > 0 else min_x - origin[0]) / direction[0])
+    if direction[1] != 0:
+        t_exit = min(t_exit, (max_y if direction[1] > 0 else min_y - origin[1]) / direction[1])
+    if direction[2] != 0:
+        t_exit = min(t_exit, (max_z if direction[2] > 0 else min_z - origin[2]) / direction[2])
+    return max(t_exit, t_current)
 ```
 
 **Parameters:**
 *   $\text{sid}, \text{sdd}$: Distances in voxel units.
-*   Stability: Source/detector endpoints must be within $10^6$ voxel lengths of volume center for float32 stability [S1, unofficial].
+*   Stability: At least one source or detector-center endpoint must lie within $10^6$ voxel lengths of the volume center, and both must lie within $10^{15}$ for stable float32 setup [S1, unofficial].
 
 **Edge Cases:**
 *   Source/detector coincidences are invalid [S1, unofficial].
 *   Detectors viewed edge-on from the source are rejected in the native flat path [S1, unofficial].
-*   At cell edges/corners, crossings coincide; derivatives are taken from one adjacent side [S1, unofficial].
+*   At a ray through a cell edge or corner, crossings coincide and the kernel returns a derivative from one adjacent side [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear in the number of ray-cell intersections.
+*   **Time Complexity:** Linear in the number of ray-cell intersections [S1, unofficial].
 *   **Memory:** Low; no sparse matrix storage required [S1, unofficial].
 *   **Strengths:** Exact cell-constant integration; supports arbitrary trajectories and differentiable geometry [S1, unofficial].
 *   **Limitations:** Does not enforce Tuy–Smith completeness; geometry second derivatives are not defined [S1, unofficial].
-*   **Use When:** Arbitrary source-detector geometry is required; differentiable projection is needed.
-*   **Avoid When:** Standard parallel/fan-beam assumptions suffice and performance is critical without differentiation.
+*   **Use When:** Arbitrary source-detector geometry is required; differentiable projection is needed [S1, unofficial].
+*   **Avoid When:** Standard parallel/fan-beam assumptions suffice and performance is critical without differentiation [S1, unofficial].
 
 ## Background
-Originated in differentiable CT operator frameworks to support arbitrary trajectories from circular orbits to complex paths [S1, unofficial]. Developed to enable gradient-based optimization in CT reconstruction with flexible geometry.
+Implemented in differentiable CT operator frameworks to support arbitrary trajectories from circular orbits to complex paths [S1, unofficial]. Developed to enable gradient-based optimization in CT reconstruction with flexible geometry [S1, unofficial].
 
 ## Sources
 

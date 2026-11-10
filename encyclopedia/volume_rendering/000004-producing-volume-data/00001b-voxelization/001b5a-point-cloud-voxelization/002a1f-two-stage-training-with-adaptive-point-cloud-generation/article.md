@@ -1,0 +1,120 @@
+# Two-stage training with adaptive point cloud generation
+
+Also called: Adding extra points, Supplemental point cloud generation
+
+## Overview
+This method expands a sparse scene representation by generating a supplemental point cloud based on the bounding volume of existing points, enabling denser sampling in a subsequent training stage [S1]. It differs from single-stage voxelization by explicitly decoupling initial coarse reconstruction from surface refinement via noise-injected gradient descent [S2, unofficial].
+
+## How it works
+**Inputs:**
+- Initial point cloud positions $P_{init} \in \mathbb{R}^{N \times 3}$.
+- Ground truth mesh (for UDF computation in Stage 2) [S2, unofficial].
+- Hyperparameters: stability constant $c=1.1$, maximum supplemental points $N_{max}=200,000$, noise scaling factor `low_range`, UDF threshold `df_filter`, outlier distance `outlier` [S1][S2, unofficial].
+
+**Outputs:**
+- Refined point cloud $P_{final}$ combining initial and generated points.
+
+**Data Structures:**
+- Bounding box defined by $Q_{min}$ and $Q_{max}$, the element-wise minimum and maximum coordinates of $P_{init}$ [S1].
+- KD-tree (specifically `cKDTree`) for efficient nearest-neighbor queries during stage 2 [S2, unofficial].
+
+**Step 1: Calculate Supplemental Point Count**
+Determine the number of points $N_p$ to generate based on the volume of the bounding box of the initial point cloud [S1]:
+$$
+N_p = \text{min}\left(\frac{\text{prod}(Q_{max} - Q_{min})}{c^3}, N_{max}\right)
+$$
+where $\text{prod}(\cdot)$ returns the product of all values in the vector $(Q_{max} - Q_{min})$ [S1].
+
+**Step 2: Generate Supplemental Points**
+Initialize a set of candidate points. The sources describe a process involving noise injection and UDF (Unsigned Distance Field) gradient descent to project these points onto the surface [S2, unofficial].
+
+1.  **Initialization:** Create initial samples. One implementation uses a grid-based initialization within a bound defined by resolution [S2, unofficial]. Let $P_{samples}$ be the tensor of initial points requiring gradients [S2, unofficial].
+2.  **Optimization Loop:**
+    -   Compute the UDF value $d$ and its gradient $\nabla d$ for each sample point [S2, unofficial].
+    -   Generate noise $\epsilon$ with standard deviation scaled by `low_range` [S2, unofficial].
+    -   Update points using gradient descent on the UDF to project them toward the surface, adding noise to escape local minima or fill gaps [S2, unofficial].
+    -   Filter samples: retain only points where $d < \text{df\_filter}$ [S2, unofficial].
+    -   Repeat until $N_p$ valid points are collected or a maximum iteration count is reached [S2, unofficial].
+3.  **Outlier Removal:** Remove points from the generated set that are further than `outlier` distance from the nearest neighbor in the initial point cloud or ground truth [S2, unofficial].
+
+**Step 3: Concatenate and Rebuild**
+Concatenate $P_{init}$ and the generated supplemental points $P_{gen}$ to form $P_{combined}$ [S2, unofficial]. Build a `cKDTree` from $P_{combined}$ to facilitate denser sampling and neighbor queries for the second training stage [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_extra_points(P_init, N_max=200000, c=1.1, low_range=0.01, df_filter=0.05, outlier=0.1):
+    """
+    Generates supplemental points based on the bounding volume of P_init.
+    Assumes access to a UDF computation function and gradient descent optimizer.
+    """
+    # Step 1: Calculate N_p
+    Q_min = P_init.min(axis=0)
+    Q_max = P_init.max(axis=0)
+    bbox_volume = np.prod(Q_max - Q_min)
+    N_p = min(bbox_volume / (c ** 3), N_max)
+    
+    if N_p == 0:
+        return P_init
+
+    # Step 2: Generate points via UDF gradient descent
+    # Note: Exact initialization varies by implementation (grid vs random).
+    # Here we assume a grid initialization within the bounding box for determinism.
+    # [G] Implementation detail: Initialize points on a coarse grid within the bbox.
+    # The number of initial samples should be >= N_p to allow for filtering.
+    samples = initialize_grid_points(bbox_min=Q_min, bbox_max=Q_max, target_count=int(N_p * 2))
+    
+    generated_points = []
+    
+    # [G] Optimization loop details are implementation-specific.
+    # The core logic from [S2, unofficial] involves:
+    # 1. Compute UDF and gradient for samples.
+    # 2. Add noise scaled by low_range.
+    # 3. Project via gradient descent.
+    # 4. Filter by UDF threshold.
+    
+    for _ in range(max_iterations): # [G] max_iterations not specified in sources
+        udf_values, gradients = compute_udf_and_gradient(samples)
+        
+        # Add noise
+        noise = np.random.normal(0, low_range, samples.shape)
+        samples = samples - gradients * learning_rate + noise # [G] learning_rate not specified
+        
+        # Filter by UDF threshold
+        valid_mask = udf_values < df_filter
+        samples = samples[valid_mask]
+        
+        if len(samples) >= N_p:
+            break
+            
+    # Take exactly N_p points if more are available, or all if fewer
+    generated_points = samples[:N_p]
+    
+    # Step 3: Remove outliers
+    # [G] Assuming KDTree is built on P_init for outlier check
+    tree = KDTree(P_init)
+    distances, _ = tree.query(generated_points)
+    valid_gen = generated_points[distances < outlier]
+    
+    # Concatenate
+    P_combined = np.concatenate([P_init, valid_gen], axis=0)
+    
+    # Rebuild KDTree for Stage 2
+    final_tree = KDTree(P_combined)
+    
+    return P_combined, final_tree
+```
+
+## Operating characteristics
+- **Time Complexity:** Dominated by UDF computation and gradient descent iterations for each supplemental point. UDF computation is typically $O(N_{mesh})$ per point or optimized via spatial structures [S2, unofficial].
+- **Memory Complexity:** Increases by $N_p$ points. $N_p$ is capped at 200,000 [S1].
+- **Strengths:** Effectively fills voids and densifies sparse regions without requiring dense initial input [S1].
+- **Limitations:** Requires access to a differentiable UDF or signed distance field representation, which may not be available for all input types (e.g., pure point clouds without mesh reconstruction) [S2, unofficial].
+
+## Background
+The method was introduced in "Deblurring 3D Gaussian Splatting" by B. Lee et al. [S1]. It addresses the issue of sparse point clouds in Gaussian Splatting by supplementing points to improve reconstruction quality, particularly under motion blur conditions [S1]. The implementation details regarding UDF gradient descent are found in the associated code repository [S2, unofficial].
+
+## Sources
+[S1] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26
+[S2] jjjkkyz/DCx, https://github.com/jjjkkyz/DCx, fetched 2026-10-26 (unofficial)
