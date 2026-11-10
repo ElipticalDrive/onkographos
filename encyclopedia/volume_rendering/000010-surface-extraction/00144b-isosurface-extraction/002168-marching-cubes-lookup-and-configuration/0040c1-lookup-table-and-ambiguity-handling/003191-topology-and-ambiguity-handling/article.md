@@ -1,26 +1,22 @@
 # Topology and Ambiguity Handling
 
-Also called: Ambiguity Resolution, Topology Correction
 
 ## Overview
-Topology and Ambiguity Handling resolves the topological inconsistencies inherent in standard lookup-table-based isosurface extraction (such as [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md)) when the isosurface passes through saddle points within a voxel. Standard methods assign a fixed triangulation to ambiguous cases (e.g., cases 46, 47, 98, 99, 210, 213, 214, 215), which can result in non-manifold vertices, cracks, or holes if adjacent voxels resolve the ambiguity inconsistently [S7, S8, unofficial]. This family provides mechanisms to ensure the resulting mesh is a topological manifold, either by decomposing the surface into disjoint patches or by leveraging dual structures with Hermite data to guarantee connectivity.
+Topology and Ambiguity Handling resolves the topological inconsistencies inherent in standard lookup-table-based isosurface extraction when the isosurface passes through saddle points within a voxel. Standard lookup tables assign a fixed triangulation to ambiguous cases (e.g., 46, 47, 98, 99, 210, 213, 214, 215), which can cause cracks or holes if adjacent voxels resolve the ambiguity differently [S1].
 
 ## Shared principles
-The family addresses the "ambiguous case" problem where the sign pattern of the 8 voxel vertices does not uniquely determine the topology of the isosurface intersection. In these configurations, the isosurface passes through the center of the cube, creating a saddle point.
-
-1.  **Ambiguity Identification**: The method identifies cases where the standard `triangleTable` yields non-manifold connections. These are typically the 8 cases where the number of sign changes on opposite faces of the cube is equal, leading to multiple valid topological interpretations [S7, S8, unofficial].
-2.  **Manifold Guarantee**: The core objective is to ensure that every edge in the output mesh is shared by exactly two triangles (or one triangle and a boundary). Standard LUTs may produce vertices with degree $\neq 4$ or edges shared by $>2$ triangles in ambiguous regions [S7, S8, unofficial].
-3.  **Local Consistency**: Resolution strategies must be consistent across voxel boundaries. A decision made in one voxel must not contradict the decision in an adjacent voxel sharing an ambiguous face or edge.
+The family addresses the ambiguous case problem where the 8-bit sign pattern of a voxel's vertices does not uniquely determine the isosurface topology. In these configurations, the isosurface passes through the cube center, creating a saddle point [S1]. All methods in this family enforce local consistency across voxel boundaries to ensure the output mesh is a topological manifold, preventing cracks or non-manifold vertices that arise when adjacent voxels resolve the ambiguity inconsistently [S1].
 
 ## Subtopics
 
 ### [Hermite Dual Marching Cubes](2197-hermite-dual-marching-cubes.md)
-A method that produces a topological manifold mesh by leveraging Hermite data (intersection points and normals) and minimizing a Quadratic Error Function (QEF). Unlike standard Dual Contouring, which may produce non-manifold artifacts in ambiguous configurations, this method guarantees manifold topology by using the dual structure of Nielson’s Dual Marching Cubes. It preserves sharp features better than standard Marching Cubes by fitting the vertex position to the planes defined by the Hermite data.
+A surface extraction method that guarantees a topological manifold mesh by leveraging Hermite data (intersection points and normals) and minimizing a Quadratic Error Function (QEF). Unlike standard Dual Contouring, which may produce non-manifold artifacts in ambiguous configurations, this method uses the dual structure of Nielson’s Dual Marching Cubes to enforce connectivity. Choose this method when sharp feature preservation is required alongside strict manifold guarantees.
 
 ### [Marching Cubes with Disjoint Patch Decomposition](5004-marching-cubes-with-disjoint-patch-decomposition.md)
-A topological ambiguity resolution method that decomposes the surface within a voxel into disjoint connected components (patches) to ensure manifold connectivity. Unlike standard lookup tables that may produce non-manifold joints in saddle-point configurations, this method uses graph-based edge coloring to group cut edges into distinct, non-intersecting surfaces. It explicitly enforces a selection rule tied to the count of ambiguous faces, ensuring manifold connectivity in complex scenarios [6727-ambiguous-face-handling-with-connected-components.md].
+A topology resolution method that decomposes the isosurface intersection within a voxel into disjoint connected components (patches) using a tetrahedral decomposition graph. Unlike standard lookup tables that may produce non-manifold joints in saddle-point configurations, this method uses graph-based edge coloring to group cut edges into distinct patches. Choose this method when consistent manifold generation is needed for complex saddle-point scenarios without relying on Hermite data.
 
 ## Background
-The ambiguity problem in Marching Cubes was first formally identified by Williams [S7] and later detailed by Nielson [S8]. The standard 256-case lookup table, while efficient, fails to distinguish between topologically distinct surfaces in saddle-point configurations. Early solutions involved modifying the lookup table or using additional criteria (such as gradient direction) to resolve ambiguities. More recent approaches, such as Hermite Dual Marching Cubes and Disjoint Patch Decomposition, address the issue by restructuring the mesh generation process to inherently satisfy manifold constraints, moving away from simple edge-triangulation heuristics.
+The ambiguity problem arises because the standard 256-case lookup table uses a fixed triangulation for saddle-point configurations, which fails to distinguish between topologically distinct surfaces [S1]. Not given in the sources. Recent approaches address the issue by restructuring the mesh generation process to inherently satisfy manifold constraints, moving away from simple edge-triangulation heuristics [G].
 
 ## Sources
+[S1] Lookup Table and Ambiguity Handling, 10327-lookup-table-and-ambiguity-handling.md, fetched 2024-01-01.

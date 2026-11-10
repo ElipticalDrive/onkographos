@@ -21,9 +21,9 @@ Splat the Net is a neural primitive-based volume rendering method that replaces 
 Each primitive $i$ stores the following parameters, totaling 99 parameters per primitive (compared to 59 for 3DGS) [S1, unofficial]:
 
 1.  **Geometry (10 parameters):**
-    *   Mean position $\mathbf{\mu} \in \mathbb{R}^3$.
+    *   Mean position $\mathbf{\mu} \in \mathbb{R}^3$ [S1, unofficial].
     *   Scale $\mathbf{s} \in \mathbb{R}^3$.
-    *   Rotation represented as a unit quaternion $\mathbf{q} \in \mathbb{R}^4$.
+    *   Rotation represented as a unit quaternion $\mathbf{q} \in \mathbb{R}^4$ [S1, unofficial].
 2.  **Neural Density MLP (41 parameters):**
     *   An 8-neuron MLP with specific weights and biases [S1, unofficial].
 3.  **Color Representation (48 parameters):**
@@ -32,7 +32,7 @@ Each primitive $i$ stores the following parameters, totaling 99 parameters per p
 ### Formulas
 
 **1. Neural Density Field**
-The density $\sigma$ at a 3D position $\mathbf{x}$ is computed by a neural primitive. For static scenes, the density is derived from an MLP. For dynamic scenes, an Eulerian approach incorporates time $\xi_t$ [S1, unofficial]:
+The density $\sigma$ at a 3D position $\mathbf{x}$ is computed by a neural primitive [S1, unofficial]. For static scenes, the density is derived from an MLP [S1, unofficial]. For dynamic scenes, an Eulerian approach incorporates time $\xi_t$ [S1, unofficial]:
 
 $$
 f_*(\mathbf{x}, \xi_t) = W_2 \cos(\omega_0 \cdot W_1(\mathbf{x}) + \xi_t \cdot W_t + \mathbf{b}_1) + \mathbf{b}_2
@@ -87,24 +87,24 @@ $$
 ### Numbered Steps
 
 1.  **Initialization:**
-    *   Uniformly sample $N$ primitives within the scene's bounding box. For dynamic scenes, $N=100,000$ [S1, unofficial].
-    *   Initialize MLP weights, geometric parameters ($\mathbf{\mu}, \mathbf{s}, \mathbf{q}$), and SH coefficients.
+    *   Uniformly sample $N$ primitives within the scene's bounding box [S1, unofficial]. For dynamic scenes, $N=100,000$ [S1, unofficial].
+    *   Initialize MLP weights, geometric parameters ($\mathbf{\mu}, \mathbf{s}, \mathbf{q}$), and SH coefficients [S1, unofficial].
 
 2.  **Rendering:**
     *   For each pixel, cast a ray.
-    *   Sort primitives by depth along the ray.
-    *   For each primitive, compute the density $\sigma$ using the neural density field formula.
-    *   Compute the color $\mathbf{c}$ using the SH coefficients (adjusted for time $\xi_t$ if dynamic) or the relighting formula.
-    *   Perform volume rendering integration (alpha compositing) to obtain the final pixel color.
+    *   Sort primitives by depth along the ray [G].
+    *   For each primitive, compute the density $\sigma$ using the neural density field formula [S1, unofficial].
+    *   Compute the color $\mathbf{c}$ using the SH coefficients (adjusted for time $\xi_t$ if dynamic) or the relighting formula [S1, unofficial].
+    *   Perform volume rendering integration (alpha compositing) to obtain the final pixel color [G].
 
 3.  **Training:**
     *   Render images from training views.
-    *   Compute loss against ground truth images.
-    *   Backpropagate to update all parameters (MLP weights, geometry, SH coefficients).
+    *   Compute loss against ground truth images [G].
+    *   Backpropagate to update all parameters (MLP weights, geometry, SH coefficients) [G].
 
 4.  **Population Control (Densification and Pruning):**
     *   **Check Interval:** Determine if the current iteration matches the densification interval for the specific dataset (e.g., every 500 iterations for Mip-NeRF360) [S1, unofficial].
-    *   **Gradient Analysis:** Compute the gradient of the loss with respect to the MLP weights for each primitive.
+    *   **Gradient Analysis:** Compute the gradient of the loss with respect to the MLP weights for each primitive [S1, unofficial].
     *   **Densification:** If a primitive's gradient magnitude exceeds the densification threshold (e.g., $10^{-4}$) and its scale is below the growing threshold ($10^{-2}$), split the primitive or add new primitives in its vicinity [S1, unofficial].
     *   **Pruning:** If a primitive's scale exceeds the pruning threshold ($0.5$), remove it [S1, unofficial].
     *   **Dynamic Scene Specifics:** Densification starts at iteration 1,000 and continues until iteration 30,000 for dynamic scenes [S1, unofficial].
@@ -120,13 +120,13 @@ def evaluate_density(x, t, params):
     """Computes density using the neural density field.
     x: (3,) spatial coordinate
     t: scalar temporal variable xi_t, None for static
-    params: dict with W1, W2, b1, b2, omega0, Wt
+    params: dict with W1 (8x3), W2 (8,), b1 (8,), b2 (8,), omega0, Wt (8,)
     """
     z = params['W1'] @ x
     if t is not None:
         z = z + params['Wt'] * t
     sigma = params['W2'] * np.cos(params['omega0'] * z + params['b1']) + params['b2']
-    return np.maximum(sigma, 0.0)  # Density must be non-negative
+    return np.maximum(sigma, 0.0)  # Density must be non-negative [G]
 
 def evaluate_dynamic_sh(S0, t, poly_coeffs, fourier_b, fourier_c, n=4, l=4):
     """Computes time-dependent SH coefficient.
@@ -142,7 +142,7 @@ def evaluate_dynamic_sh(S0, t, poly_coeffs, fourier_b, fourier_c, n=4, l=4):
 
 def render_ray(origin, direction, primitives, t=None):
     """Renders a single ray using splatting."""
-    # Sort primitives by depth along the ray
+    # Sort primitives by depth along the ray [G]
     distances = np.array([np.dot(p['center'] - origin, direction) for p in primitives])
     sorted_indices = np.argsort(distances)
     
@@ -157,16 +157,16 @@ def render_ray(origin, direction, primitives, t=None):
         closest_point = origin + proj_dist * direction
         dist_to_center = np.linalg.norm(closest_point - p['center'])
         
-        # Evaluate density at closest point
+        # Evaluate density at closest point [S1, unofficial]
         sigma = evaluate_density(closest_point, t, p['mlp_params'])
         
-        # Compute opacity from sigma and primitive scale
+        # Compute opacity from sigma and primitive scale [G]
         alpha = 1.0 - np.exp(-sigma * p['scale'])
         
         if alpha < 1e-5:
             continue
             
-        # Compute color
+        # Compute color [S1, unofficial]
         if t is not None:
             color = evaluate_dynamic_sh(
                 p['sh_params']['S0'], t, p['poly_coeffs'], 
@@ -188,10 +188,10 @@ def train_step(primitives, batch_images, batch_targets, optimizer, iteration, da
     # Forward render
     rendered_batch = [render_ray(img['origin'], img['direction'], primitives, img.get('t')) for img in batch_images]
     
-    # Compute loss (MSE)
+    # Compute loss (MSE) [G]
     loss = np.mean((np.array(rendered_batch) - np.array(batch_targets)) ** 2)
     
-    # Backward pass (simulated gradient update)
+    # Backward pass (simulated gradient update) [G]
     optimizer.step(loss)
     
     # Population control
@@ -202,7 +202,7 @@ def train_step(primitives, batch_images, batch_targets, optimizer, iteration, da
     grow_thresh = dataset_cfg['grow_thresh']
     
     if start_iter <= iteration <= end_iter and iteration % interval == 0:
-        # Compute gradient norms per primitive (simulated)
+        # Compute gradient norms per primitive w.r.t MLP weights [S1, unofficial]
         grad_norms = [np.linalg.norm(p.get('grad', np.zeros(3))) for p in primitives]
         
         new_primitives = []
@@ -224,15 +224,15 @@ def train_step(primitives, batch_images, batch_targets, optimizer, iteration, da
 
 ## Operating characteristics
 
-*   **Computational Cost:** Neural primitives have higher per-primitive computational cost than Gaussian primitives. 3DGS requires ~43 FLOPs per integration, while Splat the Net requires ~769 FLOPs [S1, unofficial].
+*   **Computational Cost:** Neural primitives have higher per-primitive computational cost than Gaussian primitives [S1, unofficial]. 3DGS requires ~43 FLOPs per integration, while Splat the Net requires ~769 FLOPs [S1, unofficial].
 *   **Rendering Speed:** Despite higher per-primitive cost, the method requires ~10x fewer primitives than 3DGS for the same scene, maintaining >100 FPS rendering speed [S1, unofficial].
-*   **Memory Efficiency:** Uses fewer primitives, leading to lower memory usage for equivalent quality. Under limited memory budgets, it outperforms 3DGS [S1, unofficial].
+*   **Memory Efficiency:** Uses fewer primitives, leading to lower memory usage for equivalent quality [S1, unofficial]. Under limited memory budgets, it outperforms 3DGS [S1, unofficial].
 *   **Expressivity:** Neural primitives are more expressive than Gaussian primitives, allowing for better reconstruction of complex structures with fewer primitives [S1, unofficial].
-*   **Training Time:** Training involves densification and pruning, which adds overhead. Dynamic scenes require up to 100,000 iterations [S1, unofficial].
+*   **Training Time:** Training involves densification and pruning, which adds overhead [S1, unofficial]. Dynamic scenes require up to 100,000 iterations [S1, unofficial].
 
 ## Background
 
-Splat the Net was introduced in the paper "Splat the Net: Radiance Fields with Splattable Neural Primitives" [S1, unofficial]. It addresses the limitations of Gaussian primitives in 3DGS by introducing neural density fields, offering a trade-off between computational cost per primitive and the number of primitives needed. The method extends to dynamic scenes and relighting by incorporating temporal variables and neural color fields [S1, unofficial].
+Splat the Net was introduced in the paper "Splat the Net: Radiance Fields with Splattable Neural Primitives" [S1, unofficial]. It addresses the limitations of Gaussian primitives in 3DGS by introducing neural density fields, offering a trade-off between computational cost per primitive and the number of primitives needed [S1, unofficial]. The method extends to dynamic scenes and relighting by incorporating temporal variables and neural color fields [S1, unofficial].
 
 ## Sources
 

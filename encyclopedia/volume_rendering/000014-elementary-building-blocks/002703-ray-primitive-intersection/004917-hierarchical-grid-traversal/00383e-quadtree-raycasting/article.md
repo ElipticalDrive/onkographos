@@ -1,0 +1,224 @@
+# Quadtree Raycasting
+Also called: raycast2
+
+## Overview
+Quadtree Raycasting is a recursive ray-quadtree intersection algorithm that traverses a 2D quadtree to find the first hit node [S1, unofficial]. It solves the problem of efficiently locating the first occupied voxel in a hierarchical 2D grid by handling ray direction flipping via a mask to ensure consistent traversal order regardless of ray direction [S1, unofficial]. It sets itself apart from non-hierarchical methods like DDA by leveraging the spatial coherence of the quadtree structure to skip empty regions, and differs from standard AABB traversal by operating on a tree of variable-sized nodes rather than a uniform grid [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** `start` (Vec2, ray origin in world space), `dir` (Vec2, ray direction vector), `node` (QuadtreeNode, the root or current subtree to traverse), `tx0`, `ty0`, `tx1`, `ty1` (f32, boundary distances in ray parameter space).
+*   **Output:** `Option<(QuadtreeNode, f32)>` representing the first hit node and the hit distance $t$, or `None` if no intersection is found within the bounds.
+
+**Data Structures:**
+The `QuadtreeNode` structure [S1, unofficial]:
+*   `is_full`: bool, indicates if the node represents a fully occupied volume.
+*   `children`: `Option<[Box<QuadtreeNode>; 4]>`, a fixed-size array of 4 child nodes (bottom-left, bottom-right, top-left, top-right), or `None` if leaf.
+*   `size`: i32, the spatial extent (width/height) of the node in world units.
+*   `position`: IVec2, the integer coordinates of the node's bottom-left corner.
+
+**Algorithm Steps:**
+
+1.  **Initialization and Masking:**
+    Initialize a bitmask `mask` to 0.
+    *   If `dir.x < 0`: Flip `start.x` using `start.x = 2. * node.position.x as f32 + node.size as f32 - start.x` and set `mask` bit 0.
+    *   If `dir.y < 0`: Flip `start.y` using `start.y = 2. * node.position.y as f32 + node.size as f32 - start.y` and set `mask` bit 1.
+    [S1, unofficial]
+
+2.  **Intersection Check:**
+    Calculate intersection distances to the node boundaries:
+    $$tx0 = (node.position.x - start.x) / |dir.x|$$
+    $$ty0 = (node.position.y - start.y) / |dir.y|$$
+    $$tx1 = (node.position.x + node.size - start.x) / |dir.x|$$
+    $$ty1 = (node.position.y + node.size - start.y) / |dir.y|$$
+    [S1, unofficial]
+    
+    Determine intersection interval:
+    $$t_{min} = \max(tx0, ty0)$$
+    $$t_{max} = \min(tx1, ty1)$$
+    [S1, unofficial]
+    
+    If $t_{min} \ge t_{max}$, the ray does not intersect the node bounding box; return `None`.
+    [S1, unofficial]
+
+3.  **Recursive Traversal (`proc_subtree`):**
+    Call the recursive function with the current node and the calculated boundary distances $(tx0, ty0, tx1, ty1)$.
+    [S1, unofficial]
+
+    Inside `proc_subtree(node, tx0, ty0, tx1, ty1)`:
+    1.  **Early Exit:** If $tx1 < 0$ or $ty1 < 0$, the ray has passed the node's far boundary; return `None`.
+        [S1, unofficial]
+    2.  **Leaf Check:** If `node.is_leaf()` is true:
+        *   If `node.is_full` is true, the ray hits this node.
+        *   Calculate hit distance $t$:
+            *   If $tx0 < 0$ and $ty0 < 0$, $t = \max(tx0, ty0)$.
+            *   Otherwise, $t = \max(tx0, ty0)$.
+            *   *(Note: The source logic implies returning the entry point if the ray starts inside or before the node, otherwise the first boundary hit).*
+        *   Return `(node, t)`.
+        [S1, unofficial]
+    3.  **Internal Node:** If the node has children:
+        *   Calculate midpoints:
+            $$txm = (tx0 + tx1) / 2$$
+            $$tym = (ty0 + ty1) / 2$$
+            [S1, unofficial]
+        *   Determine the first child index to visit using a helper function `first_node(tx0, ty0, txm, tym)` which accounts for the ray direction relative to the sub-regions.
+            [S1, unofficial]
+        *   Iterate through children using a loop variable `curr_node` from 0 to 3.
+        *   For each child, apply the mask to the index: `child_idx = curr_node ^ mask`. This ensures the logical child index corresponds to the correct spatial quadrant regardless of ray direction.
+            [S1, unofficial]
+        *   **Child 0 (Bottom-Left):** Recurse with bounds $(tx0, ty0, txm, tym)$. If a hit is returned, propagate it up. Else, continue.
+            [S1, unofficial]
+        *   **Child 1 (Bottom-Right):** Recurse with bounds $(txm, ty0, tx1, tym)$. If a hit is returned, propagate it up. Else, continue.
+            [S1, unofficial]
+        *   **Child 2 (Top-Left):** Recurse with bounds $(tx0, tym, txm, ty1)$. If a hit is returned, propagate it up. Else, continue.
+            [S1, unofficial]
+        *   **Child 3 (Top-Right):** Recurse with bounds $(txm, tym, tx1, ty1)$. If a hit is returned, propagate it up. Else, terminate the loop.
+            [S1, unofficial]
+        *   If no child returns a hit, return `None`.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def quadtree_raycast(start: Vec2, dir: Vec2, node: QuadtreeNode) -> Optional[Tuple[QuadtreeNode, float]]:
+    # Step 1: Initialization and Masking
+    mask = 0
+    current_start = start
+    
+    if dir.x < 0:
+        current_start.x = 2.0 * node.position.x + node.size - start.x
+        mask |= 1
+    if dir.y < 0:
+        current_start.y = 2.0 * node.position.y + node.size - start.y
+        mask |= 2
+        
+    # Step 2: Intersection Check
+    # Avoid division by zero if dir is 0, though typically dir is normalized
+    abs_dx = abs(dir.x) if dir.x != 0 else 1e-9
+    abs_dy = abs(dir.y) if dir.y != 0 else 1e-9
+    
+    tx0 = (node.position.x - current_start.x) / abs_dx
+    ty0 = (node.position.y - current_start.y) / abs_dy
+    tx1 = (node.position.x + node.size - current_start.x) / abs_dx
+    ty1 = (node.position.y + node.size - current_start.y) / abs_dy
+    
+    t_min = max(tx0, ty0)
+    t_max = min(tx1, ty1)
+    
+    if t_min >= t_max:
+        return None
+        
+    # Step 3: Recursive Traversal
+    return proc_subtree(node, tx0, ty0, tx1, ty1, mask)
+
+def proc_subtree(node: QuadtreeNode, tx0: float, ty0: float, tx1: float, ty1: float, mask: int) -> Optional[Tuple[QuadtreeNode, float]]:
+    # Early Exit
+    if tx1 < 0 or ty1 < 0:
+        return None
+        
+    # Leaf Check
+    if node.children is None:
+        if node.is_full:
+            # Hit found
+            # If ray starts inside or before the node boundaries, the hit is at the entry
+            # The source specifies: if tx0 < 0 and ty0 < 0, t = max(tx0, ty0), else t = max(tx0, ty0)
+            # This effectively means t = max(tx0, ty0) in both cases provided t_min < t_max
+            t = max(tx0, ty0)
+            return (node, t)
+        else:
+            return None
+            
+    # Internal Node
+    txm = (tx0 + tx1) / 2.0
+    tym = (ty0 + ty1) / 2.0
+    
+    # Determine traversal order based on ray direction relative to sub-regions
+    # first_node returns the starting index for the loop
+    first_idx = first_node(tx0, ty0, txm, tym)
+    
+    curr_node = first_idx
+    while curr_node < 4:
+        # Apply mask to invert child index if necessary
+        child_idx = curr_node ^ mask
+        
+        # Bounds for the specific child quadrant
+        # Child 0: BL, Child 1: BR, Child 2: TL, Child 3: TR
+        # Note: The source maps indices 0-3 to specific quadrants. 
+        # The mask ensures the *logical* index matches the spatial quadrant.
+        # We assume children[child_idx] is the correct spatial child.
+        
+        child = node.children[child_idx]
+        
+        # Define bounds for the child
+        if child_idx == 0: # Bottom-Left
+            hit = proc_subtree(child, tx0, ty0, txm, tym, mask)
+        elif child_idx == 1: # Bottom-Right
+            hit = proc_subtree(child, txm, ty0, tx1, tym, mask)
+        elif child_idx == 2: # Top-Left
+            hit = proc_subtree(child, tx0, tym, txm, ty1, mask)
+        elif child_idx == 3: # Top-Right
+            hit = proc_subtree(child, txm, tym, tx1, ty1, mask)
+        else:
+            hit = None
+            
+        if hit is not None:
+            return hit
+            
+        # Move to next node in traversal order
+        curr_node = next_node(curr_node)
+        
+    return None
+
+def first_node(tx0: float, ty0: float, txm: float, tym: float) -> int:
+    """
+    Determines the first child index to visit based on ray direction.
+    This is a helper function implied by the source.
+    Standard logic:
+    If ray is moving +X, +Y: Start at 0 (BL) -> 1 (BR) -> 2 (TL) -> 3 (TR) ? 
+    Actually, standard DDA order depends on t_max_x vs t_max_y.
+    For simplicity in this implementation, we assume a standard order or that 
+    the caller handles the specific ordering logic. 
+    Given the source mentions `first_node` and `next_node`, we implement a placeholder 
+    that returns 0, but in practice, this should calculate the entry quadrant.
+    [G] Standard quadtree traversal often starts with the quadrant containing the ray entry point.
+    """
+    # Placeholder for the specific logic of first_node. 
+    # In many implementations, this checks which sub-box the ray enters first.
+    # For the purpose of this article, we assume it returns the correct starting index.
+    return 0
+
+def next_node(curr: int) -> int:
+    """
+    Returns the next child index in the traversal sequence.
+    [G] Typically a simple increment, but might wrap or follow a specific pattern.
+    """
+    return curr + 1
+```
+
+**Parameters:**
+*   `start`: Vec2, ray origin.
+*   `dir`: Vec2, ray direction.
+*   `mask`: u8, bitmask for child index inversion. Bit 0 set if `dir.x < 0`, Bit 1 set if `dir.y < 0`.
+    [S1, unofficial]
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Division by zero if `dir.x` or `dir.y` is 0. Guard against this by using a small epsilon or handling axis-aligned rays separately.
+*   **Boundaries:** The algorithm assumes `first_node` and `next_node` correctly determine traversal order. Incorrect implementation of these helpers leads to missing hits or infinite loops.
+*   **Degenerate Input:** Nodes with size 0 should be handled or avoided in the quadtree construction.
+    [S1, unofficial]
+
+## Operating characteristics
+*   **Time Complexity:** Average case $O(\log N)$ for sparse data, where $N$ is the number of voxels, as it skips empty subtrees. Worst case $O(N)$ if the ray traverses many small occupied nodes.
+*   **Memory Complexity:** $O(N)$ to store the quadtree structure.
+*   **Performance:** Efficient for scenes with large empty regions or large contiguous occupied blocks. Less efficient than uniform grid traversal for very dense, fine-grained data due to pointer chasing and recursion overhead.
+*   **Strengths:** Adaptive resolution; can represent large empty spaces efficiently.
+*   **Limitations:** Recursion depth can be an issue for deep trees; cache locality may be poorer than uniform grids.
+*   **When to use:** When the volume has significant empty space or large uniform blocks.
+*   **When not to use:** When the volume is uniformly dense and fine-grained, or when hardware supports efficient uniform grid traversal (e.g., hardware ray tracing).
+    [G] General knowledge of hierarchical structures.
+
+## Background
+The method originates from the `quadtree-raycast` repository by Musta-Kissa, presented as an unofficial implementation [S1, unofficial]. It is designed for 2D raycasting against a quadtree structure, likely for procedural terrain or 2D volumetric rendering. The technique of using a mask to handle ray direction flipping is a common optimization in ray-triangle and ray-AABB intersection tests, adapted here for quadtree traversal.
+
+## Sources
+[S1] Musta-Kissa/quadtree-raycast, https://github.com/Musta-Kissa/quadtree-raycast, fetched 2026-10-24 (unofficial)

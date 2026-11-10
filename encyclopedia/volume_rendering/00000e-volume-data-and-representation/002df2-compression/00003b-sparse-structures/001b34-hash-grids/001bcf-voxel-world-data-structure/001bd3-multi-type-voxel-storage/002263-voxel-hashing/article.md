@@ -1,171 +1,180 @@
 # Voxel Hashing
 
-Also called: Hash-based voxel representation, Sparse TSDF Representation, Spatial hashing
+Also called: Hash-based voxel representation, Sparse TSDF Representation
 
 ## Overview
-Voxel Hashing is a sparse volumetric data structure that enables real-time 3D scene reconstruction by allocating memory only where measured surfaces exist, rather than filling an entire fixed grid [S2, unofficial]. It pairs small blocks of voxels with a hash table, giving systems constant time access to surface data while keeping memory usage proportional to the actual geometry observed [S2, unofficial]. It sets itself apart from its parent [Multi-type Voxel Storage](1104-multi-type-voxel-storage.md) by using a flat spatial hash table for O(1) block access instead of tree-based or typed array indexing, and from its sibling [Typed Voxels](1399-typed-voxels.md) by prioritizing GPU parallelism and constant-time lookup over type-specific optimization [S2, unofficial].
+Voxel Hashing is a sparse volumetric data structure that enables real-time 3D scene reconstruction by allocating memory only where measured surfaces exist, rather than filling an entire fixed grid [S2, unofficial]. It pairs small blocks of voxels with a hash table, giving systems constant time access to surface data while keeping memory usage proportional to the actual geometry observed [S2, unofficial]. It sets itself apart from its nearest alternative, [KinectFusion](52-kinectfusion.md), which uses a rigid, pre-allocated 3D grid confined to a small volume, by allowing room-scale and larger scenes with dynamic allocation [S2, unofficial]. Compared to [Octree Methods](1399-octree-methods.md), it offers $O(1)$ hash lookup and better GPU parallelism by avoiding tree traversal overhead and pointer chasing [S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A stream of depth frames from a sensor (structured light, time-of-flight, or stereo vision), where each frame records per-pixel distance to the nearest physical surface [S2, unofficial]. Camera pose estimates are also required for fusion [S2, unofficial].
-*   **Output:** A sparse set of allocated voxel blocks containing truncated signed distance function (TSDF) values and confidence weights, and optionally a triangle mesh extracted via Marching Cubes [S2, unofficial].
+**Inputs:** A stream of depth frames from a sensor (structured light, time of flight, or stereo vision) and the camera pose for each frame [S2, unofficial].
+**Outputs:** A sparse Truncated Signed Distance Field (TSDF) volume stored in a hash table, and optionally a triangle mesh extracted via Marching Cubes [S2, unofficial].
 
 **Data Structures:**
-1.  **Voxel Block:** A fixed-size 3D grid of voxels.
-    *   **Dimensions:** $8 \times 8 \times 8$ voxels [S1][S2, unofficial].
-    *   **Fields per Voxel:**
-        *   `tsdf`: Truncated signed distance value. Positive in front of the surface, negative behind, zero at the boundary [S2, unofficial].
-        *   `weight`: Confidence weight for the TSDF value [S2, unofficial].
-2.  **Hash Table:** A flat lookup table storing pointers or indices to Voxel Blocks.
-    *   **Capacity:** The original implementation allocated approximately 500,000 entries [S2, unofficial].
-    *   **Load Factor:** Kept under 50% to minimize probe chain length [S2, unofficial].
-    *   **Collision Resolution:** Open addressing with linear probing to avoid pointer dereferencing on GPUs [S2, unofficial].
+1.  **Voxel Block:** A fixed-size 3D grid of voxels. The standard block size is $8 \times 8 \times 8$ voxels [S1][S2, unofficial].
+2.  **Voxel:** Contains a truncated signed distance value ($d$) and a confidence weight ($w$) [S2, unofficial].
+3.  **Hash Table:** A flat lookup table storing pointers or indices to allocated Voxel Blocks. It uses open addressing with linear probing to handle collisions [S2, unofficial]. The table capacity is typically sized to keep the load factor under 50% [S2, unofficial].
 
 **Parameters:**
+*   **Voxel Block Size:** $8 \times 8 \times 8$ [S1][S2, unofficial].
+*   **TSDF Truncation Band:** Set to one block width (8 voxels) in original experiments [S1].
 *   **Voxel Resolution:** 5 mm for human sequences, 1 cm for larger scenes [S1].
-*   **TSDF Truncation Band:** Set to one block width (8 voxels) in experiments [S1].
-*   **Block Size:** Fixed to $8 \times 8 \times 8$ [S1][S2, unofficial].
+*   **Hash Table Capacity:** ~500,000 entries for room-scale scenes on 2013-era hardware [S2, unofficial].
 
 **Algorithm Steps:**
 
 1.  **Capture Depth Data:** Acquire a depth frame $D_t$ and camera pose $P_t$ [S2, unofficial].
-2.  **Determine Active Blocks:** Identify voxel blocks within the camera frustum and close to measured surfaces. For each block, compute its 3D integer coordinate $(x, y, z)$ [S2, unofficial].
-3.  **Hash Block Coordinates:** Compute hash index $h$ for the block coordinate.
-    *   *Note: The specific hash function is not detailed in the sources, but it maps 3D coordinates to table indices [S2, unofficial].*
-4.  **Allocate Block:** If block $h$ is not present in the hash table, allocate a new $8 \times 8 \times 8$ voxel block and insert it into the table at index $h$ using linear probing if necessary [S2, unofficial].
-5.  **Fuse TSDF Values:** For each voxel in the active block:
-    *   Project the voxel center into the depth frame to get a measured distance $d_{meas}$ [S2, unofficial].
-    *   Compute the signed distance $s$ from the voxel to the surface.
-    *   Truncate $s$ to the TSDF band (e.g., $\pm 8$ voxels) [S1].
-    *   Update the voxel's TSDF value and weight using a running weighted average:
-        $$ w_{new} = w_{old} + w_{meas} $$
-        $$ tsdf_{new} = \frac{w_{old} \cdot tsdf_{old} + w_{meas} \cdot tsdf_{meas}}{w_{new}} $$
-        *   *Note: $w_{meas}$ is typically derived from the depth confidence or inverse distance [S2, unofficial].*
-6.  **Garbage Collection (Periodic):** Identify stale blocks (those no longer relevant to the current view or surface) and free them for reallocation [S2, unofficial].
-7.  **Extract Mesh (Optional):** Run a Marching Cubes variant over all allocated blocks to produce a triangle mesh [S2, unofficial].
+2.  **Frustum Culling:** Determine which voxel blocks intersect the camera frustum and are close to measured surfaces [S2, unofficial].
+3.  **Hash Lookup and Allocation:**
+    *   For each candidate block with integer coordinate $B_{xyz}$, compute hash index $h = \text{Hash}(B_{xyz})$ [S2, unofficial].
+    *   Use linear probing to find the first empty slot or the slot containing $B_{xyz}$ [S2, unofficial].
+    *   If the slot is empty, allocate a new Voxel Block and store it at $h$ [S2, unofficial].
+    *   If the slot contains a different block coordinate (collision), continue probing [S2, unofficial].
+4.  **TSDF Fusion:**
+    *   For each voxel $v$ in the allocated block, compute the signed distance $d_{new}$ from the depth measurement [S2, unofficial].
+    *   If $|d_{new}| < \text{TruncationBand}$, update the stored value using a running weighted average:
+        $$ w_{new} = w_{old} + 1 $$
+        $$ d_{new\_stored} = \frac{w_{old} \cdot d_{old} + d_{new}}{w_{new}} $$
+        $$ w_{stored} = w_{new} $$
+    *   If the voxel is outside the truncation band, it is not updated or is set to the truncation boundary [S2, unofficial].
+5.  **Garbage Collection (Optional):** Identify stale blocks that are no longer in the frustum or relevant to the current view and free them for reallocation [S2, unofficial].
+6.  **Mesh Extraction (Optional):** Run a Marching Cubes variant over all allocated blocks to generate a triangle mesh [S2, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 # Constants
 BLOCK_SIZE = 8
-TRUNCATION_BAND = 8  # In voxels
-MAX_LOAD_FACTOR = 0.5
-HASH_TABLE_SIZE = 500000  # Example capacity
+TRUNCATION_BAND = BLOCK_SIZE  # 8 voxels
+HASH_TABLE_SIZE = 500000      # Power of 2 recommended for masking
+LOAD_FACTOR_LIMIT = 0.5
 
 # Data Structures
 class VoxelBlock:
     def __init__(self):
-        # 8x8x8 grid of voxels
-        self.tsdf = [0.0] * (BLOCK_SIZE ** 3)
-        self.weight = [0.0] * (BLOCK_SIZE ** 3)
+        # 8x8x8 voxels, each storing distance and weight
+        self.voxels = [[0.0 for _ in range(BLOCK_SIZE)] 
+                       for _ in range(BLOCK_SIZE * BLOCK_SIZE)]
+        self.weights = [[1.0 for _ in range(BLOCK_SIZE)] 
+                        for _ in range(BLOCK_SIZE * BLOCK_SIZE)]
 
 class HashTable:
-    def __init__(self, size):
-        self.size = size
-        self.entries = [None] * size  # Stores VoxelBlock or None
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.mask = capacity - 1
+        # Stores block coordinates (x,y,z) or None if empty
+        self.keys = [None] * capacity
+        # Stores pointers to VoxelBlock objects or None
+        self.values = [None] * capacity
+        self.used_slots = 0
 
-    def hash(self, x, y, z):
-        # Simple hash function example; actual implementation may vary
-        # Must map 3D integer coordinates to [0, size-1]
-        return (x * 73856093 ^ y * 19349663 ^ z * 83492791) % self.size
+    def insert(self, key, value):
+        # key is a tuple (x, y, z)
+        idx = hash(key) & self.mask
+        while self.keys[idx] is not None:
+            if self.keys[idx] == key:
+                return False # Already exists
+            idx = (idx + 1) & self.mask
+        self.keys[idx] = key
+        self.values[idx] = value
+        self.used_slots += 1
+        return True
 
-    def insert(self, x, y, z, block):
-        idx = self.hash(x, y, z)
-        start_idx = idx
-        while self.entries[idx] is not None:
-            # Check if existing block matches coordinates (for collision resolution)
-            # In practice, linear probing finds the first empty slot
-            idx = (idx + 1) % self.size
-            if idx == start_idx:
-                raise Exception("Hash table full")
-        self.entries[idx] = block
+    def get_or_allocate(self, key, allocator):
+        idx = hash(key) & self.mask
+        while self.keys[idx] is not None:
+            if self.keys[idx] == key:
+                return self.values[idx]
+            idx = (idx + 1) & self.mask
+        # Slot empty, allocate
+        block = allocator()
+        self.keys[idx] = key
+        self.values[idx] = block
+        self.used_slots += 1
+        return block
 
-    def get_or_create(self, x, y, z):
-        idx = self.hash(x, y, z)
-        start_idx = idx
-        while self.entries[idx] is not None:
-            # Note: The sources do not specify how to check if the existing block
-            # corresponds to the requested coordinates. 
-            # In a real implementation, one might store coordinates in the entry
-            # or use a separate coordinate array. 
-            # For this pseudocode, we assume linear probing finds the slot for
-            # the first occurrence of this coordinate, or we simply allocate
-            # if not found. 
-            # [G] Guard: In a robust implementation, one would check if the 
-            # existing block at idx corresponds to (x,y,z). If not, continue probing.
-            idx = (idx + 1) % self.size
-            if idx == start_idx:
-                # Table full, need to expand or garbage collect
-                pass
-        if self.entries[idx] is None:
-            self.entries[idx] = VoxelBlock()
-        return self.entries[idx]
+    def is_full(self):
+        return (self.used_slots / self.capacity) >= LOAD_FACTOR_LIMIT
 
-def fuse_depth_frame(depth_frame, camera_pose, hash_table):
-    # Iterate over pixels in depth frame
-    for u, v in depth_frame.pixels:
-        depth = depth_frame.get_depth(u, v)
-        # Project voxel centers in the frustum to depth
-        # For each voxel in the relevant blocks:
-        for block in hash_table.get_active_blocks_in_frustum(camera_pose):
-            for i in range(BLOCK_SIZE):
-                for j in range(BLOCK_SIZE):
-                    for k in range(BLOCK_SIZE):
-                        voxel_idx = i * BLOCK_SIZE * BLOCK_SIZE + j * BLOCK_SIZE + k
-                        # Get voxel world position
-                        voxel_pos = block.get_voxel_world_position(i, j, k)
-                        # Project voxel_pos to depth frame
-                        projected_depth = project_to_depth(voxel_pos, camera_pose)
-                        if projected_depth is not None:
-                            measured_depth = depth_frame.get_depth_at(projected_depth.u, projected_depth.v)
-                            if measured_depth is not None:
-                                # Compute signed distance
-                                signed_dist = voxel_pos.distance_to_surface(measured_depth)
-                                # Truncate
-                                truncated_dist = max(-TRUNCATION_BAND, min(TRUNCATION_BAND, signed_dist))
-                                # Update weight and TSDF
-                                # [G] Assuming uniform weight for simplicity; sources mention weighted average
-                                w_meas = 1.0 
-                                w_old = block.weight[voxel_idx]
-                                tsdf_old = block.tsdf[voxel_idx]
-                                
-                                w_new = w_old + w_meas
-                                tsdf_new = (w_old * tsdf_old + w_meas * truncated_dist) / w_new
-                                
-                                block.weight[voxel_idx] = w_new
-                                block.tsdf[voxel_idx] = tsdf_new
+def hash_block_coord(x, y, z):
+    # Simple spatial hash function
+    # Using a prime multiplier strategy for 3D coordinates
+    p1 = 73856093
+    p2 = 19349663
+    p3 = 83492791
+    return (x * p1) ^ (y * p2) ^ (z * p3)
+
+def fuse_voxel(block, voxel_idx, new_dist, old_dist, old_weight):
+    # Truncation check
+    if abs(new_dist) > TRUNCATION_BAND:
+        return old_dist, old_weight
+    
+    # Weighted average fusion
+    new_weight = old_weight + 1.0
+    new_dist = (old_weight * old_dist + new_dist) / new_weight
+    return new_dist, new_weight
+
+def process_frame(depth_frame, camera_pose, hash_table, block_allocator):
+    # 1. Frustum Culling and Block Identification
+    # Determine which 8x8x8 blocks intersect the camera frustum
+    candidate_blocks = get_blocks_in_frustum(depth_frame, camera_pose, BLOCK_SIZE)
+    
+    for block_coord in candidate_blocks:
+        # 2. Hash Lookup
+        h_idx = hash_block_coord(*block_coord)
+        # Note: In GPU implementation, this uses atomic CAS or linear probing
+        # Here we simulate the logic
+        block = hash_table.get_or_allocate(block_coord, block_allocator)
+        
+        # 3. TSDF Fusion
+        # Project depth points to voxel grid
+        for point in depth_frame.points:
+            voxel_pos = world_to_voxel(point, camera_pose, BLOCK_SIZE)
+            if is_inside_block(voxel_pos, block_coord, BLOCK_SIZE):
+                local_idx = voxel_to_local_index(voxel_pos, block_coord, BLOCK_SIZE)
+                d_new = point.distance
+                d_old = block.voxels[local_idx]
+                w_old = block.weights[local_idx]
+                
+                d_new_stored, w_new_stored = fuse_voxel(
+                    block, local_idx, d_new, d_old, w_old
+                )
+                block.voxels[local_idx] = d_new_stored
+                block.weights[local_idx] = w_new_stored
 
 def extract_mesh(hash_table):
-    mesh = Mesh()
-    for entry in hash_table.entries:
-        if entry is not None:
+    mesh = []
+    for i in range(hash_table.capacity):
+        if hash_table.values[i] is not None:
+            block = hash_table.values[i]
             # Run Marching Cubes on this block
-            triangles = marching_cubes(entry.tsdf, BLOCK_SIZE)
-            mesh.add_triangles(triangles)
+            triangles = marching_cubes_block(block)
+            mesh.extend(triangles)
     return mesh
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Hash Collisions:** Multiple block coordinates can resolve to the same hash bucket. Handled by open addressing with linear probing [S2, unofficial].
-*   **Stale Blocks:** As the camera moves, previously scanned regions may fall out of relevance. Stale blocks accumulate and crowd out space for new data. Handled by a garbage collection pass [S2, unofficial].
-*   **Tracking Drift:** When the camera pose estimator loses accuracy, incoming depth data fuses into incorrect positions, producing ghosting or doubled surfaces. Mitigated by pairing with robust pose alignment methods such as frame-to-model Iterative Closest Point (ICP) or learned visual feature matching [S2, unofficial].
-*   **Moving Objects:** The standard pipeline assumes a static world. People walking through the scene or objects being relocated cause smeared geometry. Addressed by extensions like DynamicFusion and VolumeDeform, which warp the volume to accommodate non-rigid motion [S2, unofficial].
-*   **Fine Geometric Detail:** A fixed voxel resolution can fail to capture very thin structures like wires, railings, or chair legs. Addressed by schemes that introduce finer block subdivisions near detailed surfaces [S2, unofficial].
+## Subtopics
+
+### [Thread-Safe Splitting and Merging](12395-thread-safe-splitting-and-merging.md)
+This method manages the dynamic refinement and coarsening of voxel blocks within a thread-safe voxel hash table, enabling parallel updates to sparse volumetric representations like TSDFs. It differs from non-parallel approaches by using atomic compare-and-swap operations on linked list entries to handle concurrent block allocation and deallocation without locks, and from purely static hashing by supporting runtime structural changes. It builds on [Voxel Hashing](2702-voxel-hashing.md) by adding the logic for maintaining consistency during topology changes.
+
+### [Hierarchical Voxel Block Hashing Integration](12411-hierarchical-voxel-block-hashing-integration.md)
+Hierarchical Voxel Block Hashing Integration is a method for efficiently integrating depth images into a 3D Truncated Signed Distance Field (TSDF) by using a multi-resolution spatial hash table. It solves the problem of memory inefficiency and cache misses in single-resolution voxel hashing by allocating fine-grained voxel data only where necessary, while maintaining a coarse grid for fast traversal. It sets itself apart from standard Voxel Hashing by introducing a hierarchy of resolution levels, allowing the system to skip empty regions at coarse levels and only allocate memory for active blocks at finer levels, thereby reducing memory footprint and improving parallel allocation throughput on GPUs.
 
 ## Operating characteristics
-*   **Time Complexity:** O(1) average-case lookup for block access due to hash table [S2, unofficial]. Octree methods trade this for O(log n) tree traversal [S2, unofficial].
-*   **Memory Complexity:** Proportional to the actual geometry observed, not the entire volume [S2, unofficial].
-*   **Performance:** A well-optimized system can sustain 30 frames per second or more on current graphics hardware [S2, unofficial]. InfiniTAM implementation exceeds 1000 fps on a high-end NVIDIA GPU [S2, unofficial].
-*   **Strengths:** Constant time access, GPU parallelism, scalability to room-scale and larger scenes, memory efficiency [S2, unofficial].
-*   **Limitations:** Fixed voxel resolution may miss fine details; sensitive to tracking drift; requires garbage collection for stale data [S2, unofficial].
-*   **When to Use:** Real-time 3D reconstruction, AR/VR spatial mapping, robotic SLAM where memory and speed are critical [S2, unofficial].
-*   **When Not to Use:** Scenes with highly dynamic, non-rigid motion without extensions; applications requiring multi-resolution flexibility without the overhead of tree traversal (though Voxel Hashing is O(1), it lacks the hierarchical detail of octrees) [S2, unofficial].
+**Time Complexity:** Block allocation and lookup are $O(1)$ on average due to hashing [S2, unofficial]. Fusion is linear in the number of projected depth points per block [S2, unofficial]. Mesh extraction is linear in the number of allocated blocks [S2, unofficial].
+**Memory Complexity:** Memory usage is proportional to the surface area of the observed geometry, not the volume of the scene [S2, unofficial].
+**Performance:** A well-optimized system can sustain 30 frames per second or more on current graphics hardware [S2, unofficial]. InfiniTAM implementation exceeds 1000 fps on a high-end NVIDIA GPU [S2, unofficial].
+**Strengths:** Constant-time access, low memory footprint for sparse scenes, high GPU parallelism [S2, unofficial].
+**Limitations:** Hash collisions can cause thread stalls if the load factor is high [S2, unofficial]. Stale blocks require garbage collection [S2, unofficial]. Fixed resolution may miss fine details [S2, unofficial]. Moving objects cause smearing unless dynamic extensions are used [S2, unofficial].
+**When to use:** Real-time reconstruction of large, sparse environments where memory is constrained [S2, unofficial].
+**When not to use:** Scenes with extremely dense, uniform geometry where a dense grid is more efficient, or when multi-resolution flexibility is critical without the overhead of hierarchical structures [S2, unofficial].
 
 ## Background
-Voxel Hashing was introduced in the 2013 paper “Real time 3D Reconstruction at Scale Using Voxel Hashing” by Matthias Nießner, Michael Zollhöfer, Shahram Izadi, and Marc Stamminger, published in ACM Transactions on Graphics and presented at SIGGRAPH Asia 2013 [S2, unofficial]. It addressed the limitations of prior systems like KinectFusion, which used a rigid, pre-allocated 3D grid confined to roughly a three-meter cube [S2, unofficial]. Voxel Hashing broke through this ceiling by using sparse block allocation and hash table indexing, allowing room-scale and larger scenes with memory proportional to geometry [S2, unofficial]. It is used in AR headsets for persistent spatial maps, robotic navigation/SLAM (TU Munich, Stanford), and medical volumetric imaging (CT/MRI) [S2, unofficial]. It also serves as a backend for SLAM frameworks like ORB SLAM, ElasticFusion, BundleFusion, and NICE SLAM [S2, unofficial]. NVIDIA’s Instant NGP (2022) adapted the concept using a multiresolution hash table of trainable feature vectors instead of fixed TSDF values [S2, unofficial].
+Voxel Hashing was introduced in the 2013 paper “Real time 3D Reconstruction at Scale Using Voxel Hashing” by Matthias Nießner, Michael Zollhöfer, Shahram Izadi, and Marc Stamminger, published in ACM Transactions on Graphics and presented at SIGGRAPH Asia 2013 [S2, unofficial]. It addressed the limitations of Microsoft’s KinectFusion, which was confined to a ~3-meter cube due to fixed grid allocation [S2, unofficial]. The technique gained widespread attention for enabling affordable depth cameras to produce dense, detailed 3D models of entire rooms on a single consumer GPU [S2, unofficial]. It is used in AR headsets for persistent spatial maps, robotic navigation/SLAM (TU Munich, Stanford), and medical volumetric imaging [S2, unofficial]. It also serves as a backend for SLAM frameworks like ORB SLAM, ElasticFusion, BundleFusion, and NICE SLAM [S2, unofficial]. NVIDIA’s Instant NGP (2022) adapted the concept using a multiresolution hash table of trainable feature vectors [S2, unofficial].
 
 ## Sources
 [S1] Implicit Surface Compression -- with Good Old Discrete Cosine Transform and Motion Compensation, https://doi.org/10.1145/3811298, fetched 2026-10-30

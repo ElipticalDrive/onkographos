@@ -3,64 +3,58 @@
 Also called: Kniss et al. 3D TF Specification, Kniss et al. Vis '01, Kniss, Kindlmann, Hansen method
 
 ## Overview
-This method enables users to specify three-dimensional transfer functions (TFs) by interacting directly with a 2D histogram of scalar values versus gradient magnitudes [S1, unofficial][S2, unofficial]. It solves the limitation of 1D TFs, which cannot accurately capture material boundaries where different materials share similar scalar values but differ in gradient characteristics (e.g., enamel vs. dentin) [S1, unofficial]. By allowing users to "paint" opacity regions in this 2D domain using geometric widgets, it provides a more intuitive specification process than manual parameter tuning [S1, unofficial].
+This method enables users to specify multi-dimensional transfer functions (TFs) by directly manipulating geometric widgets on a 2D histogram of scalar values versus gradient magnitudes [S2, unofficial]. It solves the limitation of 1D TFs, which cannot accurately capture material boundaries where different materials share similar scalar values but differ in gradient characteristics [S1, unofficial]. Unlike standard 1D TF editing, this approach allows users to "paint" opacity into the transfer function domain by pointing at features in the volume, linking spatial queries directly to TF feedback [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar volume dataset $V$.
-*   **Output:** A composite 3D transfer function mapping $(f, g, h) \rightarrow (\alpha, \mathbf{c})$, where $f$ is scalar value, $g$ is gradient magnitude, and $h$ is the second derivative along the gradient direction.
+*   **Input:** A 3D scalar volume dataset $V(x,y,z)$.
+*   **Output:** A final 3D transfer function mapping $(f, |\nabla f|, f'')$ to color $C$ and opacity $\alpha$, and the resulting rendered image.
 
 **Data Structures:**
-The core data structure is a 2D histogram $H$ with axes:
-1.  **X-axis:** Scalar value $f \in [f_{min}, f_{max}]$.
-2.  **Y-axis:** Gradient magnitude $g \in [0, g_{max}]$.
-*   Each bin $(i, j)$ stores a count of voxels with scalar value in bin $i$ and gradient magnitude in bin $j$.
-*   The second derivative $h$ is not an axis but a parameter associated with each interaction widget [S2, unofficial].
+*   **2D Histogram:** A 2D array $H$ where the x-axis represents scalar value $f$ and the y-axis represents gradient magnitude $|\nabla f|$. The bins store counts of voxels.
+*   **Widget:** A geometric object (e.g., ellipse, rectangle) defined in the 2D histogram space. Each widget $W_i$ has:
+    *   Position $(f_c, g_c)$: Center in scalar/gradient space.
+    *   Shape parameters: Width, height, rotation.
+    *   Associated Color $C_i$ and Opacity function $\alpha_i(f, |\nabla f|)$.
 
-**Interaction Widgets:**
-*   Geometric shapes (e.g., rectangles, ellipses, polygons) are placed on the 2D histogram $H$.
-*   Each widget $W_k$ defines a partial opacity transfer function $\alpha_k(f, g)$ and an associated color $\mathbf{c}_k$.
-*   The widget implicitly defines a range for the second derivative $h$ [S2, unofficial].
-
-**Numbered Steps:**
-1.  **Histogram Construction:** Compute the 2D histogram $H$ of the volume $V$. For each voxel $v$, calculate scalar value $f_v$, gradient magnitude $g_v = \|\nabla f_v\|$, and second derivative $h_v$ along the gradient direction. Bin $f_v$ and $g_v$ into $H$ [S2, unofficial].
-2.  **Widget Placement:** User places geometric widgets on the 2D histogram $H$. Each widget $W_k$ covers a region $R_k$ in the $(f, g)$ plane [S2, unofficial].
-3.  **Partial TF Definition:** For each widget $W_k$, define a partial opacity function $\alpha_k(f, g)$. Typically, $\alpha_k(f, g) = 1$ if $(f, g) \in R_k$ and $0$ otherwise, or a smooth transition at boundaries [S2, unofficial].
-4.  **Composite TF Construction:** Combine partial TFs. The final opacity $\alpha(f, g, h)$ is the sum of partial opacities for all widgets $W_k$ that cover $(f, g)$ and satisfy the second derivative condition $h$ [S2, unofficial].
-    $$ \alpha(f, g, h) = \sum_{k} \alpha_k(f, g) \cdot \delta(h \in H_k) $$
-    where $H_k$ is the second derivative range associated with widget $W_k$, and $\delta$ is an indicator function [S2, unofficial].
-5.  **Rendering:** Perform volume rendering using the composite TF. For each ray, sample the volume, evaluate $f, g, h$ at each sample point, look up $\alpha$ and $\mathbf{c}$ from the composite TF, and accumulate color and opacity using standard front-to-back or back-to-front compositing [S1, unofficial].
-
-**Formulas:**
-*   Gradient magnitude: $g = \sqrt{\left(\frac{\partial f}{\partial x}\right)^2 + \left(\frac{\partial f}{\partial y}\right)^2 + \left(\frac{\partial f}{\partial z}\right)^2}$ [S2, unofficial].
-*   Second derivative along gradient: $h = \nabla f \cdot \nabla^2 f \cdot \frac{\nabla f}{\|\nabla f\|}$ (conceptually, the directional second derivative) [S2, unofficial].
+**Steps:**
+1.  **Compute Gradient:** For each voxel, compute the gradient magnitude $|\nabla f| = \sqrt{(\frac{\partial f}{\partial x})^2 + (\frac{\partial f}{\partial y})^2 + (\frac{\partial f}{\partial z})^2}$ [S2, unofficial].
+2.  **Build Histogram:** Populate the 2D histogram $H(f, |\nabla f|)$ by binning each voxel's scalar value and gradient magnitude [S2, unofficial].
+3.  **Display Histogram:** Render the histogram as a 2D plot. Overlay geometric widgets $W_i$ on this plot [S2, unofficial].
+4.  **User Interaction:**
+    *   Users place or move widgets on the histogram to define regions of interest [S2, unofficial].
+    *   Users can "point" at features in the volume rendering; the system identifies the corresponding $(f, |\nabla f|)$ coordinates and highlights or creates a widget at that location in the histogram [S1, unofficial].
+    *   Each widget defines a partial opacity function $\alpha_i$. A common implementation uses a Gaussian or elliptical falloff from the widget center:
+        $$ \alpha_i(f, |\nabla f|) = \alpha_{max} \cdot \exp\left( -\frac{(f-f_c)^2}{2\sigma_f^2} - \frac{(|\nabla f|-g_c)^2}{2\sigma_g^2} \right) $$
+        where $\sigma_f, \sigma_g$ are shape parameters of the widget [G].
+5.  **Combine TFs:** The final opacity $\alpha_{final}$ is the sum of partial opacities from all active widgets, clamped to $[0, 1]$:
+    $$ \alpha_{final}(f, |\nabla f|) = \min\left(1, \sum_{i} \alpha_i(f, |\nabla f|)\right) $$
+    The color $C_{final}$ is typically the weighted average of the colors associated with the active widgets [S2, unofficial].
+6.  **Render:** Perform volume rendering using the final 3D TF (scalar, gradient, and implicitly second derivative via widget shape) [S1, unofficial].
 
 **Parameters:**
 *   Histogram resolution: Not given in the sources.
-*   Widget shape: Not given in the sources.
-*   Second derivative range per widget: Not given in the sources.
+*   Widget shape parameters ($\sigma_f, \sigma_g$): Not given in the sources.
 
-**Edge Cases and Pitfalls:**
-*   **Degenerate Input:** Voxels with zero gradient magnitude ($g=0$) may cause division by zero when computing the second derivative direction. [G] Handle by setting $h=0$ or skipping such voxels in the second derivative calculation.
-*   **Precision:** Histogram binning may lose information if resolution is too low. [G] Use sufficient bin counts to preserve material boundaries.
-*   **Boundary Ambiguity:** Materials with similar $f$ and $g$ but different $h$ may be indistinguishable if widgets do not account for $h$. [S2, unofficial].
+**Edge Cases:**
+*   **Degenerate Input:** If the volume has no gradient (constant regions), all voxels map to $|\nabla f|=0$, potentially clustering in one histogram bin [S2, unofficial].
+*   **Precision:** Gradient computation noise can create false high-gradient bins [G].
 
 ## Subtopics
 
 ### [Direct Manipulation Widgets for Multidimensional TF](6551-direct-manipulation-widgets-for-multidimensional-tf.md)
-Provides a suite of interaction tools to bridge the gap between spatial and TF domains, allowing simultaneous interaction in both. It solves the problem of identifying small regions of interest in multidimensional TFs. It sets itself apart by enabling users to probe spatial data and immediately visualize corresponding TF values.
+A suite of interactive tools that bridge the spatial and TF domains by allowing users to "paint" features into the TF by probing the volume with geometric objects, unlike methods requiring manual adjustment of abstract control points.
 
 ## Operating characteristics
-*   **Time Complexity:** Histogram construction is $O(N)$ where $N$ is the number of voxels. Rendering is $O(R)$ where $R$ is the number of rays. Widget interaction is $O(1)$ per widget per ray.
-*   **Memory Complexity:** $O(N)$ for the volume and histogram. $O(W)$ for widgets, where $W$ is the number of widgets.
-*   **Measured Performance:** Not given in the sources.
-*   **Strengths:** Intuitive specification of complex material boundaries; handles cases where 1D TFs fail.
-*   **Limitations:** Requires understanding of gradient and second derivative properties; 2D histogram may not capture all 3D TF dimensions explicitly.
-*   **When to Use:** When materials have similar scalar values but different gradient/curvature characteristics.
-*   **When Not to Use:** When scalar values alone are sufficient to distinguish materials.
+*   **Time Complexity:** Histogram construction is $O(N)$ where $N$ is the number of voxels. Rendering is $O(N)$ per frame.
+*   **Memory Complexity:** $O(N)$ for the volume and gradient data. Histogram size depends on bin resolution.
+*   **Strengths:** Intuitive interaction; separates materials with similar scalar values but different gradients [S1, unofficial].
+*   **Limitations:** Requires gradient computation; 2D histogram may not fully capture 3D TF complexity (second derivative is implicit) [S2, unofficial].
+*   **When to use:** When 1D TFs fail to distinguish materials based on scalar value alone.
+*   **When not to use:** When computational resources are extremely limited (gradient computation overhead).
 
 ## Background
-Introduced by Kniss, Kindlmann, and Hansen in Vis ’01 [S1, unofficial]. It addresses the limitations of 1D transfer functions in capturing material boundaries accurately [S1, unofficial]. The method is based on 2D histogram analysis of scalar value vs. gradient magnitude, with the second derivative as a widget parameter [S2, unofficial].
+Introduced by Kniss, Kindlmann, and Hansen in Vis ’01 [S1, unofficial]. It addresses the limitations of 1D transfer functions by incorporating gradient magnitude and implicitly second derivative information into the interaction model [S2, unofficial].
 
 ## Sources
 [S1] Transfer Functions for Direct Volume Rendering, https://www.cs.purdue.edu/homes/xmt/classes/slides/CS530/Transfer_Functions.pdf, fetched 2026-10-28 (unofficial)

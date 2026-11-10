@@ -3,191 +3,150 @@
 Also called: Grid Activation, Grid Initialization, activate, vTable1 initialization
 
 ## Overview
-Voxel Grid Initialization constructs the active set of a sparse voxel grid from raw data sources such as dense arrays, level-set functions, or file-based representations [S1, S3, unofficial]. It differs from [Voxel Grid Construction](3085-voxel-grid-construction.md) by focusing on activation logic and memory allocation rather than geometric vertex deduplication, and from [Grid Background Change](3210-grid-background-change.md) by establishing the initial active state rather than modifying existing values [G].
+Voxel Grid Initialization is the process of populating a dense or sparse voxel grid structure with active voxels derived from source data, such as existing active sets, dense arrays, or external files [S1, S3, S4, unofficial]. It solves the problem of transitioning raw geometric or volumetric data into a format suitable for traversal and rendering by establishing the grid's active topology and memory layout [S1, S3, unofficial]. It differs from [Coordinate Space Conversion](1785-coordinate-space-conversion.md) and [World to UVW Normalization](2229-world-to-uvw-normalization.md) by focusing on the logical activation of voxels and memory allocation rather than coordinate transformation, and from [Bitstream Voxel Position Encoding](2371-bitstream-voxel-position-encoding.md) by handling the initial population rather than the compact storage of positions [S1, S3, unofficial].
 
 ## How it works
-**Inputs and Outputs**: Inputs include raw voxel data (dense 3D array, file stream, empty size parameters, or an existing sparse tree), a background scalar value, a bounding box minimum (`bbox_min`), and grid dimensions (`linearGridDim`) [S1, S2, S3, unofficial]. Outputs consist of an initialized grid structure containing an active voxel table (`vTable1`), grid metadata (`gridSize`, `gridVoxelSize`), and GPU buffers or textures for shader access [S2, S3, unofficial].
+The method varies by source type (tree-based, dense array, or file-based), but generally involves allocating memory, identifying active voxels, and binding the resulting structure to the rendering pipeline.
 
-**Data Structures**: The core grid structure contains `vTable1` (`unsigned int*`), `gridSize` (`int`), and `gridVoxelSize` (`float`) [S2, unofficial]. For file-based or empty initialization, a Grid Hierarchy (GH) structure is used, containing a `levels` array and a `buffer_size` field [S3, unofficial].
+### Inputs and Outputs
+- **Inputs**: Source data (tree leaves, dense 3D array, or file), background value, bounding box parameters, and grid dimensions.
+- **Outputs**: An initialized grid structure with active voxels marked, a voxel table (`vTable1`) or hierarchy, and GPU buffers/textures ready for binding [S1, S2, S3, unofficial].
 
-**Numbered Steps**:
-1. **Sparse Tree Activation**: Initialize a temporary data structure `data` with all currently active voxels from `active_voxels(tree)` [S1, unofficial]. Allocate memory for the voxel table (`vTable1`) using `vTableMalloc`, calculating the dimension based on `linearGridDim` [S2, unofficial]. Iterate all leaves in the tree [S1, unofficial]. For each leaf, iterate offsets in `off_indices(leaf.value_mask)` [S1, unofficial]. If `leaf.values[offset + 1] == value`, decode coordinate `c` and add `data[c] = value` [S1, unofficial]. Build the new grid using `build_grid(data, tree.background)` [S1, unofficial].
-2. **GPU Grid Structure Initialization**: Initialize the allocated voxel table to all zeros (empty) using `vTableInitialEmpty` [S2, unofficial]. Initialize the grid structure on the GPU by setting `vTable1` to `NULL`, and setting `gridSize` and `gridVoxelSize` [S2, unofficial].
-3. **Dense Copy Ingestion**: Iterate array indices `ix, iy, iz` [S1, unofficial]. If `array[ix, iy, iz] != background`, compute world coordinate `c` using `bbox_min` and add to `data` [S1, unofficial]. Build the grid using `build_grid(data, background)` [S1, unofficial].
-4. **File/Empty Loading and Binding**: If loading from an empty size, create an empty GH structure [S3, unofficial]. If loading from a file, read the file and parse it into a GH structure using `GH::from_vox` [S3, unofficial]. Construct the levels uniform array by copying `gh.levels[i]` into `UVec4` with zeroed `y`, `z`, `w` components [S3, unofficial]. Create the `grid_hierarchy` buffer with size `gh.get_buffer_size()` and usage flags `STORAGE | COPY_DST` [S3, unofficial].
-5. **VoxelGridFromList**: Retrieve the input grid from index 0 and cast it to `VoxelGrid3D` [S4, unofficial]. Clone the retrieved grid [S4, unofficial]. Retrieve the list of boolean values from index 1 [S4, unofficial]. Calculate `max` as the minimum of the grid's voxel count and the input list's count [S4, unofficial]. Iterate from index 0 to `max` (exclusive) [S4, unofficial]. Set the value at index `i` in the grid to the value at index `i` in the input list [S4, unofficial]. Set the modified grid as the output at index 0 [S4, unofficial].
+### Data Structures
+1.  **Grid Structure**: Contains `vTable1` (unsigned int pointer to voxel table), `gridSize` (integer dimension), and `gridVoxelSize` (float) [S2, unofficial].
+2.  **Voxel Table (`vTable1`)**: A dense array where indices correspond to linearized grid coordinates. The dimension is calculated via `vTableDimension(linearGridDim)` [S2, unofficial].
+3.  **Grid Hierarchy (GH)**: Used in file-based initialization, containing levels and buffer sizes [S3, unofficial].
+4.  **Bind Group Layout**: For GPU initialization, includes:
+    -   Binding 0: Uniform Buffer (`TraceUniforms`) [S3, unofficial].
+    -   Binding 1: TextureView (`Voxel World`) [S3, unofficial].
+    -   Binding 2: Storage Buffer (`Grid Hierarchy`) [S3, unofficial].
+    -   Binding 3: TextureView (`Mip Texture`) [S3, unofficial].
+    -   Binding 4: Sampler (`Texture Sampler`) [S3, unofficial].
 
-**Formulas**:
-- Voxel Table Dimension: The dimension of the voxel table is calculated by `vTableDimension(linearGridDim)` [S2, unofficial]. The specific formula for `vTableDimension` is not provided in the sources.
-- Coordinate Conversion: World coordinate `c` is derived from array indices `ix, iy, iz` and `bbox_min` [S1, unofficial]. The exact formula is not given in the sources.
+### Steps
 
-**Parameters**:
-- `background`: The scalar value representing empty space [S1, unofficial].
-- `linearGridDim`: The linear dimension of the grid used for memory allocation [S2, unofficial].
-- `bbox_min`: The minimum corner of the bounding box used to compute world coordinate `c` from array indices [S1, unofficial].
+#### 1. Tree-Based Initialization (Activation)
+This variant expands the active set by activating voxels that match a specific value [S1, unofficial].
 
-**Edge Cases and Pitfalls**:
-- Empty Grids: Handling empty size inputs requires creating a valid but empty GH structure to prevent null pointer dereferences in shaders [S3, unofficial].
-- Precision: Not given in the sources.
-- Memory Allocation: Not given in the sources.
+1.  Initialize a temporary data structure `data` with all currently active voxels from `active_voxels(tree)` [S1, unofficial].
+2.  Iterate through all leaves of the tree.
+3.  For each leaf, iterate through offsets defined by `off_indices(leaf.value_mask)` [S1, unofficial].
+4.  If `leaf.values[offset + 1] == value`, decode the coordinate `c` and set `data[c] = value` [S1, unofficial].
+5.  Build the new grid using `build_grid(data, tree.background; ...)` [S1, unofficial].
 
-**Pseudocode**:
+#### 2. Dense Array Ingestion
+This variant builds a grid from a dense 3D array, storing only values differing from the background [S1, unofficial].
+
+1.  Iterate through array indices `ix, iy, iz`.
+2.  If `array[ix, iy, iz] != background`, compute the world coordinate `c` using `bbox_min` and voxel size [S1, unofficial].
+3.  Add `c` to the `data` structure [S1, unofficial].
+4.  Build the grid using `build_grid(data, background; ...)` [S1, unofficial].
+
+#### 3. GPU Memory and Hierarchy Initialization
+This variant prepares the GPU buffers and voxel table for rendering [S2, S3, unofficial].
+
+1.  Allocate memory for the voxel table (`vTable1`) using `vTableMalloc`, calculating dimensions based on `linearGridDim` [S2, unofficial].
+2.  Initialize the allocated voxel table to all zeros (empty) using `vTableInitialEmpty` [S2, unofficial].
+3.  Initialize the grid structure on the GPU:
+    -   Set `vTable1` to NULL [S2, unofficial].
+    -   Set `gridSize` and `gridVoxelSize` [S2, unofficial].
+4.  If loading from an empty size, create an empty Grid Hierarchy (GH) structure [S3, unofficial].
+5.  If loading from a file, read and parse it into a GH structure using `GH::from_vox` [S3, unofficial].
+6.  Construct the levels uniform array by copying `gh.levels[i]` into `UVec4` with zeroed `y`, `z`, `w` components [S3, unofficial].
+7.  Create the `grid_hierarchy` buffer with size `gh.get_buffer_size()` and usage `STORAGE | COPY_DST` [S3, unofficial].
+
+#### 4. List-Based Initialization
+This variant initializes a grid from a boolean list [S4, unofficial].
+
+1.  Retrieve the input grid from index 0 and cast it to `VoxelGrid3D` [S4, unofficial].
+2.  Clone the retrieved grid [S4, unofficial].
+3.  Retrieve the list of boolean values from index 1 [S4, unofficial].
+4.  Calculate `max` as the minimum of the grid's voxel count and the input list's count [S4, unofficial].
+5.  Iterate from index `0` to `max` (exclusive).
+6.  Set the value at index `i` in the grid to the value at index `i` in the input list [S4, unofficial].
+7.  Set the modified grid as the output at index 0 [S4, unofficial].
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def initialize_voxel_grid(input_type, background, bbox_min, linear_grid_dim, source_data=None):
+def initialize_voxel_grid(tree, target_value, background, bbox_min, voxel_size):
     """
-    Initializes a voxel grid from various sources.
-    Args:
-        input_type: 'sparse_tree', 'gpu_init', 'dense_array', 'file', 'empty', or 'voxel_list'
-        background: Scalar value for empty voxels
-        bbox_min: Tuple (x, y, z) for coordinate conversion
-        linear_grid_dim: Integer for grid sizing
-        source_data: Depends on input_type (tree, array, file_path, list, etc.)
-    Returns:
-        grid: Initialized grid structure
+    Initializes a voxel grid by activating voxels matching target_value
+    from a tree structure, or from a dense array.
     """
+    # Step 1: Collect active voxels
     data = {}
     
-    if input_type == 'sparse_tree':
-        tree = source_data
-        # Step 1: Initialize data with existing active voxels
-        for voxel in active_voxels(tree):
-            data[voxel.coord] = voxel.value
-        # Step 2: Allocate vTable1
-        vtable_dim = vTableDimension(linear_grid_dim)
-        vTable1 = vTableMalloc(vtable_dim)
-        # Step 3 & 4: Iterate leaves and activate matching values
+    # If source is a tree
+    if tree is not None:
+        # Initialize with currently active voxels
+        for c in active_voxels(tree):
+            data[c] = tree.get_value(c)
+            
+        # Iterate leaves and activate matching voxels
         for leaf in tree.leaves:
             offsets = off_indices(leaf.value_mask)
             for offset in offsets:
-                c = decode_coordinate(leaf, offset)
-                if leaf.values[offset + 1] == background:
-                    data[c] = background
-        # Step 5: Build grid
-        grid = build_grid(data, background)
-        
-    elif input_type == 'gpu_init':
-        # Initialize allocated voxel table to zeros
-        vTable1 = vTableMalloc(linear_grid_dim)
-        vTableInitialEmpty(vTable1)
-        # Initialize grid structure on GPU
-        grid = Grid(vTable1=None, gridSize=linear_grid_dim, gridVoxelSize=0.5)
-        
-    elif input_type == 'dense_array':
-        arr = source_data
-        for ix, iy, iz in indices_of_dense_array(arr):
-            val = arr[ix, iy, iz]
-            if val != background:
-                c = compute_world_coord(ix, iy, iz, bbox_min)
-                data[c] = val
-        grid = build_grid(data, background)
-        
-    elif input_type == 'file':
-        file_path = source_data
-        gh = GH.from_vox(file_path)
-        levels_uniform = []
-        for i in range(len(gh.levels)):
-            uvec4 = UVec4(gh.levels[i].x, 0, 0, 0)
-            levels_uniform.append(uvec4)
-        buffer_size = gh.get_buffer_size()
-        grid_hierarchy_buffer = create_buffer(buffer_size, usage=STORAGE | COPY_DST)
-        grid = Grid(vTable1=None, gridSize=gh.size, gridVoxelSize=gh.voxel_size)
-        
-    elif input_type == 'empty':
-        gh = create_empty_gh()
-        grid = Grid(vTable1=None, gridSize=gh.size, gridVoxelSize=gh.voxel_size)
-        
-    elif input_type == 'voxel_list':
-        grid_in = source_data[0]
-        bool_list = source_data[1]
-        grid_out = grid_in.clone()
-        max_idx = min(len(grid_out), len(bool_list))
-        for i in range(max_idx):
-            grid_out[i] = bool_list[i]
-        grid = grid_out
-        
-    else:
-        raise ValueError("Unknown input source")
+                # Check if the value at the offset matches the target
+                if leaf.values[offset + 1] == target_value:
+                    c = decode_coordinate(leaf, offset)
+                    data[c] = target_value
+                    
+    # If source is a dense array (variant)
+    # for ix, iy, iz in array_indices:
+    #     if array[ix, iy, iz] != background:
+    #         c = world_to_grid_index(bbox_min, voxel_size, ix, iy, iz)
+    #         data[c] = array[ix, iy, iz]
+            
+    # Step 2: Build the grid structure
+    grid = build_grid(data, background)
+    
+    # Step 3: GPU Initialization (if applicable)
+    # vTable1 = vTableMalloc(vTableDimension(grid.linearGridDim))
+    # vTableInitialEmpty(vTable1)
+    # grid.vTable1 = vTable1
+    # grid.gridSize = grid.linearGridDim
+    # grid.gridVoxelSize = voxel_size
+    
     return grid
 
-# Helper definitions to ensure self-contained pseudocode
-def active_voxels(tree):
-    """Yields (coord, value) tuples for all active voxels in the tree."""
-    for leaf in tree.leaves:
-        for offset in off_indices(leaf.value_mask):
-            yield decode_coordinate(leaf, offset), leaf.values[offset + 1]
-
-def off_indices(mask):
-    """Returns a list of bit offsets where mask is set."""
-    return [i for i in range(mask.bit_length()) if (mask >> i) & 1]
-
-def decode_coordinate(leaf, offset):
-    """Reconstructs a 3D coordinate from leaf data and offset."""
-    # Standard reconstruction: leaf.base_coord + offset_vector
-    return leaf.base_coord + offset
-
-def build_grid(data, background):
-    """Constructs the final grid object from the populated data dictionary."""
-    return Grid(vTable1=None, gridSize=len(data), gridVoxelSize=0.5)
-
-def vTableDimension(linearGridDim):
-    """Calculates the dimension of the voxel table."""
-    # Not given in the sources.
-    return linearGridDim
-
-def vTableMalloc(dim):
-    """Allocates an unsigned integer array of the given dimension."""
-    return [0] * dim
-
-def vTableInitialEmpty(table):
-    """Fills the voxel table with zeros."""
-    for i in range(len(table)):
-        table[i] = 0
-
-def compute_world_coord(ix, iy, iz, bbox_min):
-    """Computes world coordinate from array indices and bounding box minimum."""
-    return (bbox_min[0] + ix, bbox_min[1] + iy, bbox_min[2] + iz)
-
-def indices_of_dense_array(arr):
-    """Yields all valid 3D indices for a dense array."""
-    import itertools
-    dims = arr.shape
-    for ix, iy, iz in itertools.product(range(dims[0]), range(dims[1]), range(dims[2])):
-        yield ix, iy, iz
-
-def create_buffer(size, usage):
-    """Creates a GPU buffer with specified size and usage flags."""
-    return {"size": size, "usage": usage}
-
-def create_empty_gh():
-    """Creates an empty Grid Hierarchy structure."""
-    return {"levels": [], "size": 0, "voxel_size": 0.5}
-
-class Grid:
-    def __init__(self, vTable1, gridSize, gridVoxelSize):
-        self.vTable1 = vTable1
-        self.gridSize = gridSize
-        self.gridVoxelSize = gridVoxelSize
-    def clone(self):
-        return Grid(self.vTable1, self.gridSize, self.gridVoxelSize)
-    def __setitem__(self, idx, val):
-        pass
-    def __getitem__(self, idx):
-        return 0
-
-class UVec4:
-    def __init__(self, x, y, z, w):
-        self.x = x
-        self.y = y
-        self.z = z
-        self.w = w
-
-class GH:
-    @staticmethod
-    def from_vox(path):
-        return {"levels": [], "size": 0, "voxel_size": 0.5}
+def initialize_gpu_buffers(gh):
+    """
+    Initializes GPU buffers for a Grid Hierarchy.
+    """
+    # Construct levels uniform array
+    levels_uniform = []
+    for level in gh.levels:
+        # Copy level data into UVec4 with zeroed y, z, w
+        levels_uniform.append(UVec4(level.x, 0, 0, 0))
+        
+    # Create grid hierarchy buffer
+    buffer_size = gh.get_buffer_size()
+    grid_hierarchy_buffer = create_buffer(
+        size=buffer_size,
+        usage=STORAGE | COPY_DST
+    )
+    
+    # Bind groups setup (conceptual)
+    bind_group_layout = {
+        0: UniformBuffer("TraceUniforms"),
+        1: TextureView("Voxel World"),
+        2: StorageBuffer(grid_hierarchy_buffer),
+        3: TextureView("Mip Texture"),
+        4: Sampler("Texture Sampler")
+    }
+    
+    return bind_group_layout
 ```
+
+### Parameters and Edge Cases
+-   **`target_value`**: The specific value that triggers activation in tree-based initialization [S1, unofficial].
+-   **`background`**: The default value for inactive voxels; used to filter dense arrays [S1, unofficial].
+-   **`bbox_min`**: The minimum corner of the bounding box, used for coordinate conversion in dense ingestion [S1, unofficial].
+-   **Precision**: Integer quantization is used for vertex deduplication in related construction steps to handle floating-point inaccuracies [S1, unofficial].
+-   **Empty Grids**: If loading from an empty size, an empty GH structure is created [S3, unofficial].
 
 ## Subtopics
 
@@ -198,31 +157,29 @@ Constructs a 3D voxel grid where each cube has 8 corner vertices, deduplicating 
 Updates the background value of inactive voxels in a volume grid while preserving the values of active voxels. It returns a new grid where inactive voxels holding the old background value are updated to a new background value, while active voxels remain unchanged.
 
 ### [Voxel Grid Storage and Voxelization](6433-voxel-grid-storage-and-voxelization.md)
-Converts continuous geometric representations into a discrete, dense 3D grid of scalar values, typically signed distances. It establishes the initial data layout for volume rendering, differing from [Voxel Grid Construction](3085-voxel-grid-construction.md) by defining the memory layout and per-voxel evaluation logic, and from [Grid Background Change](3210-grid-background-change.md) by populating the grid rather than modifying it [G].
+Converts continuous geometric primitives (typically meshes) into a discrete, dense 3D grid representation suitable for volume rendering or signed distance field (SDF) computation. It solves the problem of spatial discretization by mapping world-space coordinates to integer grid indices and evaluating geometric predicates (such as SDFs) at voxel centers. It differs from [Voxel Grid Construction](3085-voxel-grid-construction.md) by focusing on the specific memory layout (1D array vs. multi-dimensional pointers) and the explicit initialization of grid bounds and dimensions, whereas Construction may imply a broader pipeline including sparse structures. It differs from [Grid Background Change](3210-grid-background-change.md) by handling the initial population of the grid with geometric data rather than modifying existing background values.
 
 ### Dense Copy Ingestion
-Builds a VDB grid from a dense 3D array [S1, unofficial]. Only values differing from `background` are stored as active voxels [S1, unofficial]. It iterates array indices, computes world coordinates using `bbox_min`, and builds the grid using `build_grid` [S1, unofficial].
+Builds a VDB grid from a dense 3D array. Only values differing from `background` are stored as active voxels [S1, unofficial]. It iterates array indices, computes world coordinates using `bbox_min`, and builds the grid using `build_grid` [S1, unofficial].
 
 ### Voxel Data Initialization and Binding
-The process of loading voxel world data from files or empty generation, creating GPU buffers/textures, and setting up bind groups for the trace shader [S3, unofficial]. It involves creating a Grid Hierarchy (GH) structure, parsing files via `GH::from_vox`, constructing uniform arrays, and creating storage buffers [S3, unofficial].
+Loads voxel world data from files or empty generation, creating GPU buffers/textures, and setting up bind groups for the trace shader [S3, unofficial]. It parses files into a GH structure, constructs levels uniform arrays, and creates storage buffers with specific usage flags [S3, unofficial].
 
 ### VoxelGridFromList
-Retrieves an input grid and casts it to `VoxelGrid3D` [S4, unofficial]. It clones the grid, retrieves a boolean list, calculates the iteration limit as the minimum of the grid's voxel count and the list's count, and applies the boolean values to the grid indices [S4, unofficial].
+Initializes a grid from a boolean list by cloning the input grid, iterating up to the minimum of the grid's voxel count and the list's count, and setting values based on the list [S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: Linear with respect to the number of active voxels or dense array elements, $O(N)$, where $N$ is the number of voxels processed [S1, S3, unofficial].
-- **Memory Complexity**: Proportional to the number of active voxels for sparse grids, or the full grid volume for dense ingestion before sparsification [S1, S3, unofficial].
-- **Measured Performance**: Benchmarks in [S1, unofficial] show warmup renders followed by timed renders, measuring total milliseconds including JIT effects [S1, unofficial]. Specific performance numbers are not provided in the notes [S1, unofficial].
-- **Strengths**: Efficiently handles sparse data by only storing active voxels; supports multiple input formats (dense, file, empty) [S1, S3, unofficial].
-- **Limitations**: Requires careful memory management for `vTable1` allocation; coordinate conversion can be a bottleneck for large dense arrays [S1, S2, unofficial].
-- **When to Use**: When initializing a volume rendering scene from raw data or when switching background values [S1, S3, unofficial].
-- **When Not to Use**: When the grid is already initialized and only minor updates are needed (use [Grid Background Change](3210-grid-background-change.md) instead) [G].
+-   **Time Complexity**: Depends on the number of active voxels or total voxels in dense ingestion. Tree-based iteration is proportional to the number of leaves and active voxels [S1, unofficial].
+-   **Memory Complexity**: Proportional to the grid dimensions for dense tables (`vTable1`) or the number of active voxels for sparse structures [S2, unofficial].
+-   **Performance**: Benchmarks show warmup renders are necessary to defeat JIT first-call effects and allocation pollution [S1, unofficial].
+-   **Strengths**: Efficiently handles sparse data by only storing active voxels; supports multiple input formats (tree, array, file) [S1, S3, unofficial].
+-   **Limitations**: Dense ingestion can be memory-intensive for large grids; requires careful handling of coordinate conversions [S1, unofficial].
 
 ## Background
-Voxel grid initialization is a fundamental step in volume rendering pipelines, enabling the transition from raw data to a renderable format [S1, S3, unofficial]. The methods described here are derived from implementations in Julia (Lyr.jl), C++ (gpu-voxelizer), and Rust (bevy-voxel-engine) [S1, S2, S3, unofficial]. The concept of activating voxels based on value thresholds and managing sparse voxel tables is common in modern real-time volume rendering engines [S1, S3, unofficial].
+Voxel grid initialization is a fundamental step in volume rendering pipelines, evolving from early ray casting methods to modern GPU-accelerated techniques. The use of voxel tables (`vTable1`) and grid hierarchies (GH) reflects the shift towards efficient spatial indexing and GPU memory management [S2, S3, unofficial]. The method is widely used in real-time rendering engines and scientific visualization tools [S1, S3, unofficial].
 
 ## Sources
-[S1] Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
-[S2] gpu-voxelizer, https://github.com/ivandrodri/gpu-voxelizer, fetched 2026-10-26 (unofficial)
-[S3] bevy-voxel-engine, https://github.com/ria8651/bevy-voxel-engine, fetched 2026-10-27 (unofficial)
-[S4] voxeltools, https://github.com/arendvw/voxeltools, fetched 2026-10-29 (unofficial)
+[S1] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+[S2] ivandrodri/gpu-voxelizer, https://github.com/ivandrodri/gpu-voxelizer, fetched 2026-10-26 (unofficial)
+[S3] ria8651/bevy-voxel-engine, https://github.com/ria8651/bevy-voxel-engine, fetched 2026-10-27 (unofficial)
+[S4] voxeltool, https://github.com/arendvw/voxeltools, fetched 2026-10-29 (unofficial)

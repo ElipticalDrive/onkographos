@@ -44,7 +44,7 @@ The method relies on two ring buffers:
 **Parameters:**
 *   $B_{\text{HDD} \rightarrow \text{RAM}}$: Typical value 1.2 GB/s [S1, unofficial].
 *   $B_{\text{RAM} \rightarrow \text{GPU}}$: Typical value 1.6 GB/s [S1, unofficial].
-*   $m_{\text{app}}$: Range $[0, 1]$ or $\mathbb{R}$ [S1, unofficial].
+*   $m_{\text{app}}$: Range $[0, 1]$ [S1, unofficial].
 *   $m_{\text{func}}$: Range $\mathbb{R}$ [S1, unofficial].
 
 **Steps:**
@@ -71,17 +71,12 @@ The method relies on two ring buffers:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-class BufferItem:
-    def __init__(self, data, item_id):
-        self.data = data
-        self.id = item_id
-        self.is_transferring = False
-
-class DeviceBufferItem:
-    def __init__(self, host_ref, cuda_mem):
-        self.host_ref = host_ref
-        self.cuda_mem = cuda_mem
-        self.cuda_stream = None
+def calculate_streaming_params(B_hdd_ram, B_ram_gpu, size_S, t0, t1, N_S, m_app, m_func):
+    B_min = min(B_hdd_ram, B_ram_gpu)
+    t_delta = size_S / B_min
+    t_S = (t1 - t0) / (N_S - 1)
+    N_skip = (t_delta / t_S) * m_app * m_func
+    return t_delta, N_skip
 
 class RingBuffer:
     def __init__(self, capacity):
@@ -89,122 +84,94 @@ class RingBuffer:
         self.items = [None] * capacity
         self.head = 0
         self.tail = 0
-        self.size = 0
+        self.count = 0
 
     def push_right(self, item):
         self.items[self.tail] = item
         self.tail = (self.tail + 1) % self.capacity
-        self.size += 1
+        self.count += 1
 
     def pop_left(self):
-        if self.size == 0:
+        if self.count == 0:
             return None
         item = self.items[self.head]
         self.head = (self.head + 1) % self.capacity
-        self.size -= 1
+        self.count -= 1
         return item
 
-    def get_item(self, index):
+    def get(self, index):
         return self.items[(self.head + index) % self.capacity]
 
-    def last_item(self):
+    def last(self):
         return self.items[(self.tail - 1 + self.capacity) % self.capacity]
 
-def calculate_streaming_params(B_hdd_ram, B_ram_gpu, size_S, t0, t1, N_S, m_app, m_func):
-    """Calculate the minimum time interval and skip count for streaming."""
-    B_min = min(B_hdd_ram, B_ram_gpu)
-    t_delta = size_S / B_min
-    if N_S <= 1:
-        raise ValueError("Number of slices must be greater than 1")
-    t_S = (t1 - t0) / (N_S - 1)
-    N_skip = (t_delta / t_S) * m_app * m_func
-    return t_delta, N_skip
+class Slice:
+    def __init__(self, item_id, time, data, is_transferring=False):
+        self.id = item_id
+        self.time = time
+        self.data = data
+        self.is_transferring = is_transferring
 
-class StreamingManager:
-    def __init__(self, B_hdd_ram, B_ram_gpu, size_S, t0, t1, N_S, m_app, m_func):
-        self.t_delta, self.N_skip = calculate_streaming_params(
-            B_hdd_ram, B_ram_gpu, size_S, t0, t1, N_S, m_app, m_func
-        )
-        self.m_app = m_app
-        self.m_func = m_func
-        self.host_buffer = RingBuffer(capacity=6)
-        self.device_buffer = RingBuffer(capacity=4)
-        self.cuda_streams = [None] * 4
-        self.t_func = t0
+class DeviceSlice:
+    def __init__(self, host_ref, cuda_mem, cuda_stream):
+        self.host_ref = host_ref
+        self.cuda_mem = cuda_mem
+        self.cuda_stream = cuda_stream
 
-    def update_function_time(self, dt):
-        """Update t_func based on multipliers and delta time."""
-        self.t_func += self.t_delta * self.m_app * self.m_func
+def host_layer_update(host_buf, t_func, t_delta, N_skip):
+    # Check if t_func leaves the valid interval between items 2 and 3
+    if t_func > host_buf.get(3).time:
+        # Pop item 0 from left and push to right
+        item_0 = host_buf.pop_left()
+        host_buf.push_right(item_0)
+    
+    # Insert new item (ID 5)
+    new_item = Slice(id=host_buf.count, time=t_func, data=None, is_transferring=False)
+    host_buf.push_right(new_item)
+    
+    # Schedule load for future slice determined by N_skip
+    future_id = new_item.id + int(N_skip)
+    # [G] Standard disk I/O scheduling would be implemented here
+    
+    # Synchronization: Block if host memory is still subject to transfer
+    if host_buf.last().is_transferring:
+        # [G] Standard thread blocking mechanism
+        pass
 
-    def host_layer_step(self, new_slice_data):
-        """Manage host layer ring buffer."""
-        # Check if t_func leaves the valid interval between items 2 and 3
-        # Assuming items are indexed 0-5, center items are 2 and 4
-        if self.is_interval_exceeded(self.host_buffer, 2, 3):
-            item_0 = self.host_buffer.pop_left()
-            self.host_buffer.push_right(item_0)
-            
-        # Insert new item
-        new_item = BufferItem(data=new_slice_data, id=self.host_buffer.size)
-        self.host_buffer.push_right(new_item)
+def device_layer_update(host_buf, device_buf):
+    # Pop one item from left of device buffer
+    if device_buf.count > 0:
+        popped = device_buf.pop_left()
+        # [G] Standard CUDA queue release mechanism
+        pass
         
-        # Schedule load for future slice determined by N_skip
-        future_slice_id = self.host_buffer.last_item().id + self.N_skip
-        # [G] Standard disk I/O scheduling would be implemented here
-        self.schedule_disk_load(future_slice_id)
-        
-        # Synchronization: Block if host memory is still subject to transfer
-        if self.host_buffer.last_item().is_transferring:
-            # [G] Standard thread blocking mechanism
-            pass
+    # Copy last fully loaded host item by reference to device layer
+    last_host = host_buf.last()
+    stream_id = device_buf.count % 4
+    device_item = DeviceSlice(host_ref=last_host, cuda_mem=None, cuda_stream=f"stream_{stream_id}")
+    
+    # Schedule asynchronous memory transfer
+    # [G] Standard asynchronous memory copy
+    device_buf.push_right(device_item)
+    
+    # Synchronization: Block if host memory is still subject to host layer transfer
+    if device_buf.last().host_ref.is_transferring:
+        # [G] Standard thread blocking mechanism
+        pass
 
-    def device_layer_step(self):
-        """Manage device layer ring buffer."""
-        # Pop from left of device buffer
-        if self.device_buffer.size > 0:
-            popped_item = self.device_buffer.pop_left()
-            # [G] Standard CUDA queue release mechanism
-            self.send_memory_to_cuda_queue(popped_item)
-            
-        # Copy last fully loaded host item to device
-        last_host_item = self.host_buffer.last_item()
-        device_item = DeviceBufferItem(
-            host_ref=last_host_item,
-            cuda_mem=None # [G] Standard CUDA memory allocation
-        )
-        
-        # Schedule asynchronous transfer
-        stream_id = self.device_buffer.size % 4
-        self.cuda_streams[stream_id] = None # [G] Standard CUDA stream creation
-        device_item.cuda_stream = self.cuda_streams[stream_id]
-        # [G] Standard asynchronous memory copy
-        self.async_copy_to_device(device_item, device_item.cuda_stream)
-        self.device_buffer.push_right(device_item)
-        
-        # Synchronization: Block if host memory is still subject to host layer transfer
-        if self.device_buffer.last_item().host_ref.is_transferring:
-            # [G] Standard thread blocking mechanism
-            pass
-
-    def launch_cuda(self):
-        """Synchronize center device items before launch."""
-        # Synchronize items 1 and 2
-        self.cuda_streams[1].synchronize()
-        self.cuda_streams[2].synchronize()
-        
-        # Launch kernel
-        # [G] Standard CUDA kernel launch
-        self.render_kernel(self.device_buffer.get_item(1), self.device_buffer.get_item(2))
-
-    def is_interval_exceeded(self, buffer, idx1, idx2):
-        """Check if t_func has moved past the interval between two buffer indices."""
-        # [G] Standard time comparison logic
-        return True
+def launch_cuda(device_buf):
+    # Synchronize device layer items with IDs 1 and 2
+    device_buf.get(1).cuda_stream.synchronize()
+    device_buf.get(2).cuda_stream.synchronize()
+    # [G] Standard CUDA kernel launch
+    pass
 ```
 
-**Subtopics:**
-*   **Ring Buffer Management:** A technique for maintaining a fixed-size window of data items to ensure the most relevant time slices are always available for interpolation. It differs from simple FIFO queues by allowing circular reuse of memory slots. Choose this when memory is constrained but continuous access to a sliding window of time steps is required. See [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md) for spatial equivalents.
-*   **Asynchronous CUDA Streams:** A mechanism for overlapping data transfer with computation. It differs from synchronous transfers by allowing the CPU to continue scheduling tasks while the GPU processes previous ones. Choose this to hide I/O latency. See [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) for hardware-specific optimizations.
+**Pitfalls:**
+*   Using $t_\Delta$ directly for skip calculation assumes constant transfer rates and function time, which can be disturbed by user input or system load. Synchronization rules are required to handle these deviations [S1, unofficial].
+*   Queue items in both host and device layers consume allocated memory even when unused. On the device layer, memory is scarce, so the number of items should be kept to a minimum [S1, unofficial].
+
+## Subtopics
 
 ## Operating characteristics
 *   **Time Complexity:** The calculation of $N_{\text{skip}}$ is $O(1)$ [S1, unofficial]. The streaming overhead is dominated by I/O latency, which is hidden by asynchronous transfers [S1, unofficial].
@@ -214,7 +181,6 @@ class StreamingManager:
 *   **Strengths:** Decouples rendering speed from dataset size; allows real-time exploration of large simulations; handles user interaction (time manipulation) gracefully via synchronization [S1, unofficial].
 *   **Limitations:** Relies on constant transfer rates for $N_{\text{skip}}$ calculation; actual transfer may take longer than $t_\Delta$ (up to twice as long), requiring the safety margin provided by the multi-layered buffer structure [S1, unofficial]. Memory is scarce on the device layer, so buffer sizes must be minimized [S1, unofficial].
 *   **When to use:** When streaming volumetric data from slow storage (HDD) to GPU for real-time visualization, especially when the dataset is too large for GPU memory [S1, unofficial].
-*   **When not to use:** When the entire dataset fits in GPU memory (uploading all is simpler and faster); when network bandwidth is the bottleneck in a distributed setting (see [Distributed computing and load balancing](5624-distributed-computing-and-load-balancing.md)).
 
 ## Background
 The method originates from the work of Dirk Sowinski in his 2012 Master's thesis "Real-Time Smoke Volume Rendering" [S1, unofficial]. It was developed to address the limitations of uploading entire simulation outputs to the GPU, which is infeasible for large datasets [S1, unofficial]. The approach uses a multi-layered streaming architecture (Host and Device layers) with specific synchronization rules to handle the asynchronous nature of data transfer and user interaction [S1, unofficial].

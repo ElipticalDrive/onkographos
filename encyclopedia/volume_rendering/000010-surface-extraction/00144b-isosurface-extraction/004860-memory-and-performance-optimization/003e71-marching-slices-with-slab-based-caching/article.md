@@ -3,126 +3,223 @@
 Also called: Marching Slices, Slab-based Marching Cubes
 
 ## Overview
-Marching Slices is an isosurface extraction algorithm that polygonizes volumetric data one slice at a time to significantly reduce memory usage compared to traditional marching cubes [S1]. It solves the problem of high memory consumption in large volumes by caching only the data necessary for the current processing slab, using slab-based caches to prevent redundant visits to processed cubes and to manage connectivity across slice boundaries [S1]. Unlike surface-following marching cubes which requires all slices in memory, this method processes slabs independently, enabling lower working memory footprint and improved cache locality [S1].
+Marching Slices is an isosurface extraction algorithm that reduces memory usage by processing a volume one slice at a time, caching only the data necessary for the current processing unit [S1]. It solves the problem of high memory residency required by traditional marching cubes by partitioning the volume into slabs and using boundary consistency via slice caches to ensure geometric continuity [S1]. Unlike surface-following marching cubes which keeps all $N_z + 1$ slices in memory, this approach uses significantly less working memory and is faster due to increased locality of memory accesses [S1].
 
 ## How it works
-**Inputs and Outputs**
-- Input: A 3D volumetric grid of field values $V(x, y, z)$ with dimensions $N_x \times N_y \times N_z$.
-- Output: A stream of triangles representing the isosurface at a specified threshold.
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar field defined on a grid of size $N_x \times N_y \times N_z$.
+*   **Output:** A stream of triangles (vertices and indices) representing the isosurface.
 
-**Data Structures**
-The algorithm processes the volume in blocks. Each block is treated as a vertical array of $N_z$ slabs, numbered $0$ to $N_z$ where $z$ increases upwards [S1]. Each slab contains $N_x \times N_y \times 1$ cubes [S1]. Slabs are bounded by 2D slices, numbered $0$ to $N_z + 1$, where adjacent slabs share slices [S1].
+**Data Structures:**
+The algorithm treats the volume as a vertical array of $N_z$ slabs, numbered $0$ to $N_z-1$ (where $z$ increases upwards). Each slab is of size $N_x \times N_y \times 1$ cubes. The slabs are bounded by $N_z + 1$ 2D slices, numbered $0$ to $N_z$. Adjacent slabs share slices.
 
-1.  **Todo List**: For each of the $N_z$ slabs, a linked list stores integer $(x, y)$ tuples representing cubes in that slab that may need to be rendered [S1].
-2.  **Slice Cache**: Allocated for the slice above and below a slab being polygonized [S1]. Each cache consists of:
-    -   A 2D corner index array of size $(N_x + 1) \times (N_y + 1)$ [S1]. Each element stores an index to retrieve a computed corner from the corner cache (or 0 if not computed) and two boolean "done" flags: `done_above` and `done_below` [S1]. These flags indicate whether the cubes above and below the slice at that corner location have been rendered [S1].
-    -   A dynamically resizing vector of corner values (corner cache) storing the actual interpolated corner positions/values [S1].
+1.  **Todo List:** For each slab $s$, a linked list containing integer tuples $(x, y)$ representing cubes in that slab that may need to be rendered.
+2.  **Slice Cache:** Allocated for the slice above and below a slab being polygonized. Each cache consists of:
+    *   A 2D **corner index array** of size $(N_x + 1) \times (N_y + 1)$. Each element stores an index to retrieve a computed corner from the corner cache (or 0 if not computed).
+    *   A **corner cache**: A dynamically resizing vector storing the actual corner values (interpolated positions).
+    *   **Done Flags:** Each element in the corner index array also includes two boolean flags: `done_above` and `done_below`. These indicate whether the cubes immediately above and below the slice at that corner location have been rendered.
 
-**Algorithm Steps**
-1.  **Initialization**: Create empty todo lists for all $N_z$ slabs [S1].
-2.  **Seeding**: Identify seed cubes containing the isosurface. If seeding fails to find all local minima, the algorithm may need to step downwards to render connected cubes in slabs below, breaking unidirectional order [S1].
-3.  **Processing Loop**: While any slab's todo list is not empty:
-    a. Select a slab $s$ with a non-empty todo list [S1].
-    b. Allocate slice caches for the slice above ($s+1$) and below ($s-1$) slab $s$ if not already allocated [S1].
-    c. While slab $s$'s todo list is not empty:
-        i. Pop a cube $(x, y)$ from slab $s$'s todo list [S1].
-        ii. Perform marching cubes on cube $(x, y)$ using field values and corner data from the slice caches [S1].
-        iii. For each of the 8 corners of the cube, check the `done` flags in the adjacent slice caches to determine if neighboring cubes in adjacent slabs need to be added to their respective todo lists [S1]. Specifically:
-            - If a corner is shared with a cube in slab $s+1$ and that cube is not marked `done_above` in the upper slice cache, add $(x, y)$ to slab $s+1$'s todo list and mark the corner's `done_above` flag [S1].
-            - If a corner is shared with a cube in slab $s-1$ and that cube is not marked `done_below` in the lower slice cache, add $(x, y)$ to slab $s-1$'s todo list and mark the corner's `done_below` flag [S1].
-            - Handle lateral neighbors within slab $s$ similarly using the appropriate slice cache flags to avoid redundant processing [S1].
-    d. After slab $s$'s todo list is empty:
-        i. If slab $s+1$'s todo list is empty, deallocate the slice cache for slice $s+1$ [S1].
-        ii. If slab $s-1$'s todo list is empty, deallocate the slice cache for slice $s-1$ [S1].
-        iii. When deallocating a slice cache, reset its corner index arrays by clearing nonzero indices and done flags using the entries in its corner caches, and return the memory to a common pool [S1].
-4.  **Completion**: The algorithm completes when all todo lists are empty. Index and vertex buffers are then flushed to the video card [S1].
+**Algorithm Steps:**
 
-**Pseudocode**
+1.  **Initialization:**
+    *   Create $N_z$ empty todo lists, one for each slab.
+    *   Identify seed cubes. Since field values are not known a-priori, the algorithm cannot simply march back-to-front. It must find seed cubes (e.g., local minima or specific isovalue crossings) and add their $(x, y)$ coordinates to the corresponding slab's todo list [S1].
+    *   Allocate a common memory pool for slice caches.
+
+2.  **Processing Loop:**
+    While there are non-empty todo lists in any slab:
+    1.  Select a slab $s$ with a non-empty todo list.
+    2.  Ensure slice caches are allocated for the slice below slab $s$ (slice $s$) and the slice above slab $s$ (slice $s+1$). If a cache is not allocated, allocate it and initialize its corner index array and done flags to zero/false.
+    3.  While slab $s$'s todo list is not empty:
+        1.  Pop a cube $(x, y)$ from slab $s$'s todo list.
+        2.  **Polygonize:** Perform the standard marching cubes lookup for the cube defined by corners at $(x, y, z)$ and $(x+1, y+1, z+1)$ within slab $s$.
+        3.  **Corner Retrieval:** For each of the 8 corners of the cube:
+            *   Check the corner index array of the relevant slice cache (above or below depending on the corner's z-coordinate).
+            *   If the index is 0, compute the corner position (interpolate based on field values) and store it in the corner cache. Update the index array with the new cache index.
+            *   Mark the corner as computed.
+        4.  **Mark Done:** For each of the 8 corners, update the `done_above` and `done_below` flags in the respective slice caches to indicate that the cubes adjacent to these corners in the current slab have been processed.
+        5.  **Neighbor Propagation:** For each of the 8 corners, check the adjacent cubes in neighboring slabs. If a neighbor cube has not been processed (checked via the `done` flags in the slice cache of the *other* slab), add its $(x, y)$ coordinate to the todo list of that neighbor slab [S1].
+            *   Specifically, if a corner is shared with a cube in slab $s-1$ (below) or $s+1$ (above), and that cube's `done` flag is false, push the cube's $(x, y)$ to the respective slab's todo list.
+            *   Also check lateral neighbors within the same slab if they share corners across slice boundaries (though typically lateral connectivity is handled within the slab's own traversal if the slab is thick, but here slabs are 1 cube thick, so lateral neighbors in the same slab are handled by the slab's own todo list logic or by ensuring the slice cache flags prevent re-adding). *Note: The source describes checking `slice below` and `slice above` flags to push to `slab below` or `slab above` todo lists.*
+    4.  **Cache Management:**
+        *   After slab $s$'s todo list is empty, check if the slice cache below slab $s$ (slice $s$) can be deallocated. This is safe if the todo list for slab $s-1$ is also empty (meaning no cubes in the slab below need data from this slice).
+        *   Similarly, check if the slice cache above slab $s$ (slice $s+1$) can be deallocated if the todo list for slab $s+1$ is empty.
+        *   When a slice cache is deallocated, reset its corner index arrays by clearing nonzero indices and done flags using the entries in the corner cache, and return the memory to the common pool [S1].
+
+3.  **Completion:**
+    *   The algorithm completes when all $N_z$ todo lists are empty.
+    *   Flush the accumulated index and vertex buffers to the video card [S1].
+
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def marching_slices(volume, Nx, Ny, Nz, isosurface_threshold):
-    # Initialize todo lists for each slab
+def marching_slices(volume, isovalue, Nx, Ny, Nz):
+    # Data structures
     todo_lists = [LinkedList() for _ in range(Nz)]
+    slice_caches = [None] * (Nz + 1)  # Cache for each slice
+    corner_pool = []  # Common pool for corner values
     
-    # Seed cubes (implementation detail not specified in sources)
-    seed_cubes = find_seed_cubes(volume, isosurface_threshold)
-    for (x, y, z) in seed_cubes:
-        todo_lists[z].push((x, y))
-    
-    # Process slabs
-    while any(not todo_list.is_empty() for todo_list in todo_lists):
+    # 1. Find seeds and populate todo lists
+    seeds = find_seeds(volume, isovalue, Nx, Ny, Nz)
+    for (x, y, z) in seeds:
+        if 0 <= z < Nz:
+            todo_lists[z].push((x, y))
+            
+    # 2. Process slabs
+    while any(not tl.is_empty() for tl in todo_lists):
         # Select a slab with work
-        slab_idx = find_slab_with_todo(todo_lists)
+        slab_idx = find_non_empty_slab(todo_lists)
         if slab_idx is None:
             break
             
-        # Allocate slice caches for adjacent slices if needed
-        slice_above_cache = get_or_allocate_slice_cache(slab_idx + 1, Nx, Ny)
-        slice_below_cache = get_or_allocate_slice_cache(slab_idx - 1, Nx, Ny)
+        # Ensure caches for slices below and above the slab
+        slice_below_idx = slab_idx
+        slice_above_idx = slab_idx + 1
         
-        # Process all cubes in the current slab
+        if slice_caches[slice_below_idx] is None:
+            slice_caches[slice_below_idx] = allocate_slice_cache(Nx, Ny)
+        if slice_caches[slice_above_idx] is None:
+            slice_caches[slice_above_idx] = allocate_slice_cache(Nx, Ny)
+            
         while not todo_lists[slab_idx].is_empty():
             (x, y) = todo_lists[slab_idx].pop()
             
-            # Perform marching cubes on cube (x, y, slab_idx)
-            triangles = perform_marching_cubes_cube(
-                volume, x, y, slab_idx, isosurface_threshold,
-                slice_above_cache, slice_below_cache
-            )
-            yield triangles
+            # Polygonize the cube at (x, y, slab_idx)
+            # Get 8 corners. Each corner belongs to a specific slice (z or z+1)
+            corners = get_cube_corners(x, y, slab_idx, Nx, Ny, Nz)
             
-            # Update todo lists for adjacent slabs based on corner flags
-            update_adjacent_todo_lists(
-                x, y, slab_idx, todo_lists,
-                slice_above_cache, slice_below_cache
-            )
+            triangles = []
+            for corner in corners:
+                # Determine which slice cache this corner belongs to
+                # Corner z-coordinate determines slice index
+                slice_idx = corner.z
+                cache = slice_caches[slice_idx]
+                
+                # Check if corner is already computed
+                if cache.corner_index[corner.x][corner.y] == 0:
+                    # Compute corner value
+                    val = interpolate_corner(volume, corner, isovalue)
+                    idx = len(corner_pool)
+                    corner_pool.append(val)
+                    cache.corner_index[corner.x][corner.y] = idx + 1 # 1-based index
+                    cache.done_above[corner.x][corner.y] = False
+                    cache.done_below[corner.x][corner.y] = False
+                    
+                # Mark done flags for the cubes adjacent to this corner
+                # The corner is shared by 8 cubes. We need to mark the cubes
+                # in the current slab and adjacent slabs as processed.
+                # Specifically, we mark the cubes that share this corner.
+                # For the current slab, we mark the cube we just processed.
+                # For adjacent slabs, we mark the cubes that share this corner.
+                
+                # Update done flags in the cache for the cubes above and below this corner
+                # This prevents re-processing and re-adding to todo lists
+                cache.done_above[corner.x][corner.y] = True
+                cache.done_below[corner.x][corner.y] = True
+                
+                # Propagate to neighbor slabs if needed
+                # Check if the cube in the slab above (if corner is at top of current slab)
+                # or slab below (if corner is at bottom) needs to be added to todo list
+                # This logic is simplified; the source implies checking flags to push to todo lists
+                
+                # Example: If corner is at z+1 (top of current slab), it is shared with slab above
+                if corner.z == slab_idx + 1:
+                    # Check if cube in slab above at (x, y) is done
+                    # The done flag in slice_above cache for this corner indicates if
+                    # the cube in slab above has been processed? 
+                    # Actually, the source says: "prevent the addition of cubes that have 
+                    # already been processed to the todo list of an adjacent slab."
+                    # So we check the done flag of the neighbor cube.
+                    
+                    # If the neighbor cube (slab_idx+1, x, y) is not done, add to todo
+                    # We need a way to check if a specific cube is done. 
+                    # The source uses slice cache done flags for this.
+                    
+                    # If the cube in slab above at (x,y) has not been processed,
+                    # its corresponding corner flags in the slice cache below it (slice_idx+1)
+                    # would be false? Or we check the slab's todo list?
+                    # The source says: "if do_above and !slice_above[x,y].done_above then push"
+                    
+                    # Let's assume we check the done flag in the cache of the slice 
+                    # that is the boundary for the neighbor cube.
+                    
+                    # For cube (x,y, slab_idx+1), its bottom corners are in slice slab_idx+1.
+                    # If those corners are marked done_above, it means the cube above (slab_idx+2) 
+                    # has processed them? No, done_above means the cube ABOVE the slice is done.
+                    
+                    # Correct interpretation:
+                    # done_above at (x,y) in slice S means the cube in slab S (above slice S) is done.
+                    # done_below at (x,y) in slice S means the cube in slab S-1 (below slice S) is done.
+                    
+                    # So, to check if cube (x,y, slab_idx+1) is done:
+                    # Look at slice slab_idx+1. Check done_below at (x,y).
+                    # If done_below is False, then cube (x,y, slab_idx+1) is not done.
+                    
+                    if not slice_caches[slice_above_idx].done_below[x][y]:
+                        todo_lists[slab_idx + 1].push((x, y))
+                        
+                # Similarly for slab below
+                if corner.z == slab_idx:
+                    # Cube (x,y, slab_idx-1) shares this corner
+                    # Check done_above in slice slab_idx
+                    if not slice_caches[slice_below_idx].done_above[x][y]:
+                        if slab_idx > 0:
+                            todo_lists[slab_idx - 1].push((x, y))
+                            
+            # Add triangles to output buffer
+            output_triangles(triangles)
             
-        # Deallocate slice caches if adjacent slabs are done
-        if todo_lists[slab_idx + 1].is_empty():
-            deallocate_slice_cache(slice_above_cache)
-        if todo_lists[slab_idx - 1].is_empty():
-            deallocate_slice_cache(slice_below_cache)
+        # Check if caches can be deallocated
+        if todo_lists[slab_idx - 1].is_empty() if slab_idx > 0 else True:
+            if slice_caches[slice_below_idx] is not None:
+                deallocate_slice_cache(slice_caches[slice_below_idx])
+                slice_caches[slice_below_idx] = None
+                
+        if todo_lists[slab_idx + 1].is_empty() if slab_idx + 1 < Nz else True:
+            if slice_caches[slice_above_idx] is not None:
+                deallocate_slice_cache(slice_caches[slice_above_idx])
+                slice_caches[slice_above_idx] = None
 
-def update_adjacent_todo_lists(x, y, slab_idx, todo_lists, slice_above, slice_below):
-    # Check corners and update flags/todo lists for neighbors
-    # This involves checking the 8 corners of the cube (x, y, slab_idx)
-    # and updating the done flags in slice_above and slice_below caches.
-    # If a neighbor cube in an adjacent slab is not marked done, add it to that slab's todo list.
-    # Specific logic for each corner direction (front, back, left, right, up, down)
-    # is implied by the source description of checking done flags and pushing to todo lists.
-    pass
+    flush_buffers()
 
-def get_or_allocate_slice_cache(slice_idx, Nx, Ny):
-    # Returns existing cache or allocates new one with (Nx+1)x(Ny+1) index array and empty corner cache
-    pass
+def allocate_slice_cache(Nx, Ny):
+    cache = {
+        'corner_index': [[0] * (Ny + 1) for _ in range(Nx + 1)],
+        'done_above': [[False] * (Ny + 1) for _ in range(Nx + 1)],
+        'done_below': [[False] * (Ny + 1) for _ in range(Nx + 1)]
+    }
+    return cache
 
 def deallocate_slice_cache(cache):
-    # Reset corner index arrays and return memory to pool
-    pass
+    # Clear indices and flags
+    for x in range(len(cache['corner_index'])):
+        for y in range(len(cache['corner_index'][0])):
+            cache['corner_index'][x][y] = 0
+            cache['done_above'][x][y] = False
+            cache['done_below'][x][y] = False
+    # Return memory to pool (implementation specific)
 ```
 
-**Parameters**
-- Typical number of slices kept in memory at the same time is three [S1].
+**Parameters:**
+*   **Number of slices in memory:** Typically three slices are kept in memory at the same time (one for the current slab's top, one for the bottom, and potentially one for the next slab's bottom if processing is pipelined, but the source emphasizes caching only data necessary for the current slice and its immediate neighbors) [S1].
+*   **Grid Size:** For a $110 \times 110 \times 110$ grid, the cache memory used is below 1MB [S1].
 
-**Edge Cases and Pitfalls**
-- Field values are not known a-priori, so the algorithm cannot simply march back-to-front. It must traverse connected cubes in arbitrary forward/reverse order [S1].
-- Seeding algorithms may fail to find all local minima, causing the algorithm to step downwards to render connected cubes in slabs below that were missed, requiring additional slices to store the abandoned frontier [S1].
-- When seeding fails, the algorithm steps back to do work on a slab 'below' the current slab, breaking the unidirectional order of polygonization [S1].
-- Cached data not reused must be discarded, and redundant visits to completed cubes must be avoided to reduce memory [S1].
+**Edge Cases and Pitfalls:**
+*   **Seeding Failure:** Seeding algorithms may fail to find all local minima, causing the algorithm to step downwards to render connected cubes in slabs below that were missed. This requires additional slices to store the abandoned frontier and breaks the unidirectional order of polygonization [S1].
+*   **Arbitrary Order:** Because field values are not known a-priori, the algorithm must support arbitrary forward/reverse traversal order, which complicates the simple "march back-to-front" assumption [S1].
+*   **Redundant Visits:** Care must be taken to avoid redundant visits to completed cubes. The done flags in the slice cache prevent this [S1].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Significantly lower than surface-following marching cubes. For a $110 \times 110 \times 110$ grid, the amount of cache memory used is below 1MB [S1].
-- **Measured Performance**: Faster than surface-following marching cubes due to increased locality of memory accesses [S1]. Much faster than hash map based approaches by avoiding hash map lookup costs [S1].
-- **Scaling**: Not given in the sources.
-- **Strengths**: Low memory usage, fast performance due to cache locality, straightforward parallelization as each block is rendered independently [S1].
-- **Limitations**: Seeding failures can break unidirectional processing order, potentially requiring more slices to be stored temporarily [S1].
-- **When to use**: When memory is constrained and the volume is large, and when high performance is needed [S1].
-- **When not to use**: When the volume is small enough that memory is not a constraint, or when a simpler implementation is preferred [S1].
+*   **Memory Complexity:** Significantly lower than full-volume marching cubes. For a $110 \times 110 \times 110$ grid, memory usage is below 1MB [S1]. It uses much less working memory than surface-following marching cubes which keeps all $N_z + 1$ slices in memory [S1].
+*   **Time Complexity:** Faster than hash-map based approaches due to the avoidance of hash map lookup costs [S1]. The use of 2D arrays for corner indices provides $O(1)$ access time.
+*   **Strengths:** Low memory footprint, high performance due to memory locality, straightforward parallelization of blocks [S1].
+*   **Limitations:** Seeding failures can lead to complex traversal patterns and potential performance degradation if many slabs need to be revisited [S1].
+*   **When to Use:** Suitable for real-time applications or environments with strict memory constraints where the volume is too large to fit in memory [S1].
 
 ## Background
-The Marching Slices algorithm was introduced in the paper "Real-time particle isosurface extraction" [S1]. It is used in real-time particle isosurface extraction applications where memory efficiency and speed are critical [S1]. The algorithm treats each block as a vertical array of slabs, allowing for independent processing of blocks on multi-core hardware [S1].
+The Marching Slices algorithm was introduced in the paper "Real-time particle isosurface extraction" [S1]. It was developed to address the memory limitations of traditional marching cubes when dealing with large volumes or real-time applications. The method builds on the principles of isosurface extraction but optimizes for memory by processing the volume in slabs and caching only necessary boundary data.
 
 ## Sources
 [S1] Real-time particle isosurface extraction, https://doi.org/10.1145/1342250.1342256, fetched 2026-11-04

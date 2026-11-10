@@ -1,0 +1,357 @@
+--- v005.md
++++ v006.md
+@@ -4,241 +4,134 @@
+ 
+ ## Overview
+-Custom Pass Rendering is a multi-pass, object-order rendering pipeline designed for high-performance visualization of large-scale volumetric data (specifically NanoVDB) and octree-based geometry within a modern graphics API context [S1, S2, unofficial]. It solves the problem of efficiently computing surface attributes (position, normal, material ID) and lighting effects (SSAO, shadows) for sparse volumetric datasets by decoupling geometric traversal from shading [S1, S2, unofficial]. Unlike monolithic ray-marching shaders, this method uses a sequence of specialized FullScreenPass stages to build intermediate G-buffers (hit position, filtered normals, ambient occlusion) before a final shading pass [S1, S2, unofficial]. It is distinct from [Plug-and-Play Ray Marching and Rendering](981-plug-and-play-ray-marching-and-rendering.md) by its explicit separation of traversal and lighting into discrete render passes, and from [Fragment List-Based Rendering Pipeline](3488-fragment-list-based-rendering-pipeline.md) by its reliance on screen-space fragment buffers rather than explicit primitive lists [S1, S2, unofficial].
++Custom Pass Rendering is a multi-pass, object-order rendering architecture that decomposes volumetric visualization into a sequence of specialized GPU compute and fragment shader stages. Unlike single-pass ray marchers, it separates geometric reconstruction (depth/position/normal estimation) from shading and post-processing effects (SSAO, shadows, material lookup) [S1, S2, unofficial]. It is distinct from [DirectXSplat Renderer API](8504-directxsplat-renderer-api.md) by relying on explicit frame buffer object (FBO) attachments for intermediate data rather than a unified API abstraction, and from [Time-Sliced Pipelined Architecture](1435-time-sliced-pipelined-architecture.md) by executing all passes synchronously per frame rather than asynchronously across frames [S1, S2, unofficial].
+ 
+ ## How it works
+-The pipeline executes a fixed sequence of render passes [S1, S2, unofficial]. Each pass renders a full-screen quad to process the entire screen resolution, reading from and writing to specific Frame Buffer Objects (FBOs) [S2, unofficial].
++### Inputs and Outputs
++**Inputs:**
++*   Volumetric data: Stored in a GPU buffer (e.g., `ComputeBuffer` or `usamplerBuffer`) representing an octree or sparse voxel grid [S1, S2, unofficial].
++*   Camera parameters: View matrix, projection matrix, inverse matrices, camera position, screen resolution (`screenRes`), and field of view (FOV) [S1, S2, unofficial].
++*   Scene bounds: `sceneBBoxMin`, `sceneBBoxMax`, `sceneCenter`, `rootHalfSide` [S1, unofficial].
++*   Material data: Optional material octree encoded in a texture buffer (`matOctree`) [S1, unofficial].
+ 
+-### Inputs and Outputs
+-*   **Inputs:** Camera matrices (View, Projection, Inverse View, Inverse Projection), screen resolution, volume data (NanoVDB octree or DAG), optional material octree, light position, and previous pass outputs [S1, S2, unofficial].
+-*   **Outputs:** Final color buffer with alpha blending [S2, unofficial].
++**Outputs:**
++*   Final image: A color buffer with alpha blending [S2, unofficial].
++*   Intermediate buffers: Depth, Hit Position, Hit Normal, Material ID, Shadow map, Ambient Occlusion (AO), and Blurred AO [S1, unofficial].
+ 
+-### Data Structures and Layout
+-The pipeline utilizes a set of Frame Buffer Objects (FBOs) to store intermediate state [S1, unofficial]. Textures are `GL_TEXTURE_2D` with `GL_NEAREST` filtering, except for the depth texture which uses `GL_LINEAR` filtering [S1, unofficial].
+-*   **FBO[0] (Primary Rays/Depth):** Attachment 0: `_glTexDepth` (`GL_RGBA32F`, `GL_LINEAR`) [S1, unofficial].
+-*   **FBO[1] (Hit Position/Normal):** Attachment 0: `_glTexHitPos` (`GL_RGB32F`, `GL_NEAREST`) [S1, unofficial]. Attachment 1: `_glTexHitNorm` (`GL_RGB32F`, `GL_NEAREST`) [S1, unofficial].
+-*   **FBO[2] (Materials, optional):** Attachment 0: `_glTexHitMaterial` (`GL_R8UI`, `GL_NEAREST`) [S1, unofficial].
+-*   **FBO[3] (Normal Filtering):** Attachment 0: `_glTexHitNormFiltered` (`GL_RGB32F`, `GL_NEAREST`) [S1, unofficial].
+-*   **FBO[4] (Shadows):** Attachment 0: `_glTexShadows` (`GL_R32F`, `GL_NEAREST`) [S1, unofficial].
+-*   **FBO[5] (AO):** Attachment 0: `_glTexAO` (`GL_R32F`, `GL_NEAREST`) [S1, unofficial].
+-*   **FBO[6] (AO Blurred):** Attachment 0: `_glTexAOBlurred` (`GL_R32F`, `GL_NEAREST`) [S1, unofficial].
++### Data Structures
++The pipeline utilizes a series of Frame Buffer Objects (FBOs) with specific attachments [S1, unofficial]:
++
++*   **FBO[0] (Primary Rays/Depth):**
++    *   Attachment 0: `_glTexDepth` (`GL_TEXTURE_2D`, `GL_RGBA32F`, screen resolution, `GL_LINEAR`). Stores depth (`x`), derivative info (`y`), and iteration count (`z`) [S1, unofficial].
++*   **FBO[1] (Hit Pos/Norm):**
++    *   Attachment 0: `_glTexHitPos` (`GL_TEXTURE_2D`, `GL_RGB32F`, screen resolution, `GL_NEAREST`). Stores world-space hit position [S1, unofficial].
++    *   Attachment 1: `_glTexHitNorm` (`GL_TEXTURE_2D`, `GL_RGB32F`, screen resolution, `GL_NEAREST`). Stores world-space hit normal [S1, unofficial].
++*   **FBO[2] (Materials, optional):**
++    *   Attachment 0: `_glTexHitMaterial` (`GL_TEXTURE_2D`, `GL_R8UI`, screen resolution, `GL_NEAREST`). Stores material ID [S1, unofficial].
++*   **FBO[3] (Normal Filtering):**
++    *   Attachment 0: `_glTexHitNormFiltered` (`GL_TEXTURE_2D`, `GL_RGB32F`, screen resolution, `GL_NEAREST`) [S1, unofficial].
++*   **FBO[4] (Shadows):**
++    *   Attachment 0: `_glTexShadows` (`GL_TEXTURE_2D`, `GL_R32F`, screen resolution, `GL_NEAREST`) [S1, unofficial].
++*   **FBO[5] (AO):**
++    *   Attachment 0: `_glTexAO` (`GL_TEXTURE_2D`, `GL_R32F`, screen resolution, `GL_NEAREST`) [S1, unofficial].
++*   **FBO[6] (AO Blurred):**
++    *   Attachment 0: `_glTexAOBlurred` (`GL_TEXTURE_2D`, `GL_R32F`, screen resolution, `GL_NEAREST`) [S1, unofficial].
+ 
+ ### Numbered Steps
+ 
+-1.  **Initialization:** Create `NUM_PASSES` RendererMonitor instances [S1, unofficial]. Initialize the render pipeline (e.g., HDRenderPipeline) [S2, unofficial]. Set render state: `ZWrite Off`, `Cull Off`, `Blend One OneMinusSrcAlpha` [S2, unofficial].
+-2.  **Pass 1: Pos and Norm Computation:**
+-    *   Compile shader `SHADER_POS_NORM_FILE` with `#pragma target 5.0` and `#pragma use_dxc` [S2, unofficial].
+-    *   Bind uniforms: `screenRes`, `depth` (from FBO[0]), `projectionFactor` [S1, unofficial].
+-    *   **Logic:** For each pixel, read depth `val.x` from `depthTex`. If `val.x <= 0`, discard. Compute screen coordinates: `screenCoords = (gl_FragCoord.xy / screenRes) * 2.0 - 1.0` [S1, unofficial]. Compute camera ray `r` using `screenCoords` and inverse projection matrix [S1, unofficial]. Calculate hit position: `hitPosition = r.o + val.x * r.d` [S1, unofficial].
+-    *   **Normal Calculation:** Compute diffuse factor `dif` [S1, unofficial]. If `useDif` is true: `dif = max(0.001, 2.0 * (val.y * projectionFactor) / val.x)` [S1, unofficial]. Apply smoothing: if `dif > MINK (5.0)`, `dif = mix(dif, 1.0, min(dif - MINK, MAXK - MINK) / (MAXK - MINK))` where `MAXK = 20.0` [S1, unofficial]. Compute normal `hitNormal` based on `r.d` and `dif` [S1, unofficial]. Ensure normal orientation: if `dot(n, camDir) > 0`, `n = -n` [S1, unofficial].
+-    *   Write `hitPosition` to `_glTexHitPos` and `hitNormal` to `_glTexHitNorm` [S1, unofficial].
+-3.  **Pass 2: Material Finding (Optional):**
+-    *   Condition: Executed only if `_materialOctree` is not NULL [S1, unofficial].
+-    *   Compile shader `SHADER_MATERIAL_FILE` [S1, unofficial].
+-    *   Bind uniforms: `matOctree` (GL_TEXTURE_BUFFER backed by encoded octree data), `screenRes`, `depth`, `matOctreehalfSide`, `matOctreeCenter`, `matOctreeLevels` [S1, unofficial].
+-    *   **Logic:** For each pixel, if hit position is valid, query the material octree at `hitPosition` to determine material ID [S1, unofficial]. Write ID to `_glTexHitMaterial` [S1, unofficial].
+-4.  **Pass 3: Normal Filtering:**
+-    *   Condition: Executed if `_filterNormals` is true [S1, unofficial].
+-    *   Compile shader `SHADER_NORMAL_FILTER_FILE` [S1, unofficial].
+-    *   Define `MSIZE = _msize` (default 10) [S1, unofficial].
+-    *   Bind uniform: `inputTex` (int, `TEX_NUM_HITNORM`) [S1, unofficial].
+-    *   **Logic:** Apply bilateral or Gaussian filtering to `_glTexHitNorm` using kernel size `MSIZE` and parameter `_sigma` (default 4.0) or `_bsigma` (default 0.4) [S1, unofficial]. Write result to `_glTexHitNormFiltered` [S1, unofficial].
+-5.  **Pass 4: SSAO (Screen Space Ambient Occlusion):**
+-    *   Condition: Executed if `_doSSAO` is true [S1, unofficial].
+-    *   Compile shader `SHADER_SSAO_FILE` [S1, unofficial].
+-    *   Define `NUM_SAMPLES = _ssaoNSamples` (default 32) and `SIDE_NOISE_TEX = _ssaoNoiseTexSide` (default 64) [S1, unofficial].
+-    *   Bind uniforms: `hitPosTex` (from `_glTexHitPos`), `hitNormTex` (from `_glTexHitNormFiltered`), `depthTex`, `noiseTex` [S1, unofficial].
+-    *   **Pre-computation:** Generate `NUM_SAMPLES` 3D samples using `generateSSAOSamples` and upload to `samples` uniform [S1, unofficial]. Generate a noise texture of size `SIDE_NOISE_TEX x SIDE_NOISE_TEX` using `generateNoiseTex` and bind to `noiseTex` [S1, unofficial].
+-    *   **Logic:** For each pixel, read `hitPos` and `hitNorm`. Offset `hitPos` slightly along normal: `hitPos += hitNorm * hitDepth_cellSize.y / 5.0` [S1, unofficial]. Generate tangent space basis (TBN) using noise vector `rvec` [S1, unofficial]. For each sample `i`:
+-        *   Transform sample: `samp = hitPos + (tbn * samples[i]) * radius` [S1, unofficial].
+-        *   Project to screen space: `offset = projMat * viewMat * vec4(samp, 1.0)`, then divide by `w` and map to [0,1] [S1, unofficial].
+-        *   Read depth at projected coordinates.
+-        *   Calculate occlusion: `occlusion += (sampleDepth < length(camPos - samp) ? 1.0 : 0.0) * rangeCheck` [S1, unofficial].
+-        *   `rangeCheck` is 1.0 if `abs(hitDepth_cellSize.x - sampleDepth) < radius`, else 0.0 [S1, unofficial].
+-    *   Result: `outVisibility = 1.0 - occlusion / count` [S1, unofficial]. Write to `_glTexAO` [S1, unofficial].
+-6.  **Pass 5: Blur AO:**
+-    *   Compile shader `SHADER_BLUR_FILE` [S1, unofficial].
+-    *   Bind uniform: `inputTex` (int, `TEX_NUM_AO`) [S1, unofficial].
+-    *   **Logic:** Apply blur filter to `_glTexAO`. Write result to `_glTexAOBlurred` [S1, unofficial].
+-7.  **Pass 6: Shading:**
+-    *   Compile shader `SHADER_SHADING_FILE` [S1, unofficial].
+-    *   Define `USE_MATERIALS` and `NUM_MATERIALS` if materials are enabled [S1, unofficial].
+-    *   Bind uniforms: `screenRes`, `hitPosTex`, `hitNormTex` (filtered), `shadowsTex`, `aoTex` (blurred), `depthTex`, `materialTex` [S1, unofficial]. If materials enabled, upload `materials` array [S1, unofficial].
+-    *   **Logic:**
+-        *   Read `hitPos`, `norm`, `shadow`, `ao` from respective textures [S1, unofficial].
+-        *   If background (`pos == 0,0,0`), return sky color [S1, unofficial].
+-        *   Determine `diffuseColor`: Default `0.8` or from `materialTex` if `useMaterials` [S1, unofficial].
+-        *   Compute final color using lighting model (diffuse, specular, etc.) incorporating `shadow` and `ao` [S1, unofficial].
+-        *   Return `float4(color.rgb, color.a)` with blending [S2, unofficial].
++1.  **Initialization:** Create `NUM_PASSES` `RendererMonitor` instances [S1, unofficial]. Load volumetric data into a GPU buffer (e.g., `ComputeBuffer`) [S2, unofficial].
++2.  **Pass 1: Position and Normal Computation:**
++    *   Compile a fragment shader (`SHADER_POS_NORM_FILE`) with `#pragma target 5.0` [S2, unofficial].
++    *   Set uniforms: `screenRes` (vec2), `depth` (int, `TEX_NUM_DEPTH`), `projectionFactor` (float) [S1, unofficial].
++    *   If materials are enabled, compile a material lookup pass (`SHADER_MATERIAL_FILE`) with uniforms: `matOctree` (int, `TEX_NUM_MATOCTREE`), `screenRes`, `depth`, `matOctreehalfSide`, `matOctreeCenter`, `matOctreeLevels` [S1, unofficial]. Bind the material octree data to `TEX_NUM_MATOCTREE` [S1, unofficial].
++    *   Execute the pass. For each pixel, compute the camera ray using screen coordinates and inverse projection matrix [S1, unofficial].
++    *   Sample depth from `_glTexDepth`. If depth is valid, compute world-space hit position: $\mathbf{p} = \mathbf{o} + t \cdot \mathbf{d}$, where $\mathbf{o}$ is camera origin, $\mathbf{d}$ is ray direction, and $t$ is depth [S1, unofficial].
++    *   Compute normal using finite differences or geometric properties. The derivative factor is calculated as:
++        $$ \text{dif} = \max(0.001, 2.0 \cdot \frac{y_{\text{depth}} \cdot \text{projectionFactor}}{x_{\text{depth}}}) $$
++        where $x_{\text{depth}}$ and $y_{\text{depth}}$ are components of the depth texture texel [S1, unofficial].
++    *   Apply smoothing if $\text{dif} > 5.0$:
++        $$ \text{dif}_{\text{smooth}} = \text{mix}(\text{dif}, 1.0, \min(\frac{\text{dif}-5.0}{20.0-5.0}, 1.0)) $$
++        [S1, unofficial].
++    *   Calculate normal $\mathbf{n}$ based on $\text{dif}$ and ray direction [S1, unofficial]. Ensure normal points towards camera: if $\mathbf{n} \cdot \mathbf{camDir} > 0$, negate $\mathbf{n}$ [S1, unofficial].
++    *   Write position to `_glTexHitPos` and normal to `_glTexHitNorm` [S1, unofficial].
++3.  **Pass 2: Normal Filtering:**
++    *   Compile blur shader (`SHADER_NORMAL_FILTER_FILE`) [S1, unofficial].
++    *   Set uniform: `inputTex` (int, `TEX_NUM_HITNORM`) [S1, unofficial].
++    *   Define kernel size `MSIZE` (default 10) [S1, unofficial].
++    *   Apply bilateral or Gaussian filtering to `_glTexHitNorm` using parameter `_sigma` (default 4.0) or `_bsigma` (default 0.4) [S1, unofficial].
++    *   Write result to `_glTexHitNormFiltered` [S1, unofficial].
++4.  **Pass 3: SSAO (Screen Space Ambient Occlusion):**
++    *   Compile SSAO shader (`SHADER_SSAO_FILE`) [S1, unofficial].
++    *   Set uniforms: `hitPosTex` (`TEX_NUM_HITPOS`), `hitNormTex` (`TEX_NUM_HITNORMFILTERED`), `depthTex` (`TEX_NUM_DEPTH`), `noiseTex` (`TEX_NUM_AONOISE`) [S1, unofficial].
++    *   Generate `NUM_SAMPLES` (default 32) 3D sample vectors using `generateSSAOSamples` and upload to `samples` uniform [S1, unofficial].
++    *   Generate a noise texture of size `_ssaoNoiseTexSide` (default 64) x 64 using `generateNoiseTex` and bind to `TEX_NUM_AONOISE` [S1, unofficial].
++    *   For each pixel, retrieve hit position $\mathbf{p}$ and normal $\mathbf{n}$ [S1, unofficial].
++    *   Construct TBN matrix using random tangent vector from noise texture [S1, unofficial].
++    *   For each sample $i$:
++        *   Compute sample position: $\mathbf{s}_i = \mathbf{p} + (\mathbf{T}\mathbf{s}_i^{\text{local}} + \mathbf{B}\mathbf{s}_i^{\text{local}} + \mathbf{N}\mathbf{s}_i^{\text{local}}) \cdot \text{radius}$ [S1, unofficial].
++        *   Project $\mathbf{s}_i$ to clip space and then to screen space [S1, unofficial].
++        *   Sample depth at projected coordinates [S1, unofficial].
++        *   Calculate occlusion contribution based on depth difference and range check [S1, unofficial].
++    *   Compute final AO value: $V = 1.0 - \frac{\sum \text{occlusion}}{\text{count}}$ [S1, unofficial].
++    *   Write to `_glTexAO` [S1, unofficial].
++5.  **Pass 4: AO Blur:**
++    *   Compile blur shader (`SHADER_BLUR_FILE`) [S1, unofficial].
++    *   Set uniform: `inputTex` (int, `TEX_NUM_AO`) [S1, unofficial].
++    *   Apply Gaussian blur to `_glTexAO` [S1, unofficial].
++    *   Write result to `_glTexAOBlurred` [S1, unofficial].
++6.  **Pass 5: Shading:**
++    *   Compile shading shader (`SHADER_SHADING_FILE`) [S1, unofficial].
++    *   Set uniforms: `screenRes`, `hitPosTex` (`TEX_NUM_HITPOS`), `hitNormTex` (`TEX_NUM_HITNORMFILTERED`), `shadowsTex` (`TEX_NUM_SHADOW`), `aoTex` (`TEX_NUM_AOBLURRED`), `depthTex` (`TEX_NUM_DEPTH`), `materialTex` (`TEX_NUM_MATERIAL`) [S1, unofficial].
++    *   If materials are used, define `USE_MATERIALS` and `NUM_MATERIALS`, and upload material colors to `materials` uniform [S1, unofficial].
++    *   For each pixel:
++        *   Retrieve position, normal, shadow, and AO values [S1, unofficial].
++        *   If material lookup is enabled, fetch material ID from `_glTexHitMaterial` and retrieve diffuse color from `materials` array [S1, unofficial].
++        *   Compute lighting model (diffuse, specular, etc.) using light position, normal, and view direction [S1, unofficial].
++        *   Apply AO and shadow factors [S1, unofficial].
++        *   Output final color [S1, unofficial].
++7.  **Volume Rendering (NanoVolume Pass):**
++    *   In Unity implementation, include `NanoVolumePass.hlsl` [S2, unofficial].
++    *   Call `NanoVolumePass` with camera position and negated view direction [S2, unofficial].
++    *   Return color with alpha blending: `float4(color.rgb, color.a)` [S2, unofficial].
+ 
+ ### Formulas
+-
+-**Projection Factor:**
+-$$ \text{projectionFactor} = \frac{\text{inv\_2tan\_half\_fovy}}{\text{screen\_tolerance}} $$
+-Where:
+-$$ \text{inv\_2tan\_half\_fovy} = \frac{1.0}{2.0 \cdot \tan(0.5 \cdot \text{fovy})} $$
+-$$ \text{fovy} = 60^\circ \quad (\text{converted to radians: } 60 \cdot \frac{\pi}{180}) $$
+-$$ \text{screen\_tolerance} = \frac{1.0}{\text{screenRes}[1]} $$
+-[S1, unofficial]
+-
+-**Diffuse Factor for Normal Estimation:**
+-$$ \text{dif} = \max(0.001, \frac{2.0 \cdot (\text{val.y} \cdot \text{projectionFactor})}{\text{val.x}}) $$
+-[S1, unofficial]
+-
+-**Diffuse Smoothing:**
+-If $\text{dif} > \text{MINK}$ (5.0):
+-$$ \text{dif} = \text{mix}(\text{dif}, 1.0, \frac{\min(\text{dif} - \text{MINK}, \text{MAXK} - \text{MINK})}{\text{MAXK} - \text{MINK}}) $$
+-Where $\text{MAXK} = 20.0$ [S1, unofficial]
+-
+-**SSAO Occlusion:**
+-$$ \text{outVisibility} = 1.0 - \frac{\sum_{i=0}^{\text{NUM\_SAMPLES}-1} (\text{sampleDepth} < \|\text{camPos} - \text{samp}\| ? 1.0 : 0.0) \cdot \text{rangeCheck}}{\text{count}} $$
+-Where $\text{rangeCheck} = 1.0$ if $\|\text{hitDepth\_cellSize.x} - \text{sampleDepth}\| < \text{radius}$, else $0.0$ [S1, unofficial]
++*   **Projection Factor:**
++    $$ \text{projectionFactor} = \frac{\text{inv\_2tan\_half\_fovy}}{\text{screen\_tolerance}} $$
++    where $\text{inv\_2tan\_half\_fovy} = \frac{1.0}{2.0 \cdot \tan(0.5 \cdot \text{fovy})}$ and $\text{screen\_tolerance} = \frac{1.0}{\text{screenRes}[1]}$ [S1, unofficial].
++*   **Camera Ray Direction:**
++    $$ \mathbf{rd} = \text{normalize}(\mathbf{e}' - \mathbf{o}') $$
++    where $\mathbf{o}' = \text{viewMatInv} \cdot [0,0,0,1]^T$ and $\mathbf{e}' = \text{viewMatInv} \cdot [\mathbf{rd}_{\text{clip}}, 1]^T$ [S1, unofficial].
++*   **Normal Derivative Factor:**
++    $$ \text{dif} = \max(0.001, 2.0 \cdot \frac{y_{\text{depth}} \cdot \text{projectionFactor}}{x_{\text{depth}}}) $$
++    [S1, unofficial].
+ 
+ ### Parameters
+-
+-| Parameter | Default Value | Description |
+-| :--- | :--- | :--- |
+-| `_sigma` | 4.0f | Smoothing parameter for normal filtering/SSAO [S1, unofficial] |
+-| `_bsigma` | 0.4f | Bilateral filtering parameter [S1, unofficial] |
+-| `_msize` | 10 | Kernel size for normal filtering (MSIZE) [S1, unofficial] |
+-| `_ssaoRadius` | `eo->getHalfSide(eo->getNLevels()) * 100.0f` | Radius for SSAO sample generation [S1, unofficial] |
+-| `_ssaoNSamples` | 32 | Number of samples for SSAO [S1, unofficial] |
+-| `_ssaoNoiseTexSide` | 64 | Side length of SSAO noise texture [S1, unofficial] |
+-| `_renderMode` | 0 | Render mode selector (0: Shading, 4: Steps) [S1, unofficial] |
+-| `_useDif` | true | Enable diffuse shading [S1, unofficial] |
+-| `_filterNormals` | true | Enable normal filtering pass [S1, unofficial] |
+-| `_doSSAO` | true | Enable SSAO pass [S1, unofficial] |
+-| `_doShadows` | true | Enable shadow pass [S1, unofficial] |
+-| `_useMaterials` | false | Enable material lookup pass [S1, unofficial] |
++*   `_sigma`: 4.0 (Normal filtering/SSAO smoothing) [S1, unofficial].
++*   `_bsigma`: 0.4 (Bilateral filtering/SSAO smoothing) [S1, unofficial].
++*   `_msize`: 10 (Normal filtering kernel size) [S1, unofficial].
++*   `_ssaoRadius`: `eo->getHalfSide(eo->getNLevels()) * 100.0` (SSAO sample radius) [S1, unofficial].
++*   `_ssaoNSamples`: 32 (SSAO sample count) [S1, unofficial].
++*   `_ssaoNoiseTexSide`: 64 (SSAO noise texture side length) [S1, unofficial].
++*   `_renderMode`: 0 (Render mode selector) [S1, unofficial].
++*   `_useDif`: true (Enable diffuse shading) [S1, unofficial].
++*   `_filterNormals`: true (Enable normal filtering) [S1, unofficial].
++*   `_doSSAO`: true (Enable SSAO) [S1, unofficial].
++*   `_doShadows`: true (Enable shadows) [S1, unofficial].
++*   `_useMaterials`: false (Enable material lookup) [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Background Pixels:** Passes must handle pixels with no hit (depth `val.x <= 0` or `hitPos == 0,0,0`) by discarding or returning default values (e.g., sky color) to avoid writing garbage to FBOs [S1, unofficial].
+-*   **Normal Orientation:** Normals must be flipped if they point towards the camera (`dot(n, camDir) > 0`) to ensure consistent lighting [S1, unofficial].
+-*   **Material IDs:** If `useMaterials` is true, invalid material IDs (e.g., `255`) may trigger debug colors (magenta) [S1, unofficial].
+-
+-### Pseudocode
+-
+-```python
+-# Custom Pass Rendering Pipeline Implementation
+-# Note: create_fbo, bind_fbo, bind_texture, set_uniform, render_fullscreen_quad, 
+-# generate_ssao_samples, generate_noise_tex are standard graphics API wrappers [G].
+-
+-def run_custom_pass_pipeline(camera, volume_data, material_octree, screen_res, light_pos):
+-    # 1. Initialization
+-    # Create FBOs with specified formats and GL_NEAREST filtering (FBO[0] uses GL_LINEAR)
+-    fbo_depth = create_fbo(screen_res, GL_RGBA32F, GL_LINEAR)
+-    fbo_hit_pos = create_fbo(screen_res, GL_RGB32F, GL_NEAREST)
+-    fbo_hit_norm = create_fbo(screen_res, GL_RGB32F, GL_NEAREST)
+-    fbo_hit_norm_filtered = create_fbo(screen_res, GL_RGB32F, GL_NEAREST)
+-    fbo_shadows = create_fbo(screen_res, GL_R32F, GL_NEAREST)
+-    fbo_ao = create_fbo(screen_res, GL_R32F, GL_NEAREST)
+-    fbo_ao_blurred = create_fbo(screen_res, GL_R32F, GL_NEAREST)
+-    fbo_material = None
+-    if material_octree is not None:
+-        fbo_material = create_fbo(screen_res, GL_R8UI, GL_NEAREST)
+-
+-    # Calculate projection factor
+-    fovy = 60.0 * 3.14159 / 180.0
+-    inv_2tan_half_fovy = 1.0 / (2.0 * tan(0.5 * fovy))
+-    screen_tolerance = 1.0 / screen_res[1]
+-    projection_factor = inv_2tan_half_fovy / screen_tolerance
+-
+-    # Set render state
+-    set_render_state(z_write=False, cull_off=True, blend_one_minus_src_alpha=True)
+-
+-    # 2. Pass 1: Pos and Norm Computation
+-    bind_fbo(fbo_hit_pos, fbo_hit_norm)
+-    bind_texture(fbo_depth, "depthTex")
+-    set_uniform("screenRes", screen_res)
+-    set_uniform("projectionFactor", projection_factor)
+-    set_uniform("useDif", True)
+-    render_fullscreen_quad(shader_pos_norm)
+-    unbind_fbo()
+-
+-    # 3. Pass 2: Material Finding (Optional)
+-    if material_octree is not None:
+-        bind_fbo(fbo_material)
+-        bind_texture(fbo_hit_pos, "hitPosTex")
+-        bind_texture(fbo_depth, "depthTex")
+-        bind_buffer(material_octree.data, "matOctree")
+-        set_uniform("screenRes", screen_res)
+-        set_uniform("matOctreehalfSide", material_octree.half_side)
+-        set_uniform("matOctreeCenter", material_octree.center)
+-        set_uniform("matOctreeLevels", material_octree.levels)
+-        render_fullscreen_quad(shader_material)
+-        unbind_fbo()
+-
+-    # 4. Pass 3: Normal Filtering
+-    if filter_normals:
+-        bind_fbo(fbo_hit_norm_filtered)
+-        bind_texture(fbo_hit_norm, "inputTex")
+-        set_uniform("MSIZE", msize)
+-        set_uniform("sigma", sigma)
+-        render_fullscreen_quad(shader_normal_filter)
+-        unbind_fbo()
+-
+-    # 5. Pass 4: SSAO
+-    if do_ssao:
+-        # Pre-generate samples and noise
+-        samples = generate_ssao_samples(num_samples)
+-        noise_tex = generate_noise_tex(ssao_noise_tex_side)
+-        
+-        bind_fbo(fbo_ao)
+-        bind_texture(fbo_hit_pos, "hitPosTex")
+-        bind_texture(fbo_hit_norm_filtered, "hitNormTex")
+-        bind_texture(fbo_depth, "depthTex")
+-        bind_texture(noise_tex, "noiseTex")
+-        set_uniform("samples", samples)
+-        set_uniform("radius", ssao_radius)
+-        set_uniform("numSamples", num_samples)
+-        render_fullscreen_quad(shader_ssao)
+-        unbind_fbo()
+-
+-    # 6. Pass 5: Blur AO
+-    bind_fbo(fbo_ao_blurred)
+-    bind_texture(fbo_ao, "inputTex")
+-    render_fullscreen_quad(shader_blur)
+-    unbind_fbo()
+-
+-    # 7. Pass 6: Shading
+-    bind_fbo(primary_color_buffer)
+-    bind_texture(fbo_hit_pos, "hitPosTex")
+-    bind_texture(fbo_hit_norm_filtered, "hitNormTex")
+-    bind_texture(fbo_shadows, "shadowsTex")
+-    bind_texture(fbo_ao_blurred, "aoTex")
+-    bind_texture(fbo_depth, "depthTex")
+-    if fbo_material is not None:
+-        bind_texture(fbo_material, "materialTex")
+-        set_uniform("useMaterials", True)
+-        set_uniform("materials", material_colors)
+-    set_uniform("screenRes", screen_res)
+-    set_uniform("lightPos", light_pos)
+-    set_uniform("camPos", camera.position)
+-    set_uniform("projMatInv", camera.proj_inv)
+-    set_uniform("viewMatInv", camera.view_inv)
+-    render_fullscreen_quad(shader_shading)
+-    unbind_fbo()
+-
+-    return primary_color_buffer
+-```
+-
+-## Subtopics
+-
+-### NanoVolume Pass
+-A specific shader module used within the shading pass to handle volume-specific ray marching or density evaluation, often integrated with the Custom Pass pipeline for hybrid rendering. It sets itself apart by providing a standardized interface for density sampling that decouples volume data access from lighting calculations. Choose it when integrating sparse voxel octrees into a Unity HDRP environment. See [NanoVolume Pass](981-plug-and-play-ray-marching-and-rendering.md).
+-
+-### Octree DDA Traversal
+-The underlying geometric traversal algorithm used in the Pos/Norm pass to find hit positions in the volume octree, utilizing stack-based depth-first search. It sets itself apart by operating directly on DAG/Octree structures without explicit mesh generation. Choose it when rendering massive sparse volumetric datasets where explicit geometry is unavailable. See [Octree DDA Traversal](8936-ray-centric-and-hardware-accelerated-rendering.md).
++*   **Background Pixels:** If depth value is $\le 0$ or hit position is $(0,0,0)$, discard pixel or render sky color [S1, unofficial].
++*   **Normal Orientation:** Normals must be flipped if they point away from the camera ($\mathbf{n} \cdot \mathbf{camDir} > 0$) [S1, unofficial].
++*   **Precision:** Use `GL_RGBA32F` for depth and position buffers to avoid precision loss in large scenes [S1, unofficial].
++*   **Material IDs:** Handle invalid material IDs (e.g., 255) with debug colors [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to screen resolution ($O(W \times H)$) per pass, with a constant number of passes (typically 6) [G]. The cost of the material lookup pass depends on octree depth but is generally fast due to texture buffer access [S1, S2, unofficial].
+-*   **Memory Complexity:** Proportional to screen resolution [G]. Requires 7 FBOs (or 6 if materials are disabled) [S1, unofficial]. For a 1920x1080 screen with 32-bit floats, this is approximately $7 \times 1920 \times 1080 \times 4 \text{ bytes} \approx 58 \text{ MB}$ [S1, unofficial].
+-*   **Performance:** Highly dependent on GPU fill rate due to full-screen passes. SSAO pass is computationally expensive due to multiple texture fetches and matrix multiplications per sample [S1, unofficial].
+-*   **Strengths:** Modular design allows enabling/disabling effects (SSAO, materials) independently. Efficient for large volumes where explicit geometry is not available [G].
+-*   **Limitations:** Screen-space techniques (SSAO, normal estimation from depth) suffer from edge artifacts and holes. Requires high-precision depth buffers for accurate normal estimation [S1, unofficial].
+-*   **When to use:** Real-time visualization of large scientific datasets (NanoVDB) where visual quality (SSAO, shadows) is prioritized over absolute geometric precision [G].
+-*   **When not to use:** Scenes with significant transparency where depth-based normal estimation fails, or when hardware does not support the required shader features (e.g., `#pragma use_dxc`) [S2, unofficial].
++*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of passes (typically 5-7) [S1, S2, unofficial]. Each pass is $O(N)$ for screen-space operations, except volume traversal which depends on tree depth [S1, unofficial].
++*   **Memory Complexity:** $O(N \cdot B)$, where $B$ is the number of bytes per pixel per buffer. With 7 FBOs and 32-bit floats, this is approximately $7 \times 4 \times W \times H$ bytes [S1, unofficial].
++*   **Performance:** Real-time on modern GPUs for resolutions up to 4K, depending on scene complexity and SSAO sample count [S1, S2, unofficial].
++*   **Strengths:** Modular, allows independent tuning of effects (SSAO, shadows, materials), leverages hardware rasterization for depth/position [S1, S2, unofficial].
++*   **Limitations:** High memory bandwidth usage due to multiple FBOs, not suitable for extremely large scenes without tiling, SSAO quality depends on sample count [S1, S2, unofficial].
+ 
+ ## Background
+-The Custom Pass Rendering pipeline originates from the **SSVDAG** (Sparse Stochastic Volume DAG) project and the **NanoVolume** renderer [S1, S2, unofficial]. It was developed to enable real-time rendering of massive volumetric datasets (terabytes in size) by leveraging sparse data structures (DAGs/Octrees) and modern GPU architectures [S1, S2, unofficial]. The pipeline was adapted for Unity's High Definition Render Pipeline (HDRP) to provide a flexible, multi-pass framework for volume visualization [S2, unofficial]. It builds on the principles of stage separation and intermediate storage common to modern rendering pipelines [S1, S2, unofficial].
++Custom Pass Rendering originated from the SSVDAG (Sparse Sparse Voxel DAG) project by ajaspe [S1, unofficial] and was adapted for Unity by andersblomqvist [S2, unofficial]. It is used in real-time volumetric visualization tools, particularly for scientific data and game engines requiring high-quality volumetric effects [S1, S2, unofficial].
+ 
+ ## Sources

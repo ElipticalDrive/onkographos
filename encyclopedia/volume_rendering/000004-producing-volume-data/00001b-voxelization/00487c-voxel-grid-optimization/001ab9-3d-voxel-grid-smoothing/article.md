@@ -1,112 +1,119 @@
 # 3D Voxel Grid Smoothing
-
 Also called: 3D Box Filter, Voxel Grid Smoothing
 
 ## Overview
-3D Voxel Grid Smoothing is a post-processing operation applied to a discrete voxel grid to reduce high-frequency noise and aliasing artifacts, typically prior to isosurface extraction or volume rendering [S1, unofficial]. It functions by applying a separable 3D convolution using a triangular kernel, effectively averaging voxel values with their immediate neighbors [S1, unofficial]. Unlike [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) which focuses on compression, or [Occupancy Voxel Creation](2628-occupancy-voxel-creation.md) which focuses on generation, this method modifies the scalar field's continuity to ensure smoother geometric transitions [S1, unofficial].
+A smoothing operation applied to a 3D voxel grid to reduce noise or aliasing artifacts before isosurface extraction [S1, unofficial]. It uses a separable 3D convolution with a 1D kernel of size 3 [S1, unofficial]. It differs from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by operating on continuous values rather than binary occupancy, and from [Coordinate Grid Generation](1273-coordinate-grid-generation.md) by modifying the scalar field values rather than generating spatial coordinates.
 
 ## How it works
-**Inputs:**
-- `voxelValues`: A 3D array of floating-point values representing the voxel grid.
-- `Resolution`: A 3D vector defining the dimensions of the grid $(W, H, D)$.
-- `SmoothIterations`: An integer specifying the number of sequential filter passes.
-- `stencil`: A 1D array of weights for the convolution kernel.
+**Inputs and Outputs**
+- Input: `voxelValues`, a 3D array of floating-point values representing the scalar field.
+- Input: `Resolution`, a 3D vector defining the grid dimensions $(X, Y, Z)$.
+- Input: `SmoothIterations`, an integer specifying the number of sequential filter passes.
+- Input: `stencil`, a 1D array of weights $\{0.5, 1.0, 0.5\}$ [S1, unofficial].
+- Output: `voxelValues`, the smoothed scalar field in-place.
 
-**Outputs:**
-- `voxelValues`: The smoothed voxel grid, updated in place (via a temporary buffer).
+**Data Structures**
+- `voxelValues`: A 1D buffer of size $X \times Y \times Z$ storing the scalar field.
+- `_voxelValues`: A temporary 1D buffer of the same size and type as `voxelValues`, used to store intermediate results for each iteration [S1, unofficial].
+- `INDEX(x, y, z)`: A macro or function calculating the linear memory index in row-major order (x fastest, z slowest):
+  $$ \text{INDEX}(x, y, z) = x + y \cdot X + z \cdot X \cdot Y $$
+  [S1, unofficial]
 
-**Data Structures:**
-- **Linear Indexing**: The 3D grid is stored in row-major order. The linear index for coordinates $(x, y, z)$ is calculated as:
-  $$ \text{INDEX}(x, y, z) = x + y \cdot W + z \cdot W \cdot H $$
-  where $W$ is `Resolution.values[0]` and $H$ is `Resolution.values[1]` [S1, unofficial].
-- **Temporary Buffer**: A float buffer `_voxelValues` of the same size as `voxelValues` is allocated to store intermediate results for each iteration [S1, unofficial].
+**Steps**
+1. If `SmoothIterations` is 0, terminate immediately [S1, unofficial].
+2. Allocate `_voxelValues` of size $X \cdot Y \cdot Z$ [S1, unofficial].
+3. Loop `iter` from 0 to `SmoothIterations - 1`:
+   4. Initialize `_voxelValues` to zero [G].
+   5. For each voxel $(x, y, z)$ where $0 \le x < X$, $0 \le y < Y$, $0 \le z < Z$:
+      6. Initialize `sum = 0.0` and `weightSum = 0.0` [G].
+      7. For each offset `xx` in $[-1, 0, 1]$:
+         8. For each offset `yy` in $[-1, 0, 1]$:
+            9. For each offset `zz` in $[-1, 0, 1]$:
+               10. Check boundary conditions: if $0 \le x+xx < X$, $0 \le y+yy < Y$, and $0 \le z+zz < Z$:
+                   11. Calculate neighbor index: $idx_{neighbor} = \text{INDEX}(x+xx, y+yy, z+zz)$ [S1, unofficial].
+                   12. Calculate weight: $w = \text{stencil}[xx+1] \cdot \text{stencil}[yy+1] \cdot \text{stencil}[zz+1]$ [S1, unofficial].
+                   13. Accumulate weighted value: $sum \leftarrow sum + \text{voxelValues}[idx_{neighbor}] \cdot w$ [S1, unofficial].
+                   14. Accumulate weight: $weightSum \leftarrow weightSum + w$ [S1, unofficial].
+               15. End if.
+            16. End for.
+         17. End for.
+      18. End for.
+      19. Normalize: $\text{_voxelValues}[\text{INDEX}(x, y, z)] = sum / weightSum$ [S1, unofficial].
+   20. End for.
+   21. Copy `_voxelValues` back to `voxelValues` using `memcpy` [S1, unofficial].
+4. End loop.
 
-**Parameters:**
-- **Stencil Weights**: The default 1D kernel is $\{0.5, 1.0, 0.5\}$, representing a triangular filter [S1, unofficial].
-- **Iterations**: If `SmoothIterations` is 0, the operation is skipped [S1, unofficial].
+**Parameters**
+- `stencil`: The 1D convolution kernel weights, defined as $\{0.5, 1.0, 0.5\}$ [S1, unofficial]. This corresponds to a triangular filter in 1D [S1, unofficial].
+- `SmoothIterations`: The number of times the smoothing filter is applied sequentially. If 0, smoothing is skipped [S1, unofficial].
 
-**Algorithm Steps:**
-1. Allocate `_voxelValues` with the same dimensions as `voxelValues`.
-2. Loop `i` from 0 to `SmoothIterations.value - 1`:
-   1. Initialize `_voxelValues` to zero.
-   2. Initialize `weightSum` to 0.0.
-   3. Iterate through every voxel $(x, y, z)$ in the grid bounds ($0 \le x < W, 0 \le y < H, 0 \le z < D$):
-      1. Initialize `currentSum` to 0.0.
-      2. Iterate through neighbor offsets $(xx, yy, zz)$ where $xx, yy, zz \in \{-1, 0, 1\}$:
-         1. Check boundary conditions: if $0 \le x+xx < W$, $0 \le y+yy < H$, and $0 \le z+zz < D$:
-            1. Calculate neighbor index: $idx_{neighbor} = \text{INDEX}(x+xx, y+yy, z+zz)$.
-            2. Calculate weight: $w = \text{stencil}[xx+1] \cdot \text{stencil}[yy+1] \cdot \text{stencil}[zz+1]$.
-            3. Accumulate value: `currentSum` += `voxelValues`[$idx_{neighbor}$] $\cdot w$.
-            4. Accumulate weight: `weightSum` += $w$.
-      3. Normalize: `_voxelValues`[$\text{INDEX}(x, y, z)$] = `currentSum` / `weightSum`.
-   4. Copy `_voxelValues` back to `voxelValues` using `memcpy` or equivalent bulk copy operation.
+**Edge Cases and Pitfalls**
+- Boundary handling: Neighbors outside the grid are excluded from the sum and weight calculation, effectively using zero-padding or clamping implicitly by only summing valid neighbors [S1, unofficial]. The normalization by `weightSum` handles varying numbers of neighbors at edges and corners, ensuring correct averaging even when fewer than 27 neighbors are available [S1, unofficial].
 
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def smooth_voxel_grid(voxel_values, resolution, smooth_iterations, stencil):
     """
-    Applies 3D voxel grid smoothing using a separable triangular filter.
+    Applies 3D voxel grid smoothing using a separable convolution.
     
     Args:
-        voxel_values: 1D list or array of floats, size W*H*D.
-        resolution: Tuple (W, H, D).
-        smooth_iterations: Integer > 0.
-        stencil: List of 3 floats [w_-1, w_0, w_1].
-        
-    Returns:
-        Smoothed voxel_values array.
+        voxel_values (list[float]): 1D array of size X*Y*Z.
+        resolution (tuple[int, int, int]): (X, Y, Z) dimensions.
+        smooth_iterations (int): Number of passes.
+        stencil (list[float]): 1D kernel weights of size 3.
     """
-    W, H, D = resolution
-    size = W * H * D
+    X, Y, Z = resolution
+    size = X * Y * Z
+    
+    if smooth_iterations == 0:
+        return voxel_values
+    
+    # Allocate temporary buffer
     _voxel_values = [0.0] * size
     
-    # Precompute stencil products for all 27 neighbors to avoid repeated multiplication
-    # stencil_indices map (dx, dy, dz) to stencil index (0, 1, 2)
-    stencil_weights = {}
-    for dx in [-1, 0, 1]:
-        for dy in [-1, 0, 1]:
-            for dz in [-1, 0, 1]:
-                w = stencil[dx + 1] * stencil[dy + 1] * stencil[dz + 1]
-                stencil_weights[(dx, dy, dz)] = w
-
     for _ in range(smooth_iterations):
         # Reset temporary buffer
         for i in range(size):
             _voxel_values[i] = 0.0
             
-        # Process each voxel
-        for z in range(D):
-            for y in range(H):
-                for x in range(W):
-                    current_sum = 0.0
+        for z in range(Z):
+            for y in range(Y):
+                for x in range(X):
+                    sum_val = 0.0
                     weight_sum = 0.0
                     
                     # Iterate over 3x3x3 neighborhood
-                    for dx in [-1, 0, 1]:
-                        for dy in [-1, 0, 1]:
-                            for dz in [-1, 0, 1]:
-                                nx, ny, nz = x + dx, y + dy, z + dz
+                    for xx in [-1, 0, 1]:
+                        for yy in [-1, 0, 1]:
+                            for zz in [-1, 0, 1]:
+                                nx = x + xx
+                                ny = y + yy
+                                nz = z + zz
                                 
                                 # Boundary check
-                                if 0 <= nx < W and 0 <= ny < H and 0 <= nz < D:
-                                    neighbor_idx = nx + ny * W + nz * W * H
-                                    w = stencil_weights[(dx, dy, dz)]
-                                    current_sum += voxel_values[neighbor_idx] * w
+                                if 0 <= nx < X and 0 <= ny < Y and 0 <= nz < Z:
+                                    # Calculate neighbor index
+                                    idx_neighbor = nx + ny * X + nz * X * Y
+                                    
+                                    # Calculate weight
+                                    w = stencil[xx + 1] * stencil[yy + 1] * stencil[zz + 1]
+                                    
+                                    # Accumulate
+                                    sum_val += voxel_values[idx_neighbor] * w
                                     weight_sum += w
                     
-                    # Normalize by valid weight sum (handles boundaries)
+                    # Normalize and store
                     if weight_sum > 0:
-                        idx = x + y * W + z * W * H
-                        _voxel_values[idx] = current_sum / weight_sum
+                        idx_current = x + y * X + z * X * Y
+                        _voxel_values[idx_current] = sum_val / weight_sum
                     else:
-                        # Should not happen if stencil has non-zero center, 
-                        # but guard against empty grid or zero stencil
-                        idx = x + y * W + z * W * H
-                        _voxel_values[idx] = 0.0
-
-        # Copy back to main buffer
+                        # Should not happen if stencil weights are positive and at least center is valid
+                        idx_current = x + y * X + z * X * Y
+                        _voxel_values[idx_current] = 0.0
+                        
+        # Copy back to original buffer
         for i in range(size):
             voxel_values[i] = _voxel_values[i]
             
@@ -115,37 +122,25 @@ def smooth_voxel_grid(voxel_values, resolution, smooth_iterations, stencil):
 
 ## Subtopics
 
+### [NxNxN Cube Filter for Gradient Smoothing](864-nxnxn-cube-filter-for-gradient-smoothing.md)
+A filtering step applied to gradients to smooth them out and prevent high irregularities. It averages the surrounding N^3 samples.
+
 ### [3D Box Filter for Voxel Averaging](1513-3d-box-filter-for-voxel-averaging.md)
-A 3D convolution operation using a uniform box filter to average voxel values over a receptive field, typically used for smoothing or downsampling the grid. It generalizes the parent method's fixed size 3 kernel to an arbitrary odd-sized cubic kernel for configurable smoothing intensity. Choose this when uniform averaging is preferred over the triangular weighting of the standard smoothing filter, or when downsampling is required.
+A 3D convolution operation using a uniform box filter to average voxel values over a receptive field, typically used for smoothing or downsampling the grid. It generalizes the parent method's fixed size 3 kernel to an arbitrary odd-sized cubic kernel for configurable smoothing intensity.
 
-### NxNxN Cube Filter for Gradient Smoothing
-A filtering step applied to gradients to smooth them out and prevent high irregularities. It averages the surrounding $N^3$ samples [S2, unofficial]. It differs from scalar smoothing by operating on vector fields (gradients) and includes a normalization step for the resulting vector [S2, unofficial]. Choose this when smoothing gradient data for transfer functions or normal estimation rather than scalar density. Default filter size is 3 [S2, unofficial].
-
-### Iterative Convolution and Thresholding for Noise Removal
-Removes scattered noise voxels from the grid by iteratively applying a convolution with a filled circle kernel and zeroing out voxels below a threshold [S3, unofficial]. It differs from standard smoothing by combining convolution with aggressive thresholding to eliminate isolated noise artifacts rather than just blurring them [S3, unofficial]. Choose this for cleaning sparse or noisy occupancy/alpha channels. Default parameters: kernel size 3, radius 1.0, threshold 2, 20 iterations [S3, unofficial].
+### [Iterative Convolution and Thresholding for Noise Removal](1516-iterative-convolution-and-thresholding-for-noise-removal.md)
+This method removes scattered noise voxels from a 3D voxel grid by iteratively applying a convolution with a filled circle kernel and zeroing out voxels below a threshold. It is designed to clean up stray artifacts that persist after initial voxelization or smoothing, distinct from the broader smoothing operations of [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) which primarily address aliasing. Unlike [NxNxN Cube Filter for Gradient Smoothing](864-nxnxn-cube-filter-for-gradient-smoothing.md) which preserves gradients, or [3D Box Filter for Voxel Averaging](1513-3d-box-filter-for-voxel-averaging.md) which averages values, this method acts as a binary cleaner, aggressively removing low-intensity noise while preserving significant signal.
 
 ## Operating characteristics
-**Time Complexity:** $O(I \cdot W \cdot H \cdot D \cdot K^3)$, where $I$ is the number of iterations, $W,H,D$ are grid dimensions, and $K$ is the kernel size (3 for standard smoothing, $N$ for variants). The separable nature of the standard triangular filter allows optimization to $O(I \cdot W \cdot H \cdot D \cdot K)$ if implemented as three 1D passes, though the provided implementation uses the direct 3D convolution approach [S1, unofficial].
-
-**Memory Complexity:** $O(W \cdot H \cdot D)$ for the input/output grid plus $O(W \cdot H \cdot D)$ for the temporary buffer `_voxelValues` [S1, unofficial].
-
-**Strengths:**
-- Simple to implement and highly parallelizable.
-- Effective at removing high-frequency noise and aliasing.
-- Boundary handling via dynamic weight normalization prevents edge artifacts caused by zero-padding [S1, unofficial].
-
-**Limitations:**
-- Blurs sharp features and reduces resolution.
-- Iterative application increases computational cost linearly.
-- Not suitable for preserving fine geometric details or sharp edges without additional edge-preserving techniques.
-
-**When to use:** Pre-processing step before isosurface extraction (e.g., Marching Cubes) to ensure smooth surfaces.
-**When not to use:** When sharp boundaries are critical, or when real-time performance is constrained and the grid is already clean.
+- Time Complexity: $O(I \cdot N)$, where $I$ is the number of iterations and $N$ is the total number of voxels ($X \cdot Y \cdot Z$). Each voxel processes a constant 27 neighbors.
+- Memory Complexity: $O(N)$ for the temporary buffer `_voxelValues` [S1, unofficial].
+- Strengths: Simple to implement; effectively reduces high-frequency noise and aliasing artifacts [S1, unofficial].
+- Limitations: Blurs sharp features; boundary handling requires careful normalization [S1, unofficial].
+- When to use: Before isosurface extraction to clean up voxelized data [S1, unofficial].
+- When not to use: When preserving sharp edges is critical without subsequent sharpening steps.
 
 ## Background
-The method originates from implementations of isosurface extraction pipelines, specifically those utilizing voxel grids for implicit surface representation [S1, unofficial]. The triangular kernel $\{0.5, 1.0, 0.5\}$ is a standard choice for smoothing as it approximates a Gaussian blur with minimal computational overhead [S1, unofficial]. Variants for gradient smoothing and noise removal have been documented in volume rendering tutorials and open-source implementations for plenoptic and neural voxel representations [S2, unofficial][S3, unofficial].
+Origin: The method is derived from the `IsoSurfaceExtraction` project by Michael Kazhdan [S1, unofficial]. It is part of a broader family of voxel grid optimization techniques [S1, unofficial].
 
 ## Sources
 [S1] mkazhdan/IsoSurfaceExtraction, https://github.com/mkazhdan/IsoSurfaceExtraction, fetched 2026-10-27 (unofficial)
-[S2] Volume Rendering 102: Transfer Functions, http://graphicsrunner.blogspot.com/2009/01/volume-rendering-102-transfer-functions.html, fetched 2026-10-28 (unofficial)
-[S3] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)

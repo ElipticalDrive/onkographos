@@ -3,187 +3,169 @@
 Also called: PERF training loop, collaborative RGBD inpainting and progressive inpainting-and-erasing
 
 ## Overview
-Progressive View Synthesis Training (PERF) is a training strategy for Panoramic Neural Radiance Fields (NeRF) that synthesizes novel views from a single input panorama by progressively adding reference views to improve geometry and semantic coherence in occluded regions [S1]. It distinguishes itself from sibling methods like DS-NeRF, DietNeRF, and SinNeRF by replacing generic semantic regularization or depth constraints with collaborative RGBD inpainting and a progressive inpainting-and-erasing strategy, which prevents the "foggy effects" and redundant geometry artifacts common in single-panorama NeRF optimization [S1].
+Progressive View Synthesis Training (PERF) is a training strategy for Panoramic Neural Radiance Fields (NeRF) that synthesizes novel views from a single input panorama by iteratively expanding the set of reference views [S1]. It solves the problem of synthesizing occluded regions in panoramic scenes, where standard NeRF methods suffer from "foggy effects" or "floating" densities due to lack of semantic and geometric constraints [S1]. Unlike sibling methods that rely on semantic regularization via CLIP or DINO features [S1], PERF distinguishes itself by using collaborative RGBD inpainting and a progressive inpainting-and-erasing strategy to generate high-quality pseudo-ground truth for occluded areas, ensuring semantic coherence and valid surface convergence [S1].
 
 ## How it works
-**Inputs and Outputs:**
-- **Input:** A single input RGB-D panorama.
-- **Output:** A trained NeRF model capable of synthesizing novel panoramic views with coherent geometry and semantics in occluded regions.
+The method operates in an iterative loop that alternates between sampling new camera poses, generating inpainted reference views for those poses, and retraining the NeRF representation with the expanded dataset.
 
-**Data Structures:**
-- **NeRF Representation:** Instant-NGP [S1].
-    - Hash table size: $2^{19}$ [S1].
-    - Levels of feature vectors: 16 [S1].
-    - Channel size per level: 2 [S1].
-- **Inpainting Model:** Pre-trained Stable Diffusion 2 [S1].
-- **Optimizer:** Adam [S1].
+### Inputs and Outputs
+*   **Input:** A single input RGB-D panorama (color image and depth map).
+*   **Output:** A trained NeRF model capable of rendering novel views (RGB and depth) from arbitrary camera poses within the scene.
 
-**Parameters:**
-- Initial training iterations: 10,000 [S1].
-- Number of progressively sampled new positions: 32 [S1].
-- Training iterations per new view: 2,000 [S1].
-- Supervision iterations using only the new view: 100 [S1].
-- Supervision iterations using all views: 1,900 [S1].
-- Initial learning rate: $10^{-3}$ [S1].
-- Decayed learning rate: $10^{-4}$ [S1].
-- Number of rays sampled per iteration: 2,048 [S1].
-- Distortion loss weight ($\lambda_{dist}$): 1 [S1].
+### Data Structures
+The implementation uses the Instant-NGP representation via the NeRFAcc framework [S1].
+*   **Hash Grid:** A hash table of size $2^{19}$ with 16 levels of feature vectors, each having a channel size of 2 [S1].
+*   **Ray Buffer:** At each iteration, 2048 rays are sampled. Each ray is associated with a ground-truth or inpainted color value and a depth value [S1].
 
-**Steps:**
+### Parameters
+*   **Initial Training Iterations:** 10,000 [S1].
+*   **Number of New Views:** 32 positions are progressively sampled [S1].
+*   **Sampling Distance:** New positions are sampled with gradually increased distance from the original reference panorama view position [S1].
+*   **Training Iterations per New View:** 2,000 [S1].
+*   **Supervision Split:**
+    *   First 100 iterations: Supervision uses only the new reference view [S1].
+    *   Remaining 1,900 iterations: Supervision uses all accumulated reference views [S1].
+*   **Optimizer:** Adam [S1].
+*   **Learning Rate Schedule:**
+    *   Initial learning rate: $10^{-3}$ [S1].
+    *   Decayed learning rate: $10^{-4}$ [S1].
+    *   Strategy: Cosine annealing for each learning stage of a newly sampled view [S1].
+*   **Rays per Iteration:** 2,048 [S1].
+*   **Distortion Loss Weight ($\lambda_{dist}$):** 1 [S1].
+*   **Inpainting Model:** Pre-trained Stable Diffusion 2 [S1].
 
-1.  **Initial Training:** Train the NeRF model using only the single input panorama for 10,000 iterations [S1].
-2.  **View Sampling:** Progressively sample 32 new camera positions with gradually increased distance from the original reference panorama view position [S1].
-3.  **Iterative View Addition:** For each newly added reference view, perform the following sub-steps:
-    a.  **Collaborative RGBD Inpainting:** Generate ground-truth or inpainted colors and depth values for the new view.
-        -   *Pitfall Handling:* Since inpainting models (Stable Diffusion 2) are trained on perspective FOV images, direct application to panoramas causes distortion [S1].
-        -   *Procedure:* Project masked regions of the panorama to perspective views, apply inpainting, and project the inpainted region back to the panorama [S1].
-    b.  **Progressive Inpainting-and-Erasing:** Apply this strategy to avoid geometry conflicts arising from different views, which otherwise lead to wrong redundant geometry and degraded RGB quality [S1].
-    c.  **NeRF Optimization:** Continue NeRF training for 2,000 iterations using the Adam optimizer [S1].
-        -   **Learning Rate Schedule:** For each learning stage of a newly sampled view, set the initial learning rate to $10^{-3}$ and decay to $10^{-4}$ using cosine annealing [S1].
-        -   **Supervision Strategy:**
-            -   First 100 iterations: Supervise using *only* the new reference view [S1].
-            -   Remaining 1,900 iterations: Supervise using *all* reference views (original + newly added) [S1].
-        -   **Ray Sampling:** At each iteration, randomly sample 2,048 rays with ground-truth or inpainted colors and depth values [S1].
-        -   **Regularization:** Apply distortion loss with weight $\lambda_{dist} = 1$ to encourage volume densities to converge to a valid surface instead of producing "foggy effects" or "floating" densities [S1].
-4.  **Repeat:** Repeat Step 3 for all 32 sampled positions [S1].
+### Steps
+1.  **Initial Training:** Train the NeRF model using the single input panorama for 10,000 iterations [S1].
+2.  **View Sampling:** Progressively sample 32 new camera positions. The distance of these positions from the original reference view increases gradually [S1].
+3.  **Collaborative RGBD Inpainting:** For each newly added reference view position:
+    *   Render the current NeRF to identify occluded or unreliable regions.
+    *   Project the masked regions of the panorama to perspective views to avoid distortion artifacts inherent in applying perspective-trained inpainting models directly to panoramas [S1].
+    *   Apply the pre-trained Stable Diffusion 2 model to inpaint the color and depth information in these perspective views [S1].
+    *   Project the inpainted regions back to the panorama format [S1].
+4.  **Progressive Inpainting-and-Erasing:** Apply the inpainting-and-erasing strategy to resolve geometry conflicts that arise from different views, preventing wrong redundant geometry and degraded RGB quality [S1].
+5.  **Incremental Training:** Continue NeRF training for 2,000 iterations with the new view:
+    *   **Phase 1 (Iterations 1–100):** Use only the new reference view (and its inpainted data) for supervision [S1].
+    *   **Phase 2 (Iterations 101–2000):** Supervise the NeRF using all accumulated reference views (original + newly added) [S1].
+6.  **Ray Sampling and Loss:** At each iteration, randomly sample 2,048 rays. Compute the loss using the ground-truth or inpainted colors and depth values. Include the distortion loss with weight $\lambda_{dist} = 1$ to encourage volume densities to converge to a valid surface rather than "floating" everywhere [S1].
+7.  **Repeat:** Repeat steps 2–6 for all 32 new views.
 
-**Pseudocode:**
+### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def progressive_view_synthesis_training(single_panorama_rgb, single_panorama_depth):
+def progressive_view_synthesis_training(input_panorama_rgb, input_panorama_depth):
     """
     Implements the PERF training loop for a single panorama.
-    
-    Args:
-        single_panorama_rgb: RGB data of the input panorama.
-        single_panorama_depth: Depth data of the input panorama.
-        
-    Returns:
-        trained_nerf: The optimized NeRF model.
     """
-    # Initialize NeRF with Instant-NGP settings
+    # Initialize NeRF with Instant-NGP representation
     # Hash table size: 2^19, 16 levels, channel size 2
-    nerf = InstantNGPNeRF(hash_size=2**19, levels=16, channel_size=2)
+    nerf = InstantNGPNeRF()
     
-    # Initialize Adam optimizer
+    # Initialize optimizer (Adam)
     optimizer = Adam(nerf.parameters(), lr=1e-3)
     
-    # Initialize list of reference views
-    # Each view contains RGB and Depth
-    reference_views = [(single_panorama_rgb, single_panorama_depth)]
-    
-    # Step 1: Initial training with single panorama
-    for iteration in range(10000):
-        rays = sample_rays(2048, reference_views[0])
-        loss = compute_loss(nerf, rays, reference_views[0])
+    # Step 1: Initial Training
+    # Train for 10,000 iterations using only the single input panorama
+    for i in range(10000):
+        rays = sample_rays(2048, input_panorama_rgb, input_panorama_depth)
+        colors, depths = nerf.render(rays)
+        loss = compute_loss(colors, depths, rays.gt_color, rays.gt_depth, lambda_dist=1.0)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
-    # Step 2 & 3: Progressive view addition
-    num_new_views = 32
-    for view_idx in range(num_new_views):
-        # Sample new position with gradually increased distance
-        new_camera_pose = sample_new_position(reference_views[0].camera_pose, view_idx, num_new_views)
+    # Step 2: Progressive View Sampling
+    # Sample 32 new positions with gradually increased distance from original view
+    new_view_positions = sample_positions(count=32, base_position=input_panorama.camera_pose, distance_schedule='gradual_increase')
+    
+    for view_pos in new_view_positions:
+        # Step 3: Collaborative RGBD Inpainting
+        # Render current NeRF to find occluded/masked regions
+        rendered_rgb, rendered_depth, mask = nerf.render_view(view_pos)
         
-        # Generate new view via collaborative RGBD inpainting
-        # Project masked regions to perspective, inpaint, project back
-        new_rgb, new_depth = collaborative_rgb_d_inpainting(
-            reference_views, 
-            new_camera_pose, 
-            inpainting_model="StableDiffusion2"
-        )
+        # Project masked regions to perspective views to handle distortion
+        perspective_patches = project_to_perspective(mask, rendered_rgb, rendered_depth)
         
-        # Apply progressive inpainting-and-erasing to avoid geometry conflicts
-        new_rgb, new_depth = progressive_inpainting_and_erasing(
-            reference_views, 
-            new_rgb, 
-            new_depth
-        )
+        # Inpaint using Stable Diffusion 2
+        inpainted_patches = stable_diffusion_2_inpaint(perspective_patches)
         
-        # Add new view to reference views
-        reference_views.append((new_rgb, new_depth))
+        # Project back to panorama
+        inpainted_rgb, inpainted_depth = project_back_to_perspective(inpainted_patches, mask)
         
-        # Step 3c: NeRF Optimization for the new view
-        # Learning rate schedule: cosine annealing from 1e-3 to 1e-4
-        lr_scheduler = CosineAnnealingLR(optimizer, T_max=2000, eta_min=1e-4)
+        # Step 4: Progressive Inpainting-and-Erasing
+        # Apply strategy to avoid geometry conflicts
+        apply_inpainting_and_erasing_strategy(inpainted_rgb, inpainted_depth)
         
-        for iteration in range(2000):
-            # Sample rays from all current reference views
-            rays = sample_rays(2048, reference_views)
+        # Create new reference view data
+        new_view_data = {
+            'camera_pose': view_pos,
+            'rgb': inpainted_rgb,
+            'depth': inpainted_depth
+        }
+        
+        # Add to accumulated reference views
+        reference_views.append(new_view_data)
+        
+        # Step 5: Incremental Training
+        # Train for 2,000 iterations per new view
+        # Learning rate schedule: Cosine annealing from 1e-3 to 1e-4
+        scheduler = CosineAnnealingLR(optimizer, T_max=2000, eta_min=1e-4)
+        
+        for j in range(2000):
+            # Sample rays from all accumulated reference views
+            # Use ground-truth or inpainted colors and depths
+            rays = sample_rays_from_views(2048, reference_views)
+            
+            colors, depths = nerf.render(rays)
             
             # Compute loss with distortion regularization
-            # lambda_dist = 1
-            loss = compute_loss(nerf, rays, reference_views, lambda_dist=1.0)
+            loss = compute_loss(colors, depths, rays.gt_color, rays.gt_depth, lambda_dist=1.0)
             
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
-            # Update learning rate
-            lr_scheduler.step()
-            
-        # Note: Supervision strategy is implicit in sample_rays and compute_loss
-        # First 100 iterations: rays sampled only from the new view (reference_views[-1])
-        # Remaining 1900 iterations: rays sampled from all reference_views
-        # This logic is handled within sample_rays based on iteration count
-        if iteration < 100:
-            rays = sample_rays(2048, [reference_views[-1]])
-        else:
-            rays = sample_rays(2048, reference_views)
+            scheduler.step()
             
     return nerf
 
-def sample_rays(num_rays, views):
+def compute_loss(rendered_colors, rendered_depths, gt_colors, gt_depths, lambda_dist):
     """
-    Randomly samples rays from the given views.
+    Computes the training loss including color, depth, and distortion terms.
     """
-    rays = []
-    for view in views:
-        # Sample rays from view's camera pose
-        # Use ground-truth or inpainted colors and depth for supervision
-        ray = generate_ray(view.camera_pose, view.rgb, view.depth)
-        rays.append(ray)
-    return random_sample(rays, num_rays)
-
-def compute_loss(nerf, rays, views, lambda_dist=1.0):
-    """
-    Computes the training loss.
-    """
-    rendered_colors, rendered_depths = nerf.render(rays)
+    # Color loss (e.g., L1 or L2)
+    color_loss = mean_squared_error(rendered_colors, gt_colors)
     
-    # Supervision loss against ground-truth or inpainted values
-    gt_colors, gt_depths = get_ground_truth(rays, views)
-    color_loss = mse_loss(rendered_colors, gt_colors)
-    depth_loss = mse_loss(rendered_depths, gt_depths)
+    # Depth loss (e.g., L1)
+    depth_loss = mean_absolute_error(rendered_depths, gt_depths)
     
-    # Distortion loss to prevent foggy effects
-    distortion_loss = compute_distortion_loss(nerf, rays)
+    # Distortion loss to prevent floating densities
+    # Weight lambda_dist = 1
+    distortion_loss = compute_distortion_loss(rendered_depths, lambda_dist)
     
-    total_loss = color_loss + depth_loss + lambda_dist * distortion_loss
+    total_loss = color_loss + depth_loss + distortion_loss
     return total_loss
 ```
 
+### Edge Cases and Pitfalls
+*   **Panorama Distortion:** Inpainting models trained on perspective FOV cannot be directly applied to panoramas due to distortion. The method must project masked regions to perspective views, inpaint, and project back [S1].
+*   **Foggy Effects/Floating Densities:** NeRF can produce invalid surfaces ("foggy effects") if not regularized. This is mitigated by using distortion loss with weight $\lambda_{dist} = 1$ [S1].
+*   **Geometry Conflicts:** Without the inpainting-and-erasing strategy, geometry conflicts arise from different views, leading to wrong redundant geometry and degraded RGB quality [S1].
+
 ## Operating characteristics
-- **Time Complexity:** Training a scene takes approximately 2 hours on a single Nvidia V100 GPU with 32G memory [S1].
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** PERF achieves the best performance in terms of PSNR, SSIM, and LPIPS on the Replica dataset compared to DS-NeRF, DietNeRF, SinNeRF, 360FusionNeRF, and Omni-NeRF [S1]. In a user study with 29 users, ~81% preferred PERF results over the other methods [S1].
-- **Strengths:**
-    - Effectively inpaints invisible/occluded regions, achieving significant improvement on masked PSNR [S1].
-    - Avoids foggy artifacts and redundant geometry through inpainting-and-erasing and distortion loss [S1].
-    - Provides better semantic coherence than methods relying on CLIP or DINO ViT regularization [S1].
-- **Limitations:**
-    - Relies on pre-trained inpainting models (Stable Diffusion 2), which may introduce artifacts if not properly projected [S1].
-    - Performance on real-world "in-the-wild" datasets may vary, though it shows improvement over baselines [S1].
-- **When to use:** Single panorama novel view synthesis, 3D virtual tours, VR games/conferences, filmmaking, text-to-3D, and 3D scene stylization [S1].
-- **When not to use:** When multiple input views are available (other methods may be more efficient), or when high semantic coherence in occluded regions is not required.
+*   **Time Complexity:** Training a scene takes approximately 2 hours on a single Nvidia V100 GPU with 32G memory [S1].
+*   **Memory Complexity:** The hash table size is $2^{19}$ with 16 levels of feature vectors of channel size 2 [S1].
+*   **Performance:** On the Replica dataset, PERF achieves a PSNR of 23.49, SSIM of 0.838, and LPIPS of 0.244, outperforming DS-NeRF, DietNeRF, SinNeRF, 360FusionNeRF, and Omni-NeRF [S1].
+*   **Strengths:** Superior performance in synthesizing occluded regions with semantic coherence; avoids foggy artifacts and floating densities; better visual quality compared to semantic regularization methods [S1].
+*   **Limitations:** Relies on a pre-trained inpainting model (Stable Diffusion 2), which may introduce artifacts if the inpainting is inaccurate; requires careful handling of panorama distortion [S1].
+*   **When to Use:** Single panorama novel view synthesis, 3D virtual tours, VR games/conferences, filmmaking, text-to-3D, and 3D scene stylization [S1].
+*   **When Not to Use:** When high-quality multi-view input is available (other methods may be more efficient); when computational resources are extremely limited (2 hours on V100 is non-trivial); when semantic coherence is less critical than geometric accuracy from direct observations.
 
 ## Background
-- **Origin:** PERF was introduced in the paper "PERF: Panoramic Neural Radiance Field From a Single Panorama" [S1].
-- **History and Development:** The method addresses the limitations of existing NeRF techniques in single-panorama settings, such as DS-NeRF's inability to synthesize occluded regions well, DietNeRF's and SinNeRF's lack of semantic coherence, and Omni-NeRF's blurred results due to lack of geometric regularization [S1]. It integrates Instant-NGP for efficient representation and Stable Diffusion 2 for semantic inpainting [S1].
-- **Usage:** Used for single panorama novel view synthesis and extended to applications like text-to-3D and 3D scene stylization [S1].
+*   **Origin:** Proposed in the paper "PERF: Panoramic Neural Radiance Field From a Single Panorama" [S1].
+*   **History:** Developed to address the limitations of existing NeRF methods in handling single-panorama inputs, particularly in occluded regions where standard NeRF fails to infer content semantically [S1].
+*   **Usage:** Used in applications such as 3D virtual tours, VR games/conferences, filmmaking, text-to-3D, and 3D scene stylization [S1].
 
 ## Sources
 [S1] PERF: Panoramic Neural Radiance Field From a Single Panorama, https://doi.org/10.1109/tpami.2024.3387307, fetched 2026-10-26

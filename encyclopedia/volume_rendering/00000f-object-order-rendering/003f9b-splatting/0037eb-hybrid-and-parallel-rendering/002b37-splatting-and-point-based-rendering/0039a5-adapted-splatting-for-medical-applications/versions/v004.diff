@@ -1,0 +1,87 @@
+--- v003.md
++++ v004.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Adapted Splatting is a volume rendering method that optimizes standard splatting by culling voxels invisible to the observer and using a compressed data format to reduce memory usage for free voxels [S1, unofficial]. It solves the high computational cost of processing all voxels in a model and the large memory footprint of storing sparse volumetric data [S1, unofficial]. It sets itself apart from standard splatting by introducing a two-pass optimization: a depth-buffer-based occlusion culling pass that identifies only visible voxels, followed by rendering only those selected voxels, while simultaneously employing a run-length-like encoding for storage that groups consecutive free voxels [S1, unofficial]. It builds on [Splatting and Point-based Rendering](4975-splatting-and-point-based-rendering.md) and differs from siblings such as [Ray-Box Intersection via Quad Rasterization](2253-ray-box-intersection-via-quad-rasterization.md), [Sparse Voxel Octree Rendering via Square Splats](2993-sparse-voxel-octree-rendering-via-square-splats.md), [Voxel Point Sprite Rendering](4307-voxel-point-sprite-rendering.md), and [Differentiable Point-Based Radiance Fields](7366-differentiable-point-based-radiance-fields.md) by relying on explicit voxel culling and a custom segment-based storage layout rather than hierarchical traversal or differentiable field representations.
++Adapted Splatting is a volume rendering method that optimizes standard splatting by culling voxels invisible to the observer and using a compressed data format to reduce memory usage for free voxels [S1, unofficial]. It solves the high computational cost of processing all voxels in a model and the large memory footprint of storing sparse volumetric data [S1, unofficial]. It sets itself apart from standard splatting by introducing a two-pass optimization: a depth-buffer-based occlusion culling pass that identifies only visible voxels, followed by rendering only those selected voxels, while simultaneously employing a run-length-like encoding for storage that groups consecutive free voxels [S1, unofficial]. It builds on [Splatting and Point-based Rendering](4975-splatting-and-point-based-rendering.md) and differs from siblings such as [Ray-Box Intersection via Quad Rasterization](2253-ray-box-intersection-via-quad-rasterization.md), [Sparse Voxel Octree Rendering via Square Splats](2993-sparse-voxel-octree-rendering-via-square-splats.md), [Voxel Point Sprite Rendering](4307-voxel-point-sprite-rendering.md), and [Differentiable Point-Based Radiance Fields](7366-differentiable-point-based-radiance-fields.md) by relying on explicit voxel culling and a custom segment-based storage layout rather than hierarchical traversal or differentiable field representations [S1, unofficial].
+ 
+ ## How it works
+@@ -48,5 +48,5 @@
+ #### 2. Occlusion Culling (Buffer Plane Pass)
+ This pass identifies which voxels contribute to the final image by simulating a depth test [S1, unofficial].
+-1.  Initialize a **Buffer Plane** (depth buffer) with dimensions equal to the screen plane ($W \times H$). Initialize all entries to $+\infty$ (or the maximum possible Z value) [G].
++1.  Initialize a **Buffer Plane** (depth buffer) with dimensions equal to the screen plane ($W \times H$) [G]. Initialize all entries to $+\infty$ (or the maximum possible Z value) [G].
+ 2.  Iterate through the entire voxel model (reading from the In-Memory Data Structure) [S1, unofficial].
+ 3.  For each occupied voxel $v$:
+@@ -56,6 +56,6 @@
+     d. For each pixel $(x, y)$, compare the voxel's depth $Z_v$ with the current value in the Buffer Plane $B[x, y]$ [S1, unofficial].
+     e. If $Z_v < B[x, y]$, update $B[x, y] = Z_v$. Otherwise, leave $B[x, y]$ unchanged [S1, unofficial].
+-    f. Track whether any pixel in the footprint was updated or if the footprint overlaps with any pixel that has a finite depth value. A voxel is discarded if its projected radius is completely covered by the radii of other points closer to the screen (smaller Z) [S1, unofficial].
+-    g. **Refined Logic for Selection:** Before updating, check if the voxel's footprint is fully occluded. A voxel is fully occluded if, for all pixels $(x, y)$ in its footprint, the current Buffer Plane value $B[x, y]$ is less than $Z_v$ (meaning a closer voxel already covers that area) [S1, unofficial]. If the voxel is **not** fully occluded, mark it as **Visible** [S1, unofficial]. If not fully occluded, perform the depth update: for all $(x, y)$ in footprint, if $Z_v < B[x, y]$, set $B[x, y] = Z_v$ [S1, unofficial]. If fully occluded, discard it (do not update buffer, do not render) [S1, unofficial].
++    f. Track whether any pixel in the footprint was updated or if the footprint overlaps with any pixel that has a finite depth value [S1, unofficial]. A voxel is discarded if its projected radius is completely covered by the radii of other points closer to the screen (smaller Z) [S1, unofficial].
++    g. **Refined Logic for Selection:** Before updating, check if the voxel's footprint is fully occluded [S1, unofficial]. A voxel is fully occluded if, for all pixels $(x, y)$ in its footprint, the current Buffer Plane value $B[x, y]$ is less than $Z_v$ (meaning a closer voxel already covers that area) [S1, unofficial]. If the voxel is **not** fully occluded, mark it as **Visible** [S1, unofficial]. If not fully occluded, perform the depth update: for all $(x, y)$ in footprint, if $Z_v < B[x, y]$, set $B[x, y] = Z_v$ [S1, unofficial]. If fully occluded, discard it (do not update buffer, do not render) [S1, unofficial].
+ 
+ #### 3. Rendering (Splatting Pass)
+@@ -79,5 +79,5 @@
+         voxel_model: Object containing 'byte_sequence' and 'offset_array'.
+                      Each segment in the sequence starts with f_i, n_i, followed by n_i voxels.
+-        camera: Object with methods to project voxel to screen.
++        camera: Object with a project(voxel_center) method returning (u, v, z).
+         screen_width: int
+         screen_height: int
+@@ -105,19 +105,23 @@
+         
+         voxel_data_start = start_offset + 8
++        voxel_size = 12 + sum(attribute_byte_sizes) # 3 floats for coordinates + attributes
+         
+         # Iterate through occupied voxels in this segment
+         for k in range(n_i):
+-            # Parse voxel: coordinates (assumed 3 floats) + additional attributes
+-            voxel_bytes = voxel_model.byte_sequence[voxel_data_start + k * (12 + sum(attribute_byte_sizes)) : voxel_data_start + (k + 1) * (12 + sum(attribute_byte_sizes))]
+-            voxel_center = (float.from_bytes(voxel_bytes[0:4], 'little'), float.from_bytes(voxel_bytes[4:8], 'little'), float.from_bytes(voxel_bytes[8:12], 'little'))
+-            voxel_value = float.from_bytes(voxel_bytes[12:16], 'little') # Assuming first attribute is the scalar value
++            # Parse voxel: coordinates (3 floats) + additional attributes
++            voxel_bytes = voxel_model.byte_sequence[voxel_data_start + k * voxel_size : voxel_data_start + (k + 1) * voxel_size]
++            voxel_center = (float.from_bytes(voxel_bytes[0:4], 'little'), 
++                            float.from_bytes(voxel_bytes[4:8], 'little'), 
++                            float.from_bytes(voxel_bytes[8:12], 'little'))
++            
++            # Parse scalar value: assumes the first attribute byte block contains the render value [G]
++            value_offset = 12
++            voxel_value = float.from_bytes(voxel_bytes[value_offset:value_offset+4], 'little')
+             
+             # Project voxel to screen
+-            screen_coords = camera.project(voxel_center)
+-            u, v = screen_coords.x, screen_coords.y
+-            z_v = voxel_center.z # Depth value
+-            
+-            # Determine footprint radius R based on kernel and projection
+-            R = get_footprint_radius(voxel_center, camera)
++            u, v, z_v = camera.project(voxel_center)
++            
++            # Determine footprint radius R based on kernel and projection [G]
++            R = max(1, int(2.0 * camera.scale_factor)) 
+             
+             # Check for full occlusion and update buffer
+@@ -153,7 +157,6 @@
+     
+     for voxel_center, voxel_value in visible_voxels:
+-        screen_coords = camera.project(voxel_center)
+-        u, v = screen_coords.x, screen_coords.y
+-        R = get_footprint_radius(voxel_center, camera)
++        u, v, _ = camera.project(voxel_center)
++        R = max(1, int(2.0 * camera.scale_factor))
+         
+         min_x = max(0, int(u - R))
+@@ -177,10 +180,4 @@
+ 
+     return framebuffer
+-
+-def get_footprint_radius(voxel_center, camera):
+-    # Returns the radius R of the kernel footprint in screen pixels
+-    # Depends on voxel size, kernel width, and camera projection scale
+-    # Placeholder for projection-specific scaling logic [G]
+-    return 5.0 
+ ```
+ 

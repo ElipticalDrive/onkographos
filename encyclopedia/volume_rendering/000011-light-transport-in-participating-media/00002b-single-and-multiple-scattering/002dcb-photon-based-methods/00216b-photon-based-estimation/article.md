@@ -1,21 +1,21 @@
 # Photon-based Estimation
 
-Also called: Photon-based Radiance Estimation, Photon Gathering
+Also called: Photon-based Radiance Estimation, Photon Gathering for Participating Media
 
 ## Overview
-Photon-based Estimation methods solve the problem of estimating radiance in participating media by decoupling light transport into a preprocessing phase (photon tracing) and a rendering phase (radiance estimation via density estimation) [S1, S2]. Unlike direct integration methods that trace paths per pixel, these methods store photon interactions in spatial structures and estimate incident radiance at query points using kernel density estimation [S2]. What sets this family apart from its siblings is the specific use of stored photon data (points, beams, or surfaces) to approximate the integral of the radiance transfer equation, differing from the explicit path tracing of [Compute Shader Photon Integration](2111-compute-shader-photon-integration.md) and the boundary-segment sampling of [Grid-based Importance Sampling for Boundary Segments](7643-grid-based-importance-sampling-for-boundary-segments.md).
+Photon-based Estimation methods solve the problem of computing realistic in-scattering and indirect illumination in participating media by decoupling light transport simulation from the final image synthesis. Unlike direct integration methods (e.g., [Ray Marching](52-name.md)) that solve the Radiative Transfer Equation (RTE) per-pixel, these methods store photon interactions in a spatial data structure and estimate radiance via density estimation or direct contribution summation. This family is distinguished from [Photon Beam Mapping](7874-photon-beam-mapping.md) and [Adaptive Beam Tracing for Volume Caustics](8406-adaptive-beam-tracing-for-volume-caustics.md) by using discrete point-based or simplified geometric representations rather than continuous beam segments, and from [Instant Radiosity / Virtual Point Lights (VPLs)](9319-instant-radiosity-virtual-point-lights-vpls.md) by explicitly tracking photon paths through the medium's scattering events rather than approximating them as point light sources.
 
 ## Shared principles
-All methods in this family are derived from the conservation of energy for a differential cylinder of light passing through a medium [S1]. They share the following core definitions and mechanisms:
+All methods in this family are derived from the conservation of energy for a differential cylinder of light passing through a medium [G]. They share the following core definitions and mechanisms:
 
 **1. Fundamental Interactions**
-Any volumetric effect is composed of three fundamental characteristics [S1]:
-*   **Absorption:** The loss of radiant energy along a ray due to energy conversion (e.g., to heat). It is described by the absorption coefficient $\sigma_a$ (units: $m^{-1}$) [S1].
-*   **Emission:** The addition of radiant energy where the medium is luminous (e.g., flames). It is described by the emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$, representing radiance emitted per unit length [S1].
+Any volumetric effect is composed of three fundamental characteristics [G]:
+*   **Absorption:** The loss of radiant energy along a ray due to energy conversion (e.g., to heat). It is described by the absorption coefficient $\sigma_a$ (units: $m^{-1}$) [G].
+*   **Emission:** The addition of radiant energy where the medium is luminous (e.g., flames). It is described by the emissive term $L_e(\mathbf{p}, \boldsymbol{\omega})$, representing radiance emitted per unit length [G].
 *   **Scattering:** The redirection of light rays upon collision with particles. It is split into:
-    *   *In-scattering:* Light from other directions reflected into the view ray.
-    *   *Out-scattering:* Light from the view ray reflected away.
-In most lighting calculations, out-scattering is folded into the **extinction** term because its net effect on the view ray is identical to absorption [S1].
+    *   *In-scattering:* Light from other directions reflected into the view ray [G].
+    *   *Out-scattering:* Light from the view ray reflected away [G].
+In most lighting calculations, out-scattering is folded into the **extinction** term because its net effect on the view ray is identical to absorption [G].
 
 **2. Notation**
 *   $\mathbf{p}$: Position of interaction.
@@ -23,51 +23,38 @@ In most lighting calculations, out-scattering is folded into the **extinction** 
 *   $L$: Radiance quantity.
 *   $L_i$: Incoming radiance.
 *   $L_o$: Outgoing radiance.
-*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [S1].
+*   $\sigma_t$: Total extinction coefficient, $\sigma_t = \sigma_a + \sigma_s$ [G].
 
 **3. Differential Forms**
-The change in radiance $dL$ over a differential path length $dt$ is governed by the balance of loss and gain terms [S1]:
-*   **Absorption Model:** $dL = -\sigma_a L_i dt$ [S1].
-*   **Emission Model:** $dL = \sigma_e dt$ (where $\sigma_e$ is the emission coefficient) [S1].
-*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [S1].
+The change in radiance $dL$ over a differential path length $dt$ is governed by the balance of loss and gain terms [G]:
+*   **Absorption Model:** $dL = -\sigma_a L_i dt$ [G].
+*   **Emission Model:** $dL = \sigma_e dt$ (where $\sigma_e$ is the emission coefficient) [G].
+*   **General RTE:** Combines extinction (loss) and source terms (gain from emission and in-scattering) [G].
 
 **4. Transmittance**
 The fraction of light surviving transmission through a medium is defined by the Beer-Lambert law [S1]:
 $$ T = e^{-\tau} $$
 where $\tau$ is the optical depth (integrated extinction) [S1].
 
-**5. Phase Functions**
-Scattering directionality is modeled by a phase function $p(\omega_i, \omega_o)$, defined in terms of $a = \cos(\theta)$, where $\theta$ is the angle between the incident direction $\omega_i$ and the scattered direction $\omega_o$ [S1]. The choice of phase function depends on the ratio of particle radius $r$ to wavelength $\lambda$ [S1]:
-*   **Rayleigh Scattering:** Used when $r \ll \lambda$ (e.g., smoke, dust, water molecules).
-    $$ P_R(a) = \frac{3}{4}(1+a)^2 $$
-*   **Mie Scattering:** Used when $r \approx \lambda$ (e.g., fog, water droplets). Common variants include:
-    *   Haziness: $P_{HM}(a) = 1 + 9 \left( \frac{1+a}{2} \right)^8$
-    *   Murkiness: $P_{MM}(a) = 1 + 50 \left( \frac{1+a}{2} \right)^{32}$
-*   **Henyey-Greenstein (HG):** An approximation to Mie scattering, widely used in graphics for its efficiency and asymmetry parameter $g$:
-    $$ P_{HG}(a) = \frac{1 - g^2}{(1 + g^2 - 2ga)^{\frac{3}{2}}} $$
-*   **Schlick's Approximation:** A computationally cheaper approximation to HG that avoids fractional exponentiation:
-    $$ P_S(a) = \frac{1-g^2}{(1-ga)^2} $$
-
 ## Subtopics
 
 ### [Compute Shader Photon Integration](2111-compute-shader-photon-integration.md)
-A GPU-accelerated Monte Carlo photon integration technique that simulates photon transport through participating media using parallel compute shaders. It solves the problem of estimating radiance by tracing random walks of photons, handling absorption, scattering, and null collisions, while accumulating results in a feedback buffer. What sets it apart from its siblings is its explicit use of global invocation IDs for parallel photon processing and its specific implementation of incremental radiance updates and null-collision sampling within a compute shader environment, differing from the spatial photon storage of [Volumetric Photon Mapping](2190-volumetric-photon-mapping.md) and the point-based light transport approach of [Point-Based Light Transport in Participating Media](3763-point-based-light-transport-in-participating-media.md).
+A GPU-accelerated Monte Carlo method that simulates light transport by processing photons in parallel using compute shaders. It differs from CPU-based approaches by leveraging global invocation IDs to perform random walk steps, handling absorption, scattering, and null collisions via Russian Roulette-like probability checks, while accumulating radiance in a feedback buffer. Unlike traditional photon mapping which stores photons in a spatial data structure for later density estimation, this method directly updates radiance buffers per-frame, making it suitable for dynamic scenes or real-time feedback. Choose this for real-time or dynamic volume rendering where precomputation is infeasible.
 
 ### [Volumetric Photon Mapping](2190-volumetric-photon-mapping.md)
-A global illumination technique for participating media that simulates light transport by separating direct (single-scattering) and indirect (multiple-scattering) illumination. It solves the problem of realistic in-scattering in volumes by storing photon interactions in a spatial data structure and estimating radiance via density estimation. Unlike [Point-Based Light Transport in Participating Media](3763-point-based-light-transport-in-participating-media.md) which may use different storage or estimation primitives, VPM specifically generalizes Jensen's surface photon mapping to volumes using a 3D kernel for point-to-point density estimation. It differs from [Beam Radiance Estimate](1283-beam-radiance-estimate.md) by estimating incident radiance at discrete points via spherical queries rather than integrating along the entire camera ray.
+A global illumination technique that decouples indirect illumination simulation from direct illumination. It solves the problem of computing realistic in-scattering and absorption in complex volumes by storing photon interactions in a spatial data structure (typically a volume texture or KD-tree) and estimating radiance via density estimation. It sets itself apart from [Beam Radiance Estimate](1283-beam-radiance-estimate.md) by using discrete point-to-point density estimation rather than continuous beam-based integration, and from [Photon Beam Storage in BVH](2275-photon-beam-storage-in-bvh.md) by storing discrete photon packets rather than beam segments. Choose this for offline rendering of static volumes with complex indirect lighting and caustics.
+
+### [Photon Beam Storage in BVH](2275-photon-beam-storage-in-bvh.md)
+An acceleration structure for the spatial query phase of photon-based radiance estimation. It organizes photon beams into a Bounding Volume Hierarchy (BVH) to efficiently retrieve all beams intersecting a specific eye ray. Unlike brute-force linear scans or static grids, it leverages the Surface Area Heuristic (SAH) to partition overlapping beam data, trading construction overhead for significant query speedups in scenes with high photon densities. Choose this when using beam-based estimators (like [Photon Beam Mapping](7874-photon-beam-mapping.md)) and requiring fast runtime gathering.
 
 ### [Point-Based Light Transport in Participating Media](3763-point-based-light-transport-in-participating-media.md)
-A global illumination method for homogeneous translucent materials with refractive boundaries. It decorrelates scene complexity from illumination computation by replacing the scene with a shaded point cloud (volume samples) for indirect illumination, while keeping polygonal representation for direct visibility. It computes single, double, and multiple scattering contributions separately. Unlike methods exploiting screen-space coherence (e.g., ray-marching through light propagation volumes, volumetric shadow mapping) which target media without refractive interfaces, this method targets materials enclosed inside a refractive interface which breaks screen-space coherence.
-
-### Photon Beam Storage in BVH
-Photon beams are stored in a Bounding Volume Hierarchy (BVH) constructed using the surface area heuristic [S1]. To improve partitioning by the BVH, beams are split into sub-beams during construction, with the splitting length set automatically to produce sub-beams with approximately unit aspect ratio [S1]. At run-time, the camera ray is intersected with the BVH to quickly obtain all intersected beams for radiance estimation [S1].
+A global illumination method for homogeneous translucent materials with refractive boundaries. It decorrelates scene complexity from illumination computation by replacing the scene with a shaded point cloud (volume samples) for indirect illumination, while keeping polygonal representation for direct visibility. It computes single, double, and multiple scattering contributions separately. Unlike methods exploiting screen-space coherence (e.g., ray-marching through light propagation volumes, volumetric shadow mapping) which target media without refractive interfaces, this method targets materials enclosed inside a refractive interface which breaks screen-space coherence. Choose this for rendering translucent objects like skin or wax with refractive boundaries.
 
 ### Generalized Photon Surface Estimation
-A method by Deng et al. [12] that generalizes photon planes to photon surfaces, introducing new estimators like photon cone, cylinder, and sphere, combined with Multiple Importance Sampling (MIS) for robustness [S2]. It combines different types of estimators with MIS to increase robustness for arbitrary types of participating media and proposes a delta kernel to couple the light and camera subpath to avoid bias [S2]. It reduces variance significantly compared to prior work [5] and handles any scattering event, including single scattering [S2]. However, it is unable to handle medium interactions immediately following scattering from a surface, such as volumetric caustics [S2].
+A method by Deng et al. [S1] that generalizes photon planes to photon surfaces, introducing new estimators like photon cone, cylinder, and sphere, combined with Multiple Importance Sampling (MIS) for robustness. It combines different types of estimators to increase robustness for arbitrary types of participating media and proposes a delta kernel to couple the light and camera subpath to avoid bias. It reduces variance significantly compared to prior work [S1] and handles any scattering event, including single scattering. However, it is unable to handle medium interactions immediately following scattering from a surface, such as volumetric caustics [S1].
 
 ## Background
-Photon-based estimation for participating media was formalized by Jensen and Buhler in "A comprehensive theory of volumetric radiance estimation using photon points and beams" [S1]. They explored acceleration schemes including KD-Trees, BVHs, and grids, finding that a BVH with modifications performed well for their problem domain [S1]. The theory established the use of photon points and beams to estimate radiance in participating media. Later surveys, such as "A survey on rendering homogeneous participating media" [S2], categorized these methods as density estimation-based approaches, noting they are the most common solutions for participating media rendering because they support all types of scattering [S2].
+Photon-based methods for participating media originated from the adaptation of photon mapping techniques to volumetric rendering. Early approaches focused on storing photons in KD-trees or grids to estimate in-scattering [S1]. The survey by Deng et al. [S1] highlights the evolution from singular photon plane estimators to more robust surface-based estimators (cones, cylinders, spheres) to handle arbitrary scattering events. The method by Qin et al. [S1] introduced unbiased photon gathering by combining photon paths with camera paths. These methods are primarily used in offline rendering for medical visualization (e.g., ultrasound), artistic volume rendering, and realistic material rendering (e.g., skin, marble) where indirect illumination is critical.
 
 ## Sources
-[S1] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26
-[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26
+[S1] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

@@ -3,107 +3,118 @@
 Also called: Axis-Aligned Sheet-Buffer Compositing, Muller sheet-buffer, Sheet Buffer Splatting, Sheet-Buffer Method, slice-based composition
 
 ## Overview
-Slice-by-Slice (Sheet Buffer) Splatting is a volume rendering optimization that organizes splats into cache-sheets aligned parallel to the volume face most closely parallel to the image plane, then composites these sheets slice-by-slice [S1, S3, unofficial]. It sets itself apart from its siblings, such as [Plug-and-Play Ray Marching and Rendering](981-plug-and-play-ray-marching-and-rendering.md) and [Screen Quad Rendering](2435-screen-quad-rendering.md), by leveraging hardware-accelerated rasterization for bulk accumulation within 2D planes rather than per-pixel ray casting or full-screen quads, while avoiding the "sparkling" artifacts of [Multi-View Splatting Pipeline with Fill-Rate Filtering](4689-multi-view-splatting-pipeline-with-fill-rate-filtering.md) at the cost of potential "popping" artifacts when view angles change [S2][S3, unofficial].
+Slice-by-Slice (Sheet Buffer) Splatting is a volume rendering optimization that organizes splats into cache-sheets aligned parallel to the volume face most closely parallel to the image plane, then composites these sheets slice-by-slice [S1, S3, unofficial]. It sets itself apart from its siblings, such as [Plug-and-Play Ray Marching and Rendering](981-plug-and-play-ray-marching-and-rendering.md) and [Screen Quad Rendering](2435-screen-quad-rendering.md), by leveraging hardware-accelerated rasterization for compositing rather than ray-casting or full-screen quads, while avoiding the "sparkling" artifacts of per-splat compositing at the cost of introducing "popping" artifacts when the view angle crosses 45° relative to the data axes [S2][S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of volume splats (primitives) defined by position $\mathbf{p}_k$, density $\rho_k$, and kernel $h$; a viewing direction; and a target 2D image buffer.
-*   **Output:** A composited 2D image with correct visibility determination.
+*   **Input:** Volume dataset (regular grid), camera parameters (view matrix, projection matrix), transfer function.
+*   **Output:** 2D image (color and alpha buffer).
 
 **Data Structures:**
-1.  **Sheet Buffer:** A 2D array (texture or render target) aligned with the volume axis most parallel to the image plane. It stores intermediate color and alpha values for the current slice.
-2.  **Cache Image:** The final output image buffer (or a temporary buffer if compositing is multi-pass).
-3.  **Splat List:** A list of splats sorted by depth relative to the current sheet orientation.
+1.  **Sheet Buffer:** A 2D array (texture or render target) matching the screen resolution. It accumulates the weighted contributions of splats belonging to a specific depth slice.
+2.  **Cache Image:** The current accumulated result of composited slices.
+3.  **Splat List:** A list of transformed splats, typically sorted or bucketed by their depth coordinate $z$ in volume space.
 
-**Steps:**
-1.  **Determine Sheet Orientation:** Identify the volume axis (X, Y, or Z) most parallel to the image plane. The sheet buffer is aligned with this axis [S1, S3, unofficial].
-2.  **Organize Splats into Sheets:** Group splats into cache-sheets. Each sheet corresponds to a specific slice index along the chosen axis [S1, unofficial].
-3.  **Compute Sheet Positions:** Since the sheet buffer does not correspond directly to voxel positions in space, compute new positions for splats using interpolation so they lie correctly on the slice [S1, unofficial].
-4.  **Rasterize into Sheet Buffer:** For each sheet, rasterize the splats into the 2D sheet buffer. This step leverages hardware-accelerated blending to accumulate contributions [S1, S3, unofficial].
-5.  **Composite Sheet to Image:** Once a sheet buffer has received all contributions, composite it into the current image (cache image) using alpha blending [S1, unofficial].
-6.  **Advance Slice:** Process the next slice. If the view angle changes such that the most parallel volume axis changes (typically crossing a 45-degree threshold), switch the compositing axis to maintain alignment with the view [S3, unofficial].
-
-**Formulas:**
-The contribution of a voxel $D$ to the sheet buffer is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S10, abstract only, unofficial]:
-$$ F(x,y) = \int h(x-x_D, y-y_D, z) \, dz $$
-The intensity written to the pixel in the sheet buffer is:
-$$ P(x,y) = \text{weight}(x,y) \cdot \rho(D) $$
-where $\text{weight}(x,y) = F(x-x_D, y-y_D)$ [S10, abstract only, unofficial].
+**Method Steps:**
+1.  **Sheet Alignment:** Determine the volume axis ($x, y,$ or $z$) most parallel to the image plane. The sheet buffers are aligned with this axis [S1, S3, unofficial].
+2.  **Splat Transformation:** Transform splat centers from volume space to screen space. For perspective projections, the footprint may be distorted (e.g., EWA) [S6, unofficial][S10, abstract only, unofficial].
+3.  **Bucketing:** Assign each splat to a specific sheet buffer corresponding to its depth slice index $k$ along the alignment axis [S1, unofficial].
+4.  **Rasterization (Splatting):** For each sheet buffer $k$:
+    *   Clear the sheet buffer.
+    *   Rasterize all splats assigned to sheet $k$ onto the sheet buffer. The contribution of a voxel $D$ to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S2][S6, unofficial][S10, abstract only, unofficial]:
+        $$ F(x,y) = \int h(x-x_D, y-y_D, z) \, dz $$
+    *   The intensity written to the pixel is modulated by the voxel density:
+        $$ P(x,y) = \text{weight}(x,y) \cdot \rho(D) $$
+        where $\text{weight}(x,y) = F(x-x_D, y-y_D)$ [S10, abstract only, unofficial].
+5.  **Compositing:** Traverse the sheet buffers in depth order (back-to-front for opacity, or front-to-back depending on the compositing equation used). For each sheet buffer:
+    *   Composite the sheet buffer into the cache image using alpha blending [S1, unofficial][S2][S3, unofficial][S7].
+    *   This step effectively adds voxel contributions slice-by-slice [S1, unofficial].
+6.  **Output:** The cache image is the final rendered image.
 
 **Parameters:**
-*   **Switching Threshold:** The compositing axis is typically switched at 45 degrees to maintain alignment with the view [S3, unofficial].
+*   **Switching Threshold:** The view angle at which the alignment axis switches (typically 45°) [S3, unofficial].
+*   **Kernel Width:** Determines the footprint size $F(x,y)$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Popping Artifacts:** Popping occurs when the orientation of the sheets suddenly changes, particularly when the view angle crosses the 45-degree switching threshold (e.g., from 44.7° to 45.2°) [S1, unofficial][S2][S3, unofficial].
-*   **Perspective Distortion:** The method works best for orthographic views, as it requires only a single footprint table and reconstruction kernel, which is constant except for screen space offset [S1, unofficial].
+*   **Popping Artifacts:** Occur when the orientation of the sheets suddenly changes, specifically when the view angle crosses the 45-degree switching threshold (e.g., from 44.7° to 45.2°) [S1, unofficial][S2][S3, unofficial].
+*   **Interpolation:** Since the sheet buffer does not correspond directly to voxel positions in space, new positions for splats must be computed using interpolation to lie on the slice [S1, unofficial].
+*   **Orthographic vs. Perspective:** The method works best for orthographic views because it requires only a single footprint table and reconstruction kernel, which is constant except for screen space offset [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def slice_by_slice_splatting(splats, view_direction, image_buffer):
-    # Determine the volume axis most parallel to the image plane
-    axis = get_most_parallel_axis(view_direction)
+def slice_by_slice_splatting(volume, camera, image_width, image_height):
+    # 1. Determine alignment axis based on camera view
+    # Align with volume axis most parallel to image plane
+    alignment_axis = determine_alignment_axis(camera.view_matrix)
     
-    # Group splats into sheets based on the chosen axis
-    sheets = organize_splats_into_sheets(splats, axis)
+    # 2. Initialize sheet buffers and cache image
+    # Sheet buffers are 2D arrays matching screen resolution
+    sheet_buffers = create_sheet_buffers(volume, alignment_axis)
+    cache_image = create_zero_image(image_width, image_height)
     
-    # Sort sheets in back-to-front order relative to the view
-    sheets.sort_by_depth(back_to_front=True)
+    # 3. Transform and bucket splats
+    splats = transform_splats(volume, camera)
+    bucket_splats_into_sheets(splats, sheet_buffers, alignment_axis)
     
-    for sheet in sheets:
-        # Create a temporary sheet buffer for this slice
-        sheet_buffer = create_2d_buffer(sheet.dimensions)
-        
-        # Rasterize splats in this sheet into the sheet buffer
+    # 4. Rasterize splats into sheet buffers
+    for sheet in sheet_buffers:
+        clear_sheet(sheet)
         for splat in sheet.splats:
-            # Interpolate position to lie on the slice if necessary
-            pos = interpolate_position(splat.position, axis)
+            # Compute footprint F(x,y) and weight
+            # For perspective, footprint may be distorted
+            footprint = compute_footprint(splat.kernel, splat.center, camera)
+            weight = footprint.evaluate(splat.center_screen)
+            color = splat.color * weight
             
-            # Compute footprint and weight
-            footprint = compute_footprint(splat.kernel, pos)
-            weight = footprint * splat.density
+            # Rasterize onto sheet buffer
+            rasterize_splat(sheet, splat, color)
             
-            # Rasterize into sheet buffer using hardware blending
-            rasterize_into_buffer(sheet_buffer, pos, weight)
+    # 5. Composite sheets into cache image
+    # Traverse in depth order (back-to-front for standard alpha blending)
+    sorted_sheets = sort_sheets_by_depth(sheet_buffers, alignment_axis)
+    for sheet in sorted_sheets:
+        composite_sheet_into_image(sheet, cache_image)
         
-        # Composite the sheet buffer into the main image
-        composite_sheet_into_image(sheet_buffer, image_buffer)
-        
-        # Clear sheet buffer for next slice
-        clear_buffer(sheet_buffer)
-    
-    return image_buffer
+    return cache_image
 
-def get_most_parallel_axis(view_direction):
-    # Return the axis (X, Y, or Z) with the smallest dot product magnitude
-    # with the view direction, indicating it is most parallel to the image plane
-    pass
+def rasterize_splat(sheet, splat, color):
+    # Rasterize the footprint of the splat onto the 2D sheet buffer
+    # This leverages hardware-accelerated scan-conversion
+    for pixel in sheet.intersecting_pixels(splat):
+        alpha = splat.kernel.evaluate(pixel.position - splat.center_screen)
+        # Standard alpha blending into the sheet buffer
+        sheet[pixel] = blend(sheet[pixel], color, alpha)
 
-def organize_splats_into_sheets(splats, axis):
-    # Group splats by their coordinate along the chosen axis
-    pass
+def composite_sheet_into_image(sheet, cache_image):
+    # Composite the accumulated sheet buffer into the main cache image
+    for pixel in sheet:
+        alpha = sheet[pixel].alpha
+        color = sheet[pixel].color
+        # Blend into the existing cache image
+        cache_image[pixel] = blend(cache_image[pixel], color, alpha)
 ```
 
 ## Subtopics
 
 ### [Image-Aligned Sheet-Buffer Compositing](5594-image-aligned-sheet-buffer-compositing.md)
-Image-Aligned Sheet-Buffer Compositing is a variant that eliminates "popping" artifacts by aligning the sheet buffer compositing axis with the image plane, rather than the volume axes. Unlike standard axis-aligned sheet buffers, it slices interpolation kernels into sections parallel to the image plane and alpha-composites these sections to ensure smooth color transitions. It is chosen when smooth animation is critical and computational cost is acceptable, as it requires multiple footprint rasterizations per point. See [Image-Aligned Sheet-Buffer Compositing](5594-image-aligned-sheet-buffer-compositing.md).
+Image-Aligned Sheet-Buffer Compositing is a variant that eliminates "popping" artifacts by aligning the sheet buffer compositing axis with the image plane, rather than the volume axes. Unlike standard axis-aligned sheet buffers, which suffer from discontinuities when the viewing angle crosses 45° relative to the data axes, this method slices interpolation kernels into sections parallel to the image plane. It sets itself apart from its parent method, [Slice-by-Slice (Sheet Buffer) Splatting](2110-slice-by-slice-sheet-buffer-splatting.md), by using image-aligned cutting planes and alpha-compositing kernel sections to ensure smooth color transitions across varying optical properties and resolutions. However, it has a high computational cost and requires multiple footprint rasterizations per point.
 
 ### Sheet-based Splatting (Westover)
-Sheet-based Splatting, proposed by Westover, accumulates splats onto a 2D sheet aligned with the volume axis most parallel to the view plane, then composites the sheets in depth order into the image with a matting operation [S4, unofficial]. It is a foundational approach for sheet-buffer methods but does not explicitly address the popping artifacts associated with axis switching [S4, unofficial].
+Sheet-based Splatting, proposed by Westover, accumulates splats onto a 2D sheet aligned with the volume axis most parallel to the view plane, then composites the sheets in depth order into the image with a matting operation [S4, unofficial]. It is a foundational concept for the sheet-buffer approach, improving image quality over simple splat-every-sample composition by handling depth ordering more effectively [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of splats, plus overhead for sheet management and compositing.
-*   **Memory Complexity:** $O(W \times H)$ for the sheet buffer and image buffer, where $W, H$ are image dimensions.
-*   **Measured Performance:** In comparisons, slice-based composition produces brighter images due to correct visibility determination but is slower than splat-every-sample composition because it avoids per-slice additions in the other method [S2]. Specific FPS data for this method is not provided in the sources, but related pre-classification methods show varying performance depending on the engine and dataset [S2].
-*   **Strengths:** Correct visibility determination; hardware-accelerated rasterization; reduced sparkling compared to list-based splatting.
-*   **Limitations:** Popping artifacts when view angle crosses 45-degree threshold; high computational cost for image-aligned variants; best suited for orthographic views [S1, unofficial][S2][S3, unofficial].
-*   **When to Use:** When correct visibility is more important than animation smoothness, and the view angle is relatively stable or orthographic.
-*   **When Not to Use:** When smooth animation across all view angles is required without popping, or when perspective distortion is significant and not handled by hybrid methods [S1, unofficial][S2].
+*   **Time Complexity:** $O(N)$ where $N$ is the number of splats, plus the cost of compositing the sheet buffers. The compositing step is $O(W \cdot H \cdot S)$ where $W, H$ are image dimensions and $S$ is the number of slices [S2].
+*   **Memory Complexity:** $O(W \cdot H \cdot S)$ for the sheet buffers if all are kept in memory, or $O(W \cdot H)$ if composited one by one into a cache image [S1, unofficial].
+*   **Performance:** Slice-based composition produces brighter images due to correct visibility determination but is slower than splat-every-sample composition because it avoids per-slice additions in the other method [S2]. Performance depends heavily on the number of slices and the efficiency of the rasterization step [S2].
+*   **Strengths:** Hardware-accelerated, good image quality compared to simple splatting, avoids sparkling artifacts [S3, unofficial].
+*   **Limitations:** Popping artifacts at 45° view angles, high computational cost for image-aligned variants, best suited for orthographic views [S1, unofficial][S2][S3, unofficial].
+*   **When to use:** When real-time performance is needed and the view angle is stable or orthographic.
+*   **When not to use:** When the view angle frequently crosses 45° thresholds and popping artifacts are unacceptable, or when perspective distortion is significant and orthogonal approximation is insufficient [S1, unofficial][S2].
 
 ## Background
-The sheet-buffer method was proposed by Müller [Muller98] as an optimization for splatting, organizing splats into cache-sheets aligned parallel to the volume face most closely parallel to the image plane [S1, unofficial]. Müller and Yagel [Muller96] suggested a hybrid method to handle perspective distortion [S1, unofficial]. Müller and Crawfis [13] later proposed image-aligned kernel-slicing to mitigate popping artifacts, though it has high computational cost [S2]. The method builds on Westover's earlier work on sheet-based accumulation [S4, unofficial].
+The sheet-buffer method was proposed by Müller and Yagel [Müller96] and Müller [Müller98] as an optimization for CPU-based volume rendering, later adapted for GPU pipelines [S1, unofficial][S2]. It builds on Westover's earlier work on sheet-based accumulation [S4, unofficial]. The method addresses the "sparkling" artifacts of per-splat compositing by grouping splats into sheets [S3, unofficial]. Müller and Crawfis later proposed image-aligned kernel-slicing to mitigate popping artifacts, though this increased computational cost [S2].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)

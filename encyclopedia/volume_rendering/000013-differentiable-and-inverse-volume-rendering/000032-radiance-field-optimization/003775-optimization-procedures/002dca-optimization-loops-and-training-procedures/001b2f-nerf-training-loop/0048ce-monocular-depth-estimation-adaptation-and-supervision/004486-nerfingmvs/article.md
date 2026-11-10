@@ -1,0 +1,194 @@
+# NerfingMVS
+
+Also called: Guided NeRF Optimization for MVS, Guided Optimization of Neural Radiance Fields for Indoor Multi-View Stereo, NeRF with Depth Priors
+
+## Overview
+NerfingMVS is a method for indoor multi-view stereo that optimizes Neural Radiance Fields (NeRF) using depth priors to resolve the shape-radiance ambiguity inherent in implicit volumes [S2]. It differs from standard NeRF by explicitly incorporating sparse depth estimates from Structure-from-Motion (SfM) and dense depth estimates from a fine-tuned monocular network to guide volume sampling bounds, rather than relying solely on uniform or stratified sampling [S3, unofficial].
+
+## How it works
+**Inputs:**
+- Multi-view RGB images and camera poses (from COLMAP).
+- A pre-trained monocular depth estimation (MDE) network.
+- Sparse 3D point cloud from COLMAP's multi-view stereo (MVS) stage.
+
+**Outputs:**
+- Optimized NeRF model (density and color fields).
+- Dense depth maps for each view.
+
+**Data Structures:**
+- `rays_o`, `rays_d`: Ray origins and directions, shape `[num_rays, 3]`.
+- `depth_priors`: Array of shape `[num_rays]` containing prior depth estimates for each ray.
+- `depth_confidences`: Array of shape `[num_rays]` containing confidence values for each prior.
+- `near`, `far`: Scalar bounds for ray clipping.
+
+**Steps:**
+
+1.  **Sparse Depth Extraction:** Run COLMAP on the test scene to acquire per-view sparse depth maps by projecting fused 3D point clouds after multi-view stereo [S2][S3, unofficial].
+2.  **Monocular Network Adaptation:** Fine-tune a pretrained monocular depth network on the target scene using the sparse depth maps from COLMAP as supervision. The loss function is scale-invariant to handle the scale ambiguity of the sparse reconstruction [S2]:
+    $$ L(D^i_p, D^i_{Sparse}) = \frac{1}{n} \sum_{j=1}^n \left| \log D^i_p(j) - \log D^i_{Sparse}(j) + \alpha(D^i_p, D^i_{Sparse}) \right| $$
+    where $D^i_p$ is the predicted depth and $D^i_{Sparse}$ is the sparse ground truth [S2].
+3.  **Depth Prior Generation:** Feed the adapted monocular network with input images to extract a dense depth map prior $D^*$ and associated confidence map [S1][S3, unofficial].
+4.  **Ray Setup:** For each camera pose, compute ray origins and directions. If NDC coordinates are used, convert rays to NDC space [S3, unofficial].
+5.  **Guided Sampling Bounds:** Use the depth priors to clamp the ray bounds. The near and far bounds for each ray are determined by the depth prior and its confidence, restricting the sampling interval to relevant depths [S1][S3, unofficial].
+6.  **Volume Rendering:**
+    - Divide the ray into $N$ equal bins within the clamped bounds [S1].
+    - Sample points along the ray.
+    - Compute density $\sigma$ and color $c$ for each sample using the NeRF MLP.
+    - Compute alpha values: $\alpha_i = 1 - \exp(-\sigma_i \cdot \delta_i)$, where $\delta_i$ is the distance between samples scaled by the ray direction norm [S3, unofficial].
+    - Compute weights: $w_i = \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j + \epsilon)$, with $\epsilon = 10^{-10}$ for numerical stability [S3, unofficial].
+    - Render RGB: $\hat{C}(r) = \sum_i w_i c_i$.
+    - Render Depth: $\hat{D}(r) = \sum_i w_i z_i$, where $z_i$ is the distance of sample $i$ from the camera [S3, unofficial].
+7.  **Loss Computation:** Minimize the photometric loss between rendered RGB and input images, and potentially a depth consistency loss between rendered depth and monocular priors (though the primary innovation is the *sampling guidance* via bounds) [S1, S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def nerfingmvs_render(rays_o, rays_d, depth_priors, depth_confidences, near_bound, far_bound, 
+                      num_samples, nerf_model, white_bkgd=True):
+    """
+    Render rays using NerfingMVS guided sampling.
+    
+    Args:
+        rays_o: [num_rays, 3] ray origins
+        rays_d: [num_rays, 3] ray directions
+        depth_priors: [num_rays] depth estimates from monocular network
+        depth_confidences: [num_rays] confidence values
+        near_bound: float, absolute near bound (e.g., 0.05)
+        far_bound: float, absolute far bound (e.g., 0.15)
+        num_samples: int, number of samples per ray
+        nerf_model: NeRF MLP model
+        white_bkgd: bool, composite against white background
+        
+    Returns:
+        rgb_map: [num_rays, 3]
+        depth_map: [num_rays]
+        acc_map: [num_rays]
+    """
+    num_rays = rays_o.shape[0]
+    
+    # Step 1: Determine ray bounds using depth priors
+    # Clamp the ray interval [t_near, t_far] based on depth priors.
+    # The prior depth is along the ray direction. 
+    # t_near is typically the absolute near bound or max(near_bound, depth_prior - margin)
+    # t_far is typically the absolute far bound or min(far_bound, depth_prior + margin)
+    # For simplicity, we use the depth prior to define the center of the sampling interval,
+    # clamped by absolute bounds.
+    
+    # Calculate t values for the depth priors
+    # Assuming depth_priors are distances along the ray direction
+    t_priors = depth_priors
+    
+    # Define sampling interval around the prior
+    # The width of the interval can be determined by confidence or fixed
+    interval_width = 0.05 # Not given in sources, placeholder for implementation detail [G]
+    
+    t_near = torch.clamp(t_priors - interval_width, min=near_bound, max=far_bound)
+    t_far = torch.clamp(t_priors + interval_width, min=near_bound, max=far_bound)
+    
+    # Ensure t_near < t_far
+    t_near = torch.min(t_near, t_far)
+    t_far = torch.max(t_near, t_far)
+    
+    # Step 2: Sample points along the ray within [t_near, t_far]
+    # Divide the ray into num_samples equal bins
+    t_vals = torch.linspace(0, 1, num_samples, device=rays_o.device)
+    t_vals = t_vals.view(1, -1).expand(num_rays, -1)
+    
+    # Interpolate t values between t_near and t_far
+    # t_sample = t_near + t_vals * (t_far - t_near)
+    # However, standard NeRF uses linear spacing in t.
+    # Let's use stratified sampling or uniform sampling within the interval.
+    # Uniform sampling:
+    t_sample = t_near.unsqueeze(1) + t_vals * (t_far.unsqueeze(1) - t_near.unsqueeze(1))
+    
+    # Compute 3D positions
+    # r = o + t * d
+    pts = rays_o.unsqueeze(1) + t_sample.unsqueeze(2) * rays_d.unsqueeze(1)
+    pts = pts.reshape(-1, 3) # [num_rays * num_samples, 3]
+    
+    # Step 3: Query NeRF
+    # Assuming nerf_model takes positions and view directions
+    # View directions need to be repeated for each sample
+    viewdirs = rays_d.unsqueeze(1).expand(-1, num_samples, -1).reshape(-1, 3)
+    
+    raw = nerf_model(pts, viewdirs) # [num_rays * num_samples, 4] (RGB + sigma)
+    
+    # Step 4: Compute weights and render
+    # Reshape raw
+    raw_rgb = raw[:, :3].reshape(num_rays, num_samples, 3)
+    raw_sigma = raw[:, 3].reshape(num_rays, num_samples)
+    
+    # Compute distances between samples
+    # dists = t_sample[:, 1:] - t_sample[:, :-1]
+    # Append a large value for the last segment
+    dists = t_sample[:, 1:] - t_sample[:, :-1]
+    dists = torch.cat([dists, torch.ones_like(dists[:, :1]) * 1e10], dim=1)
+    
+    # Scale distances by ray direction norm (usually 1 if normalized)
+    ray_norms = torch.norm(rays_d, dim=1, keepdim=True)
+    dists = dists * ray_norms
+    
+    # Compute alpha
+    noise = 0.0 # Not given in sources, placeholder [G]
+    alpha = 1.0 - torch.exp(-F.relu(raw_sigma + noise) * dists)
+    
+    # Compute weights
+    # weights = alpha * cumprod(1 - alpha)
+    # Use 1e-10 for stability
+    alpha_shifted = 1.0 - alpha + 1e-10
+    alpha_shifted = torch.cat([torch.ones_like(alpha_shifted[:, :1]), alpha_shifted[:, :-1]], dim=1)
+    weights = alpha * torch.cumprod(alpha_shifted, dim=1)
+    
+    # Render RGB
+    rgb_map = torch.sum(weights.unsqueeze(2) * raw_rgb, dim=1)
+    
+    # Render Depth
+    # depth_map = sum(weights * z_vals) / sum(weights)
+    # z_vals are the t_sample values (distances along ray)
+    depth_map = torch.sum(weights * t_sample, dim=1) / (torch.sum(weights, dim=1) + 1e-10)
+    
+    # Accumulated Opacity
+    acc_map = torch.sum(weights, dim=1)
+    
+    # Composite against white background
+    if white_bkgd:
+        rgb_map = rgb_map + (1.0 - acc_map.unsqueeze(1)) * torch.ones_like(rgb_map)
+        
+    return rgb_map, depth_map, acc_map
+```
+
+## Subtopics
+
+### [Depth-Guided NeRF Training via Earth Mover’s Distance](11911-depth-guided-nerf-training-via-earth-mover-s-distance.md)
+Uses Earth Mover’s Distance for depth alignment. Choose when robust to outliers is needed.
+
+### [Monocular Depth Regularization on Seen Views](12330-monocular-depth-regularization-on-seen-views.md)
+Applies depth loss only on training views. Choose when novel view synthesis is not the primary goal.
+
+### [DäRF](12331-d-rf.md)
+Uses depth for regularization during training. Choose for general NeRF improvement.
+
+### [NeRF-guided MDE Adaptation](12333-nerf-guided-mde-adaptation.md)
+Uses NeRF to adapt MDE. Choose when MDE accuracy is the bottleneck.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of samples per ray and the number of rays. The adaptation of the monocular network adds an initial overhead. [S3, unofficial]
+- **Memory Complexity:** Standard NeRF memory usage plus storage for depth priors and confidences. [S3, unofficial]
+- **Performance:** On ScanNet scenes, the method takes approximately 3.5 hours on a single NVIDIA GeForce RTX 2080 GPU, including COLMAP, depth priors training, NeRF training, filtering, and evaluation [S3, unofficial].
+- **Strengths:** Improves geometry in indoor scenes by resolving shape-radiance ambiguity. Eliminates the need for accurate pixel matching across views [S2].
+- **Limitations:** Relies on the quality of COLMAP poses and sparse reconstruction. Performance degrades if COLMAP fails [S3, unofficial].
+- **When to use:** Indoor multi-view stereo where geometry accuracy is critical and COLMAP provides reasonable sparse reconstruction.
+- **When not to use:** Outdoor scenes with large baselines or dynamic content where COLMAP may fail.
+
+## Background
+NerfingMVS was introduced by Wei et al. in September 2021 at ICCV [S1][S3, unofficial]. It addresses the limitations of standard NeRF in indoor multi-view stereo by integrating learning-based depth priors. The method builds on the NeRF framework [S3, unofficial] and uses COLMAP for initial sparse reconstruction [S2].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] Depth-Guided Optimization of Neural Radiance Fields for Indoor Multi-View Stereo, https://doi.org/10.1109/tpami.2023.3263464, fetched 2026-10-27
+[S3] weiyithu/NerfingMVS, https://github.com/weiyithu/NerfingMVS, fetched 2026-10-27 (unofficial)

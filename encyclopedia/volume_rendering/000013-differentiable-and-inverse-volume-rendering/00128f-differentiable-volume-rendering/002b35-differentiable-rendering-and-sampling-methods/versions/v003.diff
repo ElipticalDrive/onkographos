@@ -1,0 +1,198 @@
+--- v002.md
++++ v003.md
+@@ -10,10 +10,9 @@
+ 
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera parameters (origin, direction), scene representation (implicit function, e.g., MLP or hash grid), and ground truth image (for loss computation).
+-*   **Outputs:** Rendered pixel color $\hat{C}$ and gradients with respect to scene parameters.
++*   **Inputs:** Camera parameters (origin, direction), scene representation (implicit function, e.g., MLP or hash grid), and ground truth image (for loss computation) [S1, unofficial].
++*   **Outputs:** Rendered pixel color $\hat{C}$ and gradients with respect to scene parameters [G].
+ 
+ **Data Structures:**
+ *   **Scene Representation:** A neural network (e.g., MLP) or data structure (e.g., Instant NGP) that maps 3D coordinates (and viewing direction) to volumetric properties. For NeRF, it outputs density $\sigma$ and color $\mathbf{c}$. For SDF-based models, it outputs a signed distance value and a feature vector for color [S1, unofficial].
+-*   **Ray Buffer:** Stores ray origins, directions, and sampled points along the ray.
+ 
+ **Numbered Steps:**
+@@ -38,108 +37,31 @@
+ 
+ ```python
+-import torch
+-import torch.nn as nn
+-
+-class DifferentiableRenderer:
+-    def __init__(self, scene_network, num_samples_coarse, num_samples_fine):
+-        self.scene_network = scene_network
+-        self.num_samples_coarse = num_samples_coarse
+-        self.num_samples_fine = num_samples_fine
+-
+-    def generate_rays(self, camera_params):
+-        """
+-        Generate rays for each pixel based on camera parameters.
+-        Returns: ray_origins (H, W, 3), ray_directions (H, W, 3)
+-        """
+-        # Implementation depends on camera model (e.g., pinhole)
+-        # [G] Standard pinhole camera ray generation logic
+-        pass
+-
+-    def sample_points(self, ray_origins, ray_directions, near, far):
+-        """
+-        Sample points along rays.
+-        Returns: points (H, W, N, 3)
+-        """
+-        # Stratified sampling along the ray
+-        t_vals = torch.linspace(near, far, self.num_samples_coarse)
+-        # Add jitter for stratified sampling
+-        jitter = torch.rand_like(t_vals)
+-        t_vals = t_vals + jitter / self.num_samples_coarse
+-        # Expand dimensions for batch processing
+-        points = ray_origins.unsqueeze(2) + ray_directions.unsqueeze(2) * t_vals.unsqueeze(3)
+-        return points
+-
+-    def query_scene(self, points):
+-        """
+-        Query the scene network for density and color.
+-        Returns: sigma (H, W, N, 1), color (H, W, N, 3)
+-        """
+-        # Reshape points to (H*W*N, 3) for network input
+-        batch_points = points.view(-1, 3)
+-        # Query network
+-        # [G] Assuming scene_network returns (sigma, color)
+-        sigma, color = self.scene_network(batch_points)
+-        # Reshape back
+-        sigma = sigma.view(points.shape[0], points.shape[1], points.shape[2], 1)
+-        color = color.view(points.shape[0], points.shape[1], points.shape[2], 3)
+-        return sigma, color
+-
+-    def composite(self, sigma, points, ray_directions):
+-        """
+-        Perform differentiable volume rendering.
+-        Returns: rendered_color (H, W, 3), transmittance (H, W, N, 1)
+-        """
+-        # Compute step sizes
+-        # [G] Assuming uniform sampling for simplicity; non-uniform requires delta_i calculation
+-        delta = torch.norm(points[:, :, 1:, :] - points[:, :, :-1, :], dim=3)
+-        # Handle first and last points
+-        delta = torch.cat([delta, delta[:, :, -1:, :]], dim=2)
+-        
+-        # Compute opacity alpha
+-        alpha = 1.0 - torch.exp(-sigma * delta)
+-        
+-        # Compute transmittance T_i
+-        # T_i = exp(-sum_{j<i} sigma_j * delta_j)
+-        # Accumulate weight
+-        weights = alpha * torch.cumprod(torch.cat([torch.ones_like(alpha[:, :, 0:1, :]), 1.0 - alpha[:, :, :-1, :]], dim=2), dim=2)
+-        
+-        # Compute final color
+-        rendered_color = torch.sum(weights * alpha * sigma * 0 + weights * color, dim=2) # Simplified: weights already include alpha
+-        # Correct formula: C = sum(T_i * alpha_i * c_i)
+-        # T_i is product of (1-alpha) for j < i
+-        T = torch.cumprod(torch.cat([torch.ones_like(alpha[:, :, 0:1, :]), 1.0 - alpha[:, :, :-1, :]], dim=2), dim=2)
+-        rendered_color = torch.sum(T * alpha * color, dim=2)
+-        
+-        return rendered_color, T
+-
+-    def forward(self, camera_params, ground_truth_image):
+-        """
+-        Forward pass with loss computation.
+-        """
+-        ray_origins, ray_directions = self.generate_rays(camera_params)
+-        
+-        # Coarse sampling
+-        points_coarse = self.sample_points(ray_origins, ray_directions, near=0.0, far=1.0)
+-        sigma_coarse, color_coarse = self.query_scene(points_coarse)
+-        
+-        # Hierarchical sampling: use coarse density to guide fine sampling
+-        # [G] Importance sampling based on sigma_coarse
+-        # For simplicity, assume fine samples are generated similarly but focused
+-        points_fine = self.sample_points(ray_origins, ray_directions, near=0.0, far=1.0) # Placeholder for importance sampling logic
+-        sigma_fine, color_fine = self.query_scene(points_fine)
+-        
+-        # Composite fine samples
+-        rendered_color, _ = self.composite(sigma_fine, points_fine, ray_directions)
+-        
+-        # Compute loss
+-        loss = torch.mean((rendered_color - ground_truth_image) ** 2)
+-        
+-        return loss
+-
+-    def backward(self, loss):
+-        """
+-        Backpropagation is handled by automatic differentiation frameworks (e.g., PyTorch).
+-        """
+-        loss.backward()
++def differentiable_render(ray_origin, ray_direction, near, far, num_samples, scene_query):
++    # 1. Generate sample positions along the ray
++    t_vals = linear_space(near, far, num_samples)
++    points = ray_origin + t_vals[:, None] * ray_direction
++    
++    # 2. Compute step sizes (delta)
++    deltas = t_vals[1:] - t_vals[:-1]
++    deltas = concatenate([deltas, deltas[-1:]])  # Pad last delta
++    
++    # 3. Query scene for density and color
++    sigma, color = scene_query(points)
++    
++    # 4. Compute opacity alpha
++    alpha = 1.0 - exp(-sigma * deltas)
++    
++    # 5. Compute transmittance T
++    # T_i = exp(-sum_{j<i} sigma_j * delta_j)
++    sigma_deltas = sigma * deltas
++    cumsum_sigma_deltas = cumulative_sum(sigma_deltas)
++    T = exp(-cumsum_sigma_deltas)
++    T = concatenate([ones(1), T[:-1]])  # T_0 = 1
++    
++    # 6. Compute weights and final color
++    weights = T * alpha
++    rendered_color = sum(weights[:, None] * color, axis=0)
++    
++    return rendered_color, T, alpha, weights
+ ```
+ 
+@@ -150,7 +72,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point precision issues can arise in transmittance calculation for very dense or transparent volumes.
+-*   **Boundaries:** Handling near and far clipping planes correctly is essential to avoid sampling outside the scene.
+-*   **Degenerate Input:** Empty space or zero density regions can lead to undefined behavior if not handled (e.g., by clamping or skipping).
++*   **Precision:** Floating-point precision issues can arise in transmittance calculation for very dense or transparent volumes [G].
++*   **Boundaries:** Handling near and far clipping planes correctly is essential to avoid sampling outside the scene [G].
++*   **Degenerate Input:** Empty space or zero density regions can lead to undefined behavior if not handled (e.g., by clamping or skipping) [G].
+ 
+ ## Subtopics
+@@ -171,4 +93,10 @@
+ RGBXY Derivatives with Optimal Transport (DROT) is a differentiable rendering method that associates each screen-space pixel with a visible 3D geometric point (point proxy) to compute 5D RGBXY derivatives, measuring how 3D RGB color and 2D projected screen-space position change with respect to scene parameters. It combines these dense derivatives with an optimal transport-based loss function to find pixel matching between rendered and target images, solving the problem of converging in inverse rendering when initial and target object locations are not close. Unlike traditional methods that rely on sparse, local per-pixel color derivatives and L2 loss, DROT captures global and long-range object motions, making it superior for optimizing global translations and rotations.
+ 
++### [Sensitivity AOV](10809-sensitivity-aov.md)
++A render output carrying the sensitivity of a scalar objective M with respect to scene parameters θ. It allows human inspection of which parts of a scene matter for a given goal, analogous to how primal AOVs expose intermediate light transport quantities. Not given in the sources.
++
++### [Generalized Differentiable Renderer (GenDR)](11684-generalized-differentiable-renderer-gendr.md)
++A generalized differentiable mesh renderer that models the forward rendering process under a probabilistic perturbation defined by a probability distribution with density f and a temperature/scale parameter τ > 0, making the renderer continuous everywhere and differentiable almost everywhere. Not given in the sources.
++
+ ### Differentiable Monte Carlo Ray Tracing
+ A rendering technique used to compute global illumination via single-bounce differentiable MC ray tracing within the JOC framework [S2, unofficial]. JOC uses single-bounce differentiable MC rendering, whereas previous methods like NVDIFFRECMC avoided multi-bounce due to noise and cost, limiting them to direct lighting [S2, unofficial].
+@@ -180,13 +108,15 @@
+ An architecture using an MLP to map 16 semantic channels to 16 color space channels, decoded with a final MLP on the 16-channel output image [S4, unofficial]. It performs compositing in an abstract 16-channel color space, using VNetLight for encoding, direct compositing of semantic channels, and an MLP decoder for the final RGB image [S4, unofficial]. Steps include using VNetLight architecture to implement the volume encoder producing a 16-channel volume, using the same MLP architecture as VNetL16-4 for feature mapping but using 16 semantic channels directly in compositing, decoding the resulting 16-channel image (plus one additional alpha channel) using another MLP with one ReLU-activated 16-channel hidden layer and a sigmoid output layer to yield a 3-channel RGB image, and using the opacity directly as produced from the DVRUnit [S4, unofficial]. Layout: Encoder: VNet16. TF: MLP16. Accumulation: Alpha. Decoder: MLP3. Parameters: ~12.3 M [S4, unofficial].
+ 
++### Differentiable Mesh Optimization for SAR Reconstruction
++A method to reconstruct a 3D mesh of an object from Synthetic Aperture Radar (SAR) images at known aspect angles by optimizing the mesh geometry using a differentiable renderer and a composite loss function [S6]. The total loss is a weighted sum of five terms: $L_{total} = E[|y - \tilde{y}|^2] + 1.5L_l + 0.02L_n + 0.03L_e + 0.4L_f$, where $y$ is the label SAR image, $\tilde{y}$ is the rendered prediction, $L_l$ is Laplacian loss, $L_n$ is Normal Consistency loss, $L_e$ is Edge Length loss, and $L_f$ is Floor-Plane loss [S6].
++
+ ### Parameter-space ReSTIR
+-A differentiable rendering formulation that computes gradients directly in parameter space instead of image space, enabling efficient sample reuse across optimization iterations by storing one reservoir per parameter (texel) rather than per pixel [S5]. It reformulates the derivative estimation as a single integral over the parameter space, allowing the use of one reservoir per parameter (texel) instead of one per pixel, reducing storage from O(pixels × parameters) to O(parameters) [S5].
++Not given in the sources.
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Depends on the number of samples per ray and the complexity of the scene query network. Hierarchical sampling reduces the number of samples needed for high-quality results [S1, unofficial].
+-*   **Memory Complexity:** Standard reverse-mode AD requires storing $O(kn)$ intermediate states, leading to high memory usage [S5]. Adjoint methods and analytic inversion can reduce this to $O(n)$ [S5].
+-*   **Measured Performance:** Differentiable Monte Carlo Ray Tracing can provide a ×6 speedup over deterministic ray marching with sparsity thresholding at the cost of increased variance [S1, unofficial].
++*   **Memory Complexity:** Standard reverse-mode AD requires storing intermediate states, leading to high memory usage [G].
+ *   **Strengths:** Enables gradient-based optimization of 3D scene representations from 2D images; handles complex topology and view consistency; suitable for view synthesis and scene reconstruction [S1, unofficial].
+-*   **Limitations:** High memory usage for large scenes with standard AD; stochastic methods introduce variance; requires careful tuning of sampling and loss functions [S1, unofficial][S5].
++*   **Limitations:** Stochastic methods introduce variance; requires careful tuning of sampling and loss functions [S1, unofficial].
+ *   **When to Use:** When optimizing implicit 3D scene representations (NeRF, SDFs) from 2D images; when view synthesis or scene reconstruction is required [S1, unofficial].
+ *   **When Not to Use:** When explicit geometry output is needed without surface extraction; when real-time performance is critical without pre-training [S1, unofficial].
+@@ -200,3 +130,4 @@
+ [S3] Differentiable ray tracing — from paths to gradients | Bai Liping, https://bailiping.com/differentiable-ray-tracing/, fetched 2026-10-28 (unofficial)
+ [S4] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)
+-[S5] Parameter-space ReSTIR for Differentiable and Inverse Rendering, https://doi.org/10.1145/3588432.3591512, fetched 2026-10-27+[S5] Fourier Splatting: Generalized Fourier encoded primitives for scalable radiance fields, https://doi.org/10.48550/arXiv.2603.19834, fetched 2026-10-30
++[S6] Differentiable Rendering for Synthetic Aperture Radar Imagery, https://doi.org/10.48550/arxiv.2204.01248, fetched 2026-10-26

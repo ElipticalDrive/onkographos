@@ -1,0 +1,96 @@
+# Velocity Reconstruction (VelRecon)
+Also called: VelRecon
+
+## Overview
+Velocity Reconstruction (VelRecon) is an optimization-based method for estimating 3D velocity fields from temporal sequences of volumetric density fields, serving as the motion estimation component in coupled density-velocity fluid modeling [S2, unofficial]. Unlike tracer-based techniques (e.g., tomographic PIV) that require specialized hardware and physical tracers, VelRecon is a tracer-free approach that infers motion directly from captured video data by solving a constrained optimization problem [S2, unofficial]. It sets itself apart by formulating velocity estimation as a primal-dual optimization problem subject to physical constraints, enabling robust fluid motion estimation without external markers [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Volumetric density fields at two consecutive time steps, $\rho_{t-2}$ and $\rho_{t-1}$ [S2, unofficial].
+- **Output:** Estimated velocity field $u_{t-1}$ at time step $t-1$ [S2, unofficial].
+
+**Data Structures:**
+The method operates on voxel grids representing the density and velocity fields. Specific bit-packing or layout details are not given in the sources [G: Standard 3D array layout assumed for $\rho$ and $u$].
+
+**Algorithm Steps:**
+VelRecon solves the velocity estimation problem using a fast primal-dual approach [S2, unofficial]. The optimization is governed by Equations (11)–(13) as constraints and solved via Equations (14)–(16) [S2, unofficial]. The iterative procedure is as follows:
+
+1.  Initialize iteration loop for $k$ from $0$ to $\text{maxIter}$ [S1].
+2.  Update the velocity estimate $u_{t-1}^{k+1}$ using the proximal operator of the constraint function $g$, a scaling parameter $\gamma$, and an auxiliary variable $X_k$ [S1].
+    *   Formula: $u_{t-1}^{k+1} = \text{prox}_{\gamma g} (u_{t-1}^k - \gamma X_k)$ [G: Derived from standard primal-dual proximal form].
+3.  Update the auxiliary variable $Y_{k+1}$ using a momentum term $\theta$ and the difference between the current and previous velocity estimates [S1].
+    *   Formula: $Y_{k+1} = u_{t-1}^{k+1} + \theta (u_{t-1}^{k+1} - u_{t-1}^k)$ [G: Standard Nesterov-like momentum update].
+4.  Compute the residual $r_{k+1}$ as the difference between the current and previous velocity estimates [S1].
+    *   Formula: $r_{k+1} = u_{t-1}^{k+1} - u_{t-1}^k$ [S1].
+5.  Update the error threshold $e$ by adding 3 times the absolute value of the new residual to the previous error [S1].
+    *   Formula: $e_{k+1} = e_k + 3 |r_{k+1}|$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def VelRecon(rho_t_minus_2, rho_t_minus_1, max_iter, gamma, theta):
+    # Initialize velocity estimate (e.g., zero or previous estimate)
+    u_prev = zeros_like(rho_t_minus_1)
+    X = zeros_like(rho_t_minus_1)
+    e = 0.0
+    
+    for k in range(max_iter):
+        # Step 2: Update velocity estimate using proximal operator of g
+        # Note: The specific form of g and its proximal operator is defined in [S2, unofficial] Equations 11-13
+        # This typically involves enforcing physical constraints like divergence-free conditions
+        u_curr = proximal_operator_g(u_prev - gamma * X, gamma)
+        
+        # Step 3: Update auxiliary variable with momentum
+        Y = u_curr + theta * (u_curr - u_prev)
+        
+        # Step 4: Compute residual
+        r = u_curr - u_prev
+        
+        # Step 5: Update error threshold
+        e = e + 3.0 * abs(r)
+        
+        # Update for next iteration
+        u_prev = u_curr
+        # Update X based on primal-dual dual variable update (Equation 16 in [S2, unofficial])
+        # X = X + ... (Specific dual update rule from [S2, unofficial] Equations 14-16)
+        
+    return u_curr
+```
+
+**Parameters:**
+- $\gamma$: Scaling parameter for the proximal operator. Value not given in sources.
+- $\theta$: Momentum term. Value not given in sources.
+- $\text{maxIter}$: Maximum number of iterations. Value not given in sources.
+
+**Edge Cases and Pitfalls:**
+- Precision issues may arise if the proximal operator is not well-conditioned [G].
+- Boundary conditions for the velocity field are not explicitly detailed in the sources [G].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The method uses a fast primal-dual approach, suggesting linear or near-linear complexity with respect to the number of voxels per iteration [S2, unofficial]. Memory complexity is proportional to the storage of density fields, velocity fields, and auxiliary variables [G].
+
+**Measured Performance:**
+Specific performance metrics (FPS, accuracy) are not provided in the sources [S1][S2, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Tracer-free, does not require specialized hardware or complex camera setups [S2, unofficial]. Couples density and velocity reconstruction in a physics-constrained manner for robustness [S2, unofficial].
+- **Limitations:** Requires solving an optimization problem at each step, which may be computationally intensive compared to direct methods [G]. Relies on the accuracy of the density field inputs [G].
+
+**When to Use:**
+Use when estimating fluid motion from monocular video without access to tracer particles or specialized PIV hardware [S2, unofficial].
+
+## Background
+**Origin:**
+The method is described in the context of physics-based differentiable rendering for fluid modeling [S1][S2, unofficial]. It is part of a coupled density and velocity estimation framework where velocity reconstruction is called to estimate velocity fields from previous density fields to perform advection [S2, unofficial].
+
+**History and Development:**
+The approach contrasts with traditional tracer-based methods like tomographic PIV, synthetic aperture PIV, and structured-light PIV, which require careful particle choice and complex setups [S2, unofficial]. VelRecon represents a tracer-free alternative leveraging differentiable rendering and optimization [S2, unofficial].
+
+**Usage:**
+Used in differentiable rendering frameworks for fluid simulation and reconstruction from monocular video [S1][S2, unofficial].
+
+## Sources
+[S1] Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video, https://doi.org/10.3390/e25091348, fetched 2026-10-26
+[S2] Physics-Based Differentiable Rendering for Efficient and ... - MDPI, https://www.mdpi.com/1099-4300/25/9/1348, fetched 2026-10-27 (unofficial)

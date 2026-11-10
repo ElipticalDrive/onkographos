@@ -3,143 +3,158 @@
 Also called: Cell-by-Cell Method, Upson and Keeler Method, Upson-Keller Method, Y-bucket scan conversion, Z-buffer algorithm for volume
 
 ## Overview
-Cell Projection with Scan-line Conversion is a software-based object-order rendering algorithm for direct volume rendering on irregular, unstructured, and multiple grids [S1][S7, unofficial]. It solves the problem of efficiently rasterizing volumetric primitives by leveraging spatial coherence between adjacent pixels and scan lines, avoiding the computational overhead of per-pixel ray casting or the artifacts of hardware-accelerated Gouraud shading [S1][S7, unofficial]. Unlike its sibling [Parallel Cell Projection](875-parallel-cell-projection.md), which may distribute work differently, this method explicitly uses Y-bucket sorting and scan-line generation to process cells completely before moving to the next, progressively displaying the view from front-most to distant pixels [S5, unofficial]. It sets itself apart from [Cell Projection with Texture Mapping for Opacity](993-cell-projection-with-texture-mapping-for-opacity.md) by performing scan conversion and compositing in software, thereby eliminating the need for special graphics hardware and associated artifacts [S7, unofficial].
+Cell Projection with Scan-line Conversion is a software-based object-order volume rendering algorithm that projects volumetric primitives (such as tetrahedra or hexahedra) into screen space and rasterizes them using scan-line conversion techniques [S1][S4, S5, unofficial]. It solves the problem of rendering irregular, unstructured, or curvilinear grids efficiently on CPUs by leveraging spatial coherence between adjacent pixels and scan lines, avoiding the overhead of per-pixel ray casting or the artifacts of hardware Gouraud shading [S1, S3][S7, unofficial]. Unlike its sibling [Cell Projection with Texture Mapping for Opacity](993-cell-projection-with-texture-mapping-for-opacity.md), which relies on 3D texture hardware, this method performs scan conversion and compositing entirely in software, making it suitable for early hardware environments and precise control over integration [S7, unofficial]. It is distinguished from [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md) by its explicit use of Y-bucket lists and scan-line generation to manage depth sorting and pixel coverage [S2, S5, unofficial].
 
 ## How it works
-The method projects 3D volumetric cells into 2D screen space and rasterizes them using a scan-line algorithm with depth sorting.
+The method processes the volume cell-by-cell, projecting each cell's faces onto the image plane and rasterizing the resulting polygons to accumulate color and opacity [S5, unofficial].
 
 **Inputs and Outputs:**
-*   **Input:** A volumetric dataset represented as a grid of convex polyhedral cells (e.g., tetrahedra, hexahedra, curvilinear grids).
-*   **Output:** A 2D image with accumulated color and opacity.
+*   **Input:** A volumetric dataset decomposed into convex polyhedral cells (e.g., tetrahedra, hexahedra subdivided into triangles) [S2, unofficial][S3]. The cells have scalar values at their vertices.
+*   **Output:** A 2D image with accumulated color and opacity values for each pixel [S1][S5, unofficial].
 
 **Data Structures:**
-1.  **Triangle List:** Each cell is decomposed into triangles. For a hexahedron, this results in twelve triangles (two per face) [S2, unofficial][S3][S5, unofficial].
-2.  **Y-Bucket Lists:** A list of lists, where each bucket corresponds to a scan line (y-coordinate). Each bucket contains a list of triangles that intersect that scan line.
-3.  **X-Bucket Lists (or Active Edge List):** Within a scan line, triangles are sorted or managed based on their x-intersections to determine spans [S2, unofficial].
-4.  **Pixel Buffer:** Stores accumulated color and opacity for each pixel.
+1.  **Triangle List:** Each volumetric cell is decomposed into triangles. For a hexahedron, this typically results in 12 triangles (2 per face) [S2, unofficial][S3].
+2.  **Y-Bucket Lists:** A hierarchical sorting structure. The image height is divided into buckets (scan-line ranges). Each bucket contains a list of triangles that intersect that vertical range [S2, unofficial].
+3.  **X-Bucket Lists (or Active Edge Lists):** Within a specific scan line, triangles are sorted by their x-intercepts to determine coverage spans [S2, unofficial].
+4.  **Frame Buffer:** Stores the accumulated color ($C$) and opacity ($\alpha$) for each pixel [S1][S5, unofficial].
 
 **Numbered Steps:**
 
-1.  **Decomposition:** Decompose volumetric primitives into triangles depending on the grid type. For example, a hexahedron is decomposed into twelve triangles [S2, unofficial][S3][S5, unofficial].
-2.  **Projection:** Project the 3D vertices of the triangles onto the 2D image plane [S3][S5, unofficial].
-3.  **Sorting (Y-Bucket Construction):** Sort the triangles into Y-bucket lists. Each bucket contains triangles that first appear on or intersect a specific scan line [S2, unofficial]. This step leverages coherence between adjacent scan lines [S2, unofficial][S3].
-4.  **Depth Sorting:** Sort the cells (or their constituent triangles) in depth-sorted order to ensure correct back-to-front compositing. This can be done using approximate depth sorting based on the center of gravity of the cells [S6, unofficial] or more rigorous methods like Painter’s Algorithm or kd-tree culling [S3].
-5.  **Scan-line Conversion:** Iterate through each scan line (y-coordinate) from top to bottom (or based on depth order):
-    a.  Identify the active triangles for the current scan line from the Y-bucket lists [S2, unofficial].
-    b.  For each active triangle, calculate the intersection polygon with the scan line [S5, unofficial].
-    c.  Break down the intersection polygon into smaller polygons called 'spans' when projected onto the image plane [S5, unofficial].
-    d.  For each span, integrate the scalar values (using tri-linear interpolation) to find the average contribution to each pixel in the scan line [S5, unofficial].
-    e.  Calculate the correct color and opacity for the segment using the integrated values and the segment length $l$ [S5, unofficial].
-    f.  Accumulate the color and opacity front-to-back into the pixel buffer [S2, unofficial].
-6.  **Iteration:** Scan each cell completely before moving to the next cell [S5, unofficial]. The method progressively displays the view on the screen, with front-most pixels displayed first [S5, unofficial].
-
-**Formulas:**
-*   **Opacity Calculation:** As per the parent [Cell projection](26-cell-projection.md), the integrated opacity $\alpha$ for a segment of length $l$ with average differential opacity $\tau_{avg}$ is:
-    $$ \alpha = 1 - \exp(-\tau_{avg} l) $$
-    [S1][S4, unofficial].
-*   **Integration:** Tri-linear interpolation is used to find the average contribution of scalar values along the ray segment within the cell [S5, unofficial].
-
-**Parameters:**
-*   **Grid Type:** Determines the number of triangles per cell (e.g., 12 for hexahedra) [S2, unofficial].
-*   **Resolution:** Variable resolution is achieved by changing the height and width of the output screen [S7, unofficial].
-*   **Macro-cell Size:** In hierarchical variants, macro-cells of size $m^3$ (where $m$ is usually between 4 and 10) may be used to build a min/max octree for culling [S3].
-
-**Edge Cases and Pitfalls:**
-*   **Sorting Errors:** Using only the centroids of each face as a sorting criterion may lead to incorrect sorting and visual artifacts [S3][S2, unofficial].
-*   **Depth Order Changes:** The depth order of cells may change pixel-by-pixel, making perfect depth sorting impossible [S6, unofficial]. Approximate sorting must be recalculated when the viewpoint changes [S6, unofficial].
-*   **Curvilinear Grids:** Non-planar faces in curvilinear grids must be subdivided into tetrahedra with planar faces to ensure correct sorting and rasterization [S4, unofficial].
-*   **Performance:** Software scan conversion is slower than hardware methods but produces clearer images with fewer artifacts [S1].
+1.  **Decomposition:** Decompose the volumetric primitives into triangles based on the grid type. For example, decompose hexahedra into 12 triangles [S2, unofficial][S3].
+2.  **Projection:** Project the 3D vertices of each triangle into 2D screen coordinates $(x, y)$ [S3][S5, unofficial].
+3.  **Bucket Sorting (Y-Buckets):**
+    *   Initialize Y-bucket lists for the image height.
+    *   For each triangle, determine its minimum and maximum screen-space $y$ coordinates ($y_{min}, y_{max}$).
+    *   Add the triangle to the Y-bucket lists corresponding to the scan lines it intersects [S2, unofficial].
+4.  **Scan-Line Conversion:**
+    *   Iterate through each scan line $y$ from top to bottom (or bottom to top, depending on coordinate system).
+    *   For the current scan line, retrieve the list of active triangles from the Y-bucket list [S2, unofficial].
+    *   Sort these triangles based on their x-intercepts at the current scan line $y$ [S2, unofficial].
+5.  **Span Generation:**
+    *   For each triangle in the sorted list, calculate the intersection interval $[x_{start}, x_{end}]$ with the current scan line [S5, unofficial].
+    *   Break down the intersection polygon into smaller polygons called 'spans' when projected onto the image plane [S5, unofficial].
+6.  **Integration and Compositing:**
+    *   For each pixel covered by a span, calculate the contribution of the cell.
+    *   Use integration (from tri-linear or barycentric interpolated values) to find the average scalar value along the ray segment within the cell [S5, unofficial].
+    *   Calculate the differential opacity $\tau$ and color $C$ for the segment length $l$ using the transfer function and the parent's opacity formula [S1][S5, unofficial].
+    *   Composite the fragment into the frame buffer using the Porter-Duff over operation in back-to-front order. The method progressively displays the view, ensuring front-most pixels are updated first, followed by more distant pixels [S5, unofficial].
+    *   *Note:* To optimize, coherence between adjacent pixels and scan lines is used to avoid redundant calculations [S3][S2, unofficial].
+7.  **Culling:** Use a kd-tree to cull invisible regions from the current viewpoint before processing [S2, unofficial][S3].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def cell_projection_scanline(volume_data, camera):
-    # 1. Decompose cells into triangles
-    triangles = []
-    for cell in volume_data.cells:
-        triangles.extend(decompose_into_triangles(cell))
+def cell_projection_scanline(cells, image_width, image_height):
+    # Initialize frame buffer
+    frame_buffer = [0.0] * (image_width * image_height) # Stores color
+    alpha_buffer = [0.0] * (image_width * image_height) # Stores opacity
     
-    # 2. Project triangles to 2D
-    projected_triangles = []
-    for tri in triangles:
-        projected_triangles.append(project_triangle(tri, camera))
-        
-    # 3. Sort triangles into Y-buckets
-    y_buckets = {}
-    for tri in projected_triangles:
-        min_y, max_y = get_y_range(tri)
-        for y in range(min_y, max_y + 1):
-            if y not in y_buckets:
-                y_buckets[y] = []
-            y_buckets[y].append(tri)
+    # 1. Decompose and Project
+    # Each cell is decomposed into triangles. 
+    # Triangles have vertices with 3D positions and scalar values.
+    all_triangles = []
+    for cell in cells:
+        triangles = decompose_cell_into_triangles(cell)
+        for tri in triangles:
+            # Project 3D vertices to 2D screen space
+            projected_tri = project_to_screen(tri)
+            all_triangles.append(projected_tri)
             
-    # 4. Sort cells/triangles by depth (approximate or exact)
-    # Using center of gravity for approximate sorting [S6, unofficial]
-    sorted_cells = sort_cells_by_depth(volume_data.cells)
+    # 2. Build Y-Bucket Lists
+    # Buckets are lists of triangles intersecting a specific y-range
+    y_buckets = [[] for _ in range(image_height)]
     
-    # 5. Scan-line conversion
-    image_buffer = initialize_image_buffer()
-    
-    for y in sorted(y_buckets.keys()):
-        active_tris = y_buckets[y]
-        # Sort active triangles by x-intersection for span generation
-        active_tris.sort(key=lambda t: get_x_intersection(t, y))
+    for tri in all_triangles:
+        y_min = min(v.y for v in tri.vertices)
+        y_max = max(v.y for v in tri.vertices)
         
-        for tri in active_tris:
-            # Calculate intersection polygon with scan line y
-            span = get_span(tri, y)
-            if span is None:
+        # Determine scan lines covered by this triangle
+        start_y = int(max(0, y_min))
+        end_y = int(min(image_height - 1, y_max))
+        
+        for y in range(start_y, end_y + 1):
+            # Check if triangle actually intersects this scan line
+            if intersects_scanline(tri, y):
+                y_buckets[y].append(tri)
+                
+    # 3. Scan-Line Conversion
+    for y in range(image_height):
+        active_triangles = y_buckets[y]
+        
+        # Sort triangles by x-intercept at current y for correct overlap handling
+        # This implements the "Painter's Algorithm" logic per scan line
+        sorted_tris = sort_by_x_intercept(active_triangles, y)
+        
+        # 4. Process Spans
+        for tri in sorted_tris:
+            # Calculate intersection interval [x_start, x_end] at scan line y
+            x_start, x_end = get_scanline_intersection(tri, y)
+            
+            # Clip to image bounds
+            x_start = max(0, int(x_start))
+            x_end = min(image_width - 1, int(x_end))
+            
+            if x_start > x_end:
                 continue
                 
-            # Integrate scalar values along the ray segment within the cell
-            # This requires knowing which cell the triangle belongs to
-            cell = get_cell_for_triangle(tri)
-            avg_opacity, avg_color = integrate_cell_values(cell, span, camera)
-            
-            # Calculate opacity for the segment
-            l = get_segment_length(span, camera)
-            alpha = 1 - exp(-avg_opacity * l)
-            
-            # Accumulate front-to-back
-            accumulate_pixel(image_buffer, span, avg_color, alpha)
-            
-    return image_buffer
-
-def integrate_cell_values(cell, span, camera):
-    # Tri-linear interpolation along the ray segment
-    # Returns average opacity and color
-    pass
-
-def get_span(tri, y):
-    # Returns the x-interval(s) of the triangle at scan line y
-    pass
-
-def accumulate_pixel(buffer, span, color, alpha):
-    # Porter-Duff over operation
-    for x in span:
-        buffer[x].over(color, alpha)
+            # 5. Integrate and Composite
+            # For each pixel in the span, calculate contribution
+            for x in range(x_start, x_end + 1):
+                # Calculate ray segment length and average scalar value
+                # within the triangle at this pixel
+                segment_length = get_segment_length(tri, x, y)
+                avg_scalar = integrate_scalar(tri, x, y)
+                
+                # Map scalar to color and extinction coefficient
+                color, extinction = transfer_function(avg_scalar)
+                
+                # Calculate opacity for this segment
+                # alpha = 1 - exp(-extinction * segment_length)
+                opacity = 1.0 - math.exp(-extinction * segment_length)
+                
+                # Composite into frame buffer (Back-to-Front assumed by sort order)
+                # C_out = C_in + C_new * (1 - alpha_in)
+                # alpha_out = alpha_in + alpha_new * (1 - alpha_in)
+                
+                idx = y * image_width + x
+                current_alpha = alpha_buffer[idx]
+                
+                # If pixel is already opaque, skip (optimization)
+                if current_alpha >= 1.0:
+                    continue
+                
+                # Update buffer
+                alpha_buffer[idx] = current_alpha + opacity * (1.0 - current_alpha)
+                frame_buffer[idx] = (frame_buffer[idx] * (1.0 - current_alpha) + 
+                                     color * opacity * (1.0 - current_alpha)) / alpha_buffer[idx]
+                # Note: Division by alpha_buffer[idx] is for premultiplied alpha handling
+                # If using non-premultiplied, standard Porter-Duff over is applied directly
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Sorting Errors:** Using only the centroids of each face as a sorting criterion (as in early implementations by Lucas) may lead to incorrect depth sorting and visual artifacts [S3][S2, unofficial]. The scan-line method mitigates this by sorting per scan line [S3].
+*   **Perspective Depth:** Accurate depth calculation is required for perspective viewing. The method must account for the non-linear relationship between screen-z and world-z [S1][S7, unofficial].
+*   **Opaque Data:** The method does not inherently support early ray termination (stopping when a pixel becomes opaque) as efficiently as ray casting, potentially making it slower for highly opaque datasets like head scans [S1].
 
 ## Subtopics
 
 ### Approximate Depth Sorting
-A sorting scheme to process scan conversion in depth-sorted order to reduce ray-segment list length and manipulation cost, using the depth order of cell centers of gravity [S6, unofficial]. It differs from octree search by being simpler and less costly, avoiding the computational cost of sorting and list manipulation required for near-perfect order [S6, unofficial]. Perfect depth order is impossible because cell depth order may change pixel-by-pixel, so sorting must be recalculated when the viewpoint changes [S6, unofficial]. This approximation does not cause any quality error in the final image [S6, unofficial].
+A sorting scheme used to process scan conversion in depth-sorted order to reduce ray-segment list length and manipulation cost [S6, unofficial]. It sorts cells based on the depth order of their center of gravity (centroid) [S6, unofficial]. Perfect depth order is impossible because cell depth order may change pixel-by-pixel, and recalculating perfect order is computationally expensive [S6, unofficial]. This approximation does not cause quality errors in the final image but is simpler and less costly than octree searches [S6, unofficial].
 
 ### Scan-line algorithm for volume rendering of multiple curvilinear grids
-A volume rendering technique based on a scan-line algorithm with depth sorting that handles any connected grid, including multiple non-convex intersecting curvilinear grids, designed to run in parallel on a MIMD architecture [S7, unofficial]. Scan conversion and compositing are performed in software, eliminating the need for special graphics hardware and avoiding artifacts associated with graphics hardware [S7, unofficial]. The algorithm includes a solution for rendering accurate depths in perspective viewing [S7, unofficial]. Variable resolution is achieved by changing the height and width of the output screen [S7, unofficial].
+A variant designed to handle any connected grid, including multiple non-convex intersecting curvilinear grids, often running in parallel on MIMD architectures [S7, unofficial]. It performs scan conversion and compositing in software to eliminate graphics hardware artifacts and the need for special hardware [S7, unofficial]. It includes a solution for rendering accurate depths in perspective viewing and achieves variable resolution by changing the output screen dimensions [S7, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Generally faster than ray casting due to the use of coherence between adjacent pixels and scan lines [S1]. However, it is slower than hardware-accelerated methods like Gouraud shading [S1].
-*   **Memory Complexity:** Requires storage for the Y-bucket lists and the image buffer. The size depends on the number of triangles and image resolution.
-*   **Measured Performance:** An average frame rate of 0.8 fps was reported with an image resolution of 512 × 512 pixels on a single PIV 1.9 GHz processor [S3]. Interactive rendering of mid-sized models is possible with 2 to 5 fps [S3]. Rendering images with a 512² viewport can take up to one minute or more on an SGI Onyx with four processors [S2, unofficial].
-*   **Strengths:** Produces image quality equivalent to ray casting but faster due to coherence [S1]. Yields noticeably clearer images with fewer artifacts than hardware Gouraud shading methods [S1]. Can handle irregular and multiple grids [S1].
-*   **Limitations:** Slower than hardware methods [S1]. Ray casting can be competitive or faster on opaque datasets (e.g., head) because it can halt early when a pixel becomes opaque [S1].
-*   **When to use:** When high image quality is required for irregular/unstructured grids and hardware acceleration is not available or insufficient [S1][S7, unofficial].
-*   **When not to use:** For real-time rendering on opaque datasets where early ray termination in ray casting is effective [S1].
+*   **Time Complexity:** Generally faster than splatting for parallel projection due to coherence [S4, unofficial]. However, it is slower than hardware-accelerated methods and can be slower than ray casting for opaque datasets where early termination is effective [S1].
+*   **Memory Complexity:** Requires storage for the frame buffer, Y-bucket lists, and triangle data. The software frame buffer for a 500x500 window takes approximately 5.0 Mbytes [S1].
+*   **Performance:** Software scan conversion produces image quality equivalent to ray casting but with better clarity and fewer artifacts than hardware Gouraud shading [S1]. Performance varies by hardware; for example, a 512x512 viewport took up to one minute on an SGI Onyx with four processors [S2, unofficial]. Interactive rendering of mid-sized models is possible with 2 to 5 fps on modern CPUs [S3].
+*   **Strengths:** Handles irregular and curvilinear grids well; leverages spatial coherence; produces high-quality images without hardware artifacts [S1][S7, unofficial].
+*   **Limitations:** Slower than ray casting for opaque data; requires significant CPU resources for scan-line sorting and integration; not optimized for early ray termination [S1].
 
 ## Background
-The method was proposed as an early software implementation based on projection, where projected faces of an irregular grid are sorted using the Painter’s Algorithm [S3]. Lucas [Luc92] was one of the first to propose this, though his use of face centroids for sorting could lead to errors [S3][S2, unofficial]. Wilhelm et al. [WGTG96] improved this by using a software scan conversion that optimizes sorting by leveraging coherence between adjacent pixels and scan lines, using Y- and X-bucket lists [S2, unofficial][S3]. Williams et al. [WMS98] developed an elaborate volume rendering system purely based on projection, including detailed analytical solutions for the rendering equation [S3]. The method is also known as the Cell-by-Cell Method or Upson-Keller Method, referencing early work in ray casting and projection [S5, unofficial]. It is designed to run in parallel on MIMD architectures and handle multiple curvilinear grids [S7, unofficial].
+The method originated as an early software implementation for volume rendering on irregular grids. Lucas [Luc92] proposed an early version using the Painter’s Algorithm with centroid-based sorting [S3][S2, unofficial]. Wilhelms et al. [WGTG96] improved this by introducing software scan conversion with Y-bucket lists to exploit coherence between adjacent pixels and scan lines [S3][S2, unofficial]. Williams et al. [WMS98] developed a sophisticated system based on this approach, analytically solving the rendering equation for high-quality images [S3]. The method is also associated with Upson and Keeler [UK88], who presented a projection method similar to ray casting but based on scan lines [S5, unofficial]. It was designed to avoid expensive graphics hardware limitations of the time while handling unstructured tetrahedral and curvilinear grids [S1].
 
 ## Sources
 [S1] Hierarchical and parallelizable direct volume rendering for irregular and multiple grids, https://doi.org/10.1109/visual.1996.567606, fetched 2026-10-24

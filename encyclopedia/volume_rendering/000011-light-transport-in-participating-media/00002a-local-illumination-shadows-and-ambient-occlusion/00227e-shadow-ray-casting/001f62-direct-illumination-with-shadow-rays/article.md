@@ -3,150 +3,136 @@
 Also called: Direct Lighting with Shadows, Direct Lighting with Volume Transmittance, Direct Radiance with Volumetric Transmittance, Shadow Ray Illumination, Shadow Ray Lighting
 
 ## Overview
-Direct Illumination with Shadow Rays computes the direct lighting contribution at a surface point $\mathbf{p}$ by evaluating visibility to light sources through participating media [S1, unofficial]. It differs from standard surface shadowing by integrating the extinction coefficient $\sigma_t$ along the path to the light to calculate volumetric transmittance, and from path tracing by evaluating illumination locally without recursive bounces [S1, unofficial]. It builds on [Local illumination, shadows and ambient occlusion](34-local-illumination-shadows-and-ambient-occlusion.md).
+Direct Illumination with Shadow Rays computes the direct lighting contribution at a surface point by evaluating visibility and volumetric attenuation toward light sources [S1, S2, unofficial]. It differs from [Ambient Occlusion via Shadow Rays](878-ambient-occlusion-via-shadow-rays.md) by calculating specific directional light contributions rather than a hemisphere-integrated ambient term, and from [Lookup Table Shadow Rendering](3588-lookup-table-shadow-rendering.md) by performing real-time ray traversal instead of precomputed texture lookups.
 
 ## How it works
-**Inputs:** Surface point $\mathbf{p}$, surface normal $\mathbf{n}$, light source positions $\mathbf{l}_i$, light colors $C_{light, i}$, volume extinction coefficient field $\sigma_t(\mathbf{x})$, and surface material properties (diffuse reflectance $\rho$, specular parameters) [S1, unofficial][S2, unofficial].
-**Outputs:** Direct radiance $L_{direct}$ at $\mathbf{p}$ [S1, unofficial].
+**Inputs:** Surface position $\mathbf{p}$, surface normal $\mathbf{n}$, list of light sources $\{L_i\}$, volume density field $\sigma_t(\mathbf{x})$ (or geometry for binary shadowing), and material properties (diffuse/specular coefficients).
+**Outputs:** Direct radiance $L_{direct}$ at $\mathbf{p}$.
 
 **Data Structures:**
-*   **Light:** Struct containing position $\mathbf{l}_i$, color $C_{light, i}$, and enabled flag [S2, unofficial].
-*   **HitPoint:** Contains position $\mathbf{p}$, normal $\mathbf{n}$, and material properties [S3, unofficial].
-*   **Ray:** Origin $\mathbf{o}$, direction $\mathbf{d}$, and current distance $t$ [S3, unofficial].
+*   **Light Source:** Contains position $\mathbf{p}_L$, color $C_L$, and optionally area $A_L$ [S1, S2, unofficial].
+*   **Shadow Ray Result:** Boolean or transmittance value $T \in [0, 1]$ indicating occlusion [S1, S2, unofficial].
 
 **Steps:**
-1.  Initialize total direct light contribution $L_{direct} = \mathbf{0}$ [S2, unofficial].
-2.  For each enabled light source $i$:
-    a.  Compute light direction vector $\mathbf{L} = \mathbf{l}_i - \mathbf{p}$ and distance $d_{light} = \|\mathbf{L}\|$ [S2, unofficial][S4, unofficial].
-    b.  Normalize direction: $\mathbf{l} = \mathbf{L} / d_{light}$ [S2, unofficial].
-    c.  Create a shadow ray originating from $\mathbf{p}$ towards $\mathbf{l}_i$. To avoid self-intersection, offset the origin: $\mathbf{o}_{shadow} = \mathbf{p} + \epsilon \mathbf{n}$, where $\epsilon$ is a small constant (e.g., $0.01$) [S3, unofficial].
-    d.  Evaluate volumetric transmittance $T_{light}$ from $\mathbf{o}_{shadow}$ to $\mathbf{l}_i$ by ray marching through the volume [S1, unofficial][S4, unofficial].
-        i.  Initialize transmittance $T = 1.0$ [S1, unofficial].
-        ii. Sample $\sigma_t$ at $N$ points along the segment from $\mathbf{o}_{shadow}$ to $\mathbf{l}_i$ [S1, unofficial].
-        iii. Accumulate optical depth: $\tau = \sum_{j=1}^{N} \sigma_t(\mathbf{x}_j) \Delta s_j$ [S1, unofficial].
-        iv. Compute $T_{light} = \exp(-\tau)$ [S1, unofficial].
-    e.  Check for geometric occlusion by solid objects. If a solid object intersects the shadow ray at distance $t_{hit} < d_{light}$, set $T_{light} = 0.0$ [S4, unofficial].
-    f.  Compute the geometric attenuation term. For a point light, this is $1/d_{light}^2$ [S1, unofficial]. For directional lights, this is $1$ [S1, unofficial].
-    g.  Compute the dot product terms for the BRDF: $NdotL = \max(0, \mathbf{n} \cdot \mathbf{l})$ [S1, unofficial].
-    h.  Calculate the direct lighting contribution for this light:
-        $$ L_{direct} += C_{light, i} \cdot T_{light} \cdot \frac{NdotL}{d_{light}^2} \cdot \rho $$
-        [S1, unofficial][S2, unofficial]
-        *Note: Some implementations use a simplified Phong model including specular terms [S4, unofficial].*
-3.  Return $L_{direct}$ [S2, unofficial].
-
-**Formulas:**
-*   **Volumetric Transmittance:**
-    $$ T_{light} = \exp\left(-\int_{\mathbf{o}_{shadow}}^{\mathbf{l}_i} \sigma_t(\mathbf{x}) \, d\mathbf{x}\right) \approx \exp\left(-\sum_{j=1}^{N} \sigma_t(\mathbf{x}_j) \Delta s_j\right) $$
-    [S1, unofficial]
-*   **Direct Radiance (Diffuse):**
-    $$ L_{direct} = \sum_{i} C_{light, i} \cdot T_{light, i} \cdot \frac{\max(0, \mathbf{n} \cdot \mathbf{l}_i)}{d_{light, i}^2} \cdot \rho $$
-    [S1, unofficial]
-*   **Specular Term (Phong):**
-    $$ L_{spec} = C_{light, i} \cdot T_{light, i} \cdot \text{specular} \cdot \max(0, \mathbf{H} \cdot \mathbf{n})^{\text{shininess}} $$
-    where $\mathbf{H} = \text{normalize}(\mathbf{l}_i + \mathbf{V})$ and $\mathbf{V}$ is the view direction [S4, unofficial].
-
-**Parameters:**
-*   $N$: Number of samples for transmittance integration. Typical value: 16 [S1, unofficial].
-*   $\epsilon$: Offset for shadow ray origin. Typical value: $0.01$ [S3, unofficial].
-*   MAX_LIGHTS: Maximum number of lights processed. Typical value: 8 [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Self-Intersection:** Failing to offset the shadow ray origin causes the ray to immediately intersect the surface it originates from, resulting in incorrect shadows [S3, unofficial].
-*   **Precision:** Floating-point precision errors in ray marching can cause "shadow acne" or incorrect transmittance if step sizes are too large relative to density variations [S1, unofficial].
-*   **Heterogeneous Media:** If $\sigma_t$ varies significantly, uniform sampling may introduce noise; adaptive sampling or majorant sampling may be required [S1, unofficial].
+1.  **Initialization:** Initialize accumulated direct light color $L_{direct} = \mathbf{0}$ [S2, unofficial].
+2.  **Light Loop:** For each light source $L_i$:
+    a.  **Direction:** Compute light direction vector $\mathbf{l} = \mathbf{p}_L - \mathbf{p}$ and distance $d = \|\mathbf{l}\|$ [S2, unofficial]. Normalize to get $\hat{\mathbf{l}} = \mathbf{l}/d$ [S4, unofficial].
+    b.  **Shadow Ray Casting:** Cast a shadow ray from $\mathbf{p}$ in direction $\hat{\mathbf{l}}$ [S4, unofficial].
+        *   *Offset:* To avoid self-intersection, start the ray at $\mathbf{p}' = \mathbf{p} + \epsilon \mathbf{n}$, where $\epsilon$ is a small constant (e.g., $0.01$) [S3, G, unofficial].
+        *   *Traversal:* March along the ray to detect occlusion [S3, unofficial].
+        *   *Visibility Check:* Determine if the ray hits an occluder before reaching the light [S3, unofficial].
+            *   If no hit occurs, or the hit distance $t_{hit} \ge d$, the light is visible ($V=1$) [S3, unofficial].
+            *   If an occluder is found at $t_{hit} < d$, the light is shadowed ($V=0$) [S3, S4, unofficial].
+        *   *Volumetric Transmittance:* If the scene contains participating media, compute transmittance $T_{vol}$ along the path from $\mathbf{p}$ to $\mathbf{p}_L$ [S1, unofficial]. This is typically done by integrating the extinction coefficient $\sigma_t$ along the ray [S1, unofficial].
+            $$ T_{vol} = \exp\left(-\int_{0}^{d} \sigma_t(\mathbf{p} + s\hat{\mathbf{l}}) \, ds\right) $$
+            In discrete implementations, this integral is approximated by summing $\sigma_t \cdot \Delta s$ over $N$ samples (e.g., $N=16$) [S1, unofficial].
+    c.  **Lighting Contribution:**
+        *   Compute the geometric term $G$ [S1, unofficial]:
+            $$ G = \frac{\max(0, \mathbf{n} \cdot \hat{\mathbf{l}}) \cdot |\hat{\mathbf{l}} \cdot \mathbf{n}_L|}{d^2} $$
+            where $\mathbf{n}_L$ is the normal of the light source (if applicable) [S1, unofficial]. For point lights, the second term is often 1.
+        *   Compute the probability density $p_y$ for the light sampling [S1, unofficial]:
+            $$ p_y = \frac{1}{A_L} $$
+            where $A_L$ is the area of the light source [S1, unofficial].
+        *   Calculate the BRDF contribution $L_{BRDF}$ using the light color $C_L$, transmittance $T_{vol}$, and visibility $V$ [S1, S4, unofficial]:
+            $$ L_{BRDF} = \frac{C_L \cdot f_r(\mathbf{n}, \hat{\mathbf{l}}, -\hat{\mathbf{v}}) \cdot V \cdot T_{vol} \cdot G}{p_y} $$
+            where $f_r$ is the BRDF (diffuse + specular) [S4, unofficial].
+        *   Add to accumulator: $L_{direct} += L_{BRDF}$ [S2, unofficial].
+3.  **Return:** Return $L_{direct}$ [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def direct_illumination_with_shadow_rays(p: Vec3, n: Vec3, lights: List[Light], sigma_t: Function, material: Material) -> Vec3:
+def direct_illumination_with_shadow_rays(p, n, lights, volume_integrator):
     """
-    Computes direct illumination at point p with normal n, considering volumetric shadows.
+    Computes direct lighting for a surface point p with normal n.
+    lights: list of Light objects with position, color, and area.
+    volume_integrator: object with method transmittance(ray) returning T.
     """
-    L_direct = Vec3(0.0, 0.0, 0.0)
-    epsilon = 0.01
-    num_samples = 16
-
+    L_direct = vec3(0.0)
+    
     for light in lights:
-        if not light.enabled:
+        # 1. Compute light direction and distance
+        delta = light.position - p
+        d = length(delta)
+        if d == 0:
             continue
-
-        # 1. Light vector and distance
-        L_vec = light.position - p
-        d_light = length(L_vec)
-        if d_light < 1e-6:
-            continue
-        l_dir = normalize(L_vec)
-
-        # 2. Shadow Ray Setup
-        # Offset origin to avoid self-intersection
-        shadow_origin = p + epsilon * n
-        shadow_ray = Ray(shadow_origin, l_dir)
-
-        # 3. Volumetric Transmittance Calculation
-        # Integrate sigma_t along the ray to the light
-        tau = 0.0
-        step_size = d_light / num_samples
-        for j in range(num_samples):
-            # Sample point along the ray
-            t_sample = (j + 0.5) * step_size
-            if t_sample > d_light:
-                t_sample = d_light
-            point = shadow_ray.origin + t_sample * shadow_ray.direction
-            sigma = sigma_t(point)
-            tau += sigma * step_size
-
-        T_light = exp(-tau)
-
-        # 4. Geometric Occlusion Check (Solid Objects)
-        # If a solid object intersects the shadow ray before the light, T_light becomes 0
-        # This requires a separate intersection test against the scene geometry
-        hit_dist = intersect_scene(shadow_ray, max_t=d_light)
-        if hit_dist is not None and hit_dist < d_light:
-            T_light = 0.0
-
-        # 5. BRDF Calculation
-        NdotL = max(0.0, dot(n, l_dir))
+        l_dir = normalize(delta)
         
-        # Diffuse contribution
-        diffuse_term = material.diffuse_reflectance * NdotL
-        attenuation = 1.0 / (d_light * d_light) # Point light attenuation
+        # 2. Cast shadow ray
+        # Offset start point to avoid self-intersection [S3, unofficial]
+        ray_origin = p + 0.01 * n
+        shadow_ray = Ray(ray_origin, l_dir)
         
-        L_direct += light.color * T_light * diffuse_term * attenuation
-
-        # Specular contribution (optional, depends on material)
-        if material.specular_enabled:
-            V = normalize(camera_position - p) # View direction
-            H = normalize(l_dir + V)
-            NdotH = max(0.0, dot(n, H))
-            specular_term = material.specular_reflectance * pow(NdotH, material.shininess)
-            L_direct += light.color * T_light * specular_term * attenuation
-
+        # Check for occlusion
+        # Implementation depends on scene representation (geometry vs volume)
+        # Here we assume a generic intersection test or volume march
+        hit_dist = scene_intersect(shadow_ray) # Returns distance to nearest hit, or infinity
+        
+        is_visible = False
+        if hit_dist == infinity or hit_dist >= d:
+            is_visible = True
+        
+        # 3. Compute Volumetric Transmittance [S1, unofficial]
+        # Integrate sigma_t along the path to the light
+        # Using 16-step integration as per [S1, unofficial]
+        T_vol = volume_integrator.transmittance(shadow_ray, d)
+        
+        # 4. Compute Lighting Contribution [S1, S4, unofficial]
+        if is_visible:
+            # Geometric term [S1, unofficial]
+            # Assuming point light, |dot(-wi, light_n)| is 1
+            cos_theta = max(0.0, dot(n, l_dir))
+            G = cos_theta / (d * d)
+            
+            # Probability density for area light [S1, unofficial]
+            p_y = 1.0 / light.area
+            
+            # BRDF calculation [S4, unofficial]
+            # Simplified diffuse BRDF: color / pi
+            # Specular term omitted for brevity, but included in full PBR [S4, unofficial]
+            brdf = light.color * (1.0 / 3.14159) # Diffuse only example
+            
+            # Final contribution
+            L_direct += brdf * G * T_vol / p_y
+        else:
+            # Shadowed: add ambient occlusion term as fallback [S3, unofficial]
+            L_direct += vec3(0.03) * hit.material.color * hit.material.ao
+            
     return L_direct
 ```
+
+**Parameters:**
+*   $\epsilon$: Shadow ray offset scale. Typical value: $0.01$ [S3, unofficial].
+*   $N$: Number of samples for volumetric integration. Typical value: $16$ [S1, unofficial].
+*   $MAX\_LIGHTS$: Maximum number of lights processed. Typical value: $8$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Self-Intersection:** Failing to offset the shadow ray origin causes false occlusion. Use $\epsilon \mathbf{n}$ [S3, unofficial].
+*   **Precision:** Floating-point errors in distance comparisons ($t_{hit} \ge d$) can cause flickering. Use a small epsilon tolerance [S3, unofficial].
+*   **Volumetric Sampling:** Insufficient samples in the volume integration lead to noise. Adaptive sampling or majorant sampling may be required for heterogeneous media [S1, unofficial].
 
 ## Subtopics
 
 ### [Shadow Ray Transmittance Estimation](5248-shadow-ray-transmittance-estimation.md)
-Estimates transmittance from a surface point to a distant light source through participating media using majorant sampling. It differs from standard majorant sampling by integrating the sampling loop directly into the shadow ray traversal, allowing for tighter bounds per channel in chromatic variants and reducing variance caused by global majorants.
+Estimates transmittance from a surface point to a distant light through participating media using majorant sampling. It differs from standard majorant sampling by integrating the sampling loop directly into the shadow ray traversal, allowing for tighter bounds per channel in chromatic variants and reducing variance caused by global majorants.
+
+### [Voxel Direct Lighting and Shadowing](6610-voxel-direct-lighting-and-shadowing.md)
+Computes local illumination and shadows in voxel-based scenes by casting shadow rays from surface positions toward light sources [G]. It differs from [Shadow Ray Transmittance Estimation](5248-shadow-ray-transmittance-estimation.md) by using binary hit/miss results for shadowing rather than estimating transmittance through participating media [G]. It builds on [Direct Illumination with Shadow Rays](2011-direct-illumination-with-shadow-rays.md) by applying these concepts specifically to voxel geometry [G].
 
 ### Transparent Shadows
 A shadowing technique where shadow rays cross smooth glass in a straight line, and paths refracted to a light already reached that way do not count as reaching the light [S5, unofficial].
 
-### Voxel Direct Lighting and Shadowing
-Calculates diffuse lighting and shadow factors for voxel-based scenes [S6, unofficial]. It computes diffuse lighting using the dot product of the normal and sun direction, initializes a shadow factor to 1.0, and casts a shadow ray if shadows are enabled. The shadow factor is set to 0 if the shadow ray hits an object, otherwise 1.0. Emissive color is added if the material has non-zero alpha. The final color is `diffuse * shadow + emissive` [S6, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity:** $O(L \cdot N)$, where $L$ is the number of lights and $N$ is the number of samples per shadow ray [S1, unofficial].
-*   **Memory Complexity:** $O(1)$ auxiliary memory per light, excluding the volume data structure [S1, unofficial].
-*   **Performance:** Fast for scenes with few lights and simple volumes. Performance degrades with high-resolution volumes or many lights due to the cost of ray marching [S1, unofficial].
-*   **Strengths:** Simple to implement; provides accurate volumetric shadows for participating media [S1, unofficial].
-*   **Limitations:** Does not account for indirect illumination or multiple scattering; noisy results in highly heterogeneous media without advanced sampling [S1, unofficial].
-*   **When to Use:** Real-time rendering with simple volumetric effects; offline rendering where direct lighting dominates [S1, unofficial].
-*   **When Not to Use:** Scenes requiring accurate global illumination or complex light transport within volumes [S1, unofficial].
+*   **Time Complexity:** $O(N_L \cdot N_s)$, where $N_L$ is the number of lights and $N_s$ is the number of samples per shadow ray [S1, S2, unofficial].
+*   **Memory Complexity:** $O(1)$ per light, assuming the volume/geometry is accessed on-demand [S1, S4, unofficial].
+*   **Strengths:** Accurate shadows and volumetric attenuation; simple to implement for point and directional lights [S1, S2, unofficial].
+*   **Limitations:** High computational cost for many lights or complex volumes; noisy results in highly heterogeneous media without advanced sampling [S1, unofficial].
+*   **When to Use:** Real-time rendering with limited lights, or offline rendering where accuracy is prioritized over speed [S2, S4, unofficial].
+*   **When Not to Use:** Scenes with thousands of lights or extremely large volumes where precomputed shadows are more efficient [S4, unofficial].
 
 ## Background
-Direct illumination with shadow rays is a fundamental technique in computer graphics for simulating lighting in participating media. It extends the concept of shadow rays from surface rendering to volume rendering by incorporating volumetric transmittance [S1, unofficial]. The method is widely used in real-time engines and offline renderers for creating realistic atmospheric effects [S1, unofficial][S2, unofficial].
+Direct illumination with shadow rays is a fundamental technique in ray tracing and ray marching, originating from the work of Whitted (1980) on ray tracing [G]. It has been widely adopted in real-time graphics for local illumination [S2, S3, unofficial] and in offline rendering for accurate volumetric effects [S1, S4, unofficial].
 
 ## Sources
 [S1] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)
@@ -154,4 +140,3 @@ Direct illumination with shadow rays is a fundamental technique in computer grap
 [S3] An Introduction to Raymarching - Maxime Garcia, https://typhomnt.github.io/teaching/ray_tracing/raymarching_intro/, fetched 2026-10-27 (unofficial)
 [S4] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
 [S5] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)
-[S6] ria8651/bevy-voxel-engine, https://github.com/ria8651/bevy-voxel-engine, fetched 2026-10-27 (unofficial)
