@@ -3,128 +3,82 @@
 Also called: CLIP-based learning of TFs, T2TF Transfer Function Parameterization and Optimization, T2TF optimization, Text-based Transfer Function Optimization, Text-based transfer function design
 
 ## Overview
-Text-to-Transfer Function (T2TF) is a method for designing transfer functions (TFs) for volume rendering via natural language text prompts [S1]. It optimizes TF parameters to produce volume-rendered images that are semantically compatible with the user's description while discouraging alignment with negative prompts [S1]. Unlike methods that optimize a fixed 3D field (such as neural radiance fields), T2TF optimizes the parameters of a transfer function for a fixed, pre-existing volumetric scalar field [S1]. It sets itself apart from naive CLIP maximization by using a contrastive loss with negative prompts and a transmittance prior to ensure dense, realistic renderings rather than transparent, background-dominated outputs [S1].
+Text-to-Transfer Function (T2TF) is a method for designing transfer functions (TFs) for volume rendering by optimizing TF parameters to satisfy a user's natural language description, using a contrastive loss based on CLIP scores against positive and negative prompts [S1]. Unlike methods that optimize a fixed 3D field (like neural radiance fields), T2TF optimizes the parameters of a Transfer Function for a fixed, pre-existing volumetric scalar field [S1]. It sets itself apart from naive CLIP maximization by employing contrastive learning with negative prompts and density priors to ensure the rendered image is unique to the description and avoids overfitting to transparent materials or background noise [S1].
 
 ## How it works
-**Inputs:** A volumetric scalar field $f$, a positive text prompt $y$, and a set of negative prompts $\mathcal{P}$ (e.g., from LAION) [S1].
-**Outputs:** TF parameters $\phi$ defining density $\sigma_\phi$ and color $c_\phi$ [S1].
+**Inputs and Outputs**
+*   **Input:** A volumetric scalar field $f$, a positive text prompt $y$ describing the desired content, and a set of negative prompts $\mathcal{P}$ (e.g., from LAION) [S1].
+*   **Output:** Optimized TF parameters $\phi$, comprising control point locations, density values $\sigma_\phi$, and color values $\mathbf{c}_\phi$ [S1].
 
-**Data Structures and Layout:**
-The TF parameters $\phi$ consist of control point locations, density values, and color values [S1].
-1.  **Control Points:** Represented by spacing parameters between adjacent points. These are unconstrained real numbers. To ensure strictly non-negative spacing, they are transformed via the softplus function: $s_i = \text{softplus}(u_i)$ [S1]. The absolute positions are obtained by computing the cumulative sum of $s_i$. These positions are normalized such that the first control point maps to the minimum value of the scalar field $f_{min}$ and the last maps to $f_{max}$ [S1].
-2.  **Density ($\sigma_\phi$):** Unconstrained values mapped to the range $[0, 255]$ via a hyperbolic tangent nonlinearity: $\sigma = 127.5 \cdot \tanh(v) + 127.5$ [S1].
-3.  **Color ($c_\phi$):** Each RGB channel is an unconstrained value mapped to $[0, 1]$ via hyperbolic tangent: $c = 0.5 \cdot \tanh(w) + 0.5$ [S1].
+**Data Structures**
+The TF parameters $\phi$ are represented as piecewise linear functions. The structure is defined as follows:
+1.  **Control Points:** Defined by relative spacing parameters. These are unconstrained real numbers transformed via softplus to ensure non-negativity, then cumulatively summed to get absolute positions. These positions are normalized such that the first control point maps to the minimum value of $f$ and the last to the maximum value of $f$ [S1].
+2.  **Density ($\sigma_\phi$):** Unconstrained values mapped to the range $[0, 255]$ via a hyperbolic tangent nonlinearity: $\sigma = 127.5 \cdot \tanh(x) + 127.5$ [S1].
+3.  **Color ($\mathbf{c}_\phi$):** Unconstrained RGB values mapped to the range $[0, 1]$ via a hyperbolic tangent nonlinearity: $\mathbf{c} = 0.5 \cdot \tanh(x) + 0.5$ [S1].
 
-**Parameters:**
-*   Target average transmittance for initialization $\rho = 0.05$ [S1].
+**Parameters**
+*   $\rho = 0.05$: Target average transmittance for density initialization [S1].
 *   Color initialization range: $[0.3, 0.7]$ [S1].
 *   Optimizer: Stochastic Gradient Descent (SGD) with momentum [S1].
-*   Learning rate $\eta$: 10, with linear annealing [S1].
+*   Learning rate $\eta$: 10 (with linear annealing) [S1].
 *   Momentum: 0.75 [S1].
-*   Total optimization steps $N$: 300 [S1].
+*   Total steps $N$: 300 [S1].
 *   Camera poses per step: 3 [S1].
-*   Density regularization weight $\lambda_1$: $2 \cdot 10^{-5}$ [S1].
-*   Color regularization weight $\lambda_2$: $8 \cdot 10^{-4}$ [S1].
-*   Beta prior parameters $a, b$: $a = b < 1$ [S1].
+*   Camera distance: $[2d, 4d]$ from volume center, where $d$ is the distance from center [S1].
+*   $\lambda_1 = 2 \cdot 10^{-5}$: Density regularization weight [S1].
+*   $\lambda_2 = 8 \cdot 10^{-4}$: Color regularization weight [S1].
+*   Beta prior parameters: $a = b < 1$ [S1].
 
-**Algorithm:**
+**Algorithm**
+The optimization loop proceeds as follows [S1]:
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+1.  **Initialization:**
+    *   Initialize color parameters $\mathbf{c}_\phi$ randomly in $[0.3, 0.7]$.
+    *   Initialize density parameters $\sigma_\phi$ such that the average transmittance $T_N$ at a fixed viewpoint $V_0$ is approximately $\rho = 0.05$. This is done by initializing density inversely proportional to the estimated density of the scalar field (approximated via volume histogram) and adjusting via gradient descent [S1].
 
-```python
-def text_to_transfer_function(scalar_field, positive_prompt, negative_prompts_set):
-    # 1. Initialize TF parameters phi
-    # Initialize color TF parameters c_phi randomly in [0.3, 0.7]
-    c_phi = random_uniform(low=0.3, high=0.7, shape=(num_control_points, 3))
-    
-    # Initialize density TF parameters sigma_phi
-    # Estimate density of scalar field via volume histogram
-    estimated_density_histogram = compute_histogram(scalar_field)
-    # Initialize density inversely proportional to estimated density
-    sigma_raw = 1.0 / (estimated_density_histogram + epsilon)
-    # Normalize sigma_raw to achieve target average transmittance rho = 0.05
-    # at a fixed viewpoint V0
-    sigma_phi = scale_to_transmittance(sigma_raw, target_transmittance=0.05, view=V0)
-    
-    # Initialize control point spacings (unconstrained)
-    spacing_raw = random_uniform(shape=(num_control_points - 1,))
-    
-    # 2. Optimization Loop
-    for step in range(1, 301):
-        # Sample camera pose V
-        # Yaw: arbitrary angle orbiting volume
-        # Pitch: in [-pi/4, pi/4]
-        # Distance: between 2x and 4x distance from volume center
-        V = sample_camera_pose()
-        
-        # Sample background B
-        if step <= 25:
-            # Constant color background (random shade of gray)
-            B = random_gray()
-        else:
-            # Background augmentation: uniform choice between checkerboard, noise, or random Fourier feature
-            B = sample_background_augmentation()
-            
-        # Sample negative prompts y_ch
-        y_ch = sample_prompts_from_set(negative_prompts_set, count=128)
-        
-        # 3. Volume Rendering
-        # Render foreground C(V; phi)
-        C = differentiable_volume_render(scalar_field, phi, V)
-        # Compute transmittance T_N(V; phi)
-        T_N = compute_transmittance(phi, V)
-        # Composite with background
-        I = C + T_N * B
-        
-        # 4. Compute Losses
-        # Encode image and texts using CLIP
-        e_I = clip_encode_image(I)
-        e_y = clip_encode_text(positive_prompt)
-        e_y_ch = [clip_encode_text(y) for y in y_ch]
-        
-        # Contrastive CLIP Loss (Cross-Entropy)
-        # Logits are dot products between image embedding and text embeddings
-        logits = [dot(e_I, e_y)] + [dot(e_I, e) for e in e_y_ch]
-        # Target is index 0 (positive prompt)
-        L_CLIP = cross_entropy_loss(logits, target=0)
-        
-        # Density Loss (Beta Prior on Transmittance)
-        # Bias transmittance towards 0 or 1 using Beta(a, b) with a=b<1
-        L_density = -log_beta_pdf(T_N, a=0.5, b=0.5) # Example a=b=0.5
-        
-        # Regularization Loss
-        # L1 on density, L2 on color towards 0.5 (gray)
-        L_reg = lambda1 * l1_norm(sigma_phi) + lambda2 * l2_norm(c_phi - 0.5)
-        
-        # 5. Update Parameters
-        # Apply density prior only after step 100
-        if step < 100:
-            L_density = 0.0
-            
-        total_loss = L_CLIP + L_density + L_reg
-        gradients = compute_gradients(total_loss, phi)
-        phi = update_sgd(phi, gradients, learning_rate=10, momentum=0.75)
-        
-    return phi
-```
+2.  **Optimization Loop** (for $i = 1$ to $N$):
+    *   **Sampling:**
+        *   Sample a camera pose $V$ from distribution $\mathcal{V}$ (arbitrary yaw, pitch in $[-\pi/4, \pi/4]$, distance in $[2d, 4d]$) [S1].
+        *   Sample a background image $B$ from distribution $\mathcal{B}$:
+            *   If $i \le 25$: Constant random gray color [S1].
+            *   If $i > 25$: Uniformly random choice between checkerboard, noise, or random Fourier feature [S1].
+        *   Sample $K=128$ negative prompts $\check{y}$ uniformly from $\mathcal{P}$ (12M subsampled LAION prompts) [S1].
+    *   **Rendering:**
+        *   Compute the volume-rendered foreground image $C(V; \phi)$ using the emission-absorption model [G].
+        *   Compute the background transmittance $T_N(V; \phi)$ (transmittance at the last sample) [S1].
+        *   Composite the final image: $I = C(V; \phi) + T_N(V; \phi) \cdot B$ [S1].
+    *   **Loss Computation:**
+        *   **Contrastive CLIP Loss ($L_{CLIP}$):**
+            *   Encode image $I$ using CLIP image encoder $e_I$ to get $\mathbf{z}_I = e_I(I)$ [S1].
+            *   Encode positive prompt $y$ and negative prompts $\check{y}$ using CLIP text encoder $e_T$ to get $\mathbf{z}_y = e_T(y)$ and $\mathbf{z}_{\check{y}} = e_T(\check{y})$ [S1].
+            *   Compute logits: $s_y = \mathbf{z}_I^T \mathbf{z}_y$ and $s_{\check{y}} = \mathbf{z}_I^T \mathbf{z}_{\check{y}}$ [S1].
+            *   Compute cross-entropy loss between the distribution defined by $\{s_y, s_{\check{y}}\}$ and the target label "positive" [S1].
+        *   **Density Prior Loss ($L_{density}$):**
+            *   Apply only if $i \ge 100$ [S1].
+            *   Compute negative log-beta prior on transmittance $T_N$: $L_{density} = -\log \text{Beta}(T_N; a, b)$ where $a=b<1$ [S1].
+        *   **Regularization Loss ($L_{reg}$):**
+            *   $L_{reg} = \lambda_1 \|\sigma_\phi\|_1 + \lambda_2 \|\mathbf{c}_\phi - 0.5\|_2^2$ [S1].
+    *   **Update:**
+        *   Compute total loss $L = L_{CLIP} + L_{density} + L_{reg}$ [S1].
+        *   Update $\phi$ using SGD with momentum: $\phi \leftarrow \phi - \eta \nabla_\phi L$ [S1].
 
-**Edge Cases and Pitfalls:**
-*   **Saturated Gradients:** Sophisticated optimizers like Adam can lead to saturated gradients for control point values (color or density). SGD with momentum is preferred [S1].
-*   **Optimization Instability:** Background augmentation can cause instability in the first few steps. Constant gray backgrounds are used for the first 25 steps [S1].
-*   **Naive CLIP Maximization:** Maximizing CLIP score alone is unreliable, often emphasizing transparent materials and volume background. Contrastive loss with negative prompts is required for uniqueness and realism [S1].
-*   **Irrelevant Density:** Without regularization, TFs may place high density in occluded or irrelevant regions, causing confusion during editing. L1 regularization on density and L2 on color mitigate this [S1].
-*   **Density Prior Timing:** The density prior is delayed until step 100 to ensure the general scene is well-represented before refining towards a specific density bias [S1].
+**Edge Cases and Pitfalls**
+*   **Saturated Gradients:** Sophisticated optimizers like Adam can lead to saturated gradients for control point values; SGD is preferred [S1].
+*   **Background Instability:** Background augmentation causes instability in the first few steps; constant gray backgrounds are used initially [S1].
+*   **Naive CLIP Maximization:** Maximizing CLIP score alone often emphasizes transparent materials and background; contrastive loss with negative prompts is required for realistic, dense renderings [S1].
+*   **Irrelevant Density:** Without regularization, TFs may place high density in occluded regions, confusing editing; L1 density regularization mitigates this [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by backpropagation through the volume renderer. Optimization takes approximately 0.5s per gradient descent step for the 'Visible Male' volume and ~2s for the 'Rayleigh-Taylor instability' volume, per single camera pose [S1]. With 3 poses and 300 steps, total time is roughly 450s to 1800s [S1].
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Produces dense, realistic renderings with natural colors and thickness. Curated negative prompts effectively isolate specific features (e.g., teeth) by creating opacity peaks only at target values [S1].
-*   **Limitations:** Not interactive; optimization is slow. Assumes user descriptions are visible at arbitrary camera poses, which may not hold for localized, view-specific features [S1].
-*   **When to use:** When a user wants to semantically segment or highlight specific objects in a known volumetric dataset using natural language.
-*   **When not to use:** When interactive exploration is required, or when the target features are highly view-dependent and not visible from arbitrary orbits [S1].
+*   **Time Complexity:** Dominated by backpropagation through the volume renderer. Performance scales with volume size.
+*   **Measured Performance:** ~0.5s per gradient step for the 'Visible Male' volume (single pose); ~2s per step for 'Rayleigh-Taylor instability' (single pose) [S1]. With 3 poses and 300 steps, total optimization time is several minutes [S1].
+*   **Memory Complexity:** Not explicitly given, but relies on storing intermediate states for AD or adjoint variables [G].
+*   **Strengths:** Produces interpretable, editable TFs; handles semantic descriptions intuitively; contrastive loss yields more realistic colors and thickness than naive CLIP maximization [S1].
+*   **Limitations:** Not interactive (seconds per step); assumes desired features are visible at arbitrary camera poses (may fail for highly localized, view-specific features) [S1].
+*   **When to use:** When a user wants to explore or isolate specific semantic structures in a known volumetric dataset using natural language.
+*   **When not to use:** When interactive speed is required, or when the target features are not view-invariant.
 
 ## Background
-T2TF was introduced in the paper "Text-based transfer function design for semantic volume rendering" published at IEEE Visualization 2024 [S1]. It builds on prior work in differentiable volume rendering and vision-language models (CLIP) [S1]. The method addresses the challenge of intuitive semantic TF design, allowing users to specify what they want to see in a volume via text [S1]. It is used on datasets from Open Scientific Visualization Datasets and OpenVisus, including scanned data (Visible Male CT) and numerical simulations (Rayleigh-Taylor instability) [S1].
+T2TF was introduced in the paper "Text-based transfer function design for semantic volume rendering" published at IEEE Visualization 2024 [S1]. It builds on the combination of vision-language models (CLIP) and differentiable volume rendering. The method addresses the under-constrained nature of semantic volume rendering by introducing contrastive learning and density priors, drawing inspiration from prior work on neural volume rendering priors (e.g., Lombardi et al. [22]) and background augmentation (Jain et al. [11]). It is used on datasets from Open Scientific Visualization Datasets and OpenVisus, including the Visible Male CT scan and Rayleigh-Taylor instability simulations [S1].
 
 ## Sources
 [S1] Text-based transfer function design for semantic volume rendering, https://doi.org/10.1109/vis55277.2024.00047, fetched 2026-10-26

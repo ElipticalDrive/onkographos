@@ -3,132 +3,179 @@
 Also called: Basic Ray Casting, Ray Casting Volume Rendering, Single pass GPU Ray casting, Standard Ray Casting Loop
 
 ## Overview
-Ray Casting and Compositing Loop is the fundamental image-order rendering method for direct volume visualization, where scalar data is sampled along rays and mapped directly to color and opacity without intermediate surface extraction [S1, unofficial]. It differs from iso-surface marching by avoiding zero-crossing detection and normal computation, instead relying on front-to-back compositing to accumulate optical properties [S1, unofficial]. This method serves as the core integration engine for the parent scheme, [Ray Traversal and Integration Schemes](8341-ray-traversal-and-integration-schemes.md).
+Ray Casting and Compositing Loop is the fundamental image-order rendering method for direct volume visualization, solving the problem of mapping 3D scalar field data to a 2D image by integrating optical properties along camera rays [S1, S5, S10, S13, unofficial]. It sets itself apart from sibling methods like [IsoSurface Ray Marching](4324-front-to-back-volume-ray-casting-with-hsv-shading-and-sos-at.md) by avoiding explicit surface extraction, normal computation, or zero-crossing detection, instead relying on direct scalar-to-color mapping and front-to-back compositing [S1, S5, S13, unofficial]. Unlike [Monte Carlo Path Tracing for Volume Rendering](4980-monte-carlo-path-tracing-for-volume-rendering.md), it uses deterministic integration rather than stochastic sampling, and unlike [Multi-layer Volume Ray Casting](9441-multi-layer-volume-ray-casting.md), it processes the volume as a single continuous entity without hierarchical layering [S1, S5, S13, unofficial].
 
 ## How it works
-The method executes a single-pass loop per pixel (or ray) to accumulate color and opacity. It assumes the parent scheme has provided the ray segment $[t_{start}, t_{end}]$ and the step size $\Delta t$ [S5, S10, S17, unofficial].
+The method executes a single-pass loop per pixel, iterating along the ray segment intersecting the volume. It combines sampling, classification, and compositing into a tight computational kernel.
 
 **Inputs and Outputs:**
-*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), volume texture sampler, transfer function parameters, maximum sample count $N_{max}$, and early termination threshold $\alpha_{thresh}$ [S1, S2, unofficial].
-*   **Output:** Final pixel color $C_{final}$ and opacity $\alpha_{final}$ [S1, unofficial].
+*   **Inputs:**
+    *   `oTexCoords`: Smooth 3D texture coordinates representing the ray origin in texture space [S1, unofficial].
+    *   `u_cameraPosition`: Camera position in world/texture space [S1, unofficial].
+    *   `u_stepSize`: Uniform step size for discretization [S1, unofficial].
+    *   `u_Volume3DSampler`: 3D texture sampler bound to the volume data [S1, unofficial].
+    *   `texMin`, `texMax`: Bounding box of the volume in texture space [S1, unofficial].
+*   **Outputs:**
+    *   `FragColor`: Output `vec4` containing the accumulated RGB color and opacity [S1, unofficial].
 
 **Data Structures:**
-*   **Accumulators:** Two variables, $C_{acc}$ (vec3, initialized to 0) and $\alpha_{acc}$ (float, initialized to 0) [S1, S12, S43, unofficial].
-*   **Ray State:** Current position $\mathbf{p}$, initialized to $\mathbf{o}$ [S1, unofficial].
-*   **Volume Data:** 3D texture or grid accessed via interpolation [S1, S10].
+*   **Volume Data:** Stored in a 3D texture (`sampler3D`) or equivalent linear memory array, accessed via trilinear interpolation [S7, S10, S43, unofficial].
+*   **Accumulators:** `FragColor.rgb` (accumulated color) and `FragColor.a` (accumulated opacity), initialized to zero [S1, S12, S43, unofficial].
 
-**Steps:**
+**Numbered Steps:**
 
-1.  **Initialization:** Set $C_{acc} = (0, 0, 0)$ and $\alpha_{acc} = 0$ [S1, S12]. Initialize current position $\mathbf{p} = \mathbf{o}$ [S1, unofficial].
-2.  **Loop:** For $i = 0$ to $N_{max} - 1$:
-    a.  **Boundary Check:** If $\mathbf{p}$ is outside the volume bounding box, break the loop [S1, S2, unofficial].
-        *   *Implementation Note:* A common GPU check is `dot(sign(p - min), sign(max - p)) < 3.0` [S1, unofficial].
-    b.  **Sampling:** Retrieve scalar value $d_i$ from the volume at $\mathbf{p}$ using trilinear interpolation [S1, S10, S43, unofficial].
-    c.  **Classification:** Map $d_i$ to color $C_i$ and opacity $\alpha_i$ using the transfer function $T(d_i) \rightarrow (C_i, \alpha_i)$ [S2, S2789].
-        *   *Step Size Correction:* If the parent scheme provides a step size $\Delta t$ that differs from the interpolation grid spacing, correct opacity: $\alpha_i' = 1 - (1 - \alpha_i)^{\Delta t}$ [S11, S32, unofficial]. Use $\alpha_i'$ in subsequent steps.
-    d.  **Compositing:** Update accumulators using the front-to-back equation [S1, S13, S56]:
-        $$
-        C_{acc} = C_{acc} + (1 - \alpha_{acc}) \alpha_i' C_i
-        $$
-        $$
-        \alpha_{acc} = \alpha_{acc} + (1 - \alpha_{acc}) \alpha_i'
-        $$
-    e.  **Early Termination:** If $\alpha_{acc} \ge \alpha_{thresh}$ (typically 0.99), break the loop [S1, S2, S10, S12, unofficial].
-    f.  **Advance:** Update position $\mathbf{p} = \mathbf{p} + \mathbf{d} \cdot \Delta t$ [S1, S10, S17, unofficial].
+1.  **Ray Initialization:**
+    Calculate the ray direction in texture space. Subtract the camera position from the origin coordinates and normalize:
+    $$ \mathbf{d} = \text{normalize}(\mathbf{oTexCoords} - \mathbf{u\_cameraPosition}) $$
+    [S1, unofficial]
 
-3.  **Final Composition:** Composite the accumulated result over a background color $C_{bg}$ (e.g., white or black):
-    $$
-    C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}
-    $$
-    $$
-    \alpha_{final} = \alpha_{acc}
-    $$
-    [S1, S14, unofficial].
+2.  **Boundary Intersection:**
+    Intersect the ray with the volume bounding box defined by `texMin` and `texMax` to determine the entry and exit points. This defines the integration interval $[t_{start}, t_{end}]$ [S1, S2, unofficial]. If the ray does not intersect the volume, output black/transparent.
+
+3.  **Discretization:**
+    Compute the step vector in texture space:
+    $$ \mathbf{step} = \mathbf{d} \times \mathbf{u\_stepSize} $$
+    [S1, unofficial]
+    The number of samples $N$ is determined by the ray length and step size, capped by `MAX_SAMPLES` (typically 300) [S1, unofficial].
+
+4.  **Integration Loop:**
+    For each sample index $i$ from 0 to `MAX_SAMPLES`:
+    
+    a. **Sampling:**
+       Sample the volume at the current position $\mathbf{p}_i$:
+       $$ d_i = \text{texture}(\text{u\_Volume3DSampler}, \mathbf{p}_i) $$
+       [S1, unofficial]
+       
+    b. **Classification:**
+       Map the scalar value $d_i$ to color $C_i$ and opacity $\alpha_i$ using a transfer function. In the basic loop, this is often a direct mapping or a simple lookup [S1, S2, unofficial].
+       
+    c. **Compositing:**
+       Update the accumulated color and opacity using the front-to-back equation [S1, S12, S43, unofficial]:
+       $$ \alpha_{contrib} = \alpha_i (1 - \alpha_{acc}) $$
+       $$ C_{acc} = C_{acc} + \alpha_{contrib} C_i $$
+       $$ \alpha_{acc} = \alpha_{acc} + \alpha_{contrib} $$
+       
+       In the specific implementation from [S1, unofficial], this is computed as:
+       ```python
+       prev_alpha = fSample * (1.0 - FragColor.a)
+       FragColor.rgb = prev_alpha * vec3(fSample) + FragColor.rgb
+       FragColor.a += prev_alpha
+       ```
+       [S1, unofficial]
+       *Note: This specific code snippet assumes the transfer function maps scalar directly to color and opacity, or that `fSample` represents the pre-multiplied alpha contribution. Standard practice separates $C_i$ and $\alpha_i$ [S5, S10, S13, unofficial].*
+
+    d. **Advance:**
+       $$ \mathbf{p}_{i+1} = \mathbf{p}_i + \mathbf{step} $$
+       [S1, unofficial]
+
+    e. **Boundary Check:**
+       Check if the current position has exited the volume. A robust check uses the dot product of signed distances:
+       ```python
+       if dot(sign(p_i - texMin), sign(texMax - p_i)) < 3.0:
+           break
+       ```
+       [S1, unofficial]
+       This condition fails if the point is outside the box in any dimension.
+
+    f. **Early Ray Termination:**
+       If $\alpha_{acc} > \text{threshold}$ (typically 0.99), break the loop [S1, S2, unofficial].
+
+5.  **Final Compositing:**
+       Composite the accumulated color over a background color $C_{bg}$ (often black or white):
+       $$ C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg} $$
+       [S1, S14, unofficial]
+
+**Parameters:**
+*   `MAX_SAMPLES`: Maximum number of steps per ray. Value: 300 [S1, unofficial].
+*   `u_stepSize`: Uniform step size. Value: Not given in the sources.
+*   Early Ray Termination Threshold: 0.99 [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Precision:** The MLS function approximation is ill-defined away from data points, making accurate boundary intersection points critical for correct integration intervals [S2, unofficial].
+*   **Precision:** Floating-point precision errors in ray advancement can cause rays to miss voxels or sample outside the volume if not clamped [G].
+*   **Degenerate Input:** Rays parallel to volume faces or originating inside the volume require careful handling of $t_{start}$ [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_casting_loop(ray_origin, ray_direction, volume_sampler, transfer_function, 
-                     volume_min, volume_max, max_samples, alpha_threshold, 
-                     step_size, background_color):
+def ray_casting_loop(oTexCoords, u_cameraPosition, u_stepSize, u_Volume3DSampler, texMin, texMax, MAX_SAMPLES=300, ET_threshold=0.99):
+    # 1. Ray Initialization
+    direction = normalize(oTexCoords - u_cameraPosition)
+    step_vector = direction * u_stepSize
+    
+    # 2. Boundary Intersection (Simplified AABB)
+    # In practice, solve for t_min and t_max using slab method
+    # For this basic loop, we assume oTexCoords is inside or just outside,
+    # and we advance until boundary check fails.
+    
     # Initialize accumulators
-    acc_color = vec3(0.0, 0.0, 0.0)
+    acc_color = vec3(0.0)
     acc_alpha = 0.0
     
-    # Current position
-    current_pos = ray_origin
+    current_pos = oTexCoords
     
-    for i in range(max_samples):
-        # 1. Boundary Check
-        # Check if current_pos is inside the bounding box defined by volume_min and volume_max
-        # Using the sign-dot product method from [S1, unofficial]
-        sign_diff_min = sign(current_pos - volume_min)
-        sign_diff_max = sign(volume_max - current_pos)
-        if dot(sign_diff_min, sign_diff_max) < 3.0:
-            break
-            
-        # 2. Sampling
-        # Sample scalar value from volume using trilinear interpolation
-        scalar_val = volume_sampler.sample_trilinear(current_pos)
+    for i in range(MAX_SAMPLES):
+        # 3. Sampling
+        # Sample volume at current_pos. 
+        # Note: Standard implementation uses separate color/alpha transfer function.
+        # Here we follow [S1, unofficial]'s simplified direct mapping for scalar fSample.
+        f_sample = texture(u_Volume3DSampler, current_pos)
         
-        # 3. Classification
-        # Map scalar to color and opacity
-        color_val, raw_alpha = transfer_function(scalar_val)
+        # 4. Classification & Compositing
+        # Assuming f_sample is scalar, mapped to color/alpha by transfer function T()
+        # For the specific [S1, unofficial] implementation:
+        # prev_alpha = fSample * (1.0 - FragColor.a)
+        # FragColor.rgb = prev_alpha * vec3(fSample) + FragColor.rgb
+        # FragColor.a += prev_alpha
         
-        # Correct opacity for step size if necessary [S11, S32, unofficial]
-        # Assuming step_size is normalized relative to voxel size or explicitly given
-        corrected_alpha = 1.0 - pow(1.0 - raw_alpha, step_size)
+        # Generalized form:
+        color_i, alpha_i = transfer_function(f_sample)
+        alpha_contrib = alpha_i * (1.0 - acc_alpha)
+        acc_color = acc_color + alpha_contrib * color_i
+        acc_alpha = acc_alpha + alpha_contrib
         
-        # 4. Compositing
-        # Front-to-back blending [S1, S56]
-        contribution = (1.0 - acc_alpha) * corrected_alpha
-        acc_color = acc_color + contribution * color_val
-        acc_alpha = acc_alpha + contribution
-        
-        # 5. Early Termination
-        if acc_alpha >= alpha_threshold:
+        # 5. Early Ray Termination
+        if acc_alpha > ET_threshold:
             break
             
         # 6. Advance
-        current_pos = current_pos + ray_direction * step_size
+        current_pos = current_pos + step_vector
         
-    # 7. Final Composition
-    final_color = acc_color + (1.0 - acc_alpha) * background_color
-    final_alpha = acc_alpha
+        # 7. Boundary Check
+        # Check if current_pos is outside the box [texMin, texMax]
+        # Using the dot product method from [S1, unofficial]
+        sign_diff_min = sign(current_pos - texMin)
+        sign_diff_max = sign(texMax - current_pos)
+        if dot(sign_diff_min, sign_diff_max) < 3.0:
+            break
+            
+    # 8. Final Compositing
+    bg_color = vec3(0.0, 0.0, 0.0) # Black background
+    final_color = acc_color + (1.0 - acc_alpha) * bg_color
     
-    return final_color, final_alpha
+    return final_color
 ```
-
-**Parameters:**
-*   `max_samples`: Maximum number of steps per ray. Typical value: 300 [S1, unofficial].
-*   `alpha_threshold`: Early termination threshold. Typical value: 0.99 [S1, S2, unofficial].
-*   `step_size`: Distance between samples. Determined by the parent scheme's discretization [S5, S10, S17, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Boundary Intersection:** If the ray traversal scheme (parent) does not accurately clip to the volume hull, samples may fall outside valid data, leading to undefined interpolation results [S2, unofficial].
-*   **Opacity Correction:** Failing to correct opacity for step size $\Delta t$ causes aliasing and incorrect density accumulation, especially with large steps [S11, S32, unofficial].
-*   **Precision:** Accumulating small contributions over many samples can lead to floating-point precision loss in $C_{acc}$ if $\alpha_{acc}$ remains low [G].
 
 ## Subtopics
 
-### [Wavelet-Assisted Volume Ray Casting](10893-wavelet-assisted-volume-ray-casting.md)
-Uses wavelet coefficients to determine adaptive sampling distances, skipping empty regions. Chosen when performance is critical and data has sparse frequency content.
+### [CUDA GPU Implementation](9833-cuda-gpu-implementation.md)
+Implements the loop on NVIDIA GPUs using CUDA, parallelizing ray traversal across thousands of threads. It decouples traversal from the data structure, using dynamic redundant octrees for neighbor lookups and explicit caching for high-resolution data.
 
-### CUDA GPU Implementation
-A variant where each thread processes a single ray, decoupling traversal from the data structure using a dynamic redundant octree [S2, unofficial]. Chosen for high-performance GPU rendering.
+### [Wavelet-Assisted Volume Ray Casting](10893-wavelet-assisted-volume-ray-casting.md)
+Uses wavelet coefficients to determine adaptive sampling distances, skipping samples in low-frequency regions. It pre-computes an index volume to guide traversal, combining spatial rendering with wavelet analysis.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the average number of samples per ray (bounded by $N_{max}$) [S1, S10].
-*   **Memory Complexity:** $O(1)$ per thread/pixel for accumulators, plus $O(V)$ for the volume data structure [S1, S2, unofficial].
-*   **Performance:** Interactive frame rates are achievable on modern GPUs for moderate resolution volumes due to the simplicity of the loop and early termination [S2, unofficial].
-*   **Strengths:** Simple to implement, hardware-friendly (single-pass), handles transparency naturally [S1, unofficial].
-*   **Limitations:** Performance degrades with high-resolution volumes or large step sizes; requires efficient ray traversal (parent) to avoid sampling empty space [S1, S2, unofficial].
-*   **When to Use:** Direct visualization of scalar fields where surface extraction is not required [S1, unofficial].
-*   **When Not to Use:** When surface-based shading (normals, lighting) is required, or when the volume is extremely sparse and traversal overhead dominates [S1, S2, unofficial].
+*   **Time Complexity:** $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of samples per ray (capped by `MAX_SAMPLES` and early termination) [S1, S5, S10, unofficial].
+*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(1)$ per thread for accumulators [S1, S5, unofficial].
+*   **Performance:** On CPU, this method is slow due to lack of parallelism. On GPU, it achieves real-time rates for moderate resolutions but suffers from cache misses in large viewports [S1, S5, S10, unofficial].
+*   **Strengths:** Simple to implement, visually accurate for direct volume rendering, supports early ray termination for speed [S1, S5, S10, unofficial].
+*   **Limitations:** High computational cost for large volumes, sensitive to step size (aliasing), no explicit surface representation [S1, S5, S10, unofficial].
+*   **When to Use:** Direct visualization of scalar fields where surface extraction is not required, and real-time or near-real-time performance is needed on GPU [S1, S5, S10, unofficial].
+*   **When Not to Use:** When explicit surface geometry is needed (use [IsoSurface Ray Marching](4324-front-to-back-volume-ray-casting-with-hsv-shading-and-sos-at.md)), or for extremely large volumes requiring hierarchical acceleration (use [Multi-layer Volume Ray Casting](9441-multi-layer-volume-ray-casting.md)) [S1, S5, S10, unofficial].
 
 ## Background
-The method originates from the foundational work on direct volume rendering, specifically the front-to-back compositing equation [S1, S13, S56]. It was popularized in the mid-1990s with the advent of GPU hardware capable of texture sampling and fragment processing [S1, unofficial]. The specific implementation details, such as the sign-dot boundary check and early termination threshold, are derived from practical GPU implementations [S1, S2, unofficial].
+The method originates from the foundational work on direct volume rendering, specifically the front-to-back compositing equation derived by Levoy [S1, S13, unofficial]. It has been widely implemented in GPU shaders since the advent of programmable graphics pipelines, with notable implementations in CUDA for high-performance computing [S1, unofficial]. The specific boundary check and early termination optimizations are common in modern real-time renderers [S1, S2, unofficial].
 
 ## Sources
 [S1] Volumetric Render Engine - GitHub, https://github.com/mikejernil/volumetric-render-engine, fetched 2026-10-27 (unofficial)

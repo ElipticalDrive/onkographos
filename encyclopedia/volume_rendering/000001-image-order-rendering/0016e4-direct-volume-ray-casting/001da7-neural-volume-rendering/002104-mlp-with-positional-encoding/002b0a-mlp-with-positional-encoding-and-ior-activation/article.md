@@ -111,20 +111,20 @@ def mlp_with_ior_activation(x, params, deg_point, net_depth, net_width, do_skip,
 ## Subtopics
 
 ### MLP_act_dm
-Uses `net_width=128`, `do_skip=True`, `activation=relu` [S1, unofficial]. Optimized for dark matter simulations [S1, unofficial].
+A dark matter variant of the MLP that uses `net_width=128`, `do_skip=True`, and `activation=relu`. It is distinguished from the gas variant by its shallower width and enabled skip connections, which optimize it for capturing the diffuse scattering properties of dark matter fields. Choose this variant when simulating dark matter distributions. See [MLP_act_dm](4052-mlp-act-dm.md).
 
 ### MLP_act_gas
-Uses `net_width=256`, `do_skip=False`, `activation=elu` [S1, unofficial]. Optimized for gas/neural field simulations [S1, unofficial].
+A gas/neural field variant of the MLP that uses `net_width=256`, `do_skip=False`, and `activation=elu`. It is distinguished from the dark matter variant by its increased width, disabled skip connections, and ELU activation, which better model the continuous density gradients of gas. Choose this variant when simulating gas or neural field volumes. See [MLP_act_gas](4053-mlp-act-gas.md).
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [S1, unofficial]
+- **Memory Complexity:** Not given in the sources. [S1, unofficial]
+- **Performance:** Not given in the sources. [S1, unofficial]
+- **Strengths:** Not given in the sources. [S1, unofficial]
+- **Limitations:** Not given in the sources. [S1, unofficial]
 
 ## Background
-This method originates from the `rtnf` (Refractive Neural Fields) project, an unofficial implementation for neural volume rendering with refractive effects [S1, unofficial]. It adapts the standard MLP architecture used in NeRF-like models to predict refractive index fields instead of color/density [S1, unofficial]. The specific activation function is designed to map unconstrained neural network outputs to the physical domain of refractive indices [S1, unofficial].
+This method originates from the `rtnf` (Refractive Neural Fields) project, an unofficial implementation for neural volume rendering with refractive effects [S1, unofficial]. It adapts the standard MLP architecture used in NeRF-like models to predict refractive index fields instead of color or density [S1, unofficial]. The specific activation function is designed to map unconstrained neural network outputs to the physical domain of refractive indices [S1, unofficial].
 
 ## Sources
 [S1] brandonyzhao/rtnf, https://github.com/brandonyzhao/rtnf, fetched 2026-10-27 (unofficial)

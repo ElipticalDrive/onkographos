@@ -1,0 +1,201 @@
+# Unity GPU Mesh Voxelizer Part 1
+Part 1 of a GPU mesh voxelizer for Unity. Read the accompanying blog post [here](https://bronsonzgeb.com/index.php/2021/05/22/gpu-mesh-voxelizer-part-1/).
+
+![Example](https://github.com/bzgeb/UnityGPUMeshVoxelizerPart1/blob/main/Screenshots/VoxelGrid.png)
+
+### Assets/GpuVoxelizer/Voxel.shader
+```
+﻿Shader "Custom/Voxel"
+{
+    Properties
+    {
+        _Color ("Color", Color) = (1, 0, 0, 1)
+    }
+
+    SubShader
+    {
+        Pass 
+        {
+            Name "Draw Points"
+            Tags { "RenderType" = "Opaque" }
+            Blend SrcAlpha one
+
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+
+            #include "UnityCG.cginc"
+            
+            #pragma target 5.0
+            struct v2f
+            {
+                float4 position : SV_POSITION;
+                float4 color : COLOR;
+                float size : PSIZE;
+            };
+
+            float4x4 _LocalToWorldMatrix;
+            StructuredBuffer<float4> _VoxelGridPoints;
+            float4 _Color;
+
+            v2f vert(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
+            {
+                v2f o;
+                float4 pos = _VoxelGridPoints[instance_id];
+                pos.w = 1.0;
+                o.position = UnityWorldToClipPos(mul(_LocalToWorldMatrix, pos));
+                o.size = 5;
+                o.color = _Color;
+                return o;
+            }
+
+            float4 frag(v2f i) : COLOR
+            {
+                return i.color;
+            }
+            ENDCG
+        }
+    }
+    FallBack Off
+}
+```
+
+### Assets/GpuVoxelizer/VoxelizeMesh.compute
+```
+#pragma kernel VoxelizeMesh
+
+RWStructuredBuffer<float4> _VoxelGridPoints;
+
+float4 _BoundsMin;
+
+float _CellHalfSize;
+int _GridWidth;
+int _GridHeight;
+int _GridDepth;
+
+[numthreads(4,4,4)]
+void VoxelizeMesh(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _GridWidth || id.y >= _GridHeight || id.z >= _GridDepth) return;
+    
+    float cellSize = _CellHalfSize * 2.0;
+
+    _VoxelGridPoints[id.x + _GridWidth * (id.y + _GridHeight * id.z)] = float4(
+        _BoundsMin.x + id.x * cellSize,
+        _BoundsMin.y + id.y * cellSize,
+        _BoundsMin.z + id.z * cellSize, 1.0);
+}
+```
+
+### Assets/GpuVoxelizer/VoxelizedMesh.cs
+```
+﻿#if UNITY_EDITOR
+using UnityEditor;
+#endif
+using UnityEngine;
+using UnityEngine.Profiling;
+
+[ExecuteAlways]
+public class VoxelizedMesh : MonoBehaviour
+{
+    [SerializeField] MeshFilter _meshFilter;
+    [SerializeField] MeshCollider _meshCollider;
+    [SerializeField] float _halfSize = 0.05f;
+    [SerializeField] Vector3 _boundsMin;
+
+    [SerializeField] Material _gridPointMaterial;
+    [SerializeField] int _gridPointCount;
+
+    [SerializeField] ComputeShader _voxelizeComputeShader;
+    ComputeBuffer _voxelPointsBuffer;
+
+    [SerializeField] bool _drawDebug;
+
+    static readonly int LocalToWorldMatrix = Shader.PropertyToID("_LocalToWorldMatrix");
+    static readonly int BoundsMin = Shader.PropertyToID("_BoundsMin");
+    static readonly int VoxelGridPoints = Shader.PropertyToID("_VoxelGridPoints");
+
+    Vector4[] _gridPoints;
+
+    void OnRenderObject()
+    {
+        if (!_drawDebug) return;
+
+        VoxelizeMeshWithGPU();
+
+        _gridPointMaterial.SetMatrix(LocalToWorldMatrix, transform.localToWorldMatrix);
+        _gridPointMaterial.SetVector(BoundsMin, new Vector4(_boundsMin.x, _boundsMin.y, _boundsMin.z, 0.0f));
+        _gridPointMaterial.SetBuffer(VoxelGridPoints, _voxelPointsBuffer);
+        _gridPointMaterial.SetPass(0);
+        Graphics.DrawProceduralNow(MeshTopology.Points, 1, _gridPointCount);
+    }
+
+    void OnDestroy()
+    {
+        _voxelPointsBuffer.Dispose();
+    }
+
+    void VoxelizeMeshWithGPU()
+    {
+        Profiler.BeginSample("Voxelize Mesh (GPU)");
+
+        Bounds bounds = _meshCollider.bounds;
+        _boundsMin = transform.InverseTransformPoint(bounds.min);
+
+        Vector3 voxelCount = bounds.extents / _halfSize;
+        int xGridSize = Mathf.CeilToInt(voxelCount.x);
+        int yGridSize = Mathf.CeilToInt(voxelCount.y);
+        int zGridSize = Mathf.CeilToInt(voxelCount.z);
+
+        _voxelPointsBuffer?.Dispose();
+        _voxelPointsBuffer = new ComputeBuffer(xGridSize * yGridSize * zGridSize, 4 * sizeof(float));
+        if (_gridPoints == null || _gridPoints.Length != xGridSize * yGridSize * zGridSize)
+        {
+            _gridPoints = new Vector4[xGridSize * yGridSize * zGridSize];
+        }
+        _voxelPointsBuffer.SetData(_gridPoints);
+
+        var voxelizeKernel = _voxelizeComputeShader.FindKernel("VoxelizeMesh");
+        _voxelizeComputeShader.SetInt("_GridWidth", xGridSize);
+        _voxelizeComputeShader.SetInt("_GridHeight", yGridSize);
+        _voxelizeComputeShader.SetInt("_GridDepth", zGridSize);
+
+        _voxelizeComputeShader.SetFloat("_CellHalfSize", _halfSize);
+
+        _voxelizeComputeShader.SetBuffer(voxelizeKernel, VoxelGridPoints, _voxelPointsBuffer);
+
+        _voxelizeComputeShader.SetVector(BoundsMin, _boundsMin);
+
+        _voxelizeComputeShader.GetKernelThreadGroupSizes(voxelizeKernel, out uint xGroupSize, out uint yGroupSize,
+            out uint zGroupSize);
+
+        _voxelizeComputeShader.Dispatch(voxelizeKernel,
+            Mathf.CeilToInt(xGridSize / (float) xGroupSize),
+            Mathf.CeilToInt(yGridSize / (float) yGroupSize),
+            Mathf.CeilToInt(zGridSize / (float) zGroupSize));
+        _gridPointCount = _voxelPointsBuffer.count;
+
+        Profiler.EndSample();
+    }
+
+#if UNITY_EDITOR
+    void Reset()
+    {
+        _meshFilter = GetComponent<MeshFilter>();
+        if (TryGetComponent(out MeshCollider meshCollider))
+        {
+            _meshCollider = meshCollider;
+        }
+        else
+        {
+            _meshCollider = gameObject.AddComponent<MeshCollider>();
+        }
+
+        var basePath = "Assets/GpuVoxelizer/";
+        _gridPointMaterial = AssetDatabase.LoadAssetAtPath<Material>($"{basePath}Materials/GridPointMaterial.mat");
+        _voxelizeComputeShader =
+            AssetDatabase.LoadAssetAtPath<ComputeShader>($"{basePath}ComputeShaders/VoxelizeMesh.compute");
+    }
+#endif
+}
+```

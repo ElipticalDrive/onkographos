@@ -1,0 +1,153 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method enables the interactive visualization of inner structures in volumetric datasets by performing clipping via Boolean operations (intersection, subtraction, union) directly on the GPU [S1, unofficial]. It solves the problem of specifying complex transfer functions for revealing internal features by instead using geometric primitives to define visible regions [S1, unofficial]. It differs from standard convex clipping by supporting concave volumes through the decomposition of 3D Boolean operations into 1D operations along the ray, avoiding the high video memory costs associated with storing complex analytical convex objects [S1, unofficial].
++This method enables the interactive visualization of inner structures in volumetric datasets by performing clipping via Boolean operations (intersection, subtraction, union) directly on the GPU [S1, unofficial]. It avoids the difficulties of specifying appropriate transfer functions by using parameters for common analytical convex objects, such as polyhedrons and spheres, to define visible regions [S1, unofficial]. It supports concave volumes by decomposing 3D Boolean operations into 1D operations along the ray, consuming very little video memory compared to storing complex geometry [S1, unofficial].
+ 
+ ## How it works
+@@ -14,10 +14,10 @@
+ 
+ **Data Structures:**
+-*   **Clipping Primitives:** Defined by parameters. The method leverages the fact that common analytical convex objects consume very little video memory [S1, unofficial].
+-*   **Ray State:** For each pixel, a ray is cast. The intersection of the ray with the volume and the clipping primitives is computed.
++*   **Clipping Primitives:** Defined by parameters for common analytical convex objects. The exact memory layout, fields, sizes, and bit packing are not given in the sources [S1, unofficial].
++*   **Ray State:** For each pixel, a ray is cast. The intersection of the ray with the volume and the clipping primitives is computed [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 1.  **Ray Casting:** Cast rays from the camera through each pixel into the volumetric dataset [S1, unofficial].
+-2.  **3D to 1D Conversion:** Convert the 3D Boolean operations (intersection, subtraction, union) of the clipping geometry into 1D Boolean operations along the ray [S1, unofficial]. This allows the GPU to evaluate visibility against complex concave shapes using simple scalar logic on the ray parameter $t$.
++2.  **3D to 1D Conversion:** Convert the 3D Boolean operations (intersection, subtraction, union) of the clipping geometry into 1D Boolean operations along the ray [S1, unofficial]. This allows the GPU to evaluate visibility against complex concave shapes using simple scalar logic on the ray parameter $t$ [S1, unofficial].
+ 3.  **Boolean Evaluation:** Evaluate the 1D Boolean logic to determine if the current sample point along the ray is inside the clipped region [S1, unofficial].
+ 4.  **Rendering:** Apply a pseudo-color based rendering model to the visible samples [S1, unofficial].
+@@ -25,63 +25,80 @@
+ 6.  **Color Selection:** Allow users to select from pre-defined color schemes or specify their own to clarify inner anatomical structures [S1, unofficial].
+ 
++**Formulas:**
++*   Ray equation: $P(t) = O + tD$, where $O$ is the ray origin, $D$ is the direction vector, and $t \ge 0$ is the scalar parameter [G].
++*   1D Boolean combination: $I_{out} = I_{vol} \circ I_{clip}$, where $I_{vol} = [t_{min}, t_{max}]$ is the volume traversal interval, $I_{clip}$ is the set of 1D intervals derived from clipping primitives, and $\circ \in \{\cap, \setminus, \cup\}$ denotes intersection, subtraction, or union [G].
++
+ **Pseudocode:**
+ ```python
+-# Pseudocode for a single ray cast with Boolean clipping
+-# Note: Specific 1D conversion formulas are not provided in the source [S1, unofficial].
+-# The following represents the logical flow described.
++def render_volume_with_boolean_clipping(volume_data, camera_origin, camera_direction, clipping_primitives, color_scheme, operation_type):
++    # 1. Initialize ray parameters
++    t_min = 0.0
++    t_max = compute_volume_exit_t(camera_origin, camera_direction, volume_data.bounds)  # [G] Standard ray-volume traversal exit
+ 
+-def render_volume_with_boolean_clipping(volume_data, camera_ray, clipping_primitives, color_scheme):
+-    """
+-    Renders a volume slice along a ray, applying Boolean clipping.
+-    """
+-    # 1. Initialize ray parameters
+-    t_min = volume_entry_t
+-    t_max = volume_exit_t
+-    
+     # 2. Convert 3D clipping primitives to 1D intervals along the ray
+-    # This step converts the geometric intersection of the ray with 
+-    # convex objects (polyhedrons, spheres) into valid t-intervals.
+-    # Let I_clip be the set of 1D intervals representing the clipping volume.
+-    I_clip = convert_3d_to_1d_boolean(clipping_primitives, camera_ray)
+-    
++    clip_intervals = []
++    for prim in clipping_primitives:
++        t_start, t_end = intersect_ray_primitive(camera_origin, camera_direction, prim)  # [G] Analytical intersection for sphere/polyhedron
++        if t_start < t_end:
++            clip_intervals.append((t_start, t_end))
++
+     # 3. Define the base volume interval
+-    I_vol = [t_min, t_max]
+-    
++    vol_interval = (t_min, t_max)
++
+     # 4. Apply Boolean Operation (e.g., Intersection)
+-    # The visible interval is the intersection of the volume and the clip
+-    I_visible = boolean_intersect_1d(I_vol, I_clip)
+-    
++    # Combine volume interval with clipping intervals using the selected 1D boolean operator
++    visible_interval = apply_1d_boolean_operations([vol_interval] + clip_intervals, operation_type)  # [G] Standard interval boolean logic
++
+     # 5. Sample the volume along the visible interval
+-    color = (0, 0, 0, 0) # Initial color
+-    
+-    for t in sample_range(I_visible):
+-        sample = sample_volume(volume_data, camera_ray.origin + t * camera_ray.direction)
+-        
++    color = (0.0, 0.0, 0.0, 0.0)  # Initial RGBA
++    step_size = compute_step_size(visible_interval, resolution)  # [G] Standard sampling step
++
++    t = visible_interval[0]
++    while t < visible_interval[1]:
++        pos = camera_origin + t * camera_direction
++        sample_value = sample_volume(volume_data, pos)  # [G] Trilinear/nearest interpolation
++
+         # 6. Apply Pseudo-Color Rendering Model
+-        # Map sample value to color based on the selected scheme
+-        c = apply_pseudo_color(sample, color_scheme)
+-        
+-        # 7. Composite (Standard Volume Rendering Composite)
+-        # Alpha compositing
+-        color = composite(color, c)
+-        
+-        if color.alpha >= 1.0:
++        c = apply_pseudo_color(sample_value, color_scheme)  # [G] Transfer function mapping
++
++        # 7. Composite (Front-to-Back Alpha Blending)
++        alpha = c[3]
++        color = (
++            color[0] + c[0] * alpha * (1.0 - color[3]),
++            color[1] + c[1] * alpha * (1.0 - color[3]),
++            color[2] + c[2] * alpha * (1.0 - color[3]),
++            color[3] + alpha * (1.0 - color[3])
++        )
++
++        if color[3] >= 0.99:  # [G] Standard opacity threshold
+             break
+-            
++
++        t += step_size
++
+     # 8. Apply Phong Illumination on clipped surfaces
+-    # If the ray exits the clipping boundary, apply lighting to that surface point
+-    if is_boundary_exit(t):
+-        normal = compute_normal(volume_data, camera_ray.origin + t * camera_ray.direction)
+-        color = apply_phong_illumination(color, normal, camera_ray.direction)
+-        
++    # If the ray exits the clipping boundary, compute lighting for that surface point
++    if t >= visible_interval[1] and visible_interval[1] > t_min:
++        exit_pos = camera_origin + visible_interval[1] * camera_direction
++        normal = compute_normal(volume_data, exit_pos)  # [G] Gradient-based normal
++        light_dir = normalize(vec3(0.5, 1.0, 0.5))
++        view_dir = normalize(-camera_direction)
++        diffuse = max(dot(normal, light_dir), 0.0)
++        specular = pow(max(dot(reflect(-light_dir, normal), view_dir), 0.0), 32.0)
++        color = (
++            color[0] * (0.5 + 0.5 * diffuse) + 0.2 * specular,
++            color[1] * (0.5 + 0.5 * diffuse) + 0.2 * specular,
++            color[2] * (0.5 + 0.5 * diffuse) + 0.2 * specular,
++            color[3]
++        )
++
+     return color
+ ```
+ 
+ **Parameters:**
+-*   **Color Scheme:** Users can select from several pre-defined schemes or specify their own [S1, unofficial].
++*   **Color Scheme:** Users can select from several pre-defined schemes or specify their own [S1, unofficial]. Typical values are not given in the sources.
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Precision:** Not given in the sources.
+-*   **Boundaries:** The method relies on converting 3D operations to 1D; degenerate cases where the ray is tangent to a clipping primitive may require specific handling not detailed in the source [S1, unofficial].
++*   **Boundaries:** Degenerate ray-primitive intersections and boundary handling are not detailed in the sources.
+ 
+ ## Subtopics
+@@ -94,5 +111,5 @@
+ *   **Memory Complexity:** Consumes very little video memory because common analytical convex objects are determined by parameters rather than storing complex geometry [S1, unofficial].
+ *   **Measured Performance:** Tested on a standard PC with a GeForce FX8600 graphics card, achieving interactive frame rates [S1, unofficial].
+-*   **Strengths:** Avoids difficulties in specifying appropriate transfer functions; supports concave volumes; low memory footprint for clipping geometry.
++*   **Strengths:** Avoids difficulties in specifying appropriate transfer functions; supports concave volumes; low memory footprint for clipping geometry [S1, unofficial].
+ *   **Limitations:** Relies on common analytical convex objects for the Boolean primitives; specific performance metrics beyond "interactive" are not given [S1, unofficial].
+ 

@@ -1,0 +1,100 @@
+--- v001.md
++++ v002.md
+@@ -4,44 +4,57 @@
+ 
+ ## Overview
+-This method generates an occupancy map by counting the number of rays passing through each voxel in a 3D grid, identifying regions viewed by training cameras to initialize or refine the geometry mask [S1, unofficial]. It differs from hierarchical approaches like [Occupancy Mipmap Generation](2700-occupancy-mipmap-generation.md) by using explicit ray casting rather than JAX convolutions, and from [Occupancy Grid Update](2916-occupancy-grid-update.md) by focusing on initial generation via ray traversal statistics rather than incremental updates.
++This method generates an occupancy map by counting the number of rays passing through each voxel in a 3D grid, identifying regions viewed by training cameras to initialize or refine the geometry mask [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `rays`: Tensor of ray origins and directions.
+-- `world_size`: Dimensions of the 3D grid.
+-- `stepsize`: Distance between sample points along a ray.
+-- `near`, `far`: Clamping distances for ray segment intersection.
+-- `downrate`: Downsampling factor for rays if `irregular_shape` is false.
+-- `irregular_shape`: Boolean flag determining ray batching strategy.
++- `rays`: Tensor of ray origins and directions [S1, unofficial].
++- `world_size`: Dimensions of the 3D grid [S1, unofficial].
++- `stepsize`: Distance between sample points along a ray [S1, unofficial].
++- `near`, `far`: Clamping distances for ray segment intersection [S1, unofficial].
++- `downrate`: Downsampling factor for rays if `irregular_shape` is false [S1, unofficial].
++- `irregular_shape`: Boolean flag determining ray batching strategy [S1, unofficial].
+ 
+ **Outputs:**
+-- `count`: A zero-initialized tensor with the same shape as the density grid, accumulating ray hits.
++- `count`: A zero-initialized tensor with the same shape as the density grid, accumulating ray hits [S1, unofficial].
+ 
+ **Data Structures:**
+-- `count`: 3D tensor, shape `(D, H, W)`, dtype float32.
+-- `ones`: A `DenseGrid` object representing a 3D grid of ones, used for gradient accumulation.
++- `count`: 3D tensor, shape `(D, H, W)`, dtype float32 [S1, unofficial].
++- `ones`: A `DenseGrid` object representing a 3D grid of ones, used for gradient accumulation [S1, unofficial].
+ 
+-**Steps:**
+-1. Initialize `count` as a zero tensor with shape `world_size`.
+-2. Determine ray batching:
+-   - If `irregular_shape` is true, split rays into chunks of 10,000.
+-   - Otherwise, downsample rays by `downrate` along both spatial dimensions, flatten, and split into chunks of 10,000.
+-3. For each batch of rays:
+-   a. Create a `DenseGrid` named `ones` with size `world_size` and appropriate world bounds.
+-   b. Compute ray direction normalization vector `vec`. Replace zero components with $10^{-6}$ to avoid division by zero.
+-   c. Calculate intersection parameters `rate_a` and `rate_b` for the bounding box corners relative to the ray origin.
+-   d. Determine near and far intersection distances:
+-      $$ t_{min} = \max(\min(rate\_a), \min(rate\_b)) $$
+-      $$ t_{max} = \min(\max(rate\_a), \max(rate\_b)) $$
+-      Clamp $t_{min}$ and $t_{max}$ to the interval $[near, far]$.
+-   e. Generate sample positions `interpx` along the ray segment between $t_{min}$ and $t_{max}$ using precomputed `rng` and `stepsize`. The number of samples $N_{samples}$ is calculated as:
+-      $$ N_{samples} = \left\lfloor \frac{\| \text{world\_size} + 1 \|}{\text{stepsize}} \right\rfloor + 1 $$
+-   f. Compute 3D coordinates `rays_pts` for all sample points.
+-   g. Query the `ones` grid at `rays_pts` and call `backward()` to accumulate gradients, effectively marking the voxels traversed by the ray.
+-   h. After processing all rays, increment the `count` grid where the gradient of the `ones` grid is greater than 1.
++**Pseudocode:**
++```python
++def generate_occupancy_map(rays, world_size, stepsize, near, far, downrate, irregular_shape, world_bounds):
++    count = torch.zeros(world_size, dtype=torch.float32)
++    if irregular_shape:
++        ray_batches = [rays[i:i+10000] for i in range(0, len(rays), 10000)]
++    else:
++        rays_downsampled = rays[::downrate, ::downrate].reshape(-1, rays.shape[-1])
++        ray_batches = [rays_downsampled[i:i+10000] for i in range(0, len(rays_downsampled), 10000)]
++
++    for batch in ray_batches:
++        ones = DenseGrid(size=1, world_size=world_size, bounds=world_bounds)
++        vec = batch.direction.clone()
++        vec[vec == 0] = 1e-6
++        rate_a = (world_bounds.min - batch.origin) / vec
++        rate_b = (world_bounds.max - batch.origin) / vec
++        t_min = max(min(rate_a), min(rate_b))
++        t_max = min(max(rate_a), max(rate_b))
++        t_min = clamp(t_min, near, far)
++        t_max = clamp(t_max, near, far)
++        N_samples = int(np.linalg.norm(np.array(world_size) + 1) / stepsize) + 1
++        interpx = torch.linspace(t_min, t_max, N_samples)
++        rays_pts = batch.origin + interpx.unsqueeze(1) * batch.direction
++        ones.query(rays_pts).backward()
++        count += (ones.grad > 1).float()
++    return count
++```
++
++**Formulas:**
++- Sample count per ray: $N_{\text{samples}} = \left\lfloor \frac{\| \text{world\_size} + 1 \|}{\text{stepsize}} \right\rfloor + 1$ [S1, unofficial].
++- Intersection bounds: $t_{\min} = \max(\min(\text{rate\_a}), \min(\text{rate\_b}))$ and $t_{\max} = \min(\max(\text{rate\_a}), \max(\text{rate\_b}))$, clamped to $[\text{near}, \text{far}]$ [S1, unofficial].
+ 
+ **Parameters:**
+ - `far`: Set to $10^9$ to prevent rays from stopping early due to small bounding box limits [S1, unofficial].
+-- `N_samples`: Calculated as above.
++- `N_samples`: Calculated as above [S1, unofficial].
+ 
+ **Edge Cases:**
+@@ -50,8 +63,8 @@
+ 
+ ## Operating characteristics
+-Time complexity is proportional to the number of rays and samples per ray. Memory complexity is dominated by the `count` grid and the `ones` grid. Performance depends on the number of training cameras and the resolution of the 3D grid. Strengths include explicit visibility information. Limitations include the computational cost of ray casting for large scenes.
++Not given in the sources.
+ 
+ ## Background
+-Originated in the context of Unbounded NeRF implementations, specifically in the `sjtuytc/UnboundedNeRFPytorch` repository [S1, unofficial]. It is used to initialize or refine geometry masks based on camera visibility.
++Not given in the sources.
+ 
+ ## Sources

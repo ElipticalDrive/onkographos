@@ -3,146 +3,153 @@
 Also called: Data Structure and Compression
 
 ## Overview
-Structural and Geometric Compression is a method for compressing volumetric surface representations by storing depth values, surface connectivity links, and surface normals in a compact, voxel-aligned data structure. It solves the problem of efficiently storing and transmitting complex isosurfaces for real-time ray casting by exploiting the spatial coherence of depth buffers. Unlike general-purpose volume compression methods that operate on scalar field coefficients, this method operates directly on the geometric primitives (depth, normal, connectivity) extracted from the volume, allowing for on-the-fly rendering without full volume reconstruction [S1]. It sets itself apart from sibling methods like [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md) by avoiding transform-domain quantization in favor of direct geometric parameterization and sparse connectivity encoding.
+Structural and Geometric Compression is a method for compressing particle-based volume data by storing only the surface depth values, connectivity links, and normals for each pixel column, rather than the full volumetric grid. It solves the problem of high memory usage in particle rendering by exploiting the sparsity of particle systems, where most voxels are empty. Unlike sibling methods that compress the entire 3D coefficient space (e.g., [Value compression](6-value-compression.md)), this method operates on a 2.5D representation (depth layers per pixel), achieving high compression ratios by storing only the relevant surface geometry and its immediate topological connections.
 
 ## How it works
-The method compresses a voxelized representation of a surface (e.g., from particle data or isosurfaces) into a compact data structure suitable for ray casting.
+The method compresses particle data by extracting surface information into a compact data structure per pixel column.
 
 **Inputs and Outputs:**
-- Input: A 3D volume or mesh representing the surface geometry.
-- Output: A compressed bitstream containing depth values, surface links, and normals.
+*   **Input:** A set of particle spheres defined by center and radius.
+*   **Output:** A compressed bitstream containing depth values, neighbor links, and normals for each pixel column.
 
 **Data Structures:**
-For each voxel column (pixel) in the rendering resolution, the structure stores:
-1.  **Depth Values:** Stored in 32-bit floating-point format ($f32$) [S1].
-2.  **Surface Links:** Links to the four direct neighbors (up, down, left, right) of each depth value. Each link is stored in 1 byte ($u8$), totaling 4 bytes ($32$ bits) per depth entry [S1].
-3.  **Normals:** Compressed into a 32-bit word using octahedron normal encoding. This consists of two 16-bit normalized integers ($u16$) [S1].
+For each pixel column (voxel column along the view ray), the following data is stored:
+1.  **Depth Values:** Stored in 32-bit floating-point format [S1]. Multiple entries may exist per column for translucency (entry and exit depths).
+2.  **Neighbor Links:** Links to the four direct spatial neighbors (up, down, left, right) of each depth value. Each link is stored in 1 byte, totaling 32 bits (4 bytes) per depth entry [S1].
+3.  **Normals:** Compressed to a 32-bit word using octahedron normal encoding. This consists of two 16-bit normalized integers [S1].
 
 **Steps:**
-1.  **Voxelization/Extraction:** Identify voxels that overlap the surface of the input geometry (e.g., particle spheres) [S1].
-2.  **Depth Buffer Generation:** For each pixel (voxel column), extract the depth values of the surface intersections.
-3.  **Smoothing (Optional):** Apply iterative smoothing to the reciprocal of depth values to ensure even filter spread. The number of iterations depends on the distance of the surface point to the camera to maintain a constant world-space filter radius [S1].
-4.  **Normal Estimation:** Compute surface normals using the Sobel operator to estimate derivatives in two directions from the smoothed depth data [S1].
-5.  **Link Generation:** Determine connectivity links to the four direct neighbors for each depth entry. These links allow the reconstruction of surface connectivity on the fly during rendering [S1].
-6.  **Encoding:**
-    - Pack depth values as 32-bit floats.
-    - Pack neighbor links as four 8-bit integers.
-    - Pack normals using octahedron encoding: map the 3D normal vector $(n_x, n_y, n_z)$ to a 2D vector on the octahedron surface, then quantize to two 16-bit integers [S1].
-7.  **Storage:** Store depth, links, and normals in parallel arrays, aligned by pixel column [S1].
-
-**Formulas:**
-- **Octahedron Normal Encoding:**
-  Given a normalized normal vector $\mathbf{n} = (n_x, n_y, n_z)$, the octahedron coordinates $(u, v)$ are computed as:
-  $$ u = \text{sign}(n_x) \cdot \frac{|n_x|}{|n_x| + |n_y| + |n_z|} $$
-  $$ v = \text{sign}(n_y) \cdot \frac{|n_y|}{|n_x| + |n_y| + |n_z|} $$
-  These values are then scaled and quantized to 16-bit integers [S1].
-
-**Parameters:**
-- Link size: 1 byte per neighbor [S1].
-- Normal encoding: 16-bit integers per component [S1].
-- Depth format: 32-bit float [S1].
-
-**Edge Cases and Pitfalls:**
-- **Data Coherency:** In parallel implementations, shared vertices between partitions can be disregarded with minimal impact on quality [S2].
-- **Data Balancing:** Critical for parallel performance because processing cost per triangle is constant time [S2].
+1.  **Voxelization:** Mark voxels that overlap the surface of each particle sphere. Only these voxels are processed [S1].
+2.  **Depth Extraction:** For each pixel column, extract the depth values of the surface intersections.
+3.  **Link Generation:** Generate links to the four direct neighbors for each depth value. These links allow on-the-fly computation of surface connectivity during rendering [S1].
+4.  **Normal Estimation:** Apply a Sobel operator to estimate derivatives in two directions to generate normals [S1].
+5.  **Compression:**
+    *   Store depth values as 32-bit floats [S1].
+    *   Store neighbor links as 1-byte integers per direction, totaling 32 bits per depth entry [S1].
+    *   Encode normals using octahedron encoding (two 16-bit integers) into a 32-bit word [S1].
+6.  **Rendering:**
+    *   For frontmost surface rendering, read the first depth and normal entry of every pixel column [S1].
+    *   For translucency, iterate over all depth and normal entries, applying a scattering and absorption model using ray segment lengths computed from the differences between adjacent entry and exit depths [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compress_surface(volume_data, resolution):
-    """
-    Compresses surface geometry into depth, links, and normals.
-    """
-    # Initialize structures
-    # depth_buffer: list of lists of floats (32-bit)
-    # link_buffer: list of lists of tuples (4x u8)
-    # normal_buffer: list of lists of tuples (2x u16)
-    
-    depth_buffer = []
-    link_buffer = []
-    normal_buffer = []
-    
-    for y in range(resolution.y):
-        row_depth = []
-        row_links = []
-        row_normals = []
-        
-        for x in range(resolution.x):
-            # 1. Extract depth values for this voxel column
-            depths = extract_depths(volume_data, x, y)
-            
-            # 2. Smooth depths if necessary
-            # depths = smooth_depths(depths, camera_distance)
-            
-            # 3. Compute normals using Sobel operator
-            normals = compute_normals_sobel(depths)
-            
-            # 4. Encode normals to octahedron
-            encoded_normals = []
-            for n in normals:
-                # Octahedron encoding
-                denom = abs(n.x) + abs(n.y) + abs(n.z)
-                if denom == 0:
-                    u, v = 0.0, 0.0
-                else:
-                    u = sign(n.x) * abs(n.x) / denom
-                    v = sign(n.y) * abs(n.y) / denom
-                
-                # Quantize to 16-bit
-                u_int = int((u + 1.0) * 32767)
-                v_int = int((v + 1.0) * 32767)
-                encoded_normals.append((u_int, v_int))
-            
-            # 5. Compute links to neighbors
-            # Links are 1-byte indices or flags indicating connectivity
-            links = compute_neighbor_links(depths, x, y, resolution)
-            
-            row_depth.append(depths)
-            row_links.append(links)
-            row_normals.append(encoded_normals)
-        
-        depth_buffer.append(row_depth)
-        link_buffer.append(row_links)
-        normal_buffer.append(row_normals)
-        
-    return depth_buffer, link_buffer, normal_buffer
+# Data structure for a single depth entry in a pixel column
+class DepthEntry:
+    depth: float32      # 32-bit float
+    links: [uint8, uint8, uint8, uint8] # 4 bytes: up, down, left, right
+    normal: uint32      # 32-bit octahedron encoded normal
 
-def compute_neighbor_links(depths, x, y, resolution):
-    """
-    Computes 1-byte links to 4 direct neighbors.
-    Returns a tuple of 4 bytes.
-    """
-    links = []
-    # Up, Down, Left, Right
-    for dx, dy in [(0, -1), (0, 1), (-1, 0), (1, 0)]:
-        nx, ny = x + dx, y + dy
-        if 0 <= nx < resolution.x and 0 <= ny < resolution.y:
-            # Check connectivity based on depth continuity or surface adjacency
-            # Placeholder for specific connectivity logic
-            link_byte = 0xFF # Default or computed value
-            links.append(link_byte)
-        else:
-            links.append(0x00) # Boundary
-    return tuple(links)
+def compress_particle_data(particles, image_width, image_height):
+    # Initialize storage for each pixel column
+    # Each column stores a list of DepthEntry objects
+    column_data = [[[] for _ in range(image_height)] for _ in range(image_width)]
+    
+    # Step 1: Voxelization - mark voxels overlapping particle surfaces
+    for particle in particles:
+        voxels = get_voxels_overlapping_sphere(particle.center, particle.radius)
+        for voxel in voxels:
+            # Mark voxel as part of surface
+            mark_voxel_surface(voxel)
+
+    # Step 2: Depth Extraction and Link Generation
+    for x in range(image_width):
+        for y in range(image_height):
+            # Get depth values for this column
+            depths = get_depth_values_for_column(x, y)
+            
+            # Sort depths to ensure correct entry/exit order
+            depths.sort()
+            
+            for i, depth in enumerate(depths):
+                entry = DepthEntry()
+                entry.depth = depth
+                
+                # Step 3: Generate links to neighbors
+                # Links point to the index of the neighbor's depth entry in the same column
+                # or a special value if no neighbor exists
+                entry.links = [
+                    get_neighbor_link(x, y, i, direction='up'),
+                    get_neighbor_link(x, y, i, direction='down'),
+                    get_neighbor_link(x, y, i, direction='left'),
+                    get_neighbor_link(x, y, i, direction='right')
+                ]
+                
+                # Step 4: Normal Estimation
+                # Use Sobel operator on depth derivatives
+                normal = estimate_normal_sobel(depths, i)
+                entry.normal = octahedron_encode(normal)
+                
+                column_data[x][y].append(entry)
+                
+    return column_data
+
+def render_frontmost(column_data):
+    for x in range(image_width):
+        for y in range(image_height):
+            entries = column_data[x][y]
+            if entries:
+                # Read first depth and normal
+                first_entry = entries[0]
+                depth = first_entry.depth
+                normal = octahedron_decode(first_entry.normal)
+                # Render pixel at depth with normal
+                render_pixel(x, y, depth, normal)
+
+def render_translucent(column_data):
+    for x in range(image_width):
+        for y in range(image_height):
+            entries = column_data[x][y]
+            if len(entries) < 2:
+                continue
+            
+            # Iterate over all depth entries
+            for i in range(len(entries) - 1):
+                entry_in = entries[i]
+                entry_out = entries[i+1]
+                
+                # Compute ray segment length
+                segment_length = entry_out.depth - entry_in.depth
+                
+                # Apply scattering and absorption model
+                color = apply_scattering_absorption(
+                    entry_in.normal, 
+                    segment_length, 
+                    particle_properties
+                )
+                accumulate_color(x, y, color)
 ```
+
+**Parameters:**
+*   **Smoothing Iterations:** The number of iterations for the 3x3 smoothing kernel depends on the distance of the surface point to the camera to maintain a constant world-space filter radius [S1].
+*   **Link Size:** 1 byte per neighbor direction [S1].
+*   **Normal Encoding:** Octahedron encoding with two 16-bit integers [S1].
+
+**Edge Cases:**
+*   **Empty Columns:** Pixel columns with no particle intersections should be handled gracefully (e.g., skip rendering or use background color).
+*   **Boundary Links:** Links at the image boundaries must be handled to avoid out-of-bounds access.
+*   **Precision:** Depth values are stored as 32-bit floats, which may introduce precision errors for very large or very small depth values [S1].
 
 ## Subtopics
 
-### Parallel Edgebreaker
-A parallel compression algorithm for isosurfaces where each part of the mesh is encoded independently from the others, based on the Edgebreaker algorithm [S2]. It increases file size by almost 10% compared to sequential compression but achieves significant speedup in processing and transmission [S2]. Data balancing is critical due to constant processing time per triangle, while data coherency (shared vertices) can be disregarded with minimal quality loss [S2].
+### [Fractal Compression](5719-fractal-compression.md)
+Fractal compression is a lossy volume compression method that exploits self-similarity within the dataset by mapping each "range block" to a larger, dissimilar "domain block" from the same volume, storing only the affine transformation required to convert the domain block into the range block. Unlike vector quantization, which stores a reference to a codeword, fractal compression stores the geometric relationship between two different-sized blocks, allowing for high compression ratios at the cost of extreme encoding complexity and iterative reconstruction during decoding.
+
+### [Parallel Edgebreaker](7789-parallel-edgebreaker.md)
+Parallel Edgebreaker is a parallel compression algorithm for isosurfaces where each part of the mesh is encoded independently from the others, based on the Edgebreaker algorithm. It solves the bottleneck of sequential mesh compression in distributed environments by trading a slight increase in file size for significant reductions in transmission and processing time. Unlike sequential methods that require global traversal, this method allows independent encoding of mesh partitions, making it suitable for high-latency network transfers where processing speed outweighs storage efficiency.
 
 ## Operating characteristics
-- **Compression Ratio:** For the XT-52 dataset (374 MB uncompressed), sequential compression reduced size to 31 MB, and parallel compression to 32 MB [S2].
-- **Performance:** On a 1.14 Mbps network, transmission time for XT-52 was 44min:37sec (uncompressed), 17min:36sec (sequential compressed), and 4min:31sec (parallel compressed with 16 processes) [S2].
-- **Strengths:** Enables real-time ray casting by storing only necessary geometric primitives; parallel processing offers high speedup [S1, S2].
-- **Limitations:** Parallel version has ~10% larger file size; requires careful data balancing for parallel efficiency [S2].
-- **When to use:** Real-time visualization of complex isosurfaces where bandwidth or memory is constrained [S1, S2].
-- **When not to use:** When lossless scalar field reconstruction is required, or when data coherency across parallel partitions is critical [S2].
+*   **Time Complexity:** Encoding complexity is dominated by voxelization and link generation, which is linear with respect to the number of particles and surface voxels. Decoding is efficient as it involves simple lookups and on-the-fly connectivity computation [S1].
+*   **Memory Complexity:** Memory usage is proportional to the number of surface voxels per pixel column, significantly less than storing the full 3D volume [S1].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** High compression ratios for sparse particle data; efficient rendering for frontmost and translucent surfaces; on-the-fly connectivity computation reduces storage overhead [S1].
+*   **Limitations:** Limited to particle-based data; smoothing iterations depend on camera distance, which may require dynamic adjustment [S1].
+*   **When to use:** Suitable for rendering large-scale particle systems where memory bandwidth is a bottleneck and the data is sparse.
+*   **When not to use:** Not suitable for dense volumetric data or non-particle-based volumes.
 
 ## Background
-The method originates from research on memory-efficient on-the-fly voxelization of particle data and parallel isosurface extraction for distributed environments [S1, S2]. It was developed to address the challenges of rendering complex particle-based volumes and isosurfaces in real-time applications, leveraging compact data structures and parallel processing techniques [S1, S2].
+The method was introduced in "Memory-Efficient On-The-Fly Voxelization of Particle Data" [S1]. It builds on the idea of storing surface geometry rather than volumetric data to reduce memory footprint. The use of octahedron normal encoding and neighbor links allows for efficient rendering and connectivity computation without storing explicit mesh structures [S1].
 
 ## Sources
 [S1] Memory-Efficient On-The-Fly Voxelization of Particle Data, https://doi.org/10.2312/pgv.20151150, fetched 2026-10-26
-[S2] Parallel Isosurface Extraction for 3D Data Analysis Workflows in Distributed Environments, https://doi.org/10.1002/cpe.1710, fetched 2026-10-26

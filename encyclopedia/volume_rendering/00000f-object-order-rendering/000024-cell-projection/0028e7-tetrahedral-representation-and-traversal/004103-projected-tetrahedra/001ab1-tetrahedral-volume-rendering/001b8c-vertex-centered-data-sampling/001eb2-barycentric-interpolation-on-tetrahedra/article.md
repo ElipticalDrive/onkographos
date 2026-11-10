@@ -1,80 +1,83 @@
 # Barycentric Interpolation on Tetrahedra
 
-Also called: 3D Barycentric Coordinates Interpolation, Barycentric Feature Interpolation, Linear Feature Interpolation, Piecewise Linear Interpolation (Tetrahedral)
+Also called: 3D Barycentric Coordinates Interpolation, Barycentric Feature Interpolation, Barycentric Interpolation in Tetrahedra, Linear Feature Interpolation, Piecewise Linear Interpolation (Tetrahedral)
 
 ## Overview
-Barycentric interpolation on tetrahedra is a method for reconstructing scalar or vector values at an arbitrary point inside a tetrahedron by computing a weighted sum of the values at the tetrahedron's four vertices, where the weights are the point's 3D barycentric coordinates [S1, unofficial][S2][S3]. It solves the problem of smoothly varying field data across unstructured tetrahedral meshes, which are commonly used to partition irregular volumetric datasets [S2]. Unlike bilinear interpolation on hexahedra, which requires solving a system of equations or iterative refinement, barycentric interpolation on tetrahedra is a direct, closed-form linear operation [S1, unofficial]. It differs from its sibling method, [Barycentric Interpolation on Triangles](5671-barycentric-interpolation-on-triangles.md), by operating in 3D volume using four vertices and three independent coordinates, whereas the triangle method operates on 2D surfaces using three vertices and two coordinates [S3].
+Barycentric interpolation on tetrahedra reconstructs a feature vector (scalar or multidimensional) at an arbitrary point $p$ inside a tetrahedron by computing a weighted sum of the feature vectors at the tetrahedron's four vertices, where the weights are the barycentric coordinates of $p$ [S1, unofficial][S2, S3, S4]. It extends 2D barycentric interpolation to 3D by relating four tetrahedral subvolumes to the total volume [S1, unofficial]. Unlike its parent method, [Vertex-centered Data Sampling](1037-vertex-centered-data-sampling.md), which describes the general concept of interpolating vertex-centered data, this article details the specific geometric computation of the weights and the resulting affine property within a single tetrahedral element. It is distinct from higher-order methods like [Clough–Tocher Bézier Patch Interpolation](9134-clough-tocher-b-zier-patch-interpolation.md) by relying solely on vertex values rather than requiring per-vertex gradients, resulting in C0 continuity [S1, unofficial][S2].
 
 ## How it works
 **Inputs:**
-- A tetrahedron defined by four vertices $V_1, V_2, V_3, V_4$ with 3D coordinates $\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3, \mathbf{v}_4 \in \mathbb{R}^3$.
-- A feature vector $\mathbf{f}_i$ associated with each vertex $V_i$ (e.g., scalar density, color, or normal).
-- A query point $\mathbf{p} \in \mathbb{R}^3$.
+- Point $p \in \mathbb{R}^3$ (or $q$ in some notations).
+- Four vertices of the tetrahedron: $v_0, v_1, v_2, v_3 \in \mathbb{R}^3$.
+- Feature vectors at vertices: $g(v_0), g(v_1), g(v_2), g(v_3) \in \mathbb{R}^d$ (where $d=1$ for scalars).
 
 **Outputs:**
-- A boolean indicating whether $\mathbf{p}$ lies inside the tetrahedron.
-- The interpolated feature vector $\mathbf{f}(\mathbf{p})$.
+- Interpolated feature vector $g(p) \in \mathbb{R}^d$.
+- Boolean indicating if $p$ is inside the tetrahedron.
 
 **Data Structures:**
 - Vertices: Array of 4 vectors, each 3 floats.
-- Features: Array of 4 vectors, size depends on feature dimension $D$ (e.g., 1 for scalar, 3 for normal).
-- Barycentric coordinates: 4 floats $(\alpha_1, \alpha_2, \alpha_3, \alpha_4)$.
+- Features: Array of 4 vectors, each $d$ floats.
+- Matrix $C$: $3 \times 3$ matrix defined below.
+- Matrix $G$: $d \times 3$ matrix defined below.
 
 **Steps:**
 
-1. **Compute Sub-tetrahedron Volumes:**
-   Calculate the signed volume of the four sub-tetrahedra formed by the query point $\mathbf{p}$ and the faces of the original tetrahedron opposite to each vertex. The volume of a tetrahedron with vertices $\mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d}$ is given by $\frac{1}{6} |(\mathbf{b}-\mathbf{a}) \times (\mathbf{c}-\mathbf{a}) \cdot (\mathbf{d}-\mathbf{a})|$ [S3].
-   
-   Let $V$ be the total volume of the tetrahedron $V_1 V_2 V_3 V_4$.
-   Let $V_i$ be the volume of the sub-tetrahedron formed by $\mathbf{p}$ and the face opposite to vertex $i$.
-   
-   The volumes are computed as [S3]:
-   $$
-   V_1 = \frac{1}{6} |(\mathbf{v}_2 - \mathbf{p}) \times (\mathbf{v}_3 - \mathbf{p}) \cdot (\mathbf{v}_4 - \mathbf{p})|
-   $$
-   $$
-   V_2 = \frac{1}{6} |(\mathbf{v}_3 - \mathbf{p}) \times (\mathbf{v}_4 - \mathbf{p}) \cdot (\mathbf{v}_1 - \mathbf{p})|
-   $$
-   $$
-   V_3 = \frac{1}{6} |(\mathbf{v}_4 - \mathbf{p}) \times (\mathbf{v}_1 - \mathbf{p}) \cdot (\mathbf{v}_2 - \mathbf{p})|
-   $$
-   $$
-   V_4 = \frac{1}{6} |(\mathbf{v}_1 - \mathbf{p}) \times (\mathbf{v}_2 - \mathbf{p}) \cdot (\mathbf{v}_3 - \mathbf{p})|
-   $$
-   
-   The total volume $V$ is the sum of these sub-volumes:
-   $$
-   V = V_1 + V_2 + V_3 + V_4
-   $$
-   
-   *Note:* Using absolute values ensures positive volumes for the barycentric weight calculation [S3]. Alternatively, signed volumes can be used if the winding order is consistent, but the condition for being inside requires checking signs [S1, unofficial].
+1. **Check containment:**
+   Compute barycentric coordinates $w_1, w_2, w_3$ (see Step 2). The point $p$ is inside the tetrahedron if and only if:
+   $$ w_1 > 0, \quad w_2 > 0, \quad w_3 > 0, \quad \text{and} \quad w_1 + w_2 + w_3 < 1 $$
+   [S1, unofficial][S3]. If any condition fails, $p$ is outside. Note: $w_0 = 1 - (w_1 + w_2 + w_3)$, so $w_0 > 0$ is equivalent to $w_1 + w_2 + w_3 < 1$ [S3].
 
-2. **Compute Barycentric Coordinates:**
-   The barycentric coordinate $\alpha_i$ for vertex $i$ is the ratio of the sub-volume $V_i$ to the total volume $V$ [S3]:
-   $$
-   \alpha_i = \frac{V_i}{V}
-   $$
-   Thus, $\alpha_1 = V_1/V$, $\alpha_2 = V_2/V$, $\alpha_3 = V_3/V$, $\alpha_4 = V_4/V$.
-   
-   By definition, $\sum_{i=1}^4 \alpha_i = 1$ [S3].
+2. **Compute barycentric coordinates:**
+   Define the matrix $C \in \mathbb{R}^{3 \times 3}$ using the edge vectors from $v_0$:
+   $$ C = \begin{bmatrix} v_1 - v_0 & v_2 - v_0 & v_3 - v_0 \end{bmatrix} $$
+   [S3]. Compute the inverse $C^{-1}$.
+   Compute the vector $\Delta v = p - v_0$.
+   Solve for $[w_1, w_2, w_3]^T$:
+   $$ \begin{bmatrix} w_1 \\ w_2 \\ w_3 \end{bmatrix} = C^{-1} (p - v_0) $$
+   [S3].
+   Compute $w_0$:
+   $$ w_0 = 1 - (w_1 + w_2 + w_3) $$
+   [S3].
 
-3. **Check Containment:**
-   The point $\mathbf{p}$ is inside the tetrahedron if and only if all barycentric coordinates are non-negative [S1, unofficial][S3].
-   Condition: $\alpha_1 \ge 0, \alpha_2 \ge 0, \alpha_3 \ge 0, \alpha_4 \ge 0$.
-   
-   *Equivalence to [S1, unofficial]:* Source [S1, unofficial] uses parameters $\beta, \gamma, \delta$ corresponding to $\alpha_2, \alpha_3, \alpha_4$ respectively, with $\alpha_1 = 1 - \beta - \gamma - \delta$. The condition $\beta > 0, \gamma > 0, \delta > 0$ and $\beta + \gamma + \delta < 1$ is equivalent to $\alpha_2 > 0, \alpha_3 > 0, \alpha_4 > 0$ and $\alpha_1 > 0$ [S1, unofficial].
+   *Alternative Volume-Based Computation:*
+   Barycentric weights can also be computed as ratios of sub-volumes [S4]:
+   $$ \alpha_i = \frac{V_i}{V} $$
+   where $V$ is the total volume of the tetrahedron, and $V_i$ is the volume of the subtetrahedron formed by $p$ and the face opposite to vertex $i$ [S4].
+   For vertices $v_1, v_2, v_3, v_4$ (mapping to $v_0, v_1, v_2, v_3$ above) and point $p$:
+   $$ V_1 = \frac{1}{6} | (v_2 - p) \times (v_3 - p) \cdot (v_4 - p) | $$
+   $$ V_2 = \frac{1}{6} | (v_3 - p) \times (v_4 - p) \cdot (v_1 - p) | $$
+   $$ V_3 = \frac{1}{6} | (v_4 - p) \times (v_1 - p) \cdot (v_2 - p) | $$
+   $$ V_4 = \frac{1}{6} | (v_1 - p) \times (v_2 - p) \cdot (v_3 - p) | $$
+   [S4]. Note: The absolute value ensures positive volumes, but signed volumes must be used to preserve the sign of the coordinates for containment testing [S1, unofficial][S3]. The matrix method (Step 2) inherently handles signs correctly if $C$ is invertible.
 
-4. **Interpolate Feature:**
-   If the point is inside, compute the interpolated feature $\mathbf{f}(\mathbf{p})$ as the weighted sum of the vertex features [S2][S3]:
-   $$
-   \mathbf{f}(\mathbf{p}) = \sum_{i=1}^4 \alpha_i \mathbf{f}_i = \alpha_1 \mathbf{f}_1 + \alpha_2 \mathbf{f}_2 + \alpha_3 \mathbf{f}_3 + \alpha_4 \mathbf{f}_4
-   $$
+3. **Interpolate features:**
+   Define the matrix $G \in \mathbb{R}^{d \times 3}$ using the feature differences from $v_0$:
+   $$ G = \begin{bmatrix} g(v_1) - g(v_0) & g(v_2) - g(v_0) & g(v_3) - g(v_0) \end{bmatrix} $$
+   [S3].
+   Compute the interpolated feature:
+   $$ g(p) = g(v_0) + G \begin{bmatrix} w_1 \\ w_2 \\ w_3 \end{bmatrix} $$
+   [S3].
    
-   *Note:* Source [S1, unofficial] expresses this as:
-   $$
-   f(p) = (1 - \beta - \gamma - \delta) f(V_{qbcd}) + \beta f(V_{qacd}) + \gamma f(V_{qabd}) + \delta f(V_{qabc})
-   $$
-   where $V_{qbcd}$ etc. refer to the vertex opposite the face not containing the point in the sub-tetrahedron definition, which maps directly to the $\alpha_i$ formulation [S1, unofficial].
+   *Expanded Form:*
+   $$ g(p) = w_0 g(v_0) + w_1 g(v_1) + w_2 g(v_2) + w_3 g(v_3) $$
+   [S3].
+
+   *Affine Form:*
+   The interpolation is an affine transformation of the input $p$:
+   $$ g(p) = A p + b $$
+   [S3], where:
+   $$ A = G C^{-1} $$
+   $$ b = g(v_0) - G C^{-1} v_0 $$
+   [S3]. This form is useful for optimization and analysis but requires precomputing $A$ and $b$ per tetrahedron.
+
+**Parameters:**
+- None intrinsic to the method. The geometry of the tetrahedron and the vertex features are the inputs.
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Tetrahedra:** The matrix $C$ is only invertible if the four vertices are not coplanar and no three vertices are collinear [S3]. If degenerate, barycentric coordinate computation fails [S3].
+- **Precision:** Floating-point errors may cause $w_i$ to be slightly negative for points on the boundary or inside. A small epsilon tolerance may be needed for containment checks in robust implementations [G].
+- **Volume Calculation:** Using absolute values in the volume method loses the sign information required for correct barycentric coordinate signs and containment testing [S1, unofficial][S3]. The matrix inversion method is generally preferred for numerical stability and correctness [S3].
 
 **Pseudocode:**
 
@@ -83,98 +86,148 @@ Barycentric interpolation on tetrahedra is a method for reconstructing scalar or
 ```python
 import numpy as np
 
-def barycentric_interpolation_tetrahedron(vertices, features, point):
+def barycentric_interpolation_tetrahedron(p, vertices, features):
     """
-    Interpolate features at a point inside a tetrahedron using barycentric coordinates.
+    Interpolate features at point p inside a tetrahedron defined by vertices and features.
     
     Args:
-        vertices: np.array of shape (4, 3), coordinates of V1, V2, V3, V4.
-        features: np.array of shape (4, D), feature vectors at V1, V2, V3, V4.
-        point: np.array of shape (3,), query point p.
+        p: np.ndarray, shape (3,), point to evaluate.
+        vertices: np.ndarray, shape (4, 3), vertices [v0, v1, v2, v3].
+        features: np.ndarray, shape (4, d), feature vectors at vertices.
         
     Returns:
-        inside: bool, True if point is inside tetrahedron.
-        f_p: np.array of shape (D,), interpolated feature vector.
+        g_p: np.ndarray, shape (d,), interpolated feature vector.
+        is_inside: bool, True if p is inside the tetrahedron.
     """
-    v1, v2, v3, v4 = vertices[0], vertices[1], vertices[2], vertices[3]
+    v0, v1, v2, v3 = vertices
+    g0, g1, g2, g3 = features
     
-    # Compute vectors from point to vertices
-    p_to_v1 = v1 - point
-    p_to_v2 = v2 - point
-    p_to_v3 = v3 - point
-    p_to_v4 = v4 - point
+    # Step 1: Compute matrix C
+    # C = [v1-v0, v2-v0, v3-v0]
+    C = np.column_stack((v1 - v0, v2 - v0, v3 - v0))
     
-    # Compute volumes of sub-tetrahedra
-    # V1: opposite to V1, formed by p, V2, V3, V4
-    # Volume = 1/6 * |(v2-p) x (v3-p) . (v4-p)|
-    vol1 = np.abs(np.dot(np.cross(p_to_v2, p_to_v3), p_to_v4))
+    # Check for degeneracy
+    if np.abs(np.linalg.det(C)) < 1e-10:
+        # Degenerate tetrahedron. Return undefined or handle error.
+        # For this implementation, we return zeros and False.
+        return np.zeros(features.shape[1]), False
     
-    # V2: opposite to V2, formed by p, V3, V4, V1
-    vol2 = np.abs(np.dot(np.cross(p_to_v3, p_to_v4), p_to_v1))
+    # Step 2: Compute barycentric coordinates w1, w2, w3
+    # [w1, w2, w3]^T = C^-1 * (p - v0)
+    diff = p - v0
+    w123 = np.linalg.solve(C, diff)
+    w1, w2, w3 = w123
     
-    # V3: opposite to V3, formed by p, V4, V1, V2
-    vol3 = np.abs(np.dot(np.cross(p_to_v4, p_to_v1), p_to_v2))
+    # w0 = 1 - (w1 + w2 + w3)
+    w0 = 1.0 - (w1 + w2 + w3)
     
-    # V4: opposite to V4, formed by p, V1, V2, V3
-    vol4 = np.abs(np.dot(np.cross(p_to_v1, p_to_v2), p_to_v3))
+    # Check containment: w0 > 0, w1 > 0, w2 > 0, w3 > 0
+    is_inside = (w0 > 0) and (w1 > 0) and (w2 > 0) and (w3 > 0)
     
-    total_vol = vol1 + vol2 + vol3 + vol4
+    # Step 3: Interpolate features
+    # g(p) = w0*g0 + w1*g1 + w2*g2 + w3*g3
+    g_p = w0 * g0 + w1 * g1 + w2 * g2 + w3 * g3
     
-    # Handle degenerate tetrahedron
-    if total_vol < 1e-12:
-        return False, np.zeros(features.shape[1])
+    return g_p, is_inside
+
+def barycentric_interpolation_tetrahedron_affine(p, vertices, features):
+    """
+    Interpolate features using precomputed affine transformation A and b.
+    This is more efficient if evaluating many points within the same tetrahedron.
     
-    # Compute barycentric coordinates
-    alpha1 = vol1 / total_vol
-    alpha2 = vol2 / total_vol
-    alpha3 = vol3 / total_vol
-    alpha4 = vol4 / total_vol
+    Args:
+        p: np.ndarray, shape (3,)
+        vertices: np.ndarray, shape (4, 3)
+        features: np.ndarray, shape (4, d)
+        
+    Returns:
+        g_p: np.ndarray, shape (d,)
+        is_inside: bool
+    """
+    v0, v1, v2, v3 = vertices
+    g0, g1, g2, g3 = features
     
-    # Check if inside
-    # Point is inside if all alphas are non-negative
-    # Due to floating point, we might use a small epsilon
-    inside = (alpha1 >= 0) and (alpha2 >= 0) and (alpha3 >= 0) and (alpha4 >= 0)
+    # Precompute A and b
+    C = np.column_stack((v1 - v0, v2 - v0, v3 - v0))
+    G = np.column_stack((g1 - g0, g2 - g0, g3 - g0))
     
-    if not inside:
-        return False, np.zeros(features.shape[1])
+    if np.abs(np.linalg.det(C)) < 1e-10:
+        return np.zeros(features.shape[1]), False
+        
+    C_inv = np.linalg.inv(C)
+    A = G @ C_inv
+    b = g0 - A @ v0
     
-    # Interpolate features
-    f_p = alpha1 * features[0] + alpha2 * features[1] + alpha3 * features[2] + alpha4 * features[3]
+    # Compute barycentric coords for containment check
+    w123 = C_inv @ (p - v0)
+    w1, w2, w3 = w123
+    w0 = 1.0 - (w1 + w2 + w3)
+    is_inside = (w0 > 0) and (w1 > 0) and (w2 > 0) and (w3 > 0)
     
-    return True, f_p
+    # Interpolate
+    g_p = A @ p + b
+    
+    return g_p, is_inside
 ```
-
-**Parameters:**
-- No tunable parameters. The method is deterministic based on geometry.
-
-**Edge Cases and Pitfalls:**
-- **Degenerate Tetrahedra:** If the four vertices are coplanar or coincident, the total volume $V$ is zero. Division by zero must be handled [S3].
-- **Precision:** For points very close to the boundary, floating-point errors may cause one $\alpha_i$ to be slightly negative when it should be zero. A small epsilon tolerance may be needed for the containment check [G].
-- **Winding Order:** The volume calculation uses absolute values, so winding order does not affect the barycentric weights, provided the point is inside [S3]. If signed volumes were used, consistent winding would be required.
 
 ## Subtopics
 
 ### [Barycentric Interpolation on Triangles](5671-barycentric-interpolation-on-triangles.md)
-Barycentric interpolation on triangles estimates vertex attributes at a point within a triangle using 2D barycentric coordinates derived from sub-triangle areas. It is distinct from the tetrahedral method by operating on 2D surfaces with 3 vertices and 2 independent coordinates, resulting in C0 continuity. It is chosen for surface mesh rendering rather than volumetric data sampling. See [Barycentric Interpolation on Triangles](5671-barycentric-interpolation-on-triangles.md).
+Barycentric interpolation on triangles is a method for estimating vertex attributes (such as colors, normals, or UV coordinates) at an arbitrary point within a triangle, given the values at the triangle's three vertices. It solves the problem of smoothly varying surface properties across a mesh by leveraging the geometric relationship between a point and the triangle's corners. Unlike its parent method, [Barycentric Interpolation on Tetrahedra](1843-barycentric-interpolation-on-tetrahedra.md), which operates in 3D volume using four vertices, this method operates strictly on the 2D surface of a triangle using three vertices. It is distinct from higher-order methods like [Clough–Tocher Bézier Patch Interpolation](9134-clough-tocher-b-zier-patch-interpolation.md) by relying solely on vertex values rather than requiring per-vertex gradients, resulting in C0 continuity..
 
 ### SDF Aggregation via Barycentric Interpolation
-This variant aggregates signed distance function (SDF) values and optional features from new point positions into an existing SDF field using barycentric interpolation within tetrahedra [S4, unofficial]. It is used in neural reconstruction pipelines (e.g., TetWeave) to update volumetric fields with new samples [S4, unofficial]. The method clones SDF values for non-neighbors, computes barycentric coordinates for points inside tetrahedra, and updates the field using a dot product of barycentric weights and tetrahedral SDF values [S4, unofficial]. It is chosen when integrating new geometric samples into a continuous implicit representation [S4, unofficial]. See [S4, unofficial].
+Aggregates new point positions and their SDF values into the existing SDF field using barycentric interpolation within tetrahedra. The method clones SDF values for non-neighbor points, computes inside tetrahedra and barycentric coordinates for updated points, creates a mask for points inside tetrahedra, and updates SDF at mask positions using einsum: `barycentric_coords[mask] dot sdf[tets[inside_tets[mask]]]`. Feature interpolation is optional and follows the same pattern. Non-neighbor points have SDF and features set to 0. Positions are updated for non-neighbor points. [S5, unofficial].
+
+### Input Preconditioning for Tetrahedral Encoder
+A global affine transformation $y = A^* x + t$ applied to input coordinates before encoding, designed to mitigate geometric anisotropy introduced by tetrahedral barycentric interpolation. The preconditioner $T$ in homogeneous coordinates is $T = [[A^*, t], [0^T, 1]]$. The encoder-induced local metric for tetrahedron $T$ is $M_T = C_T^{-1} C_T^{-1}$, where $C_T = [v_1-v_0, v_2-v_0, v_3-v_0]$. The cube-averaged metric $M = \frac{1}{6} \sum_{T \in \{S0..S5\}} M_T = \frac{1}{3} [[5, -2, -2], [-2, 5, -2], [-2, -2, 5]]$. $A^* \in \mathbb{R}^{3 \times 3}$ must be invertible. Without preconditioning, the encoder attenuates motion along the body diagonal $[1,1,1]$ and amplifies transverse directions by $\sqrt{7}$ on average, causing directional bias in feature interpolation. [S3].
+
+### Levelwise Feature Concatenation
+Concatenates barycentrically interpolated feature vectors from multiple resolution levels $\ell = 0$ to $L-1$ into a single feature vector $z(x)$. The formula is $z(x) = \bigoplus_{\ell=0}^{L-1} g^{(\ell)}(x) = [g^{(0)}(x)^T, \dots, g^{(L-1)}(x)^T]^T \in \mathbb{R}^{dL}$. In a region where feature selection is fixed, $z(x) = A' x + b'$, where $A'$ stacks $A^{(\ell)}$ and $b'$ stacks $b^{(\ell)}$. This preserves the affine property of the interpolation across levels. [S3].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per tetrahedron. The computation involves a constant number of cross products, dot products, and arithmetic operations [S1, unofficial][S3].
-- **Memory Complexity:** $O(1)$ auxiliary memory per query, plus storage for the tetrahedral mesh and vertex features [S2].
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Linear with the number of tetrahedra traversed. Efficient for sparse traversal but requires efficient mesh traversal structures [S2].
-- **Strengths:** Direct, closed-form solution; no iterative refinement; works on unstructured meshes; preserves linearity [S1, unofficial][S2].
-- **Limitations:** Only C0 continuous (discontinuous derivatives across faces); less accurate than higher-order methods for smooth fields [S2].
-- **When to Use:** Unstructured volumetric data; real-time rendering where simplicity and speed are prioritized over high-order accuracy [S2].
-- **When Not to Use:** When C1 continuity or higher-order accuracy is required; for structured grids where trilinear or higher-order interpolation is more efficient [S2].
+**Time Complexity:**
+- Computing barycentric coordinates: $O(1)$ for a fixed-size $3 \times 3$ matrix inversion or solve.
+- Interpolating features: $O(d)$ where $d$ is the feature dimension.
+- Overall per-point: $O(1)$ assuming fixed tetrahedron size and feature dimension.
+
+**Memory Complexity:**
+- Storage per tetrahedron: $O(1)$ for vertices and features.
+- No additional global memory required for the interpolation itself.
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Linear with the number of points evaluated.
+- Linear with the feature dimension $d$.
+
+**Strengths:**
+- Simple to implement.
+- Computationally efficient.
+- Provides C0 continuous interpolation.
+- Affine property allows for analytical derivatives and optimization. [S3].
+
+**Limitations:**
+- Only C0 continuous; discontinuities at tetrahedron boundaries. [S1, unofficial][S2].
+- Sensitive to tetrahedron quality; degenerate tetrahedra cause numerical instability. [S3].
+- Geometric anisotropy in regular grids can cause directional bias in feature interpolation without preconditioning. [S3].
+
+**When to use:**
+- When C0 continuity is sufficient.
+- When computational efficiency is critical.
+- When working with unstructured tetrahedral meshes. [S2].
+
+**When not to use:**
+- When higher-order continuity (C1 or higher) is required.
+- When tetrahedra are likely to be degenerate.
+- When directional bias in regular grids is unacceptable without preconditioning. [S3].
 
 ## Background
-Barycentric interpolation on tetrahedra extends the well-known 2D barycentric coordinates to 3D by relating four tetrahedral subvolumes [S1, unofficial]. It was discussed in the context of interactive volume ray tracing as an alternative to cubic polynomial interpolation, which is tedious to derive for tetrahedra [S1, unofficial]. The method is applied within each tetrahedron of an unstructured data set partition to reconstruct in-between values [S2]. It is used in semi-transparent rendering, maximum intensity projection, and iso-surface rendering from ray casting implementations on unstructured grids [S1, unofficial][S2]. The technique is also used in neural reconstruction for aggregating SDF values [S4, unofficial].
+Barycentric interpolation on tetrahedra extends the well-known 2D barycentric coordinates to 3D by relating four tetrahedral subvolumes [S1, unofficial]. It is used for piecewise linear interpolation within unstructured data sets partitioned into tetrahedral meshes [S2]. The method is fundamental in tetrahedral volume rendering, where it reconstructs values at sample points along rays [S1, unofficial][S2]. It is also used in neural reconstruction methods like Neural Harmonic Textures for high-quality primitive-based neural reconstruction [S4], and in SDF aggregation methods like TetWeave [S5, unofficial]. The affine property of barycentric interpolation within a tetrahedron has been formally proven and is used in tetrahedral networks to show piecewise affine behavior [S3]. Input preconditioning was introduced to mitigate geometric anisotropy in tetrahedral encoders [S3].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
 [S2] Interactive Volume Rendering with Ray Tracing, https://doi.org/10.2312/egst.20061055, fetched 2026-10-24
-[S3] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
-[S4] AlexandreBinninger/TetWeave, https://github.com/AlexandreBinninger/TetWeave, fetched 2026-10-27 (unofficial)
+[S3] TetraSDF: Analytic Isosurface Extraction with Multi-resolution Tetrahedral Grid, https://arxiv.org/abs/2511.16273v4, fetched 2026-10-26
+[S4] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26
+[S5] AlexandreBinninger/TetWeave, https://github.com/AlexandreBinninger/TetWeave, fetched 2026-10-27 (unofficial)

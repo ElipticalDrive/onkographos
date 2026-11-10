@@ -1,55 +1,49 @@
 # Quantization
 
+
 ## Overview
-Quantization is a lossy compression technique that maps continuous or high-precision input data to a discrete set of levels, reducing the memory footprint of volume data [S1][S2, unofficial]. It solves the problem of storing high-precision volumetric datasets by representing a large number of distinct raw values using a limited number of bits, typically achieving significant compression ratios (e.g., 4:1 for 32-bit to 8-bit) [S1][S2, unofficial]. It differs from its siblings, such as [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md) and [Laplacian Pyramid](2250-laplacian-pyramid.md), by operating directly on the coefficient or attribute values rather than relying on hierarchical frequency decomposition or residual prediction, although it is often applied to the coefficients produced by those methods.
+Quantization is a lossy compression technique that maps continuous or high-precision data values to a discrete set of levels with limited bit depth, reducing memory footprint and transmission bandwidth [S1][S2, unofficial]. It solves the problem of storing and transmitting high-resolution volume data by trading precision for compactness, typically achieving significant compression ratios (e.g., 4:1) [S1][S2, unofficial]. It differs from [Value compression](6-value-compression.md) siblings like [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md) by operating directly on values (or transformed coefficients) rather than exploiting sparsity or hierarchical structure alone, and from [Vector Quantization](907-vector-quantization.md) by treating each value (or small block) independently rather than jointly encoding correlated vectors.
 
 ## Shared principles
-The family shares the fundamental mechanism of mapping a continuous domain $X$ to a discrete set of levels $L = \{l_0, l_1, \dots, l_{M-1}\}$ using a quantization function $q(x)$. The core trade-off is between the bit depth $b$ (where $M = 2^b$) and the reconstruction error. While specific implementations vary (uniform, scalar, attribute-specific, or neural), all methods in this family reduce precision to enable storage or transmission efficiency. The reconstruction function $\hat{x} = q^{-1}(q(x))$ approximates the original value, with error characteristics dependent on the distribution of the input data and the quantization grid.
+Not given in the sources.
 
 ## Subtopics
 
 ### [Attribute Quantization](1912-attribute-quantization.md)
-Specializes in reducing precision for non-scalar attributes like colors and normals using perceptual mappings (CIELAB, ONVs).
+Attribute quantization reduces the precision of voxel attributes (colors and normals) to lower memory footprint while maintaining perceptual quality. It differs from [Scalar Quantization](5726-scalar-quantization.md) by specializing the method for data type (e.g., perceptually uniform color spaces, geometric mappings for normals) rather than applying a generic linear mapping. Choose this when preserving visual fidelity of non-scalar attributes is critical.
 
 ### [Scalar Quantization](5726-scalar-quantization.md)
-Maps voxel blocks to local ranges defined by block-specific min/max values, enabling parallel GPU decompression.
+Scalar quantization (per-block) is a random-access decompression method that maps a block of voxels to a local range defined by block-specific minimum and maximum values. It differs from general scalar quantization by computing range parameters locally per block, enabling parallel GPU decompression without loading full-resolution data. Choose this for random-access rendering where block-wise parallelism is required.
 
 ### [Uniform Quantization](5855-uniform-quantization.md)
-Maps input to discrete levels with constant spacing, simple to implement but vulnerable to wide dynamic ranges.
+Uniform quantization maps a continuous range of source data values to a discrete set of levels with equal spacing. It differs from non-uniform quantization by maintaining constant step sizes, making it simple to implement but prone to losing features in data with wide dynamic ranges if the range is not carefully selected. Choose this for data with uniform distribution or when simplicity of implementation is prioritized.
 
 ### [Chroma Subsampling](6512-chroma-subsampling.md)
-Reduces chrominance resolution while retaining luminance, using median aggregation to preserve sharpness.
+Chroma subsampling reduces the bitrate of color information by lowering the resolution of chrominance components (U, V) while maintaining full resolution for luminance (Y). It differs from general quantization by specifically addressing spatial sparsity and geometric structure, aggregating color values from groups of eight adjacent voxel corners to preserve quality. Choose this for volumetric data where color fidelity is less critical than luminance detail.
 
 ### [TetSplat Pre-processing and Data Layout](7221-tetsplat-pre-processing-and-data-layout.md)
-Defines quantization and binary layout for hierarchical tetrahedral mesh data (Shell/Solid).
+TetSplat Pre-processing converts a tetrahedral mesh into a compressed, hierarchical binary format suitable for real-time volume rendering and clipping. It differs from general volume compression by targeting the hybrid Shell/Solid representation of tetrahedral meshes, requiring distinct node layouts and boundary label management. Choose this for rendering unstructured tetrahedral meshes with multi-field scalar data.
 
 ### [Differentiable Quantization for Neural Fields](10195-differentiable-quantization-for-neural-fields.md)
-Integrates quantization into the training loop of neural radiance fields using straight-through estimators.
+Differentiable quantization reduces the memory footprint of neural radiance fields by mapping continuous grid values to single-byte integers during the optimization process. Unlike post-training quantization, it integrates quantization into the training loop using a straight-through estimator to allow gradient flow. Choose this when training neural implicit representations that require low-precision storage.
 
 ### [Neural Implicit Network Compression](10414-neural-implicit-network-compression.md)
-Compresses neural network weights (INRs) to approximate volumetric fields, serving as both storage and queryable source.
+Neural Implicit Network Compression (INR Compression) maps spatial coordinates directly to field values using a coordinate-based neural network, serving as simultaneously compressed storage and a queryable data source. Unlike [Quantization](5935-quantization.md) which discretizes values, INR compression learns a continuous function; unlike [Differentiable Quantization for Neural Fields](10195-differentiable-quantization-for-neural-fields.md) which focuses on quantizing existing fields, this method *is* the compression mechanism itself. Choose this for compact storage of complex scalar fields where query speed is acceptable.
 
 ### Lossy Quantization for Coarsened Patches
-- [S1] Lossy compression for coarsened patches in the bintree hierarchy. Quantization error $q$ is proportional to coarsening error $c$: $q = qc$, where $q$ is a fixed constant usually $< 1$. A single unified error is recomputed and nested for each patch. Quantization levels are restricted to power-of-two multiples of vertical resolution $\Delta z$ for efficient bit-shift implementation. Shift $k$ is calculated as: $k = \lceil \log_2(\epsilon_q / \Delta z) \rceil + 1$ if $\epsilon_q \ge \Delta z$, else $0$. All finest level vertices have zero shift. Vertices classified as boundary (corners $C$, legs $L$, hypotenuse $H$) and interior $I$. Corners stored at full precision. Quantization of original height values (not residuals) ensures adjacent patches agree on shared boundaries.
+Lossy compression for coarsened patches in the bintree hierarchy where quantization error $q$ is proportional to coarsening error $c$: $q = qc$, with $q$ a fixed constant usually $< 1$ [S1]. A single unified error is recomputed and nested for each patch. Quantization levels are restricted to power-of-two multiples of vertical resolution $\Delta z$ for efficient bit-shift implementation. Shift $k$ is calculated as: $k = \lceil \log_2(\epsilon_q / \Delta z) \rceil + 1$ if $\epsilon_q \ge \Delta z$, else $0$. All finest level vertices have zero shift. Vertices are classified as boundary (corners $C$, legs $L$, hypotenuse $H$) and interior $I$. Corners are stored at full precision. Quantization of original height values (not residuals) ensures adjacent patches agree on shared boundaries [S1].
 
 ### HSV Colour Sorting
-- [S2, unofficial] A technique to preserve colour quality during DXT1 compression by reordering colours based on HSV values.
-- [S2, unofficial] The effectiveness of HSV sorting depends on which component (H, S, or V) is the most frequent in the voxel data’s set of colours.
+A technique to preserve colour quality during DXT1 compression by reordering colours based on HSV values [S2, unofficial]. The effectiveness of HSV sorting depends on which component (H, S, or V) is the most frequent in the voxel data’s set of colours [S2, unofficial].
 
 ### Interpolation Symmetry Quantization
-- [S3] A method to improve the accuracy of quantized weights by exploiting the symmetry of linear interpolation between segments.
-- [S3] Quantize both $w$ and $1 - w$ using the codebook generated by the scalar quantizer.
-- [S3] Keep the representation resulting in the lower error.
-- [S3] Store either $(i, j, w)$ or $(j, i, 1 - w)$ in the output stream.
-- [S3] Linear interpolation: $(1 - w)s_i + w s_j$, where $(i, j, w)$ is equivalent to $(j, i, 1 - w)$.
+A method to improve the accuracy of quantized weights by exploiting the symmetry of linear interpolation between segments [S3]. Quantize both $w$ and $1 - w$ using the codebook generated by the scalar quantizer, and keep the representation resulting in the lower error. Store either $(i, j, w)$ or $(j, i, 1 - w)$ in the output stream. Linear interpolation is $(1 - w)s_i + w s_j$, where $(i, j, w)$ is equivalent to $(j, i, 1 - w)$ [S3].
 
 ### Position Lattice Quantization
-- [S4] An attempted method to compress Gaussian positions by quantizing them to a lattice structure and embedding positional constraints into the training process.
-- [S4] Fails to compress positions without introducing significant rendering error.
-- [S4] Identified as a future research direction for end-to-end positional compression.
+An attempted method to compress Gaussian positions by quantizing them to a lattice structure and embedding positional constraints into the training process [S4]. It fails to compress positions without introducing significant rendering error [S4]. Identified as a future research direction for end-to-end positional compression [S4].
 
 ## Background
-Quantization is a foundational technique in signal processing and data compression, widely used in volume rendering to manage the memory bandwidth and storage requirements of high-resolution datasets. In the context of volume rendering, it is often applied to scalar fields, attribute data (colors, normals), or neural network weights. The specific applications listed in the subtopics reflect the evolution from simple uniform mapping to perceptual, differentiable, and structure-aware quantization strategies.
+Quantization is a fundamental technique in data compression, widely used in image, audio, and video processing. In volume rendering, it has been adapted to handle the specific challenges of 3D scalar fields, attributes, and neural representations. Early applications focused on uniform and scalar quantization for terrain and scientific data [S1][S2, unofficial]. More recent developments include perceptual quantization for attributes [S1], chroma subsampling for sparse volumes [S1], and differentiable quantization for neural fields [S1]. The technique continues to evolve with the rise of neural implicit representations and Gaussian splatting [S1, S4].
 
 ## Sources
 [S1] On-the-fly decompression and rendering of multiresolution terrain, https://doi.org/10.1145/1730804.1730815, fetched 2026-11-01

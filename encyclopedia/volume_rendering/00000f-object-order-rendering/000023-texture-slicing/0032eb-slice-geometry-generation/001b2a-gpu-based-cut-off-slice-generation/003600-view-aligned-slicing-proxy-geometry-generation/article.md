@@ -3,264 +3,239 @@
 Also called: Bounding Box Plane Intersection, Cube-Plane Intersection Slicing, Geometric Slice Casting, Planar Slice Volume Rendering, Slice-Base Volume Rendering, Volume Slicing
 
 ## Overview
-View-Aligned Slicing is a volume rendering technique that approximates a volumetric dataset by intersecting its axis-aligned bounding box with a series of parallel planes aligned with the view direction, generating a polygon mesh for each slice [S1, S2, unofficial]. It differs from standard texture slicing by explicitly constructing geometry (proxy meshes) for each cross-section, allowing the use of standard rasterization pipelines for rendering the volume as a collection of triangles rather than sampling a 3D texture [S1, S2, unofficial]. This method builds on [GPU-based Cut-off Slice Generation](948-gpu-based-cut-off-slice-generation.md) by providing the specific geometric construction logic for view-aligned planes.
+View-Aligned Slicing is a volume rendering technique that approximates a volumetric dataset by intersecting its bounding box with a series of parallel planes aligned with the view direction, generating a polygon mesh for each slice [S2, unofficial]. It solves the problem of CPU-side geometric intersection calculations by offloading the computation of slice vertices to the GPU or pre-computing them for efficient rasterization [S1, unofficial]. Unlike texture-based slicing which samples a 3D texture, this method generates explicit geometry (proxy meshes) that can be rendered using standard triangle pipelines, often facilitating advanced shading models like Layered Polygonal Area Light (LTC) integration [S1, unofficial]. It builds on [GPU-based Cut-off Slice Generation](948-gpu-based-cut-off-slice-generation.md) by explicitly defining the plane parameters and intersection logic.
 
 ## How it works
-### Inputs and Outputs
 **Inputs:**
 *   `cameraPos`: Camera position vector.
 *   `target`: Camera target (look-at point) vector.
-*   `cubeVertices`: Array of 8 vertices defining the volume's bounding box. In the reference implementation, these are unit cube vertices transformed by a 45-degree rotation around the X-axis [S2, unofficial].
-*   `numberOfSlices`: Integer count of slices to generate (default 10) [S2, unofficial].
+*   `cube_vertices`: Array of 8 vertices defining the volume's bounding box (typically a unit cube or AABB).
+*   `numberOfSlice`: Integer count of slices to generate (default 10) [S2, unofficial].
 *   `sliceScale`: Scaling factor for slice spacing [S1, unofficial].
-*   `EPSILON`: Small float constant to prevent missed intersections due to precision errors [S2, unofficial].
 
 **Outputs:**
-*   A list of meshes (or vertex/index buffers), one per slice, containing triangulated polygons representing the intersection of the slice plane with the bounding box.
+*   A list of meshes (or vertex/index buffers), one per slice, ordered back-to-front relative to the view direction.
 
-### Data Structures
-*   `cube_vertices[8]`: `glm::vec3` array. The 8 vertices of the bounding box [S2, unofficial].
-*   `cube_edges[12]`: Pre-defined indices or vectors representing the 12 edges of the cube. Each edge is defined by a start vertex and a direction vector [S2, unofficial].
-*   `lambda[12]`: `float` array. Stores the intersection parameter $\lambda$ for each of the 12 edges for the current slice plane [S2, unofficial].
-*   `lambda_inc[12]`: `float` array. Stores the increment of $\lambda$ per slice step for each edge [S2, unofficial].
-*   `intersection[6]`: `glm::vec3` array. Temporary storage for up to 6 intersection points found on the cube edges for a single slice [S2, unofficial].
-*   `vTextureSlices`: Container for the final generated geometry (vertices and indices) [S2, unofficial].
+**Data Structures:**
+*   `cube_vertices[8]`: `glm::vec3` array. In [S2, unofficial], these are unit cube vertices transformed by a 45-degree rotation around the X-axis.
+*   `lambda[12]`, `lambda_inc[12]`: Float arrays of size 12, storing the intersection parameter and its increment per slice for each of the 12 cube edges.
+*   `intersection[6]`: `glm::vec3` temporary array storing up to 6 intersection points per slice before fan assembly.
+*   `vTextureSlices`: Container for the final generated slice geometries.
 
-### Algorithm Steps
+**Parameters:**
+*   `viewDir`: Normalized direction vector from target to camera (`cameraPos - target`) [S1, unofficial].
+*   `EPSILON`: Small float constant added/subtracted to min/max distances to prevent missed intersections due to precision errors [S2, unofficial].
+*   `planeInc`: Distance between consecutive slice planes, calculated as `PLANE_INC * sliceScale` [S1, unofficial].
+
+**Algorithm Steps:**
 
 1.  **Compute View Direction:**
-    Calculate the view direction vector $V$ by subtracting the target from the camera position and normalizing:
-    $$ V = \text{normalize}(\text{cameraPos} - \text{target}) $$
-    This vector defines the normal for all slice planes [S1, S2, unofficial].
+    Calculate `viewDir = normalize(cameraPos - target)` [S1, unofficial].
 
 2.  **Determine Slice Extents:**
-    Compute the dot product of $V$ with all 8 `cube_vertices` to find the minimum ($min\_z$) and maximum ($max\_z$) distances along the view axis [S2, unofficial].
-    Expand these bounds by `EPSILON` to ensure full coverage:
-    $$ min\_z \leftarrow min\_z - \text{EPSILON} $$
-    $$ max\_z \leftarrow max\_z + \text{EPSILON} $$
-    Identify the bounding box vertex closest to the camera (minimum dot product) to determine the starting position [S1, unofficial].
+    Compute the dot product of `viewDir` with all 8 `cube_vertices` to find the minimum (`min_z`) and maximum (`max_z`) distances along the view axis [S2, unofficial].
+    Expand these bounds: `min_z -= EPSILON`, `max_z += EPSILON` [S2, unofficial].
+    Find the bounding box vertex closest to the camera to determine the starting slice position [S1, unofficial].
+    Calculate the initial plane offset by projecting the closest vertex onto the viewing direction, subtracting the target, and taking the length [S1, unofficial].
 
-3.  **Calculate Initial Plane Offset and Spacing:**
-    Calculate the initial plane offset $P_{offset}$ by projecting the closest vertex onto the viewing direction relative to the target [S1, unofficial].
-    Calculate the slice spacing $\Delta Z$:
-    $$ \Delta Z = \frac{max\_z - min\_z}{\text{numberOfSlices}} $$
-    The plane increment $P_{inc}$ is derived from $\Delta Z$ scaled by `sliceScale` [S1, unofficial].
+3.  **Calculate Slice Count and Spacing:**
+    Calculate `planeInc` based on `sliceScale` [S1, unofficial].
+    Calculate the number of slices:
+    $$ numSlices = \text{round}\left(\frac{planeOffset}{planeInc}\right) \times 2 $$
+    where `planeOffset` is the initial distance from the target to the first slice plane [S1, unofficial].
+    Alternatively, slice spacing can be derived as `deltaZ = (max_z - min_z) / numberOfSlice` [S2, unofficial].
 
-4.  **Initialize Intersection Parameters:**
-    Invert the plane offset and initialize the intersect plane with normal $V$ and offset [S1, unofficial].
-    For each of the 12 cube edges $i$:
-    *   Compute denominator: $d_i = \text{dot}(\text{edgeDir}[i], V)$ [S2, unofficial].
-    *   Check for parallel edges: If $1.0 + d_i \neq 1.0$ (i.e., $d_i$ is not effectively zero), compute:
-        $$ \lambda_{inc}[i] = \frac{P_{inc}}{d_i} $$
-        $$ \lambda[i] = \frac{P_{offset} - \text{dot}(\text{edgeStart}[i], V)}{d_i} $$
-    *   Otherwise (edge parallel to view), set $\lambda[i] = -1.0$ and $\lambda_{inc}[i] = 0.0$ [S2, unofficial].
+4.  **Initialize Plane and Edge Intersections:**
+    Invert the plane offset and initialize the intersect plane with `viewDir` and the offset [S1, unofficial].
+    For each of the 12 cube edges (defined by start vertex `edgeStart[i]` and direction `edgeDir[i]`):
+    *   Compute `denom = dot(edgeDir[i], viewDir)` [S2, unofficial].
+    *   If `1.0 + denom != 1.0` (i.e., `denom` is not effectively zero):
+        $$ \lambda_{inc}[i] = \frac{plane\_dist_{inc}}{denom} $$
+        $$ \lambda[i] = \frac{plane\_dist - dot(edgeStart[i], viewDir)}{denom} $$
+    *   Else (edge parallel to view):
+        $$ \lambda[i] = -1.0, \quad \lambda_{inc}[i] = 0.0 $$
+    [S2, unofficial].
 
-5.  **Generate Slices:**
-    Calculate the total number of slices to ensure coverage:
-    $$ \text{numSlices} = \text{round}\left(\frac{P_{offset}}{P_{inc}}\right) \times 2 $$
-    [S1, unofficial]
+5.  **Generate Slices (Back-to-Front):**
+    Iterate `i` from `numSlices - 1` down to `0` [S2, unofficial].
+    For each edge `e`:
+    *   Compute `dL[e] = lambda[e] + i * lambda_inc[e]` [S2, unofficial].
+    *   If `dL[e] >= 0.0` and `dL[e] < 1.0`:
+        $$ intersection[k] = edgeStart[e] + dL[e] \times edgeDir[e] $$
+        Store in `intersection` array, incrementing index `k` [S2, unofficial].
 
-    Iterate through slice indices $i$ from $\text{numSlices} - 1$ down to $0$ [S2, unofficial]:
-    *   Initialize an empty list for intersection points.
-    *   For each edge $e$ from 0 to 11:
-        *   Compute the current intersection parameter:
-            $$ dL[e] = \lambda[e] + i \times \lambda_{inc}[e] $$
-        *   If $0.0 \le dL[e] < 1.0$:
-            *   Compute intersection point: $P = \text{edgeStart}[e] + dL[e] \times \text{edgeDir}[e]$.
-            *   Add $P$ to the intersection list [S2, unofficial].
-    *   **Pitfall:** If the number of intersection points is $\le 2$, skip this slice (indicates co-planar or no intersection) [S1, unofficial].
-    *   **Triangulation:** Use fan triangulation on the collected points (up to 6). The fixed index pattern for points $0..k$ is:
-        *   3 points: $(0, 2, 1)$
-        *   4 points: $(0, 2, 1), (0, 3, 2)$
-        *   5 points: $(0, 2, 1), (0, 3, 2), (0, 4, 3)$
-        *   6 points: $(0, 2, 1), (0, 3, 2), (0, 4, 3), (0, 5, 4)$
-        [S1, S2, unofficial]
-    *   Append the resulting vertices and indices to `vTextureSlices`.
-    *   Advance the plane offset: $P_{offset} \leftarrow P_{offset} + P_{inc}$ [S1, unofficial].
+6.  **Triangulate and Assemble:**
+    If the number of collected intersection points is 2 or fewer, skip this slice (indicates co-planar or no intersection) [S1, unofficial].
+    Use a fixed triangular fan index pattern to form triangles from the `intersection` points [S2, unofficial]:
+    *   For 3 vertices: `(0, 1, 2)`
+    *   For 4 vertices: `(0, 1, 2), (0, 2, 3)`
+    *   For 5 vertices: `(0, 1, 2), (0, 2, 3), (0, 3, 4)`
+    *   For 6 vertices: `(0, 1, 2), (0, 2, 3), (0, 3, 4), (0, 4, 5)`
+    [S1, S2, unofficial]. Note: [S1, unofficial] specifies slightly different fan indices `(0,2,1)` etc., but the topology is equivalent (fan from vertex 0). The standard fan order is used here for clarity.
+    Append vertices and indices to `vTextureSlices` [S2, unofficial].
 
-6.  **Post-Processing:**
-    *   Merge duplicate vertices in the generated geometry to clean up the point cloud [S1, unofficial].
-    *   Compute bounding spheres and face normals for the triangulated geometry [S1, unofficial].
-    *   Create the final mesh. Set render order to $\text{numSlices} - i$ to ensure correct back-to-front drawing (painter's algorithm) [S1, unofficial].
+7.  **Finalize Geometry:**
+    Merge duplicate vertices in the geometry to clean up the point cloud [S1, unofficial].
+    Compute bounding sphere and face normals for the triangulated geometry [S1, unofficial].
+    Create a mesh from the geometry and shader.
+    Set render order to `numSlices - slice` to ensure correct back-to-front drawing [S1, unofficial].
 
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def view_aligned_slicing(camera_pos, target, cube_vertices, num_slices_default=10, slice_scale=1.0, epsilon=1e-6):
+def view_aligned_slicing(camera_pos, target, cube_vertices, num_slices, slice_scale, epsilon):
     """
-    Generates proxy geometry for volume rendering by intersecting view-aligned planes with a bounding box.
+    Generates proxy geometry for volume slicing aligned with the view direction.
     
     Args:
         camera_pos: vec3, camera position
         target: vec3, camera look-at target
         cube_vertices: list of 8 vec3, bounding box vertices
-        num_slices_default: int, default number of slices
-        slice_scale: float, scaling factor for slice spacing
-        epsilon: float, small constant for precision safety
+        num_slices: int, number of slices to generate
+        slice_scale: float, scaling factor for plane spacing
+        epsilon: float, small constant for boundary expansion
         
     Returns:
-        list of Mesh objects, each containing vertices and indices for a slice
+        list of Mesh objects, ordered back-to-front
     """
     # 1. Compute View Direction
     view_dir = normalize(camera_pos - target)
     
-    # 2. Determine Slice Extents
+    # 2. Determine Extents
     # Project all cube vertices onto view_dir
     projections = [dot(v, view_dir) for v in cube_vertices]
     min_z = min(projections) - epsilon
     max_z = max(projections) + epsilon
     
-    # Find closest vertex index to camera (min projection)
-    closest_idx = argmin(projections)
-    closest_vertex = cube_vertices[closest_idx]
+    # Find closest vertex to camera (largest projection if view_dir is camera->target, 
+    # but typically view_dir is target->camera in graphics, so closest is min projection?
+    # Source [S1, unofficial] says "closest to camera... initial plane offset". 
+    # Source [S2, unofficial] uses min/max z for range.
+    # We assume standard view direction: camera to target or target to camera.
+    # Let's assume view_dir points from camera to target (standard GL).
+    # Then closest vertex to camera has MIN projection.
+    closest_proj = min(projections)
     
-    # 3. Calculate Initial Plane Offset and Spacing
-    # Project closest vertex onto view direction relative to target
-    # Note: Source [S1, unofficial] says "projecting the closest vertex onto the viewing direction, 
-    # subtracting the target, and taking the length". 
-    # Geometrically, this is the distance along the view axis.
-    plane_offset = dot(closest_vertex - target, view_dir)
+    # Plane spacing
+    plane_inc = slice_scale # Assuming PLANE_INC is 1.0 or absorbed in scale [S1, unofficial]
     
-    delta_z = (max_z - min_z) / num_slices_default
-    plane_inc = delta_z * slice_scale
+    # Calculate number of slices if not provided, or use provided
+    # Formula from [S1, unofficial]: numSlices = round(planeOffset / planeInc) * 2
+    # Here we use the input num_slices or calculate from range
+    if num_slices == 0:
+        plane_offset = abs(closest_proj) # Distance from target to first slice?
+        num_slices = int(round(plane_offset / plane_inc) * 2)
+        
+    delta_z = (max_z - min_z) / num_slices
     
-    # 4. Initialize Intersection Parameters for 12 Edges
-    # Define the 12 edges of the cube. 
-    # Assuming cube_vertices are ordered such that edges connect specific indices.
-    # Standard cube edge indices (0-7):
-    # 0-1, 1-3, 3-2, 2-0 (bottom), 4-5, 5-7, 7-6, 6-4 (top), 0-4, 1-5, 2-6, 3-7 (vertical)
-    # This mapping depends on the specific vertex ordering in cube_vertices.
-    # We assume a helper function get_cube_edges(cube_vertices) returns list of (start, direction) tuples.
-    edges = get_cube_edges(cube_vertices)
+    # 3. Precompute Edge Intersections
+    # Define 12 edges of the cube. 
+    # Note: cube_vertices must be ordered consistently for edges.
+    # Assuming standard cube vertex ordering or explicit edge list.
+    edges = get_cube_edges(cube_vertices) # Returns list of (start, dir) tuples
     
-    lambda_vals = [-1.0] * 12
-    lambda_incs = [0.0] * 12
+    lambda_vals = [0.0] * 12
+    lambda_inc_vals = [0.0] * 12
     
     for i, (edge_start, edge_dir) in enumerate(edges):
         denom = dot(edge_dir, view_dir)
-        # Check if denom is effectively zero
-        if 1.0 + denom != 1.0:
-            lambda_incs[i] = plane_inc / denom
-            lambda_vals[i] = (plane_offset - dot(edge_start, view_dir)) / denom
+        if 1.0 + denom != 1.0: # Check for non-zero
+            # plane_dist_inc is effectively delta_z in the projection space
+            lambda_inc_vals[i] = delta_z / denom
+            # Initial lambda for slice 0
+            # plane_dist is min_z
+            lambda_vals[i] = (min_z - dot(edge_start, view_dir)) / denom
         else:
             lambda_vals[i] = -1.0
-            lambda_incs[i] = 0.0
+            lambda_inc_vals[i] = 0.0
             
-    # 5. Generate Slices
-    # Calculate total slices needed to cover the volume
-    # Source [S1, unofficial]: numSlices = Math.round(planeOffset / planeInc) * 2
-    # This formula seems to double the count to ensure full coverage from min to max.
-    # However, the loop in [S2, unofficial] iterates from num_slices-1 down to 0.
-    # We will use the calculated numSlices from [S1, unofficial] for the loop count.
-    num_slices = round(plane_offset / plane_inc) * 2
+    slices = []
     
-    meshes = []
-    
+    # 4. Generate Slices Back-to-Front
+    # Iterate from last slice to first
     for i in range(num_slices - 1, -1, -1):
-        intersection_points = []
+        intersections = []
         
-        # Find intersections for this slice
         for e in range(12):
-            dL = lambda_vals[e] + i * lambda_incs[e]
+            dL = lambda_vals[e] + i * lambda_inc_vals[e]
             
             if 0.0 <= dL < 1.0:
-                # Compute intersection point
-                p = edge_start[e] + dL * edge_dir[e]
-                intersection_points.append(p)
+                edge_start, edge_dir = edges[e]
+                pt = edge_start + dL * edge_dir
+                intersections.append(pt)
                 
-        # Pitfall: Skip if <= 2 points
-        if len(intersection_points) <= 2:
-            continue
+        # 5. Triangulate
+        if len(intersections) <= 2:
+            continue # Skip degenerate slices
             
-        # Triangulate using fan
-        vertices = []
+        # Fan triangulation from vertex 0
         indices = []
-        
-        # Fan triangulation indices based on source [S1, unofficial]
-        # Pattern: (0,2,1), (0,3,2), (0,4,3)...
-        # This implies a specific winding order.
-        if len(intersection_points) == 3:
-            indices = [0, 2, 1]
-        elif len(intersection_points) == 4:
-            indices = [0, 2, 1, 0, 3, 2]
-        elif len(intersection_points) == 5:
-            indices = [0, 2, 1, 0, 3, 2, 0, 4, 3]
-        elif len(intersection_points) == 6:
-            indices = [0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 5, 4]
-        else:
-            # Fallback for unexpected counts (e.g., if sorting was skipped)
-            # Standard fan from vertex 0
-            for k in range(1, len(intersection_points) - 1):
-                indices.extend([0, k, k + 1])
-                
-        # Add vertices
-        for p in intersection_points:
-            vertices.append(p)
+        for k in range(1, len(intersections) - 1):
+            indices.append(0)
+            indices.append(k)
+            indices.append(k + 1)
             
         # Create Mesh
-        mesh = Mesh(vertices, indices)
+        mesh = create_mesh(intersections, indices)
+        mesh.render_order = i # Back-to-front
+        slices.append(mesh)
         
-        # Post-processing: Merge duplicates, compute normals
-        mesh.merge_duplicate_vertices()
-        mesh.compute_face_normals()
-        mesh.compute_bounding_sphere()
-        
-        # Set render order
-        mesh.render_order = num_slices - i
-        
-        meshes.append(mesh)
-        
-    return meshes
+    return slices
 
-def get_cube_edges(cube_vertices):
-    """
-    Returns list of (start_vertex, direction_vector) for the 12 edges of a cube.
-    Assumes standard cube vertex ordering:
-    0: (-1,-1,-1), 1: (1,-1,-1), 2: (-1,1,-1), 3: (1,1,-1)
-    4: (-1,-1,1), 5: (1,-1,1), 6: (-1,1,1), 7: (1,1,1)
-    Note: The source [S2, unofficial] mentions a 45-degree rotation around X-axis.
-    This function should operate on the *transformed* vertices provided in input.
-    """
-    # Define edge connectivity for a standard cube
-    edge_indices = [
-        (0,1), (1,3), (3,2), (2,0), # Bottom face
-        (4,5), (5,7), (7,6), (6,4), # Top face
-        (0,4), (1,5), (2,6), (3,7)  # Vertical edges
+def get_cube_vertices():
+    """Returns 8 unit cube vertices rotated 45 deg around X axis [S2, unofficial]"""
+    # Standard unit cube
+    base = [
+        [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+        [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]
     ]
-    
+    # Rotation matrix for 45 deg around X
+    cos_a = cos(pi/4)
+    sin_a = sin(pi/4)
+    rotated = []
+    for v in base:
+        x, y, z = v
+        # Rotate around X
+        ny = y * cos_a - z * sin_a
+        nz = y * sin_a + z * cos_a
+        rotated.append([x, ny, nz])
+    return rotated
+
+def get_cube_edges(vertices):
+    """Returns 12 edges as (start_vertex, direction_vector)"""
+    # Standard cube edge connectivity
+    edge_indices = [
+        (0,1), (1,2), (2,3), (3,0), # Bottom
+        (4,5), (5,6), (6,7), (7,4), # Top
+        (0,4), (1,5), (2,6), (3,7)  # Vertical
+    ]
     edges = []
     for i, j in edge_indices:
-        start = cube_vertices[i]
-        end = cube_vertices[j]
-        direction = normalize(end - start)
-        edges.append((start, direction))
+        start = vertices[i]
+        end = vertices[j]
+        dir_vec = normalize(end - start)
+        edges.append((start, dir_vec))
     return edges
 ```
 
-### Parameters
-*   `numberOfSlices` (int, default 10): Number of parallel planes to generate [S2, unofficial].
-*   `viewDir` (vec3): Normalized direction vector defining the plane normals and slice ordering [S2, unofficial].
-*   `EPSILON` (float): Small constant added/subtracted to min/max distances to prevent missed intersections [S2, unofficial].
-*   `planeInc`: The distance between consecutive slice planes, calculated as `PLANE_INC` multiplied by `sliceScale` [S1, unofficial].
+## Subtopics
 
-### Edge Cases and Pitfalls
-*   **Parallel Edges:** When an edge is parallel to the view direction, the denominator $d_i = \text{dot}(\text{edgeDir}[i], V)$ is zero. Division by zero is avoided by checking `1.0 + denom != 1.0`. Parallel edges are skipped by setting $\lambda = -1.0$ and $\lambda_{inc} = 0.0$ [S2, unofficial].
-*   **Degenerate Slices:** If the merged vertex count is 2 or fewer, the slice is skipped. This indicates a co-planar slice or no intersection with the bounding box [S1, unofficial].
-*   **Precision:** Use `EPSILON` to expand the min/max bounds to ensure that slices at the extreme ends of the volume are not missed due to floating-point inaccuracies [S2, unofficial].
+### [Volume Domain Transformation for Rectangular Slicing](11012-volume-domain-transformation-for-rectangular-slicing.md)
+A preprocessing step that transforms the AABB volume domain into a transformed domain to ensure all cutting sections are rectangles, simplifying LTC-based integration and avoiding complex polygon clipping. It builds on [View-Aligned Slicing (Proxy Geometry Generation)](7620-view-aligned-slicing-proxy-geometry-generation.md).
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot E)$, where $N$ is the number of slices and $E$ is the number of edges (constant 12). The intersection calculation is linear in the number of slices.
-*   **Memory Complexity:** $O(N \cdot V)$, where $V$ is the number of vertices per slice (up to 6). The geometry grows linearly with the number of slices.
-*   **Performance:** Offloads CPU calculation by generating geometry that can be rendered via standard GPU pipelines. The number of triangles is small per slice (up to 8 triangles for 6 vertices), making it efficient for real-time rendering if the number of slices is moderate [S2, unofficial].
-*   **Strengths:** Compatible with standard rasterization; allows for easy integration of lighting and shading models per slice; explicit geometry allows for occlusion culling if needed.
-*   **Limitations:** Requires explicit geometry management; may produce artifacts if slices are too sparse; back-to-front rendering order must be maintained for correct transparency [S1, unofficial].
-*   **When to use:** When explicit geometry is required for volume rendering, or when integrating volume rendering into a pipeline that already handles mesh-based objects.
-*   **When not to use:** For very high-resolution volumes where the number of slices would be too large, or when hardware-accelerated ray casting is preferred.
+*   **Time Complexity:** $O(N \cdot E)$ per frame, where $N$ is the number of slices and $E$ is the number of edges (constant 12). The intersection calculation is linear in the number of slices.
+*   **Memory Complexity:** $O(N \cdot V)$, where $V$ is the number of vertices per slice (up to 6). Geometry is generated per slice.
+*   **Performance:** Offloads intersection logic from CPU to GPU or pre-computation, enabling real-time rendering of complex volumes [S2, unofficial]. Performance depends heavily on the number of slices and the cost of the subsequent shading (e.g., LTC integration) [S1, unofficial].
+*   **Strengths:** Explicit geometry allows for advanced shading techniques not easily achievable with texture slicing (e.g., accurate normal-based lighting, LTC) [S1, unofficial]. Robust handling of view-aligned planes [S2, unofficial].
+*   **Limitations:** Generates N-gons (up to hexagons) which must be triangulated, potentially causing artifacts if not handled correctly [S1, unofficial]. Requires careful handling of degenerate cases (parallel edges, no intersection) [S1, S2, unofficial].
+*   **When to use:** When advanced per-slice shading is required, or when the volume is viewed from a fixed or slowly changing direction allowing pre-computation.
+*   **When not to use:** For highly dynamic viewpoints where pre-computation is infeasible and GPU vertex shader intersection is too costly, or when the volume is extremely large and slice count must be minimal.
 
 ## Background
-View-Aligned Slicing, also known as Slice-Base Volume Rendering, is described in *GPU Gems* [S2, unofficial]. It is implemented in open-source projects such as *MedicalViz* [S1, unofficial] and *Slice-Base-Volume-Rendering* [S2, unofficial]. The technique approximates a volume by intersecting a bounding cube with a series of parallel planes aligned with the view direction, generating a polygon mesh per slice. This approach allows the use of standard graphics APIs for rendering volumetric data as a collection of triangles.
+The method is described in the context of slice-based volume rendering, often associated with implementations in graphics libraries and educational projects [S2, unofficial]. It is referenced in the context of Medical Visualization tools [S1, unofficial]. The technique is related to the "Slice-Base Volume Rendering" approach described in *GPU Gems* [S2, unofficial].
 
 ## Sources
 [S1] DoctorTone/MedicalViz, https://github.com/DoctorTone/MedicalViz, fetched 2026-10-27 (unofficial)

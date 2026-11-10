@@ -11,15 +11,15 @@ The Gaussian Sum Transfer Function (GSTM) is a 1D signal approximation method th
 - Output: A 4-tuple $(R, G, B, \alpha)$ representing the color and opacity at value $x$. In some implementations, a fixed density $\rho = 1.0$ is returned [S3, unofficial].
 
 **Data Structures:**
-The control points are stored in an array or list. Two common layouts are observed:
-1. **Component-based (S2):** Separate sets of parameters for each color channel and opacity.
-   - Red Channel: $N_R$ Gaussians with $(A_{i,R}, \mu_{i,R}, \sigma^2_{i,R})$.
-   - Green Channel: $N_G$ Gaussians with $(A_{i,G}, \mu_{i,G}, \sigma^2_{i,G})$.
-   - Blue Channel: $N_B$ Gaussians with $(A_{i,B}, \mu_{i,B}, \sigma^2_{i,B})$.
+The control points are stored in an array or list [S2, S3, unofficial]. Two common layouts are observed:
+1. **Component-based (S2):** Separate sets of parameters for each color channel and opacity [S2, unofficial].
+   - Red Channel: $N_R$ Gaussians with $(A_{i,R}, \mu_{i,R}, \sigma^2_{i,R})$ [S2, unofficial].
+   - Green Channel: $N_G$ Gaussians with $(A_{i,G}, \mu_{i,G}, \sigma^2_{i,G})$ [S2, unofficial].
+   - Blue Channel: $N_B$ Gaussians with $(A_{i,B}, \mu_{i,B}, \sigma^2_{i,B})$ [S2, unofficial].
    - Opacity: $N_\alpha$ Gaussians with $(A_{i,\alpha}, \mu_{i,\alpha}, \sigma^2_{i,\alpha})$ [S2, unofficial].
 2. **Control Point Structure (S3):** A structure `TF1DControlPoint` containing:
-   - `position` (float): The mean $\mu_i$ on the scalar axis.
-   - `color` (Spectrum): The attenuation/color contribution vector.
+   - `position` (float): The mean $\mu_i$ on the scalar axis [S3, unofficial].
+   - `color` (Spectrum): The attenuation/color contribution vector [S3, unofficial].
    - `exponent` (float): Shape parameter (typically 2 for standard Gaussian) [S3, unofficial].
    - `offset` (float): Maps to the variance $\sigma_i^2$ used in the exponential denominator [S3, unofficial].
 
@@ -89,10 +89,10 @@ def gaussian_sum_transfer_function(x, control_points):
         amp_b = cp['amplitude_b']
         amp_a = cp['amplitude_a']
         
-        # Avoid division by zero; S1 adds epsilon, S3 relies on caller [S1][S3, unofficial]
-        denom = sigma_sq + epsilon
+        # S1 adds epsilon to the denominator; S3 relies on caller to provide non-zero variance [S1][S3, unofficial]
+        denom = 2 * sigma_sq + epsilon
         
-        # Gaussian term (using S2/S3 denominator convention)
+        # Gaussian term (using S1 denominator convention)
         exponent = -((x - mu) ** 2) / denom
         
         r += amp_r * math.exp(exponent)
@@ -104,20 +104,20 @@ def gaussian_sum_transfer_function(x, control_points):
 ```
 
 **Edge Cases and Pitfalls:**
-- **Zero Variance:** If $\sigma_i^2 = 0$, division by zero occurs in the exponential calculation. S1 adds $\epsilon$ to the denominator, while S3 relies on the caller to provide non-zero variance or handles it elsewhere [S1][S3, unofficial].
+- **Zero Variance:** If $\sigma_i^2 = 0$, division by zero occurs in the exponential calculation [S3, unofficial]. S1 adds $\epsilon$ to the denominator, while S3 relies on the caller to provide non-zero variance or handles it elsewhere [S1][S3, unofficial].
 - **Continuity:** Some implementations (TF1DExp) are not C1 continuous [S3, unofficial].
-- **Density Handling:** In S3, density is hardcoded to 1.0, and Gaussians only affect attenuation/color. In S2, Gaussians affect opacity directly. Implementers must check which model is used [S2, S3, unofficial].
+- **Density Handling:** In S3, density is hardcoded to 1.0, and Gaussians only affect attenuation/color [S3, unofficial]. In S2, Gaussians affect opacity directly [S2, unofficial]. Implementers must check which model is used [S2, S3, unofficial].
 
 ## Subtopics
 
 ### [Gaussian Transfer Function Component](4330-gaussian-transfer-function-component.md)
-A single Gaussian function for alpha, parameterized by mean, sigma, and height. Used as a building block for the sum.
+A single Gaussian function used to define alpha (opacity) contributions in a 1D transfer function, parameterized by mean, sigma, and a height factor. It serves as the fundamental building block for Gaussian Sum Transfer Functions, mapping a scalar field value to an opacity contribution. It is distinguished from its siblings by its reliance on the standard Gaussian probability density function shape, whereas the Generalized Exponential Transfer Function uses exponential bases and the Laplacian of Gaussian Mixture Model uses the second derivative of Gaussians. Choose it when standard Gaussian bumps are sufficient for opacity mapping.
 
 ### [Generalized Exponential Transfer Function](4663-generalized-exponential-transfer-function.md)
-Uses a Generalized Normal Distribution PDF with an additional shape parameter $\beta$ for flexible adaptation to data shapes.
+The Generalized Exponential Function (GEF) is a parametric transfer function component that generalizes the Gaussian distribution by introducing a learnable shape parameter $\beta$. Unlike the Gaussian Sum Transfer Function, which is limited to low-frequency modeling due to its fixed exponential decay, the GEF can adapt its tail behavior to fit signals with sharp edges or band-unlimited characteristics, such as square or triangle waves, by varying $\beta$. It serves as a more flexible alternative to the standard Gaussian Transfer Function Component when the underlying data distribution exhibits non-Gaussian kurtosis or sharp transitions. Choose it when data requires adjustable tail decay or sharp edge modeling.
 
 ### [Laplacian of Gaussian Mixture Model](4681-laplacian-of-gaussian-mixture-model.md)
-Uses Laplacian of Gaussian functions (difference of Gaussians) for sharper peaks and valleys, defined by mean, scale, and weight.
+The Laplacian of Gaussian (LoG) Mixture Model is a probabilistic transfer function used in volume rendering to map scalar field values to density and color. It constructs a transfer function by summing individual Laplacian of Gaussian basis functions, each defined by a mean, scale, and weight. Unlike the parent [Gaussian Sum Transfer Function](1812-gaussian-sum-transfer-function.md), which uses simple Gaussian bumps, the LoG model introduces a second-order derivative characteristic that creates a "Mexican hat" shape, allowing for more nuanced control over edge detection and feature highlighting within the volume. Choose it when edge highlighting or band-pass filtering of scalar features is required.
 
 ## Operating characteristics
 - **Time Complexity:** $O(N)$ per scalar value, where $N$ is the number of control points/components [G].
@@ -129,7 +129,7 @@ Uses Laplacian of Gaussian functions (difference of Gaussians) for sharper peaks
 - **When not to use:** When automatic adaptation to data statistics is preferred (use Frequency Distribution-based) or when C1 continuity is strictly required and the implementation is not C1 [G].
 
 ## Background
-The Gaussian Sum Transfer Function is based on Gaussian Mixture Models (GMM) for 1D signal approximation [S1]. It is implemented in various visualization projects for its flexibility in defining multi-modal transfer functions [S2, S3, unofficial]. The specific implementation "TF1DExp" appears in CUDA-based volume rendering projects [S3, unofficial]. The method operates within the Probabilistic and Statistical Modeling family [Parent].
+The Gaussian Sum Transfer Function is based on Gaussian Mixture Models (GMM) for 1D signal approximation [S1]. It is implemented in various visualization projects for its flexibility in defining multi-modal transfer functions [S2, S3, unofficial]. The specific implementation "TF1DExp" appears in CUDA-based volume rendering projects [S3, unofficial]. It builds on [Probabilistic and Statistical Modeling](5932-probabilistic-and-statistical-modeling.md).
 
 ## Sources
 [S1] GES: Generalized Exponential Splatting for Efficient Radiance Field Rendering, https://doi.org/10.1109/cvpr52733.2024.01873, fetched 2026-10-26

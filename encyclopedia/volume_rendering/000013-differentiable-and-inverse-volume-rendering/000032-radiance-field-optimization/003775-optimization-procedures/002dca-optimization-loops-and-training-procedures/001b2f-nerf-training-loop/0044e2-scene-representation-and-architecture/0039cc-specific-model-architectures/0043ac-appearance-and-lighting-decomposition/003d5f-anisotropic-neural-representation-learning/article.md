@@ -3,46 +3,49 @@
 Also called: Anisotropic NeRF, SH-guided anisotropic features
 
 ## Overview
-Anisotropic Neural Representation Learning is a method that models volumetric density and latent features as view-dependent functions using spherical harmonics (SH) to eliminate directional ambiguity in neural rendering, replacing the isotropic point-sampled features of standard NeRF [S1]. Unlike Mip-NeRF which samples cones to approximate pre-filtered representations, this method modifies the MLP to predict view-dependent SH coefficients directly, avoiding the need for shape-based sampling parameterization [S1].
+Anisotropic Neural Representation Learning is a method that models volumetric density and latent features as view-dependent functions using spherical harmonics (SH) to eliminate directional ambiguity in neural rendering, replacing the isotropic point-sampled features of standard NeRF [S1]. It differs from anti-aliasing approaches like Mip-NeRF, which sample cones to approximate pre-filtered representations, by modifying the MLP to predict view-dependent SH coefficients directly, avoiding the need for shape-based sampling parameterization [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D position $\mathbf{x} \in \mathbb{R}^3$ and a viewing direction $\mathbf{d} \in \mathbb{R}^3$.
-*   **Output:** Volume density $\sigma \in \mathbb{R}$ and RGB color $\mathbf{c} \in \mathbb{R}^3$.
+*   **Input:** Ray origin $\mathbf{o}$, viewing direction $\mathbf{d}$, near/far bounds $t_n, t_f$.
+*   **Output:** Rendered color $\hat{C}(\mathbf{r})$.
 
 **Data Structures:**
-The core data structure is a Multilayer Perceptron (MLP), denoted as $F_\Theta$. In the standard NeRF architecture, the first MLP maps position to density and latent features. In this method, the first MLP is modified to predict coefficients for Spherical Harmonic (SH) basis functions instead of direct density and latent features [S1].
-
-Let $K$ be the number of SH basis functions used. The MLP outputs a vector of coefficients $\mathbf{w} \in \mathbb{R}^{K \times D}$, where $D$ is the dimensionality of the feature vector (typically 3 for RGB color, or higher for latent features). For density, a separate scalar output or a specific SH basis (e.g., $l=0$) is used.
+The core data structure is the first Multi-Layer Perceptron (MLP), denoted as $M_{geo}$. Unlike standard NeRF which outputs scalar density $\sigma$ and feature vector $\mathbf{f}$, $M_{geo}$ outputs coefficients for Spherical Harmonic (SH) basis functions.
+*   Let $L$ be the SH degree. The number of coefficients per component is $(L+1)^2$.
+*   For density $\sigma$, the output is a vector $\mathbf{c}_\sigma \in \mathbb{R}^{(L+1)^2}$.
+*   For latent features $\mathbf{f}$ (dimension $D$), the output is a tensor $\mathbf{C}_f \in \mathbb{R}^{D \times (L+1)^2}$.
+*   The MLP takes spatial coordinates $\mathbf{x}$ as input. The viewing direction $\mathbf{d}$ is not an input to $M_{geo}$ but is used to evaluate the SH basis functions.
 
 **Numbered Steps:**
-1.  **Positional Encoding:** The input position $\mathbf{x}$ is encoded using positional encoding $\gamma(\mathbf{x})$ [Parent].
-2.  **SH Coefficient Prediction:** The encoded position $\gamma(\mathbf{x})$ is passed through the first MLP to predict SH coefficients $\mathbf{w}$ [S1].
-3.  **View-Dependent Evaluation:** The SH coefficients are evaluated at the query viewing direction $\mathbf{d}$ to capture anisotropy. The density $\sigma$ and latent features $\mathbf{f}$ are computed as:
+1.  **Ray Sampling:** Sample $N$ points $t_i$ along the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ within bounds $[t_n, t_f]$, defining intervals $I_i = [t_i, t_{i+1}]$ [S1].
+2.  **Spatial Encoding:** For each sample point $\mathbf{x}_i = \mathbf{r}(t_i)$, pass $\mathbf{x}_i$ through the geometry MLP $M_{geo}$ to obtain SH coefficients $\mathbf{c}_\sigma(\mathbf{x}_i)$ and $\mathbf{C}_f(\mathbf{x}_i)$ [S1].
+3.  **SH Evaluation:** Evaluate the SH basis functions $Y(\mathbf{d})$ at the query viewing direction $\mathbf{d}$ [S1]. Compute the view-dependent density $\sigma_i$ and latent feature $\mathbf{f}_i$ by projecting the coefficients onto the basis:
     $$
-    \sigma(\mathbf{x}, \mathbf{d}) = \sum_{k=1}^{K_\sigma} w_{\sigma, k} Y_k(\mathbf{d})
+    \sigma_i = \mathbf{c}_\sigma(\mathbf{x}_i) \cdot Y(\mathbf{d})
     $$
     $$
-    \mathbf{f}(\mathbf{x}, \mathbf{d}) = \sum_{k=1}^{K_f} \mathbf{w}_{f, k} Y_k(\mathbf{d})
+    \mathbf{f}_i = \mathbf{C}_f(\mathbf{x}_i) Y(\mathbf{d})
     $$
-    where $Y_k(\mathbf{d})$ is the $k$-th SH basis function evaluated at direction $\mathbf{d}$, and $K_\sigma, K_f$ are the number of SH bands for density and features respectively [S1].
-4.  **Color Prediction:** The view-dependent latent features $\mathbf{f}$ are passed through a subsequent MLP (or a linear layer) to predict the final RGB color $\mathbf{c}$ [S1].
-5.  **Rendering:** The predicted $\sigma$ and $\mathbf{c}$ are used in the standard volume rendering integral [Parent].
+    This step captures anisotropy by making the features dependent on $\mathbf{d}$ [S1].
+4.  **Appearance Estimation:** Pass the view-dependent feature $\mathbf{f}_i$ and viewing direction $\mathbf{d}$ (or transformed direction) through a color MLP $M_{color}$ to predict the radiance $\mathbf{c}_i$ [S1].
+5.  **Regularization (Training Only):** Decompose the anisotropic elements from the predicted density and latent features. Apply a point-wise operation to penalize the energy of the anisotropic components in the geometry representation to prevent over-fitting and shape-radiance ambiguity [S1].
+6.  **Rendering:** Integrate the density $\sigma_i$ and radiance $\mathbf{c}_i$ using the volume rendering equation [S1].
 
 **Formulas:**
 The volume rendering integral is approximated as a Riemann sum [S1]:
 $$
-\hat {C}(\mathbf {r})=\sum _{i=0}^{N}\mathbf {c}_{i}T_i(1-\exp (-\sigma _{i}(t_{i+1}-t_{i})))
+\hat{C}(\mathbf{r}) = \sum_{i=0}^{N} \mathbf{c}_i T_i (1 - \exp(-\sigma_i (t_{i+1} - t_i)))
 $$
-where $T (t) = \exp \left(- \int _{0}^{t} \sigma (\mathbf {r}(s)) \, ds\right)$ represents occlusions [S1].
+where $T_i = \exp\left(-\sum_{j=0}^{i-1} \sigma_j (t_{j+1} - t_j)\right)$ represents occlusions [S1].
 
 **Parameters:**
-*   $N$: The number of samples on the ray within near and far bounds ($t_n$ and $t_f$), defining intervals $I_i = [t_i, t_{i+1}]$ [S1].
-*   SH Degree ($L$): Determines the number of basis functions $K = (L+1)^2$. Not given in the sources.
+*   $N$: Number of samples on the ray within near and far bounds [S1].
+*   $L$: Degree of spherical harmonics. Not given in the sources.
 
-**Edge Cases and Pitfalls:**
-*   **Shape-Radiance Ambiguity:** Training with only color reconstruction loss causes strong anisotropy and shape-radiance ambiguity [S1].
-*   **Regularization:** To prevent over-fitting, anisotropic elements are decomposed from the predicted density and latent features, and a point-wise operation penalizes the anisotropy in the geometry representation [S1]. This regularization is applied during training.
+**Pitfalls:**
+*   Training with only color reconstruction loss causes strong anisotropy and shape-radiance ambiguity [S1]. This is handled by decomposing anisotropic elements and applying point-wise regularization [S1].
+*   Standard NeRF ignores direction information in point intervals, resulting in ambiguous features [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -50,133 +53,87 @@ where $T (t) = \exp \left(- \int _{0}^{t} \sigma (\mathbf {r}(s)) \, ds\right)$ 
 ```python
 import numpy as np
 
-def spherical_harmonic_basis(d, degree):
+def evaluate_sh_coefficients(coeffs, direction):
     """
-    Computes spherical harmonic basis functions for direction d.
-    d: numpy array of shape (3,)
-    degree: int, maximum degree L
-    Returns: numpy array of shape ((degree+1)**2,)
+    Projects SH coefficients onto the viewing direction.
+    coeffs: array of shape (num_components, num_sh_coeffs)
+    direction: unit vector (3,)
+    Returns: projected values of shape (num_components,)
     """
-    # Implementation of SH basis functions Y_l^m(theta, phi)
-    # d is assumed to be normalized
-    theta = np.arccos(np.clip(d[2], -1.0, 1.0))
-    phi = np.arctan2(d[1], d[0])
-    
-    k = 0
-    basis = np.zeros((degree + 1) ** 2)
-    
-    for l in range(degree + 1):
-        for m in range(-l, l + 1):
-            # Simplified SH evaluation (standard normalization)
-            # Note: Full implementation requires associated Legendre polynomials
-            # This is a placeholder for the mathematical operation described in [S1]
-            basis[k] = sh_function(l, m, theta, phi)
-            k += 1
-    return basis
+    # Compute SH basis vector Y(d) for degree L
+    # Y is shape (num_sh_coeffs,)
+    Y = compute_sh_basis(direction, degree=L) 
+    # Matrix multiplication: (num_components, num_sh_coeffs) @ (num_sh_coeffs,)
+    return coeffs @ Y
 
-def sh_function(l, m, theta, phi):
+def render_anisotropic_neff(ray_origin, ray_direction, t_near, t_far, num_samples, 
+                            mlp_geo, mlp_color, sh_degree):
     """
-    Placeholder for specific SH basis function calculation.
-    In a real implementation, this uses associated Legendre polynomials.
+    Renders a single ray using Anisotropic Neural Representation Learning.
     """
-    # Standard SH basis functions (e.g., from graphics libraries)
-    # Here we assume a standard implementation exists
-    if l == 0:
-        return 1.0 / np.sqrt(4 * np.pi)
-    # ... other l, m cases ...
-    return 0.0 # Placeholder
-
-def anisotropic_nerf_forward(x, d, mlp_coeffs, degree):
-    """
-    Forward pass for Anisotropic Neural Representation Learning.
+    # 1. Sample points along the ray
+    t_vals = np.linspace(t_near, t_far, num_samples)
+    points = ray_origin + t_vals[:, None] * ray_direction
     
-    x: numpy array of shape (3,), 3D position
-    d: numpy array of shape (3,), viewing direction
-    mlp_coeffs: numpy array of shape (K, D), SH coefficients from MLP
-    degree: int, SH degree
+    # 2. Get SH coefficients from geometry MLP
+    # mlp_geo outputs: density_coeffs (C_d, K) and feature_coeffs (C_f, K)
+    # where K = (sh_degree + 1)**2
+    density_coeffs, feature_coeffs = mlp_geo(points)
     
-    Returns: sigma (density), c (color)
-    """
-    # 1. Positional Encoding (as per Parent article)
-    x_enc = positional_encoding(x)
+    # 3. Evaluate view-dependent density and features
+    # Evaluate SH basis at the viewing direction
+    sh_basis = compute_sh_basis(ray_direction, sh_degree) # Shape (K,)
     
-    # 2. MLP predicts SH coefficients
-    # In the actual model, this is done by the neural network F_Theta
-    # Here we assume mlp_coeffs are the output of the first MLP
-    w = mlp_coeffs
+    # Project coefficients to get scalar density and feature vector
+    sigma = density_coeffs @ sh_basis # Shape (num_samples,)
+    features = feature_coeffs @ sh_basis.T # Shape (num_samples, C_f)
     
-    # 3. Evaluate SH at direction d
-    basis = spherical_harmonic_basis(d, degree)
+    # 4. Predict radiance
+    # mlp_color takes features and direction
+    colors = mlp_color(features, ray_direction) # Shape (num_samples, 3)
     
-    # 4. Compute density and features
-    # Assuming first K_sigma coefficients are for density, rest for features
-    # Or separate MLPs. For simplicity, we assume a single output vector
-    # where the first element is density (l=0) and others are features.
+    # 5. Compute transmittance and alpha
+    deltas = t_vals[1:] - t_vals[:-1]
+    # Add dummy delta for first point if needed, assuming constant density per interval
+    # Standard NeRF approximation: alpha_i = 1 - exp(-sigma_i * delta_i)
+    alphas = 1.0 - np.exp(-sigma[:-1] * deltas)
     
-    # Density is typically isotropic or low-degree. 
-    # If using SH for density, we sum over the density coefficients.
-    # Let's assume w has shape (K, 1) for density and (K, 3) for color features.
-    # This structure depends on the specific implementation.
-    # Based on [S1], the MLP predicts coefficients for SH functions.
+    # Transmittance T_i = product(1 - alpha_j) for j < i
+    # T_0 = 1.0
+    transmittance = np.cumprod(1.0 - alphas)
+    transmittance = np.concatenate([[1.0], transmittance])
     
-    # Simplified: Assume w_density is the first row (l=0) or specific indices
-    # and w_features are the rest.
+    # 6. Composite color
+    # C = sum(T_i * alpha_i * c_i)
+    weights = transmittance[:-1] * alphas
+    color = np.sum(weights[:, None] * colors[:-1], axis=0)
     
-    # For density:
-    sigma = np.dot(w[:len(basis), 0], basis) # Assuming 1 channel for density
-    
-    # For features (e.g., RGB):
-    # w_features shape (K, 3)
-    features = np.dot(w[:len(basis), :], basis) # Shape (3,)
-    
-    # 5. Color prediction from features
-    # Usually a second MLP or linear layer
-    c = linear_layer(features)
-    
-    return sigma, c
-
-def render_ray(rays, mlp_coeffs, degree, near, far, n_samples):
-    """
-    Renders a single ray using the anisotropic representation.
-    """
-    # Sample points along the ray
-    t_vals = np.linspace(near, far, n_samples)
-    points = rays.origin + rays.direction * t_vals[:, np.newaxis]
-    directions = rays.direction
-    
-    sigma_sum = 0
-    color = np.zeros(3)
-    T = 1.0
-    
-    for i in range(n_samples):
-        x = points[i]
-        d = directions
-        
-        sigma, c = anisotropic_nerf_forward(x, d, mlp_coeffs, degree)
-        
-        alpha = 1.0 - np.exp(-sigma * (t_vals[i+1] - t_vals[i]) if i < n_samples-1 else 0.0)
-        # Handle last interval or infinite far bound appropriately
-        
-        weight = T * alpha
-        color += weight * c
-        T *= (1.0 - alpha)
-        
-        if T < 1e-3:
-            break
-            
     return color
+
+def compute_sh_basis(direction, degree):
+    """
+    Computes the spherical harmonic basis vector for a given direction.
+    direction: unit vector (3,)
+    Returns: array of shape ((degree+1)**2,)
+    """
+    # Implementation of SH basis functions
+    # This is a standard mathematical function, not a library call
+    # For degree 0: [1]
+    # For degree 1: [y, z, x] (normalized)
+    # ...
+    # Placeholder for actual SH math implementation
+    pass
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Similar to standard NeRF, as it replaces the direct density/feature output with an SH evaluation step, which is $O(K)$ where $K$ is the number of SH coefficients.
-*   **Memory Complexity:** The MLP weights are similar in size, but the output layer size depends on the number of SH coefficients $K$.
-*   **Strengths:** Eliminates directional ambiguity, improves reconstruction quality, and is flexible enough to be plugged into various NeRF-based frameworks [S1].
-*   **Limitations:** Requires careful regularization to prevent over-fitting of anisotropy [S1].
-*   **When to use:** When high-quality novel view synthesis is required and directional ambiguity is a concern.
-*   **When not to use:** When computational resources are extremely limited and the scene is largely isotropic.
+*   **Time Complexity:** Similar to standard NeRF per sample, as SH evaluation is a dot product. However, it avoids the overhead of cone sampling or complex spatial parameterization used in anti-aliasing methods [S1].
+*   **Memory Complexity:** Increases by the factor of $(L+1)^2$ for storing SH coefficients instead of scalar density and fixed features [S1].
+*   **Strengths:** Eliminates directional ambiguity; improves rendering quality; flexible and can be plugged into various NeRF frameworks [S1].
+*   **Limitations:** Requires careful regularization to prevent over-fitting to anisotropy; higher memory usage than isotropic NeRF [S1].
+*   **When to use:** When high-quality reconstruction is needed and directional ambiguity is a concern; when computational cost of geometric priors (like Patch-based Consistency) is too high [S1].
 
 ## Background
-The method was proposed to address the limitations of standard NeRF, which ignores direction information in point intervals, resulting in ambiguous features and limited reconstruction quality [S1]. It builds on the idea of using spherical harmonics to model view-dependent functions, allowing for the capture of anisotropy without complex sampling strategies [S1]. The method was evaluated on benchmark datasets including both synthetic and real-world scenes [S1].
+The method was proposed to address the limitation of standard NeRF, which ignores direction information in point intervals, resulting in ambiguous features and limited reconstruction quality [S1]. It builds on the idea that volumetric functions can be modeled as view-dependent using spherical harmonics [S1]. The approach was introduced in "Improving Neural Volume Rendering via Learning View-Dependent Integral Approximation" [S1].
 
 ## Sources
 [S1] Improving Neural Volume Rendering via Learning View-Dependent Integral Approximation, https://doi.org/10.1109/tvcg.2025.3554692, fetched 2026-10-26

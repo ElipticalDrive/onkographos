@@ -3,174 +3,151 @@
 Also called: StensorR, tensorial able relighting radiance field for single-tensor scene representation
 
 ## Overview
-STensoRRF is a differentiable volume rendering method that represents a 3D scene using a single 4D tensor, enabling both novel view synthesis and relighting [S1, unofficial]. Unlike standard NeRF variants that predict color directly, STensoRRF decodes appearance features into a BRDF value and normal vector, allowing the scene to be re-illuminated by changing the incident light field [S1, unofficial]. It sets itself apart from sibling architectures by using a single 4D tensor decomposed via vector-matrix (VM) decomposition, rather than multiple voxel meshes or separate tensors, which accelerates convergence by 50% compared to existing relighting radiation field models [S1, unofficial].
+STensoRRF is a differentiable volume rendering method that represents a 3D scene using a single 4D tensor to enable high-quality novel view synthesis and relighting [S1, unofficial]. It distinguishes itself from standard NeRF architectures by replacing the multi-network feature grid with a decomposed single tensor and explicitly estimating a BRDF value per point to facilitate relighting via spherical Gaussian environment maps [S1, unofficial]. Unlike sibling methods that rely on complex geometric priors or multiple voxel meshes, STensoRRF achieves a 50% faster convergence rate and 1.5x faster rendering speed by combining tensor decomposition with a simplified reflectance equation [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of multi-view 2D images of a scene with unknown illumination; camera poses $(o, \mathbf{d})$; a new environment map (lighting) for relighting.
-*   **Outputs:** Rendered pixel colors for new viewpoints; rendered pixel colors under new illumination (relighting); surface normals; BRDF values.
+*   **Inputs:** A set of multi-view images of a scene with unknown illumination; camera poses $(\mathbf{o}, \mathbf{d})$.
+*   **Outputs:** Rendered pixel colors for new viewpoints; relit images under new illumination conditions; surface normals and BRDF values for geometry.
 
 **Data Structures:**
-The core representation is a single 4D tensor $\mathbf{G}_S$ [S1, unofficial].
+The core representation is a single 4D tensor $\mathcal{G}_S$ [S1, unofficial].
 *   **Dimensions:** The first three dimensions correspond to spatial coordinates $(x, y, z)$. The fourth dimension is the feature vector.
-*   **Feature Vector Layout:** The vector at each $(x, y, z)$ contains:
-    1.  The first element: Volume density $\sigma$.
-    2.  Remaining elements: Appearance features $\mathbf{f}$ [S1, unofficial].
-*   **Decomposition:** To manage memory and computation, the 4D tensor is decomposed into several low-rank tensor components using Vector-Matrix (VM) decomposition [S1, unofficial]. This allows efficient retrieval of $\sigma$ and $\mathbf{f}$ given a 3D coordinate.
+*   **Feature Vector Layout:** The first element is the volume density $\sigma$. The remaining elements are appearance features $\mathbf{f}$ [S1, unofficial].
+*   **Decomposition:** To manage memory and accelerate optimization, the 4D tensor is decomposed into low-rank components using Vector-Matrix (VM) decomposition [S1, unofficial]. This allows efficient retrieval of $\sigma$ and $\mathbf{f}$ given a 3D coordinate.
 
-**Parameters:**
-*   Number of Spherical Gaussians (SGs) used to fit the environment map: 32 [S1, unofficial].
-*   Positional Encoding: As per the parent [Parent], raw coordinates are mapped to a higher-dimensional space using sinusoidal functions before being indexed into the tensor or processed by MLPs.
+**Decoders:**
+Distinct Multi-Layer Perceptrons (MLPs) decode the appearance features $\mathbf{f}$ retrieved from the tensor:
+1.  **Color Network:** Decodes $\mathbf{f}$ into view-dependent color $\mathbf{c}$.
+2.  **Normal Network:** Decodes $\mathbf{f}$ into surface normal $\mathbf{n}$.
+3.  **BRDF Decoder:** Decodes $\mathbf{f}$ into a scalar or vector "BRDF value" $\beta$, which represents the amount of light reflected from the point [S1, unofficial].
 
-**Algorithm Steps:**
+**Lighting Model:**
+The incident light field (environment map) is simulated using 32 Spherical Gaussians (SGs) [S1, unofficial]. The reflected light integral is approximated by combining the BRDF value, the normal vector, and the SG-based lighting field [S1, unofficial].
 
-1.  **Ray Sampling:** For a given camera ray $\mathbf{r}(t) = o + t\mathbf{d}$, sample $N$ points $\mathbf{x}_i$ along the ray within the scene bounds.
-2.  **Feature Retrieval:** For each point $\mathbf{x}_i$, retrieve the volume density $\sigma_i$ and appearance feature vector $\mathbf{f}_i$ from the decomposed 4D tensor $\mathbf{G}_S$ [S1, unofficial].
-3.  **Feature Decoding:** Pass $\mathbf{f}_i$ through distinct Multi-Layer Perceptrons (MLPs) to decode:
-    *   Color value $\mathbf{c}_i$ (using a color network).
-    *   Normal vector $\mathbf{n}_i$ (using a normal network).
-    *   BRDF value $\mathbf{b}_i$ (using a BRDF decoder) [S1, unofficial].
-    *   *Note:* The "BRDF value" is defined as the amount of light reflected from a specific point, estimated directly by the network [S1, unofficial].
-4.  **Volume Rendering (Training):** Compute the pixel color $C(\mathbf{r})$ using standard volumetric rendering:
+**Rendering and Training Steps:**
+1.  **Ray Sampling:** For a camera ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, sample $N$ points $\mathbf{x}_i$ along the ray.
+2.  **Feature Retrieval:** For each $\mathbf{x}_i$, query the decomposed 4D tensor to obtain density $\sigma_i$ and appearance features $\mathbf{f}_i$ [S1, unofficial].
+3.  **Decoding:**
+    *   Compute color $\mathbf{c}_i$ from $\mathbf{f}_i$.
+    *   Compute normal $\mathbf{n}_i$ from $\mathbf{f}_i$.
+    *   Compute BRDF value $\beta_i$ from $\mathbf{f}_i$ [S1, unofficial].
+4.  **Volume Rendering (Training):** Render the pixel color $C(\mathbf{r})$ using standard volumetric rendering to supervise the tensor during initial training:
     $$
-    C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \text{where } \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
+    C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
     $$
-    where $\delta_i$ is the distance between samples [Parent].
-5.  **Lighting Simulation:** Represent the incident light field $L_i(\omega)$ using 32 Spherical Gaussians [S1, unofficial].
-6.  **Relighting Rendering:** After training convergence (or during specific relighting phases), identify surface points on the ray (e.g., using depth estimation from density $\sigma$) [S1, unofficial]. For these surface points, compute the reflected color using the BRDF value $\mathbf{b}_i$, normal $\mathbf{n}_i$, and the simulated incident light field:
-    $$
-    C_{relight} = \int_{\Omega} \mathbf{b}_i \cdot L_i(\omega) \, d\omega \approx \sum_{k=1}^{32} \mathbf{b}_i \cdot \text{SG}_k(\omega)
-    $$
-    *Note:* The source describes combining the BRDF value with the "secondary reflected light field" (simulated by SGs) to approximate the integral [S1, unofficial].
-7.  **Optimization:** Optimize the parameters of the 4D tensor $\mathbf{G}_S$ (and potentially the MLPs) by minimizing the difference between the rendered pixel colors $C(\mathbf{r})$ and the ground truth pixel values from the input images [S1, unofficial]. The supervision may include both the standard volume rendering loss and the relighting loss if ground truth relighting data is available, though the primary optimization is against the captured images [S1, unofficial].
+    where $\delta_i$ is the distance between samples [S1, unofficial].
+5.  **Surface Point Estimation:** After a certain number of iterations, identify surface points on the ray (e.g., using the density peak or transmittance threshold) [S1, unofficial].
+6.  **Relighting Rendering:** For the identified surface points, compute the reflected color using the BRDF value, normal, and SG environment map. This result is used to jointly optimize the tensor field alongside the standard volume rendering loss [S1, unofficial].
+7.  **Optimization:** Iteratively update the 4D tensor parameters by minimizing the difference between rendered pixel colors and real image pixel values [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
+def stensorrrf_forward(ray_origin, ray_direction, tensor_decomposition, sg_lighting):
+    """
+    Renders a ray using the STensoRRF representation.
+    
+    Args:
+        ray_origin: 3D vector (o)
+        ray_direction: 3D vector (d)
+        tensor_decomposition: Object representing the decomposed 4D tensor
+        sg_lighting: List of 32 Spherical Gaussian parameters
+        
+    Returns:
+        color: Rendered pixel color
+        surface_info: Dictionary containing normal, brdf_value, and depth
+    """
+    # 1. Sample points along the ray
+    # Not given in the sources: specific sampling strategy (uniform, stratified, or importance sampling)
+    # Assuming a standard set of N samples
+    t_values = sample_t_values(ray_origin, ray_direction) 
+    points = [ray_origin + t * ray_direction for t in t_values]
+    
+    densities = []
+    colors = []
+    normals = []
+    brdf_values = []
+    
+    for p in points:
+        # 2. Retrieve features from the 4D tensor via VM decomposition
+        # Not given in the sources: exact VM decomposition retrieval formula
+        sigma, features = tensor_decomposition.query(p)
+        
+        # 3. Decode features
+        c = color_network(features)
+        n = normal_network(features)
+        beta = brdf_decoder(features)
+        
+        densities.append(sigma)
+        colors.append(c)
+        normals.append(n)
+        brdf_values.append(beta)
+        
+    # 4. Volume Rendering for training supervision
+    # Not given in the sources: specific alpha/transmittance calculation details
+    # Standard volumetric rendering equation
+    alpha = [1 - exp(-sigma * delta) for sigma, delta in zip(densities, get_deltas(t_values))]
+    transmittance = [prod(1 - a for a in alpha[:i]) for i in range(len(alpha))]
+    
+    rendered_color = sum(t * a * c for t, a, c in zip(transmittance, alpha, colors))
+    
+    # 5. Surface Point Estimation
+    # Not given in the sources: specific criterion for selecting surface points
+    # Typically the point with maximum density or where transmittance drops below a threshold
+    surface_idx = find_surface_point(densities, transmittance)
+    
+    if surface_idx is not None:
+        surface_normal = normals[surface_idx]
+        surface_brdf = brdf_values[surface_idx]
+        
+        # 6. Relighting Calculation
+        # Combine BRDF, normal, and SG lighting
+        # Not given in the sources: exact reflectance equation implementation
+        relit_color = compute_reflected_light(surface_brdf, surface_normal, sg_lighting)
+        
+        return rendered_color, {
+            'normal': surface_normal,
+            'brdf_value': surface_brdf,
+            'relit_color': relit_color,
+            'depth': t_values[surface_idx]
+        }
+    else:
+        return rendered_color, None
 
-def retrieve_features(tensor_decomposed, x, y, z):
+def compute_reflected_light(brdf_value, normal, sg_lighting):
     """
-    Retrieve density and appearance features from the decomposed 4D tensor.
-    Uses VM decomposition logic to reconstruct the feature vector at (x,y,z).
+    Approximates the reflected light integral using Spherical Gaussians.
     """
-    # Implementation detail: VM decomposition allows efficient lookup.
-    # The first element of the reconstructed vector is density.
-    # The rest are appearance features.
-    feature_vector = decomposed_tensor_lookup(tensor_decomposed, x, y, z)
-    density = feature_vector[0]
-    appearance_features = feature_vector[1:]
-    return density, appearance_features
-
-def decode_features(appearance_features, color_mlp, normal_mlp, brdf_mlp):
-    """
-    Decode appearance features into color, normal, and BRDF value.
-    """
-    color = color_mlp(appearance_features)
-    normal = normal_mlp(appearance_features)
-    brdf_value = brdf_mlp(appearance_features)
-    return color, normal, brdf_value
-
-def render_volume(rays, tensor_decomposed, color_mlp, normal_mlp, brdf_mlp, num_samples=128):
-    """
-    Standard volume rendering for training supervision.
-    """
-    pixel_colors = []
-    for ray in rays:
-        o, d = ray.origin, ray.direction
-        t_vals = np.linspace(ray.near, ray.far, num_samples)
-        points = o + t_vals[:, None] * d[None, :]
-        
-        densities = []
-        colors = []
-        
-        for i in range(num_samples):
-            x, y, z = points[i]
-            sigma, features = retrieve_features(tensor_decomposed, x, y, z)
-            c, _, _ = decode_features(features, color_mlp, normal_mlp, brdf_mlp)
-            densities.append(sigma)
-            colors.append(c)
-            
-        densities = np.array(densities)
-        colors = np.array(colors)
-        
-        # Volumetric rendering formula
-        deltas = np.diff(t_vals, append=ray.far)
-        alphas = 1.0 - np.exp(-densities * deltas)
-        transmittance = np.exp(-np.cumsum(densities * deltas, axis=0))
-        weights = alphas * transmittance
-        pixel_color = np.sum(weights[:, None] * colors, axis=0)
-        pixel_colors.append(pixel_color)
-        
-    return np.array(pixel_colors)
-
-def render_relighting(rays, tensor_decomposed, color_mlp, normal_mlp, brdf_mlp, env_map_sgs):
-    """
-    Relighting rendering using Spherical Gaussians.
-    """
-    pixel_colors = []
-    for ray in rays:
-        o, d = ray.origin, ray.direction
-        # Sample points to find surface
-        t_vals = np.linspace(ray.near, ray.far, 256) # Higher res for surface finding
-        points = o + t_vals[:, None] * d[None, :]
-        
-        densities = []
-        for i in range(len(t_vals)):
-            x, y, z = points[i]
-            sigma, _ = retrieve_features(tensor_decomposed, x, y, z)
-            densities.append(sigma)
-            
-        densities = np.array(densities)
-        # Estimate surface depth (e.g., first point where transmittance is low)
-        # [G] Standard NeRF depth estimation: find t where cumulative alpha > threshold
-        alphas = 1.0 - np.exp(-densities * np.diff(t_vals, append=ray.far))
-        transmittance = np.exp(-np.cumsum(densities * np.diff(t_vals, append=ray.far), axis=0))
-        surface_idx = np.argmax(transmittance < 0.1) # Example heuristic
-        
-        if surface_idx < len(t_vals):
-            x, y, z = points[surface_idx]
-            sigma, features = retrieve_features(tensor_decomposed, x, y, z)
-            _, normal, brdf_value = decode_features(features, color_mlp, normal_mlp, brdf_mlp)
-            
-            # Integrate BRDF * Light (simulated by 32 SGs)
-            # [G] Approximate integral sum over SGs
-            relight_color = np.zeros(3)
-            for sg in env_map_sgs: # 32 SGs
-                # Evaluate SG at normal direction
-                # SG_k(omega) = a_k * exp(b_k * (omega . c_k))
-                # [G] Simplified: assume sg provides value at normal
-                light_val = sg.evaluate(normal)
-                relight_color += brdf_value * light_val
-                
-            pixel_colors.append(relight_color)
-        else:
-            pixel_colors.append(np.zeros(3))
-            
-    return np.array(pixel_colors)
+    # Not given in the sources: specific integration formula over the hemisphere
+    # Combining BRDF value, normal, and secondary reflected light field (SGs)
+    reflected_light = 0
+    for sg in sg_lighting:
+        # Not given in the sources: how SG parameters interact with BRDF value and normal
+        # Conceptually: integral of BRDF * N * L * V * Light
+        reflected_light += sg.evaluate(normal, brdf_value)
+    return reflected_light
 ```
 
-## Subtopics
+**Parameters:**
+*   **Spherical Gaussians:** 32 SGs are used to fit the environment map [S1, unofficial].
+*   **Tensor Dimensions:** Not given in the sources.
+*   **Decomposition Rank:** Not given in the sources.
 
-### Tensor Decomposition (VM)
-A technique used within STensoRRF to decompose the 4D tensor into low-rank components. It sets itself apart from full 4D tensor storage by reducing memory and accelerating optimization. Choose when memory is constrained or training speed is critical. See [Sparse and Efficient Representations](9326-sparse-and-efficient-representations.md).
-
-### Spherical Gaussians
-A method for representing the environment map (incident light field) using a sum of spherical Gaussian functions. It sets itself apart from discrete environment map sampling by providing a smooth, differentiable, and compact representation. Choose when efficient integration of lighting is required. See [Neural Light Field Representations](9273-neural-light-field-representations.md).
+**Edge Cases and Pitfalls:**
+*   **Surface Estimation:** The method relies on estimating surface points after a certain number of iterations to decode BRDF and normals. If the density field is noisy or under-converged, surface point identification may fail [S1, unofficial].
+*   **BRDF Approximation:** The "BRDF value" is a network output approximating reflection properties, not a full analytical BRDF. This simplification may limit the accuracy of complex material relighting compared to full microfacet models [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Training convergence is 50% faster than existing relighting radiation field models [S1, unofficial].
-*   **Memory Complexity:** Uses a single 4D tensor decomposed via VM decomposition, which is more memory-efficient than methods using multiple voxel meshes or tensors [S1, unofficial]. Exact memory usage depends on the tensor resolution and the rank of the VM decomposition, which is not given in the sources.
-*   **Performance:** Rendering and relighting speed is approximately 1.5x faster than previous state-of-the-art models [S1, unofficial].
-*   **Strengths:** High-quality novel view synthesis; enables relighting without complex geometric surface properties; faster convergence and rendering than prior relighting NeRFs.
-*   **Limitations:** Relies on the assumption that the scene can be well-represented by a single 4D tensor with VM decomposition; quality depends on the accuracy of the BRDF value estimation network.
-*   **When to use:** When relighting capability is required alongside novel view synthesis, and computational efficiency (convergence/rendering speed) is a priority.
-*   **When not to use:** When high-fidelity, physically accurate BRDFs are required (STensoRRF uses a learned "BRDF value" rather than a full analytical BRDF); when the scene has extreme geometric complexity that a single 4D tensor cannot capture efficiently.
+*   **Convergence:** 50% faster convergence rate compared to existing relighting radiation field models [S1, unofficial].
+*   **Speed:** Rendering and relighting speed is approximately 1.5x faster than previous state-of-the-art models [S1, unofficial].
+*   **Memory:** Uses a single 4D tensor with VM decomposition, reducing memory overhead compared to methods using multiple voxel meshes or tensors [S1, unofficial].
+*   **Strengths:** High-quality novel view synthesis; efficient relighting without complex geometric surface properties; fast convergence [S1, unofficial].
+*   **Limitations:** Relies on a simplified reflectance equation; BRDF is estimated rather than physically modeled; performance depends on the accuracy of the 32 SG environment map fit [S1, unofficial].
 
 ## Background
-STensoRRF (Tensorial able Relighting Radiance Field for Single-Tensor Scene Representation) was proposed in a preprint published in January 2024 [S1, unofficial]. It addresses the limitations of previous radiance field methods that either relied on multiple voxel meshes/tensors or combined reflectance equations with separate lighting estimation models. By integrating the reflectance equation with tensor decomposition and a direct BRDF value estimation network, it aims to accelerate convergence and enable efficient relighting [S1, unofficial].
+STensoRRF (Tensorial Able Relighting Radiance Field for Single-Tensor Scene Representation) was proposed in a preprint published in January 2024 [S1, unofficial]. It addresses the limitations of previous radiance field methods that required multiple voxel meshes or tensors for scene representation and complex geometric priors for relighting [S1, unofficial]. By leveraging tensor decomposition and a single 4D tensor, it aims to accelerate training and enable efficient relighting by directly estimating reflection properties (BRDF value) from appearance features [S1, unofficial].
 
 ## Sources
 [S1] STensoRRF:Tensorial able Relighting Radiance Field for Single-Tensor Scene Representation, https://doi.org/10.20944/preprints202401.1085.v1, fetched 2026-10-30 (unofficial)

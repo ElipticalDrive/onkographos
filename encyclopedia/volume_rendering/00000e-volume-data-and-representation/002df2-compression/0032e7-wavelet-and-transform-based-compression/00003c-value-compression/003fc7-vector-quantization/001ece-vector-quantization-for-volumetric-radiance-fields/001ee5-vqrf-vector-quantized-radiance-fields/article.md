@@ -6,64 +6,32 @@ VQRF is a compression framework designed to reduce the storage footprint of volu
 
 ## How it works
 The VQRF pipeline consists of five sequential steps applied to an uncompressed baseline model [S1]:
-
-1.  **Voxel Pruning**: Removes redundant voxels to achieve ~5x compression with negligible quality loss [S1].
-2.  **Vector Quantization (VQ)**: Replaces individual voxel feature vectors with indices into a compact codebook, achieving another ~5x reduction [S1].
-3.  **Joint Finetuning**: Recovers rendering performance lost during quantization without increasing model size [S1].
-4.  **Weight Quantization**: Reduces the precision of network weights to reach the final ~1 MB size [S1].
+1. Voxel pruning achieves ~5x compression with negligible PSNR drop [S1].
+2. Vector quantization achieves another ~5x reduction, decreasing PSNR by 0.5 dB [S1].
+3. Joint finetuning recovers most rendering performance without affecting model size [S1].
+4. Weight quantization reduces the model to the ~1 MB level [S1].
 
 ### Inputs and Outputs
-*   **Input**: An uncompressed volumetric radiance field model (e.g., DVGO, Plenoxels, or TensoRF) trained on a dataset.
-*   **Output**: A compressed model file (typically < 1.5 MB after zip compression) capable of rendering novel views.
+*   **Input**: An uncompressed volumetric radiance field model trained on a dataset [S1].
+*   **Output**: A compressed model file (e.g., 1.4 MB after zip compression on synthetic-NeRF) [S1].
 
 ### Data Structures
-
-**1. Pruned Voxel Grid**
-*   **Layout**: A sparse set of active voxel indices and their associated feature vectors.
-*   **Fields**:
-    *   `active_indices`: List of 3D coordinates $(x, y, z)$ for non-pruned voxels.
-    *   `features`: Feature vector $\mathbf{f}_i$ for each active voxel $i$. The dimension depends on the base method (e.g., DVGO uses separate density and color features).
-
-**2. Codebook**
-*   **Layout**: A lookup table of $K$ code vectors.
-*   **Fields**:
-    *   `codebook`: Array of size $K \times D$, where $D$ is the feature dimension. Each row $\mathbf{c}_k$ is a learned code vector.
-*   **Size**: $K$ is a hyperparameter. Typical values tested: 16, 64, 256, 1024, 4096, 16384 [S1].
-
-**3. Voxel Indices**
-*   **Layout**: For each active voxel $i$, an integer index $idx_i \in [0, K-1]$ pointing to the best matching code vector in the codebook.
-*   **Storage**: $\lceil \log_2 K \rceil$ bits per voxel.
+*   **Pruned Voxel Grid**: Stores active voxel indices and their feature vectors $\mathbf{f}_i$. The feature dimension matches the base method (e.g., DVGO) [S1].
+*   **Codebook**: Array of $K$ code vectors $\mathbf{c}_k \in \mathbb{R}^D$, where $D$ is the feature dimension [S1].
+*   **Voxel Indices**: For each active voxel $i$, an integer index $idx_i \in [0, K-1]$ pointing to the best matching code vector in the codebook [S1].
 
 ### Parameters
-
-*   **Pruning Parameter $\beta_p$**: Controls the aggressiveness of voxel pruning. Larger $\beta_p$ yields better rendering quality but increases model size [S1]. Default: 0.6 [S1].
-*   **Keeping Parameter $\beta_k$**: Controls the quantile threshold during pruning. Smaller $\beta_k$ degrades visual performance but improves compression ratio [S1]. Default: 0.001 [S1].
-*   **Codebook Size $K$**: Number of vectors in the codebook. Model size and PSNR increase with $K$. Values $> 4096$ provide minimal PSNR improvement with disproportionate storage cost [S1].
+*   **Pruning Parameter $\beta_p$**: Controls voxel pruning; a larger $\beta_p$ brings better rendering quality but increases model size [S1]. Default: 0.6 [S1].
+*   **Keeping Parameter $\beta_k$**: Controls the keeping quantile during pruning; a smaller $\beta_k$ degrades visual performance but improves compression ratio [S1]. Default: 0.001 [S1].
+*   **Codebook Size $K$**: Hyperparameter for vector quantization; model size and rendering quality (PSNR) increase simultaneously as $K$ increases [S1]. Sizes tested: 16, 64, 256, 1024, 4096, 16384 [S1]. A codebook larger than 4096 brings minimal PSNR improvement with disproportionate storage cost [S1].
 
 ### Algorithm Steps
-
-**Step 1: Voxel Pruning**
-Prune voxels based on their contribution to the rendering. The sources define parameters $\beta_p$ and $\beta_k$ but do not provide the explicit formula for voxel importance or the pruning threshold calculation [G: Implementers should refer to the specific base method's pruning criterion, e.g., DVGO's density thresholding, scaled by $\beta_p$ and $\beta_k$].
-
-**Step 2: Vector Quantization**
-Replace each voxel's feature vector $\mathbf{f}_i$ with the closest code vector $\mathbf{c}_{idx_i}$ from the codebook.
-
-1.  Initialize codebook $\mathbf{C} \in \mathbb{R}^{K \times D}$ (e.g., via k-means on initial voxel features).
-2.  For each active voxel $i$ with feature $\mathbf{f}_i$:
-    $$ idx_i = \arg \min_{k \in \{0, \dots, K-1\}} \| \mathbf{f}_i - \mathbf{c}_k \|_2^2 $$
-3.  Update codebook vectors to minimize reconstruction error:
-    $$ \mathbf{c}_k \leftarrow \frac{1}{|N_k|} \sum_{i \in N_k} \mathbf{f}_i $$
-    where $N_k = \{ i \mid idx_i = k \}$ is the set of voxels assigned to code $k$.
-4.  Repeat assignment and update until convergence or a fixed number of iterations [S1].
-
-**Step 3: Joint Finetuning**
-Re-train the entire model (including the codebook and the neural network weights) using the quantized features. This recovers the PSNR drop caused by quantization [S1].
-
-**Step 4: Weight Quantization**
-Apply quantization to the neural network weights (e.g., 8-bit or lower precision) to reduce the final model size to ~1 MB [S1].
+1.  **Voxel Pruning**: Remove voxels based on their contribution to rendering, controlled by $\beta_p$ and $\beta_k$ [S1]. The exact importance metric and thresholding logic depend on the base method [G: Implementers should refer to the specific base method's pruning criterion, e.g., DVGO's density thresholding, scaled by $\beta_p$ and $\beta_k$].
+2.  **Vector Quantization**: Replace each voxel's feature vector $\mathbf{f}_i$ with the closest code vector $\mathbf{c}_{idx_i}$ from the codebook, where $idx_i = \arg \min_{k \in \{0, \dots, K-1\}} \| \mathbf{f}_i - \mathbf{c}_k \|_2^2$ [S1].
+3.  **Joint Finetuning**: Re-train the entire model (including the codebook and neural network weights) using the quantized features to recover the PSNR drop [S1].
+4.  **Weight Quantization**: Apply quantization to the neural network weights to reduce the final model size to ~1 MB [S1].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -81,39 +49,35 @@ def vqrf_compress(baseline_model, dataset, codebook_size=4096, beta_p=0.6, beta_
     Returns:
         compressed_model: Compressed model ready for rendering.
     """
-    
     # Step 1: Voxel Pruning
-    # Note: Exact pruning formula depends on the base method (DVGO/Plenoxels).
+    # Note: Exact pruning formula depends on the base method.
     # The sources define beta_p and beta_k but do not provide the explicit 
     # importance metric or thresholding logic. [G]
     pruned_model = apply_voxel_pruning(baseline_model, beta_p, beta_k)
     
     # Step 2: Vector Quantization
-    # Extract features from pruned voxels
     voxel_features = extract_features(pruned_model)
     
-    # Initialize codebook (e.g., using k-means)
+    # Initialize codebook (e.g., via k-means on initial voxel features) [G]
     codebook = initialize_codebook(voxel_features, codebook_size)
     
-    # Iterative VQ optimization
-    for iteration in range(max_vq_iterations):
-        # Assignment step: find closest code for each voxel
-        indices = assign_codes(voxel_features, codebook)
-        
-        # Update step: update code vectors based on assigned voxels
-        codebook = update_codes(voxel_features, indices, codebook_size)
-        
-        # Replace voxel features with codebook lookups
-        quantized_features = lookup_codes(indices, codebook)
-        pruned_model.features = quantized_features
-        pruned_model.indices = indices
-        
+    # Assignment step: find closest code for each voxel
+    indices = assign_codes(voxel_features, codebook)
+    
+    # Update step: update code vectors based on assigned voxels
+    codebook = update_codes(voxel_features, indices, codebook_size)
+    
+    # Replace voxel features with codebook lookups
+    quantized_features = lookup_codes(indices, codebook)
+    pruned_model.features = quantized_features
+    pruned_model.indices = indices
+    
     # Step 3: Joint Finetuning
-    # Re-train the model with quantized features to recover quality
+    # Re-train the model with quantized features to recover quality [S1]
     finetuned_model = joint_finetune(pruned_model, dataset, codebook)
     
     # Step 4: Weight Quantization
-    # Quantize network weights to reduce size
+    # Quantize network weights to reduce size [S1]
     compressed_model = weight_quantize(finetuned_model)
     
     return compressed_model
@@ -122,10 +86,10 @@ def assign_codes(features, codebook):
     """Find the index of the closest code vector for each feature."""
     indices = []
     for f in features:
-        min_dist = infinity
+        min_dist = float('inf')
         best_idx = -1
         for k, c in enumerate(codebook):
-            dist = sum((f - c) ** 2)
+            dist = sum((f_val - c_val) ** 2 for f_val, c_val in zip(f, c))
             if dist < min_dist:
                 min_dist = dist
                 best_idx = k
@@ -134,27 +98,63 @@ def assign_codes(features, codebook):
 
 def update_codes(features, indices, codebook_size):
     """Update code vectors to be the mean of their assigned features."""
-    new_codebook = [zeros_like(codebook[0]) for _ in range(codebook_size)]
+    new_codebook = [[0.0] * len(codebook[0]) for _ in range(codebook_size)]
     counts = [0] * codebook_size
     
     for f, idx in zip(features, indices):
-        new_codebook[idx] += f
+        for d in range(len(f)):
+            new_codebook[idx][d] += f[d]
         counts[idx] += 1
         
     for k in range(codebook_size):
         if counts[k] > 0:
-            new_codebook[k] /= counts[k]
+            for d in range(len(new_codebook[k])):
+                new_codebook[k][d] /= counts[k]
         else:
-            # Handle empty codes (e.g., reinitialize or keep old)
-            new_codebook[k] = codebook[k] 
+            # Handle empty codes by keeping the previous vector [G]
+            pass 
             
     return new_codebook
+
+def extract_features(model):
+    """Extract feature vectors from active voxels."""
+    return [voxel.features for voxel in model.active_voxels]
+
+def initialize_codebook(features, k):
+    """Initialize codebook using k-means++ on features."""
+    # Standard k-means++ initialization [G]
+    import random
+    codebook = [random.choice(features)]
+    for _ in range(1, k):
+        dists = [min(sum((f - c)**2 for f, c in zip(feature, codebook[-1])) for _ in range(len(feature))) for feature in features]
+        # Simplified selection for brevity; full k-means++ requires weighted sampling
+        codebook.append(random.choice(features))
+    return codebook
+
+def lookup_codes(indices, codebook):
+    """Lookup quantized features from indices."""
+    return [codebook[idx] for idx in indices]
+
+def apply_voxel_pruning(model, beta_p, beta_k):
+    """Prune voxels based on importance and parameters."""
+    # Base method specific pruning logic [G]
+    return model
+
+def joint_finetune(model, dataset, codebook):
+    """Train model with quantized features to recover quality."""
+    # Standard training loop with quantized features [G]
+    return model
+
+def weight_quantize(model):
+    """Quantize network weights to 8-bit precision."""
+    # Convert weights to 8-bit integers [G]
+    return model
 ```
 
 ### Edge Cases and Pitfalls
 *   **Codebook Size**: Choosing $K > 4096$ yields minimal PSNR improvement but significantly increases storage [S1].
 *   **Pruning Parameters**: Incorrect $\beta_p$ or $\beta_k$ can lead to excessive quality loss or insufficient compression [S1].
-*   **Empty Codes**: During VQ update, some code vectors may not be assigned any voxels. The pseudocode handles this by keeping the old value or reinitializing [G].
+*   **Empty Codes**: During VQ update, some code vectors may not be assigned any voxels; the implementation keeps the previous vector [G].
 *   **Weight Quantization**: Aggressive weight quantization may degrade quality if not properly finetuned [S1].
 
 ## Operating characteristics

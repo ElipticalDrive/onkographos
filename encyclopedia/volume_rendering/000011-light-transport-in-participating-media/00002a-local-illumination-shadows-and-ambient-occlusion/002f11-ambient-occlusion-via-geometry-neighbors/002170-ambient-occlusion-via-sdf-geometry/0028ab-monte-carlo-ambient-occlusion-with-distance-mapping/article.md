@@ -3,24 +3,24 @@
 Also called: Random Ray Casting AO
 
 ## Overview
-Monte Carlo Ambient Occlusion with Distance Mapping is a method to compute ambient occlusion by casting rays in random directions and numerically evaluating the occlusion factor using a distance mapping function [S1, unofficial]. It differs from SDF-based Ambient Occlusion by relying on stochastic ray casting rather than deterministic signed distance field queries, and from Screen-Space Ambient Occlusion (SSAO) by operating in world space or precomputed volumes rather than screen-space buffers [S1, unofficial].
+Monte Carlo Ambient Occlusion with Distance Mapping is a method to compute ambient occlusion by casting rays in random directions and numerically evaluating the occlusion factor using a distance mapping function [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Surface position $p$, surface normal $n$, number of random samples $N$, and a distance mapping function $v(p, l_i)$.
-*   **Output:** Ambient occlusion factor $k_A(p)$, a floating-point value in the range $[0, 1]$.
+*   **Input:** Surface position $p$, surface normal $n$, number of random samples $N$, and a distance mapping function $v(p, l_i)$ [S1, unofficial].
+*   **Output:** Ambient occlusion factor $k_A(p)$, a floating-point value [S1, unofficial].
 
 **Data Structures:**
-No specific complex data structures are required beyond the storage of the surface point $p$, normal $n$, and the ability to evaluate the distance mapping function $v$. The distance mapping function typically queries a spatial data structure (such as a voxel grid or SDF) to determine visibility or distance to nearest geometry.
+The method requires storage for the surface point $p$, normal $n$, and a callable distance mapping function $v$ [S1, unofficial].
 
 **Steps:**
-1.  Initialize the accumulator $k_A(p)$ to 0.
-2.  For each sample $i$ from 1 to $N$:
-    a. Generate a random direction vector $l_i$ uniformly distributed over the hemisphere defined by the surface normal $n$.
-    b. Evaluate the distance mapping function $v(p, l_i)$ for the current position and direction. This function returns a floating-point value representing the occlusion contribution based on distance to geometry.
-    c. Compute the cosine weight $(n \cdot l_i)^+$, where $(x)^+ = \max(0, x)$.
-    d. Add the product $v(p, l_i) (n \cdot l_i)^+$ to the accumulator.
-3.  Divide the accumulator by $N$ to obtain the final average.
+1. Initialize an accumulator to $0$ [S1, unofficial].
+2. For each sample $i$ from $1$ to $N$:
+   a. Generate a random direction vector $l_i$ [S1, unofficial].
+   b. Evaluate the distance mapping function $v(p, l_i)$ [S1, unofficial].
+   c. Compute the cosine weight $(n \cdot l_i)^+$ [S1, unofficial].
+   d. Add the product $v(p, l_i) (n \cdot l_i)^+$ to the accumulator [S1, unofficial].
+3. Divide the accumulator by $N$ to obtain the final average [S1, unofficial].
 
 **Formula:**
 The ambient occlusion factor is calculated as:
@@ -28,27 +28,30 @@ The ambient occlusion factor is calculated as:
 $$k_A(p) = \frac{1}{N} \sum_{i=1}^N v(p, l_i) (n \cdot l_i)^+$$
 
 Where:
-*   $k_A(p)$ is the ambient occlusion factor for position $p$.
-*   $N$ is the integer number of random samples used for the Monte Carlo integration process.
-*   $v(p, l_i)$ is the distance mapping function returning a floating-point value.
-*   $l_i$ is the 3D vector representing the $i$-th random direction to cast a ray in.
-*   $n$ is the 3D vector representing the surface normal.
+*   $k_A(p)$ is the ambient occlusion factor for position $p$ [S1, unofficial].
+*   $N$ is the integer number of random samples used for the Monte Carlo integration process [S1, unofficial].
+*   $v(p, l_i)$ is the distance mapping function returning a floating-point value [S1, unofficial].
+*   $l_i$ is the 3D vector representing the $i$-th random direction to cast a ray in [S1, unofficial].
+*   $n$ is the 3D vector representing the surface normal [S1, unofficial].
 
 **Parameters:**
-*   $N$: The number of random samples. Higher values reduce noise but increase computation time. Not given in the sources.
-*   $v(p, l_i)$: The distance mapping function. Its specific implementation depends on the underlying geometry representation (e.g., voxel density, SDF value).
+*   $N$: The number of random samples. Not given in the sources.
+*   $v(p, l_i)$: The distance mapping function. Not given in the sources.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+import random
+
 def monte_carlo_ao(p, n, N, distance_mapping_function):
     """
     Computes ambient occlusion using Monte Carlo integration with distance mapping.
     
     Args:
-        p: 3D vector, surface position.
-        n: 3D vector, surface normal (assumed normalized).
+        p: Tuple (x, y, z), surface position.
+        n: Tuple (x, y, z), surface normal (assumed normalized).
         N: Integer, number of random samples.
         distance_mapping_function: Callable returning float, v(p, l).
         
@@ -56,29 +59,12 @@ def monte_carlo_ao(p, n, N, distance_mapping_function):
         Float, ambient occlusion factor k_A(p).
     """
     accumulator = 0.0
-    
-    for i in range(N):
-        # Generate random direction l_i uniformly in the hemisphere around n
-        # [G] Implementation detail: Sample a point on a unit hemisphere 
-        # aligned with normal n. A common method is to sample a point 
-        # on a unit disk in the tangent plane, lift it to the hemisphere, 
-        # and normalize, or use spherical coordinates with cosine-weighted 
-        # sampling if the cosine term were handled differently. 
-        # Here we assume uniform hemisphere sampling as per the formula structure.
+    for _ in range(N):
         l_i = random_hemisphere_direction(n)
-        
-        # Evaluate distance mapping function
         v_val = distance_mapping_function(p, l_i)
-        
-        # Compute cosine weight
-        cos_theta = dot(n, l_i)
-        if cos_theta > 0:
-            weight = cos_theta
-        else:
-            weight = 0.0
-            
+        cos_theta = n[0]*l_i[0] + n[1]*l_i[1] + n[2]*l_i[2]
+        weight = cos_theta if cos_theta > 0 else 0.0
         accumulator += v_val * weight
-        
     return accumulator / N
 
 def random_hemisphere_direction(n):
@@ -86,45 +72,34 @@ def random_hemisphere_direction(n):
     Generates a random direction uniformly distributed on the hemisphere 
     defined by normal n.
     """
-    # [G] Standard technique: 
-    # 1. Generate random point in unit disk in XY plane.
-    # 2. Construct basis vectors from n.
-    # 3. Map to hemisphere.
-    # Simplified logic for clarity:
-    u = random_float(0, 1)
-    v = random_float(0, 1)
-    theta = 2 * PI * u
-    r = sqrt(v)
-    sin_theta = sin(theta)
-    cos_theta = cos(theta)
-    
-    # Local frame where n is Z-axis
-    local_x = vec3(1, 0, 0)
-    local_y = vec3(0, 1, 0)
-    local_z = n
-    
-    # Handle edge case where n is parallel to local_x
-    if abs(dot(n, local_x)) > 0.99:
-        local_x = vec3(0, 1, 0)
-        local_y = vec3(-1, 0, 0)
+    u = random.uniform(0, 1)
+    v = random.uniform(0, 1)
+    theta = 2.0 * math.pi * u
+    r = math.sqrt(v)
+    sin_t = math.sin(theta)
+    cos_t = math.cos(theta)
+
+    # Build orthonormal basis (bx, by, bz=n)
+    if abs(n[0]) > 0.99:
+        bx = (0.0, 1.0, 0.0)
     else:
-        local_y = cross(n, local_x)
-        local_y = normalize(local_y)
-        local_x = cross(local_y, n)
-        
+        bx = (1.0, 0.0, 0.0)
+    by = (n[2]*bx[0] - n[0]*bx[2], n[2]*bx[1] - n[1]*bx[2], n[0]*bx[1] - n[1]*bx[0])
+    len_by = math.sqrt(by[0]**2 + by[1]**2 + by[2]**2)
+    by = (by[0]/len_by, by[1]/len_by, by[2]/len_by)
+
     # Point on hemisphere
-    x = r * sin_theta
-    y = r * cos_theta
-    z = sqrt(1 - r*r)
-    
+    local_dir = (r * sin_t, r * cos_t, math.sqrt(max(0.0, 1.0 - r**2)))
     # Transform to world space
-    direction = x * local_x + y * local_y + z * local_z
-    return normalize(direction)
+    wx = local_dir[0]*bx[0] + local_dir[1]*by[0] + local_dir[2]*n[0]
+    wy = local_dir[0]*bx[1] + local_dir[1]*by[1] + local_dir[2]*n[1]
+    wz = local_dir[0]*bx[2] + local_dir[1]*by[2] + local_dir[2]*n[2]
+    return (wx, wy, wz)
 ```
 
 **Edge Cases and Pitfalls:**
 *   **Halo Effect:** Since the method is not inherently cosine-weighted in the ray distribution (unless importance sampling is used), it may account for occlusion that should not be accounted for, leading to blackened edges around objects, sometimes referred to as the halo effect [S1, unofficial].
-*   **Precision:** Floating-point precision in the distance mapping function evaluation can affect the smoothness of the occlusion factor.
+*   **Precision:** Not given in the sources.
 
 ## Subtopics
 
@@ -135,15 +110,15 @@ A Monte Carlo integration formulation of screen-space AO that integrates analyti
 An approximation that substitutes the cosine weight factor with importance sampling by imbuing the cosine weight into the ray cast distribution, making rays more likely to be sent in the direction of the surface normal [S1, unofficial]. It differs from standard Monte Carlo AO by casting rays unevenly (biased towards the surface normal) instead of evenly along the hemisphere, reducing the need for a separate cosine weight factor [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$, where $N$ is the number of samples. Performance scales linearly with sample count.
-*   **Memory Complexity:** Depends on the storage of the distance mapping function's underlying data structure (e.g., voxel grid, SDF).
-*   **Strengths:** Can handle complex geometry represented by distance functions; precomputable.
-*   **Limitations:** Susceptible to noise with low sample counts; prone to halo effects if not properly weighted; computationally expensive for high-quality results compared to screen-space methods.
-*   **When to use:** When precomputed AO is needed for complex geometry or when screen-space methods are insufficient (e.g., for geometry outside the camera view).
-*   **When not to use:** When real-time performance is critical and low sample counts are acceptable (consider SSAO or HBAO instead).
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Not given in the sources.
+*   **When to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources.
 
 ## Background
-Monte Carlo methods are the most common way to precompute ambient occlusion, where either the visibility function approach or the obscurance distance mapping function approach can be used [S1, unofficial]. The method builds on the general concept of Monte Carlo integration for light transport. Kontkanen and Laine [29] and Loos and Sloan [34] expanded upon earlier approaches like Crytek's [44] and Max's Horizon Mapping [40] to formulate more efficient or visually distinct variants.
+Monte Carlo methods are the most common way to precompute ambient occlusion, where either the visibility function approach or the obscurance distance mapping function approach can be used [S1, unofficial]. The method builds on the general concept of Monte Carlo integration for light transport [S1, unofficial]. Kontkanen and Laine [29] and Loos and Sloan [34] expanded upon earlier approaches like Crytek's [44] and Max's Horizon Mapping [40] to formulate more efficient or visually distinct variants [S1, unofficial].
 
 ## Sources
 [S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)

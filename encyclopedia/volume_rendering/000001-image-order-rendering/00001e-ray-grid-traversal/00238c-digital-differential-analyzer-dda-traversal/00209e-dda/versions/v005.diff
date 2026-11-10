@@ -1,0 +1,305 @@
+--- v004.md
++++ v005.md
+@@ -5,116 +5,160 @@
+ ## Overview
+ 
+-The Digital Differential Analyzer (DDA) is a grid traversal algorithm that determines the sequence of cells (voxels or tiles) intersected by a ray in a uniform, axis-aligned grid [S4, unofficial][S5, unofficial]. It solves the problem of efficiently stepping through a discrete spatial structure without performing expensive intersection tests or fixed-step ray marching, by calculating the parameterized distance ($t$) to the next grid boundary in each dimension and advancing along the axis with the smallest $t$ [S7, unofficial][S5, unofficial]. It sets itself apart from naive fixed-step marching by using boundary-crossing logic to guarantee no voxels are missed, and from hierarchical methods by operating directly on a flat uniform grid [S1, unofficial][S3, unofficial].
++The Digital Differential Analyzer (DDA) traversal is a grid traversal algorithm that determines the sequence of axis-aligned grid cells (voxels or tiles) intersected by a ray [S1, unofficial][S4, unofficial][S7, unofficial]. It solves the problem of efficiently locating geometry in a dense grid without performing expensive per-voxel intersection tests or suffering from the gaps and redundancies of naive fixed-step ray marching [S31, S41, unofficial]. Unlike [Siddon's Algorithm](2590-siddon-s-algorithm.md), which computes exact parametric intersection lengths for integration, DDA steps discretely through grid cells using incremental comparisons, making it ideal for real-time ray casting and shadow calculation [S1, S25, unofficial]. It sets itself apart from [3D Bresenham Voxel Traversal](3951-3d-bresenham-voxel-tracing.md) by using floating-point $t$-values for boundary distances rather than integer error accumulation, allowing it to handle arbitrary ray directions and non-unit grid spacing more naturally [S3, S31, unofficial].
+ 
+ ## How it works
+ 
+ **Inputs and Outputs**
+-*   **Input:** Ray origin $\mathbf{o}$ (vec3), ray direction $\mathbf{d}$ (vec3, not necessarily normalized), grid resolution/resolution bounds, and optionally a maximum traversal time/distance [S11, unofficial][S4, unofficial].
+-*   **Output:** A sequence of voxel indices $(i, j, k)$ visited by the ray, or a boolean hit status with hit coordinates [S3, unofficial][S6].
++*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized or unnormalized), grid resolution/resolution bounds, and optionally a callback function for visited cells.
++*   **Output:** A sequence of grid cell indices $(i, j, k)$ visited by the ray, or a hit point if an intersection test is performed during traversal.
+ 
+ **Data Structures**
+-The core state for a 3D DDA traversal typically maintains the following fields [S3, unofficial][S8, unofficial]:
+-*   `pos`: Integer coordinates of the current voxel $(i, j, k)$ [S3, unofficial].
+-*   `step_dir`: Integer vector $(\pm 1, \pm 1, \pm 1)$ indicating the direction of movement along each axis [S3, unofficial].
+-*   `delta_dist`: Vector of absolute inverse direction components $|1/d_x|, |1/d_y|, |1/d_z|$ [S3, unofficial].
+-*   `side_dist`: Vector representing the remaining parameterized distance to the next grid boundary in each axis [S3, unofficial].
++The core state of a DDA traversal typically maintains the following fields [S3, S8, unofficial]:
++*   `pos`: Integer vector representing the current grid cell index (e.g., `vec3<i32>`).
++*   `step_dir`: Integer vector indicating the direction of movement along each axis (values $-1, 0, 1$).
++*   `delta_dist`: Floating-point vector representing the distance along the ray to cross one grid cell in each axis (derived from inverse direction).
++*   `side_dist`: Floating-point vector representing the remaining distance along the ray to the next grid boundary in each axis.
+ 
+ **Numbered Steps**
+ 
+ 1.  **Initialization**:
+-    *   Compute the initial voxel index by flooring the ray origin: $\mathbf{pos} = \lfloor \mathbf{o} \rfloor$ [S3, unofficial][S4, unofficial].
+-    *   Determine the step direction for each axis: $\mathbf{step\_dir} = \text{sign}(\mathbf{d})$ [S3, unofficial].
+-    *   Compute the distance between grid lines along the ray for each axis (inverse direction magnitude): $\mathbf{delta\_dist} = |1/\mathbf{d}|$ [S3, unofficial].
+-    *   Calculate the initial distance to the next grid boundary for each axis. For axis $n$, if $d_n > 0$, the boundary is at $\mathbf{pos}_n + 1$; if $d_n < 0$, it is at $\mathbf{pos}_n$. The fractional distance is derived from the ray's position within the current cell [S4, unofficial][S7, unofficial].
+-        *   Formula: $\mathbf{side\_dist}_n = (\mathbf{step\_dir}_n \cdot (\mathbf{pos}_n - \mathbf{o}_n) + 0.5) \cdot \mathbf{delta\_dist}_n + 0.5 \cdot \mathbf{delta\_dist}_n$ [S3, unofficial].
+-        *   *Note*: Some implementations simplify this to $\mathbf{side\_dist}_n = \mathbf{delta\_dist}_n \cdot (\mathbf{step\_dir}_n \cdot (\mathbf{pos}_n - \mathbf{o}_n) + 0.5) + 0.5 \cdot \mathbf{delta\_dist}_n$ [S3, unofficial].
+-    *   Handle zero-direction components: If $d_n = 0$, set $\mathbf{side\_dist}_n = \infty$ and $\mathbf{step\_dir}_n = 0$ to prevent division by zero and infinite loops [S11, unofficial][S8, unofficial].
++    *   Determine the initial grid cell containing the ray origin: $\text{pos} = \lfloor \mathbf{o} \rfloor$ [S3, S4, unofficial].
++    *   Determine the step direction for each axis: $\text{step\_dir}_i = \text{sign}(d_i)$ [S3, S4, unofficial]. If $d_i = 0$, the step direction is 0, and the ray is parallel to the grid lines in that dimension.
++    *   Calculate the distance to cross one grid cell along the ray for each axis. If using normalized direction, this is $1/|d_i|$ [S3, S4, unofficial]. Let this be $\text{delta\_dist}_i$.
++    *   Calculate the initial distance to the next grid boundary for each axis.
++        *   If $d_i > 0$, the next boundary is at $\lceil o_i \rceil$. The distance is $(\lceil o_i \rceil - o_i) / d_i$.
++        *   If $d_i < 0$, the next boundary is at $\lfloor o_i \rfloor$. The distance is $(\lfloor o_i \rfloor - o_i) / d_i$.
++        *   If $d_i = 0$, the distance is set to infinity [S11, unofficial].
++        *   This can be unified as: $\text{side\_dist}_i = (\text{step\_dir}_i \cdot (\lfloor o_i \rfloor - o_i) + 0.5 + 0.5 \cdot \text{step\_dir}_i) \cdot \text{delta\_dist}_i$ [S3, G, unofficial]. Note: Some implementations use a simpler fractional calculation: if $d_i > 0$, $\text{side\_dist}_i = (1 - \{o_i\}) / d_i$; if $d_i < 0$, $\text{side\_dist}_i = \{o_i\} / |d_i|$, where $\{x\}$ is the fractional part [S4, unofficial].
+ 
+ 2.  **Stepping Loop**:
+-    *   While the ray is within bounds and has not hit a target:
+-        *   Identify the axis to step: Find the index $axis$ such that $\mathbf{side\_dist}_{axis}$ is the minimum among the three axes [S3, unofficial][S8, unofficial].
+-        *   Update the state for the selected axis:
+-            *   Increment the voxel coordinate: $\mathbf{pos}_{axis} \leftarrow \mathbf{pos}_{axis} + \mathbf{step\_dir}_{axis}$ [S3, unofficial].
+-            *   Advance the distance to the next boundary: $\mathbf{side\_dist}_{axis} \leftarrow \mathbf{side\_dist}_{axis} + \mathbf{delta\_dist}_{axis}$ [S3, unofficial].
+-        *   Query the grid at $\mathbf{pos}$ for occupancy or color [S3, unofficial].
+-        *   Check termination condition (e.g., hit detected, max distance exceeded) [S5, unofficial].
++    *   While the ray is within bounds and no hit is found:
++        *   Identify the axis with the smallest `side_dist`. Let this be axis $a$.
++        *   Step the position in axis $a$: $\text{pos}_a \leftarrow \text{pos}_a + \text{step\_dir}_a$.
++        *   Update the distance to the next boundary in axis $a$: $\text{side\_dist}_a \leftarrow \text{side\_dist}_a + \text{delta\_dist}_a$.
++        *   (Optional) Perform an intersection test or callback for the new cell `pos`.
++        *   (Optional) If a hit is detected, terminate.
++
++**Formulas**
++*   **Distance to next boundary (X-axis, $d_x > 0$):** $t_x = \frac{\lceil o_x \rceil - o_x}{d_x}$ [S7, unofficial].
++*   **Distance to next boundary (X-axis, $d_x < 0$):** $t_x = \frac{\lfloor o_x \rfloor - o_x}{d_x}$ [S4, S7, unofficial].
++*   **Step size in t (X-axis):** $\Delta t_x = \frac{1}{|d_x|}$ [S7, unofficial].
++*   **Euclidean distance for 2D steps:** For a step of 1 unit in X, the ray length is $\sqrt{1 + (d_y/d_x)^2}$ [S5, unofficial]. For a step of 1 unit in Y, it is $\sqrt{1 + (d_x/d_y)^2}$ [S5, unofficial].
++
++**Parameters**
++*   **Ray Origin ($\mathbf{o}$):** 2D or 3D vector [S4, S11, unofficial].
++*   **Ray Direction ($\mathbf{d}$):** 2D or 3D vector. Often normalized [S4, unofficial].
++*   **Grid Resolution:** Dimensions of the grid [S3, S11, unofficial].
++*   **Max Time/Distance:** Termination condition for the ray [S2][S11, unofficial].
++
++**Edge Cases and Pitfalls**
++*   **Zero Direction Components:** If $d_i = 0$, the ray is parallel to the grid lines in that axis. Division by zero must be avoided. The step direction is 0, and the distance to the next boundary is set to infinity [S11, unofficial]. The ray never crosses a grid line in that dimension [S7, unofficial].
++*   **Ray on Boundary:** If the ray origin lies exactly on a grid line, the initial distance calculation may result in 0. This can lead to double-counting or missing cells. A guard such as `dt > 0` is often used to avoid processing zero-length segments [S11, unofficial].
++*   **Negative Directions:** The target grid line changes from the upper bound (e.g., $x=1$) to the lower bound (e.g., $x=0$) when the direction component is negative [S4, unofficial].
++*   **GPU Branching:** Standard implementations use `if` statements to determine the next axis. On GPUs, this can cause performance penalties due to branch divergence. Branchless implementations using vector comparisons (e.g., `mask = side_dist <= min(other_side_dists)`) are preferred for GPU efficiency [S3, unofficial].
+ 
+ **Pseudocode**
+ 
+ ```python
+-def dda_traverse(ray_origin, ray_direction, grid_bounds, callback):
++def dda_traverse(ray_origin, ray_direction, grid_resolution, callback):
++    """
++    Traverses a grid along a ray using DDA.
++    
++    Args:
++        ray_origin: tuple (ox, oy, oz)
++        ray_direction: tuple (dx, dy, dz)
++        grid_resolution: tuple (gx, gy, gz)
++        callback: function(cell_index, t_in, t_out)
++    """
+     # 1. Initialization
+-    # Handle zero-direction components to avoid division by zero
+-    # If direction component is 0, set inverse to infinity
+-    inv_dir = vec3(
+-        1.0 / ray_direction.x if abs(ray_direction.x) > 1e-8 else float('inf'),
+-        1.0 / ray_direction.y if abs(ray_direction.y) > 1e-8 else float('inf'),
+-        1.0 / ray_direction.z if abs(ray_direction.z) > 1e-8 else float('inf')
+-    )
++    # Current voxel index
++    pos = (floor(ray_origin[0]), floor(ray_origin[1]), floor(ray_origin[2]))
+     
+-    # Step direction: 1 if moving positive, -1 if moving negative, 0 if static
+-    step_dir = vec3(
+-        1 if ray_direction.x >= 0 else -1,
+-        1 if ray_direction.y >= 0 else -1,
+-        1 if ray_direction.z >= 0 else -1
+-    )
++    # Step direction: 1 if moving positive, -1 if negative, 0 if parallel
++    step_dir = []
++    for i in range(3):
++        if ray_direction[i] > 0:
++            step_dir.append(1)
++        elif ray_direction[i] < 0:
++            step_dir.append(-1)
++        else:
++            step_dir.append(0)
++            
++    # Delta distance: distance along ray to cross one grid cell
++    # Handle zero direction to avoid division by zero
++    delta_dist = []
++    for i in range(3):
++        if ray_direction[i] == 0:
++            delta_dist.append(float('inf'))
++        else:
++            delta_dist.append(1.0 / abs(ray_direction[i]))
++            
++    # Side distance: distance to next grid boundary
++    side_dist = []
++    for i in range(3):
++        if ray_direction[i] > 0:
++            # Next boundary is ceil(ox)
++            dist_to_boundary = (ceil(ray_origin[i]) - ray_origin[i]) / ray_direction[i]
++        elif ray_direction[i] < 0:
++            # Next boundary is floor(ox)
++            dist_to_boundary = (floor(ray_origin[i]) - ray_origin[i]) / ray_direction[i]
++        else:
++            dist_to_boundary = float('inf')
++        side_dist.append(dist_to_boundary)
++        
++    # 2. Stepping Loop
++    # We assume the ray starts inside the grid. 
++    # We step until we leave the grid or a callback decides to stop.
+     
+-    # Current voxel index (floor of origin)
+-    pos = vec3(floor(ray_origin.x), floor(ray_origin.y), floor(ray_origin.z))
+-    
+-    # Distance to next grid boundary
+-    # Formula: (step_dir * (pos - origin) + 0.5) * delta_dist + 0.5 * delta_dist
+-    # Simplified: (step_dir * (pos - origin) + 1.0) * delta_dist for positive direction logic
+-    # Using the specific formula from [S3, unofficial]:
+-    side_dist = (step_dir * (vec3(pos) - ray_origin) + (step_dir * 0.5) + 0.5) * abs(inv_dir)
+-    
+-    # Absolute inverse direction (delta_dist)
+-    delta_dist = abs(inv_dir)
+-    
+-    # 2. Stepping Loop
+-    while is_within_bounds(pos, grid_bounds):
+-        # Invoke callback for current voxel
+-        hit = callback(pos)
+-        if hit:
+-            return pos, hit
+-            
+-        # Find axis with minimum side_dist
+-        # mask[i] is true if side_dist[i] is the minimum (cyclic comparison)
+-        # x vs y,z; y vs z,x; z vs x,y
+-        mask = vec3(
+-            side_dist.x <= min(side_dist.y, side_dist.z),
+-            side_dist.y <= min(side_dist.z, side_dist.x),
+-            side_dist.z <= min(side_dist.x, side_dist.y)
+-        )
+-        
+-        # Update side_dist for the stepped axis/axes
+-        side_dist += mask * delta_dist
+-        
+-        # Update position for the stepped axis/axes
+-        pos += mask * step_dir
+-        
+-    return None, None
++    while True:
++        # Check if current pos is within grid bounds
++        if not (0 <= pos[0] < grid_resolution[0] and 
++                0 <= pos[1] < grid_resolution[1] and 
++                0 <= pos[2] < grid_resolution[2]):
++            break
++            
++        # Find the axis with the smallest side_dist
++        # This determines which grid line we cross next
++        min_dist = min(side_dist)
++        axis = side_dist.index(min_dist)
++        
++        # If the minimum distance is infinity, we are parallel to all remaining axes
++        # and have no more boundaries to cross in the active dimensions.
++        if min_dist == float('inf'):
++            break
++            
++        # Calculate t values for entry and exit of the current voxel
++        # t_in is the time we entered the current voxel (approximated by previous step)
++        # t_out is the time we will exit the current voxel (min_dist from start of this step)
++        # For simplicity, we track t_current. 
++        # In a full implementation, t_current would be updated: t_current += min_dist
++        # Here we just use side_dist to determine the step.
++        
++        # Invoke callback for the current voxel
++        # Note: In a real implementation, you'd track t_in and t_out precisely.
++        # t_in would be the max of previous side_dists, t_out would be t_in + min_dist.
++        # For this pseudocode, we assume the callback handles the logic or we pass 0.
++        callback(pos, 0, min_dist)
++        
++        # Step the position in the chosen axis
++        pos[axis] += step_dir[axis]
++        
++        # Update the side distance for the chosen axis
++        side_dist[axis] += delta_dist[axis]
+ ```
+ 
+-**Parameters**
+-*   `ray_origin`: 3D vector, the starting point of the ray [S4, unofficial].
+-*   `ray_direction`: 3D vector, the direction of the ray. Does not need to be normalized for the basic DDA logic, but normalization is often used for distance calculations [S11, unofficial][S4, unofficial].
+-*   `grid_bounds`: Defines the extent of the voxel grid [S11, unofficial].
+-
+-**Edge Cases and Pitfalls**
+-*   **Zero Direction**: Rays aligned with a grid axis ($d_n = 0$) cause division by zero in inverse direction calculations. These must be handled by setting the corresponding `side_dist` to infinity and `step_dir` to 0 [S11, unofficial][S8, unofficial].
+-*   **Boundary Alignment**: If the ray origin lies exactly on a grid boundary, floating-point precision errors may cause the ray to miss a voxel or double-count a cell. Guarding against `dt=0` or using epsilon offsets is recommended [S11, unofficial][S7, unofficial].
+-*   **Negative Directions**: The initial distance calculation must account for the direction of travel. If $d_n < 0$, the next boundary is at $\lfloor o_n \rfloor$ rather than $\lfloor o_n \rfloor + 1$ [S4, unofficial].
+-
+ ## Subtopics
+ 
++### [Hierarchical Digital Differential Analyzer (HDDA)](1122-hierarchical-digital-differential-analyzer-hdda.md)
++Hierarchical Digital Differential Analyzer (HDDA) is a ray traversal algorithm for sparse voxel grids (specifically VDB structures) that performs multi-resolution leapfrogging to skip empty space efficiently. Unlike standard DDA which steps voxel-by-voxel with a fixed size, HDDA adapts its step size to the current tree level (node or leaf), allowing it to jump over large empty regions defined by internal nodes. It builds on [Digital Differential Analyzer (DDA) Traversal](3061-digital-differential-analyzer-dda-traversal.md) by adding hierarchical awareness.
++
+ ### [TRFRay3 (DDA Ray Representation)](2104-trfray3-dda-ray-representation.md)
+-TRFRay3 is a CPU-side DDA ray representation and traversal engine designed for picking and raycasting in voxel worlds, specifically engineered to match the toroidal GPU storage layout exactly. It solves the problem of efficiently finding the first solid voxel hit along a ray in a sparse or dense voxel grid while handling edge cases like zero-direction vectors and toroidal wrapping. It differs from the Amanatides–Woo Voxel Traversal by explicitly providing a C++ class structure (`TRFRay3`) that pre-computes inverse directions and origin-inverse direction (OOD) terms for SIMD-friendly, division-free traversal loops, and from the Differentiable DDA Loop by being a non-differentiable, integer-step traversal method.
++TRFRay3 is a CPU-side Digital Differential Analyzer (DDA) ray representation and traversal engine designed for picking and raycasting in voxel worlds, specifically engineered to match the toroidal GPU storage layout exactly. It solves the problem of efficiently finding the first solid voxel hit along a ray in a sparse or dense voxel grid while handling edge cases like zero-direction vectors and toroidal wrapping. It differs from the Amanatides–Woo Voxel Traversal by explicitly providing a C++ class structure (`TRFRay3`) that pre-computes inverse directions and origin-inverse direction (OOD) terms for SIMD-friendly, division-free traversal loops, and from the Differentiable DDA Loop by being a non-differentiable, integer-step traversal method.
+ 
+ ### [Differentiable DDA Loop](2474-differentiable-dda-loop.md)
+-A differentiable Digital Differential Analyzer (DDA) loop that traverses a grid along a ray, invoking a callback function for each visited cell. It sets itself apart from standard DDA implementations by maintaining differentiability through the traversal state, allowing gradients to flow back through the ray marching steps.
++A differentiable Digital Differential Analyzer (DDA) loop that traverses a grid along a ray, invoking a callback function for each visited cell. It extends standard DDA traversal by maintaining differentiable state variables, allowing gradients to flow back through the ray marching steps [G].
+ 
+ ### [Amanatides-Woo Voxel Traversal](3132-amanatides-woo-voxel-traversal.md)
+-The Amanatides and Woo algorithm is a 3D Digital Differential Analyzer (DDA) method for traversing a uniform voxel grid along a ray, visiting every intersected voxel in order of increasing distance from the ray origin. It solves the problem of efficiently determining the sequence of grid cells a ray passes through without expensive division operations in the main loop, guaranteeing that the ray stops and tests a voxel index at exactly one of the x, y, or z dividing planes. It sets itself apart from naive fixed-step ray marching by using boundary-crossing logic to ensure no voxels are missed, and from hierarchical methods by operating directly on a flat uniform grid.
++The Amanatides-Woo algorithm is a fast, branch-minimal method for traversing a uniform 3D voxel grid along a ray, visiting every cell intersected by the ray in front-to-back order. It solves the problem of efficiently locating geometry in a dense grid without performing expensive per-voxel intersection tests or suffering from the gaps and redundancies of naive fixed-step ray marching. Unlike [Siddon's Algorithm](2590-siddon-s-algorithm.md), which computes exact parametric intersection lengths for integration, Amanatides-Woo steps discretely through grid cells using incremental comparisons, making it ideal for real-time ray casting and shadow calculation. It sets itself apart from [3D Bresenham Voxel Traversal](3949-3d-bresenham-voxel-tracing.md) by using floating-point $t$-values for boundary distances rather than integer error accumulation, allowing it to handle arbitrary ray directions and non-unit grid spacing more naturally.
+ 
+ ### [3D Bresenham Voxel Traversal](3951-3d-bresenham-voxel-traversal.md)
+@@ -125,5 +169,5 @@
+ 
+ ### [Amanatides–Woo grid traversal](5003-amanatides-woo-grid-traversal.md)
+-The Amanatides–Woo grid traversal algorithm determines the sequence of grid cells intersected by a line segment defined by two endpoints, invoking a visitor function for each cell. It distinguishes itself from its siblings by using a floating-point implementation that computes `t-max` values to determine the next cell boundary intersection, offering a straightforward approach for uniform grids where high-precision fixed-point arithmetic is not strictly required.
++The Amanatides-Woo grid traversal algorithm determines the sequence of grid cells intersected by a line segment defined by two endpoints, invoking a visitor function for each cell. It distinguishes itself from its siblings by using a floating-point implementation that computes `t-max` values to determine the next cell boundary intersection, offering a straightforward approach for uniform grids where high-precision fixed-point arithmetic is not strictly required.
+ 
+ ### Safe Inverse for DDA
+@@ -131,20 +175,38 @@
+ 
+ ### Multi-Ray Field of View Casting
+-Sweeps a full field of view by casting one ray per screen column, evenly distributed across the angular range [S13, unofficial]. Iterate $i$ from 0 to `rayCount`-1. Calculate the angle for each ray using $\theta_i = \text{facing} - \text{FOV}/2 + i \cdot (\text{FOV}/(\text{rayCount} - 1))$ [S13, unofficial]. Cast each ray using the DDA algorithm with the calculated angle and store the result (angle, distance, side, hit coordinates) [S13, unofficial].
++Sweeps a full field of view by casting one ray per screen column, evenly distributed across the angular range [S13, unofficial]. Iterate $i$ from 0 to `rayCount`-1. Calculate the angle for each ray using the formula $\theta_i = \text{facing} - \text{FOV}/2 + i \cdot (\text{FOV}/(\text{rayCount} - 1))$, where `facing` is the base angle in radians, `FOV` is the field of view in radians, and `rayCount` is the total number of rays [S13, unofficial]. Cast each ray using the DDA algorithm with the calculated angle and store the result (angle, distance, side, hit coordinates) [S13, unofficial].
+ 
+ ### Forward Stepping Enforcement
+ A macro definition, likely used to enforce forward stepping behavior in the DDA/HDDA implementations [S9].
+ 
++### LoD-aware Ray Traversal with Cone Aperture
++A rendering procedure that associates each ray with a cone aperture covering the pixel footprint to determine the appropriate Level-of-Detail (LoD) level during traversal, switching to coarser LoDs at voxel boundaries for efficiency [S14, unofficial]. Loop while $t < t_{\text{max}}$: Calculate LoD level using formula: $\text{level} = \lfloor \log_2(\tan(0.5 \cdot \theta) \cdot t / s) \rfloor$, where $s$ is base voxel size and $\theta$ is cone aperture [S14, unofficial]. Switch to a coarser LoD only at the boundary of the coarser voxels for efficiency [S14, unofficial]. Continuous LoD blending is possible but more costly than boundary-only switching [S14, unofficial].
++
+ ## Operating characteristics
+ 
+-*   **Time Complexity**: $O(N)$, where $N$ is the number of voxels intersected by the ray. The number of steps is proportional to the length of the ray within the grid, significantly fewer than fixed-step marching [S5, unofficial].
+-*   **Memory Complexity**: $O(1)$ auxiliary space for the traversal state [S3, unofficial].
+-*   **Performance**: On GPUs, branchless implementations (using masks instead of `if` statements) are preferred to avoid execution divergence [S3, unofficial][S7, unofficial].
+-*   **Strengths**: Exact boundary detection, no missed voxels, efficient for uniform grids [S5, unofficial].
+-*   **Limitations**: Performance degrades if the ray direction is very shallow relative to the grid (many steps per unit distance) [S5, unofficial]. Not suitable for hierarchical or non-uniform grids without modification [S1, unofficial].
++**Time and Memory Complexity**
++*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels visited by the ray. The number of steps is proportional to the length of the ray within the grid, divided by the voxel size.
++*   **Memory Complexity:** $O(1)$ auxiliary space for the traversal state, plus $O(V)$ for the grid data structure, where $V$ is the number of voxels.
++
++**Measured Performance**
++*   DDA is significantly faster than naive fixed-step ray marching, which may require thousands of iterations to find a collision, whereas DDA calculates "intelligent massive leaps" resulting in significantly fewer computations [S5, unofficial].
++*   On GPUs, branchless implementations of DDA (using vector comparisons instead of `if` statements) avoid the performance penalty of branch divergence, making them highly efficient for real-time applications [S3, unofficial].
++
++**Scaling**
++*   DDA scales linearly with the number of voxels intersected. It does not scale with the total size of the grid, only with the ray length and voxel density.
++*   For sparse grids, hierarchical variants like HDDA can provide significant speedups by skipping empty regions [S1, unofficial][S5, unofficial].
++
++**Strengths and Limitations**
++*   **Strengths:** Simple to implement, efficient for dense grids, branch-minimal variants exist for GPU, handles arbitrary ray directions.
++*   **Limitations:** May visit more voxels than necessary in sparse grids (unless hierarchical), precision issues can arise with very long rays or very small voxels (though less so than Bresenham), requires careful handling of edge cases (zero direction, boundary alignment).
++
++**When to Use**
++*   Use DDA for real-time ray casting in voxel environments, shadow calculation, and dense grid traversal [S1, S25, unofficial].
++*   Use hierarchical variants (HDDA) for sparse voxel grids (VDB) [S1, unofficial][S5, unofficial].
++*   Avoid naive fixed-step marching for collision detection in tile-based worlds [S5, unofficial].
+ 
+ ## Background
+ 
+-The DDA algorithm originated as a line-drawing algorithm in computer graphics, adapted for raycasting in grid-based environments [S6][S7, unofficial]. It is widely used in voxel raycasting, collision detection, and real-time rendering on limited hardware [S6][S7, unofficial]. The Amanatides–Woo variant is a standard implementation for 3D voxel traversal [S5, unofficial].
++The Digital Differential Analyzer (DDA) algorithm is a line-drawing algorithm adapted for raycasting [S6]. It was originally developed for computer graphics to efficiently draw lines on raster displays [S7, unofficial]. In the context of raycasting, it efficiently determines where rays intersect with the grid-based world map [S6]. The algorithm is particularly well-suited for raycasting in grid-based environments [S6]. It is used in libraries such as `ts-raycasting` [S6] and has been implemented in various voxel raytracers [S3, unofficial]. The algorithm's efficiency and simplicity have made it a staple in real-time rendering and game development [S6].
+ 
+ ## Sources
+@@ -162,3 +224,4 @@
+ [S11] HaouchatY/differentiable_xrt, https://github.com/HaouchatY/differentiable_xrt, fetched 2026-10-27 (unofficial)
+ [S12] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
+-[S13] mithraskuipers/InteractiveLearning-Raycasting, https://github.com/mithraskuipers/InteractiveLearning-Raycasting, fetched 2026-10-24 (unofficial)+[S13] mithraskuipers/InteractiveLearning-Raycasting, https://github.com/mithraskuipers/InteractiveLearning-Raycasting, fetched 2026-10-24 (unofficial)
++[S14] Efficient Scene Appearance Aggregation for Level-of-Detail Rendering, https://core.ac.uk/works/391729893, fetched 2026-11-01 (unofficial)

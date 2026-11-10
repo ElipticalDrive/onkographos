@@ -3,20 +3,20 @@
 Also called: NDC Ray Conversion, NDC Rays, General NDC
 
 ## Overview
-General NDC Ray Conversion maps camera-space rays into a normalized device coordinate (NDC) space to fix the near and far clipping planes at constant values, removing the need for scene-dependent depth bounds in non-spherical datasets [S1, S3, S4, S5, unofficial]. Unlike Blender-specific NDC conventions that assume fixed intrinsics, this method handles arbitrary camera parameters by explicitly shifting ray origins to the near plane and projecting them based on focal length and image dimensions [S1, S3, S4, S5, unofficial]. It is primarily used for forward-facing scenes where depth ranges are large, enabling uniform sampling in NDC space to correspond to inverse depth (disparity) sampling in the original world space [S3, S4, unofficial].
+General NDC Ray Conversion maps camera-space rays into a normalized device coordinate (NDC) space to fix the near and far clipping planes at constant values, removing the need for scene-dependent depth bounds in non-spherical datasets [S1, S3, S4, S5, unofficial]. Unlike Blender-specific NDC conventions that assume fixed intrinsics and sign conventions, this method handles arbitrary camera parameters by explicitly shifting ray origins to the near plane and projecting them based on focal length and image dimensions [S1, S3, S4, S5, unofficial]. It is primarily used for forward-facing scenes where depth ranges are large, enabling uniform sampling in NDC space to correspond to inverse depth (disparity) sampling in the original world space [S3, S4, unofficial].
 
 ## How it works
 **Inputs:**
-- `rays_o`: Ray origins in world/camera space, shape `(..., 3)`.
-- `rays_d`: Ray directions in world/camera space, shape `(..., 3)`.
-- `focal`: Focal length of the camera (scalar).
-- `W`: Image width (scalar).
-- `H`: Image height (scalar).
+- `rays_o`: Ray origins in world/camera space, shape `(..., 3)` [S3, S4, unofficial].
+- `rays_d`: Ray directions in world/camera space, shape `(..., 3)` [S3, S4, unofficial].
+- `focal`: Focal length of the camera (scalar) [S3, S4, unofficial].
+- `W`: Image width (scalar) [S3, S4, unofficial].
+- `H`: Image height (scalar) [S3, S4, unofficial].
 - `near`: Distance to the near plane (scalar). Typically hardcoded to $1.0$ in implementations [S1, S3, unofficial].
 
 **Outputs:**
-- `rays_o_ndc`: Transformed ray origins in NDC space, shape `(..., 3)`.
-- `rays_d_ndc`: Transformed ray directions in NDC space, shape `(..., 3)`.
+- `rays_o_ndc`: Transformed ray origins in NDC space, shape `(..., 3)` [S3, S4, unofficial].
+- `rays_d_ndc`: Transformed ray directions in NDC space, shape `(..., 3)` [S3, S4, unofficial].
 
 **Data Structures:**
 The method operates on batched tensors where the last dimension holds the 3D vector components $(x, y, z)$ [S3, S4, unofficial].
@@ -104,20 +104,20 @@ def general_ndc_rays(rays_o, rays_d, focal, W, H, near=1.0):
 
 **Parameters:**
 - `near`: The near plane distance. In reference implementations, this is typically hardcoded to $1.0$ [S1, S3, unofficial].
-- `focal`, `W`, `H`: Camera intrinsic parameters.
+- `focal`, `W`, `H`: Camera intrinsic parameters [S3, S4, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Division by Zero:** If `rays_d_z` or `rays_o_z` is zero, the shift or projection will fail. This occurs if a ray is parallel to the image plane or if the origin lies exactly at the camera center before shifting. Adding a small epsilon to denominators is recommended for robustness [G].
+- **Division by Zero:** If `rays_d_z` or `rays_o_z` is zero, the shift or projection will fail [S3, S4, unofficial]. This occurs if a ray is parallel to the image plane or if the origin lies exactly at the camera center before shifting [G]. Adding a small epsilon to denominators is recommended for robustness [G].
 - **Coordinate System Conventions:** The formulas above follow the sign convention of Source [S3, unofficial]. Source [S4, unofficial] uses the opposite signs for $x, y, z$ components, reflecting a different camera projection convention. Implementers must match the signs to their camera model [S3, S4, unofficial].
-- **Forward-Facing Assumption:** The method assumes forward-facing scenes where depth variation is bounded along the viewing direction. For spherical or 360-degree scenes, the code typically checks a `spheric_poses` flag and falls back to scene-dependent bounds instead of NDC conversion [S1, unofficial].
+- **Forward-Facing Assumption:** The method assumes forward-facing scenes where depth variation is bounded along the viewing direction [S3, S1, unofficial]. For spherical or 360-degree scenes, the code typically checks a `spheric_poses` flag and falls back to scene-dependent bounds instead of NDC conversion [S1, unofficial].
 
 ## Subtopics
 
 ### [Ray Generation from Pixel Coordinates](2514-ray-generation-from-pixel-coordinates.md)
-Converts 2D screen pixel coordinates into 3D ray origins and directions in world space, enabling volume rendering or ray marching to begin from the camera's perspective. It differs from [Pinhole Camera Projection (Pixel to Camera)](3162-pinhole-camera-projection-pixel-to-camera.md) by producing a full ray (origin and direction) for traversal rather than a single 3D point at a specific depth, and from General NDC Ray Conversion by typically handling the full transformation from pixel indices to world-space rays, often assuming the origin is the camera center.
+Converts 2D screen pixel coordinates into 3D ray origins and directions in world space, enabling volume rendering or ray marching to begin from the camera's perspective. It differs from [Pinhole Camera Projection (Pixel to Camera)](3162-pinhole-camera-projection-pixel-to-camera.md) by producing a full ray (origin and direction) for traversal rather than a single 3D point at a specific depth, and from General NDC Ray Conversion by typically handling the full transformation from pixel indices to world-space rays, often assuming the origin is the camera center. Choose it when initializing ray traversal from raw pixel buffers rather than precomputed camera-space rays.
 
 ### [NDC Ray Transformation](905-ndc-ray-transformation.md)
-The parent technique describing the general concept of mapping rays to NDC for inverse depth sampling.
+The parent technique describing the general concept of mapping rays to NDC for inverse depth sampling. Choose it when you need the foundational coordinate mapping logic before applying dataset-specific sign conventions or near-plane shifts.
 
 ## Operating characteristics
 - **Time Complexity:** $O(N)$ where $N$ is the number of rays, as the operations are element-wise arithmetic [S3, S4, unofficial].

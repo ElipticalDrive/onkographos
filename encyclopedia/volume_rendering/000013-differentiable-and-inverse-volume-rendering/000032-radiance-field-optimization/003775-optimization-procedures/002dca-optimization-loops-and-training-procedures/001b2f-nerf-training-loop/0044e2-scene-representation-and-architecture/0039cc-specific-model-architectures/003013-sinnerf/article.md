@@ -3,122 +3,124 @@
 Also called: Sinusoidal NeRF
 
 ## Overview
-SinNeRF is a method for training Neural Radiance Fields (NeRF) from a single input image, addressing the severe ambiguity inherent in single-view reconstruction [S1, unofficial]. It distinguishes itself from standard NeRF by incorporating a perceptual prior via a pre-trained DINO-ViT network and an adversarial discriminator to constrain unobserved views, preventing the model from collapsing to a flat or degenerate solution [S1, unofficial][S2].
+SinNeRF is a method for training Neural Radiance Fields (NeRF) from a single input image, addressing the severe under-constrained nature of single-view reconstruction [S2]. It distinguishes itself by regularizing the unobserved views using a discriminator and a perceptual loss derived from a pre-trained vision transformer, rather than relying on geometric priors or diffusion models [S1, unofficial][S2].
 
 ## How it works
-SinNeRF builds on the standard NeRF parametric function $F_\Theta$ mapping position $\mathbf{x}$ and direction $\mathbf{d}$ to density $\sigma$ and color $\mathbf{c}$, rendered via volumetric integration [Parent]. The core innovation is the addition of regularization losses derived from a reference view and a randomly sampled "unseen" view to enforce geometric and perceptual consistency [S2].
+SinNeRF builds on the canonical NeRF architecture [Parent], using two coupled MLPs ($F_\sigma$ for density, $F_c$ for color) with positional encoding [Parent]. The core innovation is the adversarial and perceptual regularization applied during the training loop to constrain the synthesized novel views.
 
 **Inputs and Outputs:**
-*   **Input:** A single reference RGB image $I_{ref}$.
-*   **Output:** A trained NeRF model $F_\Theta$ capable of synthesizing novel views.
+- **Input:** A single reference image $I_{ref}$ and its camera pose.
+- **Output:** A trained radiance field $F_\Theta$ capable of synthesizing novel views.
 
 **Data Structures:**
-*   **NeRF MLP:** Same architecture as the original NeRF paper [S2].
-*   **Discriminator:** A standard GAN discriminator (architecture not specified in sources) [S2].
-*   **DINO-ViT:** A pre-trained Vision Transformer used for feature extraction [S2].
+- **MLP Weights $\Theta$:** Parameters for the density and color networks.
+- **Discriminator $D$:** A patch-based discriminator network.
+- **Perceptual Encoder $E$:** A pre-trained DINO-ViT network [S2].
+
+**Training Steps:**
+1.  **Ray Sampling:** Randomly sample rays from the reference view and from a randomly sampled "unseen" view (simulated by perturbing the camera pose or using a different view from the dataset if available for training, though the goal is single-image generalization) [S2].
+2.  **Patch Extraction:** Render patches of rays from both views. The patch sizes are dataset-specific: $64 \times 64$ for NeRF synthetic (Blender), $84 \times 63$ for LLFF, and $70 \times 56$ for DTU [S2].
+3.  **Resizing:** Resize the rendered patches to $224 \times 224$ resolution to match the input resolution of the DINO-ViT encoder [S2].
+4.  **Loss Computation:**
+    -   **Reconstruction Loss:** Standard pixel-wise loss (e.g., MSE) between the rendered reference patch and the ground truth reference image [S2].
+    -   **Adversarial Loss:** The discriminator $D$ classifies real image patches (from ground truth) and fake image patches (from the rendered unseen view). The generator (NeRF) is trained to fool the discriminator [S2].
+    -   **Perceptual Loss:** The rendered unseen patch and the ground truth unseen patch are passed through the DINO-ViT encoder $E$. The loss is the distance between their feature representations [S2].
+5.  **Optimization:** Update $\Theta$ using the combined loss.
+
+**Formulas:**
+The total loss is a weighted sum:
+$$
+\mathcal{L} = \mathcal{L}_{rec} + \lambda_1 \mathcal{L}_{adv} + \lambda_2 \mathcal{L}_{perc} + \lambda_3 \mathcal{L}_{other}
+$$
+Where $\mathcal{L}_{rec}$ is the reconstruction loss, $\mathcal{L}_{adv}$ is the adversarial loss, and $\mathcal{L}_{perc}$ is the perceptual loss [S2]. The weights $\lambda_1, \lambda_2, \lambda_3$ are initialized to $8, 0.1, 0$ respectively, with $\lambda_2$ decreasing to 0 and $\lambda_3$ increasing to 0.1 linearly during training [S2].
 
 **Parameters:**
-*   **Loss Weights:** $\lambda_1$ (Adversarial), $\lambda_2$ (Perceptual), $\lambda_3$ (Depth/Other). Initial values: $\lambda_1=8, \lambda_2=0.1, \lambda_3=0$ [S2].
-*   **Optimizer:** RAdam with initial learning rate $1e-3$ [S2].
-*   **Patch Sizes:** $64 \times 64$ (NeRF Synthetic), $84 \times 63$ (LLFF), $70 \times 56$ (DTU) [S2].
-*   **Input Resize:** Rendered patches resized to $224 \times 224$ for DINO-ViT [S2].
-*   **Stride Schedule:** Starts at 6, reduces by 2 every 10k iterations [S2].
-
-**Numbered Steps:**
-1.  **Initialization:** Initialize NeRF MLP and Discriminator. Set $\lambda_1=8, \lambda_2=0.1, \lambda_3=0$ [S2].
-2.  **Patch Sampling:** During training, randomly sample two patches of rays: one from the reference view and one from a randomly sampled unseen view [S2].
-3.  **Rendering:** Render RGB images for both patches using the current NeRF model [S2].
-4.  **Feature Extraction:** Resize rendered patches to $224 \times 224$. Pass them through the pre-trained DINO-ViT to extract perceptual features [S2].
-5.  **Loss Calculation:**
-    *   Compute Adversarial Loss ($L_{adv}$) using the Discriminator on the rendered patches [S2].
-    *   Compute Perceptual Loss ($L_{perc}$) using the DINO-ViT features [S2].
-    *   Compute standard photometric loss against the reference image [S2].
-    *   Update weights: Gradually decrease $\lambda_2$ to 0 and increase $\lambda_3$ to 0.1 linearly [S2].
-6.  **Optimization:** Update NeRF MLP and Discriminator parameters using RAdam. The Discriminator learning rate is set to 20% of the MLP's learning rate [S2].
-7.  **Iteration:** Repeat steps 2-6. Decay MLP learning rate by half every 10k iterations [S2].
+-   **Optimizer:** RAdam [S2].
+-   **Learning Rate:** Initial $1e-3$, decayed by half every 10k iterations [S2].
+-   **Discriminator LR:** 20% of the MLP's learning rate [S2].
+-   **Stride Schedule:** Starts at 6, reduces by 2 every 10k iterations [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 # Initialization
-nerf_model = initialize_NeRF()
-discriminator = initialize_Discriminator()
-dino_vit = load_pretrained_DINO_ViT()
-optimizer = RAdam(nerf_model.parameters(), lr=1e-3)
+model = SinNeRF() # Contains F_sigma and F_c
+discriminator = Discriminator()
+dino_vit = DINO_ViT() # Pre-trained, frozen
+optimizer = RAdam(model.parameters(), lr=1e-3)
 disc_optimizer = RAdam(discriminator.parameters(), lr=1e-3 * 0.2)
 
 # Hyperparameters
-lambda_1 = 8.0
-lambda_2 = 0.1
-lambda_3 = 0.0
+lambda1 = 8.0
+lambda2 = 0.1
+lambda3 = 0.0
 stride = 6
-iteration = 0
 
 for iteration in range(total_iterations):
-    # 1. Sample patches
-    # Sample patch from reference view
-    ref_patch_rays = sample_rays(reference_view, stride=stride)
-    # Sample patch from a random unseen view
-    unseen_patch_rays = sample_rays(unseen_view, stride=stride)
+    # 1. Sample rays
+    ref_rays = sample_rays(reference_view)
+    unseen_rays = sample_rays(unseen_view) # Simulated or from dataset
     
-    # 2. Render
-    ref_colors, ref_depths = nerf_model.render(ref_patch_rays)
-    unseen_colors, unseen_depths = nerf_model.render(unseen_patch_rays)
+    # 2. Render patches
+    ref_patch = render_patches(model, ref_rays, patch_size=(64, 64) if blender else ...)
+    unseen_patch = render_patches(model, unseen_rays, patch_size=(64, 64) if blender else ...)
     
-    # 3. Resize for DINO-ViT
-    ref_patch_resized = resize(ref_colors, target_size=(224, 224))
-    unseen_patch_resized = resize(unseen_colors, target_size=(224, 224))
+    # 3. Resize for perceptual loss
+    ref_patch_resized = resize(ref_patch, 224, 224)
+    unseen_patch_resized = resize(unseen_patch, 224, 224)
     
-    # 4. Extract Features
-    ref_features = dino_vit(ref_patch_resized)
-    unseen_features = dino_vit(unseen_patch_resized)
+    # 4. Compute losses
+    # Reconstruction loss on reference view
+    loss_rec = mse(ref_patch, ground_truth_ref_patch)
     
-    # 5. Compute Losses
-    # Adversarial Loss
-    adv_loss = compute_adversarial_loss(discriminator, ref_patch_resized, unseen_patch_resized)
+    # Adversarial loss
+    ref_real_features = discriminator(ground_truth_ref_patch)
+    unseen_fake_features = discriminator(unseen_patch)
+    loss_adv = adversarial_loss(ref_real_features, unseen_fake_features)
     
-    # Perceptual Loss
-    perc_loss = compute_perceptual_loss(ref_features, unseen_features)
+    # Perceptual loss
+    ref_feat = dino_vit(ref_patch_resized)
+    unseen_feat = dino_vit(unseen_patch_resized)
+    loss_perc = mse(ref_feat, unseen_feat)
     
-    # Photometric Loss (against reference image)
-    photo_loss = compute_photometric_loss(ref_colors, reference_image_patch)
+    # Total loss
+    loss = loss_rec + lambda1 * loss_adv + lambda2 * loss_perc + lambda3 * loss_other
     
-    # Total Loss
-    # Note: lambda_3 is not explicitly defined in the loss formula in sources, 
-    # but lambda_1 and lambda_2 are used.
-    total_loss = lambda_1 * adv_loss + lambda_2 * perc_loss + photo_loss
-    
-    # 6. Update Weights Schedule
-    if iteration % 10000 == 0:
-        lambda_2 = max(0.0, lambda_2 - decay_rate)
-        lambda_3 = min(0.1, lambda_3 + decay_rate)
-        stride = max(1, stride - 2)
-        optimizer.param_groups[0]['lr'] *= 0.5
-        disc_optimizer.param_groups[0]['lr'] *= 0.5
-        
-    # 7. Backpropagate
+    # 5. Backpropagate
     optimizer.zero_grad()
-    disc_optimizer.zero_grad()
-    total_loss.backward()
+    loss.backward()
     optimizer.step()
+    
+    # Discriminator update
+    disc_optimizer.zero_grad()
+    loss_disc = discriminator_loss(ref_real_features, unseen_fake_features.detach())
+    loss_disc.backward()
     disc_optimizer.step()
+    
+    # Update hyperparameters
+    if iteration % 10000 == 0:
+        optimizer.param_groups[0]['lr'] /= 2
+        disc_optimizer.param_groups[0]['lr'] /= 2
+        stride -= 2
+        lambda2 = max(0, lambda2 - 0.01)
+        lambda3 = min(0.1, lambda3 + 0.01)
 ```
 
 ## Subtopics
 
 ### SinNeRF Implementation Configuration
-This variant refers to the specific hyperparameter settings and hardware configuration used in the original SinNeRF paper [S2]. Key details include the use of RAdam optimizer, specific patch sizes for different datasets (Blender, LLFF, DTU), and the use of an NVIDIA RTX A6000 GPU [S2]. The training process typically takes several hours per scene [S2].
+This variant refers to the specific hyperparameter and architectural settings used in the original SinNeRF paper [S2]. It uses the same MLP architecture as the original NeRF paper [S2]. Key configuration details include patch sizes of $64 \times 64$ (Blender), $84 \times 63$ (LLFF), and $70 \times 56$ (DTU), resized to $224 \times 224$ for the DINO-ViT perceptual loss [S2]. It employs RAdam with an initial LR of $1e-3$, halved every 10k iterations, and a discriminator LR at 20% of the MLP's LR [S2]. The stride for sampling patches starts at 6 and decreases by 2 every 10k iterations [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Training takes several hours per scene [S2].
-*   **Memory Complexity:** Not given in the sources.
-*   **Performance:** Evaluated on NeRF Synthetic, LLFF, and DTU datasets using PSNR, SSIM, and LPIPS metrics [S2].
-*   **Strengths:** Enables high-quality novel view synthesis from a single image by leveraging perceptual priors [S1, unofficial][S2].
-*   **Limitations:** Relies on a pre-trained DINO-ViT and a GAN discriminator, increasing complexity compared to standard NeRF [S2].
+-   **Time Complexity:** Training takes several hours per scene on an NVIDIA RTX A6000 GPU [S2].
+-   **Memory Complexity:** Not given in the sources.
+-   **Performance:** Evaluated on NeRF synthetic, LLFF, and DTU datasets using PSNR, SSIM, and LPIPS metrics [S2].
+-   **Strengths:** Enables high-quality novel view synthesis from a single image by leveraging perceptual and adversarial priors [S2].
+-   **Limitations:** Relies on the quality of the pre-trained DINO-ViT and discriminator; may struggle with highly complex scenes if the priors are insufficient [S2].
 
 ## Background
-SinNeRF was introduced in "SinNeRF: Training Neural Radiance Fields on Complex Scenes from a Single Image" published in ECCV 2022 [S1, unofficial][S2]. It addresses the limitation of standard NeRF, which requires multiple views, by using adversarial and perceptual losses to regularize the learning process from a single input [S1, unofficial].
+SinNeRF was introduced in "SinNeRF: Training Neural Radiance Fields on Complex Scenes from a Single Image" (ECCV 2022) [S2]. It addresses the limitation of NeRF requiring multiple views by introducing regularization techniques to constrain the unobserved views [S1, unofficial][S2]. It is part of a lineage of methods using priors (like depth maps or diffusion) to solve single-view reconstruction [S1, unofficial].
 
 ## Sources
 [S1] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)

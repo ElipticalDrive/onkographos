@@ -1,94 +1,136 @@
 # Ray-Ray Intersection
 Also called: Least-squares ray intersection, Ray vs. Ray Intersection
-
 ## Overview
-Computes the least-squares intersection point of two rays in 3D space, finding the point that minimizes the squared distance to both rays when they do not intersect exactly due to noise or parallax [S1, unofficial]. It differs from exact intersection methods by providing a robust solution for skew lines [S1, unofficial].
-
+Computes the least-squares intersection point of two rays in 3D space. Used when rays do not intersect exactly (e.g., due to noise or parallax), finding the point that minimizes the squared distance to both rays [S1, unofficial]. It differs from exact intersection methods by providing a robust estimate for skew lines, which is essential in volumetric reconstruction where ray origins and directions are derived from noisy camera poses [S1, unofficial].
 ## How it works
-**Inputs and Outputs**
-- **Inputs**: Two rays, each defined by an origin $\mathbf{o} \in \mathbb{R}^3$ and a direction $\mathbf{d} \in \mathbb{R}^3$, provided as batched tensors [S1, unofficial].
-- **Output**: A tensor of points $\mathbf{p} \in \mathbb{R}^3$ representing the closest point on both rays [S1, unofficial]. For parallel rays, the output is set to a large constant value [S1, unofficial].
+### Inputs and Outputs
+**Inputs:**
+- Two sets of ray origins: $O_x, O_y \in \mathbb{R}^{N \times 3}$
+- Two sets of ray directions: $D_x, D_y \in \mathbb{R}^{N \times 3}$
+- Parallel detection threshold: $\epsilon = 10^{-5}$ [S1, unofficial]
+- Infinity value: $I = 10^{10}$ [S1, unofficial]
 
-**Data Structures**
-- Origins: Tensor of shape $(2, *shape, 3)$, where the first axis indexes the two rays [S1, unofficial].
-- Directions: Tensor of shape $(2, *shape, 3)$ [S1, unofficial].
-- Intermediate matrices: Shape $(2, *shape, 3, 3)$ for the outer product terms [S1, unofficial].
+**Outputs:**
+- Intersection points $P \in \mathbb{R}^{N \times 3}$. For parallel rays, $P$ is set to $I$.
 
-**Parameters**
-- `eps`: Float threshold for parallel detection. Default value: $10^{-5}$ [S1, unofficial].
-- `inf_val`: Value used to represent infinity for parallel cases. Default value: $10^{10}$ [S1, unofficial].
+### Data Structures
+Tensors are broadcast to a common shape. Origins and directions are stacked into a single tensor of shape $(2, N, 3)$, where the first dimension indexes the ray pair (0 for ray x, 1 for ray y).
 
-**Steps**
-1. Broadcast origins and directions for both rays to a common shape [S1, unofficial].
-2. Detect parallel rays by computing the dot product of the direction vectors. If the dot product exceeds $1 - \text{eps}$, the rays are considered parallel [S1, unofficial].
-3. Filter out parallel ray pairs from the tensors [S1, unofficial].
-4. Stack origins and directions into tensors of shape $(2, *shape, 3)$ [S1, unofficial].
-5. Compute the matrix $N$ for each ray $r \in \{0, 1\}$ using the formula $n_{r,b,i,j} = d_{r,b,i} d_{r,b,j} - \delta_{i,j}$, where $\delta_{i,j}$ is the Kronecker delta [S1, unofficial].
-6. Aggregate the left-hand side matrix $L$ by summing $N$ over both rays: $L_{b,i,j} = \sum_{r=0}^{1} n_{r,b,i,j}$ [S1, unofficial].
-7. Aggregate the right-hand side vector $R$ using the origins: $R_{b,i} = \sum_{r=0}^{1} \sum_{j=0}^{2} n_{r,b,i,j} o_{r,b,j}$ [S1, unofficial].
-8. Solve the linear system $L \mathbf{p} = R$ for $\mathbf{p}$ using a least-squares solver [S1, unofficial].
-9. Initialize the output tensor with `inf_val`. Assign the computed solution $\mathbf{p}$ to the indices corresponding to non-parallel rays [S1, unofficial].
+### Steps
+1. **Broadcast:** Ensure $O_x, O_y, D_x, D_y$ share a common batch shape $N$.
+2. **Parallel Detection:** Compute the dot product of directions $D_x$ and $D_y$. Identify parallel rays where $\cos(\theta) > 1 - \epsilon$.
+3. **Stacking:** Stack origins and directions into tensors $O \in \mathbb{R}^{2 \times N \times 3}$ and $D \in \mathbb{R}^{2 \times N \times 3}$.
+4. **Matrix Construction:** Compute the matrix $N_{r,b,i,j} = D_{r,b,i} D_{r,b,j} - \delta_{i,j}$ for $r \in \{0,1\}$, where $\delta_{i,j}$ is the Kronecker delta. This represents the outer product of the direction minus the identity matrix [S1, unofficial].
+5. **System Assembly:**
+   - Left-hand side: $L_{b,i,j} = \sum_{r=0}^{1} N_{r,b,i,j}$ [S1, unofficial].
+   - Right-hand side: $R_{b,i} = \sum_{r=0}^{1} \sum_{j=0}^{2} N_{r,b,i,j} O_{r,b,j}$ [S1, unofficial].
+6. **Solve:** Solve the linear system $L p = R$ for $p$ using least squares [S1, unofficial].
+7. **Output:** Initialize output with $I$. Assign computed $p$ to non-parallel indices.
 
-**Pseudocode**
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
+import torch.nn.functional as F
 
 def ray_ray_intersection(origins_x, directions_x, origins_y, directions_y, eps=1e-5, inf_val=1e10):
-    # 1. Broadcast to common shape
-    origins_x, origins_y = torch.broadcast_tensors(origins_x, origins_y)
-    directions_x, directions_y = torch.broadcast_tensors(directions_x, directions_y)
+    """
+    Compute least-squares intersection of two rays.
     
-    # 2. Stack into shape (2, *shape, 3)
+    Args:
+        origins_x: Tensor of shape (*batch, 3)
+        directions_x: Tensor of shape (*batch, 3)
+        origins_y: Tensor of shape (*batch, 3)
+        directions_y: Tensor of shape (*batch, 3)
+        eps: Threshold for parallel detection
+        inf_val: Value for parallel ray output
+        
+    Returns:
+        points: Tensor of shape (*batch, 3)
+    """
+    # Broadcast to common shape
+    shape = torch.broadcast_shapes(origins_x.shape, directions_x.shape, origins_y.shape, directions_y.shape)
+    origins_x = origins_x.broadcast_to(shape + (3,))
+    directions_x = directions_x.broadcast_to(shape + (3,))
+    origins_y = origins_y.broadcast_to(shape + (3,))
+    directions_y = directions_y.broadcast_to(shape + (3,))
+    
+    # Stack into (2, *batch, 3)
     origins = torch.stack([origins_x, origins_y], dim=0)
     directions = torch.stack([directions_x, directions_y], dim=0)
     
-    # 3. Detect parallel rays via dot product
-    dot_product = torch.sum(directions[0] * directions[1], dim=-1)
-    parallel = dot_product > (1.0 - eps)
+    # Detect parallel rays
+    # Dot product of directions: sum(directions_x * directions_y)
+    dot_prod = torch.sum(directions_x * directions_y, dim=-1)
+    parallel_mask = dot_prod > (1.0 - eps)
     
-    # 4. Compute N matrix: outer product minus identity
-    outer = torch.einsum("r b i, r b j -> r b i j", directions, directions)
-    eye = torch.eye(3, device=directions.device, dtype=directions.dtype)
-    n = outer - eye.view(1, 1, 3, 3)
+    # Compute N matrix: N_rbij = D_ri * D_rj - delta_ij
+    # einsum("r b i, r b j -> r b i j") computes outer product
+    outer_prod = torch.einsum("r b i, r b j -> r b i j", directions, directions)
+    # Subtract identity matrix for each batch element
+    # eye(3) needs to be broadcasted to r, b dimensions
+    eye_3 = torch.eye(3, device=directions.device, dtype=directions.dtype)
+    # eye_3 shape is (3,3). We need to align it with r, b, i, j
+    # N_rbij = outer_prod_rbij - delta_ij
+    # delta_ij is independent of r and b, so we can subtract it directly if shapes align
+    # outer_prod is (2, *batch, 3, 3). eye_3 is (3,3).
+    # Broadcasting works: (2, *batch, 3, 3) - (3, 3) -> (2, *batch, 3, 3)
+    N = outer_prod - eye_3
     
-    # 5. Aggregate LHS: sum over ray index (dim 0)
-    lhs = torch.sum(n, dim=0)
+    # Compute L: sum over r
+    # L_bij = sum_r N_rbij
+    L = torch.sum(N, dim=0) # Shape: (*batch, 3, 3)
     
-    # 6. Aggregate RHS: sum over ray index and spatial index j
-    rhs_temp = torch.einsum("r b i j, r b j -> r b i", n, origins)
-    rhs = torch.sum(rhs_temp, dim=0)
+    # Compute R: sum_r sum_j N_rbij * O_rbj
+    # First, einsum("r b i j, r b j -> r b i")
+    term = torch.einsum("r b i j, r b j -> r b i", N, origins)
+    # Then sum over r
+    R = torch.sum(term, dim=0) # Shape: (*batch, 3)
     
-    # 7. Solve least squares system L p = R
-    result = torch.linalg.lstsq(lhs, rhs).solution
+    # Solve L p = R using least squares
+    # torch.linalg.lstsq expects (..., M, N) and (..., M, K)
+    # L is (*batch, 3, 3), R is (*batch, 3, 1) if we view it as column vector
+    # Reshape R to (*batch, 3, 1)
+    R_col = R.unsqueeze(-1)
     
-    # 8. Initialize output and assign non-parallel results
-    output = torch.full_like(origins_x, inf_val)
-    output[~parallel] = result[~parallel]
+    # lstsq returns solution, residuals, rank, singular values
+    # We only need the solution
+    try:
+        solution = torch.linalg.lstsq(L, R_col).solution
+    except RuntimeError:
+        # Fallback for singular matrices if lstsq fails, though least squares usually handles it
+        # Using pinv as fallback
+        L_pinv = torch.linalg.pinv(L)
+        solution = torch.matmul(L_pinv, R_col)
+        
+    P = solution.squeeze(-1) # Shape: (*batch, 3)
     
-    return output
+    # Set parallel rays to inf_val
+    P[parallel_mask] = inf_val
+    
+    return P
 ```
 
-**Edge Cases and Pitfalls**
-- **Parallel Rays**: Detected when the dot product of directions is close to 1. The method returns the `inf_val` constant for these cases [S1, unofficial].
-- **Numerical Precision**: The subtraction of the identity matrix from the outer product can lead to loss of precision if direction vectors are not normalized [G].
-- **Singular Matrix**: If rays are nearly parallel, the LHS matrix $L$ may be ill-conditioned, potentially causing solver instability [G].
+### Parameters
+- `eps`: Float, default $10^{-5}$. Threshold for detecting parallel rays based on dot product proximity to 1 [S1, unofficial].
+- `inf_val`: Float, default $10^{10}$. Value used to represent infinity for parallel ray cases [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Parallel Rays:** If rays are parallel, the matrix $L$ becomes singular. The method detects this via the dot product threshold and returns a predefined infinity value instead of solving [S1, unofficial].
+- **Precision:** Floating-point errors in direction normalization or origin calculation can lead to small distances between skew rays. The least-squares approach minimizes this distance [S1, unofficial].
+- **Degenerate Input:** If directions are zero vectors, the dot product check may fail. Ensure directions are normalized before input [G].
 
 ## Operating characteristics
-- **Time Complexity**: Not given in the sources.
-- **Memory Complexity**: Not given in the sources.
-- **Measured Performance**: Not given in the sources.
-- **Scaling**: Not given in the sources.
-- **Strengths**: Robust to noise and parallax; provides a unique solution for skew lines [S1, unofficial].
-- **Limitations**: Does not provide exact intersection [S1, unofficial].
-- **When to Use**: Use when rays are expected to be skew or nearly parallel due to noise or parallax [S1, unofficial].
-- **When Not to Use**: Not given in the sources.
+- **Time Complexity:** Dominated by the matrix multiplication and least-squares solve. For $N$ ray pairs, it is $O(N)$ with a constant factor depending on the linear algebra library's efficiency for small $3 \times 3$ systems.
+- **Memory Complexity:** $O(N)$ for storing inputs and outputs. Intermediate tensors $N, L, R$ add constant overhead per batch element.
+- **Strengths:** Robust to noise; provides a unique solution for skew lines; computationally efficient for batched operations.
+- **Limitations:** Does not provide exact intersection for intersecting rays (though the error is minimal); requires handling of parallel rays separately.
+- **When to Use:** Volumetric rendering where ray origins and directions are estimated from multiple views with slight misalignments.
+- **When Not to Use:** When exact intersection is required and rays are guaranteed to intersect.
 
 ## Background
-- **Origin**: Not given in the sources.
-- **History and Development**: Not given in the sources.
-- **Where it is used**: Not given in the sources.
+Originated in the context of volumetric splatting and reconstruction, where rays from different camera views are intersected to determine volume density [S1, unofficial]. The method is implemented in libraries like VolSplat for efficient GPU-based processing [S1, unofficial].
 
 ## Sources
 [S1] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)
