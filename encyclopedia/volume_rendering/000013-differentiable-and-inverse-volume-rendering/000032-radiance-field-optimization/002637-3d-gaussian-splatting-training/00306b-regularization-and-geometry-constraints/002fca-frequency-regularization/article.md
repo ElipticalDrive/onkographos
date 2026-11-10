@@ -1,94 +1,74 @@
 # Frequency Regularization
 
-Also called: FreGS
+Also called: Geometry Regularization, Improved Optimization via Regularization
 
 ## Overview
-Frequency regularization is a training-time technique that constrains the spectral content of the rendered output to guide Gaussian densification toward high-frequency regions [S1, unofficial]. It solves the problem where standard 3D Gaussian Splatting (3DGS) initialization and densification may fail to capture fine geometric details or high-frequency textures, leading to blurry reconstructions [S1, unofficial]. Unlike [Smoothed 2D Supervision](7213-smoothed-2d-supervision.md) which operates in the spatial domain via kernel smoothing, or [Depth Regularization](7616-depth-regularization.md) which enforces geometric consistency, frequency regularization operates in the spectral domain to explicitly encourage the representation of high-frequency signal components [S1, unofficial].
+Frequency regularization is a training-time technique that modifies the optimization trajectory of 3D Gaussian Splatting (3DGS) by penalizing or encouraging specific spectral components in the rendered output or Gaussian parameters. It addresses the problem of overreconstruction in some regions and underrepresentation in others, which leads to blur and visual inconsistencies [S1]. Unlike sibling methods that rely on geometric priors like depth or surface normals, frequency regularization operates in the spectral domain to control the spatial frequency content of the scene representation [S2, unofficial]. It sets itself apart by directly targeting the high-frequency details that standard densification may miss or blur, pushing Gaussians toward high-frequency regions to improve sharpness [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** The rendered image $I_{render}$ from the current training step, and the ground truth image $I_{gt}$.
-*   **Output:** A scalar regularization loss $\mathcal{L}_{freq}$ added to the total loss.
+- **Inputs:** The current set of 3D Gaussian parameters $\theta$ (centers $\mu$, scales $s$, rotations $q$, opacities $\alpha$, and spherical harmonic coefficients $c$); the camera poses and intrinsics; the target image $I_{target}$.
+- **Outputs:** A scalar regularization loss $\mathcal{L}_{freq}$ and its gradients with respect to $\theta$.
 
 **Data Structures:**
-No specific data structures are required beyond standard image buffers. The method operates on the pixel values of the rendered image.
+- **Rendered Image:** A 2D tensor $I_{rendered}$ of size $H \times W \times 3$ (RGB).
+- **Frequency Domain Representation:** A transformed version of $I_{rendered}$, denoted as $\mathcal{F}(I_{rendered})$, obtained via a frequency transform (e.g., Discrete Wavelet Transform or Fourier Transform).
 
-**Steps:**
-1.  **Compute Spectral Representation:** Apply a frequency transform to the rendered image $I_{render}$ and the ground truth $I_{gt}$. While the specific transform is not explicitly detailed in the primary source for the base method, it typically involves a Fourier Transform or a Wavelet Transform to decompose the image into frequency components [S1, unofficial][S2, unofficial].
-2.  **Extract High-Frequency Components:** Isolate the high-frequency coefficients from the spectral representation. Let $H(I)$ denote the high-frequency component of an image $I$.
-3.  **Compute Loss:** Calculate the difference between the high-frequency components of the rendered and ground truth images. A common formulation is the $L_1$ or $L_2$ norm of the difference in the frequency domain:
-    $$ \mathcal{L}_{freq} = \| H(I_{render}) - H(I_{gt}) \|_1 $$
-    Alternatively, the loss may penalize the magnitude of high-frequency errors directly to push Gaussians to cover areas with high-frequency detail [S1, unofficial].
-4.  **Backpropagation:** The gradients of $\mathcal{L}_{freq}$ flow back through the differentiable rasterizer to update the Gaussian parameters $\theta$ (centers $\mu$, scales $s$, rotations $q$, opacities $\alpha$, and colors $c$) [Parent].
+**Method Steps:**
+1. **Render:** Compute the differentiable rendering of the current Gaussian scene to obtain $I_{rendered}$ [Parent].
+2. **Transform:** Apply a frequency domain transform to $I_{rendered}$ to obtain $\mathcal{F}(I_{rendered})$. Common transforms include the Discrete Wavelet Transform (DWT) or Fast Fourier Transform (FFT) [S3, unofficial].
+3. **Compute Frequency Loss:** Calculate the discrepancy between the frequency components of the rendered image and the target image, or apply a penalty to specific frequency bands.
+   - For general frequency regularization, the loss often encourages high-frequency content where it is missing or suppresses it where it is excessive. A common formulation involves the $L_1$ or $L_2$ norm of the difference in the frequency domain:
+     $$ \mathcal{L}_{freq} = \| \mathcal{F}(I_{rendered}) - \mathcal{F}(I_{target}) \|_1 $$
+   - Alternatively, it may penalize low-frequency components to force the model to learn high-frequency details:
+     $$ \mathcal{L}_{freq} = \| \mathcal{F}_{low}(I_{rendered}) \|_1 $$
+   where $\mathcal{F}_{low}$ denotes the low-frequency subbands of the transform [S2, S3, unofficial].
+4. **Backpropagate:** Compute the gradients of $\mathcal{L}_{freq}$ with respect to the Gaussian parameters $\theta$ using the chain rule through the differentiable renderer and the frequency transform [Parent].
+5. **Update:** Update $\theta$ using an optimizer (e.g., Adam) with the combined loss:
+   $$ \mathcal{L}_{total} = \mathcal{L}_{rgb} + \lambda_{freq} \mathcal{L}_{freq} $$
+   where $\lambda_{freq}$ is the regularization weight [Parent].
 
 **Parameters:**
-*   $\lambda_{freq}$: Weight for the frequency regularization term. Typical values are not given in the sources. [S1, unofficial][S2, unofficial]
+- $\lambda_{freq}$: The weight for the frequency regularization term. Typical values are not explicitly given in the sources but are generally small (e.g., $0.1$ to $1.0$) to balance with the RGB loss [G].
+- Transform Type: DWT or FFT. DWT is preferred for sparse-view scenarios to encourage sharper edges [S3, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** High-frequency components are sensitive to noise and aliasing. [G] Ensure that the frequency transform is implemented with sufficient numerical stability.
-*   **Boundaries:** The choice of frequency cutoff (what constitutes "high" frequency) is critical. [G] A cutoff that is too aggressive may remove valid detail; one that is too lenient may fail to regularize effectively.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_frequency_regularization_loss(rendered_image, ground_truth_image, high_freq_cutoff=0.5):
-    """
-    Computes the frequency regularization loss.
-    
-    Args:
-        rendered_image (Tensor): Rendered image of shape (H, W, C).
-        ground_truth_image (Tensor): Ground truth image of shape (H, W, C).
-        high_freq_cutoff (float): Normalized frequency threshold for high-frequency components.
-        
-    Returns:
-        Tensor: Scalar loss value.
-    """
-    # Apply 2D Fourier Transform to both images
-    # Note: In practice, FFT is often applied per channel or on luminance
-    fft_rendered = torch.fft.fft2(rendered_image)
-    fft_gt = torch.fft.fft2(ground_truth_image)
-    
-    # Create a high-pass filter mask
-    H, W = rendered_image.shape[0], rendered_image.shape[1]
-    u, v = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
-    # Center the frequency components
-    u_centered = u - H // 2
-    v_centered = v - W // 2
-    # Compute normalized distance from center
-    freq_dist = torch.sqrt(u_centered.float()**2 + v_centered.float()**2) / (H // 2)
-    
-    # Mask for high frequencies (distance > cutoff)
-    high_freq_mask = freq_dist > high_freq_cutoff
-    
-    # Apply mask to FFTs
-    fft_rendered_high = fft_rendered * high_freq_mask.float()
-    fft_gt_high = fft_gt * high_freq_mask.float()
-    
-    # Compute L1 loss in frequency domain
-    loss = torch.mean(torch.abs(fft_rendered_high - fft_gt_high))
-    
-    return loss
-```
+- **Precision:** Frequency transforms can be sensitive to boundary effects. Padding or windowing functions may be required [G].
+- **Degenerate Input:** If the target image is noisy, frequency regularization may amplify noise in high-frequency bands [G].
 
 ## Subtopics
 
+### [Scale Regularization](9855-scale-regularization.md)
+Scale regularization is a training-time technique that constrains the intrinsic scales of 4D Gaussians during deformation to prevent excessive dilation and improve anti-aliasing in video reconstruction. It solves the problem where standard Gaussian Splatting methods suffer from artifacts or loss of detail when tested at sampling rates different from training, by jointly regulating the maximum sampling frequency relative to the Gaussian's scale constraint. Unlike [Mip-Splatting](52-mip-splatting.md), which uses a fixed expansion scale, this method dynamically adapts frequency constraints, outperforming fixed-scale approaches in monocular video reconstruction.
+
 ### DWTGS
-DWTGS is a variant that rethinks frequency regularization for sparse-view 3D Gaussian Splatting [S2, unofficial]. It applies a Discrete Wavelet Transform (DWT) on the rendered image and penalizes the loss in the wavelet domain to encourage sharper edges [S2, unofficial]. Unlike the base method which may use Fourier transforms, DWTGS leverages the multi-resolution properties of wavelets to better capture local high-frequency details and edges, which are often under-represented in sparse-view settings [S2, unofficial].
+DWTGS is a method that rethinks frequency regularization for sparse-view 3DGS by applying a discrete wavelet transform on the rendered image and penalizing the loss in the wavelet domain to encourage sharper edges [S3, unofficial]. It specifically addresses the blurriness often seen in sparse-view reconstructions by enforcing high-frequency consistency in the wavelet domain.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the frequency transform. FFT-based approaches are $O(N \log N)$ where $N$ is the number of pixels. Wavelet transforms are also efficient, typically $O(N)$.
-*   **Memory Complexity:** Requires storing the frequency domain representation of the images, which is $O(N)$.
-*   **Measured Performance:** Not given in the sources. [S1, unofficial][S2, unofficial]
-*   **Scaling:** Scales linearly with image resolution for FFT/Wavelet operations.
-*   **Strengths:** Explicitly targets high-frequency detail, which is often lost in standard 3DGS training. Effective for improving texture sharpness.
-*   **Limitations:** May introduce artifacts if the frequency cutoff is not chosen carefully. Computationally more expensive than spatial-domain losses.
-*   **When to use:** When the scene contains fine textures or high-frequency details that are not captured by standard densification.
-*   **When not to use:** When computational resources are extremely limited, or when the scene is predominantly low-frequency.
+**Time and Memory Complexity:**
+- **Time:** The addition of a frequency transform (e.g., DWT or FFT) adds $O(N \log N)$ complexity per iteration, where $N$ is the number of pixels in the rendered image [G]. This is generally negligible compared to the rasterization cost for high-resolution images.
+- **Memory:** Requires storing the frequency domain representation of the rendered image, adding $O(N)$ memory overhead [G].
+
+**Measured Performance:**
+- Specific performance metrics are not provided in the sources. However, it is noted to improve visual quality by reducing blur and inconsistencies [S1].
+
+**Scaling:**
+- Scales well with image resolution due to the efficiency of FFT/DWT algorithms [G].
+
+**Strengths and Limitations:**
+- **Strengths:** Improves sharpness and high-frequency detail; effective for sparse-view scenarios [S3, unofficial].
+- **Limitations:** May amplify noise if not carefully tuned; requires careful selection of $\lambda_{freq}$ [G].
+
+**When to Use:**
+- Use when the scene reconstruction is blurry or lacks high-frequency detail, especially in sparse-view settings [S3, unofficial].
+
+**When Not to Use:**
+- Avoid when the input data is noisy, as it may amplify noise [G].
 
 ## Background
-Frequency regularization was introduced as part of the FreGS method to address the limitations of standard 3D Gaussian Splatting in capturing high-frequency regions [S1, unofficial]. It builds on the observation that Gaussian densification based on position and opacity gradients may not sufficiently explore high-frequency areas of the image [S1, unofficial]. The method has been adapted in variants like DWTGS for sparse-view scenarios [S2, unofficial].
+Frequency regularization was introduced as one of the main directions for improving the optimization of 3D Gaussian Splatting, alongside geometry-aware approaches and optimization procedure enhancements [S1]. It was proposed to address the issues of overreconstruction and underrepresentation that lead to blur and visual inconsistencies [S1]. The method has been further refined in variants like DWTGS for sparse-view scenarios [S3, unofficial].
 
 ## Sources
-[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
-[S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S1] A Survey on 3D Gaussian Splatting, https://doi.org/10.1145/3807511, fetched 2026-10-27
+[S2] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S3] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

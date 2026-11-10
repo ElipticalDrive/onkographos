@@ -1,0 +1,406 @@
+--- v001.md
++++ v002.md
+@@ -10,14 +10,14 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of 3D Gaussians (defined by position, covariance, opacity $\sigma$, and spherical harmonics), camera parameters, and a target image resolution.
++*   **Inputs:** A set of 3D Gaussians (defined by position, covariance, opacity $\sigma$, and spherical harmonics), camera parameters, and a target image resolution [S1].
+ *   **Outputs:** A rendered image with reduced computational cost compared to standard 3DGS rasterization [S1].
+ 
+ ### Data Structures
+ The method relies on the standard 3DGS rasterization pipeline stages [S1]:
+-1.  **Preprocess:** Parallel Gaussian-level processing.
+-2.  **InclusiveSum:** Parallel Gaussian-level processing.
+-3.  **DuplicateWithKeys:** Parallel Gaussian-level processing.
+-4.  **SortPairs:** Gaussian-Tile pair parallel sorting.
+-5.  **IdentifyTileRanges:** Gaussian-Tile pair parallel range identification.
++1.  **Preprocess:** Parallel Gaussian-level processing to compute perspective-related data [S1].
++2.  **InclusiveSum:** Parallel Gaussian-level processing to compute prefix sums for tile assignment [S1].
++3.  **DuplicateWithKeys:** Parallel Gaussian-level processing to duplicate Gaussian entries for each tile they cover [S1].
++4.  **SortPairs:** Gaussian-Tile pair parallel sorting by tile index and depth [S1].
++5.  **IdentifyTileRanges:** Gaussian-Tile pair parallel range identification to determine start/end indices per tile [S1].
+ 6.  **Render:** Pixel-level parallel rendering with serial alpha blending within tiles [S1].
+ 
+@@ -67,4 +67,6 @@
+ ### Pseudocode
+ ```python
++import math
++
+ def ad_r_gaussian_rasterize(gaussians, camera, image_width, image_height, alpha_low):
+     """
+@@ -72,82 +74,57 @@
+     
+     Args:
+-        gaussians: List of Gaussian objects with attributes:
+-            - pos: 3D position
+-            - cov: 3D covariance matrix
+-            - sigma: Opacity
+-            - sh: Spherical Harmonics coefficients
+-        camera: Camera object with projection and view matrices
++        gaussians: List of dicts with keys: pos (3,), cov (3,3), sigma, sh (coeffs)
++        camera: Dict with keys: view_mat (4,4), proj_mat (4,4), focal_x, focal_y, width, height
+         image_width: int
+         image_height: int
+         alpha_low: float, minimum splatting opacity threshold for culling
+     Returns:
+-        image: Rendered image buffer
++        image: 2D array of shape (image_height, image_width, 3)
+     """
+-    
+-    # Tile configuration
+     TILE_SIZE = 16
+-    num_tiles_x = (image_width + TILE_SIZE - 1) // TILE_SIZE
+-    num_tiles_y = (image_height + TILE_SIZE - 1) // TILE_SIZE
++    num_tiles_x = math.ceil(image_width / TILE_SIZE)
++    num_tiles_y = math.ceil(image_height / TILE_SIZE)
+     
+     # Stage 1: Preprocess (Parallel per Gaussian)
+-    # Compute projected covariance and determine culling bounds
+     culling_data = []
+     for g in gaussians:
+-        # Project Gaussian to 2D
+         # 1. Transform center to camera space
+-        center_cam = camera.world_to_camera(g.pos)
+-        
+-        # 2. Project covariance matrix to 2D (Jacobian projection)
+-        # J is the Jacobian of the perspective projection
+-        # Sigma_2d = J * R * Sigma_3d * R^T * J^T
+-        # (Assuming standard 3DGS projection logic)
+-        cov_2d = project_covariance(g.cov, center_cam, camera)
++        pos_cam = camera['view_mat'] @ np.append(g['pos'], 1.0)
++        pos_cam = pos_cam[:3] / pos_cam[3]
++        
++        # 2. Project covariance to 2D (Jacobian projection)
++        # J = diag(focal_x/z, focal_y/z, -1) * [I | 0]
++        z = pos_cam[2]
++        J = np.array([
++            [camera['focal_x'] / z, 0, 0],
++            [0, camera['focal_y'] / z, 0],
++            [0, 0, -1]
++        ])
++        R = camera['view_mat'][:3, :3]
++        cov_2d = J @ R @ g['cov'] @ R.T @ J.T
++        cov_2d = cov_2d[:2, :2]
+         
+         # 3. Compute ellipse coefficients for alpha >= alpha_low
+-        # Ellipse: Ax^2 + By^2 + Cxy + D <= 0
+-        # Sigma_2d elements
+-        sxx = cov_2d[0, 0]
+-        syy = cov_2d[1, 1]
+-        sxy = cov_2d[0, 1]
+-        
++        sxx, syy, sxy = cov_2d[0,0], cov_2d[1,1], cov_2d[0,1]
+         A = syy
+         B = sxx
+         C = -2 * sxy
+-        det = sxx * syy - sxy * sxy
++        det = sxx * syy - sxy**2
+         if det <= 0:
+-            # Degenerate Gaussian, skip or handle as point
+-            continue
+-            
+-        D = -2 * sqrt(det) * log(g.sigma / alpha_low)
++            continue # Skip degenerate Gaussians [G]
++        D = -2 * math.sqrt(det) * math.log(g['sigma'] / alpha_low)
+         
+         # 4. Compute Adaptive Radius (Bounding Circle of Ellipse)
+-        # The bounding circle radius of an ellipse Ax^2 + By^2 + Cxy + D <= 0
+-        # is determined by the maximum extent from the center.
+-        # For an ellipse, the semi-major axis length is the radius.
+-        # Eigenvalues of [[A, C/2], [C/2, B]] give 1/semi-axis^2
+-        # However, the source defines it as the bounding circle radius.
+-        # Standard approach: max(sqrt(lambda_max_inv)) where lambda are eigenvalues of the quadratic form matrix.
+-        # Matrix M = [[A, C/2], [C/2, B]]
+-        # Eigenvalues of M are lambda1, lambda2.
+-        # Semi-axes lengths are 1/sqrt(lambda1), 1/sqrt(lambda2).
+-        # Radius r_ad = max(1/sqrt(lambda1), 1/sqrt(lambda2))
+-        # Note: The source says "bounding circle radius of this ellipse".
+-        
+-        M = [[A, C/2], [C/2, B]]
+-        eigenvalues = compute_eigenvalues(M)
+-        # Eigenvalues should be positive for valid ellipse
+-        r_ad = 0
+-        if eigenvalues[0] > 0 and eigenvalues[1] > 0:
+-            r_ad = max(1.0 / sqrt(eigenvalues[0]), 1.0 / sqrt(eigenvalues[1]))
+-        else:
+-            # Fallback if eigenvalues are not positive (degenerate)
+-            r_ad = 0
+-            
++        # Eigenvalues of [[A, C/2], [C/2, B]]
++        trace = A + B
++        disc = math.sqrt((A - B)**2 + C**2)
++        lam1 = (trace + disc) / 2
++        lam2 = (trace - disc) / 2
++        if lam1 <= 0 or lam2 <= 0:
++            continue # Skip invalid ellipse [G]
++        r_ad = max(1.0 / math.sqrt(lam1), 1.0 / math.sqrt(lam2))
++        
+         # 5. Compute Original Radius (99% confidence interval)
+-        # For 2D Gaussian, 99% confidence ellipse corresponds to chi-squared value ~5.991
+-        # Radius r_o is typically derived from the major axis of the 99% ellipse.
+-        # r_o = sqrt(5.991) * semi_major_axis
+-        semi_major = max(1.0 / sqrt(eigenvalues[0]), 1.0 / sqrt(eigenvalues[1]))
+-        r_o = sqrt(5.991) * semi_major
++        r_o = math.sqrt(5.991) * max(1.0 / math.sqrt(lam1), 1.0 / math.sqrt(lam2))
+         
+         # 6. Final Radius
+@@ -155,61 +132,37 @@
+         
+         # 7. Compute AABB for the ellipse
+-        # Max x and y on the ellipse Ax^2 + By^2 + Cxy + D = 0
+-        # To find max x, set dy/dx = 0 or use Lagrange multipliers.
+-        # Alternatively, find extrema of x on the ellipse.
+-        # The max x coordinate of the ellipse centered at origin is:
+-        # x_max = sqrt( -D / (A - C^2/(4B)) ) ? No, simpler to use eigen-decomposition or rotation.
+-        # Let's rotate the ellipse to align with axes.
+-        # Angle theta = 0.5 * atan2(C, A - B)
+-        # Rotated coefficients A', B'
+-        # x_max = sqrt(-D/A'), y_max = sqrt(-D/B')
+-        
+-        theta = 0.5 * atan2(C, A - B)
+-        cos_t = cos(theta)
+-        sin_t = sin(theta)
+-        
+-        # Rotate quadratic form
+-        # A' = A cos^2 + B sin^2 + C sin cos
+-        # B' = A sin^2 + B cos^2 - C sin cos
++        # Rotate ellipse to principal axes to find max x/y
++        theta = 0.5 * math.atan2(C, A - B)
++        cos_t, sin_t = math.cos(theta), math.sin(theta)
+         A_rot = A * cos_t**2 + B * sin_t**2 + C * sin_t * cos_t
+         B_rot = A * sin_t**2 + B * cos_t**2 - C * sin_t * cos_t
+-        
+-        # Check if A_rot and B_rot are positive
+         if A_rot > 0 and B_rot > 0:
+-            x_max = sqrt(-D / A_rot)
+-            y_max = sqrt(-D / B_rot)
++            x_max = math.sqrt(-D / A_rot)
++            y_max = math.sqrt(-D / B_rot)
+         else:
+-            # Fallback to r
+-            x_max = r
+-            y_max = r
+-            
+-        w = x_max
+-        h = y_max
+-        
+-        # Store culling data
++            x_max, y_max = r, r
++        w, h = x_max, y_max
++        
++        # 8. Project center to screen
++        center_2d = np.array([
++            (pos_cam[0] * camera['focal_x'] / z + image_width / 2),
++            (pos_cam[1] * camera['focal_y'] / z + image_height / 2)
++        ])
++        
+         culling_data.append({
+-            'center_2d': project_point(center_cam, camera),
+-            'r': r,
+-            'w': w,
+-            'h': h,
+-            'sigma': g.sigma,
+-            'sh': g.sh,
+-            'cov_2d': cov_2d,
+-            'pos_cam': center_cam
++            'center_2d': center_2d,
++            'r': r, 'w': w, 'h': h,
++            'sigma': g['sigma'], 'sh': g['sh'],
++            'cov_2d': cov_2d, 'pos_cam': pos_cam
+         })
+         
+     # Stage 2: InclusiveSum & DuplicateWithKeys (Parallel per Gaussian)
+-    # Assign Gaussians to tiles based on AABB overlap
+-    # Create list of (GaussianIndex, TileIndex) pairs
+     gaussian_tile_pairs = []
+     for idx, data in enumerate(culling_data):
+         cx, cy = data['center_2d']
+-        w, h = data['w'], data['h']
+-        
+-        # Determine tile range
+-        tile_min_x = max(0, floor((cx - w) / TILE_SIZE))
+-        tile_max_x = min(num_tiles_x - 1, ceil((cx + w) / TILE_SIZE))
+-        tile_min_y = max(0, floor((cy - h) / TILE_SIZE))
+-        tile_max_y = min(num_tiles_y - 1, ceil((cy + h) / TILE_SIZE))
++        tile_min_x = max(0, int(math.floor((cx - data['w']) / TILE_SIZE)))
++        tile_max_x = min(num_tiles_x - 1, int(math.ceil((cx + data['w']) / TILE_SIZE)))
++        tile_min_y = max(0, int(math.floor((cy - data['h']) / TILE_SIZE)))
++        tile_max_y = min(num_tiles_y - 1, int(math.ceil((cy + data['h']) / TILE_SIZE)))
+         
+         for ty in range(tile_min_y, tile_max_y + 1):
+@@ -218,105 +171,74 @@
+                 
+     # Stage 3: SortPairs & IdentifyTileRanges
+-    # Sort pairs by TileIndex, then by depth (z-coordinate of Gaussian in camera space)
+-    # Depth is used for alpha blending order (back-to-front)
+-    # Note: 3DGS typically sorts by depth.
+-    gaussian_tile_pairs.sort(key=lambda x: (x[1], culling_data[x[0]]['pos_cam'].z))
+-    
+-    # Identify ranges for each tile
++    gaussian_tile_pairs.sort(key=lambda x: (x[1], culling_data[x[0]]['pos_cam'][2]))
++    
+     tile_ranges = {}
+     for tile_idx in range(num_tiles_x * num_tiles_y):
+-        # Find start and end indices in the sorted list
+-        # (Implementation detail: binary search or linear scan)
+-        pass
++        start = next((i for i, p in enumerate(gaussian_tile_pairs) if p[1] == tile_idx), len(gaussian_tile_pairs))
++        end = next((i for i, p in enumerate(gaussian_tile_pairs) if p[1] != tile_idx and i > start), len(gaussian_tile_pairs))
++        tile_ranges[tile_idx] = (start, end)
+         
+     # Stage 4: Render (Pixel-level parallel) with Load Balancing
+-    image = zeros((image_height, image_width, 3))
++    image = np.zeros((image_height, image_width, 3))
+     
+     # Pre-calculate loads per pixel to balance
+-    # Count Gaussians per pixel
+-    pixel_loads = zeros((image_height, image_width), dtype=int)
++    pixel_loads = np.zeros((image_height, image_width), dtype=int)
+     for idx, tile_idx in gaussian_tile_pairs:
+         data = culling_data[idx]
+         cx, cy = data['center_2d']
+-        # Determine which pixels this Gaussian affects
+-        # This is complex; typically done during rasterization.
+-        # For load balancing, we estimate based on tile counts or actual pixel coverage.
+-        # Simplified: Assume load is proportional to number of Gaussians in tile.
+-        pass
+-        
+-    # Load Balancing Strategy:
+-    # 1. Quantify variance of Gaussian counts per pixel.
+-    # 2. For heavy-load pixels, reduce number of Gaussians.
+-    # 3. For light-load pixels, increase number of Gaussians (if possible).
+-    
+-    # Implementation of Load Balancing:
+-    # Since the source describes reducing Gaussians for heavy-load pixels,
+-    # we can implement a threshold on the number of Gaussians to blend per pixel.
+-    # Or, more accurately, the source implies adjusting the set of Gaussians.
+-    # A practical implementation:
+-    # - Compute initial render.
+-    # - Identify pixels with high computational cost (many Gaussians).
+-    # - For these pixels, truncate the blending loop earlier (e.g., stop when alpha contribution < epsilon).
+-    # - For light pixels, ensure all Gaussians are processed.
+-    
+-    # Parallel Render Kernel
++        # Estimate pixel coverage for load balancing
++        for py in range(max(0, int(cy - data['h'])), min(image_height, int(cy + data['h']))):
++            for px in range(max(0, int(cx - data['w'])), min(image_width, int(cx + data['w']))):
++                pixel_loads[py, px] += 1
++                
++    # Load Balancing Strategy
++    mean_load = np.mean(pixel_loads)
++    std_load = np.std(pixel_loads)
++    heavy_threshold = mean_load + std_load
++    light_threshold = mean_load - std_load
++    
+     def render_pixel(px, py, tile_idx):
+-        # Get Gaussians for this tile
+-        # Sort by depth (already done)
+-        # Alpha blend
+-        r, g, b = 0.0, 0.0, 0.0
+-        alpha_acc = 0.0
+-        
+-        # Get list of Gaussians for this pixel
+-        # This requires mapping Gaussian-Tile pairs to pixels
+-        # Standard 3DGS rasterizer does this efficiently.
+-        # Here we simulate the logic.
+-        
+-        gaussians_for_pixel = get_gaussians_for_pixel(px, py, gaussian_tile_pairs, culling_data)
+-        
+-        # Load Balancing Adjustment
+-        # If pixel is heavy load, limit number of Gaussians
+-        if is_heavy_load_pixel(px, py):
+-            gaussians_for_pixel = gaussians_for_pixel[:MAX_HEAVY_LOAD]
+-        else:
+-            # Light load, process all
+-            pass
+-            
+-        for g_data in gaussians_for_pixel:
+-            # Calculate splatting opacity alpha
+-            dx = px - g_data['center_2d'].x
+-            dy = py - g_data['center_2d'].y
+-            x_vec = [dx, dy]
+-            
+-            # Alpha = sigma * exp(-0.5 * x^T Sigma'^-1 x)
+-            inv_cov = inverse(g_data['cov_2d'])
+-            exponent = -0.5 * dot(x_vec, dot(inv_cov, x_vec))
+-            alpha = g_data['sigma'] * exp(exponent)
+-            
+-            if alpha < 1e-4: # Skip negligible contributions
++        r_acc, g_acc, b_acc, alpha_acc = 0.0, 0.0, 0.0, 0.0
++        start, end = tile_ranges.get(tile_idx, (0, 0))
++        count = 0
++        for i in range(start, end):
++            g_idx, _ = gaussian_tile_pairs[i]
++            data = culling_data[g_idx]
++            
++            # Load Balancing Adjustment
++            if pixel_loads[py, px] > heavy_threshold:
++                count += 1
++                if count > math.ceil(heavy_threshold * 0.8): # Reduce heavy load
++                    break
++            elif pixel_loads[py, px] < light_threshold:
++                pass # Process all for light load
++            
++            dx = px - data['center_2d'][0]
++            dy = py - data['center_2d'][1]
++            x_vec = np.array([dx, dy])
++            
++            inv_cov = np.linalg.inv(data['cov_2d'])
++            exponent = -0.5 * x_vec @ inv_cov @ x_vec
++            alpha = data['sigma'] * math.exp(exponent)
++            
++            if alpha < 1e-4:
+                 continue
+                 
+-            # Get color from SH
+-            color = sample_sh(g_data['sh'], dx, dy)
+-            
+-            # Alpha blending
+-            # C_out = C_in * (1 - alpha) + C_gauss * alpha
+-            # A_out = A_in + alpha * (1 - A_in)
+-            
+-            r = r * (1 - alpha) + color.r * alpha
+-            g = g * (1 - alpha) + color.g * alpha
+-            b = b * (1 - alpha) + color.b * alpha
++            # SH evaluation (standard graphics step) [G]
++            color = evaluate_sh(data['sh'], dx, dy)
++            
++            r_acc = r_acc * (1 - alpha) + color[0] * alpha
++            g_acc = g_acc * (1 - alpha) + color[1] * alpha
++            b_acc = b_acc * (1 - alpha) + color[2] * alpha
+             alpha_acc = alpha_acc + alpha * (1 - alpha_acc)
+             
+-            if alpha_acc > 0.999: # Early exit if fully opaque
++            if alpha_acc > 0.999:
+                 break
+                 
+-        image[py, px] = [r, g, b]
+-        
+-    # Launch parallel render
++        image[py, px] = [r_acc, g_acc, b_acc]
++        
+     for ty in range(num_tiles_y):
+         for tx in range(num_tiles_x):
+             tile_idx = ty * num_tiles_x + tx
+-            # Process pixels in tile
+             for py in range(ty * TILE_SIZE, min((ty + 1) * TILE_SIZE, image_height)):
+                 for px in range(tx * TILE_SIZE, min((tx + 1) * TILE_SIZE, image_width)):
+@@ -324,4 +246,9 @@
+                     
+     return image
++
++def evaluate_sh(sh_coeffs, dx, dy):
++    # Standard spherical harmonics evaluation for 3DGS [G]
++    # Returns RGB color based on SH coefficients and viewing direction
++    return [0.5, 0.5, 0.5] # Placeholder for standard SH math [G]
+ ```
+ 
+@@ -331,6 +258,6 @@
+ 
+ ### Edge Cases and Pitfalls
+-*   **Adaptive Radius Clamping**: If the Gaussian opacity $\sigma$ is high or $\alpha_{low}$ is low, the adaptive radius $r_{ad}$ may exceed the original radius $r_o$ (based on the 99% confidence interval). In this case, the final radius $r$ must be clamped to $r_o$ to ensure the rendering range does not exceed the standard confidence interval [S1].
+-*   **Degenerate Gaussians**: If the projected covariance matrix is singular or near-singular, the ellipse coefficients may be invalid. The pseudocode includes a check for positive eigenvalues and a fallback to the radius $r$ [S1, G].
++*   **Adaptive Radius Clamping**: If the Gaussian opacity $\sigma$ is high or $\alpha_{low}$ is low, the adaptive radius $r_{ad}$ may exceed the original radius $r_o$ (based on the 99% confidence interval) [S1]. In this case, the final radius $r$ must be clamped to $r_o$ to ensure the rendering range does not exceed the standard confidence interval [S1].
++*   **Degenerate Gaussians**: If the projected covariance matrix is singular or near-singular, the ellipse coefficients may be invalid [G]. The implementation must check the determinant and eigenvalues before computing radii or AABB bounds [G].
+ 
+ ## Operating characteristics

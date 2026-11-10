@@ -1,0 +1,192 @@
+--- v001.md
++++ v002.md
+@@ -4,16 +4,16 @@
+ 
+ ## Overview
+-This method accelerates volume rendering by using RTX-accelerated ray tracing to skip empty space. It constructs a bounding volume hierarchy (BVH) over the boundary surface between active and inactive macrocells, rather than over all active regions, to determine ray integration intervals. It differs from [Triangulated Active Brick Boundary Mesh for Space Skipping](1426-triangulated-active-brick-boundary-mesh-for-space-skipping.md) by explicitly leveraging hardware-accelerated BVH traversal and triangle intersection via OptiX/OWL to replace costly software intersection tests, and from Ganter and Manzke's method by replacing the BVH over active brick regions with a BVH over only the boundary, resulting in lower depth complexity and fewer rays [S1].
++This method accelerates volume rendering by using RTX-accelerated ray tracing to skip empty space [S1]. It constructs a bounding volume hierarchy (BVH) over the boundary surface between active and inactive macrocells, rather than over all active regions, to determine ray integration intervals [S1]. It differs from [Triangulated Active Brick Boundary Mesh for Space Skipping](1426-triangulated-active-brick-boundary-mesh-for-space-skipping.md) by explicitly leveraging hardware-accelerated BVH traversal and triangle intersection via OptiX/OWL to replace costly software intersection tests, and from Ganter and Manzke's method by replacing the BVH over active brick regions with a BVH over only the boundary, resulting in lower depth complexity and fewer rays [S1].
+ 
+ ## How it works
+ **Inputs:**
+-- 3D volume texture (scalar field).
+-- Transfer function (for active brick classification).
+-- Macrocell size $K$ (default 16).
+-- Sampling rate $dt$ (fixed step size, default 0.5).
+-- Ray origin and direction for each pixel.
++- 3D volume texture (scalar field) [S1].
++- Transfer function (for active brick classification) [S1].
++- Macrocell size $K$ (default 16) [S1].
++- Sampling rate $dt$ (fixed step size, default 0.5) [S1].
++- Ray origin and direction for each pixel [S1].
+ 
+ **Outputs:**
+-- Final color for each pixel.
++- Final color for each pixel [S1].
+ 
+ **Data Structures:**
+@@ -25,22 +25,22 @@
+ **Algorithm Steps:**
+ 
+-1.  **Active Brick Classification:** Determine which macrocells are active based on the transfer function. This is performed entirely on the GPU [S1].
+-2.  **Boundary Mesh Generation:** Extract the boundary geometry (triangles) between active and inactive macrocells. This replaces the clustering step used in prior works [S1].
+-3.  **BVH Construction:** Build a BVH over the boundary triangle mesh. This is the most expensive part of the update phase [S1].
+-4.  **Ray Tracing for Space Skipping:**
+-    - Trace a ray from the camera into the scene against the boundary BVH.
+-    - Use a closest-hit program to retrieve hit distance $t_{hit}$ and triangle orientation (normal vs. ray direction) [S1].
+-    - If no hit is found, the ray does not traverse any active volume; terminate the ray [S1].
+-    - If a hit is found:
+-        - If the triangle is back-facing (ray is inside the volume), the integration interval is $[0, t_{hit}]$ [S1].
+-        - If the triangle is front-facing (ray enters the volume), set $t_0 = t_{hit}$. Trace the same ray again with $ray.tmin = t_0$ to find the exit distance $t_1$ [S1].
+-5.  **Volume Integration:**
+-    - Integrate over the interval $[t_0, t_1]$ using fixed step size $dt$ [S1].
+-    - Sample the 3D texture, compute gradients, and apply transfer functions [S1].
+-    - Use interleaved sampling to reduce aliasing [S1].
+-    - Apply early ray termination if the accumulated opacity reaches a threshold [S1].
+-6.  **Iteration:**
+-    - If the ray has not terminated early, trace another ray from $t_1$ to find the next potential segment to integrate [S1].
+-    - Repeat until the ray terminates or exits the volume bounds [S1].
++1. **Active Brick Classification:** Determine which macrocells are active based on the transfer function. This is performed entirely on the GPU [S1].
++2. **Boundary Mesh Generation:** Extract the boundary geometry (triangles) between active and inactive macrocells. This replaces the clustering step used in prior works [S1].
++3. **BVH Construction:** Build a BVH over the boundary triangle mesh. This is the most expensive part of the update phase [S1].
++4. **Ray Tracing for Space Skipping:**
++   - Trace a ray from the camera into the scene against the boundary BVH [S1].
++   - Use a closest-hit program to retrieve hit distance $t_{hit}$ and triangle orientation (normal vs. ray direction) [S1].
++   - If no hit is found, the ray does not traverse any active volume; terminate the ray [S1].
++   - If a hit is found:
++     - If the triangle is facing (ray is inside the volume), the integration interval is $[0, t_{hit}]$ [S1].
++     - If the triangle is not facing (ray enters the volume), set $t_0 = t_{hit}$. Trace the same ray again with $ray.tmin = t_0$ to find the exit distance $t_1$ [S1].
++5. **Volume Integration:**
++   - Integrate over the interval $[t_0, t_1]$ using fixed step size $dt$ [S1].
++   - Sample the 3D texture, compute gradients, and apply transfer functions [S1].
++   - Use interleaved sampling to reduce aliasing [S1].
++   - Apply early ray termination if the accumulated opacity reaches a threshold [S1].
++6. **Iteration:**
++   - If the ray has not terminated early, trace another ray from $t_1$ to find the next potential segment to integrate [S1].
++   - Repeat until the ray terminates or exits the volume bounds [S1].
+ 
+ **Pseudocode:**
+@@ -54,19 +54,20 @@
+     alpha = 0.0
+     t_current = 0.0
+-    
++    INFINITY = 1e9
++
+     while alpha < 1.0:
+         # Trace ray against boundary BVH to find active regions
+-        hit = trace_ray(bvh=boundary_bvh, origin=ray_origin + ray_direction * t_current, 
+-                        direction=ray_direction, tmin=t_current)
+-        
++        hit = trace_ray(boundary_bvh, ray_origin, ray_direction, t_current, INFINITY)
++
+         if hit is None:
+             # No active volume encountered
+             break
+-            
++
+         t_hit = hit.distance
+-        is_back_facing = dot(hit.normal, ray_direction) < 0
+-        
+-        if is_back_facing:
+-            # Ray is inside volume, integrate from start of segment to hit
++        # "facing" triangle indicates the ray is inside the volume
++        is_facing = dot(hit.normal, ray_direction) < 0.0
++
++        if is_facing:
++            # Ray is inside volume, integrate from current position to hit
+             t0 = t_current
+             t1 = t_hit
+@@ -75,29 +76,25 @@
+             t0 = t_hit
+             # Trace again to find exit
+-            hit_exit = trace_ray(bvh=boundary_bvh, origin=ray_origin + ray_direction * t0, 
+-                                 direction=ray_direction, tmin=t0)
++            hit_exit = trace_ray(boundary_bvh, ray_origin, ray_direction, t0, INFINITY)
+             if hit_exit is None:
+                 # Ray exits volume bounds without hitting another boundary
+-                # Assume exit at some large distance or volume bounds
+-                t1 = infinity 
++                t1 = INFINITY
+             else:
+                 t1 = hit_exit.distance
+-        
++
+         # Integrate over [t0, t1]
+-        sample_color, sample_alpha = integrate_volume(
+-            volume_texture, ray_origin, ray_direction, t0, t1, dt
+-        )
+-        
++        sample_color, sample_alpha = integrate_volume(volume_texture, ray_origin, ray_direction, t0, t1, dt)
++
+         # Composite
+         color = color + sample_color * (1.0 - alpha)
+         alpha = alpha + sample_alpha * (1.0 - alpha)
+-        
++
+         # Update current position for next segment
+         t_current = t1
+-        
+-        # Early termination check is handled inside integrate_volume or here
++
++        # Early termination check
+         if alpha >= 1.0:
+             break
+-            
++
+     return color
+ 
+@@ -109,21 +106,35 @@
+     accumulated_alpha = 0.0
+     t = t0
+-    
++
+     while t < t1:
+         pos = origin + direction * t
+         value = sample_3d_texture(volume_texture, pos)
+-        
++
+         # Compute gradient and apply transfer function
+         color, alpha = apply_transfer_function(value, pos)
+-        
++
+         accumulated_color = accumulated_color + color * (1.0 - accumulated_alpha)
+         accumulated_alpha = accumulated_alpha + alpha * (1.0 - accumulated_alpha)
+-        
++
+         if accumulated_alpha >= 1.0:
+             break
+-            
++
+         t += dt
+-        
++
+     return accumulated_color, accumulated_alpha
++
++# Standard helper definitions [G]
++def trace_ray(bvh, origin, direction, tmin, tmax):
++    """Standard BVH traversal returning closest hit distance or None."""
++    # Hardware-accelerated traversal implementation omitted for brevity
++    pass
++
++def sample_3d_texture(texture, pos):
++    """Trilinear interpolation of the 3D volume texture."""
++    pass
++
++def apply_transfer_function(value, pos):
++    """Lookup color and opacity from the transfer function based on the sampled value."""
++    pass
+ ```
+ 
+@@ -139,5 +150,5 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-- The total build time remains within an interactive range, never exceeding 3.5ms for the default macrocell size $K=16$ across tested datasets [S1].
++- The total build time remains within an interactive range, though it varies by dataset; for the LLNL model at $K=16$ it is 6.0ms [S1].
+ - For the LLNL model with $K=16$, the total build time is 6.0ms, comprising 153µs for active cell classification, 119µs for triangle extraction, and 5.4ms for BVH construction [S1].
+ 
+@@ -165,5 +176,5 @@
+ 
+ **History and Development:**
+-- The method modifies prior techniques to reduce overhead. It builds on the macro-cell/active brick mask concept but replaces the BVH over active brick regions with a BVH over only the boundary between active and inactive regions [S1]. This reduces depth complexity and the number of rays traced for space skipping [S1].
++- The method modifies prior techniques to reduce overhead [S1]. It builds on the macro-cell/active brick mask concept but replaces the BVH over active brick regions with a BVH over only the boundary between active and inactive regions [S1]. This reduces depth complexity and the number of rays traced for space skipping [S1].
+ 
+ **Where it is used:**

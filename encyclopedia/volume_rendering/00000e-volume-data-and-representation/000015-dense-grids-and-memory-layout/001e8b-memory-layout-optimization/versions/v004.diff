@@ -1,0 +1,183 @@
+--- v003.md
++++ v004.md
+@@ -3,118 +3,87 @@
+ 
+ ## Overview
+-Memory Layout Optimization encompasses techniques for arranging volumetric data in linear memory to maximize bandwidth utilization, minimize cache misses, and eliminate hardware-level memory bank conflicts during ray casting [S1, S2, S3, unofficial]. It solves the problem that standard row-major or column-major layouts suffer from poor spatial locality when rays traverse 3D volumes along arbitrary directions, leading to inefficient memory access patterns [G]. What sets this family apart from its siblings is the focus on low-level data placement (bit interleaving, bank skewing, block packing) rather than high-level traversal algorithms or indexing structures; it builds on [Dense grids and memory layout](3-dense-grids-and-memory-layout.md) by defining exactly how the dense grid is laid out in bytes [G].
++Memory Layout Optimization encompasses techniques for arranging volumetric data in contiguous memory buffers to maximize spatial locality, minimize cache misses, and eliminate hardware memory bank conflicts during rendering [S1, S2, S3, S4, unofficial]. It solves the problem where naive linear indexing causes cache thrashing or SDRAM bank conflicts, leading to performance degradation [S1, S1638]. It sets itself apart from sibling methods like [Evaluation Cache](874-evaluation-cache.md) (which caches computed values) and [Tile-based Volume Ray Marching](1678-tile-based-volume-ray-marching.md) (which optimizes traversal order) by focusing exclusively on the physical storage arrangement of the voxel data itself [S1, S1638, S2174].
+ 
+ ## Shared principles
++All methods in this family operate on the principle that memory access patterns during volume rendering (typically ray marching) must align with the physical layout of the data in RAM or VRAM to exploit hardware prefetching and burst capabilities [S1, S1638, S2174].
++
++1.  **Spatial Locality:** Adjacent voxels in 3D space should be stored at adjacent memory addresses [S1, S2174]. This ensures that when a ray traverses the volume, consecutive samples hit the same or adjacent cache lines [S1, unofficial].
++2.  **Stride Minimization:** The memory stride between consecutive accesses in the dominant traversal direction should be 1 (or the cache line size) [S1, unofficial]. Naive row-major layouts often result in large strides when traversing along the Z-axis if X is the innermost dimension [S1, unofficial].
++3.  **Bank Conflict Avoidance:** For hardware implementations, memory addresses must be mapped to SDRAM banks such that concurrent requests from different threads/pipelines do not target the same bank simultaneously [S1638]. This is achieved through modulo arithmetic and skewing [S1638].
++4.  **Block Decomposition:** Large volumes are often decomposed into fixed-size blocks (e.g., $32^3$ or $2^3$) to apply localized optimization rules, such as bit-interleaving or miniblock allocation [S1, S1638, S2174].
+ 
+ ## Subtopics
+ 
+ ### [Voxel Buffer Memory Layout and Loop Optimization](1598-voxel-buffer-memory-layout-and-loop-optimization.md)
+-A dense voxel buffer implemented as a contiguous 1D array where 3D coordinates map to a 1D index using row-major ordering (x is innermost). Choose this for simple CPU-based ray casting where cache line efficiency for sequential access is the primary concern. It differs from [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md) by relying on simple row-major sequential access rather than complex bank-avoidance schemes, and from [Volume Interleaving](2174-volume-interleaving.md) by keeping attributes contiguous per voxel rather than interleaved by attribute type. It serves as the foundational implementation strategy for [Voxel Data Structure Layout](3584-voxel-data-structure-layout.md), which defines the atomic unit stored within this optimized buffer.
++This method optimizes the traversal of dense 3D voxel grids by aligning loop iteration order with the underlying 1D memory layout, thereby maximizing spatial locality and cache hit rates. It maps 3D coordinates to a contiguous array and reorders traversal loops to match the memory stride, differing from sibling methods that use bank-avoidance or bit-interleaving [G].
+ 
+ ### [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md)
+-A hardware-level strategy maximizing memory bandwidth by organizing voxels into 2x2x2 **miniblocks** and applying two-level skewing across memory modules and SDRAM banks. It ensures that any ray parallel to coordinate axes accesses a full beam of voxels in consecutive memory cycles without pipeline stalls. Choose this for fixed-function hardware or GPU architectures where bank conflicts are a critical bottleneck. It is distinct from [Volume Interleaving](2174-volume-interleaving.md) by using fixed 2x2x2 blocks rather than arbitrary interleaving, and from [Memory-Insensitive Rendering](2774-memory-insensitive-rendering.md) by relying on strict geometric alignment rather than algorithmic tolerance to latency.
++Voxel Memory Bank Allocation and Miniblock Organization is a hardware-oriented memory layout technique designed to maximize SDRAM burst read throughput and eliminate memory bank conflicts during dense volume rendering. It solves the problem of inefficient memory access by grouping voxels into small linear blocks (miniblocks) and applying modular arithmetic to distribute these blocks across memory modules and internal SDRAM banks. It sets itself apart from [Volume Interleaving](2174-volume-interleaving.md) by operating on fixed-size 2x2x2 spatial blocks rather than bit-interleaved linear arrays, and from [Memory-Insensitive Rendering](2774-memory-insensitive-rendering.md) by relying on strict spatial locality and skewing rather than algorithmic tolerance to random access.
+ 
+ ### [Volume Interleaving](2174-volume-interleaving.md)
+-A memory layout optimization that decomposes the volume into 32x32x32 blocks and interleaves the bits of voxel coordinates to map spatially adjacent voxels to contiguous memory addresses. Unlike standard row-major layouts, it ensures consecutive samples along a ray are closer in memory, reducing cache misses. Choose this for software rendering on CPUs with hierarchical caches where arbitrary ray directions are common.
++Volume Interleaving is a memory layout optimization technique designed to reduce cache misses in volume rendering by improving spatial locality. It achieves this by decomposing the volume into small, fixed-size blocks and rearranging the memory address of each voxel based on the interleaving of its coordinate bits. Unlike standard row-major or column-major layouts, which suffer from poor locality when traversing 3D space, Volume Interleaving ensures that spatially adjacent voxels are stored contiguously in memory. This method is distinct from [Voxel Memory Bank Allocation and Miniblock Organization](1638-voxel-memory-bank-allocation-and-miniblock-organization.md) in its specific use of bit-level interleaving for address generation rather than modulo-based bank distribution, and from [Memory-Insensitive Rendering](2774-memory-insensitive-rendering.md) which avoids layout optimization entirely by using streaming algorithms.
+ 
+ ### [Memory-Insensitive Rendering](2774-memory-insensitive-rendering.md)
+-A disk-based rendering technique for large unstructured grids requiring only a small, constant amount of main memory by avoiding random access. Choose this when dataset size exceeds available RAM and bandwidth is secondary to correctness.
++Memory-Insensitive Rendering (MIR) is an out-of-core technique for rendering arbitrarily large unstructured volumetric grids (specifically tetrahedral meshes) that requires only a constant, minimal amount of main memory. It solves the problem of rendering datasets exceeding available RAM by avoiding random access to the source geometry, relying instead on sequential disk scans and external sorting. Unlike sibling methods that optimize in-memory data layouts (e.g., [Voxel Buffer Memory Layout and Loop Optimization](1598-voxel-buffer-memory-layout-and-loop-optimization.md) or [Volume Interleaving](2174-volume-interleaving.md)), MIR prioritizes memory footprint over rendering speed, making it suitable for machines with severe memory constraints.
+ 
+-### [Evaluation Cache](874-evaluation-cache.md)
+-Caches evaluated voxel values to avoid recomputation. Choose this when evaluation is expensive (e.g., procedural textures) rather than when memory access is the bottleneck.
++### DDS Channel Interleave/Deinterleave
++- **Definition:** Converts between planar (deinterleaved) and interleaved byte layouts for multi-channel volume data, operating in blocks for memory efficiency [S1, unofficial].
++- **Steps:**
++    1. If `skip <= 1`, return immediately (no interleaving needed) [S1, unofficial].
++    2. Allocate temporary buffer `data2` [S1, unofficial].
++    3. For deinterleave (`restore=false`), scatter bytes: `for (ptr = data2, i = 0; i < skip; i++) for (j = i; j < bytes; j += skip) *ptr++ = data[j];` [S1, unofficial].
++    4. For interleave (`restore=true`), gather bytes: `for (ptr = data, i = 0; i < skip; i++) for (j = i; j < bytes; j += skip) data2[j] = *ptr++;` [S1, unofficial].
++    5. If `block > 0`, process data in chunks of `skip * block` bytes to limit peak memory usage [S1, unofficial].
++- **Parameters:**
++    - `skip`: Number of channels (stride) [S1, unofficial].
++    - `block`: Chunk size for block-wise processing. 0 means full array [S1, unofficial].
+ 
+-### [Bricking](914-bricking.md)
+-Divides volume into bricks for hierarchical loading. Choose this for out-of-core rendering of very large datasets.
++### Canonical terms optimization
++- **Definition:** An optimization for fields where every term is of the form $w$, $w \cdot a$, or $w \cdot a \cdot b$ (with $a$ even, $b=a+1$), storing them as three weights per field and column to avoid iterating over a term list [S2, unofficial]. Register-form kernels read every shell of a chunk from groupshared memory: centre, cutoff, $l$, AO count, primitives, and rows of $C$. Chunks packed to at most 256 primitives [S2, unofficial]. Canonical terms (`GTO_ISO_CANON_TERMS`, default 1): When every term of every field is $w \cdot a$, $w \cdot a^2$ or $w \cdot a \cdot b$ with $a$ even and $b = a + 1$ (orbitals, density matrices, products of pairs), the set keeps them as three weights per field and column [S2, unofficial].
++- **Steps:**
++    1. Stage a tile's weights in the epilogue [S2, unofficial].
++    2. Each thread applies the staged weights to its own accumulators [S2, unofficial].
++    3. Avoid rounds of 64 points over the term list [S2, unofficial].
++    4. In the vertex kernel, put a vertex's four channels on neighbouring lanes [S2, unofficial].
++    5. Shuffle the value channel to the gradient channels [S2, unofficial].
++    6. Accumulate corner values in memory over tiles instead of in registers [S2, unofficial].
++    7. Inner loop no longer waits on dependent global loads per shell. Each point skips shells out of its reach [S2, unofficial].
++    8. Epilogues stage a tile's weights and every thread processes them [S2, unofficial].
++- **Parameters:**
++    - `GTO_ISO_CANON_TERMS`: Boolean flag enabling canonical terms; default value is 1 [S2, unofficial].
+ 
+-### [Tile-based Volume Ray Marching](1678-tile-based-volume-ray-marching.md)
+-Groups rays into tiles for coherent execution. Choose this for GPU ray marching to improve warp divergence and cache coherency.
++### Linear Span Arena
++- **Definition:** A contiguous memory allocator for fixed-size spans (words) that tracks usage with a boolean array to enable fast allocation, deallocation, and reuse [S3, unofficial].
++- **Steps:**
++    1. `alloc` slides `sample_pos` backwards until `pos == 0` or `self.used[pos - 1]` is true to find `candidate_start` [S3, unofficial].
++    2. Calculates `candidate_end = candidate_start + span_len` [S3, unofficial].
++    3. If `candidate_end` exceeds data length, resets `next_alloc_start` to 0 and breaks [S3, unofficial].
++    4. Samples `(sample_pos + 1..candidate_end)` in reverse to verify no used words exist [S3, unofficial].
++    5. If free, sets range, updates `next_alloc_start`, and breaks [S3, unofficial].
++    6. Marks `self.used[range].fill(true)` and copies `span_data` [S3, unofficial].
++- **Parameters:**
++    - `span_len`: length of the span to allocate in words [S3, unofficial].
++    - `next_alloc_start`: tracks the next search position to avoid scanning from zero repeatedly; resets to 0 on wrap-around or after allocation [S3, unofficial].
++- **Layout:**
++    - `self.used`: boolean array tracking allocated spans [S3, unofficial].
++    - `self.data`: underlying buffer for span data [S3, unofficial].
++- **Code:**
++    - `let candidate_start = { let mut pos = sample_pos; 'slide: loop { if pos == 0 || self.used[pos - 1] { break 'slide; } pos -= 1; } pos };` [S3, unofficial].
++- **Pitfall:**
++    - `populate_raw` rejects partial word data by panicking if `raw_data.len()` is not a multiple of `std::mem::size_of::<VxlData>()` [S3, unofficial].
+ 
+-### [Spatial Indexing and Ordering](1797-spatial-indexing-and-ordering.md)
+-Uses spatial structures (e.g., BVH, Octree) to accelerate traversal. Choose this for sparse volumes or when empty space traversal is significant.
+-
+-### [Chunk-based Voxel Data Structure](1818-chunk-based-voxel-data-structure.md)
+-Organizes data into chunks for flexible memory management. Choose this for dynamic volumes or mixed sparse/dense regions.
+-
+-### [Global Uniform Data Layout](2955-global-uniform-data-layout.md)
+-Ensures uniform data distribution across devices. Choose this for distributed rendering systems.
+-
+-### [3D Texture Storage and Sampling](3064-3d-texture-storage-and-sampling.md)
+-Leverages GPU 3D texture hardware. Choose this when targeting modern GPUs with optimized texture units.
+-
+-### [FCC Dataset Indexing Scheme](3200-fcc-dataset-indexing-scheme.md)
+-Uses Face-Centered Cubic indexing. Choose this for specific scientific datasets with FCC symmetry.
+-
+-### [Density Bitfield Packing](3788-density-bitfield-packing.md)
+-Packs density values into bitfields. Choose this for extreme memory compression when precision loss is acceptable.
+-
+-### [Brick-based storage and caching](4138-brick-based-storage-and-caching.md)
+-Similar to Bricking but with specific caching policies. Choose this for optimized brick streaming.
+-
+-### [VDB Data Loading & 3D Texture Setup](4880-vdb-data-loading-3d-texture-setup.md)
+-Specific to OpenVDB data. Choose this when working with VDB formats.
+-
+-#### DDS Channel Interleave/Deinterleave
+-**Definition:** Converts between planar (deinterleaved) and interleaved byte layouts for multi-channel volume data, operating in blocks for memory efficiency [S1, unofficial].
+-**Step:** If `skip <= 1`, return immediately (no interleaving needed) [S1, unofficial]. Allocate temporary buffer `data2` [S1, unofficial]. For deinterleave (`restore=false`), scatter bytes: `for (ptr = data2, i = 0; i < skip; i++) for (j = i; j < bytes; j += skip) *ptr++ = data[j]` [S1, unofficial]. For interleave (`restore=true`), gather bytes: `for (ptr = data, i = 0; i < skip; i++) for (j = i; j < bytes; j += skip) data2[j] = *ptr++` [S1, unofficial]. If `block > 0`, process data in chunks of `skip * block` bytes to limit peak memory usage [S1, unofficial].
+-**Parameter:** `skip`: Number of channels (stride) [S1, unofficial]. `block`: Chunk size for block-wise processing. 0 means full array [S1, unofficial].
+-**Pseudocode:**
+-```python
+-def dds_interleave(data, bytes, skip, restore, block):
+-    if skip <= 1:
+-        return data
+-    data2 = [0] * bytes
+-    if not restore:  # deinterleave
+-        ptr = 0
+-        for i in range(skip):
+-            for j in range(i, bytes, skip):
+-                data2[ptr] = data[j]
+-                ptr += 1
+-    else:  # interleave
+-        ptr = 0
+-        for i in range(skip):
+-            for j in range(i, bytes, skip):
+-                data2[j] = data[ptr]
+-                ptr += 1
+-    if block > 0:
+-        # process in chunks of skip * block bytes
+-        pass
+-    return data2
+-```
+-
+-#### Canonical terms optimization
+-**Definition:** An optimization for fields where every term is of the form $w$, $w \cdot a$, or $w \cdot a \cdot b$ (with $a$ even, $b=a+1$), storing them as three weights per field and column to avoid iterating over a term list [S2, unofficial]. Register-form kernels read every shell of a chunk from groupshared memory: centre, cutoff, $l$, AO count, primitives, and rows of $C$ [S2, unofficial]. Chunks packed to at most 256 primitives [S2, unofficial]. Canonical terms (`GTO_ISO_CANON_TERMS`, default 1): When every term of every field is $w \cdot a$, $w \cdot a^2$ or $w \cdot a \cdot b$ with $a$ even and $b = a + 1$ (orbitals, density matrices, products of pairs), the set keeps them as three weights per field and column [S2, unofficial].
+-**Step:** Stage a tile's weights in the epilogue [S2, unofficial]. Each thread applies the staged weights to its own accumulators [S2, unofficial]. Avoid rounds of 64 points over the term list [S2, unofficial]. In the vertex kernel, put a vertex's four channels on neighbouring lanes [S2, unofficial]. Shuffle the value channel to the gradient channels [S2, unofficial]. Accumulate corner values in memory over tiles instead of in registers [S2, unofficial]. Inner loop no longer waits on dependent global loads per shell [S2, unofficial]. Each point skips shells out of its reach [S2, unofficial]. Epilogues stage a tile's weights and every thread processes them [S2, unofficial].
+-**Parameter:** `GTO_ISO_CANON_TERMS`: Boolean flag enabling canonical terms; default value is 1 [S2, unofficial].
+-
+-#### Linear Span Arena
+-**Definition:** A contiguous memory allocator for fixed-size spans (words) that tracks usage with a boolean array to enable fast allocation, deallocation, and reuse [S3, unofficial].
+-**Step:** `alloc` slides `sample_pos` backwards until `pos == 0` or `self.used[pos - 1]` is true to find `candidate_start` [S3, unofficial]. Calculates `candidate_end = candidate_start + span_len` [S3, unofficial]. If `candidate_end` exceeds data length, resets `next_alloc_start` to 0 and breaks [S3, unofficial]. Samples `(sample_pos + 1..candidate_end)` in reverse to verify no used words exist [S3, unofficial]. If free, sets range, updates `next_alloc_start`, and breaks [S3, unofficial]. Marks `self.used[range].fill(true)` and copies `span_data` [S3, unofficial].
+-**Parameter:** `span_len`: length of the span to allocate in words [S3, unofficial]. `next_alloc_start`: tracks the next search position to avoid scanning from zero repeatedly; resets to 0 on wrap-around or after allocation [S3, unofficial].
+-**Layout:** `self.used`: boolean array tracking allocated spans. `self.data`: underlying buffer for span data [S3, unofficial].
+-**Pseudocode:**
+-```python
+-def alloc(self, span_len, span_data):
+-    pos = self.sample_pos
+-    while pos > 0 and not self.used[pos - 1]:
+-        pos -= 1
+-    candidate_start = pos
+-    candidate_end = candidate_start + span_len
+-    if candidate_end > len(self.data):
+-        self.next_alloc_start = 0
+-        return
+-    for k in range(candidate_start, candidate_end):
+-        if self.used[k]:
+-            return
+-    self.used[candidate_start:candidate_end] = [True] * span_len
+-    self.data[candidate_start:candidate_end] = span_data
+-    self.next_alloc_start = candidate_end
+-```
+-**Pitfall:** `populate_raw` rejects partial word data by panicking if `raw_data.len()` is not a multiple of `std::mem::size_of::<VxlData>()` [S3, unofficial].
++### Avalanche Grid Memory Optimization
++- **Definition:** A memory optimization technique for large volume grids (e.g., 1 mile x 1 mile x 1 mile at 6 inches resolution) by not allocating memory to empty voxels [S4, unofficial].
++- **Parameters:**
++    - Data type: 16-bit floats are used for density storage, as they are usually sufficient [S4, unofficial].
++- **Numbers:**
++    - For an Avalanche grid of 1 mile x 1 mile x 1 mile at 6 inches resolution (40,000 x 40,000 x 40,000), the implied memory is > 200 TB/frame, but actual memory usage is around 200 MB/frame due to sparse allocation [S4, unofficial].
+ 
+ ## Background
+-The concept of memory layout optimization for volume rendering originated with the need to overcome the limitations of standard 3D array storage when accessed along arbitrary ray directions [G]. Early work focused on bit-interleaved address generation to improve cache performance in software renderers [S1, unofficial]. Subsequent developments introduced hardware-specific optimizations, such as miniblock organization and bank skewing, to eliminate memory bank conflicts in SDRAM-based rendering systems [S1, unofficial]. More recent approaches have adapted these principles for GPU architectures, including canonical term optimizations for efficient weight application and linear span arenas for dynamic memory management in voxel-based formats [S2, S3, unofficial]. These methods are widely used in high-performance volume rendering systems, particularly in scientific visualization and medical imaging, where large datasets and real-time performance are critical [G].
++Memory layout optimization in volume rendering originated from the need to overcome the limitations of CPU cache hierarchies and early GPU memory controllers. Early dense volume rendering suffered from severe cache thrashing due to the mismatch between 3D traversal patterns and 1D memory storage [S1, unofficial]. The concept of "Memory-Insensitive Rendering" was introduced to handle datasets larger than RAM by treating memory as a bottleneck to be bypassed via external sorting [S1, unofficial]. Hardware-specific optimizations, such as miniblock organization and bank skewing, were developed to exploit the burst capabilities of SDRAM in dedicated rendering hardware [S1638, S1, unofficial]. More recent techniques, such as Volume Interleaving, utilize bit-manipulation to improve spatial locality without changing the fundamental traversal logic [S1, unofficial]. In the context of GPU-based isosurface extraction, canonical term optimization reduces memory bandwidth pressure by restructuring how field terms are stored and accessed [S2, unofficial]. Sparse allocation techniques, as seen in the Avalanche grid example, demonstrate that for highly sparse volumes, avoiding allocation of empty space is the most effective memory optimization [S4, unofficial].
+ 
+ ## Sources
+ [S1] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
+ [S2] md_gto_iso_gpu: optimized GPU isosurface extraction (non-blocking jobs, flood, one measured path), https://github.com/scanberg/mdlib/pull/15, fetched 2026-10-28 (unofficial)
+-[S3] MuffinTastic/rust-voxlap-vxl, https://github.com/MuffinTastic/rust-voxlap-vxl, fetched 2026-10-28 (unofficial)+[S3] MuffinTastic/rust-voxlap-vxl, https://github.com/MuffinTastic/rust-voxlap-vxl, fetched 2026-10-28 (unofficial)
++[S4] PDF Production Volume Rendering - Clemson University, https://jtessen.people.clemson.edu/reports/papers_files/ProdVolRender.pdf, fetched 2026-10-27 (unofficial)

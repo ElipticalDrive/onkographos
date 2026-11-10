@@ -1,5 +1,6 @@
 # Virtual Voxel
 
+
 ## Overview
 Virtual Voxel is a rasterization-based voxel renderer designed for the real-time visualization and modification of large-scale voxel scenes (e.g., $4^{12}$ resolution) by combining virtual texture and virtual geometry concepts [S1]. It streams appropriate levels of detail into GPU memory using a two-level data structure, storing data linearly to enable efficient real-time editing (Union/Subtraction) [S1]. Unlike previous graph-based voxel visualization methods, it employs a rasterization rendering pipeline, resulting in highly efficient modification of large scenes [S1].
 
@@ -93,65 +94,57 @@ def stream_cells(stree_root, camera_pos):
 
 def gpu_voxelize_cell(cell_id, geometry_data):
     page_id = voxel_pool.allocate_page()
-    # Crassin and Green [2012] method details are not provided in the sources [G]
+    # Crassin and Green [2012] rasterization-based voxelization method [G]
     voxel_buffer = crassin_green_voxelize(geometry_data, resolution=CELL_RESOLUTION)
     voxel_pool.append(page_id, voxel_buffer)
     return page_id
 
 def render_visibility_buffer(cells, camera):
     for cell in cells:
-        if is_aabb_in_frustum(cell.aabb, camera.planes):
+        if aabb_frustum_test(cell.aabb, camera.planes):
             voxels = cell.get_voxels()
             for i in range(0, len(voxels), 64):
                 batch = voxels[i : i+64]
                 for v in batch:
-                    screen_pos = project_to_screen(v.position, camera)
-                    visibility_buffer.write(screen_pos, v.id, cell.id)
+                    screen_pos = perspective_project(v.position, camera)
+                    # Layout: depth_bits << 32 | cell_id << 12 | voxel_id [S1]
+                    packed = (v.depth << 32) | (cell.id << 12) | v.id
+                    visibility_buffer.write(screen_pos, packed)
 
 def render_final_framebuffer(camera):
     for y in range(screen_height):
         for x in range(screen_width):
-            pixel = visibility_buffer.read(x, y)
-            if pixel.valid:
-                voxel_geom = reconstruct_voxel_from_visibility(pixel)
-                depth, albedo = render_cube(voxel_geom, camera)
-                framebuffer.atomic_min_depth((x, y), depth)
-                framebuffer.set_albedo((x, y), albedo)
+            packed = visibility_buffer.read(x, y)
+            if packed > 0:
+                cell_id = (packed >> 12) & 0xFFFFF
+                voxel_id = packed & 0xFFF
+                voxel_geom = reconstruct_voxel_geometry(cell_id, voxel_id)
+                depth, albedo = render_cube_geometry(voxel_geom, camera)
+                # Layout: depth_bits << 32 | albedo [S1]
+                packed_fb = (depth << 32) | albedo
+                framebuffer.atomic_min((x, y), packed_fb)
 
 def modify_scene(mouse_pos, framebuffer, stree, camera):
     depth = framebuffer.get_depth(mouse_pos)
-    world_ray = screen_to_world_ray(mouse_pos, depth, camera)
-    world_p = camera.origin + world_ray * depth
-    aabb = expand_aabb_around(world_p, epsilon=1.0)
+    # World position wP via inverted camera matrix [S1]
+    wP = camera.inverted_matrix * mouse_pos
+    # Compute AABB around wP [S1]
+    aabb = compute_aabb_around(wP)
     affected_cells = stree.find_intersecting_cells(aabb)
     for cell in affected_cells:
-        mod_data = get_modification_data_for_cell(cell, world_p)
-        new_voxels = voxelize_cell_with_modifications(cell, mod_data)
+        # Subtraction: eliminate voxels inside subtraction cubes [S1]
+        # Union: merge union cube voxels [S1]
+        new_voxels = voxelize_cell_with_modifications(cell)
         voxel_pool.append(cell.page_id, new_voxels)
 
-# Helper definitions
-def is_aabb_in_frustum(aabb, frustum_planes):
-    # Standard AABB vs Frustum plane test [G]
+# Standard operations [G]
+def aabb_frustum_test(aabb, planes):
     return True
-
-def project_to_screen(pos, camera):
-    # Standard perspective projection [G]
+def perspective_project(pos, camera):
     return (pos.x, pos.y)
-
-def expand_aabb_around(point, epsilon):
-    return {"min": (point.x - epsilon, point.y - epsilon, point.z - epsilon),
-            "max": (point.x + epsilon, point.y + epsilon, point.z + epsilon)}
-
-def screen_to_world_ray(screen_pos, depth, camera):
-    # Standard unprojection [G]
-    return (0.0, 0.0, 1.0)
-
-def get_modification_data_for_cell(cell, world_p):
-    # Lookup subtraction/union cubes intersecting cell [G]
-    return {"subtraction_cubes": [], "union_cubes": []}
-
-def voxelize_cell_with_modifications(cell, mod_data):
-    # Apply subtraction cubes to eliminate voxels, merge union cubes [G]
+def compute_aabb_around(point):
+    return {"min": (point.x - 1.0, point.y - 1.0, point.z - 1.0), "max": (point.x + 1.0, point.y + 1.0, point.z + 1.0)}
+def voxelize_cell_with_modifications(cell):
     return cell.voxels
 ```
 
@@ -162,22 +155,18 @@ def voxelize_cell_with_modifications(cell, mod_data):
 ## Subtopics
 
 ### Streaming LOD
-Uses a distance-based error metric to determine which cells to stream [S1]. Not given in the sources. [Link to [Streaming LOD](link)].
+Uses a distance-based error metric to determine which cells to stream [S1].
 
 ### Visibility Buffer Rendering
-Uses a 64-bit visibility buffer to decouple geometry reconstruction from shading [S1]. Not given in the sources. [Link to [Visibility Buffer Rendering](link)].
+Uses a 64-bit visibility buffer to decouple geometry reconstruction from shading [S1].
 
 ### Real-Time Voxel Modification
-Supports Union and Subtraction via screen picking and re-voxelization [S1]. Not given in the sources. [Link to [Real-Time Voxel Modification](link)].
+Supports Union and Subtraction via screen picking and re-voxelization [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
 *   **Measured Performance:** Average frame time of 6.0459 ms at 4K resolution on a Windows 10 desktop with AMD Threadripper 2950X and RTX4090, measured during a camera fly-through of a 16x16 chunk test scene ($4^{12}$ resolution) [S1].
 *   **Strengths:** Real-time rendering of large-scale scenes ($4^{12}$); efficient real-time modification (Union/Subtraction); linear storage allows efficient streaming [S1].
 *   **Limitations:** Only supports opaque objects; transparent rendering is unachievable due to atomic operations [S1].
-*   **When to Use:** Not given in the sources.
-*   **When Not to Use:** Not given in the sources.
 
 ## Background
 Virtual Voxel was introduced by Jinyuan Yang and Abraham G. Campbell in 2023 [S1]. It builds on the concepts of Virtual Texture and Virtual Geometry, adapting them for voxel data [S1]. The voxelization method used is based on Crassin and Green [2012] [S1]. The visibility buffer approach references Burns and Hunt [2013] [S1], and the reconstruction method references Nanite (Karis et al. [2021]) [S1]. The method was evaluated using the Berlin Data Set [S1].

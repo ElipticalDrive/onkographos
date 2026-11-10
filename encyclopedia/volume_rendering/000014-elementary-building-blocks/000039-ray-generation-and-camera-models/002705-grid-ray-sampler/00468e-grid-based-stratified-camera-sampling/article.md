@@ -1,0 +1,251 @@
+# Grid-based Stratified Camera Sampling
+
+Also called: Grid-based Stratified Sampler, Stratified Scene Sampling
+
+## Overview
+Grid-based Stratified Camera Sampling generates camera rays by uniformly covering the scene volume using a 3D stratified grid for camera positions, combined with random selection of training view orientations [S1, unofficial]. It differs from the parent [Grid Ray Sampler](3930-grid-ray-sampler.md) by explicitly stratifying the *camera position* space across the scene bounds rather than just the pixel grid, and from siblings like [Near-Middle-Far Ray Generation](6817-near-middle-far-ray-generation.md) by decoupling position stratification from view orientation selection.
+
+## How it works
+**Inputs:**
+- `colmap_data`: A dictionary containing camera parameters indexed by view keys, loaded via `joblib.load` [S1, unofficial].
+- `dataset_train`: A collection of training views used to sample camera orientations.
+- `bins`: List of integers defining grid resolution, default `[16, 16, 16]` [S1, unofficial].
+- `min_point`, `max_point`: 3D vectors defining the bounding box of the scene volume [S1, unofficial].
+- `z_near`, `z_far`: Clipping plane distances, default `0.01` and `100.0` [S1, unofficial].
+
+**Outputs:**
+- `sample_state`: Object containing `pos` (camera position), `quat` (camera orientation quaternion), and `center` (principal point) [S1, unofficial].
+- `sample_params`: Object containing `lod` (Level of Detail parameter) [S1, unofficial].
+
+**Data Structures:**
+- `sample_state`:
+  - `pos`: 3D vector (float) [S1, unofficial].
+  - `quat`: 4D vector (float), normalized quaternion [S1, unofficial].
+  - `center`: 2D vector (float), principal point coordinates [S1, unofficial].
+- `sample_params`:
+  - `lod`: Float in range $[0.0, 1.0]$ [S1, unofficial].
+
+**Steps:**
+1. Define the stratified grid resolution `bins` (default `[16, 16, 16]`) [S1, unofficial].
+2. Generate stratified random positions within the scene bounds defined by `min_point` and `max_point` [S1, unofficial].
+3. Iterate over all bin combinations using `itertools.product(range(bins[0]), range(bins[1]), range(bins[2]))` [S1, unofficial].
+4. For each bin, assign the sampled position to `sample_state.pos` [S1, unofficial].
+5. Randomly select a camera index from `dataset_train` to determine orientation [S1, unofficial].
+6. Convert COLMAP camera data to world coordinates using `convert_colmap_camera` [S1, unofficial].
+7. Compute the gaze direction using the camera matrix and principal point:
+   $$ \text{gaze\_dir} = \text{get\_gaze\_dir\_global}(\text{cam\_mat}, \text{proj\_mat}, \text{center}) $$
+   where `center` is `sample_state.center` [S1, unofficial].
+8. Set `sample_state.quat` and `gaze_dir` from the selected camera data [S1, unofficial].
+9. Generate a random LOD value:
+   $$ \text{random\_lod} = \text{uniform}(0.0, 1.0) $$
+   and assign it to `sample_params.lod` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import itertools
+import numpy as np
+import random
+
+def grid_based_stratified_camera_sampling(
+    colmap_data,
+    dataset_train,
+    bins=[16, 16, 16],
+    min_point=np.array([-1.0, -1.0, -1.0]),
+    max_point=np.array([1.0, 1.0, 1.0]),
+    z_near=0.01,
+    z_far=100.0
+):
+    """
+    Generates camera samples using grid-based stratified sampling for positions
+    and random training view selection for orientations.
+    """
+    # Helper: Stratified random sampling within bounds
+    def stratified_random(bounds, bins):
+        """
+        Generates stratified random points within the given bounds.
+        bounds: array of shape (N, 2) where N is dimensionality.
+        bins: list of integers for grid resolution per dimension.
+        Returns: array of shape (N,) with one sample per dimension? 
+        Note: The source implies generating positions for the grid.
+        We assume this returns a single 3D point per bin iteration or 
+        a set of points. Based on 'Iterate over all bin combinations',
+        we likely sample one point per bin.
+        """
+        # Implementation detail: For each dimension, divide range into bins
+        # and pick a random point within each bin.
+        # However, the source says "Generate stratified random positions... 
+        # Iterate over all bin combinations". This suggests we might be 
+        # sampling one point per bin in the 3D grid.
+        # Let's assume we generate one sample per bin.
+        samples = []
+        for i in range(bins[0]):
+            for j in range(bins[1]):
+                for k in range(bins[2]):
+                    # Sample within each bin
+                    x = min_point[0] + (max_point[0] - min_point[0]) * (i + random.random()) / bins[0]
+                    y = min_point[1] + (max_point[1] - min_point[1]) * (j + random.random()) / bins[1]
+                    z = min_point[2] + (max_point[2] - min_point[2]) * (k + random.random()) / bins[2]
+                    samples.append(np.array([x, y, z]))
+        return samples
+
+    # Generate all stratified positions
+    positions = stratified_random(np.stack((min_point, max_point), axis=1), bins)
+    
+    # Iterate over all bin combinations
+    # Note: The source says "Iterate over all bin combinations... Assign the sampled position".
+    # This implies we process each bin's sample.
+    for i, j, k in itertools.product(range(bins[0]), range(bins[1]), range(bins[2])):
+        sample_state = type('SampleState', (), {})()
+        sample_params = type('SampleParams', (), {})()
+        
+        # Assign sampled position
+        # The index in positions corresponds to the bin combination
+        idx = i * bins[1] * bins[2] + j * bins[2] + k
+        sample_state.pos = positions[idx]
+        
+        # Randomly select a camera index from training data
+        camera_index = np.random.randint(len(dataset_train))
+        
+        # Get camera data
+        # Assuming dataset_train is indexed or we access colmap_data by key
+        # The source says "Convert COLMAP camera data... using convert_colmap_camera"
+        # and "camera_index = np.random.randint(len(dataset_train))"
+        # We assume dataset_train provides keys or indices into colmap_data
+        # For simplicity, we assume we can get camera data by index
+        # In practice, this might involve mapping index to a key in colmap_data
+        # Since the source doesn't specify the mapping, we assume direct access or a list
+        # Let's assume dataset_train is a list of keys or indices
+        # If dataset_train is a list of keys:
+        if isinstance(dataset_train, list):
+            key = dataset_train[camera_index]
+            camera_data = colmap_data[key]
+        else:
+            # Fallback: assume dataset_train is a list of indices into colmap_data values
+            # This is ambiguous. We'll assume we can get camera data directly.
+            # The source says "camera_index = np.random.randint(len(dataset_train))"
+            # and then "Convert COLMAP camera data...".
+            # We'll assume we have a function to get camera data by index
+            camera_data = get_camera_data_by_index(camera_index, colmap_data)
+            
+        # Convert COLMAP camera data to world coordinates
+        # This function is assumed to exist and handle the conversion
+        # It likely returns a dictionary with 'cam_mat', 'proj_mat', etc.
+        # The source mentions 'convert_colmap_camera'
+        # We'll assume it returns the necessary matrices
+        # Note: The source says "convert_colmap_camera" but then uses "camera_data"
+        # We assume camera_data is the result of this conversion or contains the matrices
+        
+        # Compute gaze direction
+        # get_gaze_dir_global takes cam_mat, proj_mat, and center
+        # sample_state.center is assumed to be set or derived
+        # The source says "np.array([sample_state.center[0].x, sample_state.center[0].y])"
+        # This implies sample_state.center is a list or array of points, and we take the first one's x,y
+        # For simplicity, we assume center is a 2D point [x, y]
+        # If sample_state.center is not set, we might use a default or derive it
+        # The source doesn't specify how center is set. We'll assume it's part of the camera data
+        # or derived from the camera matrix.
+        # Let's assume center is [0.5, 0.5] in normalized coordinates or derived from cam_mat
+        # The source says "sample_state.center[0].x", which is complex.
+        # We'll simplify: assume center is a 2D vector.
+        # If the source implies a specific structure, we might need to adjust.
+        # For now, we'll assume center is available in camera_data or sample_state
+        # The source says "sample_state.center" is used in get_gaze_dir_global
+        # We'll assume it's set before this step or derived.
+        # Let's assume center is [0.5, 0.5] for simplicity if not provided
+        center = np.array([0.5, 0.5]) # Placeholder if not provided
+        
+        gaze_dir = get_gaze_dir_global(
+            camera_data["cam_mat"], 
+            camera_data["proj_mat"], 
+            center
+        )
+        
+        # Set sample_state.quat and gaze_dir
+        # The source says "Set sample_state.quat and gaze_dir from the selected camera data"
+        # We assume camera_data contains the quaternion or we compute it from cam_mat
+        # For simplicity, we'll assume we can get quat from camera_data
+        # If not, we might need to convert cam_mat to quat
+        # The source doesn't specify. We'll assume quat is available
+        sample_state.quat = camera_data.get("quat", compute_quat_from_cam_mat(camera_data["cam_mat"]))
+        sample_state.gaze_dir = gaze_dir
+        
+        # Assign random LOD values
+        random_lod = random.uniform(0.0, 1.0)
+        sample_params.lod = random_lod
+        
+        # Return or yield the sample
+        # The source doesn't specify if we return all samples or one at a time
+        # We'll assume we return one sample per iteration
+        yield sample_state, sample_params
+
+def get_camera_data_by_index(index, colmap_data):
+    """
+    Helper to get camera data by index.
+    Assumes colmap_data is a dictionary and we have a way to map index to key.
+    This is a placeholder for the actual implementation.
+    """
+    # This is ambiguous in the source. We'll assume a simple mapping.
+    # In practice, this might involve a list of keys.
+    keys = list(colmap_data.keys())
+    if index < len(keys):
+        return colmap_data[keys[index]]
+    else:
+        raise IndexError("Camera index out of range")
+
+def compute_quat_from_cam_mat(cam_mat):
+    """
+    Helper to compute quaternion from camera matrix.
+    This is a placeholder. The actual implementation depends on the camera model.
+    """
+    # This is a complex operation. We'll assume a simple rotation matrix extraction.
+    # For now, return a default identity quaternion.
+    return np.array([0.0, 0.0, 0.0, 1.0])
+
+def get_gaze_dir_global(cam_mat, proj_mat, center):
+    """
+    Compute gaze direction from camera matrix and principal point.
+    This is a placeholder. The actual implementation depends on the camera model.
+    """
+    # For simplicity, assume gaze direction is along the z-axis in camera coordinates
+    # and transform to world coordinates.
+    # This is a simplification.
+    return np.array([0.0, 0.0, 1.0])
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating-point precision in coordinate transformations may affect ray accuracy [G].
+- **Boundaries:** Ensure `min_point` and `max_point` correctly enclose the scene volume to avoid sampling outside the region of interest [G].
+- **Degenerate Input:** If `dataset_train` is empty, camera orientation selection will fail [G].
+- **Camera Data Structure:** The structure of `colmap_data` and `dataset_train` must be consistent with the assumptions in the pseudocode [G].
+
+## Subtopics
+
+### [Ray Sampling and Neural Rendering Pipeline](4255-ray-sampling-and-neural-rendering-pipeline.md)
+A broader pipeline context.
+
+### [Near-Middle-Far Ray Generation](6817-near-middle-far-ray-generation.md)
+Uses fixed depth planes for ray generation.
+
+### [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md)
+Uses probability density functions for importance sampling.
+
+### [Near-Far Linear Ray Generation](6841-near-far-linear-ray-generation.md)
+Linearly interpolates between near and far planes.
+
+## Operating characteristics
+- **Time Complexity:** $O(B_0 \cdot B_1 \cdot B_2)$ where $B_i$ are the bin dimensions, due to iterating over all bin combinations [S1, unofficial].
+- **Memory Complexity:** $O(B_0 \cdot B_1 \cdot B_2)$ to store the stratified positions [S1, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with the number of bins [S1, unofficial].
+- **Strengths:** Uniform coverage of the scene volume for camera positions [S1, unofficial].
+- **Limitations:** May not adapt to scene complexity or importance [G].
+- **When to use:** When uniform coverage of camera positions is desired [S1, unofficial].
+- **When not to use:** When importance sampling based on scene content is needed [G].
+
+## Background
+Originating from the CLOD-3DGS project by Facebook Research, this method was introduced in an unofficial repository [S1, unofficial]. It is used in the context of 3D Gaussian Splatting training to generate diverse camera views for rendering [S1, unofficial].
+
+## Sources
+[S1] facebookresearch/CLOD-3DGS, https://github.com/facebookresearch/CLOD-3DGS, fetched 2026-10-27 (unofficial)

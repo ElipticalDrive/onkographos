@@ -1,0 +1,160 @@
+# Iterative Alignment Strategy
+Also called: Misalignment Correction via Optical Flow
+## Overview
+An iterative data alignment method that corrects geometric misalignments in training and testing datasets caused by inaccurate camera poses or non-rigid motion. It generates better-aligned ground truth images by warping them to match the geometry estimated by a NeRF model, thereby improving reconstruction quality and preventing biased evaluation metrics. It is distinct from the primary BARF optimization algorithm; it serves as a preprocessing or analysis step to demonstrate the impact of misalignment rather than as the core learning mechanism.
+
+## How it works
+**Inputs:**
+- A set of ground truth images $I_{gt}$ with known (potentially erroneous) camera poses.
+- A pre-trained or partially trained NeRF model (e.g., mip-NeRF 360) capable of rendering images $I_{render}$ from the given poses.
+- An optical flow estimator (specifically PWC-Net [S1]).
+
+**Outputs:**
+- A new set of warped ground truth images $I_{warped}$ that are geometrically aligned with the NeRF's estimated geometry.
+- Optionally, a warped test set for unbiased evaluation.
+
+**Data Structures:**
+- Images are treated as 2D arrays of pixel values.
+- Optical flow fields are 2D vectors $(u, v)$ per pixel, representing displacement from source to target.
+
+**Steps:**
+1. **Render:** Use the current NeRF model to render images $I_{render}$ for all training views using their associated camera poses.
+2. **Estimate Flow:** Calculate the optical flow field $F$ from the rendered views $I_{render}$ to the ground truth views $I_{gt}$ using PWC-Net.
+   - Note: This direction (rendered to ground truth) is used to determine how to warp the ground truth to match the rendered geometry.
+3. **Warp:** Warp the ground truth images $I_{gt}$ using the estimated optical flow $F$ to produce aligned images $I_{warped}$.
+   - The warping operation maps each pixel in $I_{gt}$ to its corresponding location in $I_{render}$ based on $F$.
+4. **Iterate:** Repeat steps 1-3 for 2-3 iterations.
+   - Each iteration uses the updated NeRF model (trained on the previously warped data) to generate sharper rendered images, which in turn yields more accurate optical flow in the next round.
+   - The process typically converges to best quality after 2-3 iterations.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def iterative_alignment_strategy(ground_truth_images, camera_poses, nerf_model, flow_estimator, num_iterations=3):
+    """
+    Iteratively aligns ground truth images to NeRF geometry using optical flow.
+    
+    Args:
+        ground_truth_images: List of original ground truth images.
+        camera_poses: List of camera poses corresponding to the images.
+        nerf_model: A NeRF model instance with a render method.
+        flow_estimator: PWC-Net instance for optical flow estimation.
+        num_iterations: Number of alignment iterations (typically 2-3).
+        
+    Returns:
+        warped_images: List of aligned ground truth images.
+    """
+    current_images = ground_truth_images
+    
+    for i in range(num_iterations):
+        # Step 1: Render images from current NeRF model
+        rendered_images = []
+        for img, pose in zip(current_images, camera_poses):
+            # Render using the NeRF model and the specific pose
+            rendered_img = nerf_model.render(pose)
+            rendered_images.append(rendered_img)
+        
+        # Step 2: Estimate optical flow from rendered to ground truth
+        # PWC-Net computes flow from source (rendered) to target (ground truth)
+        flow_fields = []
+        for rendered_img, gt_img in zip(rendered_images, current_images):
+            # Estimate flow F such that warping gt_img by F aligns it with rendered_img
+            # Note: The source paper describes calculating flow from rendered to ground truth
+            # to warp ground truth. The exact direction depends on the warping implementation.
+            # Assuming flow_estimator(src, dst) returns flow from src to dst.
+            # To warp dst (gt) to match src (rendered), we need flow from dst to src?
+            # The paper says: "calculate the flow from the rendered views to the ground truth views"
+            # and "warp the ground truth images using these estimated optical flows".
+            # This implies the flow field describes displacement of GT pixels to match Rendered pixels.
+            flow = flow_estimator(rendered_img, gt_img)
+            flow_fields.append(flow)
+        
+        # Step 3: Warp ground truth images using the flow
+        warped_images = []
+        for gt_img, flow in zip(current_images, flow_fields):
+            # Warp gt_img using flow to align with rendered geometry
+            warped_img = warp_image(gt_img, flow)
+            warped_images.append(warped_img)
+        
+        # Update current images for next iteration
+        current_images = warped_images
+        
+        # Note: The NeRF model is retrained on the warped_images between iterations
+        # in the full pipeline, but this function focuses on the alignment generation.
+        # In practice, nerf_model.train(warped_images, camera_poses) would be called here.
+    
+    return current_images
+
+def warp_image(image, flow_field):
+    """
+    Warps an image using a flow field.
+    For each pixel (x, y) in the output image, sample from the input image
+    at location (x + flow_u, y + flow_v).
+    """
+    # Implementation detail: Standard bilinear sampling with flow offsets.
+    # Not given in sources, marked as [G].
+    output_image = zeros_like(image)
+    h, w = image.shape[:2]
+    for y in range(h):
+        for x in range(w):
+            # Get flow offset for this pixel
+            u, v = flow_field[y, x]
+            # Calculate source coordinates
+            src_x = x + u
+            src_y = y + v
+            # Sample from original image (handling boundaries)
+            output_image[y, x] = bilinear_sample(image, src_x, src_y)
+    return output_image
+
+def bilinear_sample(image, x, y):
+    """
+    Bilinear interpolation sample at non-integer coordinates.
+    """
+    # Standard bilinear interpolation logic [G]
+    x0, y0 = floor(x), floor(y)
+    x1, y1 = x0 + 1, y0 + 1
+    dx, dy = x - x0, y - y0
+    
+    # Clamp coordinates to image bounds
+    x0 = max(0, min(x0, image.shape[1] - 1))
+    x1 = max(0, min(x1, image.shape[1] - 1))
+    y0 = max(0, min(y0, image.shape[0] - 1))
+    y1 = max(0, min(y1, image.shape[0] - 1))
+    
+    top = lerp(image[y0, x0], image[y0, x1], dx)
+    bottom = lerp(image[y1, x0], image[y1, x1], dx)
+    return lerp(top, bottom, dy)
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+```
+
+**Parameters:**
+- `num_iterations`: Typically 2-3. More iterations yield sharper images and better flow accuracy, but diminishing returns are observed after 3.
+- `flow_estimator`: PWC-Net is specified. RAFT was considered but rejected due to memory constraints.
+
+**Edge Cases and Pitfalls:**
+- **Memory Constraints:** PWC-Net may run out of memory on high-resolution images. RAFT [S1] was also rejected for the same reason.
+- **Blurry Inputs:** NeRF-rendered images are often blurry due to initial misalignment, violating the general optical flow assumption of sharp paired inputs. However, PWC-Net produces reasonable results based on global structures and shapes.
+- **Evaluation Bias:** Using misaligned test sets can lead to biased conclusions. The strategy generates a warped test set using the highest quality model (e.g., mip-NeRF 360 with 4096 channels) to ensure fair comparison.
+
+## Subtopics
+
+### [Non-Rigid Refinement](11817-non-rigid-refinement.md)
+An iterative optical flow network that refines alignment between neighbouring images and the novel view in feature space to handle domain gaps and misalignments.
+
+## Operating characteristics
+- **Time Complexity:** The method is iterative, requiring multiple passes of rendering and optical flow estimation. Each iteration involves a full forward pass of the NeRF for all training views and a forward pass of PWC-Net for all image pairs.
+- **Memory Complexity:** High, due to the memory requirements of PWC-Net on high-resolution images. This limits the resolution of images that can be processed.
+- **Performance:** Improves PSNR significantly (e.g., +0.62dB for 4096-channel mip-NeRF 360 on warped test set) and SSIM/LPIPS metrics. Smaller models (1024 channels) also see improvement (+0.23dB PSNR), though less pronounced.
+- **Strengths:** Effectively mitigates bias from misaligned data; leverages the self-improving nature of NeRF rendering quality to refine flow accuracy.
+- **Limitations:** Computationally expensive; requires a pre-trained NeRF model; not a substitute for pose optimization (like BARF's loss function) but a complementary data alignment technique.
+- **When to Use:** When camera poses are inaccurate or non-rigid motion is present, and high-fidelity reconstruction is required. Particularly useful for analysis and generating unbiased test sets.
+- **When Not to Use:** When computational resources are limited (due to PWC-Net memory usage) or when real-time performance is critical.
+
+## Background
+The Iterative Alignment Strategy was introduced in the AligNeRF paper [S1] (2023) as a method to address the misalignment issue in Neural Radiance Fields. It was developed to demonstrate the impact of misalignment on reconstruction quality and to provide a fair evaluation metric by generating aligned test sets. The strategy builds on the observation that NeRF-rendered images are blurry due to misalignment, which hinders standard optical flow estimation, but that iterative refinement can overcome this.
+
+## Sources
+[S1] AligNeRF: High-Fidelity Neural Radiance Fields via Alignment-Aware Training, https://doi.org/10.1109/cvpr52729.2023.00013, fetched 2026-10-26

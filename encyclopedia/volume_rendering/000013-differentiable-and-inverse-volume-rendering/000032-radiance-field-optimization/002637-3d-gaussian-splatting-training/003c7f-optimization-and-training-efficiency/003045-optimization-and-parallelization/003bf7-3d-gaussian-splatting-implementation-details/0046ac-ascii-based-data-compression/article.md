@@ -1,0 +1,149 @@
+# ASCII-Based Data Compression
+Also called: Anywhere Compression, Base 94 Floating-Point Compression, Base 95 Integer Compression
+
+## Overview
+This method accelerates data transmission during the training of 3D Gaussian Splatting models by compressing floating-point and integer values into ASCII strings [S1, unofficial]. It distinguishes itself from sibling methods by targeting the I/O bottleneck of training speed rather than rendering quality or memory footprint, achieving approximately 6% training speed improvement [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Floating-point numbers (e.g., Gaussian parameters, color values) and integers.
+*   **Output:** ASCII strings representing the compressed data.
+
+**Data Structures:**
+*   **Integer Encoding:** Maps integers in range $[0, 95]$ to a single ASCII character.
+*   **Floating-Point Encoding:** Maps the integer component to a single ASCII character (range $[0, 94]$) and uses a separator character for the fractional part.
+*   **Color Matrix Optimization:** Color values are truncated to one decimal place in the range $[0.0, 2.0]$, resulting in 21 discrete values, before ASCII compression [S1, unofficial].
+
+**Steps:**
+
+1.  **Integer Compression:**
+    *   Select ASCII characters with codes 32 to 126.
+    *   Map an integer $n \in [0, 95]$ to the character at index $n$ within this range.
+    *   Formula: $c = \text{chr}(n + 32)$ [S1, unofficial].
+
+2.  **Floating-Point Compression:**
+    *   Separate the floating-point number $f$ into integer part $I$ and decimal places $d$.
+    *   Encode $I$ (range $[0, 94]$) using ASCII characters 32 to 125.
+    *   Use ASCII character 126 (`~`) as a separator between the integer and fractional parts.
+    *   Formula: $s = \text{chr}(I + 32) + \text{'~'} + \text{str}(d)$ [S1, unofficial].
+    *   *Note:* The source specifies encoding the integer component in base 94, but the fractional part is stored as a string of decimal places $d$. The exact encoding of $d$ is not specified beyond being part of the string [S1, unofficial].
+
+3.  **Decoding Integer:**
+    *   Convert the ASCII character directly back to the decimal integer.
+    *   Formula: $n = \text{ord}(c) - 32$ [S1, unofficial].
+
+4.  **Decoding Floating-Point:**
+    *   Split the ASCII string at the separator `~` (ASCII 126).
+    *   Let the left part be the integer character $c_I$ and the right part be the decimal string $s_d$.
+    *   Decode $I = \text{ord}(c_I) - 32$.
+    *   Parse $s_d$ as an integer $D$.
+    *   Calculate final value: $f = I \times 10^{-D}$ [S1, unofficial].
+
+5.  **Color Matrix Optimization:**
+    *   Truncate each color matrix item to one decimal place, restricting values to $[0.0, 2.0]$.
+    *   This results in 21 possible values per channel.
+    *   Apply ASCII compression to these truncated values [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compress_integer(n: int) -> str:
+    """Compress integer [0, 95] to ASCII char [32, 126]."""
+    if not (0 <= n <= 95):
+        raise ValueError("Integer out of range [0, 95]")
+    return chr(n + 32)
+
+def decompress_integer(c: str) -> int:
+    """Decompress ASCII char [32, 126] to integer [0, 95]."""
+    return ord(c) - 32
+
+def compress_float(f: float) -> str:
+    """
+    Compress float to ASCII string.
+    Integer part I in [0, 94] encoded as char [32, 125].
+    Separator is ASCII 126 ('~').
+    Fractional part is stored as string of decimal digits.
+    """
+    # Extract integer part
+    I = int(f)
+    if not (0 <= I <= 94):
+        raise ValueError("Integer part out of range [0, 94]")
+    
+    # Extract fractional part as string of digits
+    # Note: Source does not specify precision or handling of negative numbers.
+    # Assuming positive numbers and standard decimal representation.
+    f_str = f"{f:.10f}" # Arbitrary precision for demonstration
+    if '.' in f_str:
+        integer_part, decimal_part = f_str.split('.')
+        # Remove leading zeros from decimal part for efficiency? 
+        # Source says "decimal places d", implying the count or value.
+        # Formula f = I * 10^-d suggests d is the number of decimal places?
+        # Or d is the integer value of the decimal part?
+        # "split into two part... integer part I... decimal places d... f = I * 10^-d"
+        # This formula implies d is the number of decimal places, not the value.
+        # However, "ASCII string for the decimal places d" suggests d is encoded.
+        # If d is the count, it's a single digit. If d is the value, it's multi-digit.
+        # Given "base 94" for integer part, and separator, let's assume d is the integer value of the fractional part.
+        # But the formula f = I * 10^-d is mathematically incorrect for standard floats 
+        # unless d represents the magnitude of the fractional part relative to 1.
+        # Example: f=1.23. I=1. d=23? f = 1 * 10^-23 != 1.23.
+        # Example: f=1.23. I=1. d=2? f = 1 * 10^-2 = 0.01 != 1.23.
+        # The source formula f = I * 10^-d is likely a typo or specific to a normalized representation.
+        # Standard interpretation: f = I + fractional.
+        # Let's stick to the source's explicit formula and structure:
+        # "split... integer part I... decimal places d... f = I * 10^-d"
+        # This implies the floating point number is represented as I * 10^-d.
+        # This is a very lossy or specific representation.
+        # Let's assume d is the number of decimal places for the fractional part?
+        # No, "ASCII string for the decimal places d".
+        # Let's assume the source meant f = I + d * 10^-k where k is length of d?
+        # Or f = I + d / 10^len(d)?
+        # Given the ambiguity, we implement the literal string split and the literal formula provided.
+        d_val = int(decimal_part)
+        # The source formula is f = I * 10^-d. This is likely an error in the source paper.
+        # However, for implementation, we must follow the source.
+        # We will store d as the integer value of the decimal part.
+        return chr(I + 32) + '~' + str(d_val)
+    else:
+        return chr(I + 32) + '~' + '0'
+
+def decompress_float(s: str) -> float:
+    """
+    Decompress ASCII string to float.
+    """
+    if '~' not in s:
+        raise ValueError("Invalid format")
+    c_I, d_str = s.split('~', 1)
+    I = ord(c_I) - 32
+    d = int(d_str)
+    # Source formula: f = I * 10^-d
+    # This formula is mathematically suspect for general floats.
+    # Example: I=1, d=23 -> f = 1e-23.
+    # If the intent was f = I + d * 10^-len(d), it would be different.
+    # We implement the source formula exactly.
+    return I * (10 ** -d)
+```
+
+**Parameters:**
+*   **Integer Range:** $[0, 95]$ [S1, unofficial].
+*   **Floating-Point Integer Component Range:** $[0, 94]$ [S1, unofficial].
+*   **Color Precision:** One decimal place, range $[0.0, 2.0]$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Color Matrix Traversal:** Compressing large color matrices is slow due to traversal time. Using `torch::where` and `torch::index_select` improves speed but is not sufficient for full replacement [S1, unofficial].
+*   **Line Breaks:** Using line break characters adds overhead in writing and decoding [S1, unofficial].
+*   **Formula Ambiguity:** The decoding formula $f = I \times 10^{-d}$ is ambiguous for standard floating-point representation. It may imply a specific normalization or is an error in the source [S1, unofficial].
+
+## Operating characteristics
+*   **Training Speed:** Improves training speed by approximately 6% or less [S1, unofficial].
+*   **Data Size:** Significantly reduces color matrix data size by truncating to one decimal place and using ASCII compression [S1, unofficial].
+*   **Limitations:** Not fast enough to fully replace standard data transmission for large matrices without additional optimization [S1, unofficial].
+*   **Rendering Quality:** No explicit impact on final rendering results when color matrix is truncated to one decimal place [S1, unofficial].
+
+## Background
+This method was proposed in the context of improving 3D Gaussian Splatting training speed. It is part of the "I3DGS" (Improve 3D Gaussian Splatting from Multiple Dimensions) research, which explores various optimizations including color, learning, structure, and compression [S1, unofficial].
+
+## Sources
+[S1] I3DGS: Improve 3D Gaussian Splatting from Multiple Dimensions, https://arxiv.org/abs/2405.06408v1, fetched 2026-10-26 (unofficial)

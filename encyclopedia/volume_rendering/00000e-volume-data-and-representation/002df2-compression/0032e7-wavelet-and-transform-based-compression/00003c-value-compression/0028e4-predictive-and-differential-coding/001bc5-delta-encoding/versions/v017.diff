@@ -1,0 +1,210 @@
+--- v016.md
++++ v017.md
+@@ -1,117 +1,88 @@
+ # Delta Encoding
+ 
+-Also called: DPCM, Differential pulse-code modulation, Heightfield Compression, Temporal prediction
++Also called: Differential pulse-code modulation, Heightfield Compression, Temporal prediction
+ 
+ ## Overview
+-Delta encoding (or Differential Pulse-Code Modulation, DPCM) predicts a current sample value based on previously processed neighbors or reference frames, computes the residual (difference) between the actual and predicted values, and encodes this residual [S1][S2, unofficial][S3]. It solves the problem of high redundancy in spatially or temporally coherent data by transforming the signal into a residual with a smaller dynamic range and higher probability of zero values, which is more efficiently compressed by entropy coding [S1][S2, unofficial][S3]. Unlike sibling methods that may use complex linear combinations or transform-domain residuals, standard delta encoding typically relies on simple causal predictors (e.g., previous value or heightfield base), making it computationally trivial but potentially limiting for random access [S1].
++Delta encoding is a predictive compression method that exploits temporal or spatial coherence by storing the difference (residual) between a predicted value and the actual value, rather than the absolute value itself [S1]. It is primarily used for time-varying volume data where voxel values exhibit high correlation between consecutive time steps, or for heightfields where values vary progressively [S1][S2, unofficial]. Unlike sibling methods that may use complex linear predictors or transform-domain residuals, delta encoding typically relies on the simplest prediction model: the previous value (temporal) or a base value (spatial/block) [S1][S2, unofficial]. Its key limitation is that it prevents random access to specific time steps or spatial locations without decompressing preceding data, unless absolute reference values are stored alongside the deltas [S1].
+ 
+ ## How it works
+-**Inputs:** A sequence of voxel values $V_t$ (where $t$ denotes time step or spatial scan order) and a prediction model.
+-**Outputs:** A stream of delta values (residuals) $R_t$, ready for entropy coding.
++**Inputs and Outputs:**
++*   **Input:** A sequence of volume data frames (time-varying) or a heightfield grid. Let $V_t(x,y,z)$ be the voxel value at position $(x,y,z)$ in time step $t$.
++*   **Output:** A stream of delta values (residuals) $R_t(x,y,z)$, which are subsequently entropy-coded.
+ 
+ **Data Structures:**
+-*   **Input Buffer:** Array of original values $V$.
+-*   **Prediction Buffer:** Array of previously decoded/predicted values $V_{pred}$ or $V_{prev}$.
+-*   **Output Buffer:** Array of residuals $R$.
++*   **Original Data:** $V_t$ (full precision, e.g., 16-bit or 32-bit integers/floats).
++*   **Predicted Data:** $V_{pred}$ (same precision as $V_t$).
++*   **Residual Data:** $R_t = V_t - V_{pred}$ (typically smaller dynamic range than $V_t$, allowing for reduced bit-depth or efficient entropy coding).
+ 
+-**Numbered Steps:**
+-1.  **Prediction:** Estimate the current value $V_{pred}$ using the prediction model $f$. For temporal data, $V_{pred} = V_{t-1}$ [S1]. For spatial heightfields, $V_{pred}$ may be the minimum value of the current block or a linear combination of neighbors [S2, unofficial][S3].
+-2.  **Residual Calculation:** Compute the difference $R_t = V_t - V_{pred}$ [S1][S2, unofficial][S3].
+-3.  **Storage:** Store $R_t$ in the output stream [S1].
+-4.  **Decompression (GPU/CPU):** To reconstruct, add the stored delta $R_t$ to the existing/predicted value $V_{pred}$ rather than overwriting it [S1].
++**Prediction Model:**
++For time-varying data, the prediction model assumes the voxel value does not change between time steps [S1]:
++$$ V_{pred}(x,y,z) = V_{t-1}(x,y,z) $$
++For heightfields, the prediction may use a block base value (e.g., minimum height in a block) [S2, unofficial].
+ 
+-**Formulas:**
+-*   Prediction: $V_{pred} = f(V_{neighbors})$
+-*   Residual: $R = V - V_{pred}$
+-*   Reconstruction: $V_{rec} = V_{pred} + R$
+-
+-**Parameters:**
+-*   **Prediction Model:** Simple temporal ($V_{t-1}$) or spatial (block minimum, parallelogram) [S1][S3].
+-*   **Bit Depth:** Original values are often uniformly quantized (e.g., 16 bits) before encoding [S3]. Residuals may use reduced bit-depths if the range is small [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Random Access Limitation:** Standard delta encoding prevents jumping to a specific time step or spatial location because all previous values must be decoded to reconstruct the current one [S1][S2, unofficial]. This limits use in real-time visualization requiring efficient queries [S2, unofficial].
+-*   **Mitigation:** Save absolute values in addition to delta values and load them on demand, increasing storage cost [S1].
+-*   **Precision:** Ensure that the residual calculation does not overflow the target bit depth. If residuals are quantized, closed-loop decoding (using reconstructed values for prediction) prevents error accumulation [S1][S2, unofficial][S3].
++**Steps:**
++1.  **Prediction:** For each voxel in the current time step $t$, calculate the predicted value $V_{pred}$ using the previous time step's value $V_{t-1}$ [S1].
++2.  **Residual Calculation:** Compute the delta (residual) $R_t$ as the difference between the actual value and the predicted value:
++    $$ R_t(x,y,z) = V_t(x,y,z) - V_{pred}(x,y,z) $$
++3.  **Storage/Encoding:** Store or entropy-code the residual values $R_t$ [S1].
++    *   If regions do not change between time steps, $R_t$ will be zero, creating uniform bricks that compress efficiently with variable-length coding [S1].
++    *   The distribution of $R_t$ is typically non-uniform and has a smaller range than $V_t$, allowing for further compression [S1].
++4.  **Decompression (GPU/CPU):**
++    *   Decode the residuals $R_t$.
++    *   Reconstruct the current volume by adding the decoded residual to the previously reconstructed (or original, depending on loop type) value:
++        $$ V_{rec}(x,y,z) = V_{pred}(x,y,z) + R_t(x,y,z) $$
++    *   On GPU, this is implemented by adding the calculated delta to the existing value in the volume buffer instead of overwriting it [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def delta_encode(values, prediction_model='temporal'):
++def delta_encode_time_varying(volume_prev, volume_curr):
+     """
+-    Encodes a sequence of values using delta encoding.
++    Encodes time-varying volume data using delta encoding.
++    volume_prev: 3D array of values at time t-1
++    volume_curr: 3D array of values at time t
++    Returns: 3D array of delta values
++    """
++    # Initialize delta array with same shape and dtype as volume_curr
++    deltas = empty_like(volume_curr)
+     
+-    Args:
+-        values: List of original voxel values.
+-        prediction_model: 'temporal' for time-varying data, 
+-                          'block_min' for heightfields (simplified).
+-                          
+-    Returns:
+-        List of delta values.
+-    """
+-    deltas = []
+-    prev_value = None
+-    
+-    for i, v in enumerate(values):
+-        if prediction_model == 'temporal':
+-            if i == 0:
+-                # First value must be stored as absolute or handled specially
+-                # For simplicity, assume first value is stored as-is or 
+-                # a reference frame exists. Here we store delta from 0.
+-                pred = 0 
+-            else:
+-                pred = prev_value
+-        elif prediction_model == 'block_min':
+-            # Simplified block-based: assume 'values' is a single block
+-            # In practice, block_min is computed over the block first.
+-            # This step assumes 'pred' is the block minimum.
+-            # Note: This requires two passes or pre-computation.
+-            pred = min(values) # Placeholder for block minimum logic
+-        
+-        delta = v - pred
+-        deltas.append(delta)
+-        prev_value = v # Use original value for open-loop prediction
+-        
++    # Calculate residuals
++    for x in range(volume_curr.shape[0]):
++        for y in range(volume_curr.shape[1]):
++            for z in range(volume_curr.shape[2]):
++                # Prediction: assume no change
++                predicted = volume_prev[x, y, z]
++                # Residual
++                deltas[x, y, z] = volume_curr[x, y, z] - predicted
++                
+     return deltas
+ 
+-def delta_decode(deltas, prediction_model='temporal'):
++def delta_decode_time_varying(volume_prev_reconstructed, deltas):
+     """
+-    Decodes delta values back to original values.
++    Decodes time-varying volume data using delta encoding.
++    volume_prev_reconstructed: 3D array of reconstructed values at time t-1
++    deltas: 3D array of decoded delta values
++    Returns: 3D array of reconstructed values at time t
++    """
++    # Initialize reconstructed array
++    volume_curr_reconstructed = empty_like(deltas)
+     
+-    Args:
+-        deltas: List of delta values.
+-        prediction_model: 'temporal' or 'block_min'.
+-        
+-    Returns:
+-        List of reconstructed values.
+-    """
+-    reconstructed = []
+-    prev_value = None
+-    
+-    for i, d in enumerate(deltas):
+-        if prediction_model == 'temporal':
+-            if i == 0:
+-                # Reconstruct first value
+-                # If first delta was from 0, then v = d
+-                # If first value was stored absolute, this logic differs.
+-                # Assuming standard DPCM where first value is absolute or delta from 0:
+-                pred = 0
+-            else:
+-                pred = prev_value
+-        elif prediction_model == 'block_min':
+-            # For block-based, the base value is known from the block header
+-            # This simplified version assumes the base is added to all deltas
+-            # or that the first delta is absolute.
+-            # Standard block delta: v = base + delta
+-            # Here we assume 'deltas' are relative to a known base 'B'.
+-            # Since 'B' is not passed, we assume the first delta is absolute 
+-            # or the base is implicitly 0 for this generic function.
+-            pred = 0 # Placeholder for block base value
+-            
+-        v = pred + d
+-        reconstructed.append(v)
+-        prev_value = v
+-        
+-    return reconstructed
++    # Reconstruct values
++    for x in range(deltas.shape[0]):
++        for y in range(deltas.shape[1]):
++            for z in range(deltas.shape[2]):
++                # Add delta to previous reconstructed value
++                volume_curr_reconstructed[x, y, z] = volume_prev_reconstructed[x, y, z] + deltas[x, y, z]
++                
++    return volume_curr_reconstructed
+ ```
++
++**Parameters:**
++*   **Bit-depth of Residuals:** Not explicitly defined in sources, but implied to be reduced compared to original data due to smaller dynamic range [S1].
++*   **Block Size (for Heightfields):** Equal-sized blocks (e.g., $m \times n$) used to partition heightfields for independent compression [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Random Access:** Delta encoding prevents jumping directly to a certain time step because all previous time steps must be read to reconstruct the data [S1]. This can be resolved by saving absolute values in addition to delta values and loading them on demand, at the cost of increased storage [S1].
++*   **Decompression Overhead:** Decompressing the whole dataset is required for any data access, which limits practical use in applications requiring efficient queries or traversals (e.g., realtime visualization) [S2, unofficial].
++*   **Precision:** Not given in the sources. [G] Ensure integer overflow/underflow is handled if using fixed-point arithmetic for residuals.
+ 
+ ## Subtopics
+@@ -127,14 +98,15 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Encoding and decoding are $O(N)$ where $N$ is the number of voxels, as each value is processed once with constant-time arithmetic [S1].
+-*   **Memory Complexity:** $O(N)$ for input and output buffers. No significant auxiliary memory is required for the basic algorithm [S1].
+-*   **Measured Performance:** On GPUs, delta encoding is trivial to implement and can achieve full coalescing of memory accesses if threads are organized to process adjacent memory cells (e.g., by x-coordinate in a brick) [S1].
+-*   **Strengths:** Extremely low computational overhead; effective for data with high temporal or spatial coherence (e.g., time-varying volumes, heightfields) [S1][S2, unofficial].
+-*   **Limitations:** Poor random access performance without additional structures (e.g., keyframes or block headers); sensitive to prediction accuracy [S1][S2, unofficial].
+-*   **When to Use:** Time-varying volume data with high temporal coherence; heightfields with progressive variation; scenarios where computational cost of complex predictors is prohibitive [S1][S2, unofficial].
+-*   **When Not to Use:** Data with high randomness or low coherence; applications requiring efficient random access to arbitrary time steps or spatial locations without block-based extensions [S1][S2, unofficial].
++*   **Time Complexity:** Encoding and decoding are $O(N)$ where $N$ is the number of voxels, as each voxel requires one subtraction and one addition.
++*   **Memory Complexity:** $O(N)$ for storing the original data (if needed for reference) and the delta data. If absolute values are stored for random access, memory usage increases [S1].
++*   **Measured Performance:** Not given in the sources. [G] Performance depends heavily on the entropy coding efficiency of the resulting delta distribution.
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Simple to implement; effective for data with high temporal or spatial coherence; results in uniform bricks of zeros for unchanged regions, which compress well [S1].
++*   **Limitations:** Prevents random access to time steps without storing absolute values; requires decompressing the whole dataset for any data access, limiting use in realtime visualization [S1][S2, unofficial].
++*   **When to Use:** Time-varying volume data with high temporal coherence; heightfields with progressive variation.
++*   **When Not to Use:** Applications requiring efficient random access to specific time steps or spatial locations without decompressing preceding data; data with low coherence.
+ 
+ ## Background
+-Delta encoding, also known as Differential Pulse-Code Modulation (DPCM), is a foundational technique in signal and data compression. It was originally developed for audio and image compression to exploit redundancy. In volume rendering, it has been adapted for time-varying volume data and heightfields. Key applications include the compression of time-varying scientific data [S1] and layered datasets like QuadStack [S2, unofficial]. The technique is often combined with entropy coding (e.g., Huffman, Run-Length) to achieve significant compression ratios [S1].
++Delta encoding, also known as Differential Pulse-Code Modulation (DPCM), was proposed for time-varying volume data to exploit temporal coherence [S1]. It was suggested as a simple method providing good results for heightfield compression because height values usually vary progressively [S2, unofficial]. The method is part of a broader family of predictive and differential coding techniques used in volume rendering and compression [S1].
+ 
+ ## Sources

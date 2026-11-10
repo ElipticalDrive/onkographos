@@ -3,100 +3,59 @@
 Also called: Miniblock Reordering for SDRAM, Voxel Memory Layout, Voxel Memory Organization (Miniblocks and Skewing)
 
 ## Overview
-Voxel Memory Bank Allocation and Miniblock Organization is a hardware-oriented memory layout technique designed to maximize SDRAM burst read throughput and eliminate memory bank conflicts during dense volume rendering [S1, unofficial]. It solves the problem of inefficient memory access by grouping voxels into small linear blocks (miniblocks) and applying modular arithmetic to distribute these blocks across memory modules and internal SDRAM banks [S1, unofficial]. It sets itself apart from [Volume Interleaving](2174-volume-interleaving.md) by operating on fixed-size 2x2x2 spatial blocks rather than bit-interleaved linear arrays, and from [Memory-Insensitive Rendering](2774-memory-insensitive-rendering.md) by relying on strict spatial locality and skewing rather than algorithmic tolerance to random access [S1, unofficial].
+Voxel Memory Bank Allocation and Miniblock Organization is a hardware-oriented memory layout technique designed to maximize SDRAM burst read throughput and eliminate memory bank conflicts during volume rendering [S1, unofficial]. It solves the problem of inefficient memory access patterns by grouping voxels into small, linearly stored units (miniblocks) and applying modular arithmetic to distribute these units across memory modules and banks [S1, unofficial]. It sets itself apart from [Volume Interleaving](2174-volume-interleaving.md) by operating on fixed-size 2x2x2 blocks rather than bit-interleaved linear arrays, and from [Skewed Memory Organization for Conflict-Free Ray Access](2351-skewed-memory-organization-for-conflict-free-ray-access.md) by relying on a multi-stage skewing process (module distribution followed by bank skewing) rather than a single linear skew function to guarantee conflict-free access for arbitrary view directions [S1, unofficial].
 
 ## How it works
-**Inputs:** 3D voxel volume data with dimensions $(U, V, W)$; current view direction.
-**Outputs:** Linear memory addresses for Voxel Memory; reordered miniblock streams for rendering pipelines.
+**Inputs and Outputs:**
+*   **Input:** Arbitrary volume data in host memory with arbitrary dimensions.
+*   **Output:** A layout in Voxel Memory where voxels are organized into miniblocks, distributed across memory modules, and skewed within modules to align with SDRAM bank structures.
 
 **Data Structures:**
-1.  **Voxel Memory:** A linear buffer where dimensions are padded to multiples of 32 voxels.
-2.  **Miniblock:** A 2x2x2 array of voxels stored sequentially in a single memory module at consecutive addresses [S1, unofficial].
-3.  **Memory Module:** One of four parallel interfaces/controllers [S1, unofficial].
-4.  **SDRAM Bank:** One of four internal banks within a 64-megabit SDRAM chip [S1, unofficial].
-5.  **Slice Buffer:** On-chip buffer storing three slices of data to support z-gradient computation via central differences [S1, unofficial].
+1.  **Miniblock:** A $2 \times 2 \times 2$ array of voxels. Stored linearly in a single memory module at consecutive memory addresses [S1, unofficial].
+2.  **Voxel Memory:** A collection of memory modules containing SDRAM chips. Each SDRAM chip has 4 internal memory banks [S1, unofficial].
+3.  **Slice Buffers:** On-chip buffers in rendering pipelines. Must store three slices worth of data to compute Z-gradients using central differences [S1, unofficial].
+
+**Layout and Addressing:**
+The method maps 3D voxel coordinates $(u, v, w)$ to a memory module and a specific bank within that module using integer arithmetic [S1, unofficial].
+
+1.  **Miniblock Coordinates:**
+    The voxel coordinates are mapped to miniblock coordinates $(u_m, v_m, w_m)$:
+    $$
+    u_m = \lfloor u / 2 \rfloor, \quad v_m = \lfloor v / 2 \rfloor, \quad w_m = \lfloor w / 2 \rfloor
+    $$
+    Here, division is integer division (floor) [S1, unofficial].
+
+2.  **Memory Module Assignment:**
+    Miniblocks are distributed across memory modules such that groups of four adjacent miniblocks in any direction are stored in separate modules. The module index $M$ is calculated as:
+    $$
+    M = (u_m + v_m + w_m) \bmod 4
+    $$
+    This ensures that adjacent miniblocks along any axis fall into different modules, avoiding module-level conflicts [S1, unofficial].
+
+3.  **Memory Bank Assignment:**
+    Within a memory module, miniblocks are skewed so that adjacent miniblocks never fall into the same SDRAM bank. The bank index $B$ is calculated as:
+    $$
+    B = \left( \lfloor u_m / 4 \rfloor + \lfloor v_m / 4 \rfloor + \lfloor w_m / 4 \rfloor \right) \bmod 4
+    $$
+    This maps $4 \times 4 \times 4$ cubes of miniblocks across the four memory banks, allowing back-to-back accesses with no pipeline delays [S1, unofficial].
 
 **Parameters:**
-*   **Miniblock Size:** 2x2x2 voxels [S1, unofficial].
-*   **Memory Modules:** 4 [S1, unofficial].
-*   **SDRAM Banks per Module:** 4 (based on 64-megabit SDRAMs) [S1, unofficial].
-*   **Volume Dimension Padding:** Dimensions must be multiples of 32 voxels ($2 \times 4 \times 4$) to align miniblocks for optimum SDRAM performance [S1, unofficial].
-*   **Slice Buffer Depth:** 3 slices [S1, unofficial].
+*   **Volume Dimensions:** The Voxel Memory must be allocated such that all dimensions of the volume object appear to be multiples of 32 voxels ($2 \times 4 \times 4 = 32$) [S1, unofficial]. This ensures miniblocks are properly aligned for optimum SDRAM performance [S1, unofficial].
+*   **SDRAM Banks:** The design assumes 64-megabit SDRAMs with four internal memory banks [S1, unofficial].
+*   **Slice Buffer Depth:** Three slices of data must be stored in slice buffers to support central difference gradient computation [S1, unofficial].
 
-**Steps:**
+**Processing Steps:**
+1.  **Allocation:** Arbitrary volumes from host memory are stored in Voxel Memory with dimensions padded to multiples of 32 voxels [S1, unofficial].
+2.  **Cropping:** During rendering, the system automatically crops the data to the original volume size [S1, unofficial].
+3.  **Burst Read:** Voxels are read out of Voxel Memory in miniblocks. Because voxels within a miniblock are stored sequentially, they are read in the same order to exploit SDRAM burst capabilities [S1, unofficial].
+4.  **Miniblock Reordering:** Miniblocks are rearranged based on the current view direction. This logic ensures that the positions of the voxels correspond to the canonical positions assumed for tri-linear interpolation [S1, unofficial].
+5.  **De-skewing:** The four miniblocks output by the Voxel Memory controllers are de-skewed and potentially re-shuffled by a global de-skewing network. This ensures that the left-most voxel along the X-axis flows down the leftmost pipeline and adjacent voxels in X flow down in neighboring pipelines [S1, unofficial].
+6.  **Slice Buffer Write:** The de-skewed miniblocks are written into the voxel slice buffers of the four rendering pipelines [S1, unofficial].
+7.  **Slice Processing:** The Voxel Memory interface reads two slices of voxels at a time. After reading two slices of miniblocks and writing them to the four slice buffers, all necessary data exists to compute interpolated samples and gradients [S1, unofficial].
 
-1.  **Padding and Cropping:**
-    Allocate Voxel Memory such that all volume dimensions are multiples of 32 voxels. Store arbitrary host volume data in this buffer. During rendering, the hardware automatically crops the data to the original volume size [S1, unofficial].
-
-2.  **Miniblock Coordinate Mapping:**
-    Map voxel coordinates $(u, v, w)$ to miniblock coordinates $(u_m, v_m, w_m)$ using integer division by 2:
-    $$ u_m = \lfloor u / 2 \rfloor $$
-    $$ v_m = \lfloor v / 2 \rfloor $$
-    $$ w_m = \lfloor w / 2 \rfloor $$
-    [S1, unofficial]
-
-3.  **Memory Module Allocation:**
-    Distribute miniblocks across the 4 memory modules to ensure that groups of 4 adjacent miniblocks in any direction are stored in separate modules, avoiding access conflicts. The module index $M$ is calculated as:
-    $$ M = (u_m + v_m + w_m) \bmod 4 $$
-    [S1, unofficial]
-
-4.  **Bank Skewing:**
-    Within each memory module, skew miniblocks so that adjacent miniblocks never fall into the same SDRAM bank. This allows back-to-back accesses with no pipeline delays. The bank index $B$ is calculated using integer division by 4:
-    $$ B = ((u_m \div 4) + (v_m \div 4) + (w_m \div 4)) \bmod 4 $$
-    where $\div$ denotes integer division and $\bmod$ denotes the modulus operator [S1, unofficial].
-
-5.  **Miniblock Reordering (Deskewing):**
-    Miniblocks are read out of Voxel Memory in sequential order to exploit SDRAM burst capabilities. However, they must be rearranged based on the current view direction to match the canonical positions assumed for tri-linear interpolation. Simple reorder logic in each memory interface handles this [S1, unofficial].
-
-6.  **Global De-skewing and Pipeline Distribution:**
-    The four miniblocks output by the Voxel Memory controllers are de-skewed and potentially re-shuffled by a global de-skewing network. This ensures that the left-most voxel along the x-axis flows down the leftmost pipeline and adjacent voxels in x flow down neighboring pipelines [S1, unofficial].
-
-7.  **Slice Buffer Population:**
-    The Voxel Memory interface reads two slices of voxels at a time. The de-skewed miniblocks are written into the voxel slice buffers of the four rendering pipelines. The buffer stores three slices worth of data to enable z-gradient computation using central differences [S1, unofficial].
-
-**Pseudocode:**
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_memory_address(u, v, w):
-    """
-    Computes the memory module and bank for a given voxel coordinate.
-    Assumes 4 memory modules and 4 banks per SDRAM.
-    """
-    # Step 2: Miniblock coordinates
-    u_m = u // 2
-    v_m = v // 2
-    w_m = w // 2
-    
-    # Step 3: Memory Module index
-    module_idx = (u_m + v_m + w_m) % 4
-    
-    # Step 4: Bank index
-    bank_idx = ((u_m // 4) + (v_m // 4) + (w_m // 4)) % 4
-    
-    return module_idx, bank_idx
-
-def process_voxel_memory_read(u, v, w, view_direction):
-    """
-    Simulates the data flow from Voxel Memory to Rendering Pipelines.
-    """
-    # Step 1: Assume volume is already padded to multiples of 32
-    # Step 2-4: Address calculation happens in hardware
-    module_idx, bank_idx = compute_memory_address(u, v, w)
-    
-    # Step 5: Read miniblock sequentially (burst)
-    # The hardware reads the 2x2x2 block containing (u,v,w)
-    miniblock = read_miniblock_from_module(module_idx, u, v, w)
-    
-    # Step 6: Global de-skewing based on view_direction
-    # This ensures spatial adjacency in x maps to pipeline adjacency
-    reordered_miniblock = global_deskew(miniblock, view_direction)
-    
-    # Step 7: Write to slice buffer
-    # Requires 3 slices for z-gradients
-    write_to_slice_buffer(reordered_miniblock)
-```
+**Edge Cases and Pitfalls:**
+*   **Dimension Alignment:** If volume dimensions are not multiples of 32, the skewing logic may fail to align miniblocks correctly, leading to suboptimal SDRAM performance or bank conflicts [S1, unofficial].
+*   **Supervolumes:** For volumes exceeding 256 voxels on any edge, the data must be partitioned into blocks (supervolumes). Adjacent blocks require three duplicated voxels in each dimension to maintain correct interpolation and gradients at the block edges [S1, unofficial].
 
 ## Subtopics
 
@@ -113,22 +72,19 @@ The Eight Logical Memories Architecture is a memory layout optimization for dens
 The Dual-Port Memory & Synchronization Architecture is a hardware interface method for 3-D volumetric displays that transforms 2D image points into 3D voxels by synchronizing memory readout with the physical position of a moving display surface (helix or piston). It differs from sibling methods like [Skewed Memory Organization](2351-skewed-memory-organization-for-conflict-free-ray-access.md) or [Cubic Addressing Scheme](7285-cubic-addressing-scheme.md) by relying on external mechanical synchronization signals rather than static memory layout tricks to resolve spatial mapping, allowing direct memory mapping for high-speed host writes.
 
 ### Sixty Four Memories Architecture
-An ideal solution using 64 independently accessible SDRAMs to achieve conflict-free memory access without pipeline stalls [S2]. It ensures no access penalty while crossing a page boundary by placing 2x2 neighborhoods across the page boundary in four of the other 12 SDRAMs not currently accessed. It precharges and activates SDRAMs 4-15 while accessing SDRAMs 1-4, so new voxels are available within the next clock cycle when crossing the page boundary [S2]. This architecture reaches the optimum of 10 ns access time and a 100% cache hit ratio [S2]. However, it requires the calculation and distribution of 64 independent addresses, which is expensive to build and exceeds the board space budget for a PCI-Card [S2].
+An ideal solution using 64 independently accessible SDRAMs to achieve conflict-free memory access without pipeline stalls [S2]. It ensures no access penalty while crossing a page boundary by placing $2 \times 2$ neighborhoods across the page boundary in four of the other 12 SDRAMs not currently accessed. It precharges and activates SDRAMs 4-15 while accessing SDRAMs 1-4, so new voxels are available within the next clock cycle when crossing the page boundary [S2]. This architecture reaches the optimum of 10 ns access time and a 100% cache hit ratio [S2]. However, it requires the calculation and distribution of 64 independent addresses, which is expensive to build and exceeds the board space budget for a PCI-Card [S2].
 
 ### Interleaved Data Distribution
 A data distribution strategy for shared-memory MIMD architectures that distributes pages of the voxel array in round-robin fashion among local memories to avoid hot spotting [S3]. Voxels are stored in a linearized array structure, and pages of this array are distributed in round-robin fashion among the local memories of the processors [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Memory access is $O(1)$ per miniblock, with no pipeline stalls for bank conflicts due to the skewing scheme [S1, unofficial].
-*   **Memory Complexity:** Requires padding volume dimensions to multiples of 32 voxels, increasing memory usage slightly for non-aligned volumes [S1, unofficial].
-*   **Performance:** Enables burst rates of 4-133 million voxels per second (532 million voxels/sec) with four 133 MHz memory interfaces, provided voxels are organized appropriately [S1, unofficial].
-*   **Strengths:** Maximizes SDRAM burst efficiency; eliminates bank conflicts for adjacent miniblocks; supports hardware-accelerated interpolation and gradient estimation [S1, unofficial].
-*   **Limitations:** Requires specific hardware support (e.g., VolumePro ASIC) for de-skewing and reordering; limited to volumes with dimensions that can be padded to multiples of 32; supervolumes require software partitioning for dimensions >256 [S1, unofficial].
-*   **When to use:** High-performance, hardware-accelerated volume rendering where SDRAM bandwidth is the bottleneck.
-*   **When not to use:** Software-only rendering without specialized memory controllers; volumes with irregular dimensions that cannot be efficiently padded.
+*   **Throughput:** Four 133 MHz memory interfaces can read Voxel Memory at a burst rate of 532 million voxels per second, provided voxels are organized appropriately [S1, unofficial].
+*   **Complexity:** The method requires complex hardware logic for skewing, de-skewing, and miniblock reordering based on view direction [S1, unofficial].
+*   **Limitations:** The method is tightly coupled to specific SDRAM characteristics (4 banks) and requires volume dimensions to be multiples of 32 [S1, unofficial]. It is designed for hardware implementations (e.g., VolumePro ASIC) rather than general-purpose CPU/GPU software rendering [S1, unofficial].
+*   **Scalability:** Limited by on-chip buffer sizes; volumes larger than 256 voxels per edge require software partitioning into supervolumes [S1, unofficial].
 
 ## Background
-The method was developed for the VolumePro real-time ray-casting system, specifically the vg500 ASIC [S1, unofficial]. It addresses the challenges of reading large volume datasets (e.g., 128 million 8-bit voxels) at interactive frame rates [S1, unofficial]. The technique relies on the properties of 64-megabit SDRAMs, which have four internal memory banks [S1, unofficial]. The approach was detailed in the VolumePro technical report [S1, unofficial].
+The method was developed for the VolumePro real-time ray-casting system [S1, unofficial]. It addresses the challenges of reading large volumes (e.g., 128 million 8-bit voxels) from SDRAM efficiently [S1, unofficial]. The technique is described in the VolumePro technical report [S1, unofficial].
 
 ## Sources
 [S1] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)

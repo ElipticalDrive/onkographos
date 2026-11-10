@@ -1,83 +1,130 @@
 # Neural Radiance Fields
+
 Also called: Explicit Radiance Field Representations
 
 ## Overview
-Neural Radiance Fields (NeRF) represent a 3D scene as a continuous volumetric function that maps 3D spatial coordinates and 2D viewing directions to emitted RGB color and volume density [S1][S5][S10, unofficial]. It solves the problem of novel view synthesis by replacing explicit geometric primitives (meshes or point clouds) with an implicit neural representation encoded in network weights, enabling photorealistic rendering of complex scenes with view-dependent effects like specularities and transparency [S1][S2, unofficial][S14, unofficial]. It distinguishes itself from its parent method [Radiance-field optimization](44-radiance-field-optimization.md) by introducing specific architectural choices (such as asymmetric MLPs or hierarchical sampling) and by serving as the foundational implicit representation for a wide variety of extensions including dynamic scenes, generative models, and hybrid explicit-implicit structures.
+Neural Radiance Fields (NeRF) represent a 3D scene as a continuous volumetric function parameterized by a neural network, mapping 3D spatial coordinates and 2D viewing directions to emitted RGB color and volume density [S1][S5, unofficial][S12, unofficial]. The family solves the problem of novel view synthesis by training this implicit representation to reproduce input views, enabling photorealistic rendering from sparse calibrated images [S1][S9, unofficial]. It distinguishes itself from earlier implicit methods by explicitly modeling view-dependent appearance (specularity, transparency) via an asymmetric MLP architecture and by using hierarchical sampling to efficiently resolve scene geometry [S2, unofficial][S8, unofficial].
 
 ## Shared principles
-All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses).
+All methods in this family rely on the differentiability of the forward rendering operator and the propagation of gradients through the integration steps [44-radiance-field-optimization.md]. The core mechanism is the evaluation of the volume rendering equation and the computation of gradients with respect to scene parameters (density, geometry, transfer functions, camera poses) [44-radiance-field-optimization.md].
 
-The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [S1][S5]:
+The standard emission-absorption model computes the color $\hat{C}(\mathbf{r})$ for a ray $\mathbf{r}$ as [44-radiance-field-optimization.md]:
 
 $$
 \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
 $$
 
-where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [S1][S5].
+where $\sigma_i$ is the density, $\delta_i$ is the step size, $\mathbf{c}_i$ is the color, and $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance [44-radiance-field-optimization.md].
 
-Differentiation strategies fall into three main categories:
-1.  **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [S5].
-2.  **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [S1][S3, unofficial].
-3.  **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [S5].
+Differentiation strategies fall into three main categories [44-radiance-field-optimization.md]:
+1. **Reverse-Mode Automatic Differentiation (AD):** Standard backpropagation through the computational graph. This requires storing $O(kn)$ intermediate states (where $n$ is pixels and $k$ is samples), leading to high memory usage [44-radiance-field-optimization.md].
+2. **Adjoint Method:** Computes gradients by propagating adjoint variables backward through the rendering algorithm, evaluating the chain rule from output to input. This has computational complexity largely constant in the number of parameters, making it preferable for optimizing many parameters like the transfer function [44-radiance-field-optimization.md].
+3. **Analytic Inversion / Explicit Gradients:** Uses a-priori knowledge of the DVR operations to invert the order of operations or derive closed-form gradients, reducing memory consumption to $O(n)$ by avoiding the storage of intermediate results [44-radiance-field-optimization.md].
 
 ## Subtopics
 
 ### [NeRF (Neural Radiance Fields)](1185-nerf-neural-radiance-fields.md)
-NeRF represents a 3D scene as a continuous volumetric function that maps 3D spatial coordinates and 2D viewing directions to emitted RGB color and volume density. It solves the problem of novel view synthesis by replacing explicit geometric primitives (meshes or point clouds) with an implicit neural representation encoded in network weights, enabling photorealistic rendering of complex scenes with view-dependent effects like specularities and transparency. It distinguishes itself from its parent method [Neural Radiance Fields](4972-neural-radiance-fields.md) by introducing a specific asymmetric MLP architecture that injects viewing direction near the output layer, and a two-stage hierarchical sampling strategy (coarse and fine networks) to efficiently allocate samples to opaque regions.
+Represents a static 3D scene as a continuous volumetric function. Distinguishes itself by explicitly modeling view-dependent appearance via an asymmetric MLP and using hierarchical sampling. Choose for high-quality novel view synthesis of static scenes.
+
+### [Neural Reconstruction in the Wild](6202-neural-reconstruction-in-the-wild.md)
+Addresses large-scale real-world scenes. Sets itself apart by introducing surface-guided sampling to concentrate density near geometry, improving detail fidelity. Choose for large-scale environments where standard NeRF yields coarse details.
 
 ### [Point-NeRF](6569-point-nerf.md)
-Point-NeRF synthesizes novel views by aggregating features from $K$ neighboring neural points in a 3D point cloud to compute view-dependent radiance and volume density at shading locations along rays, avoiding empty space sampling. It differs from its parent [Neural Radiance Fields](4972-neural-radiance-fields.md) by replacing the continuous volumetric grid with a sparse, surface-aligned point cloud, which allows for significantly faster training (30x speedup) and efficient rendering by restricting ray marching to regions near scene geometry.
+Synthesizes views by aggregating features from $K$ neighboring neural points in a 3D point cloud. Differs by replacing the continuous volumetric function with discrete neural points, adapting naturally to surfaces and accelerating training. Choose for faster training and explicit geometric priors.
 
 ### [Volume Feature Rendering](6628-volume-feature-rendering.md)
-Volume Feature Rendering (VFR) is a differentiable rendering technique that integrates queried feature vectors along a ray into a single aggregated feature vector, which is then transformed into the final pixel color by a single neural network evaluation. Unlike standard volume rendering, which requires $N$ neural network evaluations (one per sample) to predict color, VFR reduces the number of evaluations to one, thereby relieving the framework from the high computational cost associated with large color networks. This allows for the use of significantly larger neural networks to improve rendering quality without increasing training or rendering time proportionally.
+Integrates queried feature vectors along a ray into a single aggregated vector, transformed into color by a single network evaluation. Unlike standard volume rendering requiring $N$ evaluations, VFR reduces this to one, allowing larger networks without proportional cost. Choose for high-quality rendering with limited network evaluation budget.
 
 ### [DyNeRF](7274-dynerf.md)
-DyNeRF is a baseline method for representing volumetric videos by extending the standard Neural Radiance Field (NeRF) architecture to handle temporal dynamics. It solves the problem of novel view synthesis for dynamic scenes by conditioning a single shared MLP on both spatial coordinates and a temporal embedding. Unlike methods that decompose scenes into static and deforming components or use canonical space mappings, DyNeRF treats the entire volume as a time-varying function, predicting the radiance field for a specific video frame directly from its input coordinates. It differs from its sibling [D-NeRF](6569-point-nerf.md) by lacking an explicit deformation field or canonical space, relying instead on direct temporal conditioning.
+Represents volumetric videos by conditioning a single shared MLP on spatial coordinates and a temporal embedding. Unlike methods using canonical space mappings, it treats the volume as a time-varying function directly. Choose for dynamic scene novel view synthesis without explicit deformation fields.
 
 ### [Neural Surfel Radiance Fields](7358-neural-surfel-radiance-fields.md)
-Neural Surfel Radiance Fields (SurfelNeRF) is an online photorealistic reconstruction method that represents a scene as a dynamic collection of neural surfels, combining explicit geometric attributes with neural appearance features. Unlike standard Neural Radiance Fields (NeRF) which rely on offline optimization and volumetric sampling, SurfelNeRF progressively integrates incoming image streams into a global model using a differentiable rasterization-based rendering scheme, achieving significant speedups in both training and inference. It solves the problem of real-time, large-scale indoor scene reconstruction by replacing expensive volume integration with a hybrid rasterization-ray tracing approach that evaluates density and radiance only at surfel intersections.
+Represents scenes as a dynamic collection of neural surfels, combining explicit geometry with neural appearance. Solves real-time large-scale reconstruction by replacing volume integration with rasterization-based rendering. Choose for online, real-time reconstruction of indoor scenes.
 
 ### [Cascaded Bundle-Adjusting Neural Radiance Fields (CBARF)](8223-cascaded-bundle-adjusting-neural-radiance-fields-cbarf.md)
-CBARF is a 3D reconstruction framework that simultaneously optimizes camera poses and scene representation from input images with imperfect or partially unknown camera poses. It addresses the limitation where standard Neural Radiance Fields (NeRF) and single-stage Bundle Adjustment (BA) methods fail or over-fit when initial pose deviations are large. Unlike single-stage BA which quickly falls into sub-optimal solutions, CBARF uses a coarse-to-fine multi-stage approach with cascaded compact BA modules to progressively refine poses, avoiding the learning of incorrect scene representations.
+Simultaneously optimizes camera poses and scene representation from images with imperfect poses. Uses a coarse-to-fine multi-stage approach with cascaded compact BA modules. Choose when initial camera poses are unknown or significantly erroneous.
 
 ### [Fourier Features Mapping](8242-fourier-features-mapping.md)
-Fourier Features Mapping (FFM) is a coordinate encoding technique used to overcome the spectral bias of vanilla Multi-Layer Perceptrons (MLPs), which tend to fail to capture high-frequency details in low-dimensional domains. It transforms input spatial coordinates into higher-dimensional vectors, enabling the network to converge faster and represent fine-grained scene details with fewer parameters. Unlike geometric approaches such as octrees or subdomain grids, FFM decouples the neural network design from the underlying data structure, allowing for flexible integration into sparse volume representations like NeuralVDB.
+A coordinate encoding technique overcoming the spectral bias of vanilla MLPs. Transforms inputs to higher-dimensional vectors to capture high-frequency details. Choose to improve convergence and detail representation in implicit networks.
 
 ### [Reflection-aware NeRF](8310-reflection-aware-nerf.md)
-Reflection-aware NeRF is a neural rendering method that jointly models planar surfaces and explicitly casts reflected rays to capture the source of high-frequency reflections, preventing false geometry duplication along the primary ray. It differs from methods like NeRFReN and MS-NeRF, which decompose the scene into independent components and may cause false geometries, by using a single radiance field and ensuring that if an actual object is observed along the reflected ray, no false duplicate is created along the primary ray at the same depth.
+Jointly models planar surfaces and casts reflected rays to capture high-frequency reflections. Prevents false geometry duplication by using a single radiance field for primary and reflected rays. Choose for scenes with significant planar reflections (mirrors, windows).
 
 ### [GRAF](8539-graf.md)
-GRAF is a generative model for 3D-aware image synthesis that learns a conditional radiance field from a collection of unposed 2D images using an adversarial framework. It allows explicit control over camera rotation, translation, shape, and appearance by mapping latent codes and camera parameters to image patches via differentiable volume rendering. Unlike voxel-based approaches (e.g., HoloGAN, PLATONIC GAN) which suffer from memory limitations and discretization artifacts, GRAF uses a continuous representation that scales well with image resolution and incorporates 3D consistency by design without learned projections.
-
-### [V4D (Voxel for 4D Novel View Synthesis)](8762-v4d-voxel-for-4d-novel-view-synthesis.md)
-V4D is a voxel-based architecture for 4D novel view synthesis in dynamic scenes that models the 4D neural radiance field directly without requiring a canonical space. It addresses the limitations of MLP-only representations by using separate 3D voxel grids for density and texture, combined with a conditional positional encoding (CPE) module and a look-up table (LUT) refinement module to recover high-frequency details lost by total variation regularization. Unlike canonical-space methods such as [D-NeRF](7274-dynerf.md), V4D maps 6D attributes (3D spatial location, time, and view direction) directly to volume properties, trading longer training times for competitive inference speeds and state-of-the-art performance on single-view dynamic datasets.
+A generative model for 3D-aware image synthesis from unposed 2D images using an adversarial framework. Allows explicit control over camera pose, shape, and appearance via latent codes. Choose for generative 3D-aware synthesis from unposed image collections.
 
 ### [Flash Cache](9550-flash-cache.md)
-Flash Cache is a volumetric inverse rendering method that reduces bias and variance in radiance estimation by using a high-capacity Neural Radiance Field (NeRF) as a control variate for incoming illumination. Unlike prior radiance caches that use low-capacity models (introducing bias via inaccurate reflection estimation) or render NeRFs at single evaluation points (introducing bias via volume rendering integral approximation), Flash Cache provides an unbiased, low-variance estimate of the rendering equation. It achieves this by replacing the recursive incoming radiance term with a NeRF-based cache output, evaluated via importance sampling, while maintaining computational tractability through a "Fast Cache" approximation.
+Reduces bias and variance in radiance estimation by using a high-capacity NeRF as a control variate for incoming illumination. Provides an unbiased estimate via importance sampling. Choose for physically-based inverse rendering with complex lighting.
 
 ### [C-ToF Gaussian Splatting](9678-c-tof-gaussian-splatting.md)
+Not given in the sources.
 
 ### [Unified Neural Implicit Surface and Radiance Field Rendering](9732-unified-neural-implicit-surface-and-radiance-field-rendering.md)
-UNISURF is a unified framework for 3D reconstruction that combines the geometric precision of implicit surface rendering with the structural learning capabilities of volume rendering, enabling accurate surface reconstruction from multi-view RGB images without requiring per-pixel object masks. Unlike standard Neural Radiance Fields (NeRF) which rely on hierarchical two-stage sampling to resolve ambiguities, UNISURF eliminates this need by parameterizing occupancy directly via a continuous field and using a decaying sampling interval around the estimated surface.
+Combines implicit surface rendering with volume rendering for accurate surface reconstruction without per-pixel masks. Eliminates hierarchical sampling by parameterizing occupancy directly. Choose for precise surface reconstruction from multi-view RGB.
 
-### Neural Reconstruction in the Wild
-Uses surface-guided sampling to improve reconstruction accuracy for large-scale scenes [S2, unofficial].
+### [Neural Radiance Distribution Field](10216-neural-radiance-distribution-field.md)
+Models parametric radiance distribution along a camera ray rather than sampling discrete points. Maps rays to Fourier coefficients for opacity and color. Choose for efficient rendering with smaller network capacities, balancing speed and quality.
+
+### [Voxel-based Representation](10852-voxel-based-representation.md)
+Replaces the continuous MLP with discrete 3D voxel grids to store features/density. Solves high computational cost by enabling explicit spatial caching. Choose for significantly faster rendering speeds at the cost of model compactness.
+
+### [NeuMesh++](11394-neumesh.md)
+A mesh-based neural radiance representation encoding disentangled geometry, texture, and semantic codes on mesh vertices. Enables efficient volumetric editing.
+
+### [ExBluRF](11440-exblurf.md)
+A novel view synthesis method for extreme motion blurred images, jointly optimizing sharp voxel-based radiance fields and 6-DOF camera trajectories.
+
+### [Neural Volume Super-Resolution](11444-neural-volume-super-resolution.md)
+Super-resolves volumetric neural scene representations to generate high-resolution novel views from low-resolution captures, operating directly on the 3D representation.
+
+### [Incremental CONfidence (ICON)](11446-incremental-confidence-icon.md)
+An optimization procedure for training NeRFs from 2D video frames that removes pose initialization requirements by assuming smooth motion and using a 'confidence' measure to reweight gradients.
+
+### [Canonical Neural Radiance Field for X-ray Tomography](11451-canonical-neural-radiance-field-for-x-ray-tomography.md)
+Encodes the 3D density field of a static object (canonical volume) using a NeRF, trained on rich projection data to serve as a prior for dynamic reconstruction.
+
+### [Volumetric Supervision for NeRF](11452-volumetric-supervision-for-nerf.md)
+Improves canonical volume quality in dynamic tomography by combining projection-based training with volumetric supervision from high-fidelity static X-CT data.
+
+### [Part-based MHE-augmented NeRF](11665-part-based-mhe-augmented-nerf.md)
+Decomposes the human body into anatomical parts, assigning each its own MHE-augmented NeRF network to distribute representational power and accelerate training.
+
+### [NeRF-MAE](11769-nerf-mae.md)
+A self-supervised pretraining framework using standard 3D Vision Transformers to learn 3D representations by masking and reconstructing patches from NeRF's radiance and density grid.
 
 ### Neural Rendering
-Learn the rendering process from data instead of handcrafting differentiation. A scene generation network outputs a neural scene representation and a rendering network is jointly trained by minimizing image reconstruction error [S3, unofficial]. Improve neural rendering by adding inductive biases for 3D scenes and rendering into neural networks [S3, unofficial]. Generalizing to scenes differing from training data, scaling to multiple objects, and human modification are limited [S3, unofficial].
+**Definition:** Learn the rendering process from data instead of handcrafting differentiation. A scene generation network outputs a neural scene representation and a rendering network is jointly trained by minimizing image reconstruction error [S2, unofficial].
+**Steps:** Improve neural rendering by adding inductive biases for 3D scenes and rendering into neural networks [S2, unofficial].
+**Pitfalls:** Generalizing to scenes differing from training data, scaling to multiple objects, and human modification are limited [S2, unofficial].
 
-### FastNeRF
-A method that caches view-independent radiance values at selected 3D points sorted in a sparse spatial structure (e.g., voxel grid vertices) [S4]. Caching radiance values into explicit spatial data structures comes at the expense of model compactness [S4]. Renders high-fidelity photorealistic images at 200fps on a high-end consumer GPU [S4].
+### Generative Neural Feature Fields (GIRAFFE)
+**Definition:** A method representing individual objects in a scene as separate neural feature fields, allowing for disentangled control of pose, shape, and appearance, unlike NeRF/GRAF which represent the entire scene with a single model [S3].
+**Formula:** Positional encoding is applied element-wise to input components $t$ (from $\mathbf{x}$ or $\mathbf{d}$) with $L$ frequency octaves: $\gamma(t, L) = (\sin(2^0 t\pi), \cos(2^0 t\pi), \dots, \sin(2^L t\pi), \cos(2^L t\pi))$ [S3].
+**Parameters:** $M_f$: The dimensionality of the feature vector $\mathbf{f}$ output by the object field, replacing the 3D RGB color output used in NeRF/GRAF [S3]. $\mathbf{z}_s, \mathbf{z}_a$: Latent codes sampled from a standard normal distribution $\mathcal{N}(0, I)$, representing shape and appearance respectively [S3].
+**Layout:** Object Transformation Parameters $\mathbf{T}$: A set containing scale $\mathbf{s} \in \mathbb{R}^3$, translation $\mathbf{t} \in \mathbb{R}^3$, and rotation matrix $\mathbf{R} \in SO(3)$ [S3].
 
-### C-NeRF
-A baseline method that adopts a 3D CNN to produce feature volumes and appends a NeRF-like MLP to predict radiance fields [S5]. Tends to lose details in high frequency regions of the image because of its single shared MLP model structure [S5].
+### NeRDF Learning via Knowledge Distillation
+**Definition:** A training framework where a teacher NeRF synthesizes dense and diverse views that serve as pseudo-training data for the student NeRDF [S4].
+**Steps:** Input ray encoding method that captures rich ray information is used [S4]. Online view sampling strategy is used to expand the diversity of the pseudo-training data [S4]. A volume density constraint loss is applied to promote the learning of a strong 3D prior [S4]. The distillation process includes an additional matching between the volume density distribution of the target NeRDF and the teacher NeRF [S4].
+
+### Fourier Feature Encoding
+**Definition:** A preprocessing step reformulating the network as $F_{\Theta} = F^{\prime}_{\Theta} \circ \gamma$, where $\gamma$ encodes inputs using Fourier features to provide high-frequency features, addressing the neural network bias toward low-frequency functions [S5, unofficial].
+**Formula:** The positional encoding function $\gamma$ for vector $\mathbf{v}$ is defined as: $\gamma(\mathbf{v}) = \left( \sin\left(2^{0} \pi \mathbf{v}\right), \cos\left(2^{0} \pi \mathbf{v}\right), \ldots, \sin\left(2^{L-1} \pi \mathbf{v}\right), \cos\left(2^{L-1} \pi \mathbf{v}\right) \right)$, where $\mathbf{v} \in [-1, 1]$ and $L$ is the number of arbitrary features selected for encoding [S5, unofficial]. The final function composition is: $(\mathbf{c}, \sigma) = F^{\prime}_{\Theta}(\gamma(\mathbf{x}), \gamma(\mathbf{d}))$ [S5, unofficial].
+**Parameters:** $L$: The number of arbitrary features selected for encoding in the Fourier feature encoding [S5, unofficial].
+
+### Spline-based Deformation Field
+**Definition:** A deformation field parametrization using cubic B-splines with time-modulated weights to map spatial coordinates $(x, y, z)$ at time $t$ to canonical coordinates $(x_0, y_0, z_0)$, enabling reconstruction from sparse projections [S6, unofficial].
+**Steps:** Calculate the deformation field from sparse few-projection data recorded at intermediate times $t$ during the dynamic experiment [S6, unofficial]. Obtain full field spatio-temporal information by combining the canonical volume and the calculated deformation field [S6, unofficial].
+**Pitfalls:** Deformation fields based on canonical models fail when the scene topology changes over time, as they assume topology-preserving motion [S6, unofficial].
+**Comparison:** Unlike methods using general MLP architectures for deformation fields which require complex regularization like elastic energy, this method uses cubic B-splines to enable reconstruction from as few as two projections [S6, unofficial].
 
 ## Background
-The concept of Neural Radiance Fields was introduced by Mildenhall et al. in 2020 [S1]. The method revolutionized novel view synthesis by demonstrating that a simple MLP could implicitly represent complex 3D scenes with view-dependent appearance. Prior to NeRF, explicit representations like meshes or point clouds struggled with view-dependent effects and complex geometry, while voxel-based methods suffered from resolution limits and memory constraints. NeRF's success led to a rapid expansion of the field, including extensions for dynamic scenes (DyNeRF, D-NeRF), generative modeling (GRAF), and hybrid representations (Point-NeRF, V4D) [S1][S5]. The family has also seen significant development in optimization procedures, such as Fourier Feature Mapping to address spectral bias [S2, unofficial], and robust pose estimation techniques like CBARF [S1].
+Neural Radiance Fields were introduced by Mildenhall et al. in 2020 [S1][S5, unofficial]. The method revolutionized novel view synthesis by demonstrating that a simple MLP, trained with volume rendering, could reconstruct complex 3D scenes from unstructured image collections. Prior to NeRF, implicit representations often struggled with high-frequency details due to the spectral bias of neural networks, a problem addressed by the introduction of positional encoding [S5, unofficial]. The family has since expanded to address limitations in dynamic scenes [S1], large-scale environments [S1], and generative modeling [S3], as well as efficiency improvements through voxel-based [S1] and distribution-based [S4] representations.
 
 ## Sources
 [S1] NeRFPlayer: A Streamable Dynamic Scene Representation with Decomposed Neural Radiance Fields, https://doi.org/10.1109/tvcg.2023.3247082, fetched 2026-10-26
-[S2] NeRF的基础及后续扩展, https://pengsida.net/files/NeRF_Tutorial.pdf, fetched 2026-10-30 (unofficial)
-[S3] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
-[S4] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26
-[S5] Representing Volumetric Videos as Dynamic MLP Maps, https://arxiv.org/abs/2304.06717, fetched 2026-10-29
+[S2] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)
+[S3] GIRAFFE: Representing Scenes as Compositional Generative Neural Feature Fields, https://github.com/chaerinkong/paper-reviews/issues/63, fetched 2026-10-28
+[S4] Efficient View Synthesis with Neural Radiance Distribution Field, https://doi.org/10.1109/iccv51070.2023.01696, fetched 2026-10-26
+[S5] Neural Radiance Fields - Lei Mao's Log Book, https://leimao.github.io/blog/Neural-Radiance-Fields-NeRF/, fetched 2026-10-27 (unofficial)
+[S6] Neural rendering enables dynamic tomography, https://doi.org/10.48550/arxiv.2410.20558, fetched 2026-10-26 (unofficial)

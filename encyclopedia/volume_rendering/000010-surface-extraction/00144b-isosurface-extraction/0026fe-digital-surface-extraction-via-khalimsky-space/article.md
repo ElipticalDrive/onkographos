@@ -3,97 +3,126 @@
 Also called: Combinatorial manifold surface extraction, Digital Surface Extraction via Khalimsky Space and Surfel Adjacency, Digital boundary scanning, Dual surface to the digital boundary, Marching-cube like surface extracted using the combinatorial manifold structure of digital surfaces
 
 ## Overview
-Digital Surface Extraction via Khalimsky Space extracts a boundary surface from a digital image by constructing a Khalimsky space, defining a digital set based on intensity thresholds, and scanning the space to identify surfels (surface elements) using a specific adjacency rule (interior or exterior) [S1][S2, unofficial]. It differs from [Isosurface extraction](30-isosurface-extraction.md) methods like Marching Cubes by relying on combinatorial topology and digital geometry rather than geometric interpolation within grid cells, producing a dual surface to the digital boundary [S1][S2, unofficial].
+Digital Surface Extraction via Khalimsky Space extracts a manifold surface from a volumetric image by constructing a combinatorial Khalimsky space, identifying the digital boundary using surfel adjacency rules, and converting the resulting digital surface into a dual polygonal or triangulated mesh [S1][S2, unofficial]. It sets itself apart from [Isosurface extraction](30-isosurface-extraction.md) methods like Marching Cubes by guaranteeing topological correctness (manifoldness) through discrete topology rather than geometric interpolation, avoiding the non-manifold artifacts and ambiguity inherent in lookup-table-based approaches [S1][S2, unofficial].
 
 ## How it works
-**Inputs:**
-- A volumetric image (grid of scalar values) [S1][S2, unofficial].
-- `minThreshold` (unsigned int): Minimum voxel intensity for inclusion [S2, unofficial].
-- `maxThreshold` (unsigned int): Maximum voxel intensity for inclusion [S2, unofficial].
-- `intAdjacency` (bool): Connectivity rule (true for interior, false for exterior) [S2, unofficial].
-
-**Outputs:**
-- A triangulated or polygonal mesh representing the dual surface to the digital boundary [S2, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A volumetric image (grid of scalar values), a minimum threshold `minThreshold`, a maximum threshold `maxThreshold`, and an adjacency flag `intAdjacency` [S1][S2, unofficial].
+*   **Output:** A dual polygonal mesh or triangulated mesh representing the isosurface [S1][S2, unofficial].
 
 **Data Structures:**
-- `DigitalSet`: A set of voxels belonging to the shape. A voxel $v$ belongs to the shape if $minThreshold \le I(v) \le maxThreshold$ [S2, unofficial] (note: [S1] uses $minThreshold < I(v) \le maxThreshold$).
-- `KSpace`: The Khalimsky space constructed from the image domain's lower and upper bounds [S1][S2, unofficial].
-- `SurfelAdjacency`: Defines connectivity between surfels [S1][S2, unofficial].
-- `DigitalSurface`: A container of surfels forming the boundary [S1][S2, unofficial].
-- `CellEmbedder`: Maps digital cells to real coordinates using an offset [S1][S2, unofficial].
-- `TriangulatedSurface` / `PolygonalSurface`: The final mesh representation [S1][S2, unofficial].
+*   **DigitalSet:** A set of voxels belonging to the shape. A voxel $v$ belongs to the set if its intensity $I(v)$ satisfies:
+    $$ \text{minThreshold} < I(v) \le \text{maxThreshold} $$
+    (Note: The source code uses `minThreshold <= I(v) <= maxThreshold` in comments but `minThreshold < I(v) <= maxThreshold` in the logic description; the code `SetFromImage::append` typically implements inclusive or exclusive bounds based on implementation. The example code passes `minThreshold` and `maxThreshold` directly. The text description says "minThreshold < I(v) <= maxThreshold" [S1], while the help text says "minT <= I(v) <= maxT" [S2, unofficial]. We follow the explicit code logic description in [S1] for the definition, but note the discrepancy [S1][S2, unofficial].)
+*   **Khalimsky Space (KSpace):** A topological space constructed from the image domain, defining the adjacency relations between cells (voxels, faces, edges, vertices) [S1][S2, unofficial].
+*   **SurfelAdjacency:** Defines the connectivity rule for surfels (surface elements). `intAdjacency = 0` implies interior adjacency (connecting surfels based on interior voxels), `intAdjacency = 1` implies exterior adjacency [S1][S2, unofficial].
+*   **DigitalSurface:** A container holding the set of surfels that form the boundary of the digital set [S1][S2, unofficial].
+*   **CellEmbedder:** Maps digital cells to real-world coordinates. Uses a `CanonicEmbedder` (mapping $\mathbb{Z}^n$ to $\mathbb{R}^n$) and an `ImageLinearCellEmbedder` [S1][S2, unofficial].
 
 **Steps:**
+1.  **Read Image:** Load the volume file into an image data structure [S1][S2, unofficial].
+2.  **Create Digital Set:** Populate a `DigitalSet` with voxels satisfying the threshold condition [S1][S2, unofficial].
+3.  **Initialize Khalimsky Space:** Construct the `KSpace` from the image domain's lower and upper bounds [S1][S2, unofficial].
+4.  **Initialize Surfel Adjacency:** Create a `SurfelAdjacency` object with the chosen `intAdjacency` flag [S1][S2, unofficial].
+5.  **Extract Boundary:** Scan the Khalimsky space to identify surfels on the boundary of the digital set using `Surfaces::sMakeBoundary` [S1][S2, unofficial].
+6.  **Create Digital Surface:** Wrap the set of surfels in a `DigitalSurface` object [S1][S2, unofficial].
+7.  **Initialize Embedder:** Create a `CellEmbedder` with an isovalue offset of `minThreshold + 0.5` to prevent the surface from passing exactly through voxel centers [S1][S2, unofficial].
+8.  **Convert to Mesh:**
+    *   For triangulated mesh: Call `MeshHelpers::digitalSurface2DualTriangulatedSurface` [S1].
+    *   For polygonal mesh: Call `MeshHelpers::digitalSurface2DualPolygonalSurface` [S2, unofficial].
+9.  **Finalize:** Convert the intermediate surface representation to a viewable mesh format [S1][S2, unofficial].
 
-1.  **Read Image:** Load the volume file into an image structure.
-    ```python
-    volume = load_volume(volume_path)  # [G] Reads volume file into 3D array
-    lower, upper = volume.bounds  # [G] Grid domain bounds
-    ```
-2.  **Create Digital Set:** Initialize a digital set and populate it with voxels satisfying the threshold criteria.
-    ```python
-    digital_set = set()
-    for v in volume.voxels:
-        if min_threshold <= volume[v] <= max_threshold:  # [S2, unofficial] (Note: [S1] uses < min_threshold)
-            digital_set.add(v)
-    ```
-3.  **Initialize Khalimsky Space:** Construct the Khalimsky space from the image domain.
-    ```python
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_digital_surface_khalimsky(image, min_threshold, max_threshold, int_adjacency):
+    """
+    Extracts a dual surface from a digital volume using Khalimsky space.
+    
+    Args:
+        image: Volumetric image data with domain bounds and intensity values.
+        min_threshold: Minimum intensity for shape inclusion.
+        max_threshold: Maximum intensity for shape inclusion.
+        int_adjacency: Boolean. True for interior adjacency, False for exterior.
+        
+    Returns:
+        mesh: A triangulated or polygonal mesh object.
+    """
+    # 1. Create Digital Set
+    # Voxel v belongs to shape if min_threshold < I(v) <= max_threshold [S1]
+    # Note: Source [S2, unofficial] help text suggests inclusive bounds, but [S1] logic description specifies strict lower bound.
+    digital_set = DigitalSet(image.domain())
+    for voxel in image.domain():
+        intensity = image.get_value(voxel)
+        if min_threshold < intensity <= max_threshold:
+            digital_set.append(voxel)
+            
+    # 2. Initialize Khalimsky Space
     ks = KSpace()
-    ks.init(lower, upper, True)  # [S1][S2, unofficial]
-    ```
-4.  **Define Surfel Adjacency:** Initialize the adjacency object.
-    ```python
-    surf_adj = SurfelAdjacency(ks.dimension, int_adjacency)  # [S1][S2, unofficial]
-    ```
-5.  **Extract Boundary Surfels:** Scan the space to identify the boundary surfels.
-    ```python
-    set_of_surfels = SetOfSurfels(ks, surf_adj)
-    Surfaces.sMakeBoundary(set_of_surfels.surfel_set(), ks, digital_set, lower, upper)  # [S1][S2, unofficial]
-    dig_surf = DigitalSurface(set_of_surfels)
-    ```
-6.  **Initialize Embedder:** Create an embedder to map digital cells to real coordinates. An offset of `minThreshold + 0.5` is added to avoid the isosurface passing exactly through voxel centers, which causes geometric ambiguity [S1][S2, unofficial].
-    ```python
-    trivial_embedder = CanonicEmbedder()  # [G] Canonical injection Z^n -> R^n
-    cell_embedder = ImageLinearCellEmbedder(ks, volume, trivial_embedder)
-    iso_level = min_threshold + 0.5  # [S1][S2, unofficial] Offset avoids voxel center intersection
-    cell_embedder.init(ks, volume, trivial_embedder, iso_level)
-    ```
-7.  **Convert to Mesh:** Convert the digital surface to a dual polygonal or triangulated surface.
-    ```python
-    vmap = {}  # [G] Vertex index mapping
-    poly_mesh = PolygonalSurface()
-    MeshHelpers.digital_surface2_dual_polygonal_surface(dig_surf, cell_embedder, poly_mesh, vmap)  # [S2, unofficial]
-    ```
-8.  **Finalize Mesh:** Convert the polygonal/triangulated surface to a viewable mesh format.
-    ```python
+    lower_bound = image.domain().lower_bound()
+    upper_bound = image.domain().upper_bound()
+    space_ok = ks.init(lower_bound, upper_bound, True)
+    if not space_ok:
+        raise Error("Khalimsky space construction failed")
+        
+    # 3. Initialize Surfel Adjacency
+    # int_adjacency=0 -> interior adjacency [S1][S2, unofficial]
+    surf_adj = SurfelAdjacency(ks.dimension, int_adjacency)
+    
+    # 4. Extract Boundary Surfels
+    surfel_set = SetOfSurfels(ks, surf_adj)
+    Surfaces.s_make_boundary(surfel_set.surfel_set(), ks, digital_set, lower_bound, upper_bound)
+    digital_surface = DigitalSurface(surfel_set)
+    
+    # 5. Initialize Embedder
+    # Offset by 0.5 to avoid passing through voxel centers [S1][S2, unofficial]
+    trivial_embedder = CanonicEmbedder()
+    cell_embedder = ImageLinearCellEmbedder(ks, image, trivial_embedder)
+    isovalue = min_threshold + 0.5
+    cell_embedder.init(ks, image, trivial_embedder, isovalue)
+    
+    # 6. Convert to Dual Triangulated Surface
+    trimesh = TriangulatedSurface()
+    vertex_map = {} # Map from DigitalSurface::Vertex to TriMesh::Index
+    MeshHelpers.digital_surface2_dual_triangulated_surface(
+        digital_surface, cell_embedder, trimesh, vertex_map
+    )
+    
+    # 7. Convert to Viewable Mesh
     view_mesh = Mesh()
-    MeshHelpers.polygonal_surface2_mesh(poly_mesh, view_mesh)  # [S2, unofficial]
+    MeshHelpers.triangulated_surface2_mesh(trimesh, view_mesh)
+    
     return view_mesh
-    ```
+```
 
 **Parameters:**
-- `minThreshold`: Typical usage is passed as a command-line argument [S2, unofficial].
-- `maxThreshold`: Typical usage is passed as a command-line argument [S2, unofficial].
-- `intAdjacency`: `0` (true) indicates interior adjacency; `1` (false) indicates exterior adjacency [S2, unofficial].
+*   `minThreshold`: Minimum voxel intensity. Type: `unsigned int`. Typical: Command line argument [S2, unofficial].
+*   `maxThreshold`: Maximum voxel intensity. Type: `unsigned int`. Typical: 255 if not specified [S1].
+*   `intAdjacency`: Boolean flag. `0` (True) for interior adjacency, `1` (False) for exterior adjacency [S1][S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Binary Volumes:** If the isosurface level equals an integer voxel value (e.g., `minThreshold` without offset), the surface may pass exactly through voxel centers, causing geometric ambiguity or degeneracy [S1][S2, unofficial]. The `+0.5` offset handles this [S1][S2, unofficial].
-- **Space Construction:** Failure to initialize the Khalimsky space correctly will abort the process [S1][S2, unofficial].
+*   **Voxel Center Ambiguity:** If the isosurface level equals an integer voxel value (e.g., `minThreshold` without offset), the surface may pass exactly through voxel centers, causing geometric ambiguity or degeneracy [S1][S2, unofficial]. This is handled by adding `0.5` to the threshold during embedder initialization [S1][S2, unofficial].
 
 ## Subtopics
 
+### [Genus Computation from Digital Surface](11761-genus-computation-from-digital-surface.md)
+This method computes the genus $g$ of a digital surface $\partial O_\alpha$ derived from a Majority Interpolation (MI) reconstruction. It solves the problem of determining the topological complexity (number of handles) of the extracted isosurface without requiring mesh traversal or global connectivity analysis. It sets itself apart from general mesh-based genus algorithms by leveraging the specific combinatorial properties of the Khalimsky space and the 2-manifold guarantee of the MI reconstruction, allowing for a direct calculation based solely on local neighbor counts of surface points.
+
 ### Dual Triangulated Surface Generation
-A variant that converts the digital surface (set of surfels) directly into a dual triangulated mesh (`TriangulatedSurface`) rather than a polygonal surface [S1]. It uses the same Khalimsky space and surfel extraction but employs `MeshHelpers::digitalSurface2DualTriangulatedSurface` and `ImageLinearCellEmbedder` with a `CanonicEmbedder` to map integer coordinates to real coordinates [S1].
+A method to convert a digital surface (set of surfels) into a dual triangulated mesh. It uses an embedder to map digital cells to real coordinates and constructs a `TriangulatedSurface`. It sets itself apart from the polygonal variant by explicitly triangulating the dual faces, providing a standard triangle mesh output suitable for rendering. It is chosen when a triangulated mesh is required for downstream graphics pipelines. Pitfall: If the iso-surface level equals an integer voxel value (e.g., `minThreshold` without offset), the surface may pass exactly through voxel centers, causing geometric ambiguity or degeneracy. The code handles this by adding `0.5` to the threshold [S1].
 
 ## Operating characteristics
-- **Time Complexity:** The boundary extraction step (`sMakeBoundary`) dominates the runtime. In the provided example, extracting the boundary for a lobster volume took 2757.2 ms, while mesh conversion took 2380.92 ms [S2, unofficial].
-- **Memory Complexity:** Depends on the number of surfels and the size of the Khalimsky space. The example resulted in 160,660 surfels [S1][S2, unofficial].
-- **Strengths:** Guarantees topological correctness (manifold surface) by construction [S1][S2, unofficial].
-- **Limitations:** Requires careful thresholding and adjacency selection. Not suitable for non-grid data without discretization [S1][S2, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** On a lobster.vol file (160,660 surfels), the extraction took 2757.2 ms for boundary scanning and 2380.92 ms for mesh conversion [S2, unofficial]. The resulting polygonal surface had 160,660 vertices, 321,320 edges, 160,524 faces, and an Euler characteristic ($\chi$) of -136 [S2, unofficial].
+*   **Strengths:** Guarantees manifold topology; avoids non-manifold artifacts common in Marching Cubes; combinatorial approach is robust for digital images.
+*   **Limitations:** Requires construction of Khalimsky space which may be memory-intensive for large volumes; output is dual to the digital boundary, which may differ geometrically from the true isosurface compared to interpolation-based methods.
+*   **When to use:** When topological correctness is critical and the input is a digital image (voxel grid).
+*   **When not to use:** When geometric accuracy via interpolation is preferred over topological guarantees, or for very large volumes where Khalimsky space construction is prohibitive.
 
 ## Background
-The method originates from the DGtal library, which implements digital geometry and topology tools [S1][S2, unofficial]. It is based on the theory of Khalimsky spaces, which provide a combinatorial framework for defining digital surfaces and their adjacency properties [S1][S2, unofficial].
+The method originates from the DGtal library, specifically demonstrated in `viewMarchingCubes.cpp` and `viewPolygonalMarchingCubes.cpp` (DGtal 1.4.0) [S1][S2, unofficial]. It is based on the combinatorial manifold structure of digital surfaces and the intermediate representation of TriangulatedSurface or PolygonalSurface [S1][S2, unofficial]. The approach leverages Khalimsky topology to define digital boundaries and surfel adjacency, ensuring that the extracted surface is a combinatorial manifold [S1][S2, unofficial].
 
 ## Sources
 [S1] shapes/viewMarchingCubes.cpp, https://www.dgtal.org/doc/1.4/shapes_2viewMarchingCubes_8cpp-example.html, fetched 2026-10-28

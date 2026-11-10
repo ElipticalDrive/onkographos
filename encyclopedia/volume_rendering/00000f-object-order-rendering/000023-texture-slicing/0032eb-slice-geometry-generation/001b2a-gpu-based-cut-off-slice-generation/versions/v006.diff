@@ -1,0 +1,384 @@
+--- v005.md
++++ v006.md
+@@ -4,214 +4,164 @@
+ 
+ ## Overview
+-GPU-based Cut-off Slice Generation is an object-order volume rendering technique that computes proxy geometry (polygonal meshes) representing the intersection of a volumetric bounding box with a series of parallel slicing planes aligned to the view direction [S1, unofficial][S2, book][S4, unofficial][S5]. It solves the problem of efficiently generating cut-off slice geometry on the GPU by offloading the complex geometric calculations of plane-cube intersection from the CPU to the vertex shader [S1, S4, unofficial][S5]. It differs from sibling methods by using a fixed triangular fan assembly based on precomputed edge intersections and a deterministic vertex ordering algorithm, rather than incremental texture coordinate updates [S1, S3, unofficial] or pseudo-angle sorting [S1, unofficial][S5].
++GPU-based Cut-off Slice Generation is an object-order volume rendering technique that computes the intersection polygons between a series of parallel slicing planes and the volume's bounding box entirely on the GPU using vertex shaders [S1, unofficial][S2, book][S4, unofficial]. It solves the performance bottleneck of CPU-side geometric intersection calculations by offloading the generation of proxy geometry (polygon meshes) to the graphics pipeline [S1, unofficial][S2, book]. Unlike texture-based slicing which samples a 3D texture directly, this method generates explicit geometry that can be rendered using standard triangle pipelines, facilitating advanced shading models [S2, book][S5]. It sets itself apart from sibling methods like [Plane Slicing](845-plane-slicing.md) by explicitly handling the vertex duplication and sorting required to output valid polygons from a fixed-vertex vertex shader, and from [Sliced Volume Rendering](3568-sliced-volume-rendering.md) by focusing on the geometric intersection logic rather than the ray-casting accumulation.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Volumetric data (bound as a 3D texture), modelview matrix, camera position, view direction ($\vec{n}_p$), viewport dimensions, number of slices ($N$), voxel size, and sampling rate [S1, unofficial][S2, book][S4, unofficial][S5].
+-*   **Outputs:** A vertex array containing triangulated proxy polygons for each slice plane, ready for rendering with 3D texture mapping [S1, unofficial][S2, book][S4, unofficial][S5].
++*   **Inputs:** Volumetric data (bound as 3D textures), Model-View matrix, View direction ($\vec{n}_p$), Number of slices ($N$), Voxel size, Sampling rate.
++*   **Outputs:** A vertex array containing triangulated proxy polygons for each slice plane, ready for rasterization.
+ 
+ **Data Structures:**
+-*   **Bounding Box:** Represented by 8 vertices in object space. In view space, these are transformed vertices.
+-*   **Edge Sequence:** The 12 edges of the cube are indexed $0$ to $11$. Each edge $i$ has a start vertex $\vec{V}_{start}[i]$ and direction $\vec{e}_i = \vec{V}_{end}[i] - \vec{V}_{start}[i]$ [S4, unofficial].
+-*   **Edge Flags:** A set of six flags stored for each edge, one for each of the six faces of the bounding box (Top, Bottom, Left, Right, Front, Back). A flag is set if the edge belongs to the corresponding face [S3, unofficial].
++*   **Bounding Box:** Represented by 8 vertices and 12 edges. Each edge $E_{i \rightarrow j}$ connects vertex $V_i$ to $V_j$.
++*   **Edge Flags:** A set of 6 bits stored for each edge, corresponding to the 6 faces of the bounding box. A bit is set if the edge belongs to that face [S3, unofficial].
+ *   **Render Array:** `renderSliceArray[MAX_SLICES * 12]` of `glm::vec3` (or equivalent float32 RGB). Stores 12 vertices (4 triangles) per slice. Memory layout is contiguous [S4, unofficial].
+ *   **Parameters:**
+     *   `num_slices`: Integer, number of parallel planes. Default: 10 [S4, unofficial].
+-    *   `viewDir`: `glm::vec3`, direction perpendicular to slice planes. Default: $(0.0, 0.0, -1.0)$ [S4, unofficial].
++    *   `viewDir`: `vec3`, direction perpendicular to slice planes. Default: $(0.0, 0.0, -1.0)$ [S4, unofficial].
+     *   `EPSILON`: Float, boundary expansion factor. Value: $0.0001$ [S4, unofficial].
+     *   `MAX_SLICES`: Integer, maximum capacity. Value: 2000 [S4, unofficial].
+ 
+-**Algorithm Steps:**
++**Numbered Steps:**
+ 
+-1.  **Initialization:**
+-    *   Bind volumetric data as a 3D texture [S1, unofficial].
+-    *   Transform the 8 bounding box vertices into view coordinates using the modelview matrix [S2, book][S5].
+-    *   Compute the minimum ($min\_z$) and maximum ($max\_z$) z-coordinates of the transformed vertices by projecting them onto the view direction [S2, book][S4, unofficial][S5].
+-    *   Adjust bounds: $min\_z \leftarrow min\_z - EPSILON$, $max\_z \leftarrow max\_z + EPSILON$ [S4, unofficial].
+-    *   Compute slice spacing: $plane\_dist\_inc = (max\_z - min\_z) / num\_slices$ [S4, unofficial].
+-    *   Initialize current plane distance: $plane\_dist = min\_z$ [S4, unofficial].
+-
+-2.  **Intersection Calculation (Per Slice):**
+-    *   For each edge $i$ from $0$ to $11$:
+-        *   Compute dot product: $edgedot = \vec{e}_i \cdot \vec{viewDir}$ [S4, unofficial].
+-        *   Check for parallel edge using float-safe comparison: if $1.0 + edgedot \neq 1.0$ (i.e., $edgedot \neq 0$) [S4, unofficial]:
+-            *   Compute incremental lambda: $\lambda\_inc[i] = plane\_dist\_inc / edgedot$ [S4, unofficial].
+-            *   Compute initial lambda: $\lambda[i] = (plane\_dist - \vec{e}_i \cdot \vec{V}_{start}[i]) / edgedot$ [S4, unofficial].
+-        *   Else (edge parallel to plane):
+-            *   $\lambda[i] = -1.0$, $\lambda\_inc[i] = 0.0$ [S4, unofficial].
+-    *   *Note:* $\lambda$ represents the parameter along the edge $\vec{x} = \vec{V}_{start} + \lambda \vec{e}$. Valid intersections require $\lambda \in [0, 1]$ [S1, unofficial].
+-
+-3.  **Vertex Determination (Hardcoded Cascade):**
+-    *   The algorithm assumes a specific ordering of edges to form a valid closed polygon. The edges are grouped by their traversal order relative to the view: Red ($E_{0\rightarrow1}, E_{1\rightarrow4}, E_{4\rightarrow7}$), Yellow ($E_{1\rightarrow5}$), Green ($E_{0\rightarrow2}, E_{2\rightarrow5}, E_{5\rightarrow7}$), Cyan ($E_{2\rightarrow6}$), Blue ($E_{0\rightarrow3}, E_{3\rightarrow6}, E_{6\rightarrow7}$), Purple ($E_{3\rightarrow4}$) [S1, unofficial].
+-    *   Determine 6 intersection points ($P_0$ to $P_5$) using a hardcoded cascade based on which $\lambda$ values fall in $[0.0, 1.0)$ [S4, unofficial]:
+-        *   $P_0$: Check edges 0, 1, 3. Pick the first valid $\lambda$.
+-        *   $P_1$: Check edges 2, 0, 1, 3. Pick the next valid $\lambda$.
+-        *   $P_2$: Check edges 4, 5, 7. Pick the next valid $\lambda$.
+-        *   $P_3$: Check edges 6, 4, 5, 7. Pick the next valid $\lambda$.
+-        *   $P_4$: Check edges 8, 9, 11. Pick the next valid $\lambda$.
+-        *   $P_5$: Check edges 10, 8, 9, 11. Pick the next valid $\lambda$.
+-    *   If fewer than 6 valid intersections exist, duplicate existing vertices to fill the 6-vertex requirement. For example, if the Yellow edge has no intersection, duplicate the Red intersection [S1, unofficial].
+-    *   Compute position: $\vec{P}_k = \vec{V}_{start}[edge] + \lambda[edge] \cdot \vec{e}_{edge}$ [S4, unofficial].
+-
+-4.  **Triangulation and Output:**
+-    *   Triangulate the 6 points into 4 triangles using the index array $\{0,1,2, 0,2,3, 0,3,4, 0,4,5\}$ [S4, unofficial]. This forms a fan from vertex 0.
+-    *   Store the 12 vertices in `renderSliceArray` [S4, unofficial].
+-    *   *Alternative Sorting:* If using the flag-based method, sort remaining intersection points to form a closed polygon by verifying that adjacent points share a common face flag (bitwise OR of edge flags is nonzero) [S3, unofficial]. Then tessellate into triangles (strip or fan) [S2, book][S5].
+-
+-5.  **Rendering:**
+-    *   Upload `renderSliceArray` to GPU via VBO [S4, unofficial].
+-    *   In the vertex shader, compute texture coordinates for each vertex. For a vertex $\vec{x}$ on edge $i \rightarrow j$:
+-        $$ PI \cdot \vec{k} = \begin{cases} \frac{V_i \vec{k} - min(B_{\vec{k}})}{max(B_{\vec{k}}) - min(B_{\vec{k}})} & \vec{k} \cdot \vec{e}_{i \rightarrow j} = 0 \\ \lambda & \vec{k} \cdot \vec{e}_{i \rightarrow j} > 0 \\ 1 - \lambda & \vec{k} \cdot \vec{e}_{i \rightarrow j} < 0 \end{cases} $$
+-        where $\vec{k}$ is the x, y, or z unit vector in texture space, and $B_{\vec{k}}$ is the bounding box length in direction $\vec{k}$ [S1, unofficial].
+-    *   In the fragment shader, perform two texture mappings:
+-        1.  Sample the 3D volume texture using the computed texture coordinates.
+-        2.  Map the scalar value to RGBA using a 2D transfer function texture [S1, unofficial].
+-    *   Blend the quadruplets (RGBA) using the transparency element $A$ as the blending factor. Order can be front-to-back or back-to-front depending on polygon fill order [S1, unofficial].
++1.  **Transform Bounding Box:** Transform the 8 vertices of the volume bounding box into view coordinates using the Model-View matrix [S2, book][S5].
++2.  **Determine Depth Bounds:** Compute the minimum ($min\_z$) and maximum ($max\_z$) z-coordinates of the transformed vertices by projecting them onto the view direction [S2, book][S4, unofficial].
++    $$ min\_z = \min_i (\vec{V}_i \cdot \vec{n}_p) $$
++    $$ max\_z = \max_i (\vec{V}_i \cdot \vec{n}_p) $$
++    Adjust bounds to avoid missed intersections:
++    $$ min\_z \leftarrow min\_z - \text{EPSILON} $$
++    $$ max\_z \leftarrow max\_z + \text{EPSILON} $$
++3.  **Compute Slice Planes:** Calculate the number of sampling planes and their spacing. The sampling distance is derived from voxel size and current sampling rate [S2, book][S5].
++    $$ plane\_dist\_inc = \frac{max\_z - min\_z}{num\_slices} $$
++    Initialize $plane\_dist = min\_z$ [S4, unofficial].
++4.  **Calculate Intersections (Per Plane):** For each plane at distance $plane\_dist$:
++    *   Iterate over the 12 edges of the bounding box.
++    *   For each edge $i$, compute the dot product with the view direction:
++        $$ edgedot = \vec{e}_{i \rightarrow j} \cdot \vec{n}_p $$
++    *   Compute the intersection parameter $\lambda$ [S1, unofficial]:
++        $$ \lambda[i] = \begin{cases} \frac{plane\_dist - \vec{V}_i \cdot \vec{n}_p}{edgedot}, & edgedot \neq 0 \\ -1.0, & edgedot = 0 \end{cases} $$
++        *   If $edgedot = 0$, the edge is parallel to the plane. Set $\lambda[i] = -1.0$ and $\lambda\_inc[i] = 0.0$ to skip [S4, unofficial].
++        *   If $\lambda[i] \in [0, 1]$, the intersection is valid and lies on the edge segment [S1, unofficial].
++    *   **Incremental Optimization:** To avoid recomputing $\lambda$ for every plane, compute $\lambda$ for the first plane and update incrementally for subsequent planes [S3, S4, unofficial]:
++        $$ \lambda\_inc[i] = \frac{plane\_dist\_inc}{edgedot} \quad (\text{if } edgedot \neq 0) $$
++        $$ \lambda_{new}[i] = \lambda_{old}[i] + \lambda\_inc[i] $$
++5.  **Sort and Validate Vertices:**
++    *   Collect all valid intersection points ($\lambda \in [0, 1]$).
++    *   **Edge Flag Validation:** Use the 6-bit edge flags to verify the sequence. A sequence is valid if the bitwise OR of flags for adjacent points is non-zero (indicating a shared face) [S3, unofficial].
++    *   **Polygon Formation:** The algorithm must output exactly 6 vertices per slice, even if the polygon has fewer vertices. Duplicate vertices are generated by recalculation or feedback from existing intersections if edges (Yellow, Cyan, Purple) have no intersection [S1, unofficial].
++    *   **Sorting:** Sort the vertices to form a closed polygon.
++        *   *Method A (Rezk-Salama/Shen):* Traverse edges in a specific order: Red ($E_{0\rightarrow1}, E_{1\rightarrow4}, E_{4\rightarrow7}$), Yellow, Green ($E_{0\rightarrow2}, E_{2\rightarrow5}, E_{5\rightarrow7}$), Cyan, Blue ($E_{0\rightarrow3}, E_{3\rightarrow6}, E_{6\rightarrow7}$), Purple. If an intermediate group (Yellow/Cyan/Purple) has no intersection, duplicate the previous group's intersection [S1, unofficial].
++        *   *Method B (Pseudo-Angle):* Compute the center of the proxy polygon by averaging intersection points. Project vertices onto the x-y plane. Sort using a "pseudo-angle" scalar (tangent of angle combined with sign of coordinates) to avoid trigonometry [S2, book][S5].
++6.  **Tessellation:** Triangulate the sorted polygon vertices.
++    *   Commonly tessellated into 4 triangles using an index array `{0,1,2, 0,2,3, 0,3,4, 0,4,5}` for a 6-vertex quad/polygon [S4, unofficial].
++    *   Alternatively, use a triangle fan or strip from the center [S2, book][S5].
++7.  **Texture Coordinate Generation:** Compute texture coordinates for the vertices to sample the 3D volume [S1, unofficial][S2, book].
++    $$ PI \cdot \vec{k} = \begin{cases} \frac{V_i \vec{k} - min(B_{\vec{k}})}{max(B_{\vec{k}}) - min(B_{\vec{k}})} & \vec{k} \cdot \vec{e}_{i \rightarrow j} = 0 \\ \lambda & \vec{k} \cdot \vec{e}_{i \rightarrow j} > 0 \\ 1 - \lambda & \vec{k} \cdot \vec{e}_{i \rightarrow j} < 0 \end{cases} $$
++    Where $\vec{k}$ is the x, y, or z unit vector in texture space, and $B_{\vec{k}}$ is the bounding box length in that direction [S1, unofficial].
++8.  **Output:** Upload the vertex array to the GPU (e.g., `glBufferSubData`) for rendering [S4, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Constants
+-EPSILON = 0.0001
+-MAX_SLICES = 2000
+-
+-# Edge definitions (indices into 8 cube vertices)
+-# Assuming standard cube vertices 0..7
+-# Edges: 0:(0,1), 1:(1,4), 2:(4,7), 3:(0,3), 4:(3,6), 5:(6,7), 
+-#        6:(0,2), 7:(2,5), 8:(5,7), 9:(1,5), 10:(2,6), 11:(3,4)
+-# Note: The specific edge indices in [S4, unofficial] cascade may differ from standard labeling.
+-# The cascade logic in [S4, unofficial] is:
+-# P0 uses edges 0,1,3
+-# P1 uses edges 2,0,1,3
+-# P2 uses edges 4,5,7
+-# P3 uses edges 6,4,5,7
+-# P4 uses edges 8,9,11
+-# P5 uses edges 10,8,9,11
+-
+-def generate_slices(cube_vertices_obj, modelview_matrix, view_dir, num_slices, voxel_size, sampling_rate):
+-    # 1. Transform vertices to view space
+-    cube_vertices_view = [transform(v, modelview_matrix) for v in cube_vertices_obj]
++def generate_slices(volume_bbox_vertices, model_view_matrix, view_dir, num_slices, epsilon=0.0001):
++    """
++    Generates proxy geometry for volume slicing.
++    volume_bbox_vertices: list of 8 vec3 in object space.
++    model_view_matrix: 4x4 matrix.
++    view_dir: vec3, normalized.
++    num_slices: int.
++    """
++    # Step 1: Transform to view space
++    view_vertices = [mv * vec4(v, 1.0)[:3] for v in volume_bbox_vertices]
+     
+-    # 2. Find min/max z in view space
+-    min_z = dot(view_dir, cube_vertices_view[0])
+-    max_z = min_z
+-    for v in cube_vertices_view[1:]:
+-        dist = dot(view_dir, v)
+-        if dist < min_z: min_z = dist
+-        if dist > max_z: max_z = dist
+-        
+-    min_z -= EPSILON
+-    max_z += EPSILON
++    # Step 2: Find depth bounds
++    min_z = min(dot(v, view_dir) for v in view_vertices)
++    max_z = max(dot(v, view_dir) for v in view_vertices)
++    min_z -= epsilon
++    max_z += epsilon
+     
+     plane_dist_inc = (max_z - min_z) / num_slices
+-    plane_dist = min_z
+     
+-    render_slice_array = []
+-    
+-    # Precompute edge directions and start points in view space
+-    edges = []
+-    # Define edge pairs based on standard cube topology or specific implementation
+-    # This list must match the cascade indices in [S4, unofficial]
+-    edge_pairs = [
+-        (0,1), (1,4), (4,7), (0,3), (3,6), (6,7),
+-        (0,2), (2,5), (5,7), (1,5), (2,6), (3,4)
++    # Precompute edge data
++    # Edges defined by vertex indices (0-7)
++    edge_indices = [
++        (0,1), (1,5), (5,4), (4,0), # Bottom
++        (2,3), (3,7), (7,6), (6,2), # Top
++        (0,3), (1,2), (4,7), (5,6)  # Verticals
+     ]
+     
+-    for i in range(12):
+-        v_start = cube_vertices_view[edge_pairs[i][0]]
+-        v_end = cube_vertices_view[edge_pairs[i][1]]
+-        e_dir = v_end - v_start
+-        edges.append({'start': v_start, 'dir': e_dir})
++    # Edge flags: 6 bits, one for each face (e.g., +/-X, +/-Y, +/-Z)
++    # Simplified: Just store start vertex and direction
++    edges = []
++    for i, j in edge_indices:
++        start = view_vertices[i]
++        end = view_vertices[j]
++        dir_vec = end - start
++        edges.append({'start': start, 'dir': dir_vec, 'dot': dot(dir_vec, view_dir)})
+         
++    render_array = []
++    
++    # Step 3 & 4: Iterate planes
++    plane_dist = min_z
+     for s in range(num_slices):
+-        # 3. Compute lambdas for all edges
++        intersections = []
++        
++        # Calculate lambda for all edges
+         lambdas = []
+-        lambda_incs = []
++        for e in edges:
++            if abs(e['dot']) < 1e-9: # Parallel
++                lambdas.append(-1.0)
++            else:
++                # lambda = (d - n.Vi) / (n.E)
++                # d is plane_dist (distance along view_dir from origin)
++                # n.Vi is dot(view_dir, start)
++                l = (plane_dist - dot(e['start'], view_dir)) / e['dot']
++                lambdas.append(l)
++                
++        # Collect valid intersections
++        for idx, l in enumerate(lambdas):
++            if 0.0 <= l <= 1.0:
++                p = edges[idx]['start'] + l * edges[idx]['dir']
++                # Store point and edge index for sorting/flagging
++                intersections.append({'pos': p, 'edge_idx': idx, 'lambda': l})
++                
++        # Step 5: Sort and Format
++        # Note: Full sorting logic (Rezk-Salama or Pseudo-Angle) is complex.
++        # Here we assume a helper sorts them into a valid polygon order.
++        sorted_points = sort_polygon_vertices(intersections, edges)
+         
+-        for i in range(12):
+-            edgedot = dot(edges[i]['dir'], view_dir)
+-            # Float-safe check for zero
+-            if 1.0 + edgedot != 1.0:
+-                lambda_inc = plane_dist_inc / edgedot
+-                lambda_val = (plane_dist - dot(edges[i]['start'], view_dir)) / edgedot
+-                lambdas.append(lambda_val)
+-                lambda_incs.append(lambda_inc)
+-            else:
+-                lambdas.append(-1.0)
+-                lambda_incs.append(0.0)
+-                
+-        # 4. Determine 6 intersection points using cascade
+-        points = []
+-        used_indices = set()
++        # Step 6: Tessellate
++        # Ensure exactly 6 vertices for the fixed shader output
++        final_verts = ensure_6_vertices(sorted_points)
+         
+-        # Cascade 0: Edges 0, 1, 3
+-        for e_idx in [0, 1, 3]:
+-            if lambdas[e_idx] >= 0.0 and lambdas[e_idx] < 1.0 and e_idx not in used_indices:
+-                p = edges[e_idx]['start'] + lambdas[e_idx] * edges[e_idx]['dir']
+-                points.append(p)
+-                used_indices.add(e_idx)
+-                break
+-        # If none found, this implies no intersection with this group, handle duplication later if needed
++        # Step 7: Compute Texture Coords (simplified)
++        for v in final_verts:
++            # Compute texture coords based on lambda and edge direction
++            # This requires knowing which edge the vertex came from
++            pass 
++            
++        render_array.extend(final_verts)
+         
+-        # Cascade 1: Edges 2, 0, 1, 3
+-        for e_idx in [2, 0, 1, 3]:
+-            if lambdas[e_idx] >= 0.0 and lambdas[e_idx] < 1.0 and e_idx not in used_indices:
+-                p = edges[e_idx]['start'] + lambdas[e_idx] * edges[e_idx]['dir']
+-                points.append(p)
+-                used_indices.add(e_idx)
+-                break
+-                
+-        # Cascade 2: Edges 4, 5, 7
+-        for e_idx in [4, 5, 7]:
+-            if lambdas[e_idx] >= 0.0 and lambdas[e_idx] < 1.0 and e_idx not in used_indices:
+-                p = edges[e_idx]['start'] + lambdas[e_idx] * edges[e_idx]['dir']
+-                points.append(p)
+-                used_indices.add(e_idx)
+-                break
+-                
+-        # Cascade 3: Edges 6, 4, 5, 7
+-        for e_idx in [6, 4, 5, 7]:
+-            if lambdas[e_idx] >= 0.0 and lambdas[e_idx] < 1.0 and e_idx not in used_indices:
+-                p = edges[e_idx]['start'] + lambdas[e_idx] * edges[e_idx]['dir']
+-                points.append(p)
+-                used_indices.add(e_idx)
+-                break
+-                
+-        # Cascade 4: Edges 8, 9, 11
+-        for e_idx in [8, 9, 11]:
+-            if lambdas[e_idx] >= 0.0 and lambdas[e_idx] < 1.0 and e_idx not in used_indices:
+-                p = edges[e_idx]['start'] + lambdas[e_idx] * edges[e_idx]['dir']
+-                points.append(p)
+-                used_indices.add(e_idx)
+-                break
+-                
+-        # Cascade 5: Edges 10, 8, 9, 11
+-        for e_idx in [10, 8, 9, 11]:
+-            if lambdas[e_idx] >= 0.0 and lambdas[e_idx] < 1.0 and e_idx not in used_indices:
+-                p = edges[e_idx]['start'] + lambdas[e_idx] * edges[e_idx]['dir']
+-                points.append(p)
+-                used_indices.add(e_idx)
+-                break
+-                
+-        # Handle duplicates if fewer than 6 points
+-        while len(points) < 6:
+-            # Duplicate the last valid point or first point depending on implementation specifics
+-            # [S1, unofficial] suggests duplicating from previous valid edges (e.g., Red for Yellow)
+-            if len(points) > 0:
+-                points.append(points[-1])
+-            else:
+-                points.append(edges[0]['start']) # Fallback
+-                
+-        # 5. Triangulate (Fan from point 0)
+-        # Indices: 0,1,2; 0,2,3; 0,3,4; 0,4,5
+-        for i in range(1, 5):
+-            render_slice_array.append(points[0])
+-            render_slice_array.append(points[i])
+-            render_slice_array.append(points[i+1])
+-            
+-        # Update plane distance for next slice
+         plane_dist += plane_dist_inc
+         
+-    return render_slice_array
++    return render_array
++
++def sort_polygon_vertices(intersections, edges):
++    """
++    Sorts intersection points to form a closed polygon.
++    Uses edge flags or pseudo-angle.
++    """
++    # Implementation depends on chosen method (Rezk-Salama vs Pseudo-Angle)
++    # Rezk-Salama: Traverse specific edge groups (Red, Yellow, Green...)
++    # Pseudo-Angle: Project to XY, compute atan2/sign scalar, sort.
++    pass
++
++def ensure_6_vertices(points):
++    """
++    Duplicates vertices if fewer than 6 intersections exist.
++    """
++    if len(points) < 6:
++        # Duplicate last or first points to fill
++        while len(points) < 6:
++            points.append(points[-1])
++    return points[:6]
+ ```
+ 
+@@ -219,24 +169,24 @@
+ 
+ ### [Incremental Intersection and Texture Coordinates](997-incremental-intersection-and-texture-coordinates.md)
+-A method to compute intersection points and texture coordinates for axis-aligned boxes against parallel slicing planes incrementally, avoiding the bottleneck of recomputing intersections for every sub-volume and plane. It sets itself apart from naive per-plane intersection by leveraging the uniform spacing and parallel nature of slicing planes to update positions via constant deltas, maintaining an `ActiveIntersectionList` to track active edge intersections.
++Computes intersection points incrementally using constant deltas for parallel planes, avoiding recomputation.
+ 
+ ### [View-Aligned Slicing (Proxy Geometry Generation)](7620-view-aligned-slicing-proxy-geometry-generation.md)
+-View-Aligned Slicing is a GPU-based method for generating proxy geometry (polygonal meshes) that approximate a volumetric dataset by intersecting its bounding cube with a series of parallel planes aligned to the view direction. It solves the problem of efficiently creating cut-off slice geometry on the GPU by computing intersection parameters in a vertex shader, offloading the CPU from complex geometric calculations. It differs from sibling methods by using a fixed triangular fan assembly based on precomputed edge intersections rather than incremental texture coordinate updates or pseudo-angle sorting.
++Approximates the volume by intersecting the bounding box with view-aligned planes, generating explicit proxy meshes for standard rasterization.
+ 
+ ### [Slice Vertex Sorting via Pseudo-Angle](7642-slice-vertex-sorting-via-pseudo-angle.md)
+-This method sorts the intersection vertices of a volume slice around their centroid in counter-clockwise order using a custom pseudo-angle metric. It ensures that the resulting polygon vertices are ordered correctly for triangulation, which is a prerequisite for rendering the slice geometry generated by [GPU-based Cut-off Slice Generation](948-gpu-based-cut-off-slice-generation.md). It differs from sibling methods by using a normalized linear projection of the angle rather than trigonometric functions or incremental traversal.
++Sorts intersection vertices around the centroid using a pseudo-angle metric to ensure correct triangulation order.
++
++### [MTCut Algorithm](11789-mtcut-algorithm.md)
++Generates cut geometry using a vertex-shader-based Marching Tetrahedra variant, encoding traversal state in 2D textures.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot E)$ per frame, where $N$ is the number of slices and $E$ is the number of edges (constant 12). The intersection calculation is $O(1)$ per slice due to the fixed number of edges.
+-*   **Memory Complexity:** $O(N \cdot V)$, where $V$ is the number of vertices per slice (constant 12). The output array size is fixed at `MAX_SLICES * 12` [S4, unofficial].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Performance scales linearly with the number of slices. The algorithm is designed for real-time interaction, with response time to user input required to be less than 100ms [S1, unofficial].
+-*   **Strengths:** Offloads CPU geometry calculations to the GPU vertex shader, enabling real-time interactive rotation and slicing [S1, unofficial]. Simple to implement in fixed-function or early shader pipelines.
+-*   **Limitations:** Vertex shaders cannot insert or remove vertices, requiring the output of a fixed number of vertices (6) even for polygons with fewer vertices, leading to duplicate vertices that must be handled in the fragment shader or via specific winding rules [S1, unofficial]. The hardcoded cascade assumes a specific view direction relative to the cube; rotation requires recomputation [S1, unofficial]. Cannot rotate more than 180 degrees in one click-drag operation with Arc-ball interaction [S1, unofficial].
+-*   **When to use:** Real-time volume rendering with interactive view changes, especially on hardware with limited CPU-GPU bandwidth or where CPU geometry generation is a bottleneck.
+-*   **When not to use:** When high-quality anti-aliasing of slice boundaries is required without additional post-processing, or when the number of slices is very large and memory bandwidth is the limiting factor.
++*   **Time Complexity:** $O(N \cdot E)$ per frame, where $N$ is the number of slices and $E$ is the number of edges (constant 12). Incremental updates reduce the cost of intersection calculation to $O(1)$ per edge per slice after the first plane [S3, unofficial].
++*   **Memory Complexity:** $O(N \cdot V)$, where $V$ is the number of vertices per slice (constant 6 or 12). The output array size is fixed by `MAX_SLICES` [S4, unofficial].
++*   **Performance:** Offloads CPU geometry generation to the GPU, enabling interactive frame rates (<100ms response time) for dynamic view changes [S1, unofficial]. Performance is limited by the number of slices and the complexity of the fragment shader (texture lookups) [S1, unofficial].
++*   **Strengths:** Real-time interaction, supports advanced shading (e.g., LTC), avoids CPU-GPU synchronization bottlenecks for geometry generation.
++*   **Limitations:** Vertex shaders cannot insert/remove vertices, requiring fixed-output algorithms (6 vertices) and duplicate handling [S1, unofficial]. Cannot rotate more than 180 degrees in one arc-ball drag operation [S1, unofficial]. Precision issues may occur if $\lambda$ is near 0 or 1; EPSILON helps but requires tuning [S4, unofficial].
+ 
+ ## Background
+-The method originates from the work of Rezk-Salama et al. [50], who proposed moving the calculation of cut-off slices from the CPU to the GPU using vertex shaders [S1, unofficial]. It is also known as the Rezk-Salama method or Plane-Cube Clipping [S1, unofficial]. The algorithm is described in NVIDIA's GPU Gems, Chapter 39, as "View-Aligned Slicing" [S2, book][S5]. It is used in systems for real-time rendering of compressed time-varying volume data [S1, unofficial] and in educational implementations of slice-based volume rendering [S4, unofficial].
++The method originates from the work of Rezk-Salama et al. [50], who proposed moving the calculation of cut-off slices from the CPU to the GPU vertex shader [S1, unofficial]. It was further refined by Shen et al. [56] to provide more flexible texture coordinate translation [S1, unofficial]. The technique is described in *GPU Gems* Chapter 39 as "View-Aligned Slicing" [S2, book][S5] and is implemented in various open-source projects [S4, unofficial]. It is widely used in scientific visualization and medical imaging for real-time volume exploration.
+ 
+ ## Sources

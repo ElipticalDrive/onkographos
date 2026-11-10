@@ -1,0 +1,129 @@
+# VQ with Undefined Data
+
+Also called: Partial VQ, VQ for undefined residuals
+
+## Overview
+This method extends vector quantization (VQ) to handle residual blocks where some data values are undefined, such as those falling outside the defined spatial domain [S1, unofficial]. It solves the problem of introducing quantization error for non-existent data by ignoring undefined components during both distance computation and centroid updates [S1, unofficial]. It differs from standard VQ by modifying the $k$-means convergence steps to be robust to missing data, and from [Adaptive VQ Tree Construction](7771-adaptive-vq-tree-construction.md) by focusing specifically on the data handling aspect rather than tree pruning logic [S1, unofficial].
+
+## How it works
+**Inputs:** A set of residual vectors (broods) where some components may be undefined (NaN or masked). A target number of clusters $K$. A convergence threshold $\epsilon$.
+
+**Outputs:** A codebook of $K$ centroids and a label map assigning each residual vector to its nearest centroid.
+
+**Data Structures:**
+*   **Residual Block:** A vector $\mathbf{v} \in \mathbb{R}^d$. Each component $v_i$ has an associated validity mask $m_i \in \{0, 1\}$, where $m_i=1$ indicates defined data and $m_i=0$ indicates undefined data.
+*   **Centroid:** A vector $\mathbf{c} \in \mathbb{R}^d$.
+
+**Algorithm Steps:**
+The method modifies the standard $k$-means algorithm [LFWV03, cited in S1, unofficial] as follows:
+
+1.  **Initialization:** Initialize $K$ centroids $\mathbf{c}_j$ randomly or via a heuristic. Ensure centroids are initialized only from defined components or set to zero/mean of defined data. [G]
+2.  **Assignment Step:** For each residual vector $\mathbf{v}$ with mask $\mathbf{m}$:
+    *   Compute the squared Euclidean distance to each centroid $\mathbf{c}_j$, ignoring undefined components:
+        $$ d(\mathbf{v}, \mathbf{c}_j) = \sum_{i=1}^{d} m_i (v_i - c_{j,i})^2 $$
+    *   Assign $\mathbf{v}$ to the cluster $j^*$ with the minimum distance:
+        $$ j^* = \arg\min_{j} d(\mathbf{v}, \mathbf{c}_j) $$
+3.  **Update Step:** For each cluster $j$:
+    *   Identify the set of vectors $\mathcal{V}_j$ assigned to cluster $j$.
+    *   Update the centroid $\mathbf{c}_j$ by computing the mean of the assigned vectors, ignoring undefined components for each dimension independently:
+        $$ c_{j,i} = \frac{\sum_{\mathbf{v} \in \mathcal{V}_j} m_i v_i}{\sum_{\mathbf{v} \in \mathcal{V}_j} m_i} $$
+    *   If the denominator is zero (no defined components for dimension $i$ in any assigned vector), the centroid component $c_{j,i}$ remains unchanged or is set to a default value [G].
+4.  **Convergence:** Repeat steps 2 and 3 until the change in centroid positions is below $\epsilon$ or a maximum iteration count is reached.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def vq_undefined_data(residuals, masks, k, max_iters=100, tol=1e-4):
+    """
+    residuals: List of vectors, shape (N, D).
+    masks: List of validity masks, shape (N, D), boolean.
+    k: Number of clusters.
+    """
+    N, D = residuals.shape
+    # Initialize centroids randomly from valid data points [G]
+    centroids = residuals[np.random.choice(N, k, replace=False)]
+    
+    for iteration in range(max_iters):
+        labels = np.zeros(N, dtype=int)
+        
+        # Assignment Step
+        for i in range(N):
+            r = residuals[i]
+            m = masks[i]
+            # Compute distance to all centroids, ignoring undefined components
+            # dist[j] = sum( m * (r - centroids[j])**2 )
+            diffs = r - centroids  # Shape (k, D)
+            sq_diffs = diffs ** 2
+            masked_sq_diffs = sq_diffs * m[np.newaxis, :]  # Broadcast mask
+            dists = np.sum(masked_sq_diffs, axis=1)
+            labels[i] = np.argmin(dists)
+            
+        # Update Step
+        new_centroids = np.copy(centroids)
+        converged = True
+        
+        for j in range(k):
+            cluster_mask = (labels == j)
+            if not np.any(cluster_mask):
+                continue # Skip empty clusters [G]
+            
+            cluster_vectors = residuals[cluster_mask]
+            cluster_masks = masks[cluster_mask]
+            
+            for d in range(D):
+                valid_indices = cluster_masks[:, d]
+                if np.any(valid_indices):
+                    valid_values = cluster_vectors[valid_indices, d]
+                    new_centroids[j, d] = np.mean(valid_values)
+                else:
+                    # If no valid data for this dimension in this cluster, keep old centroid [G]
+                    converged = False 
+                    
+        # Check convergence
+        shift = np.sum((new_centroids - centroids) ** 2)
+        centroids = new_centroids
+        if shift < tol:
+            break
+            
+    return centroids, labels
+```
+
+**Parameters:**
+*   $K$: Number of clusters. Typical values depend on the complexity of the residual distribution [S1, unofficial].
+*   $\epsilon$: Convergence threshold. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Empty Clusters:** If a cluster receives no vectors with defined data for a specific dimension, the centroid update for that dimension is undefined. The algorithm must handle this by retaining the previous centroid value or initializing to a sensible default [G].
+*   **All Undefined:** If a residual vector has all components undefined, its distance to any centroid is 0. It can be assigned to any cluster without affecting the centroid calculation [S1, unofficial].
+*   **Precision:** Using squared Euclidean distance is standard, but care must be taken with numerical stability if values vary widely [G].
+
+## Subtopics
+
+### K-means Parameter Decompression
+This variant describes the decompression process for parameters compressed using K-means VQ, specifically for 3D Gaussian Splatting parameters [S2, unofficial]. It reconstructs the parameter tensor from compressed centroids and labels [S2, unofficial].
+*   **Definition:** Reconstructs a parameter tensor from compressed K-means centroids and labels by dequantizing and remapping the values [S2, unofficial].
+*   **Steps:**
+    1.  Load the compressed `.npz` file to extract `centroids_quant` and `labels` arrays [S2, unofficial].
+    2.  Normalize quantized centroids to [0, 1] range using the quantization bit depth: `centroids_norm = centroids_quant / (2 ** meta["quantization"] - 1)` [S2, unofficial].
+    3.  Scale normalized centroids back to the original parameter range using stored min/max bounds: `centroids = centroids_norm * (maxs - mins) + mins` [S2, unofficial].
+    4.  Index the centroids array with the labels array to reconstruct the full parameter tensor: `params = centroids[labels]` [S2, unofficial].
+    5.  Reshape the reconstructed tensor to `meta["shape"]` and cast to `meta["dtype"]` [S2, unofficial].
+*   **Parameters:**
+    *   `quantization` (int): Number of bits used for centroid quantization, determines the denominator `2 ** quantization - 1` [S2, unofficial].
+    *   `mins`, `maxs` (Tensor): Per-dimension minimum and maximum values used for linear dequantization scaling [S2, unofficial].
+*   **Layout:** Input `.npz` file contains two arrays: `centroids` (quantized integer values) and `labels` (integer indices mapping to centroids) [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot K \cdot D \cdot I)$, where $N$ is the number of vectors, $K$ is the number of clusters, $D$ is the dimensionality, and $I$ is the number of iterations [S1, unofficial]. The mask operations add a constant factor but do not change the asymptotic complexity.
+*   **Memory Complexity:** $O(N \cdot D)$ for storing residuals and masks, plus $O(K \cdot D)$ for centroids [S1, unofficial].
+*   **Strengths:** Reduces quantization error for boundary effects by not penalizing undefined data [S1, unofficial]. Maintains convergence properties of standard $k$-means [S1, unofficial].
+*   **Limitations:** Requires explicit handling of masks. Performance may degrade if a large portion of data is undefined, leading to unstable centroid updates [G].
+*   **When to use:** When compressing data with irregular domains or boundaries where standard VQ would introduce artifacts at the edges [S1, unofficial].
+
+## Background
+This method was introduced in the context of compressed random-access trees for spatially coherent data [S1, unofficial]. It addresses the issue that subtrees in a mipmap tree may extend beyond the defined domain, resulting in residual blocks with undefined values [S1, unofficial]. The approach leverages the known property that $k$-means can be extended to partially defined data while preserving convergence [LFWV03, cited in S1, unofficial]. It is used in conjunction with brood-based vector quantization to compress 3D data [S1, unofficial]. The decompression variant is used in the CLOD-3DGS project for compressing 3D Gaussian Splatting parameters [S2, unofficial].
+
+## Sources
+[S1] Compressed Random-Access Trees for Spatially Coherent Data, https://doi.org/10.2312/egwr/egsr07/339-349, fetched 2026-10-26 (unofficial)
+[S2] facebookresearch/CLOD-3DGS, https://github.com/facebookresearch/CLOD-3DGS, fetched 2026-10-27 (unofficial)

@@ -40,6 +40,7 @@ Where:
 
 ```python
 import math
+import random
 from collections import namedtuple
 
 Ray = namedtuple('Ray', ['origin', 'direction', 'throughput'])
@@ -49,17 +50,16 @@ def wavefront_path_tracer(gbuffer, voxel_grid, sun_direction, cell_size, num_sam
     ray_queue = []
     spatial_hash = {}  # key: (bx, by, bz), value: [sum_demodulated_radiance, count]
 
-    # Helper: hash bucket index
+    # Helper: hash bucket index [G]
     def get_bucket(pos):
         return (int(pos.x / cell_size), int(pos.y / cell_size), int(pos.z / cell_size))
 
     # Helper: cosine-weighted hemisphere sampling [G]
     def sample_cosine_weighted(normal):
-        u1, u2 = random(), random()
+        u1, u2 = random.random(), random.random()
         z = 1.0 - u1
         r = math.sqrt(max(0.0, 1.0 - z * z))
         phi = 2.0 * math.pi * u2
-        # Construct local basis from normal [G]
         tangent = math.cross(normal, (1.0, 0.0, 0.0))
         if math.dot(tangent, tangent) < 1e-6:
             tangent = math.cross(normal, (0.0, 1.0, 0.0))
@@ -79,13 +79,21 @@ def wavefront_path_tracer(gbuffer, voxel_grid, sun_direction, cell_size, num_sam
 
     # Helper: sparse ray marching [G]
     def sparse_ray_march(ray, grid):
-        # March through grid cells until hit or miss [G]
-        return None  # Placeholder for grid traversal logic
+        # Standard sparse grid traversal stepping through cells until hit or exit [G]
+        t = 0.0
+        step = cell_size
+        while t < 1000.0:  # Max march distance [G]
+            pos = ray.origin + ray.direction * t
+            bucket = get_bucket(pos)
+            if bucket in grid:
+                return grid[bucket]  # Return hit info [G]
+            t += step
+        return None
 
     # Generate Phase
     for pixel in gbuffer:
         for _ in range(num_samples):
-            if random() < 0.5:
+            if random.random() < 0.5:
                 ray_direction = sample_cosine_weighted(pixel.normal)
                 p1 = pdf_cosine(ray_direction, pixel.normal)
                 p2 = pdf_sun(ray_direction, sun_direction)
@@ -94,8 +102,9 @@ def wavefront_path_tracer(gbuffer, voxel_grid, sun_direction, cell_size, num_sam
                 p1 = pdf_cosine(ray_direction, pixel.normal)
                 p2 = pdf_sun(ray_direction, sun_direction)
             
-            f_x = p1 if random() < 0.5 else p2  # PDF of chosen distribution
-            mis_weight = f_x / (0.5 * p1 + 0.5 * p2)
+            # MIS weight calculation matching source formula [S1, unofficial]
+            mis_weight = p1 if random.random() < 0.5 else p2
+            mis_weight = mis_weight / (0.5 * p1 + 0.5 * p2)
             throughput = pixel.albedo * mis_weight
             ray_queue.append(Ray(pixel.position, ray_direction, throughput))
 
@@ -105,7 +114,7 @@ def wavefront_path_tracer(gbuffer, voxel_grid, sun_direction, cell_size, num_sam
         hit = sparse_ray_march(ray, voxel_grid)
         if hit:
             ray.throughput *= hit.albedo
-            if random() < 0.5:
+            if random.random() < 0.5:
                 new_dir = sample_cosine_weighted(hit.normal)
                 p1 = pdf_cosine(new_dir, hit.normal)
                 p2 = pdf_sun(new_dir, sun_direction)
@@ -114,8 +123,8 @@ def wavefront_path_tracer(gbuffer, voxel_grid, sun_direction, cell_size, num_sam
                 p1 = pdf_cosine(new_dir, hit.normal)
                 p2 = pdf_sun(new_dir, sun_direction)
             
-            f_x = p1 if random() < 0.5 else p2
-            mis_weight = f_x / (0.5 * p1 + 0.5 * p2)
+            mis_weight = p1 if random.random() < 0.5 else p2
+            mis_weight = mis_weight / (0.5 * p1 + 0.5 * p2)
             ray_queue.append(Ray(hit.point, new_dir, ray.throughput * mis_weight))
             
             radiance = ray.throughput
@@ -148,12 +157,12 @@ def wavefront_path_tracer(gbuffer, voxel_grid, sun_direction, cell_size, num_sam
 *   **Division by Zero:** When demodulating radiance, ensure albedo is not zero to avoid division by zero errors [G].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources. [G]
+*   **Memory Complexity:** Not given in the sources. [G]
 *   **Strengths:** Allows for spatial averaging of radiance estimates. Retains surface details by remodulating with albedo [S1, unofficial].
 *   **Limitations:** Large cell sizes cause blocky artifacts. No spatial filtering is applied to the hash map [S1, unofficial].
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **When to use:** Not given in the sources. [G]
+*   **When not to use:** Not given in the sources. [G]
 
 ## Background
 The method is loosely based on Jacco Bikker’s blog entry [S1, unofficial]. It was implemented as part of a voxel raytracer development log [S1, unofficial]. The use of MIS for combining light source and BRDF samples is a common technique in path tracing, but the specific application of spatial hashing for radiance accumulation in this context is notable [S1, unofficial].

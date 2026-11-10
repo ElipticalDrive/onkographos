@@ -1,0 +1,145 @@
+# Ray Template Traversal
+
+Also called: Ray Template, Template-Based Volume Viewing, Template-based ray casting, Templated Ray Casting
+
+## Overview
+Ray Template Traversal is a discrete ray casting technique for parallel projections (orthographic view) that accelerates rendering by reusing a single discretized 26-connected line as a traversal template for all rays [S1, unofficial][S2, unofficial][S3, book]. Unlike standard DDA methods that compute traversal steps for each ray individually, this method precomputes the voxel visitation order once, eliminating per-ray discretization overhead [S2, unofficial]. It solves the problem of redundant computation in parallel ray casting by ensuring every voxel is visited exactly once through a specific base-plane casting strategy, avoiding the gaps or overlaps that occur when casting from the image plane [S3, book].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- Volume grid dimensions $N_x, N_y, N_z$ and voxel size $v$ (assumed uniform).
+- Ray direction $\mathbf{d}$ (parallel for all rays).
+- Image resolution $W \times H$.
+- Projection type: Orthographic [S1, unofficial].
+
+**Outputs:**
+- Rendered image pixels on the image plane.
+
+### Data Structures
+1.  **Ray Template:** A list of voxel indices $(i, j, k)$ representing the 26-connected path through the volume. This structure is generated once per view direction.
+2.  **Base Plane Buffer:** A temporary buffer storing the accumulated ray values (e.g., color, opacity) for each ray originating from the base plane. The dimensions of this buffer correspond to the number of rays cast, which matches the image resolution $W \times H$ (or the projection of the volume onto the base plane).
+
+### Method Steps
+1.  **Generate Template:** Compute the 26-connected voxel traversal sequence for a ray with direction $\mathbf{d}$ using a 3D DDA algorithm [S1, unofficial][S2, unofficial]. This sequence represents the order in which a ray intersects voxels.
+2.  **Identify Base Plane:** Determine the base plane of the volume buffer that is most parallel to the image plane [S2, unofficial][S3, book]. This plane is chosen such that rays cast from it cover the volume without missing voxels or double-counting them [S3, book].
+3.  **Cast Rays from Base Plane:** For each pixel in the image, cast a ray starting from the corresponding position on the base plane [S2, unofficial][S3, book].
+    -   Use the precomputed template to traverse the volume.
+    -   Accumulate optical properties (color, opacity) along the path defined by the template.
+    -   Ensure each voxel contributes at most once to the final pixel value [S2, unofficial].
+4.  **Resample to Image Plane:** The image generated from the base plane is geometrically warped relative to the final image plane [S3, book]. Perform a final resampling step using bilinear interpolation to project the values from the base plane buffer onto the final image plane pixels [S1, unofficial][S2, unofficial][S3, book].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_template_traversal(volume, image_width, image_height, ray_direction):
+    """
+    Renders a volume using Ray Template Traversal.
+    
+    Args:
+        volume: 3D array of voxel values.
+        image_width, image_height: Dimensions of the output image.
+        ray_direction: Normalized 3D vector (dx, dy, dz) for all rays.
+        
+    Returns:
+        2D array of pixel values.
+    """
+    # 1. Generate the 26-connected ray template
+    # This is a list of voxel indices (x, y, z) visited by a single ray
+    template = generate_26_connected_template(ray_direction, volume.shape)
+    
+    # 2. Identify the base plane
+    # The base plane is the volume slice most parallel to the image plane.
+    # For simplicity, assume the image plane is XY, so base plane is the Z-extent.
+    # In practice, this depends on the ray direction's dominant axis.
+    base_plane_coords = get_base_plane_coordinates(volume.shape, ray_direction)
+    
+    # 3. Initialize base plane buffer
+    # Stores the accumulated result for each ray before final projection
+    base_buffer = np.zeros((image_width, image_height, 4)) # RGBA
+    
+    # 4. Cast rays from base plane using the template
+    for u in range(image_width):
+        for v in range(image_height):
+            # Determine the starting voxel on the base plane for this ray
+            start_voxel = get_start_voxel(u, v, base_plane_coords, ray_direction)
+            
+            # Initialize ray state
+            accumulated_color = [0.0, 0.0, 0.0, 0.0]
+            current_transmittance = 1.0
+            
+            # Traverse using the precomputed template
+            for voxel in template:
+                # Check if the voxel is within the volume bounds
+                if not is_inside_volume(voxel, volume.shape):
+                    break
+                
+                # Get voxel value (color and opacity)
+                color, opacity = volume[voxel]
+                
+                # Front-to-back compositing
+                alpha = opacity * current_transmittance
+                accumulated_color = accumulated_color + color * alpha
+                current_transmittance = current_transmittance * (1.0 - opacity)
+                
+                # Early ray termination optimization (optional)
+                if current_transmittance < 0.01:
+                    break
+            
+            base_buffer[u, v] = accumulated_color
+            
+    # 5. Resample from base plane to image plane
+    final_image = resample_to_image_plane(base_buffer, ray_direction, image_width, image_height)
+    
+    return final_image
+
+def generate_26_connected_template(ray_direction, volume_shape):
+    """
+    Generates a 26-connected voxel traversal sequence using 3D DDA.
+    """
+    # Standard 3D DDA implementation
+    # Returns list of (x, y, z) indices
+    pass
+
+def get_base_plane_coordinates(volume_shape, ray_direction):
+    """
+    Determines the coordinates of the base plane most parallel to the image plane.
+    """
+    # Logic to select the plane based on ray direction
+    pass
+
+def get_start_voxel(u, v, base_plane_coords, ray_direction):
+    """
+    Maps image pixel (u, v) to a starting voxel on the base plane.
+    """
+    pass
+
+def resample_to_image_plane(base_buffer, ray_direction, width, height):
+    """
+    Projects the base plane buffer onto the final image plane using bilinear interpolation.
+    """
+    # Perform affine transformation and interpolation
+    pass
+```
+
+### Parameters and Edge Cases
+-   **Interpolation:** The method supports higher-order interpolation by extending the template to include connected cells rather than just voxels, allowing multiple samples per cell [S2, unofficial].
+-   **Edge Case - Image Plane Casting:** Casting rays directly from the image plane causes some voxels to be missed or visited twice, resulting in incorrect rendering [S2, unofficial][S3, book]. The base plane strategy is mandatory to avoid this [S3, book].
+-   **Edge Case - Zero Direction Components:** If a ray direction component is zero, the DDA must handle it by treating the distance to the next boundary as infinity for that axis [S2, unofficial][S3, book].
+
+## Operating characteristics
+-   **Time Complexity:** $O(N_{rays} \cdot N_{voxels\_per\_ray})$. The template generation is $O(N_{voxels\_per\_ray})$ and is done once. Per-ray traversal is $O(N_{voxels\_per\_ray})$. This is faster than per-ray DDA for large images because the discretization overhead is removed [S2, unofficial].
+-   **Memory Complexity:** $O(N_{voxels\_per\_ray})$ for the template and $O(W \cdot H)$ for the base plane buffer [S2, unofficial].
+-   **Strengths:** Significant performance gain for parallel projections by eliminating per-ray voxelization [S1, unofficial][S2, unofficial]. Simple implementation once the template is generated.
+-   **Limitations:** Only applicable to orthographic (parallel) projections [S1, unofficial]. Requires a final resampling step, which adds complexity and potential artifacts if not implemented carefully [S3, book]. Not suitable for perspective views without modification.
+
+## Background
+-   **Origin:** Developed by Yagel and Kaufman [S2, unofficial][S3, book].
+-   **History:** Introduced in the early 1990s as a method to accelerate direct volume rendering for parallel views [S1, unofficial][S2, unofficial]. It is a specific instance of object-order rendering where the traversal order is precomputed [S3, book].
+-   **Usage:** Used in applications requiring fast rendering of large volumes with orthographic views, such as scientific visualization and medical imaging where parallel projections are common [S1, unofficial].
+
+## Sources
+[S1] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S2] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)
+[S3] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)

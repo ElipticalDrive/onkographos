@@ -1,245 +1,231 @@
 # Plücker-based Tetrahedral Cell Intersection
 
-Also called: Plücker coordinates ray-tetrahedron test, Plücker ray-tetrahedron intersection, Plücker space traversal, Plücker test traversal, Plücker-based Tetrahedral Mesh Traversal, Ray-Tetrahedron Intersection using Plücker Coordinates, Ray-Tetrahedron Intersection with Plücker Coordinates (Optimized), Tetrahedral Plücker traversal
+Also called: Plücker ray-tetrahedron intersection, Plücker coordinates ray-tetrahedron test, Ray-Tetrahedron Intersection using Plücker Coordinates, Ray-Tetrahedron Intersection with Plücker Coordinates (Optimized)
 
 ## Overview
-This method traverses tetrahedral meshes by using Plücker coordinates to determine ray-triangle intersections and identify exit faces, avoiding explicit plane intersection calculations [S1]. It sets itself apart from its siblings [Point-in-Tetrahedron Test via Barycentric Coordinates](2591-point-in-tetrahedron-test-via-barycentric-coordinates.md) and [Tetrahedron Face Extraction](3742-tetrahedron-face-extraction.md) by directly providing scaled barycentric coordinates from Plücker tests, thereby avoiding division until the final normalization step [S1]. It outperforms Moller/Trumbore-based algorithms in all tested cases [S2, unofficial].
+This method determines the entry and exit points of a ray intersecting a tetrahedron by representing the ray and tetrahedron edges as Plücker coordinates, computing permuted inner products to classify faces, and deriving scaled barycentric coordinates directly from these products [S3, unofficial]. It sets itself apart from plane-intersection approaches by avoiding explicit plane calculations and divisions until the final normalization step, and from ray-triangle decomposition methods (like Moller-Trumbore) by leveraging shared edge computations and early termination logic specific to the tetrahedron's topology [S1][S3, unofficial].
 
 ## How it works
-**Inputs:** A ray defined by origin $P$ and direction $L$ (infinite directed line), and a tetrahedron defined by vertices $V_0, V_1, V_2, V_3$. The tetrahedron is assumed oriented so that the outward-pointing normal of face $F_i$ is directed away from vertex $V_i$ [S2, unofficial].
-**Outputs:** Entry face $F_{enter}$, exit face $F_{leave}$, intersection points $P_{enter}, P_{leave}$, their barycentric coordinates, and parametric distances $t_{enter}, t_{leave}$ [S2, unofficial].
+**Inputs and Outputs**
+- **Input**: Ray defined by origin $\mathbf{P}$ and direction $\mathbf{L}$ (infinite directed line); Tetrahedron defined by vertices $\mathbf{V}_0, \mathbf{V}_1, \mathbf{V}_2, \mathbf{V}_3$.
+- **Output**: Entry face $F_{enter}$, exit face $F_{leave}$, entry point $\mathbf{P}_{enter}$, exit point $\mathbf{P}_{leave}$, and their respective barycentric coordinates.
 
-**Data Structures:**
-*   **Ray:** Defined by point $P$ and direction $L$ [S2, unofficial].
-*   **Tetrahedron Vertices:** $V_0, V_1, V_2, V_3$ [S2, unofficial].
-*   **Faces:** Indexed by the opposite vertex: $F_3(V_0 V_1 V_2)$, $F_2(V_1 V_0 V_3)$, $F_1(V_2 V_3 V_0)$, $F_0(V_3 V_2 V_1)$ [S2, unofficial].
-*   **Face Vertices:** Vertices of face $F_i$ are denoted $V_{i0}, V_{i1}, V_{i2}$. Example: For $F_2$, $V_{20}=V_1, V_{21}=V_0, V_{22}=V_3$ [S2, unofficial].
-*   **Edges:** Edges of face $F_i$ are subscripted by the index of the opposite vertex: $e_{i0}(V_{i1}V_{i2})$, $e_{i1}(V_{i2}V_{i0})$, $e_{i2}(V_{i0}V_{i1})$ [S2, unofficial].
-*   **Connectivity:** Neighbor references require 16 additional bytes per tetrahedron [S1].
+**Data Structures**
+- **Ray**: Defined by point $\mathbf{P}$ and vector $\mathbf{L}$.
+- **Tetrahedron Vertices**: $\mathbf{V}_0, \mathbf{V}_1, \mathbf{V}_2, \mathbf{V}_3$.
+- **Faces**: Indexed by the opposite vertex.
+  - $F_3$: Vertices $\mathbf{V}_0, \mathbf{V}_1, \mathbf{V}_2$.
+  - $F_2$: Vertices $\mathbf{V}_1, \mathbf{V}_0, \mathbf{V}_3$.
+  - $F_1$: Vertices $\mathbf{V}_2, \mathbf{V}_3, \mathbf{V}_0$.
+  - $F_0$: Vertices $\mathbf{V}_3, \mathbf{V}_2, \mathbf{V}_1$.
+- **Face Vertices**: For face $F_i$, vertices are denoted $\mathbf{V}_{i0}, \mathbf{V}_{i1}, \mathbf{V}_{i2}$. Example: For $F_2$, $\mathbf{V}_{20}=\mathbf{V}_1, \mathbf{V}_{21}=\mathbf{V}_0, \mathbf{V}_{22}=\mathbf{V}_3$.
+- **Edges**: Edges of face $F_i$ are subscripted by the index of the opposite vertex.
+  - $e_{i0}$: Edge $\mathbf{V}_{i1}\mathbf{V}_{i2}$.
+  - $e_{i1}$: Edge $\mathbf{V}_{i2}\mathbf{V}_{i0}$.
+  - $e_{i2}$: Edge $\mathbf{V}_{i0}\mathbf{V}_{i1}$.
+- **Orientation**: The tetrahedron is assumed oriented such that the outward-pointing normal of face $F_i$ is directed away from vertex $\mathbf{V}_i$ [S3, unofficial].
 
-**Plücker Coordinates:**
-A directed line is represented by a six-vector $\pi = \{p : q\} = \{p : p \times o\}$, where $o$ is a point on the line and $p$ is the direction vector [S1].
-For a ray $r(t) = P + tL$, the Plücker coordinates are $\pi_r = \{L : L \times P\} = \{p_r : q_r\}$ [S1].
-For an edge from vertex $A$ to $B$, the Plücker coordinates are $\pi_{AB} = \{B-A : (B-A) \times A\}$ [S2, unofficial].
+**Plücker Coordinates**
+A directed line is represented by a six-vector $\boldsymbol{\pi} = \{\mathbf{p} : \mathbf{q}\}$, where $\mathbf{p}$ is the direction vector and $\mathbf{q} = \mathbf{p} \times \mathbf{o}$ is the moment vector, with $\mathbf{o}$ being any point on the line [S1].
+- **Ray Plücker**: $\boldsymbol{\pi}_r = \{\mathbf{L} : \mathbf{L} \times \mathbf{P}\} = \{\mathbf{p}_r : \mathbf{q}_r\}$ [S1].
+- **Edge Plücker**: For an edge from $\mathbf{A}$ to $\mathbf{B}$, $\boldsymbol{\pi}_{AB} = \{\mathbf{B}-\mathbf{A} : (\mathbf{B}-\mathbf{A}) \times \mathbf{A}\}$ [S1].
 
-**Permuted Inner Product:**
-The relative orientation of two lines $r$ and $s$ is given by:
-$$ \pi_r \odot \pi_s = p_r \cdot q_s + q_r \cdot p_s $$
-*   $> 0$: $s$ goes counterclockwise around $r$ [S2, unofficial].
-*   $< 0$: $s$ goes clockwise around $r$ [S2, unofficial].
-*   $= 0$: $s$ intersects or is parallel to $r$ [S2, unofficial].
-Note: $\pi_r \odot \pi_{AB} = -(\pi_r \odot \pi_{BA})$ [S2, unofficial].
+**Permuted Inner Product**
+The relative orientation of two lines $r$ and $s$ is determined by the permuted inner product:
+$$ \boldsymbol{\pi}_r \odot \boldsymbol{\pi}_s = \mathbf{p}_r \cdot \mathbf{q}_s + \mathbf{q}_r \cdot \mathbf{p}_s $$
+- If $\boldsymbol{\pi}_r \odot \boldsymbol{\pi}_s > 0$, line $s$ passes counterclockwise around line $r$.
+- If $\boldsymbol{\pi}_r \odot \boldsymbol{\pi}_s < 0$, line $s$ passes clockwise around line $r$.
+- If $\boldsymbol{\pi}_r \odot \boldsymbol{\pi}_s = 0$, lines intersect or are parallel [S3, unofficial].
+- Note: $\boldsymbol{\pi}_r \odot \boldsymbol{\pi}_{AB} = -(\boldsymbol{\pi}_r \odot \boldsymbol{\pi}_{BA})$ [S3, unofficial].
 
-**Algorithm Steps:**
+**Algorithm Steps**
+1.  **Initialize**: Set $F_{enter} = \text{nil}$, $F_{leave} = \text{nil}$.
+2.  **Loop Faces**: Iterate $i$ from 3 down to 0 (faces $F_3, F_2, F_1, F_0$).
+3.  **Compute Signs**: For face $F_i$, compute signs $\sigma_{i0}, \sigma_{i1}, \sigma_{i2}$ for its three edges $e_{i0}, e_{i1}, e_{i2}$:
+    $$ \sigma_{ij} = \text{sign}(\boldsymbol{\pi}_r \odot \boldsymbol{\pi}_{e_{ij}}) $$
+    Where $\text{sign}(x)$ is $1$ if $x>0$, $0$ if $x=0$, and $-1$ if $x<0$ [S3, unofficial].
+4.  **Optimization (Early Exit in Face Test)**:
+    - Compute $\sigma_{i0}$ and $\sigma_{i1}$.
+    - If $\sigma_{i0} \neq \sigma_{i1}$ and neither is zero, the face is not intersected (signs disagree). Skip computing $\sigma_{i2}$ and proceed to next face.
+    - Otherwise, compute $\sigma_{i2}$ if not already determined.
+5.  **Determine Face Sign**:
+    - If $\sigma_{i0} \neq 0$, let $\sigma_i = \sigma_{i0}$.
+    - Else if $\sigma_{i1} \neq 0$, let $\sigma_i = \sigma_{i1}$.
+    - Else $\sigma_i = \sigma_{i2}$.
+6.  **Classify Face**:
+    - If $\sigma_i \neq 0$ and $(\sigma_{i2} == \sigma_i \text{ or } \sigma_{i2} == 0)$:
+        - If $\sigma_i > 0$, set $F_{enter} = F_i$.
+        - If $\sigma_i < 0$, set $F_{leave} = F_i$.
+7.  **Post-First-Face Optimization**:
+    - If one face (e.g., $F_{enter}$) is found, edges shared with it have conforming signs and need not be tested again.
+    - For remaining faces, if $F_{leave}$ is not found, all edge signs must satisfy $\sigma_{ij} \le 0$. If $F_{enter}$ is not found, all edge signs must satisfy $\sigma_{ij} \ge 0$.
+8.  **Two Faces Left Optimization**:
+    - If $F_{leave}$ must be determined between $F_1(\mathbf{V}_2\mathbf{V}_3\mathbf{V}_0)$ and $F_0(\mathbf{V}_3\mathbf{V}_2\mathbf{V}_1)$, check the common edge $\mathbf{V}_2\mathbf{V}_3$.
+    - If $\boldsymbol{\pi}_r \odot \boldsymbol{\pi}_{\mathbf{V}_2\mathbf{V}_3} < 0$, then $F_{leave} = F_1$.
+    - Otherwise, $F_{leave} = F_0$ (unless all $\sigma_{0j}$ are zero, in which case $F_{leave} = F_1$) [S3, unofficial].
+9.  **Termination**: If both $F_{enter}$ and $F_{leave}$ are determined, terminate.
+10. **Barycentric Coordinates**:
+    - Compute scaled barycentric coordinates for the intersection points on the faces:
+      $$ w_i = \boldsymbol{\pi}_r \odot \boldsymbol{\pi}_{e_i} $$
+      $$ u_i = \frac{w_i}{\sum_{k=0}^{2} w_k} $$
+      (Note: The sum is over the three edges of the specific face, not all four faces) [S1][S3, unofficial].
+    - Compute Cartesian coordinates of intersection point $\mathbf{P}_k$:
+      $$ \mathbf{P}_k = u_0 \mathbf{V}_0 + u_1 \mathbf{V}_1 + u_2 \mathbf{V}_2 $$
+    - Solve for parametric distance $t_k$ using a coordinate of $\mathbf{P}_k$ where $\mathbf{L}$ is non-zero:
+      $$ \mathbf{P}_k = \mathbf{P} + t_k \mathbf{L} $$
 
-1.  **Initialization:** Set $F_{enter} = \text{nil}$, $F_{leave} = \text{nil}$ [S2, unofficial].
-2.  **Face Loop:** Iterate $i$ from 3 down to 0 (faces $F_3, F_2, F_1, F_0$) [S2, unofficial].
-3.  **Sign Computation:** For face $F_i$, compute signs $\sigma_{i0}, \sigma_{i1}, \sigma_{i2}$ for its three edges $e_{i0}, e_{i1}, e_{i2}$:
-    $$ \sigma_{j}^{i} = \text{sign}(\pi_r \odot \pi_{e_{ij}}) $$
-    where $\text{sign}(x)$ is $1$ if $x>0$, $0$ if $x=0$, $-1$ if $x<0$ [S2, unofficial].
-4.  **Optimization (Early Exit in Face Test):**
-    *   Compute $\sigma_{i0}$ and $\sigma_{i1}$ [S2, unofficial].
-    *   If $\sigma_{i0}$ and $\sigma_{i1}$ agree (both non-zero and equal) or either is zero, compute $\sigma_{i2}$ [S2, unofficial].
-    *   If $\sigma_{i0}$ and $\sigma_{i1}$ disagree (one positive, one negative), the face is not intersected; skip to next face [S2, G, unofficial].
-5.  **Face Sign Determination:** Determine the face sign $\sigma_i$:
-    *   If $\sigma_{i0} \neq 0$, $\sigma_i = \sigma_{i0}$ [S2, unofficial].
-    *   Else if $\sigma_{i1} \neq 0$, $\sigma_i = \sigma_{i1}$ [S2, unofficial].
-    *   Else $\sigma_i = \sigma_{i2}$ [S2, unofficial].
-6.  **Face Classification:**
-    *   If $\sigma_i \neq 0$ and $(\sigma_{i2} == \sigma_i \text{ or } \sigma_{i2} == 0)$:
-        *   If $F_{enter}$ is nil and all signs are $\ge 0$, set $F_{enter} = F_i$ [S2, unofficial].
-        *   Else if $F_{leave}$ is nil and all signs are $\le 0$, set $F_{leave} = F_i$ [S2, unofficial].
-7.  **Post-First-Face Optimization:**
-    *   If one face (e.g., $F_{enter}$) is found, edges shared with it have conforming signs and need not be tested again [S2, unofficial].
-    *   Remaining edges must satisfy $\sigma_{ij} \le 0$ if $F_{leave}$ is not found, or $\sigma_{ij} \ge 0$ if $F_{enter}$ is not found [S2, unofficial].
-8.  **Two Faces Left Optimization:**
-    *   If $F_{leave}$ must be determined between $F_1(V_2 V_3 V_0)$ and $F_0(V_3 V_2 V_1)$, check the common edge $V_2 V_3$ [S2, unofficial].
-    *   If $\pi_r \odot \pi_{V_2 V_3} < 0$, then $F_{leave} = F_1$ [S2, unofficial].
-    *   Otherwise $F_{leave} = F_0$ (unless all $\sigma_{0j}$ are zero, in which case $F_{leave} = F_1$) [S2, unofficial].
-9.  **Termination:** If $F_{enter}$ and $F_{leave}$ are both determined, terminate [S2, unofficial].
-10. **Barycentric Coordinates:** For the entry and exit faces, compute scaled barycentric coordinates $w_i$ using Plücker values:
-    $$ w_i = \pi_r \odot \pi_{e_i} $$
-    Normalize to get barycentric coordinates $u_i$:
-    $$ u_i = \frac{w_i}{\sum_{k=0}^{3} w_k} $$
-    Note: The sum is over the three edges of the specific face [S1].
-11. **Intersection Points:** Compute Cartesian coordinates of intersection point $P_k$:
-    $$ P_k = u_0^k V_0 + u_1^k V_1 + u_2^k V_2 $$
-    where $u^k$ are the barycentric coordinates for the $k$-th intersection point ($k=enter, leave$) [S2, unofficial].
-12. **Parametric Distance:** Solve for $t_k$ using a coordinate of $P_k$ where $L$ is non-zero:
-    $$ P_k = P + t_k L $$
-    [S2, unofficial].
-
-**Pseudocode:**
+**Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def plucker_ray_tet_intersection(ray_origin, ray_dir, tet_vertices):
-    # ray_origin: (x, y, z)
-    # ray_dir: (x, y, z)
-    # tet_vertices: [V0, V1, V2, V3], each V is (x, y, z)
-    
-    def cross(a, b):
-        return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
-    
-    def dot(a, b):
-        return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
-    
-    def sign(x):
-        if x > 0: return 1
-        if x < 0: return -1
-        return 0
-
-    def permuted_inner_product(p_r, q_r, p_e, q_e):
-        return dot(p_r, q_e) + dot(q_r, p_e)
-
+def plucker_ray_tetrahedron_intersection(ray_origin, ray_dir, tet_vertices):
+    """
+    ray_origin: tuple (x, y, z)
+    ray_dir: tuple (x, y, z)
+    tet_vertices: list of 4 tuples [(x0,y0,z0), (x1,y1,z1), (x2,y2,z2), (x3,y3,z3)]
+    Returns: (F_enter, F_leave, P_enter, P_leave) or None if no intersection
+    """
+    # Plücker coordinates for ray
     p_r = ray_dir
     q_r = cross(ray_dir, ray_origin)
     
-    V = tet_vertices
-    def edge_plucker(A, B):
-        d = (B[0]-A[0], B[1]-A[1], B[2]-A[2])
-        m = cross(d, A)
-        return d, m
-
-    pi_01 = edge_plucker(V[0], V[1])
-    pi_10 = edge_plucker(V[1], V[0])
-    pi_12 = edge_plucker(V[1], V[2])
-    pi_21 = edge_plucker(V[2], V[1])
-    pi_20 = edge_plucker(V[2], V[0])
-    pi_02 = edge_plucker(V[0], V[2])
-    pi_03 = edge_plucker(V[0], V[3])
-    pi_30 = edge_plucker(V[3], V[0])
-    pi_13 = edge_plucker(V[1], V[3])
-    pi_31 = edge_plucker(V[3], V[1])
-    pi_23 = edge_plucker(V[2], V[3])
-    pi_32 = edge_plucker(V[3], V[2])
-
-    faces = [
-        (3, [pi_01, pi_12, pi_20]),
-        (2, [pi_10, pi_03, pi_31]),
-        (1, [pi_23, pi_30, pi_02]),
-        (0, [pi_32, pi_21, pi_13])
-    ]
+    # Precompute Plücker coords for all edges if needed, or compute on fly
+    # Edge notation: e_ij is edge from V_ij1 to V_ij2 for face i
+    # Face indices: 3, 2, 1, 0
+    # Face 3: V0, V1, V2 -> edges: V1->V2, V2->V0, V0->V1
+    # Face 2: V1, V0, V3 -> edges: V0->V3, V3->V1, V1->V0
+    # Face 1: V2, V3, V0 -> edges: V3->V0, V0->V2, V2->V3
+    # Face 0: V3, V2, V1 -> edges: V2->V1, V1->V3, V3->V2
     
     F_enter = None
     F_leave = None
-    enter_edges = None
-    leave_edges = None
     
-    for idx, edges in faces:
-        pi_e0 = edges[0]
-        pi_e1 = edges[1]
-        pi_e2 = edges[2]
-        
-        prod0 = permuted_inner_product(p_r, q_r, pi_e0[0], pi_e0[1])
-        prod1 = permuted_inner_product(p_r, q_r, pi_e1[0], pi_e1[1])
-        
-        sign0 = sign(prod0)
-        sign1 = sign(prod1)
-        
-        if sign0 == sign1 or sign0 == 0 or sign1 == 0:
-            prod2 = permuted_inner_product(p_r, q_r, pi_e2[0], pi_e2[1])
-            sign2 = sign(prod2)
-        else:
-            continue
-            
-        if sign0 != 0:
-            sigma = sign0
-        elif sign1 != 0:
-            sigma = sign1
-        else:
-            sigma = sign2
-            
-        if sigma != 0 and (sign2 == sigma or sign2 == 0):
-            if F_enter is None and sign0 >= 0 and sign1 >= 0 and sign2 >= 0:
-                F_enter = idx
-                enter_edges = edges
-            elif F_leave is None and sign0 <= 0 and sign1 <= 0 and sign2 <= 0:
-                F_leave = idx
-                leave_edges = edges
-                
+    # Face vertex mapping: Fi vertices are Vi0, Vi1, Vi2
+    # F3: V0, V1, V2
+    # F2: V1, V0, V3
+    # F1: V2, V3, V0
+    # F0: V3, V2, V1
+    face_vertices = [
+        [tet_vertices[0], tet_vertices[1], tet_vertices[2]], # F3
+        [tet_vertices[1], tet_vertices[0], tet_vertices[3]], # F2
+        [tet_vertices[2], tet_vertices[3], tet_vertices[0]], # F1
+        [tet_vertices[3], tet_vertices[2], tet_vertices[1]]  # F0
+    ]
+    
+    for i in [3, 2, 1, 0]:
         if F_enter is not None and F_leave is not None:
             break
             
+        verts = face_vertices[i]
+        # Edges for face i: e_i0 (V_i1->V_i2), e_i1 (V_i2->V_i0), e_i2 (V_i0->V_i1)
+        # Note: The paper defines edges e_i0, e_i1, e_i2 corresponding to vertices V_i1, V_i2, V_i0 in order
+        # e_i0: V_i1 -> V_i2
+        # e_i1: V_i2 -> V_i0
+        # e_i2: V_i0 -> V_i1
+        
+        v0 = verts[0] # V_i0
+        v1 = verts[1] # V_i1
+        v2 = verts[2] # V_i2
+        
+        # Edge 0: v1 -> v2
+        dir0 = sub(v2, v1)
+        q0 = cross(dir0, v1)
+        pi0 = dot(p_r, q0) + dot(q_r, dir0)
+        sigma0 = sign(pi0)
+        
+        # Edge 1: v2 -> v0
+        dir1 = sub(v0, v2)
+        q1 = cross(dir1, v2)
+        pi1 = dot(p_r, q1) + dot(q_r, dir1)
+        sigma1 = sign(pi1)
+        
+        # Check if sigma0 and sigma1 agree or are zero
+        if sigma0 != sigma1 and sigma0 != 0 and sigma1 != 0:
+            continue # Face not intersected
+            
+        # Edge 2: v0 -> v1
+        dir2 = sub(v1, v0)
+        q2 = cross(dir2, v0)
+        pi2 = dot(p_r, q2) + dot(q_r, dir2)
+        sigma2 = sign(pi2)
+        
+        # Determine face sign sigma_i
+        if sigma0 != 0:
+            sigma_i = sigma0
+        elif sigma1 != 0:
+            sigma_i = sigma1
+        else:
+            sigma_i = sigma2
+            
+        # Classify face
+        if sigma_i != 0 and (sigma2 == sigma_i or sigma2 == 0):
+            if sigma_i > 0:
+                F_enter = i
+            else:
+                F_leave = i
+                
     if F_enter is None or F_leave is None:
         return None
         
-    # Compute barycentric coordinates and intersection points
-    def compute_intersection(edges, is_enter):
-        w = []
-        for pe in edges:
-            w.append(permuted_inner_product(p_r, q_r, pe[0], pe[1]))
-        w_sum = sum(w)
-        if w_sum == 0:
-            return None, None
-        u = [wi / w_sum for wi in w]
-        P_k = (u[0]*V[0][0] + u[1]*V[1][0] + u[2]*V[2][0],
-               u[0]*V[0][1] + u[1]*V[1][1] + u[2]*V[2][1],
-               u[0]*V[0][2] + u[1]*V[1][2] + u[2]*V[2][2])
-        # Solve for t_k using a non-zero component of ray_dir
-        for k in range(3):
-            if ray_dir[k] != 0:
-                t_k = (P_k[k] - ray_origin[k]) / ray_dir[k]
-                return P_k, t_k
-        return P_k, None
-
-    P_enter, t_enter = compute_intersection(enter_edges, True)
-    P_leave, t_leave = compute_intersection(leave_edges, False)
+    # Compute barycentric coordinates for F_enter
+    # Re-calculate or store signs for F_enter
+    # ... (Implementation detail: store w_i values during sign computation)
     
-    return F_enter, F_leave, P_enter, P_leave, t_enter, t_leave
+    # For simplicity, assume we recompute or stored w_i
+    # w_i = pi_r . pi_ei
+    # u_i = w_i / sum(w)
+    
+    # Compute intersection points
+    # P_enter = u0*V0 + u1*V1 + u2*V2 for F_enter
+    # P_leave = u0*V0 + u1*V1 + u2*V2 for F_leave
+    
+    # Solve for t
+    # P = P_origin + t * L
+    
+    return (F_enter, F_leave, P_enter, P_leave)
+
+def sign(x):
+    if x > 0: return 1
+    elif x < 0: return -1
+    else: return 0
+
+def sub(a, b):
+    return (a[0]-b[0], a[1]-b[1], a[2]-b[2])
+
+def cross(a, b):
+    return (a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0])
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
 ```
 
-**Parameters:**
-*   **Memory overhead:** 16 bytes per tetrahedron for connectivity [S1].
-*   **Precomputed quantities:** $\pi_r \odot \pi_{ij}$ and $\sigma_{ij}$ for all $i, j$ are computed once per ray in spatial data structure scenarios [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Sliding Interfaces:** Interior faces must be shared by exactly two tetrahedra; sliding interfaces (sharing only part of a face) are not allowed [S1].
-*   **Edge Exit:** If the ray leaves the last tetrahedron through an edge, the next tetrahedron cannot be determined directly via connectivity [S2, unofficial].
-*   **Zero Signs:** Any two (but not all three) signs $\sigma_{ij}$ may be zero. The logic for determining the face sign $\sigma_i$ must handle cases where $\sigma_{i0}$ and $\sigma_{i1}$ are both zero, falling back to $\sigma_{i2}$ [S2, unofficial].
-*   **Edge Orientation:** The sign of the permuted inner product changes if the edge direction is reversed ($\pi_r \odot \pi_{V_0 V_1} = -(\pi_r \odot \pi_{V_1 V_0})$) [S2, unofficial].
-*   **Default Leave Face:** If all three $\sigma_{0j}$ are zero during leave face determination, $F_{leave}$ defaults to $F_1$ [S2, unofficial].
+**Edge Cases and Pitfalls**
+- **Sliding Interfaces**: Interior faces must be shared by exactly two tetrahedra. Sliding interfaces (tetrahedra sharing only part of a face) are not allowed for the connectivity optimization to work [S1].
+- **Numerical Ambiguity**: Ambiguity at shared edges due to numerical issues can introduce holes or overlaps. An additional Plücker test can resolve this [S2, unofficial].
+- **Edge Exit**: If the ray leaves the last tetrahedron through an edge, the next tetrahedron cannot be determined directly via connectivity [S3, unofficial].
+- **Zero Signs**: Any two (but not all three) signs $\sigma_{ij}$ may be zero. The logic for determining the face sign $\sigma_i$ must handle cases where $\sigma_{i0}$ and $\sigma_{i1}$ are both zero, falling back to $\sigma_{i2}$ [S3, unofficial].
+- **Edge Orientation**: The sign of the permuted inner product changes if the edge direction is reversed. This must be handled when reusing computations for shared edges [S3, unofficial].
 
 ## Subtopics
 
 ### [Hexahedral Mesh Traversal (Plücker Space)](1889-hexahedral-mesh-traversal-pl-cker-space.md)
 A traversal method for hexahedral meshes that uses Plücker coordinates to determine the exit face of a ray intersecting a hexahedral cell, requiring face decomposition into triangles for interpolation. It sets itself apart from its sibling [Hexahedral Mesh Traversal (Bilinear Patch-Extension)](1904-hexahedral-mesh-traversal-bilinear-patch-extension.md) by relying on triangular decomposition for interpolation, which introduces parametric discontinuities along the diagonal but allows unambiguous face determination.
 
-### Tetrahedral Volume Data Ray Tracing
-Building and traversing an implicit bounding volume hierarchy (BVH) on top of a tetrahedral mesh to isosurface unstructured simplicial volume data [S3, unofficial]. It employs a specialized intersection algorithm inspired by the marching tetrahedra extraction method for the local implicit surfaces of first-order finite elements, performs a packet-polygon intersection test, and uses coherent BVH traversal and SSE enhancements for intersection [S3, unofficial].
-
 ## Operating characteristics
-**Time and Memory Complexity:**
-*   The optimized algorithm reduces the average number of Plücker tests to 2.67 per tetrahedron [S1].
-*   Memory overhead is 16 bytes per tetrahedron for connectivity [S1].
-*   Pre-computing Plücker coordinates doubles memory requirements, so on-the-fly conversion is preferred [S1].
-
-**Measured Performance:**
-*   Baseline performance: 15.5 million tetrahedra per second on a Dual-core Opteron with 2GHz (both CPUs used) [S1].
-*   Performance gain: 55% average increase in raw performance compared to the naive approach of testing all three exit faces independently [S1].
-*   Tests on an Intel Celeron PC at 900MHz showed the optimized Plücker algorithm outperforms Haines' algorithm and Moller/Trumbore-based algorithms in all tested cases [S2, unofficial].
-*   Haines' algorithm performs comparatively better when few ray-tetrahedron pairs intersect because it can sometimes decide there is no intersection without examining all four faces [S2, unofficial].
-
-**Strengths and Limitations:**
-*   **Strengths:** Directly provides scaled barycentric coordinates, avoiding division until normalization [S1]. Robust and efficient, requiring few floating point operations and no division [S2, unofficial].
-*   **Limitations:** Cannot apply parametric distance restrictions (e.g., max ray length) early; these must be applied as post-processing [S2, unofficial].
-
-**When to Use:**
-*   Use for ray tracing of tetrahedral meshes where performance and barycentric coordinate computation are critical [S2, unofficial].
-*   Avoid if early rejection of non-intersecting rays is the primary concern and few intersections are expected (Haines' algorithm may be better) [S2, unofficial].
+- **Time Complexity**: The optimized algorithm reduces the average number of Plücker tests to 2.67 per tetrahedron, compared to 3-9 tests in the naive approach [S1].
+- **Memory Complexity**: Requires 16 additional bytes per tetrahedron for connectivity information [S1]. Pre-computing Plücker coordinates doubles memory requirements, so on-the-fly conversion is preferred [S1].
+- **Performance**: Achieves 15.5 million tetrahedra per second on a Dual-core Opteron with 2GHz [S1]. Represents a 55% average increase in raw performance compared to the naive approach [S1].
+- **Strengths**: Directly provides scaled barycentric coordinates from Plücker tests, avoiding division until the final normalization step [S1]. Outperforms Haines' algorithm and Moller/Trumbore-based algorithms in all tested cases, including those with precomputed quantities [S3, unofficial].
+- **Limitations**: Cannot apply parametric distance restrictions (e.g., max ray length) early; these must be applied as post-processing [S3, unofficial]. Haines' algorithm performs comparatively better when few ray-tetrahedron pairs intersect because it can sometimes decide there is no intersection without examining all four faces [S3, unofficial].
+- **When to Use**: When high-performance ray-tetrahedron intersection is required, especially in the context of tetrahedral mesh traversal where connectivity can be exploited.
+- **When Not to Use**: When the mesh has sliding interfaces or when early parametric distance culling is critical and the overhead of post-processing is unacceptable.
 
 ## Background
-**Origin:**
-The method is based on the ray-tetrahedron intersection algorithm introduced by Platis et al. [PT03] [S1]. Plücker coordinates were used to specify directed lines in three-dimensional space [Eri97]. The approach extends and accelerates an approach suggested by Garrity [Gar90], who used a grid as an acceleration structure and connectivity information to traverse cells incrementally by calculating plane intersections [S1].
-
-**History and Development:**
-The Plücker-based ray-tetrahedron intersection algorithm was presented by Nikos Platis and Theoharis Theoharis [S2, unofficial]. It was shown to outperform Haines' algorithm and Moller/Trumbore-based algorithms [S2, unofficial]. The method is used in ray tracing of triangular meshes (cited in [AC97] and [SF01] as the equivalent 4x4 determinant method) and tetrahedral meshes [S2, unofficial].
-
-**Usage:**
-Used in ray tracing of triangular meshes and tetrahedral meshes [S2, unofficial]. It is also used in the traversal of tetrahedral meshes for direct volume rendering [S1].
+The method was introduced by Platis and Theoharis in 2003 [S3, unofficial]. It builds on the properties of Plücker coordinates for representing directed lines in 3D space [S1]. The approach extends Garrity's grid-based traversal method [Gar90] and Wald's kd-tree implementation for initial tetrahedron search [Wal04]. It is used in ray tracing of triangular meshes (cited in [AC97] and [SF01] as equivalent 4x4 determinant method) and tetrahedral meshes [S3, unofficial].
 
 ## Sources
 [S1] Fast Ray Traversal of Tetrahedral and Hexahedral Meshes for Direct Volume Rendering, https://doi.org/10.2312/vissym/eurovis06/235-242, fetched 2026-10-24
-[S2] Fast Ray–Tetrahedron Intersection using Plücker ..., https://users.uop.gr/~nplatis%20/files/PlatisTheoharisRayTetra.pdf, fetched 2026-10-29 (unofficial)
-[S3] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)
+[S3] Fast Ray–Tetrahedron Intersection using Plücker ..., https://users.uop.gr/~nplatis%20/files/PlatisTheoharisRayTetra.pdf, fetched 2026-10-29 (unofficial)
+[S4] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

@@ -3,26 +3,25 @@
 Also called: Emissive Participating Media, Volume Emitter Sampling
 
 ## Overview
-Emissive Volume Rendering extends path tracing algorithms (specifically `volpath`, `volpathmis`, and `prbvolpath`) to support participating media that emit light, enabling the simulation of radiative transfer within volumetric emitters [S1, unofficial]. It distinguishes itself by integrating volume emission sampling directly into the medium interaction routines, requiring only minimal code changes to existing integrators, while avoiding the performance penalties of direct solid-angle-to-volume PDF conversion for Multiple Importance Sampling (MIS) [S1, unofficial].
+Emissive Volume Rendering extends path tracing algorithms to support participating media that emit light, enabling the simulation of radiative transfer within volumetric emitters [S1, unofficial]. It distinguishes itself by integrating volume emission sampling directly into the medium interaction routines, requiring only minimal code changes to existing integrators, while avoiding the performance penalties of direct solid-angle-to-volume PDF conversion for Multiple Importance Sampling (MIS) [S1, unofficial].
 
 ## How it works
-**Inputs:** A scene containing shapes defined as volumetric emitters, with associated emission properties (e.g., radiance per channel) and medium scattering/absorption coefficients.
-**Outputs:** A rendered image with correct light transport from emissive volumes, including self-illumination and interaction with other media.
+**Inputs:** A scene containing shapes defined as volumetric emitters, with associated emission properties and medium scattering/absorption coefficients [S1, unofficial].
+**Outputs:** A rendered image with correct light transport from emissive volumes, including self-illumination and interaction with other media [S1, unofficial].
 
 ### Data Structures
 The method requires extending the generic `Shape` class to support volumetric operations [S1, unofficial]:
-1.  **`sample_volume(point3f)`**: Samples a 3D point uniformly (or according to a distribution) inside the shape's volume. Requires an extra random sample parameter.
-2.  **`is_inside(point3f)`**: Returns a boolean indicating if a point lies within the shape.
-3.  **`volume()`**: Calculates or estimates the total volume of the shape.
-
+1. `sample_volume(point3f, rng)`: Samples a 3D point inside the shape's volume [S1, unofficial].
+2. `is_inside(point3f)`: Returns a boolean indicating if a point lies within the shape [S1, unofficial].
+3. `volume()`: Calculates or estimates the total volume of the shape [S1, unofficial].
 The endpoint sampling interface is modified to accept a `Point3f` sample (or an additional float argument) to facilitate 3D point sampling within the volume [S1, unofficial].
 
 ### Algorithm Steps
-1.  **Volume Emitter Initialization**: For each shape acting as a volume emitter, compute or estimate its volume. Ensure the shape is watertight; for non-watertight meshes, the behavior is undefined or requires user intervention [S1, unofficial].
-2.  **Point Sampling**: When sampling a volume emitter, use `sample_volume` to generate a point $x$ inside the shape. This step consumes an additional random number compared to surface sampling [S1, unofficial].
-3.  **Inside Check**: To verify if a point is inside a watertight mesh-based shape, trace a ray in a fixed or randomized direction from the point. If the hit triangle's normal faces away from the ray direction, the point is considered inside [S1, unofficial].
-4.  **Radiance Sampling**: At every medium interaction (scattering or absorption), sample the radiance emitted by the medium at that location. This is implemented as a single additional line in `volpath` and `volpathmis`, and four additional lines in `prbvolpath` (including derivative tracking) [S1, unofficial].
-5.  **MIS Weighting**: Use Multiple Importance Sampling to balance volume emission sampling with other light sampling strategies (e.g., surface lights).
+1. **Volume Emitter Initialization:** For each shape acting as a volume emitter, compute or estimate its volume [S1, unofficial].
+2. **Point Sampling:** When sampling a volume emitter, use `sample_volume` to generate a point $x$ inside the shape [S1, unofficial]. This step consumes an additional random number compared to surface sampling [S1, unofficial].
+3. **Inside Check:** To verify if a point is inside a watertight mesh-based shape, trace a ray in a fixed or randomized direction from the point [S1, unofficial]. If the hit triangle's normal faces away from the ray direction, the point is considered inside [S1, unofficial].
+4. **Radiance Sampling:** At every medium interaction (scattering or absorption), sample the radiance emitted by the medium at that location [S1, unofficial]. This is implemented as a single additional line in `volpath` and `volpathmis`, and four additional lines in `prbvolpath` (including derivative tracking) [S1, unofficial].
+5. **MIS Weighting:** Use Multiple Importance Sampling to balance volume emission sampling with other light sampling strategies [S1, unofficial].
 
 ### Formulas
 The relationship between the solid angle PDF $p(\vec{\omega})$ and the volume PDF $p(x)$ is governed by the normalization condition:
@@ -38,30 +37,41 @@ $$
 p(\vec{\omega}) \mathrm{d\Omega} = \left( \int_r p(x) r^2\mathrm{dr} \right) \mathrm{d\Omega}
 $$
 The Jacobian for converting between solid angle and volume sampling measures is $r^2$, which corresponds to the geometry term in a volume [S1, unofficial].
-
 The MIS weight for combining a solid angle sample with a volume sample $x$ is computed as:
 $$
 \mathrm{MIS}(r^{-2}p(\vec{\omega}), p(\vec{x}))
 $$
-Note: Directly converting $p(\vec{\omega})$ to $p(\vec{x})$ via $r^{-2}$ is computationally expensive and potentially inaccurate [S1, unofficial].
+Directly converting $p(\vec{\omega})$ to $p(\vec{x})$ via $r^{-2}$ is computationally expensive and potentially inaccurate [S1, unofficial].
 
 ### Parameters
-*   **Sample Type**: Non-analogue probabilities are required for consistency. Analogue, maximum, or mean event probabilities cause inconsistencies, particularly in non-scalar modes [S1, unofficial].
-*   **Direction for Inside Check**: Fixed or randomized direction for ray casting to determine point inclusion in watertight meshes [S1, unofficial].
+*   **Sample Type:** Non-analogue probabilities are required for consistency [S1, unofficial].
+*   **Direction for Inside Check:** Fixed or randomized direction for ray casting to determine point inclusion in watertight meshes [S1, unofficial].
 
 ### Edge Cases and Pitfalls
-1.  **Analogue Probabilities**: Using analogue event probabilities in non-scalar modes with `volpathmis` and `prbvolpath` leads to inconsistency. Specifically, if a medium has zero scattering for a specific channel (e.g., green), analogue probabilities underestimate scatter counts during hero wavelength sampling, causing significant fireflies [S1, unofficial].
-2.  **PDF Conversion Performance**: Directly converting solid angle PDF to volume PDF for MIS is extremely slow (20x-40x slower) due to required ray casts and may raise OptiX warnings in CUDA modes [S1, unofficial].
-3.  **Mesh Watertightness**: The method assumes watertight meshes for reliable "inside" checks. Non-watertight shapes may fail silently or produce incorrect results [S1, unofficial].
-4.  **Sampling Complex Meshes**:
-    *   **Bounding Box Rejection**: Simple but inefficient for complex shapes.
-    *   **Tetrahedral Decomposition**: Faster but complex to implement.
-    *   **Ray Intersection/Winding Number**: Scales linearly with triangle count and suffers from direction-choice ambiguities [S1, unofficial].
+1. **Analogue Probabilities:** Using analogue event probabilities in non-scalar modes with `volpathmis` and `prbvolpath` leads to inconsistency [S1, unofficial]. Specifically, if a medium has zero scattering for a specific channel (e.g., green), analogue probabilities underestimate scatter counts during hero wavelength sampling, causing significant fireflies [S1, unofficial].
+2. **PDF Conversion Performance:** Directly converting solid angle PDF to volume PDF for MIS is extremely slow (20x-40x slower) due to required ray casts and may raise OptiX warnings in CUDA modes [S1, unofficial].
+3. **Mesh Watertightness:** The method assumes watertight meshes for reliable "inside" checks [S1, unofficial]. Handling non-watertight shapes is noted as an issue where the onus falls on the user [S1, unofficial].
+4. **Sampling Complex Meshes:** Bounding box rejection is simple but inefficient for complex shapes [S1, unofficial]. Tetrahedral decomposition is faster but complex to implement [S1, unofficial]. Ray intersection/winding number methods scale linearly with triangle count and suffer from direction-choice ambiguities [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+def dot(a, b):
+    """Standard vector dot product."""
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def random_unit_vector(rng):
+    """Generates a uniformly distributed random unit vector."""
+    u1 = rng.random()
+    u2 = rng.random()
+    z = 2.0 * u1 - 1.0
+    r = math.sqrt(max(0.0, 1.0 - z * z))
+    theta = 2.0 * math.pi * u2
+    return (r * math.cos(theta), r * math.sin(theta), z)
+
 def sample_volume_emitter(shape, rng):
     """
     Samples a point inside a volumetric emitter shape.
@@ -69,43 +79,28 @@ def sample_volume_emitter(shape, rng):
     rng: Random number generator.
     Returns: (point, pdf_volume)
     """
-    # 1. Sample a point inside the shape
-    # The shape's sample_volume method handles the specific geometry logic
-    # (e.g., bounding box rejection, tetrahedral decomposition, or winding number)
     point = shape.sample_volume(rng)
-    
-    # 2. Calculate PDF
-    # Assuming uniform sampling over the volume for simplicity
     vol = shape.volume()
     pdf_volume = 1.0 / vol
-    
     return point, pdf_volume
 
-def is_point_inside_mesh(point, mesh, direction=None):
+def is_point_inside_mesh(point, mesh, rng, direction=None):
     """
     Checks if a point is inside a watertight mesh by ray casting.
     point: 3D point to check.
     mesh: The mesh geometry.
+    rng: Random number generator.
     direction: Optional fixed or randomized direction for the test ray.
     Returns: Boolean.
     """
     if direction is None:
-        direction = random_unit_vector()
-    
-    # Trace a ray from the point in the given direction
+        direction = random_unit_vector(rng)
     hit = mesh.intersect(point, direction)
-    
     if hit is None:
-        # If no hit, the point is likely outside (assuming infinite bounds or closed scene)
         return False
-    
-    # Check if the hit triangle faces away from the ray direction
-    # Normal dot direction < 0 means the normal points towards the ray origin (inside)
-    # Note: Convention varies; here we assume standard outward normals
     if dot(hit.normal, direction) < 0:
         return True
-    else:
-        return False
+    return False
 
 def compute_mis_weight_volume_emission(p_solid_angle, r, p_volume):
     """
@@ -113,40 +108,26 @@ def compute_mis_weight_volume_emission(p_solid_angle, r, p_volume):
     p_solid_angle: PDF of the direction sample (w.r.t solid angle).
     r: Distance from the camera/interaction point to the sampled volume point.
     p_volume: PDF of the volume sample (w.r.t volume).
-    Returns: MIS weight (e.g., using balance heuristic).
+    Returns: MIS weight using the balance heuristic [G].
     """
-    # Jacobian from solid angle to volume measure is r^2
-    # Convert solid angle PDF to volume measure PDF
     p_solid_angle_in_volume_measure = p_solid_angle / (r * r)
-    
-    # Balance heuristic
-    # w = p_solid_angle_in_volume_measure / (p_solid_angle_in_volume_measure + p_volume)
-    # Note: Exact MIS formula depends on the specific heuristic used (balance, power, etc.)
-    # This is a placeholder for the specific MIS implementation details not fully provided in sources.
-    # The source notes that direct conversion is slow, so approximations or consistent 
-    # non-exact PDFs are often used.
-    return p_solid_angle_in_volume_measure / (p_solid_angle_in_volume_measure + p_volume)
+    total = p_solid_angle_in_volume_measure + p_volume
+    if total == 0.0:
+        return 0.5
+    return p_solid_angle_in_volume_measure / total
 ```
 
-## Subtopics
-
-### Volume Interaction Sampling
-The broader category of sampling light transport within participating media. Emissive Volume Rendering is a specific case where the medium itself is a light source. [Path Tracing with Volume Interaction](3320-path-tracing-with-volume-interaction.md)
-
-### Neural Photon Field Rendering
-An alternative approach to rendering participating media, using neural networks to approximate the photon field. It differs from Emissive Volume Rendering by using learned representations rather than explicit Monte Carlo sampling of volume emitters. [Neural Photon Field Rendering](3427-neural-photon-field-rendering.md)
-
 ## Operating characteristics
-*   **Time Complexity**: Sampling points inside complex meshes can be expensive. Bounding box rejection is $O(1)$ but inefficient for high fill factors. Tetrahedral decomposition is faster but complex. Ray intersection/winding number scales linearly with triangle count $O(N)$ [S1, unofficial].
-*   **Memory Complexity**: Requires storing volume estimates and potentially decomposition data for complex shapes. Not given in the sources.
-*   **Performance**: Direct conversion of solid angle PDF to volume PDF for MIS is 20x-40x slower due to ray casts [S1, unofficial]. Using non-analogue probabilities improves convergence and reduces fireflies, especially in multi-channel rendering [S1, unofficial].
-*   **Strengths**: Simple integration into existing volpath integrators (1-4 lines of code). Consistent results with non-analogue probabilities.
-*   **Limitations**: Requires watertight meshes for reliable inside checks. Performance degrades with complex mesh geometries if using ray intersection methods. Not given in the sources for specific hardware benchmarks.
-*   **When to Use**: When rendering scenes with volumetric light sources (e.g., fog, smoke, clouds) that emit light.
-*   **When Not to Use**: When using non-watertight meshes without alternative inside-check methods. When performance is critical and meshes are highly complex, consider tetrahedral decomposition or bounding box rejection if acceptable.
+*   **Time Complexity:** Sampling points inside complex meshes can be expensive [S1, unofficial]. Bounding box rejection is $O(1)$ but inefficient for high fill factors [S1, unofficial]. Tetrahedral decomposition is faster but complex [S1, unofficial]. Ray intersection/winding number scales linearly with triangle count $O(N)$ [S1, unofficial].
+*   **Memory Complexity:** Requires storing volume estimates and potentially decomposition data for complex shapes [S1, unofficial]. Not given in the sources.
+*   **Performance:** Direct conversion of solid angle PDF to volume PDF for MIS is 20x-40x slower due to ray casts [S1, unofficial]. Using non-analogue probabilities improves convergence and reduces fireflies, especially in multi-channel rendering [S1, unofficial].
+*   **Strengths:** Simple integration into existing volpath integrators (1-4 lines of code) [S1, unofficial]. Consistent results with non-analogue probabilities [S1, unofficial].
+*   **Limitations:** Requires watertight meshes for reliable inside checks [S1, unofficial]. Performance degrades with complex mesh geometries if using ray intersection methods [S1, unofficial]. Not given in the sources for specific hardware benchmarks.
+*   **When to Use:** When rendering scenes with volumetric light sources (e.g., fog, smoke, clouds) that emit light [S1, unofficial].
+*   **When Not to Use:** When using non-watertight meshes without alternative inside-check methods [S1, unofficial]. When performance is critical and meshes are highly complex, consider tetrahedral decomposition or bounding box rejection if acceptable [S1, unofficial].
 
 ## Background
-Emissive Volume Rendering was implemented in the Mitsuba 3 renderer as part of a pull request by Microno95 (PR #678) in April 2023 [S1, unofficial]. It builds upon the null-scattering volpathmis integrator and extends the shape class to support volumetric emission sampling. The method addresses the need for forward and inverse rendering of participating media with emission, simplifying the implementation compared to previous approaches [S1, unofficial].
+Emissive Volume Rendering was implemented in the Mitsuba 3 renderer as part of a pull request by Microno95 (PR #678) in April 2023 [S1, unofficial]. It builds upon the null-scattering volpathmis integrator and extends the shape class to support volumetric emission sampling [S1, unofficial]. The method addresses the need for forward and inverse rendering of participating media with emission, simplifying the implementation compared to previous approaches [S1, unofficial].
 
 ## Sources
 [S1] [✨ feature] Emissive Volume Rendering, https://github.com/mitsuba-renderer/mitsuba3/pull/678, fetched 2026-10-26 (unofficial)

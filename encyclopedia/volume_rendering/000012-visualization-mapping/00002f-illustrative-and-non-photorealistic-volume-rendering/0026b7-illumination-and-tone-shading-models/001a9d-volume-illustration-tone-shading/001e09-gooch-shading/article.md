@@ -6,14 +6,14 @@ Gooch Shading is a non-photorealistic illumination model for volume rendering th
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** Scalar volume data $V(x,y,z)$, light direction vector $\mathbf{L}$, warm color $C_w$, cool color $C_c$, warm/cool ratios $k_w, k_c$, base ray sample color $I_r$, and opacity $\alpha$.
-- **Output:** Final fragment color $c$.
+- **Input:** Scalar volume data $V(x,y,z)$, light direction vector $\mathbf{L}$, warm color $C_w$, cool color $C_c$, warm/cool ratios $k_w, k_c$, base ray sample color $I_r$, and opacity $\alpha$ [S4, unofficial].
+- **Output:** Final fragment color $c$ [S4, unofficial].
 
 **Data Structures:**
 - **Vertex Normals:** Computed on the fly using central differences on the scalar field [S2][S3, unofficial]. No pre-computed normal buffer is required for the rasterization approach [S2].
 
 **Steps:**
-1. **Normal Estimation:** For each vertex or sample point on the isosurface, compute the gradient $\mathbf{G}$ using central differences: $\mathbf{G} = [\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z}]$, where $\frac{\partial V}{\partial x} \approx \frac{V(x+1, y, z) - V(x-1, y, z)}{2}$, and similarly for $y$ and $z$ [S2][S3, unofficial]. Normalize $\mathbf{G}$ to unit length.
+1. **Normal Estimation:** For each vertex or sample point on the isosurface, compute the gradient $\mathbf{G}$ using central differences: $\mathbf{G} = [\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z}]$, where $\frac{\partial V}{\partial x} \approx \frac{V(x+1, y, z) - V(x-1, y, z)}{2}$, and similarly for $y$ and $z$ [S2][S3, unofficial]. Normalize $\mathbf{G}$ to unit length [S4, unofficial].
 2. **Pass to Fragment Shader:** The computed normal $\mathbf{G}$ and normalized light direction $\mathbf{L}$ are passed to the fragment shader [S2][S3, unofficial].
 3. **Dot Product Factor:** Compute $\kappa = \mathbf{G} \cdot \mathbf{L}$ [S4, unofficial]. The illuminated contribution uses only the positive dot product, becoming zero at orthogonal orientations [S4, unofficial].
 4. **Tone Contribution:** Calculate $I_t$ by interpolating between $C_w$ and $C_c$ based on $\kappa$: $I_t = \left(k_w \frac{1.0 + \kappa}{2}\right) C_w + \left(k_c \left(1 - \frac{1.0 + \kappa}{2}\right)\right) C_c$ [S4, unofficial].
@@ -44,8 +44,8 @@ def compute_central_difference_normal(volume, x, y, z):
     return vec3(dx / length, dy / length, dz / length)
 
 def gooche_shading_fragment(G, L, C_w, C_c, k_w, k_c, alpha, I_r):
-    # Compute dot product factor kappa
-    kappa = dot(G, L)
+    # Compute dot product factor kappa, clamped to positive values per source
+    kappa = max(0.0, dot(G, L))
     # Calculate tone contribution interpolation factor
     t = (1.0 + kappa) / 2.0
     # Interpolate between warm and cool colors
@@ -56,9 +56,9 @@ def gooche_shading_fragment(G, L, C_w, C_c, k_w, k_c, alpha, I_r):
 ```
 
 ## Operating characteristics
-- **Time Complexity:** Normal computation is $O(1)$ per vertex/sample. Shading is $O(1)$ per fragment.
+- **Time Complexity:** Normal computation is $O(1)$ per vertex/sample [G]. Shading is $O(1)$ per fragment [G].
 - **Memory Complexity:** No additional memory for normals if computed on the fly [S2].
-- **Measured Performance:** Not specified in sources.
+- **Measured Performance:** Not given in the sources.
 - **Strengths:** Consistent visual appearance across different rendering techniques (rasterization and ray-marching) due to identical fragment shader implementation [S2][S3, unofficial].
 - **Limitations:** Relies on central difference normal estimation, which requires neighboring voxels and may produce undefined normals in flat regions [G]. Boundary handling is not specified in the sources [G].
 

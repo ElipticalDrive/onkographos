@@ -3,24 +3,24 @@
 Also called: Accelerated intersections using wave intrinsics within a mesh shader, Optimized Cyrus-Beck for tetrahedra
 
 ## Overview
-This method accelerates ray-tetrahedron intersection testing by leveraging mesh shader wave intrinsics to share geometric data across the four vertices of a single tetrahedron, reducing redundant memory loads and arithmetic operations [S1, unofficial]. It improves upon the naive per-vertex loading approach by precomputing plane parameters in the mesh shader and solving the Cyrus-Beck inequalities in the fragment shader, achieving a runtime cost of only 12 FLOPs for the intersection logic [S1, unofficial].
+This method optimizes the ray-tetrahedron intersection test by leveraging mesh shader wave intrinsics to share geometric data among the four vertices of a single tetrahedron [S1, unofficial]. It reduces redundant memory loads by a factor of four and lowers the computational cost of the intersection routine to approximately 12 floating-point operations (FLOPs) [S1, unofficial]. Unlike naive implementations that load tetrahedron data independently for each vertex, this approach precomputes plane parameters in the mesh shader and interpolates them in the fragment shader, building on the standard Cyrus-Beck algorithm [S1, unofficial].
 
 ## How it works
-The method splits the intersection calculation into two stages: a mesh shader stage that computes plane parameters for each face of the tetrahedron, and a fragment shader stage that solves the linear inequalities of the Cyrus-Beck algorithm using interpolated values [S1, unofficial].
+The method splits the intersection calculation between a mesh shader (for precomputation) and a fragment shader (for final distance calculation). It assumes a tetrahedron is defined by four vertices and four outward-facing triangular faces.
 
 ### Inputs and Outputs
 **Inputs:**
-- Ray origin $\mathbf{o}_{ray}$ and direction $\mathbf{d}_{ray}$ [S1, unofficial].
-- Vertex positions of the tetrahedron, accessible via wave intrinsics [S1, unofficial].
-- `tetVertexId`: The index of the current vertex within the tetrahedron (0–3) [S1, unofficial].
+- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$, passed as uniform or per-ray data.
+- Vertex positions of the tetrahedron, accessible via wave intrinsics.
+- `tetVertexId`: An identifier for the current vertex within the tetrahedron (0–3).
 
 **Outputs:**
-- `o.planeN`: A vector of 4 floats containing the numerator of the plane equation for each face [S1, unofficial].
-- `o.planeD`: A vector of 4 floats containing the denominator (dot product of normal and ray direction) for each face [S1, unofficial].
+- `planeN`: A vector of four numerators for the plane equations, one per face.
+- `planeD`: A vector of four denominators for the plane equations, one per face.
 
 ### Data Structures
-**Static Lookup Table:**
-A constant array `kTetTriangles` of 4 `uint4` vectors defines the vertex indices for the 4 faces of a tetrahedron [S1, unofficial]. The indices are ordered to ensure outward-facing normals [S1, unofficial].
+**Static Lookup Table (`kTetTriangles`)**
+A constant array of 4 `uint4` vectors defining the vertex indices for the 4 faces of a tetrahedron. The indices are ordered to ensure outward-facing normals.
 $$
 \text{kTetTriangles} = \begin{bmatrix}
 0, 2, 1, 3 \\
@@ -29,37 +29,39 @@ $$
 3, 0, 1, 2
 \end{bmatrix}
 $$
-Each row `kTetTriangles[i]` corresponds to the face opposite vertex `i` [S1, unofficial]. The first three elements define the triangle vertices, and the fourth is unused in the cross product but part of the `uint4` layout [S1, unofficial].
+Each row $i$ corresponds to the face opposite vertex $i$. The three indices define the triangle vertices.
 
 ### Algorithm Steps
 
-1. **Retrieve Face Indices:** In the mesh shader, for the current vertex `tetVertexId`, retrieve the face vertex indices from `kTetTriangles[tetVertexId]` [S1, unofficial]. Let these be $v_0, v_1, v_2$ (the first three components) [S1, unofficial].
-2. **Access Vertices via Wave Intrinsics:** Use wave read intrinsics to access the positions of the tetrahedron's vertices [S1, unofficial]. Since all 4 vertices of the tetrahedron are processed in the same wave group, each lane can access any vertex's position [S1, unofficial]. Let $\mathbf{P}_k$ be the position of vertex $k$, and the vertices for the current face be $\mathbf{P}_{v_0}, \mathbf{P}_{v_1}, \mathbf{P}_{v_2}$ [S1, unofficial].
-3. **Compute Outward Normal:** Calculate the outward-facing normal $\mathbf{n}$ for the current face using the cross product of two edge vectors: $\mathbf{n} = (\mathbf{P}_{v_2} - \mathbf{P}_{v_0}) \times (\mathbf{P}_{v_1} - \mathbf{P}_{v_0})$ [S1, unofficial]. This normal is computed in each lane but represents the same geometric plane for the tetrahedron face [S1, unofficial].
-4. **Compute Plane Numerator:** Select the first vertex of the face, $\mathbf{v} = \mathbf{P}_{v_0}$ [S1, unofficial]. Compute the numerator for the plane equation: $\text{num} = \mathbf{n} \cdot (\mathbf{v} - \mathbf{o}_{ray})$ [S1, unofficial].
-5. **Broadcast Numerator:** Broadcast the scalar `num` to all lanes in the wave group to populate the output vector `o.planeN` [S1, unofficial]. Specifically, lane $i$ stores `num` in `o.planeN[i]` [S1, unofficial].
-6. **Compute Plane Denominator:** For each lane $i$, compute the denominator by dotting the normal $\mathbf{n}$ (which is identical across lanes for this face) with the ray direction $\mathbf{d}_{ray}$: $\text{planeD}_i = \mathbf{n} \cdot \mathbf{d}_{ray}$ [S1, unofficial]. Store these in `o.planeD` [S1, unofficial].
-7. **Fragment Shader Normalization:** In the fragment shader, normalize the denominator by the length of the ray direction: $\text{planeD}_i \leftarrow \frac{\text{planeD}_i}{\|\mathbf{d}_{ray}\|}$ [S1, unofficial].
-8. **Compute Intersection Parameters:** For each plane $i \in \{0, 1, 2, 3\}$, compute the intersection parameter $t_i$: $t_i = \frac{\text{planeN}_i}{\text{planeD}_i}$ [S1, unofficial].
-9. **Determine Entry and Exit Distances:** Initialize $t_{enter} = -\infty$ and $t_{exit} = +\infty$ [S1, unofficial]. For each plane $i$: if $\text{planeD}_i > 0$, update $t_{enter} = \max(t_{enter}, t_i)$; if $\text{planeD}_i < 0$, update $t_{exit} = \min(t_{exit}, t_i)$ [S1, unofficial]. If $\text{planeD}_i = 0$, the ray is parallel to the plane and does not contribute to the bounds [S1, unofficial].
-10. **Result:** The ray intersects the tetrahedron if $t_{enter} < t_{exit}$ and $t_{exit} > 0$ [S1, unofficial].
+1.  **Face Index Retrieval**: For the current vertex `tetVertexId`, retrieve the face index `tri` from `kTetTriangles[tetVertexId]`.
+2.  **Normal Computation**: Compute the outward-facing normal $\mathbf{n}$ for the triangle defined by `tri`. The vertices of the triangle are accessed using wave intrinsics to read the positions of the other lanes in the wave group.
+    $$ \mathbf{n} = (\mathbf{v}_{\text{tri}[2]} - \mathbf{v}_{\text{tri}[0]}) \times (\mathbf{v}_{\text{tri}[1]} - \mathbf{v}_{\text{tri}[0]}) $$
+    Where $\mathbf{v}_{\text{idx}}$ is the position of the vertex with index `idx`, retrieved via `WaveReadLaneAt`.
+3.  **Plane Numerator**: Compute the numerator for the plane equation. Let $\mathbf{v}_0$ be the position of the first vertex of the triangle (`tri[0]`).
+    $$ \text{num} = \mathbf{n} \cdot (\mathbf{v}_0 - \mathbf{o}) $$
+    Broadcast this scalar `num` to all lanes in the wave group to populate the `planeN` vector.
+4.  **Plane Denominator**: Compute the denominator for each lane. The normal $\mathbf{n}$ is broadcasted to the specific lane.
+    $$ \text{planeD}_{\text{lane}} = \mathbf{n}_{\text{lane}} \cdot \mathbf{d} $$
+5.  **Normalization**: In the fragment shader, normalize the denominator by the length of the ray direction $\mathbf{d}$:
+    $$ \text{planeD}' = \frac{\text{planeD}}{\|\mathbf{d}\|} $$
+6.  **Intersection Parameters**: Compute the intersection parameter $t$ for each plane:
+    $$ t_i = \frac{\text{planeN}_i}{\text{planeD}'_i} $$
+7.  **Entry and Exit Distances**:
+    -   $t_{\text{enter}} = \max \{ t_i \mid \text{planeD}'_i > 0 \}$. If no such $i$ exists, $t_{\text{enter}} = -\infty$.
+    -   $t_{\text{exit}} = \min \{ t_i \mid \text{planeD}'_i < 0 \}$. If no such $i$ exists, $t_{\text{exit}} = +\infty$.
 
 ### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Helper definitions for wave intrinsics (conceptual hardware mapping)
-def wave_broadcast(value):
-    """Returns the value replicated across all 4 lanes."""
-    return [value] * 4
+# Mesh Shader Pre-calculation
+# Assumes wave group size is at least 4, and 4 lanes are assigned to one tetrahedron
+# WRTRV(x, id) is WaveReadLaneAt(x, base_lane + id)
 
-def wave_read_lane_at(value, lane_idx):
-    """Hardware wave shuffle; returns the value from the specified lane."""
-    return value
-
-# Mesh Shader Stage
-def mesh_shader_intersect(ray_origin, ray_dir, tet_vertex_positions, tet_vertex_id):
+def mesh_shader_intersect(ray_origin, ray_dir, tet_vertex_id, vertex_positions):
     # Static lookup table for outward-facing faces
+    # Each uint4 represents indices [v0, v1, v2, unused] for the face opposite tet_vertex_id
     kTetTriangles = [
         (0, 2, 1, 3),
         (1, 2, 3, 0),
@@ -67,54 +69,76 @@ def mesh_shader_intersect(ray_origin, ray_dir, tet_vertex_positions, tet_vertex_
         (3, 0, 1, 2)
     ]
     
-    # Get face indices for the current tetrahedron vertex
-    face_indices = kTetTriangles[tet_vertex_id]
-    v0_idx, v1_idx, v2_idx = face_indices[0], face_indices[1], face_indices[2]
+    # Get face indices for the current vertex
+    tri = kTetTriangles[tet_vertex_id]
     
-    # Access vertex positions using wave intrinsics
-    P_v0 = wave_read_lane_at(tet_vertex_positions, v0_idx)
-    P_v1 = wave_read_lane_at(tet_vertex_positions, v1_idx)
-    P_v2 = wave_read_lane_at(tet_vertex_positions, v2_idx)
+    # Base lane index for this tetrahedron
+    base_lane = (WaveGetLaneIndex() // 4) * 4
     
-    # Compute outward normal n
-    edge1 = P_v2 - P_v0
-    edge2 = P_v1 - P_v0
+    # Helper to read vertex position from another lane
+    def get_vertex(idx):
+        return WRTRV(vertex_positions, base_lane + idx)
+    
+    # Compute outward facing normal n
+    # Triangle vertices are tri[0], tri[1], tri[2]
+    v0 = get_vertex(tri[0])
+    v1 = get_vertex(tri[1])
+    v2 = get_vertex(tri[2])
+    
+    edge1 = v2 - v0
+    edge2 = v1 - v0
     n = cross(edge1, edge2)
     
-    # Compute numerator num = n . (v - rayOrigin)
-    v = P_v0
-    num = dot(n, v - ray_origin)
+    # Compute numerator num = dot(n, v0 - ray_origin)
+    # Note: The source code uses v = WRTRV(vertex, tri[0]) which is v0
+    # The plane equation is n . (x - v0) = 0 => n . x = n . v0
+    # Ray: o + t*d. Intersection: n . (o + t*d - v0) = 0
+    # t * (n . d) = n . (v0 - o)
+    # num = n . (v0 - o)
+    num = dot(n, v0 - ray_origin)
     
-    # Broadcast num to all lanes for planeN
-    planeN = wave_broadcast(num)
+    # Broadcast num to all lanes
+    planeN = float4(
+        WRTRV(num, base_lane + 0),
+        WRTRV(num, base_lane + 1),
+        WRTRV(num, base_lane + 2),
+        WRTRV(num, base_lane + 3)
+    )
     
-    # Compute denominator planeD = n . rayDir for each lane
-    planeD = [dot(wave_read_lane_at(n, i), ray_dir) for i in range(4)]
+    # Compute denominator for each lane: dot(n_lane, ray_dir)
+    # n is different for each lane because each lane computes the normal for its own face
+    planeD = float4(
+        dot(WRTRV(n, base_lane + 0), ray_dir),
+        dot(WRTRV(n, base_lane + 1), ray_dir),
+        dot(WRTRV(n, base_lane + 2), ray_dir),
+        dot(WRTRV(n, base_lane + 3), ray_dir)
+    )
     
     return planeN, planeD
 
 def fragment_shader_intersect(planeN, planeD, ray_dir):
     # Normalize denominator by ray direction length
-    ray_len = length(ray_dir)
-    normalized_planeD = [d / ray_len for d in planeD]
+    d_len = length(ray_dir)
+    planeD_norm = planeD / d_len
     
     # Compute t for each plane
-    all_t = []
-    for i in range(4):
-        if normalized_planeD[i] == 0.0:
-            all_t.append(float('inf'))
-        else:
-            all_t.append(planeN[i] / normalized_planeD[i])
+    # Handle division by zero or near-zero if necessary, though planeD=0 implies parallel
+    # Source uses direct division
+    all_t = planeN / planeD_norm
     
-    # Compute t_enter and t_exit
-    t_enter = float('-inf')
-    t_exit = float('inf')
-    
+    # Compute t_enter: max t where planeD > 0
+    # If planeD <= 0, treat t as -infinity
+    t_enter = -float('inf')
     for i in range(4):
-        if normalized_planeD[i] > 0.0:
+        if planeD_norm[i] > 0.0:
             if all_t[i] > t_enter:
                 t_enter = all_t[i]
-        elif normalized_planeD[i] < 0.0:
+                
+    # Compute t_exit: min t where planeD < 0
+    # If planeD >= 0, treat t as +infinity
+    t_exit = float('inf')
+    for i in range(4):
+        if planeD_norm[i] < 0.0:
             if all_t[i] < t_exit:
                 t_exit = all_t[i]
                 
@@ -122,22 +146,21 @@ def fragment_shader_intersect(planeN, planeD, ray_dir):
 ```
 
 ### Parameters
-- **kTetTriangles**: Static constant array defining vertex indices for outward-facing normals [S1, unofficial].
-- **Wave Size**: The method assumes a wave size of at least 4 to process all 4 vertices of the tetrahedron in a single wave group [S1, unofficial].
+-   **kTetTriangles**: Static constant array. Values are fixed as shown in the Data Structures section.
 
 ### Edge Cases and Pitfalls
-- **Redundant Loads**: The naive implementation loads tetrahedron data for each vertex separately [S1, unofficial]. This optimization avoids that by sharing data via wave intrinsics, reducing memory loads by a factor of four [S1, unofficial].
-- **Perspective-Correct Interpolation**: The source notes that interpolation between distances must be perspective-correct barycentric interpolation to ensure correctness, although the core Cyrus-Beck logic described here operates on precomputed plane parameters in the mesh shader [S1, unofficial]. The 12 FLOP count applies to the optimized Cyrus-Beck steps [S1, unofficial].
-- **Parallel Rays**: If `planeD` is zero, the ray is parallel to the plane [S1, unofficial]. The algorithm handles this by excluding it from the max/min updates, which is correct for convex polyhedra [S1, unofficial].
+-   **Redundant Loads**: The naive version loads tetrahedron information for each of the 4 vertices separately, leading to redundant memory loads. This method avoids this by sharing information between vertices in the mesh shader [S1, unofficial].
+-   **Interpolation**: The source mentions that in the vertex shader, intersection distances are precomputed and then interpolated in the fragment shader using perspective-correct barycentric interpolation. However, the provided Algorithm 1 computes the plane parameters directly in the mesh shader and performs the final division in the fragment shader. The pseudocode above follows the explicit Algorithm 1 provided in the source [S1, unofficial].
+-   **Wave Size**: The method assumes a wave size of at least 4 to accommodate the 4 vertices of a tetrahedron.
 
 ## Operating characteristics
-- **Time Complexity**: The optimized implementation reduces the runtime cost to 12 FLOPs for the intersection calculation [S1, unofficial].
-- **Memory Efficiency**: By sharing information between vertices in the mesh shader, the method reduces memory loads by a factor of four compared to the naive per-vertex approach [S1, unofficial].
-- **Strengths**: Significant reduction in arithmetic and memory bandwidth usage [S1, unofficial]. Suitable for high-performance volumetric rendering where tetrahedral meshes are dense [S1, unofficial].
-- **Limitations**: Requires hardware support for mesh shaders and wave intrinsics [S1, unofficial]. The optimization is specific to tetrahedral primitives [S1, unofficial].
+-   **Time Complexity**: The optimized implementation reduces the runtime cost to only 12 FLOPs for the intersection calculation [S1, unofficial].
+-   **Memory Access**: Reduces memory loads by a factor of four compared to the naive version by leveraging wave intrinsics to share data among vertices [S1, unofficial].
+-   **Strengths**: Significant reduction in computational cost and memory bandwidth usage for tetrahedral mesh rendering.
+-   **Limitations**: Requires hardware support for mesh shaders and wave intrinsics. The method is specific to tetrahedral primitives.
 
 ## Background
-This method was introduced in a preprint describing an optimized implementation of the Cyrus-Beck algorithm for computing ray-tetrahedron intersections using mesh shaders [S1, unofficial]. It builds on the standard Cyrus-Beck algorithm for ray-convex polygon intersection, adapting it for tetrahedral meshes using modern GPU mesh shader capabilities [S1, unofficial]. The goal was to accelerate the intersection test, which is a bottleneck in raytracing irregular volumes [S1, unofficial].
+This method was introduced in "Radiance Meshes for Volumetric Reconstruction" [S1, unofficial]. It addresses the inefficiency of naive ray-tetrahedron intersection tests in volumetric rendering by exploiting the parallel execution model of mesh shaders. The technique is a specialized application of the Cyrus-Beck algorithm [S1, unofficial].
 
 ## Sources
 [S1] Radiance Meshes for Volumetric Reconstruction, https://arxiv.org/abs/2512.04076v1, fetched 2026-10-26 (unofficial)

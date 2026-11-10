@@ -1,0 +1,204 @@
+--- v001.md
++++ v002.md
+@@ -4,11 +4,11 @@
+ 
+ ## Overview
+-This article defines the standard hyperparameter configuration for neural networks in radiance-field optimization, specifically focusing on activation functions, dropout regularization, and latent space dimensionality validation. It addresses the problem of stabilizing training and preventing overfitting in differentiable rendering pipelines. It is distinguished from general optimization loops by its focus on architectural regularization (dropout) and non-linearities (PReLU) rather than gradient descent dynamics. It builds on [Training Protocol](4528-training-protocol.md).
++This article specifies the activation functions, dropout regularization, and latent space dimensionality validation for neural networks in radiance-field optimization [S1, unofficial][S2]. It addresses stabilizing training and preventing overfitting in differentiable rendering pipelines by defining architectural hyperparameters [S1, unofficial][S2]. It builds on [Training Protocol](4528-training-protocol.md).
+ 
+ ## How it works
+ 
+ ### Inputs and Outputs
+-- **Inputs**: Network architecture definition (layer types, residual blocks), training dataset (e.g., Combustion dataset), and hyperparameter search space (latent dimensions).
+-- **Outputs**: A trained network with optimized weights, validated latent space dimensionality, and final model performance metrics (RMSE, EMD).
++- **Inputs**: Network architecture definition (layer types, residual blocks) and training dataset [S1, unofficial][S2].
++- **Outputs**: A trained network with optimized weights and a validated latent space dimensionality [S1, unofficial][S2].
+ 
+ ### Data Structures
+@@ -16,19 +16,12 @@
+ 
+ ### Steps
+-1. **Initialize Network**: Construct the network using 3D or 2D convolutional layers.
+-2. **Apply Activation**: Use Parametric ReLU (PReLU) for all layers except the final output layer, which uses Sigmoid [S1, unofficial].
+-3. **Apply Dropout**: During training, apply dropout with probability $p=0.5$ after every convolutional layer, excluding those within residual blocks [S1, unofficial].
+-4. **Validate Latent Dimensionality**:
+-   - Test latent space dimensions $d \in \{4, 8, 16, 32, 64\}$ [S2].
+-   - Modify architecture to produce $64 \times 64$ resolution images by removing last upsampling layers to reduce computational cost [S2].
+-   - Set loss weight $\lambda = 0$ in the loss function (Equation 9 from [S2]) to remove L1 loss influence, as latent space primarily affects shape, not color [S2].
+-   - Evaluate on Combustion dataset without illumination [S2].
+-   - Select dimension that minimizes color image RMSE while maintaining opacity image quality [S2].
++1. **Initialize Network**: Construct the network using convolutional layers and residual blocks [S1, unofficial].
++2. **Apply Activation**: Use Parametric ReLU (PReLU) for all hidden layers and a sigmoid function for the final output layer [S1, unofficial].
++3. **Apply Dropout**: During training, apply dropout with probability $p=0.5$ after every convolutional layer, excluding layers within residual blocks [S1, unofficial].
++4. **Validate Latent Dimensionality**: Test latent space dimensions $d \in \{4, 8, 16, 32, 64\}$ [S2]. Modify the architecture to produce $64 \times 64$ resolution images by removing the last few upsampling layers to reduce computational cost [S2]. Set the loss weight $\lambda = 0$ in the loss function to remove the L1 loss influence, as the latent space primarily impacts shape rather than color [S2]. Evaluate performance on the Combustion dataset without illumination [S2]. Select the dimension that minimizes color image RMSE, as latent space dimensionality has minimal impact on opacity image quality [S2].
+ 5. **Finalize Configuration**: Use the validated dimension (typically 8) for full-resolution training [S2].
+ 
+ ### Formulas
+-- **Loss Function (Modified)**:
+-  $$ L = L_{adv} + \lambda L_{L1} $$
+-  Where $\lambda = 0$ during latent dimension validation [S2].
++- **Modified Loss Function**: $L = L_{\text{adv}} + \lambda L_{\text{L1}}$, where $\lambda = 0$ during latent dimension validation to isolate shape impact from color [S2].
+ - **Dropout**: Applied with probability $p=0.5$ [S1, unofficial].
+ 
+@@ -38,9 +31,9 @@
+ - **Latent Space Dimensions Tested**: 4, 8, 16, 32, 64 [S2].
+ - **Optimal Latent Dimension**: 8 [S2].
+-- **Resolution for Validation**: $64 \times 64$ [S2].
++- **Validation Resolution**: $64 \times 64$ [S2].
+ - **Loss Weight ($\lambda$)**: 0 during validation [S2].
+ 
+ ### Edge Cases and Pitfalls
+-- **Overestimating Dimensionality**: Using a latent space dimension larger than necessary (e.g., >8) can result in poorer generalization and makes the TF latent space more difficult to sample [S2].
++- **Overestimating Dimensionality**: Using a latent space dimension larger than necessary results in poorer generalization and makes the TF latent space more difficult to sample [S2].
+ - **Color vs. Shape**: Latent space dimensionality has minimal impact on opacity image quality but significant impact on color image quality [S2].
+ - **Computational Burden**: Full-resolution training for all dimensions is computationally expensive; validation uses reduced resolution [S2].
+@@ -48,58 +41,79 @@
+ ### Pseudocode
+ ```python
+-def initialize_network():
+-    # Define layers
+-    layers = []
+-    for layer in architecture:
+-        if layer.type == 'conv':
+-            # Add convolutional layer
+-            conv_layer = Conv2d(layer.in_channels, layer.out_channels, layer.kernel_size, layer.stride)
+-            # Add PReLU activation for all layers except last
+-            if layer.is_last:
+-                activation = Sigmoid()
+-            else:
+-                activation = PReLU()
+-            layers.append(ConvBlock(conv_layer, activation))
+-    return Sequential(layers)
++def initialize_network(layer_definitions):
++    network = []
++    for i, layer in enumerate(layer_definitions):
++        is_last = (i == len(layer_definitions) - 1)
++        conv_op = lambda x: standard_convolution(x, layer['out_channels'], layer['kernel_size'], layer['stride'])
++        if is_last:
++            activation = lambda x: 1.0 / (1.0 + exp(-x))
++        else:
++            activation = lambda x: max(0.01 * x, x)
++        network.append({'op': conv_op, 'act': activation, 'is_residual': layer.get('residual', False)})
++    return network
+ 
+ def apply_dropout(network, training=True):
+-    if training:
+-        for layer in network.modules():
+-            if isinstance(layer, Conv2d) and not is_in_residual_block(layer):
+-                layer.dropout = Dropout(p=0.5)
++    if not training:
++        return network
++    for layer in network:
++        layer['dropout_active'] = not layer['is_residual']
+     return network
+ 
+-def validate_latent_dimension(dataset, dimensions=[4, 8, 16, 32, 64]):
++def forward_pass(network, input_tensor):
++    x = input_tensor
++    for layer in network:
++        x = layer['op'](x)
++        if layer['dropout_active']:
++            x = apply_dropout_mask(x, probability=0.5)
++        x = layer['act'](x)
++    return x
++
++def validate_latent_dimension(dataset, dimensions=[4, 8, 16, 32, 64], epochs=10):
+     best_dim = None
+-    best_rmse = float('inf')
+-    
++    best_color_rmse = float('inf')
+     for dim in dimensions:
+-        # Modify architecture for faster validation
+-        model = create_model(latent_dim=dim, resolution=(64, 64))
+-        
+-        # Train with modified loss (lambda=0)
+-        for epoch in range(num_epochs):
++        model = build_model(latent_dim=dim, output_resolution=(64, 64))
++        for _ in range(epochs):
+             for batch in dataset:
+-                # Forward pass
+-                output = model(batch)
+-                # Loss calculation with lambda=0
+-                loss = adversarial_loss(output, batch) # L1 term excluded
+-                # Backward pass and update
+-                optimizer.zero_grad()
+-                loss.backward()
+-                optimizer.step()
+-        
+-        # Evaluate on Combustion dataset
+-        rmse = compute_color_rmse(model, dataset)
+-        if rmse < best_rmse:
+-            best_rmse = rmse
++                output = forward_pass(model, batch)
++                # Lambda=0 removes L1 loss; only adversarial loss is computed
++                loss = compute_adversarial_loss(output, batch)
++                gradient_descent_step(model, loss)
++        color_rmse = compute_rmse(output, batch)
++        if color_rmse < best_color_rmse:
++            best_color_rmse = color_rmse
+             best_dim = dim
+-            
+     return best_dim
+ 
+-def is_in_residual_block(layer):
+-    # Check if layer is part of a residual block
+-    # Implementation depends on specific architecture definition
+-    return layer.parent_block_type == 'residual'
++def build_model(latent_dim, output_resolution):
++    # Remove last upsampling layers to match target resolution
++    layer_defs = define_architecture(latent_dim, output_resolution)
++    return initialize_network(layer_defs)
++
++def apply_dropout_mask(tensor, probability):
++    mask = random_uniform(tensor.shape) > probability
++    return tensor * mask / (1.0 - probability)
++
++def standard_convolution(tensor, out_channels, kernel_size, stride):
++    # Standard convolution operation
++    return tensor # Operation defined by standard convolution rules
++
++def compute_adversarial_loss(output, batch):
++    # Adversarial loss computation
++    return abs(output - batch) # Placeholder for specific adversarial metric
++
++def gradient_descent_step(model, loss):
++    # Update model weights using gradient descent
++    pass # Implementation depends on optimizer configuration
++
++def compute_rmse(output, batch):
++    # Root Mean Square Error calculation
++    return sqrt(mean((output - batch) ** 2))
++
++def define_architecture(latent_dim, output_resolution):
++    # Define layer definitions based on latent dimension and resolution
++    return [{'out_channels': 8, 'kernel_size': 5, 'stride': 2, 'residual': False},
++            {'out_channels': 16, 'kernel_size': 3, 'stride': 2, 'residual': False},
++            {'out_channels': 16, 'kernel_size': 3, 'stride': 1, 'residual': True}] # Example structure
+ ```
+ 
+@@ -107,5 +121,5 @@
+ 
+ ### Latent Space Dimensionality Validation
+-A validation process comparing networks with different latent space dimensionalities (4, 8, 16, 32, 64) to determine the optimal dimension for capturing shape variations. It sets $\lambda=0$ in the loss function to isolate shape impact from color. The optimal dimension found was 8, as higher dimensions lead to poorer generalization and sampling difficulties. Use this when determining the capacity of the latent space for a new dataset. [S2]
++A validation process comparing networks with different latent space dimensionalities (4, 8, 16, 32, 64) to determine the optimal dimension for capturing shape variations [S2]. It sets $\lambda=0$ in the loss function to isolate shape impact from color [S2]. The optimal dimension found was 8, as higher dimensions lead to poorer generalization and sampling difficulties [S2]. Use this when determining the capacity of the latent space for a new dataset [S2].
+ 
+ ## Operating characteristics
+@@ -121,13 +135,13 @@
+ 
+ ### Strengths and Limitations
+-- **Strengths**: PReLU and Dropout help stabilize training and prevent overfitting. Validating latent dimensionality ensures a balance between detail capture and generalization.
+-- **Limitations**: High-dimensional latent spaces are difficult to sample and may generalize poorly. Validation requires reduced resolution, which may not fully reflect full-resolution performance.
++- **Strengths**: PReLU and Dropout help stabilize training and prevent overfitting [S1, unofficial]. Validating latent dimensionality ensures a balance between detail capture and generalization [S2].
++- **Limitations**: High-dimensional latent spaces are difficult to sample and may generalize poorly [S2]. Validation requires reduced resolution, which may not fully reflect full-resolution performance [S2].
+ 
+ ### When to Use It and When Not
+-- **Use**: When training deep convolutional networks for differentiable rendering, especially when dealing with 3D shape and color reconstruction.
+-- **Do Not Use**: When computational resources are extremely limited and latent space validation is not feasible; consider using a fixed, smaller dimension (e.g., 4) with caution.
++- **Use**: When training deep convolutional networks for differentiable rendering, especially when dealing with 3D shape and color reconstruction [S1, unofficial][S2].
++- **Do Not Use**: When computational resources are extremely limited and latent space validation is not feasible; consider using a fixed, smaller dimension (e.g., 4) with caution [S2].
+ 
+ ## Background
+-Originated in the context of differentiable rendering and neural radiance fields. The activation and dropout settings are based on [S1, unofficial] (RenderNet, 2018). The latent space dimensionality validation is based on [S2] (A Generative Model for Volume Rendering, 2018). These methods are used in volume rendering pipelines that require generative models for shape and color synthesis.
++Originated in the context of differentiable rendering and neural radiance fields [S1, unofficial][S2]. The activation and dropout settings are based on [S1, unofficial] (RenderNet, 2018). The latent space dimensionality validation is based on [S2] (A Generative Model for Volume Rendering, 2018). These methods are used in volume rendering pipelines that require generative models for shape and color synthesis [S1, unofficial][S2].
+ 
+ ## Sources

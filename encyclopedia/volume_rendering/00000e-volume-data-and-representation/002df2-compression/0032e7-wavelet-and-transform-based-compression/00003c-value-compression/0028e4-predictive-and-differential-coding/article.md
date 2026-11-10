@@ -1,58 +1,68 @@
 # Predictive and Differential Coding
 
-Also called: Differential Pulse Code Modulation (DPCM), Linear Predictive Coding (LPC), Delta Encoding
+Also called: Predictive Coding, Differential Pulse Code Modulation (DPCM), Residual Coding
 
 ## Overview
-Predictive and Differential Coding compresses volumetric data by exploiting spatial, temporal, or directional redundancy, encoding the difference (residual) between a predicted value and the actual value rather than the absolute value itself [S1, unofficial][S2, S3]. This family solves the problem of high entropy in correlated data by converting redundant absolute values into sparse, low-magnitude residuals that are more efficiently entropy-coded [S1, unofficial]. Unlike transform-based methods that decompose data into frequency subbands, predictive coding operates directly on the sample values (or transform coefficients) using local neighborhood information [S1, unofficial][S2]. It sets itself apart from siblings like [Triadic frequency band decomposition](828-triadic-frequency-band-decomposition.md) by relying on causal or spatial prediction models rather than hierarchical frequency decomposition, and from [Vector Quantization](907-vector-quantization.md) by encoding residuals rather than indexing codebooks.
+Predictive and Differential Coding compresses volumetric data by encoding the difference (residual) between a predicted value and the actual value, rather than the absolute value itself [S1, unofficial]. This method exploits spatial or temporal coherence to reduce the dynamic range of the data, making it more amenable to entropy coding. It sets itself apart from transform-based methods (like [Wavelet and Transform-based Compression](6882-transform-based-block-coding.md)) by operating directly on the signal values (or their direct differences) rather than frequency coefficients, and from [Vector Quantization](907-vector-quantization.md) by using explicit mathematical prediction models rather than codebook lookups.
 
 ## Shared principles
-All methods in this family share the mechanism of estimating a current sample value $V_{pred}$ from previously processed neighbors or reference frames, computing a residual $R = V - V_{pred}$, and encoding $R$ [S1, unofficial][S2, S3].
+The family shares the fundamental mechanism of estimating a current sample value $\hat{v}$ from previously processed neighbors or reference frames, and encoding the residual $r = v - \hat{v}$.
 
-1.  **Prediction Model:** The core of the method is the predictor function $V_{pred} = f(V_{neighbors})$. Models range from simple spatial deltas ($V_{prev}$) to complex linear combinations of neighbors or transform coefficients [S1, unofficial][S2, S3].
-2.  **Residual Encoding:** The residual $R$ typically has a smaller dynamic range and higher probability of zero values than the original data, making it suitable for entropy coding (Huffman, Arithmetic, Run-Length) [S1, unofficial][S2, S3].
-3.  **Causality and Order:** For lossless spatial compression, a strict scan order (e.g., raster-scan) ensures that only already-decoded neighbors are used for prediction, maintaining decoder consistency [S1, unofficial][S2, S3].
-4.  **Closed-Loop vs. Open-Loop:** In lossy scenarios, predictors may use reconstructed (dequantized) values to prevent error accumulation (closed-loop) or original values for simplicity (open-loop) [S1, unofficial][S2, S3].
+1.  **Prediction Model:** A predictor function $P$ estimates the current value based on available context. The context may include spatial neighbors (for static volumes) or temporally adjacent frames (for time-varying data).
+2.  **Residual Generation:** The residual $r$ is computed as the difference between the actual value $v$ and the prediction $\hat{v}$.
+    $$ r = v - \hat{v} $$
+3.  **Entropy Coding:** The residuals, which typically have a smaller dynamic range and a distribution peaked around zero compared to the original data, are entropy-coded (e.g., Huffman, Arithmetic, or Range coding).
+4.  **Reconstruction:** The decoder reconstructs the value by adding the decoded residual to the same prediction derived from previously reconstructed data.
+    $$ v_{rec} = \hat{v}_{rec} + r_{dec} $$
 
 ## Subtopics
 
 ### [Delta Encoding](1096-delta-encoding.md)
-Delta encoding predicts the current value based on the immediately preceding value (spatial or temporal) and stores the difference. It is chosen for data with high coherence where changes are sparse. Unlike linear predictors, it uses a fixed model $V_{pred} = V_{prev}$, which prevents random access without storing reference frames.
+Delta encoding is the simplest form of predictive coding, using the immediately preceding value (temporal) or a base value (spatial) as the predictor. It is primarily used for time-varying volume data where voxel values exhibit high correlation between consecutive time steps, or for heightfields. Unlike complex linear predictors, it relies on the model $V_{pred}(x,y,z) = V_{t-1}(x,y,z)$. Its key limitation is the prevention of random access to specific time steps without decompressing preceding data, unless absolute reference values are stored.
 
 ### [Residual Updates in Transform Domain](5256-residual-updates-in-transform-domain.md)
-This method predicts current transform coefficients (e.g., DCT) from the previous frame's reconstructed coefficients, operating in the frequency domain. It sets itself apart from spatial delta encoding by concentrating residual energy near surface changes in the transform domain, improving compressibility for time-varying volumes.
+This method performs predictive coding in the frequency domain. It predicts current transform coefficients (e.g., DCT) from the previously reconstructed frame's coefficients. It sets itself apart from spatial predictors by concentrating residual energy near regions of surface change in the transform domain, improving compressibility for subsequent entropy coding. It handles block appearance/disappearance by treating inactive blocks as zero references or negative residuals.
 
 ### [Residual Coding for Volumetric Compression](6518-residual-coding-for-volumetric-compression.md)
-This technique encodes the difference between the original view and the direct reconstruction from unquantized volume data. It decouples image fidelity from view synthesis quality, allowing residuals to be truncated for bitrate scaling without affecting the base volume's view synthesis properties.
+This technique encodes the difference between the original view image and the direct reconstruction from the volume data *without* quantization or coding. It is distinct because residuals are derived from the unquantized volume, meaning they are consistent across bitrates (scalability). However, it does not improve view synthesis quality and may degrade it at high bitrates.
 
 ### [Optimal Linear Volumetric Predictor with Truncated Huffman Coding](7759-optimal-linear-volumetric-predictor-with-truncated-huffman-c.md)
-A lossless method that derives optimal linear predictor coefficients for each volume to minimize mean-square error, using a causal 6-neighborhood predictor and truncated Huffman coding. It outperforms generic compressors by explicitly removing spatial redundancy and adapts to the specific volume statistics.
+A lossless algorithm that uses a globally optimal linear predictor derived from the Yule-Walker equations to predict voxel values from 6 face-sharing neighbors. It adapts to non-isotropic voxel sampling. It uses a truncated Huffman code where the $L_1=256$ most frequent symbols are Huffman coded, and the rest are fixed-length coded, managing the large alphabet size of 16-bit residuals.
 
 ### [Lorenz Predictor with Arithmetic Coding](8070-lorenz-predictor-with-arithmetic-coding.md)
-An isotropic lossless predictor for $n$-dimensional fields that estimates a sample from its $2^n - 1$ immediate neighbors using a specific algebraic formula. It is distinguished by its ability to exactly reconstruct polynomials of degree less than $n$ and its isotropic exploitation of coherence, unlike anisotropic scanline predictors.
+An isotropic predictor for $n$-dimensional scalar fields that estimates a sample from its $2^n - 1$ immediate neighbors in a regular grid. It is the simplest isotropic predictor capable of exactly reconstructing all polynomials of degree less than $n$. It uses a context arithmetic encoder where the context is the predicted value.
 
 ### [RDLS-SS-DWT+Pred](11251-rdls-ss-dwt-pred.md)
-Combines a modified 3D DWT with spatial prediction on the final subbands. It uses Reversible Denoising Lifting Steps (RDLS) and Step Skipping (SS) to reduce noise and redundancy before applying a heuristic-selected spatial predictor to decorrelate the highest-frequency subbands.
+Combines 3D Discrete Wavelet Transform (DWT) with reversible denoising lifting steps (RDLS) and step skipping (SS). It applies spatial prediction specifically to the final high-frequency subbands generated by the transform. It differs from siblings by incorporating RDLS filters to reduce noise artifacts, though sources indicate actual denoising filters may be avoided without sacrificing bitrate improvements.
 
 ### [Closed-Loop DPCM Decompression](11737-closed-loop-dpcm-decompression.md)
-Reconstructs data (e.g., seismic traces) using inverse quantization and delta decoding within a closed-loop feedback structure. It ensures that quantization errors do not accumulate unbounded drift by using the reconstructed value as the prediction base for the next sample.
+Reconstructs volumetric trace data using the previously reconstructed sample to predict the current sample. It distinguishes itself by ensuring the decoder's prediction state matches the encoder's (closed-loop), preventing error accumulation in lossy quantization scenarios.
 
-### Directional Linear Predictive Coding
+#### Directional Linear Predictive Coding
 - **Definition:** Compresses hologram interference patterns losslessly by exploiting directional correlation using DPCM and linear prediction [S1, unofficial].
-- **Steps:** Segment interference patterns into blocks. Scan pixels in eight directions for each block. Calculate entropy in each direction. Determine the direction with minimum entropy. Encode the difference by DPCM in the determined direction. Calculate prediction coefficients for the determined direction. Use DPCM only to determine the prediction direction for the original pixel. Calculate the difference between the predicted and the original pixel [S1, unofficial].
+- **Steps:**
+    1. Segment interference patterns into blocks [S1, unofficial].
+    2. Scan pixels in eight directions for each block [S1, unofficial].
+    3. Calculate entropy in each direction [S1, unofficial].
+    4. Determine the direction with minimum entropy [S1, unofficial].
+    5. Encode the difference by DPCM in the determined direction [S1, unofficial].
+    6. Calculate prediction coefficients for the determined direction [S1, unofficial].
+    7. Use DPCM only to determine the prediction direction for the original pixel [S1, unofficial].
+    8. Calculate the difference between the predicted and the original pixel [S1, unofficial].
 - **Performance:** The first process (directional DPCM) achieved a compression rate of 26.7% [S1, unofficial].
 
-### JPEG-LS
+#### JPEG-LS
 - **Definition:** An older JPEG standard variant tested against 3-D/2-D MLZC, featuring seven prediction modes [S2].
 - **Comparison:** Provides the best compression for ANGIO data but lacks quality scalability and simultaneous lossy/lossless support in the same codestream [S2].
 
-### Inter-frame Delta Encoding with Haar Wavelets
+#### Inter-frame Delta Encoding with Haar Wavelets
 - **Definition:** Classifies each time step as intra-coded or predictive frame. All frames are encoded with Haar wavelet, but predictive frames are also expressed as delta with respect to previous frames and then encoded [S3].
 
-### Functional Representation (Spherical Ellipsoids)
+#### Functional Representation (Spherical Ellipsoids)
 - **Definition:** An approach similar to inter-frame delta encoding but encoding data with a functional representation based on spherical ellipsoids [S3].
 
 ## Background
-Predictive coding in volume rendering originated from the need to compress large medical and scientific datasets for efficient storage and transmission. Early work focused on spatial redundancy using linear predictors [S1, unofficial][S2]. The application to holographic displays highlighted the importance of directional correlation in interference patterns [S1, unofficial]. Temporal compression methods evolved from simple delta encoding to transform-domain residuals to handle time-varying volumes [S3]. The integration of predictive coding with wavelet transforms (e.g., JP3D) became a standard approach for lossless and near-lossless compression in medical imaging [S2, S3].
+Predictive coding has been a cornerstone of data compression since the development of Differential Pulse Code Modulation (DPCM). In the context of volume rendering, it has been applied to time-varying biomedical data, holographic interference patterns, and static volumetric datasets. The method is often compared against transform-based approaches like JPEG2000 and wavelet-based codecs. While transform methods excel at decorrelating smooth data, predictive coding is particularly effective when strong local correlations (spatial or temporal) exist, such as in time-varying simulations or structured heightfields.
 
 ## Sources
 [S1] Holographic display method for volume data by volume rendering, https://www.researchgate.net/publication/330223296_Holographic_display_method_for_volume_data_by_volume_rendering, fetched 2026-10-27 (unofficial)
