@@ -1,0 +1,376 @@
+--- v004.md
++++ v005.md
+@@ -4,240 +4,186 @@
+ 
+ ## Overview
+-
+-Gradient-Based Shading is a discrete volume rendering (DVR) technique that renders 3D textures using front-to-back accumulation, shading voxels via a pseudo-normal estimated from the volume gradient and a directional light model [S1, unofficial]. It differs from sibling methods like [GGX Microfacet BRDF](3715-ggx-microfacet-brdf.md) or [Blinn-Phong with Metallic Reflections](4252-blinn-phong-with-metallic-reflections.md) by relying on a simple Lambertian diffuse model driven by finite-difference normals rather than complex microfacet distributions or metallic reflections [S1, unofficial]. It is distinct from [Fast Shading for Voxel Engines](5606-fast-shading-for-voxel-engines.md) by its explicit use of a transfer function LUT and continuous/discrete normalization modes within a standard raymarching loop [S1, unofficial].
++Gradient-Based Shading is a discrete volume rendering (DVR) technique that renders 3D textures using front-to-back accumulation, shading sampled voxels via a pseudo-normal estimated from the volume gradient and a directional light model [S1, unofficial]. It solves the problem of flat, unlit volume appearance by introducing surface-like shading cues derived from the scalar field's spatial derivatives, allowing standard lighting models to be applied to volumetric data [S1, unofficial]. Unlike pure volumetric scattering methods, it treats the volume as a collection of semi-transparent surfaces, offering a balance between performance and visual fidelity for medical and scientific data [S1, unofficial].
+ 
+ ## How it works
++**Inputs and Outputs:**
++*   **Input:** A 3D volume texture (`_VolumeTex`) containing scalar values (float32), a 2D transfer function texture (`_TFTex`), camera parameters (position, direction), and light parameters (direction, intensity).
++*   **Output:** A 2D image with accumulated RGB color and alpha.
+ 
+-### Inputs and Outputs
+-*   **Input:** A 3D volume texture (`_VolumeTex`) containing single-channel `float32` data, and a 2D transfer function texture (`_TFTex`) mapping intensity/label to RGBA [S1, unofficial].
+-*   **Output:** A `float4` color value (RGB + accumulated alpha) for each fragment [S1, unofficial].
++**Data Structures:**
++*   **Volume Texture (`_VolumeTex`):** 3D texture, format `RFloat` (single channel `float32`). Memory order is x-fast, then y, then z [S1, unofficial].
++*   **Transfer Function Texture (`_TFTex`):** 2D texture, format `RGBAFloat`. Dimensions are 256x1. The U coordinate maps to normalized intensity/label, and the V coordinate is fixed at 0.5 [S1, unofficial].
+ 
+-### Data Structures
+-*   **Volume Texture (`_VolumeTex`):** 3D texture, format `RFloat` (single channel `float32`) [S1, unofficial].
+-*   **Transfer Function Texture (`_TFTex`):** 2D texture, format `RGBAFloat` [S1, unofficial]. Dimensions $256 \times 1$ [S1, unofficial]. The U coordinate maps to normalized intensity/label, and the V coordinate is fixed at $0.5$ [S1, unofficial].
++**Parameters:**
++*   `_StepSize`: Distance advanced along the ray per sample. Range: 0.0005 to 0.02. Default: 0.003 [S1, unofficial].
++*   `_Brightness`: Global multiplier applied to accumulated RGB. Range: 0 to 5. Default: 1.5 [S1, unofficial].
++*   `_AlphaScale`: Multiplier for sampled alpha. Range: 0 to 2. Default: 0.5 [S1, unofficial].
++*   `_LightDir`: Light direction in world space. Default: (0,0,1,0) [S1, unofficial].
++*   `_LightIntensity`: Diffuse light intensity. Range: 0 to 5. Default: 1.0 [S1, unofficial].
++*   `_Ambient`: Ambient lighting constant. Range: 0 to 1. Default: 0.2 [S1, unofficial].
++*   `_IsLabelMap`: Integer flag (1 or 0). 1 for discrete labels, 0 for continuous intensities [S1, unofficial].
++*   `_P1`, `_P99`: Percentiles for continuous normalization. Used when `_IsLabelMap` is 0 [S1, unofficial].
++*   `MAX_STEPS`: Maximum samples per ray. Default: 2048 [S1, unofficial].
+ 
+-### Parameters
+-*   `_StepSize`: Distance advanced along the ray per sample. Range: $[0.0005, 0.02]$. Default: $0.003$ [S1, unofficial].
+-*   `_Brightness`: Global multiplier for accumulated RGB. Range: $[0, 5]$. Default: $1.5$ [S1, unofficial].
+-*   `_AlphaScale`: Multiplier for sampled alpha. Range: $[0, 2]$. Default: $0.5$ [S1, unofficial].
+-*   `_LightDir`: World-space light direction. Default: $(0, 0, 1, 0)$ [S1, unofficial].
+-*   `_LightIntensity`: Diffuse light intensity. Range: $[0, 5]$. Default: $1.0$ [S1, unofficial].
+-*   `_Ambient`: Ambient lighting constant. Range: $[0, 1]$. Default: $0.2$ [S1, unofficial].
+-*   `_IsLabelMap`: Integer flag ($1$ or $0$). $1$ for discrete labels, $0$ for continuous intensities [S1, unofficial].
+-*   `_P1`: Lower percentile for continuous normalization [S1, unofficial].
+-*   `_P99`: Upper percentile for continuous normalization [S1, unofficial].
+-*   `MAX_STEPS`: Maximum samples per ray. Default: $2048$ [S1, unofficial].
++**Algorithm Steps:**
+ 
+-### Algorithm Steps
++1.  **Vertex Shader:** Transform vertex position to clip space and compute world position [S1, unofficial].
++2.  **Ray Setup (Fragment Shader):**
++    *   Reconstruct camera position (`camPosObj`) and fragment position in object space (cube `[-0.5, +0.5]^3`) [S1, unofficial].
++    *   Compute ray direction: `rayDirObj = normalize(fragmentPosObj - camPosObj)` [S1, unofficial].
++    *   Transform light direction to object space: `Lobj = normalize(TransformWorldToObject(_LightDir))` [S1, unofficial].
++3.  **Ray-Box Intersection:**
++    *   Intersect `rayDirObj` with the object-space bounding box `[-0.5, 0.5]^3` [S1, unofficial].
++    *   Calculate entry (`tEnter`) and exit (`tExit`) distances.
++    *   If no intersection, return transparent black `float4(0,0,0,0)` [S1, unofficial].
++4.  **Initialization:**
++    *   Set `t = max(tEnter, 0.0)` [S1, unofficial].
++    *   Initialize accumulators: `accRGB = (0,0,0)`, `accA = 0.0` [S1, unofficial].
++5.  **Ray Marching Loop:**
++    *   Iterate `step` from 0 to `MAX_STEPS`.
++    *   **Termination Check:** Break if `t > tExit` or `accA >= 0.9999` [S1, unofficial].
++    *   **Sample Position:** Compute object-space position: `pObj = camPosObj + rayDirObj * t` [S1, unofficial].
++    *   **Texture Coordinates:** Convert `pObj` to `[0,1]^3` UVW: `uvw = pObj + 0.5` [S1, unofficial].
++    *   **Boundary Check:** Break if any coordinate in `uvw` is outside `[0,1]` [S1, unofficial].
++    *   **Voxel Sampling:** Sample volume texture: `voxelVal = texture(_VolumeTex, uvw).r` [S1, unofficial].
++    *   **Transfer Function Sampling:**
++        *   If `_IsLabelMap == 1`:
++            *   Round `val` to nearest integer, clamp to `[0, 255]`.
++            *   Normalize: `u = clamp(round(val), 0, 255) / 255.0` [S1, unofficial].
++            *   Sample TF: `tf = texture(_TFTex, float2(u, 0.5))` [S1, unofficial].
++        *   If `_IsLabelMap == 0`:
++            *   Normalize continuous value: `u = saturate((voxelVal - _P1) / max(_P99 - _P1, 1e-6))` [S1, unofficial].
++            *   Sample TF: `tf = texture(_TFTex, float2(u, 0.5))` [S1, unofficial].
++    *   **Alpha Scaling:** `aSample = tf.a * _AlphaScale` [S1, unofficial].
++    *   **Shading (if `aSample > 0.001`):**
++        *   Estimate normal `N` at `pObj` using finite differences (see Formula).
++        *   Compute Lambertian diffuse: `lambert = saturate(dot(normalize(N), normalize(Lobj)))` [S1, unofficial].
++        *   Compute lighting: `lighting = _Ambient + _LightIntensity * lambert` [S1, unofficial].
++        *   Compute lit color: `litColor = tf.rgb * lighting` [S1, unofficial].
++    *   **Front-to-Back Accumulation (if `aSample > 0.001`):**
++        *   `remain = 1.0 - accA` [S1, unofficial].
++        *   `accRGB += remain * litColor * aSample` [S1, unofficial].
++        *   `accA += remain * aSample` [S1, unofficial].
++    *   **Step Advance:** `t += _StepSize` [S1, unofficial].
++6.  **Final Output:**
++    *   `accRGB *= _Brightness` [S1, unofficial].
++    *   Return `float4(accRGB, accA)` [S1, unofficial].
+ 
+-1.  **Ray Setup:**
+-    *   Reconstruct camera position (`camPosObj`) and fragment position in object space (cube $[-0.5, +0.5]^3$) [S1, unofficial].
+-    *   Compute ray direction: $\mathbf{d}_{obj} = \text{normalize}(\text{fragPosObj} - \text{camPosObj})$ [S1, unofficial].
+-    *   Transform world-space light direction to object space: $\mathbf{L}_{obj}$ [S1, unofficial].
+-    *   Intersect ray with object-space bounding box $[-0.5, 0.5]^3$. If no intersection, return transparent black [S1, unofficial]. Let $t_{enter}$ and $t_{exit}$ be the intersection distances [S1, unofficial].
++**Formulas:**
+ 
+-2.  **Initialization:**
+-    *   $t = \max(t_{enter}, 0.0)$ [S1, unofficial].
+-    *   $\text{accRGB} = (0, 0, 0)$ [S1, unofficial].
+-    *   $\text{accA} = 0.0$ [S1, unofficial].
++*   **Normal Estimation:**
++    The normal $\mathbf{N}$ is estimated using central finite differences in object space:
++    $$ \mathbf{N} = \frac{[V(x+\epsilon, y, z) - V(x-\epsilon, y, z), \quad V(x, y+\epsilon, z) - V(x, y-\epsilon, z), \quad V(x, y, z+\epsilon) - V(x, y, z-\epsilon)]}{\sqrt{\max(\|\mathbf{grad}\|^2, 10^{-6})}} $$
++    where $\epsilon = 0.002$ in object space, and the denominator is clamped to $10^{-6}$ before the square root to prevent division by zero [S1, unofficial].
+ 
+-3.  **Raymarching Loop:**
+-    *   Iterate $i$ from $0$ to `MAX_STEPS` [S1, unofficial].
+-    *   **Termination Check:** If $t > t_{exit}$ or $\text{accA} \ge 0.9999$, break loop [S1, unofficial].
+-    *   **Position:** $\mathbf{p}_{obj} = \text{camPosObj} + \mathbf{d}_{obj} \times t$ [S1, unofficial].
+-    *   **Coordinates:** $\text{uvw} = \mathbf{p}_{obj} + 0.5$. If any component of $\text{uvw}$ is outside $[0, 1]$, break loop [S1, unofficial].
+-    *   **Sampling:** Sample volume texture at $\text{uvw}$ to get `voxelVal` (red channel) [S1, unofficial].
+-    *   **Transfer Function:**
+-        *   If `_IsLabelMap == 1`:
+-            *   $u = \frac{\text{clamp}(\text{round}(\text{voxelVal}), 0, 255)}{255}$ [S1, unofficial].
+-        *   If `_IsLabelMap == 0`:
+-            *   $u = \text{saturate}\left(\frac{\text{voxelVal} - \_P1}{\max(\_P99 - \_P1, 10^{-6})}\right)$ [S1, unofficial].
+-        *   Sample `_TFTex` at $(u, 0.5)$ to get $\text{tf.rgb}$ and $\text{tf.a}$ [S1, unofficial].
+-    *   **Alpha Scaling:** $a_{sample} = \text{tf.a} \times \_AlphaScale$ [S1, unofficial].
+-    *   **Shading:**
+-        *   If $a_{sample} > 0.001$:
+-            *   Estimate normal $\mathbf{N}$ at $\mathbf{p}_{obj}$ using finite differences (see Formula) [S1, unofficial].
+-            *   $\mathbf{n} = \text{normalize}(\mathbf{N})$ [S1, unofficial].
+-            *   $\mathbf{l} = \text{normalize}(\mathbf{L}_{obj})$ [S1, unofficial].
+-            *   $\text{lambert} = \text{saturate}(\text{dot}(\mathbf{n}, \mathbf{l}))$ [S1, unofficial].
+-            *   $\text{lighting} = \_Ambient + \_LightIntensity \times \text{lambert}$ [S1, unofficial].
+-            *   $\text{litColor} = \text{tf.rgb} \times \text{lighting}$ [S1, unofficial].
+-    *   **Accumulation:**
+-        *   If $a_{sample} > 0.001$:
+-            *   $\text{remain} = 1.0 - \text{accA}$.
+-            *   $\text{accRGB} += \text{remain} \times \text{litColor} \times a_{sample}$ [S1, unofficial].
+-            *   $\text{accA} += \text{remain} \times a_{sample}$ [S1, unofficial].
+-    *   **Advance:** $t += \_StepSize$ [S1, unofficial].
++*   **Continuous Normalization:**
++    $$ u = \text{saturate}\left(\frac{val - P1}{\max(P99 - P1, 10^{-6})}\right) $$
++    where $P1$ and $P99$ are the 1st and 99th percentiles of the volume data [S1, unofficial].
+ 
+-4.  **Final Output:**
+-    *   $\text{outColor} = \text{accRGB} \times \_Brightness$ [S1, unofficial].
+-    *   Return $\text{float4}(\text{outColor}, \text{accA})$ [S1, unofficial].
++*   **Discrete Label Mapping:**
++    $$ u = \frac{\text{clamp}(\text{round}(val), 0, 255)}{255} $$
++    used when `_IsLabelMap` is 1 [S1, unofficial].
+ 
+-### Formulas
+-
+-**Normal Estimation:**
+-The normal $\mathbf{N}$ is estimated using central finite differences with step size $\epsilon = 0.002$ in object space:
+-$$ \mathbf{N} = \frac{[V(x+\epsilon, y, z) - V(x-\epsilon, y, z), \quad V(x, y+\epsilon, z) - V(x, y-\epsilon, z), \quad V(x, y, z+\epsilon) - V(x, y, z-\epsilon)]}{\sqrt{\max(\|\mathbf{grad}\|^2, 10^{-6})}} $$
+-where the denominator is clamped to $10^{-6}$ before the square root to prevent division by zero [S1, unofficial].
+-
+-**Continuous Normalization:**
+-$$ u = \text{saturate}\left(\frac{val - P1}{\max(P99 - P1, 10^{-6})}\right) $$
+-If $P99 = P1$, the denominator becomes $10^{-6}$ to avoid division by zero [S1, unofficial].
+-
+-**Discrete Label Mapping:**
+-$$ u = \frac{\text{clamp}(\text{round}(val), 0, 255)}{255} $$
+-
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+-def gradient_based_shading(cam_pos_obj, frag_pos_obj, light_dir_world, volume_tex, tf_tex, params):
+-    # 1. Ray Setup
+-    ray_dir_obj = normalize(frag_pos_obj - cam_pos_obj)
+-    # Transform world-space light direction to object space [G]
+-    light_dir_obj = normalize(mul(inverse_world_matrix, light_dir_world))
++def gradient_based_shading(cam_pos_obj, ray_dir_obj, light_dir_world, volume_tex, tf_tex, params):
++    """
++    cam_pos_obj: vec3, camera position in object space
++    ray_dir_obj: vec3, normalized ray direction in object space
++    light_dir_world: vec3, light direction in world space
++    volume_tex: 3D texture (RFloat)
++    tf_tex: 2D texture (RGBAFloat, 256x1)
++    params: dict containing _StepSize, _Brightness, _AlphaScale, _LightIntensity, 
++            _Ambient, _IsLabelMap, _P1, _P99, MAX_STEPS
++    """
++    # Transform light to object space
++    light_dir_obj = normalize(transform_world_to_object(light_dir_world))
+     
+-    # Intersect ray with object-space bounding box [-0.5, 0.5]^3
+-    t_enter, t_exit = intersect_ray_box(ray_dir_obj, cam_pos_obj, (-0.5, -0.5, -0.5), (0.5, 0.5, 0.5))
+-    if t_enter is None:
++    # Ray-box intersection for bounding box [-0.5, 0.5]^3
++    t_enter, t_exit = intersect_box(ray_dir_obj, min=-0.5, max=0.5)
++    
++    if t_enter > t_exit:
+         return (0.0, 0.0, 0.0, 0.0)
+     
+-    # Initialize t and accumulators
+     t = max(t_enter, 0.0)
+     acc_rgb = (0.0, 0.0, 0.0)
+     acc_a = 0.0
+     
+-    # 2. Raymarching Loop
+-    for i in range(params.MAX_STEPS):
+-        # Termination Check
++    for step in range(params['MAX_STEPS']):
+         if t > t_exit or acc_a >= 0.9999:
+             break
+             
+-        # Position
+-        p_obj = (cam_pos_obj[0] + ray_dir_obj[0] * t,
+-                 cam_pos_obj[1] + ray_dir_obj[1] * t,
+-                 cam_pos_obj[2] + ray_dir_obj[2] * t)
+-        uvw = (p_obj[0] + 0.5, p_obj[1] + 0.5, p_obj[2] + 0.5)
++        # Sample position
++        p_obj = cam_pos_obj + ray_dir_obj * t
++        uvw = p_obj + 0.5
+         
+-        # Coordinates bounds check
+-        if not (0.0 <= uvw[0] <= 1.0 and 0.0 <= uvw[1] <= 1.0 and 0.0 <= uvw[2] <= 1.0):
+-            break
++        # Boundary check
++        if not (0.0 <= uvw.x <= 1.0 and 0.0 <= uvw.y <= 1.0 and 0.0 <= uvw.z <= 1.0):
++            t += params['_StepSize']
++            continue
+             
+-        # Sampling
+-        voxel_val = sample_texture(volume_tex, uvw)
++        # Voxel sampling
++        voxel_val = volume_tex.sample(uvw).r
+         
+-        # Transfer Function
+-        if params.IsLabelMap:
++        # Transfer function sampling
++        if params['_IsLabelMap'] == 1:
+             u = clamp(round(voxel_val), 0, 255) / 255.0
+         else:
+-            denom = max(params.P99 - params.P1, 1e-6)
+-            u = saturate((voxel_val - params.P1) / denom)
++            denom = max(params['_P99'] - params['_P1'], 1e-6)
++            u = saturate((voxel_val - params['_P1']) / denom)
+             
+-        tf_sample = sample_texture(tf_tex, (u, 0.5, 0.0))
+-        tf_rgb = tf_sample[:3]
+-        tf_a = tf_sample[3]
++        tf_color = tf_tex.sample((u, 0.5))
++        a_sample = tf_color.a * params['_AlphaScale']
+         
+-        # Alpha Scaling
+-        a_sample = tf_a * params.AlphaScale
+-        
+-        # Shading
+         if a_sample > 0.001:
+-            # Estimate Normal
++            # Normal estimation
+             eps = 0.002
+-            # Clamp gradient sample coordinates to [0,1] to prevent out-of-bounds access [G]
+-            def clamp_uv(uv): return (max(0.0, min(1.0, uv[0])), max(0.0, min(1.0, uv[1])), max(0.0, min(1.0, uv[2])))
+-            
+-            grad_x = sample_texture(volume_tex, clamp_uv((uvw[0] + eps, uvw[1], uvw[2]))) - \
+-                     sample_texture(volume_tex, clamp_uv((uvw[0] - eps, uvw[1], uvw[2])))
+-            grad_y = sample_texture(volume_tex, clamp_uv((uvw[0], uvw[1] + eps, uvw[2]))) - \
+-                     sample_texture(volume_tex, clamp_uv((uvw[0], uvw[1] - eps, uvw[2])))
+-            grad_z = sample_texture(volume_tex, clamp_uv((uvw[0], uvw[1], uvw[2] + eps))) - \
+-                     sample_texture(volume_tex, clamp_uv((uvw[0], uvw[1], uvw[2] - eps)))
++            grad_x = volume_tex.sample((uvw.x + eps, uvw.y, uvw.z)).r - volume_tex.sample((uvw.x - eps, uvw.y, uvw.z)).r
++            grad_y = volume_tex.sample((uvw.x, uvw.y + eps, uvw.z)).r - volume_tex.sample((uvw.x, uvw.y - eps, uvw.z)).r
++            grad_z = volume_tex.sample((uvw.x, uvw.y, uvw.z + eps)).r - volume_tex.sample((uvw.x, uvw.y, uvw.z - eps)).r
+             
+             grad_sq = grad_x**2 + grad_y**2 + grad_z**2
+-            norm_len = (max(grad_sq, 1e-6)) ** 0.5
++            norm_len = sqrt(max(grad_sq, 1e-6))
+             
+-            n = (grad_x / norm_len, grad_y / norm_len, grad_z / norm_len)
+-            l = normalize(light_dir_obj)
++            normal = (grad_x / norm_len, grad_y / norm_len, grad_z / norm_len)
+             
+-            lambert = saturate(n[0]*l[0] + n[1]*l[1] + n[2]*l[2])
+-            lighting = params.Ambient + params.LightIntensity * lambert
+-            lit_color = (tf_rgb[0] * lighting, tf_rgb[1] * lighting, tf_rgb[2] * lighting)
++            # Lighting
++            lambert = saturate(dot(normalize(normal), normalize(light_dir_obj)))
++            lighting = params['_Ambient'] + params['_LightIntensity'] * lambert
++            lit_color = tf_color.rgb * lighting
+             
+             # Accumulation
+             remain = 1.0 - acc_a
+-            acc_rgb = (acc_rgb[0] + remain * lit_color[0] * a_sample,
+-                       acc_rgb[1] + remain * lit_color[1] * a_sample,
+-                       acc_rgb[2] + remain * lit_color[2] * a_sample)
++            acc_rgb = (
++                acc_rgb[0] + remain * lit_color[0] * a_sample,
++                acc_rgb[1] + remain * lit_color[1] * a_sample,
++                acc_rgb[2] + remain * lit_color[2] * a_sample
++            )
+             acc_a += remain * a_sample
+             
+-        # Advance
+-        t += params.StepSize
++        t += params['_StepSize']
+         
+-    out_rgb = (acc_rgb[0] * params.Brightness, acc_rgb[1] * params.Brightness, acc_rgb[2] * params.Brightness)
+-    return (out_rgb[0], out_rgb[1], out_rgb[2], acc_a)
+-
+-def sample_texture(tex, uvw):
+-    # Standard 3D texture lookup returning RGBA tuple [G]
+-    return tex.sample(uvw)
+-
+-def normalize(v):
+-    length = (v[0]**2 + v[1]**2 + v[2]**2) ** 0.5
+-    if length == 0: return (0.0, 0.0, 0.0)
+-    return (v[0]/length, v[1]/length, v[2]/length)
+-
+-def saturate(x):
+-    return max(0.0, min(1.0, x))
+-
+-def clamp(x, min_val, max_val):
+-    return max(min_val, min(max_val, x))
+-
+-def intersect_ray_box(ray_dir, ray_origin, box_min, box_max):
+-    # Standard slab method for ray-AABB intersection [G]
+-    t_min = (box_min[0] - ray_origin[0]) / ray_dir[0] if ray_dir[0] != 0 else float('inf')
+-    t_max = (box_max[0] - ray_origin[0]) / ray_dir[0] if ray_dir[0] != 0 else float('inf')
+-    if t_min > t_max: t_min, t_max = t_max, t_min
+-    
+-    ty_min = (box_min[1] - ray_origin[1]) / ray_dir[1] if ray_dir[1] != 0 else float('inf')
+-    ty_max = (box_max[1] - ray_origin[1]) / ray_dir[1] if ray_dir[1] != 0 else float('inf')
+-    if ty_min > ty_max: ty_min, ty_max = ty_max, ty_min
+-    
+-    if (t_min > ty_max) or (ty_min > t_max):
+-        return None, None
+-    
+-    t_min = max(t_min, ty_min)
+-    t_max = min(t_max, ty_max)
+-    
+-    tz_min = (box_min[2] - ray_origin[2]) / ray_dir[2] if ray_dir[2] != 0 else float('inf')
+-    tz_max = (box_max[2] - ray_origin[2]) / ray_dir[2] if ray_dir[2] != 0 else float('inf')
+-    if tz_min > tz_max: tz_min, tz_max = tz_max, tz_min
+-    
+-    if (t_min > tz_max) or (tz_min > t_max):
+-        return None, None
+-        
+-    t_min = max(t_min, tz_min)
+-    t_max = min(t_max, tz_max)
+-    
+-    return t_min, t_max
++    acc_rgb = (acc_rgb[0] * params['_Brightness'], acc_rgb[1] * params['_Brightness'], acc_rgb[2] * params['_Brightness'])
++    return (acc_rgb[0], acc_rgb[1], acc_rgb[2], acc_a)
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Division by Zero in Normalization:** If `P99` equals `P1`, the denominator in continuous normalization is zero. This is handled by using `max(_P99 - _P1, 1e-6)` [S1, unofficial].
+-*   **Zero-Length Gradient:** If the gradient vector is zero, normal estimation divides by zero. This is handled by clamping the squared length to $10^{-6}$ before the square root [S1, unofficial].
+-*   **Premature Termination:** The loop breaks if accumulated alpha reaches $0.9999$ to allow some background to show through, preventing total opacity too early [S1, unofficial].
++## Subtopics
++
++### [Hybrid Scattering](12458-hybrid-scattering.md)
++Hybrid Scattering is a stochastic shading technique for distance-field ray marching that switches between surface-based Bidirectional Reflectance Distribution Function (BRDF) and volumetric phase function scattering based on the local gradient magnitude. It solves the problem of rendering ambiguity in ill-defined regions by providing specular highlights where gradients are strong and volumetric scattering where gradients are weak, reducing sample variance compared to pure volumetric methods. Unlike conventional Phong shading, the underlying BRDF model is reciprocal and energy conserving.
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** Not given in the sources.
+-*   **Memory Complexity:** Not given in the sources.
+-*   **Strengths:** Not given in the sources.
+-*   **Limitations:** Not given in the sources.
+-*   **When to use:** Not given in the sources.
+-*   **When not to use:** Not given in the sources.
++*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of steps per ray (up to `MAX_STEPS`). The complexity is linear with respect to the number of samples taken along each ray.
++*   **Memory Complexity:** $O(V)$ for the volume texture and $O(T)$ for the transfer function, where $V$ is the number of voxels and $T$ is the size of the LUT.
++*   **Measured Performance:** Performance depends heavily on `_StepSize` and `MAX_STEPS`. Smaller step sizes increase accuracy but reduce performance. The use of early termination (`accA >= 0.9999`) helps maintain performance in opaque regions.
++*   **Strengths:** Simple to implement, computationally efficient compared to full volumetric path tracing, provides intuitive surface-like shading for volumes.
++*   **Limitations:** The pseudo-normal estimation can be noisy in low-gradient regions, leading to shading artifacts. It does not account for subsurface scattering or complex light transport within the volume.
++*   **When to use:** Suitable for real-time visualization of medical images (CT/MRI) and scientific data where surface appearance is desired.
++*   **When not to use:** Not suitable for highly translucent or scattering media where volumetric effects are critical.
+ 
+ ## Background
+-
+-Gradient-Based Shading is implemented in the `VolumeDVR.shader` component of the VRDF SDK, a tool for real-time volume rendering of 3D medical or scientific data [S1, unofficial]. It is designed to work with Unity's URP (Universal Render Pipeline) [S1, unofficial]. The method encapsulates both continuous anatomy (MRI/CT) and discrete segmentations (AI masks, tumor maps) within a single binary container format (`.vrdf`) [S1, unofficial].
++Gradient-Based Shading is a method used in real-time volume rendering, particularly within frameworks like the VRDF SDK for Unity. It leverages the gradient of the scalar field to approximate surface normals, allowing standard lighting models to be applied to volumetric data. This approach is common in medical imaging visualization to enhance the perception of depth and structure.
+ 
+ ## Sources
+-
+ [S1] guillaume-schneider/vrdf-sdk, https://github.com/guillaume-schneider/vrdf-sdk, fetched 2026-10-26 (unofficial)

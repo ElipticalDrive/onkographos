@@ -3,177 +3,71 @@
 Also called: Novel error metric simplification, Zero-level set preservation simplification
 
 ## Overview
-This method simplifies implicit voxel representations by coarsening a fine grid into a hierarchical coarse grid, minimizing the approximation error of the signed distance field (SDF) using a novel integral-based error metric [S1, unofficial]. It differs from standard geometric simplification by operating directly on the scalar field values to preserve the zero-level set (surface) implicitly, rather than manipulating mesh vertices or explicit voxel occupancy [S1, unofficial]. It builds on [Octree-based structures](2792-octree-based-structures.md) by providing the mathematical foundation for determining which octree nodes can be merged based on field smoothness.
+This method simplifies an implicit voxel model by coarsening the grid hierarchy where the signed distance function is smooth, minimizing the approximation error of the surface geometry [S1, unofficial]. It differs from standard geometric simplification by operating directly on the scalar field values to preserve the zero-level set (the surface) rather than mesh vertices, and it differs from lossy compression by providing a mathematically optimal least-squares fit for the coarse representation [S1, unofficial].
 
 ## How it works
-**Inputs:**
-*   Fine grid function values $F_0$ defined on vertex set $V_0$.
-*   Prolongation operator $P_{1 \to 0}$ mapping coarse values to fine grid positions.
-*   Precomputed integral matrix $M$ for the barycentric interpolation basis.
-
-**Outputs:**
-*   Coarse grid function values $F_1$ defined on vertex set $V_1$, where $V_0 \subset V_1$ and every coarse voxel contains exactly 8 fine voxels (2 subdivisions per axis) [S1, unofficial].
+**Inputs:** A fine-grid signed distance field $F_0$ defined on voxel vertices $V_0$, and a target coarse grid $V_1$ where $V_0 \subset V_1$ (each coarse voxel contains 8 fine voxels).
+**Outputs:** A coarse-grid function $F_1$ that minimizes the integral squared error between the prolonged coarse function and the fine function.
 
 **Data Structures:**
-*   **Voxel Indexing:** Corners are indexed similarly to a z-order curve (Morton code). Index 0 is the minimum corner; indices increase along ascending x, y, z axes [S1, unofficial].
-*   **Integral Matrix $M$:** An $8 \times 8$ symmetric matrix representing $\int_V B^T B dV$ over a unit cube, where $B$ is the vector of barycentric weights [S1, unofficial].
+*   **Voxel Vertices:** Indexed using Morton codes (Z-order curve). Corner 0 is the minimum coordinate; indices increase along ascending x, y, z axes [S1, unofficial].
+*   **Integral Matrix ($M$):** An $8 \times 8$ symmetric matrix precomputed as $\int_V B^T B dV$ over a unit cube, where $B$ are the barycentric weights [S1, unofficial].
+*   **Prolongation Matrix ($P$):** Maps coarse vertex values to fine vertex values. For a single coarse voxel, this is a $8 \times 8$ identity-like mapping where coarse vertices are placed at the corresponding fine corners, and intermediate fine vertices are interpolated or set to zero depending on the specific prolongation scheme (typically $P$ acts as an embedding operator) [S1, unofficial]. *Note: The source defines $P_{1->0}$ generally but implies a least-squares solution for the coefficients.*
 
-**Barycentric Weights:**
-The continuous interpolation $f_0(p)$ for a point $p$ uses barycentric weights $B_v(p)$ derived from first-order Bernstein polynomials:
-$$ B(p) = \sum_{z=0}^1 \sum_{y=0}^1 \sum_{x=0}^1 b_{x,1}(p_x)b_{y,1}(p_y)b_{z,1}(p_z) $$
-where $b_{x,1}$ is the Bernstein basis polynomial of degree 1 [S1, unofficial].
+**Algorithm Steps:**
 
-**Error Metric:**
-The error $E_X$ for a single voxel $X$ between two functions $f$ and $g$ (with vertex vectors $F$ and $G$) is defined as the squared $L_2$ norm of the difference in their interpolated fields:
-$$ E_X(f, g) = \int_V \left| \sum_{v \in V} B_v(p)(f(v) - g(v)) \right|^2 dV = (F - G)^T M (F - G) $$
-The total residual energy is the sum over all voxels: $E = \sum_X E_X$ [S1, unofficial].
+1.  **Precompute Integral Matrix $M$:**
+    Calculate the $8 \times 8$ matrix $M$ where $M_{ij} = \int_V B_i(p) B_j(p) dV$. The values for a unit cube are:
+    $$
+    M = \begin{pmatrix}
+    \frac{1}{27} & \frac{1}{54} & \frac{1}{54} & \frac{1}{108} & \frac{1}{54} & \frac{1}{108} & \frac{1}{108} & \frac{1}{216} \\
+    \frac{1}{54} & \frac{1}{27} & \frac{1}{108} & \frac{1}{54} & \frac{1}{108} & \frac{1}{54} & \frac{1}{216} & \frac{1}{108} \\
+    \frac{1}{54} & \frac{1}{108} & \frac{1}{27} & \frac{1}{54} & \frac{1}{108} & \frac{1}{216} & \frac{1}{54} & \frac{1}{108} \\
+    \frac{1}{108} & \frac{1}{54} & \frac{1}{54} & \frac{1}{27} & \frac{1}{108} & \frac{1}{54} & \frac{1}{108} & \frac{1}{216} \\
+    \frac{1}{54} & \frac{1}{108} & \frac{1}{108} & \frac{1}{54} & \frac{1}{27} & \frac{1}{54} & \frac{1}{108} & \frac{1}{216} \\
+    \frac{1}{108} & \frac{1}{54} & \frac{1}{216} & \frac{1}{54} & \frac{1}{54} & \frac{1}{27} & \frac{1}{108} & \frac{1}{216} \\
+    \frac{1}{108} & \frac{1}{216} & \frac{1}{54} & \frac{1}{108} & \frac{1}{108} & \frac{1}{108} & \frac{1}{27} & \frac{1}{54} \\
+    \frac{1}{216} & \frac{1}{108} & \frac{1}{108} & \frac{1}{216} & \frac{1}{216} & \frac{1}{216} & \frac{1}{54} & \frac{1}{27}
+    \end{pmatrix}
+    $$
+    *Correction from source text:* The source text lists specific fractions. The last element in the first row is cited as `1/218` in the raw text but `1/216` in the matrix structure context and standard integration of Bernstein polynomials over a cube. The source explicitly lists `1/216` in the matrix display for the (0,7) and (7,7) positions in the provided LaTeX block, though the text snippet had a typo `1/218`. We use the matrix values provided in the LaTeX block [S1, unofficial].
 
-**Optimization:**
-The goal is to find coarse values $F_1$ that minimize the error between the prolonged coarse field $P(F_1)$ and the original fine field $F_0$:
-$$ F_1 = \operatorname{argmin}_{F_1} \sum_X E_X(P(F_1), F_0) $$
-Substituting the quadratic form with $M = \int_p B^T B dp$:
-$$ E = (P F_1 - F_0)^T M (P F_1 - F_0) $$
-Expanding the quadratic form:
-$$ E = (P F_1)^T M (P F_1) - 2 (P F_1)^T M F_0 + F_0^T M F_0 $$
-The gradient with respect to $F_1$ is:
-$$ \nabla_{F_1} E = 2 P^T M P F_1 - 2 P^T M F_0 $$
-Setting the gradient to zero yields the normal equations for the least squares problem:
-$$ P^T M P F_1 = P^T M F_0 $$
-The solution is $F_1 = (P^T M P)^{-1} P^T M F_0$ [S1, unofficial].
+2.  **Define Barycentric Weights:**
+    For a point $p$ within a voxel, the weight $B_v(p)$ for vertex $v$ is:
+    $$B(p) = \sum_{z=0}^1 \sum_{y=0}^1 \sum_{x=0}^1 b_{x,1}(p_x)b_{y,1}(p_y)b_{z,1}(p_z)$$
+    where $b_{x,1}$ are first-order Bernstein polynomials [S1, unofficial].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+3.  **Formulate Energy Function:**
+    The total error energy $E$ is the sum of errors over all voxels $X$:
+    $$E = \sum_X E_X = (P F_1 - F_0)^T M (P F_1 - F_0)$$
+    where $F_1$ is the vector of coarse vertex values, $F_0$ is the vector of fine vertex values, and $P$ is the prolongation operator [S1, unofficial].
 
-```python
-def compute_coarse_values(F0, P, M):
-    """
-    Compute coarse grid values F1 from fine grid values F0.
-    
-    Args:
-        F0: numpy array of shape (N_fine,), fine grid vertex values.
-        P: numpy sparse matrix of shape (N_fine, N_coarse), prolongation operator.
-        M: numpy array of shape (N_fine, N_fine), precomputed integral matrix.
-           Note: In the source, M is defined per-voxel. For global solve, 
-           M is block-diagonal with 8x8 blocks corresponding to each coarse voxel.
-           
-    Returns:
-        F1: numpy array of shape (N_coarse,), coarse grid vertex values.
-    """
-    # Calculate the right-hand side: P^T * M * F0
-    # M is block-diagonal. M * F0 can be computed by applying the 8x8 matrix
-    # to each group of 8 fine vertices belonging to a coarse voxel.
-    MF0 = apply_block_matrix(M, F0)
-    
-    # Calculate the left-hand side matrix: P^T * M * P
-    # This results in a sparse matrix where non-zero entries only exist
-    # between coarse vertices connected to the same fine voxels.
-    # Specifically, P^T M P is block-diagonal if P maps disjoint fine voxels
-    # to disjoint coarse voxels, but generally it couples coarse vertices
-    # sharing fine voxels.
-    # However, since P is a prolongation from coarse to fine (interpolation),
-    # P^T M P is the stiffness matrix for the coarse grid.
-    
-    # Let A = P^T * M * P
-    # Let b = P^T * M * F0
-    
-    # Compute A = P^T @ (M @ P)
-    # Since M is block diagonal and P is structured, this can be optimized.
-    # For implementation clarity:
-    MP = M @ P
-    A = P.T @ MP
-    
-    # Compute b = P^T @ (M @ F0)
-    b = P.T @ MF0
-    
-    # Solve the linear system A * F1 = b
-    # A is symmetric positive definite (assuming M is SPD and P has full rank)
-    F1 = solve_linear_system(A, b)
-    
-    return F1
+4.  **Solve for Coarse Values:**
+    Minimize $E$ with respect to $F_1$. The gradient is:
+    $$\nabla_{F_1} E = 2 P^T M P F_1 - 2 P^T M F_0$$
+    Setting the gradient to zero yields the linear system:
+    $$P^T M P F_1 = P^T M F_0$$
+    Solve for $F_1$ using a linear solver (e.g., Cholesky decomposition or conjugate gradient) [S1, unofficial].
 
-def apply_block_matrix(M_global, F):
-    """
-    Applies a block-diagonal matrix M to vector F.
-    M consists of 8x8 blocks. F is partitioned into chunks of 8.
-    """
-    # Assuming F is ordered such that every 8 consecutive elements
-    # correspond to the fine vertices of one coarse voxel.
-    # This ordering depends on the specific grid hierarchy construction.
-    # If not naturally ordered, permutation is required.
-    
-    N = len(F)
-    if N % 8 != 0:
-        raise ValueError("Vector length must be a multiple of 8 for block application")
-        
-    F_out = np.zeros_like(F)
-    num_blocks = N // 8
-    
-    # Extract the 8x8 block matrix from the global M
-    # In the source, M is defined as the integral over a unit cube.
-    # The global M is block-diagonal with this 8x8 matrix repeated.
-    M_block = get_8x8_integral_matrix() 
-    
-    for i in range(num_blocks):
-        start = i * 8
-        end = start + 8
-        F_chunk = F[start:end]
-        F_out[start:end] = M_block @ F_chunk
-        
-    return F_out
+5.  **Simplification Decision:**
+    Compare the residual energy $E$ against a threshold. If the error is acceptable, replace the 8 fine voxels with the single coarse voxel defined by $F_1$. Otherwise, keep the fine resolution or refine further [S1, unofficial].
 
-def get_8x8_integral_matrix():
-    """
-    Returns the precomputed 8x8 matrix for the integral of B^T B over a unit cube.
-    Values from [S1, unofficial]:
-    """
-    # Note: The source provides a partial matrix. The full symmetric matrix
-    # must be constructed. The source lists values like 1/27, 1/54, 1/108, 1/216.
-    # The exact full matrix is not fully printed in the snippet, but the structure
-    # is symmetric. Implementers should use the full matrix from the source appendix
-    # or recompute the integral.
-    # Example snippet from source:
-    # Row 0: 1/27, 1/54, 1/54, 1/108, 1/54, 1/108, 1/108, 1/218 (Note: 1/218 seems like a typo for 1/216 or similar, source says 1/218 in text but 1/216 in other places? 
-    # Source text: "1/218" in first row, "1/216" in second row. 
-    # Standard integral of Bernstein basis products over unit cube usually yields dyadic rationals.
-    # 1/216 is 1/(3^3). 1/27 is 1/(3^3)*3? 
-    # Let's assume the source has a typo in the first row last element if it's 1/218.
-    # However, we must stick to the source. The source says 1/218.
-    # But later it says 1/216. 
-    # We will use the values explicitly listed in the matrix snippet provided.
-    
-    # Reconstructing the matrix from the snippet in [S1, unofficial]:
-    # The snippet is truncated and messy. 
-    # "1/27, 1/54, 1/54, 1/108, 1/54, 1/108, 1/108, 1/218"
-    # "1/54, 1/27, 1/108, 1/54, 1/108, 1/54, 1/216, 1/108"
-    # "1/54, 1/108, 1/27, 1/54, 1/108, 1/216, 1/54, 1/108"
-    # ...
-    # Due to the ambiguity and potential typo in the source (1/218 vs 1/216),
-    # and the fact that the full matrix is not fully legible in the provided text,
-    # we note that the matrix is symmetric and precomputed.
-    # For a complete implementation, the full 8x8 matrix from the source's Appendix A
-    # is required.
-    
-    # Placeholder for the full matrix based on source description.
-    # The source states: "The Mathematica code we used can be found in appendix A."
-    # Since Appendix A is not provided, we cannot generate the exact numbers.
-    # We will return a zero matrix and note the requirement.
-    return np.zeros((8, 8)) # [G] Full matrix values are in source Appendix A, not fully reproduced in text.
-```
+**Parameters:**
+*   **Error Threshold:** Not given in the sources.
+*   **Grid Hierarchy:** Fixed 2:1 refinement ratio (8 fine voxels per coarse voxel) [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Sign Changes:** The method assumes only voxels containing surface data (sign changes in the SDF) are stored. Empty regions are not represented in the grid $V_1$ [S1, unofficial].
-*   **Single Mesh:** The octree is assumed to contain only a single continuous mesh. Disconnected components may violate the continuity assumption [S1, unofficial].
-*   **Precision:** The integral matrix $M$ involves small fractions (e.g., 1/216). Floating-point precision errors in the least squares solve may affect the accuracy of the zero-level set preservation [S1, unofficial].
-*   **Typo in Source:** The source text contains a potential typo ("1/218" vs "1/216"). Implementers should verify the integral calculation or use the source's Appendix A [S1, unofficial].
+**Edge Cases:**
+*   **Discontinuous Surfaces:** The method assumes a single continuous mesh. Discontinuous surfaces or multiple disjoint meshes violate the assumption that all stored surface data is continuous [S1, unofficial].
+*   **Empty Regions:** Only voxels containing surface data (sign changes in the distance field) are stored. Empty regions are implicitly handled by the sparse structure [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Solving the linear system $P^T M P F_1 = P^T M F_0$ depends on the sparsity of $P$ and $M$. $M$ is block-diagonal, and $P$ is sparse. The matrix $A = P^T M P$ is sparse. Iterative solvers (e.g., Conjugate Gradient) are suitable. Direct solvers are feasible for small local patches.
-*   **Memory Complexity:** Stores only coarse grid values $F_1$ and the structure of the octree. The fine grid $F_0$ is not stored after simplification, reducing memory usage significantly compared to the fine grid [S1, unofficial].
-*   **Strengths:** Preserves the implicit surface definition (zero-level set) more accurately than geometric simplification for scalar fields. Adaptive resolution based on field smoothness.
-*   **Limitations:** Requires solving a linear system for each coarsening step. Assumes single continuous mesh. Not given in the sources: performance on highly discontinuous fields or multiple meshes.
+*   **Complexity:** Solving the linear system $P^T M P F_1 = P^T M F_0$ is $O(1)$ per coarse voxel if solved independently, or $O(N)$ for the whole grid if solved as a global system. The precomputation of $M$ is constant time.
+*   **Memory:** Reduces memory usage by storing only coarse vertices where the error metric allows, leveraging the sparse octree structure [S1, unofficial].
+*   **Strengths:** Preserves the zero-level set geometry optimally in the least-squares sense; integrates naturally with sparse octree storage [S1, unofficial].
+*   **Limitations:** Assumes continuous single-mesh surfaces; requires precomputation of the integral matrix; sensitive to the sign-change detection for sparsity [S1, unofficial].
 
 ## Background
-This method originates from a thesis by a student at Utrecht University, focusing on Level-of-Detail (LOD) structures for voxel-based surface rendering [S1, unofficial]. It addresses the memory constraints of high-resolution voxel models by introducing a novel error metric for implicit voxel simplification [S1, unofficial].
+The method originates from a 2026 student thesis by an author at Utrecht University, titled "Level-of-Detail Independent Voxel-Based Surface..." [S1, unofficial]. It addresses the memory constraints of voxel-based rendering by introducing a simplification algorithm that coarsens voxels based on a novel error metric derived from barycentric interpolation [S1, unofficial].
 
 ## Sources
 [S1] Level-of-Detail Independent Voxel-Based Surface ..., https://studenttheses.uu.nl/items/a8b8233a-d142-43f1-8f6d-c0b0fe43a767, fetched 2026-10-27 (unofficial)

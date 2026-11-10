@@ -1,0 +1,156 @@
+# HardSoftRas Blending
+
+Also called: HardSoftRas Shading and Blending
+
+## Overview
+HardSoftRas Blending is a pixel-wise compositing strategy for differentiable rendering that distinguishes between edge pixels (silhouettes and vertical surfaces) and non-edge pixels to balance anti-aliasing with texture sharpness [S1]. Unlike SoftRas, which applies weighted blending across all faces including those inside silhouettes, HardSoftRas preserves the most frontal color for non-edge regions while using probabilistic blending for edges, thereby maintaining sharp internal textures while generating far-range gradients for optimization [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $K$ rasterized buffers. For each buffer $k$, the method requires the shaded color $C_k$ (RGB) and the signed distance $dist_k$ from the pixel center to the face in that buffer. It also requires a stencil mask $SH$ indicating the presence of hard faces in the frontal buffer, and a radius parameter $r$ defining the edge detection scale.
+*   **Outputs:** The final pixel color $I_c$ and silhouette intensity $I_s$.
+
+**Data Structures:**
+*   **Buffers:** An array of $K$ elements, each containing color $C_k$ and signed distance $dist_k$.
+*   **Edge Mask $E$:** A binary mask of the same resolution as the image, where $E_{ij}=1$ if pixel $(i,j)$ is within distance $\delta$ of a silhouette edge, and $0$ otherwise.
+
+**Parameters:**
+*   $K$: Number of buffers (default $K=3$ in preferred settings) [S1].
+*   $\sigma$: Temperature parameter for sigmoid, typically $\sigma = r/7$ [S1].
+*   $\delta$: Width of the edge mask, typically $\delta = r$ [S1].
+*   $r$: Radius parameter controlling the scale of edge detection and blending (e.g., $r=0.01$) [S1].
+
+**Steps:**
+
+1.  **Compute Edge Mask $E$:**
+    Generate a stencil mask $SH$ of hard faces in the frontal buffer. Apply edge detection and dilation to $SH$ to create the binary edge mask $E$ with width $\delta \le r$ [S1].
+
+2.  **Compute Probabilities $D_k$:**
+    For each buffer $k$ and pixel, calculate the probability $D_k$ using the sigmoid function of the signed distance. Note: The square of the distance used in SoftRas is removed to avoid numerical instability [S1].
+    $$
+    D_k = \text{sigmoid}\left(\frac{dist_k}{\sigma}\right) = \frac{1}{1 + e^{-dist_k / \sigma}}
+    $$
+    where $dist_k$ is the signed distance and $\sigma > 0$ [S1].
+
+3.  **Compute Edge Color $I_{ce}$:**
+    Calculate the blended color for edge pixels using weighted averaging of all buffers, weighted by $D_k$. Depth values are not used directly for color blending [S1].
+    $$
+    I_{ce} = \frac{\sum_{k=1}^{K} D_k C_k}{\sum_{k=1}^{K} D_k}
+    $$
+
+4.  **Compute Non-Edge Color $I_{cne}$:**
+    For non-edge pixels, retain the color of the most frontal buffer (typically buffer 1, or the one indicated by $SH$).
+    $$
+    I_{cne} = SH \cdot C_1
+    $$
+    (Where $C_1$ is the shaded color of the most frontal face) [S1].
+
+5.  **Compute Final Color $I_c$:**
+    Combine edge and non-edge colors using the edge mask $E$:
+    $$
+    I_c = E \cdot I_{ce} + (1 - E) \cdot I_{cne}
+    $$
+
+6.  **Compute Silhouette Edge Intensity $I_{se}$:**
+    For silhouette rendering, use binary occupancy blending for edges. This represents the probability that at least one face is present across all buffers [S1].
+    $$
+    I_{se} = 1 - \prod_{k=1}^{K} (1 - D_k)
+    $$
+
+7.  **Compute Non-Edge Silhouette Intensity $I_{sne}$:**
+    For non-edge pixels, use flat intensity based on the stencil mask.
+    $$
+    I_{sne} = SH
+    $$
+
+8.  **Compute Final Silhouette $I_s$:**
+    $$
+    I_s = E \cdot I_{se} + (1 - E) \cdot I_{sne}
+    $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hardsoft_ras_blend(buffers, SH, r, sigma_scale=1/7):
+    """
+    buffers: List of K tuples (C_k, dist_k)
+    SH: Binary mask of frontal hard faces
+    r: Radius parameter
+    sigma_scale: Factor for sigma, default 1/7
+    """
+    K = len(buffers)
+    r = float(r)
+    sigma = r * sigma_scale
+    
+    # Step 1: Compute Edge Mask E
+    # SH is stencil mask of hard faces in frontal buffer
+    # E is created by edge detection and dilation on SH with width delta <= r
+    # Implementation detail: E = dilate(edge_detect(SH), radius=delta)
+    # Not given in sources: specific edge detection/dilation algorithm
+    E = compute_edge_mask(SH, delta=r) 
+    
+    # Step 2: Compute Probabilities D_k
+    D = []
+    for k in range(K):
+        C_k, dist_k = buffers[k]
+        # Remove square of dist_k compared to SoftRas for stability
+        # sigmoid(dist / sigma)
+        D_k = 1.0 / (1.0 + torch.exp(-dist_k / sigma))
+        D.append(D_k)
+        
+    # Step 3: Compute Edge Color I_ce
+    # Weighted average of colors by D_k
+    numerator = sum(D[k] * buffers[k][0] for k in range(K))
+    denominator = sum(D[k] for k in range(K))
+    # Avoid division by zero if denominator is 0
+    I_ce = numerator / (denominator + 1e-8)
+    
+    # Step 4: Compute Non-Edge Color I_cne
+    # Keep most frontal color C_1
+    I_cne = SH * buffers[0][0]
+    
+    # Step 5: Final Color I_c
+    I_c = E * I_ce + (1 - E) * I_cne
+    
+    # Step 6: Compute Silhouette Edge Intensity I_se
+    # Product over k of (1 - D_k)
+    prod_term = 1.0
+    for k in range(K):
+        prod_term *= (1 - D[k])
+    I_se = 1 - prod_term
+    
+    # Step 7: Compute Non-Edge Silhouette I_sne
+    I_sne = SH
+    
+    # Step 8: Final Silhouette I_s
+    I_s = E * I_se + (1 - E) * I_sne
+    
+    return I_c, I_s
+
+def compute_edge_mask(SH, delta):
+    # Placeholder for image processing step
+    # Edge detection followed by dilation
+    # Not given in sources: specific implementation
+    return SH # Simplified for structure
+```
+
+**Edge Cases and Pitfalls:**
+*   **Numerical Instability:** SoftRas originally squared the distance in the sigmoid; HardSoftRas removes this square to prevent numerical instability [S1].
+*   **Pseudo-occlusions:** If the `Shift()` operation is disabled, the renderer may suffer from pseudo-occlusions where boundaries appear shaggy or incorrect [S1].
+*   **Edge Width:** The width $\delta$ of the edge mask $E$ is adjustable. Setting $\delta$ too small may fail to capture sufficient gradient information, while setting it too large may blur sharp textures inside silhouettes [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of buffers $K$ and image resolution, as it involves per-pixel sigmoid and weighted averaging operations [S1].
+*   **Memory Complexity:** Requires storing $K$ buffers of color and distance, plus the edge mask $E$ [S1].
+*   **Strengths:** Maintains sharp textures inside silhouettes (unlike SoftRas) while providing far-range gradients for optimization (unlike standard Anti-Aliasing) [S1]. It generalizes anti-aliasing and SoftRas [S1].
+*   **Limitations:** Requires careful tuning of parameters $r$, $K$, and $\sigma$ [S1]. The edge detection step adds preprocessing overhead [S1].
+*   **When to use:** When differentiable optimization requires both sharp internal details and smooth gradients at boundaries [S1].
+*   **When not to use:** When simple alpha blending suffices or when computational budget is extremely tight and gradient smoothness is not critical [S1].
+
+## Background
+HardSoftRas Blending was introduced in the "Dressi" renderer, a hardware-agnostic differentiable renderer with reactive shader packing and soft rasterization [S1]. It was developed by Y. Takimoto, H. Sato, H. Takehara, K. Uragaki, T. Tawara, X. Liang, K. Oku, W. Kishimoto, and B. Zheng [S1]. The method updates and generalizes the SoftRas blending function to address issues with texture sharpness and optimization convergence in complex scenes with many overlaps [S1].
+
+## Sources
+[S1] Dressi: A Hardware‐Agnostic Differentiable Renderer with Reactive Shader Packing and Soft Rasterization, https://doi.org/10.1111/cgf.14455, fetched 2026-10-29

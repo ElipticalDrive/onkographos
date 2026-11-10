@@ -1,63 +1,49 @@
 # Volumetric Inverse Rendering with Differentiable Path Tracing
 
-Also called: Differentiable Volumetric Inverse Rendering, Differentiable Volumetric Path Tracing Optimization, Mitsuba 3 Volumetric Inverse Rendering, Mitsuba 3 Volumetric Inverse Rendering Tutorial, Volumetric Inverse Rendering with Differentiable Path Replay Backpropagation, Volumetric Path Tracing with Adjoint Differentiation
+Also called: Differentiable Volumetric Inverse Rendering, Differentiable Volumometric Path Tracing Optimization, Mitsuba 3 Volumetric Inverse Rendering, Mitsuba 3 Volumetric Inverse Rendering Tutorial, Volumetric Inverse Rendering with Differentiable Path Replay Backpropagation, Volumetric Path Tracing with Adjoint Differentiation
 
 ## Overview
-This method optimizes a 3D volume density (extinction/scattering) stored on a regular grid to match a set of synthetic reference images [S2, unofficial][S3, unofficial]. It accounts for direct and indirect illumination by using path replay backpropagation to compute derivatives of delta tracking and volumetric multiple scattering [S2, unofficial][S3, unofficial]. Unlike standard volume rendering which assumes known parameters, this approach treats the volume grid as trainable parameters, enabling the reconstruction of volumetric scenes from multi-view observations [S2, unofficial][S3, unofficial].
+This method optimizes a 3D volume density (extinction/scattering) stored on a regular grid to match a set of synthetic reference images [S2, S3, unofficial]. It accounts for direct and indirect illumination by using path replay backpropagation to compute derivatives of delta tracking and volumetric multiple scattering [S2, S3, unofficial]. Unlike standard differentiable volume rendering which often relies on analytic inversion or simple reverse-mode AD on discrete steps, this approach integrates the adjoint method directly into the path tracing loop, allowing for the optimization of complex volumetric properties while maintaining differentiability through stochastic sampling events [S2, S3, unofficial].
 
 ## How it works
-
 ### Inputs and Outputs
 **Inputs:**
-*   A set of reference images rendered from known camera viewpoints [S2, unofficial][S3, unofficial].
-*   A scene description containing a differentiable volumetric path tracer (e.g., `prbvolpath`) [S2, unofficial][S3, unofficial].
-*   A heterogeneous volume interior with an extinction coefficient grid (`sigma_t`) initialized to a low constant value [S2, unofficial][S3, unofficial].
+*   A set of reference images $\{I_{ref}^{(i)}\}$ captured from multiple viewpoints.
+*   A scene description containing a differentiable volumetric path tracer (e.g., `prbvolpath` in Mitsuba 3) [S2, S3, unofficial].
+*   An initial guess for the volume density grid $\sigma_t$, typically a low constant value [S2, S3, unofficial].
+*   Camera parameters (poses, intrinsics) corresponding to the reference images [S2, S3, unofficial].
 
 **Outputs:**
-*   An optimized volume grid representing the reconstructed scene density [S2, unofficial][S3, unofficial].
+*   Optimized volume density grid $\sigma_t$ that minimizes the difference between rendered images and reference images [S2, S3, unofficial].
 
 ### Data Structures
-*   **Volume Grid:** A 4D tensor of shape $(V, V, V, 1)$ where $V$ is the resolution. The data type is `TensorXf` (floating point) [S2, unofficial][S3, unofficial].
-*   **Scene Parameters:** Accessed via traversal, specifically the key `'object.interior_medium.sigma_t.data'` [S2, unofficial][S3, unofficial].
-*   **Sensors:** Perspective cameras with a half-circle arrangement. Film resolution is typically $64 \times 64$ pixels with a 'tent' filter [S2, unofficial][S3, unofficial].
+*   **Volume Grid:** A 3D tensor (e.g., `TensorXf` in Dr.Jit) representing the extinction coefficient $\sigma_t$. The grid has dimensions $(V_x, V_y, V_z, 1)$ [S2, S3, unofficial].
+*   **Scene Parameters:** Traversed scene parameters map, where the volume data is accessed via a specific key (e.g., `'object.interior_medium.sigma_t.data'`) [S2, S3, unofficial].
+*   **Optimizer State:** Internal state for the Adam optimizer (momentum, variance) associated with the volume data [S2, S3, unofficial].
 
 ### Steps
 
-1.  **Sensor Setup:** Create $N$ sensors (typically $N=5$ for simple scenes, up to 50-100 for complex ones) placed on a half-circle around the origin [S2, unofficial][S3, unofficial]. For each sensor $i$:
-    *   Calculate angle: $\theta_i = \frac{180.0}{N} \cdot i - 90.0$ [S2, unofficial][S3, unofficial].
-    *   Create rotation transform: $R = \text{rotate}([0, 1, 0], \theta_i)$ [S2, unofficial][S3, unofficial].
-    *   Create look-at transform: $L = \text{look\_at}(\text{target}=[0, 0, 0], \text{origin}=[0, 0, 4], \text{up}=[0, 1, 0])$ [S2, unofficial][S3, unofficial].
-    *   Combine: $T_{\text{to\_world}} = R \cdot L$ [S2, unofficial][S3, unofficial].
-    *   Load sensor with type 'perspective', FOV 45, film $64 \times 64$ HDR with tent filter [S2, unofficial][S3, unofficial].
+1.  **Sensor Setup:** Create $N$ sensors (e.g., $N=5$) placed on a half-circle around the origin. For each sensor $i$, calculate the angle $\theta_i = \frac{180.0}{N} \cdot i - 90.0$. Apply a rotation around the Y-axis by $\theta_i$, then apply a look-at transform from the origin $[0,0,0]$ to the camera origin $[0,0,4]$ with up vector $[0,1,0]$ [S2, S3, unofficial]. Load each sensor with type `'perspective'`, field of view 45, and a 64x64 HDR film with a tent filter [S2, S3, unofficial].
 
-2.  **Reference Rendering:** Render the ground-truth scene using the differentiable path tracer (e.g., `prbvolpath`) for each sensor with high samples per pixel (e.g., `ref_spp` = 512) [S2, unofficial][S3, unofficial]. Store these as `ref_images` [S2, unofficial][S3, unofficial].
+2.  **Reference Image Rendering:** Render the reference scene (containing the ground-truth volume) using the differentiable path tracer for each sensor. Store the resulting images in a list $\{I_{ref}^{(i)}\}$ [S2, S3, unofficial]. The number of samples per pixel (spp) for reference images is typically high (e.g., 512) to reduce noise in the target [S2, S3, unofficial].
 
-3.  **Optimization Scene Initialization:**
-    *   Create a scene with a container cube having a 'null' BSDF (invisible surface) [S2, unofficial][S3, unofficial].
-    *   Set interior type to 'heterogeneous' [S3, unofficial].
-    *   Initialize `sigma_t` grid to a low constant value (e.g., 0.002) [S2, unofficial][S3, unofficial]. This facilitates optimization by making it easier to increase density than to remove it from a dense volume [S2, unofficial][S3, unofficial].
-    *   Set volume scale (e.g., 40.0), which scales the extinction range to $[10^{-6} \cdot \text{scale}, \text{scale}]$ [S2, unofficial][S3, unofficial].
-    *   Use a low initial resolution (e.g., $16 \times 16 \times 16$) to simplify the solution landscape [S2, unofficial][S3, unofficial].
+3.  **Optimization Scene Initialization:** Create an optimization scene with a uniform volume grid of resolution $V \times V \times V \times 1$ (e.g., $16^3$). Initialize the extinction coefficient $\sigma_t$ to a low constant value (e.g., 0.002) [S2, S3, unofficial]. This low initial value helps the optimizer by making it easier to increase density than to remove parts of a very dense volume [S2, S3, unofficial]. The container object (e.g., a cube) should have a `'null'` BSDF to prevent surface interactions [S2, S3, unofficial]. The volume scale parameter (e.g., 40.0) defines the range of extinction values [S2, S3, unofficial].
 
-4.  **Parameter Extraction:** Traverse the scene to identify the trainable parameter key: `'object.interior_medium.sigma_t.data'` [S2, unofficial][S3, unofficial].
+4.  **Parameter Extraction and Optimizer Setup:** Traverse the scene to extract the volume data parameter key (e.g., `'object.interior_medium.sigma_t.data'`) [S2, S3, unofficial]. Initialize an Adam optimizer with a learning rate (e.g., 0.02) and assign the volume data to it [S2, S3, unofficial].
 
-5.  **Optimizer Setup:** Instantiate an Adam optimizer with learning rate 0.02 [S2, unofficial][S3, unofficial]. Assign the volume data to the optimizer [S2, unofficial][S3, unofficial].
+5.  **Optimization Loop:** For each iteration:
+    a. Initialize total loss to 0.0.
+    b. For each sensor $i$:
+        i. Render the scene using the differentiable path tracer with the current parameters, using a lower spp (e.g., 8) for efficiency [S2, S3, unofficial].
+        ii. Compute the L2 loss: $L = \text{mean}((I_{rendered} - I_{ref}^{(i)})^2)$ [S2, S3, unofficial].
+        iii. Backpropagate gradients using automatic differentiation [S2, S3, unofficial].
+        iv. Take a gradient step with the optimizer [S2, S3, unofficial].
+        v. Clamp the optimized density values to $[10^{-6}, 1.0]$ to prevent invalid values [S2, S3, unofficial].
+        vi. Update scene parameters [S2, S3, unofficial].
+        vii. Add loss to total loss [S2, S3, unofficial].
+    c. (Optional) Apply multi-resolution upsampling if the current resolution is low.
 
-6.  **Optimization Loop:**
-    *   For each iteration:
-        *   For each sensor:
-            *   Render the scene using the differentiable path tracer with low samples per pixel (e.g., `spp` = 8) [S2, unofficial][S3, unofficial].
-            *   Compute L2 loss: $\mathcal{L} = \text{mean}((\text{img} - \text{ref\_images})^2)$ [S2, unofficial][S3, unofficial].
-            *   Backpropagate gradients using automatic differentiation [S2, unofficial][S3, unofficial].
-            *   Take a gradient step [S2, unofficial][S3, unofficial].
-            *   Clamp density values to $[10^{-6}, 1.0]$ to prevent invalid values [S2, unofficial][S3, unofficial].
-            *   Update scene parameters via `params.update(opt)` [S2, unofficial][S3, unofficial].
-
-7.  **Volume Upsampling:**
-    *   After initial convergence, upsample the volume grid to a higher resolution (e.g., $64 \times 64 \times 64$) [S2, unofficial][S3, unofficial].
-    *   Use `dr.upsample` [S2, unofficial] or `dr.resample` with a linear filter [S3, unofficial] to preserve value ranges and avoid negative densities.
-    *   The optimizer automatically resets internal state (e.g., momentum) upon size change [S2, unofficial][S3, unofficial].
-    *   Continue optimization with increased samples per pixel (e.g., $8 \times \text{ref\_spp}$) [S2, unofficial][S3, unofficial].
+6.  **Volume Upsampling (Multi-resolution Strategy):** After initial optimization at low resolution, upsample the volume grid to a higher resolution (e.g., $64^3$) using a linear resampling filter [S2, S3, unofficial]. The linear filter is crucial to prevent overshooting and negative density values, which can occur with cubic filters [S3, unofficial]. The optimizer automatically resets its internal state (e.g., momentum) when the size of the optimized variable changes [S2, S3, unofficial]. Continue optimization at the higher resolution [S2, S3, unofficial].
 
 ### Pseudocode
 
@@ -88,33 +74,44 @@ def setup_sensors(sensor_count=5):
     return sensors
 
 def render_reference_images(scene_ref, sensors, ref_spp=512):
-    """Render reference images from all sensors."""
-    return [mi.render(scene_ref, sensor=sensors[i], spp=ref_spp) for i in range(len(sensors))]
+    """Render reference images from multiple viewpoints."""
+    ref_images = []
+    for i in range(len(sensors)):
+        img = mi.render(scene_ref, sensor=sensors[i], spp=ref_spp)
+        ref_images.append(img)
+    return ref_images
 
-def create_optimization_scene(v_res=16, scale=40.0, init_sigma_t=0.002):
-    """Create optimization scene with low-res uniform volume."""
+def setup_optimization_scene(v_res=16, scale=40.0):
+    """Create an optimization scene with a low-resolution uniform volume."""
+    import drjit as dr
+    import mitsuba as mi
+    from mitsuba import ScalarTransform4f as T
+    
     scene_dict = {
         'type': 'scene',
         'integrator': {'type': 'prbvolpath'},
         'object': {
             'type': 'cube',
-            'bsdf': {'type': 'null'},
             'interior': {
                 'type': 'heterogeneous',
                 'sigma_t': {
                     'type': 'gridvolume',
-                    'grid': mi.VolumeGrid(dr.full(mi.TensorXf, init_sigma_t, (v_res, v_res, v_res, 1))),
-                    'to_world': mi.ScalarTransform4f().translate(-1).scale(2.0)
+                    'grid': mi.VolumeGrid(dr.full(mi.TensorXf, 0.002, (v_res, v_res, v_res, 1))),
+                    'to_world': T().translate(-1).scale(2.0)
                 },
-                'scale': scale
-            }
+                'scale': scale,
+            },
+            'bsdf': {'type': 'null'}
         },
         'emitter': {'type': 'constant'}
     }
     return mi.load_dict(scene_dict)
 
 def optimize_volume(scene, sensors, ref_images, iteration_count=20, spp=8, lr=0.02):
-    """Run optimization loop."""
+    """Optimize volume density to match reference images."""
+    import drjit as dr
+    import mitsuba as mi
+    
     params = mi.traverse(scene)
     key = 'object.interior_medium.sigma_t.data'
     
@@ -132,44 +129,31 @@ def optimize_volume(scene, sensors, ref_images, iteration_count=20, spp=8, lr=0.
             opt[key] = dr.clip(opt[key], 1e-6, 1.0)
             params.update(opt)
             total_loss += loss
-    return scene, params
+        print(f"Iteration {it}: Loss = {total_loss}")
 
 def upsample_volume(opt, key, new_shape=(64, 64, 64, 1)):
-    """Upsample volume grid using linear filter."""
-    # dr.resample is preferred for explicit filter control to avoid negative values
+    """Upsample the volume grid using linear filter."""
+    import drjit as dr
+    # Use linear filter to prevent negative values
     opt[key] = dr.resample(opt[key], shape=new_shape, filter='linear')
 ```
 
-### Parameters
-*   **sensor_count:** Number of views. Typical: 5. Complex scenes: 50-100 [S2, unofficial][S3, unofficial].
-*   **volume_type:** 'heterogeneous' [S3, unofficial].
-*   **sensor_resolution:** $64 \times 64$ pixels [S2, unofficial][S3, unofficial].
-*   **volume_scale:** 40.0. Scales extinction range to $[10^{-6} \cdot \text{scale}, \text{scale}]$ [S2, unofficial][S3, unofficial].
-*   **sensor_filter:** 'tent' [S2, unofficial][S3, unofficial].
-*   **initial_sigma_t:** 0.002. Low constant value to facilitate density increase [S2, unofficial][S3, unofficial].
-*   **ref_spp:** 512. Samples per pixel for reference images [S2, unofficial][S3, unofficial].
-*   **optimizer_type:** Adam [S2, unofficial][S3, unofficial].
-*   **learning_rate:** 0.02 [S2, unofficial][S3, unofficial].
-*   **iteration_count:** 20 per resolution stage [S2, unofficial][S3, unofficial].
-*   **upsampled_spp:** $8 \times \text{ref\_spp}$ (4096) after upsampling [S2, unofficial][S3, unofficial].
-
 ### Edge Cases and Pitfalls
-*   **Density Clamping:** Optimized values must be clamped to $[10^{-6}, 1.0]$ due to the volume scale parameter [S2, unofficial][S3, unofficial].
-*   **Upsampling Filter:** Using a cubic filter can overshoot and produce negative densities. A linear filter must be used [S3, unofficial].
-*   **Optimizer State:** The optimizer resets internal state (momentum) when variable size changes during upsampling [S2, unofficial][S3, unofficial].
-*   **Resolution:** Initial low resolution ($16^3$) is crucial for convexity; upsampling to higher resolution ($64^3$) recovers detail [S2, unofficial][S3, unofficial].
+*   **Density Clamping:** Optimized density values must be clamped to a valid range (e.g., $[10^{-6}, 1.0]$) because the `scale` parameter scales the extinction [S2, S3, unofficial].
+*   **Upsampling Filter Choice:** Using a cubic filter for upsampling can overshoot and produce negative density values. A linear filter should be used to preserve the value range [S3, unofficial].
+*   **Optimizer State Reset:** When the size of the optimized variable changes (e.g., during upsampling), the optimizer automatically resets its internal state (e.g., momentum) [S2, S3, unofficial].
+*   **Initial Density Value:** Initializing to a low constant value (e.g., 0.002) is preferred over a high value because it is easier for the optimizer to increase density than to remove parts of a very dense volume [S2, S3, unofficial].
+*   **Multi-View Requirement:** Multiple viewpoints are needed to sufficiently constrain the reconstructed volume density. Using a single view is insufficient [S2, S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of sensors, iterations, and samples per pixel (SPP). Reference rendering uses high SPP (512), while optimization uses low SPP (8) for speed [S2, unofficial][S3, unofficial].
-*   **Memory Complexity:** Proportional to the volume grid size ($V^3$) and the number of sensors [S2, unofficial][S3, unofficial].
-*   **Performance:** Measured on standard hardware using Mitsuba 3 [S2, unofficial][S3, unofficial].
-*   **Strengths:** Handles direct and indirect illumination via path replay backpropagation [S2, unofficial][S3, unofficial]. Multi-resolution approach improves optimization convexity [S2, unofficial][S3, unofficial].
-*   **Limitations:** Requires multiple viewpoints to constrain the volume [S2, unofficial][S3, unofficial]. Sensitive to initial density values [S2, unofficial][S3, unofficial].
-*   **When to Use:** When reconstructing volumetric scenes from multi-view synthetic or real images [S2, unofficial][S3, unofficial].
-*   **When Not to Use:** For single-view reconstruction or when computational resources are extremely limited [S2, unofficial][S3, unofficial].
+*   **Time Complexity:** The optimization loop involves rendering multiple views per iteration. The cost per iteration is proportional to the number of sensors and the number of samples per pixel (spp). Multi-resolution strategies reduce the cost of early iterations by using lower resolutions.
+*   **Memory Complexity:** Memory usage is dominated by the volume grid and the intermediate states required for automatic differentiation. The use of path replay backpropagation helps manage memory compared to storing all intermediate states for reverse-mode AD [S2, S3, unofficial].
+*   **Performance:** The method is computationally intensive due to the need for multiple renders per iteration and the complexity of volumetric path tracing. However, the multi-resolution approach helps converge faster by starting with a simpler optimization landscape [S2, S3, unofficial].
+*   **Strengths:** Handles direct and indirect illumination, supports heterogeneous volumes, and allows for the optimization of complex volumetric properties. The multi-resolution strategy improves convergence [S2, S3, unofficial].
+*   **Limitations:** Requires multiple reference images. Computationally expensive. Sensitive to the choice of initial density and upsampling filter [S2, S3, unofficial].
 
 ## Background
-This method is implemented in Mitsuba 3 using the `prbvolpath` integrator, `heterogeneous` volume plugin, and `gridvolume` plugin [S2, unofficial][S3, unofficial]. It is demonstrated in the Mitsuba 3 tutorial for volumetric inverse rendering [S2, unofficial][S3, unofficial]. The approach leverages differentiable programming to optimize volume parameters directly from image data [S2, unofficial][S3, unofficial].
+This method is implemented in Mitsuba 3 using the `prbvolpath` integrator, heterogeneous volume plugin, and `gridvolume` plugin [S2, S3, unofficial]. It is demonstrated in the Mitsuba 3 tutorial for volumetric inverse rendering [S2, S3, unofficial]. The approach builds on the principles of differentiable rendering and inverse rendering, specifically focusing on volumetric media [S2, S3, unofficial].
 
 ## Sources
 [S1] facebookresearch/volumetric_primitives, https://github.com/facebookresearch/volumetric_primitives, fetched 2026-10-26 (unofficial)

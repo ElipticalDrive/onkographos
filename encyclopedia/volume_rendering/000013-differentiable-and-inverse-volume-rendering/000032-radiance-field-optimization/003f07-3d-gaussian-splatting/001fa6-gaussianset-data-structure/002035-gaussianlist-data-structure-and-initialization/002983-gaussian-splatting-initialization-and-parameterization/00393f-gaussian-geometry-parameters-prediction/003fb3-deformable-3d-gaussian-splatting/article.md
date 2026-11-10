@@ -3,60 +3,42 @@
 Also called: Deformable 3D Gaussians, Deformable3DGS (Yang et al.), Yang et al
 
 ## Overview
-Deformable 3D Gaussian Splatting is a method for dynamic scene reconstruction that learns 3D Gaussians in a canonical (static) space and models spatial-temporal deformation using an implicit deformation field implemented as a Multi-Layer Perceptron (MLP) [S1, S2]. It sets itself apart from static 3D Gaussian Splatting by enabling the rendering of time-varying scenes, and from continuous implicit methods like dynamic NeRF by maintaining the discrete, rasterizable nature of Gaussians, which makes it more sensitive to pose inaccuracies during time interpolation [S2].
+Deformable 3D Gaussian Splatting is a method for dynamic scene reconstruction that learns 3D Gaussians in a canonical (static) space and models spatial-temporal deformation using an implicit deformation field implemented as a Multi-Layer Perceptron (MLP) [S1, S2]. It differs from static 3D Gaussian Splatting by introducing time-dependent offsets to Gaussian attributes, and from other dynamic variants like [Mesh-Embedded Gaussian Splatting](9553-mesh-embedded-gaussian-splatting.md) by relying on an implicit MLP rather than explicit mesh constraints or voxel grids [S1, S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Camera poses, image observations at various timestamps $t$, and initial 3D Gaussian parameters in a canonical space.
-*   **Outputs:** Rendered images for arbitrary timestamps and camera views.
+*   **Inputs:** Canonical 3D Gaussian parameters (position $\mathbf{p}_0$, rotation $\mathbf{q}_0$, scale $\mathbf{s}_0$, opacity $\alpha_0$) stored in a canonical space; a camera pose; a timestep $t$.
+*   **Outputs:** Deformed Gaussian parameters ($\mathbf{p}, \mathbf{q}, \mathbf{s}$) at time $t$, and rendered image.
 
 **Data Structures:**
-The method extends the Gaussian attributes defined in [Gaussian Geometry Parameters Prediction](8442-gaussian-geometry-parameters-prediction.md). Each Gaussian $i$ in the canonical space stores:
-*   Position $\mathbf{p}_0 \in \mathbb{R}^3$
-*   Rotation $\mathbf{q}_0 \in \mathbb{R}^4$ (unit quaternion)
-*   Scaling $\mathbf{s}_0 \in \mathbb{R}^3$
-*   Other attributes (opacity, spherical harmonics coefficients) which are typically treated as static or handled separately.
+*   **Canonical Gaussians:** Stored as a list of Gaussians. Each Gaussian has fields for position $\mathbf{p}_0 \in \mathbb{R}^3$, rotation quaternion $\mathbf{q}_0 \in \mathbb{R}^4$, scale vector $\mathbf{s}_0 \in \mathbb{R}^3$, and opacity $\alpha_0 \in \mathbb{R}$.
+*   **Deformation MLP:** A neural network that takes positional-encoded position and time as input and outputs offsets.
 
-The deformation field is an MLP $f_{\theta}(\cdot)$ with parameters $\theta$.
-
-**Algorithm Steps:**
-
-1.  **Canonical Initialization:** Initialize a set of 3D Gaussians in a canonical static configuration, typically using the static 3DGS initialization pipeline [Gaussian Splatting Initialization and Parameterization](8442-gaussian-geometry-parameters-prediction.md).
-
-2.  **Deformation Field Definition:** Define an MLP $f_{\theta}$ that takes positional encoding of the canonical position and a time encoding of the timestamp as input, and outputs offsets for position, rotation, and scaling.
-    *   Input: $[\text{PE}(\mathbf{p}_0), \text{PE}(t)]$
-    *   Output: $\Delta \mathbf{p}, \Delta \mathbf{q}, \Delta \mathbf{s}$
-
-3.  **Temporal Smoothing (Noise Injection):** To improve temporal smoothing without additional computational overhead, a linearly decaying Gaussian noise is added to the encoded time vector before it enters the MLP [S2].
-    *   Let $t_{enc}$ be the encoded time.
-    *   $t'_{enc} = t_{enc} + \mathcal{N}(0, \sigma(t))$, where $\sigma(t)$ decays linearly with time or is fixed based on implementation details not fully specified in the summary notes [G]. *Note: The source [S2] states "linearly decaying Gaussian noise... to the encoded time vector". The exact decay function is not provided in the snippets.*
-
-4.  **Deformation Prediction:** For a Gaussian $i$ at time $t$:
-    *   Compute offsets: $[\Delta \mathbf{p}_i, \Delta \mathbf{q}_i, \Delta \mathbf{s}_i] = f_{\theta}(\text{PE}(\mathbf{p}_{0,i}), \text{PE}(t))$
-    *   Apply offsets to canonical parameters to get world-space parameters at time $t$:
-        *   $\mathbf{p}_i(t) = \mathbf{p}_{0,i} + \Delta \mathbf{p}_i$
-        *   $\mathbf{q}_i(t) = \text{Normalize}(\mathbf{q}_{0,i} + \Delta \mathbf{q}_i)$ [G] (Standard quaternion normalization is required after addition to maintain unit length, though [S2] mentions GauFRe does this explicitly, Yang et al. implies similar handling for stability).
-        *   $\mathbf{s}_i(t) = \mathbf{s}_{0,i} + \Delta \mathbf{s}_i$
-
-5.  **Rendering:** Project the deformed Gaussians $\{\mathbf{p}_i(t), \mathbf{q}_i(t), \mathbf{s}_i(t)\}$ to 2D and rasterize using standard 3DGS splatting for the current camera view.
-
-6.  **Optimization:** Minimize the difference between rendered and ground truth images using photometric loss. The MLP parameters $\theta$ and canonical Gaussian parameters are optimized jointly or in stages (static first, then deformation) [S2].
+**Steps:**
+1.  **Canonical Initialization:** Initialize a set of 3D Gaussians in a canonical static space using standard 3DGS initialization methods [S2].
+2.  **Time Encoding:** For a given timestep $t$, compute a positional encoding $\gamma(t)$ [S2]. To improve temporal smoothing without additional computational overhead, add linearly decaying Gaussian noise to the encoded time vector [S2].
+3.  **Deformation Prediction:** For each Gaussian $i$ with canonical position $\mathbf{p}_{0,i}$, pass the concatenation of the positional encoding of $\mathbf{p}_{0,i}$ and the encoded time $t$ into the deformation MLP [S2].
+4.  **Offset Application:** The MLP outputs offsets for position ($\Delta \mathbf{p}$), rotation ($\Delta \mathbf{q}$), and scaling ($\Delta \mathbf{s}$) [S2].
+    *   Deformed position: $\mathbf{p}_i = \mathbf{p}_{0,i} + \Delta \mathbf{p}_i$
+    *   Deformed rotation: $\mathbf{q}_i = \text{Normalize}(\mathbf{q}_{0,i} + \Delta \mathbf{q}_i)$ [G]
+    *   Deformed scale: $\mathbf{s}_i = \mathbf{s}_{0,i} + \Delta \mathbf{s}_i$ [G]
+5.  **Rendering:** Render the deformed Gaussians using standard differentiable rasterization [S2].
 
 **Pitfalls:**
-*   **Pose Sensitivity:** Inaccurate camera poses affect rendering quality significantly more than in continuous NeRF models. This is amplified in discrete 3DGS, especially during time interpolation tasks [S2].
+*   Inaccurate camera poses significantly affect rendering quality, a problem amplified in discrete 3DGS compared to continuous NeRF, especially during time interpolation [S2].
 
 ## Subtopics
 
 ### [Shape-Shifting Splats](10708-shape-shifting-splats.md)
-A method that predicts every parameter of 3D Gaussians via shallow, fully-connected MLPs conditioned on a control parameter, allowing all attributes to be changed at render time.
+A dynamic reconstruction method that predicts all 3D Gaussian parameters via shallow, fully-connected MLPs conditioned on a control parameter, allowing all attributes to be changed at render time. It builds on Deformable 3D Gaussian Splatting by replacing explicit storage of scale, rotation, offset, and opacity with learned functions, enabling context translation (e.g., RGB to thermal) and stylization without retraining the scene geometry.
 
 ## Operating characteristics
 *   **Performance:** On the D-NeRF dataset, Yang et al. achieves PSNR 39.51, SSIM 0.990, and LPIPS 0.012 [S2].
-*   **Strengths:** Implicit deformation via MLP allows flexible modeling of complex non-rigid motions without explicit skeletal or mesh constraints.
-*   **Limitations:** High sensitivity to camera pose accuracy. The use of MLPs for deformation can be computationally heavier per Gaussian than grid-based or voxel-based deformation methods (e.g., GaGS, 4D-GS) if not optimized, though the noise injection technique helps smoothing without extra overhead [S2].
+*   **Strengths:** Implicit deformation field allows flexible modeling of complex dynamics without explicit topology [S1].
+*   **Limitations:** Sensitive to inaccurate camera poses, particularly in time interpolation tasks [S2].
 
 ## Background
-Deformable 3D Gaussian Splatting was proposed by Yang et al. [19] as an extension of 3D Gaussian Splatting to dynamic scenes. It follows the paradigm of using a canonical space with an implicit deformation field, similar to dynamic NeRF [66], but adapts it to the discrete Gaussian representation [S1, S2]. It is cited as the first method to propose deformable 3D Gaussians tailored for dynamic scenes [S1].
+Deformable 3D Gaussian Splatting was proposed by Yang et al. [19] as a tailored solution for dynamic scenes, building on the idea of learning Gaussians in a canonical space and modeling deformation with an implicit MLP, similar to dynamic NeRF [S1, S2].
 
 ## Sources
 [S1] A Survey on 3D Gaussian Splatting, https://doi.org/10.1145/3807511, fetched 2026-10-27

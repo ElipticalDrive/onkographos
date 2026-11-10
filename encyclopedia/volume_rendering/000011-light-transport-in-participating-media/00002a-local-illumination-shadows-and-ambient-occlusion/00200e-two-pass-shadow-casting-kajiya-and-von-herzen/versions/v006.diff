@@ -1,0 +1,149 @@
+--- v005.md
++++ v006.md
+@@ -35,5 +35,5 @@
+     In practice, the integral does not run to infinity but only to the edge of the data volume [S1, unofficial][S2]. Numerically, this is approximated by summing $\tau \cdot \Delta s$ along the ray from the light source entry point to $\mathbf{X}$ [G].
+ 
+-2.  **Pass 2: Gathering (Scattering to Viewpoint)**
++2.  **Pass 2: Gathering (Scattering to Viewpoint)** [S1, unofficial][S2]
+     Reflect or scatter the computed illumination $i(\mathbf{X}, \omega')$ to the viewpoint using the shading rule $g(\mathbf{X}, \omega) = r(\mathbf{X}, \omega, \omega') i(\mathbf{X}, \omega')$ [S1, unofficial][S2]. Gather the reflected intensity $g(\mathbf{X}, \omega)$ along viewing rays [S2].
+     
+@@ -50,5 +50,7 @@
+ 
+ ```python
+-def two_pass_shadow_casting(tau_grid, volume_bounds, light_dir, view_dir, viewpoint, background_intensity, phase_func, ray_length, step_size):
++import math
++
++def two_pass_shadow_casting(tau_grid, volume_bounds, light_dir, view_dir, viewpoint, L, I0, phase_func, ray_length, step_size):
+     """
+     Computes volumetric shadows using the Kajiya and Von Herzen two-pass method.
+@@ -60,5 +62,6 @@
+         view_dir: Unit vector omega pointing from volume to camera.
+         viewpoint: 3D position of the camera X.
+-        background_intensity: Scalar I0.
++        L: Light source intensity.
++        I0: Background intensity.
+         phase_func: Function r(x, omega, omega') returning scattering coefficient.
+         ray_length: Distance D from viewpoint to far plane.
+@@ -73,14 +76,10 @@
+             volume_bounds[2] <= y < volume_bounds[3] and
+             volume_bounds[4] <= z < volume_bounds[5]):
+-            return tau_grid[x, y, z]
++            return tau_grid[int(x)][int(y)][int(z)]
+         return 0.0
+ 
+     # Pass 1: Precompute Illumination Field
+     # Propagate flux from light source through the volume, one voxel layer at a time.
+-    # We iterate over voxels sorted by projection onto light_dir to simulate layer traversal.
+-    illumination_field = [[0.0 for _ in range(volume_bounds[1]-volume_bounds[0])] 
+-                          for _ in range(volume_bounds[3]-volume_bounds[2])]
+-    
+-    # Collect voxel centers and sort by light direction for layer-by-layer propagation
++    # We sort voxels by projection onto light_dir to process layers sequentially.
+     voxels = []
+     for x in range(volume_bounds[0], volume_bounds[1]):
+@@ -89,5 +88,10 @@
+                 voxels.append((x, y, z))
+     voxels.sort(key=lambda v: v[0]*light_dir[0] + v[1]*light_dir[1] + v[2]*light_dir[2])
+-    
++
++    width = volume_bounds[1] - volume_bounds[0]
++    height = volume_bounds[3] - volume_bounds[2]
++    depth = volume_bounds[5] - volume_bounds[4]
++    illumination_field = [[[0.0 for _ in range(width)] for _ in range(height)] for _ in range(depth)]
++
+     for X in voxels:
+         optical_depth = 0.0
+@@ -101,40 +105,36 @@
+             pos[1] += light_dir[1] * step_size
+             pos[2] += light_dir[2] * step_size
+-        illumination_field[X[0]-volume_bounds[0]][X[1]-volume_bounds[2]] = background_intensity * exp(-optical_depth)
++        ix = X[0] - volume_bounds[0]
++        iy = X[1] - volume_bounds[2]
++        iz = X[2] - volume_bounds[4]
++        illumination_field[ix][iy][iz] = L * math.exp(-optical_depth)
+ 
+     # Pass 2: Gather Scattered Light along view ray
+     scattering_integral = 0.0
+     transmittance_view = 1.0
+-    current_pos = list(viewpoint)
+-    
+-    # Iterate s from 0 to ray_length
+     num_steps = int(ray_length / step_size)
+-    for s in range(num_steps):
+-        scattering_point = [viewpoint[0] - view_dir[0] * s * step_size,
+-                            viewpoint[1] - view_dir[1] * s * step_size,
+-                            viewpoint[2] - view_dir[2] * s * step_size]
+-        
++
++    for s_idx in range(num_steps):
++        s = s_idx * step_size
++        scattering_point = [viewpoint[0] - view_dir[0] * s,
++                            viewpoint[1] - view_dir[1] * s,
++                            viewpoint[2] - view_dir[2] * s]
++
+         if (volume_bounds[0] <= scattering_point[0] < volume_bounds[1] and
+             volume_bounds[2] <= scattering_point[1] < volume_bounds[3] and
+             volume_bounds[4] <= scattering_point[2] < volume_bounds[5]):
+-            
+-            # Retrieve precomputed illumination
+-            i_scatter = illumination_field[int(scattering_point[0]-volume_bounds[0])][int(scattering_point[1]-volume_bounds[2])]
+-            
+-            # Phase function evaluation
++
++            ix = int(scattering_point[0] - volume_bounds[0])
++            iy = int(scattering_point[1] - volume_bounds[2])
++            iz = int(scattering_point[2] - volume_bounds[4])
++            i_scatter = illumination_field[ix][iy][iz]
++
+             r_val = phase_func(scattering_point, view_dir, light_dir)
+-            
+-            # Accumulate scattering integral: r * i * T_view * ds
+             scattering_integral += r_val * i_scatter * transmittance_view * step_size
+-            
+-            # Update transmittance from camera to current scattering point
++
+             tau_val = sample_tau(scattering_point)
+-            transmittance_view *= exp(-tau_val * step_size)
+-            
+-        current_pos[0] += view_dir[0] * step_size
+-        current_pos[1] += view_dir[1] * step_size
+-        current_pos[2] += view_dir[2] * step_size
+-        
+-    background_term = background_intensity * transmittance_view
++            transmittance_view *= math.exp(-tau_val * step_size)
++
++    background_term = I0 * transmittance_view
+     return background_term + scattering_integral
+ ```
+@@ -146,5 +146,5 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Multiple Scattering:** The method is a single-scattering model. It is only valid if the albedo or density is low, so that multiple scattering is unlikely [S1, unofficial][S2]. It is not suitable for dense media like atmospheric clouds where multiple scattering is significant [S1, unofficial][S2].
++*   **Multiple Scattering:** The method is a single-scattering model [S1, unofficial][S2]. It is only valid if the albedo or density is low, so that multiple scattering is unlikely [S1, unofficial][S2]. It is not suitable for dense media like atmospheric clouds where multiple scattering is significant [S1, unofficial][S2].
+ *   **Performance:** The method takes only twice as long as the gathering pass without shadows [S1, unofficial][S2].
+ *   **Amortization:** The illumination pass can be amortized over several animated frames if only the viewpoint moves [S2].
+@@ -157,19 +157,17 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method takes only twice as long as the gathering pass without shadows [S1, unofficial][S2]. This is significantly faster than recursive ray tracing for dense volumes, as it avoids sending shadow feelers for every sample point.
+-*   **Memory Complexity:** Requires storing the illumination field for the entire volume, which is $O(N)$ where $N$ is the number of voxels.
++*   **Time Complexity:** The method takes only twice as long as the gathering pass without shadows [S1, unofficial][S2]. Unlike recursive ray tracing which sends a shadow feeler to the light source at each point, this method integrates the shadowing effect along the ray [S2].
++*   **Memory Complexity:** Requires storing the illumination field for the entire volume, which is $O(N)$ where $N$ is the number of voxels [G].
+ *   **Strengths:**
+-    *   Provides realistic shadows in participating media.
++    *   Provides realistic shadows in participating media [S1, unofficial][S2].
+     *   Efficient for static lights and moving viewpoints, as the illumination pass can be amortized [S2].
+-    *   Simpler to implement than full path tracing for single-scattering scenarios.
+ *   **Limitations:**
+     *   Single-scattering only; inaccurate for high-density or high-albedo media [S1, unofficial][S2].
+-    *   Requires precomputing the illumination field, which can be memory-intensive for large volumes.
+-    *   Less flexible for dynamic lights compared to ray casting methods.
++    *   Requires precomputing the illumination field, which can be memory-intensive for large volumes [S1, unofficial][S2].
+ *   **When to Use:** Suitable for medical imaging (e.g., Heidelberg ray tracing model) and scenes with low-density participating media where single scattering is a good approximation [S1, unofficial][S2].
+ *   **When Not to Use:** Unsuitable for atmospheric clouds or dense fog where multiple scattering is dominant [S1, unofficial][S2].
+ 
+ ## Background
+-The two-pass numerical algorithm for shadows was suggested by Kajiya and Von Herzen [S1, unofficial][S2]. It was introduced as a more general approach to account for shadows in volume rendering, moving beyond simpler shading models that ignored volume transparency between the light and the point of interest. The method has been systematically applied to medical images in the "Heidelberg ray tracing model" by Meinzer et al. [S1, unofficial][S2]. While its utility in general volume rendering applications has been questioned due to the prevalence of multiple scattering in natural media like clouds, it remains a foundational technique for single-scattering shadow computation [S1, unofficial][S2].
++The two-pass numerical algorithm for shadows was suggested by Kajiya and Von Herzen [S1, unofficial][S2]. It was introduced as a more general approach to account for shadows in volume rendering, moving beyond simpler shading models that ignored volume transparency between the light and the point of interest [S1, unofficial][S2]. The method has been systematically applied to medical images in the "Heidelberg ray tracing model" by Meinzer et al. [S1, unofficial][S2]. While its utility in general volume rendering applications has been questioned due to the prevalence of multiple scattering in natural media like clouds, it remains a foundational technique for single-scattering shadow computation [S1, unofficial][S2].
+ 
+ ## Sources

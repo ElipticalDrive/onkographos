@@ -1,98 +1,85 @@
 # Fragment List-Based Rendering Pipeline
+
 Also called: 4-Stage Rendering Pipeline, Smoker Rendering Pipeline
 
 ## Overview
-The Fragment List-Based Rendering Pipeline is a multi-pass architecture designed for accurate real-time smoke volume rendering, chosen specifically to circumvent the self-intersection and global intersection artifacts inherent in raytracing approaches [S1, unofficial]. It decouples geometry assembly from pixel evaluation by using fragment lists to store per-pixel data, ensuring that the final visualization is computed from a complete set of contributions rather than a single depth-sorted hit [S1, unofficial].
+The Fragment List-Based Rendering Pipeline is a multi-pass architecture designed for real-time smoke volume rendering that processes volumetric data through four distinct stages (Clear, Construction, Insertion, Evaluation) using fragment lists to store and evaluate per-pixel data [S1, unofficial]. It is chosen to maintain high accuracy and circumvent the self-intersection and global intersection problems inherent in raytracing approaches [S1, unofficial]. Unlike standard splatting which blends directly into a color buffer, this method decouples the accumulation of fragment data from the final visualization, allowing for complex per-pixel storage and evaluation strategies [S1, unofficial].
 
 ## How it works
-The pipeline processes smoke volumes through four distinct logical stages executed by three shader programs: **Clear**, **Render** (combining Construction and Insertion), and **Display** (Evaluation) [S1, unofficial].
+The pipeline consists of four sequential stages executed by three distinct shader programs: Clear, Render (combining Construction and Insertion), and Display (Evaluation) [S1, unofficial].
 
 ### Inputs and Outputs
-*   **Inputs**: Smoke volume data (density, flow tangents), geometry primitives (vertices representing the volume), and OpenGL buffer objects for intermediate storage.
-*   **Outputs**: A final rendered image where per-pixel information (e.g., accumulated density, color) is interpreted and visualized.
+*   **Inputs:** Smoke volume data (density, flow tangents), geometry primitives (triangles/cells representing the volume), and OpenGL buffer objects for intermediate storage [S1, unofficial].
+*   **Outputs:** A final rendered image on the screen buffer [S1, unofficial].
 
 ### Data Structures
-The pipeline relies on OpenGL buffer objects to store intermediate state. While specific layouts depend on the visualization method (e.g., simple pixel counter vs. complex storage structure), the critical structure is the **fragment list** or shared indexing mechanism used in the Insertion stage [S1, unofficial]. This structure must be compatible with the Evaluation step, allowing the Display shader to interpret the prepared per-pixel information [S1, unofficial].
+The pipeline relies on OpenGL buffer objects to store intermediate state between stages [S1, unofficial]. Specific layouts for the fragment lists are not detailed in the source, but the Insertion stage writes to a "complicated storage data structure" compatible with the Evaluation step [S1, unofficial]. The source notes that concurrent modification of shared memory is a critical concern, implying the use of atomic operations or synchronized access mechanisms for these buffers [S1, unofficial].
 
 ### Steps
-1.  **Clear**: Reset OpenGL buffer objects required for the subsequent frame. This stage is initiated by rendering a single screen-filling quad [S1, unofficial].
-2.  **Construction**:
-    *   **Vertex Shader**: Performs perspective transformation and assigns additional vertex data, such as density or flow tangents [S1, unofficial].
-    *   **Geometry Shader**: Assembles primitives, processes triangle-related data (orientation, topology, volume information), and forwards the results to the Insertion stage [S1, unofficial].
-3.  **Insertion**:
-    *   Primitives constructed in the previous stage are rasterized and forwarded to the fragment shader [S1, unofficial].
-    *   The fragment shader processes incoming fragments according to the specific visualization method. This ranges from a simple pixel counter to inserting fragments into a complicated storage data structure (the fragment list) [S1, unofficial].
-    *   This stage is the primary bottleneck due to concurrent access to shared memory [S1, unofficial].
-4.  **Evaluation**:
+1.  **Clear:** Reset OpenGL buffer objects required for the subsequent frame. This is initiated by rendering a single screen-filling quad, launching fragment shader threads to zero out or prepare the storage buffers [S1, unofficial].
+2.  **Construction:**
+    *   **Vertex Shader:** Performs perspective transformation of vertices. Assigns additional vertex data such as density or flow tangents [S1, unofficial].
+    *   **Geometry Shader:** Assembles primitives. Processes triangle-related data including orientation, topology, and volume information. Forwards the constructed primitives to the Insertion stage [S1, unofficial].
+3.  **Insertion:**
+    *   **Rasterization:** The primitives constructed in the previous stage are rasterized [S1, unofficial].
+    *   **Fragment Shader:** Processes incoming fragments. The processing logic varies by visualization method, ranging from a simple pixel counter to inserting fragments into a complex storage data structure (e.g., a linked list or atomic counter array) [S1, unofficial]. The type of fragment processing must be strictly compatible with the Evaluation step [S1, unofficial]. This stage is identified as the primary bottleneck due to simultaneous access to shared indexing mechanisms [S1, unofficial].
+4.  **Evaluation:**
     *   Render a single screen-filling quad to initiate fragment evaluation [S1, unofficial].
-    *   The Display shader interprets and visualizes the per-pixel information that was prepared and stored by the Insertion stage [S1, unofficial].
+    *   Interpret and visualize the per-pixel information that was prepared and stored by the Insertion stage [S1, unofficial].
 
 ### Pseudocode
+The following pseudocode outlines the execution flow of the three shader programs. Note that the specific data structures for the fragment list are abstracted as `FragmentList`, and the source does not provide the exact memory layout or insertion algorithm, only that it must be compatible with evaluation [S1, unofficial].
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Stage 1: Clear
-# Initiated by rendering a screen-filling quad
-def Clear():
-    # Reset OpenGL buffer objects for the subsequent frame
-    # [G] Implementation depends on specific buffer types (e.g., glBindBuffer, glClearBufferData)
-    pass
+# Program 1: Clear
+# Called once per frame before rendering geometry
+def ClearStage():
+    # Render a single screen-filling quad
+    # Fragment shader resets all OpenGL buffer objects
+    # used by the pipeline for the next frame
+    render_screen_filling_quad(shader=ClearShader)
 
-# Stage 2 & 3: Render (Construction + Insertion)
-# Initiated by rendering the smoke volume geometry
-def Render():
-    # Vertex Shader
-    def VertexShader(vertex):
-        # Perform perspective transformation
-        transformed_pos = perspective_transform(vertex.position)
-        # Assign additional vertex data
-        density = vertex.density
-        flow_tangent = vertex.flow_tangent
-        return transformed_pos, density, flow_tangent
+# Program 2: Render (Construction + Insertion)
+# Called to process the smoke volume geometry
+def RenderStage(geometry):
+    # Vertex Shader: Transform and assign data
+    # Output: Transformed vertices with density/tangents
+    
+    # Geometry Shader: Assemble primitives
+    # Output: Rasterizable primitives with orientation/topology
+    
+    # Rasterization happens implicitly here
+    
+    # Fragment Shader: Insertion
+    # For each fragment generated by the primitives:
+    for fragment in rasterized_primitives:
+        # Process fragment based on visualization method
+        # Options: simple pixel counter OR insertion into storage structure
+        insert_fragment_into_list(fragment, FragmentList)
 
-    # Geometry Shader
-    def GeometryShader(primitive):
-        # Process triangle-related data
-        orientation = compute_orientation(primitive)
-        topology = compute_topology(primitive)
-        volume_info = compute_volume_info(primitive)
-        # Forward results to Insertion
-        return primitive, orientation, topology, volume_info
-
-    # Fragment Shader (Insertion)
-    def FragmentShader(fragment):
-        # Process incoming fragments based on visualization method
-        # [G] Specific logic varies: simple counter or complex insertion
-        # Example: Insert into a shared fragment list
-        insert_into_fragment_list(fragment.position, fragment.density, fragment.flow_tangent)
-
-# Stage 4: Display (Evaluation)
-# Initiated by rendering a screen-filling quad
-def Display():
-    # Fragment Shader (Evaluation)
-    def FragmentShader(screen_quad):
-        # Interpret and visualize per-pixel information
-        # [G] Read from fragment list or buffer prepared by Insertion
-        accumulated_data = read_from_fragment_list(screen_quad.position)
-        color = visualize(accumulated_data)
-        return color
+# Program 3: Display (Evaluation)
+# Called after RenderStage to produce the final image
+def DisplayStage():
+    # Render a single screen-filling quad
+    # Fragment shader reads from FragmentList and visualizes
+    render_screen_filling_quad(shader=DisplayShader)
 ```
 
-### Parameters
-*   **Pipeline Stages**: Clear, Construction, Insertion, Evaluation [S1, unofficial].
-*   **Shader Programs**: Clear, Render (Construction + Insertion), Display (Evaluation) [S1, unofficial].
-
-### Edge Cases and Pitfalls
-*   **Concurrent Modification**: The Insertion step is the greatest bottleneck due to simultaneous access to shared indexing mechanisms. Unmanaged access to shared memory can leave it in an inconsistent state because shader threads cannot check if a shared address is currently being modified [S1, unofficial].
-*   **Compatibility**: The type of fragment processing in the Insertion stage must be strictly compatible with the Evaluation step to ensure correct interpretation of per-pixel information [S1, unofficial].
+### Parameters and Edge Cases
+*   **Shader Programs:** Clear, Render, Display [S1, unofficial].
+*   **Pitfalls:** Concurrent modification of shared memory during the Insertion step causes bottlenecks and inconsistent states if unmanaged. Shader threads cannot check whether a shared address is currently being modified, requiring careful handling of critical sections [S1, unofficial].
+*   **Compatibility:** The fragment processing method in the Insertion stage must be compatible with the Evaluation step [S1, unofficial].
 
 ## Operating characteristics
-*   **Strengths**: Maintains high accuracy by avoiding raytracing artifacts (self-intersection, global intersection) [S1, unofficial]. Allows runtime switching between rendering methods without re-initializing the smoke volume [S1, unofficial].
-*   **Limitations**: The Insertion stage is a significant performance bottleneck due to concurrent modification of shared memory [S1, unofficial].
-*   **Performance**: Measured in the context of real-time smoke volume rendering (Smoker application) [S1, unofficial]. Specific hardware metrics are not provided in the sources.
+*   **Performance:** The Insertion stage is the greatest bottleneck of the entire rendering pipeline due to simultaneous access to shared indexing mechanisms [S1, unofficial].
+*   **Accuracy:** Maintains the best possible accuracy by avoiding raytracing artifacts [S1, unofficial].
+*   **Flexibility:** Allows switching between rendering methods during runtime without re-initializing the smoke volume [S1, unofficial].
+*   **Hardware:** Relies heavily on shader application, memory transactions, and GPU-related functionality [S1, unofficial].
 
 ## Background
-The Fragment List-Based Rendering Pipeline was implemented in the **Smoker** application for real-time smoke volume rendering [S1, unofficial]. It was developed as part of a master's thesis by **Sowinski** in **2012** [S1, unofficial]. The approach was chosen to provide a flexible framework that allows comparing different rendering strategies using identical configurations [S1, unofficial].
+The method was implemented in the "Smoker" application for real-time smoke volume rendering [S1, unofficial]. It was developed as part of a master's thesis by Sowinski in 2012 [S1, unofficial]. The pipeline was designed to address the limitations of raytracing for smoke volumes, specifically self-intersection and global intersection problems [S1, unofficial].
 
 ## Sources
 [S1] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)

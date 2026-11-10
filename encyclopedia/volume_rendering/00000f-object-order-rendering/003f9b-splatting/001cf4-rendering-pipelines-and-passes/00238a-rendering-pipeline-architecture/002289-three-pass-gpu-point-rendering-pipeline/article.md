@@ -1,144 +1,130 @@
 # Three-Pass GPU Point Rendering Pipeline
+
 Also called: Hardware Accelerated Point Splatting Pipeline
 
 ## Overview
-The Three-Pass GPU Point Rendering Pipeline is a hardware-accelerated method for rendering point clouds or splatted primitives by separating depth occlusion, color accumulation, and normalization into distinct rendering stages [S1, unofficial]. It solves the problem of correctly blending overlapping splats with varying filter weights on standard graphics hardware without requiring complex software sorting or custom fragment shaders for every pixel [S1, unofficial]. Unlike the [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md), which attempts to compute weights and colors in one go, this method uses an intermediate depth buffer to resolve occlusion before accumulating color, ensuring that only the front-most contributions are weighted correctly [S1, unofficial]. It differs from [Splat Attributes Pass](1066-splat-attributes-pass.md) by explicitly handling the normalization of accumulated weights in a final dedicated pass rather than embedding it in the attribute computation [S1, unofficial].
+The Three-Pass GPU Point Rendering Pipeline is a hardware-accelerated method for rendering point clouds or volumetric splats by separating depth testing, color accumulation, and normalization into distinct rendering passes [S1, unofficial]. It solves the problem of correctly compositing transparent splats with perspective-correct filtering on modern GPUs without requiring explicit sorting or complex shader logic for weight normalization [S1, unofficial]. It differs from the [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md) by decoupling the accumulation of filter weights from the color blending, allowing for exact normalization of the final image [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   A set of 3D points with associated attributes (position, color, filter variance/weight).
-*   Camera projection matrices (intrinsic and extrinsic).
-*   Viewport dimensions (width $W$, height $H$).
+- A set of $N$ splats, each defined by position $\mathbf{p}_k$, color $\mathbf{c}_k$, and a reconstruction kernel (typically Gaussian) [S1, unofficial].
+- Camera parameters (projection matrix, view matrix) [S1, unofficial].
+- Framebuffer attachments: Depth buffer, Color buffer (for weighted sum), Weight buffer (for filter weight sum) [S1, unofficial].
 
 **Outputs:**
-*   A final 2D image where each pixel contains the correctly blended color of the visible splats.
+- Final rendered image where each pixel color is normalized by its accumulated filter weight [S1, unofficial].
 
 **Data Structures:**
-*   **Framebuffers:** Three framebuffers are typically used or reused across passes:
-    1.  **Depth Buffer:** Stores depth values. Initialized to infinity or cleared per pass.
-    2.  **Color Buffer:** Stores accumulated color values (RGB).
-    3.  **Weight Buffer:** Stores accumulated filter weights (alpha or scalar sum). *Note: The source [S1, unofficial] implies weight accumulation happens implicitly or via the blending state, but explicitly mentions dividing by accumulated filter weights in Pass 3. Standard implementations often use a separate buffer or the alpha channel for weights. Based on [S1, unofficial], the color blending computes the weighted sum, implying the weight is part of the blend equation or stored separately. We assume a standard setup where Color and Weight are accumulated.*
-    4.  **Stencil/Depth Test Buffer:** Used for occlusion culling.
+- **Depth Buffer:** Stores depth values $z$ for occlusion testing. Initialized to $+\infty$ [S2, unofficial].
+- **Color Buffer:** Accumulates the weighted color sum $\sum \mathbf{c}_k w_k$ [S1, unofficial].
+- **Weight Buffer:** Accumulates the scalar filter weights $\sum w_k$ [S1, unofficial].
+
+**Steps:**
+
+1.  **Pass 1: Depth Offset Rendering**
+    Render the scene geometry (or points) to the depth buffer. The depth values are slightly offset along the viewing rays [S1, unofficial]. This pass establishes the occlusion hierarchy for subsequent passes. The offset ensures that splats are tested against the correct depth boundaries, preventing self-occlusion artifacts or incorrect blending order [S1, unofficial].
+
+2.  **Pass 2: Weighted Color Accumulation**
+    Render the splats again. In this pass:
+    - Depth testing is enabled (using the depth buffer from Pass 1) to ensure only visible splats contribute [S1, unofficial].
+    - Color updates to the framebuffer are disabled (or masked) for the depth buffer, but color blending is enabled for the color and weight buffers [S1, unofficial].
+    - The fragment shader computes the contribution of each splat to the current pixel. The contribution is the product of the splat's color and its filter weight $w_k$ [S1, unofficial].
+    - The color buffer accumulates $\sum \mathbf{c}_k w_k$ using additive blending [S1, unofficial].
+    - The weight buffer accumulates $\sum w_k$ using additive blending [S1, unofficial].
+    - OpenGL points are used as the rendering primitive instead of quads or triangles [S1, unofficial].
+
+3.  **Pass 3: Normalization**
+    Render a full-screen quad (or the same geometry) to normalize the accumulated color values. For each pixel, the final color $\mathbf{C}_{final}$ is computed by dividing the accumulated color by the accumulated weight:
+    $$ \mathbf{C}_{final} = \frac{\sum \mathbf{c}_k w_k}{\sum w_k} $$
+    If the accumulated weight is zero (no splats covered the pixel), the pixel is set to transparent or background color [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def three_pass_point_rendering(points, camera, viewport):
+# Pass 1: Render Depth with Offset
+def render_depth_pass(splats, camera, depth_buffer):
     """
-    Renders points using the three-pass pipeline.
-    
-    Args:
-        points: List of point objects with pos (x,y,z), color (r,g,b), and weight (w).
-        camera: Camera object with project() method returning screen coords and depth.
-        viewport: Tuple (width, height).
+    Renders splats to depth buffer with a slight offset along viewing rays.
     """
-    W, H = viewport
-    
-    # Initialize Framebuffers
-    # depth_buffer: stores depth values, initialized to infinity
-    depth_buffer = [[float('inf')] * W for _ in range(H)]
-    
-    # color_buffer: stores accumulated color, initialized to (0,0,0)
-    color_buffer = [[(0.0, 0.0, 0.0)] * W for _ in range(H)]
-    
-    # weight_buffer: stores accumulated filter weights, initialized to 0
-    weight_buffer = [[0.0] * W for _ in range(H)]
-    
-    # Pass 1: Render Depth Image
-    # Render a depth image of the scene slightly offset along the viewing rays.
-    # This establishes the occlusion boundary.
-    for point in points:
-        # Project point to screen space
-        sx, sy, depth = camera.project(point.pos)
+    for splat in splats:
+        # Project splat center to screen space
+        screen_pos = camera.project(splat.position)
         
-        # Check if within viewport
-        if 0 <= sx < W and 0 <= sy < H:
-            # Offset depth slightly to avoid z-fighting in subsequent passes
-            # The source mentions "slightly offset along the viewing rays"
-            # This is often done by rendering the point's depth with a small bias
-            # or by rendering the splat's bounding depth.
-            # For a point, we use the point's depth.
-            current_depth = depth_buffer[sy][sx]
-            
-            # Update depth buffer if this point is closer
-            # Note: In hardware, this is done via Depth Test with GL_LEQUAL
-            if depth < current_depth:
-                depth_buffer[sy][sx] = depth
-
-    # Pass 2: Accumulate Color
-    # Draw splats using only depth tests (no updates to depth buffer), 
-    # with color blending enabled. Accumulate color values.
-    # The blending function typically adds the splat's color weighted by its alpha/weight.
-    # However, to compute the weighted sum correctly for normalization, 
-    # we must also accumulate the weights.
-    
-    # Reset depth buffer for the next stage? 
-    # The source says "using only depth tests". This implies we use the depth 
-    # established in Pass 1 to cull fragments.
-    
-    for point in points:
-        sx, sy, depth = camera.project(point.pos)
+        # Calculate offset depth
+        # The offset is small and along the view direction to resolve ordering
+        offset_depth = screen_pos.z + epsilon
         
-        if 0 <= sx < W and 0 <= sy < H:
-            # Depth test: only process if point is closer than stored depth
-            if depth <= depth_buffer[sy][sx]:
-                # Accumulate color and weight
-                # Assuming point has color (r,g,b) and weight w
-                r, g, b = point.color
-                w = point.weight
-                
-                # Accumulate weighted color
-                cr, cg, cb = color_buffer[sy][sx]
-                color_buffer[sy][sx] = (cr + r * w, cg + g * w, cb + b * w)
-                
-                # Accumulate weight
-                weight_buffer[sy][sx] += w
+        # Write to depth buffer
+        depth_buffer.write(screen_pos.x, screen_pos.y, offset_depth)
 
-    # Pass 3: Normalize Color
-    # Normalize color values by dividing through the accumulated filter weights.
-    final_image = [[(0.0, 0.0, 0.0)] * W for _ in range(H)]
-    
-    for y in range(H):
-        for x in range(W):
-            cr, cg, cb = color_buffer[y][x]
-            w = weight_buffer[y][x]
-            
-            if w > 0:
-                final_image[y][x] = (cr / w, cg / w, cb / w)
-            else:
-                final_image[y][x] = (0.0, 0.0, 0.0)
-                
-    return final_image
+# Pass 2: Accumulate Weighted Color and Weights
+def render_accumulation_pass(splats, camera, color_buffer, weight_buffer, depth_buffer):
+    """
+    Renders splats to color and weight buffers.
+    Only updates color/weight buffers, uses depth buffer for occlusion.
+    """
+    for splat in splats:
+        # Project splat center
+        screen_pos = camera.project(splat.position)
+        
+        # Check depth test against depth_buffer
+        if screen_pos.z < depth_buffer.read(screen_pos.x, screen_pos.y):
+            continue # Occluded
+        
+        # Compute filter weight w_k for this splat at pixel (x,y)
+        # This depends on the kernel function (e.g., Gaussian) and distance
+        w_k = compute_kernel_weight(splat, screen_pos.x, screen_pos.y)
+        
+        # Additive blending for color buffer
+        color_buffer.add(screen_pos.x, screen_pos.y, splat.color * w_k)
+        
+        # Additive blending for weight buffer
+        weight_buffer.add(screen_pos.x, screen_pos.y, w_k)
+
+# Pass 3: Normalize
+def render_normalization_pass(color_buffer, weight_buffer, final_image):
+    """
+    Divides accumulated color by accumulated weight.
+    """
+    for x, y in final_image.dimensions():
+        accumulated_color = color_buffer.read(x, y)
+        accumulated_weight = weight_buffer.read(x, y)
+        
+        if accumulated_weight > epsilon:
+            final_image.set(x, y, accumulated_color / accumulated_weight)
+        else:
+            final_image.set(x, y, background_color)
 ```
 
 **Parameters:**
-*   **Rendering Primitive:** OpenGL points are used instead of quads or triangles [S1, unofficial].
-*   **Depth Offset:** A small offset is applied to the depth in Pass 1 to ensure correct occlusion in Pass 2 [S1, unofficial]. The exact value is implementation-dependent but must be sufficient to prevent z-fighting [G].
-*   **Blending Function:** In Pass 2, the blending function must accumulate the weighted color. Typically, `glBlendFunc(GL_ONE, GL_ONE)` is used if the color is pre-multiplied by weight, or a custom blend equation is used [G]. The source [S1, unofficial] states "color blending enabled" and "computing the weighted sum", implying the fragment shader outputs `color * weight` and the blend function adds it.
+- `epsilon`: Small constant for depth offset and weight normalization to avoid division by zero. Typical value: $10^{-6}$ [S1, unofficial].
+- `Rendering Primitive`: OpenGL points [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Numerical Ill-conditioning:** Computing the variance matrix for splat shape may require inversion of the projective mapping, which can be ill-conditioned if the splat degenerates into a line segment [S1, unofficial].
-*   **Zero Weight:** If a pixel has no accumulated weight (background), division by zero must be handled in Pass 3 [G].
-*   **Depth Precision:** Using a single depth buffer for both occlusion culling and depth testing in Pass 2 requires careful handling of depth values to avoid artifacts [G].
+- **Numerical Ill-conditioning:** Computing the variance matrix for perspective-accurate splatting may require inverting the projective mapping, which can be ill-conditioned if the splat degenerates into a line segment [S1, unofficial].
+- **Zero Weight:** Pixels with no contributing splats must be handled to avoid NaN results during normalization [S1, unofficial].
 
 ## Subtopics
 
 ### Standard Point Splatting Assembly
-This variant refers to the core assembly step where point colors are written to a canvas based on depth sorting and a fixed or implicit radius [S2, unofficial]. It differs from the general pipeline by explicitly sorting points by depth and iterating in ascending order, writing color only if the point's depth is less than the current depth at that pixel [S2, unofficial]. It is chosen when software-based depth sorting is preferred or when the hardware pipeline needs to be emulated in a compute shader [S2, unofficial]. The process involves initializing canvases (depth with infinity, color/label with zeros, index with -1), sorting points, iterating and writing, and finally masking unwritten pixels [S2, unofficial].
+The core assembly step for standard point splatting, writing point colors to a canvas based on depth sorting and a fixed or implicit radius [S2, unofficial].
+- **Step 1:** Initialize canvases: `depth_canvas` filled with `float('inf')`, `color_canvas` and `label_canvas` with zeros, `index_canvas` with -1 [S2, unofficial].
+- **Step 2:** Sort points by depth and iterate in ascending order. For each point, write its color to the pixel if the point's depth is less than the current depth at that pixel [S2, unofficial].
+- **Step 3:** After processing all points, create a written mask where `depth_canvas < float('inf')` [S2, unofficial].
+- **Step 4:** Set color, label, and index to 0 (or -1 for index) for pixels not written to [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ for projection and rasterization, where $N$ is the number of points. The normalization pass is $O(W \times H)$, where $W, H$ are viewport dimensions.
-*   **Memory Complexity:** $O(W \times H)$ for the framebuffers (depth, color, weight).
-*   **Performance:** Hardware-accelerated, leveraging GPU rasterization units. The separation into three passes allows for efficient use of depth testing hardware [S1, unofficial].
-*   **Strengths:** Correct handling of occlusion and weighted blending; simple to implement on standard OpenGL/DirectX pipelines [S1, unofficial].
-*   **Limitations:** Requires multiple passes over the framebuffer; potential for z-fighting if depth offset is not handled correctly; ill-conditioned variance matrix inversion for edge cases [S1, unofficial].
-*   **When to Use:** When rendering point clouds with varying densities and requiring accurate occlusion and blending on standard GPU hardware [S1, unofficial].
-*   **When Not to Use:** When real-time performance is critical and the number of points is very large, as the multiple passes and framebuffer reads/writes can be costly [G].
+- **Time Complexity:** $O(N \cdot R^2)$ per pass, where $N$ is the number of splats and $R$ is the radius of the splat footprint in pixels [S1, unofficial]. The three-pass structure adds a constant factor of 3 to the rendering time compared to a single-pass method, but allows for simpler shader logic and exact normalization [S1, unofficial].
+- **Memory Complexity:** Requires additional framebuffer attachments for the weight buffer and potentially a separate color buffer for accumulation, increasing memory usage compared to single-pass methods [S1, unofficial].
+- **Strengths:** Perspective-accurate splatting with correct normalization; leverages hardware depth testing for occlusion; simple shader implementation [S1, unofficial].
+- **Limitations:** Requires multiple render passes, which can be slower than optimized single-pass methods on some hardware; sensitive to numerical precision in depth offset and weight accumulation [S1, unofficial].
+- **When to use:** When perspective accuracy and correct alpha blending are critical, and hardware acceleration is available [S1, unofficial].
+- **When not to use:** When real-time performance on low-end hardware is required and perspective distortion is acceptable [S1, unofficial].
 
 ## Background
-The method originates from research on perspective-accurate splatting for hardware acceleration [S1, unofficial]. It builds on previous methods for hardware-accelerated point splatting described in [1, 6, 22] (cited in [S1, unofficial]). The key innovation is the use of a depth offset in the first pass and the separation of color accumulation and normalization to handle perspective distortion and varying filter weights accurately [S1, unofficial].
+The method was introduced in "Perspective Accurate Splatting" [S1, unofficial]. It builds on previous methods for hardware-accelerated point splatting [S1, unofficial]. The technique differs from earlier approaches in the computation of the resampling filter variance matrix, using a novel approximation that requires inverting the projective mapping [S1, unofficial].
 
 ## Sources
 [S1] Perspective Accurate Splatting, http://infoscience.epfl.ch/record/149345, fetched 2026-10-26 (unofficial)

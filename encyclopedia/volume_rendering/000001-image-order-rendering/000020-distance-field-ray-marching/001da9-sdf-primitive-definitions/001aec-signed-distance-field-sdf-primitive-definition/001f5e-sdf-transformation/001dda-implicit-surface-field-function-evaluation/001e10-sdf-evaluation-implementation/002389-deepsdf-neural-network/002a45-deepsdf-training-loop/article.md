@@ -3,11 +3,11 @@
 Also called: DeepSDF Optimization Loop, DeepSDF Training Procedure
 
 ## Overview
-The DeepSDF Training Loop is the optimization procedure for the DeepSDF model, which jointly learns a continuous signed distance field (SDF) representation for 3D shapes and a per-shape latent code [S1, unofficial]. It solves the problem of reconstructing arbitrary 3D geometry from sparse or unstructured point cloud data by mapping (latent code, 3D coordinate) pairs to signed distance values using a multi-layer perceptron (MLP) [S1, unofficial]. It differs from voxel-based methods like Vox2SDF by optimizing a continuous implicit function rather than a discrete grid, allowing for higher resolution reconstruction without memory constraints proportional to grid size [S1, unofficial].
+The DeepSDF Training Loop is the optimization procedure for the DeepSDF model, which jointly learns a continuous signed distance field (SDF) representation for 3D shapes and a per-shape latent code [S1, unofficial]. It solves the problem of reconstructing arbitrary 3D geometry from sparse or unstructured point cloud data by mapping (latent code, 3D coordinate) pairs to signed distance values using a multi-layer perceptron [S1, unofficial]. It differs from Vox2SDF by optimizing a continuous implicit function and per-shape latent codes rather than relying solely on a discrete grid decoder [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A dataset of 3D shapes, where each shape is represented by a set of 3D points and their corresponding ground-truth signed distance values. The dataset is batched into tuples `(points, sdfs, index)`, where `points` is a tensor of shape $(N, 3)$, `sdfs` is a tensor of shape $(N, 1)$, and `index` identifies the shape within the dataset [S1, unofficial].
+*   **Inputs:** A dataset of 3D shapes, where each shape is represented by a set of 3D points and their corresponding ground-truth signed distance values [S1, unofficial]. The dataset is batched into tuples `(points, sdfs, index)`, where `points` is a tensor of shape $(N, 3)$, `sdfs` is a tensor of shape $(N, 1)$, and `index` identifies the shape within the dataset [S1, unofficial].
 *   **Outputs:** Updated MLP weights, updated embedding table weights, and a history of training losses [S1, unofficial].
 
 **Data Structures:**
@@ -50,66 +50,49 @@ The DeepSDF Training Loop is the optimization procedure for the DeepSDF model, w
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import os
+import numpy as np
+import torch
+
 def train_loop(model, embeddings, optimizer, scheduler, criterion, dataloader, start_epoch, epochs, result_dir):
     losses = []
     for e in range(start_epoch, epochs + 1):
-        epoch_loss = 0
+        epoch_loss = 0.0
         for points, sdfs, index in dataloader:
-            points = points.to(model.device)
-            sdfs = sdfs.to(model.device)
-            
+            points = points.to("cuda" if torch.cuda.is_available() else "cpu")
+            sdfs = sdfs.to(points.device)
             real_batch_size = index.shape[0]
-            
-            # Retrieve latent codes for the shapes in this batch
-            latent_codes = embeddings(index.to(model.device))
-            
-            # Forward pass
+            latent_codes = embeddings(index.to(points.device))
             sdf_pred = model(latent_codes, points)
-            
-            # Flatten predictions and targets for loss computation
             sdf_pred = sdf_pred.view(real_batch_size, -1)
             sdfs = sdfs.view(real_batch_size, -1)
-            
-            # Compute L1 loss
             loss = criterion(sdf_pred, sdfs)
-            
-            # Backward pass
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            
             epoch_loss += loss.item()
-        
-        # Update learning rate
         scheduler.step()
-        
-        # Save checkpoint every 100 epochs
         if e % 100 == 0:
-            save_model(model, embeddings, e, result_dir)
+            model_path = os.path.join(result_dir, f"voxel_sdf_epoch_{e}.param")
+            embedding_path = os.path.join(result_dir, f"embeddings_epoch_{e}.param")
+            torch.save(model.state_dict(), model_path)
+            torch.save(embeddings.state_dict(), embedding_path)
             losses.append(epoch_loss)
             np.save(os.path.join(result_dir, "losses.npy"), np.array(losses))
-        
         yield e, losses
-
-def save_model(model, embeddings, epoch, result_dir):
-    model_path = os.path.join(result_dir, f"voxel_sdf_epoch_{epoch}.param")
-    embedding_path = os.path.join(result_dir, f"embeddings_epoch_{epoch}.param")
-    torch.save(model.state_dict(), model_path)
-    torch.save(embeddings.state_dict(), embedding_path)
 
 def latest_epoch(result_dir):
     losses_path = os.path.join(result_dir, "losses.npy")
     if os.path.exists(losses_path):
         losses = np.load(losses_path).tolist()
-        latest_epoch = len(losses) // 100 * 100
-        # Verify files exist, decrement if necessary
-        model_path = os.path.join(result_dir, f"voxel_sdf_epoch_{latest_epoch}.param")
-        embedding_path = os.path.join(result_dir, f"embeddings_epoch_{latest_epoch}.param")
-        while not (os.path.exists(model_path) and os.path.exists(embedding_path)) and latest_epoch > 0:
-            latest_epoch -= 100
-            model_path = os.path.join(result_dir, f"voxel_sdf_epoch_{latest_epoch}.param")
-            embedding_path = os.path.join(result_dir, f"embeddings_epoch_{latest_epoch}.param")
-        return latest_epoch
+        current = (len(losses) // 100) * 100
+        model_path = os.path.join(result_dir, f"voxel_sdf_epoch_{current}.param")
+        embedding_path = os.path.join(result_dir, f"embeddings_epoch_{current}.param")
+        while not (os.path.exists(model_path) and os.path.exists(embedding_path)) and current > 0:
+            current -= 100
+            model_path = os.path.join(result_dir, f"voxel_sdf_epoch_{current}.param")
+            embedding_path = os.path.join(result_dir, f"embeddings_epoch_{current}.param")
+        return current
     return 0
 ```
 
@@ -119,15 +102,13 @@ def latest_epoch(result_dir):
 Trains the VoxelSDF decoder and grid embeddings using L1 loss and an Adam optimizer with separate learning rates for the model and embeddings (1e-4 for model, 1e-2 for embeddings) [S1, unofficial]. It uses a step scheduler with `step_size=100` epochs [S1, unofficial]. The training loop iterates over the ShapeNetSDF dataset, performs a forward pass through the grid embeddings and model, computes L1 loss, and updates parameters [S1, unofficial]. It saves the model every 100 epochs [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of epochs and the number of batches per epoch [S1, unofficial].
-*   **Memory Complexity:** Proportional to the batch size and the number of shapes in the dataset (for the embedding table) [S1, unofficial].
-*   **Strengths:** Allows for high-resolution reconstruction by avoiding voxel grid memory constraints; learns a continuous representation [S1, unofficial].
-*   **Limitations:** Requires careful tuning of learning rates for embeddings vs. model parameters; resuming training requires verifying checkpoint existence [S1, unofficial].
-*   **When to use:** When reconstructing complex 3D shapes from point clouds with high fidelity is required [S1, unofficial].
-*   **When not to use:** When real-time inference on low-memory devices is critical, or when discrete voxel representations are sufficient [S1, unofficial].
+*   **Time and memory complexity:** Not given in the sources. [S1, unofficial]
+*   **Strengths and limitations:** Not given in the sources. [S1, unofficial]
+*   **When to use and when not to use:** Not given in the sources. [S1, unofficial]
+*   **Resuming training:** Requires verifying that both `voxel_sdf_epoch_{epoch}.param` and `embeddings_epoch_{epoch}.param` files exist; if missing, the epoch index is decremented by 100 until found or returns 0 [S1, unofficial].
 
 ## Background
-The DeepSDF method was introduced by Park et al. in 2019 [S1, unofficial]. It represents a shift from discrete voxel-based representations to continuous implicit functions for 3D shape reconstruction [S1, unofficial]. The training loop described here is based on the implementation in VC-SDFGen [S1, unofficial].
+The training loop is based on the implementation in VC-SDFGen [S1, unofficial]. The origin of the method, authors, and publication year are not given in the sources. [S1, unofficial]
 
 ## Sources
 [S1] TurtleJayWang/VC-SDFGen, https://github.com/TurtleJayWang/VC-SDFGen, fetched 2026-10-28 (unofficial)

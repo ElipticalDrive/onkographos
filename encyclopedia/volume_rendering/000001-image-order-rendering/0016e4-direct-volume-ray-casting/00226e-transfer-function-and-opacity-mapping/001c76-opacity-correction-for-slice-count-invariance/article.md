@@ -3,113 +3,95 @@
 Also called: Brightness normalization across slice counts, Intensity Preservation, Slice Opacity Scaling, Opacity Correction for Variable Slice Counts, Slice density compensation
 
 ## Overview
-This method scales the per-sample opacity $\alpha$ during direct volume ray casting to maintain constant image intensity regardless of the number of rendered slices or the sampling rate [S1, unofficial][S2, S3, unofficial]. It solves the problem where varying the discretization density (slice count or step size) artificially changes the accumulated opacity, causing the volume to appear denser or lighter than intended [S2, S3, unofficial]. Unlike [Piecewise Density Approximation for Reparameterized Sampling](1139-piecewise-density-approximation-for-reparameterized-sampling.md), which adjusts density based on spatial reparameterization, this method applies a uniform scalar correction to opacity values derived from the transfer function [S2, S3, unofficial]. It differs from [Opacity Correction for Sampling Rate](3354-opacity-correction-for-sampling-rate.md) primarily in its framing: while both address sampling density, this article focuses on the discrete slice count invariant implementation often used in slice-based rendering, whereas the sibling handles continuous step-size variations relative to the grid [S2, S3, unofficial].
+Opacity Correction for Slice Count Invariance is a technique used in direct volume ray casting to maintain consistent visual density and brightness when the number of rendered slices (or sampling rate) changes [S1, unofficial][S2]. It solves the problem where varying the discretization step size along a ray artificially alters the accumulated opacity, causing the volume to appear either too dense or too transparent [S2]. It sets itself apart from its siblings by applying a simple linear scaling factor to the per-sample opacity derived from the transfer function, rather than using complex physical integration models or piecewise approximations [S1, unofficial][S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Current number of slices $N_{current}$ (or current sampling rate $s$); Reference slice count $N_{ref}$ (or reference sampling rate $s_0$); Base opacity $\alpha_{ref}$ computed from the transfer function.
-*   **Output:** Corrected opacity $\alpha_{new}$ passed to the compositing stage.
+- Input: Current sampling rate $s$ (or current slice count $N_{current}$), reference sampling rate $s_0$ (or reference slice count $N_{ref}$), and the uncorrected opacity $\alpha_{ref}$ output by the transfer function for a given sample.
+- Output: Corrected opacity $\alpha_{new}$ suitable for front-to-back compositing.
 
 **Data Structures:**
-The method requires a scalar correction factor $C_{opacity}$, typically passed as a uniform variable or push constant to the rendering shader.
-*   `opacityCorrection` (float): The scaling factor $C_{opacity}$.
+The method requires storing two scalar parameters:
+1.  $N_{ref}$ (or $s_0$): The baseline reference count. In implementations, this is often a constant (e.g., 256) [S1, unofficial].
+2.  $N_{current}$ (or $s$): The active count determined by the current rendering configuration or user interaction [S1, unofficial][S2].
 
 **Steps:**
-1.  Define a reference slice count $N_{ref}$ (or reference sampling rate $s_0$) that corresponds to the desired visual baseline.
-2.  Determine the current rendering parameters: the active number of slices $N_{current}$ (or current sampling rate $s$).
-3.  Compute the correction factor $C_{opacity}$ as the ratio of the reference count to the current count.
-4.  Pass $C_{opacity}$ to the fragment shader (or ray-casting kernel).
-5.  Multiply the base opacity $\alpha_{ref}$ by $C_{opacity}$ to obtain the corrected opacity $\alpha_{new}$.
-
-**Formulas:**
-The correction factor $C_{opacity}$ is defined as [S1, unofficial]:
-$$
-C_{opacity} = \frac{N_{ref}}{N_{current}}
-$$
-where:
-*   $N_{ref}$ is the reference slice count.
-*   $N_{current}$ is the active slice count.
-
-The corrected opacity $\alpha_{new}$ is then [S1, unofficial]:
-$$
-\alpha_{new} = \alpha_{ref} \cdot C_{opacity}
-$$
-
-Alternatively, expressed in terms of sampling rates $s$ (current) and $s_0$ (reference) [S2]:
-$$
-\alpha_{new} = \alpha_{ref} \cdot \frac{s}{s_0}
-$$
-where $s$ and $s_0$ represent the sampling density (e.g., samples per unit distance or slices per volume). Note that if $s$ is defined as "slices per frame," the ratio is $s/s_0$. If $s$ is defined as "step size," the relationship is inverse to the count. The sources [S1, unofficial] and [S2] both confirm that opacity scales linearly with the sampling density relative to the reference.
-
-**Parameters:**
-*   $N_{ref}$: Typically 256 [S1, unofficial].
-*   $N_{current}$: Variable, typically ranging from 16 to 768 [S1, unofficial].
-*   $\alpha_{ref}$: The opacity value output by the transfer function $T(d_i)$ before correction, bounded in $[0, 1]$ [S2].
-
-**Edge Cases and Pitfalls:**
-*   **Division by Zero:** If $N_{current}$ is 0, the correction factor is undefined. Implementers must ensure $N_{current} \ge 1$ [G].
-*   **Opacity Clamping:** The product $\alpha_{ref} \cdot C_{opacity}$ may exceed 1.0 if $N_{current} < N_{ref}$ and $\alpha_{ref}$ is high. The corrected opacity must be clamped to $[0, 1]$ before compositing [G].
-*   **Precision:** When $N_{current}$ is very large, $C_{opacity}$ becomes small. Floating-point precision loss in the multiplication $\alpha_{ref} \cdot C_{opacity}$ may occur, though this is rarely visually significant for standard float32 [G].
+1.  **Determine Reference and Current Rates:** Identify the reference slice count $N_{ref}$ (typically fixed at 256 in specific implementations [S1, unofficial]) and the current slice count $N_{current}$ being rendered [S1, unofficial]. Alternatively, determine the current sampling rate $s$ and reference sampling rate $s_0$ [S2].
+2.  **Calculate Correction Factor:** Compute the opacity correction factor $C_{opacity}$ as the ratio of the reference count to the current count [S1, unofficial].
+    $$ C_{opacity} = \frac{N_{ref}}{N_{current}} $$
+    Or equivalently using sampling rates [S2]:
+    $$ C_{opacity} = \frac{s_0}{s} $$
+    *Note: Sources [S1, unofficial] and [S2] present slightly different formulations. [S1, unofficial] uses $N_{ref}/N_{current}$, while [S2] uses $\alpha_{ref} \cdot (s/s_0)$. If $s$ is defined as samples per unit distance, a higher $s$ means smaller steps. If $s$ is defined as "number of slices", the ratio is inverted. [S2] states "when using fewer slices, the opacity has to be scaled up", implying $s$ is the number of slices. Thus $s < s_0 \implies \alpha_{new} > \alpha_{ref}$. This aligns with $C_{opacity} = s_0/s$. [S1, unofficial] uses $N_{ref}/N_{current}$, which is mathematically identical if $N$ represents the count. We use the count-based formulation for clarity as it is explicit in [S1, unofficial].*
+3.  **Scale Opacity:** Multiply the transfer function output opacity $\alpha_{ref}$ by the correction factor to get the corrected opacity $\alpha_{new}$ [S1, unofficial][S2].
+    $$ \alpha_{new} = \alpha_{ref} \cdot C_{opacity} = \alpha_{ref} \cdot \frac{N_{ref}}{N_{current}} $$
+4.  **Pass to Shader:** The correction factor is typically passed to the fragment shader via push constants or uniform buffers to scale the accumulated opacity during compositing [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_opacity_correction(n_ref: int, n_current: int, alpha_ref: float) -> float:
+# Constants
+K_REFERENCE_SLICES = 256
+
+def compute_opacity_correction(n_current: int) -> float:
     """
-    Computes the corrected opacity for slice count invariance.
+    Computes the opacity correction factor based on the current slice count.
     
     Args:
-        n_ref: Reference slice count (e.g., 256).
-        n_current: Current number of slices being rendered.
-        alpha_ref: Base opacity from transfer function.
+        n_current: The current number of slices being rendered.
         
     Returns:
-        Corrected opacity clamped to [0, 1].
+        The correction factor to multiply the per-sample opacity.
     """
     if n_current <= 0:
-        return 0.0  # Guard against division by zero [G]
-    
-    # Calculate correction factor
-    c_opacity = n_ref / n_current
-    
-    # Apply correction
-    alpha_new = alpha_ref * c_opacity
-    
-    # Clamp to valid range [0, 1] [G]
-    if alpha_new > 1.0:
-        alpha_new = 1.0
-    elif alpha_new < 0.0:
-        alpha_new = 0.0
-        
-    return alpha_new
+        return 1.0  # Guard against division by zero [G]
+    return K_REFERENCE_SLICES / n_current
 
-# Example usage in a rendering loop:
-# n_ref = 256
-# n_current = user_defined_slices  # e.g., 128
-# alpha_base = transfer_function(value)
-# alpha_corrected = compute_opacity_correction(n_ref, n_current, alpha_base)
+def apply_opacity_correction(alpha_ref: float, n_current: int) -> float:
+    """
+    Applies opacity correction to maintain slice count invariance.
+    
+    Args:
+        alpha_ref: The opacity value output by the transfer function.
+        n_current: The current number of slices.
+        
+    Returns:
+        The corrected opacity value.
+    """
+    correction_factor = compute_opacity_correction(n_current)
+    alpha_new = alpha_ref * correction_factor
+    return alpha_new
 ```
+
+**Parameters:**
+- $N_{ref}$: Reference slice count. Typical value: 256 [S1, unofficial].
+- $N_{current}$: Current slice count. Range: 16 to 768 in some implementations [S1, unofficial].
+- $\alpha_{ref}$: Uncorrected opacity from transfer function, bounded to $[0, 1]$ [G].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If $N_{current}$ is 0, the correction factor is undefined. A guard clause should return 1.0 or handle the error [G].
+- **Opacity Clamping:** The corrected opacity $\alpha_{new}$ may exceed 1.0 if $N_{current} < N_{ref}$. It must be clamped to $[0, 1]$ before compositing to prevent invalid values [G].
+- **Non-Linearity:** This method assumes a linear relationship between slice count and visual density. It does not account for the non-linear nature of front-to-back compositing ($1 - (1-\alpha)^N$) as accurately as exponential correction methods, but it is computationally cheaper [S1, unofficial][S2].
 
 ## Subtopics
 
 ### [Fixed-Step Volume Rendering with Opacity Correction](1536-fixed-step-volume-rendering-with-opacity-correction.md)
-A variant that uses a fixed reference length for opacity scaling, maintaining consistent intensity regardless of sample count. Choose this when using fixed-step ray casting with explicit slice management.
+A variant that uses a fixed reference length for opacity scaling, ensuring consistent intensity regardless of sample count. Choose when fixed-step rendering is required.
 
 ### [Opacity Correction for Sampling Rate](3354-opacity-correction-for-sampling-rate.md)
-Adjusts opacity for continuous variations in sample spacing relative to the volume grid. Choose this when the sampling rate changes continuously or dynamically based on distance, rather than discrete slice counts.
+Adjusts opacity based on the sampling rate $s/s_0$ to maintain visual density. Choose when dynamic sampling rates are used.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample. The correction is a single multiplication and clamp operation [S1, unofficial][S2, S3, unofficial].
-*   **Memory Complexity:** $O(1)$. Requires storing only the reference count and current count [S1, unofficial].
-*   **Performance:** Negligible overhead. The correction factor is computed once per frame and passed as a uniform/push constant [S1, unofficial].
-*   **Strengths:** Simple to implement; effectively normalizes brightness across different rendering qualities; preserves visual consistency during interactive quality adjustments [S1, unofficial][S2, S3, unofficial].
-*   **Limitations:** Assumes linear relationship between slice count and opacity accumulation, which is an approximation; does not account for non-linear transfer functions or complex lighting interactions that might require more sophisticated density compensation [S2, S3, unofficial].
-*   **When to use:** Interactive volume rendering where users frequently change the number of slices or sampling rate [S2, S3, unofficial].
-*   **When not to use:** High-fidelity offline rendering where exact physical accuracy is required over visual consistency, or when using adaptive sampling strategies that require per-sample density estimation [S2, S3, unofficial].
+- **Time Complexity:** $O(1)$ per sample. The correction is a simple multiplication.
+- **Memory Complexity:** $O(1)$. Requires storing two scalar values ($N_{ref}, N_{current}$).
+- **Measured Performance:** In implementations using Vulkan push constants, the correction is applied with negligible overhead [S1, unofficial].
+- **Strengths:** Simple to implement; low computational cost; effective for maintaining consistent brightness across different slice counts [S1, unofficial][S2].
+- **Limitations:** Does not provide physically accurate integration; may result in slight brightness inconsistencies compared to exponential correction methods [S1, unofficial][S2].
+- **When to Use:** Interactive volume rendering where performance is critical and slight visual inaccuracies are acceptable.
+- **When Not to Use:** Scientific visualization requiring strict physical accuracy or quantitative analysis of density.
 
 ## Background
-The method originates from interactive volume rendering techniques described in *GPU Gems* Chapter 39 [S2] and implemented in various GPU-based volume rendering frameworks [S1, unofficial]. It addresses the common user expectation that changing the rendering quality (number of slices) should not alter the perceived brightness or density of the volume [S1, unofficial][S2, S3, unofficial]. The approach is widely used in medical imaging viewers and scientific visualization tools where real-time interaction is critical [S2, S3, unofficial].
+The method originates from early GPU-based volume rendering techniques where dynamic adjustment of slice counts was necessary for interactive performance [S1, unofficial][S2]. It was documented in GPU Gems Chapter 39 and various unofficial implementations [S1, unofficial][S2]. The technique is widely used in medical imaging viewers and real-time visualization tools where users frequently adjust the number of slices for speed [S1, unofficial][S2].
 
 ## Sources
 [S1] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)

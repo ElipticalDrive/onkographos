@@ -1,0 +1,122 @@
+--- v001.md
++++ v002.md
+@@ -8,47 +8,83 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A fragment with RGB color values representing data properties (e.g., scalar values, gradients, or derived features) and a 3D texture containing the transfer function (color and alpha values).
+-*   **Output:** A new fragment color and alpha value determined by the 3D texture lookup.
++*   **Input:** A fragment with RGB color values representing data properties (e.g., scalar values, gradients, or derived features) and a 3D texture containing the transfer function (color and alpha values) [S1, book].
++*   **Output:** A new fragment color and alpha value determined by the 3D texture lookup [S1, book].
+ 
+ **Data Structures:**
+-*   **3D Transfer Function Texture:** A 3D texture where each texel stores the output color (RGB) and opacity (A). The dimensions of this texture do not need to match the dynamic range of the input data channels, allowing for memory-efficient discretization [S1, book][S2].
+-*   **Proxy Geometry:** Typically a plane or view-aligned slice across which data values are interpolated [S1, book][S2].
++*   **3D Transfer Function Texture:** A 3D texture where each texel stores the output color (RGB) and opacity (A) [S1, book]. The dimensions of this texture do not need to match the dynamic range of the input data channels, allowing for memory-efficient discretization [S1, book].
++*   **Proxy Geometry:** Typically a plane or view-aligned slice across which data values are interpolated [S1, book].
+ 
+ **Steps:**
+-1.  **Data Interpolation:** Data values are stored in the color components of a 3D texture (or derived from volume data) and interpolated across proxy geometry (e.g., a plane) [S1, book][S2].
+-2.  **Coordinate Generation:** The RGB channel values of the resulting fragment are scaled to the range $[0, 1]$ [S1, book][S2]. These scaled values serve as the $(u, v, w)$ texture coordinates for the 3D transfer function texture [S1, book][S2].
+-3.  **Texture Lookup:** A 3D texture lookup is performed using the generated coordinates [S1, book][S2].
+-4.  **Interpolation:** The lookup uses either nearest-neighbor or linear interpolation to determine the replacement color values [S1, book][S2].
+-5.  **Replacement:** The original RGB fragment values are replaced by the color and alpha values acquired from the 3D texture lookup [S1, book][S2].
++1.  **Data Interpolation:** Data values are stored in the color components of a 3D texture (or derived from volume data) and interpolated across proxy geometry (e.g., a plane) [S1, book].
++2.  **Coordinate Generation:** The RGB channel values of the resulting fragment are scaled to the range $[0, 1]$ [S1, book]. These scaled values serve as the $(u, v, w)$ texture coordinates for the 3D transfer function texture [S1, book].
++3.  **Texture Lookup:** A 3D texture lookup is performed using the generated coordinates [S1, book].
++4.  **Interpolation:** The lookup uses either nearest-neighbor or linear interpolation to determine the replacement color values [S1, book].
++5.  **Replacement:** The original RGB fragment values are replaced by the color and alpha values acquired from the 3D texture lookup [S1, book].
+ 
+ **Pseudocode:**
+ ```python
+-# Pseudocode for Dependent Texture Read Classification
+-# Assumes fragment color 'frag_rgb' contains scaled data values in [0, 1]
+-# Assumes 'transfer_function_texture' is a 3D texture with filtering enabled
++def clamp(x, lo, hi):
++    return max(lo, min(hi, x))
+ 
+-def classify_fragment(frag_rgb, transfer_function_texture):
+-    # Step 1: Use fragment RGB as texture coordinates
+-    # The hardware automatically scales these if they are outside [0,1] or clamps them,
+-    # but the core concept is using R, G, B as u, v, w.
+-    u = frag_rgb.r
+-    v = frag_rgb.g
+-    w = frag_rgb.b
++def lerp(a, b, t):
++    return a + t * (b - a)
++
++def trilinear_interpolate(tex, u, v, w, dim_x, dim_y, dim_z):
++    # Map normalized coordinates [0,1] to texel indices [0, dim-1]
++    # This mapping aligns hardware texture sampling with standard raycast references
++    ix = u * (dim_x - 1)
++    iy = v * (dim_y - 1)
++    iz = w * (dim_z - 1)
+     
+-    # Step 2: Perform 3D texture lookup
+-    # Interpolation method (nearest or linear) is set by texture state
+-    new_color = texture_3d_lookup(transfer_function_texture, u, v, w)
++    x0, x1 = int(ix), min(int(ix) + 1, dim_x - 1)
++    y0, y1 = int(iy), min(int(iy) + 1, dim_y - 1)
++    z0, z1 = int(iz), min(int(iz) + 1, dim_z - 1)
+     
+-    # Step 3: Replace original color
++    fx = ix - x0
++    fy = iy - y0
++    fz = iz - z0
++    
++    # Fetch 8 surrounding texels (RGBA)
++    c000 = tex[x0, y0, z0]
++    c100 = tex[x1, y0, z0]
++    c010 = tex[x0, y1, z0]
++    c110 = tex[x1, y1, z0]
++    c001 = tex[x0, y0, z1]
++    c101 = tex[x1, y0, z1]
++    c011 = tex[x0, y1, z1]
++    c111 = tex[x1, y1, z1]
++    
++    # Trilinear interpolation
++    c00 = lerp(c000, c100, fx)
++    c01 = lerp(c010, c110, fx)
++    c10 = lerp(c001, c101, fx)
++    c11 = lerp(c011, c111, fx)
++    
++    c0 = lerp(c00, c01, fy)
++    c1 = lerp(c10, c11, fy)
++    
++    return lerp(c0, c1, fz)
++
++def classify_fragment(frag_rgb, transfer_function_texture, dim_x, dim_y, dim_z):
++    # Step 1 & 2: Scale and clamp RGB channels to [0, 1] as per hardware behavior [S1, book]
++    u = clamp(frag_rgb.r, 0.0, 1.0)
++    v = clamp(frag_rgb.g, 0.0, 1.0)
++    w = clamp(frag_rgb.b, 0.0, 1.0)
++    
++    # Step 3 & 4: Perform 3D texture lookup with linear interpolation
++    new_color = trilinear_interpolate(transfer_function_texture, u, v, w, dim_x, dim_y, dim_z)
++    
++    # Step 5: Return replacement color and alpha
+     return new_color
+ ```
+ 
+ **Parameters:**
+-*   **Texture Dimensions:** The number of elements along an axis of the 3D transfer function texture can differ from the dynamic range of the input component [S1, book][S2]. This flexibility prevents prohibitively large textures [S1, book][S2]. For example, for 8-bit data, an ideal texture might have 256 values per axis, but this is often reduced for performance [S1, book].
+-*   **Interpolation Mode:** Nearest-neighbor or linear interpolation [S1, book][S2].
++*   **Texture Dimensions:** The number of elements along an axis of the 3D transfer function texture can differ from the dynamic range of the input component [S1, book]. This flexibility prevents prohibitively large textures [S1, book]. For example, for 8-bit data, an ideal texture might have 256 values per axis, but this is often reduced for performance [S1, book].
++*   **Interpolation Mode:** Nearest-neighbor or linear interpolation [S1, book].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Memory Size:** Without the ability to scale coordinates, a 3D dependent texture would require dimensions matching the full dynamic range of the input data, leading to prohibitively large memory requirements [S1, book][S2].
+-*   **Data Range:** Input values must be appropriately scaled to $[0, 1]$ to map correctly to texture coordinates [S1, book][S2].
++*   **Memory Size:** Without the ability to scale coordinates, a 3D dependent texture would require dimensions matching the full dynamic range of the input data, leading to prohibitively large memory requirements [S1, book].
++*   **Data Range:** Input values must be appropriately scaled to $[0, 1]$ to map correctly to texture coordinates [S1, book].
++*   **Boundary Mapping:** Texture coordinates map $0.0$ to the left/bottom edge and $1.0$ to the right/top edge of the texture volume; failing to scale coordinates to $[0, 1]$ or using incorrect index mapping causes systematic sampling bias [G].
+ 
+ ## Subtopics
+@@ -61,6 +97,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per fragment for the lookup, assuming constant-time texture access. The cost is dominated by the texture fetch and interpolation [S1, book][S2].
+-*   **Memory Complexity:** Depends on the dimensions of the 3D transfer function texture. For an 8-bit scalar, a full 3D TF would be $256^3 \times 4$ bytes, which is enormous [S1, book]. Practical implementations limit dimensions based on importance to maintain interactivity [S1, book].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** Hardware-accelerated, making it significantly more efficient than software-based lookup tables [S1, book][S2].
+ *   **Strengths:** Enables real-time interaction with multidimensional transfer functions; leverages existing GPU texture hardware [S1, book][S2].

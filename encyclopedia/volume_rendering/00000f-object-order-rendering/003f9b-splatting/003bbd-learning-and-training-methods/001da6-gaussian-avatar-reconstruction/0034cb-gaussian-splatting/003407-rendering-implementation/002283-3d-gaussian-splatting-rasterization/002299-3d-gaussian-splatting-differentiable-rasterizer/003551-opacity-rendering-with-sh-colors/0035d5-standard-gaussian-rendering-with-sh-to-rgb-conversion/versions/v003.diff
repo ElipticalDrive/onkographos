@@ -1,0 +1,109 @@
+--- v002.md
++++ v003.md
+@@ -4,9 +4,9 @@
+ 
+ ## Overview
+-This method is a rendering pass that computes RGB colors from spherical harmonics (SH) coefficients in Python before rasterization [S1, unofficial]. It rasterizes Gaussians using precomputed geometry and opacity, then converts SH coefficients to RGB colors post-rasterization [S1, unofficial]. It differs from [Opacity Rendering with SH Colors](7480-opacity-rendering-with-sh-colors.md) by performing the SH-to-RGB conversion in the Python host code rather than precomputing colors for the rasterizer [S1, unofficial].
++This method is a rendering pass that computes RGB colors from spherical harmonics (SH) coefficients in Python, bypassing the rasterizer's built-in SH evaluation [S1, unofficial]. The evidence describes it as computing colors before rasterization and also as converting SH to RGB post-rasterization, indicating the conversion can occur either before or after the rasterization step depending on the pipeline configuration [S1, unofficial]. It differs from [Opacity Rendering with SH Colors](7480-opacity-rendering-with-sh-colors.md) by performing the SH-to-RGB conversion in the Python host code rather than precomputing colors for the rasterizer [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `gaussians`: A Gaussian model object containing 3D means, SH coefficients, opacities, scales, rotations, and covariance matrices [S1, unofficial].
++- `gaussians`: A Gaussian model object containing 3D means (`get_xyz`), SH coefficients (`get_features`), opacities, scales, rotations, and covariance matrices (`cov3D_precomp`) [S1, unofficial].
+ - `viewpoint_camera`: Camera parameters including `camera_center` [S1, unofficial].
+ - `pipeline`: Rendering pipeline configuration [S1, unofficial].
+@@ -27,12 +27,12 @@
+ **Steps:**
+ 1. **Reshape SH features:** Transpose and view SH features as `(-1, 3, (max_sh_degree+1)^2)` [S1, unofficial].
+-   $$ \text{shs\_view} = \text{pc.get\_features}^T \text{ viewed as } (-1, 3, (\text{pc.max\_sh\_degree}+1)^2) $$
++   $$ \text{shs\_view} = \text{gaussians.get\_features}^T \text{ viewed as } (-1, 3, (\text{gaussians.max\_sh\_degree}+1)^2) $$
+ 2. **Compute view directions:** Calculate normalized direction vectors from the camera center to each Gaussian center [S1, unofficial].
+-   $$ \text{dir\_pp} = \text{pc.get\_xyz} - \text{viewpoint\_camera.camera\_center.repeat}(\text{pc.get\_features.shape}[0], 1) $$
++   $$ \text{dir\_pp} = \text{gaussians.get\_xyz} - \text{viewpoint\_camera.camera\_center.repeat}(\text{gaussians.get\_features.shape}[0], 1) $$
+    $$ \text{dir\_pp\_normalized} = \frac{\text{dir\_pp}}{\|\text{dir\_pp}\|_2} $$
+ 3. **Evaluate SH to RGB:** Evaluate SH to get RGB values using the active SH degree, reshaped coefficients, and normalized directions [S1, unofficial].
+    $$ \text{sh2rgb} = \text{eval\_sh}(\text{active\_sh\_degree}, \text{shs\_view}, \text{dir\_pp\_normalized}) $$
+ 4. **Clamp colors:** Clamp resulting RGB values to a minimum of 0.0 after adding a 0.5 bias [S1, unofficial].
+-   $$ \text{color} = \max(\text{sh2rgb} + 0.5, 0.0) $$
++   $$ \text{color} = \text{clamp\_min}(\text{sh2rgb} + 0.5, 0.0) $$
+ 5. **Rasterize:** Call the rasterizer with `means3D`, `means2D`, `shs`, `colors_precomp=None`, `opacities`, `scales`, `rotations`, and `cov3D_precomp` to get `rendered_image`, `radii`, `rendered_depth`, and `rendered_alpha` [S1, unofficial].
+ 6. **Return results:** Return a dictionary containing `render`, `depth`, `alpha`, `viewspace_points`, `visibility_filter` (radii > 0), `radii`, `opacity`, and `color` [S1, unofficial].
+@@ -40,20 +40,22 @@
+ **Pseudocode:**
+ ```python
++def compute_sh_basis(degree, directions):
++    # Standard spherical harmonic basis evaluation for degrees 0 to degree [G]
++    x, y, z = directions[:, 0], directions[:, 1], directions[:, 2]
++    bases = [torch.ones_like(x)]
++    if degree >= 1:
++        bases += [-y, z, -x]
++    if degree >= 2:
++        bases += [x * y, y * z, 2 * z**2 - x**2 - y**2, x * z, x**2 - y**2]
++    if degree >= 3:
++        bases += [x * y * z, y * (3 * x**2 - y**2), y * (5 * z**2 - y**2),
++                  z * (5 * z**2 - 3), x * (5 * z**2 - 1), x * (x**2 - 3 * y**2),
++                  x * (x**2 - 7 * y**2)]
++    return torch.stack(bases, dim=1)
++
+ def eval_sh(degree, sh_coeffs, directions):
+     # sh_coeffs: (N, 3, num_bases), directions: (N, 3)
+-    # Standard spherical harmonic evaluation: compute basis vectors for each direction
+-    # and perform dot product with coefficients.
+-    num_bases = sh_coeffs.shape[2]
+-    # Compute SH basis vectors for degrees 0 to degree for each direction
+-    # (Standard SH basis evaluation)
+     bases = compute_sh_basis(degree, directions)
+     return torch.sum(bases * sh_coeffs, dim=1)
+-
+-def compute_sh_basis(degree, directions):
+-    # Standard SH basis computation up to the given degree
+-    # Returns tensor of shape (N, num_bases, 3)
+-    # Implementation follows standard spherical harmonic definitions
+-    # Not given in the sources.
+-    pass
+ 
+ def render_sh_to_rgb(gaussians, viewpoint_camera, pipeline, background, active_sh_degree):
+@@ -69,10 +71,8 @@
+     
+     # Step 4: Clamp colors
+-    color = torch.clamp(sh2rgb + 0.5, min=0.0)
++    color = torch.clamp_min(sh2rgb + 0.5, 0.0)
+     
+     # Step 5: Rasterize
+-    render_pkg = render(
+-        viewpoint_camera, gaussians, pipeline, background, inference=True
+-    )
++    render_pkg = render(viewpoint_camera, gaussians, pipeline, background, inference=True)
+     
+     # Step 6: Return results
+@@ -90,20 +90,20 @@
+ 
+ **Parameters:**
+-- `active_sh_degree`: Controls the order of spherical harmonics used for color evaluation [S1, unofficial]. Typical value: 3 [S1, unofficial].
++- `active_sh_degree`: Controls the order of spherical harmonics used for color evaluation [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ - Precision: Clamping after adding 0.5 bias prevents negative colors [S1, unofficial].
+-- Boundaries: Ensure `dir_pp` is not zero vector to avoid division by zero in normalization [G].
++- Boundaries: Ensure `dir_pp` is not a zero vector to avoid division by zero in normalization [G].
+ - Degenerate input: Handle cases where `gaussians.get_features` shape does not match expected dimensions [G].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+-- **Measured Performance:** Not given in the sources.
+-- **Scaling:** Not given in the sources.
+-- **Strengths:** Not given in the sources.
+-- **Limitations:** Not given in the sources.
+-- **When to use:** Not given in the sources.
+-- **When not to use:** Not given in the sources.
++- **Time Complexity:** Not given in the sources. [S1, unofficial]
++- **Memory Complexity:** Not given in the sources. [S1, unofficial]
++- **Measured Performance:** Not given in the sources. [S1, unofficial]
++- **Scaling:** Not given in the sources. [S1, unofficial]
++- **Strengths:** Not given in the sources. [S1, unofficial]
++- **Limitations:** Not given in the sources. [S1, unofficial]
++- **When to use:** Not given in the sources. [S1, unofficial]
++- **When not to use:** Not given in the sources. [S1, unofficial]
+ 
+ ## Background

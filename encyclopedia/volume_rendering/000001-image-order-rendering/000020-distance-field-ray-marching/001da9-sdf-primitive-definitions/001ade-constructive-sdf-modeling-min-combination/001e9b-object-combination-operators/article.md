@@ -1,38 +1,36 @@
 # Object Combination Operators
-
 Also called: SDF boolean operators, smooth minimum alternatives
 
 ## Overview
-Object Combination Operators are constructive solid geometry (CSG) primitives that merge two Signed Distance Functions (SDFs), $a$ and $b$, into a single field with rounded edges, chamfers, or other specific features, replacing the sharp discontinuities of standard boolean operations [S1, S2, unofficial]. Unlike the basic [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) which uses `min` for unions and `max` for intersections, these operators introduce a radius parameter $r$ to control the geometry of the transition [S1, S2, unofficial]. They are distinguished from generic smooth blends by their specific geometric intent (e.g., fillets, stairs, pipes) and their ability to preserve Lipschitz continuity (gradient magnitude $\le 1$) under orthogonal gradient conditions, which is critical for stable ray marching [S1, S2, unofficial].
+Object Combination Operators are constructive modeling primitives that merge two Signed Distance Functions (SDFs), $a$ and $b$, into a single distance field $d_{out}$ to create rounded edges, chamfers, or smooth transitions, replacing the sharp geometric intersections of standard boolean logic [S1, S2, unofficial]. Unlike the standard `min` operator used in [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md), these operators introduce a radius parameter $k$ (or $r$) to control the feature size, aiming to preserve Lipschitz continuity ($|\nabla d| \le 1$) better than naive smooth minimums when surface gradients are orthogonal [S1, S2, unofficial].
 
 ## Shared principles
-All operators in this family take two scalar distance values $a$ and $b$ and a scalar radius parameter $r > 0$ as input, returning a single scalar distance $d_{out}$ [S1, S2, unofficial]. The parameter $r$ defines the size of the blending feature and must be significantly smaller than the scale of the objects to prevent geometric distortion [S1, S2, unofficial].
+All operators in this family accept two scalar distance values $a$ and $b$ and a scalar radius parameter $k > 0$ (sometimes denoted $r$) [S1, S2, unofficial]. The parameter $k$ defines the width of the transition region or feature size; it must be significantly smaller than the scale of the objects to prevent geometric distortion [S1, S2, unofficial].
 
-The core mathematical challenge is to blend the distance fields such that the resulting field remains a valid distance function (or a tight bound) in the transition region. A key property of these specific operators is that they preserve the Lipschitz continuity of the SDF (i.e., $|\nabla d| \le 1$) provided the gradients of the two input SDFs are orthogonal (at right angles) [S1, S2, unofficial]. If the gradients deviate by more than $30^\circ$ or if the surfaces are parallel and close, Lipschitz continuity is lost, leading to ray marching artifacts such as overshooting or jittering [S1, S2, unofficial].
+The core mathematical challenge is maintaining the Lipschitz condition. The resulting SDF preserves Lipschitz continuity only if the gradients of the two input SDFs are orthogonal (at right angles) [S1, S2, unofficial]. If the angle between gradients deviates by more than $30^\circ$, or if surfaces are parallel and close, continuity is lost, leading to ray marching artifacts such as overshooting or jittering [S1, S2, unofficial].
 
-The operators are categorized by the shape of the resulting edge:
-1.  **Chamfer:** Linear blending of the distance values.
-2.  **Round:** Circular/arc blending of the distance values.
-3.  **Stairs/Columns:** Discrete or stepped blending.
-4.  **Soft:** Smooth, non-linear blending.
-5.  **Feature-specific:** Operators for specific geometric features like pipes, engravings, grooves, and tongues.
+While standard boolean operators use `min` (union) and `max` (intersection), combination operators use blended formulas. Common structural patterns include:
+1.  **Polynomial Blends:** Using cubic or quadratic interpolation terms like $k \cdot h \cdot (1-h)$ to subtract or add a rounded profile [S1, S2, unofficial].
+2.  **Exponential Blends:** Using LogSumExp approximations for smoothness [S4, unofficial].
+3.  **Geometric/Root Blends:** Using Euclidean distance calculations (e.g., $\sqrt{\dots}$) to construct rounded corners [S3, unofficial].
+4.  **Chamfer/Round Specifics:** Some operators explicitly construct chamfered or rounded profiles using vector lengths and clamping [S2, unofficial].
 
 ## Subtopics
 
 ### [SDF Smooth Union](1817-sdf-smooth-union.md)
-Blends two SDFs into a smooth union using either Polynomial (cubic) or LogSumExp (exponential) formulations. Chosen when organic curvature is desired or when computational cost/performance trade-offs dictate the use of one formulation over the other.
+Blends two SDFs into a single smooth distance field using polynomial (cubic) or exponential (LogSumExp) formulations, replacing sharp intersections with a rounded transition controlled by $k$. Choose this for general smooth merging where curvature control is needed.
 
 ### [Smooth Intersection](1839-smooth-intersection.md)
-Blends the overlap of two SDFs to produce rounded internal corners (fillets). Chosen when a chamfered or rounded interior corner is required between two intersecting volumes, distinct from external union blending.
+Blends the overlap region of two shapes to produce rounded edges, serving as a smooth approximation of boolean intersection. It uses polynomial or geometric root formulations to create a continuous transition. Choose this when you need to merge interiors smoothly rather than exteriors.
 
 ### [Multi-Material Distance Fields](1943-multi-material-distance-fields.md)
-Extends standard SDFs to return both a distance value and a material identifier. Chosen when distinct shading or material assignment is required for individual primitives within a CSG scene without requiring complex texture atlases.
+Extends standard SDFs to return both a geometric distance and a material identifier (e.g., color index) for every point. This allows CSG operations to preserve material assignments during boolean combinations. Choose this when per-object shading or texturing is required within a single ray-marched scene.
 
 ### [Linear SDF Blend](3004-linear-sdf-blend.md)
-Linearly interpolates between two SDFs based on a blend factor. Chosen for creating organic morphing transitions or time-varying geometry where the surface topology changes gradually, rather than for boolean CSG operations.
+Interpolates between two SDFs using a linear blend factor $a \in [0, 1]$ to create smooth transitions or morphing. Unlike rounded boolean unions, it produces a linear interpolation of distance values. Choose this for morphing animations or soft blending where geometric accuracy of the boundary is less critical than visual smoothness.
 
 ## Background
-The specific formulas for Chamfer, Round, Stairs, Soft, Pipe, Engrave, Groove, and Tongue operators were documented in the context of GLSL-based ray marching shaders [S1, S2, unofficial]. The "Smooth Minimum" concept, often implemented via the `smin` function, is a broader category that these operators refine or replace to ensure better distance field properties [S1, S2, unofficial]. The preservation of Lipschitz continuity under orthogonality is a key theoretical distinction from naive smooth minimums, which often violate this property even at right angles [S1, S2, unofficial].
+The concept of combining SDFs to create features like rounded edges and chamfers originated in the context of ray marching and procedural modeling, popularized by blogs and community repositories such as *kushchevd/RayMarching* and *yeataro/TD-Raymarching-System* [S1, S2, unofficial]. These sources document operators like `fOpUnionChamfer`, `fOpUnionRound`, and `fOpUnionSoft`, which aim to produce correct distance bounds or approximate distances, distinguishing them from "smooth minimum" operators that may violate Lipschitz continuity [S1, S2, unofficial]. The specific constraint regarding the $30^\circ$ gradient deviation and parallel surfaces highlights the mathematical rigor required to ensure stable ray marching steps [S1, S2, unofficial].
 
 ## Sources
 [S1] kushchevd/RayMarching, https://github.com/kushchevd/RayMarching, fetched 2026-10-26 (unofficial)

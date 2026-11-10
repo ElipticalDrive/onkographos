@@ -2,69 +2,57 @@
 Also called: Mask and Offset Layout for Wavelets, Westermann's Method
 
 ## Overview
-This method provides fast random access to wavelet coefficients stored in compressed linear arrays, overcoming the variable-length decoding overhead inherent in Huffman or arithmetic coding [S1, unofficial]. It achieves this by organizing significant coefficients into a hierarchy of quadratic blocks (32x32, then 8x8) and lines, using bitmaps and split offset arrays to locate data directly [S1, unofficial]. It sets itself apart from sibling methods by explicitly partitioning the offset space across three record levels to minimize storage overhead while maintaining constant-time lookup probabilities [S1, unofficial].
+This method provides a data layout technique to support random access to wavelet coefficients stored in compressed linear arrays, overcoming the variable-length decoding overhead inherent in Huffman or arithmetic coding [S1, unofficial]. It achieves this by organizing significant coefficients into a hierarchy of quadratic blocks (32x32, then 8x8) and lines, using bitmaps and split offset arrays to locate data directly [S1, unofficial]. It sets itself apart from sibling methods by explicitly partitioning the offset space across three record levels to minimize storage overhead while maintaining constant-time lookup probabilities [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Wavelet coefficients from a multi-resolution decomposition.
-*   **Output:** A linear memory layout supporting $O(1)$ random access to specific coefficients.
+*   **Input:** A 3D volume $V$ decomposed into wavelet coefficients $C$ across multiple resolution levels.
+*   **Output:** A compressed linear byte stream supporting $O(1)$ random access to any coefficient, along with auxiliary mask and offset structures.
 
 **Data Structures:**
-The data is stored as linear arrays per level. Each entry consists of:
-1.  **Mask:** A leading bitfield defining which coefficients were removed or are significant.
-2.  **Coefficients:** The quantized wavelet values themselves.
-3.  **Offsets:** Additional metadata indicating the byte distance between streams or blocks.
-*   Zero-only entries use run-length coding [S1, unofficial].
+The data is stored as linear arrays per level. Each entry in the array corresponds to a spatial location and contains:
+1.  **Mask:** A leading byte (or bit-field) defining which coefficients were removed or are significant.
+2.  **Coefficients:** The quantized wavelet coefficients themselves.
+3.  **Offsets:** Additional arrays (`OFFx`, `OFFy`, `OFFz`) indicating the byte distance between streams or blocks to enable direct indexing.
 
 **Steps:**
-1.  **Quantization:** Quantize wavelet coefficients (which are concentrated around zero) into 2 or 3 bits using non-uniform quantization [S1, unofficial].
-2.  **Packing:** Pack these fixed-size values into bytes. This achieves a 4:1 compression ratio and enables fixed-size random access [S1, unofficial].
-3.  **Layout Construction:** Reorder volumes as linear arrays. Store a leading mask followed by the coefficients for each entry [S1, unofficial].
-4.  **Offset Addition:** Add offset information to speed up traversal, indicating the number of bytes from a certain stream to another [S1, unofficial].
-
-**Parameters:**
-*   Quantization bits: 2 or 3 bits per coefficient [S1, unofficial].
-*   Compression ratio: ~4:1 [S1, unofficial].
+1.  **Transform:** Apply a separable 1D filter bank along each axis to decompose the volume into subbands (approximation and detail coefficients) [S1, unofficial].
+2.  **Quantization:** Quantize the wavelet coefficients, which are concentrated around zero, into 2 or 3 bits using non-uniform quantization [S1, unofficial]. This achieves a 4:1 compression ratio for the coefficient data itself.
+3.  **Packing:** Pack the quantized values into bytes. For 2-bit quantization, four coefficients fit into one byte [S1, unofficial].
+4.  **Masking:** For each entry, generate a leading mask that defines which coefficients have been removed or are zero [S1, unofficial].
+5.  **Run-Length Coding:** Apply run-length coding to entries that consist entirely of zero coefficients to further compress the stream [S1, unofficial].
+6.  **Offset Calculation:** Compute offset information indicating the number of bytes from a certain stream to another. This allows the renderer to jump directly to the required data block without sequential search [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def access_coefficient(level, block_index, coeff_index):
-    """
-    Access a specific wavelet coefficient using Westermann's layout.
-    level: The resolution level (e.g., 0 for highest).
-    block_index: Index of the block in the linear stream.
-    coeff_index: Index of the coefficient within the block.
-    """
-    # 1. Calculate base offset for the level
-    # Note: Exact offset array structure is not fully detailed in sources [S1, unofficial]
-    base_offset = get_level_offset(level)
+def westermann_layout(volume):
+    # 1. Transform
+    coeffs = wavelet_transform(volume)
     
-    # 2. Locate the block using offset arrays
-    # The method uses split offset arrays for three record levels [S1, unofficial]
-    block_offset = base_offset + get_block_offset(level, block_index)
+    # 2. Quantize (2-3 bits non-uniform)
+    quantized = non_uniform_quantize(coeffs, bits=2)
     
-    # 3. Read the mask for the block
-    mask = read_byte(block_offset)
+    # 3. Pack into bytes
+    packed_bytes = pack_bits(quantized, bits_per_val=2)
     
-    # 4. Determine if the entry is zero-only (run-length coded)
-    if is_zero_entry(mask):
-        return 0.0
+    # 4. Generate masks for removed/zero coefficients
+    masks = generate_masks(coeffs)
     
-    # 5. Extract the specific coefficient
-    # Coefficients are packed 4 per byte (2 bits each) [S1, unofficial]
-    byte_offset = block_offset + 1 # Mask is 1 byte
-    coeff_byte = read_byte(byte_offset + (coeff_index // 4))
+    # 5. Run-length encode zero-only entries
+    rle_stream, rle_offsets = run_length_encode(packed_bytes, masks)
     
-    # Extract 2-bit value
-    bit_shift = (coeff_index % 4) * 2
-    quantized_val = (coeff_byte >> bit_shift) & 0x3
+    # 6. Compute offsets for random access
+    offsets = compute_offsets(rle_stream, rle_offsets)
     
-    # 6. Dequantize (inverse of non-uniform quantization)
-    # Exact dequantization table not provided in sources [S1, unofficial]
-    return dequantize(quantized_val)
+    return rle_stream, masks, offsets
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Non-uniform quantization may introduce visible artifacts if the bit-depth is too low for the dynamic range of the data [S1, unofficial].
+*   **Boundaries:** The mask must correctly handle boundary conditions where fewer than the maximum number of coefficients exist per entry [S1, unofficial].
+*   **Degenerate Input:** If the volume contains no significant coefficients, the run-length coding should handle large blocks of zeros efficiently [S1, unofficial].
 
 ## Subtopics
 
@@ -72,16 +60,14 @@ def access_coefficient(level, block_index, coeff_index):
 This method provides fast random access to wavelet coefficients stored in compressed linear streams, overcoming the variable-length decoding overhead inherent in Huffman or arithmetic coding. It achieves this by organizing significant coefficients into a hierarchy of quadratic blocks (32x32, then 8x8) and lines, using bitmaps and split offset arrays to locate data directly. It sets itself apart from sibling methods by explicitly partitioning the offset space across three record levels to minimize storage overhead while maintaining constant-time lookup probabilities.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ random access to coefficients due to fixed-size packing and offset arrays [S1, unofficial].
-*   **Memory Complexity:** Introduces overhead data (masks, offsets) compared to pure Huffman coding [S1, unofficial].
-*   **Performance:** Achieves 4:1 compression with fixed-size access [S1, unofficial].
-*   **Strengths:** Fast traversal, no sequential search required at the run-length level [S1, unofficial].
-*   **Limitations:** Memory overhead for masks and offsets [S1, unofficial].
-*   **When to use:** When random access speed is critical and memory overhead is acceptable [S1, unofficial].
-*   **When not to use:** When memory efficiency is the primary constraint and sequential access is sufficient [S1, unofficial].
+*   **Time Complexity:** Random access is $O(1)$ after offset computation, as it avoids sequential decoding of variable-length codes [S1, unofficial].
+*   **Memory Complexity:** Introduces overhead due to masks and offset arrays. The trade-off is between memory usage and speed efficiency [S1, unofficial].
+*   **Performance:** Achieves a 4:1 compression ratio with 2-bit quantization [S1, unofficial].
+*   **Strengths:** Enables direct rendering without full decompression; efficient bit-wise extraction in C [S1, unofficial].
+*   **Limitations:** Memory overhead from masks and offsets; potential quality loss from quantization [S1, unofficial].
 
 ## Background
-Originated by Westermann [S1, unofficial]. The method addresses the problem that Huffman coding requires full decoding for random access, and run-length coding still requires sequential search [S1, unofficial]. It is used in direct rendering of multiresolution decomposed volume data [S1, unofficial].
+Originated by Westermann [51] as a solution to the problem of random access in compressed wavelet data [S1, unofficial]. The method was proposed to overcome the limitations of Huffman coding, which requires sequential decoding, and run-length coding, which requires sequential search [S1, unofficial]. It is used in direct rendering of multiresolution decomposed volume data [S1, unofficial].
 
 ## Sources
 [S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
