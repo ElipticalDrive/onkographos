@@ -1,110 +1,118 @@
 # B-spline Wavelet Compression
 
-Also called: B-spline Wavelet Preprocessing
+Also called: B-spline FWT, B-spline Wavelet Transform, Fast Wavelet Transform, Matrix-based Wavelet Transform
 
 ## Overview
-B-spline Wavelet Compression is a preprocessing method that decomposes volume data into wavelet coefficients using B-spline basis functions, arranges them by importance, and compresses them via delta encoding, quantization, run-length, and Huffman coding [S1]. It distinguishes itself from other wavelet methods by using B-spline wavelets, which provide better approximation properties and smoother representations compared to standard orthogonal wavelets like Haar or Daubechies, reducing artifacts in the reconstructed volume [S1].
+B-spline Wavelet Compression is a method for decomposing volumetric data into a multi-resolution hierarchy of scaling and wavelet coefficients using B-spline basis functions [S1, unofficial]. It solves the problem of efficiently representing smooth volumetric data by exploiting the linear complexity of the B-spline transform, avoiding the over- and undershoots associated with standard subdivision wavelets [S1, unofficial]. Unlike [L2 Norm Wavelet Compression](3542-l2-norm-wavelet-compression.md) which focuses on error metrics, or [Biorthogonal Wavelet Compression](5381-biorthogonal-wavelet-compression.md) which uses separate primal/dual filters, this method relies on the semi-orthogonality of B-splines, projecting data into dual space for decomposition and solving linear systems for reconstruction [S1, unofficial].
 
 ## How it works
-**Inputs:** 3D volume data $V$.
-**Outputs:** Compressed bitstream.
+**Inputs:** A 1D data vector $\mathbf{c}_m$ of length $N = 2^{M-m} + d$, where $M$ is the maximum decomposition level, $m$ is the current level, and $d$ is the B-spline degree (e.g., $d=3$ for cubic B-splines) [S1, unofficial].
+**Outputs:** Scaling coefficients $\mathbf{c}_{m+1}$ and wavelet (detail) coefficients $\mathbf{d}_{m+1}$ [S1, unofficial].
 
 **Data Structures:**
-1.  **Wavelet Coefficients ($C$):** A set of scalar values representing the volume in the wavelet domain.
-2.  **Positions ($P$):** Metadata storing the spatial location or index of each coefficient in the original volume grid.
-3.  **Importance List:** A sorted list of coefficients ordered by decreasing magnitude or energy, used to prioritize compression or transmission.
+*   $\mathbf{c}_m$: Input coefficient vector.
+*   $\tilde{\mathbf{c}}_m$: Dual-space scaling coefficients.
+*   $\tilde{\mathbf{d}}_m$: Dual-space wavelet coefficients.
+*   $\mathbf{C}_m$: Band-diagonal inner-product matrix for primal-to-dual projection.
+*   $\mathbf{D}_m$: Band-diagonal inner-product matrix for dual-space wavelet normalization.
+*   $\mathbf{P}_{m+1}, \mathbf{Q}_{m+1}$: Primal projection matrices (scaling and detail).
+*   $\mathbf{A}_{m+1}, \mathbf{B}_{m+1}$: Decomposition operators.
 
 **Steps:**
-1.  **Transform:** Apply a 3D B-spline wavelet transform to the input volume $V$. This involves separable 1D B-spline wavelet filters applied along each axis, consistent with the shared principles of [Wavelet and Pyramid Transforms](3856-wavelet-and-pyramid-transforms.md). The result is a set of approximation and detail coefficients.
-2.  **Arrange:** Sort the coefficients $C$ and their corresponding positions $P$ based on decreasing importance (e.g., magnitude). This creates a hierarchy where significant features are preserved first [S1].
-3.  **Delta Encode:** Apply delta encoding to the sorted coefficients. This reduces the dynamic range of the values, making them more suitable for subsequent quantization and entropy coding [S1].
-4.  **Quantize:** Quantize the delta-encoded coefficients. The quantization step is lossy and determines the trade-off between compression ratio and reconstruction fidelity [S1].
-5.  **Run-Length Encode:** Apply run-length encoding to the quantized data to exploit runs of identical values, particularly common after quantization [S1].
-6.  **Huffman Encode:** Apply Huffman coding to the run-length encoded data to produce the final compressed bitstream [S1].
+1.  **Expansion:** Expand the original data vector $\mathbf{c}_m$ by repeating the last data value to yield the required length $N = 2^{M-m} + d$ [S1, unofficial].
+2.  **Dual Space Projection:** Transform the primal coefficients into the dual space using the inner-product matrix $\mathbf{C}_m$:
+    $$ \tilde{\mathbf{c}}_m = \mathbf{C}_m \mathbf{c}_m $$
+    Since $\mathbf{C}_m$ is band-diagonal, this step is $O(N)$ [S1, unofficial].
+3.  **Decomposition:** Apply the transpose of the primal projection matrices to obtain the dual-space coefficients:
+    $$ \tilde{\mathbf{c}}_{m+1} = (\mathbf{P}_{m+1})^T \tilde{\mathbf{c}}_m $$
+    $$ \tilde{\mathbf{d}}_{m+1} = (\mathbf{Q}_{m+1})^T \tilde{\mathbf{c}}_m $$
+    The lengths of $\tilde{\mathbf{c}}_{m+1}$ and $\tilde{\mathbf{d}}_{m+1}$ are $2^{M-m-1}+1$ and $2^{M-m-1}+d$ respectively, allowing space-efficient in-place implementation [S1, unofficial].
+4.  **Recovery of Detail Signals:** Solve for the primal detail coefficients $\mathbf{d}_{m+1}$ by inverting the dual-space normalization:
+    $$ \mathbf{D}_{m+1} \mathbf{d}_{m+1} = \tilde{\mathbf{d}}_{m+1} $$
+    The matrix $\mathbf{D}_{m+1}$ is diagonally dominant and well-conditioned, but its inverse is dense and ill-conditioned. Therefore, brute-force inversion is avoided; instead, an LU-decomposition is used to solve the system in linear time [S1, unofficial].
+5.  **Final Level:** At the final level $M$, compute $\mathbf{c}_M$ in the same fashion as the detail signal at previous levels (solving the linear system) [S1, unofficial].
+
+**Reconstruction:**
+To reconstruct $\mathbf{c}_m$ from $\mathbf{c}_{m+1}$ and $\mathbf{d}_{m+1}$:
+$$ \mathbf{c}_m = \mathbf{P}_{m+1} \mathbf{c}_{m+1} + \mathbf{Q}_{m+1} \mathbf{d}_{m+1} $$
+The backprojection of the pure scaling function subband into primal space must be carried out separately in higher dimensions [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def b_spline_wavelet_compress(volume):
-    # Step 1: Transform
-    # Apply 3D B-spline wavelet transform
-    coefficients = apply_3d_b_spline_wavelet_transform(volume)
+def bspline_decompose_1d(c_m, P, Q, C, D, d_degree):
+    """
+    Decomposes a 1D vector using B-spline wavelets.
+    c_m: input vector of length N = 2^(M-m) + d
+    P, Q: projection matrices for current level
+    C: inner-product matrix for current level
+    D: inner-product matrix for next level (for detail recovery)
+    d_degree: B-spline degree
+    """
+    # Step 1: Expansion (if c_m is shorter than required N)
+    # Note: In a recursive multi-level scheme, this is handled by the input size
+    # N = 2^(M-m) + d_degree
     
-    # Step 2: Arrange by importance
-    # Sort coefficients by magnitude (descending)
-    # Store positions for reconstruction
-    indexed_coeffs = [(abs(c), i, c) for i, c in enumerate(coefficients)]
-    indexed_coeffs.sort(key=lambda x: x[0], reverse=True)
+    # Step 2: Project to dual space
+    # c_mtilde = C @ c_m
+    # Since C is band-diagonal, this is a sparse matrix-vector multiply
     
-    sorted_coeffs = [c for _, _, c in indexed_coeffs]
-    positions = [i for _, i, _ in indexed_coeffs]
+    # Step 3: Apply projection operators
+    # c_m1_tilde = P.T @ c_mtilde
+    # d_m1_tilde = Q.T @ c_mtilde
     
-    # Step 3: Delta Encode
-    # Compute differences between consecutive sorted coefficients
-    delta_encoded = [sorted_coeffs[0]]
-    for i in range(1, len(sorted_coeffs)):
-        delta_encoded.append(sorted_coeffs[i] - sorted_coeffs[i-1])
-        
-    # Step 4: Quantize
-    # Apply quantization (e.g., uniform quantization with step size Q)
-    # Q is a parameter controlling lossiness
-    quantized = [round(d / Q) for d in delta_encoded]
+    # Step 4: Recover primal detail coefficients
+    # Solve D @ d_m1 = d_m1_tilde using LU decomposition
+    # d_m1 = solve(D, d_m1_tilde)
     
-    # Step 5: Run-Length Encode
-    # Compress runs of identical values
-    rle_encoded = []
-    if quantized:
-        current_val = quantized[0]
-        count = 1
-        for val in quantized[1:]:
-            if val == current_val:
-                count += 1
-            else:
-                rle_encoded.append((current_val, count))
-                current_val = val
-                count = 1
-        rle_encoded.append((current_val, count))
-        
-    # Step 6: Huffman Encode
-    # Build Huffman tree based on frequency of (value, count) pairs
-    # and encode the RLE data
-    bitstream = huffman_encode(rle_encoded)
-    
-    return bitstream, positions, Q
+    return c_m1_tilde, d_m1
+
+def bspline_reconstruct_1d(c_m1, d_m1, P, Q):
+    """
+    Reconstructs primal coefficients from scaling and detail coefficients.
+    """
+    # c_m = P @ c_m1 + Q @ d_m1
+    return P @ c_m1 + Q @ d_m1
 ```
 
 **Parameters:**
--   $Q$: Quantization step size. Not given in the sources.
--   B-spline order: Determines the smoothness of the basis functions. Not given in the sources.
+*   $d$: Degree of the B-spline. Typical value: 3 (cubic) [S1, unofficial].
+*   $M$: Maximum decomposition level [S1, unofficial].
 
-**Edge Cases:**
--   **Boundary Effects:** B-spline wavelets may exhibit boundary artifacts if not handled with appropriate extension schemes (e.g., symmetric extension). Not given in the sources.
--   **Precision:** Delta encoding can amplify quantization errors if not carefully managed. Not given in the sources.
+**Edge Cases and Pitfalls:**
+*   **Ill-conditioned Inverse:** The inverse of $\mathbf{D}_{m+1}$ is dense and ill-conditioned. Direct inversion must not be used [S1, unofficial].
+*   **Non-compact Support:** Dual functions of B-spline basis do not have compact support (only fast exponential decay). Standard decomposition operators are not band matrices, requiring the modified dual-space scheme [S1, unofficial].
+*   **Boundary Conditions:** The data vector must be expanded by repeating the last value to satisfy the length requirement $2^{M-m} + d$ [S1, unofficial].
 
 ## Subtopics
 
 ### [B-spline Wavelet Lifting Scheme](7585-b-spline-wavelet-lifting-scheme.md)
-A method to generate best approximations in a multiresolution hierarchy using B-spline wavelets, avoiding the over- and undershoots (and resulting topological changes in isosurfaces) caused by standard subdivision wavelets. It is chosen when topological correctness of isosurfaces is critical. Link: [B-spline Wavelet Lifting Scheme](7585-b-spline-wavelet-lifting-scheme.md).
+A method to generate best approximations in a multiresolution hierarchy using B-spline wavelets, avoiding the over- and undershoots (and resulting topological changes in isosurfaces) caused by standard subdivision wavelets. It sets itself apart from standard subdivision wavelets by using B-spline lifting to avoid over- and undershoots, and specifically addresses the data sparsity where values at "blue" positions are not directly available during the wavelet detail calculation, requiring linear interpolation from black vertices. See [B-spline Wavelet Lifting Scheme](7585-b-spline-wavelet-lifting-scheme.md).
 
 ### [Progressive Compression System](7668-progressive-compression-system.md)
-A compression system constructing a progressive bit stream from a hierarchy of subdivision wavelets, optimized for coarse to fine reconstruction. It is chosen when progressive transmission or rendering is required. Link: [Progressive Compression System](7668-progressive-compression-system.md).
+The Progressive Compression System is a method for compressing volumetric subdivision meshes by constructing a progressive bit stream optimized for coarse-to-fine reconstruction. It solves the problem of efficiently storing and transmitting 3D mesh geometry by exploiting the decay behavior of wavelet coefficients across spatial scales. Unlike zerotree algorithms that rely on a rigorous theoretical framework for parent-child relationships, this system applies Set Partitioning in Hierarchical Trees (SPIHT) using intuitive spatial relationships analogous to image coding trees. It builds on [B-spline Wavelet Compression](5377-b-spline-wavelet-compression.md) by replacing its fixed Huffman/RLE backend with the SPIHT coder to enable progressive refinement. See [Progressive Compression System](7668-progressive-compression-system.md).
 
 ### Wavelet-GS
-A compression method that compresses the SH (Spherical Harmonic) coefficients of each Gaussian using a wavelet decomposition, discarding high-frequency components that are not visible at typical viewing distances. It is applied in 3D Gaussian Splatting to reduce memory footprint while maintaining visual quality at standard viewing distances. Link: [Wavelet-GS](7585-b-spline-wavelet-lifting-scheme.md) (Note: No dedicated article exists, so linked to parent or sibling if applicable; however, the prompt asks for children. Wavelet-GS is a minor variant, not a child article. The prompt says "Minor variants (they have no article of their own: write each one under Subtopics as a '### <Name>' entry carrying ALL of its details below, cited; it may be a short paragraph)". So it goes here.)
+A compression method that compresses the SH coefficients of each Gaussian using a wavelet decomposition, discarding high-frequency components that are not visible at typical viewing distances [S3, unofficial].
+
+### 2D Wavelet Decomposition
+Adaptation of the 1D decomposition scheme to higher dimensions, handling mixed bands comprising both primal and dual coefficients. It performs single iteration steps involving operators $L^*, H^*, L^{-1}, H^{-1}$ to separate scaling and wavelet subbands, and carries out the backprojection of the pure scaling function subband into primal space separately [S1, unofficial]. Overall complexity is $O(N)$ [S1, unofficial].
+
+### Nonstandard 2D Wavelet Decomposition
+A multi-dimensional extension strategy where 1D transforms are alternated between rows and columns at each resolution level, avoiding mixed-resolution basis functions. It extracts detail coefficients $d^{type}_{mpq}$ for type 1, 2, 3 and scaling coefficients $c_{mpq}$. The 2D Basis functions are defined as $\phi^2_{mpq}(x,y) = \phi_{mp}(x)\phi_{mq}(y)$, $\psi^{2,1}_{mpq} = \psi_{mp}\phi_{mq}$, $\psi^{2,2}_{mpq} = \phi_{mp}\psi_{mq}$, $\psi^{2,3}_{mpq} = \psi_{mp}\psi_{mq}$ [S1, unofficial]. It differs from Standard Decomposition (row-then-column) by providing direct control of resolution level $m$, having square support for all basis functions, and being more efficient [S1, unofficial].
 
 ## Operating characteristics
--   **Time Complexity:** Dominated by the 3D wavelet transform and the sorting step. The transform is $O(N)$ where $N$ is the number of voxels. Sorting is $O(N \log N)$.
--   **Memory Complexity:** Requires storage for coefficients, positions, and intermediate buffers during transform. Not given in the sources.
--   **Measured Performance:** Not given in the sources.
--   **Strengths:** Smooth representation, good approximation properties, effective compression via delta and entropy coding.
--   **Limitations:** Requires preprocessing, may introduce artifacts if quantization is too aggressive.
--   **When to use:** When smooth volume representation is needed and compression is required.
--   **When not to use:** When real-time compression is needed or when topological accuracy is critical without lifting schemes.
+*   **Time Complexity:** $O(N)$, where $N$ is the length of the data vector [S1, unofficial].
+*   **Memory Complexity:** Space-efficient in-place implementation is possible because the total length of the decomposition vectors equals the length of the original vector [S1, unofficial].
+*   **Performance:** Full decomposition and reconstruction of a 1D data vector requires 30.25 multiplications per data value [S1, unofficial].
+*   **Strengths:** Linear complexity construction, which is not guaranteed for general bi- or semi-orthogonal wavelets [S1, unofficial]. Avoids over/undershoots of standard subdivision wavelets [S1, unofficial].
+*   **Limitations:** Dual functions lack compact support, requiring the modified dual-space projection scheme [S1, unofficial]. The inverse of the detail normalization matrix is ill-conditioned, requiring LU decomposition [S1, unofficial].
 
 ## Background
-The method was proposed by Lippert et al. [LGK97] as a preprocessing step for compressed GPU-based direct volume rendering [S1]. It builds on the principles of wavelet transforms and applies them specifically with B-spline bases to improve approximation quality.
+Originated in the context of multiresolution representation and compression of surfaces and volumes, specifically detailed in the thesis "Multiresolution representation and compression of surfaces and volumes" [S1, unofficial]. It is used in volume rendering compression pipelines, often combined with delta encoding, quantization, run-length, and Huffman coding [S2]. It is also applied in modern Gaussian Splatting compression (Wavelet-GS) to compress spherical harmonic coefficients [S3, unofficial].
 
 ## Sources
-[S1] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
-[S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
+[S1] Multiresolution representation and compression of surfaces and volumes, https://doi.org/10.3929/ethz-a-004086690, fetched 2026-10-26 (unofficial)
+[S2] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S3] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

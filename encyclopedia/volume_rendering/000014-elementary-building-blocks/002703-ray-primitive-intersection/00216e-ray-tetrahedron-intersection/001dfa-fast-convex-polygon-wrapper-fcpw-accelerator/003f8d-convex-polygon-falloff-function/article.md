@@ -1,0 +1,125 @@
+# Convex Polygon Falloff Function
+
+Also called: Convex Polygon Distance Falloff, Falloff Function g
+
+## Overview
+The Convex Polygon Falloff Function computes a scalar occlusion weight for a point in space based on its distance from a convex polygon $P$. It solves the problem of defining a smooth, monotonic falloff from a surface (mapping distance 0 to weight 1, and distance $\delta$ to weight 0) for arbitrary convex polygons, not just triangles. It sets itself apart from sibling methods by using a product of linear clamped terms defined by edge and face normals, enabling efficient rasterization of the ambient occlusion volume (AOV) via the [Fast Convex Polygon Wrapper (FCPW) Accelerator](1664-fast-convex-polygon-wrapper-fcpw-accelerator.md).
+
+## How it works
+**Inputs:**
+- Polygon vertices $\{\vec{p}_0, \dots, \vec{p}_{k-1}\}$, where no three vertices are collinear.
+- Falloff distance parameter $\delta > 0$.
+- Surface type flag $\bar{\alpha}$ (1 for solid surfaces).
+
+**Outputs:**
+- Scalar falloff value $g(\vec{x}) \in [0, 1]$ for a query point $\vec{x}$.
+
+**Data Structures:**
+- Edge normals $\hat{m}_i$ for $i \in \{0, \dots, k-1\}$.
+- Face normal $\hat{m}_k$.
+- These are precomputed vectors stored in memory.
+
+**Steps:**
+1. Compute the negative face normal $\hat{m}_k$ using the first three vertices $\vec{p}_0, \vec{p}_1, \vec{p}_2$:
+   $$ \hat{m}_k = S((\vec{p}_2 - \vec{p}_0) \times (\vec{p}_1 - \vec{p}_0)) $$
+   where $S(\vec{v}) = \vec{v} / \|\vec{v}\|$ is the normalization function.
+2. Compute the inward-facing edge normals $\hat{m}_i$ for each edge $i \in \{0, \dots, k-1\}$:
+   $$ \hat{m}_i = S\left((\vec{p}_{(i+1) \bmod k} - \vec{p}_i) \times \hat{m}_k\right) $$
+3. Evaluate the falloff function $g(\vec{x})$ for a point $\vec{x}$:
+   $$ g(\vec{x}) = \bar{\alpha} \prod_{i=0}^k \max(0, \min(1, (\vec{x} - \vec{p}_{i \bmod k}) \cdot \hat{m}_i / \delta + 1)) $$
+   Note: The product index $i$ runs from $0$ to $k$. The term for $i=k$ uses $\hat{m}_k$ and vertex $\vec{p}_{k \bmod k} = \vec{p}_0$.
+
+**Parameters:**
+- $\delta$: The distance at which the falloff reaches 0. Typical values depend on scene scale and desired occlusion softness. Not given in the sources.
+- $\bar{\alpha}$: Set to 1 for solid surfaces.
+
+**Edge Cases and Pitfalls:**
+- **Collinear Vertices:** The method assumes no three vertices are collinear. Degenerate polygons may produce zero-length normals, causing division by zero during normalization. [G] Implementers should check for zero-length cross products and skip or handle degenerate edges.
+- **Precision:** The clamping $\max(0, \min(1, \dots))$ ensures numerical stability but may introduce artifacts if $\delta$ is very small relative to vertex precision.
+- **Vertex Indexing:** The formula uses $i \bmod k$ for vertex indexing in the product. For $i=k$, this refers to $\vec{p}_0$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_falloff(p_vertices, delta, x, alpha=1.0):
+    """
+    Compute convex polygon falloff for point x.
+    p_vertices: list of k 3D vectors (p_0, ..., p_{k-1})
+    delta: falloff distance parameter
+    x: query 3D vector
+    alpha: surface alpha (1.0 for solid)
+    """
+    k = len(p_vertices)
+    
+    # Step 1: Compute negative face normal m_k
+    # Use first three vertices p_0, p_1, p_2
+    v0 = p_vertices[0]
+    v1 = p_vertices[1]
+    v2 = p_vertices[2]
+    
+    edge1 = v1 - v0
+    edge2 = v2 - v0
+    cross_face = cross(edge2, edge1) # (p_2 - p_0) x (p_1 - p_0)
+    
+    norm_face = length(cross_face)
+    if norm_face < 1e-10:
+        return 0.0 # Degenerate polygon
+    
+    m_k = cross_face / norm_face
+    
+    # Step 2: Compute edge normals m_i for i in 0..k-1
+    m_edge = []
+    for i in range(k):
+        p_i = p_vertices[i]
+        p_next = p_vertices[(i + 1) % k]
+        edge_vec = p_next - p_i
+        cross_edge = cross(edge_vec, m_k)
+        
+        norm_edge = length(cross_edge)
+        if norm_edge < 1e-10:
+            return 0.0 # Degenerate edge
+            
+        m_i = cross_edge / norm_edge
+        m_edge.append(m_i)
+        
+    # Step 3: Evaluate falloff function
+    result = alpha
+    for i in range(k + 1):
+        # Vertex index: i mod k
+        p_idx = p_vertices[i % k]
+        
+        # Normal index: i (0..k-1 are edge normals, k is face normal)
+        if i < k:
+            m_i = m_edge[i]
+        else:
+            m_i = m_k
+            
+        diff = x - p_idx
+        dot_val = dot(diff, m_i) / delta + 1.0
+        
+        # Clamp to [0, 1]
+        clamped = max(0.0, min(1.0, dot_val))
+        result *= clamped
+        
+    return result
+```
+
+## Subtopics
+
+### [Bounding Volume {B}](10055-bounding-volume-b.md)
+The Bounding Volume {B} defines the spatial extent of the ambient occlusion volume (AOV) generated by a convex polygon $P$ using the Convex Polygon Falloff Function. It solves the problem of efficiently rasterizing the region where occlusion is non-zero by constructing a closed polyhedron $V$ bounded by $k+2$ planes. It sets itself apart from sibling methods by explicitly computing the displacement vectors required to extrude the polygon's vertices into a 3D volume suitable for depth-buffer-based occlusion queries.
+
+## Operating characteristics
+- **Time Complexity:** $O(k)$ per query point, where $k$ is the number of vertices.
+- **Memory Complexity:** $O(k)$ to store precomputed normals.
+- **Strengths:** Efficient evaluation; works for any convex polygon, not just triangles; monotonic falloff.
+- **Limitations:** Requires precomputation of normals; degenerate polygons cause issues.
+- **When to use:** When generating ambient occlusion volumes for convex polygonal occluders in real-time rendering.
+- **When not to use:** For non-convex polygons or when higher-order falloff functions are required.
+
+## Background
+The Convex Polygon Falloff Function was introduced by Matt McGuire in the paper "Ambient Occlusion Volumes" [S1, unofficial]. It is part of the AOV framework for real-time ambient occlusion, allowing static and dynamic geometry to correctly occlude each other. The method is designed for efficiency on GPUs, leveraging the fact that the falloff function can be rasterized as a volume.
+
+## Sources
+[S1] Ambient Occlusion Volumes, https://research.nvidia.com/sites/default/files/pubs/2010-06_Ambient-Occlusion-Volumes/McGuire10AOV.pdf, fetched 2026-10-28 (unofficial)

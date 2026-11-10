@@ -3,48 +3,49 @@
 Also called: NeRF Region Proposal Network
 
 ## Overview
-NeRF-RPN is a 3D object detection framework that utilizes a multi-scale Object-NeRF architecture to regress 3D axis-aligned bounding boxes (AABB) and classify objects directly from the neural radiance field representation [S1]. It distinguishes itself from standard NeRF variants by enabling 3D bounding box regression without requiring rendering from any viewpoint, and it serves as a general framework capable of detecting objects even when no class labels are provided during training [S1].
+NeRF-RPN is a framework for 3D object detection and instance segmentation that utilizes a multi-scale Object-NeRF architecture to encode scene geometry and appearance [S1]. It distinguishes itself from standard NeRFs by regressing 3D bounding boxes and class labels directly from the neural volume features without requiring rendering from multiple viewpoints [S1]. It serves as the foundational proposal mechanism for downstream instance segmentation models like NeRF-RCNN [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** A set of training images with corresponding camera poses. The model does not require 3D bounding box annotations for detection, nor does it require semantic labels for the general detection task [S1].
-*   **Outputs:** 3D Axis-Aligned Bounding Boxes (AABB) for detected objects, class labels (if applicable), and discrete 3D masks [S1].
+The method takes a set of camera poses and corresponding images as input. It outputs a set of 3D Axis-Aligned Bounding Boxes (AABB), class labels, and discrete 3D masks for detected objects [S1].
 
 **Data Structures:**
-The core data structure is the **Object-NeRF**, which consists of two coupled branches:
-1.  **Scene Branch:** Encodes the global geometry and appearance of the scene. It uses a voxel representation of 3D neural volume features [S1].
-2.  **Object Branch:** Encodes each independent object within the scene. It is designed to generate a dedicated NeRF representation for objects without sharing global parameters with the scene branch [S1].
+The core data structure is a multi-scale Object-NeRF representation [S1]. This consists of two coupled branches:
+1.  **Scene Branch:** Encodes the global geometry and appearance of the scene using a voxel representation of 3D neural volume features [S1].
+2.  **Object Branch:** Encodes each independent object within the scene [S1].
 
 **Method Steps:**
-1.  **Voxel Feature Encoding:** The scene branch constructs a voxel grid representing 3D neural volume features. This explicit representation allows for efficient querying of geometry and appearance [S1].
-2.  **Object Branch Encoding:** For each candidate object region, the object branch encodes the specific object's radiance field. This branch operates independently of the global scene parameters [S1].
-3.  **3D Bounding Box Regression:** The model regresses 3D AABBs directly from the learned neural volume features. This process does not involve rendering intermediate views to estimate depth or boundaries [S1].
-4.  **Classification and Masking:** Learnable object activation codes are used to classify target entities within the scene. These codes support logical operations such as copying, moving, or rotating the identified objects [S1].
-5.  **Rendering (Optional for Detection):** While the primary output is detection, the underlying NeRF structure supports standard volumetric rendering for novel view synthesis if required [S1].
-
-**Formulas:**
-The specific mathematical formulation for the voxel feature aggregation or the bounding box regression loss is not provided in the sources [S1]. The general radiance field function $F_\Theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\sigma, \mathbf{c})$ applies to the underlying NeRF components [Parent].
+1.  **Feature Extraction:** The scene branch processes the input data to generate a voxel-based neural volume feature representation [S1].
+2.  **Proposal Generation:** The Object-NeRF architecture is used to regress 3D bounding boxes directly from these features [S1]. This process does not involve rendering the scene from any viewpoint [S1].
+3.  **Classification:** The framework supports classification of target entities using learnable object activation codes [S1].
+4.  **Refinement (via NeRF-RCNN):** While NeRF-RPN generates proposals, the NeRF-RCNN extension appends box and mask prediction heads to refine these proposals into final instance masks and bounding boxes [S1].
 
 **Parameters:**
-*   **Multi-scale:** The architecture employs a multi-scale approach, though the specific scales are not defined in the sources [S1].
-*   **Learnable Activation Codes:** Used for classification and manipulation [S1].
+*   **Architecture:** Multi-scale Object-NeRF [S1].
+*   **Capabilities:** Supports copy, move, or rotation of objects; does not support arbitrary deformation [S1].
+*   **Generality:** The framework is general and can detect objects without class labels [S1].
 
-**Edge Cases and Pitfalls:**
-*   The method is noted to support only copy, move, or rotate operations for object editing, limiting complex deformation capabilities [S1].
-*   As a general framework, it can detect unlabelled objects, but specific performance characteristics on cluttered scenes are not detailed [S1].
+**Pitfalls:**
+*   The method relies on the quality of the voxel representation for accurate bounding box regression [S1].
+*   It is limited to rigid transformations (copy, move, rotate) and cannot handle non-rigid deformations [S1].
 
 ## Subtopics
 
 ### [NeRF-RCNN](10610-nerf-rcnn.md)
-An extension of NeRF-RPN that appends box and mask prediction heads to refine proposals into final 3D instance masks and bounding boxes, providing instance-level segmentation unlike the general detection of NeRF-RPN.
+NeRF-RCNN is a proposal-based 3D instance segmentation model that extends NeRF-RPN. It takes the proposals generated by NeRF-RPN and refines them into final instances by appending a box prediction head and a mask prediction head. Unlike Semantic-NeRF, which lacks instance-level information, NeRF-RCNN outputs discrete instance masks and bounding boxes.
+
+### NeRF-MAE Pretraining Architecture
+NeRF-MAE utilizes the Swin-S Transformer backbone and the anchor-free RPN head architecture from NeRF-RPN for fair comparison in downstream tasks [S2]. It employs a masked autoencoder objective for self-supervised pretraining on diverse scenes [S2].
 
 ## Operating characteristics
-*   **Strengths:** Enables 3D bounding box regression without viewpoint rendering; supports general object detection without class labels; provides dedicated object representations [S1].
-*   **Limitations:** Editing capabilities are restricted to rigid transformations (copy, move, rotate); specific computational complexity and memory usage metrics are not provided in the sources [S1].
-*   **Performance:** Not given in the sources.
+*   **Complexity:** Not given in the sources.
+*   **Performance:** Not given in the sources for the base NeRF-RPN model. NeRF-MAE (based on NeRF-RPN) achieves higher AP50 on ScanNet and Front3D compared to the baseline NeRF-RPN [S2].
+*   **Strengths:** Direct regression of 3D boxes without rendering; general framework for unlabeled objects [S1].
+*   **Limitations:** Limited to rigid object transformations; requires voxel representation [S1].
 
 ## Background
-NeRF-RPN was proposed by Hu et al. in 2023 [S1]. It was developed to address the need for detecting all object boundaries in a scene, leveraging the explicit 3D model capabilities of neural radiance fields for tasks such as semantic segmentation and object detection [S1].
+NeRF-RPN was proposed by Hu et al. in 2023 [S1]. It was developed to enable 3D object detection and instance segmentation within neural radiance fields, addressing the need for bounding box regression without multi-view rendering [S1]. It builds on the general NeRF framework but introduces a multi-scale Object-NeRF structure [S1].
 
 ## Sources
 [S1] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31
+[S2] NeRF-MAE: Masked AutoEncoders for Self-Supervised 3D Representation Learning for Neural Radiance Fields, https://arxiv.org/abs/2404.01300v3, fetched 2026-10-26

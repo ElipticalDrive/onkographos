@@ -1,83 +1,148 @@
 # Point Cloud Voxelization Visualization
 
-Also called: PCL Voxelization Viewer, Voxel Grid Rendering
+Also called: PCL VoxelGrid, PCL Voxelization Viewer, Voxel Grid Filtering and Visualization, Voxel Grid Rendering, Voxelization via PCL
 
 ## Overview
-This method provides a visualization pipeline for voxelized point clouds using the Point Cloud Library (PCL), supporting axis-aligned or custom bounding boxes with three distinct rendering modes [S1, unofficial]. It builds on [Hard Voxelization](5345-hard-voxelization.md) by adding geometric rendering of the resulting voxel grid structure, distinguishing itself from siblings by offering specific visual representations (point cloud, solid cubes, wireframe cubes) rather than just data generation [S1, unofficial].
+This method visualizes the occupancy of a point cloud after voxelization using the Point Cloud Library (PCL) [S1, S2, unofficial]. It supports axis-aligned bounding boxes (AABB) or custom fixed-resolution grids, and offers three rendering modes: point cloud coloring, solid cubes, or wireframe cubes [S1, unofficial]. It differs from standard hard voxelization by focusing on the visual representation of voxel centers and occupancy rather than producing a dense tensor for deep learning [S1, S2, unofficial].
 
 ## How it works
 **Inputs:**
-- `cloud`: Input point cloud data (typically `pcl::PointXYZ` or similar structure with `x, y, z` fields) [S1, unofficial].
-- `voxelSize`: Scalar float representing the side length of each voxel grid cell [S1, unofficial].
-- `box_mode`: String, either `"AABB"` (computed from min/max points) or `"CUSTOM"` (fixed resolution) [S1, unofficial].
-- `rendering_mode`: String, either `"A"`, `"B"`, or `"C"` [S1, unofficial].
-- `bound_min`, `bound_max`: Bounding box coordinates (required if `box_mode` is `"CUSTOM"`) [S1, unofficial].
+- `cloud`: Input point cloud (e.g., from a PCD file) [S2, unofficial].
+- `voxelSize`: Side length of the voxel grid cell [S1, S2, unofficial].
+- `box_mode`: "AABB" (computed from min/max points) or "CUSTOM" (fixed resolution) [S1, unofficial].
+- `rendering_mode`: "A" (points only), "B" (solid cubes), or "C" (wireframe cubes + points) [S1, unofficial].
 
 **Outputs:**
-- A visualizer window displaying the point cloud and/or voxel cubes [S1, unofficial].
-- Optional text file output containing space index arrays and statistics [S1, unofficial].
+- Visualizer window displaying the selected rendering mode [S1, S2, unofficial].
 
 **Data Structures:**
-- `center_cloud`: A vector of `point_XYZ` structures, where each element contains `point_X`, `point_Y`, and `point_Z` representing the center coordinates of occupied voxels [S1, unofficial].
-- `space_Index`: A 3D array (e.g., `128x192x128`) storing occupancy information [S1, unofficial].
+- `center_cloud`: Array of points with fields `point_X`, `point_Y`, `point_Z` representing the center coordinates of occupied voxels [S1, unofficial].
+- `cloud_filtered`: Downsampled point cloud resulting from the VoxelGrid filter [S2, unofficial].
 
 **Steps:**
-1. **Voxelization (Pre-processing):**
-   - Apply PCL's `VoxelGrid` filter to downsample the input `cloud` using `voxelSize` [S1, unofficial].
-   - Compute the center of each occupied voxel. For a group of points mapped to the same voxel, the center is the arithmetic mean of their coordinates:
+1. Load the point cloud data from a PCD file into `cloud` [S2, unofficial].
+2. Create a VoxelGrid filter object `sor` [S2, unofficial].
+3. Set the input cloud to `sor` [S2, unofficial].
+4. Set the leaf size (voxel size) to `voxelSize` [S2, unofficial].
+5. Execute the filter to produce `cloud_filtered` [S2, unofficial].
+6. Compute voxel centers for visualization:
+   - For each point $p = (x, y, z)$ in the filtered cloud (or original cloud for Mode A/C in CUSTOM mode):
      $$
-     \text{center}_X = \frac{\sum x_i}{N}, \quad \text{center}_Y = \frac{\sum y_i}{N}, \quad \text{center}_Z = \frac{\sum z_i}{N}
+     c_x = \left\lfloor \frac{x}{v} \right\rfloor \cdot v + \frac{v}{2}
      $$
-     where $N$ is the number of points in the voxel [S1, unofficial].
-   - Store these centers in `center_cloud` [S1, unofficial].
-
-2. **Bounding Box Setup:**
-   - If `box_mode` is `"AABB"`: Compute `min_point_AABB` and `max_point_AABB` from the input cloud's extent [S1, unofficial].
-   - If `box_mode` is `"CUSTOM"`: Use predefined `bound_min` and `bound_max` (e.g., corresponding to a fixed 128x192x128 resolution) [S1, unofficial].
-   - Add the bounding box wireframe to the viewer using `addCube` with the calculated min/max coordinates [S1, unofficial].
-   - Set the bounding box rendering property to wireframe: `PCL_VISUALIZER_REPRESENTATION_WIREFRAME` [S1, unofficial].
-
-3. **Rendering Mode Execution:**
-   - **Mode A (Point Cloud):**
-     - Color the original (or filtered) point cloud by the Z-axis field using `PointCloudColorHandlerGenericField` [S1, unofficial].
-     - Add the colored point cloud to the viewer [S1, unofficial].
-   - **Mode B (Solid Cubes):**
-     - Iterate through the `center_cloud` (if CUSTOM) or filtered points (if AABB) [S1, unofficial].
-     - Compute the voxel center for each point using the formula:
-       $$
-       c_x = \left\lfloor \frac{x}{v} \right\rfloor \cdot v + \frac{v}{2}, \quad
-       c_y = \left\lfloor \frac{y}{v} \right\rfloor \cdot v + \frac{v}{2}, \quad
-       c_z = \left\lfloor \frac{z}{v} \right\rfloor \cdot v + \frac{v}{2}
-       $$
-       where $v$ is `voxelSize` [S1, unofficial].
-     - Add a solid cube at each center using `addCube` with identity rotation [S1, unofficial].
-   - **Mode C (Wireframe Cubes + Point Cloud):**
-     - Perform all steps from Mode A (add Z-colored point cloud) [S1, unofficial].
-     - Perform all steps from Mode B (add cubes) [S1, unofficial].
-     - For each added cube, set the rendering property to wireframe: `PCL_VISUALIZER_REPRESENTATION_WIREFRAME` [S1, unofficial].
-
-4. **Main Loop:**
-   - Spin the viewer once per iteration with a 100ms sleep to keep the window responsive [S1, unofficial].
+     $$
+     c_y = \left\lfloor \frac{y}{v} \right\rfloor \cdot v + \frac{v}{2}
+     $$
+     $$
+     c_z = \left\lfloor \frac{z}{v} \right\rfloor \cdot v + \frac{v}{2}
+     $$
+     where $v$ is `voxelSize` [S1, S2, unofficial].
+   - Store these centers in `center_cloud` if using CUSTOM mode [S1, unofficial].
+7. Initialize a PCL Visualizer and set the background color (e.g., white or black) [S1, S2, unofficial].
+8. Add the bounding box wireframe:
+   - If `box_mode` is "AABB", compute min/max points and add a cube wireframe [S1, unofficial].
+   - If `box_mode` is "CUSTOM", add a fixed-size cube wireframe [S1, unofficial].
+   - Set the rendering property to wireframe [S1, unofficial].
+9. Render based on `rendering_mode`:
+   - **Mode A**: Color the point cloud by the Z-axis field and add it to the viewer [S1, S2, unofficial].
+   - **Mode B**: Iterate through `cloud_filtered` (or `center_cloud` for CUSTOM), compute voxel centers, and add solid cubes at each center [S1, S2, unofficial].
+   - **Mode C**: Combine Mode A and Mode B, adding wireframe rendering to each individual cube [S1, S2, unofficial].
+10. Spin the viewer in a loop with a sleep interval (e.g., 100ms) [S1, unofficial].
 
 **Parameters:**
-- `voxelSize`: Typical value for hairstyle point data is between 0.011 and 0.016 [S1, unofficial].
-- `BOX_MODE`: `"AABB"` or `"CUSTOM"` [S1, unofficial].
-- `RENDERING_MODE`: `"A"`, `"B"`, or `"C"` [S1, unofficial].
+- `voxelSize`: Typical value for hairstyle point data is between 0.011 and 0.016 [S1, unofficial]. In some examples, it is set to 3 (with a comment suggesting 0.01) [S2, unofficial].
+- `BOX_MODE`: "AABB" or "CUSTOM" [S1, unofficial].
+- `RENDERING_MODE`: "A", "B", or "C" [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - Invalid `BOX_MODE` or `RENDERING_MODE` values cause immediate program termination with an error message [S1, unofficial].
-- The method assumes the input cloud is compatible with PCL's `VoxelGrid` filter [S1, unofficial].
+- The code visualizes a cube for *every* point in the filtered cloud, even if multiple points map to the same voxel center, resulting in overlapping cubes rather than a single representative cube per unique voxel [S2, unofficial].
+- Precision issues may arise if `voxelSize` is not consistent between the filter and the visualization calculation [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def visualize_voxelization(cloud, voxel_size, box_mode, rendering_mode):
+    """
+    cloud: list of [x, y, z] points
+    voxel_size: float
+    box_mode: str ("AABB" or "CUSTOM")
+    rendering_mode: str ("A", "B", or "C")
+    """
+    if rendering_mode not in ["A", "B", "C"]:
+        raise ValueError("Invalid rendering mode")
+    if box_mode not in ["AABB", "CUSTOM"]:
+        raise ValueError("Invalid box mode")
+
+    # Step 1: Filter cloud (simplified)
+    # In practice, use PCL's VoxelGrid filter
+    cloud_filtered = filter_voxel_grid(cloud, voxel_size)
+
+    # Step 2: Compute voxel centers
+    centers = []
+    for p in cloud_filtered:
+        x, y, z = p
+        cx = math.floor(x / voxel_size) * voxel_size + voxel_size / 2
+        cy = math.floor(y / voxel_size) * voxel_size + voxel_size / 2
+        cz = math.floor(z / voxel_size) * voxel_size + voxel_size / 2
+        centers.append([cx, cy, cz])
+
+    # Step 3: Initialize viewer
+    viewer = PCLVisualizer()
+    viewer.set_background_color(255, 255, 255) # White
+
+    # Step 4: Add bounding box
+    if box_mode == "AABB":
+        min_pt = np.min(cloud, axis=0)
+        max_pt = np.max(cloud, axis=0)
+        viewer.add_cube_wireframe(min_pt, max_pt)
+    else: # CUSTOM
+        # Assume fixed bounds for CUSTOM mode
+        viewer.add_cube_wireframe([-64, -96, -64], [64, 96, 64]) # Example dimensions
+
+    # Step 5: Render
+    if rendering_mode == "A":
+        # Color by Z-axis
+        viewer.add_point_cloud(cloud_filtered, color_field="z")
+    elif rendering_mode == "B":
+        # Solid cubes
+        for center in centers:
+            viewer.add_cube(center, voxel_size, voxel_size, voxel_size, solid=True)
+    elif rendering_mode == "C":
+        # Wireframe cubes + points
+        viewer.add_point_cloud(cloud_filtered, color_field="z")
+        for center in centers:
+            viewer.add_cube(center, voxel_size, voxel_size, voxel_size, solid=False)
+
+    # Step 6: Spin
+    while not viewer.wasStopped():
+        viewer.spin_once(100)
+```
+
+## Subtopics
+
+### [Multiscale Hard Voxelization](3319-multiscale-hard-voxelization.md)
+Uses multiple voxel sizes for hierarchical representation. Choose when scene complexity varies significantly.
+
+### [Hard Voxelization (Deterministic)](3321-hard-voxelization-deterministic.md)
+Ensures reproducible voxel assignment. Choose when deterministic output is critical for training.
 
 ## Operating characteristics
-- **Time Complexity:** Dominated by the PCL `VoxelGrid` filter and the iteration over points for rendering. The complexity is linear with respect to the number of points $N$ for filtering and rendering [S1, unofficial].
-- **Memory Complexity:** Requires storage for the filtered cloud, `center_cloud`, and potentially the `space_Index` array (e.g., $128 \times 192 \times 128$ integers) [S1, unofficial].
-- **Strengths:** Simple integration with PCL; provides immediate visual feedback on voxel occupancy and bounding box constraints [S1, unofficial].
-- **Limitations:** Tightly coupled to PCL's visualization API; not suitable for real-time high-performance rendering pipelines outside of PCL [S1, unofficial].
-- **When to use:** PCL-based point cloud processing pipelines for visualizing voxel grid occupancy [S1, unofficial].
-- **When not to use:** When high-performance, GPU-accelerated rendering is required, or when using non-PCL frameworks [S1, unofficial].
+- **Time Complexity:** Linear with respect to the number of points $N$ for filtering and center calculation [S1, S2, unofficial].
+- **Memory Complexity:** Linear with respect to $N$ for storing filtered points and centers [S1, S2, unofficial].
+- **Performance:** Visualization speed depends on the number of cubes rendered; overlapping cubes in Mode B/C can reduce performance [S2, unofficial].
+- **Strengths:** Simple, intuitive visualization of voxel occupancy; supports multiple rendering styles [S1, S2, unofficial].
+- **Limitations:** Does not deduplicate voxel centers, leading to redundant rendering; limited to PCL-based pipelines [S1, S2, unofficial].
+- **When to use:** For debugging voxelization parameters or visualizing point cloud density [S1, S2, unofficial].
+- **When not to use:** When efficient tensor generation for deep learning is required; use [Hard Voxelization](5345-hard-voxelization.md) instead.
 
 ## Background
-This method originates from an unofficial GitHub repository `ericmaic/Point-Cloud-Voxelization` [S1, unofficial]. It is used in PCL-based point cloud processing pipelines for visualizing voxel grid occupancy and bounding box constraints [S1, unofficial]. The code demonstrates a practical application of hard voxelization for visualization purposes, specifically highlighting the difference between axis-aligned and custom bounding boxes [S1, unofficial].
+Originating from the Point Cloud Library (PCL), this visualization method is commonly used in robotics and 3D perception pipelines [S1, S2, unofficial]. It leverages PCL's `VoxelGrid` filter for downsampling and `PCLVisualizer` for rendering [S1, S2, unofficial]. The method is often cited in unofficial repositories for educational purposes [S1, S2, unofficial].
 
 ## Sources
 [S1] ericmaic/Point-Cloud-Voxelization, https://github.com/ericmaic/Point-Cloud-Voxelization, fetched 2026-10-27 (unofficial)
+[S2] jsLi1/Voxelization, https://github.com/jsLi1/Voxelization, fetched 2026-10-27 (unofficial)

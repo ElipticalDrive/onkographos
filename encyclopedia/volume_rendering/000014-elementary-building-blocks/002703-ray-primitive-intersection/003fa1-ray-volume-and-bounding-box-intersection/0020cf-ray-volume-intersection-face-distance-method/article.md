@@ -3,99 +3,130 @@
 Also called: Six-face intersection check, Volume::intersect
 
 ## Overview
-The Ray-Volume Intersection (Face Distance Method) is a two-step procedure to determine if a viewing ray intersects the data volume and to find the entry point for volume traversal [S1, unofficial]. It calculates distances from the ray origin to each of the six faces of the volume geometry, divides by the corresponding ray direction component, and selects the smallest valid distance as the nearest impact point [S1, unofficial].
+This method determines if a viewing ray intersects the bounding volume of a dataset and calculates the entry point for subsequent volume traversal [S1, unofficial][S2, unofficial]. It serves as the initial geometric culling step in ray casting, ensuring that rays missing the data volume are discarded before expensive sampling occurs [S1, unofficial]. Unlike [Ray-box intersection](776-ray-box-intersection.md), which typically uses slab-based interval intersection for axis-aligned bounding boxes, this method explicitly computes distances to the six faces of the data volume to determine a planar impact coordinate [S1, unofficial]. It is distinct from [Homogeneous Volume Intersection](3260-homogeneous-volume-intersection.md) by not assuming uniform density for analytical free-path calculation, and from [Near/Far Distance Precomputation Pass](3576-near-far-distance-precomputation-pass.md) by using analytical geometry rather than rasterization to find bounds [S1, unofficial][G].
 
 ## How it works
-**Inputs:**
-*   Ray origin $\mathbf{o} = (o_x, o_y, o_z)$ [S1, unofficial].
-*   Ray direction $\mathbf{d} = (d_x, d_y, d_z)$, normalized to unit length [S1, unofficial].
-*   Volume geometry definition (typically a rectangular prism defined by six faces, or specific primitives like cylinders/spheres as handled by helper functions [S2, unofficial]).
+**Inputs and Outputs**
+*   **Input**: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized to unit length) [S1, unofficial]. The volume is defined by its six faces (e.g., a rectangular prism or specific geometry) [S1, unofficial][S2, unofficial].
+*   **Output**: Boolean indicating intersection; if intersecting, the entry point (impact point) on the volume surface [S1, unofficial].
 
-**Outputs:**
-*   Entry distance $t_{in}$ (or impact point) [S1, unofficial].
-*   Exit distance $t_{out}$ (or impact point) [S2, unofficial].
-*   Boolean flag indicating intersection success [G].
+**Data Structures**
+The volume is represented by its geometric boundaries. For a standard rectangular data volume, this implies six planes defining the faces [S1, unofficial]. The ray is defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [G].
 
-**Data Structures:**
-*   The volume is treated as a closed boundary defined by six planes [S1, unofficial].
-*   Variables `inAbs` and `outAbs` store the absolute distances along the ray vector [S2, unofficial].
+**Steps**
+1.  **Check Origin Inside**: Test if the ray origin $\mathbf{o}$ lies within the data volume [S1, unofficial].
+    *   If yes, the impact point is set to $\mathbf{o}$ [S1, unofficial].
+    *   If no, proceed to step 2.
+2.  **Calculate Face Distances**: For each of the six faces of the data volume, calculate the distance from the ray origin to the face [S1, unofficial].
+    *   Let $d_i$ be the distance from $\mathbf{o}$ to face $i$.
+    *   Let $c_i$ be the corresponding component of the ray direction vector $\mathbf{d}$ associated with that face's normal or axis [S1, unofficial].
+    *   Compute the parameter $t_i = d_i / c_i$ [S1, unofficial].
+3.  **Compute Planar Impact Coordinates**: Multiply each calculated distance parameter $t_i$ by the corresponding eye positional ordinate (coordinate component) to create a planar impact coordinate [S1, unofficial].
+    *   Impact point candidate $\mathbf{p}_i = \mathbf{o} + t_i \mathbf{d}$ [G] (derived from "multiply... by corresponding eye positional ordinate to create a planar impact coordinate" [S1, unofficial]).
+4.  **Select Nearest Intersection**:
+    *   Filter valid intersections (where $t_i > 0$ and the point lies on the face segment) [G].
+    *   Select the smallest valid $t_i$ (or corresponding impact point) as the nearest ray-volume impact point [S1, unofficial].
+5.  **Miss Handling**: If no intersection points are found, the ray misses the volume, and processing proceeds to the next pixel [S1, unofficial].
 
-**Steps:**
-1.  **Origin Check:** Test if the ray origin $\mathbf{o}$ lies inside the volume boundary [S1, unofficial]. If inside, set the impact point to the ray's origin ($t_{in} = 0$) [S1, unofficial].
-2.  **Face Distance Calculation:** If outside, calculate the distance $d_i$ from $\mathbf{o}$ to each of the six faces [S1, unofficial]. Divide $d_i$ by the corresponding component of the ray direction vector $\mathbf{d}$ to obtain a parameter $t_i = d_i / d_{\text{axis}}$ [S1, unofficial].
-3.  **Planar Coordinate Mapping:** Multiply each calculated distance parameter $t_i$ by the corresponding eye positional ordinate $e_i$ to create a planar impact coordinate $p_i = t_i \cdot e_i$ [S1, unofficial].
-4.  **Selection:** Select the smallest valid distance/coordinate as the nearest ray-volume impact point [S1, unofficial]. If no intersection points are found, the ray misses the volume [S1, unofficial].
-
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_volume_intersect_face_distance(ray_origin, ray_direction, volume_bounds, eye_ordinates):
+def ray_volume_intersect_face_distance(ray_origin, ray_direction, volume_faces):
     """
-    ray_origin: tuple (ox, oy, oz)
-    ray_direction: tuple (dx, dy, dz), assumed normalized
-    volume_bounds: object with attributes xmin, xmax, ymin, ymax, zmin, zmax
-    eye_ordinates: tuple (ex, ey, ez) corresponding to spatial axes
-    Returns: (hit, t_entry, t_exit)
+    ray_origin: float3 (x, y, z)
+    ray_direction: float3 (normalized)
+    volume_faces: list of 6 plane definitions or boundary limits
+    Returns: (hit: bool, t_min: float, impact_point: float3)
     """
-    ox, oy, oz = ray_origin
-    dx, dy, dz = ray_direction
-    ex, ey, ez = eye_ordinates
+    t_min = infinity
+    hit = False
+    
+    # Step 1: Check if origin is inside volume
+    if is_inside_volume(ray_origin, volume_faces):
+        return True, 0.0, ray_origin
 
-    # Step 1: Check if origin is inside
-    if (volume_bounds.xmin <= ox <= volume_bounds.xmax) and \
-       (volume_bounds.ymin <= oy <= volume_bounds.ymax) and \
-       (volume_bounds.zmin <= oz <= volume_bounds.zmax):
-        return (True, 0.0, 0.0)
+    # Step 2 & 3: Calculate distances to each of the six faces
+    for face in volume_faces:
+        # Calculate distance from ray origin to the face plane
+        # For a plane with normal n and point p_on_plane:
+        # d = dot(p_on_plane - ray_origin, n)
+        # However, source [S1, unofficial] describes dividing distance by ray component.
+        # Assuming axis-aligned faces for standard implementation:
+        
+        # Example for a face perpendicular to X-axis at x = x_limit
+        # Distance from origin to plane along X is (x_limit - ray_origin.x)
+        # Ray component is ray_direction.x
+        # t = (x_limit - ray_origin.x) / ray_direction.x
+        
+        # Generalizing based on [S1, unofficial]: "distance from each face ... divided by 
+        # corresponding component of the ray"
+        
+        # Calculate t for this face
+        t = calculate_face_t(ray_origin, ray_direction, face)
+        
+        # Step 3: Create planar impact coordinate
+        # "Multiply each calculated distance ... by corresponding eye positional ordinate"
+        # This implies computing the point on the ray: p = o + t * d
+        impact_point = ray_origin + t * ray_direction
+        
+        # Validate if this intersection is valid (in front of ray, on the face)
+        if t > 0 and is_on_face(impact_point, face):
+            if t < t_min:
+                t_min = t
+                hit = True
+                best_impact = impact_point
 
-    candidates = []
-    # Step 2 & 3: Face distance calculation and planar coordinate mapping
-    # For each of the six faces, compute t = distance / direction_component
-    # Then compute planar coordinate = t * eye_ordinate_component
-    faces = [
-        (volume_bounds.xmin, dx, ex), (volume_bounds.xmax, dx, ex),
-        (volume_bounds.ymin, dy, ey), (volume_bounds.ymax, dy, ey),
-        (volume_bounds.zmin, dz, ez), (volume_bounds.zmax, dz, ez)
-    ]
-    origins = [ox, ox, oy, oy, oz, oz]
+    # Step 5: Miss handling
+    if not hit:
+        return False, infinity, None
+    
+    return True, t_min, best_impact
 
-    for i, (face_val, dir_comp, eye_comp) in enumerate(faces):
-        if dir_comp == 0.0:
-            continue # [G] Skip division by zero for rays parallel to face normals
-        dist = face_val - origins[i]
-        t = dist / dir_comp
-        planar_coord = t * eye_comp
-        candidates.append((planar_coord, t))
+def calculate_face_t(origin, direction, face):
+    # Implementation depends on specific face geometry.
+    # For axis-aligned box face at limit L along axis A:
+    # t = (L - origin[A]) / direction[A]
+    # Note: Division by zero if direction[A] is 0 (ray parallel to face)
+    # If parallel, no intersection with this specific infinite plane 
+    # (or ray lies in it, handled by inside check).
+    return (face.limit - origin[face.axis]) / direction[face.axis]
 
-    # Step 4: Select smallest valid distance/coordinate
-    # [G] Valid implies t > 0 and intersection lies within face bounds
-    valid = [(p, t) for p, t in candidates if t > 0.0]
-    if not valid:
-        return (False, 0.0, 0.0)
-
-    t_entry = min(t for p, t in valid)
-    # [G] Exit distance typically computed via a second pass or traversal bounds
-    return (True, t_entry, 0.0)
+def is_inside_volume(origin, volume_faces):
+    # Check if origin is within all 6 boundaries
+    for face in volume_faces:
+        if not is_within_boundary(origin, face):
+            return False
+    return True
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Ray Miss:** If no intersection points are found, the ray misses the volume entirely and processing must proceed to the next pixel without traversal [S1, unofficial].
-*   **Zero Direction Component:** Division by zero occurs if $d_x, d_y,$ or $d_z$ is zero [G]. The implementation must skip the corresponding face checks or treat them as infinite bounds [G].
-*   **Precision:** Floating-point precision errors may cause rays to slightly miss faces or enter/exit incorrectly [G]. Epsilon adjustments may be needed [G].
+**Parameters**
+*   Ray direction normalization: Unit length [S1, unofficial].
+*   Volume definition: Six faces [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Ray Parallel to Face**: If the ray direction component corresponding to a face normal is zero, division by zero occurs. Such rays do not intersect that specific infinite plane (unless contained within it, which is handled by the "inside" check) [G].
+*   **Miss Handling**: If no valid $t_i$ is found, the ray misses the volume entirely. The algorithm must return a miss status to avoid invalid traversal [S1, unofficial].
+*   **Precision**: Floating-point precision issues may cause rays to miss thin volumes or intersect incorrectly near boundaries [G].
 
 ## Subtopics
 
 ### [Homogeneous Volume Intersection](3260-homogeneous-volume-intersection.md)
-Homogeneous Volume Intersection computes the first interaction point of a ray within a constant-density volume, or determines if the ray exits the medium without interacting. It differs from [Heterogeneous Volume Intersection](3261-heterogeneous-volume-intersection.md) by assuming a uniform density field, allowing for direct analytical sampling of the free path length without the overhead of majorant-based rejection sampling. It serves as the core traversal logic for participating media where density does not vary spatially.
+Assumes uniform density, allowing direct analytical sampling without majorant-based rejection sampling.
 
 ### [Near/Far Distance Precomputation Pass](3576-near-far-distance-precomputation-pass.md)
-The Near/Far Distance Precomputation Pass renders voxel bricks to a render target to compute the entry ($t_{Near}$) and exit ($t_{Far}$) distances of viewing rays intersecting the volume for each pixel. This prepares the bounds for the subsequent raymarching pass, allowing the main rendering pass to skip empty space and focus computation only on occupied regions. It differs from [Homogeneous Volume Intersection](3260-homogeneous-volume-intersection.md) by explicitly rasterizing the volume geometry to derive depth bounds rather than analytically solving for intersections with a homogeneous bounding box.
+Uses rasterization to compute entry/exit depths, differing from this analytical face-distance approach[G].
 
 ## Operating characteristics
-Not given in the sources.
+*   **Time Complexity**: $O(1)$ per ray, as it involves a fixed number of face checks (6 for a hexahedron) [S1, unofficial].
+*   **Memory Complexity**: $O(1)$ auxiliary memory for storing face parameters [G].
+*   **Strengths**: Simple, fast culling for rectangular volumes; avoids rasterization overhead [S1, unofficial].
+*   **Limitations**: Requires explicit face definitions; less efficient for complex non-convex geometries compared to hierarchical methods [G].
+*   **When to Use**: Initial culling for axis-aligned or simple convex volumes in ray casting [S1, unofficial].
+*   **When Not to Use**: Complex procedural geometries where [Procedural Ray/Box Intersection](8356-procedural-ray-box-intersection.md) or triangle-based intersection [S2, unofficial] is more appropriate.
 
 ## Background
-The method is described in a DTIC report (ADA202661) detailing volumetric rendering techniques for displaying three-dimensional aerodynamic flow field data [S1, unofficial]. The approach involves a two-step process: first checking if the ray origin is inside the data volume, and if not, calculating distances to the six faces to find the nearest impact point [S1, unofficial]. This method was used to initialize the ray traversal for volume rendering, preceding the actual resampling or marching steps [S1, unofficial]. Later implementations, such as those in CUDA-based volume rendering, adapted this logic, sometimes extending it to handle cylindrical or spherical geometries via specific helper functions (`rayIntersectCyl`, `rayIntersectSpher`) [S2, unofficial].
+This method originates from early volumetric rendering techniques for displaying 3D aerodynamic flow field data [S1, unofficial]. It was used as a two-step process to determine ray-volume intersection before incremental ray extension through the data [S1, unofficial]. Early versions of VRVE (Volumetric Rendering of Volume Elements) used similar approaches, though they faced aliasing issues with uniform resampling [S1, unofficial]. The method is also referenced in CUDA-based volume rendering implementations [S2, unofficial].
 
 ## Sources
 [S1] DTIC ADA202661: Volumetric Rendering Techniques for the Display of Three-Dimensional Aerodynamic Flow Field Data, https://archive.org/details/DTIC_ADA202661, fetched 2026-10-26 (unofficial)

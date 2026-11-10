@@ -1,0 +1,105 @@
+# Topology Verification using Digital Surfaces
+
+
+## Overview
+Topology Verification using Digital Surfaces (DT) is a method for validating the topological correctness of isosurface extraction algorithms by comparing extracted meshes against theoretically expected topological invariants derived from the underlying scalar field [S1, unofficial]. It solves the problem of detecting topological errors (such as incorrect hole counts or connectivity) in generated meshes by leveraging the rigorous mathematical framework of Digital Topology [S1, unofficial]. Unlike Stratified Morse Theory (SMT), which only provides the Euler characteristic $\chi$, DT computes detailed Betti numbers ($\beta_0, \beta_1, \beta_2$), allowing for precise localization of topological failures [S1, unofficial].
+
+## How it works
+**Inputs:**
+1. A rectilinear grid scalar field $f$ of resolution $N_x \times N_y \times N_z$ (e.g., $5 \times 5 \times 5$) [S1, unofficial].
+2. An isosurface extraction algorithm under test, producing a polygonal mesh $M$ [S1, unofficial].
+3. Ground truth topological invariants for the scalar field, computed via Majority Interpolation (MI) or theoretical calculation [S1, unofficial].
+
+**Outputs:**
+A boolean result indicating whether the extracted mesh $M$ matches the expected topology, and potentially a report of mismatched Betti numbers [S1, unofficial].
+
+**Data Structures:**
+*   **Scalar Field:** A 3D array of scalar values.
+*   **Mesh $M$:** A set of vertices and triangles forming a PL-manifold.
+*   **Betti Numbers:** Integers $\beta_0$ (connected components), $\beta_1$ (loops/handles), and $\beta_2$ (voids/cavities) [S1, unofficial].
+
+**Steps:**
+1.  **Generate Test Data:** Create random scalar fields on a rectilinear grid [S1, unofficial].
+2.  **Extract Mesh:** Run the isosurface extraction algorithm on the scalar field to produce mesh $M$ [S1, unofficial].
+3.  **Compute Mesh Invariants:** Calculate the Betti numbers $\beta_0(M), \beta_1(M), \beta_2(M)$ for the extracted mesh $M$ [S1, unofficial].
+4.  **Determine Expected Invariants:** Compute the expected Betti numbers $\beta_0^{exp}, \beta_1^{exp}, \beta_2^{exp}$ for the scalar field using Digital Surface theory (based on the Majority Interpolation reconstruction) [S1, unofficial].
+5.  **Compare:** Check if $\beta_i(M) == \beta_i^{exp}$ for $i \in \{0, 1, 2\}$ [S1, unofficial].
+6.  **Report:** If any invariant mismatches, the extraction failed the topology consistency test [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def verify_topology(scalar_field, extraction_algorithm):
+    """
+    Verifies the topology of an extracted isosurface mesh against 
+    expected invariants derived from Digital Surface theory.
+    """
+    # Step 1: Extract the mesh
+    mesh = extraction_algorithm.extract(scalar_field)
+    
+    # Step 2: Compute Betti numbers for the extracted mesh
+    # Requires mesh to be a 2-manifold without boundary
+    beta_0_mesh, beta_1_mesh, beta_2_mesh = compute_betti_numbers(mesh)
+    
+    # Step 3: Compute expected Betti numbers from the scalar field
+    # This relies on the underlying Digital Surface (DS) theory
+    # which assumes the surface is a 2-manifold without boundary.
+    beta_0_exp, beta_1_exp, beta_2_exp = compute_expected_betti_numbers(scalar_field)
+    
+    # Step 4: Compare invariants
+    if (beta_0_mesh != beta_0_exp or 
+        beta_1_mesh != beta_1_exp or 
+        beta_2_mesh != beta_2_exp):
+        return False, {
+            "beta_0_diff": beta_0_mesh - beta_0_exp,
+            "beta_1_diff": beta_1_mesh - beta_1_exp,
+            "beta_2_diff": beta_2_mesh - beta_2_exp
+        }
+    
+    return True, {}
+
+def compute_betti_numbers(mesh):
+    """
+    Computes Betti numbers for a PL-manifold mesh.
+    beta_0: Number of connected components.
+    beta_1: Number of 1-dimensional holes (loops).
+    beta_2: Number of 2-dimensional voids (cavities).
+    """
+    # Implementation depends on homology computation library or algorithm
+    # [G] Standard simplicial homology computation using boundary matrices
+    return beta_0, beta_1, beta_2
+
+def compute_expected_betti_numbers(scalar_field):
+    """
+    Computes expected Betti numbers using Digital Surface theory.
+    Based on the Majority Interpolation (MI) reconstruction O_alpha.
+    """
+    # [G] This step involves constructing the Digital Surface from the 
+    # scalar field and computing its homology. 
+    # The specific algorithm for this is detailed in 
+    # [Genus Computation from Digital Surface](11761-genus-computation-from-digital-surface.md)
+    return beta_0_exp, beta_1_exp, beta_2_exp
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundaries:** The method cannot handle surfaces with boundaries because the underlying Digital Surface theory is only valid for surfaces without boundary [S1, unofficial]. Special treatment for boundaries is not employed [S1, unofficial].
+*   **Manifold Requirement:** The Betti numbers $\beta_1$ and $\beta_2$ are computed only if the output mesh is a 2-manifold without boundary [S1, unofficial].
+*   **Implementation Bugs:** Incorrect traversal of grid boundaries or misconfiguration of isosurface table entries (e.g., MC configuration 13) can lead to false mismatches [S1, unofficial].
+
+## Subtopics
+
+### [Digital Surface (DS) Verification](11764-digital-surface-ds-verification.md)
+A verification tool based on Digital Topology that generates detailed information about expected topology, including Betti numbers $\beta_0, \beta_1, \beta_2$. It is valid for surfaces without boundary.
+
+## Operating characteristics
+*   **Complexity:** Not given in the sources.
+*   **Performance:** In tests on 1000 randomly generated scalar fields, DT successfully detected topological errors in algorithms like DELISO and SNAP MC [S1, unofficial].
+*   **Strengths:** Provides detailed information about specific topological features ($\beta_0, \beta_1, \beta_2$) rather than just the Euler characteristic ($\chi$), making it easier to locate the source of failure [S1, unofficial].
+*   **Limitations:** Cannot handle surfaces with boundaries [S1, unofficial]. If an algorithm incorrectly introduces topological features to preserve $\chi$ (as might happen with SMT), DT would still detect the error via Betti numbers, but SMT would fail to detect it [S1, unofficial].
+
+## Background
+The method is described in the context of topology consistency testing for isosurface extraction algorithms [S1, unofficial]. It is contrasted with Stratified Morse Theory (SMT) as a more informative verification tool for manifold surfaces [S1, unofficial]. The approach relies on the theoretical framework of Digital Surfaces and Majority Interpolation [S1, unofficial].
+
+## Sources
+[S1] Topology Verification for Isosurface Extraction, https://hal.science/hal-01211133, fetched 2026-10-26 (unofficial)

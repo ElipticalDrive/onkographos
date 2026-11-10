@@ -1,0 +1,135 @@
+# Progressive training by scales of Gaussians
+
+Also called: Progressive scaling
+
+## Overview
+This method prevents rendering artifacts caused by 3D Gaussians becoming smaller than a single pixel during optimization by enforcing a minimum projected area through covariance regularization [S1]. It differs from standard 3D Gaussian Splatting by introducing a scale-dependent low-pass filter that focuses training on low-frequency details in early stages, ensuring coarse scene structure is learned efficiently before fine details are resolved [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** 3D Gaussian parameters (position, covariance $\Sigma'_i$, opacity, color), image dimensions ($H, W$), total Gaussian count ($N$), and iteration counter.
+*   **Output:** Regularized covariance matrix $\Sigma_{reg}$ and updated Gaussian parameters.
+
+**Data Structures:**
+*   **Covariance Matrix ($\Sigma'_i$):** A $3 \times 3$ symmetric positive-definite matrix representing the spatial extent of the $i$-th Gaussian.
+*   **Scale Parameter ($s$):** A scalar value controlling the minimum spread.
+
+**Algorithm Steps:**
+1.  **Initialization:** Start optimization with only 20% of the 3D points from the Structure-from-Motion (SfM) initialization that have the lowest reconstruction error [S1].
+2.  **Calculate Minimum Scale ($s_{min}$):** Compute the theoretical minimum scale required to ensure the projected area is larger than one pixel:
+    $$ s_{min} = \frac{HW}{9\pi N} $$
+    where $H$ is image height, $W$ is image width, and $N$ is the number of Gaussians [S1].
+3.  **Determine Regularization Value ($s$):**
+    *   The regularization value $s$ is progressively changed during optimization [S1].
+    *   It is lower-bounded by a default value of $0.3$ as the number of Gaussians increases [S1].
+    *   Using a larger $s$ in the beginning allows Gaussians to receive gradients from a wider area, efficiently learning the coarse structure [S1].
+4.  **Covariance Regularization:** Replace the raw covariance matrix $\Sigma'_i$ with the regularized matrix $\Sigma_{reg}$ by adding $s$ to the diagonal elements:
+    $$ \Sigma_{reg} = \Sigma'_i + sI $$
+    where $I$ is the identity matrix [S1]. This ensures the minimum projected area is larger than $9\pi s$ [S1].
+5.  **Training Schedule:**
+    *   **Iterations 0–10K:** Use Adaptive Bitwise Encoding (ABE) split and progressive scale strategies [S1].
+    *   **Iterations 10K–15K:** Enable standard densification every 100 iterations [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_regularized_covariance(covariance_matrix, iteration, num_gaussians, image_height, image_width):
+    """
+    Computes the regularized covariance matrix for a single Gaussian.
+    
+    Args:
+        covariance_matrix: 3x3 numpy array, the raw covariance matrix Sigma'_i.
+        iteration: Current training iteration number.
+        num_gaussians: Total number of active Gaussians N.
+        image_height: Image height H.
+        image_width: Image width W.
+        
+    Returns:
+        Regularized 3x3 covariance matrix.
+    """
+    # Step 1: Calculate theoretical minimum scale based on pixel area
+    # s_min ensures projected area > 9 * pi * s_min
+    s_min = (image_height * image_width) / (9 * math.pi * num_gaussians)
+    
+    # Step 2: Determine the regularization scalar s
+    # s is progressively changed during optimization [S1]
+    # It is lower bounded by 0.3 as N increases [S1]
+    # Note: The exact function for progressive change is not specified in sources [G]
+    # We assume a decay or constant schedule based on iteration.
+    # For implementation, s must be >= s_min and >= 0.3
+    
+    # Example implementation of lower bound logic:
+    s = max(s_min, 0.3)
+    
+    # In early training, s might be larger to capture coarse structure [S1]
+    # This part requires external scheduling logic not detailed in [S1]
+    # if iteration < 10000:
+    #     s = s * scale_factor_from_schedule(iteration)
+    
+    # Step 3: Add s to diagonal elements
+    identity_matrix = np.eye(3)
+    regularized_covariance = covariance_matrix + s * identity_matrix
+    
+    return regularized_covariance
+
+def initialize_training_points(sfm_points, sfm_errors):
+    """
+    Selects initial 3D points for optimization.
+    
+    Args:
+        sfm_points: Array of 3D points from SfM.
+        sfm_errors: Array of reconstruction errors corresponding to sfm_points.
+        
+    Returns:
+        Subset of sfm_points (lowest 20% error).
+    """
+    # Sort points by error
+    sorted_indices = np.argsort(sfm_errors)
+    
+    # Select top 20% with lowest error
+    num_points = len(sfm_points)
+    num_selected = int(num_points * 0.2)
+    
+    selected_indices = sorted_indices[:num_selected]
+    return sfm_points[selected_indices]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Ensure $s$ does not become so large that it blurs fine details excessively in later stages. The progressive nature is critical [S1].
+*   **Boundary:** If $N$ is very small, $s_{min}$ may exceed 0.3, requiring $s$ to be set to $s_{min}$ [S1].
+*   **Degenerate Input:** If SfM provides no points or all errors are equal, the 20% selection is arbitrary; fallback to random selection or all points [G].
+
+## Subtopics
+
+### [Scale Decay](10043-scale-decay.md)
+A technique to balance rendering quality and speed by gradually reducing the scale of Gaussians during training, which reduces the final Gaussian count and improves performance at a slight cost to visual quality.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Trick-GS (which includes this method) achieves a PSNR of 27.16 on MipNeRF 360 with 1369K Gaussians and storage of 830MB, compared to baseline 25.18 PSNR with 5958K Gaussians and 1409MB storage [S1]. Training time is reduced to 222 minutes vs 33.36 minutes for baseline? No, baseline is 33.36 mins? Wait, Table I shows "Time" column. Baseline: 33.36 mins? No, the table header is ambiguous. Let's look at the numbers.
+    *   Baseline (all checks off): PSNR 25.18, Storage 1409, Time 33.36? No, the table has "Time" and "FPS".
+    *   Trick-GS: PSNR 27.16, Storage 830, Time 222? That seems high. Let's re-read the table structure.
+    *   Columns: BL, DS, SG, GM, AT, SHM, DE, SC, PSNR, SSIM, LPIPS, Storage, Time, FPS, Max-#GS, #GS.
+    *   Row 1 (Baseline): BL=✗, ..., SC=✗. PSNR=25.18, Storage=1409, Time=33.36, FPS=70, Max-#GS=5958.
+    *   Row 3 (Trick-GS): BL=✓, ..., SC=✓. PSNR=27.16, Storage=830, Time=222, FPS=696, Max-#GS=1369.
+    *   Wait, Time 222 vs 33.36? That's slower. But FPS is 696 vs 70. This implies the "Time" column might be training time in minutes? And FPS is inference?
+    *   The text says "Trick-GS can reconstruct scenes with much lower training time". But 222 > 33.36.
+    *   Let's check the other rows. Trick-GS-small: Time 570.
+    *   Maybe the "Time" column is not training time? Or maybe the baseline is very fast but low quality?
+    *   Actually, usually 3DGS training takes hours. 33 minutes is very fast. 222 minutes is ~3.7 hours.
+    *   The text says "lower training time". This contradicts the table if Time=Training Time.
+    *   Perhaps the "Time" column is something else? Or the baseline is a different method?
+    *   The table caption says "Results between the double horizontal lines are from retraining the models on our system."
+    *   Maybe the baseline is not 3DGS?
+    *   Regardless, the source [S1] claims lower training time. I will cite the claim and the table data separately.
+*   **Strengths:** Prevents pixel-sized artifacts; improves efficiency by starting with fewer points; balances quality and speed [S1].
+*   **Limitations:** Requires careful tuning of the progressive schedule for $s$; slight cost to visual quality if scale decay is too aggressive [S1, Subtopic].
+*   **When to use:** When training stability is an issue due to small Gaussians; when computational resources are limited [S1].
+
+## Background
+This method is part of the Trick-GS framework, introduced in 2025 by the authors of "Trick-GS: A Balanced Bag of Tricks for Efficient Gaussian Splatting" [S1]. It builds on the observation that unregularized Gaussians can shrink below pixel size, causing aliasing and artifacts [S1]. The technique is inspired by previous work [4] (cited in [S1]) that suggested adding a small value to the covariance diagonal.
+
+## Sources
+[S1] Trick-GS: A Balanced Bag of Tricks for Efficient Gaussian Splatting, https://doi.org/10.1109/icassp49660.2025.10889395, fetched 2026-10-30

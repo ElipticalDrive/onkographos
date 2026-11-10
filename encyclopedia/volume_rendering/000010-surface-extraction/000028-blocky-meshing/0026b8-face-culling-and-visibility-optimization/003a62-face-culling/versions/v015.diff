@@ -1,0 +1,288 @@
+--- v014.md
++++ v015.md
+@@ -4,147 +4,165 @@
+ 
+ ## Overview
+-Face Culling is a mesh generation optimization that reduces the number of vertices and triangles sent to the GPU by skipping the rendering of voxel faces that are adjacent to existing neighboring voxels [S1, unofficial]. It solves the problem of naively rendering all 6 faces of every cube, including those hidden by neighbors, which results in significant redundant geometry [S1, unofficial]. Unlike [Voxel Backface Culling and Internal Face Masking](4569-voxel-backface-culling-and-internal-face-masking.md) which may handle internal visibility or backfaces, or [Block Visibility Culling](5334-block-visibility-culling.md) which operates at a higher chunk level, Face Culling operates at the individual voxel face level during mesh construction [S1, unofficial]. It builds on the shared principles of [Face Culling and Visibility Optimization](3861-face-culling-and-visibility-optimization.md) by primarily relying on the Adjacency/Occlusion Test [S1, unofficial].
++Face Culling is a mesh generation optimization that reduces the number of vertices sent to the GPU by skipping the rendering of voxel faces that are adjacent to existing neighboring voxels [S1, unofficial]. It solves the problem of naively rendering all 6 faces of every cube, including those hidden by neighbors. It is distinguished from its siblings by its reliance on direct spatial neighbor checks during the mesh creation phase to identify "exposed" faces, rather than using coverage masks, backface normals, or block-level visibility pre-processing [S1, unofficial].
+ 
+ ## How it works
+-The method identifies exposed faces by checking the occupancy state of the six immediate neighbors in the voxel grid. If a neighbor exists in a specific direction, the face in that direction is considered internal and is not added to the vertex buffer [S1, unofficial]. Only faces with no adjacent solid voxel are added to the mesh [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** A set of occupied voxel positions, typically stored in a hash set or dense array for $O(1)$ lookup [S1, unofficial].
++*   **Output:** A vertex buffer containing only the faces of voxels that are not adjacent to other solid voxels [S1, unofficial].
+ 
+-### Inputs and Outputs
+-*   **Input:** A set of occupied voxel positions, typically stored in a hash set or dense array for $O(1)$ lookup [S1, unofficial].
+-*   **Output:** A list of vertices and indices representing only the visible (exposed) faces of the voxel mesh [S1, unofficial].
++**Data Structures:**
++The method uses a `Cube` struct to represent individual voxels and a `Face` struct to represent their surfaces [S1, unofficial].
++*   `Cube` struct:
++    *   `faces`: A vector of 6 `Face` objects, one for each direction ($\pm X, \pm Y, \pm Z$) [S1, unofficial].
++    *   `cubeCenter`: The 3D integer coordinates of the voxel's center (`glm::ivec3`) [S1, unofficial].
++    *   `gridPos`: The grid position of the voxel (`glm::ivec3`) [S1, unofficial].
++    *   `neighbors`: An integer counter for adjacent neighbors (`int`) [S1, unofficial].
++*   `Face` struct:
++    *   `vertices`: A vector of floats representing the geometric vertices of the face (`std::vector<float>`) [S1, unofficial].
++    *   `normal`: The normal vector of the face (`glm::ivec3`) [S1, unofficial].
++    *   `isSideFace`: A boolean flag indicating if the face is a side face (`bool`) [S1, unofficial].
++    *   `isBottomFace`: A boolean flag indicating if the face is a bottom face (`bool`) [S1, unofficial].
++    *   `renderFlag`: A boolean flag determining if the face should be rendered (`bool`) [S1, unofficial].
+ 
+-### Data Structures
+-The implementation may use the following structures [S1, unofficial]:
+-*   **Occupied Positions:** A hash set (e.g., `std::unordered_set<glm::ivec3>`) storing the integer coordinates of all solid voxels.
+-*   **Cube Struct:** Represents a single voxel during processing.
+-    *   `faces`: A vector of 6 `Face` objects, one for each direction (e.g., +X, -X, +Y, -Y, +Z, -Z).
+-    *   `cubeCenter`: The integer grid position of the voxel (`glm::ivec3`).
+-    *   `gridPos`: The grid position (often identical to `cubeCenter`).
+-    *   `neighbors`: An integer counter for adjacent neighbors (used in specific variants).
+-*   **Face Struct:** Represents a single potential face of the voxel.
+-    *   `vertices`: A vector of floats containing the vertex data for the face.
+-    *   `normal`: The direction vector of the face (`glm::ivec3`).
+-    *   `isSideFace`: Boolean flag indicating if the face is a side face (not top/bottom).
+-    *   `isBottomFace`: Boolean flag indicating if the face is the bottom face.
+-    *   `renderFlag`: Boolean flag determining if the face should be rendered.
++**Algorithm Steps:**
++1.  Iterate through each voxel in the world grid.
++2.  For each voxel, iterate through its 6 faces.
++3.  For each face, calculate the position of the immediate neighbor in the direction of the face's normal:
++    $$ P_{neighbor} = P_{voxel} + \mathbf{n} $$
++    where $P_{voxel}$ is the voxel's center position and $\mathbf{n}$ is the face's normal vector [S1, unofficial].
++4.  Check if a solid voxel exists at $P_{neighbor}$ using the occupied positions set [S1, unofficial].
++5.  Determine the `renderFlag` for the face based on the following logic [S1, unofficial]:
++    *   If the face is a bottom face (`isBottomFace` is true): Set `renderFlag` to `false` (always culled) [S1, unofficial].
++    *   If the face is a side face (`isBottomFace` is false):
++        *   Check if a neighbor exists at $P_{neighbor}$ [S1, unofficial].
++        *   Additionally, check if a neighbor exists at $P_{neighbor} + (0, 1, 0)$ (directly above the neighbor position) [S1, unofficial].
++        *   If either neighbor exists, set `renderFlag` to `false` [S1, unofficial].
++        *   Otherwise, set `renderFlag` to `true` (exposed) [S1, unofficial].
++6.  If `renderFlag` is `true`, add the face's vertices to the vertex buffer [S1, unofficial].
++7.  (Optional) Count neighbors for metadata by checking specific offsets relative to the voxel center [S1, unofficial].
+ 
+-### Algorithm Steps
+-The culling check runs once during mesh creation, resulting in no framerate loss during rendering [S1, unofficial].
++**Pseudocode:**
++```python
++def generate_mesh(occupied_positions: set[Vector3i]) -> list[Vertex]:
++    """
++    Generates a mesh by culling faces adjacent to other voxels.
++    :param occupied_positions: Set of 3D integer coordinates representing solid voxels.
++    :return: List of vertices for the visible faces.
++    """
++    vertices = []
++    
++    # Define the 6 face directions and their corresponding normal vectors
++    # Order: +X, -X, +Y, -Y, +Z, -Z
++    # Note: The specific mapping of 'isBottomFace' and 'isSideFace' 
++    # depends on the coordinate system. Based on [S1, unofficial], Y is likely Up.
++    face_definitions = [
++        {"normal": Vector3i(1, 0, 0), "is_bottom": False},
++        {"normal": Vector3i(-1, 0, 0), "is_bottom": False},
++        {"normal": Vector3i(0, 1, 0), "is_bottom": False}, # Top face
++        {"normal": Vector3i(0, -1, 0), "is_bottom": True},  # Bottom face
++        {"normal": Vector3i(0, 0, 1), "is_bottom": False},
++        {"normal": Vector3i(0, 0, -1), "is_bottom": False},
++    ]
+ 
+-1.  Initialize an empty list for visible faces.
+-2.  For each voxel in the world grid:
+-    a.  Let $P$ be the voxel's grid position.
+-    b.  For each of the 6 directions $d \in \{+X, -X, +Y, -Y, +Z, -Z\}$:
+-        i.  Calculate the neighbor position $P_{neighbor} = P + d$.
+-        ii. Check if $P_{neighbor}$ exists in the `occupiedPositions` set.
+-        iii. If $P_{neighbor}$ does **not** exist, the face is exposed. Add the face geometry for direction $d$ to the vertex buffer.
+-        iv. If $P_{neighbor}$ **does** exist, the face is internal. Skip adding this face.
++    for voxel_pos in occupied_positions:
++        for face_def in face_definitions:
++            normal = face_def["normal"]
++            is_bottom = face_def["is_bottom"]
++            
++            # Calculate neighbor position
++            neighbor_pos = voxel_pos + normal
++            
++            # Determine if face is visible
++            render = False
++            
++            if is_bottom:
++                # Bottom faces are always culled according to [S1, unofficial]
++                render = False
++            else:
++                # Side faces (including top)
++                # Check direct neighbor
++                neighbor_exists = neighbor_pos in occupied_positions
++                
++                # Check neighbor above (0, 1, 0) relative to neighbor position
++                # This implies checking if the voxel above the neighbor is solid
++                # This specific logic is derived from [S1, unofficial] code snippet
++                neighbor_above_pos = neighbor_pos + Vector3i(0, 1, 0)
++                neighbor_above_exists = neighbor_above_pos in occupied_positions
++                
++                if neighbor_exists or neighbor_above_exists:
++                    render = False
++                else:
++                    render = True
++            
++            if render:
++                # Generate vertices for this face
++                # Assuming unit cube centered at voxel_pos with side length 1
++                # Vertices are generated based on the face normal
++                face_vertices = generate_face_vertices(voxel_pos, normal)
++                vertices.extend(face_vertices)
++                
++    return vertices
+ 
+-### Specific Logic Variants (Source-Specific Implementation)
+-The source [S1, unofficial] provides a specific implementation detail that introduces additional culling conditions beyond simple adjacency, particularly for side faces and bottom faces. This logic is described below as a distinct variant found in the source code.
+-
+-**Variant: Extended Neighbor Check**
+-This variant culls side faces not only if a neighbor exists directly adjacent, but also if a neighbor exists directly above the neighbor position. It also unconditionally culls bottom faces.
+-
+-1.  For each voxel `cube` in the grid:
+-    a.  For each `face` in `cube.faces`:
+-        i.  Calculate `neighborPos` = `cube.cubeCenter` + `face.normal`.
+-        ii. Check if `occupiedPositions` contains `neighborPos`. Let this be `neighborExists`.
+-        iii. If `face.isBottomFace` is true:
+-            *   Set `face.renderFlag` = `false`. (Bottom faces are always culled regardless of neighbors below) [S1, unofficial].
+-        iv. Else (if `face.isSideFace` is true):
+-            *   Check if `occupiedPositions` contains `neighborPos` + $(0, 1, 0)$ (the position directly above the neighbor).
+-            *   If such a neighbor exists:
+-                *   Set `face.renderFlag` = `false`.
+-            *   Else:
+-                *   Set `face.renderFlag` = `!neighborExists`. (Cull if direct neighbor exists) [S1, unofficial].
+-        v. (Note: The source code also increments a `neighbors` counter by checking 6 specific offsets above the cube, but this does not affect the `renderFlag` logic directly in the provided snippet).
+-
+-### Pseudocode
+-The following pseudocode implements the standard adjacency check. The specific variant from [S1, unofficial] is included as a comment block where the logic diverges.
+-
+-```python
+-def generate_mesh(occupied_positions):
++def generate_face_vertices(center: Vector3i, normal: Vector3i) -> list[Vector3f]:
+     """
+-    Generates a mesh by culling faces adjacent to occupied voxels.
+-    
+-    Args:
+-        occupied_positions: A set of (x, y, z) tuples representing solid voxels.
+-        
+-    Returns:
+-        A list of vertices and indices for visible faces.
++    Generates the 4 vertices of a face on a unit cube.
++    This is a helper function [G] as the exact vertex generation logic 
++    is not detailed in the sources but is required for implementation.
+     """
+-    visible_faces = []
+-    directions = [
+-        (1, 0, 0), (-1, 0, 0),  # Right, Left
+-        (0, 1, 0), (0, -1, 0),  # Top, Bottom
+-        (0, 0, 1), (0, 0, -1)   # Front, Back
++    # Define the 8 corners of a unit cube centered at (0,0,0)
++    # Offset to center at 'center'
++    corners = [
++        Vector3f(-0.5, -0.5, -0.5), Vector3f(0.5, -0.5, -0.5),
++        Vector3f(0.5, 0.5, -0.5), Vector3f(-0.5, 0.5, -0.5),
++        Vector3f(-0.5, -0.5, 0.5), Vector3f(0.5, -0.5, 0.5),
++        Vector3f(0.5, 0.5, 0.5), Vector3f(-0.5, 0.5, 0.5)
+     ]
+     
+-    # Define face geometry generation helper (implementation details omitted as they are generic)
+-    def get_face_vertices(center, direction):
+-        # Returns the 4 vertices and 2 triangles for the face at 'center' facing 'direction'
+-        pass 
+-
+-    for voxel_pos in occupied_positions:
+-        for direction in directions:
+-            neighbor_pos = (
+-                voxel_pos[0] + direction[0],
+-                voxel_pos[1] + direction[1],
+-                voxel_pos[2] + direction[2]
+-            )
+-            
+-            # Standard Adjacency Check
+-            if neighbor_pos not in occupied_positions:
+-                # Face is exposed, add to mesh
+-                vertices = get_face_vertices(voxel_pos, direction)
+-                visible_faces.append(vertices)
+-                
+-            # [S1, unofficial] Variant Logic:
+-            # If implementing the specific logic from cadenmbond/Voxel-Terrain-Generation:
+-            # is_bottom = (direction == (0, -1, 0))
+-            # is_side = not is_bottom
+-            # if is_bottom:
+-            #     render_flag = False
+-            # elif is_side:
+-            #     neighbor_above = (neighbor_pos[0], neighbor_pos[1] + 1, neighbor_pos[2])
+-            #     if neighbor_above in occupied_positions:
+-            #         render_flag = False
+-            #     else:
+-            #         render_flag = (neighbor_pos not in occupied_positions)
+-            # else:
+-            #     render_flag = (neighbor_pos not in occupied_positions)
+-            #
+-            # if render_flag:
+-            #     vertices = get_face_vertices(voxel_pos, direction)
+-            #     visible_faces.append(vertices)
+-
+-    return visible_faces
++    # Select the 4 corners that form the face defined by 'normal'
++    # This selection logic [G] depends on the specific face direction
++    if normal == Vector3i(1, 0, 0): # +X
++        selected = [corners[1], corners[5], corners[6], corners[2]]
++    elif normal == Vector3i(-1, 0, 0): # -X
++        selected = [corners[0], corners[3], corners[7], corners[4]]
++    elif normal == Vector3i(0, 1, 0): # +Y
++        selected = [corners[6], corners[2], corners[3], corners[7]]
++    elif normal == Vector3i(0, -1, 0): # -Y
++        selected = [corners[4], corners[0], corners[1], corners[5]]
++    elif normal == Vector3i(0, 0, 1): # +Z
++        selected = [corners[5], corners[1], corners[2], corners[6]]
++    elif normal == Vector3i(0, 0, -1): # -Z
++        selected = [corners[4], corners[7], corners[3], corners[0]]
++    else:
++        return []
++        
++    # Translate to world position
++    return [c + Vector3f(center.x, center.y, center.z) for c in selected]
+ ```
+ 
+-### Parameters and Typical Values
+-*   **Grid Resolution:** Depends on the scene. The source measured performance on 4096 cubes [S1, unofficial].
+-*   **Occupancy Data Structure:** Hash sets are used in the source [S1, unofficial]. Dense arrays or bitmasks are alternatives mentioned in the parent article [S1, unofficial].
++**Parameters:**
++*   **Neighbor Check Radius:** 1 voxel (immediate neighbors) [S1, unofficial].
++*   **Bottom Face Culling:** Always enabled (hardcoded in the reference implementation) [S1, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Bottom Face Culling:** In the specific variant from [S1, unofficial], bottom faces are always culled (`renderFlag = false`) regardless of whether there is a voxel below them. This implies the mesh is intended to be viewed from above or the bottom is not rendered for performance/aesthetic reasons [S1, unofficial].
+-*   **Side Face Over-Culling:** The same variant culls a side face if a neighbor exists directly above the neighbor position. This can cull faces that are technically exposed to the side but "shadowed" by a voxel above the adjacent voxel. This is a specific design choice of that implementation [S1, unofficial].
+-*   **Performance of Naive Approach:** Checking each of the six faces by looping through neighbors and performing random memory access leads to very poor performance [S2, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Bottom Face Culling:** The reference implementation always culls bottom faces (`isBottomFace`), regardless of whether there is a voxel below it [S1, unofficial]. This may be intentional for terrain generation (hiding the ground) but is a limitation for general voxel meshing [S1, unofficial].
++*   **Side Face Logic:** Side faces are culled if a neighbor exists directly adjacent OR if a neighbor exists directly above the neighbor position [S1, unofficial]. This specific "above neighbor" check is non-standard and may lead to incorrect culling in complex geometries if not carefully understood [S1, unofficial].
++*   **Performance:** The naive approach of looping through all voxels and checking neighbors can lead to poor performance due to random memory access [S2, unofficial]. Using efficient data structures like hash sets or bitmasks is recommended [S1, unofficial][S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Binary Hidden-Face Culling
+-A technique to reduce the number of faces in a voxel mesh by removing those completely hidden (adjacent to another voxel), using bitwise operations on a bitmask representation of voxels to determine visible faces in bulk [S2, unofficial]. It sets itself apart from standard neighbor checks by operating on 1D bitmasks (representing rows or columns of voxels) rather than 3D neighbor lookups, allowing for vectorized or bulk bitwise operations. It is chosen when memory access patterns are linear and the voxel data can be efficiently flattened into bitmasks, avoiding the random memory access penalties of hash sets [S2, unofficial]. To determine visible left faces, shift the bitmask right by 1 position, invert the result, and perform a bitwise AND with the original mask. For right faces, shift left [S2, unofficial].
++A technique to reduce the number of faces in a voxel mesh by removing those completely hidden (adjacent to another voxel), using bitwise operations on a bitmask representation of voxels to determine visible faces in bulk [S2, unofficial]. It sets itself apart from standard neighbor checks by processing entire rows or columns of voxels at once using shifts and bitwise AND/OR operations, avoiding per-voxel loops and random memory access [S2, unofficial]. Choose this method when working with 1D or 2D slices of voxels where bitwise operations can be applied efficiently. It is linked to [Face Culling](52-face-culling.md) as a specialized, optimized variant.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(V)$ where $V$ is the number of voxels, assuming $O(1)$ neighbor lookup. The culling check runs once during mesh creation [S1, unofficial].
+-*   **Memory Complexity:** $O(V)$ to store the occupied positions and the resulting mesh.
++*   **Time Complexity:** $O(V)$ where $V$ is the number of voxels, assuming $O(1)$ lookup for neighbor checks [S1, unofficial]. However, the naive implementation with random memory access can be slow [S2, unofficial].
++*   **Memory Complexity:** $O(V)$ to store the occupied positions and the resulting vertex buffer [S1, unofficial].
+ *   **Measured Performance:** 4096 cubes rendered at ~60 FPS on the author's system [S1, unofficial].
+-*   **Strengths:** Significantly reduces the number of vertices and triangles sent to the GPU by eliminating internal faces. The check is performed once during generation, causing no runtime overhead [S1, unofficial].
+-*   **Limitations:** The naive implementation using random memory access for neighbor checks can be slow [S2, unofficial]. The specific variant from [S1, unofficial] may over-cull side faces based on vertical neighbors, which might not be desired for all applications.
+-*   **When to use:** When generating static voxel meshes where internal faces are never visible.
+-*   **When not to use:** When dynamic voxel changes require frequent re-culling and the overhead of rebuilding the mesh is too high, or when bottom faces must be rendered.
++*   **Strengths:** Simple to implement; runs once during mesh creation, resulting in no framerate loss during rendering [S1, unofficial].
++*   **Limitations:** The reference implementation always culls bottom faces, which may not be desirable for all applications [S1, unofficial]. The specific logic for side faces (checking above neighbors) is non-standard and may require adjustment for general use [S1, unofficial].
++*   **When to use:** When generating static voxel meshes and performance during mesh creation is acceptable, but rendering performance is critical.
++*   **When not to use:** When dynamic voxel changes are frequent and per-frame culling is needed, or when bottom faces must be visible.
+ 
+ ## Background
+-Face Culling is a fundamental optimization in voxel terrain generation. The specific implementation details and data structures described in [S1, unofficial] originate from the project "Voxel-Terrain-Generation" by cadenmbond [S1, unofficial]. The binary bitmask variant was described in a devlog for the project "YNL - Vozel" by Yunasawa [S2, unofficial].
++Face Culling in voxel meshing originated as a basic optimization to reduce the vertex count of voxel terrain. The specific implementation details described here come from a GitHub repository by cadenmbond [S1, unofficial]. The binary variant was described in a devlog by Yunasawa for the project "YNL - Vozel" [S2, unofficial]. These methods are commonly used in voxel-based games and simulations to improve rendering performance by reducing the number of draw calls and vertices processed by the GPU.
+ 
+ ## Sources

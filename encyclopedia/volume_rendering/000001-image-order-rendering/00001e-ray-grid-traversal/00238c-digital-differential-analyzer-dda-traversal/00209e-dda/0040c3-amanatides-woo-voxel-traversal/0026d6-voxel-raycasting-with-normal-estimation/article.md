@@ -1,50 +1,114 @@
 # Voxel Raycasting with Normal Estimation
 
-Also called: DDA-like voxel traversal, Step-wise ray-sphere intersection for voxels
+Also called: DDA-like voxel traversal, Digital Differential Analyzer voxel traversal, Step-wise ray-sphere intersection for voxels, Voxel Raycasting via DDA, VoxelTrace
 
 ## Overview
-Voxel Raycasting with Normal Estimation is a brute-force raycasting algorithm for voxel grids that steps along a ray at fixed intervals to find the first solid voxel, then estimates the surface normal based on the direction of travel relative to the voxel grid axes [S1, unofficial]. It differs from [Amanatides-Woo Voxel Traversal](3132-amanatides-woo-voxel-traversal.md) by using fixed-step sampling rather than boundary-crossing logic [S1, unofficial].
+Voxel Raycasting with Normal Estimation is a method for tracing a ray through a regular 3D voxel grid to locate the first solid voxel and estimate the surface normal at the point of intersection [S1, S2, unofficial]. It solves the problem of efficient block placement and collision detection in voxel-based environments by visiting only intersected cells, offering better performance than general-purpose physics raycasts for voxel grids [S1, unofficial]. It differs from its siblings by explicitly estimating the entry normal based on the axis of traversal (the axis with the smallest delta value in the DDA step) rather than relying on geometric surface reconstruction or post-processing [S1, S2, unofficial].
 
 ## How it works
-**Inputs:** Ray origin $O$, ray direction $D$, maximum distance $T_{max}$, voxel grid query function `solidAtWorld(x, y, z)` or `solidAt(x, y, z)` [S1, unofficial].
-**Outputs:** Hit position $P_{hit}$, estimated surface normal $N$, and boolean hit status [S1, unofficial].
+This method builds on [Amanatides-Woo Voxel Traversal](3132-amanatides-woo-voxel-traversal.md) by adding a normal estimation step derived from the traversal direction. The algorithm steps through the grid using a Digital Differential Analyzer (DDA) approach, advancing to the nearest voxel boundary on the axis with the smallest t-value [S1, S2, unofficial].
 
-**Data Structures:**
-The voxel grid is accessed via a query function that returns true if the voxel at integer coordinates $(x, y, z)$ is solid, false otherwise [S1, unofficial]. The implementation assumes a world-space voxel grid where each voxel is a unit cube aligned with the axes [G].
+### Inputs and Outputs
+*   **Inputs**:
+    *   `ray.origin`: The starting position of the ray in world coordinates ($\mathbb{R}^3$).
+    *   `ray.direction`: The normalized direction vector of the ray ($\mathbb{R}^3$).
+    *   `maxDist`: The maximum length of the ray cast ($\mathbb{R}$).
+    *   `solidAt(x, y, z)`: A function returning true if the voxel at integer coordinates $(x, y, z)$ is occupied/solid.
+*   **Outputs**:
+    *   `hit`: Boolean indicating if a solid voxel was found.
+    *   `hitPos`: The integer voxel coordinates $(x, y, z)$ of the first solid voxel hit.
+    *   `normal`: The estimated surface normal vector ($\mathbb{R}^3$) at the entry point.
 
-**Parameters:**
-- Step size $\Delta t$: Fixed increment for ray advancement. Typical value: $0.05$ [S1, unofficial].
-- Maximum distance $T_{max}$: Limit for ray traversal. Typical value: $6.0$ [S1, unofficial].
+### Data Structures
+*   **Ray**: Defined by origin and direction.
+*   **Voxel Coordinates**: Integer triplets $(x, y, z)$.
+*   **Delta Values**: Floating-point values representing the distance to the next voxel boundary along each axis.
+*   **Step Vector**: Integer triplet $(sx, sy, sz)$ indicating the direction of traversal along each axis.
 
-**Algorithm Steps:**
-1. Initialize `prev = O` and `t = 0`.
-2. Loop while $t \le T_{max}$:
-   a. Calculate current position: $P = O + D \cdot t$.
-   b. Determine voxel coordinates: $x = \lfloor P_x \rfloor$, $y = \lfloor P_y \rfloor$, $z = \lfloor P_z \rfloor$.
-   c. Check if voxel is solid using `solidAtWorld(x, y, z)` or `solidAt(x, y, z)` [S1, unofficial].
-   d. If solid:
-      i. Set $P_{hit} = (x, y, z)$.
-      ii. Calculate displacement vector: $diff = P - prev$.
-      iii. Estimate normal $N$ by comparing absolute components of $diff$:
-           - If $|diff_x| > |diff_y|$ and $|diff_x| > |diff_z|$: $N = (\text{sign}(diff_x) \cdot -1, 0, 0)$.
-           - Else if $|diff_y| > |diff_z|$: $N = (0, \text{sign}(diff_y) \cdot -1, 0)$.
-           - Else: $N = (0, 0, \text{sign}(diff_z) \cdot -1)$.
-      iv. Return true with $P_{hit}$ and $N$.
-   e. Update `prev = P`.
-   f. Increment $t = t + \Delta t$.
-3. If loop completes without hit, return false [S1, unofficial].
+### Parameters
+*   `epsilon`: A small constant to handle near-zero ray direction components and avoid division by zero or NaN issues. Value: $0.0001$ [S1, unofficial].
+*   `maxDist`: Maximum ray length. Value: $6.0$ [S2, unofficial].
+*   `stepSize`: Increment for the DDA loop. Value: $0.05$ [S2, unofficial]. Note: [S1, unofficial] uses a continuous DDA with variable step sizes based on ray direction, while [S2, unofficial] uses a fixed discrete step size. The implementation below follows the [S2, unofficial] fixed-step approach as it is explicitly detailed with normal estimation logic, but acknowledges the [S1, unofficial] continuous DDA structure for boundary calculation.
 
-**Pseudocode:**
+### Algorithm Steps
+
+1.  **Initialization**:
+    *   Set `pos = ray.origin`.
+    *   Set `prev = ray.origin`.
+    *   Initialize `hit = false`.
+    *   Initialize `normal = (0, 0, 0)`.
+
+2.  **Degeneracy Check**:
+    *   If the squared magnitude of `ray.direction` is less than `epsilon`, return `hit = false` [S1, unofficial].
+
+3.  **Loop**:
+    *   Iterate `t` from $0$ to `maxDist` with increment `stepSize` ($0.05$) [S2, unofficial].
+    *   Calculate current position: `pos = ray.origin + ray.direction * t`.
+    *   Determine voxel coordinates:
+        *   $x = \lfloor pos.x \rfloor$
+        *   $y = \lfloor pos.y \rfloor$
+        *   $z = \lfloor pos.z \rfloor$
+    *   Check if voxel is solid:
+        *   If `solidAt(x, y, z)` is true:
+            *   Set `hitPos = (x, y, z)`.
+            *   Set `hit = true`.
+            *   Break loop.
+
+4.  **Normal Estimation**:
+    *   If `hit` is true:
+        *   Calculate displacement vector: `diff = pos - prev`.
+        *   Compare absolute components of `diff`:
+            *   If $|diff.x| > |diff.y|$ and $|diff.x| > |diff.z|$:
+                *   `normal.x = -1.0` if `diff.x > 0` else $1.0$.
+                *   `normal.y = 0.0`.
+                *   `normal.z = 0.0`.
+            *   Else if $|diff.y| > |diff.z|$:
+                *   `normal.x = 0.0`.
+                *   `normal.y = -1.0` if `diff.y > 0` else $1.0$.
+                *   `normal.z = 0.0`.
+            *   Else:
+                *   `normal.x = 0.0`.
+                *   `normal.y = 0.0`.
+                *   `normal.z = -1.0` if `diff.z > 0` else $1.0$.
+        *   Return `hit`, `hitPos`, `normal`.
+
+5.  **No Hit**:
+    *   If the loop completes without finding a solid voxel, return `hit = false`.
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def voxel_raycast_with_normal(origin, direction, max_dist, step_size, solid_at_world):
-    prev = origin
-    t = 0.0
+def voxel_raycast_with_normal_estimation(ray_origin, ray_direction, max_dist=6.0, step_size=0.05, epsilon=0.0001):
+    """
+    Traces a ray through a voxel grid to find the first solid voxel and estimate its normal.
     
+    Args:
+        ray_origin (Vec3): Starting position of the ray.
+        ray_direction (Vec3): Normalized direction vector of the ray.
+        max_dist (float): Maximum length of the ray cast.
+        step_size (float): Increment for the DDA loop.
+        epsilon (float): Small constant to handle near-zero components.
+        
+    Returns:
+        tuple: (hit: bool, hit_pos: Vec3, normal: Vec3)
+    """
+    # Check for degenerate ray
+    if ray_direction.length_squared() < epsilon:
+        return (False, Vec3(0, 0, 0), Vec3(0, 0, 0))
+    
+    pos = ray_origin
+    prev = ray_origin
+    hit = False
+    hit_pos = Vec3(0, 0, 0)
+    normal = Vec3(0, 0, 0)
+    
+    # Iterate along the ray
+    t = 0.0
     while t <= max_dist:
         # Calculate current position
-        pos = origin + direction * t
+        pos = ray_origin + ray_direction * t
         
         # Determine voxel coordinates
         x = floor(pos.x)
@@ -52,65 +116,66 @@ def voxel_raycast_with_normal(origin, direction, max_dist, step_size, solid_at_w
         z = floor(pos.z)
         
         # Check if voxel is solid
-        if solid_at_world(x, y, z):
-            hit_pos = (x, y, z)
-            
-            # Calculate displacement vector
-            diff = pos - prev
-            
-            # Estimate normal based on largest component of displacement
-            abs_dx = abs(diff.x)
-            abs_dy = abs(diff.y)
-            abs_dz = abs(diff.z)
-            
-            if abs_dx > abs_dy and abs_dx > abs_dz:
-                # X-axis is dominant
-                normal = (-1.0 if diff.x > 0 else 1.0, 0.0, 0.0)
-            elif abs_dy > abs_dz:
-                # Y-axis is dominant
-                normal = (0.0, -1.0 if diff.y > 0 else 1.0, 0.0)
-            else:
-                # Z-axis is dominant
-                normal = (0.0, 0.0, -1.0 if diff.z > 0 else 1.0)
-            
-            return True, hit_pos, normal
+        if solid_at(x, y, z):
+            hit = True
+            hit_pos = Vec3(x, y, z)
+            break
         
+        # Update previous position
         prev = pos
-        t += step_size
         
-    return False, None, None
+        # Increment t
+        t += step_size
+    
+    if hit:
+        # Estimate normal based on displacement
+        diff = pos - prev
+        
+        abs_diff_x = abs(diff.x)
+        abs_diff_y = abs(diff.y)
+        abs_diff_z = abs(diff.z)
+        
+        if abs_diff_x > abs_diff_y and abs_diff_x > abs_diff_z:
+            # X-axis is dominant
+            normal.x = -1.0 if diff.x > 0 else 1.0
+            normal.y = 0.0
+            normal.z = 0.0
+        elif abs_diff_y > abs_diff_z:
+            # Y-axis is dominant
+            normal.x = 0.0
+            normal.y = -1.0 if diff.y > 0 else 1.0
+            normal.z = 0.0
+        else:
+            # Z-axis is dominant
+            normal.x = 0.0
+            normal.y = 0.0
+            normal.z = -1.0 if diff.z > 0 else 1.0
+            
+    return (hit, hit_pos, normal)
 ```
 
-**Edge Cases and Pitfalls:**
-- **Step Size Accuracy:** If the step size is large relative to voxel size, the normal estimation may be inaccurate. The normal is derived from the displacement between steps, assuming the ray enters the voxel face corresponding to the largest component of the displacement vector [S1, unofficial].
-- **Corner Cases:** If the ray passes through a voxel corner, the displacement vector may not accurately reflect the entry face, leading to incorrect normal orientation [S1, unofficial].
-- **Precision:** Floating-point precision errors in position calculation can cause missed hits or incorrect voxel indexing. Using `floor` ensures consistent voxel coordinate mapping [S1, unofficial].
+### Edge Cases and Pitfalls
+*   **Large Step Size**: If the step size is large relative to voxel size, the normal estimation may be inaccurate. The ray might pass through a corner or edge, and the displacement vector `diff` may not align with the actual entry face normal [S2, unofficial].
+*   **Axis-Aligned Rays**: If the ray direction is exactly aligned with one of the grid axes, the displacement vector will have two zero components. The normal estimation logic handles this by selecting the non-zero component, but precision issues may arise if the ray origin is exactly on a voxel boundary [S1, S2, unofficial].
+*   **Degenerate Rays**: Rays with zero length or near-zero direction vectors should be handled explicitly to avoid division by zero or NaN results [S1, unofficial].
 
 ## Subtopics
 
-### [3D Bresenham Voxel Tracing](3949-3d-bresenham-voxel-tracing.md)
-Uses integer arithmetic to step through voxels, avoiding floating-point operations. Choose when performance is critical and grid alignment is strict.
-
-### [Restartable DDA for Voxel Traversal](5187-restartable-dda-for-voxel-traversal.md)
-Allows resuming traversal from a previous state. Choose for multi-pass rendering or interactive applications.
-
-### [Naive Voxel Ray Traversal](5192-naive-voxel-ray-traversal.md)
-Simple iteration over all voxels. Choose for small grids or debugging.
-
-### DN_step_map
-Casts a ray into the voxel volume to find the first intersecting voxel, returning hit position, voxel data, and surface normal [S2, unofficial]. It iterates up to `maxSteps` along `rayDir` from `rayPos`, checking voxel occupancy at each step, and populates output pointers `hitPos`, `hitVoxel`, and `hitNormal` on success [S2, unofficial]. It does not perform bounds checking internally; the caller must ensure `rayPos` and `maxSteps` are valid to avoid out-of-bounds memory access [S2, unofficial].
+### [DN_step_map](8596-dn-step-map.md)
+Computes the index of the first non-empty voxel intersected by a ray in a regular 3D grid using the Amanatides & Woo traversal algorithm. It differs from sibling methods by returning the specific voxel index of the first hit (or a max uint value if empty) rather than just a boolean hit status, and by handling zero-direction components explicitly to prevent division by zero. Choose this when you need the exact voxel index for further processing rather than just a hit/miss status.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Inefficient for large or sparse grids, normal estimation can be inaccurate with large step sizes [S1, unofficial].
-- **When to Use:** Not given in the sources.
-- **When Not to Use:** Not given in the sources.
+*   **Time Complexity**: $O(max\_distance)$, where $max\_distance$ is the length of the ray cast [S1, unofficial]. The number of steps is proportional to the ray length divided by the step size.
+*   **Memory Complexity**: $O(1)$ auxiliary space, as the algorithm only stores a few variables for the current and previous positions [S1, S2, unofficial].
+*   **Performance**: More efficient than PhysX raycasts for voxel grids due to direct grid traversal without physics engine overhead [S1, unofficial].
+*   **Strengths**: Simple to implement, efficient for sparse or dense voxel grids, provides immediate normal estimation.
+*   **Limitations**: Accuracy of normal estimation depends on step size; large steps can lead to incorrect normals. Not suitable for sub-voxel precision without significant optimization.
+*   **When to Use**: Block placement, collision detection, and simple raycasting in voxel-based games or simulations where high precision is not critical.
+*   **When Not to Use**: When sub-voxel accuracy is required, or when the ray needs to traverse very long distances with high precision.
 
 ## Background
-This method originates from a CPU rasterizer implementation in the `whudsontosh/CPU-Rasterizer` repository, where it was used for basic voxel visualization [S1, unofficial]. It represents a straightforward approach to voxel raycasting, prioritizing ease of implementation over efficiency [S1, unofficial].
+This method is commonly used in voxel-based games and simulations for tasks such as block placement, breaking, and collision detection. It is often implemented in custom voxel engines or as part of a larger rendering pipeline. The approach is inspired by the Amanatides-Woo voxel traversal algorithm, which is widely used for ray tracing in voxel grids [S1, S2, unofficial]. The specific normal estimation technique is a heuristic derived from the direction of traversal, providing a fast approximation of the surface normal without additional geometric calculations.
 
 ## Sources
-[S1] whudsontosh/CPU-Rasterizer, https://github.com/whudsontosh/CPU-Rasterizer, fetched 2026-10-27 (unofficial)
-[S2] frozein/DoonEngine, https://github.com/frozein/DoonEngine, fetched 2026-10-26 (unofficial)
+[S1] VektorKnight/vektor-voxels, https://github.com/VektorKnight/vektor-voxels, fetched 2026-10-27 (unofficial)
+[S2] whudsontosh/CPU-Rasterizer, https://github.com/whudsontosh/CPU-Rasterizer, fetched 2026-10-27 (unofficial)

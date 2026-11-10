@@ -7,28 +7,28 @@ A forward rendering method for scattering and emissive media that models the sce
 
 ## How it works
 **Inputs:**
-- A set of $N$ volumetric primitives $\{P_i\}_{i=1}^N$.
+- A set of $N$ volumetric primitives $\{P_i\}_{i=1}^N$ [S1, unofficial].
 - For each primitive $P_i$:
-  - Spatial density distribution defined by a kernel function $K_i(\mathbf{x})$ (e.g., Gaussian or Epanechnikov).
-  - Optical cross-section $\sigma_i$ (or $\tau_i$ in some notations, representing the peak optical depth scaling).
-  - Emission term $Q_i(\omega)$.
-  - Phase function $f_{p,i}(\omega' \to \omega)$.
-- Camera ray origin $\mathbf{x}_0$ and direction $\omega$.
-- Scene bounding volume hierarchy (BVH) built on primitive bounding boxes/shells.
+  - Spatial density distribution defined by a kernel function $K_i(\mathbf{x})$ (e.g., Gaussian or Epanechnikov) [S1, unofficial].
+  - Optical cross-section $\sigma_i$ (peak optical depth scaling) [S1, unofficial].
+  - Emission term $Q_i(\omega)$ [S1, unofficial].
+  - Phase function $f_{p,i}(\omega' \to \omega)$ [S1, unofficial].
+- Camera ray origin $\mathbf{x}_0$ and direction $\omega$ [S1, unofficial].
+- Scene bounding volume hierarchy (BVH) built on primitive bounding boxes/shells [S1, unofficial].
 
 **Outputs:**
-- Radiance $L(\mathbf{x}_0, \omega)$ along the ray.
+- Radiance $L(\mathbf{x}_0, \omega)$ along the ray [S1, unofficial].
 
 **Data Structures:**
 - **Primitive List:** Array of $N$ primitives. Each primitive stores:
-  - Kernel parameters (e.g., mean $\mathbf{c}_i$, covariance $\Sigma_i$ for Gaussian; center and radius for Epanechnikov).
-  - Scalar optical cross-section $\sigma_i$.
-  - Emission color/vector $Q_i$.
-  - Phase function parameters.
-  - Bounding box (AABB) for acceleration structure.
-- **Segment List:** Ordered list of ray segments $S_k = [b_{t_{k,0}}, b_{t_{k,1}}]$ resulting from ray-primitive intersection tests. Each segment stores:
-  - Start parameter $b_{t_{k,0}}$ and end parameter $b_{t_{k,1}}$ along the ray.
-  - List of primitive indices overlapping this segment.
+  - Kernel parameters (e.g., mean $\mathbf{c}_i$, covariance $\Sigma_i$ for Gaussian; center and radius for Epanechnikov) [G].
+  - Scalar optical cross-section $\sigma_i$ [S1, unofficial].
+  - Emission color/vector $Q_i$ [S1, unofficial].
+  - Phase function parameters [S1, unofficial].
+  - Bounding box (AABB) for acceleration structure [S1, unofficial].
+- **Segment List:** Ordered list of ray segments $S_k = [b_{t_{k,0}}, b_{t_{k,1}}]$ resulting from ray-primitive intersection tests [S1, unofficial]. Each segment stores:
+  - Start parameter $b_{t_{k,0}}$ and end parameter $b_{t_{k,1}}$ along the ray [S1, unofficial].
+  - List of primitive indices overlapping this segment [S1, unofficial].
 
 **Steps:**
 
@@ -40,18 +40,18 @@ A forward rendering method for scattering and emissive media that models the sce
     where $K_i(\mathbf{x})$ is the normalized kernel function for primitive $i$ [S1, unofficial].
 
 2.  **Ray-Primitive Intersection and Segmentation:**
-    Use hardware-accelerated ray tracing (e.g., BVH on OptiX) to find all primitives intersecting the camera ray.
-    - Collect all entry and exit points (parameters $t$) where the ray enters or leaves any primitive's bounding volume.
-    - Sort these points to define an ordered sequence of segments $S_k = [b_{t_{k,0}}, b_{t_{k,1}}]$.
+    Use hardware-accelerated ray tracing (e.g., BVH on OptiX) to find all primitives intersecting the camera ray [S1, unofficial].
+    - Collect all entry and exit points (parameters $t$) where the ray enters or leaves any primitive's bounding volume [S1, unofficial].
+    - Sort these points to define an ordered sequence of segments $S_k = [b_{t_{k,0}}, b_{t_{k,1}}]$ [S1, unofficial].
     - For each segment $S_k$, identify the set of primitives $\mathcal{I}_k$ that overlap with this interval. Note that a segment may contain 0, 1, or multiple overlapping primitives [S1, unofficial].
 
 3.  **Transmittance Calculation:**
-    For each segment $S_k$, calculate the transmittance from the segment start $b_{t_{k,0}}$ to a point $t$ within the segment ($b_{t_{k,0}} \le t \le b_{t_{k,1}}$).
+    For each segment $S_k$, calculate the transmittance from the segment start $b_{t_{k,0}}$ to a point $t$ within the segment ($b_{t_{k,0}} \le t \le b_{t_{k,1}}$) [S1, unofficial].
     - Calculate the optical depth $\tau_i(\mathbf{x}_a, \mathbf{x}_b)$ for each primitive $i \in \mathcal{I}_k$ along the ray segment from parameter $a$ to $b$:
       $$
       \tau_i(\mathbf{x}_a, \mathbf{x}_b) = \sigma_i \int_{\max(a, t_{i,0})}^{\min(b, t_{i,1})} K_i(\mathbf{x}_{t'}) dt'
       $$
-      where $t_{i,0}$ and $t_{i,1}$ are the ray parameters where the ray enters and exits the support of primitive $i$ (or its bounding volume if clipped).
+      where $t_{i,0}$ and $t_{i,1}$ are the ray parameters where the ray enters and exits the support of primitive $i$ [S1, unofficial].
     - The total transmittance for the segment is:
       $$
       T(\mathbf{x}_{b_{t_{k,0}}}, \mathbf{x}_t) = \exp \left( -\sum_{i \in \mathcal{I}_k} \tau_i(\mathbf{x}_{b_{t_{k,0}}}, \mathbf{x}_{\min(t, b_{t_{k,1}})}) \right)
@@ -61,27 +61,26 @@ A forward rendering method for scattering and emissive media that models the sce
       - For **Epanechnikov Kernels**, which have finite support, the integral is also analytical (polynomial) within the support [S1, unofficial].
 
 4.  **Free-Flight Distance Sampling:**
-    Sample a scattering event distance $t$ along the ray proportional to the PDF $p(t) = \mu_t(\mathbf{x}_t)T(\mathbf{x}_0, \mathbf{x}_t)$.
-    - **Single Primitive Segment:** If a segment contains only one primitive, use analytical inversion of the cumulative distribution function (CDF) derived from the transmittance formula.
+    Sample a scattering event distance $t$ along the ray proportional to the PDF $p(t) = \mu_t(\mathbf{x}_t)T(\mathbf{x}_0, \mathbf{x}_t)$ [S1, unofficial].
+    - **Single Primitive Segment:** If a segment contains only one primitive, use analytical inversion of the cumulative distribution function (CDF) derived from the transmittance formula [S1, unofficial].
     - **Multiple Overlapping Primitives:** If a segment contains multiple primitives, the CDF may not have a simple closed-form inverse. Use numerical root-finding (e.g., Newton-Raphson or bisection) to invert the CDF, or use uniform sampling approximation if precision allows [S1, unofficial].
-    - If no scattering event is sampled within the segment, proceed to the next segment.
+    - If no scattering event is sampled within the segment, proceed to the next segment [S1, unofficial].
 
 5.  **Radiance Accumulation (Segment-wise):**
     Integrate radiance front-to-back over all segments $k=1 \dots M$:
     $$
     L(\mathbf{x}_0, \omega) = \sum_{k=1}^{M} T^{k-1}(\mathbf{x}_0, \mathbf{x}_{b_{t_{k,0}}}) L_k(\mathbf{x}_{b_{t_{k,0}}}, \omega)
     $$
-    where $T^{k-1}$ is the transmittance from the camera to the start of segment $k$, and $L_k$ is the radiance contributed by segment $S_k$.
+    where $T^{k-1}$ is the cumulative transmittance from the camera to the start of segment $k$, and $L_k$ is the radiance contributed by segment $S_k$ [S1, unofficial].
     - $L_k$ includes:
-      - **Emission:** Direct emission from primitives within the segment.
-      - **Scattering:** Light scattered into the ray direction from other light paths.
+      - **Emission:** Direct emission from primitives within the segment [S1, unofficial].
+      - **Scattering:** Light scattered into the ray direction from other light paths [S1, unofficial].
 
 6.  **Next-Event Estimation (NEE) for Multiple Scattering:**
-    - When a scattering event is sampled at point $\mathbf{x}_s$ within a segment, use Next-Event Estimation to sample direct illumination from light sources.
-    - Trace a shadow ray to the light source.
-    - Compute the transmittance from $\mathbf{x}_s$ to the light using the same analytical segment-based transmittance logic.
-    - Add the estimated radiance to the path contribution.
-    - Recursively trace the scattered ray (if not terminated by Russian Roulette) to handle multiple scattering [S1, unofficial].
+    - When a scattering event is sampled at point $\mathbf{x}_s$ within a segment, use Next-Event Estimation to sample direct illumination from light sources [S1, unofficial].
+    - Trace a shadow ray to the light source [G].
+    - Compute the transmittance from $\mathbf{x}_s$ to the light using the same analytical segment-based transmittance logic [S1, unofficial].
+    - Add the estimated radiance to the path contribution [G].
 
 **Pseudocode:**
 
@@ -90,185 +89,161 @@ A forward rendering method for scattering and emissive media that models the sce
 ```python
 import math
 
-def evaluate_kernel_gaussian(x, center, cov_inv):
+def gaussian_kernel_integral(t_start, t_end, center, alpha):
     """
-    Evaluate Gaussian kernel K(x) = exp(-0.5 * (x-c)^T Sigma^-1 (x-c))
-    Assumes 1D ray parameterization for simplicity in integration context.
-    In practice, this integral is pre-computed analytically using erf.
+    Analytical integral of 1D Gaussian kernel K(t) = exp(-alpha * (t - center)^2)
+    along ray segment [t_start, t_end].
+    Result: sqrt(pi/alpha) * 0.5 * [erf(sqrt(alpha)*(t_end - center)) - erf(sqrt(alpha)*(t_start - center))]
     """
-    diff = x - center
-    exponent = -0.5 * diff * cov_inv * diff
-    return math.exp(exponent)
+    sqrt_alpha = math.sqrt(alpha)
+    arg_end = sqrt_alpha * (t_end - center)
+    arg_start = sqrt_alpha * (t_start - center)
+    return (math.sqrt(math.pi) / (2.0 * sqrt_alpha)) * (math.erf(arg_end) - math.erf(arg_start))
 
-def integrate_gaussian_kernel_analytic(t_start, t_end, center, cov_inv):
-    """
-    Analytical integral of Gaussian kernel along ray segment [t_start, t_end].
-    Integral of exp(-a*t^2 + b*t + c) dt involves erf.
-    Simplified placeholder for the closed-form solution using erf.
-    """
-    # This is a placeholder for the actual erf-based closed-form calculation.
-    # The exact formula depends on the specific parameterization of the Gaussian
-    # along the ray. For a 1D Gaussian along the ray:
-    # Integral = sqrt(pi/a) * [erf(...) - erf(...)]
-    # Here we assume a simplified constant approximation for structure demonstration.
-    # In real implementation, use the derived erf expression from the paper.
-    pass
-
-def integrate_epanechnikov_kernel_analytic(t_start, t_end, center, radius):
+def epanechnikov_kernel_integral(t_start, t_end, center, radius):
     """
     Analytical integral of Epanechnikov kernel.
     K(t) = 3/4 * (1 - ((t-center)/radius)^2) for |t-center| <= radius, else 0.
     """
-    # Clip integration bounds to kernel support
     t_min = max(t_start, center - radius)
     t_max = min(t_end, center + radius)
-    
     if t_min >= t_max:
         return 0.0
     
-    # Integral of (1 - ((t-c)/r)^2) dt from t_min to t_max
-    # Let u = (t-c)/r, dt = r*du
-    # Integral = r * Integral (1 - u^2) du = r * [u - u^3/3]
-    
     u_min = (t_min - center) / radius
     u_max = (t_max - center) / radius
-    
-    val = (u_max - u_max**3/3) - (u_min - u_min**3/3)
+    # Integral of (1 - u^2) du = u - u^3/3
+    val = (u_max - u_max**3 / 3.0) - (u_min - u_min**3 / 3.0)
     return (3.0 / 4.0) * radius * val
 
 def compute_optical_depth(primitive, t_a, t_b):
-    """
-    Compute optical depth tau_i for primitive i along ray segment [t_a, t_b].
-    """
+    """Compute optical depth tau_i for primitive i along ray segment [t_a, t_b]."""
     if primitive.kernel_type == 'gaussian':
-        # Use analytical erf-based integration
-        tau = integrate_gaussian_kernel_analytic(t_a, t_b, primitive.center, primitive.cov_inv)
+        tau = gaussian_kernel_integral(t_a, t_b, primitive.center, primitive.alpha)
     elif primitive.kernel_type == 'epanechnikov':
-        tau = integrate_epanechnikov_kernel_analytic(t_a, t_b, primitive.center, primitive.radius)
+        tau = epanechnikov_kernel_integral(t_a, t_b, primitive.center, primitive.radius)
     else:
         raise ValueError("Unknown kernel type")
-    
     return primitive.sigma * tau
 
-def trace_volumetric_primitives(ray_origin, ray_direction, primitives, lights):
+def sample_free_flight(t_start, t_end, mu_t_func, T_func, rng):
     """
-    Main VPPT rendering function.
+    Sample free-flight distance t in [t_start, t_end] proportional to p(t) = mu_t(x_t) * T(x_0, x_t).
+    Uses bisection on the CDF for general overlapping primitives [S1, unofficial].
     """
+    # Compute total probability mass in segment
+    mass = 0.0
+    steps = 100
+    dt = (t_end - t_start) / steps
+    for i in range(steps):
+        t_mid = t_start + (i + 0.5) * dt
+        mass += mu_t_func(t_mid) * T_func(t_mid) * dt
+    
+    target = rng.uniform(0.0, mass)
+    current_mass = 0.0
+    t_low, t_high = t_start, t_end
+    
+    for _ in range(50): # Bisection iterations
+        t_mid = (t_low + t_high) / 2.0
+        current_mass += mu_t_func(t_mid) * T_func(t_mid) * dt
+        if current_mass >= target:
+            t_high = t_mid
+        else:
+            t_low = t_mid
+        if t_high - t_low < 1e-6:
+            break
+    return (t_low + t_high) / 2.0
+
+def trace_volumetric_primitives(ray_origin, ray_direction, ray_t_min, ray_t_max, primitives, lights, rng):
+    """Main VPPT rendering function."""
     # 1. Intersection and Segmentation
-    # Find all intersecting primitives and their entry/exit points
     intersections = []
     for p in primitives:
-        # Ray-primitive intersection test (e.g., ray-AABB or ray-ellipsoid)
         t_entry, t_exit = p.intersect(ray_origin, ray_direction)
         if t_entry is not None:
             intersections.append((t_entry, t_exit, p))
     
-    # Sort by entry point
     intersections.sort(key=lambda x: x[0])
     
-    # Build segments
     segments = []
-    current_t = ray_origin.t_min # e.g., 0.0 or camera near plane
+    current_t = ray_t_min
     prev_exit = None
     
     for t_entry, t_exit, p in intersections:
         if t_entry > current_t:
-            # Gap between segments (empty space)
             if prev_exit is not None and prev_exit > current_t:
                 segments.append((current_t, prev_exit, []))
             current_t = t_entry
-        
-        # Add primitive to current segment
-        # Handle overlapping primitives by grouping them
         if segments and segments[-1][0] == t_entry:
             segments[-1] = (segments[-1][0], max(segments[-1][1], t_exit), segments[-1][2] + [p])
         else:
             segments.append((t_entry, t_exit, [p]))
-            
         current_t = t_exit
         prev_exit = t_exit
         
-    # Add final segment if needed
-    if current_t < ray_origin.t_max:
-        segments.append((current_t, ray_origin.t_max, []))
+    if current_t < ray_t_max:
+        segments.append((current_t, ray_t_max, []))
 
     # 2. Radiance Accumulation
     total_radiance = 0.0
-    transmittance_so_far = 1.0
+    cumulative_transmittance = 1.0
     
     for t_start, t_end, overlapping_primitives in segments:
         if t_start >= t_end:
             continue
             
-        # Calculate transmittance from start of segment to end of segment
-        # T_segment = exp(-sum(tau_i for i in overlapping_primitives))
+        # Calculate segment transmittance
         total_optical_depth = 0.0
         for p in overlapping_primitives:
             tau = compute_optical_depth(p, t_start, t_end)
             total_optical_depth += tau
-            
         segment_transmittance = math.exp(-total_optical_depth)
         
-        # Contribution from this segment
-        # L_k = Emission + Scattering
-        # For simplicity, assume direct emission and single scattering approximation here
-        # In full VPPT, NEE is used for multiple scattering
-        
+        # Compute segment radiance L_k
         segment_radiance = 0.0
         
-        # Add emission
+        # Emission contribution
         for p in overlapping_primitives:
-            # Emission is integrated over the segment
-            # Integral of Q_i * K_i dt
             if p.kernel_type == 'gaussian':
-                emission_integral = integrate_gaussian_kernel_analytic(t_start, t_end, p.center, p.cov_inv)
+                emission_integral = gaussian_kernel_integral(t_start, t_end, p.center, p.alpha)
             elif p.kernel_type == 'epanechnikov':
-                emission_integral = integrate_epanechnikov_kernel_analytic(t_start, t_end, p.center, p.radius)
-            
+                emission_integral = epanechnikov_kernel_integral(t_start, t_end, p.center, p.radius)
             segment_radiance += p.emission * emission_integral
             
-        # Add scattering (simplified: single scattering from lights)
+        # NEE scattering contribution
         for light in lights:
-            # Sample light direction, check visibility
-            # Compute transmittance from segment to light using same method
-            # Add contribution
-            pass
+            # Sample light direction, check visibility, compute transmittance to light
+            # Add contribution using phase function and emission
+            pass 
             
-        # Accumulate
-        total_radiance += transmittance_so_far * segment_radiance
+        total_radiance += cumulative_transmittance * segment_radiance
+        cumulative_transmittance *= segment_transmittance
         
-        # Update transmittance for next segment
-        transmittance_so_far *= segment_transmittance
-        
-        # Russian Roulette for path termination could be applied here
-        # if transmittance_so_far < threshold:
-        #     if random() < survival_prob:
-        #         transmittance_so_far /= survival_prob
-        #     else:
-        #         break
+        # Russian Roulette for path termination could be applied here [G]
+        # if cumulative_transmittance < threshold: ...
 
     return total_radiance
 ```
 
 **Parameters:**
 - **Kernel Types:** Gaussian Kernel (infinite support, smooth, uses erf for transmittance) and Epanechnikov Kernel (finite support, sharper edges, more efficient acceleration structures) [S1, unofficial].
-- **Optical Cross-Section ($\sigma_i$):** Controls the density/scattering strength of each primitive.
-- **Emission ($Q_i$):** Color/intensity of light emitted by the primitive.
-- **Phase Function ($f_{p,i}$):** Describes scattering directionality (e.g., Henyey-Greenstein).
+- **Optical Cross-Section ($\sigma_i$):** Controls the density/scattering strength of each primitive [S1, unofficial].
+- **Emission ($Q_i$):** Color/intensity of light emitted by the primitive [S1, unofficial].
+- **Phase Function ($f_{p,i}$):** Describes scattering directionality (e.g., Henyey-Greenstein) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Gaussian Infinite Support:** Gaussian kernels have infinite support, requiring clipping to a finite radius to avoid evaluating all primitives. This clipping must be consistent with the acceleration structure bounds [S1, unofficial].
-- **Overlapping Primitives:** Multiple overlapping primitives in a segment require summing optical depths. The transmittance calculation must correctly handle the sum of integrals, not the integral of sums, if kernels are not normalized to 1 in the same way.
+- **Gaussian Infinite Support:** Gaussian kernels have infinite support, requiring clipping to a finite radius to avoid evaluating all primitives [S1, unofficial].
+- **Overlapping Primitives:** Multiple overlapping primitives in a segment require summing optical depths. The transmittance calculation must correctly handle the sum of integrals, not the integral of sums, if kernels are not normalized to 1 in the same way [G].
 - **Numerical Stability:** For very high optical depths, transmittance approaches 0. Use log-transmittance or clamp values to avoid underflow/overflow in exponentiation [G].
 - **Degenerate Input:** Primitives with $\sigma_i = 0$ or zero volume should be ignored or handled as empty [G].
 
 ## Operating characteristics
-- **Time Complexity:** Depends on the number of primitives $N$ and the number of intersections per ray. With BVH acceleration, intersection testing is $O(\log N)$ on average. Transmittance calculation is $O(K)$ per segment where $K$ is the number of overlapping primitives. NEE adds complexity proportional to the number of lights.
+- **Time Complexity:** Depends on the number of primitives $N$ and the number of intersections per ray. With BVH acceleration, intersection testing is $O(\log N)$ on average. Transmittance calculation is $O(K)$ per segment where $K$ is the number of overlapping primitives. NEE adds complexity proportional to the number of lights [G].
 - **Memory Complexity:** $O(N)$ to store primitive parameters. Significantly lower than voxel grids for high-resolution scenes [S1, unofficial].
 - **Measured Performance:** Significantly faster than voxel-based methods due to analytical solutions and compact representation. Epanechnikov kernels offer faster rendering than Gaussian kernels due to finite support and simpler integration [S1, unofficial].
 - **Scaling:** Scales well with the number of primitives. Level-of-Detail (LoD) can be implemented by adjusting the number of primitives [S1, unofficial].
-- **Strengths:** Noise-free single-scattering results, efficient memory usage, physically based, supports multiple scattering via NEE, avoids popping artifacts.
-- **Limitations:** Requires careful handling of overlapping primitives. Gaussian kernels require clipping. Not as flexible as neural fields for complex, non-parametric shapes [S1, unofficial].
+- **Strengths:** Noise-free single-scattering results, efficient memory usage, physically based, supports multiple scattering via NEE, avoids popping artifacts [S1, unofficial].
+- **Limitations:** Requires careful handling of overlapping primitives. Gaussian kernels require clipping [S1, unofficial].
 
 ## Background
 Originated from the paper "Don’t Splat your Gaussians: Volumetric Ray-Traced Primitives for Modeling and Rendering Scattering and Emissive Media" by Meta (2025) [S1, unofficial]. The method addresses the limitations of voxel grids (high memory, noise) and 3D Gaussian Splatting (lack of physical scattering, ordering artifacts) by introducing kernel-based volumetric primitives with closed-form integration. It is used in forward and inverse rendering, tomography, and radiance field optimization [S1, unofficial].

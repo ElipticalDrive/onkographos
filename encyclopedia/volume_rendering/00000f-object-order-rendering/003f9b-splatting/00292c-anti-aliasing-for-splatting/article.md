@@ -2,29 +2,30 @@
 Also called: Anti-Aliased Splatting, Anti-Aliasing Technique for Splatting, Perspective Anti-Aliased Splatting
 
 ## Overview
-Anti-Aliasing for Splatting is a method designed to prevent sample-rate aliasing artifacts (pre-aliasing) that arise during the resampling phase of volume rendering when the integration grid sampling frequency is insufficient [S1, S2, unofficial]. Unlike standard splatting, which uses a fixed reconstruction kernel size in eye space, this method scales the splat size proportional to the viewing frustum and attenuates the splat energy for distant primitives to maintain constant energy per unit area on the view plane [S2, unofficial]. It specifically addresses the divergence of rays in perspective projections where the distance between adjacent rays exceeds the volume raster sampling rate [S1, S2, unofficial].
+Anti-Aliasing for Splatting is a method designed to prevent sample-rate aliasing artifacts (pre-aliasing) that arise during the resampling phase of volume rendering when the integration grid sampling frequency is insufficient [S1, unofficial][S2, unofficial]. Unlike standard splatting, which uses a fixed reconstruction kernel size in eye space, this method scales the splat size proportional to the viewing frustum and attenuates the splat energy for distant primitives to maintain constant energy per unit area on the view plane [S2, unofficial]. It specifically addresses the divergence of rays in perspective projections where the distance between adjacent rays exceeds the volume raster sampling rate [S1, unofficial][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Volume raster defined by grid spacing $s$; camera parameters including eye-to-screen distance $D$; pixel extent $p$; volume raster sample spacing $v$; splat primitives with initial radius $r_1$ and energy $u_1$ at a reference distance.
-*   **Outputs:** Rendered image with aliased artifacts removed for distances beyond the critical threshold.
+*   **Inputs:** Volume raster defined by grid spacing $s$; camera parameters including eye-to-screen distance $D$; pixel extent $p$; volume raster sample spacing $v$; splat primitives with initial radius $r_1$ and energy $u_1$ at a reference distance [S1, unofficial][S2, unofficial].
+*   **Outputs:** Rendered image with aliased artifacts removed for distances beyond the critical threshold [S2, unofficial].
 
 **Data Structures:**
-*   **Volume Raster:** Defined by grid spacing $s$. The sampling rate is $p = 1/s$ [S1, S2, unofficial].
+*   **Volume Raster:** Defined by grid spacing $s$ [S1, unofficial]. The sampling rate is $p = 1/s$ [S1, unofficial][S2, unofficial].
 *   **Splat Kernel:** Pre-computed and stored in a texture (e.g., 256x256 table) for hardware acceleration [S2, unofficial].
 *   **Polygon Representation:** Each splat is rendered as a polygon in world space, centered at the voxel position and rotated perpendicular to the eye-to-voxel ray [S2, unofficial].
 
 **Parameters:**
-*   $s$: Volume raster grid spacing [S1, S2, unofficial].
-*   $p$: Volume raster sampling rate, $p = 1/s$ [S1, S2, unofficial].
+*   $s$: Volume raster grid spacing [S1, unofficial][S2, unofficial].
+*   $p$: Volume raster sampling rate, $p = 1/s$ [S1, unofficial][S2, unofficial].
 *   $D$: Distance from the eye point to the screen (view plane) [S2, unofficial].
 *   $v$: Sample spacing of the volume raster [S2, unofficial].
-*   $k$: Critical distance along the $z_e$ axis where the sampling rates of the volume raster and the integration grid are equal [S1, S2, unofficial].
+*   $k$: Critical distance along the $z_e$ axis where the sampling rates of the volume raster and the integration grid are equal [S1, unofficial][S2, unofficial].
+*   Note: The source uses $p$ for both the volume raster sampling rate ($1/s$) and the pixel extent in Equation 3 [S2, unofficial].
 
 **Step-by-Step Method:**
 
 1.  **Calculate Critical Distance ($k$):**
-    Determine the distance $k$ from the eye point to the view plane where the volume raster sampling rate equals the integration grid sampling rate. This is calculated using similar triangles [S2, unofficial]:
+    Determine the distance $k$ from the eye point to the view plane where the volume raster sampling rate equals the integration grid sampling rate [S2, unofficial]. This is calculated using similar triangles [S2, unofficial]:
     $$ k = \frac{v}{p} \cdot D $$
     where $v$ is the volume raster sample spacing, $p$ is the pixel extent, and $D$ is the eye-to-screen distance [S2, unofficial].
 
@@ -33,13 +34,13 @@ Anti-Aliasing for Splatting is a method designed to prevent sample-rate aliasing
 
 3.  **Conditional Rendering:**
     *   **Case 1: $d < k$ (Region 1):**
-        The integration grid sampling frequency $\phi(d)$ is greater than the volume raster sampling rate $p$. Assuming the volume raster is bandlimited such that $p > 2\omega$ (where $\omega$ is the bandlimit frequency), then $\phi(d) > 2\omega$. No additional filtering is required. Render the splat using standard splatting techniques, where the splat size decreases with distance in perspective space [S1, S2, unofficial].
+        The integration grid sampling frequency $\phi(d)$ is greater than the volume raster sampling rate $p$ [S1, unofficial]. Assuming the volume raster is bandlimited such that $p > 2\omega$ (where $\omega$ is the bandlimit frequency), then $\phi(d) > 2\omega$ [S1, unofficial]. No additional filtering is required [S1, unofficial]. Render the splat using standard splatting techniques, where the splat size decreases with distance in perspective space [S1, unofficial][S2, unofficial].
     *   **Case 2: $d \ge k$ (Region 2):**
-        The integration grid sampling frequency $\phi(d)$ is less than $p$. To avoid aliasing, the volume raster must be low-pass filtered such that $\phi(d) > 2\omega(d)$, where $\omega(d)$ is the reduced highest frequency [S2, unofficial].
-        1.  **Scale Splat Radius:** Scale the splat radius $r$ by a factor of $(d/k)$ relative to its size at $k$. If $r_1$ is the radius at distance $k$, the new radius $r_2$ is:
+        The integration grid sampling frequency $\phi(d)$ is less than $p$ [S1, unofficial]. To avoid aliasing, the volume raster must be low-pass filtered such that $\phi(d) > 2\omega(d)$, where $\omega(d)$ is the reduced highest frequency [S2, unofficial].
+        1.  **Scale Splat Radius:** Scale the splat radius $r$ by a factor of $(d/k)$ relative to its size at $k$ [S2, unofficial]. If $r_1$ is the radius at distance $k$, the new radius $r_2$ is:
             $$ r_2 = r_1 \cdot \frac{d}{k} $$
             This scaling is proportional to the viewing frustum [S2, unofficial].
-        2.  **Attenuate Energy:** Attenuate the splat's energy (e.g., alpha channel) by the inverse square of the distance ratio to maintain constant energy per unit area on the view plane. If $u_1$ is the energy at distance $k$, the new energy $u_2$ is:
+        2.  **Attenuate Energy:** Attenuate the splat's energy (e.g., alpha channel) by the inverse square of the distance ratio to maintain constant energy per unit area on the view plane [S2, unofficial]. If $u_1$ is the energy at distance $k$, the new energy $u_2$ is:
             $$ u_2 = u_1 \cdot \left(\frac{k}{d}\right)^2 $$
         3.  **Composite:** Render the scaled and attenuated splat into the view plane [S2, unofficial].
 
@@ -48,6 +49,8 @@ Anti-Aliasing for Splatting is a method designed to prevent sample-rate aliasing
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def render_splat_anti_aliasing(splat, eye_position, screen_distance, pixel_extent, volume_sample_spacing):
     """
     Renders a single splat with anti-aliasing for distances beyond k.
@@ -63,7 +66,10 @@ def render_splat_anti_aliasing(splat, eye_position, screen_distance, pixel_exten
         Rendered contribution (scaled radius, attenuated energy).
     """
     # Calculate distance from eye to splat center
-    d = vector_length(splat.voxel_center - eye_position)
+    dx = splat.voxel_center.x - eye_position.x
+    dy = splat.voxel_center.y - eye_position.y
+    dz = splat.voxel_center.z - eye_position.z
+    d = math.sqrt(dx**2 + dy**2 + dz**2)
     
     # Calculate critical distance k
     # k = (v / p) * D
@@ -90,19 +96,19 @@ def render_splat_anti_aliasing(splat, eye_position, screen_distance, pixel_exten
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Off-Axis Error:** The calculation of splat size using similar triangles (Equation 4 in source) underestimates the required low-pass filtering for splats not on the $+z_e$ axis. At the view cone boundary ($\alpha = 30^\circ$), the kernel is approximately 1.15 times larger than strictly necessary. However, this error results in *more* filtering than required, satisfying the Nyquist condition and thus avoiding aliasing [S2, unofficial].
+*   **Off-Axis Error:** The calculation of splat size using similar triangles (Equation 4 in source) underestimates the required low-pass filtering for splats not on the $+z_e$ axis [S2, unofficial]. At the view cone boundary ($\alpha = 30^\circ$), the kernel is approximately 1.15 times larger than strictly necessary [S2, unofficial]. However, this error results in *more* filtering than required, satisfying the Nyquist condition and thus avoiding aliasing [S2, unofficial].
 *   **Aliasing Artifacts:** Occur when the distance between adjacent rays is greater than one voxel ($d > k$) if the volume raster is not low-pass filtered [S2, unofficial].
-*   **Bandlimiting Assumption:** The method assumes the volume raster is bandlimited. If the sampled function is not bandlimited, aliasing will be present regardless of the sampling rate [S1, S2, unofficial].
+*   **Bandlimiting Assumption:** The method assumes the volume raster is bandlimited [S1, unofficial]. If the sampled function is not bandlimited, aliasing will be present regardless of the sampling rate [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The method adds a constant-time calculation per splat (distance check, scaling, attenuation) to the standard splatting pipeline. The complexity remains linear with respect to the number of splats $N$, i.e., $O(N)$ [S2, unofficial].
-*   **Memory Complexity:** Requires storage for the pre-computed splat kernel texture (e.g., 256x256) and standard splat data structures. No significant additional memory overhead compared to standard splatting [S2, unofficial].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
 *   **Performance:** In tests, a 498x398x1 volume (198K splats) rendered into a 270x157 image showed strong aliasing in standard splatting, which was smoothed out by the anti-aliased method [S2, unofficial]. A 512x512x103 terrain volume (386K splats) rendered into a 270x175 image showed flickering and strobing in standard splatting, which were eliminated [S2, unofficial].
 *   **Strengths:** Eliminates pre-aliasing and post-aliasing artifacts for splats beyond distance $k$ by ensuring the integration grid sampling rate satisfies the Nyquist criterion relative to the filtered volume raster [S2, unofficial].
-*   **Limitations:** Increases blur for distant splats due to the larger kernel size. Does not address temporal aliasing effects (flickering due to motion) [S2, unofficial].
+*   **Limitations:** Increases blur for distant splats due to the larger kernel size [S2, unofficial]. Does not address temporal aliasing effects (flickering due to motion) [S2, unofficial].
 
 ## Background
-The method was introduced in the paper "An Anti-Aliasing Technique for Splatting" presented at IEEE Visualization 1997, where it was awarded Best Paper [S2, unofficial]. It addresses a fundamental limitation of splatting algorithms, which generally perform reconstruction in perspective space and lack the equivalent mechanism to avoid aliasing that volume ray-casting algorithms possess (where reconstruction kernels become larger as rays diverge in eye space) [S1, S2, unofficial]. The technique is particularly relevant for perspective views where the integration grid diverges, causing the sampling frequency to drop below the Nyquist limit for distant objects [S1, S2, unofficial].
+The method was introduced in the paper "An Anti-Aliasing Technique for Splatting" presented at IEEE Visualization 1997, where it was awarded Best Paper [S2, unofficial]. It addresses a fundamental limitation of splatting algorithms, which generally perform reconstruction in perspective space and lack the equivalent mechanism to avoid aliasing that volume ray-casting algorithms possess (where reconstruction kernels become larger as rays diverge in eye space) [S1, unofficial][S2, unofficial]. The technique is particularly relevant for perspective views where the integration grid diverges, causing the sampling frequency to drop below the Nyquist limit for distant objects [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] DTIC ADA363073: Perspective Splatting, https://archive.org/details/DTIC_ADA363073, fetched 2026-10-26 (unofficial)

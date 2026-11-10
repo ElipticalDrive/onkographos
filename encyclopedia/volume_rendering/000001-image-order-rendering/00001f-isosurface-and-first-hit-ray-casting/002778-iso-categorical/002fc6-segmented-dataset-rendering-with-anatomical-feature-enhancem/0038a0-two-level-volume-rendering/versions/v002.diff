@@ -1,0 +1,156 @@
+--- v001.md
++++ v002.md
+@@ -36,28 +36,43 @@
+ **Pseudocode**
+ ```python
+-def two_level_volume_rendering(volume_data, ray_origin, ray_direction, object_configs):
++def two_level_volume_rendering(volume_data, ray_origin, ray_direction, volume_bounds, step_size, object_configs):
+     """
+     volume_data: 3D array of (density, object_id) tuples.
+-    ray_origin: 3D vector.
+-    ray_direction: 3D vector.
++    ray_origin: 3D vector (x, y, z).
++    ray_direction: 3D vector (x, y, z).
++    volume_bounds: Tuple of (min_corner, max_corner) defining the volume extent.
++    step_size: Float, distance between sample points along the ray.
+     object_configs: Dictionary mapping object_id to rendering parameters (TF, shading, etc.).
+     """
+-    # Initialize global accumulators
+-    global_color = [0.0, 0.0, 0.0, 0.0]
++    # [G] Standard ray-box intersection to find valid traversal interval
++    t_min = 0.0
++    t_max = float('inf')
++    for i in range(3):
++        if ray_direction[i] == 0.0:
++            if ray_origin[i] < volume_bounds[0][i] or ray_origin[i] > volume_bounds[1][i]:
++                return [0.0, 0.0, 0.0, 0.0]
++        else:
++            t1 = (volume_bounds[0][i] - ray_origin[i]) / ray_direction[i]
++            t2 = (volume_bounds[1][i] - ray_origin[i]) / ray_direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
+     
+-    # List to store local object results along the ray
+-    local_object_results = []
++    if t_min >= t_max:
++        return [0.0, 0.0, 0.0, 0.0]
+ 
+-    # Step 1-3: Ray marching and sample point processing
+-    t = 0.0
+-    while t < volume_depth:
++    # Local pass accumulators: dictionary mapping object_id -> (accum_color, accum_opacity)
++    local_pass = {}
++
++    t = t_min
++    while t < t_max:
+         sample_pos = ray_origin + ray_direction * t
+         
+-        # Get voxel data at sample_pos
+-        density, voxel_id = volume_data.sample(sample_pos)
++        # [G] Standard grid sampling: map sample_pos to voxel coordinates
++        voxel_coords = [int(round((sample_pos[i] - volume_bounds[0][i]) / (volume_bounds[1][i] - volume_bounds[0][i]) * volume_data.shape[i])) for i in range(3)]
++        
++        density, voxel_id = volume_data[voxel_coords]
+         
+         # Interpolate object identity using Nearest Neighbor
+-        # [G] In a discrete grid, this is simply the voxel_id of the nearest voxel
+-        object_id = voxel_id 
++        object_id = voxel_id
+         
+         # Get rendering config for this object
+@@ -67,65 +82,40 @@
+             continue
+ 
+-        # Step 4: Local Rendering Pass
+-        # Calculate optical properties for this sample point based on object-specific TF
++        # Calculate optical properties based on object-specific TF and shading
+         opacity = config.transfer_function(density)
+         color = config.shading_model(density, sample_pos, ray_direction)
+         
+-        # Store local result for this object at this position
+-        # [G] In a real implementation, we would accumulate these locally per object
+-        # before the global pass, or store them in a buffer keyed by object_id
+-        local_object_results.append({
+-            'object_id': object_id,
+-            'color': color,
+-            'opacity': opacity,
+-            'position': sample_pos
+-        })
++        # Local compositing: accumulate per object
++        if object_id not in local_pass:
++            local_pass[object_id] = ([0.0, 0.0, 0.0, 0.0], 0.0)
++        
++        local_color, local_opacity = local_pass[object_id]
++        alpha = opacity * (1.0 - local_opacity)
++        local_pass[object_id] = (
++            [local_color[i] + color[i] * alpha for i in range(4)],
++            local_opacity + alpha
++        )
+         
+         t += step_size
+ 
+-    # Step 5: Global Rendering Pass
+-    # Group local results by object_id
+-    objects = {}
+-    for res in local_object_results:
+-        oid = res['object_id']
+-        if oid not in objects:
+-            objects[oid] = []
+-        objects[oid].append(res)
+-
+-    # Composite each object's local result
+-    # [G] The specific local compositing method (e.g., MIP, DVR) is defined in config
+-    # Here we assume standard front-to-back compositing for the local pass per object
+-    for oid, samples in objects.items():
+-        # Sort samples by depth (t)
+-        samples.sort(key=lambda s: s['position'])
++    # Global compositing: combine local object results
++    global_color = [0.0, 0.0, 0.0, 0.0]
++    global_opacity = 0.0
++    
++    for object_id, (local_color, local_opacity) in local_pass.items():
++        alpha = local_opacity * (1.0 - global_opacity)
++        global_color = [global_color[i] + local_color[i] * alpha for i in range(4)]
++        global_opacity += alpha
+         
+-        local_accum_color = [0.0, 0.0, 0.0, 0.0]
+-        local_accum_opacity = 0.0
+-        
+-        for sample in samples:
+-            c = sample['color']
+-            o = sample['opacity']
+-            
+-            # Local compositing
+-            alpha = o * (1.0 - local_accum_opacity)
+-            local_accum_color = local_accum_color + c * alpha
+-            local_accum_opacity = local_accum_opacity + alpha
+-            
+-        # Add this object's contribution to the global composite
+-        # [G] Standard front-to-back global compositing
+-        alpha = local_accum_opacity * (1.0 - global_color[3])
+-        global_color = global_color + local_accum_color * alpha
+-        global_color[3] = global_color[3] + alpha
+-
+     return global_color
+ ```
+ 
+ **Edge Cases and Pitfalls**
+-*   **Identity Interpolation:** The method relies on Nearest Neighbor interpolation for object identity numbers. Degenerate cases where a ray passes through boundaries between many small objects may require careful handling to ensure correct identity assignment [S2, unofficial].
+-*   **Performance:** The approach increases computation and time consumption significantly compared to standard volume rendering. Software-based implementations suffer a significant efficiency decrease; a GPU-based approach is necessary for real-time performance [S2, unofficial].
+-*   **Clipping Context:** Clipping must be handled per-object. Clipped parts need specific rendering parameters (e.g., low opacity) to maintain context, otherwise structures may disappear entirely [S1, unofficial].
++*   **Identity Interpolation:** The method relies on Nearest Neighbor interpolation for object identity numbers [S2, unofficial]. Degenerate cases where a ray passes through boundaries between many small objects may require careful handling to ensure correct identity assignment [S2, unofficial].
++*   **Performance:** The approach increases computation and time consumption significantly compared to standard volume rendering [S2, unofficial]. Software-based implementations suffer a significant efficiency decrease; a GPU-based approach is necessary for real-time performance [S2, unofficial].
++*   **Clipping Context:** Clipping must be handled per-object [S1, unofficial]. Clipped parts need specific rendering parameters (e.g., low opacity) to maintain context, otherwise structures may disappear entirely [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Higher than standard volume rendering due to the two-pass compositing structure and per-object property lookups. The complexity is proportional to the number of sample points and the number of distinct objects intersected by the ray [S2, unofficial].
++*   **Time Complexity:** Higher than standard volume rendering due to the two-pass compositing structure and per-object property lookups [S2, unofficial]. The approach increases computation and time consumption significantly compared to standard volume rendering [S2, unofficial].
+ *   **Memory Complexity:** Requires storing an additional integer (object identity) per voxel alongside the density value, increasing memory footprint [S2, unofficial].
+ *   **Performance:** On a single CPU, typical visualizations of $256^3$ medical data sets can render up to 35 frames per second [S1, unofficial]. However, software-based applications suffer significant efficiency decreases, making GPU-based approaches necessary for efficient realization [S2, unofficial].
+@@ -136,5 +126,5 @@
+ 
+ ## Background
+-Two-level volume rendering was introduced by H. Hagen, M. B. G. [S1, S2, unofficial]. It was developed to address the limitations of standard volume rendering in handling segmented data, where different objects benefit from different rendering modes [S1, unofficial]. The method forms the foundation for more advanced techniques like Importance-Driven Volume Rendering (IDVR) [S2, unofficial]. It is used in medical visualization applications to enhance the graphical representation of complex anatomical structures by allowing object-specific rendering attributes [S2, unofficial].
++Two-level volume rendering was introduced in [HMBG00] as cited in [S1, S2, unofficial]. It was developed to address the limitations of standard volume rendering in handling segmented data, where different objects benefit from different rendering modes [S1, unofficial]. The method forms the foundation for more advanced techniques like Importance-Driven Volume Rendering (IDVR) [S2, unofficial]. It is used in medical visualization applications to enhance the graphical representation of complex anatomical structures by allowing object-specific rendering attributes [S2, unofficial].
+ 
+ ## Sources

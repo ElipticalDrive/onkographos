@@ -1,0 +1,157 @@
+--- v014.md
++++ v015.md
+@@ -4,86 +4,100 @@
+ 
+ ## Overview
+-Delta encoding (also known as Differential Pulse-Code Modulation or DPCM) is a predictive compression method that exploits coherence in data by storing the difference between a predicted value and the actual value [S1]. In volume rendering, it is primarily used to compress time-varying data by predicting that a voxel's value remains unchanged between time steps, or heightfields where values vary progressively [S1][S2, unofficial]. It sets itself apart from sibling methods like [Optimal Linear Volumetric Predictor with Truncated Huffman Coding](7759-optimal-linear-volumetric-predictor-with-truncated-huffman-c.md) by using a constant predictor (identity or previous time step) rather than a complex linear combination of spatial neighbors, resulting in lower computational overhead but potentially higher residual entropy if the data changes rapidly [S1].
++Delta encoding predicts the current value of a data element based on a previous value (typically the preceding time step or spatial neighbor) and stores only the difference (error) between the prediction and the actual value [S1]. It solves the problem of compressing data with high temporal or spatial coherence by converting redundant absolute values into sparse, low-magnitude residuals [S1]. Unlike sibling methods that may use complex linear predictors or transform-domain residuals, standard delta encoding relies on the simplest possible prediction model: $V_{pred} = V_{prev}$ [S1]. Its primary limitation is that it prevents random access to specific time steps or spatial locations without decompressing the entire preceding sequence, as each value depends on the reconstruction of all previous values [S1][S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A sequence of volume data $V_t$ (where $t$ is the time step) or a heightfield $H$.
+-*   **Output:** A stream of residual values (deltas) $D$, which are subsequently entropy-encoded.
++*   **Input:** A sequence of volume data $V_t$ at time step $t$ (or a linearized spatial sequence).
++*   **Output:** A sequence of delta values $\Delta_t$ and, optionally, absolute reference values for random access.
+ 
+ **Data Structures:**
+-The residual $d$ for a voxel at position $p$ in time step $t$ is stored as an integer. If the original data is 16-bit, the delta is typically stored in 16-bit signed integers to accommodate negative differences [S1].
++*   **Delta Buffer:** Stores the difference values $\Delta_t$. The bit-depth can be reduced if the range of $\Delta_t$ is smaller than the original data range [S1].
++*   **Reference Buffer (Optional):** Stores absolute values $V_{ref}$ at specific intervals to allow random access [S1].
+ 
+ **Steps:**
+-1.  **Prediction:** For each voxel $v_{t,p}$ in the current time step $t$, predict the value $\hat{v}_{t,p}$ based on the previous time step $t-1$.
+-    $$ \hat{v}_{t,p} = v_{t-1,p} $$
+-    For heightfields, the prediction is often the previous value in a scan order or a spatial neighbor [S2, unofficial][S3].
+-2.  **Residual Calculation:** Compute the difference between the actual value and the prediction.
+-    $$ d_{t,p} = v_{t,p} - \hat{v}_{t,p} $$
+-    If the voxel has not changed, $d_{t,p} = 0$ [S1].
+-3.  **Storage:** Store the residual $d_{t,p}$. Regions with no change produce uniform bricks of zeros, which are highly compressible via variable-length coding (e.g., Huffman) [S1].
+-4.  **Decompression (GPU/CPU):** To reconstruct $v_{t,p}$, the decoder adds the decoded residual to the previously reconstructed value.
+-    $$ v_{t,p} = \hat{v}_{t,p} + d_{t,p} $$
+-    On the GPU, this is implemented by adding the calculated delta to the existing value in the volume buffer rather than overwriting it, ensuring memory coalescing if threads are organized by x-coordinate [S1].
++1.  **Prediction:** For each voxel $v$ at time $t$, predict the value using the value from the previous time step $t-1$.
++    $$ V_{pred}(v, t) = V(v, t-1) $$
++    [S1]
++2.  **Delta Calculation:** Compute the difference between the actual value and the prediction.
++    $$ \Delta(v, t) = V(v, t) - V_{pred}(v, t) $$
++    [S1]
++3.  **Storage:** Store $\Delta(v, t)$. If regions are unchanged, $\Delta(v, t) = 0$, creating uniform bricks suitable for variable-length coding [S1].
++4.  **Decompression (GPU/CPU):** To reconstruct $V(v, t)$, add the stored delta to the previously reconstructed value.
++    $$ V_{recon}(v, t) = V_{recon}(v, t-1) + \Delta(v, t) $$
++    [S1]
++
++**Parameters:**
++*   **Prediction Model:** Constant (previous value) [S1].
++*   **Bit-depth:** Can be reduced if the maximum absolute delta value fits in fewer bits than the original data [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Random Access:** Standard delta encoding requires reading all previous time steps to reconstruct a specific time step $t$ [S1]. This limits practical use in applications requiring efficient queries or realtime visualization [S2, unofficial].
++*   **Drift:** In lossy scenarios or if not handled carefully, errors can accumulate, though standard delta encoding is often used losslessly [S1].
++*   **Storage Overhead:** To resolve the random access limitation, absolute values can be saved at intervals, increasing storage requirements [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def encode_delta_encoding(volume_prev, volume_curr):
++def encode_delta(time_steps):
+     """
+-    Encodes the difference between two consecutive time steps.
+-    volume_prev: 3D array of previous time step values.
+-    volume_curr: 3D array of current time step values.
+-    Returns: 3D array of delta residuals.
++    Encodes a list of 3D volumes (time steps) using delta encoding.
++    time_steps: List of 3D arrays, where time_steps[t] is the volume at time t.
++    Returns: List of delta volumes.
+     """
+-    residuals = empty_array_like(volume_curr)
+-    for p in all_voxels(volume_curr):
+-        predicted = volume_prev[p]
+-        actual = volume_curr[p]
+-        residuals[p] = actual - predicted
+-    return residuals
++    deltas = []
++    # The first time step has no previous value, so it must be stored as-is or handled separately.
++    # For simplicity, we assume the first step is stored as absolute or the encoder handles t=0.
++    # Here we encode t=1 to N relative to t-1.
++    
++    prev_volume = time_steps[0]
++    
++    for t in range(1, len(time_steps)):
++        current_volume = time_steps[t]
++        delta_volume = current_volume - prev_volume
++        deltas.append(delta_volume)
++        prev_volume = current_volume # Update for next iteration
++        
++    return deltas
+ 
+-def decode_delta_encoding(volume_prev, residuals):
++def decode_delta(deltas, initial_volume):
+     """
+-    Reconstructs the current time step from the previous step and residuals.
+-    volume_prev: 3D array of previously reconstructed values.
+-    residuals: 3D array of decoded delta residuals.
+-    Returns: 3D array of reconstructed current values.
++    Decodes a list of delta volumes back into time steps.
++    deltas: List of delta volumes.
++    initial_volume: The absolute volume at time t=0.
++    Returns: List of reconstructed volumes.
+     """
+-    volume_curr = empty_array_like(residuals)
+-    for p in all_voxels(residuals):
+-        volume_curr[p] = volume_prev[p] + residuals[p]
+-    return volume_curr
++    volumes = [initial_volume]
++    current_volume = initial_volume
++    
++    for delta_volume in deltas:
++        # Reconstruct current volume by adding delta to previous
++        current_volume = current_volume + delta_volume
++        volumes.append(current_volume)
++        
++    return volumes
+ ```
+-
+-**Parameters:**
+-*   **Bit Depth:** The residual storage bit depth should match the dynamic range of the expected differences. For 16-bit height data, 16-bit signed integers are standard [S3].
+-*   **Block Size:** For heightfields, partitioning into blocks (e.g., $m \times n$) allows independent compression of blocks [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Random Access Limitation:** Delta encoding creates a temporal dependency chain. To access time step $t$, all previous steps $0 \dots t-1$ must be decoded [S1]. This prevents jumping directly to a specific time step.
+-*   **Mitigation:** Absolute values can be stored alongside deltas for keyframes, allowing random access to those specific steps at the cost of increased storage [S1].
+-*   **Precision:** If the original data is quantized, the residuals are also quantized. Ensure the residual type can represent the maximum possible difference without overflow [S1].
++[G] The first time step $t=0$ must be stored as absolute data or a reference value, as there is no $t=-1$ to predict from. The pseudocode above assumes the caller handles $t=0$ separately or that `deltas` starts from $t=1$.
+ 
+ ## Subtopics
+ 
+ ### [Heightfield Compression with Block-Based Delta Encoding](1116-heightfield-compression-with-block-based-delta-encoding.md)
+-This variant partitions a heightfield into equal-sized blocks and encodes each block relative to its minimum height value using a reduced bit-depth for the differences. It solves the primary limitation of standard delta encoding—where accessing any single value requires decompressing the entire dataset—by enabling random access with only two reads: one for the block header and one for the block's data.
++This method compresses heightfields by partitioning them into equal-sized blocks, where each block is encoded relative to its minimum height value using a reduced bit-depth for the differences. It solves the primary limitation of standard delta encoding—where accessing any single value requires decompressing the entire dataset—by enabling random access with only two reads: one for the block header and one for the block's data.
+ 
+ ### [Differences-based Compression](5723-differences-based-compression.md)
+-Differences-based Compression stores quantized differences relative to a block base value, expanding them to 16-bit integers during decompression to reconstruct final data. It distinguishes itself from sibling methods by utilizing pre-computed shift patterns to handle variable bit-depths efficiently during SIMD-based decompression, avoiding runtime bit-manipulation overhead.
++Differences-based Compression is a value compression method that stores quantized differences relative to a block base value, expanding them to 16-bit integers during decompression to reconstruct final data. It distinguishes itself from sibling methods by utilizing pre-computed shift patterns to handle variable bit-depths efficiently during SIMD-based decompression, avoiding runtime bit-manipulation overhead.
+ 
+ ### Parallelogram Prediction with Diamond Residuals
+-A lossless compression method for height fields using linear prediction where height values are uniformly quantized to 16 bits [S3]. It uses parallelogram prediction for the z-component, traversing vertices in diagonal rows to maximize square diamond configurations, ensuring predictor vertices are close in the domain [S3]. The first three vertices of the first triangle are stored uncompressed [S3].
++Lossless compression of height fields using linear prediction. Height values are uniformly quantized to 16 bits. Parallelogram prediction is used for the z-component. Vertices are traversed in diagonal rows. The first three vertices of the first triangle are stored uncompressed. Subsequent vertices are predicted using a diamond configuration to maximize square diamond configurations, ensuring predictor vertices are close in the domain [S3].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Encoding and decoding are $O(N)$, where $N$ is the number of voxels, as each voxel requires one subtraction and one addition [S1].
+-*   **Memory Complexity:** $O(N)$ for storing the residuals. If absolute values are stored for keyframes, memory usage increases proportionally to the keyframe frequency [S1].
+-*   **Performance:** Highly efficient for data with high temporal coherence (e.g., slowly evolving simulations) or smooth heightfields [S1][S2, unofficial]. Performance on GPU is optimized by coalesced memory accesses when processing voxels along x-coordinates [S1].
+-*   **Strengths:** Simple implementation; excellent compression ratios for static or slowly changing regions; low computational overhead [S1].
+-*   **Limitations:** Poor compression for random or rapidly changing data; lack of random access in time-varying data without keyframes [S1].
+-*   **When to Use:** Time-varying volumes with high frame-to-frame similarity; heightfields with progressive variation [S1][S2, unofficial].
+-*   **When Not to Use:** Data with high entropy or random noise; applications requiring frequent random access to intermediate time steps without keyframe overhead [S1].
++*   **Time Complexity:** Encoding and decoding are $O(N)$ where $N$ is the number of voxels, as each voxel requires one subtraction and one addition [S1].
++*   **Memory Complexity:** $O(N)$ for storing deltas. If reference values are stored for random access, memory usage increases [S1].
++*   **Measured Performance:** Delta encoding is trivial to implement on GPUs, allowing for coalesced memory accesses when organized correctly (e.g., distributing brick assembly onto blocks of threads) [S1]. It provides good results for heightfields because height values usually vary progressively [S2, unofficial].
++*   **Strengths:** Simple implementation; effective for data with high temporal coherence (time-varying data) or spatial smoothness; creates uniform bricks of zeros for unchanged regions, which compress well with entropy coding [S1].
++*   **Limitations:** Prevents random access to specific time steps without decompressing the entire sequence [S1][S2, unofficial]. Not suitable for applications requiring efficient queries or realtime visualization of arbitrary time steps without additional reference data [S2, unofficial].
++*   **When to use:** Time-varying volume data with high temporal coherence; heightfields with progressive variation.
++*   **When not to use:** Data requiring random access to arbitrary time steps without significant storage overhead; data with low coherence where deltas are not sparse or small.
+ 
+ ## Background
+-Delta encoding, also known as Differential Pulse-Code Modulation (DPCM), was introduced for volume data compression to exploit temporal coherence [S1]. It was notably applied in GPU-supported lossless compression schemes for rendering time-varying volume data [S1]. The method has also been adapted for heightfield compression in layered datasets like QuadStack, where it serves as a simple yet effective baseline for interval height compression [S2, unofficial]. The parallelogram prediction variant was developed for on-the-fly decompression and rendering of multiresolution terrain [S3].
++Delta encoding, also known as Differential Pulse-Code Modulation (DPCM), was introduced for time-varying volume data to exploit temporal coherence [S1]. It was proposed as a method to predict that the current voxel value will not change in the next time step and store the difference [S1]. The technique is cited from earlier works such as [AABY06] and [FBS07] in the context of volume compression [S1]. It is also applied in heightfield compression, where it is noted as a simple method providing good results due to the progressive variation of height values [S2, unofficial]. The parallelogram prediction variant is used in terrain compression to maximize square diamond configurations for better prediction accuracy [S3].
+ 
+ ## Sources

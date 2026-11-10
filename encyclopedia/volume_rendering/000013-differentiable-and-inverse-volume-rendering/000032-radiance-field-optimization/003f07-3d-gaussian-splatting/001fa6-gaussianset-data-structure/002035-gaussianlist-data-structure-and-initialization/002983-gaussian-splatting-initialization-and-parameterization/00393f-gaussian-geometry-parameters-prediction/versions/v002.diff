@@ -1,0 +1,334 @@
+--- v001.md
++++ v002.md
+@@ -1,138 +1,153 @@
+ # Gaussian Geometry Parameters Prediction
+ 
+-Also called: EVolSplat, Efficient Volume-based Gaussian Splatting, Gaussian MLP Heads, Gaussian Parameter Prediction
++Also called: EVolSplat, Efficient Volume-based Gaussian Splatting, GRM, Gaussian MLP Heads, Gaussian Parameter Prediction, Gaussian Representation Model
+ 
+ ## Overview
+-Gaussian Geometry Parameters Prediction is a feed-forward method for initializing and refining 3D Gaussian primitives in a unified global volume, primarily designed for urban scene reconstruction [S1]. It solves the problem of redundant, inconsistent, and ghosted primitives that arise in existing pixel-aligned feed-forward methods by accumulating depth priors into a global point cloud and refining geometry via a 3D convolutional network [S1]. Unlike [Gaussian Splatting Initialization and Parameterization](2313-gaussian-splatting-initialization-and-parameterization.md), which typically relies on per-scene optimization or simple static initialization, this method predicts geometry parameters (position offsets, opacity, covariance) directly from a learned feature volume, enabling fast, consistent reconstruction without iterative optimization [S1].
++Gaussian Geometry Parameters Prediction is a feed-forward method that predicts the geometric attributes (position, opacity, and covariance) of 3D Gaussians from a global volumetric feature representation, rather than regressing them per-pixel from 2D features [S2]. It solves the problem of multi-view inconsistencies and ghosting artifacts common in pixel-aligned 3DGS methods by accumulating depth information into a unified global volume and refining Gaussian locations in 3D space [S2]. Unlike standard initialization which fixes geometry from point clouds, this method learns to adjust initial noisy positions via recursive offset prediction to achieve faithful reconstruction [S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of $N$ sparse input images $\{I_n\}_{n=1}^N$ with known intrinsic matrices $\{K_n\}$ and extrinsic matrices $\{T_n = R_n | t_n\}$; an off-the-shelf metric depth estimator.
+-*   **Outputs:** A set of 3D Gaussians $\mathcal{G} = \{(\mu_i, \alpha_i, \Sigma_i, c_i)\}_{i=1}^{N_p}$, where $\mu_i$ is the center, $\alpha_i$ is the opacity, $\Sigma_i$ is the covariance matrix, and $c_i$ is the view-dependent color.
++**Inputs:** A set of $N$ sparse input images $\{I_n\}_{n=1}^N$, their calibrated intrinsic matrices $\{K_n\}_{n=1}^N$, and extrinsic matrices $\{T_n = R_n | t_n\}_{n=1}^N$. An off-the-shelf metric depth estimator provides depth maps $\{D_n\}_{n=1}^N$ for each frame [S2].
++
++**Outputs:** A set of 3D Gaussians $\mathcal{G} = \{(\mu_i, \alpha_i, \Sigma_i, c_i)\}_{i=1}^{N_p}$, where $\mu_i$ is the center, $\alpha_i$ is the opacity, $\Sigma_i$ is the covariance matrix, and $c_i$ is the view-dependent color [S2].
+ 
+ **Data Structures:**
+-*   **Global Point Cloud $P$:** A set of 3D points in world coordinates, derived from unprojected depth maps. Dimensions: $N_p \times 3$.
+-*   **Feature Volume $F$:** A sparse 3D tensor extracted by a sparse 3D CNN. Dimensions: $H \times W \times D \times C$, where $H, W, D$ are spatial resolutions and $C$ is the feature dimension. Aligned with the world coordinate system.
+-*   **MLP Heads:** Three independent Multi-Layer Perceptrons:
+-    *   $\mathcal{D}_{pos}$: Predicts position offset $\Delta \mu_i$.
+-    *   $\mathcal{D}_{opa}$: Predicts opacity $\alpha_i$.
+-    *   $\mathcal{D}_{cov}$: Predicts covariance matrix $\Sigma_i$.
+-
+-**Numbered Steps:**
+-
+-1.  **Depth Estimation:** For each input image $I_n$, predict a metric depth map $D_n$ using an off-the-shelf depth estimator (e.g., Metric3D, Unidepth) [S1].
+-2.  **Global Point Cloud Construction:** Unproject the RGB images and depth maps into 3D space using the camera matrices to construct a global scene point cloud $P$:
++1.  **Global Scene Point Cloud ($P$):** A set of 3D points in world coordinates, $P \in \mathbb{R}^{N_p \times 3}$, constructed by unprojecting RGB images using depth maps and camera poses [S2].
++2.  **Feature Volume ($F$):** A sparse 3D tensor $F \in \mathbb{R}^{H \times W \times D \times C}$ extracted by a sparse 3D CNN (e.g., sparse U-Net) from the point cloud $P$. $H \times W \times D$ is the spatial resolution, and $C$ is the feature dimension [S2].
++3.  **MLP Heads:** Three independent Multi-Layer Perceptrons: $\mathcal{D}_{pos}$ for position offset, $\mathcal{D}_{opa}$ for opacity, and $\mathcal{D}_{cov}$ for covariance [S2].
++4.  **Voxel Size ($v_{\text{size}}$):** A scalar parameter used to scale the position offset output [S2].
++
++**Steps:**
++
++1.  **Global Point Cloud Construction:**
++    Unproject the RGB images $\{I_n\}$ into 3D space using the depth maps $\{D_n\}$ and camera poses $\{T_n, K_n\}$ to construct the global point cloud $P$:
+     $$ P = \bigcup_{n=1}^N \pi^{-1}(I_n, D_n, T_n, K_n) $$
+-    where $\pi^{-1}$ denotes pixel unprojection [S1].
+-3.  **Filtering:**
+-    *   Apply a **uniform filter** to $P$ to delete duplicate primitives while preserving scene structure [S1].
+-    *   Apply a **statistical filter** to remove floating artifacts (noise) from the filtered points [S1].
+-4.  **Feature Volume Extraction:** Construct a sparse tensor from the filtered points $P$ and feed it into a sparse 3D CNN (e.g., sparse U-Net) to extract the feature volume $F$ [S1].
+-5.  **Initialization:** Initialize the Gaussian centers $\mu^{init}_i$ using the points in $P$ (i.e., $\mu^{init}_i = p_i \in P$) [S1].
+-6.  **Geometry Parameter Prediction (Training):**
+-    *   For each Gaussian $i$, query the feature volume $F$ at the current estimated position $\mu^{init}_i + \Delta \mu^{prev}_i$ using trilinear interpolation to obtain feature vector $f_i$:
+-        $$ f_i = F(\mu^{init}_i + \Delta \mu^{prev}_i) $$
+-    *   Decode opacity and covariance using MLP heads:
+-        $$ \alpha_i = \mathcal{D}_{opa}(f_i), \quad \Sigma_i = \mathcal{D}_{cov}(f_i) $$
+-    *   Decode position offset $\Delta \mu_i$ using the position MLP head, scaled by voxel size $v_{size}$:
+-        $$ \Delta \mu_i = \text{Tanh}(\mathcal{D}_{pos}(f_i)) \cdot v_{size} $$
+-    *   Update the Gaussian center:
+-        $$ \mu_i = \mu^{init}_i + \Delta \mu_i $$
+-    *   Track $\Delta \mu_i$ as $\Delta \mu^{prev}_i$ for the next iteration [S1].
+-7.  **Color Prediction:** Project the 3D Gaussians to the nearest $K$ reference views to retrieve 2D context (color windows $\{c_k\}$ and visibility maps). Decode the Gaussian color $c_i$ using this 2D context [S1].
+-8.  **Background Modeling:** Model distant views and the sky with a generalizable hemisphere Gaussian model where geometry is fixed and color is predicted similarly to the foreground [S1].
+-9.  **Rendering:** Compose foreground and background Gaussians to reconstruct the image. The rendered color $c$ is computed via alpha blending:
++    where $\pi^{-1}$ denotes pixel unprojection [S2].
++
++2.  **Filtering:**
++    Apply a uniform filter to $P$ to delete duplicate primitives while keeping the scene structure. Then, apply a statistical filter to remove floating artifacts (floaters) from the processed primitives [S2].
++
++3.  **Feature Volume Extraction:**
++    Feed the filtered point cloud $P$ into a sparse 3D CNN to extract the neural feature volume $F$ [S2].
++
++4.  **Initialization:**
++    Initialize the Gaussian centers $\mu^{init}_i$ using the scene point cloud $P$, such that $\mu^{init}_i = p_i \in P$ for each Gaussian $i$ [S2].
++
++5.  **Geometry Parameters Prediction (Recursive Update):**
++    For each Gaussian $i$, predict the geometry parameters using the feature volume $F$ and the MLP heads. This process involves a recursive update rule to converge the position offset $\Delta \mu_i$ [S2]:
++    
++    a. Query the latent feature $f_i$ from $F$ at the current estimated position $\mu^{init}_i + \Delta \mu^{prev}_i$ using trilinear interpolation:
++    $$ f_i = F(\mu^{init}_i + \Delta \mu^{prev}_i) $$
++    where $\Delta \mu^{prev}_i$ is the position offset predicted in the previous iteration (initialized to 0 during inference) [S2].
++    
++    b. Decode opacity $\alpha_i$ and covariance $\Sigma_i$ using the feature $f_i$:
++    $$ \alpha_i = \mathcal{D}_{opa}(f_i), \quad \Sigma_i = \mathcal{D}_{cov}(f_i) $$
++    where $\mathcal{D}_{opa}$ and $\mathcal{D}_{cov}$ are the opacity and covariance MLP heads [S2].
++    
++    c. Predict the position offset $\Delta \mu_i$ and update the center $\mu_i$:
++    $$ \Delta \mu_i = \text{Tanh}(\mathcal{D}_{pos}(f_i)) \cdot v_{\text{size}} $$
++    $$ \mu_i = \mu^{init}_i + \Delta \mu_i $$
++    where $\mathcal{D}_{pos}$ is the position MLP head, $\text{Tanh}$ is the hyperbolic tangent activation, and $v_{\text{size}}$ is the voxel size scaling factor [S2].
++
++6.  **Inference Convergence:**
++    During inference, initialize $\Delta \mu^{prev}_i = 0$. Recursively execute the update rules (steps 5a-5c) twice to obtain a converged $\Delta \mu_i$. Use the converged point $\mu_i$ to query $\alpha_i$ and $\Sigma_i$ [S2].
++
++7.  **Color Prediction:**
++    Project the 3D Gaussians to the nearest $K$ reference views to retrieve 2D context, including color windows $\{c_k\}_{k=1}^K$ and visibility maps. Decode the Gaussian color $c_i$ using this retrieved 2D context [S2].
++
++8.  **Background Modeling:**
++    Model distant views and the sky with a generalizable hemisphere Gaussian model where geometry is fixed and color is predicted similarly to the foreground volume [S2].
++
++9.  **Rendering:**
++    Compose the foreground and background Gaussians to reconstruct the full image. The rendered color $c$ is computed via alpha blending:
+     $$ c = \sum_{i \in G} c_i \alpha_i \prod_{j=1}^{i-1} (1 - \alpha_j) $$
+-    where $G$ is the set of splatted Gaussians [S1].
++    where $G$ is the set of 3D Gaussians, $c_i$ is the view-dependent color of Gaussian $i$, and $\alpha_i$ is the opacity of Gaussian $i$ [S2].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def predict_gaussian_geometry(input_images, camera_matrices, depth_estimator):
++def predict_gaussian_geometry(point_cloud_P, feature_volume_F, voxel_size_v):
+     """
+-    Predicts 3D Gaussian geometry parameters using a global volume approach.
++    Predicts Gaussian geometry parameters (position, opacity, covariance)
++    from a global point cloud and feature volume using recursive offset updates.
+     
+     Args:
+-        input_images: List of N RGB images {I_n}.
+-        camera_matrices: List of intrinsic {K_n} and extrinsic {T_n} matrices.
+-        depth_estimator: Function to predict metric depth maps.
++        point_cloud_P: List of initial 3D points (mu_init).
++        feature_volume_F: Sparse 3D feature tensor.
++        voxel_size_v: Scalar scaling factor for position offset.
+         
+     Returns:
+-        Gaussians: List of Gaussian parameters (mu, alpha, Sigma, color).
++        List of Gaussian parameters: (mu, alpha, Sigma) for each point.
+     """
+-    # Step 1 & 2: Depth Estimation and Global Point Cloud Construction
+-    depth_maps = [depth_estimator(I) for I in input_images]
+-    global_point_cloud = []
+-    for n in range(len(input_images)):
+-        # Unproject RGB and Depth to 3D world coordinates
+-        points = unproject_3d(input_images[n], depth_maps[n], 
+-                              camera_matrices[n].K, camera_matrices[n].T)
+-        global_point_cloud.extend(points)
+-    
+-    # Step 3: Filtering
+-    # Remove duplicates while keeping structure
+-    global_point_cloud = uniform_filter(global_point_cloud)
+-    # Remove floating artifacts
+-    global_point_cloud = statistical_filter(global_point_cloud)
+-    
+-    # Step 4: Feature Volume Extraction
+-    # Construct sparse tensor from points and run sparse 3D CNN
+-    feature_volume = sparse_3d_cnn(global_point_cloud)
+-    
+-    # Step 5: Initialization
+-    # Initialize Gaussian centers from the point cloud
+     gaussians = []
+-    for p in global_point_cloud:
+-        gaussians.append({
+-            'mu_init': p,
+-            'mu_prev': p, # Current estimated position
+-            'delta_mu_prev': 0.0 # Initial offset
+-        })
+-        
+-    # Step 6: Geometry Parameter Prediction (Recursive Update)
+-    # During training, this loop runs for optimization steps.
+-    # During inference, it runs recursively to convergence.
+-    for iteration in range(max_iterations):
+-        for g in gaussians:
+-            # Query feature volume at current estimated position
+-            # Trilinear interpolation
+-            f = trilinear_interpolate(feature_volume, g['mu_prev'])
++    
++    # Initialize previous offset to 0 for inference
++    delta_mu_prev = {p: [0.0, 0.0, 0.0] for p in point_cloud_P}
++    
++    # Recursive update: execute twice for convergence
++    for iteration in range(2):
++        for i, p_init in enumerate(point_cloud_P):
++            # Calculate current estimated position
++            current_pos = p_init + delta_mu_prev[p_init]
++            
++            # Query feature volume using trilinear interpolation
++            # F is assumed to be a function or object supporting trilinear query
++            f_i = feature_volume_F.trilinear_interpolate(current_pos)
+             
+             # Decode opacity and covariance
+-            g['alpha'] = mlp_heads['opa'](f)
+-            g['Sigma'] = mlp_heads['cov'](f)
+-            
+-            # Decode position offset
+-            # Tanh activation scaled by voxel size
+-            delta_mu = tanh(mlp_heads['pos'](f)) * voxel_size
+-            g['delta_mu'] = delta_mu
++            alpha_i = MLP_opa(f_i)
++            Sigma_i = MLP_cov(f_i)
++            
++            # Predict position offset
++            # MLP_pos outputs a vector, Tanh squashes it, then scale by voxel size
++            raw_offset = MLP_pos(f_i)
++            delta_mu_i = tanh(raw_offset) * voxel_size_v
+             
+             # Update center
+-            g['mu'] = g['mu_init'] + delta_mu
+-            g['mu_prev'] = g['mu'] # Track for next iteration
+-            
+-        # Check for convergence (optional, or fixed iterations)
+-        if iteration >= 2 and inference_mode:
+-            break
+-            
+-    # Step 7: Color Prediction
+-    for g in gaussians:
+-        # Project to nearest K views
+-        context = retrieve_2d_context(g, input_images, camera_matrices, K=K)
+-        g['color'] = decode_color(context)
+-        
++            mu_i = p_init + delta_mu_i
++            
++            # Store for next iteration's feature query
++            delta_mu_prev[p_init] = delta_mu_i
++            
++            # Store final parameters for this Gaussian
++            gaussians.append({
++                'mu': mu_i,
++                'alpha': alpha_i,
++                'Sigma': Sigma_i
++            })
++            
+     return gaussians
++
++def MLP_opa(f):
++    # Placeholder for opacity MLP head definition
++    # In implementation, this is a specific neural network layer
++    return sigmoid(dot(W_opa, f) + b_opa)
++
++def MLP_cov(f):
++    # Placeholder for covariance MLP head definition
++    # Returns parameters for a valid covariance matrix (e.g., 6 values for symmetric 3x3)
++    return linear_transform(f)
++
++def MLP_pos(f):
++    # Placeholder for position MLP head definition
++    return linear_transform(f)
++
++def tanh(x):
++    return (exp(x) - exp(-x)) / (exp(x) + exp(-x))
++
++def sigmoid(x):
++    return 1 / (1 + exp(-x))
+ ```
+ 
+ **Parameters:**
+-*   $N$: Number of input images [S1].
+-*   $N_p$: Number of points in the global point cloud [S1].
+-*   $K$: Number of nearest reference views for retrieving 2D context [S1].
+-*   $v_{size}$: Voxel size used to scale the position offset output [S1].
++*   $N$: Number of input images [S2].
++*   $P$: Global scene point cloud, dimensions $N_p \times 3$ [S2].
++*   $F$: Feature volume extracted by sparse 3D CNN [S2].
++*   $K$: Number of nearest reference views for color retrieval [S2].
++*   $v_{\text{size}}$: Voxel size used to scale the position offset [S2].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Ghosting Artifacts:** Pixel-aligned methods generate redundant primitives in overlapping regions. This method addresses this by using a global volume and filtering duplicates [S1].
+-*   **Depth Noise:** Monocular depth predictions contain noise and floating artifacts. This method handles this by applying a statistical filter to remove floaters after uniform filtering [S1].
+-*   **Recursive Convergence:** The position offset $\Delta \mu_i$ depends on the previous estimation. During inference, initializing $\Delta \mu^{prev}_i = 0$ and recursively executing the update rules twice is sufficient to obtain a converged $\Delta \mu_i$ [S1].
++*   **Ghosting Artifacts:** Pixel-aligned methods generate redundant and inconsistent primitives in overlapping regions. This method addresses this by using a global volume and filtering duplicates [S2].
++*   **Depth Noise:** Monocular depth predictions contain noise and floating artifacts. This method handles this by applying a statistical filter to remove floaters after uniform filtering [S2].
++*   **Recursive Stability:** The position offset $\Delta \mu_i$ depends on the previous estimation. The method relies on the convergence of this recursive formulation, which is stabilized at infinite training iterations [S2].
+ 
+ ## Subtopics
+@@ -150,31 +165,55 @@
+ Oriented Gaussian Splatting is a variant of 3D Gaussian Splatting where each primitive is assigned a learnable oriented normal vector $n_i$ to create a reciprocal attenuation model, enabling the derivation of explicit geometric fields (normal and occupancy) via the Objects as Volumes framework. It differs from standard Gaussian Splatting by restoring reciprocity ($\sigma(x, w) = \sigma(x, -w)$), which is broken by standard attenuation, thereby allowing the extraction of watertight meshes and consistent normals.
+ 
++### [3D Skew-Normal Splatting](10045-3d-skew-normal-splatting.md)
++3D Skew-Normal Splatting (SNS) is a volume rendering method that replaces the standard symmetric 3D Gaussian kernel with the Azzalini Skew-Normal distribution to model asymmetric structures like sharp boundaries and one-sided surfaces. It sets itself apart from symmetric variants like [3D Gaussian Splatting](8441-3d-gaussian-splatting.md) and other asymmetric approaches like [Oriented Gaussian Splatting](9621-oriented-gaussian-splatting.md) by providing continuous shape interpolation between symmetric Gaussians and half-ellipsoids while preserving analytical tractability under affine transformations. This allows for seamless integration into existing splat-based rasterization pipelines without the distributional discontinuities introduced by hard truncation methods.
++
++### [Deformable 3D Gaussian Splatting](10060-deformable-3d-gaussian-splatting.md)
++A dynamic reconstruction method that uses an MLP to implicitly fit a deformation field. It inputs positional-encoded Gaussian position and timestep t to the MLP, which outputs offsets for position, rotation, and scaling.
++
++### [Fourier Splatting Primitive](11094-fourier-splatting-primitive.md)
++A planar primitive for radiance field rendering that replaces the fixed Gaussian falloff with a Fourier-encoded boundary, allowing arbitrary closed shapes and inherent scalability via coefficient truncation.
++
++### [Conditional Slicing Mechanism](11455-conditional-slicing-mechanism.md)
++Conditions the 7D Gaussian on observed time $t$ and view direction $d$ to yield a conditional 3D Gaussian governing the spatial component, integrating temporal dynamics and view-dependent effects into the 3D rendering pipeline.
++
+ ### GSGEN
+-GSGEN introduces a 3D SDS loss based on Point-E to mitigate the multi-face or Janus problem in text-to-3D generation [S2]. It adopts Point-E to initialize the point cloud as the initial geometry for optimization and refines the appearance using only the 2D image prior [S2].
++A method introducing 3D SDS loss based on Point-E to mitigate the multi-face or Janus problem in text-to-3D generation. Point-E is adopted to initialize the point cloud as the initial geometry for optimization. Appearance is refined using only the 2D image prior [S1].
+ 
+ ### BrightDreamer
+-BrightDreamer predicts the deviation of a set of fixed anchor points to determine the centers of Gaussians [S2]. The centers of Gaussians are determined from these predicted deviations [S2].
++A method predicting the deviation of a set of fixed anchor points to determine the centers of Gaussians. The deviation of a set of fixed anchor points is predicted, and the centers of Gaussians are determined from these deviations [S1].
+ 
+ ### NeRF-Guided 3D Gaussian Splatting
+-NeRF-Guided 3D Gaussian Splatting uses a pretrained NeRF as a teacher to guide feature distillation, improving alignment between geometry and semantics [S3, unofficial].
++Uses a pretrained NeRF as a teacher to guide feature distillation, improving alignment between geometry and semantics [S3, unofficial].
++
++### Gaussian Splatting Attribute Prediction
++A voxel transformer that predicts residuals added to initial Gaussian rendering attributes on voxels, rather than generating new attributes directly. The predicted residual $\Delta \mathbf{G}_j$ is calculated as $\Delta \mathbf{G}_j = \text{MLP}_{fine}([\mathbf{O}_j, \mathbf{E}_j])$, where $\mathbf{O}_j$ is the offset and $\mathbf{E}_j$ is the voxel attribute. The final splat rendering parameter is $\mathbf{G}'_j = \mathbf{G}_j + \Delta \mathbf{G}_j$, where $\mathbf{G}_j$ is the initial rendering parameter [S4].
++
++### 6D Gaussian Splatting
++An extension of 3DGS that models view-dependent effects by adding directional dimensions, representing scene elements as 6D Gaussians (space+direction). The full 6D covariance is parameterized via Cholesky decomposition $\Sigma = LL^\top$ with $L$ lower-triangular and positive diagonal entries to guarantee positive definiteness [S5].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Feed-forward inference is significantly faster than per-scene optimization methods. The method involves a single pass through a sparse 3D CNN and MLP heads, followed by a recursive update for position convergence (empirically 2 iterations suffice) [S1].
+-*   **Memory Complexity:** Uses a global feature volume $F$ aligned with the world coordinate system. The sparse 3D CNN reduces memory usage compared to dense volumes [S1].
+-*   **Measured Performance:** Achieves real-time rendering by feed-forward prediction of Gaussian primitives [S1].
+-*   **Scaling:** The method is designed for urban scenes with large camera movements and small parallax, where traditional methods struggle [S1].
+-*   **Strengths:** Improves global consistency and reduces ghosting artifacts compared to pixel-aligned methods like Flash3D and DrivingForward by learning Gaussian geometry in 3D and incorporating neighbor information [S1].
+-*   **Limitations:** Relies on the quality of the off-the-shelf depth estimator; noisy depth can lead to initial artifacts, though filtering mitigates this [S1].
+-*   **When to Use:** Urban scene reconstruction, autonomous driving applications, and scenarios requiring fast, feed-forward novel view synthesis with global consistency [S1].
+-*   **When Not to Use:** Small-scale scenes with high overlap where per-scene optimization might be more accurate, or scenes where high-frequency appearance details are critical and the downsampling of initial primitives leads to loss (though IBR-based color prediction helps mitigate this) [S1].
++**Time and Memory Complexity:** The method uses a sparse 3D CNN to extract a feature volume, which reduces computation compared to dense volumes. It downsamples initial primitives to reduce computation and learns Gaussian geometry in 3D, better incorporating neighbor information [S2]. The feed-forward nature allows for real-time rendering without per-scene optimization [S2].
++
++**Measured Performance:** EVolSplat achieves real-time rendering by feed-forward prediction of Gaussian primitives [S2]. It improves global consistency and reduces ghosting artifacts when rendering new images from new viewpoints compared to existing feed-forward, pixel-aligned 3DGS methods [S2].
++
++**Strengths and Limitations:**
++*   **Strengths:** Global consistency, reduced ghosting artifacts, efficient feed-forward reconstruction, handles foreground and background separately [S2].
++*   **Limitations:** Relies on off-the-shelf depth estimators which may contain noise and floating artifacts, requiring filtering [S2]. The recursive offset prediction requires convergence steps during inference [S2].
++
++**When to Use:** Suitable for urban scene reconstruction and novel view synthesis where global consistency is critical and per-scene optimization is too slow [S2].
++
++**When Not to Use:** Not suitable for scenes where high-frequency appearance details are lost due to downsampling of initial primitives, unless compensated by the image-based rendering technique for color prediction [S2].
+ 
+ ## Background
+-*   **Origin:** EVolSplat was introduced by Sheng Miao, Jiaxin Huang, Dongfeng Bai, Xu Yan, Hongyu Zhou, Yue Wang, Bingbing Liu, Andreas Geiger, and Yiyi Liao from Zhejiang University, Huawei Noah’s Ark Lab, and University of Tübingen [S1].
+-*   **Date:** Published in March 2025 (arXiv:2503.20168v1) [S1].
+-*   **History:** The method addresses limitations in existing feed-forward 3DGS methods that suffer from multi-view inconsistencies and duplicated content. It builds on the idea of using depth priors to initialize Gaussian locations, as seen in Flash3D and DrivingForward, but improves upon them by predicting a global scene representation instead of per-pixel Gaussians [S1].
+-*   **Usage:** Primarily used for efficient street scene reconstruction and novel view synthesis in autonomous driving-related applications [S1].
++**Origin:** The method was introduced in "EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis" by Sheng Miao et al. in 2025 [S2].
++
++**History and Development:** It addresses limitations of existing NeRF and 3DGS-based methods that require slow, per-scene optimization and struggle with large camera movements and small parallax in driving scenes [S2]. It builds on the idea of accumulating and refining depth information in 3D space to predict a global scene representation, improving upon pixel-aligned methods like Flash3D and DrivingForward which regress Gaussian parameters from 2D feature maps [S2].
++
++**Applications:** Urban view synthesis, autonomous driving-related applications, and efficient 3D reconstruction from sparse input views [S2].
+ 
+ ## Sources
+-[S1] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
+-[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+-[S3] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)+[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
++[S2] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
++[S3] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)
++[S4] Learning Efficient Fuse-and-Refine for Feed-Forward 3D Gaussian Splatting, https://arxiv.org/abs/2503.14698v2, fetched 2026-10-27
++[S5] 7DGS: Unified Spatial-Temporal-Angular Gaussian Splatting, https://arxiv.org/abs/2503.07946v1, fetched 2026-10-26

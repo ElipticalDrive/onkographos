@@ -1,154 +1,71 @@
 # Volume Resampling
 
-Also called: Data Representation and Processing, Data Resampling, Isotropic Volume Resampling, Volume Resampling Comparison
+Also called: Data Representation and Processing, Data Resampling, Isotropic Volume Resampling, Volume Resampling Comparison, Volumetric Data Resampling, data resampling tool
 
 ## Overview
-Volume resampling converts unstructured particle data (such as SPH particles) into a structured 3D grid representation to enable efficient direct volume rendering [S1]. It solves the problem of rendering point clouds by discretizing data onto a voxel grid, allowing standard hardware-accelerated volume rendering pipelines to be used [S1]. It differs from direct particle rendering by shifting computational cost to a long preprocessing phase, resulting in significantly faster per-frame rendering times [S1].
+Volume resampling is a preprocessing technique that converts unstructured particle data (such as SPH) or arbitrary-resolution volumetric data into a structured 3D grid to enable fast direct volume rendering [S1][S4, unofficial]. It solves the problem of expensive per-particle evaluation during rendering by shifting the computational load to an offline or pre-rendering phase [S1]. It distinguishes itself from direct particle rendering by trading long preprocessing times for significantly faster rendering speeds, though it struggles with precise reconstruction of phase interfaces due to discretization artifacts [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Unstructured particle data (e.g., SPH particles with phase, attribute, and density values) [S1].
-*   **Output:** A 3D texture or volume grid containing preprocessed voxel data (phase, attribute, density) and derived surface normals [S1].
+*   **Input:** Source volumetric data (e.g., SPH particles, CT scans) with original dimensions, spacing, and origin.
+*   **Output:** A resampled 3D grid (volume) with target dimensions, isotropic spacing, and preserved geometry.
 
 **Data Structures:**
-*   **3D Grid/Texture:** Stores voxel data [S2, unofficial][S3].
-    *   **Fields:** `phase` (scalar/categorical), `attribute` (optical/physical properties), `density` (scalar), and `normal` (3D vector computed from density gradients) [S1].
-    *   **Layout:** Stored as a 3D texture object or sets of 2D texture slices [S2, unofficial][S3].
-    *   **Format:** Power-of-two dimensions are typically used to maximize rendering performance [S2, unofficial][S3].
+The output is typically stored as a 3D array or texture. For GPU rendering, power-of-two-size textures are often used to maximize performance [S3]. In ITK-based implementations, the data is represented as an `itk::Image` with specific spatial geometry metadata [S2, unofficial].
 
 **Steps:**
-1.  **Grid Initialization & Padding:** Define a 3D grid resolution. If the data does not fit the target texture memory or format, pad the boundaries by placing data into a larger volume and filling empty regions with default values (e.g., zero or background) [S2, unofficial][S3].
-2.  **Preprocessing (Particle Evaluation):** Evaluate particle data at each voxel center in the grid. Compute the contribution of nearby particles to the voxel center and store the resulting `phase`, `attribute`, and `density` values at the center point of each voxel [S1].
-3.  **Normal Computation:** Compute surface normals for the volume by calculating density gradients using central differences on the stored density field, then normalizing the gradient vector [S1].
-4.  **Interpolation & Rendering:** Probe the volume to compute interpolated data values at arbitrary sampling locations from voxel neighbors [S2, unofficial][S3]. Use hardware-accelerated trilinear interpolation for attribute and density lookups [S1]. Use custom interpolation logic with a maximum operator for SPH phases, as standard linear interpolation is insufficient for phase interfaces [S1].
+1.  **Data Conversion:** Convert the input volume data into a processing-friendly format, such as an ITK image [S2, unofficial].
+2.  **Dimension Calculation:** Calculate the output dimensions for each axis based on the physical extent and target spacing.
+    *   Formula: $D_{out} = \lceil \frac{D_{in} \times S_{in}}{S_{target}} \rceil$
+    *   Where $D_{in}$ is input dimension, $S_{in}$ is input spacing, and $S_{target}$ is the target isotropic spacing [S2, unofficial].
+    *   Cast results to `std::size_t` [S2, unofficial].
+3.  **Configuration:** Configure the resampling filter with the following parameters:
+    *   **Transform:** Identity transform [S2, unofficial].
+    *   **Interpolator:** Linear (trilinear) or higher-order (cubic) [S2, unofficial][S3].
+    *   **Size:** Calculated output dimensions [S2, unofficial].
+    *   **Output Spacing:** Set to $S_{target}$ for all axes (e.g., 1.0F) [S2, unofficial].
+    *   **Output Origin/Direction:** Preserved from the input image to maintain geometric alignment [S2, unofficial].
+    *   **Default Pixel Value:** 0.0F for empty regions [S2, unofficial].
+4.  **Execution:** Execute the resampling filter (e.g., `UpdateLargestPossibleRegion`) to probe the source volume and compute interpolated values for the target grid [S2, unofficial].
+5.  **Post-Processing (Optional):** Apply additional operations such as Gaussian smoothing, median filtering, or gradient magnitude generation [S4, unofficial].
+6.  **Conversion Back:** Convert the resulting ITK image back to the application's native VolumeData structure using the original spatial geometry [S2, unofficial].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def preprocess_sph_to_volume(particles, grid_resolution, grid_bounds):
-    density_grid = [[[0.0] * grid_resolution for _ in range(grid_resolution)] for _ in range(grid_resolution)]
-    attribute_grid = [[[0.0] * grid_resolution for _ in range(grid_resolution)] for _ in range(grid_resolution)]
-    phase_grid = [[[0.0] * grid_resolution for _ in range(grid_resolution)] for _ in range(grid_resolution)]
-    
-    step = (grid_bounds.max - grid_bounds.min) / grid_resolution
-    for x in range(grid_resolution):
-        for y in range(grid_resolution):
-            for z in range(grid_resolution):
-                center = grid_bounds.min + vec3(x, y, z) * step + step * 0.5
-                d, a, p = evaluate_particles_at_point(particles, center)
-                density_grid[x, y, z] = d
-                attribute_grid[x, y, z] = a
-                phase_grid[x, y, z] = p
-    return density_grid, attribute_grid, phase_grid
-
-def compute_normals(density_grid, grid_resolution):
-    normals = [[[vec3(0.0, 0.0, 0.0)] * grid_resolution for _ in range(grid_resolution)] for _ in range(grid_resolution)]
-    for x in range(grid_resolution):
-        for y in range(grid_resolution):
-            for z in range(grid_resolution):
-                dx = density_grid[min(x+1, grid_resolution-1), y, z] - density_grid[max(x-1, 0), y, z]
-                dy = density_grid[x, min(y+1, grid_resolution-1), z] - density_grid[x, max(y-1, 0), z]
-                dz = density_grid[x, y, min(z+1, grid_resolution-1)] - density_grid[x, y, max(z-1, 0)]
-                normals[x, y, z] = normalize(vec3(dx, dy, dz))
-    return normals
-
-def render_volume(density_grid, attribute_grid, phase_grid, normals_grid, grid_bounds, grid_resolution, ray_origin, ray_direction):
-    step_size = (grid_bounds.max - grid_bounds.min).length() / grid_resolution
-    max_distance = ray_direction.length()
-    accumulated_color = vec3(0.0)
-    accumulated_opacity = 0.0
-    t = 0.0
-    
-    while t < max_distance and accumulated_opacity < 1.0:
-        sample_pos = ray_origin + ray_direction * t
-        clamped_pos = clamp(sample_pos, grid_bounds.min, grid_bounds.max)
-        u = (clamped_pos - grid_bounds.min) / (grid_bounds.max - grid_bounds.min)
-        ix, iy, iz = u * grid_resolution
-        
-        density = trilinear_interpolate(density_grid, ix, iy, iz, grid_resolution)
-        attribute = trilinear_interpolate(attribute_grid, ix, iy, iz, grid_resolution)
-        phase = max_operator_interpolation(phase_grid, ix, iy, iz, grid_resolution)
-        normal = normals_grid[int(ix), int(iy), int(iz)]
-        
-        opacity = compute_opacity(density, attribute)
-        color = compute_color(attribute, phase, normal)
-        
-        weight = opacity * (1.0 - accumulated_opacity)
-        accumulated_color += color * weight
-        accumulated_opacity += weight
-        t += step_size
-    return accumulated_color
-
-def trilinear_interpolate(grid, ix, iy, iz, res):
-    x0, y0, z0 = floor(ix), floor(iy), floor(iz)
-    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
-    fx, fy, fz = ix - x0, iy - y0, iz - z0
-    def sample(x, y, z):
-        x = max(0, min(x, res - 1))
-        y = max(0, min(y, res - 1))
-        z = max(0, min(z, res - 1))
-        return grid[x, y, z]
-    c00 = sample(x0, y0, z0) * (1-fx) + sample(x1, y0, z0) * fx
-    c10 = sample(x0, y1, z0) * (1-fx) + sample(x1, y1, z0) * fx
-    c01 = sample(x0, y0, z1) * (1-fx) + sample(x1, y0, z1) * fx
-    c11 = sample(x0, y1, z1) * (1-fx) + sample(x1, y1, z1) * fx
-    return c00 * (1-fy) + c10 * fy, c01 * (1-fy) + c11 * fy
-
-def max_operator_interpolation(grid, ix, iy, iz, res):
-    x0, y0, z0 = floor(ix), floor(iy), floor(iz)
-    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
-    def sample(x, y, z):
-        x = max(0, min(x, res - 1))
-        y = max(0, min(y, res - 1))
-        z = max(0, min(z, res - 1))
-        return grid[x, y, z]
-    return max(sample(x0, y0, z0), sample(x1, y0, z0), sample(x0, y1, z0), sample(x1, y1, z0),
-               sample(x0, y0, z1), sample(x1, y0, z1), sample(x0, y1, z1), sample(x1, y1, z1))
-
-def evaluate_particles_at_point(particles, point):
-    # [G]: Standard SPH kernel aggregation over nearby particles
-    return 0.0, 0.0, 0.0
-
-def compute_opacity(density, attribute):
-    # [G]: Standard transfer function mapping
-    return 0.0
-
-def compute_color(attribute, phase, normal):
-    # [G]: Standard shading/transfer function mapping
-    return vec3(0.0, 0.0, 0.0)
-```
+**Interpolation Details:**
+*   **Standard Data:** Hardware trilinear interpolation is commonly used for attribute and density lookups due to its efficiency [S1, S3].
+*   **Phase Data:** For multi-phase data (e.g., SPH phases), custom interpolation using a maximum operator is required to preserve phase boundaries, as standard linear interpolation fails to reconstruct interfaces precisely [S1].
+*   **Quality vs. Artifacts:** Trilinear interpolation is easy to implement but can introduce visual artifacts (e.g., wood-like artifacts) [S4, unofficial]. If quality is crucial, piecewise cubic polynomials are required [S3].
 
 **Parameters:**
-*   **Grid Resolution:** Determines the level of detail. High-quality comparisons used a grid resolution of 1024 voxels along the longest dimension [S1].
-*   **Texture Format:** Power-of-two sizes are recommended for performance [S2, unofficial][S3].
-*   **Interpolation Method:** Trilinear for attributes/density; custom (maximum operator) for phase [S1].
+*   **kTargetSpacing:** The target isotropic spacing value. A common hardcoded value is 1.0F [S2, unofficial].
+*   **Texture Format:** Power-of-two dimensions are preferred for GPU performance [S3].
 
-**Edge Cases and Pitfalls:**
-*   **Phase Interface Reconstruction:** Resampling struggles with the precise reconstruction of phase interfaces due to discretization errors [S1].
-*   **Visual Artifacts:** Trilinear interpolation, while easy to implement, can introduce visual artifacts if high quality is required [S2, unofficial][S3].
-*   **Preprocessing Time:** The method requires evaluating a large number of SPH particles, leading to long preprocessing times (minutes per dataset) [S1].
+**Pitfalls:**
+*   **Interface Reconstruction:** Resampling struggles with the precise reconstruction of phase interfaces due to discretization errors [S1].
+*   **Preprocessing Time:** The method requires evaluating data at every grid point, leading to long preprocessing times (minutes) compared to direct rendering methods (<30ms) [S1].
+*   **Memory:** Large grid resolutions can exceed available texture memory [S3].
 
 ## Subtopics
 
 ### [Area-Averaged Resampling](3142-area-averaged-resampling.md)
-A downsampling technique that computes the average color of an input region mapped to a single output pixel, weighted by overlap area, reducing resolution by $2^k$ using a box filter. Chosen when a physically accurate, alias-free reduction of volumetric or image data is required.
+A downsampling technique that computes the average color of an input image region mapped to a single output pixel, weighted by the area of overlap. It distinguishes itself by accounting for partial pixel coverage, unlike nearest-neighbor subsampling. Choose it when preserving integrated intensity during resolution reduction is critical.
 
 ### [Volume Resampling to Isotropic Spacing](7482-volume-resampling-to-isotropic-spacing.md)
-Resamples volumes to a target uniform spacing to standardize voxel dimensions across axes. Chosen when consistent spatial resolution is required regardless of original acquisition aspect ratios [G].
+Resamples a volume with arbitrary anisotropic voxel spacing into a new volume with uniform spacing. It solves inconsistent physical scales across axes. Unlike area-averaged resampling, it strictly enforces geometric isotropy by calculating output dimensions based on physical extent. Choose it when downstream operations require uniform grid metrics.
 
 ## Operating characteristics
-*   **Preprocessing Time:** Long. The sources report preprocessing times of several minutes per dataset (e.g., 269.896 seconds for the Turbine dataset) [S1]. This is orders of magnitude slower than direct particle rendering preprocessing (<30 ms) [S1].
-*   **Rendering Time:** Fast. Rendering times are in the millisecond range (e.g., 82 ms to 293 ms) [S1]. This is significantly faster than direct particle rendering (seconds per frame) [S1].
-*   **Memory:** Requires storing a 3D texture. Power-of-two textures are used to maximize performance, which may increase memory usage if the data does not naturally fit these dimensions [S2, unofficial][S3].
-*   **Quality:** Image quality for homogeneous volume materials is close to non-resampled renderings at high resolutions (1024 voxels) [S1]. However, precise reconstruction of phase interfaces is difficult due to discretization [S1].
-*   **When to use:** When rendering speed is critical and preprocessing time can be amortized or is acceptable. Suitable for homogeneous materials [S1].
-*   **When not to use:** When precise phase interface reconstruction is required, or when preprocessing time is a bottleneck [S1].
+*   **Time Complexity:** Preprocessing time is high, proportional to the number of target grid points and the cost of source data evaluation (e.g., SPH kernel evaluations). Sources report preprocessing times of several minutes for complex datasets [S1].
+*   **Rendering Time:** Significantly faster than direct particle rendering. Render times are in the millisecond range (e.g., 82–293 ms) compared to seconds for direct methods [S1].
+*   **Memory Complexity:** Requires storing the full 3D grid. Memory usage scales with the product of the output dimensions. Power-of-two texture constraints may increase memory overhead [S3].
+*   **Strengths:** Enables real-time or near-real-time volume rendering of complex particle data; leverages hardware-accelerated texture sampling [S1, S3].
+*   **Limitations:** Long preprocessing latency; loss of fine detail at phase interfaces due to discretization; potential visual artifacts from linear interpolation [S1, S3][S4, unofficial].
+*   **When to Use:** When rendering speed is prioritized over preprocessing time and when the data can be adequately approximated by a grid structure.
+*   **When Not to Use:** When precise reconstruction of sharp phase boundaries is required, or when preprocessing time is constrained [S1].
 
 ## Background
-Volume resampling is a common approach in volume rendering, particularly for rendering Smoothed Particle Hydrodynamics (SPH) data [S1]. It involves evaluating particle data on a 3D grid in a preprocessing step, followed by direct volume rendering on the grid [S1]. The technique is discussed in the context of comparing direct SPH rendering to traditional volume resampling methods [S1]. The use of 3D textures and hardware interpolation is a standard practice in GPU volume rendering, as described in general graphics literature [S2, unofficial][S3].
+Volume resampling was introduced as a standard approach for rendering particle-based data, such as Smoothed Particle Hydrodynamics (SPH) simulations, by converting them into a uniform grid representation [S1]. The method allows the use of efficient direct volume rendering techniques on data that is inherently unstructured. Early implementations utilized GPU fragment shaders for on-the-fly resampling [S4, unofficial], while later approaches leveraged toolkits like ITK for robust preprocessing [S2, unofficial]. The technique is widely used in scientific visualization where interactive frame rates are necessary for large-scale particle datasets [S1][S4, unofficial].
 
 ## Sources
 [S1] Stochastic Volume Rendering of Multi‐Phase SPH Data, https://doi.org/10.1111/cgf.14121, fetched 2026-10-27
-[S2] wpop/qt-viewer-pro, https://github.com/wpop/qt-viewer-pro, fetched 2026-10-27, (unofficial)
+[S2] wpop/qt-viewer-pro, https://github.com/wpop/qt-viewer-pro, fetched 2026-10-27 (unofficial)
 [S3] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29
+[S4] GENERAL IMPLEMENTATION ASPECTS OF THE GPU- ..., http://sv-journal.org/2011-1/02/, fetched 2026-10-30 (unofficial)

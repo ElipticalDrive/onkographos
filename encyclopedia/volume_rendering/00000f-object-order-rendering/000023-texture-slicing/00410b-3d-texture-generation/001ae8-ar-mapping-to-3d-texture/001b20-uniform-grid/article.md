@@ -1,0 +1,101 @@
+# Uniform Grid
+
+Also called: Uniform Mesh
+
+## Overview
+A uniform grid is a structured mesh where vertices are spaced uniformly along each axis, with geometry and connectivity defined implicitly by bounding box limits and vertex counts [S1, unofficial]. It serves as the foundational data structure for storing scalar fields in volume rendering, enabling efficient spatial indexing and interpolation [S1, unofficial]. Unlike unstructured meshes, it eliminates the need to store explicit connectivity or vertex positions, trading flexibility for computational simplicity and memory efficiency [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `aabb_min`: Minimum corner of the axis-aligned bounding box (AABB). Default: `[-1, -1, -1]` [S2, unofficial].
+- `aabb_max`: Maximum corner of the AABB. Default: `[1, 1, 1]` [S2, unofficial].
+- `x_ext, y_ext, z_ext`: Number of vertices along each axis.
+- `default_value`: Initial scalar value for all grid points. Default: `float_max` [S2, unofficial].
+
+**Outputs:**
+- `get_points()`: Returns a `(X, Y, Z, 3)` tensor of `float32` containing 3D coordinates of all grid points [S2, unofficial].
+- `get_values()`: Returns a `(X, Y, Z)` tensor of `float32` containing scalar values at each vertex [S2, unofficial].
+- `set_values(tensor)`: Updates the scalar field with a `(X, Y, Z)` `float32` tensor [S2, unofficial].
+
+**Data Structure:**
+The grid is defined by:
+1.  `x0, y0, z0`: Position of the minimum vertex [S1, unofficial].
+2.  `x1, y1, z1`: Position of the maximum vertex [S1, unofficial].
+3.  `x_ext, y_ext, z_ext`: Vertex counts per axis [S1, unofficial].
+
+Connectivity is implicit: vertices form quadrilateral cells (or cubes in 3D) based on their index order. The coordinates of any vertex $(i, j, k)$ are computed linearly from the bounds [S1, unofficial].
+
+**Algorithm:**
+1.  **Initialization**: Allocate memory for scalar values of size $x\_ext \times y\_ext \times z\_ext$. Fill with `default_value` [S2, unofficial].
+2.  **Coordinate Computation**: For any vertex at indices $(i, j, k)$ where $0 \le i < x\_ext$, $0 \le j < y\_ext$, $0 \le k < z\_ext$:
+    $$
+    x = x_0 + i \cdot \frac{x_1 - x_0}{x\_ext - 1}
+    $$
+    $$
+    y = y_0 + j \cdot \frac{y_1 - y_0}{y\_ext - 1}
+    $$
+    $$
+    z = z_0 + k \cdot \frac{z_1 - z_0}{z\_ext - 1}
+    $$
+    [S1, G, unofficial]
+    *Note: If $x\_ext=1$, the denominator is 1 to avoid division by zero, resulting in $x=x_0$.*
+3.  **Access**: Retrieve values via direct indexing into the allocated tensor [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class UniformGrid:
+    def __init__(self, x_ext, y_ext, z_ext, aabb_min=(-1.0, -1.0, -1.0), aabb_max=(1.0, 1.0, 1.0), default_value=float('inf')):
+        self.x_ext = x_ext
+        self.y_ext = y_ext
+        self.z_ext = z_ext
+        self.aabb_min = aabb_min
+        self.aabb_max = aabb_max
+        self.values = [[default_value for _ in range(z_ext)] for _ in range(y_ext)] for _ in range(x_ext)]
+
+    def get_point(self, i, j, k):
+        # Handle degenerate cases where extent is 1
+        dx = self.aabb_max[0] - self.aabb_min[0] if self.x_ext > 1 else 0.0
+        dy = self.aabb_max[1] - self.aabb_min[1] if self.y_ext > 1 else 0.0
+        dz = self.aabb_max[2] - self.aabb_min[2] if self.z_ext > 1 else 0.0
+        
+        x = self.aabb_min[0] + i * (dx / (self.x_ext - 1)) if self.x_ext > 1 else self.aabb_min[0]
+        y = self.aabb_min[1] + j * (dy / (self.y_ext - 1)) if self.y_ext > 1 else self.aabb_min[1]
+        z = self.aabb_min[2] + k * (dz / (self.z_ext - 1)) if self.z_ext > 1 else self.aabb_min[2]
+        return (x, y, z)
+
+    def get_values(self):
+        return self.values
+
+    def set_values(self, new_values):
+        # Assumes new_values is a 3D structure matching x_ext, y_ext, z_ext
+        self.values = new_values
+```
+
+**Edge Cases:**
+- **Degenerate Dimensions**: If any extent is 1, the division by $(extent - 1)$ becomes division by zero. The formula must clamp to the minimum bound or handle the single point case explicitly [G].
+- **Precision**: Floating-point errors may cause slight gaps or overlaps in reconstruction if not handled during interpolation [G].
+
+## Subtopics
+
+### [Gradient-Isosurface Texture Packing](889-gradient-isosurface-texture-packing.md)
+Packs gradient and isosurface data into textures for optimized ray marching. Choose when memory bandwidth is the bottleneck.
+
+### [Röttger et al. Rendering](938-r-ttger-et-al-rendering.md)
+Uses pre-integrated textures for high-quality volume rendering. Choose when photorealism is required over raw speed.
+
+## Operating characteristics
+- **Time Complexity**: $O(1)$ for point coordinate calculation and value access. $O(N)$ for initialization where $N = x\_ext \cdot y\_ext \cdot z\_ext$ [S1, S2, unofficial].
+- **Memory Complexity**: $O(N)$ for storing scalar values. No overhead for connectivity or vertex positions [S1, unofficial].
+- **Strengths**: Extremely fast access; minimal memory footprint; simple implementation [S1, unofficial].
+- **Limitations**: Cannot represent complex geometries or non-uniform sampling; memory usage grows cubically with resolution [S1, unofficial].
+- **When to Use**: Regular, structured data like CT/MRI scans or terrain models [S1, unofficial].
+- **When Not to Use**: Irregular domains or adaptive refinement requirements [S1, unofficial].
+
+## Background
+Uniform grids were introduced as a standard method for representing structured meshes in computational geometry and volume rendering [S1, unofficial]. They are widely used in digital terrain models and medical imaging (CT, MRI) due to their simplicity and efficiency [S1, unofficial]. The concept is foundational in multiresolution surface and volume representation [S1, unofficial].
+
+## Sources
+[S1] Multiresolution representation and compression of surfaces and volumes, https://doi.org/10.3929/ethz-a-004086690, fetched 2026-10-26 (unofficial)
+[S2] GuangyanCai/isoext, https://github.com/GuangyanCai/isoext, fetched 2026-10-27 (unofficial)

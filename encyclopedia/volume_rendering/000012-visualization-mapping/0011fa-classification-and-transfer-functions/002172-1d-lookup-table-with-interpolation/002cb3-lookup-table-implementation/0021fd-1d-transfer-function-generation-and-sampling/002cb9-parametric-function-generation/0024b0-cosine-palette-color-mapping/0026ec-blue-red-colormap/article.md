@@ -17,11 +17,11 @@ The Blue-Red Colormap normalizes scalar depth values to the range $[0, 1]$ and m
 
 **Steps:**
 
-1.  **Compute Global Extents:** Determine the minimum and maximum depth values across all pixels. Parallel implementations compute these using atomic operations across all rays [S2, unofficial].
+1.  **Compute Global Extents:** Determine the minimum and maximum depth values across all pixels [S2, unofficial]. Parallel implementations compute these using atomic operations across all rays [S2, unofficial].
     $$ d_{min} = \min_{i,j} (d_{i,j}) $$
     $$ d_{max} = \max_{i,j} (d_{i,j}) $$
 
-2.  **Normalize Depth:** For each pixel, normalize the raw depth value to the range $[0, 1]$ using min-max normalization. A small epsilon ($\epsilon = 10^{-8}$) is added to the denominator to prevent division by zero in degenerate cases [S1, unofficial].
+2.  **Normalize Depth:** For each pixel, normalize the raw depth value to the range $[0, 1]$ using min-max normalization [S1, unofficial]. A small epsilon ($\epsilon = 10^{-8}$) is added to the denominator to prevent division by zero in degenerate cases [S1, unofficial].
     $$ x = \frac{d_{i,j} - d_{min}}{d_{max} - d_{min} + \epsilon} $$
 
 3.  **Compute Color Channels:** Calculate the Red ($R$), Green ($G$), and Blue ($B$) channels using piecewise linear functions of the normalized depth $x$ [S1, unofficial]:
@@ -45,17 +45,17 @@ def blue_red_colormap(depth_buffer):
     Applies Blue-Red colormap to a depth buffer.
     
     Args:
-        depth_buffer: 2D array of shape (height, width) with raw depth values.
+        depth_buffer: 2D list of shape (height, width) with raw depth values.
         
     Returns:
-        rgb_image: 2D array of shape (height, width, 3) with uint8 RGB values.
+        rgb_image: 2D list of shape (height, width, 3) with uint8 RGB values.
     """
     def clip(val, lo, hi):
-        return max(lo, min(hi, val))
+        return lo if val < lo else (hi if val > hi else val)
 
     # Step 1: Compute global min and max
-    min_v = min(row for row in depth_buffer)
-    max_v = max(row for row in depth_buffer)
+    min_v = min(min(row) for row in depth_buffer)
+    max_v = max(max(row) for row in depth_buffer)
     
     # Step 2: Normalize depth to [0, 1]
     epsilon = 1e-8
@@ -94,17 +94,17 @@ def blue_red_colormap(depth_buffer):
 *   `len_dis`: Lens size for Depth of Field, default 0.04 [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Zero Variance:** If $d_{max} = d_{min}$, the denominator becomes zero. The epsilon term prevents division by zero [S1, unofficial].
+*   **Zero Variance:** If $d_{max} = d_{min}$, the denominator becomes zero [S1, unofficial]. The epsilon term prevents division by zero [S1, unofficial].
 *   **Out-of-Bounds Depth:** Depth values outside the $[d_{min}, d_{max}]$ range calculated from the buffer will be clipped to 0 or 1 by the `clip` function in the channel calculations, ensuring valid RGB output [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Performance:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
+*   **Performance:** Not given in the sources [S1, unofficial][S2, unofficial].
 *   **Strengths:** High contrast between near and far objects; simple piecewise linear implementation [S1, unofficial].
 *   **Limitations:** Not perceptually uniform; the green band in the middle may obscure subtle depth variations in the mid-range [S1, unofficial].
 *   **When to use:** Visualizing depth maps where spatial structure needs to be quickly assessed [S1, unofficial].
-*   **When not to use:** Not given in the sources.
+*   **When not to use:** Not given in the sources [S1, unofficial][S2, unofficial].
 
 ## Background
 The method is implemented in open-source repositories for 3D vision and depth visualization, such as `nerf-3d-vision` and `taichi-ngp-renderer` [S1, unofficial][S2, unofficial].

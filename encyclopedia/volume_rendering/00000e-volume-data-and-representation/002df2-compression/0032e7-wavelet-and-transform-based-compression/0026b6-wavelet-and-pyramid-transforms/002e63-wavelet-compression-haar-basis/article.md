@@ -1,192 +1,81 @@
 # Wavelet Compression (Haar Basis)
-Also called: Haar Wavelet Linear Algebra Approach, Matrix-based Haar Transform, Multiresolution Image Compression
+
+Also called: Global Oracle (Orthogonal), Haar Wavelet Linear Algebra Approach, Matrix-based Haar Transform, Multiresolution Image Compression, Wavelet Coefficient Thresholding, Wavelet Thresholding
 
 ## Overview
-Wavelet Compression (Haar Basis) expresses original volume data using a smaller set of coefficients via a Haar wavelet basis, supporting both lossless and lossy compression based on a user-specified error tolerance [S1, unofficial]. It distinguishes itself from sibling methods by offering a linear algebra formulation where the transform is executed via matrix multiplication, providing a mathematically explicit, albeit computationally less efficient, framework for understanding the decomposition [S2, unofficial]. Unlike [L2 Norm Wavelet Compression](3542-l2-norm-wavelet-compression.md) which optimizes coefficient selection via norm minimization, or [Biorthogonal Wavelet Compression](5381-biorthogonal-wavelet-compression.md) which uses symmetric filters for better phase properties, the Haar basis relies on the simplest orthogonal step-function basis [S1, unofficial].
+Wavelet Compression (Haar Basis) is a lossy or lossless compression method that represents volume data using a smaller set of coefficients derived from the Haar wavelet basis [S1, unofficial]. It solves the problem of reducing memory footprint and bandwidth for volume rendering by exploiting the sparsity of wavelet coefficients, where most energy is concentrated in a few large coefficients [S1, S3, unofficial]. Unlike sibling methods that may use biorthogonal filters or packet transforms, this method relies on the orthogonal Haar basis, allowing for a globally optimal compression strategy via coefficient thresholding (the "Global Oracle") that minimizes the $L^2$ approximation error for a given number of retained coefficients [S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A volume dataset $V$ (or a 1D vector $\tilde{x}_0$ for the 1D case) and a user-specified error tolerance $\epsilon$ [S1, unofficial]. For lossless compression, $\epsilon = 0$ [S1, unofficial].
-*   **Output:** A compressed set of coefficients $\tilde{X}_1$ (averages and differences) and, if lossy, a thresholded version of these coefficients.
+- Input: A 3D volume data set $V$ (or 2D slices/vectors within it).
+- Output: A compressed bitstream of wavelet coefficients, optionally with a threshold or error tolerance parameter.
 
 **Data Structures:**
-The method operates on vectors and matrices.
-*   **Vector $\tilde{x}_0$:** The input data array of size $N$.
-*   **Haar Matrix $A_k$:** An orthogonal matrix of size $2^k \times 2^k$ (or appropriate power of 2) representing the transform at level $k$. The columns are orthogonal with respect to the standard dot product [S2, unofficial].
-*   **Combined Matrix $W$:** The product of individual level matrices $W = A_1 * A_2 * \dots * A_n$ [S2, unofficial].
+- **Coefficient Vector:** A 1D array or flattened structure storing the Haar wavelet coefficients. For multi-level decomposition, coefficients are typically organized by scale (approximation coefficients at the coarsest level, followed by detail coefficients at finer levels).
+- **Haar Matrix ($W$ or $A_i$):** A sparse orthogonal matrix representing the transform. For a vector of length $N=2^k$, the matrix is constructed from the Kronecker product of 1D Haar matrices or applied recursively [S2, unofficial].
 
 **Steps:**
-1.  **1D Transform (Vector):**
-    For a single vector $\tilde{x}_0$, the transform is performed by multiplying by the Haar Matrix $A_1$:
-    $$ \tilde{X}_1 = A_1 * \tilde{x}_0 $$
-    The resulting vector $\tilde{X}_1$ contains components representing averages (low-frequency) and differences (high-frequency) of adjacent values in $\tilde{x}_0$ [S2, unofficial].
 
-2.  **Multi-level Transform:**
-    To achieve deeper compression levels, the process is recursive. The resulting vector from level $j$ is multiplied by the next Haar matrix $A_{j+1}$:
-    $$ \tilde{X}_{j+1} = A_{j+1} * \tilde{X}_j $$
-    Alternatively, a single combined matrix $W$ can be pre-computed as the product of all level matrices:
-    $$ W = A_1 * A_2 * \dots * A_n $$
-    The final coefficients are obtained by:
-    $$ \tilde{X}_1 = W * \tilde{x}_0 $$
-    [S2, unofficial]
+1.  **Preprocessing (Optional):** Normalize density values to a standard range (e.g., 0–255) if histograms are outside expected bounds [S2, unofficial]. Apply a density filter to zero out values below $d_1$ or above $d_3$ if specific visualization goals require it [S2, unofficial].
 
-3.  **2D Transform (Matrix):**
-    For a 2D matrix $P$ of size $2^r \times 2^r$, the transform is applied separably.
-    *   **Row Transformation:** $Q = P \hat{W}$ (where $\hat{W}$ is the Haar matrix applied to rows).
-    *   **Column Transformation:** The result is transposed and multiplied by the Haar matrix again, or equivalently:
-        $$ T = W^0 P W $$
-        Here, $W^0$ denotes the transpose of $W$ (since $W$ is orthogonal, $W^0 = W^{-1}$ in some notations, but the source specifies $W^0 P W$ for compression) [S2, unofficial].
-    *   **Decompression:** To recover $P$ from $T$:
-        $$ P = (W^{-1})^0 T W^{-1} $$
-        [S2, unofficial]
+2.  **Forward Transform:**
+    Apply the Haar wavelet transform to the data. This can be done using a separable filter bank or matrix multiplication [S2, unofficial].
+    - **Matrix Approach:** For a 1D input vector $\tilde{x}_0$, compute $\tilde{X}_1 = A_1 \tilde{x}_0$, where $A_1$ is the Haar matrix for one level [S2, unofficial]. For multi-level compression, the total transform matrix is $W = A_1 A_2 \dots A_n$, and the result is $\tilde{X}_1 = W \tilde{x}_0$ [S2, unofficial].
+    - **Separable Approach:** For a 3D volume, apply the 1D Haar transform along each axis. For a 2D matrix $P$, apply row transformation $Q = P W$ and column transformation $T = W^T P W$ [S2, unofficial].
+    - **Integer Packing Variant:** To avoid floating-point arithmetic, use unsigned 32-bit integers. The unused bits of the 32-bit word handle intermediate overflows/underflows, maintaining precision without loss [S1, unofficial].
 
-4.  **3D Transform (Volume):**
-    The 2D approach is extended to 3D volumes. The volume is processed by applying the Haar transform along each of the three dimensions. This can be done by treating the volume as a stack of 2D matrices and applying the 2D transform to each, followed by the third dimension, or by applying the 1D transform to vectors along each axis sequentially [S2, unofficial].
+3.  **Coefficient Sorting and Thresholding (Global Oracle):**
+    - Sort all wavelet coefficients by their absolute magnitude (descending) [S3, unofficial].
+    - Determine the set of coefficients to retain based on a user-specified error tolerance $\epsilon$ (for lossless, $\epsilon = 0$) or a target compression ratio [S1, S3, unofficial].
+    - Reject the $K$ smallest coefficients. The optimal strategy for orthogonal bases is to keep the $N-K$ largest coefficients [S3, unofficial].
 
-5.  **Reconstruction:**
-    To recover the original data, the inverse transform is applied. The inverse of the combined matrix is:
-    $$ W^{-1} = A_1^{-1} * A_2^{-1} * \dots * A_n^{-1} $$
-    Since the Haar matrices are orthogonal, their inverses are their transposes [S2, unofficial]. The original vector is recovered by:
-    $$ \tilde{x}_0 = W^{-1} * \tilde{X}_1 $$
-    [S2, unofficial]
+4.  **Encoding:**
+    - Store the indices and values of the retained coefficients.
+    - Apply entropy coding (e.g., Huffman, Arithmetic, Run-Length) to the quantized or raw coefficients to produce the compressed bitstream [Parent].
+
+5.  **Reconstruction (Decompression):**
+    - Decode the bitstream to retrieve the retained coefficients and their positions.
+    - Reconstruct the full coefficient vector by inserting zeros at the positions of rejected coefficients.
+    - Apply the inverse transform: $\tilde{x}_0 = W^{-1} \tilde{X}_1$, where $W^{-1} = A_n^{-1} \dots A_2^{-1} A_1^{-1}$ [S2, unofficial].
+    - For the integer packing variant, perform the inverse integer operations to recover the original data [S1, unofficial].
+
+**Formulas:**
+- **Transform:** $\tilde{X}_1 = W \tilde{x}_0$ [S2, unofficial].
+- **Inverse Transform:** $\tilde{x}_0 = W^{-1} \tilde{X}_1$ [S2, unofficial].
+- **Approximation Error:** The $L^2$ error of the approximation is the sum of the squares of the rejected coefficients:
+  $$ ||f - f'||^2 = \sum_{i=K+1}^N |c_i|^2 $$
+  where $c_i$ are the sorted coefficients and $N$ is the total count [S3, unofficial].
+- **Optimality Condition:** For orthogonal bases, keeping the largest coefficients minimizes this error [S3, unofficial].
 
 **Parameters:**
-*   **$\epsilon$ (epsilon):** User-specified error tolerance. Determines the threshold for discarding small coefficients in lossy mode. $\epsilon = 0$ for lossless [S1, unofficial].
+- $\epsilon$: User-specified error tolerance. $\epsilon = 0$ for lossless compression [S1, unofficial].
+- $K$: Number of coefficients to reject.
+- $d_1, d_2, d_3, d_4$: Density threshold values for preprocessing filtering [S2, unofficial].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def haar_matrix_1d(size):
-    """
-    Constructs the 1D Haar transform matrix for a given power-of-2 size.
-    Returns an orthogonal matrix A.
-    """
-    if size == 1:
-        return [[1.0]]
-    
-    # Recursive construction or iterative block construction
-    # For size N, the matrix consists of averages and differences.
-    # Average of x[i], x[i+1] is (x[i] + x[i+1]) / sqrt(2)
-    # Difference is (x[i] - x[i+1]) / sqrt(2)
-    # Note: Source [S2, unofficial] uses standard matrix multiplication without explicit normalization factors in the text,
-    # but orthogonality implies normalization. We assume standard orthogonal Haar basis.
-    
-    A = [[0.0] * size for _ in range(size)]
-    # Level 1: First row is all 1/sqrt(N), subsequent rows are differences
-    # However, the source describes A1, A2... as sequential levels.
-    # A1 operates on pairs.
-    
-    # Simplified implementation of the orthogonal Haar matrix
-    for i in range(size):
-        for j in range(size):
-            # Standard Haar basis function evaluation
-            # This is a placeholder for the exact matrix construction logic
-            # which depends on the specific definition of A1, A2 in [S2, unofficial]
-            pass 
-    return A
-
-def transform_vector(x, W):
-    """
-    Applies the Haar transform to vector x using matrix W.
-    """
-    # Matrix-vector multiplication
-    n = len(x)
-    result = [0.0] * n
-    for i in range(n):
-        sum_val = 0.0
-        for j in range(n):
-            sum_val += W[i][j] * x[j]
-        result[i] = sum_val
-    return result
-
-def transform_matrix_2d(P, W):
-    """
-    Applies 2D Haar transform to matrix P.
-    T = W^T * P * W
-    """
-    # Row transform: P * W
-    # Column transform: W^T * (P * W)
-    
-    # Step 1: Row transformation Q = P * W
-    rows = len(P)
-    cols = len(P[0])
-    W_cols = len(W)
-    
-    Q = [[0.0] * W_cols for _ in range(rows)]
-    for i in range(rows):
-        for j in range(W_cols):
-            sum_val = 0.0
-            for k in range(cols):
-                sum_val += P[i][k] * W[k][j]
-            Q[i][j] = sum_val
-            
-    # Step 2: Column transformation T = W^T * Q
-    # Transpose W
-    W_T = [[W[j][i] for j in range(len(W))] for i in range(len(W[0]))]
-    
-    T = [[0.0] * cols for _ in range(rows)]
-    for i in range(rows):
-        for j in range(cols):
-            sum_val = 0.0
-            for k in range(len(W_T)):
-                sum_val += W_T[i][k] * Q[k][j]
-            T[i][j] = sum_val
-            
-    return T
-
-def inverse_transform_matrix_2d(T, W):
-    """
-    Reconstructs P from T.
-    P = (W^-1)^T * T * W^-1
-    Since W is orthogonal, W^-1 = W^T.
-    So P = W * T * W^T
-    """
-    # W_inv is W^T
-    W_inv = [[W[j][i] for j in range(len(W))] for i in range(len(W[0]))]
-    
-    # Step 1: T * W_inv
-    rows = len(T)
-    cols = len(T[0])
-    W_inv_cols = len(W_inv)
-    
-    Q = [[0.0] * W_inv_cols for _ in range(rows)]
-    for i in range(rows):
-        for j in range(W_inv_cols):
-            sum_val = 0.0
-            for k in range(cols):
-                sum_val += T[i][k] * W_inv[k][j]
-            Q[i][j] = sum_val
-            
-    # Step 2: W_inv^T * Q  => W * Q
-    W_T = [[W[j][i] for j in range(len(W))] for i in range(len(W[0]))]
-    
-    P = [[0.0] * cols for _ in range(rows)]
-    for i in range(rows):
-        for j in range(cols):
-            sum_val = 0.0
-            for k in range(len(W_T)):
-                sum_val += W_T[i][k] * Q[k][j]
-            P[i][j] = sum_val
-            
-    return P
-```
+**Edge Cases and Pitfalls:**
+- **Boundary Conditions:** Standard Haar transforms on bounded intervals can introduce artifacts due to discontinuities at endpoints if zero-padding is used. Periodization or special boundary elements (e.g., endpoint-interpolating B-splines) should be considered for bounded domains [S3, unofficial].
+- **Support Regions:** When using local oracles (see Subtopics), ignoring the support regions of wavelet basis functions can cause artifacts when rejecting coefficients that extend into regions of interest [S3, unofficial].
+- **Precision:** Floating-point operations may suffer from precision loss. Using integer arithmetic with sufficient bit-width (e.g., 32-bit) can mitigate this [S1, unofficial].
 
 ## Subtopics
 
 ### [3D Non-standard Haar Wavelet Decomposition with Integer Packing](6693-3d-non-standard-haar-wavelet-decomposition-with-integer-pack.md)
-Uses unsigned 32-bit integers to store coefficients, replacing floating-point arithmetic to leverage faster integer operations without loss of precision. It differs from standard float-based wavelet compression by utilizing the unused bits of a 32-bit integer word to handle intermediate overflows and underflows, allowing for a fixed-point hierarchy that occupies the same memory footprint as the original volume.
+This method performs a 3D Haar wavelet decomposition using unsigned 32-bit integers to store coefficients, replacing floating-point arithmetic to leverage faster integer operations without loss of precision. It differs from standard float-based wavelet compression by utilizing the unused bits of a 32-bit integer word to handle intermediate overflows and underflows, allowing for a fixed-point hierarchy that occupies the same memory footprint as the original volume.
+
+### Local Oracle
+A compression method that controls approximation error locally in specific regions of interest using a spatial weighting function [S3, unofficial]. It projects the spatial weighting function into wavelet space, accounting for the Heisenberg bound and dyadic scale. The center of the Gaussian in wavelet space at level $m$ is computed as $x_0^m = x_0 / 2^m$ and $y_0^m = y_0 / 2^m$ [S3, unofficial]. A key pitfall is that early versions ignored basis function support regions, causing artifacts when rejecting wavelets that extend into the region of interest [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The matrix-based approach described in [S2, unofficial] involves $O(N^3)$ operations for an $N \times N$ 2D matrix if implemented as dense matrix multiplication, which is inefficient for large datasets. The source notes that "for large data sets there are much better ways to accomplish the wavelet transform," implying the Fast Wavelet Transform (O(N log N)) is preferred in practice, though the matrix formulation is provided for theoretical clarity [S2, unofficial].
-*   **Memory Complexity:** The matrix-based approach requires storing the Haar matrix $W$, which is $O(N^2)$ for 2D. The integer packing variant [S1, unofficial] maintains the same memory footprint as the original volume.
-*   **Strengths:** Simple mathematical definition; orthogonal basis ensures stable reconstruction; supports both lossless and lossy compression via $\epsilon$ [S1, unofficial].
-*   **Limitations:** The Haar basis has poor frequency localization compared to smoother wavelets (like Daubechies or Biorthogonal); the dense matrix implementation is computationally expensive [S2, unofficial].
-*   **When to use:** When a simple, orthogonal basis is required and computational efficiency is not the primary constraint, or for educational purposes to understand the linear algebra of wavelets [S2, unofficial].
+- **Time Complexity:** The forward and inverse transforms are $O(N)$ for $N$ data points using the fast wavelet transform. Sorting coefficients for the global oracle takes $O(N \log N)$ [S3, unofficial].
+- **Memory Complexity:** The compressed size depends on the number of retained coefficients. In the integer packing variant, the memory footprint is identical to the original volume if all coefficients are stored, but can be reduced significantly if only non-zero or large coefficients are stored [S1, unofficial].
+- **Performance:** The method is effective for volumes with smooth regions and sharp edges, as the Haar basis is good at capturing discontinuities [S2, unofficial]. However, it may produce blocky artifacts in smooth gradients compared to smoother wavelets (e.g., B-spline) [S3, unofficial].
+- **Strengths:** Simple implementation, orthogonal basis allows for optimal $L^2$ error minimization via simple thresholding, integer arithmetic support for speed [S1, S3, unofficial].
+- **Limitations:** Poor frequency localization compared to smoother wavelets, potential boundary artifacts [S3, unofficial].
 
 ## Background
-The method is based on work by Stollnitz in computer graphics, applying multiresolution decomposition using wavelets [S1, unofficial]. It was used in the context of direct rendering of multiresolution decomposed volume data [S1, unofficial]. The matrix-based formulation is presented in the context of volumetric medical images visualization on mobile devices, where the simplicity of the Haar transform is leveraged [S2, unofficial].
+The method is based on the work of Stollnitz et al. in computer graphics, applying multiresolution decomposition using wavelets to volume data [S1, unofficial]. The Haar wavelet is one of the simplest wavelet bases, defined by piecewise constant functions. The "Global Oracle" concept for orthogonal wavelets was formalized in the context of optimal compression by rejecting the smallest coefficients to minimize error [S3, unofficial]. The matrix-based linear algebra approach provides an alternative view of the transform, useful for understanding the invertibility and structure of the decomposition [S2, unofficial].
 
 ## Sources
 [S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
 [S2] Volumetric Medical Images Visualization on Mobile Devices, http://hdl.handle.net/2099.1/11308, fetched 2026-10-26 (unofficial)
+[S3] Multiresolution representation and compression of surfaces and volumes, https://doi.org/10.3929/ethz-a-004086690, fetched 2026-10-26 (unofficial)
