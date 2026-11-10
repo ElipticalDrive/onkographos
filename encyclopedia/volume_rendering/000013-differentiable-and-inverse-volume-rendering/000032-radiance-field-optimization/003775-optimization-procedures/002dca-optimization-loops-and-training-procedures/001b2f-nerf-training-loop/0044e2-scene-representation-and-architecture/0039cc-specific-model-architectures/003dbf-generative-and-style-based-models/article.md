@@ -3,7 +3,7 @@
 Also called: 3D-aware generative models, NeRF-GAN hybrids
 
 ## Overview
-Generative and Style-based Models extend standard NeRFs by synthesizing novel 3D-consistent images from latent noise or text prompts, rather than reconstructing a single static scene from known views. They solve the limitation of standard NeRFs, which require known camera positions and specific input views, by learning a distribution of 3D scenes [S1]. Unlike sibling methods that optimize latent codes for a fixed network (e.g., [Latent-NeRF](9110-latent-nerf.md)) or use transformers, this family generates the network parameters themselves or leverages pre-trained diffusion priors to enable unconditional or conditional 3D generation [S1].
+Generative and Style-based Models integrate Neural Radiance Fields (NeRF) with generative frameworks such as Generative Adversarial Networks (GANs) or diffusion models to synthesize novel 3D-consistent views from limited or unstructured data. Unlike standard NeRF which reconstructs a specific scene from multi-view images, these models learn a distribution of scenes or generate high-fidelity textures that standard NeRF cannot resolve due to resolution limits or lack of input views. They are distinguished from siblings like [AdaNeRF](6195-adanerf.md) by their primary objective of *generation* rather than *reconstruction*, often employing hypernetworks or latent space decoders to bypass the computational cost of high-resolution volumetric rendering.
 
 ## Shared principles
 All methods in this family share the mechanism of mapping 6D input coordinates (3D position $\mathbf{x}$ and 2D viewing direction $\mathbf{d}$) to 4D output values (density $\sigma$ and color $\mathbf{c}$) using a differentiable neural network. This allows the radiance field to be optimized through the volumetric rendering integral.
@@ -29,39 +29,31 @@ and $\delta_i$ is the distance between samples [S1][S3].
 
 ## Subtopics
 
-### HyperNeRFGAN
-HyperNeRFGAN is a generative adversarial network (GAN) architecture that synthesizes 3D-aware radiance fields from 2D images without requiring camera pose information during training [S1]. It solves the limitation of standard NeRFs, which require known camera positions, by using a hypernetwork to generate the weights of a simplified NeRF target network directly from a Gaussian noise vector [S1]. Unlike sibling methods like [Latent-NeRF](9110-latent-nerf.md) which optimize latent codes for a fixed network, HyperNeRFGAN generates the network parameters themselves, allowing for the creation of distinct 3D objects from noise while maintaining 3D consistency through a standard 2D discriminator [S1].
+### [HyperNeRFGAN](8765-hypernerfgan.md)
+HyperNeRFGAN is a generative adversarial network (GAN) architecture that employs a hypernetwork to transform a Gaussian noise vector into the weights of a simplified NeRF target network, enabling 3D-aware image generation without requiring camera position information during training. Unlike standard NeRF which uses a 5D input (position and viewing direction), HyperNeRFGAN uses a 3D input (position only) because the training datasets lack view-dependent characteristics like reflections. It differs from siblings like [Latent-NeRF](9110-latent-nerf.md) by using a hypernetwork to generate NeRF weights directly, avoiding the complexity of NeRF conditioning mechanisms while maintaining 3D awareness.
 
 ### [Latent-NeRF](9110-latent-nerf.md)
-Latent-NeRF is a method for optimizing Neural Radiance Fields (NeRF) by integrating a pre-trained latent diffusion model, enabling text-guided and shape-guided 3D generation. It differs from standard NeRF training by replacing photometric reconstruction loss with score distillation from a diffusion model operating on a compact latent space. Unlike [HyperNeRFGAN](8765-hypernerfgan.md), which uses adversarial training, Latent-NeRF leverages the generative priors of Stable Diffusion to synthesize high-resolution details that are otherwise lost in low-resolution NeRF outputs.
+Latent-NeRF is a method for optimizing Neural Radiance Fields (NeRF) by mapping the radiance field output to a compact latent space that is subsequently decoded by a pre-trained 2D diffusion model. It solves the problem of low-resolution details and poor generalization in standard NeRF training by leveraging the high-fidelity generative priors of Stable Diffusion. Unlike standard NeRF which predicts RGB colors directly, Latent-NeRF predicts latent features, allowing the use of score distillation from a diffusion model to enforce photorealistic textures and structural consistency. It is distinguished from its sibling [HyperNeRFGAN](8765-hypernerfgan.md) by using a diffusion-based generative prior rather than a GAN-based adversarial loss.
 
 ### StyleNeRF
-#### definition
-- [S1] A 3D-aware generative model that merges 3D scene representation with style-based generative models.
-#### step
-- [S1] Uses NeRF to generate low-resolution feature maps and samples them to high resolution to avoid super-computation volume rendering.
-- [S1] Applies regularization terms to improve 3D consistency.
+**Definition:** A 3D-aware generative model that merges 3D scene representation with style-based generative models [S1].
+**Steps:** Uses NeRF to generate low-resolution feature maps and samples them to high resolution to avoid super-computation volume rendering. Applies regularization terms to improve 3D consistency [S1].
 
 ### NeRFFaceShop
-#### definition
-- [S2] A 3D-aware generative model that produces animatable and relightable human heads by training on large-scale in-the-wild videos.
-#### step
-- [S2] Deforms feature maps rather than 3D points so lighting and expression changes stay consistent during motion.
-- [S2] Builds on a tri-plane generator and introduces a unified animation and lighting representation.
-- [S2] Extracts expression coefficients from video to learn a detailed animation space, enabling smooth, controllable head motion and relighting across humans and nonhuman domains.
+**Definition:** A 3D-aware generative model that produces animatable and relightable human heads by training on large-scale in-the-wild videos [S2].
+**Steps:** Deforms feature maps rather than 3D points so lighting and expression changes stay consistent during motion. Builds on a tri-plane generator and introduces a unified animation and lighting representation. Extracts expression coefficients from video to learn a detailed animation space, enabling smooth, controllable head motion and relighting across humans and nonhuman domains [S2].
 
 ### Generative Latent Optimization
-#### definition
-- [S2] A method where a set of randomly sampled latent codes is paired to a set of images, and the latent codes are input to a generator whose parameters are jointly optimized with the latent code using a reconstruction loss. It can be thought of as a Discriminator-less GAN.
-#### parameter
-- [S2] u_i represents the other inputs not optimized over (needed in NeRF but not necessarily for other models).
+**Definition:** A method where a set of randomly sampled latent codes is paired to a set of images, and the latent codes are input to a generator whose parameters are jointly optimized with the latent code using a reconstruction loss. It can be thought of as a Discriminator-less GAN [S2].
+**Parameters:** $u_i$ represents the other inputs not optimized over (needed in NeRF but not necessarily for other models) [S2].
 
 ### LOLNeRF
-#### definition
-- [S2] A method capable of single-shot view synthesis of human faces, built similarly to π-GAN but using Generative Latent Optimization instead of adversarial training.
+**Definition:** A method capable of single-shot view synthesis of human faces, built similarly to $\pi$-GAN but using Generative Latent Optimization instead of adversarial training [S2].
 
 ## Background
-The intersection of NeRF and GANs began with GRAF (2020), which established the foundation for conditional radiance fields by introducing a discriminator to obtain high-resolution synthetic views, though it was limited to single-object scenes [S1]. In 2021, Niemeyer et al. proposed GIRAFFE, which represented scenes as compositional generative neural feature fields, separating object shape, appearance, and background without explicit supervision [S1]. Also in 2021, Chan et al. introduced π-GAN, a periodic implicit GAN using periodic activation functions and volume rendering for high-quality 3D-aware image synthesis [S1]. However, these early methods required large datasets and struggled with complex scenes [S1]. Concurrently, methods like HyperNeRFGAN and Latent-NeRF emerged to address data efficiency and resolution limits, with LOLNeRF (2021) applying Generative Latent Optimization for single-shot face synthesis [S2].
+The intersection of NeRF and generative modeling began with GRAF (Schwarz et al., 2020), which established the foundation for combining conditional radiance fields with GANs to generate high-resolution synthetic views, though initially limited to single-object scenes [S1]. To address multi-object scenes and the lack of high-quality images in earlier GAN-NeRF hybrids, GIRAFFE (Niemeyer et al., 2021) introduced compositional generative neural feature fields, separating shape, appearance, and background without explicit supervision [S1]. Subsequently, $\pi$-GAN (Chan et al., 2021) utilized periodic activation functions and volume rendering to achieve view-consistent radiance fields for high-quality 3D-aware image synthesis, though it required substantial data and was best suited for simple geometries like faces and cars [S1].
+
+Later developments focused on efficiency and specific domains. StyleNeRF (Gu et al., 2022) merged 3D scene representation with style-based generation, using NeRF for low-resolution feature maps and upsampling to avoid the computational cost of full high-resolution volume rendering, while applying regularization for 3D consistency [S1]. In the domain of human faces, NeRFFaceShop (2025) learned animatable and relightable models from in-the-wild videos by deforming feature maps rather than 3D points, ensuring lighting and expression consistency [S2]. LOLNeRF (2021) achieved single-shot view synthesis of faces using Generative Latent Optimization, offering a discriminator-less alternative to adversarial training [S2]. These methods collectively address the limitations of standard NeRF in generalization, resolution, and data efficiency.
 
 ## Sources
 [S1] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31

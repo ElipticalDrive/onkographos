@@ -3,50 +3,35 @@
 Also called: SVO File Format Deserialization, SVO binary reader, SVOBIN
 
 ## Overview
-The SVO Binary Serialization Format is a binary file format for serializing Sparse Voxel Octrees (SVO) that stores tree topology, leaf specifications, and arbitrary data arrays with strict bounds checking and overflow protection [S1, unofficial]. It ensures compatibility through a magic header, version, and endian marker, and provides a deserialization method that validates these fields before reconstructing the Octree tree and `SerializedScene` [S1, unofficial]. It differs from its sibling [WideNodeDescriptor Binary Layout](5156-widenodedescriptor-binary-layout.md) by defining the complete file structure and validation logic rather than just the node descriptor packing.
+The SVO Binary Serialization Format is a binary file format for serializing Sparse Voxel Octrees (SVO) that stores tree topology, leaf specifications, and arbitrary data arrays with strict bounds checking and overflow protection [S1, unofficial]. It ensures compatibility through a magic header, version, and endian marker, and provides a deserialization method that validates these fields before reconstructing the Octree tree and `SerializedScene` [S1, unofficial]. It differs from its sibling [WideNodeDescriptor Binary Layout](5156-widenodedescriptor-binary-layout.md) by defining the complete file structure and validation logic rather than just the node descriptor packing [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A binary file stream containing the SVO data.
-- Output: A reconstructed `Scene` object containing an `Octree` (with nodes, wide nodes, leaf payload indices, leaf specs) and a list of `SerializedArray` objects.
+- Input: A binary file stream containing the SVO data [S1, unofficial].
+- Output: A reconstructed `Scene` object containing an `Octree` (with nodes, wide nodes, leaf payload indices, leaf specs) and a list of `SerializedArray` objects [S1, unofficial].
 
 **Data Structures:**
-The format consists of a header followed by sequential data blocks. All integers are stored in little-endian byte order, determined by the endian marker.
+The format consists of a header followed by sequential data blocks [S1, unofficial]. All integers are stored in little-endian byte order, determined by the endian marker [S1, unofficial].
 
 1.  **Header:**
-    - `magic`: 8 bytes. Must match `kMagic`.
-    - `version`: 4 bytes (`uint32`). Must match `kFormatVersion`.
-    - `endian_marker`: 4 bytes (`uint32`). Must match `kEndianMarker`.
-    - `branching_mode`: 4 bytes (`uint32`). 0 = Octree8, 1 = Wide4.
-    - `max_depth`: 4 bytes (`int32`).
-    - `root_bounds`: 16 floats (`float[2][3]`). `root_bounds[corner][axis]` where `corner` is 0 (min) or 1 (max), and `axis` is 0 (x), 1 (y), 2 (z).
-    - `counts`: 5 `uint64` values: `node_count`, `wide_node_count`, `leaf_payload_index_count`, `leaf_spec_count`, `array_count`.
+    - `magic`: 8 bytes. Must match `kMagic` [S1, unofficial].
+    - `version`: 4 bytes (`uint32`). Must match `kFormatVersion` [S1, unofficial].
+    - `endian_marker`: 4 bytes (`uint32`). Must match `kEndianMarker` [S1, unofficial].
+    - `branching_mode`: 4 bytes (`uint32`). 0 = Octree8, 1 = Wide4 [S1, unofficial].
+    - `max_depth`: 4 bytes (`int32`) [S1, unofficial].
+    - `root_bounds`: 16 floats (`float[2][3]`). `root_bounds[corner][axis]` where `corner` is 0 (min) or 1 (max), and `axis` is 0 (x), 1 (y), 2 (z) [S1, unofficial].
+    - `counts`: 5 `uint64` values: `node_count`, `wide_node_count`, `leaf_count`, `leaf_spec_count`, `array_count` [S1, unofficial].
 
 2.  **Node Data:**
-    - `nodes`: `node_count` entries of `uint64` (packed `NodeDescriptor` bits).
-    - `wide_nodes`: `wide_node_count` entries. Each entry consists of:
-        - `child_mask`: `uint64`
-        - `leaf_mask`: `uint64`
-        - `child_base`: `uint32`
-        - `payload_base`: `uint32`
-        These are packed into `WideNodeDescriptor` using `WideNodeDescriptor::pack(child_mask, leaf_mask, child_base, payload_base)`.
+    - `nodes`: `node_count` entries of `uint64` (packed `NodeDescriptor` bits) [S1, unofficial].
+    - `wide_nodes`: `wide_node_count` entries. Each entry consists of `child_mask` (`uint64`), `leaf_mask` (`uint64`), `child_base` (`uint32`), `payload_base` (`uint32`) [S1, unofficial]. These are packed into `WideNodeDescriptor` using `WideNodeDescriptor::pack(child_mask, leaf_mask, child_base, payload_base)` [S1, unofficial].
 
 3.  **Leaf Data:**
-    - `leaf_payload_indices`: `leaf_payload_index_count` entries of `uint32`. Stored as raw bytes.
-    - `leaf_specs`: `leaf_spec_count` entries. Each spec contains:
-        - `coord_min`: 3 `int32` values (x, y, z).
-        - `depth`: `int32`.
-        - `payload_index`: `uint32`.
+    - `leaf_payload_indices`: `leaf_count` entries of `uint32`. Stored as raw bytes [S1, unofficial].
+    - `leaf_specs`: `leaf_spec_count` entries. Each spec contains `coord_min` (3 `int32` values), `depth` (`int32`), and `payload_index` (`uint32`) [S1, unofficial].
 
 4.  **Arrays:**
-    - `array_count` entries. Each array contains:
-        - `name_size`: `uint64`.
-        - `name`: `name_size` bytes.
-        - `dtype`: `uint32`. Must be `SerializedArrayDType::Float32`.
-        - `dim_count`: `uint64`.
-        - `shape`: `dim_count` entries of `uint64`.
-        - `byte_count`: `uint64`.
-        - `data`: `byte_count` bytes.
+    - `array_count` entries. Each array contains `name_size` (`uint64`), `name` (`name_size` bytes), `dtype` (`uint32`, must be `SerializedArrayDType::Float32`), `dim_count` (`uint64`), `shape` (`dim_count` entries of `uint64`), `byte_count` (`uint64`), and `data` (`byte_count` bytes) [S1, unofficial].
 
 **Parameters:**
 - `kMagic`: `'SVOBIN1\0'` (8 bytes) [S1, unofficial].
@@ -65,7 +50,7 @@ The format consists of a header followed by sequential data blocks. All integers
 6.  **Read Branching Mode:** Read `branching_mode` as `uint32`. Map 0 to `BranchingMode::Octree8`, 1 to `BranchingMode::Wide4`. Else throw `ValidationError` [S1, unofficial].
 7.  **Read Max Depth:** Read `max_depth` as `int32` [S1, unofficial].
 8.  **Read Root Bounds:** Iterate `corner` from 0 to 1 and `axis` from 0 to 2, reading `float` values into `root_bounds[corner][axis]` [S1, unofficial].
-9.  **Read Counts:** Read `node_count`, `wide_node_count`, `leaf_count` (leaf payload indices count), `leaf_spec_count`, `array_count` as `uint64` [S1, unofficial].
+9.  **Read Counts:** Read `node_count`, `wide_node_count`, `leaf_count`, `leaf_spec_count`, `array_count` as `uint64` [S1, unofficial].
 10. **Validate Counts:** Check if any count exceeds `std::numeric_limits<std::size_t>::max()`. If so, throw `ValidationError` [S1, unofficial].
 11. **Calculate Topology Bytes:** Calculate `required_topology_bytes`:
     $$ \text{required\_topology\_bytes} = \text{node\_count} \times \text{sizeof(uint64)} + \text{wide\_node\_count} \times (2 \times \text{sizeof(uint64)} + 2 \times \text{sizeof(uint32)}) + \text{leaf\_count} \times \text{sizeof(uint32)} + \text{leaf\_spec\_count} \times (5 \times \text{sizeof(uint32)}) + \text{array\_count} \times \text{sizeof(uint64)} $$
@@ -79,7 +64,7 @@ The format consists of a header followed by sequential data blocks. All integers
     a. Read `name_size` (`uint64`). If `name_size` == 0 or > `kMaxArrayNameBytes`, throw `ValidationError` [S1, unofficial].
     b. Require remaining bytes for `name_size + sizeof(uint32) + sizeof(uint64)` [S1, unofficial].
     c. Resize `array.name` to `name_size`. Read name bytes [S1, unofficial].
-    d. Read `dtype` (`uint32`). If `dtype` != `SerializedArrayDType::Float32`, throw `ValidationError` [S1, unofficial]. Set `array.dtype = SerializedArrayDType::Float32` [S1, unofficial].
+    d. Read `dtype` (`uint32`). If `dtype` != `SerializedArrayDType::Float32`, throw `ValidationError`. Set `array.dtype = SerializedArrayDType::Float32` [S1, unofficial].
     e. Read `dim_count` (`uint64`). If `dim_count` > `kMaxArrayDims`, throw `ValidationError` [S1, unofficial].
     f. Require remaining bytes for `dim_count * sizeof(uint64) + sizeof(uint64)` [S1, unofficial].
     g. Resize `array.shape` to `dim_count`. Loop `dim_index` from 0 to `dim_count`, read dimension into `array.shape[dim_index]` [S1, unofficial].
@@ -96,6 +81,127 @@ The format consists of a header followed by sequential data blocks. All integers
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import struct
+import sys
+
+class ValidationError(Exception):
+    pass
+
+class BranchingMode:
+    Octree8 = 0
+    Wide4 = 1
+
+class Device:
+    CPU = 0
+
+class SerializedArrayDType:
+    Float32 = 0
+
+class LeafSpec:
+    def __init__(self, coord_min, depth, payload_index):
+        self.coord_min = coord_min
+        self.depth = depth
+        self.payload_index = payload_index
+
+class WideNodeDescriptor:
+    @staticmethod
+    def pack(child_mask, leaf_mask, child_base, payload_base):
+        # Exact bit-packing layout is not specified in the sources [G]
+        return {"child_mask": child_mask, "leaf_mask": leaf_mask, "child_base": child_base, "payload_base": payload_base}
+
+class Array:
+    def __init__(self, name, dtype, shape, data):
+        self.name = name
+        self.dtype = dtype
+        self.shape = shape
+        self.data = data
+
+class Octree:
+    def __init__(self, max_depth, device, root_bounds, branching, nodes, wide_nodes, leaf_payload_indices, leaf_specs):
+        self.max_depth = max_depth
+        self.device = device
+        self.root_bounds = root_bounds
+        self.branching = branching
+        self.nodes = nodes
+        self.wide_nodes = wide_nodes
+        self.leaf_payload_indices = leaf_payload_indices
+        self.leaf_specs = leaf_specs
+
+class Scene:
+    def __init__(self, tree, arrays):
+        self.tree = tree
+        self.arrays = arrays
+
+def read_uint32(stream):
+    data = stream.read(4)
+    if len(data) < 4:
+        raise ValidationError("Truncated file")
+    return int.from_bytes(data, 'little')
+
+def read_uint64(stream):
+    data = stream.read(8)
+    if len(data) < 8:
+        raise ValidationError("Truncated file")
+    return int.from_bytes(data, 'little')
+
+def read_int32(stream):
+    data = stream.read(4)
+    if len(data) < 4:
+        raise ValidationError("Truncated file")
+    return int.from_bytes(data, 'little', signed=True)
+
+def read_float(stream):
+    data = stream.read(4)
+    if len(data) < 4:
+        raise ValidationError("Truncated file")
+    return struct.unpack('f', data)[0]
+
+def stream_size(stream):
+    current = stream.tell()
+    stream.seek(0, 2)
+    size = stream.tell()
+    stream.seek(current)
+    return size
+
+def bytes_read(stream):
+    return stream.tell()
+
+def require_remaining_bytes(stream, file_size, required, context):
+    remaining = file_size - bytes_read(stream)
+    if remaining < required:
+        raise ValidationError(f"Not enough data for {context}")
+
+def checked_add(a, b):
+    if a > sys.maxsize - b:
+        raise ValidationError("Overflow in checked_add")
+    return a + b
+
+def checked_bytes(count, size, context):
+    total = count * size
+    if count > 0 and total // count != size:
+        raise ValidationError(f"Overflow in {context}")
+    return total
+
+def array_element_count(shape):
+    count = 1
+    for dim in shape:
+        count *= dim
+    return count
+
+def array_element_size(dtype):
+    if dtype == SerializedArrayDType.Float32:
+        return 4
+    return 0
+
+def read_leaf_specs(stream, count, file_size):
+    specs = []
+    for _ in range(count):
+        coord_min = [read_int32(stream) for _ in range(3)]
+        depth = read_int32(stream)
+        payload_index = read_uint32(stream)
+        specs.append(LeafSpec(coord_min, depth, payload_index))
+    return specs
+
 def load_svo(filepath):
     # 1. Open File
     try:
@@ -177,9 +283,9 @@ def load_svo(filepath):
         wide_nodes.append(WideNodeDescriptor.pack(child_mask, leaf_mask, child_base, payload_base))
 
     # 15. Read Leaf Payload Indices
-    leaf_payload_indices = read_bytes(stream, leaf_count * 4)
-    # Interpret as uint32 array
-    leaf_payload_indices = [int.from_bytes(leaf_payload_indices[i:i+4], 'little') for i in range(0, len(leaf_payload_indices), 4)]
+    payload_data_len = checked_bytes(leaf_count, 4, "leaf payload indices")
+    leaf_payload_indices_raw = stream.read(payload_data_len)
+    leaf_payload_indices = [int.from_bytes(leaf_payload_indices_raw[i:i+4], 'little') for i in range(0, len(leaf_payload_indices_raw), 4)]
 
     # 16. Read Leaf Specs
     leaf_specs = read_leaf_specs(stream, leaf_spec_count, file_size)
@@ -228,142 +334,26 @@ def load_svo(filepath):
     # 19. Construct Scene
     tree = Octree(max_depth, Device.CPU, root_bounds, branching, nodes, wide_nodes, leaf_payload_indices, leaf_specs)
     return Scene(tree, arrays)
-
-def read_uint32(stream):
-    data = stream.read(4)
-    if len(data) < 4:
-        raise ValidationError("Truncated file")
-    return int.from_bytes(data, 'little')
-
-def read_uint64(stream):
-    data = stream.read(8)
-    if len(data) < 8:
-        raise ValidationError("Truncated file")
-    return int.from_bytes(data, 'little')
-
-def read_int32(stream):
-    data = stream.read(4)
-    if len(data) < 4:
-        raise ValidationError("Truncated file")
-    return int.from_bytes(data, 'little', signed=True)
-
-def read_float(stream):
-    data = stream.read(4)
-    if len(data) < 4:
-        raise ValidationError("Truncated file")
-    import struct
-    return struct.unpack('f', data)[0]
-
-def stream_size(stream):
-    current = stream.tell()
-    stream.seek(0, 2)
-    size = stream.tell()
-    stream.seek(current)
-    return size
-
-def bytes_read(stream):
-    return stream.tell()
-
-def require_remaining_bytes(stream, file_size, required, context):
-    remaining = file_size - bytes_read(stream)
-    if remaining < required:
-        raise ValidationError(f"Not enough data for {context}")
-
-def checked_add(a, b):
-    if a > sys.maxsize - b:
-        raise ValidationError("Overflow in checked_add")
-    return a + b
-
-def checked_bytes(count, size, context):
-    total = count * size
-    if count > 0 and total // count != size:
-        raise ValidationError(f"Overflow in {context}")
-    return total
-
-def array_element_count(shape):
-    count = 1
-    for dim in shape:
-        count *= dim
-    return count
-
-def array_element_size(dtype):
-    if dtype == SerializedArrayDType.Float32:
-        return 4
-    return 0
-
-def read_leaf_specs(stream, count, file_size):
-    specs = []
-    for _ in range(count):
-        coord_min = [read_int32(stream) for _ in range(3)]
-        depth = read_int32(stream)
-        payload_index = read_uint32(stream)
-        specs.append(LeafSpec(coord_min, depth, payload_index))
-    return specs
-
-class LeafSpec:
-    def __init__(self, coord_min, depth, payload_index):
-        self.coord_min = coord_min
-        self.depth = depth
-        self.payload_index = payload_index
-
-class WideNodeDescriptor:
-    @staticmethod
-    def pack(child_mask, leaf_mask, child_base, payload_base):
-        # Placeholder for actual packing logic not detailed in sources
-        return {"child_mask": child_mask, "leaf_mask": leaf_mask, "child_base": child_base, "payload_base": payload_base}
-
-class BranchingMode:
-    Octree8 = 0
-    Wide4 = 1
-
-class Device:
-    CPU = 0
-
-class SerializedArrayDType:
-    Float32 = 0
-
-class Array:
-    def __init__(self, name, dtype, shape, data):
-        self.name = name
-        self.dtype = dtype
-        self.shape = shape
-        self.data = data
-
-class Scene:
-    def __init__(self, tree, arrays):
-        self.tree = tree
-        self.arrays = arrays
-
-class Octree:
-    def __init__(self, max_depth, device, root_bounds, branching, nodes, wide_nodes, leaf_payload_indices, leaf_specs):
-        self.max_depth = max_depth
-        self.device = device
-        self.root_bounds = root_bounds
-        self.branching = branching
-        self.nodes = nodes
-        self.wide_nodes = wide_nodes
-        self.leaf_payload_indices = leaf_payload_indices
-        self.leaf_specs = leaf_specs
 ```
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-- Time: Linear with respect to the number of nodes, wide nodes, leaves, and arrays. Specifically, $O(N + W + L + A)$ where $N$ is node count, $W$ is wide node count, $L$ is leaf count, and $A$ is array count.
-- Memory: Linear with respect to the same counts, plus the size of the array data.
+- Time: Linear with respect to the number of nodes, wide nodes, leaves, and arrays. Specifically, $O(N + W + L + A)$ where $N$ is node count, $W$ is wide node count, $L$ is leaf count, and $A$ is array count [S1, unofficial].
+- Memory: Linear with respect to the same counts, plus the size of the array data [S1, unofficial].
 
 **Measured Performance:**
 Not given in the sources.
 
 **Scaling:**
-Scales linearly with the size of the serialized data.
+Scales linearly with the size of the serialized data [S1, unofficial].
 
 **Strengths and Limitations:**
-- Strengths: Strict bounds checking and overflow protection prevent security vulnerabilities and data corruption. Magic header and endian marker ensure cross-platform compatibility.
-- Limitations: Only supports `Float32` array data types. Requires the entire file to be read into memory for validation before reconstruction.
+- Strengths: Strict bounds checking and overflow protection prevent security vulnerabilities and data corruption [S1, unofficial]. Magic header and endian marker ensure cross-platform compatibility [S1, unofficial].
+- Limitations: Only supports `Float32` array data types [S1, unofficial]. Requires the entire file to be read into memory for validation before reconstruction [S1, unofficial].
 
 **When to use it and when not:**
-- Use when you need to persist an SVO to disk with guaranteed integrity and compatibility.
-- Do not use if you need to support other data types for arrays or if you need incremental reading without full validation.
+- Use when you need to persist an SVO to disk with guaranteed integrity and compatibility [S1, unofficial].
+- Do not use if you need to support other data types for arrays or if you need incremental reading without full validation [S1, unofficial].
 
 ## Background
 The SVO Binary Serialization Format is part of the `sparse-voxels` library by Hector Piteau [S1, unofficial]. It is used for serializing and deserializing Sparse Voxel Octrees in the context of volume rendering and ray tracing.

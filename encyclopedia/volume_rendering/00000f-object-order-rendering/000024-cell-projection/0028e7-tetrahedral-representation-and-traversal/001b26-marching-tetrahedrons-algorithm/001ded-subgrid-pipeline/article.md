@@ -3,136 +3,132 @@
 Also called: Subgrid Marching Pipeline
 
 ## Overview
-The Subgrid Pipeline is a method for extracting watertight triangle soups from tetrahedral grids by explicitly resolving topological ambiguities in isosurface extraction [S1, unofficial]. It processes individual tetrahedra to generate open, scoop, and normal boundary curves, handling configurations that standard Marching Tetrahedrons algorithms do not explicitly resolve [S1, unofficial].
+The Subgrid Pipeline is a method for extracting isosurfaces from tetrahedral grids by resolving topological ambiguities within individual tetrahedra using subgrid-accurate intersection data [S1, unofficial][S2]. It distinguishes itself from standard Marching Tetrahedrons by explicitly handling open, scoop, and normal boundary curves to ensure watertightness, allowing multiple intersection vertices per edge to represent complex topology [S1, unofficial]. It builds on [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md) by replacing the fixed lookup table with a local reconstruction procedure that processes boundary curves [S1, unofficial][S2].
 
 ## How it works
-The pipeline iterates over a tetrahedral grid, queries edge intersections, applies optional modulo-2 reduction, constructs boundary curves to resolve ambiguities, and merges local triangle soups into a global result [S1, unofficial].
-
 **Inputs and Outputs:**
-- **Input:** A tetrahedral grid accessed via a `TetRange` iterator, a scalar field or SDF, an isovalue, and options (`opts`) including `mod2` (boolean), `greedy` (boolean), and `mergeEPS` (float) [S1, unofficial].
-- **Output:** A global `TriangleSoup` containing the extracted isosurface [S1, unofficial].
+- **Input:** A range of tetrahedra in a grid, a scalar field defined on vertices, an isovalue, and configuration options (`mod2`, `greedy`, `compute_normals`).
+- **Output:** A global `TriangleSoup` containing the extracted surface triangles.
 
 **Data Structures:**
-- `EdgeInts`: A structure storing intersection counts for the 6 edges of a tetrahedron, indexed by vertex pairs (0,1), (0,2), (0,3), (1,2), (1,3), (2,3) [S1, unofficial].
-- `CombFace`: Represents a curve segment in the combinatorial boundary representation [S1, unofficial].
-- `TriangleSoup`: A container for triangles supporting combinatorial or numerical merging [S1, unofficial].
+- `EdgeInts`: A structure storing intersection data for the 6 edges of a tetrahedron.
+  - Fields: `ne_01`, `ne_02`, `ne_03`, `ne_12`, `ne_13`, `ne_23`.
+  - Each `ne_ij` represents the number of intersections on edge $(i,j)$. In the standard pipeline, these are integers derived from t-values. In the `Mod2 Reduction` variant, they are reduced modulo 2.
+- `CombFace`: Represents a boundary curve (open, scoop, or normal). Contains a list of vertices defining the curve.
+- `TriangleSoup`: A collection of triangles (triplets of vertices) accumulated from all tetrahedra.
 
 **Steps:**
-1. **Iterate:** Loop through each tetrahedron in the grid using a `TetRange` iterator [S1, unofficial].
-2. **Query Intersections:** For the current tetrahedron, query the edge intersection handler for all 6 edges, requesting t-values and normals (normals are skipped if not needed) [S1, unofficial].
-3. **Compute Counts:** Calculate the number of intersections per edge from the returned t-values and store them in an `EdgeInts` object [S1, unofficial].
-4. **Mod2 Reduction (Optional):** If `opts.mod2` is true, apply modulo-2 reduction to the intersection data to simplify topology [S1, unofficial]. If the reduction function returns true, skip processing this tetrahedron [S1, unofficial].
-5. **Construct Boundary Curves:** Call `boundary_comb_curves` with the tetrahedron indices, intersection counts, and edge occupation flags to resolve topological ambiguities, yielding `open_curves`, `scoop_curves`, and `normal_curves` [S1, unofficial].
-6. **Track Statistics (Optional):** Increment a counter for "non-even" tetrahedra if `open_curves` is not empty, and increment a counter for "non-normal" tetrahedra if `open_curves` is empty AND `scoop_curves` is empty [S1, unofficial].
-7. **Construct Local Surface:** Create a local `TriangleSoup` for the current tetrahedron using either the greedy or standard surface construction method based on `opts.greedy` [S1, unofficial].
-8. **Merge:** Merge the local `TriangleSoup` into the global result soup [S1, unofficial].
+1. **Iterate Tetrahedra:** Loop through each tetrahedron in the input range using a `TetRange` iterator [S1, unofficial].
+2. **Query Intersections:** For the current tetrahedron, query the edge intersections.
+   - Request t-values (positions) and normals for all 6 edges if `compute_normals` is true [S1, unofficial].
+   - Compute the intersection count for each edge based on the scalar field values at the vertices and the isovalue. Let $N_{ij}$ be the number of intersections on edge $(i,j)$.
+3. **Mod2 Reduction (Optional):** If the `mod2` option is enabled:
+   - Apply modulo-2 reduction to the intersection counts: $N'_{ij} = N_{ij} \pmod 2$ [S1, unofficial].
+   - This limits the output to at most one intersection per edge, restoring the single-surface-per-edge constraint of classic Marching Tetrahedra while using subgrid-accurate vertex positions [S1, unofficial].
+   - If the reduction results in a configuration that implies no surface (e.g., all $N'_{ij} = 0$), skip processing this tetrahedron [S1, unofficial].
+4. **Construct Boundary Curves:** Call `boundary_comb_curves` with the tetrahedron indices, intersection counts, and edge occupation flags [S1, unofficial].
+   - This function analyzes the intersection topology to identify three types of curves:
+     - `open_curves`: Curves that enter and exit the tetrahedron.
+     - `scoop_curves`: Curves that form closed loops or "scoops" within the tetrahedron.
+     - `normal_curves`: Curves associated with normal boundary conditions.
+   - The function returns these three lists of `CombFace` objects [S1, unofficial].
+5. **Track Statistics (Optional):**
+   - Increment a counter for "non-even" tetrahedra if `open_curves` is not empty [S1, unofficial].
+   - Increment a counter for "non-normal" tetrahedra if `open_curves` is empty AND `scoop_curves` is empty [S1, unofficial].
+6. **Construct Local Surface:**
+   - Create a local `TriangleSoup` for the current tetrahedron.
+   - Use the `subgrid_surface` method for general cases or `subgrid_greedy` for optimized performance, based on the `opts.greedy` flag [S1, unofficial].
+   - The reconstruction procedure resolves the boundary curves into triangles, ensuring watertightness [S1, unofficial].
+7. **Merge:** Append the local `TriangleSoup` to the global result soup [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def subgrid_pipeline(tet_grid, scalar_field, isovalue, opts):
-    global_soup = []
-    non_even_count = 0
-    non_normal_count = 0
-
-    for tet in tet_grid:
+def subgrid_pipeline(tet_range, scalar_field, isovalue, opts):
+    global_soup = TriangleSoup()
+    
+    for tet in tet_range:
         # Step 2: Query edge intersections
-        edge_ints = [0] * 6
+        edge_ints = EdgeInts()
         for edge_idx in range(6):
-            v0, v1 = tet.vertices[edge_idx // 2], tet.vertices[1 - edge_idx % 2]
-            val0 = scalar_field(v0)
-            val1 = scalar_field(v1)
-            if (val0 - isovalue) * (val1 - isovalue) < 0:
-                t = (isovalue - val0) / (val1 - val0)
-                edge_ints[edge_idx] = 1
-            else:
-                edge_ints[edge_idx] = 0
-
-        # Step 4: Mod2 Reduction
+            edge = tet.edges[edge_idx]
+            # Compute intersection count N_ij based on scalar values and isovalue
+            # This may involve solving for t-values if multiple intersections exist
+            n_ij = compute_edge_intersections(edge, scalar_field, isovalue)
+            edge_ints.set(edge_idx, n_ij)
+            
+            # If normals are needed, compute and store them here
+            if opts.compute_normals:
+                normals[edge_idx] = compute_normal(edge, scalar_field, isovalue)
+        
+        # Step 3: Mod2 Reduction
         if opts.mod2:
-            if convert_mod2_intersections(edge_ints):
+            for edge_idx in range(6):
+                edge_ints.set(edge_idx, edge_ints.get(edge_idx) % 2)
+            
+            # Check if all intersections are zero after mod2
+            if all(edge_ints.get(i) == 0 for i in range(6)):
                 continue
-
-        # Step 5: Construct boundary curves
+        
+        # Step 4: Construct boundary curves
         open_curves, scoop_curves, normal_curves = boundary_comb_curves(
-            tet.indices, edge_ints
+            tet.indices, edge_ints, opts
         )
-
-        # Step 6: Track statistics
-        if len(open_curves) > 0:
-            non_even_count += 1
-        if len(open_curves) == 0 and len(scoop_curves) == 0:
-            non_normal_count += 1
-
-        # Step 7: Construct local surface
-        local_soup = []
+        
+        # Step 5: Track statistics (optional)
+        if opts.track_stats:
+            if open_curves:
+                non_even_count += 1
+            if not open_curves and not scoop_curves:
+                non_normal_count += 1
+        
+        # Step 6: Construct local surface
         if opts.greedy:
-            construct_greedy_surface(local_soup, tet, edge_ints, open_curves, scoop_curves, normal_curves)
+            local_soup = subgrid_greedy(tet, open_curves, scoop_curves, normal_curves, edge_ints)
         else:
-            construct_standard_surface(local_soup, tet, edge_ints, open_curves, scoop_curves, normal_curves)
-
-        # Step 8: Merge
-        global_soup.extend(local_soup)
-
-    return global_soup, non_even_count, non_normal_count
-
-def convert_mod2_intersections(edge_ints):
-    # Returns True if mod2 reduction indicates the tetrahedron should be skipped
-    return sum(edge_ints) % 2 == 0
-
-def boundary_comb_curves(tet_indices, edge_ints):
-    # Iteratively groups intersected edges into open, scoop, and normal curves
-    open_curves = []
-    scoop_curves = []
-    normal_curves = []
-    # Sources do not specify the exact curve-traversal algorithm; 
-    # standard combinatorial grouping is applied iteratively here.
-    for i in range(6):
-        if edge_ints[i] == 1:
-            curve = [tet_indices[i]]
-            # Iterative curve extension logic would follow here
-            if i < 3:
-                open_curves.append(curve)
-            elif i < 5:
-                scoop_curves.append(curve)
-            else:
-                normal_curves.append(curve)
-    return open_curves, scoop_curves, normal_curves
-
-def construct_greedy_surface(soup, tet, edge_ints, open_curves, scoop_curves, normal_curves):
-    # Iteratively generates triangles from boundary curves
-    for curve in open_curves + scoop_curves + normal_curves:
-        if len(curve) >= 2:
-            soup.append((tet.vertices[curve[0]], tet.vertices[curve[1]]))
-
-def construct_standard_surface(soup, tet, edge_ints, open_curves, scoop_curves, normal_curves):
-    # Iteratively generates triangles using standard combinatorial rules
-    for curve in open_curves + scoop_curves + normal_curves:
-        if len(curve) >= 2:
-            soup.append((tet.vertices[curve[0]], tet.vertices[curve[1]]))
+            local_soup = subgrid_surface(tet, open_curves, scoop_curves, normal_curves, edge_ints)
+        
+        # Step 7: Merge
+        global_soup.merge(local_soup)
+    
+    return global_soup
 ```
 
 **Parameters:**
-- `opts.mod2`: Boolean. If true, applies modulo-2 reduction to intersection data [S1, unofficial].
-- `opts.greedy`: Boolean. If true, uses the greedy surface construction method for optimized performance [S1, unofficial].
-- `opts.mergeEPS`: Float. Positional merge epsilon. If provided, switches from combinatorial merge to numerical merge [S1, unofficial].
+- `mod2`: Boolean. If true, reduces intersection counts modulo 2 [S1, unofficial].
+- `greedy`: Boolean. If true, uses the optimized `subgrid_greedy` reconstruction [S1, unofficial].
+- `compute_normals`: Boolean. If true, computes normals for intersection points [S1, unofficial].
+- `track_stats`: Boolean. If true, collects statistics on curve types [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Mod2 Reduction:** The function `convert_mod2_intersections` must be correctly implemented and was moved to `query/mod2_reduction.h` in the reference implementation [S1, unofficial].
-- **Boundary Curves:** The `boundary_comb_curves` function must correctly handle open, scoop, and normal curves to ensure watertightness; failure to resolve these correctly leads to non-watertight meshes [S1, unofficial].
-- **Merge Strategy:** The choice between combinatorial and numerical merge (controlled by `mergeEPS`) affects the final mesh quality and connectivity [S1, unofficial].
+- **Precision:** Subgrid methods require accurate computation of intersection positions. Floating-point errors can lead to non-watertight surfaces if not handled carefully [S2].
+- **Degenerate Input:** Tetrahedra with zero volume or collinear vertices may cause issues in intersection computation.
+- **Complex Topology:** The ability to handle multiple intersections per edge allows for complex topologies, but increases computational cost [S2].
 
 ## Subtopics
 
-### Mod2 Reduction
-A preprocessing step applied to intersection data to reduce the complexity of the subgrid construction by considering intersections modulo 2 [S1, unofficial]. It is called within the dual subgrid pipeline if `opts.mod2` is true, and if it returns true, the current tetrahedron is skipped [S1, unofficial]. The function `convert_mod2_intersections` was moved to `query/mod2_reduction.h` [S1, unofficial].
+### [Mod2 Reduction](1665-mod2-reduction.md)
+Mod2 Reduction is an ablation of the Subgrid Marching Tetrahedra method that provides exact input intersection locations but limits the output to at most one intersection per edge. It uses the parity of the intersection count to determine connectivity, effectively restoring the single-surface-per-edge constraint of classic Marching Tetrahedra while utilizing subgrid-accurate vertex positions. It is distinguished from its sibling [Subgrid Surface Reconstruction](1666-subgrid-surface-reconstruction.md) by its strict limitation to one output vertex per edge, whereas the full subgrid method allows multiple vertices to represent complex topology.
+
+### [Subgrid Surface Reconstruction](1666-subgrid-surface-reconstruction.md)
+Subgrid Surface Reconstruction is a method for extracting a triangle soup from a tetrahedral grid by processing individual tetrahedra to resolve topological ambiguities in isosurface extraction. It distinguishes itself from standard Marching Tetrahedrons by explicitly handling open, scoop, and normal boundary curves to ensure watertightness, offering two variants: `subgrid_surface` for general cases and `subgrid_greedy` for optimized performance.
+
+### Subgrid Marching Triangles
+Subgrid Marching Triangles is a 2D contouring algorithm that reconstructs curves within a single triangle using a subgrid procedure, applied to all triangles in a 2D triangular grid given intersection counts on grid edges [S2]. Unlike 3D subgrid marching tets, this 2D variant does not need to worry about compatibility between neighboring cells, allowing for the specific modification in the odd sum case: rather than subtracting 1 from all 3 edge coordinates in a face, subtract 1 from the largest edge coordinate, breaking ties arbitrarily [S2]. For the dual method, it uses the same regularized QEF as in Section 3.3.2 of [S2], but in two dimensions. It can be applied to arbitrary unstructured triangulations, including surface meshes, as it makes no assumptions about the structure of the triangle grid [S2].
 
 ## Operating characteristics
-The method processes each tetrahedron independently, allowing for potential parallelization [S1, unofficial]. The complexity is linear with respect to the number of tetrahedra, $O(N)$, where $N$ is the number of tetrahedra [S1, unofficial]. The construction of boundary curves and local triangle soups adds constant overhead per tetrahedron [S1, unofficial]. The final merge step depends on the merge strategy (combinatorial or numerical) and the number of triangles [S1, unofficial]. The method ensures watertightness, which is a significant advantage over standard Marching Tetrahedrons in ambiguous cases [S1, unofficial]. However, the explicit handling of boundary curves may increase computational cost compared to simpler methods [S1, unofficial].
+- **Time Complexity:** The per-tetrahedron cost is greater than that of marching tets because it may produce more polygons per tet and involves additional logic for local reconstruction [S2]. However, the amortized cost per output triangle is quite comparable [S2].
+- **Memory Complexity:** Depends on the number of output triangles. The method requires storing boundary curves and local triangle soups during processing.
+- **Performance:** Speed improvements can be achieved by precomputing a table of common stencils if speed or thread synchronization is critical [S2].
+- **Strengths:** Handles complex topology with multiple intersections per edge; ensures watertightness; applicable to arbitrary unstructured grids [S1, unofficial][S2].
+- **Limitations:** Higher per-tetrahedron computational cost compared to classic marching tets; potential for increased output polygon count [S2].
+- **When to Use:** When topological accuracy and watertightness are critical, and the grid is unstructured or contains complex features [S1, unofficial][S2].
+- **When Not to Use:** When performance is the primary concern and the topology is simple enough for classic marching tets [S2].
 
 ## Background
-The Subgrid Pipeline is part of the `subgrid-marching` project by H. Baktash [S1, unofficial]. It is designed to address the topological ambiguities inherent in the Marching Tetrahedrons algorithm by explicitly resolving open, scoop, and normal boundary curves [S1, unofficial].
+The Subgrid Pipeline originates from the work on Subgrid Marching Tetrahedra, which aims to improve the accuracy of isosurface extraction by considering subgrid details within each tetrahedron [S2]. The method was developed to address the limitations of classic Marching Tetrahedrons in handling complex topologies and ensuring watertightness [S1, unofficial][S2]. The 2D variant, Subgrid Marching Triangles, extends these concepts to two-dimensional contouring [S2].
 
 ## Sources
 [S1] hbaktash/subgrid-marching, https://github.com/hbaktash/subgrid-marching, fetched 2026-10-27 (unofficial)
+[S2] Subgrid Marching Tetrahedra, https://doi.org/10.1145/3811358, fetched 2026-10-26

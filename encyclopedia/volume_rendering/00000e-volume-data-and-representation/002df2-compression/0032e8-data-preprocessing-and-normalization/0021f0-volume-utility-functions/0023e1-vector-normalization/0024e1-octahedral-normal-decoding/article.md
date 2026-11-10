@@ -10,7 +10,7 @@ Decodes a 2D octahedral coordinate into a 3D unit vector [S1, unofficial].
 **Steps:**
 1. Compute the initial 3D vector: $v = \text{vec3}(e.x, e.y, 1.0 - |e.x| - |e.y|)$ [S1, unofficial].
 2. If $v.z < 0$, fold the xy components: $v.xy = (1.0 - |e.yx|) \cdot \text{vec2}(\text{sign}(e.x), \text{sign}(e.y))$, where $\text{sign}(x) = 1$ if $x \ge 0$ else $-1$ [S1, unofficial].
-3. Compute the length: $len = \sqrt{v.x^2 + v.y^2 + v.z^2}$ [S1, unofficial].
+3. Compute the length: $len = \sqrt{v.x^2 + v.y^2 + v_z^2}$ [S1, unofficial].
 4. If $len > 0$, return $v / len$; otherwise return $\text{vec3}(0, 0, 1)$ [S1, unofficial].
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -34,7 +34,7 @@ def oct_decode(e_x, e_y):
     else:
         return (0.0, 0.0, 1.0)
 ```
-**Parameters:** Not given in the sources.
+**Parameters:** Not given in the sources. [G]
 **Edge Cases:** If the input produces a zero vector, the method returns $\text{vec3}(0, 0, 1)$ [S1, unofficial].
 ## Subtopics
 
@@ -42,13 +42,13 @@ def oct_decode(e_x, e_y):
 Packs a 3D normal vector into a single u8 representing one of 6 octahedral directions based on the dominant axis and sign [S2, unofficial]. It maps a 3D normal to a discrete index [S2, unofficial]. The steps are: if $n[0] > 0.5$, return 1; else if $n[0] < -0.5$, return 0; else if $n[1] > 0.5$, return 3; else if $n[1] < -0.5$, return 2; else if $n[2] > 0.5$, return 5 [S2, unofficial]. Normal indices are 0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z, 5=+Z [S2, unofficial].
 
 ## Operating characteristics
-Time and memory complexity: Not given in the sources.
-Measured performance: Not given in the sources.
-Scaling: Not given in the sources.
-Strengths and limitations: Not given in the sources.
-When to use: Not given in the sources.
+Time and memory complexity: Not given in the sources. [G]
+Measured performance: Not given in the sources. [G]
+Scaling: Not given in the sources. [G]
+Strengths and limitations: Not given in the sources. [G]
+When to use: Not given in the sources. [G]
 ## Background
-Origin, history, and usage: Not given in the sources.
+Origin, history, and usage: Not given in the sources. [G]
 ## Sources
 [S1] ReconWorldLab/godot-gaussian-splatting, https://github.com/ReconWorldLab/godot-gaussian-splatting, fetched 2026-10-27 (unofficial)
 [S2] B4rtekk1/Minerust, https://github.com/B4rtekk1/Minerust, fetched 2026-10-27 (unofficial)

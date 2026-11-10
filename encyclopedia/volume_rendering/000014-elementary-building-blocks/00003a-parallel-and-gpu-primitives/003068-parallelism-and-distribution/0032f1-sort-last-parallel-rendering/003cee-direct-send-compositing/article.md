@@ -3,111 +3,92 @@
 Also called: Direct send
 
 ## Overview
-Direct send compositing is a parallel image compositing method used in sort-last rendering to combine partial images rendered by multiple processors into a final composite [S1, unofficial]. It solves the problem of efficiently aggregating screen-space data by dividing the final image into $n$ tiles, where each processor is responsible for compositing one specific tile [S1, unofficial]. Unlike hierarchical methods such as Binary Swap or Tree-like algorithms that use multi-stage communication to reduce message counts, Direct Send relies on a single all-to-all communication stage, making it simpler to implement and robust even with expensive synchronization mechanisms [S1, unofficial].
+Direct send compositing is a parallel image compositing method for sort-last rendering that divides the final image into $n$ screen-space tiles to avoid exchanging full-size images [S1, unofficial]. Each processor is associated with compositing one tile and sends all other tiles from the full-size image it rendered to the respective processors [S1, unofficial]. It sets itself apart from hierarchical methods like [Binary swap](7162-binary-swap.md) by using a single all-to-all communication stage rather than a multi-step tree, making it robust even with expensive synchronization mechanisms [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** $n$ partial images (tiles), one rendered by each of the $n$ processors in the cluster. Each partial image contains the ray-cast results for a specific screen-space tile.
-*   **Output:** One final composite image, assembled by a master process.
+- Input: $n$ partial images (one per processor), where each partial image contains the rendered contribution for the entire volume but is logically divided into $n$ tiles.
+- Output: $n$ composited tiles, which are then gathered to form the final image.
 
 **Data Structures:**
-*   **Tile:** A rectangular sub-region of the final image. The final image is divided into $n$ equal-sized tiles, one per processor.
-*   **Message:** Contains the pixel data for the tile rendered by a specific processor, intended for a specific destination processor.
+- The final image is divided into $n$ equal-sized tiles in screen space.
+- Each processor $P_i$ holds a local buffer containing the $n$ tiles it rendered. Let $T_{i,j}$ be the tile $j$ rendered by processor $i$.
 
-**Algorithm Steps:**
-1.  **Tile Assignment:** The final image is divided into $n$ screen-space tiles. Processor $i$ is assigned the responsibility of compositing the $i$-th tile.
-2.  **Local Rendering:** Each processor $i$ renders its portion of the volume data, producing a partial image. This partial image is split into $n$ tiles. Processor $i$ keeps its own tile (Tile $i$) and prepares the other $n-1$ tiles (Tiles $j$ where $j \neq i$) for transmission.
-3.  **All-to-All Exchange:** All processors simultaneously send their $n-1$ non-local tiles to the respective processors responsible for compositing them. Processor $i$ receives tiles $j$ from all other processors $j$.
-    *   *Optimization:* The algorithm can be tuned to send only pixels that actually need compositing (e.g., transparent pixels may be skipped if the background is known, or only opaque fragments are sent), reducing the average number of exchanging nodes to $n$ [S1, unofficial].
-4.  **Independent Compositing:** Once all tiles for a specific destination have arrived at processor $k$, processor $k$ independently composites its assigned tile using front-to-back or back-to-front alpha blending.
-5.  **Final Gathering:** Each processor sends its fully composited tile to a designated master process.
-6.  **Assembly:** The master process assembles the $n$ composited tiles into the final image.
+**Steps:**
+1. **All-to-All Exchange:** Each processor $P_i$ sends its tile $T_{i,j}$ to processor $P_j$ for all $j \neq i$. Processor $P_i$ also retains its own tile $T_{i,i}$. This constitutes one communication stage.
+2. **Independent Compositing:** Once all tiles have arrived, each processor $P_j$ composites its assigned tile $T_{j,j}$ independently. The compositing operation involves blending the incoming tiles $T_{i,j}$ (for all $i$) into the target tile $T_{j,j}$ using standard front-to-back or back-to-front volume compositing equations.
+3. **Gathering:** The composited tiles are sent to a master process for final assembly [S1, unofficial].
 
 **Parameters:**
-*   **$n$:** Number of processors/nodes.
-*   **Communication Steps:** 1 (the all-to-all exchange).
-*   **Synchronization Points:** 2 (one after the exchange, one after the gathering) [S1, unofficial].
+- Number of processors $n$.
+- Tile size: Typically $1/n$ of the total image area.
+
+**Edge Cases and Pitfalls:**
+- **Synchronization:** The algorithm has two synchronization points: one after the exchange and one after gathering [S1, unofficial]. It works well even if synchronization is expensive because there are no intermediate synchronization barriers during the compositing phase [S1, unofficial].
+- **Network Congestion:** In the worst case, $n(n-1)$ messages are sent. On low-bandwidth networks, this many-to-many pattern can cause bottlenecks [S2].
+- **Optimization:** The algorithm can be tuned to send only pixels that need compositing (e.g., those with non-zero opacity), reducing the average number of exchanging nodes to $n$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def direct_send_compositing(my_id, n, my_partial_image_tiles):
+def direct_send_compositing(n, my_id, my_tiles):
     """
-    my_id: Integer ID of this processor (0 to n-1).
-    n: Total number of processors.
-    my_partial_image_tiles: List of n tiles. 
-                            my_partial_image_tiles[i] is the tile for screen position i,
-                            rendered by this processor.
+    my_tiles: list of n tiles, where my_tiles[i] is the tile i rendered by this processor.
+    n: total number of processors.
     """
+    # Step 1: All-to-All Exchange
+    # Each processor sends its tiles to all others and receives tiles from all others.
+    # In a real implementation, this uses MPI_Alltoall or equivalent.
+    received_tiles = all_to_all_exchange(my_tiles)
     
-    # Step 1: Prepare messages
-    # Each processor sends tile j to processor j, for all j != my_id
-    messages_to_send = []
-    for dest_id in range(n):
-        if dest_id != my_id:
-            # Send the tile that belongs to dest_id's compositing responsibility
-            tile_data = my_partial_image_tiles[dest_id]
-            messages_to_send.append((dest_id, tile_data))
-            
-    # Step 2: All-to-All Communication
-    # Send all prepared messages and receive messages from all other processors
-    received_tiles = send_and_receive_all(messages_to_send, n)
-    # received_tiles[j] contains the tile data sent by processor j to my_id
+    # received_tiles[j] is the tile j received from processor j.
+    # Note: received_tiles[my_id] is my own tile.
     
-    # Step 3: Composite the assigned tile
-    # Processor my_id is responsible for compositing tile my_id
-    # It needs to composite all received tiles for position my_id
-    # Note: received_tiles[my_id] is the tile rendered by myself, 
-    # received_tiles[k] is the tile rendered by processor k for position my_id
+    # Step 2: Independent Compositing
+    # Composite the assigned tile (my_id) using all received tiles.
+    composited_tile = composite_tile(received_tiles, target_tile_index=my_id)
     
-    composited_tile = empty_tile()
-    for source_id in range(n):
-        tile_data = received_tiles[source_id]
-        # Perform alpha blending of tile_data into composited_tile
-        # Standard front-to-back compositing:
-        composited_tile = alpha_blend(composited_tile, tile_data)
-        
-    # Step 4: Send composited tile to master
-    # Assuming processor 0 is the master, or a specific master_id is known
-    master_id = 0 
-    if my_id != master_id:
-        send_to_master(master_id, composited_tile)
-    else:
-        # Master receives tiles from all other processors
-        # and assembles the final image
-        final_image = assemble_final_image(n, my_composited_tile, receive_from_all())
-        
-    return final_image if my_id == master_id else None
-```
+    # Step 3: Gathering
+    # Send the composited tile to the master process.
+    send_to_master(composited_tile, master_id=0)
+    
+    return composited_tile
 
-**Edge Cases and Pitfalls:**
-*   **Network Congestion:** In the worst-case scenario, Direct Send generates up to $n(n-1)$ messages [S1, unofficial]. On low-bandwidth networks, this many-to-many communication pattern can cause significant bottlenecks [S2].
-*   **Synchronization Cost:** While the algorithm has only one communication step, the synchronization required for the all-to-all exchange can be expensive if the underlying MPI or network library is not optimized [S1, unofficial].
-*   **Tile Size:** As $n$ increases, tile sizes decrease. While this reduces the volume of data per message, it increases the overhead of message management and synchronization [S1, unofficial].
+def composite_tile(tiles, target_tile_index):
+    """
+    Composite a single tile from a list of tiles from different processors.
+    Uses standard volume compositing (e.g., front-to-back).
+    """
+    # Initialize output tile with transparency
+    output_tile = create_empty_tile(tiles[0].width, tiles[0].height)
+    
+    # Composite each incoming tile into the output
+    for tile in tiles:
+        output_tile = blend(output_tile, tile)
+        
+    return output_tile
+```
 
 ## Subtopics
 
+### [Tiling Compositing](12057-tiling-compositing.md)
+Tiling Compositing is a parallel compositing strategy for distributed volume rendering where processing elements (PEs) hold tiles of the final image and pass partial results to adjacent PEs in a staggered, linear fashion to merge them into the final image. It builds on [Direct Send Compositing](9377-direct-send-compositing.md) by organizing the compositing traffic into a linear chain of tiles rather than exchanging full-size images. Unlike the inverted binary tree method, which leaves many PEs idle in later cycles, tiling keeps all PEs working until the final image is completed.
+
 ### SLIC Parallel Image Compositing
-SLIC (Scalable Low-latency Image Compositing) is an optimized variant of Direct Send that minimizes the number of messages exchanged among processors [S2]. It uses a view-dependent precomputed compositing schedule to determine exactly which pixels need to be sent, avoiding unnecessary data transfer [S2]. The preprocessing step to compute this schedule introduces very low overhead (generally under 10 milliseconds) [S2]. SLIC is particularly beneficial for high-resolution images (1024x1024 pixels or larger) and low-bandwidth networks, where reducing the message count is critical to performance [S2]. It outperforms standard Direct Send because communication is generally more expensive than computation [S2].
+SLIC is an optimized parallel image compositing algorithm for sort-last rendering that minimizes the number of messages exchanged among processors using a view-dependent precomputed compositing schedule [S2]. It builds on [Direct Send Compositing](9377-direct-send-compositing.md) by replacing the all-to-all exchange with a minimal message set [S2]. The preprocessing step to compute the schedule introduces very low overhead, generally under 10 milliseconds [S2]. SLIC outperforms previous algorithms, especially for high-resolution images (1024x1024 pixels or larger) [S2]. On low-bandwidth networks, care must be taken to avoid the many-to-one or many-to-many communication patterns inherent in direct send [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** The communication complexity is $O(n^2)$ in the worst case due to the all-to-all exchange of $n(n-1)$ messages [S1, unofficial]. However, with optimization (sending only necessary pixels), the average number of exchanging nodes can be reduced to $n$, improving practical performance [S1, unofficial].
-*   **Memory Complexity:** Each processor must store $n$ tiles (one for each screen position) during the exchange phase, even though it only composites one. This requires $O(n \cdot T)$ memory, where $T$ is the size of a tile.
-*   **Measured Performance:** SLIC, an optimized Direct Send variant, outperforms previous algorithms, especially for high-resolution images (1024x1024 pixels or larger) [S2].
-*   **Strengths:**
-    *   Simple implementation; does not require special network topology [S2].
-    *   Only one communication step with two synchronization points, making it robust even with expensive synchronization mechanisms [S1, unofficial].
-    *   Tile sizes decrease as processor count increases, potentially reducing communication volume per message [S1, unofficial].
-*   **Limitations:**
-    *   High message count ($n(n-1)$) can saturate low-bandwidth networks [S2].
-    *   Many-to-many communication patterns can lead to bottlenecks [S2].
-    *   Less efficient than hierarchical methods (like Binary Swap) in terms of total data volume for large $n$ [S1, unofficial].
-*   **When to use:** Suitable for high-performance clusters with high-bandwidth networks where simplicity and low synchronization overhead are prioritized. Also suitable when the number of processors is small to moderate.
-*   **When not to use:** Unsuitable for low-bandwidth networks or very large $n$ where the $O(n^2)$ message count becomes prohibitive.
+- **Time Complexity:** The communication phase involves $O(n^2)$ messages in the worst case [S1, unofficial]. However, with optimization (sending only necessary pixels), the average number of exchanging nodes is reduced to $n$ [S1, unofficial].
+- **Memory Complexity:** Each processor stores $n$ tiles, so memory usage scales linearly with the number of processors relative to the tile size.
+- **Performance:** Direct send works well even with expensive synchronization due to its single communication step [S1, unofficial]. As processor count increases, tiles become smaller, potentially reducing communication volume [S1, unofficial].
+- **Strengths:** Simple to implement, does not require special network topology, robust to synchronization costs [S2].
+- **Limitations:** Can cause network congestion on low-bandwidth networks due to many-to-many communication [S2]. Worst-case message count is $n(n-1)$ [S2].
+- **When to use:** Suitable for high-performance clusters with high-bandwidth networks where simplicity and low synchronization overhead are prioritized.
+- **When not to use:** Unsuitable for low-bandwidth networks or when the number of processors is very large without optimization, due to potential communication bottlenecks [S2].
 
 ## Background
-Direct Send compositing was introduced as a parallel compositing method for volume rendering on large-scale displays [S1, unofficial]. It is based on earlier work in parallel image compositing, such as [Hsu93, Neu94, MC97], which utilized the approach because it is easy to implement and does not require special network topology [S2]. The method is often contrasted with Binary Swap and Tree-like algorithms, which use hierarchical communication to reduce message counts [S1, unofficial]. SLIC, an optimized version of Direct Send, was developed to address the communication bottlenecks of the original method [S2].
+Direct send compositing was introduced as a parallel compositing method for sort-last rendering [S1, unofficial]. It has been used in various research contexts, including [Hsu93, Neu94, MC97], because it is easy to implement and does not require a special network topology [S2]. It is a foundational method for parallel image compositing, serving as the basis for more optimized variants like SLIC [S2].
 
 ## Sources
 [S1] Volume Visualization and Compositing on Large-Scale Displays Using Handheld Touchscreen Interaction, https://doi.org/10.25781/kaust-d5m7l, fetched 2026-10-26 (unofficial)

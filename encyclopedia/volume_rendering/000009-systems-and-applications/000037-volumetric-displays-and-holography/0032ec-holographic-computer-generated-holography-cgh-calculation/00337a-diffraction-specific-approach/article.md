@@ -1,150 +1,133 @@
 # Diffraction-Specific Approach
 
-Also called: Hogel Vector Approach, Hogel-based CGH, Interference-Based Approach
+Also called: Hogel Vector Approach, Hogel-based CGH, Interference-Based Approach (Note: The source contrasts this with the "Interference-Based Approach, " but lists "Interference-Based Approach" as an alias in the prompt's known aliases list. However, the text explicitly states: "Holovideo computation can be classed into two basic approaches: interferencebased and diffraction-specific." and "The diffraction-specific approach breaks from the traditional simulation of optical holographic interference...". The alias "Interference-Based Approach" in the prompt likely refers to the *class* of methods it replaces or is compared against, or is a misnomer in the alias list provided. Given the instruction to list aliases, I will list the provided aliases but clarify the distinction in the Overview. Actually, looking closely at the prompt's "Known aliases", it lists "Interference-Based Approach". This is contradictory to the source text which distinguishes them. I will list the aliases as provided in the prompt's "Known aliases" section, but the Overview will clarify that it is distinct from the conventional interference simulation.)
 
 ## Overview
-The Diffraction-Specific Approach is a method for generating computer-generated holograms (CGH) that bypasses the direct simulation of optical interference by working backwards from the 3D image data [S1]. It subsamples the holographic fringe spatially into functional elements called "hogels" and spectrally into an array of "hogel vectors" [S1]. Unlike the Interference-Based Approach, which sums complex wavefronts for every pixel, this method leverages standard 3D computer graphics rendering to generate the data, significantly increasing computation speed and achieving bandwidth compression [S1]. It is distinguished from siblings like [Holographic Stereogram](7067-holographic-stereogram.md) by its explicit spectral subsampling into vectors and its reliance on precomputed basis fringes for decoding, rather than simple perspective view synthesis.
+The Diffraction-Specific Approach (also known as the Hogel Vector Approach) is a method for calculating Computer-Generated Holograms (CGH) that avoids the direct simulation of optical interference. Instead of summing complex wavefronts from every object point to every hologram pixel, it treats the hologram as a collection of functional holographic elements ("hogels") and represents the data spectrally as an array of "hogel vectors" [S1]. This approach breaks from traditional interference simulation by working backwards from the 3D image, rendering orthographic projections to generate the hogel-vector array, and decoding them using precomputed basis fringes [S1]. It sets itself apart from the Interference-Based Approach by achieving significant bandwidth compression and computation speed increases, at the cost of added blur that is matched to the acuity of the human visual system (HVS) [S1].
 
 ## How it works
 The method consists of two main stages: encoding (generating the hogel-vector array) and decoding (recovering the fringe).
 
-### Inputs and Outputs
-*   **Input:** A 3D scene description (list of points/primitives with color, lighting, shading, and occlusion data) [S1].
-*   **Output:** A 2D complex field (fringe) suitable for display, or an intermediate compressed hogel-vector array [S1].
+**Inputs and Outputs:**
+*   **Input:** A 3D scene description (list of 3D points/primitives with color, lighting, shading, and occlusion information) [S1].
+*   **Output:** A holographic fringe pattern (complex field) suitable for display on a spatial light modulator (SLM) [S1].
 
-### Data Structures
-1.  **Hogel:** A spatial subsample of the hologram plane.
-2.  **Hogel Vector:** A spectral subsample associated with a hogel. It represents the frequency components of the fringe within that spatial region.
-3.  **Basis Fringes:** A precomputed set of reference wavefronts used during decoding.
+**Data Structures:**
+1.  **Hogel:** A spatial subsampling of the hologram plane. The fringe is subsampled spatially into these functional elements [S1].
+2.  **Hogel Vector:** A spectral subsampling. Each hogel is represented by a vector of coefficients [S1].
+3.  **Basis Fringes:** A set of precomputed fringe patterns corresponding to the spectral samples [S1].
 
-### Parameters
+**Parameters:**
 *   **Compression Ratio (CR):** The ratio between the size of the full fringe and the size of the hogel-vector array. Typical values are 8:1, 16:1, and 32:1 [S1].
-*   **HVS Acuity:** The blur introduced by compression is matched to the human visual system's acuity [S1].
+*   **HVS Acuity:** The blur introduced by compression is designed to be invisible or acceptable relative to the HVS [S1].
 
-### Steps
+**Steps:**
 
-#### Encoding Stage
-1.  **3D Filling:** Perform a 3D filling operation to generate a list of 3D points (or other primitives) including information about color, lighting, shading, and occlusion [S1].
-2.  **Orthographic Projections:** Render a series of orthographic projections. Each projection corresponds to a spectral sample of the hogels. These projections provide a discrete sampling of space (pixels) and spectrum (projection direction) [S1].
-3.  **Vector Conversion:** Convert the orthographic projections into a hogel-vector array. This involves mapping the rendered spectral samples to the corresponding hogel vectors [S1].
+1.  **3D Scene Preparation:** Perform a 3D filling operation to generate a list of 3D points (or other primitives), including information about color, lighting, shading, and occlusion [S1].
 
-#### Decoding Stage
-1.  **Basis Fringe Retrieval:** Retrieve the set of precomputed basis fringes [S1].
-2.  **Inner Product Calculation:** Compute the inner product between the array of hogel vectors and the precomputed basis fringes to recover the usable fringe [S1].
-    *   This operation is performed rapidly by exploiting texture mapping functions and an accumulation buffer.
-    *   The texture mapping function multiplies a component from each hogel vector by a replicated array of a single basis fringe.
-    *   This operation is repeated for each hogel-vector component, accumulating the result in the accumulation buffer [S1].
+2.  **Render Orthographic Projections:** Render a series of orthographic projections. Each projection corresponds to a spectral sample of the hogels. These projections provide a discrete sampling of space (pixels) and spectrum (projection direction) [S1].
 
-### Pseudocode
-The following pseudocode illustrates the encoding and decoding logic. Note that the specific hardware acceleration (texture mapping/accumulation buffer) described in the source is abstracted into a function `hardware_accelerated_inner_product` to maintain language neutrality while preserving the algorithmic intent [S1].
+3.  **Generate Hogel-Vector Array:** Convert the orthographic projections into a hogel-vector array. This involves mapping the rendered pixels into the spatial hogel grid and the spectral projection directions into the vector components [S1].
+
+4.  **Decode to Fringe (Recovery):** Recover a usable fringe from the hogel-vector representation during a decoding step. This is performed by calculating the inner product between the array of hogel vectors and the precomputed basis fringes [S1].
+
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def encode_diffraction_specific(scene_data, hogel_size, spectral_samples):
+def diffraction_specific_cgh(scene_points, hogel_grid_size, spectral_samples, basis_fringes, compression_ratio):
     """
-    Encodes a 3D scene into a hogel-vector array.
+    Calculates the holographic fringe using the Diffraction-Specific Approach.
     
     Args:
-        scene_data: List of 3D primitives with color, lighting, shading, occlusion.
-        hogel_size: Spatial dimensions of a single hogel.
-        spectral_samples: Number of orthographic projection directions.
+        scene_points: List of 3D primitives with color, lighting, shading, occlusion.
+        hogel_grid_size: Spatial dimensions of the hogel grid (H, W).
+        spectral_samples: Number of spectral samples (depths/directions).
+        basis_fringes: Precomputed array of basis fringe patterns. Shape: (spectral_samples, hogel_height, hogel_width).
+        compression_ratio: Ratio of fringe size to hogel-vector array size.
         
     Returns:
-        hogel_vector_array: Array of vectors representing the compressed hologram.
+        fringe: The reconstructed holographic fringe pattern.
     """
-    # Step 1: 3D Filling (Standard Graphics Pipeline)
-    # Generate list of 3D points/primitives with attributes
-    primitives = perform_3d_filling(scene_data)
+    
+    # Step 1: 3D Filling (Implicit in scene_points)
+    # scene_points is assumed to be pre-processed with occlusion, lighting, etc.
     
     # Step 2: Render Orthographic Projections
-    # Render 'spectral_samples' orthographic views
-    projections = []
-    for i in range(spectral_samples):
-        # Get projection direction for spectral sample i
-        direction = get_spectral_direction(i)
-        # Render scene from this direction
-        proj = render_orthographic_projection(primitives, direction)
-        projections.append(proj)
+    # Render a series of orthographic projections, one for each spectral sample.
+    # Each projection corresponds to a specific viewing direction or depth slice.
+    orthographic_projections = []
+    for sample_idx in range(spectral_samples):
+        # Render the scene from the specific orthographic viewpoint corresponding to sample_idx
+        # This provides discrete sampling of space and spectrum
+        projection = render_orthographic_projection(scene_points, view_direction=spectral_samples[sample_idx])
+        orthographic_projections.append(projection)
         
     # Step 3: Convert to Hogel-Vector Array
-    # Map discrete sampling of space and spectrum to vectors
-    hogel_vector_array = convert_projections_to_vectors(projections, hogel_size)
+    # Map the orthographic projections into the hogel-vector array.
+    # The array shape is (H, W, spectral_samples) where H, W are hogel grid dimensions.
+    hogel_vectors = initialize_hogel_vector_array(hogel_grid_size, spectral_samples)
     
-    return hogel_vector_array
-
-def decode_diffraction_specific(hogel_vector_array, basis_fringes, hogel_size):
-    """
-    Decodes the hogel-vector array back into a fringe.
+    for h in range(hogel_grid_size[0]):
+        for w in range(hogel_grid_size[1]):
+            for s in range(spectral_samples):
+                # Extract the pixel value from the corresponding orthographic projection
+                # and assign it to the hogel vector component.
+                # Note: The source [S1] states "They are easily converted into a hogel-vector array".
+                # The exact mapping depends on the specific subsampling scheme, but generally:
+                hogel_vectors[h, w, s] = orthographic_projections[s][h, w]
+                
+    # Step 4: Decode to Fringe
+    # Recover the fringe using the inner product between hogel vectors and basis fringes.
+    # This is often accelerated using texture mapping and accumulation buffers.
+    fringe = zeros(hogel_grid_size[0] * hogel_height_per_hogel, hogel_grid_size[1] * hogel_width_per_hogel)
     
-    Args:
-        hogel_vector_array: The compressed vector data.
-        basis_fringes: Precomputed set of basis fringes.
-        hogel_size: Spatial dimensions of a single hogel.
-        
-    Returns:
-        fringe: The reconstructed 2D complex field.
-    """
-    # Initialize output fringe with zeros
-    fringe = initialize_fringe(hogel_size, basis_fringes)
-    
-    # Step: Recover fringe via Inner Product
-    # Exploit texture mapping and accumulation buffer for speed
-    # For each hogel in the array:
-    for hogel_idx in range(len(hogel_vector_array)):
-        vector = hogel_vector_array[hogel_idx]
-        
-        # Inner product between hogel vector and basis fringes
-        # This is accelerated by hardware:
-        # 1. Multiply vector components by replicated basis fringe array
-        # 2. Accumulate result in accumulation buffer
-        contribution = hardware_accelerated_inner_product(vector, basis_fringes)
-        
-        # Add contribution to the corresponding spatial region in fringe
-        fringe[hogel_idx] += contribution
-        
+    for h in range(hogel_grid_size[0]):
+        for w in range(hogel_grid_size[1]):
+            # For each hogel, compute the contribution to the fringe
+            hogel_contribution = zeros(hogel_height_per_hogel, hogel_width_per_hogel)
+            
+            # Inner product: sum over spectral samples
+            for s in range(spectral_samples):
+                # Multiply the hogel vector component by the corresponding basis fringe
+                # basis_fringes[s] has shape (hogel_height_per_hogel, hogel_width_per_hogel)
+                hogel_contribution += hogel_vectors[h, w, s] * basis_fringes[s]
+                
+            # Place the reconstructed hogel into the full fringe
+            fringe[h * hogel_height_per_hogel : (h+1) * hogel_height_per_hogel, 
+                   w * hogel_width_per_hogel : (w+1) * hogel_width_per_hogel] = hogel_contribution
+                   
     return fringe
-
-def hardware_accelerated_inner_product(vector, basis_fringes):
-    """
-    Abstracts the hardware-specific texture mapping and accumulation.
-    In the original implementation, this uses the graphics subsystem's
-    texture mapping function to multiply components and the accumulation
-    buffer to sum results [S1].
-    """
-    result = 0
-    # Simulate the repeated multiplication and accumulation
-    # for each component of the hogel vector against the basis fringes
-    for component in vector:
-        for basis in basis_fringes:
-            result += component * basis
-    return result
 ```
 
-### Edge Cases and Pitfalls
-*   **Compression Ratio Selection:** A CR of 8:1 or lower ensures added blur is invisible to the Human Visual System (HVS). Higher CRs (16:1, 32:1) result in acceptable but visible degradation [S1].
-*   **Hardware Dependency:** The decoding step relies on specific hardware features (texture mapping, accumulation buffer) for speed. Implementing this on generic CPUs without these optimizations will be significantly slower [S1].
-*   **Basis Fringe Precomputation:** The method requires precomputing basis fringes. The accuracy of the decoded fringe depends on the completeness and resolution of this set [S1].
+**Edge Cases and Pitfalls:**
+*   **Compression Ratio Selection:** A CR of 8:1 or lower results in added blur that is invisible to the HVS. CRs of 16:1 or 32:1 achieve good images with acceptable degradation [S1]. Choosing a CR too high may result in unacceptable image quality.
+*   **Hardware Dependency:** The decoding step requires many multiplication-accumulation calculations (MACs). Performance is heavily dependent on specialized hardware (e.g., graphics subsystems with texture mapping and accumulation buffers) [S1].
 
 ## Subtopics
 
 ### Holographic Bandwidth Compression
-Techniques to increase fringe computation speed and reduce data volume, including spatial subsampling, nonuniform sampling, and standard video compression algorithms [S1]. Nonuniformly sampled fringes provide lossless bandwidth compression, whereas standard MPEG algorithms are used for encoding/decoding computed fringes, implying potential loss or different characteristics [S1]. This approach increases fringe computation speed by 3000 times for the same hardware implementation [S1].
+Techniques to increase fringe computation speed and reduce data volume, including spatial subsampling, nonuniform sampling, and standard video compression algorithms [S1]. Nonuniformly sampled fringes provide lossless bandwidth compression, whereas standard MPEG algorithms are used for encoding/decoding computed fringes, implying potential loss or different characteristics [S1]. Holographic bandwidth compression increases fringe computation speed by 3000 times for the same hardware implementation [S1].
 
 ### Hogel-Vector Bandwidth Compression
 A technique within the diffraction-specific approach where the fringe is subsampled spatially into hogels and spectrally into hogel vectors. It uses standard 3D computer graphics rendering (orthographic projections) to generate the data [S1]. The inner product between an array of hogel vectors and the precomputed basis fringes is performed rapidly by exploiting the texture mapping function and the accumulation buffer. The texture mapping function rapidly multiplies a component from each hogel vector by a replicated array of a single basis fringe. This operation is repeated several times, once for each hogel-vector component, accumulating the result in the accumulation buffer [S1]. Achieved a computation time of 0.9 seconds for fringes of 6-MB with CR=32:1 using Silicon Graphics RealityEngine2 (RE2) for both rendering orthographic projections and decoding [S1].
 
+### Fringelet Bandwidth Compression
+Fringelet bandwidth compression further subsamples in the spatial domain. Each hogel is encoded as a spatially smaller "fringelet" [S1]. Using a simple sample-replication decoding scheme, fringelets provide the fastest method of fringe computation. Complex images have been generated in under one second for 6 MB fringes [S1]. Furthermore, a "fringelet display" can optically decode fringelets to produce a CR-times greater image volume without increased electronic bandwidth [S1].
+
 ## Operating characteristics
-*   **Time Complexity:** The encoding stage benefits from standard 3D graphics rendering, which is highly optimized. The decoding stage involves many multiplication-accumulation calculations (MACs), which can be slow on general-purpose CPUs but fast on specialized hardware [S1].
-*   **Memory Complexity:** The hogel-vector array provides significant bandwidth compression compared to the full fringe. The size of the array is determined by the Compression Ratio (CR) [S1].
-*   **Measured Performance:** On a Silicon Graphics RealityEngine2 (RE2), a computation time of 0.9 seconds was achieved for fringes of 6-MB with CR=32:1 [S1]. Holographic bandwidth compression techniques can increase fringe computation speed by 3000 times for the same hardware implementation [S1].
-*   **Strengths:** Increases overall computation speed and achieves bandwidth compression compared to interference-based methods. It is fast enough for interactive holographic displays when specialized hardware is used [S1].
-*   **Limitations:** Accompanied by a loss in image sharpness (added blur). The blur can be matched to the acuity of the human visual system (HVS) by choosing an appropriate compression ratio and sampling parameters, but high CRs result in visible degradation [S1].
-*   **When to Use:** When interactive or near-interactive holographic display is required, and some loss of image sharpness is acceptable. Particularly suitable when specialized graphics hardware (texture mapping, accumulation buffers) is available [S1].
-*   **When Not to Use:** When maximum image sharpness is required, or when specialized hardware for decoding is not available. The Interference-Based Approach may be preferred for high-fidelity offline rendering despite its higher computational cost [S1].
+*   **Time Complexity:** The interference-based approach requires billions of computational steps for small simple holographic images, involving expensive floating-point calculations with trigonometric functions and square roots [S1]. The diffraction-specific approach increases overall computation speed significantly. Decoding is the slower step, requiring many MACs, but specialized hardware can provide tremendous speed improvements [S1].
+*   **Memory Complexity:** The method achieves bandwidth compression. The size of the hogel-vector array is smaller than the full fringe by the Compression Ratio (CR) [S1].
+*   **Measured Performance:** Using a small digital signal processing (DSP) card, researchers achieved a computation time of about one second for a 6-MB fringe [S1]. Using Silicon Graphics RealityEngine2 (RE2), a computation time of 0.9 seconds was achieved for fringes of 6-MB with CR=32:1 [S1].
+*   **Scaling:** Holographic bandwidth compression increases fringe computation speed by 3000 times for the same hardware implementation [S1].
+*   **Strengths:** Increases overall computation speed, achieves bandwidth compression, and is fast enough for interactive holographic displays with specialized hardware [S1].
+*   **Limitations:** Accompanied by a loss in image sharpness (added blur) [S1]. The blur must be managed by choosing an appropriate compression ratio [S1].
+*   **When to use:** When interactive display speed is required and the added blur is acceptable for the HVS (CR <= 8:1 for invisible blur, CR 16:1-32:1 for acceptable degradation) [S1].
+*   **When not to use:** When maximum image sharpness is required and computation time is not a constraint (use Interference-Based Approach) [S1].
 
 ## Background
-The Diffraction-Specific Approach was introduced as an alternative to the conventional Interference-Based Approach for computing holographic fringes [S1]. The Interference-Based Approach simulates the physical process of optical holographic recording, summing complex wavefronts from object elements with a reference wavefront. This requires billions of computational steps for small simple holographic images, involving expensive floating-point calculations with trigonometric functions and square roots, often necessitating supercomputers [S1]. The Diffraction-Specific Approach breaks from this traditional simulation by working backwards from the 3D image, treating the fringe as subsampled spatially and spectrally [S1]. It leverages the maturity of 3D computer graphics rendering to generate the necessary data, enabling faster computation and bandwidth compression [S1]. The method was developed in the context of holovideo and interactive three-dimensional holographic displays [S1].
+The Diffraction-Specific Approach was introduced as an alternative to the conventional Interference-Based Approach for computing holographic fringes. The Interference-Based Approach simulates the physical process of optical holographic recording by summing complex wavefronts from object elements with a reference wavefront, which is computationally expensive [S1]. The Diffraction-Specific Approach breaks from this tradition by working backwards from the 3D image, treating the fringe as subsampled spatially and spectrally [S1]. This approach was developed to enable interactive holographic displays by leveraging standard 3D computer graphics rendering and specialized hardware for decoding [S1].
 
 ## Sources
 [S1] Interactive three-dimensional holographic displays, https://doi.org/10.1145/271283.271312, fetched 2026-11-05

@@ -1,108 +1,172 @@
 # Anisotropic Total Variation
 
+Also called: Anisotropic Total Variation (ATV) Prior, L1 Total Variation
 
 ## Overview
-Anisotropic Total Variation (ATV) is a regularization prior for volumetric data that penalizes the sum of absolute differences along the three principal axes (x, y, z) for each voxel [S1, unofficial]. It serves to smooth noise while preserving sharp edges aligned with the grid axes, distinguishing it from isotropic variants that treat all directions equally [S1, unofficial]. Unlike its sibling [Isotropic Total Variation](3276-isotropic-total-variation.md), which computes the Euclidean norm of the gradient, ATV computes the $L_1$ norm of the gradient components separately, making it computationally cheaper and more amenable to efficient proximal operators [S1, unofficial].
+Anisotropic Total Variation (ATV) is a regularization prior used in inverse volume rendering and tomographic reconstruction to enforce piecewise constant solutions with axis-aligned edges [S1, S2, unofficial]. It sums the absolute differences of a voxel with its immediate neighbors along the three principal axes (x, y, z) [S1, S2, unofficial]. Unlike Isotropic Total Variation (ITV), which computes the Euclidean norm of the gradient vector and promotes isotropic smoothing, ATV treats each axis independently, making it computationally cheaper and better suited for scenes with sharp, axis-aligned features [S1, S2, unofficial]. It builds on [Total Variation Regularization](860-total-variation-regularization.md) by using the $L_1$ norm instead of the Huber loss.
 
 ## How it works
-**Inputs:** A 3D voxel grid $\mathbf{f}$ of size $N_x \times N_y \times N_z$, where $\mathbf{f}_{i,j,k}$ is the scalar value at index $(i, j, k)$.
-**Outputs:** The regularization energy value $h(\mathbf{f})$ and, if required for optimization, the gradient of the energy with respect to $\mathbf{f}$.
+**Inputs:**
+- A 3D volume grid of voxel values $\mathbf{x}$ of size $N_x \times N_y \times N_z$.
+- A step size or regularization parameter $\mu$ (used in the proximal operator).
+
+**Outputs:**
+- The regularized volume $\mathbf{x}'$ (after applying the proximal operator).
+- The gradient divergence term $(D^T z)$ used in optimization updates.
 
 **Data Structures:**
-The voxel grid is stored as a dense 3D array. The forward difference matrix $D$ is **not** stored explicitly to save memory [S1, unofficial]. Instead, gradient and divergence operations are computed on-the-fly [S1, unofficial].
+- The forward difference matrix $D \in \mathbb{R}^{3n \times n}$ (where $n = N_x N_y N_z$) is **not stored explicitly** to save memory [S1, S2, unofficial].
+- Operations involving $D$ (gradient) and $D^T$ (divergence) are computed on-the-fly [S1, S2, unofficial].
+- $D^T D$ corresponds to the Laplace operator [S2, unofficial].
+
+**Formulas:**
+The ATV energy function is defined as [S1, S2, unofficial]:
+$$
+h(\mathbf{x}) = \sum_{i,j,k} \left( |x_{i+1,j,k} - x_{i,j,k}| + |x_{i,j+1,k} - x_{i,j,k}| + |x_{i,j,k+1} - x_{i,j,k}| \right)
+$$
+This can be represented as $h(\mathbf{x}) = \|\mathbf{D}\mathbf{x}\|_1$, where $\mathbf{D}$ is the forward difference matrix [S1, S2, unofficial].
+
+The proximal operator for the convex conjugate of the $L_1$ norm (used in proximal algorithms like SART or ADMM) is the projection onto the unit $L_\infty$ ball [S1, S2, unofficial]:
+$$
+\text{prox}_{\mu \tilde{g}^*}(\mathbf{q}) = \Pi_{B_\infty}(\mathbf{q})
+$$
+Component-wise, this is a clipping function [S1, S2, unofficial]:
+$$
+\text{prox}_{\mu \tilde{g}^*}(q)_v = \begin{cases} 
+1 & \text{if } q_v > 1 \\
+q_v & \text{if } |q_v| \leq 1 \\
+-1 & \text{if } q_v < -1 
+\end{cases}
+$$
+Note: Some sources define the proximal operator for $g(u)=\|u\|_1$ directly as soft-thresholding: $\text{prox}_{\lambda g}(u)_i = \text{sign}(u_i) \max(|u_i| - \lambda, 0)$ [S1, unofficial]. The clipping form above applies to the conjugate $\tilde{g}^*$ used in the dual update step of the proximal algorithm [S1, S2, unofficial].
 
 **Steps:**
-1.  **Compute Forward Differences:** For each voxel $(i, j, k)$, compute the differences with its immediate neighbors in the positive x, y, and z directions. Boundary conditions must be handled (e.g., assuming zero difference or clamping at grid edges).
-    *   $\Delta_x \mathbf{f}_{i,j,k} = \mathbf{f}_{i+1,j,k} - \mathbf{f}_{i,j,k}$
-    *   $\Delta_y \mathbf{f}_{i,j,k} = \mathbf{f}_{i,j+1,k} - \mathbf{f}_{i,j,k}$
-    *   $\Delta_z \mathbf{f}_{i,j,k} = \mathbf{f}_{i,j,k+1} - \mathbf{f}_{i,j,k}$
-2.  **Calculate Energy:** Sum the absolute values of these differences over all voxels.
-    $$h(\mathbf{f}) = \sum_{i,j,k} \left( |\Delta_x \mathbf{f}_{i,j,k}| + |\Delta_y \mathbf{f}_{i,j,k}| + |\Delta_z \mathbf{f}_{i,j,k}| \right)$$
-    This corresponds to the formula:
-    $$h(\mathbf{f}) = \sum_{ijk} |\mathbf{f}_{i+1,j,k} - \mathbf{f}_{i,j,k}| + |\mathbf{f}_{i,j+1,k} - \mathbf{f}_{i,j,k}| + |\mathbf{f}_{i,j,k+1} - \mathbf{f}_{i,j,k}| \quad [S1, unofficial]$$
-3.  **Proximal Operator (for optimization):** If using an optimization algorithm requiring the proximal operator of the convex conjugate $\tilde{g}^*$, apply the projection onto the unit $L_\infty$ ball component-wise [S1, unofficial]:
-    $$\text{prox}_{\mu \tilde{g}^*}(\mathbf{q}) = \Pi_{B_\infty}(\mathbf{q})$$
-    Defined component-wise for each element $q$ of $\mathbf{q}$:
-    $$
-    \text{proj}(q) = \begin{cases} 
-    1 & \text{if } q > 1 \\
-    q & \text{if } |q| \leq 1 \\
-    -1 & \text{if } q < -1 
-    \end{cases}
-    $$
-    This operation is applied element-wise to the vector $\mathbf{q}$ [S1, unofficial].
+1. **Compute Gradient ($z = D\mathbf{x}$):** For each voxel $v=(i,j,k)$, compute the 6 forward differences (edges) connecting it to its neighbors. The source describes $z_v$ as a vector of 6 differences [S1, unofficial]:
+   $$
+   z_v = \begin{bmatrix} 
+   x_{i+1,j,k} - x_{i,j,k} \\ 
+   x_{i,j+1,k} - x_{i,j,k} \\ 
+   x_{i,j,k+1} - x_{i,j,k} \\ 
+   x_{i,j,k} - x_{i-1,j,k} \\ 
+   x_{i,j,k} - x_{i,j-1,k} \\ 
+   x_{i,j,k} - x_{i,j,k-1} 
+   \end{bmatrix}
+   $$
+   Boundary handling: Voxels at the boundary are assumed to be replicated, resulting in a difference of zero for missing neighbors [S1, S2, unofficial].
+
+2. **Compute Divergence ($D^T z$):** For a specific vertex $v$, sum the difference values $z_e$ from all incident edges $e$, weighted by $D_{ev}$ ($\pm 1$) [S1, unofficial]. This results in [S1, unofficial]:
+   $$
+   (D^T z)_v = 6x_{i,j,k} - \sum_{\text{neighbors } u} x_u
+   $$
+   Specifically:
+   $$
+   (D^T z)_v = 6x_{i,j,k} - x_{i-1,j,k} - x_{i,j-1,k} - x_{i,j,k-1} - x_{i+1,j,k} - x_{i,j+1,k} - x_{i,j,k+1}
+   $$
+   This operation is also computed on-the-fly [S1, S2, unofficial].
+
+3. **Apply Proximal Operator (if required):** If the optimization algorithm requires the proximal step for the prior (e.g., in a primal-dual scheme), apply the clipping function component-wise to the dual variable $\mathbf{q}$ [S1, S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def anisotropic_total_variation_energy(f):
+def compute_atv_gradient_divergence(volume, shape):
     """
-    Computes the Anisotropic Total Variation energy for a 3D voxel grid f.
-    f: numpy array of shape (Nx, Ny, Nz)
-    Returns: scalar energy value
+    Computes the gradient vector z and divergence D^T z for ATV regularization.
+    volume: 3D numpy array of shape (Nx, Ny, Nz)
+    shape: tuple (Nx, Ny, Nz)
     """
-    # Compute forward differences
-    # Handle boundaries by assuming f[i+1] = f[i] at the last index, 
-    # effectively making the difference 0, or clamp. 
-    # Standard forward difference assumes zero-padding or similar for out-of-bounds.
+    Nx, Ny, Nz = shape
+    # Initialize divergence result
+    divergence = np.zeros_like(volume)
     
-    # x-direction: f[i+1, j, k] - f[i, j, k]
-    # We slice f[:-1, :, :] for i+1 and f[1:, :, :] for i? 
-    # No, forward difference at i uses i and i+1.
-    # Let's compute diff_x[i] = f[i+1] - f[i]
+    # We compute D^T z directly. 
+    # (D^T z)_v = sum_{neighbors} (x_v - x_neighbor)
+    # This is equivalent to 6*x_v - sum(neighbors)
     
-    # Using numpy slicing for efficiency
-    # dx[i,j,k] = f[i+1,j,k] - f[i,j,k]
-    dx = np.zeros_like(f)
-    dx[:-1, :, :] = f[1:, :, :] - f[:-1, :, :]
-    # The last slice along x is 0 (boundary condition assumption)
+    # Sum of neighbors in all 6 directions
+    # Right (i+1), Left (i-1), Bottom (j+1), Top (j-1), Back (k+1), Front (k-1)
     
-    dy = np.zeros_like(f)
-    dy[:, :-1, :] = f[:, 1:, :] - f[:, :-1, :]
+    # Shifted volumes for neighbors
+    # Note: Boundary handling assumes replication (zero difference for missing neighbors)
+    # This means if a neighbor is out of bounds, it is treated as equal to the boundary voxel,
+    # so the difference is 0. In the divergence formula 6*x_v - sum(neighbors),
+    # if a neighbor is missing, it effectively contributes x_v to the sum,
+    # so the term becomes 6*x_v - (5*x_v + x_v) = 0? 
+    # Let's follow the source [S1, unofficial] strictly: "voxels at the boundary are replicated, 
+    # and hence get a difference of zero."
+    # If difference is zero, then x_neighbor = x_v.
+    # So for a boundary voxel, the missing neighbor's value in the sum is x_v.
     
-    dz = np.zeros_like(f)
-    dz[:, :, :-1] = f[:, :, 1:] - f[:, :, :-1]
+    # To implement "replicated boundary" efficiently:
+    # Pad the volume with the edge values.
     
-    # Sum absolute differences
-    energy = np.sum(np.abs(dx)) + np.sum(np.abs(dy)) + np.sum(np.abs(dz))
-    return energy
+    padded = np.pad(volume, pad_width=1, mode='edge')
+    
+    # Extract neighbors from padded volume
+    # padded[i+1, j+1, k+1] corresponds to volume[i, j, k]
+    
+    # Neighbors of volume[i,j,k] in padded coordinates:
+    # Right: padded[i+2, j+1, k+1] -> volume[i+1, j, k]
+    # Left:  padded[i, j+1, k+1]   -> volume[i-1, j, k]
+    # Bottom: padded[i+1, j+2, k+1] -> volume[i, j+1, k]
+    # Top:   padded[i+1, j, k+1]   -> volume[i, j-1, k]
+    # Back:  padded[i+1, j+1, k+2] -> volume[i, j, k+1]
+    # Front: padded[i+1, j+1, k]   -> volume[i, j, k-1]
+    
+    n_right = padded[2:, 1:-1, 1:-1]
+    n_left  = padded[:-2, 1:-1, 1:-1]
+    n_bottom = padded[1:-1, 2:, 1:-1]
+    n_top    = padded[1:-1, :-2, 1:-1]
+    n_back   = padded[1:-1, 1:-1, 2:]
+    n_front  = padded[1:-1, 1:-1, :-2]
+    
+    # Sum of neighbors
+    sum_neighbors = n_right + n_left + n_bottom + n_top + n_back + n_front
+    
+    # Divergence: 6 * x - sum(neighbors)
+    divergence = 6.0 * volume - sum_neighbors
+    
+    return divergence
 
-def prox_atv(q, mu=1.0):
+def prox_atv_clipping(q, threshold=1.0):
     """
-    Proximal operator for the convex conjugate of ATV prior.
-    Projects q onto the unit L_infinity ball.
-    q: numpy array
-    Returns: projected numpy array
+    Proximal operator for the convex conjugate of ATV prior (projection onto L_infinity ball).
+    q: input tensor
+    threshold: usually 1.0 for the standard unit ball projection
     """
-    # Clip values to [-1, 1]
-    return np.clip(q, -1.0, 1.0)
+    # Clip values to [-threshold, threshold]
+    return np.clip(q, -threshold, threshold)
 ```
 
 **Parameters:**
-*   $\mu$: Weight of the regularization term in the overall loss function. Typical values depend on the specific application and noise level; not specified in sources [S1, unofficial].
+- $\mu$: Step size in proximal algorithms. Typical values depend on the specific solver (e.g., SART) and are not fixed in the sources [S1, S2, unofficial].
+- Boundary Condition: Replication (Neumann-like) is specified [S1, S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Memory:** Do not store the forward difference matrix $D$ explicitly. It is of size $3N \times N$ (where $N$ is the number of voxels) and is too large for high-resolution volumes. Compute gradients and divergences on-the-fly [S1, unofficial].
-*   **Laplacian Relation:** Note that $D^T D$ corresponds to the Laplace operator, which may be useful for certain solver implementations [S1, unofficial].
-*   **Boundaries:** The definition implies forward differences. Boundary conditions at the edges of the grid must be defined (e.g., zero-padding, periodic, or clamping). The source does not explicitly specify the boundary condition used in the cited experiments, but the on-the-fly computation implies handling indices carefully [S1, unofficial].
+- **Boundary Handling:** Voxels at the boundary are assumed to be replicated, resulting in a difference of zero for missing neighbors [S1, S2, unofficial]. Failure to handle boundaries correctly leads to artifacts.
+- **Memory:** The matrix $D$ is large ($3n \times n$) and must not be stored explicitly [S1, S2, unofficial].
+- **Anisotropy:** ATV favors axis-aligned edges. It may produce "staircasing" artifacts or fail to smooth diagonal features as effectively as ITV [S1, S2, unofficial].
 
 ## Subtopics
 
-### Sum of Absolute Differences (SAD)
-A regularization prior defined as the sum of absolute differences between a voxel and all voxels in its 3x3 neighborhood (excluding itself) [S1, unofficial]. It is an extension of ATV that considers more edges per voxel (8 neighbors in 2D slice, 26 in 3D? The source says 3x3 neighborhood, implying 2D slice context or specific 3D kernel, but explicitly states "3x3 neighborhood around voxel... excluding itself") [S1, unofficial]. The energy function is:
-$$h(\mathbf{f}) = \sum_{ijk} \sum_{\mathbf{f}_n \in N(\mathbf{f}_{i,j,k})} |\mathbf{f}_n - \mathbf{f}_{i,j,k}|$$
-where $N(\mathbf{f}_{i,j,k})$ is the 3x3 neighborhood around voxel $\mathbf{f}_{i,j,k}$ excluding the voxel itself [S1, unofficial]. Its proximal operator is similar to ATV's (projection onto unit ball) [S1, unofficial]. SAD has been shown to produce excellent results in stochastic tomography reconstruction compared to other priors [S1, unofficial].
+### [Sum of Absolute Differences (SAD)](3279-sum-of-absolute-differences-sad.md)
+Extends ATV by considering a larger 3x3 spatial neighborhood, enforcing stronger local smoothing.
+
+### [Isotropic Total Variation](3276-isotropic-total-variation.md)
+Computes the Euclidean norm of the gradient vector, promoting isotropic smoothing but at higher computational cost.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as it requires a single pass to compute differences and sum them.
-*   **Memory Complexity:** $O(N)$ to store the voxel grid. No additional storage for difference matrices [S1, unofficial].
-*   **Strengths:** Computationally efficient due to separable $L_1$ norms. The proximal operator is simple (clipping) [S1, unofficial]. Effective for preserving sharp edges aligned with axes.
-*   **Limitations:** Can produce "staircasing" artifacts (piecewise constant solutions) more than $L_2$ based methods. Less rotationally invariant than Isotropic TV [S1, unofficial].
-*   **When to use:** When computational efficiency is critical, or when the underlying data has strong axis-aligned features. Suitable for stochastic tomography reconstruction [S1, unofficial].
+- **Time Complexity:** Computing the gradient and divergence is $O(n)$ where $n$ is the number of voxels, as it involves a constant number of operations per voxel [S1, S2, unofficial].
+- **Memory Complexity:** $O(n)$ for storing the volume. The difference matrix $D$ is not stored, saving significant memory compared to explicit matrix methods [S1, S2, unofficial].
+- **Strengths:** Computationally efficient due to separable axis-wise differences; promotes piecewise constant solutions; simple proximal operator (clipping) [S1, S2, unofficial].
+- **Limitations:** Anisotropic smoothing may not be suitable for isotropic features; sensitive to axis alignment [S1, S2, unofficial].
+- **When to use:** When computational efficiency is critical and the scene has axis-aligned structures; in stochastic tomography reconstruction [S2, unofficial].
+- **When not to use:** When isotropic smoothing is required (use ITV) or when stronger local smoothing is needed (use SAD) [S1, S2, unofficial].
 
 ## Background
-Anisotropic Total Variation is a standard prior in image and volume reconstruction, originating from the broader field of Total Variation regularization introduced by Rudin, Osher, and Fatemi [S1, unofficial]. In the context of space-time tomographic reconstruction of deforming objects, it is presented alongside Isotropic TV and SAD as a model for what the reconstructed volume should look like [S1, unofficial]. The specific formulation and proximal operator details are discussed in the thesis "Space-Time Tomographic Reconstruction of Deforming Objects" [S1, unofficial].
+Anisotropic Total Variation was introduced as a regularization prior in the context of industrial computed tomography and proximal algorithms for tomography reconstruction [S1, S2, unofficial]. It is widely used in inverse volume rendering and radiance field optimization to prevent artifacts such as holes or floaters [S1, S2, unofficial]. The method leverages the sparsity-promoting nature of the $L_1$ norm [S1, S2, unofficial].
 
 ## Sources
-[S1] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)
+[S1] Industrial Computed Tomography using Proximal Algorithm, https://doi.org/10.25781/kaust-th10i, fetched 2026-10-27 (unofficial)
+[S2] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)

@@ -3,54 +3,117 @@
 Also called: Digitization, Digitization (T_o
 
 ## Overview
-Analytic Voxelization converts parametrically defined continuous geometric objects into digital volume representations by assigning each voxel a membership value in $[0, 1]$ reflecting the fraction of the voxel's total volume occupied by the object [S1]. Unlike binary voxelization methods that use all-or-none occupancy flags, this approach retains the inaccuracies and boundary ambiguities of the digitization process naturally, creating a grey-scale scene representation suitable for applications like prosthesis design and radiation therapy planning [S1]. It sets itself apart from [Signed Distance Field Voxelization](3849-signed-distance-field-voxelization.md) by providing exact volumetric overlap fractions rather than distance metrics, and from [Surface-Aware Discretization](6820-surface-aware-discretization.md) by focusing on the continuous-to-discrete mapping of volume rather than surface approximation [S1].
+Analytic Voxelization converts parametrically defined continuous geometric objects ($Q_c$) into digital object representations ($D_p$) defined on a 3D grid [S1]. Unlike binary voxelization which assigns an all-or-none membership value, this method assigns each voxel a membership value in the range $[0, 1]$ reflecting the fraction of the total voxel volume occupied by the continuous object [S1]. This approach retains the inaccuracies and boundary ambiguities of the digitization process naturally within the representation, creating a scene similar to grey segmentation from a continuous description [S1].
 
 ## How it works
-**Inputs:** A parametric continuous object description $Q_c$ (e.g., a sphere defined by center and radius) and a target voxel grid resolution.
-**Outputs:** A digital object representation $D_p$ where each voxel $v$ holds a scalar value $m(v) \in [0, 1]$.
+**Inputs:** A continuous parametric object description $Q_c$ (e.g., implicit surfaces, parametric solids) and a target 3D grid resolution.
+**Outputs:** A 3D scalar field $D_p$ where each voxel stores a value in $[0, 1]$.
 
 **Data Structures:**
-*   **Voxel Grid:** A 3D array of floating-point values.
-*   **Continuous Object:** Defined by parametric equations or implicit functions.
+The output is a 3D array of floating-point values. Each element corresponds to a voxel in the grid. The value represents the volume fraction of the voxel intersected by $Q_c$.
 
 **Steps:**
-1.  **Define Digitization Transform:** The process is characterized by the transform $T_o: Q_c \to D_p$, mapping the set of parametric object descriptions to the digital representation [S1].
-2.  **Iterate Voxels:** For each voxel in the target grid, determine its spatial relationship with the continuous object.
-3.  **Calculate Membership Value:**
-    *   If the voxel is completely inside the object, assign $m(v) = 1$.
-    *   If the voxel is completely outside the object, assign $m(v) = 0$.
-    *   If the voxel intersects the boundary of the object, calculate the exact fraction of the voxel's volume occupied by the object. Assign this fraction to $m(v)$ [S1].
+1.  **Grid Definition:** Define the bounding box of the continuous object $Q_c$ and discretize it into a 3D grid of voxels. Let the grid dimensions be $N_x \times N_y \times N_z$.
+2.  **Voxel Evaluation:** For each voxel $v$ in the grid:
+    a. Determine the spatial extent of the voxel.
+    b. Compute the intersection volume between the voxel volume and the continuous object $Q_c$.
+    c. Calculate the membership value $m_v$ as:
+       $$ m_v = \frac{\text{Volume}(v \cap Q_c)}{\text{Volume}(v)} $$
+    d. Clamp or store $m_v$ in the range $[0, 1]$.
+3.  **Boundary Handling:** Voxels completely inside $Q_c$ receive a value of 1. Voxels completely outside receive 0. Voxels intersecting the boundary receive the fractional volume [S1].
 
-**Formula:**
-For a voxel $v$ with volume $V_v$ and the intersection of the continuous object $Q_c$ with the voxel $V_{int} = Q_c \cap v$, the membership value is:
-$$ m(v) = \frac{\text{Volume}(V_{int})}{V_v} $$
-where $\text{Volume}(V_{int})$ is the analytic volume of the intersection [S1].
-
-**Example:**
-For a sphere, the region of the resulting scene is a cube that encloses the sphere. Voxels completely inside or outside are assigned 1 or 0, respectively. Intersecting voxels are assigned the fraction of the voxel volume intersected by the sphere [S1].
+**Parameters:**
+- Grid resolution: Determines the granularity of the digitization. Higher resolution reduces discretization error but increases memory and computation [S1].
+- Transformation: The method supports transforms $T_o: Q_c \to Q$ and $T_b: S_c \to S$ [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Calculating the exact intersection volume for complex shapes may require robust geometric clipping or numerical integration.
-*   **Boundary:** The method explicitly retains boundary inaccuracies, which is a feature for soft segmentation but requires care if hard boundaries are needed later [S1].
+- **Precision:** Computing the exact intersection volume for arbitrary parametric shapes can be computationally expensive. Approximations may be necessary for complex surfaces [S1].
+- **Degenerate Input:** If the object $Q_c$ has zero volume or is empty, all voxels should be 0. If the object fills the entire bounding box, all voxels should be 1.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def analytic_voxelization(object_qc, grid_bounds, resolution):
+    """
+    Voxelize a continuous parametric object into a 3D grid.
+    
+    Args:
+        object_qc: A callable or geometric primitive representing the continuous object.
+                   Must support a function `volume_intersection(voxel_bounds)` that returns
+                   the volume of the intersection between the object and the voxel bounds.
+        grid_bounds: Tuple (min_x, min_y, min_z, max_x, max_y, max_z) defining the bounding box.
+        resolution: Tuple (nx, ny, nz) defining the number of voxels in each dimension.
+        
+    Returns:
+        A 3D numpy array of shape (nz, ny, nx) with values in [0, 1].
+    """
+    nx, ny, nz = resolution
+    min_x, min_y, min_z, max_x, max_y, max_z = grid_bounds
+    
+    # Calculate voxel dimensions
+    dx = (max_x - min_x) / nx
+    dy = (max_y - min_y) / ny
+    dz = (max_z - min_z) / nz
+    voxel_volume = dx * dy * dz
+    
+    # Initialize output grid
+    grid = np.zeros((nz, ny, nx))
+    
+    for k in range(nz):
+        z_min = min_z + k * dz
+        z_max = z_min + dz
+        for j in range(ny):
+            y_min = min_y + j * dy
+            y_max = y_min + dy
+            for i in range(nx):
+                x_min = min_x + i * dx
+                x_max = x_min + dx
+                
+                # Define voxel bounds
+                voxel_bounds = (x_min, y_min, z_min, x_max, y_max, z_max)
+                
+                # Compute intersection volume
+                # Note: The exact implementation of volume_intersection depends on the
+                # specific parametric definition of object_qc.
+                intersection_vol = object_qc.volume_intersection(voxel_bounds)
+                
+                # Calculate membership value
+                # Clamp to [0, 1] to handle potential numerical errors
+                membership = min(1.0, max(0.0, intersection_vol / voxel_volume))
+                
+                grid[k, j, i] = membership
+                
+    return grid
+```
 
 ## Subtopics
 
+### [Monte Carlo 2D Voxelization](1734-monte-carlo-2d-voxelization.md)
+Monte Carlo 2D Voxelization is a differentiable method for converting a 2D triangle mesh into a volumetric occupancy grid using Monte Carlo integration of the generalized winding number. It sets itself apart from Analytic Voxelization by using stochastic sampling rather than exact geometric intersection, allowing for adaptive sampling strategies and gradient propagation through the sampling process. It differs from Differentiable Voxelization (MC/CF) by specifically implementing the 2D case with a focus on the generalized winding number boundary term.
+
+### [Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md)
+Differentiable Voxelization (MC/CF) is a PyTorch autograd function that converts 2D polygons or 3D triangle meshes into a grid of winding numbers (occupancy), supporting both Marching Cubes (MC) and Convolution Filter (CF) methods with differentiable backward passes. It builds on Analytic Voxelization by providing closed-form gradients with respect to mesh vertex positions, enabling gradient-based optimization of surface representations based on volumetric properties. Unlike Monte Carlo 2D Voxelization which relies on stochastic sampling, this method uses deterministic closed-form integration for the CF variant and hybrid MC/closed-form for the MC variant, yielding sparse near-surface derivative signals.
+
+### [Analytic Moment Voxelization](3307-analytic-moment-voxelization.md)
+Analytic Moment Voxelization is a GPU-based technique for converting 3D polyhedra into digital volume representations by computing analytic moments of a polynomial density field over the polyhedron's volume. It solves the problem of high-fidelity voxelization for arbitrary convex shapes by using geometric clipping and simplicial decomposition to derive exact moment integrals, rather than relying on sampling or rasterization. It differs from Monte Carlo 2D Voxelization and Differentiable Voxelization (MC/CF) by providing deterministic, analytic results for polynomial fields, and from Analytic Tetrahedron Voxelization by handling general polyhedra through a clipping-based decomposition rather than pre-defined tetrahedral primitives.
+
+### [Analytic Tetrahedron Voxelization](3724-analytic-tetrahedron-voxelization.md)
+Analytic Tetrahedron Voxelization converts a continuous tetrahedral mesh into a discrete Cartesian grid representation by computing physically conservative moments (volume, linear, quadratic) for each voxel. Unlike standard binary voxelization which only stores occupancy flags, this method ensures that the sum of voxelized moments exactly equals the analytic moments of the input tetrahedra, thereby avoiding aliasing noise and preserving physical quantities. It distinguishes itself from sibling methods like Monte Carlo 2D Voxelization by providing exact, deterministic results without stochastic error, and from Analytic Moment Voxelization by specifically leveraging tetrahedral geometry and robust planar graph clipping for convex polyhedra intersection.
+
 ### Precomputed Obstacle Voxelization
-Precomputed Obstacle Voxelization is a variant for scenarios involving obstacles undergoing simple analytic transformations [S2, unofficial]. It involves precomputing the voxelization of the obstacle mesh once. During runtime, when accessing inside-outside or obstacle velocity textures, the texture coordinates are multiplied by the inverse of the transformation matrix to retrieve the correct precomputed values [S2, unofficial]. This method is limited to simple analytic transformations (e.g., rigid translation and rotation) and does not support complex skinning operations [S2, unofficial].
+Precomputed Obstacle Voxelization involves precomputing voxelization for obstacles with simple analytic transformations and applying the inverse transformation during texture access [S2, unofficial]. The steps are: 1) Precompute the voxelization of the obstacle mesh [S2, unofficial]. 2) When accessing inside-outside and obstacle velocity textures, multiply the texture coordinates by the inverse of the transformation matrix [S2, unofficial]. A pitfall is that this method only applies to simple analytic transformations (e.g., rigid translation and rotation), not complex skinning operations [S2, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-The complexity depends on the cost of calculating the intersection volume for each voxel. For simple shapes like spheres, this can be done analytically in constant time per voxel. For complex meshes, it may require clipping or sampling. Memory usage is proportional to the number of voxels in the grid [S1].
-
-**Strengths and Limitations:**
-*   **Strengths:** Retains geometric accuracy at boundaries; suitable for applications requiring soft transitions or physical conservation (implied by the fraction-based approach) [S1].
-*   **Limitations:** Computationally expensive for complex shapes if exact intersection volumes are required; not suitable for real-time simulation of complex deformable objects without precomputation or simplification [S2, unofficial].
-
-**When to Use:**
-Use when visualizing or analyzing continuous parametric objects in medical or engineering contexts where boundary accuracy and volumetric fractions are critical [S1]. Use for static or rigidly moving obstacles in fluid simulations to avoid per-frame voxelization costs [S2, unofficial].
+- **Time Complexity:** Depends on the complexity of the intersection volume calculation for each voxel. For simple shapes, it can be $O(N)$ where $N$ is the number of voxels. For complex parametric surfaces, it may be higher due to the need for numerical integration or geometric clipping.
+- **Memory Complexity:** $O(N)$ where $N$ is the number of voxels, storing a single float per voxel.
+- **Strengths:** Provides a smooth, anti-aliased representation of continuous objects. Retains boundary information more accurately than binary voxelization. Suitable for applications like radiation therapy planning and prosthesis design where precise volume representation is critical [S1].
+- **Limitations:** Computationally expensive for complex shapes. Requires efficient algorithms for computing intersection volumes. Not suitable for real-time applications with very high resolutions without optimization or precomputation [S1][S2, unofficial].
+- **When to use:** When a smooth, fractional representation of a continuous object is needed, and the object is defined parametrically. Useful in medical imaging and simulation where volume accuracy is important.
+- **When not to use:** When binary occupancy is sufficient, or when real-time performance is critical and the object is complex.
 
 ## Background
-The concept of digitizing continuous geometric objects into digital representations was introduced by Upupa and Goncalves [S1]. They characterized the digitization operation as a transform from parametric object descriptions to digital sets, emphasizing the retention of inaccuracies through fractional membership values. This approach bridges the gap between continuous parametric models and discrete digital entities, enabling structure-related operations like visualization and manipulation [S1]. The application of precomputed voxelization for transformed obstacles was later discussed in the context of real-time fluid simulation [S2, unofficial].
+The concept of digitizing continuous parametric objects into digital representations was discussed in the context of imaging transforms for visualizing surfaces and volumes [S1]. The work by Upad and Goncalves highlights the need for such digitization in applications like prosthesis design and radiation therapy planning [S1]. The method is part of a broader family of analytic and algebraic voxelization techniques that aim to preserve geometric information during the discretization process.
 
 ## Sources
 [S1] Imaging transforms for visualizing surfaces and volumes, https://doi.org/10.1007/bf03168529, fetched 2026-10-29

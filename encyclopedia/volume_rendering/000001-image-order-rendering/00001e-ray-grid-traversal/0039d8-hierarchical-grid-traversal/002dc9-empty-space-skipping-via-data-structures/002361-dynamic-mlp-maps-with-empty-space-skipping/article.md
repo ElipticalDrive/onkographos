@@ -1,6 +1,4 @@
 # Dynamic MLP Maps with Empty Space Skipping
-
-
 ## Overview
 Dynamic MLP Maps is a rendering technique for volumetric videos that combines multi-level hash tables with 2D CNN-generated MLP maps and uses an occupancy volume for empty space skipping to achieve real-time performance [S1, unofficial]. It differs from its siblings by using a hybrid representation where spatial features are stored in hash tables and network parameters are predicted by a CNN decoder onto orthogonal planes, allowing for efficient evaluation of multiple small MLPs [S1, unofficial]. Unlike [Object-Order Empty Space Skipping](865-object-order-empty-space-skipping.md) which operates on geometry, or [Space Leaping](5863-space-leaping.md) which uses fixed grid strides, this method dynamically skips empty space using a pre-computed per-frame occupancy volume [S1, unofficial].
 
@@ -87,7 +85,7 @@ def compute_occupancy_volume(scene_min, scene_max, density_fn, resolution=OCCUPA
                 occupied[i, j, k] = is_occupied
     return occupied
 
-def world_to_voxel_coords(point, scene_min, resolution):
+def world_to_voxel_coords(point, scene_min, scene_max, resolution):
     """Map world point to voxel grid indices."""
     return [int((point[0] - scene_min[0]) / ((scene_max[0] - scene_min[0]) / resolution[0])),
             int((point[1] - scene_min[1]) / ((scene_max[1] - scene_min[1]) / resolution[1])),
@@ -136,7 +134,7 @@ def render_ray(ray_origin, ray_direction, scene_min, scene_max, occupancy_volume
     
     while t < max_t:
         point = ray_origin + ray_direction * t
-        coords = world_to_voxel_coords(point, scene_min, occupancy_volume.shape)
+        coords = world_to_voxel_coords(point, scene_min, scene_max, occupancy_volume.shape)
         if is_in_bounds(coords, occupancy_volume.shape) and occupancy_volume[coords]:
             occupied_points.append(point)
         t += step_size
@@ -202,19 +200,19 @@ Stores high-dimensional feature vectors for spatial locations using a hash grid 
 Uses a 2D CNN to predict network parameters onto three axis-aligned 2D planes [S1, unofficial]. Sets itself apart from feature maps by enabling faster rendering with smaller MLPs, as feature maps require a large MLP for high quality which is slow [S1, unofficial]. Choose when rendering speed is critical and the scene has smooth variations [S1, unofficial]. See [Space Leaping](5863-space-leaping.md) for comparison on acceleration structures.
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering is accelerated by empty space skipping, reducing the number of samples per ray. The evaluation of multiple small MLPs is faster than a single large MLP. The method achieves real-time performance [S1, unofficial].
-*   **Memory Complexity:** Storage is significantly reduced compared to per-frame models. For a 300-frame video, it requires 240 MB, compared to 9 GB for per-frame KiloNeRF models [S1, unofficial].
+*   **Time Complexity:** Rendering is accelerated by empty space skipping, reducing the number of samples per ray [S1, unofficial]. The evaluation of multiple small MLPs is faster than a single large MLP [S1, unofficial]. The method achieves real-time performance [S1, unofficial].
+*   **Memory Complexity:** Storage is significantly reduced compared to per-frame models [S1, unofficial]. For a 300-frame video, it requires 240 MB, compared to 9 GB for per-frame KiloNeRF models [S1, unofficial].
 *   **Measured Performance:**
     *   **NHR Dataset (sport1):** PSNR 32.92, SSIM 0.959, LPIPS 0.067 [S1, unofficial].
     *   **ZJU-MoCap Dataset (scene 313):** PSNR 32.15, SSIM 0.976, LPIPS 0.049 [S1, unofficial].
 *   **Scaling:** Training time and storage scale linearly with the number of frames for per-frame methods, but this method maintains constant storage and low training time (16 hours for 300 frames) [S1, unofficial].
 *   **Strengths:** Real-time rendering, low storage, high quality compared to baselines like Neural Volumes, C-NeRF, D-NeRF, and DyNeRF [S1, unofficial].
 *   **Limitations:** Difficulty rendering very detailed content (text, fingers) [S1, unofficial].
-*   **When to Use:** Real-time volumetric video playback where storage and training time are constraints.
-*   **When Not to Use:** Scenes with extremely fine, high-frequency details that the hash table and MLP map resolution cannot capture.
+*   **When to Use:** Real-time volumetric video playback where storage and training time are constraints [S1, unofficial].
+*   **When Not to Use:** Scenes with extremely fine, high-frequency details that the hash table and MLP map resolution cannot capture [S1, unofficial].
 
 ## Background
-Dynamic MLP Maps was introduced by Sida Peng, Yunzhi Yan, Qing Shuai, Hujun Bao, and Xiaowei Zhou from the State Key Lab of CAD&CG, Zhejiang University [S1, unofficial]. It is designed to represent volumetric videos efficiently, addressing the limitations of storing per-frame neural radiance fields. The method builds on [Empty Space Skipping via Data Structures](5619-empty-space-skipping-via-data-structures.md) by using an occupancy volume to skip empty space, and on [Space Leaping](5863-space-leaping.md) by using a grid-based structure for acceleration. It improves upon [Object-Order Empty Space Skipping](865-object-order-empty-space-skipping.md) by integrating the skipping directly into the neural rendering pipeline for dynamic content [S1, unofficial].
+Dynamic MLP Maps was introduced by Sida Peng, Yunzhi Yan, Qing Shuai, Hujun Bao, and Xiaowei Zhou from the State Key Lab of CAD&CG, Zhejiang University [S1, unofficial]. It is designed to represent volumetric videos efficiently, addressing the limitations of storing per-frame neural radiance fields [S1, unofficial]. The method builds on [Empty Space Skipping via Data Structures](5619-empty-space-skipping-via-data-structures.md) by using an occupancy volume to skip empty space, and on [Space Leaping](5863-space-leaping.md) by using a grid-based structure for acceleration [S1, unofficial]. It improves upon [Object-Order Empty Space Skipping](865-object-order-empty-space-skipping.md) by integrating the skipping directly into the neural rendering pipeline for dynamic content [S1, unofficial].
 
 ## Sources
 [S1] PDF Supplementary Material for Representing Volumetric Videos as Dynamic ..., https://pengsida.net/project_page_assets/mlp_maps/supplementary_material.pdf, fetched 2026-10-29 (unofficial)

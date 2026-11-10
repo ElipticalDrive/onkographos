@@ -1,0 +1,103 @@
+--- v009.md
++++ v010.md
+@@ -1,5 +1,5 @@
+ # Hierarchical Sampling (Inverse CDF Sampling)
+ 
+-Also called: Inverse CDF Sampling, PDF Sampling, PDF Sampling via Inverse CDF, Inverse Opacity Sampling
++Also called: Inverse CDF, Inverse CDF Sampling, PDF Sampling, PDF Sampling via Inverse CDF, Piecewise-Constant PDF Sampling
+ 
+ ## Overview
+@@ -19,31 +19,31 @@
+ 
+ **Data Structures:**
+-*   The method operates on tensors representing the ray space discretization. `bins` defines the support of the distribution, and `weights` defines the probability mass.
++*   The method operates on tensors representing the ray space discretization. `bins` defines the support of the distribution, and `weights` defines the probability mass [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Stabilize Weights:** Add a small epsilon ($\epsilon = 10^{-5}$) to all weights to prevent division by zero during normalization [S1, S2, S12, unofficial].
++1.  **Stabilize Weights:** Add a small epsilon ($\epsilon = 10^{-5}$) to all weights to prevent division by zero during normalization [S1, S12, unofficial].
+     $$ w'_i = w_i + \epsilon $$
+-2.  **Compute PDF:** Normalize the stabilized weights along the last dimension to form a Probability Density Function (PDF). For a batch of rays, the PDF for bin $i$ is:
++2.  **Compute PDF:** Normalize the stabilized weights along the last dimension to form a Probability Density Function (PDF) [S1, unofficial]. For a batch of rays, the PDF for bin $i$ is:
+     $$ p_i = \frac{w'_i}{\sum_{j} w'_j} $$
+     where the sum is over all bins for that ray [S1, S7, S12, unofficial].
+-3.  **Compute CDF:** Compute the Cumulative Distribution Function (CDF) by taking the cumulative sum of the PDF. Prepend a zero tensor to the CDF to align indices with the bin boundaries (since CDF values correspond to bin edges, not centers) [S4, S5, S12, unofficial].
++3.  **Compute CDF:** Compute the Cumulative Distribution Function (CDF) by taking the cumulative sum of the PDF [S1, unofficial]. Prepend a zero tensor to the CDF to align indices with the bin boundaries (since CDF values correspond to bin edges, not centers) [S4, S5, S12, unofficial].
+     $$ \text{cdf}_i = \sum_{k=0}^{i} p_k, \quad \text{cdf}_{\text{padded}} = [0, \text{cdf}_0, \text{cdf}_1, \dots, \text{cdf}_{T-2}] $$
+-    The resulting CDF has shape `(B, T)` [S4, S12, unofficial].
+-4.  **Generate Query Values ($u$):** Generate $N_{samples}$ query values $u$ uniformly distributed in $[0, 1]$.
++    The resulting CDF has shape `(B, T)` [S1, unofficial].
++4.  **Generate Query Values ($u$):** Generate $N_{samples}$ query values $u$ uniformly distributed in $[0, 1]$ [S1, unofficial].
+     *   If `det` is `False`: $u \sim \text{Uniform}(0, 1)$ [S1, S12, unofficial].
+     *   If `det` is `True`: $u$ is a linearly spaced vector from 0 to 1, expanded to match the batch shape [S1, S12, unofficial].
+-5.  **Find Bin Indices:** Use `searchsorted` to find the index `inds` in the CDF where each $u$ falls. The `right=True` argument ensures that $u$ values exactly equal to a CDF boundary are assigned to the right bin [S1, S8, S13, unofficial].
++5.  **Find Bin Indices:** Use `searchsorted` to find the index `inds` in the CDF where each $u$ falls [S1, unofficial]. The `right=True` argument ensures that $u$ values exactly equal to a CDF boundary are assigned to the right bin [S1, S8, S13, unofficial].
+     $$ \text{inds} = \text{searchsorted}(\text{cdf}, u, \text{side}=\text{'right'}) $$
+-6.  **Determine Interpolation Bounds:** Identify the lower (`below`) and upper (`above`) bin indices for interpolation. Clamp indices to valid ranges $[0, T-1]$ [S1, S5, S13, unofficial].
++6.  **Determine Interpolation Bounds:** Identify the lower (`below`) and upper (`above`) bin indices for interpolation [S1, unofficial]. Clamp indices to valid ranges $[0, T-1]$ [S1, S5, S13, unofficial].
+     $$ \text{below} = \max(0, \text{inds} - 1) $$
+     $$ \text{above} = \min(T - 1, \text{inds}) $$
+-7.  **Gather CDF and Bin Values:** Gather the CDF values and bin boundaries corresponding to `below` and `above` for each sample [S1, S5, S13, unofficial].
++7.  **Gather CDF and Bin Values:** Gather the CDF values and bin boundaries corresponding to `below` and `above` for each sample [S1, unofficial].
+     $$ \text{cdf}_g = \text{gather}(\text{cdf}, [\text{below}, \text{above}]) $$
+     $$ \text{bins}_g = \text{gather}(\text{bins}, [\text{below}, \text{above}]) $$
+     $\text{cdf}_g$ and $\text{bins}_g$ have shape `(B, N_samples, 2)` [S1, S12, unofficial].
+-8.  **Interpolate:** Compute the interpolation factor $t$ within each bin. Handle zero-width bins (where $\text{cdf}_g[..., 1] - \text{cdf}_g[..., 0] \approx 0$) by clamping the denominator to 1 [S1, S12, unofficial].
++8.  **Interpolate:** Compute the interpolation factor $t$ within each bin [S1, unofficial]. Handle zero-width bins (where $\text{cdf}_g[..., 1] - \text{cdf}_g[..., 0] \approx 0$) by clamping the denominator to $10^{-5}$ [S1, S12, unofficial].
+     $$ \text{denom} = \text{cdf}_g[..., 1] - \text{cdf}_g[..., 0] $$
+-    $$ \text{denom} = \begin{cases} 1 & \text{if } \text{denom} < 10^{-5} \\ \text{denom} & \text{otherwise} \end{cases} $$
++    $$ \text{denom} = \begin{cases} 10^{-5} & \text{if } \text{denom} < 10^{-5} \\ \text{denom} & \text{otherwise} \end{cases} $$
+     $$ t = \frac{u - \text{cdf}_g[..., 0]}{\text{denom}} $$
+     Finally, compute the sample depths:
+@@ -102,5 +102,5 @@
+     # 8. Interpolate
+     denom = cdf_g[..., 1] - cdf_g[..., 0]
+-    denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
++    denom = torch.where(denom < 1e-5, torch.ones_like(denom) * 1e-5, denom)
+     t = (u - cdf_g[..., 0]) / denom
+     z_samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
+@@ -115,6 +115,6 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Zero Weights:** If all weights are zero, normalization fails. Adding epsilon prevents this [S1, S12, unofficial].
+-*   **Zero-Width Bins:** If two consecutive bin boundaries are identical (or very close), the denominator in interpolation becomes zero. Clamping the denominator to $10^{-5}$ prevents NaNs [S1, S12, unofficial].
++*   **Zero Weights:** If all weights are zero, normalization fails. Adding epsilon prevents this [S1, unofficial].
++*   **Zero-Width Bins:** If two consecutive bin boundaries are identical (or very close), the denominator in interpolation becomes zero. Clamping the denominator to $10^{-5}$ prevents NaNs [S1, unofficial].
+ *   **Boundary Conditions:** The CDF must be padded with a leading zero to correctly map the first bin (from index 0 to 1 in CDF) to the first bin boundary [S4, S12, unofficial].
+ 
+@@ -125,5 +125,5 @@
+ 
+ ### [Proposal Network Sampling](1589-proposal-network-sampling.md)
+-Proposal Network Sampling is a method that uses a coarse Multi-Layer Perceptron (MLP) to directly estimate the Probability Density Function (PDF) along a ray, enabling importance sampling that concentrates samples on high-contribution areas (surfaces) while spreading them in empty or occluded regions. Unlike spatial skipping methods (e.g., [RangeFineSampler](3141-rangefinesampler.md)) which skip empty space entirely, proposal networks always spread samples throughout the space but with varying density, providing more accurate transmittance estimation at the cost of higher sample counts in empty regions. It builds on [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md) by providing the discrete probability distribution via a learned neural estimator rather than a static grid or uniform distribution.
++Proposal Network Sampling is a method that uses a coarse Multi-Layer Perceptron (MLP) to directly estimate the Probability Density Function (PDF) along a ray, enabling importance sampling that concentrates samples on high-contribution areas (surfaces) while spreading them in empty or occluded regions. Unlike spatial skipping methods (e.g., [RangeFineSampler](3141-rangefinesampler.md)) which skip empty space entirely, proposal networks always spread samples throughout the space but with varying density, providing more accurate transmittance estimation at the cost of higher sample counts in empty regions. It builds on [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md) by providing the discrete probability distribution via a learned neural estimator rather than a static grid or uniform distribution [G].
+ 
+ ### [RangeFineSampler](3141-rangefinesampler.md)
+@@ -138,21 +138,19 @@
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** $O(N_{coarse} + N_{fine})$ per ray. The dominant operations are the cumulative sum and searchsorted, which are linear in the number of coarse bins and fine samples [S1, S12, unofficial].
+-*   **Memory Complexity:** $O(N_{coarse} + N_{fine})$ per ray to store the CDF and intermediate tensors [S1, unofficial].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Measured Performance:** In NeRF implementations, using 64 coarse samples and 128 fine samples via hierarchical sampling significantly improves PSNR compared to uniform sampling with the same total sample count, particularly for scenes with thin structures or high-frequency details [S4, S12, unofficial].
+ *   **Strengths:**
+-    *   Reduces variance in regions of high density/opacity.
+-    *   Simple to implement and differentiable.
++    *   Reduces variance in regions of high density/opacity [S1, S12, unofficial].
++    *   Simple to implement and differentiable [S1, S12, unofficial].
+     *   Works well with MLP-based radiance fields where density is explicitly modeled [S1, S12, unofficial].
+ *   **Limitations:**
+-    *   Requires a coarse pass to generate weights, doubling the computational cost of the forward pass if not optimized [S1, unofficial].
+     *   Can still waste samples in empty space if the coarse density estimate is inaccurate [S1, unofficial].
+-    *   Not suitable for skipping empty space entirely (unlike [RangeFineSampler](3141-rangefinesampler.md)) [S1, unofficial].
+-*   **When to Use:** When rendering scenes with varying density where uniform sampling is inefficient, and a coarse estimate of importance is available. Common in NeRF and similar implicit neural representations [S1, S12, unofficial].
++*   **When to Use:** When rendering scenes with varying density where uniform sampling is inefficient, and a coarse estimate of importance is available [S1, S12, unofficial].
+ *   **When Not to Use:** When memory is extremely constrained (due to storing CDF), or when the scene is mostly empty and skipping is preferred [S1, unofficial].
+ 
+ ## Background
+ 
+-Hierarchical Sampling was introduced in the seminal NeRF paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" by Mildenhall et al. (2020) [S2, S12, unofficial]. It was designed to address the inefficiency of uniform sampling in volume rendering, where many samples fall in empty space. By using the density predicted by a coarse network to guide the sampling of a fine network, NeRF achieved high-quality novel view synthesis with manageable computational cost [S2, S12, unofficial]. The method has since become a standard component in many neural rendering pipelines, including Instant NGP and various other NeRF variants [S3, S4, unofficial].
++Hierarchical Sampling was introduced in the seminal NeRF paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" by Mildenhall et al. (2020) [S2, S12, unofficial]. It was designed to address the inefficiency of uniform sampling in volume rendering, where many samples fall in empty space [S2, S12, unofficial]. By using the density predicted by a coarse network to guide the sampling of a fine network, NeRF achieved high-quality novel view synthesis with manageable computational cost [S2, S12, unofficial].
+ 
+ ## Sources

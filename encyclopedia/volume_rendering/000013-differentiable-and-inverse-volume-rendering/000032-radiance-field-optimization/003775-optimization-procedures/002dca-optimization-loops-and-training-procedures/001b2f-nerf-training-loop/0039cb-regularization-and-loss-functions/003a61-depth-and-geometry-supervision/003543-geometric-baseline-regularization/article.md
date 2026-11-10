@@ -1,0 +1,239 @@
+# Geometric Baseline Regularization
+
+Also called: Geometric Baseline, Geometric Loss
+
+## Overview
+Geometric Baseline Regularization is a composite loss function designed to prevent degenerate solutions in Neural Radiance Field (NeRF) optimization, particularly in few-view settings where the network might collapse to reproducing training images directly [S1]. It augments the standard photometric loss with three geometric priors: foreground completeness, frustum consistency, and depth distribution compactness [S1]. Unlike methods that rely on external depth supervision or guided optimization, this approach enforces geometric plausibility solely through the internal consistency of the volume rendering weights and densities [S1].
+
+## How it works
+The method computes a total loss $\mathcal{L}_{\text{geom}}$ by combining the photometric reconstruction error with three regularization terms [S1].
+
+**Inputs and Outputs:**
+- **Inputs:** Ground truth images $I_i$ for each training view $i$; rendered images $\mathbf{C}_i$ generated from the NeRF; ray parameters $t_i, t_{i+1}$ (near/far bounds and sample positions); weights $w_i$ computed during volume rendering; expected depth $\mathbf{D}(\mathbf{r})$; and frustum counts $n_i$ for each sample point.
+- **Outputs:** Scalar loss value $\mathcal{L}_{\text{geom}}$ and its gradients with respect to the NeRF parameters (density $\sigma$ and color $\mathbf{c}$ fields) [S1].
+
+**Data Structures:**
+- **Ray Samples:** For a ray $\mathbf{r}$, a list of $N$ sample points. Each sample $i$ has position $t_i$, weight $w_i$, and a count $n_i$ representing the number of training view frustums containing the point $t_i$ [S1].
+- **Frustum Count ($n_i$):** An integer indicating how many training cameras can "see" the point along the ray at $t_i$ [S1].
+
+**Formulas:**
+The total loss is defined as [S1]:
+$$ \mathcal{L}_{\text{geom}} = \mathcal{L}_{\text{photo}} + \lambda_{\text{fg}} \mathcal{L}_{\text{fg}} + \lambda_{\text{fr}} \mathcal{L}_{\text{fr}} + \lambda_{\text{dist}} \mathcal{L}_{\text{dist}} $$
+
+1.  **Photometric Loss ($\mathcal{L}_{\text{photo}}$):** The L2 difference between input images and renderings [S1]:
+    $$ \mathcal{L}_{\text{photo}}(\sigma, \mathbf{c}) = \sum_{i=1}^{\mathcal{I}} ||I_i - \mathbf{C}_i||_2 $$
+    where $\mathcal{I}$ is the number of training views [S1].
+
+2.  **Foreground Loss ($\mathcal{L}_{\text{fg}}$):** Encourages the sum of weights along a ray to equal unity, assuming the ray is fully absorbed by scene geometry [S1]:
+    $$ \mathcal{L}_{\text{fg}} = \left( 1 - \sum_{i=1}^N w_i \right)^2 $$
+
+3.  **Frustum Regularization ($\mathcal{L}_{\text{fr}}$):** Penalizes density placed in only one view frustum to prevent the "copying" of training images in few-view scenarios [S1]:
+    $$ \mathcal{L}_{\text{fr}} = \sum_i w_i \mathbf{1}(n_i \le 1) $$
+    where $\mathbf{1}(\cdot)$ is the indicator function, and $n_i$ is the number of training view frustums containing the point $t_i$ [S1].
+
+4.  **Distribution Regularization ($\mathcal{L}_{\text{dist}}$):** Encourages the weights to have a compact distribution around the expected depth [S1]:
+    $$ \mathcal{L}_{\text{dist}} = \frac{1}{\mathbf{D}(\mathbf{r})} \left( \sum_{i,j} w_i w_k \left| \frac{t_i + t_{i+1}}{2} - \frac{t_j + t_{j+1}}{2} \right| + \frac{1}{3} \sum_{i=1}^N w_i^2 (t_{i+1} - t_i) \right) $$
+    Note: The source uses index $k$ in the first sum term $\sum_{i,j} w_i w_k$, which appears to be a typo for $w_j$ based on standard variance-like formulations, but is cited exactly as $w_k$ in the source [S1]. The term $\mathbf{D}(\mathbf{r})$ is the expected depth [S1]:
+    $$ \mathbf{D}(\mathbf{r}) = \frac{\sum_{i=1}^N w_i t_i}{\sum_{i=1}^N w_i} $$
+
+**Parameters:**
+- $\lambda_{\text{fg}}, \lambda_{\text{fr}}$: Coefficients for foreground and frustum regularizers. Values not explicitly given in the sources, assumed to be non-zero constants [S1].
+- $\lambda_{\text{dist}}$: Weight for the distribution regularizer. It is 0 for the first 2500 training steps. It then linearly increases to a maximum value at 8000 steps [S1].
+    - Maximum value for DTU dataset: $1 \times 10^{-4}$ [S1].
+    - Maximum value for LLFF dataset: $1.5 \times 10^{-5}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def geometric_baseline_loss(rendered_colors, ground_truth_images, 
+                            weights, t_near, t_far, sample_positions, 
+                            frustum_counts, lambda_fg, lambda_fr, 
+                            lambda_dist, step, max_steps=8000):
+    """
+    Computes the Geometric Baseline Loss.
+    
+    Args:
+        rendered_colors: List of rendered images C_i for each view.
+        ground_truth_images: List of ground truth images I_i for each view.
+        weights: List of lists, weights[i][j] is the weight w_j for ray i.
+        t_near: Array of near plane distances for each ray.
+        t_far: Array of far plane distances for each ray.
+        sample_positions: List of lists, sample_positions[i][j] is t_j for ray i.
+        frustum_counts: List of lists, frustum_counts[i][j] is n_j for ray i.
+        lambda_fg: Float, weight for foreground loss.
+        lambda_fr: Float, weight for frustum loss.
+        lambda_dist: Float, current weight for distribution loss.
+        step: Int, current training step.
+        max_steps: Int, steps at which lambda_dist reaches max.
+        
+    Returns:
+        total_loss: Float, the computed loss value.
+    """
+    total_loss = 0.0
+    
+    # 1. Photometric Loss
+    photo_loss = 0.0
+    for C_i, I_i in zip(rendered_colors, ground_truth_images):
+        # L2 norm squared (or L2 as per source notation ||...||_2, 
+        # though standard MSE is squared L2. Source eq 5 uses ||...||_2.
+        # We follow source notation strictly.)
+        diff = C_i - I_i
+        # Assuming diff is a tensor/vector, compute L2 norm
+        norm = sqrt(sum(d**2 for d in diff.flatten()))
+        photo_loss += norm
+    total_loss += photo_loss
+    
+    # 2. Geometric Regularizers
+    fg_loss = 0.0
+    fr_loss = 0.0
+    dist_loss = 0.0
+    
+    for i in range(len(weights)): # Iterate over rays
+        w = weights[i]
+        t = sample_positions[i]
+        n = frustum_counts[i]
+        
+        # Number of samples
+        N = len(w)
+        
+        # Foreground Loss: (1 - sum(w))^2
+        sum_w = sum(w)
+        fg_loss += (1.0 - sum_w) ** 2
+        
+        # Frustum Loss: sum(w_i * 1(n_i <= 1))
+        for j in range(N):
+            if n[j] <= 1:
+                fr_loss += w[j]
+                
+        # Distribution Loss
+        # Calculate Expected Depth D(r)
+        sum_wt = sum(w[j] * t[j] for j in range(N))
+        sum_w_ray = sum(w)
+        
+        # Avoid division by zero
+        if sum_w_ray > 1e-8:
+            D_r = sum_wt / sum_w_ray
+            
+            # Term 1: sum_{i,j} w_i w_k | (t_i + t_{i+1})/2 - (t_j + t_{j+1})/2 |
+            # Note: Source uses w_k in sum_{i,j} w_i w_k. This is likely a typo for w_j.
+            # However, the source text explicitly writes w_k. 
+            # In standard variance formulations, it is w_i * w_j.
+            # We implement as w_i * w_j to make mathematical sense, 
+            # but note the source discrepancy [S1].
+            # Also, t_i + t_{i+1} requires t_{i+1}. 
+            # If t is sample positions, t_{i+1} is the next sample.
+            # We assume t includes both endpoints or we use segment midpoints.
+            # Source: | (t_i + t_{i+1})/2 - (t_j + t_{j+1})/2 |
+            # This implies t is a list of N+1 points or we iterate i from 0 to N-1.
+            # Let's assume t has N elements representing sample centers, 
+            # and we need segment bounds. 
+            # Standard NeRF: t_i is near, t_{i+1} is far for segment i.
+            # If sample_positions[i] are the t_i values (centers), 
+            # we might need t_near and t_far arrays.
+            # The source formula uses t_i and t_{i+1}. 
+            # Let's assume t is the list of sample positions (centers).
+            # We need the segment boundaries. 
+            # If t_near and t_far are provided for the whole ray, 
+            # we can approximate segment i bounds.
+            # However, the source formula is specific. 
+            # Let's assume t is the list of N sample positions.
+            # And we have access to t_prev and t_next or segment bounds.
+            # Given the ambiguity, we implement the structure:
+            
+            term1 = 0.0
+            # Iterate over all pairs of segments
+            # Assuming t has N elements, and we have segment bounds.
+            # If t is just centers, we can't compute t_{i+1} exactly without bounds.
+            # Let's assume t is the list of N sample positions.
+            # And we have an array of segment lengths or bounds.
+            # For implementation completeness, we assume we have segment midpoints m_i = (t_i + t_{i+1})/2.
+            # If not provided, this part is "Not given in the sources" regarding exact boundary derivation.
+            # We will assume m_i is available or computed from t.
+            
+            # Re-reading source: "sum_{i,j} w_i w_k | ... |"
+            # This looks like a variance term.
+            # Let's assume m_i is the midpoint of segment i.
+            # If t is sample positions, m_i is often just t_i if uniform.
+            # But source distinguishes t_i and t_{i+1}.
+            
+            # To be safe and implementable:
+            # We assume we have midpoints m_i for each segment i.
+            # If only sample positions t are given, and they are centers, 
+            # then m_i = t_i.
+            
+            # Let's assume m is the list of midpoints.
+            # If not, we compute from t and segment lengths.
+            # Since segment lengths are not explicitly in the input list, 
+            # we assume t contains the necessary info or m is derived.
+            
+            # Simplified implementation assuming m_i = t_i (common in some formulations)
+            # OR assuming t is the list of N+1 boundaries.
+            # Source eq 6: sum_{i=1}^N w_i^2 (t_{i+1} - t_i). This implies t has N+1 elements.
+            # So t is likely the list of boundaries.
+            # Then midpoints are (t[i] + t[i+1])/2.
+            
+            # Let's assume t is the list of N+1 boundaries.
+            # weights has N elements.
+            
+            midpoints = [(t[j] + t[j+1]) / 2.0 for j in range(N)]
+            
+            for j in range(N):
+                for k in range(N): # Source says sum_{i,j} w_i w_k. Indices i,j in text, k in formula.
+                    # Assuming i and j are the loop indices for the two terms
+                    # Source: sum_{i,j} w_i w_k ...
+                    # This is likely sum_{i,j} w_i w_j ...
+                    diff_mid = abs(midpoints[j] - midpoints[k])
+                    term1 += w[j] * w[k] * diff_mid
+                    
+            # Term 2: (1/3) * sum_{i=1}^N w_i^2 * (t_{i+1} - t_i)
+            term2 = 0.0
+            for j in range(N):
+                segment_len = t[j+1] - t[j]
+                term2 += (w[j] ** 2) * segment_len
+                
+            dist_loss += (term1 + (1.0/3.0) * term2) / D_r
+        else:
+            # If no density, dist loss is 0 or undefined. 
+            # Usually 0.
+            pass
+            
+    total_loss += lambda_fg * fg_loss
+    total_loss += lambda_fr * fr_loss
+    total_loss += lambda_dist * dist_loss
+    
+    return total_loss
+```
+
+**Edge Cases and Pitfalls:**
+- **Few-View Collapse:** Without $\mathcal{L}_{\text{fr}}$, NeRFs may collapse to a solution where each camera is covered by a copy of the training image [S1].
+- **Division by Zero:** $\mathbf{D}(\mathbf{r})$ in $\mathcal{L}_{\text{dist}}$ can be zero if no density is present. A guard is required [G].
+- **Indexing Ambiguity:** The source formula for $\mathcal{L}_{\text{dist}}$ uses $w_k$ in the double sum $\sum_{i,j} w_i w_k$, which is likely a typo for $w_j$ [S1]. The implementation should use $w_j$ for consistency with variance-like terms.
+- **Boundary Definitions:** The formula relies on $t_{i+1}$, implying $t$ includes far boundaries. The exact layout of $t$ (N samples vs N+1 boundaries) must be consistent with the weight array size [S1].
+
+## Subtopics
+
+### Guided Optimization of NeRF
+Uses a guidance signal to steer optimization, differing from the purely internal geometric priors of the baseline [7496-guided-optimization-of-nerf.md].
+
+### Single-view NeRF Training with Depth Map
+Relies on external depth maps for supervision, whereas the baseline uses only image and internal geometric consistency [8679-single-view-nerf-training-with-depth-map.md].
+
+### Depth-Supervised NeRF
+Incorporates explicit depth loss terms, distinct from the weight-based regularization of the baseline [8687-depth-supervised-nerf.md].
+
+### Depth Structural Consistency Regularization
+Focuses on structural consistency of depth, differing from the frustum and distribution priors of the baseline [9371-depth-structural-consistency-regularization.md].
+
+## Operating characteristics
+- **Time Complexity:** The photometric and foreground/frustum losses are linear in the number of rays and samples. The distribution loss $\mathcal{L}_{\text{dist}}$ involves a double sum over samples ($O(N^2)$ per ray), which can be computationally expensive for large $N$ [S1].
+- **Memory Complexity:** Linear in the number of samples and rays to store weights, positions, and frustum counts [S1].
+- **Strengths:** Provides a strong baseline for few-view settings by preventing degenerate solutions without requiring external data like depth maps or multiple views [S1].
+- **Limitations:** The $O(N^2)$ term in $\mathcal{L}_{\text{dist}}$ may limit scalability to high-resolution sampling. The effectiveness depends on careful tuning of $\lambda$ parameters, especially $\lambda_{\text{dist}}$ which requires a warm-up schedule [S1].
+- **When to Use:** When training NeRFs with few views and no external depth supervision is available [S1].
+
+## Background
+The Geometric Baseline Regularization was introduced in the context of DiffusioNeRF, a method that regularizes NeRFs with Denoising Diffusion Models [S1]. It serves as a strong baseline for NeRF optimization, demonstrating that geometric priors alone can significantly improve reconstruction quality in challenging few-view scenarios [S1]. The method was evaluated on the DTU and LLFF datasets [S1].
+
+## Sources
+[S1] DiffusioNeRF: Regularizing Neural Radiance Fields with Denoising Diffusion Models, https://doi.org/10.1109/cvpr52729.2023.00407, fetched 2026-10-26

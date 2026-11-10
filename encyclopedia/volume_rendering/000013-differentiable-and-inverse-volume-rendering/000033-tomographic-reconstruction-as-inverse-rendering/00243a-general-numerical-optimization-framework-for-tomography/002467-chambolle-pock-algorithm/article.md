@@ -1,123 +1,143 @@
 # Chambolle-Pock Algorithm
 
-Also called: CP Algorithm, Chambolle-Pock Primal-Dual Algorithm, PSART Framework Solver, first-order primal-dual algorithm
+Also called: CP Algorithm, Chambolle-Pock Primal-Dual (CP) Algorithm, First-order Primal-Dual Algorithm, PSART Framework Solver
 
 ## Overview
-The Chambolle-Pock (CP) algorithm is a first-order primal-dual optimization method used to solve convex optimization problems of the form $\min_{\mathbf{f}} f(\mathbf{f}) + g(\mathbf{Kf})$, commonly encountered in tomographic reconstruction [S1, unofficial]. It solves this by splitting the problem into independent proximal operators for the data fidelity term and the regularizer, which are solved iteratively [S1, unofficial].
+The Chambolle-Pock (CP) algorithm is a first-order primal-dual optimization method used to solve convex composite optimization problems of the form $\min_{\mathbf{f}} f(\mathbf{f}) + g(\mathbf{Kf})$ [S1, S2, unofficial]. In the context of tomographic reconstruction, it decomposes the inverse problem into independent proximal sub-problems for the data fidelity term and the regularizer, enabling the handling of non-smooth regularization (e.g., Total Variation) and large-scale linear systems [S1, S2, unofficial]. It is distinguished from sibling methods by its explicit use of primal-dual splitting with an extrapolation (heavy-ball) step to accelerate convergence, rather than relying solely on gradient descent or alternating direction methods [S1, S2, unofficial].
 
 ## How it works
-The algorithm minimizes the composite objective function by alternating between updates in the primal variable (the volume $\mathbf{f}$) and the dual variable (associated with the regularizer) [S1, unofficial]. It requires calculating the spectral norm of the linear operator $\mathbf{K}$ to determine optimal step sizes [S1, unofficial].
+The algorithm solves the optimization problem by alternating between updates of the primal variable $\mathbf{f}$ (the volume estimate) and the dual variable $\mathbf{z}$ (associated with the regularizer), utilizing proximal operators for the data term $f(\cdot)$ and the convex conjugate $g^*(\cdot)$ of the regularization term $g(\cdot)$ [S1, S2, unofficial].
 
-**Inputs and Outputs:**
+### Inputs and Outputs
 *   **Inputs:**
-    *   $\mathbf{p}$: Observed projection data (sinogram).
-    *   $A$: Forward projection operator (matrix-free).
-    *   $K$: Linear operator transforming volume to sparse domain (e.g., gradient).
-    *   $f(\cdot)$: Data fidelity function (typically $\|A\mathbf{f} - \mathbf{p}\|_2^2$).
-    *   $g(\cdot)$: Regularization function (e.g., Total Variation).
-    *   $\tau, \eta$: Step sizes for primal and dual updates.
-    *   $\theta$: Extrapolation parameter (typically set to 1) [S1, unofficial].
+    *   $\mathbf{p}$: Observed sinogram/projections.
+    *   $A$ (or $\mathcal{P}$): Forward projection operator (matrix-free).
+    *   $K$: Linear operator transforming the volume into the sparse domain (e.g., gradient operator).
+    *   $f(\cdot)$: Data fidelity function (typically least-squares).
+    *   $g(\cdot)$: Regularization function.
+    *   $\tau$: Step size for primal update.
+    *   $\eta$ (or $\mu$): Step size for dual update.
+    *   $\theta$: Extrapolation parameter (over-relaxation).
+    *   $T$: Number of iterations.
 *   **Outputs:**
-    *   $\mathbf{f}$: Reconstructed volume estimate.
+    *   $\mathbf{f}^{(T)}$: Reconstructed volume estimate.
 
-**Data Structures:**
-*   $\mathbf{f} \in \mathbb{R}^N$: Primal variable (volume).
-*   $\mathbf{y} \in \mathbb{R}^M$: Dual variable (associated with $K\mathbf{f}$).
-*   $\bar{\mathbf{f}} \in \mathbb{R}^N$: Extrapolated primal variable.
+### Data Structures
+*   $\mathbf{f} \in \mathbb{R}^n$: Primal variable (volume), where $n$ is the number of voxels.
+*   $\mathbf{z} \in \mathbb{R}^d$: Dual variable, where $d$ is the dimension of the transformed domain (e.g., number of gradient components).
+*   $\bar{\mathbf{f}} \in \mathbb{R}^n$: Extrapolated primal variable.
 
-**Proximal Operator Definition:**
-The algorithm relies on proximal operators [S1, unofficial]:
-$$
-\text{prox}_{\zeta h}(\mathbf{q}) \triangleq \underset{\mathbf{f}}{\text{argmin }} h(\mathbf{f}) + \frac{1}{2\zeta} \|\mathbf{f} - \mathbf{q}\|_2^2
-$$
-where $\mathbf{q}$ is the input vector, $\zeta$ is the step size, and $h$ is the function being proximized [S1, unofficial].
+### Proximal Operators
+The algorithm requires two specific proximal operators [S1, S2, unofficial]:
 
-**Algorithm Steps:**
-1.  **Initialization:** Set $\mathbf{f}^{(0)} = \mathbf{0}$, $\bar{\mathbf{f}}^{(0)} = \mathbf{0}$, and $\mathbf{y}^{(0)} = \mathbf{0}$ [S1, unofficial].
-2.  **Iterate** for $t = 0, 1, \dots, T-1$:
-    3.  **Dual Update:** Compute the proximal operator for the convex conjugate $g^*$ of the regularizer $g$ [S1, unofficial]:
-        $$
-        \mathbf{y}^{t+1} = \text{prox}_{\eta g^*} \left( \mathbf{y}^t + \eta K \bar{\mathbf{f}}^t \right)
-        $$
-        For Total Variation, this involves projecting onto a constraint set defined by the dual norm [S1, unofficial].
-    4.  **Primal Update:** Compute the proximal operator for the data fidelity term $f$ [S1, unofficial]:
-        $$
-        \mathbf{f}^{t+1} = \text{prox}_{\tau f} \left( \mathbf{f}^t - \tau K^* \mathbf{y}^{t+1} \right)
-        $$
-        where $K^*$ is the adjoint of $K$. This step solves a linear least-squares subproblem using a matrix-free solver, with SART noted as effective for sparse projections [S1, unofficial].
-    5.  **Extrapolation:** Update the extrapolated variable using heavy-ball momentum [S1, unofficial]:
-        $$
-        \bar{\mathbf{f}}^{t+1} = \mathbf{f}^{t+1} + \theta (\mathbf{f}^{t+1} - \mathbf{f}^t)
-        $$
-6.  **Return** $\mathbf{f}^{T+1}$.
+1.  **Proximal Operator for $f$**:
+    $$ \text{prox}_{\tau f}(\mathbf{q}) = \operatorname{argmin}_{\mathbf{x}} f(\mathbf{x}) + \frac{1}{2\tau} \|\mathbf{x} - \mathbf{q}\|_2^2 $$
+    For the least-squares data term $f(\mathbf{f}) = \|A\mathbf{f} - \mathbf{p}\|_2^2$, this subproblem is solved using a matrix-free solver, typically SART, as it converges better than Conjugate Gradients for sparse projection matrices [S1, S2, unofficial].
 
-**Pseudocode:**
+2.  **Proximal Operator for $g^*$**:
+    $$ \text{prox}_{\eta g^*}(\mathbf{q}) = \operatorname{argmin}_{\mathbf{x}} g^*(\mathbf{x}) + \frac{1}{2\eta} \|\mathbf{x} - \mathbf{q}\|_2^2 $$
+    where $g^*$ is the convex conjugate of $g$, defined as $g^*(\mathbf{u}) = \sup_{\mathbf{x}} \mathbf{u}^T \mathbf{x} - g(\mathbf{x})$ [S1, unofficial].
+    
+    Using Moreau's decomposition, this can be computed via the proximal operator of $g$:
+    $$ \text{prox}_{\eta g^*}(\mathbf{u}) = \mathbf{u} - \eta \, \text{prox}_{\frac{1}{\eta}g}\left(\frac{\mathbf{u}}{\eta}\right) $$
+    [S1, unofficial].
+
+### Algorithm Steps
+The standard CP algorithm proceeds as follows [S1, S2, unofficial]:
+
+1.  **Initialize**: Set $\bar{\mathbf{f}}^{(0)} = \mathbf{f}^{(0)}$, $\mathbf{z}^{(0)} = \mathbf{0}$.
+2.  **Iterate** for $t = 1$ to $T$:
+    a.  **Dual Update**: Compute the dual variable using the proximal operator of the convex conjugate:
+        $$ \mathbf{z}^{(t+1)} = \text{prox}_{\eta g^*} \left( \mathbf{z}^{(t)} + \eta K \bar{\mathbf{f}}^{(t)} \right) $$
+    b.  **Primal Update**: Compute the primal variable using the proximal operator of the data term:
+        $$ \mathbf{f}^{(t+1)} = \text{prox}_{\tau f} \left( \mathbf{f}^{(t)} - \tau K^T \mathbf{z}^{(t+1)} \right) $$
+    c.  **Extrapolation**: Update the extrapolated primal variable using heavy-ball momentum:
+        $$ \bar{\mathbf{f}}^{(t+1)} = \mathbf{f}^{(t+1)} + \theta (\mathbf{f}^{(t+1)} - \mathbf{f}^{(t)}) $$
+3.  **Return** $\mathbf{f}^{(T)}$.
+
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def chambolle_pock(p, A, K, prox_data, prox_reg_dual, tau, eta, theta, T):
-    # Initialize primal f, extrapolated f_bar, dual y
-    f = zeros_like(p)  # Volume shape
-    f_bar = zeros_like(p)
-    y = zeros_like(p)  # Dual variable shape matches Kf output
+    """
+    Chambolle-Pock Primal-Dual Algorithm for Tomographic Reconstruction.
+    
+    Args:
+        p: Observed sinogram (vector).
+        A: Forward projection operator (function or matrix-free object).
+        K: Linear operator for regularization (e.g., gradient).
+        prox_data: Function implementing prox_{tau f}(q).
+        prox_reg_dual: Function implementing prox_{eta g*}(q).
+        tau: Primal step size.
+        eta: Dual step size.
+        theta: Extrapolation parameter (typically 1).
+        T: Number of iterations.
+        
+    Returns:
+        f: Reconstructed volume.
+    """
+    # Initialize primal f, extrapolated f_bar, dual z
+    # f shape: (n_voxels,)
+    # z shape: (n_transformed,) e.g., 3 * n_voxels for 3D gradient
+    f = zeros_like_volume() 
+    f_bar = zeros_like_volume()
+    z = zeros_like_dual() 
+    
     for t in range(T):
         # Store old primal for extrapolation
         f_old = f.copy()
-        # Dual update: y^{t+1} = prox_{eta g*}(y^t + eta * K * f_bar^t)
-        y = prox_reg_dual(y + eta * K(f_bar), eta)
-        # Primal update: f^{t+1} = prox_{tau f}(f^t - tau * K^T * y^{t+1})
+        
+        # Dual update: z^{t+1} = prox_{eta g*}(z^t + eta * K * f_bar^t)
+        # K(f_bar) computes the transformed variable (e.g., gradient)
+        z = prox_reg_dual(z + eta * K(f_bar), eta)
+        
+        # Primal update: f^{t+1} = prox_{tau f}(f^t - tau * K^T * z^{t+1})
         # prox_data solves the linear least-squares subproblem (e.g., via SART)
-        f = prox_data(f - tau * K.T(y), tau)
+        # K.T(z) computes the adjoint action (e.g., divergence/back-projection)
+        f = prox_data(f - tau * K.T(z), tau)
+        
         # Extrapolation: f_bar^{t+1} = f^{t+1} + theta * (f^{t+1} - f^t)
         f_bar = f + theta * (f - f_old)
+        
     return f
 ```
 
-**Parameters:**
-*   $\tau, \eta$: Step sizes. Their optimal values are determined by the spectral norm of the operator $K$ ($\|K\|$) [S1, unofficial]. The stability condition requires $\tau \eta \|K\|^2 < 1$ [S1, unofficial].
-*   $\theta$: Extrapolation parameter. Set to 1 in experiments to accelerate convergence [S1, unofficial].
+### Parameters and Constraints
+*   **Step Sizes ($\tau, \eta$)**: Must satisfy the stability condition $\tau \eta \|K\|^2 < 1$, where $\|K\|$ is the spectral norm (largest singular value) of the linear operator $K$ [S1, S2, unofficial]. The norm of $K$ must be calculated to set optimal values for faster convergence [S2, unofficial].
+*   **Extrapolation ($\theta$)**: Typically set to $1$ to accelerate convergence [S1, S2, unofficial].
+*   **Regularization Weight ($\lambda$)**: If the problem is formulated as $\min \|A\mathbf{f}-\mathbf{p}\|_2^2 + \lambda g(\mathbf{Kf})$, $\lambda$ is absorbed into the definition of $g$ or handled via scaling in the proximal operator [S2, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Step Size Selection:** Incorrect $\tau$ or $\eta$ leads to divergence; the norm of $K$ must be calculated accurately [S1, unofficial].
-*   **Matrix-Free Requirement:** The forward operator $A$ and $K$ must be implemented as matrix-free operators to control memory consumption for large 3D volumes [S1, unofficial].
-*   **Proximal Solver Choice:** The choice of solver for the data term proximal operator affects convergence; SART is preferred over Conjugate Gradients for sparse data [S1, unofficial].
+### Edge Cases and Pitfalls
+*   **Spectral Norm Calculation**: Incorrect estimation of $\|K\|$ leads to divergence or slow convergence. For discrete gradient operators, $\|K\|^2$ can be derived analytically or estimated via power iteration [S2, unofficial].
+*   **Proximal Implementation**: The proximal operator for the data term $f$ often lacks a closed-form solution when $A$ is a large sparse matrix. Using an iterative solver (like SART) inside the proximal step adds computational overhead but is necessary for memory efficiency [S1, S2, unofficial].
+*   **Boundary Conditions**: The operator $K$ (e.g., gradient) requires careful handling of volume boundaries to avoid artifacts. Zero-padding or periodic boundary conditions are common choices [S1, S2, unofficial].
 
 ## Subtopics
 
+### [Proximal Operator](10110-proximal-operator.md)
+The proximal operator is a mathematical tool used in proximal algorithms to solve non-smooth, constrained, or large-scale optimization problems by iteratively getting closer to the optimal solution while staying close to the current estimate. It serves as a generalization of projections onto convex sets, allowing complex optimization problems to be split into smaller, simpler sub-problems. In the context of tomographic reconstruction, it enables the handling of regularization terms (such as sparsity or smoothing norms) that often lack closed-form solutions in standard gradient-based methods.
+
 ### Primal-Dual Proximal Algorithm for STP Reconstruction
-An iterative algorithm solving $\min_f \|Af - p\|_2^2 + \lambda STP_p(f)$ by converting it into a saddle-point problem and solving it using the CP algorithm [S1, unofficial]. It differs from standard CP by using a specific Sum of Total Pseudo-norms (STP) regularizer and a heavy-ball momentum update for the primal variable [S1, unofficial].
-
-**Steps:**
-1.  Initialize $\bar{f}^{(0)} = 0$ [S1, unofficial].
-2.  For $t = 1 \dots T$:
-    3.  Solve for dual variable: $\mathbf{Y}^{t+1} = \text{prox}_{\eta g_*} \left( \mathbf{Y}^t + \eta \mathbf{J} \bar{\mathbf{f}}^t \right) = \Pi_{\lambda B_{\infty, q}} \left( \mathbf{Y}^t + \eta \mathbf{J} \bar{\mathbf{f}}^t \right)$ [S1, unofficial].
-    4.  Solve for primal variable: $\mathbf{f}^{t+1} = \text{prox}_{\tau f} \left( \mathbf{f}^t - \tau \mathbf{J}_K^* \mathbf{Y}^{t+1} \right)$ using the SART solver (Algorithm 2 in source) [S1, unofficial].
-    5.  Update extrapolated variable: $\bar{\mathbf{f}}^{t+1} = \mathbf{f}^{t+1} + \theta (\mathbf{f}^{t+1} - \mathbf{f}^t)$ [S1, unofficial].
-
-**Formulas:**
-The problem is reformulated as a saddle-point problem [S1, unofficial]:
-$$
-\min_f \max_H \|Af - p\|_2^2 + \langle H, J_K f \rangle - \iota_{\lambda B_{\infty, q}}(H)
-$$
-where $\iota$ is the indicator function of the norm ball $\lambda B_{\infty, q}$ [S1, unofficial].
-
-**Parameters:**
-*   $\lambda$: Regularization weight.
-*   $\eta$: Step size for dual variable.
-*   $\tau$: Step size for primal variable.
-*   $\theta$: Extrapolation parameter.
-*   $p$: Schatten norm parameter.
-*   $l$: Neighborhood size (e.g., $3 \times 3 \times 3$ voxels) [S1, unofficial].
+An iterative algorithm to solve the reconstruction problem $\min_f \|Af - p\|_2^2 + \lambda STP_p(f)$ by converting it into a saddle-point problem and solving it using a primal-dual Chambolle-Pock (CP) algorithm [S2, unofficial].
+*   **Definition**: Reformulates the problem as $\min_f \max_H \|Af - p\|_2^2 + \langle H, J_K f \rangle - \iota_{\lambda B_{\infty, q}}(H)$, where $\iota$ is the indicator function of the norm ball $\lambda B_{\infty, q}$ [S2, unofficial].
+*   **Steps**:
+    1.  Initialize $\bar{f}^{(0)} = 0$.
+    2.  Solve for primal $f^{t+1}$ using the proximal operator of the data term on $f^t - \tau J_K^* Y^{t+1}$ (via SART).
+    3.  Update extrapolated variable $\bar{f}^{t+1} = f^{t+1} + \theta (f^{t+1} - f^t)$.
+*   **Parameters**: $\lambda$ (regularization weight), $\eta$ (dual step size), $\tau$ (primal step size), $\theta$ (extrapolation), $p$ (Schatten norm parameter), $l$ (neighborhood size) [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Each iteration requires forward/backward projections and proximal operator evaluations [S1, unofficial].
-*   **Memory Complexity:** Low, as it uses matrix-free operators for $A$ and $K$, storing only the volume and dual variables [S1, unofficial].
-*   **Strengths:** Handles non-smooth regularizers (TV, STP) efficiently; robust to sparse data; low memory footprint [S1, unofficial].
-*   **Limitations:** Requires careful tuning of step sizes ($\tau, \eta$) based on the operator norm [S1, unofficial].
-*   **When to Use:** Tomographic reconstruction with non-smooth regularizers (TV, STP) and limited projection data [S1, unofficial].
+*   **Time Complexity**: Each iteration involves one forward projection ($K$), one adjoint back-projection ($K^T$), and two proximal operator evaluations. The complexity per iteration is dominated by the linear operators and the SART solver for the data term.
+*   **Memory Complexity**: $O(n + d)$, where $n$ is the number of voxels and $d$ is the size of the dual variable. The matrix-free nature of $A$ and $K$ allows handling of large 3D volumes that would not fit in memory as explicit matrices [S1, S2, unofficial].
+*   **Convergence**: The algorithm converges with a rate of $O(1/T)$ for general convex problems. The extrapolation parameter $\theta=1$ provides acceleration [S1, S2, unofficial].
+*   **Strengths**: Handles non-smooth regularizers (TV, STP) efficiently; robust to large-scale problems; decouples data fidelity and regularization [S1, S2, unofficial].
+*   **Limitations**: Requires careful tuning of step sizes $\tau$ and $\eta$ based on $\|K\|$; convergence can be slow for ill-conditioned problems if step sizes are not optimal [S1, S2, unofficial].
+*   **When to Use**: Suitable for tomographic reconstruction with non-smooth regularization (e.g., Total Variation) and large datasets where matrix-based solvers are infeasible [S1, S2, unofficial].
 
 ## Background
-The Chambolle-Pock algorithm is a first-order primal-dual method used within the PSART framework for tomographic reconstruction [S1, unofficial]. It is applied to solve inverse problems with complex regularizers by decomposing the optimization into proximal sub-problems [S1, unofficial].
+The Chambolle-Pock algorithm was proposed by Antonin Chambolle and Thomas Pock in 2011 [S1, S2, unofficial]. It is a first-order primal-dual algorithm designed for convex optimization problems involving composite functions. In tomography, it has been adopted as a core solver within frameworks like PSART (Proximal SART) to handle complex regularization priors such as Anisotropic Total Variation (ATV), Isotropic Total Variation (ITV), and Space-Time Tomographic Prior (STP) [S1, S2, unofficial]. The algorithm's ability to split the problem into independent proximal steps makes it particularly effective for integrating advanced regularizers into iterative reconstruction pipelines [S1, S2, unofficial].
 
 ## Sources
-[S1] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)
+[S1] Industrial Computed Tomography using Proximal Algorithm, https://doi.org/10.25781/kaust-th10i, fetched 2026-10-27 (unofficial)
+[S2] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)

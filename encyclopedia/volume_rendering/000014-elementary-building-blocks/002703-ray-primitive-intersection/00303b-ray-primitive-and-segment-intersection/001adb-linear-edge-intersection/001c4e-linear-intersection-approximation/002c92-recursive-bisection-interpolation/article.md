@@ -7,23 +7,20 @@ Recursive Bisection Interpolation refines edge intersection points by recursivel
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Edge endpoints $a$ and $b$ (3D vectors), their scalar field values $value_a$ and $value_b$, and the target isovalue $iso$.
-- Output: Intersection point $p$ (3D vector) on the edge.
+- Input: Edge endpoints $a$ and $b$, their scalar field values $value_a$ and $value_b$, and the target isovalue $iso$ [S1, unofficial].
+- Output: Intersection point $p$ on the edge [S1, unofficial].
 
 **Data Structures:**
-- No persistent data structures; the method is stateless and recursive.
+Not given in the sources.
 
 **Parameters:**
 - `surface_shift` (int): Boolean flag (0 or 1) to enable recursive bisection interpolation instead of standard linear interpolation [S1, unofficial].
 
 **Steps:**
-1. Calculate the midpoint $c$ of the edge: $c = \frac{a + b}{2}$.
-2. Evaluate the scalar field at the midpoint to get $value_c$ [S1, unofficial].
-3. Check if the isovalue lies between $value_a$ and $value_c$:
-   - If $(value_a - iso)(value_c - iso) < 0$, the intersection is in the first half. Recursively call the function with endpoints $a$ and $c$ [S1, unofficial].
-   - Else, check if the isovalue lies between $value_b$ and $value_c$:
-     - If $(value_b - iso)(value_c - iso) < 0$, the intersection is in the second half. Recursively call the function with endpoints $b$ and $c$ [S1, unofficial].
-     - Otherwise, the linear interpolation assumption holds for this segment (or the values are too close to distinguish via bisection). Return the linear interpolation result [S1, unofficial].
+1. Compute the midpoint $c = \frac{a + b}{2}$ and its scalar value $value_c$ [S1, unofficial].
+2. Check if $(value_a - iso)(value_c - iso) < 0$; if true, recurse on half $[a, c]$ [S1, unofficial].
+3. Else check if $(value_b - iso)(value_c - iso) < 0$; if true, recurse on half $[b, c]$ [S1, unofficial].
+4. Otherwise, return linear interpolation on $[a, b]$ [S1, unofficial].
 
 **Formula:**
 - Linear interpolation fallback:
@@ -36,13 +33,11 @@ Recursive Bisection Interpolation refines edge intersection points by recursivel
 
 ```python
 def recursive_bisection_interpolation(a, b, value_a, value_b, iso):
-    # Calculate midpoint
+    # Compute midpoint
     c = (a + b) / 2.0
     
-    # Evaluate value at midpoint
-    # [G] In a real implementation, value_c is obtained by trilinear interpolation 
-    # from the voxel grid at position c.
-    value_c = evaluate_scalar_field(c)
+    # [G] value_c is obtained by evaluating the scalar field at position c
+    value_c = field_at(c)
     
     # Check first half [a, c]
     if (value_a - iso) * (value_c - iso) < 0:
@@ -53,18 +48,19 @@ def recursive_bisection_interpolation(a, b, value_a, value_b, iso):
         return recursive_bisection_interpolation(b, c, value_b, value_c, iso)
     
     # Fallback to linear interpolation
-    # Handle division by zero if value_a == value_b
     if value_b == value_a:
-        return a  # [G] Arbitrary choice if values are identical
+        return a  # [G] Fallback for degenerate case where values are identical
     
     t = (iso - value_a) / (value_b - value_a)
     return a + t * (b - a)
+
+def field_at(p):
+    # [G] Standard scalar field evaluation (e.g., trilinear interpolation from voxel grid)
+    raise NotImplementedError("Scalar field evaluation must be provided by the renderer.")
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Deep recursion may suffer from floating-point precision errors if the edge is very small or the scalar field varies slowly.
-- **Boundaries:** The method assumes the scalar field can be evaluated at any point within the edge.
-- **Degenerate Input:** If $value_a = value_b = iso$, the linear interpolation formula divides by zero. The pseudocode handles this by returning $a$ [G].
+Not given in the sources.
 
 ## Subtopics
 
@@ -72,13 +68,13 @@ def recursive_bisection_interpolation(a, b, value_a, value_b, iso):
 A geometric constraint technique used during hierarchical isosurface extraction to prevent refinement dependencies and topological artifacts at the interfaces of adjacent sub-blocks. It extends the standard time lag method by enforcing a local inclusion check against block boundaries, ensuring that edge contractions do not create geometric inconsistencies between neighbors. Unlike the original time lag which applies globally, this extension specifically targets the borders of current sub-blocks to maintain consistency in parallel or partitioned rendering environments.
 
 ## Operating characteristics
-- **Time Complexity:** $O(\log(\frac{L}{\epsilon}))$ where $L$ is the edge length and $\epsilon$ is the desired precision or minimum segment size. In the worst case, it performs more computations than linear interpolation.
-- **Memory Complexity:** $O(\log(\frac{L}{\epsilon}))$ stack space due to recursion.
-- **Measured Performance:** Not given in the sources.
-- **Strengths:** Reduces geometric holes between different LODs by ensuring intersection points are more accurately located within the scalar field's zero-crossing [S1, unofficial].
-- **Limitations:** Computationally more expensive than linear interpolation.
-- **When to use:** When visual quality at LOD boundaries is critical and performance allows for additional computation per edge [S1, unofficial].
-- **When not to use:** When performance is paramount or the scalar field is smooth enough that linear interpolation provides sufficient accuracy.
+- Strengths: Reduces geometric holes between different LODs by ensuring intersection points are more accurately located within the scalar field's zero-crossing [S1, unofficial].
+- Limitations: Not given in the sources.
+- Measured Performance: Not given in the sources.
+- Time Complexity: Not given in the sources.
+- Memory Complexity: Not given in the sources.
+- When to use: Not given in the sources.
+- When not to use: Not given in the sources.
 
 ## Background
 Recursive Bisection Interpolation, also known as Surface Shifting, is implemented in the OpenGL Marching Cubes/Tetrahedra Geometry Shader framework by AnBenLa [S1, unofficial]. It is used in conjunction with Simple LOD and Transvoxel algorithm implementations to improve mesh quality [S1, unofficial]. The method was described in the context of a GitHub repository for real-time volume visualization [S1, unofficial].

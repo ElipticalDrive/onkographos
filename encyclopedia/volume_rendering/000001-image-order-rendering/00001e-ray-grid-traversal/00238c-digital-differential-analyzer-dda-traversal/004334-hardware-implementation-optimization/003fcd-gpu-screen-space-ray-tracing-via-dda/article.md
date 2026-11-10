@@ -1,0 +1,122 @@
+# GPU Screen-Space Ray Tracing via DDA
+
+Also called: Efficient GPU Screen-Space Ray Tracing via DDA, Linear 2D Iteration, Perspective-Correct DDA Ray Tracing, Thin-line Rasterization for Ray Casting
+
+## Overview
+This method provides an efficient GPU solution for screen-space 3D ray tracing against a depth buffer by adapting the perspective-correct Digital Differential Analyzer (DDA) line rasterization algorithm [S1, unofficial]. It solves the inefficiency and missing intersections inherent in linear 3D marching by ensuring that sampled pixels form a contiguous set with no oversampling [S1, unofficial]. Unlike linear 3D ray marching, which projects 3D points to screen space and can skip pixels or oversample the same pixel multiple times, this method places each sampled pixel adjacent (in x, y, or diagonally) to the previous one and samples each pixel at most once [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The function takes the camera-space ray origin ($csOrig$) and direction ($csDir$), the projection matrix ($proj$), the negative near plane Z ($nearPlaneZ$), the depth buffer ($csZBuffer$), its dimensions ($csZBufferSize$), and encoding flag ($csZBufferIsHyperbolic$) [S1, unofficial]. Additional parameters include camera-space z-thickness ($csZThickness$), maximum trace distance ($maxDistance$), maximum steps ($maxSteps$), stride, and jitter [S1, unofficial]. The function returns true if the ray hits a surface, with output parameters for hit pixel coordinates, hit layer, and camera-space hit point [S1, unofficial].
+
+**Data Structures and Layout:**
+The depth buffer is accessed via `texelFetch`. The method assumes a right-handed camera space where +z is out of the screen [S1, unofficial]. The projection matrix is used to convert camera-space positions to screen-space pixel coordinates [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Clip Far End:** Clip only the far end of the ray against the near plane. The caller ensures the ray origin lies within the view frustum, eliminating the need for complex frustum clipping logic [S1, unofficial].
+2.  **Unify DDA Cases:** Unify the eight classic DDA cases (4 quadrants × 2 iteration directions) by permuting axes and taking derivatives relative to the sign of $\Delta x$, ensuring iteration is always performed along the x-axis [S1, unofficial]. A matrix permutation compensates for this in the vertical case [S1, unofficial].
+3.  **Iterate:** Perform the DDA iteration along the x-axis. Implicitly clip to the viewport by structuring the test so that a zero value returned by `texelFetch` for an out-of-bounds depth-buffer sample terminates iteration [S1, unofficial].
+4.  **Intersection Test:** At each step, calculate the 3D point corresponding to the current 2D screen point and test for intersection with the depth buffer, accounting for $csZThickness$ [S1, unofficial].
+5.  **Termination:** Break out of the loop on a hit, but do not check if it was a legal screen coordinate until the end of the step to reduce loop body size [S1, unofficial].
+
+**Formulas:**
+The 3D point $Q'$ corresponding to a 2D screen point $(x, y)$ is calculated as [S1, unofficial]:
+$$ Q'(x,y) = \frac{(Q \otimes k)(x,y)}{k(x,y)} $$
+where $k = 1/(H \otimes (0,0,0,1))$ is the reciprocal of the homogeneous w component, and $Q \otimes k$ interpolates linearly in 2D [S1, unofficial].
+
+**Parameters:**
+*   `stride`: Controls spacing between samples. `stride = 1.0` produces thin-line rasterization. Larger values space samples for efficiency at the cost of quality [S1, unofficial].
+*   `jitter`: A value in the range $[0,1]$ used to bump the ray in pixels to conceal banding artifacts introduced by spaced samples (`stride > 1.0`) [S1, unofficial].
+*   `csZBufferIsHyperbolic`: Boolean encoding flag for the depth buffer. Determines if the depth buffer stores hyperbolic (perspective-correct) depth values [S1, unofficial].
+*   `csZThickness`: Camera-space z-thickness ascribed to each point in the depth buffer, used for robustness in intersection testing [S1, unofficial].
+*   `maxDistance`: Maximum trace distance in camera-space [S1, unofficial].
+*   `maxSteps`: Maximum number of steps allowed during the trace [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traceRay(csOrig, csDir, proj, nearPlaneZ, csZBuffer, csZBufferSize, csZBufferIsHyperbolic, csZThickness, maxDistance, maxSteps, stride, jitter):
+    # Convert ray endpoints to screen space
+    # P0 and P1 are screen-space pixel endpoints of the line segment
+    P0 = project(csOrig, proj)
+    P1 = project(csOrig + csDir * maxDistance, proj)
+    
+    # Unify DDA cases by permuting axes so iteration is always on x-axis
+    # This avoids divergent execution on GPUs
+    # Matrix permutation compensates for the permutation in the vertical case
+    # All code after this assumes iteration in x
+    
+    # Clip far end against near plane
+    # Caller ensures ray origin is within view frustum
+    
+    # Initialize DDA variables
+    dx = P1.x - P0.x
+    dy = P1.y - P0.y
+    
+    # Determine step direction and magnitude based on sign(delta.x)
+    # Take derivatives relative to sign(delta.x)
+    
+    # Iterate along x-axis
+    for t in range(0, int(abs(dx) * stride), int(stride)):
+        # Calculate current screen position
+        # Apply jitter if stride > 1.0
+        current_x = P0.x + t * sign(dx)
+        current_y = P0.y + t * sign(dx) * (dy / dx)
+        
+        # Check viewport bounds implicitly via texelFetch behavior
+        # If out of bounds, texelFetch returns 0, terminating iteration
+        
+        # Calculate 3D point Q' from 2D screen point (current_x, current_y)
+        # Q'(x,y) = ((Q ⊗ k)(x,y)) / k(x,y)
+        # where k = 1/(H ⊗ (0,0,0,1))
+        Q_prime = unproject(current_x, current_y, proj, csZBufferIsHyperbolic)
+        
+        # Test intersection with depth buffer
+        # Use csZThickness for robustness
+        depth = texelFetch(csZBuffer, (current_x, current_y))
+        if depth == 0:
+            break # Out of bounds
+            
+        if isHit(Q_prime, depth, csZThickness):
+            return True, (current_x, current_y), csZThickness, Q_prime
+            
+        # Check max steps and max distance
+        if t / stride >= maxSteps:
+            break
+        if distance(csOrig, Q_prime) >= maxDistance:
+            break
+            
+    return False, None, None, None
+```
+
+**Edge Cases and Pitfalls:**
+*   **Divergent Execution:** Classic DDA implementations suffer from divergent execution on GPUs due to branching for different quadrants and iteration directions. This method avoids this by unifying cases via axis permutation [S1, unofficial].
+*   **Banding Artifacts:** Banding artifacts appear when using `stride > 1.0` for efficiency. This is handled by applying a jitter value in $[0,1]$ to the ray [S1, unofficial].
+*   **Frustum Clipping:** Complex frustum clipping is avoided by relying on the caller to ensure the ray origin lies within the view frustum [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The method is optimized for GPU execution, minimizing peak register count and using conditional assignment instead of branches [S1, unofficial]. The inner loop contains simple fused multiply-add (FMUL) instructions, which are well-suited to the GPU [S1, unofficial].
+
+**Measured Performance:**
+Used in production for reflections in ripply water, achieving 2 ms at 1080p on GeForce 650M [S1, unofficial].
+
+**Scaling:**
+The method scales well with GPU hardware due to its branchless nature and efficient use of instruction cache [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Ensures sampling at a contiguous set of pixels with no oversampling; efficient on GPUs due to branchless execution; proven in production in recent major game titles [S1, unofficial].
+*   **Limitations:** Quality decreases with larger stride values; banding artifacts may require jitter to conceal [S1, unofficial].
+
+**When to Use:**
+Use for screen-space ray tracing tasks such as reflections, especially when performance is critical and the hardware is a GPU [S1, unofficial].
+
+**When Not to Use:**
+Not suitable for scenarios requiring high-quality sampling without jitter or when the ray origin cannot be guaranteed to be within the view frustum [S1, unofficial].
+
+## Background
+The underlying method of 2D iteration is about 20 years old, evolving from Bresenham's algorithm through DDA [S1, unofficial]. Recent games brought details for reflection tracing and GPU optimizations [S1, unofficial]. Wronski [2014a, 80][2014b] and Valient [2014b, 90][2014a] sketched algorithms in presentations [S1, unofficial]. The full implementation details were provided by McGuire and Mara [S1, unofficial].
+
+## Sources
+[S1] Efficient GPU screen-space ray tracing, https://jcgt.org/published/0003/04/04/paper.pdf, fetched 2026-10-25 (unofficial)

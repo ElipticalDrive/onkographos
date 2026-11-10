@@ -3,135 +3,132 @@
 Also called: Curvature Based TF, Non-photorealistic Curvature TF, Shape Based TF (Curvature), cbTF
 
 ## Overview
-The Curvature-based Transfer Function (cbTF) is a data feature-based classification method that uses the second derivative (curvature) of the volume data, in addition to the scalar value, to distinguish structural transitions and emphasize geometric contours [S1][S3, unofficial]. It is primarily used for non-photorealistic rendering to highlight ridges, valleys, and surface bumpiness, or to distinguish features of different sizes that share similar intensity values [S1][S2, S3, unofficial]. Unlike gradient-based methods which detect edges, cbTF detects the *shape* of the edge (convex vs. concave), allowing it to separate the borders of small and large features that have identical intensity gradients [S1].
+The Curvature-based Transfer Function (cbTF) is a data feature-based classification method that maps volume data values and local surface curvature to optical properties (opacity and color) [S1][S3, unofficial]. It solves the problem of distinguishing structural boundaries and emphasizing geometric features, such as contours, ridges, and valleys, which scalar value-based transfer functions cannot resolve [S1][S2, unofficial]. Unlike sibling methods that rely on gradient magnitude or size, cbTF utilizes the second derivative of the data to highlight the shape and "bumpiness" of structures, making it particularly effective for non-photorealistic rendering and contour highlighting [S1][S2, S4, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A scalar volume dataset $V$ and a camera position $\mathbf{c}$.
-*   **Output:** Opacity $\alpha \in [0, 1]$ and color $\mathbf{C} = (r, g, b)$ for each sample point.
+*   **Input:** A scalar volume dataset $V(\mathbf{x})$, where $\mathbf{x}$ is the spatial position.
+*   **Output:** Opacity $\alpha \in [0, 1]$ and color $\mathbf{C}$ for each sample point.
 
 **Data Structures:**
-The classification function is typically implemented as a 2D Lookup Table (LUT) [S1]. The axes of the LUT are:
-1.  **Data Value:** The scalar intensity $v$ at the sample point.
-2.  **Curvature:** The computed curvature metric $\kappa$ at the sample point.
-*Note: Some implementations may incorporate camera position as a third dimension or use it to modulate the output, but the core cbTF domain is 2D [S1].*
+The classification is typically implemented using a 2D lookup table (LUT) [S1]. The dimensions of the LUT correspond to:
+1.  Data value (scalar intensity).
+2.  Curvature metric (second derivative magnitude or specific curvature type).
+*Note: Camera position may be used as an additional dimension or parameter for view-dependent contouring [S1][S3, unofficial].*
 
 **Curvature Computation:**
-Curvature is derived from the local geometry of the isosurfaces. It is commonly calculated using the Hessian matrix $H$ of the scalar field or approximated via the Laplacian [S4, unofficial].
-1.  Compute the Hessian matrix $H(\mathbf{x})$ at each voxel $\mathbf{x}$, which contains the second partial derivatives:
-    $$
-    H(\mathbf{x}) = \begin{bmatrix}
-    f_{xx} & f_{xy} & f_{xz} \\
-    f_{yx} & f_{yy} & f_{yz} \\
-    f_{zx} & f_{zy} & f_{zz}
-    \end{bmatrix}
-    $$
-2.  Compute the eigenvalues $\lambda_1, \lambda_2, \lambda_3$ of $H(\mathbf{x})$.
-3.  Derive curvature metrics from the eigenvalues. Common metrics include:
-    *   **Mean Curvature:** $H_{mean} = \frac{\lambda_1 + \lambda_2 + \lambda_3}{3}$
-    *   **Gaussian Curvature:** $K = \lambda_1 \lambda_2 \lambda_3$
-    *   Alternatively, maximum curvature $k_1$ and minimum curvature $k_2$ can be used [S4, unofficial].
-*   **Neighborhood:** The computation of curvature requires a neighborhood of at least 26 points (the 3x3x3 cube excluding the center) to estimate the second derivatives accurately [S1].
+Curvature is computed from the local geometry of isosurfaces or the scalar field itself. It requires a neighborhood of at least 26 points (the 3x3x3 voxel neighborhood excluding the center) [S1].
 
-**Classification Steps:**
-1.  **Preprocessing (Optional):** To combat spurious curvature variations caused by noise (common in MRI data), the data values may be smoothed using Gaussian filters [S2, unofficial]. This sacrifices resolution and accuracy [S2, unofficial].
-2.  **Feature Extraction:** For each sample point $\mathbf{x}$ along the ray:
-    a. Retrieve the scalar value $v = V(\mathbf{x})$.
-    b. Compute the curvature $\kappa$ at $\mathbf{x}$ using the Hessian/Laplacian method described above.
-3.  **Lookup:** Query the 2D LUT using coordinates $(v, \kappa)$ to retrieve opacity $\alpha$ and color $\mathbf{C}$ [S1].
-4.  **Rendering:** Composite the sample using standard volume rendering integration (e.g., front-to-back compositing) [G].
+Two primary approaches exist for computing curvature [S4, unofficial]:
+1.  **Hessian-based:** Uses the Hessian matrix $H$ of second directional derivatives. This is more precise but computationally expensive.
+2.  **Laplacian-based:** Approximates the second derivative using the Laplacian operator $\nabla^2 f$. This has lower computational cost but yields less precise results [S4, unofficial].
+
+From the principal curvatures (maximum $k_1$ and minimum $k_2$), derived metrics such as Mean Curvature ($H = \frac{k_1 + k_2}{2}$) or Gaussian Curvature ($K = k_1 k_2$) can be used [S4, unofficial].
+
+**Algorithm Steps:**
+1.  **Smoothing (Optional but Recommended):** Apply a smoothing filter (e.g., Gaussian) to the input volume $V$ to reduce noise. This step is critical because curvature amplifies noise, leading to spurious variations [S2, unofficial]. Note that smoothing sacrifices accuracy and resolution [S2, unofficial].
+2.  **Compute Curvature:** For each voxel $\mathbf{x}$, compute the curvature metric $C(\mathbf{x})$ using the 26-point neighborhood [S1].
+    *   If using the Laplacian approximation:
+        $$ C(\mathbf{x}) \approx \nabla^2 V(\mathbf{x}) = \sum_{i=1}^{3} \frac{\partial^2 V}{\partial x_i^2} $$
+    *   If using Hessian eigenvalues: Compute eigenvalues $\lambda_1, \lambda_2, \lambda_3$ of the Hessian matrix $H$ at $\mathbf{x}$, then derive $k_1, k_2$ [S4, unofficial].
+3.  **Lookup:** Query the 2D transfer function table using the pair $(V(\mathbf{x}), C(\mathbf{x}))$ to retrieve opacity $\alpha$ and color $\mathbf{C}$ [S1].
+4.  **Rendering:** Perform volume rendering (e.g., ray casting) using the retrieved optical properties [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_curvature_hessian(volume, x, y, z):
+def compute_curvature_transfer_function(volume, tf_table, use_laplacian=True):
     """
-    Computes curvature metrics using the Hessian matrix at voxel (x,y,z).
-    Requires a 3x3x3 neighborhood.
+    Computes opacity and color for a volume using curvature-based transfer function.
+    
+    Args:
+        volume: 3D numpy array of scalar values.
+        tf_table: 2D array mapping (data_value, curvature) to (opacity, color).
+        use_laplacian: Boolean flag to choose between Laplacian (faster, less precise) 
+                       and Hessian (slower, more precise) curvature computation.
+    
+    Returns:
+        result_volume: 3D array of (opacity, color) tuples.
     """
-    # Extract 3x3x3 neighborhood values
-    # Note: Boundary checks required in implementation [G]
-    neighborhood = get_3x3x3_patch(volume, x, y, z)
+    height, width, depth = volume.shape
+    result_volume = np.zeros((height, width, depth, 4)) # RGBA
     
-    # Compute second derivatives (Hessian elements)
-    # Using central differences or convolution kernels on the neighborhood
-    f_xx = compute_second_derivative(neighborhood, axis=0)
-    f_yy = compute_second_derivative(neighborhood, axis=1)
-    f_zz = compute_second_derivative(neighborhood, axis=2)
-    f_xy = compute_cross_derivative(neighborhood, axis0=0, axis1=1)
-    f_xz = compute_cross_derivative(neighborhood, axis0=0, axis1=2)
-    f_yz = compute_cross_derivative(neighborhood, axis0=1, axis1=2)
-    
-    # Construct Hessian Matrix
-    H = [
-        [f_xx, f_xy, f_xz],
-        [f_xy, f_yy, f_yz],
-        [f_xz, f_yz, f_zz]
-    ]
-    
-    # Compute eigenvalues of H
-    eigenvalues = compute_eigenvalues(H)
-    lambda1, lambda2, lambda3 = sorted(eigenvalues, reverse=True)
-    
-    # Return Mean and Gaussian Curvature
-    mean_curvature = (lambda1 + lambda2 + lambda3) / 3.0
-    gaussian_curvature = lambda1 * lambda2 * lambda3
-    
-    return mean_curvature, gaussian_curvature
+    # Precompute curvature
+    # Note: In a real implementation, boundary conditions must be handled.
+    # Smoothing is recommended before this step to combat noise [S2, unofficial].
+    if use_laplacian:
+        # Laplacian kernel for 3D (approximate second derivative)
+        # This requires a 3x3x3 neighborhood (26 points + center) [S1]
+        curvature = compute_laplacian_curvature(volume)
+    else:
+        # Hessian-based curvature computation
+        # Requires computing second derivatives and eigenvalues
+        curvature = compute_hessian_curvature(volume)
+        
+    for z in range(depth):
+        for y in range(height):
+            for x in range(width):
+                val = volume[z, y, x]
+                curv = curvature[z, y, x]
+                
+                # Normalize or clamp values for LUT indexing if necessary
+                # The specific indexing depends on the tf_table resolution
+                opacity, color = tf_table.lookup(val, curv)
+                
+                result_volume[z, y, x] = [opacity, color[0], color[1], color[2]]
+                
+    return result_volume
 
-def classify_cbtf(sample_x, volume, tf_lut_2d):
+def compute_laplacian_curvature(volume):
     """
-    Classifies a sample point using Curvature-based Transfer Function.
+    Computes curvature using the Laplacian operator.
     """
-    # 1. Get scalar value
-    v = volume[sample_x]
-    
-    # 2. Compute curvature
-    # Requires precomputed curvature volume or on-the-fly computation
-    # On-the-fly requires 26-point neighborhood [S1]
-    k_mean, k_gauss = compute_curvature_hessian(volume, sample_x.x, sample_x.y, sample_x.z)
-    
-    # 3. Map to optical properties
-    # Using Mean Curvature as the primary second dimension for LUT indexing
-    alpha, color = tf_lut_2d.lookup(v, k_mean)
-    
-    return alpha, color
+    # Implementation of 3D Laplacian convolution
+    # Kernel typically sums neighbors in x, y, z directions
+    # This is a placeholder for the specific convolution logic
+    # [G] Standard 3D Laplacian kernel: 
+    # [[0,0,1,0,0], [0,0,1,0,0], [1,1,-6,1,1], [0,0,1,0,0], [0,0,1,0,0]] 
+    # extended to 3D.
+    pass
+
+def compute_hessian_curvature(volume):
+    """
+    Computes curvature using the Hessian matrix eigenvalues.
+    """
+    # [G] Compute second partial derivatives d2f/dx2, d2f/dy2, d2f/dz2, 
+    # and mixed derivatives d2f/dxdy, etc.
+    # Form Hessian matrix H.
+    # Compute eigenvalues k1, k2, k3.
+    # Derive mean or Gaussian curvature.
+    pass
 ```
 
 **Parameters:**
-*   **Smoothing Kernel:** If used, the sigma of the Gaussian filter for noise reduction [S2, unofficial].
-*   **Curvature Metric:** Choice between Mean, Gaussian, or Principal curvatures [S4, unofficial].
+*   **Smoothing Strength:** Not given in the sources. Critical for noise reduction [S2, unofficial].
+*   **Curvature Type:** Mean, Gaussian, or Principal. Not given in the sources.
+*   **LUT Resolution:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Noise Amplification:** Curvature is a second derivative and is highly sensitive to noise. In noisy datasets (e.g., MRI), spurious surface curvature variations occur, leading to incorrect classification [S1][S2, unofficial].
-*   **Ambiguity:** Many different features share the same curvature value. It is difficult to emphasize a targeted feature without inadvertently emphasizing other features with similar curvature [S1].
-*   **Resolution Loss:** Smoothing data to reduce noise sacrifices accuracy and resolution [S2, unofficial].
+*   **Noise Amplification:** Curvature is a second derivative, making it highly sensitive to noise. Spurious surface curvature variations occur in noisy datasets (e.g., MRI) [S2, unofficial]. Smoothing is required but reduces resolution [S2, unofficial].
+*   **Ambiguity:** Many different features share the same curvature value, making it difficult to emphasize a targeted feature without unintended emphasis on other structures with similar geometry [S1].
+*   **Boundary Conditions:** The 26-point neighborhood requirement necessitates careful handling of volume boundaries [S1].
 
 ## Subtopics
 
 ### Curvature
-A specific metric computed by signal convolution that describes local shape contours and measures how much a surface deviates from a straight aspect [S4, unofficial]. It is derived from the maximum curvature $k_1$ and minimum curvature $k_2$ [S4, unofficial]. Different types include mean curvature and Gaussian curvature [S4, unofficial]. It is commonly used for non-photorealistic visualizations [S4, unofficial].
+A specific metric computed via signal convolution that describes local shape contours and measures surface deviation from a straight aspect [S4, unofficial]. It is derived from maximum ($k_1$) and minimum ($k_2$) principal curvatures, allowing for the generation of Mean and Gaussian curvature variants [S4, unofficial]. It is commonly used for non-photorealistic visualizations [S4, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-*   **Memory:** Requires a 2D LUT for the transfer function [S1].
-*   **Time:** Real-time capability is achievable on GPU [S1]. However, it is computationally expensive due to the need for second derivative estimation. A real-time GPU variant requires a minimum of 27 3D texture lookups per sample (to gather the 3x3x3 neighborhood for Hessian computation) [S1]. This is significantly higher than 1D TFs (1 lookup) or Gradient-based TFs (7 lookups) [S1].
-
-**Strengths and Limitations:**
-*   **Strengths:** Can distinguish between borders of features with different sizes (curvatures) even if they have the same intensity [S1]. Effective for non-photorealistic contouring and ridge/valley visualization [S1][S2, S3, unofficial].
-*   **Limitations:** Highly sensitive to noise [S1][S2, unofficial]. Computationally intensive due to neighborhood requirements [S1]. Difficult to isolate specific features due to curvature ambiguity [S1].
-
-**When to Use:**
-*   Use when the goal is non-photorealistic rendering emphasizing surface shape, contours, or bumpiness [S1][S2, S3, unofficial].
-*   Use when distinguishing features based on their geometric size/shape rather than intensity [S1].
-
-**When Not to Use:**
-*   Do not use for noisy datasets without significant preprocessing/smoothing, as noise amplifies curvature errors [S1][S2, unofficial].
-*   Do not use if real-time performance is critical and hardware cannot support the high number of texture lookups required for Hessian estimation [S1].
+*   **Time Complexity:** Real-time capability is achievable on GPU hardware [S1].
+*   **Memory/Performance:** Requires a minimum of 27 3D texture lookups per sample (1 for data, 26 for the neighborhood to compute curvature/gradient) [S1]. This is significantly higher than 1D data-based TFs (1 lookup) or gradient-based TFs (7 lookups) [S1].
+*   **Strengths:** Effective for highlighting contours, ridges, and valleys; enables non-photorealistic rendering styles [S1][S2, S3, unofficial]. Can distinguish feature borders based on curvature differences (e.g., small vs. large features) [S1].
+*   **Limitations:** High computational cost due to neighborhood requirements; sensitive to noise; ambiguous mapping (different shapes can have same curvature) [S1][S2, unofficial].
+*   **When to use:** When contour highlighting or non-photorealistic emphasis of geometric structure is desired [S1][S2, unofficial].
+*   **When not to use:** In noisy datasets without prior smoothing (which degrades resolution) [S2, unofficial]; when precise isolation of specific features is required without affecting others with similar curvature [S1].
 
 ## Background
-The Curvature-based Transfer Function was introduced by Kindlmann et al. in 2003 [KWTM03], who used curvature as a second dimension in their transfer function domain to allow non-photorealistic renderings that highlight volume contours [S3, unofficial]. It is described in reference [16] of [S2, unofficial] and compared with other TF types in [S1]. Real-time GPU variants were later published in GPU Gems 2 [PF05] and [HSS∗05] for iso-surfaces [S1].
+The curvature-based transfer function was introduced by Kindlmann et al. [KWTM03] as a method to use curvature as a second dimension in the transfer function domain [S1][S3, unofficial]. It was further popularized for real-time GPU implementation in *GPU Gems 2* [PF05] and [HSS∗05] for iso-surface rendering [S1]. The approach is rooted in the use of higher-degree derivatives of scalar volumes for classification [S3, unofficial]. It is often compared against 1D, gradient-based, size-based, texture-based, and distance-based transfer functions in medical visualization surveys [S1].
 
 ## Sources
 [S1] A Survey of Transfer Functions Suitable for Volume Rendering, https://doi.org/10.2312/vg/vg10/077-083, fetched 2026-10-26

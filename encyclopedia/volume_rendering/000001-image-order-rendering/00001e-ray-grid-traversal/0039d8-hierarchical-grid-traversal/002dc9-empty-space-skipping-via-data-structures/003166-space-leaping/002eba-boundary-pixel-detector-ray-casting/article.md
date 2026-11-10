@@ -11,11 +11,11 @@ Boundary Pixel Detector Ray Casting is a safety mechanism within Space Leaping [
 *   **Output:** A set of detector rays originating from boundary pixels that populate the leap buffer [S2].
 
 **Data Structures:**
-*   **Leap Buffer:** A 2D array of size $W \times H$ corresponding to image pixels, used to track processed or leaped pixels [S2]. Not given in the sources.
+*   **Leap Buffer:** A 2D array corresponding to the image buffer pixels, used to track processed or leaped pixels [S2].
 
 **Steps:**
-1.  Identify boundary pixels of the image buffer [S2].
-2.  Shoot detector rays from all identified boundary pixels to populate the leap buffer [S2].
+1. Identify boundary pixels of the image buffer [S2].
+2. Shoot detector rays from all identified boundary pixels to populate the leap buffer [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -23,7 +23,6 @@ Boundary Pixel Detector Ray Casting is a safety mechanism within Space Leaping [
 ```python
 def shoot_boundary_detector_rays(W, H, leap_buffer):
     """Shoots detector rays from all image boundary pixels to populate the leap buffer."""
-    # Step 1: Identify boundary pixels
     boundary_pixels = []
     for x in range(W):
         boundary_pixels.append((x, 0))
@@ -31,38 +30,36 @@ def shoot_boundary_detector_rays(W, H, leap_buffer):
     for y in range(1, H - 1):
         boundary_pixels.append((0, y))
         boundary_pixels.append((W - 1, y))
-
-    # Step 2: Shoot detector rays and populate leap buffer
     for x, y in boundary_pixels:
         # [G] Standard ray generation maps pixel (x, y) to a view ray.
         # [G] The detector ray is shot without space-leaping skips.
         # [G] Results are recorded in the leap buffer to mark the pixel as processed.
-        leap_buffer[x][y] = 1  # Mark as processed/detector pixel
+        leap_buffer[x][y] = 1
     return leap_buffer
 ```
 
 **Parameters:**
 *   **Boundary Definition:** Strictly the outermost rows and columns of the image buffer [S2].
-*   **Leap Buffer Update:** The specific flag or value written to the leap buffer is not detailed in the sources.
+*   **Leap Buffer Update:** The specific flag or value written to the leap buffer is not given in the sources.
 
 **Edge Cases and Pitfalls:**
 *   **Missing Boundary Objects:** If detector rays are not shot from boundary pixels, a cell group might be leaped over and missed if the detector rays around its projection intersect another cell group further away [S1].
-*   **First Sample Rule:** The general space leaping technique requires that the first sample of a space leap ray be in an empty cell to avoid missing non-transparent sample points [S1, S2]. Boundary detector rays must adhere to this to ensure correctness [G].
+*   **First Sample Rule:** The general space leaping technique requires that the first sample of a space leap ray be in an empty cell to avoid missing non-transparent sample points [S1, S2]. Boundary detector rays must adhere to this rule to ensure correctness [S1, S2].
 
 ## Subtopics
 
 ### Backtracking Space Leap Rays
-*   **What it is:** A rule applied to space leap rays to ensure they do not leap beyond an object boundary inside a cell group [G].
-*   **Distinction:** It focuses on intra-cell-group accuracy rather than inter-cell-group skipping [G].
-*   **When to choose:** When ensuring that no non-transparent sample points are missed within a single cell group during the leap process [G].
+*   **What it is:** A rule applied to space leap rays to ensure they do not leap beyond an object boundary inside a cell group.
+*   **Distinction:** It focuses on intra-cell-group accuracy rather than inter-cell-group skipping.
+*   **When to choose:** When ensuring that no non-transparent sample points are missed within a single cell group during the leap process.
 *   **Link:** [Backtracking Space Leap Rays](5863-backtracking-space-leap-rays.md)
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Not given in the sources.
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
+*   Time complexity is not given in the sources [S1, S2].
+*   Memory complexity is not given in the sources [S1, S2].
+*   Strengths are not given in the sources [S1, S2].
+*   Limitations are not given in the sources [S1, S2].
+*   When to use is not given in the sources [S1, S2].
 
 ## Background
 *   **Origin:** Introduced in "Light Weight Space Leaping using Ray Coherence" by Lakare et al. (2004) [S1, S2].

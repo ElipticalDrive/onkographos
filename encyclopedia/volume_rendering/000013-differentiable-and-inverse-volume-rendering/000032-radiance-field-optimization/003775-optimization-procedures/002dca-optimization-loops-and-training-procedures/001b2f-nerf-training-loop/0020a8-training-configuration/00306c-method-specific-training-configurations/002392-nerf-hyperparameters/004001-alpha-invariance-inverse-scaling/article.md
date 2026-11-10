@@ -1,0 +1,98 @@
+# Alpha Invariance / Inverse Scaling
+
+Also called: Alpha invariance handling, Inverse scaling between distance and volume density
+
+## Overview
+Alpha invariance is a property in neural volume rendering where the opacity (alpha value) of a discretized segment remains constant despite changes in the scene's physical scale [S1]. It solves the problem that the magnitude of the optimized volume density $\sigma(\mathbf{x})$ is intrinsically tied to the domain of integration (distance along the ray), meaning that scaling the scene requires inversely scaling the density to preserve the visual appearance of local geometry [S1]. Unlike Multi-Plane Images (MPIs) which fix discretization in advance, NeRF's continuous density parameterization allows flexible resampling but requires this specific handling to maintain robust view synthesis across arbitrary scene scales [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Scene scale factor $k$ (where $k > 0$), original volume density field $\sigma(\mathbf{x})$, and ray segment distances $d_i$.
+*   **Output:** Adjusted volume density $\sigma'(\mathbf{x})$ such that the alpha values $\alpha_i$ remain invariant under scaling.
+
+**Data Structures:**
+*   **Volume Density Field:** A continuous function $\sigma: \mathbb{R}^3 \to \mathbb{R}_{\ge 0}$, typically parameterized by a neural network.
+*   **Ray Segments:** A set of intervals along a ray, each defined by a start point, end point, and length $d_i$.
+
+**Formulas:**
+The transmittance $T$ over a segment of length $d$ with constant density $\sigma$ is defined as [S1]:
+$$ T = e^{-\sigma d} $$
+The alpha value (opacity) for that segment is:
+$$ \alpha = 1 - T = 1 - e^{-\sigma d} $$
+The overall survival probability (transmittance) for a ray cut into discrete intervals $i=1 \dots N$ is [S1]:
+$$ T_{\text{total}} = \prod_{i=1}^{N} (1 - \alpha_i) = \prod_{i=1}^{N} e^{-\sigma_i d_i} = e^{-\sum_{i=1}^{N} \sigma_i d_i} = \exp\left(-\int_0^L \sigma(s) ds\right) $$
+To maintain alpha invariance when changing the scene scale by a factor $k$, the volume density must be adjusted such that the product $\sigma d$ remains constant for corresponding segments [S1]. If the physical distances are scaled by $k$ (i.e., $d' = k d$), the density must be scaled by $1/k$ (i.e., $\sigma' = \sigma / k$) [S1].
+
+**Steps:**
+1.  Determine the scene scale factor $k$ relative to the reference scale used during training or initialization.
+2.  For each ray segment $i$ with original length $d_i$ and original density $\sigma_i$:
+    a. Calculate the new length $d'_i = k \cdot d_i$.
+    b. Calculate the new density $\sigma'_i = \sigma_i / k$.
+3.  Verify that $\sigma'_i d'_i = \sigma_i d_i$, ensuring $\alpha'_i = \alpha_i$.
+4.  Use $\sigma'(\mathbf{x})$ for rendering or further optimization.
+
+**Parameters:**
+*   **Scale factor $k$:** Not given in the sources.
+*   **Interval length heuristic:** In some implementations (e.g., DVGO), interval lengths are hardcoded to 0.5 or 1 based on voxel grid resolution ratio rather than true physical distances [S1].
+
+**Pitfalls and Edge Cases:**
+*   **Stochastic Sampling:** In methods like DVGO, the sampling procedure is stochastic with unique sample counts per ray, making the concept of a deterministic "ray length" meaningless as there are no fixed near/far planes [S1].
+*   **Heuristic Distortion:** Disabling the heuristic of fixing interval lengths to 0.5 or 1 and using true physical distances can significantly worsen rendering quality in certain architectures [S1].
+*   **Insufficient Rectification:** For some methods like Plenoxels, merely rectifying $\sigma$ with an exponential function is insufficient to maintain convergence at various scene scales; a high transmittance offset is also needed even at $k=1$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_alpha_invariance(density_field, scale_factor_k, ray_segments):
+    """
+    Adjusts volume density to maintain alpha invariance under scene scaling.
+    
+    Args:
+        density_field: Function or array representing sigma(x).
+        scale_factor_k: Float, the factor by which scene dimensions are scaled.
+        ray_segments: List of tuples (start_pos, end_pos, original_sigma_value).
+                      Note: In practice, sigma is queried from the field.
+    
+    Returns:
+        Adjusted density field or values.
+    """
+    # The core principle is sigma' = sigma / k
+    # This ensures sigma' * d' = (sigma / k) * (k * d) = sigma * d
+    # Thus alpha' = 1 - exp(-sigma' * d') = 1 - exp(-sigma * d) = alpha
+    
+    adjusted_density_values = []
+    for start, end, original_sigma in ray_segments:
+        # Calculate physical distance
+        distance = vector_norm(end - start)
+        
+        # Apply inverse scaling
+        adjusted_sigma = original_sigma / scale_factor_k
+        
+        adjusted_density_values.append(adjusted_sigma)
+        
+    return adjusted_density_values
+```
+
+## Subtopics
+
+### NeRF vs MPI Discretization
+NeRF optimizes continuous volumetric densities $\sigma(\mathbf{x})$, allowing easy adjustment of discretization and resampling along a ray, whereas MPIs fix discretization in advance [S1]. This flexibility ties the magnitude of $\sigma(\mathbf{x})$ to the domain of integration, necessitating alpha invariance handling [S1]. [NeRF Hyperparameters](3065-nerf-hyperparameters.md)
+
+### Volume-Rendered SDF
+Methods like NeuS and VolSDF transform signed distance functions into volumetric densities for alpha compositing, which also relies on the relationship between distance and density [S1]. [NeRF Hyperparameters](3065-nerf-hyperparameters.md)
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** The technique is used in NeRF variants and related works to handle arbitrary scene scaling and robust view synthesis [S1]. In DVGO, disabling the interval length heuristic in favor of true physical distances worsens rendering quality [S1]. For Plenoxels, additional offsets are required for convergence at various scales [S1].
+*   **Strengths:** Maintains visual consistency of local geometry (opacity) regardless of scene scale.
+*   **Limitations:** Requires careful handling of sampling heuristics; simple density scaling may not be sufficient for all architectures (e.g., Plenoxels).
+*   **When to use:** When training or rendering NeRF variants on scenes with arbitrary or varying physical scales.
+*   **When not to use:** When the scene scale is fixed and known, or when using discrete representations like MPIs that do not optimize continuous density.
+
+## Background
+The concept of alpha invariance is implied in steps involving the computation of up-to-scale depth maps proportional to $-\log(1 - \alpha)$ [S1]. The explicit emphasis on alpha invariance in the context of NeRF's continuous density parameterization versus MPIs' fixed discretization is detailed in recent works on neural radiance fields [S1]. The notion that the opacity is an invariant property of local geometry, despite changes in $\sigma(\mathbf{x})$ and distance, is a key insight for inverse rendering tasks [S1].
+
+## Sources
+[S1] Alpha Invariance: On Inverse Scaling Between Distance and Volume Density in Neural Radiance Fields, https://www.youtube.com/watch?v=YQhBEXC464w, fetched 2026-10-31

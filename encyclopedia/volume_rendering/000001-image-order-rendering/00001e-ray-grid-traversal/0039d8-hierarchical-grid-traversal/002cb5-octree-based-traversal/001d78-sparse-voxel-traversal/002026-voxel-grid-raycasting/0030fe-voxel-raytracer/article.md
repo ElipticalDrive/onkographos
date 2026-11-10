@@ -1,6 +1,5 @@
 # Voxel Raytracer
 
-Also called: Voxel Ray Marching
 
 ## Overview
 A voxel raytracer renders 3D voxel models by marching rays through a 3D grid of voxels, supporting multiple bounces for diffuse reflection and a ground plane [S1, unofficial]. It differs from standard voxel grid raycasting by implementing a full path-tracing loop with diffuse scattering and anti-aliasing, rather than simple direct illumination or single-pass raymarching [S1, unofficial].
@@ -39,47 +38,27 @@ A voxel raytracer renders 3D voxel models by marching rays through a 3D grid of 
 
 ### Algorithm Steps
 
-1.  **Random Number Generation**: Initialize a PCG state per pixel using `iResolution.x * gl_FragCoord.y + gl_FragCoord.x`. The `stepRandom` function updates state: `rngState * 747796405 + 1`. The `random` function permutes the state: `word = ((rngState >> ((rngState >> 28) + 4)) ^ rngState) * 277803737; word = (word >> 22) ^ word;` and returns `float(word) / 4294967295.0f` [S1, unofficial].
-
-2.  **Voxel Presence Check**: For a given voxel coordinate `voxOrigin`, check bounds `0 <= x < modelSize.x`, `0 <= y < modelSize.y`, `0 <= z < modelSize.z`. If out of bounds, return false. Otherwise, access `data[voxOrigin.x + voxOrigin.y * modelSize.x + voxOrigin.z * modelSize.x * modelSize.y]`. Extract albedo from `.xyz`. Return true if alpha `.a > 0` [S1, unofficial].
-
+1.  **Random Number Generation**: Initialize a PCG state per pixel using `iResolution.x * gl_FragCoord.y + gl_FragCoord.x` [S1, unofficial]. The `stepRandom` function updates state: `rngState * 747796405 + 1` [S1, unofficial]. The `random` function permutes the state: `word = ((rngState >> ((rngState >> 28) + 4)) ^ rngState) * 277803737; word = (word >> 22) ^ word;` and returns `float(word) / 4294967295.0f` [S1, unofficial].
+2.  **Voxel Presence Check**: For a given voxel coordinate `voxOrigin`, check bounds `0 <= x < modelSize.x`, `0 <= y < modelSize.y`, `0 <= z < modelSize.z` [S1, unofficial]. If out of bounds, return false [S1, unofficial]. Otherwise, access `data[voxOrigin.x + voxOrigin.y * modelSize.x + voxOrigin.z * modelSize.x * modelSize.y]` [S1, unofficial]. Extract albedo from `.xyz` [S1, unofficial]. Return true if alpha `.a > 0` [S1, unofficial].
 3.  **Voxel Marching (DDA)**:
-    1.  Initialize `voxOrigin = ivec3(floor(ray.origin))`.
-    2.  Calculate step direction: `posStepDir = ivec3(step(0.0, ray.direction))`, `stepDir = ivec3(posStepDir * 2 - 1)`.
-    3.  Calculate `justOut` coordinates for boundary exit: `posStepDir * (models[0].size - 1) + stepDir`.
-    4.  Calculate initial `tMax`: `(posStepDir - (ray.origin - voxOrigin)) / ray.direction`.
-    5.  Calculate `tDelta`: `stepDir / ray.direction`.
+    1.  Initialize `voxOrigin = ivec3(floor(ray.origin))` [S1, unofficial].
+    2.  Calculate step direction: `posStepDir = ivec3(step(0.0, ray.direction))`, `stepDir = ivec3(posStepDir * 2 - 1)` [S1, unofficial].
+    3.  Calculate `justOut` coordinates for boundary exit: `posStepDir * (models[0].size - 1) + stepDir` [S1, unofficial].
+    4.  Calculate initial `tMax`: `(posStepDir - (ray.origin - voxOrigin)) / ray.direction` [S1, unofficial].
+    5.  Calculate `tDelta`: `stepDir / ray.direction` [S1, unofficial].
     6.  Loop up to 1000 times:
-        a. Check `voxelPresent(voxOrigin)`. If present, set `rec.normal = lastOrigin - voxOrigin`, `rec.t = tMin`, `rec.p = ray.origin + tMin * ray.direction`, return true.
-        b. Update `lastOrigin = voxOrigin`.
-        c. Compare `tMax` components to determine which axis to step.
-        d. Increment `voxOrigin` on that axis.
-        e. If `voxOrigin` equals `justOut` on that axis, break loop.
-        f. Update `tMin` to the `tMax` of the stepped axis.
+        a. Check `voxelPresent(voxOrigin)` [S1, unofficial]. If present, set `rec.normal = lastOrigin - voxOrigin`, `rec.t = tMin`, `rec.p = ray.origin + tMin * ray.direction`, return true [S1, unofficial].
+        b. Update `lastOrigin = voxOrigin` [S1, unofficial].
+        c. Compare `tMax` components to determine which axis to step [S1, unofficial].
+        d. Increment `voxOrigin` on that axis [S1, unofficial].
+        e. If `voxOrigin` equals `justOut` on that axis, break loop [S1, unofficial].
+        f. Update `tMin` to the `tMax` of the stepped axis [S1, unofficial].
         g. Update `tMax` for that axis by adding `tDelta` [S1, unofficial].
-
-4.  **Ground Hit**: Calculate intersection with plane y=0: `t = (0 - ray.origin.y) / ray.direction.y`. If `t < 0` or `t > 50`, return false. Set normal: `vec3(0.0, float(ray.direction.y < 0) * 2.0 - 1.0, 0.0)`. Set albedo to `(0.8, 0.8, 0.0)`. Set `p = ray.origin + ray.direction * t`. Return true [S1, unofficial].
-
-5.  **World Hit**: Call `groundHit` and `voxelMarch`. If both hit, return the one with smaller `t`. If only one hits, return that one. If neither, return false [S1, unofficial].
-
-6.  **Ray Generation**: Camera center is at `(models[0].size.x / 2, models[0].size.y / 2, models[0].size.z + 12)`. Viewport height is 2.0. Viewport width is `2.0 * image_width / image_height`. Viewport lower left is `center - vec3(0, 0, 1.0) - viewport_u / 2 - viewport_v / 2`. Pixel 0,0 location is `viewport_lower_left + 0.5 * (pixel_delta_u + pixel_delta_v)`. Ray direction is normalized vector from center to `pixel00_loc + (gl_FragCoord.x - 0.5 + random()) * pixel_delta_u + (gl_FragCoord.y - 0.5 + random()) * pixel_delta_v` [S1, unofficial].
-
-7.  **Color Calculation (Path Tracing)**: Initialize `out_color = (1,1,1)`. Loop `d` from 0 to `MAX_DEPTH-1`.
-    1.  Generate ray using `get_ray()`.
-    2.  Call `worldHit(ray, rec)`.
-    3.  If hit:
-        a. Calculate scatter direction: `rec.normal + random_unit_vector()`.
-        b. Handle near-zero scatter direction: if `abs(scatter_dir.x/y/z) < 1e-8`, set `scatter_dir = rec.normal`.
-        c. Update ray origin: `rec.p + scatter_dir * 0.001`.
-        d. Update ray direction: `scatter_dir`.
-        e. Multiply `out_color` by `rec.albedo`.
-    4.  If no hit:
-        a. Calculate sky gradient factor `a = 0.5 * (ray.direction.y + 1.0)`.
-        b. Mix white `(1,1,1)` and sky blue `(0.5, 0.7, 1.0)` using `a`.
-        c. Multiply `out_color` by result.
-        d. Break loop [S1, unofficial].
-
-8.  **Final Output**: Accumulate `SAMPLES_PER_PIXEL` samples. Average by dividing by `SAMPLES_PER_PIXEL`. Apply gamma correction by taking the square root. Output as `vec4(sqrt(out_color / SAMPLES_PER_PIXEL), 1.0)` [S1, unofficial].
+4.  **Ground Hit**: Calculate intersection with plane y=0: `t = (0 - ray.origin.y) / ray.direction.y` [S1, unofficial]. If `t < 0` or `t > 50`, return false [S1, unofficial]. Set normal: `vec3(0.0, float(ray.direction.y < 0) * 2.0 - 1.0, 0.0)` [S1, unofficial]. Set albedo to `(0.8, 0.8, 0.0)` [S1, unofficial]. Set `p = ray.origin + ray.direction * t` [S1, unofficial]. Return true [S1, unofficial].
+5.  **World Hit**: Call `groundHit` and `voxelMarch` [S1, unofficial]. If both hit, return the one with smaller `t` [S1, unofficial]. If only one hits, return that one [S1, unofficial]. If neither, return false [S1, unofficial].
+6.  **Ray Generation**: Camera center is at `(models[0].size.x / 2, models[0].size.y / 2, models[0].size.z + 12)` [S1, unofficial]. Viewport height is 2.0 [S1, unofficial]. Viewport width is `2.0 * image_width / image_height` [S1, unofficial]. Viewport lower left is `center - vec3(0, 0, 1.0) - viewport_u / 2 - viewport_v / 2` [S1, unofficial]. Pixel 0,0 location is `viewport_lower_left + 0.5 * (pixel_delta_u + pixel_delta_v)` [S1, unofficial]. Ray direction is normalized vector from center to `pixel00_loc + (gl_FragCoord.x - 0.5 + random()) * pixel_delta_u + (gl_FragCoord.y - 0.5 + random()) * pixel_delta_v` [S1, unofficial].
+7.  **Color Calculation (Path Tracing)**: Initialize `out_color = (1,1,1)` [S1, unofficial]. Loop `d` from 0 to `MAX_DEPTH-1` [S1, unofficial]. Generate ray using `get_ray()` [S1, unofficial]. Call `worldHit(ray, rec)` [S1, unofficial]. If hit: calculate scatter direction: `rec.normal + random_unit_vector()` [S1, unofficial]. Handle near-zero scatter direction: if `abs(scatter_dir.x/y/z) < 1e-8`, set `scatter_dir = rec.normal` [S1, unofficial]. Update ray origin: `rec.p + scatter_dir * 0.001` [S1, unofficial]. Update ray direction: `scatter_dir` [S1, unofficial]. Multiply `out_color` by `rec.albedo` [S1, unofficial]. If no hit: calculate sky gradient factor `a = 0.5 * (ray.direction.y + 1.0)` [S1, unofficial]. Mix white `(1,1,1)` and sky blue `(0.5, 0.7, 1.0)` using `a` [S1, unofficial]. Multiply `out_color` by result [S1, unofficial]. Break loop [S1, unofficial].
+8.  **Final Output**: Accumulate `SAMPLES_PER_PIXEL` samples [S1, unofficial]. Average by dividing by `SAMPLES_PER_PIXEL` [S1, unofficial]. Apply gamma correction by taking the square root [S1, unofficial]. Output as `vec4(sqrt(out_color / SAMPLES_PER_PIXEL), 1.0)` [S1, unofficial].
 
 ### Pseudocode
 
@@ -87,7 +66,6 @@ A voxel raytracer renders 3D voxel models by marching rays through a 3D grid of 
 
 ```python
 import math
-import random
 
 # Constants
 SAMPLES_PER_PIXEL = 256
@@ -132,11 +110,9 @@ def voxel_present(data, model_size, vox_origin):
     if x < 0 or y < 0 or z < 0 or x >= model_size[0] or y >= model_size[1] or z >= model_size[2]:
         return False, None
     
-    # Index calculation: (x + y * width + z * width * height) * 4
     width, height, length = model_size
     index = (x + y * width + z * width * height) * 4
     
-    # Assuming data is a flat list of floats, 4 per voxel
     r = data[index]
     g = data[index + 1]
     b = data[index + 2]
@@ -149,21 +125,17 @@ def voxel_present(data, model_size, vox_origin):
 def voxel_march(ray, data, model_size):
     vox_origin = (int(math.floor(ray.origin[0])), int(math.floor(ray.origin[1])), int(math.floor(ray.origin[2])))
     
-    # Step direction
     pos_step_dir = (1 if ray.direction[0] >= 0 else 0, 1 if ray.direction[1] >= 0 else 0, 1 if ray.direction[2] >= 0 else 0)
     step_dir = (pos_step_dir[0] * 2 - 1, pos_step_dir[1] * 2 - 1, pos_step_dir[2] * 2 - 1)
     
-    # Just out coordinates
     just_out = (pos_step_dir[0] * (model_size[0] - 1) + step_dir[0],
                 pos_step_dir[1] * (model_size[1] - 1) + step_dir[1],
                 pos_step_dir[2] * (model_size[2] - 1) + step_dir[2])
     
-    # Initial tMax
     t_max = ((pos_step_dir[0] - (ray.origin[0] - vox_origin[0])) / ray.direction[0],
              (pos_step_dir[1] - (ray.origin[1] - vox_origin[1])) / ray.direction[1],
              (pos_step_dir[2] - (ray.origin[2] - vox_origin[2])) / ray.direction[2])
     
-    # tDelta
     t_delta = (step_dir[0] / ray.direction[0],
                step_dir[1] / ray.direction[1],
                step_dir[2] / ray.direction[2])
@@ -185,7 +157,6 @@ def voxel_march(ray, data, model_size):
         
         last_origin = vox_origin
         
-        # Determine axis to step
         if t_max[0] < t_max[1]:
             if t_max[0] < t_max[2]:
                 vox_origin = (vox_origin[0] + step_dir[0], vox_origin[1], vox_origin[2])
@@ -224,11 +195,6 @@ def ground_hit(ray):
         return None
     
     rec = HitRecord()
-    rec.normal = (0.0, 1.0 if ray.direction[1] < 0 else -1.0, 0.0) # Note: source uses float(ray.direction.y < 0) * 2.0 - 1.0 which is 1 if <0 else -1
-    # Correction: source says float(ray.direction.y < 0) * 2.0 - 1.0. 
-    # If ray.direction.y < 0, float is 1.0, 1.0*2-1 = 1.0.
-    # If ray.direction.y >= 0, float is 0.0, 0.0*2-1 = -1.0.
-    # So normal.y is 1.0 if coming from below, -1.0 if coming from above.
     rec.normal = (0.0, 1.0 if ray.direction[1] < 0 else -1.0, 0.0)
     rec.t = t
     rec.albedo = (0.8, 0.8, 0.0)
@@ -264,44 +230,7 @@ def random_unit_vector(rng):
     length = math.sqrt(p[0]**2 + p[1]**2 + p[2]**2)
     return (p[0]/length, p[1]/length, p[2]/length)
 
-def get_ray(rng, model_size, resolution):
-    image_width, image_height = resolution
-    aspect_ratio = image_width / image_height
-    
-    center = (model_size[0] / 2, model_size[1] / 2, model_size[2] + 12)
-    
-    viewport_height = 2.0
-    viewport_width = viewport_height * image_width / image_height
-    
-    viewport_u = (viewport_width, 0.0, 0.0)
-    viewport_v = (0.0, viewport_height, 0.0)
-    
-    pixel_delta_u = (viewport_u[0] / image_width, viewport_u[1] / image_width, viewport_u[2] / image_width)
-    pixel_delta_v = (viewport_v[0] / image_height, viewport_v[1] / image_height, viewport_v[2] / image_height)
-    
-    viewport_lower_left = (center[0] - 0.0 - viewport_u[0]/2 - viewport_v[0]/2,
-                           center[1] - 0.0 - viewport_u[1]/2 - viewport_v[1]/2,
-                           center[2] - 1.0 - viewport_u[2]/2 - viewport_v[2]/2)
-    
-    pixel00_loc = (viewport_lower_left[0] + 0.5 * (pixel_delta_u[0] + pixel_delta_v[0]),
-                   viewport_lower_left[1] + 0.5 * (pixel_delta_u[1] + pixel_delta_v[1]),
-                   viewport_lower_left[2] + 0.5 * (pixel_delta_u[2] + pixel_delta_v[2]))
-    
-    # Note: gl_FragCoord is 0-indexed in the source logic for random offset
-    # pixel00_loc + (gl_FragCoord.x - 0.5 + random()) * pixel_delta_u ...
-    # This pseudocode assumes we are generating a ray for a specific pixel (fx, fy)
-    # The source uses gl_FragCoord.x and gl_FragCoord.y directly.
-    # Here we will assume fx, fy are passed in or derived from the loop context.
-    # For the sake of this function, let's assume it's called per pixel.
-    # However, the source code shows get_ray() being called inside the sample loop.
-    # The random() call inside get_ray() consumes the RNG state.
-    
-    # To make this self-contained, we need fx, fy.
-    # Let's assume the caller passes them or we are inside a loop.
-    # Since the prompt asks for a complete method, I will add fx, fy as args.
-    pass # Placeholder for logic below which depends on fx, fy
-
-def get_ray_with_coords(rng, fx, fy, model_size, resolution):
+def get_ray(rng, fx, fy, model_size, resolution):
     image_width, image_height = resolution
     aspect_ratio = image_width / image_height
     
@@ -344,7 +273,7 @@ def get_color(fx, fy, rng, data, model_size, resolution):
     out_color = (1.0, 1.0, 1.0)
     
     for _ in range(SAMPLES_PER_PIXEL):
-        ray = get_ray_with_coords(rng, fx, fy, model_size, resolution)
+        ray = get_ray(rng, fx, fy, model_size, resolution)
         
         for d in range(MAX_DEPTH):
             rec = world_hit(ray, data, model_size)
@@ -353,7 +282,6 @@ def get_color(fx, fy, rng, data, model_size, resolution):
                                rec.normal[1] + random_unit_vector(rng)[1],
                                rec.normal[2] + random_unit_vector(rng)[2])
                 
-                # Handle near-zero scatter direction
                 if abs(scatter_dir[0]) < 1e-8 and abs(scatter_dir[1]) < 1e-8 and abs(scatter_dir[2]) < 1e-8:
                     scatter_dir = rec.normal
                 
@@ -377,21 +305,20 @@ def get_color(fx, fy, rng, data, model_size, resolution):
     return (math.sqrt(out_color[0] / SAMPLES_PER_PIXEL),
             math.sqrt(out_color[1] / SAMPLES_PER_PIXEL),
             math.sqrt(out_color[2] / SAMPLES_PER_PIXEL))
-
 ```
 
 ### Edge Cases and Pitfalls
-- **Precision**: The DDA uses floating-point arithmetic for `tMax` and `tDelta`. Small errors can accumulate, but the loop limit of 1000 iterations prevents infinite loops [S1, unofficial].
+- **Precision**: The DDA uses floating-point arithmetic for `tMax` and `tDelta` [S1, unofficial]. The loop limit of 1000 iterations prevents infinite loops [S1, unofficial].
 - **Boundaries**: The `voxelPresent` function explicitly checks bounds to avoid out-of-bounds memory access [S1, unofficial].
-- **Degenerate Rays**: If `ray.direction.y` is 0 in `groundHit`, division by zero occurs. The source does not explicitly handle this, but `t` would be infinity or NaN, likely failing the `t < 0` check if handled correctly, or causing undefined behavior [S1, unofficial].
-- **Scatter Direction Zero**: If the random vector cancels the normal exactly, the scatter direction becomes zero. The code checks for this and resets to the normal [S1, unofficial].
+- **Degenerate Rays**: If `ray.direction.y` is 0 in `groundHit`, division by zero occurs [S1, unofficial]. The source does not explicitly handle this, but `t` would be infinity or NaN, likely failing the `t < 0` check if handled correctly, or causing undefined behavior [S1, unofficial].
+- **Scatter Direction Zero**: If the random vector cancels the normal exactly, the scatter direction becomes zero [S1, unofficial]. The code checks for this and resets to the normal [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(N \cdot S \cdot D)$, where $N$ is the number of pixels, $S$ is samples per pixel, and $D$ is max depth. The voxel marching step is $O(V)$ where $V$ is the number of voxels traversed, typically proportional to the ray length in the grid.
+- **Time Complexity**: $O(N \cdot S \cdot D \cdot V)$, where $N$ is the number of pixels, $S$ is samples per pixel, $D$ is max depth, and $V$ is the number of voxels traversed per ray [S1, unofficial].
 - **Memory Complexity**: $O(W \cdot H \cdot L)$ for the voxel grid storage, where $W, H, L$ are the dimensions of the voxel model [S1, unofficial].
-- **Measured Performance**: Rendered on a GTX 1050 TI Mobile with 256 samples per pixel and 50 max bounces. Times: 82.95 ms, 74.47 ms, 516.46 ms for different scenes [S1, unofficial].
+- **Measured Performance**: Rendered on a GTX 1050 TI Mobile with 256 samples per pixel and 50 max bounces [S1, unofficial]. Times: 82.95 ms, 74.47 ms, 516.46 ms for different scenes [S1, unofficial].
 - **Strengths**: Simple implementation, supports diffuse reflections, anti-aliasing, and soft shadows (via multiple bounces) [S1, unofficial].
-- **Limitations**: No explicit acceleration structure (like an octree) is used for the voxel grid itself, relying on DDA which can be slow for large empty spaces. No support for specular materials or complex lighting [S1, unofficial].
+- **Limitations**: No explicit acceleration structure (like an octree) is used for the voxel grid itself, relying on DDA which can be slow for large empty spaces [S1, unofficial]. No support for specular materials or complex lighting [S1, unofficial].
 
 ## Background
 The method is based on an unofficial voxel raytracer implementation by ahmedkhalf [S1, unofficial]. It builds on standard ray tracing techniques, specifically DDA for voxel traversal [S1, unofficial], and path tracing for global illumination [S1, unofficial]. The random number generation uses a PCG algorithm commonly found in graphics programming [S1, unofficial].

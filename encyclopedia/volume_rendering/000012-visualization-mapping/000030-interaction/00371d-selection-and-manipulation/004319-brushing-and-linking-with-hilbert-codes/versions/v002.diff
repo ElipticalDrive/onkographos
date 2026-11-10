@@ -1,0 +1,176 @@
+--- v001.md
++++ v002.md
+@@ -4,108 +4,95 @@
+ 
+ ## Overview
+-This method enables interactive selection in volume rendering by mapping Regions of Interest (ROIs) identified in a 1D data view (such as Dynamic Volume Lines) to corresponding spatial cells in a 3D view. It solves the problem of efficiently linking disparate visualizations by using Hilbert space-filling codes as compact selection ranges, avoiding the transmission of large lists of cell indices. It is distinguished from sibling methods by representing selection boundaries as 1D Hilbert code intervals rather than 3D geometric primitives or explicit cell lists [S1][S2, unofficial].
++This method connects 1D visualization views (such as Dynamic Volume Lines) with 3D volume rendering by using Hilbert space-filling curve codes to define selection ranges. When a user selects a Region of Interest (ROI) in the 1D plot, the corresponding cells in the 3D view are highlighted. It differs from standard spatial selection by mapping the selection criterion to a 1D range of Hilbert codes rather than a 3D bounding box, allowing for compact representation of non-contiguous spatial regions [S1].
+ 
+ ## How it works
+ **Inputs:**
+-*   A set of selected ROIs from the 1D view, defined by their first and last Hilbert codes ($H_{start}, H_{end}$).
+-*   A 3D volume dataset (structured-regular or AMR).
+-*   A 3D rendering shader.
++- A set of ROIs defined in the 1D view, each specified by a start and end Hilbert code ($H_{start}, H_{end}$).
++- A 3D volume dataset (structured-regular or AMR).
++- A transfer function $T$ mapping scalar values to color and opacity.
+ 
+ **Outputs:**
+-*   A selection mask applied to the 3D view, highlighting cells whose Hilbert codes fall within the specified ranges.
++- Highlighted cells in the 3D view corresponding to the selected ROIs.
+ 
+ **Data Structures:**
+-*   **Selection Range:** A pair of integers $(H_{start}, H_{end})$ representing the inclusive range of Hilbert codes for the selected ROI [S1][S2, unofficial].
+-*   **Cell Hilbert Code:** An integer index representing the position of a cell in the Hilbert space-filling curve traversal [S1].
++- **Hilbert Code:** A 64-bit integer representing the position of a cell in the Hilbert curve ordering [S1].
++- **ROI Range:** A pair of integers $(H_{start}, H_{end})$ defining the selection interval [S1].
+ 
+ **Steps:**
+-1.  **User Selection:** The user selects a region in the 1D plot. The system identifies the first and last Hilbert codes of the cells comprising this ROI, denoted as $H_{start}$ and $H_{end}$ [S1][S2, unofficial].
+-2.  **Transmission:** These two values are sent to the 3D rendering context. The ROIs are represented as these Hilbert code ranges, not as lists of world-space coordinates [S1][S2, unofficial].
+-3.  **Shader Execution:** For each sample or cell processed in the 3D shader:
+-    a.  Determine the spatial position of the current cell center $C$.
+-    b.  Compute the Hilbert code $H(C)$ for this position.
+-    c.  Check if $H_{start} \le H(C) \le H_{end}$ [S1][S2, unofficial].
+-4.  **Highlighting:** If the condition in step 3c is true, the cell is marked as selected and highlighted (e.g., via opacity or color modification) [S1][S2, unofficial].
++1. **User Selection:** The user selects one or more ROIs in the 1D view. The system records the first and last Hilbert codes of each selected ROI [S1].
++2. **Shader Initialization:** The 3D rendering shader receives the list of ROI ranges $(H_{start}, H_{end})$ as uniform variables [S1].
++3. **Ray Casting:** For each pixel, a ray is cast through the volume. At each sample point $p$ along the ray:
++    a. **Coordinate to Hilbert Conversion:** The 3D coordinates of the sample point $p$ are transformed into its corresponding Hilbert code $H(p)$ [S1].
++    b. **Containment Test:** The shader checks if $H(p)$ falls within any of the active ROI ranges:
++       $$ \exists k : H_{start}^{(k)} \le H(p) \le H_{end}^{(k)} $$
++    c. **Value Lookup:** If contained, the scalar value at $p$ is retrieved and passed to the transfer function $T$ to determine color and opacity [S1].
++4. **Compositing:** Standard front-to-back or back-to-front compositing is performed using the resulting color and opacity values [S1].
+ 
+ **Formulas:**
+-*   **Selection Test:** A cell with Hilbert code $H$ is selected if:
+-    $$ H_{start} \le H \le H_{end} $$
+-    where $H$ is the Hilbert code of the cell center [S1][S2, unofficial].
++- **ROI Containment:** A sample at position $p$ is part of ROI $k$ if:
++  $$ H_{start}^{(k)} \le H(p) \le H_{end}^{(k)} $$
++  where $H(p)$ is the Hilbert code of the cell containing $p$ [S1].
++- **Alpha Approximation (for AMR):** For AMR data, the alpha value for a ROI is approximated by:
++  $$ V_\alpha = \max_{m \in M} \left( \max_{a \in [i, j]} A(m, a) - \min_{a \in [i, j]} A(m, a) \right) $$
++  where $A$ is the transfer function lookup, $[i, j]$ is the Hilbert code range, and $M$ is the set of fields [S1].
+ 
+ **Parameters:**
+-*   **Hilbert Order:** Determined by the resolution of the grid or the depth of the AMR hierarchy. Not given in the sources.
++- **Hilbert Order:** Determined by the resolution of the volume grid. Not given in the sources.
++- **Bit Width:** Typically 64-bit integers for Hilbert codes [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Structured-Regular Volumes:** Cell bounds can be derived implicitly from the Hilbert code because all cells have uniform size. No explicit location lookup is needed for size determination [S1][S2, unofficial].
+-*   **AMR Data:** The Hilbert code of the cell centroid is insufficient to determine the exact size or bounds of the ROI. The implementation must explicitly locate cells to know the ROI's exact size when checking if a sample falls inside an ROI [S1][S2, unofficial].
+-*   **Performance:** Transforming the cell center to Hilbert space in the shader incurs computational cost, but this is traded for the compactness of the selection representation [S1].
++- **Structured-Regular Volumes:** Cell bounds can be derived implicitly from the Hilbert code because cells are uniform in size [S1].
++- **AMR Data:** The Hilbert code of the cell centroid is insufficient to determine if a sample falls inside an ROI because cell sizes vary. The shader must explicitly locate cells to know the ROI's exact size when checking containment [S1].
++- **Precision:** Transforming 3D coordinates to Hilbert space requires precise mapping to avoid boundary errors [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def is_selected(cell_center, h_start, h_end, data_type):
+-    """
+-    Determines if a cell is within the selected Hilbert range.
++# Pseudocode for 3D Shader Ray Casting Step
++def ray_cast_pixel(ray_origin, ray_direction, roi_ranges, volume_data, transfer_function):
++    color = (0.0, 0.0, 0.0, 0.0)
++    alpha = 0.0
+     
+-    Args:
+-        cell_center: 3D coordinates of the cell center.
+-        h_start: Integer, first Hilbert code of the ROI.
+-        h_end: Integer, last Hilbert code of the ROI.
+-        data_type: String, 'structured' or 'amr'.
++    # Sample along the ray
++    for t in range(0, max_depth, step_size):
++        p = ray_origin + t * ray_direction
++        h_code = compute_hilbert_code(p) # [G] Helper to map 3D coord to Hilbert int
+         
+-    Returns:
+-        Boolean, True if the cell is selected.
+-    """
+-    # Compute Hilbert code for the cell center
+-    h_code = compute_hilbert_code(cell_center)
+-    
+-    # Basic range check
+-    if h_start <= h_code <= h_end:
+-        # For AMR, we must ensure the sample is actually inside the ROI bounds.
+-        # The Hilbert code of the centroid is not sufficient for AMR size checks.
+-        if data_type == 'amr':
+-            # Explicitly locate the cell to determine its exact size/bounds
+-            # and verify the sample falls within the ROI's spatial extent.
+-            # [G] Implementation detail: This requires accessing the AMR hierarchy
+-            # to get the cell's bounding box and checking containment.
+-            if not is_sample_inside_roi_bounds(cell_center, h_start, h_end):
+-                return False
++        is_selected = False
++        for (h_start, h_end) in roi_ranges:
++            if h_start <= h_code <= h_end:
++                is_selected = True
++                break
+         
+-        # For structured data, uniform cell size allows implicit derivation.
+-        # No additional bounds check is needed beyond the Hilbert range.
+-        return True
+-    
+-    return False
+-
+-def compute_hilbert_code(point):
+-    """
+-    Converts 3D point to Hilbert code.
+-    [G] Standard Hilbert curve mapping algorithm implementation.
+-    """
+-    # Implementation depends on the specific Hilbert curve variant and grid resolution.
+-    # This function maps (x, y, z) to a 1D integer index.
+-    pass
+-
+-def is_sample_inside_roi_bounds(cell_center, h_start, h_end):
+-    """
+-    Checks if the cell center is within the spatial bounds defined by the ROI.
+-    [G] Requires access to the AMR cell hierarchy to determine the extent of cells
+-    corresponding to the Hilbert range [h_start, h_end].
+-    """
+-    # Retrieve the bounding box of the ROI from the AMR structure
+-    roi_bbox = get_roi_bounding_box(h_start, h_end)
+-    
+-    # Check if cell_center is inside roi_bbox
+-    return point_in_box(cell_center, roi_bbox)
++        if is_selected:
++            scalar_value = volume_data.sample(p)
++            rgba = transfer_function(scalar_value)
++            
++            # Front-to-back compositing
++            color = color + rgba.color * rgba.alpha * (1.0 - alpha)
++            alpha = alpha + rgba.alpha * (1.0 - alpha)
++            
++            if alpha > 0.99:
++                break
++                
++    return color
+ ```
+ 
++## Subtopics
++
++### Interactive Volume Lines (IVL)
++The GPU-accelerated implementation of Dynamic Volume Lines that uses this brushing and linking technique. It allows for real-time interaction with large AMR data [S1].
++
++### Hilbert Code Generation
++The process of mapping 3D voxel coordinates to 1D Hilbert codes. This is a prerequisite for the selection method. Not given in the sources.
++
+ ## Operating characteristics
+-*   **Time Complexity:** The selection test is $O(1)$ per cell in the shader, assuming Hilbert code computation is constant time relative to the number of cells. However, for AMR data, the explicit location lookup adds overhead [S1][S2, unofficial].
+-*   **Memory Complexity:** The selection state is stored as two integers per ROI, which is significantly more compact than storing a list of cell indices [S1].
+-*   **Strengths:** Compact representation of selection ranges; efficient transmission between 1D and 3D views; suitable for GPU implementation [S1][S2, unofficial].
+-*   **Limitations:** Hilbert code computation in the shader can be costly; AMR data requires additional logic to handle variable cell sizes [S1][S2, unofficial].
+-*   **When to use:** When linking 1D data views (like DVL) with 3D volume views, especially for large datasets where transmitting cell lists is prohibitive [S1][S2, unofficial].
++- **Time Complexity:** The containment test is $O(1)$ per sample per ROI range. The overall complexity is dominated by the ray casting steps.
++- **Memory Complexity:** The ROI ranges are stored as small lists of integers, making the memory footprint for selection data minimal [S1].
++- **Performance:** The method is efficient for GPU implementation using CUDA. The compact representation of ROIs as Hilbert codes reduces memory bandwidth usage compared to storing lists of cell indices [S1].
++- **Strengths:** Compact representation of complex, non-contiguous ROIs; efficient GPU implementation; seamless integration between 1D and 3D views [S1].
++- **Limitations:** Requires pre-computation of Hilbert codes; AMR data requires explicit cell location for accurate containment testing, which may be more expensive than structured grids [S1].
+ 
+ ## Background
+-This method was introduced in the context of Visual Analysis of Large Multi-Field AMR Data on GPUs Using Interactive Volume Lines (2023) [S1][S2, unofficial]. It builds on the concept of Dynamic Volume Lines (DVL) and extends it to 3D views using Hilbert space-filling curves for efficient spatial indexing and selection [S1][S2, unofficial].
++This method was introduced in the context of visual analysis of large multi-field AMR data on GPUs using Interactive Volume Lines. It was presented at IEEE VIS 2023 [S1]. The technique builds on the concept of Dynamic Volume Lines (DVL) and extends it to support 3D view interaction through Hilbert space-filling curves [S1].
+ 
+ ## Sources

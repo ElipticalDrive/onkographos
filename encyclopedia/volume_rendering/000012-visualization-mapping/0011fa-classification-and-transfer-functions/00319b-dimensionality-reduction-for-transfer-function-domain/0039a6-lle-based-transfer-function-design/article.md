@@ -1,153 +1,197 @@
 # LLE-based Transfer Function Design
 
-Also called: LLE basd TF, Local Linear Embedding for Transfer Function Design
+Also called: LLE basd TF, Local Linear Embedding (LLE) for Dimension Reduction, Local Linear Embedding (LLE) for TF Design
 
 ## Overview
-LLE-based Transfer Function Design is a method for constructing high-dimensional transfer functions by projecting multi-dimensional volume parameters into a low-dimensional (typically 2D) space using Local Linear Embedding (LLE), followed by k-means classification to assign colors [S1]. It solves the problem of interactive design complexity in high-dimensional feature spaces by reducing the dimensionality of the classification domain [S1]. Unlike its sibling [t-SNE for Transfer Function Design](7098-t-sne-for-transfer-function-design.md), which optimizes for local neighborhood preservation via stochastic gradient descent, LLE preserves local linear structures via deterministic least-squares optimization [S1, S7]. Compared to [PCA-based Transfer Function Design](6556-dimensionality-reduction-for-transfer-function-domain.md), LLE handles non-linear relationships between features, offering easier operation and classification in 2D, though it requires extra mapping time [S1].
+LLE-based Transfer Function Design is a dimensionality reduction technique that maps high-dimensional volume parameters into a low-dimensional (typically 2D) global coordinate system to simplify the interactive design of transfer functions (TFs) [S1, S2]. It solves the problem of navigating complex, high-dimensional feature spaces by preserving the local neighborhood structure of the data, allowing users to classify voxels in 2D and assign colors/opacities [S1, S2]. Unlike PCA or metric MDS, LLE eliminates the need to estimate pairwise distances between widely separated points, making it superior for identifying underlying nonlinear manifold structures [S1].
 
 ## How it works
-The method extracts multi-dimensional statistical parameters from the volume data, projects them into a 2D embedded space using LLE, classifies the projected points using k-means, and maps the resulting clusters to a 2D transfer function [S1].
+**Inputs and Outputs:**
+*   **Input:** A volume dataset where each voxel is represented by a high-dimensional feature vector $\mathbf{X}_i \in \mathbb{R}^D$. Common parameters include intensity, gradient magnitude, difference moment, skewness, variance, and sum entropy [S1, S2].
+*   **Output:** A 2D embedding space where each voxel is mapped to a point $\mathbf{Y}_i \in \mathbb{R}^2$, and a classification of these points (typically via k-means) that defines the transfer function [S1, S2].
 
-### Inputs and Outputs
-*   **Input:** A 3D volume dataset $V$ with dimensions $D_x \times D_x \times D_z$ (or similar), and a set of $N$ statistical features to extract (e.g., intensity, gradient, difference moment, skewness, variance, sum entropy) [S1].
-*   **Output:** A 2D Transfer Function (TF) defined over the embedded coordinates $(u, v)$, where each region is associated with a color and opacity [S1].
+**Data Structures:**
+*   **Feature Matrix:** An $N \times D$ matrix where $N$ is the number of voxels and $D$ is the number of extracted parameters [S1].
+*   **Weight Matrix $W$:** An $N \times N$ sparse matrix where $W_{ij}$ represents the reconstruction weight of neighbor $j$ for point $i$ [S1].
+*   **Embedding Matrix $Y$:** An $N \times d$ matrix (where $d=2$) containing the final low-dimensional coordinates [S1].
 
-### Data Structures
-1.  **Feature Matrix ($X$):** An $M \times N$ matrix, where $M$ is the number of voxels (or sampled points) and $N$ is the number of extracted features. Each row $x_i$ represents the feature vector for voxel $i$ [S1].
-2.  **Embedded Matrix ($Y$):** An $M \times 2$ matrix, where each row $y_i$ is the 2D coordinate $(u_i, v_i)$ for voxel $i$ after LLE projection [S1].
-3.  **Cluster Labels ($C$):** An array of length $M$, where $C_i \in \{1, \dots, K\}$ is the cluster index assigned to voxel $i$ by k-means [S1].
+**Algorithm Steps:**
 
-### Parameters
-*   **Window Size ($WS$):** The size of the local neighborhood used for gradient and statistical calculations. Smaller $WS$ increases computation time [S1].
-*   **Number of Neighbors ($k$):** The number of nearest neighbors used in LLE. Not explicitly given in sources, but standard for LLE [S1, S7].
-*   **Number of Clusters ($K$):** The number of clusters for k-means. Not explicitly given in sources [S1].
-*   **Features:** Commonly includes intensity, gradient, difference moment, skewness, variance, and sum entropy [S1].
+1.  **Parameter Extraction:** For each voxel $i$, compute the high-dimensional feature vector $\mathbf{X}_i$. The specific parameters depend on the dataset but typically include intensity, gradient, and statistical moments (e.g., variance, entropy) [S1, S2].
+2.  **Neighbor Identification:** For each data point $\mathbf{X}_i$, identify its $k$ nearest neighbors in the high-dimensional space. The number of neighbors $k$ is a user-controllable parameter [S1].
+3.  **Weight Computation:** Compute the reconstruction weights $W_{ij}$ that best reconstruct $\mathbf{X}_i$ from its neighbors. This is done by minimizing the cost function:
+    $$ \epsilon(W) = \sum_i \left\| \mathbf{X}_i - \sum_j W_{ij} \mathbf{X}_j \right\|^2 $$
+    subject to the constraints $\sum_j W_{ij} = 1$ for all $i$, and $W_{ij} = 0$ if $\mathbf{X}_j$ is not a neighbor of $\mathbf{X}_i$ [S1].
+4.  **Embedding Optimization:** Find the low-dimensional coordinates $\mathbf{Y}_i$ that preserve these local reconstruction weights. This is achieved by minimizing the embedding cost function:
+    $$ \phi(Y) = \sum_i \left\| \mathbf{Y}_i - \sum_j W_{ij} \mathbf{Y}_j \right\|^2 $$
+    This minimization is solved by finding the $d$ lowest non-zero eigenvectors of the matrix $(I - W)^T (I - W)$, where $I$ is the identity matrix [S1].
+5.  **Classification:** Apply the k-means clustering algorithm to the resulting 2D points $\mathbf{Y}_i$ to group voxels into distinct classes [S1, S2].
+6.  **TF Design:** The user assigns color and opacity values to each cluster in the 2D space. These assignments define the final transfer function [S1, S2].
 
-### Steps
-1.  **Parameter Extraction:** For each voxel, compute $N$ statistical features within a local window of size $WS$. This includes intensity, gradient magnitude, difference moment, skewness, variance, and sum entropy [S1].
-2.  **LLE Projection:**
-    *   Find the $k$ nearest neighbors for each voxel in the feature space [S1].
-    *   Compute reconstruction weights $W$ such that each voxel is reconstructed as a linear combination of its neighbors, minimizing reconstruction error [S1].
-    *   Compute the 2D embedding $Y$ by minimizing the cost function $\Phi(Y) = \sum_{i=1}^M \| y_i - \sum_{j \in neighbors(i)} W_{ij} y_j \|^2$ [S1, S7].
-3.  **K-Means Classification:** Apply k-means clustering to the 2D points $Y$ to assign each voxel to one of $K$ clusters [S1].
-4.  **TF Design:** Map each cluster to a specific color and opacity in the 2D TF domain [S1].
+**Pseudocode:**
 
-### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def lle_transfer_function(volume, window_size, num_neighbors, num_clusters):
+def lle_transfer_function_design(volume_data, num_neighbors, embedding_dim=2):
     """
-    volume: 3D numpy array of voxel intensities
-    window_size: int, size of local window for feature extraction
-    num_neighbors: int, k for LLE
-    num_clusters: int, K for k-means
-    """
-    # Step 1: Extract multi-dimensional parameters
-    # Features: intensity, gradient, difference moment, skewness, variance, sum entropy
-    # Note: Exact formulas for difference moment, skewness, variance, sum entropy 
-    # are not provided in sources [S1]. Implementation requires standard statistical 
-    # definitions over the local window [G].
-    features = extract_features(volume, window_size)
-    # features shape: (M, N) where M is number of voxels, N is number of features
+    Performs LLE-based transfer function design.
     
-    # Step 2: Project to 2D using LLE
-    embedded_points = lle_project(features, num_neighbors)
-    # embedded_points shape: (M, 2)
+    Args:
+        volume_data: 3D array of voxel values.
+        num_neighbors: Integer k for k-nearest neighbors.
+        embedding_dim: Integer d for output dimension (default 2).
+        
+    Returns:
+        tf_map: 2D array of shape (N, 2) containing LLE embeddings.
+        clusters: 1D array of shape (N,) containing cluster labels.
+    """
+    # Step 1: Extract high-dimensional features
+    # Note: Specific feature extraction depends on domain requirements.
+    # Common features: intensity, gradient, variance, entropy.
+    features = extract_volume_features(volume_data)
+    N, D = features.shape
     
-    # Step 3: K-means classification
-    labels, centroids = kmeans(embedded_points, num_clusters)
-    # labels shape: (M,)
+    # Step 2: Compute k-nearest neighbors
+    # Using a standard distance metric (e.g., Euclidean)
+    neighbor_indices = compute_knn(features, k=num_neighbors)
     
-    # Step 4: Design 2D TF
-    # Map each cluster label to a color/opacity
-    tf = create_2d_tf(centroids, labels)
+    # Step 3: Compute reconstruction weights W
+    # Minimize epsilon(W) = sum_i || X_i - sum_j W_ij X_j ||^2
+    # Subject to sum_j W_ij = 1 and W_ij = 0 if j not in neighbors
+    W = compute_weights(features, neighbor_indices)
     
-    return tf
-
-def extract_features(volume, window_size):
-    """
-    Extracts intensity, gradient, difference moment, skewness, variance, and sum entropy
-    for each voxel within a local window.
-    """
-    # Implementation details for specific statistical moments are not in sources [S1]
-    # This is a placeholder for the actual statistical computation [G]
-    pass
-
-def lle_project(features, k):
-    """
-    Performs Local Linear Embedding on the feature matrix.
-    """
-    # 1. Find k nearest neighbors for each point
-    neighbors = find_k_nearest_neighbors(features, k)
-    
-    # 2. Compute reconstruction weights W
-    # Minimize || x_i - sum_j W_ij * x_j ||^2 subject to sum_j W_ij = 1
-    weights = compute_lle_weights(features, neighbors)
-    
-    # 3. Compute 2D embedding Y
-    # Minimize sum_i || y_i - sum_j W_ij * y_j ||^2
-    embedding = compute_lle_embedding(weights, dim=2)
-    
-    return embedding
-
-def find_k_nearest_neighbors(features, k):
-    """
-    Finds k nearest neighbors for each point in features using Euclidean distance.
-    """
-    # Standard k-NN algorithm [G]
-    pass
-
-def compute_lle_weights(features, neighbors):
-    """
-    Computes the reconstruction weights W for LLE.
-    """
-    # For each point i, solve the linear system to find weights W_ij
-    # such that x_i is approximated by sum_j W_ij * x_j
-    # This involves solving a small linear system for each point [S7]
-    pass
-
-def compute_lle_embedding(weights, dim):
-    """
-    Computes the low-dimensional embedding Y by solving the eigenvalue problem.
-    """
+    # Step 4: Compute low-dimensional embedding Y
+    # Minimize phi(Y) = sum_i || Y_i - sum_j W_ij Y_j ||^2
+    # Solution: Eigenvectors of (I - W)^T (I - W)
     # Construct the matrix M = (I - W)^T (I - W)
-    # Solve for the smallest eigenvectors of M [S7]
+    I = identity_matrix(N)
+    M = transpose(subtract(I, W)) @ subtract(I, W)
+    
+    # Find the d lowest non-zero eigenvectors
+    # Note: The smallest eigenvalue is 0 (constant vector). 
+    # We take the next d smallest.
+    eigenvalues, eigenvectors = compute_eigenvectors(M, k=embedding_dim + 1)
+    
+    # Discard the first eigenvector (corresponding to eigenvalue 0)
+    # and take the next 'embedding_dim' eigenvectors
+    Y = eigenvectors[:, 1:embedding_dim + 1]
+    
+    # Step 5: Classify using k-means
+    # Number of clusters is not specified in sources; user-defined or heuristic.
+    # Assuming a default or user-specified number of clusters K
+    K = 5 # Placeholder for user-defined cluster count
+    clusters = kmeans(Y, K)
+    
+    return Y, clusters
+
+def extract_volume_features(volume):
+    """
+    Extracts multi-dimensional parameters from volume data.
+    Returns a 2D array of shape (N, D).
+    """
+    # Implementation depends on specific features required (e.g., intensity, gradient, etc.)
+    # This is a placeholder for the specific feature extraction logic.
     pass
 
-def kmeans(points, k):
+def compute_knn(features, k):
+    """
+    Computes k-nearest neighbors for each point.
+    Returns a list of arrays, where each array contains indices of k neighbors.
+    """
+    pass
+
+def compute_weights(features, neighbor_indices):
+    """
+    Computes the weight matrix W.
+    """
+    N = features.shape[0]
+    W = zeros((N, N))
+    
+    for i in range(N):
+        neighbors = neighbor_indices[i]
+        # Local reconstruction: solve for W_i such that X_i approx sum(W_ij * X_j)
+        # Let X_i be the target, and X_neighbors be the neighbor vectors.
+        # We solve the linear system: (X_neighbors^T X_neighbors) W_local = X_neighbors^T X_i
+        # Subject to sum(W_local) = 1.
+        
+        # Extract neighbor vectors
+        X_neighbors = features[neighbors]
+        X_target = features[i]
+        
+        # Compute covariance matrix of neighbors
+        C = X_neighbors.T @ X_neighbors
+        
+        # Solve for weights
+        # Using pseudo-inverse or direct solver for small systems
+        try:
+            w_local = solve(C, X_neighbors.T @ X_target)
+        except LinAlgError:
+            # Fallback if singular
+            w_local = solve(C + epsilon * identity(len(neighbors)), X_neighbors.T @ X_target)
+            
+        # Normalize weights to sum to 1
+        w_local = w_local / sum(w_local)
+        
+        # Assign weights to global matrix
+        for idx, neighbor_idx in enumerate(neighbors):
+            W[i, neighbor_idx] = w_local[idx]
+            
+    return W
+
+def kmeans(data, K):
     """
     Standard k-means clustering algorithm.
     """
-    # Initialize centroids, assign labels, update centroids until convergence [G]
-    pass
-
-def create_2d_tf(centroids, labels):
-    """
-    Creates a 2D transfer function based on cluster centroids and labels.
-    """
-    # Map each cluster to a color and opacity
     pass
 ```
 
-### Edge Cases and Pitfalls
-*   **Information Loss:** Dimension reduction causes information loss, which may affect classification accuracy [S1]. However, structures like piston rings/rods and soil/trunk/leaves remain recognizable [S1].
-*   **Opacity Control:** There is no easy way to effectively control and organize opacity settings in the projected space [S1].
-*   **Sorting Challenge:** Properly sorting the principal components or clusters remains a challenge [S1].
-*   **Performance Bottleneck:** The main time-consuming part is parameter extraction, which depends on dataset size and window size [S1]. LLE mapping time is also significant but generally less than the interactive design time of PCA-based methods [S1].
+**Parameters:**
+*   **Number of neighbors ($k$):** User-controllable. Affects the locality of the embedding. Not given in the sources.
+*   **Embedding dimension ($d$):** User-controllable. Default is 2D [S1].
+*   **Window Size (WS):** Used during parameter extraction. Smaller WS increases computation time [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Information Loss:** Dimension reduction causes loss and distortion of information. LLE cannot provide quantitative information as accurate as Parallel Coordinates based TF (PCbTF) [S1].
+*   **Qualitative vs Quantitative:** LLE is suitable for revealing qualitative aspects (shape, dissimilarity) but may fail to preserve exact quantitative relationships [S1].
+*   **Bottleneck:** The main time-consuming part is parameter extraction, which depends on dataset size and window size [S2].
+
+## Subtopics
+
+### PCbTF (Parallel Coordinates based Transfer Function)
+The parent method that LLE-based design simplifies. PCbTF allows interactive design in high-dimensional parallel coordinates but suffers from interactive design bottlenecks. LLE provides an easier, faster classification method in 2D at the cost of some accuracy [S1, S2].
+
+### PCA for TF Design
+A linear dimensionality reduction alternative. PCA estimates pairwise distances between widely separated points, which can be less effective than LLE for capturing nonlinear manifold structures [S1].
+
+### Metric MDS for TF Design
+Another linear alternative. Like PCA, it relies on global pairwise distances and may not preserve local neighborhood structures as effectively as LLE [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Parameter extraction is the bottleneck, scaling with volume size and inversely with window size [S1]. LLE projection time is also significant but manageable [S1].
-*   **Memory Complexity:** Requires storing the feature matrix ($M \times N$) and the embedded matrix ($M \times 2$) [S1].
-*   **Performance:** On a CT Bonsai dataset (256^3), parameter extraction took 76.90 seconds and LLE projection took 64.72 seconds (WS=73) [S1]. On a CT Engine dataset (256^3), parameter extraction took 22.35 seconds and LLE projection took 17.30 seconds (WS=93) [S1].
-*   **Strengths:** Easier operation and classification in 2D compared to PCA-based methods; faster total design time for users without specified objects [S1].
-*   **Limitations:** Information loss due to dimension reduction; difficulty in controlling opacity and sorting clusters [S1].
-*   **When to Use:** When interactive design in high-dimensional spaces is too complex, and the user wants a quick, easy-to-use 2D interface without specifying objects in advance [S1].
-*   **When Not to Use:** When precise opacity control is critical, or when the non-linear structure of the data is not well-captured by local linear embeddings [S1].
+**Time and Memory Complexity:**
+*   **Parameter Extraction:** The most time-consuming part. Time increases with volume size and decreases with window size [S2].
+*   **LLE Computation:** Depends on the number of voxels $N$ and neighbors $k$. Solving the eigenvalue problem is $O(N^3)$ in the worst case but can be optimized for sparse matrices [S1].
+
+**Measured Performance:**
+*   **CT Foot (256^3, WS 73):** Parameter extraction: 75.11 sec; LLE time: 60.95 sec [S1].
+*   **CT Engine (256^3, WS 93):** Parameter extraction: 22.35 sec; LLE time: 17.30 sec [S1].
+*   **CT Bonsai (256^3, WS 73):** Parameter extraction: 76.90 sec; LLE time: 64.72 sec [S1]
+
+**Strengths and Limitations:**
+*   **Strengths:** Preserves global nonlinear structure from locally linear fits; eliminates need to estimate pairwise distances between widely separated points; provides an easy operation and classification method in 2D; total design time is small compared to interactive PCbTF [S1, S2].
+*   **Limitations:** Causes loss and distortion of information; cannot provide quantitative information as accurate as PCbTF; requires extra mapping time [S1, S2].
+
+**When to Use:**
+*   When no specific objects are wanted by the user and a quick, qualitative visualization is sufficient [S2].
+*   When the underlying data structure is nonlinear and local neighborhoods are more important than global distances [S1].
+
+**When Not to Use:**
+*   When precise quantitative information is required [S1].
+*   When the user needs to interactively manipulate high-dimensional relationships directly (use PCbTF instead) [S2].
 
 ## Background
-Local Linear Embedding (LLE) was introduced by Roweis and Saul in 2000 in the paper "Nonlinear dimensionality reduction by locally linear embedding" published in *Science* [S1, S7]. The LLE-based Transfer Function Design method was proposed to simplify the design of high-dimensional transfer functions by reducing the dimensionality of the feature space to 2D, allowing for interactive classification [S1]. It has been applied to visualization of organs and cancer detection, demonstrated on datasets such as CT Engine, CT Bonsai Tree, CT Carp, CT Bladder, MRI Prostate, and CT Foot [S1].
+Local Linear Embedding (LLE) was introduced by Roweis and Saul in 2000 in the paper "Nonlinear dimensionality reduction by locally linear embedding" published in *Science* [S2]. It was applied to transfer function design by Zhao and Kaufman in 2010 as a dimension reduction technique to simplify the design of nD transfer functions [S1]. It is used in visualization of organs and cancer detection, demonstrated on datasets such as CT engine, CT bonsai tree, CT Carp, CT Bladder, MRI Prostate, and CT Foot [S2].
 
 ## Sources
-[S1] Multi-dimensional Reduction and Transfer Function Design using Parallel ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC4536824/, fetched 2026-10-27
-[S7] Nonlinear dimensionality reduction by locally linear embedding, https://www.science.org/doi/10.1126/science.290.5500.2323, fetched 2026-10-27
+[S1] Multi-dimensional Reduction and Transfer Function Design using Parallel Coordinates, https://doi.org/10.2312/vg/vg10/069-076, fetched 2026-10-26
+[S2] Multi-dimensional Reduction and Transfer Function Design using Parallel ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC4536824/, fetched 2026-10-27

@@ -1,0 +1,219 @@
+--- v001.md
++++ v002.md
+@@ -4,149 +4,127 @@
+ 
+ ## Overview
+-MVDream Multi-View Diffusion Guidance is a method that utilizes diffusion priors to generate different viewpoints of a scene iteratively, providing gradient guidance for 3D optimization [S1][S2, unofficial]. It sets itself apart from single-view guidance methods by encoding RGB images and camera poses into a multi-view diffusion model to predict noise, thereby enforcing multi-view consistency during the radiance field optimization process [S2, unofficial].
++MVDream Multi-View Diffusion Guidance provides gradient guidance for 3D optimization by encoding RGB images and camera poses into a multi-view diffusion model, predicting noise, and stepping the DDIM scheduler [S1, unofficial]. It sets itself apart from single-view guidance methods by enforcing multi-view consistency through a multi-view diffusion prior [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-*   **Inputs:**
+-    *   Text prompts (string).
+-    *   Camera poses (4x4 matrices, batched).
+-    *   Predicted RGB images (batched, typically 256x256 resolution).
+-    *   Diffusion model components: Text encoder, Image encoder, Multi-view diffusion UNet, DDIM scheduler.
+-*   **Outputs:**
+-    *   Gradient signal derived from the difference between predicted noise and actual noise in the latent space, used to update the 3D representation.
++*   **Inputs:** Text prompts, camera poses (4x4 matrices, batched), and predicted RGB images (batched, 256x256 resolution) [S1, unofficial].
++*   **Outputs:** A gradient signal derived from the predicted noise in the latent space, used to update the 3D representation [S1, unofficial].
+ 
+ **Data Structures**
+-*   **Camera Tensor:** Shape `[batch_size, 16]`. Created by normalizing the 4x4 pose matrix and flattening it. The normalization involves converting to Blender convention (flipping Y and Z axes) and standardizing the pose representation [S2, unofficial].
+-*   **Context Dictionary:** Contains:
+-    *   `context`: Text embeddings, shape `[B, 77, 768]`.
+-    *   `camera`: Camera tensor, shape `[B, 16]`.
+-    *   `num_frames`: Integer, typically 4 [S2, unofficial].
++*   **Camera Tensor:** Shape `[batch_size, 16]`, created by normalizing the 4x4 pose matrix and flattening it [S1, unofficial].
++*   **Context Dictionary:** Contains `context` (text embeddings, shape `[B, 77, 768]`), `camera` (shape `[B, 16]`), and `num_frames` (4) [S1, unofficial].
+ 
+ **Parameters**
+-*   `t_range`: List of floats, default `[0.02, 0.98]`. Defines the range of noise levels for training.
++*   `t_range`: List of floats, default `[0.02, 0.98]`, defines the range of noise levels for training [S1, unofficial].
+     *   `min_step = int(1000 * t_range[0])`
+-    *   `max_step = int(1000 * t_range[1])` [S2, unofficial].
+-*   `guidance_scale`: Float, default `100`. Multiplier for classifier-free guidance [S2, unofficial].
++    *   `max_step = int(1000 * t_range[1])` [S1, unofficial].
++*   `guidance_scale`: Float, default `100`, multiplier for classifier-free guidance [S1, unofficial].
+ 
+ **Algorithm Steps**
+-1.  **Encode Text:** Encode the text prompts into embeddings. Repeat the embeddings to match the batch size required by the multi-view model (e.g., 4 views).
++1.  **Encode Text:** Encode the text prompts into embeddings and repeat them four times to match the multi-view model's expected batch structure [S1, unofficial].
+     $$ \text{pos\_embeds} = \text{encode\_text}(\text{prompts}).\text{repeat}(4, 1, 1) $$
+-2.  **Convert Camera Convention:** Transform the input camera poses to the Blender convention. This involves reordering the columns and flipping the Y-axis.
+-    $$ \text{camera}_{\text{temp}} = \text{camera}[:, [0, 2, 1, 3]] $$
+-    $$ \text{camera}_{\text{temp}}[:, 1] *= -1 $$
+-3.  **Normalize Camera:** Normalize the transformed camera poses and flatten them into the 16-dimensional vector.
++2.  **Convert Camera Convention:** Reorder the camera pose columns to the Blender convention and flip the Y-axis [S1, unofficial].
++    $$ \text{camera}_{\text{temp}} = \text{camera}[:, :, [0, 2, 1, 3]] $$
++    $$ \text{camera}_{\text{temp}}[:, :, 1] *= -1 $$
++3.  **Normalize Camera:** Normalize the transformed camera poses and flatten them into a 16-dimensional vector [S1, unofficial].
+     $$ \text{camera}_{\text{norm}} = \text{normalize\_camera}(\text{camera}_{\text{temp}}).\text{view}(\text{batch\_size}, 16) $$
+-4.  **Encode Images:** Encode the predicted RGB images (resized to 256x256) into latent space representations.
++4.  **Encode Images:** Encode the predicted RGB images into latent space representations [S1, unofficial].
+     $$ \text{latents} = \text{encode\_imgs}(\text{pred\_rgb\_256}) $$
+-5.  **Sample Timestep:** Sample a timestep $t$ uniformly between `min_step` and `max_step`.
++5.  **Sample Timestep:** Sample a timestep $t$ uniformly between `min_step` and `max_step` [S1, unofficial].
+     $$ t \sim \text{Uniform}(\text{min\_step}, \text{max\_step}) $$
+-6.  **Forward Model with CFG:** Pass the latents, timestep, and context through the diffusion model. Apply Classifier-Free Guidance (CFG) by splitting the output into conditional and unconditional predictions.
+-    $$ \text{noise\_pred} = \text{model}(\text{latent\_model\_input}, t, \text{context}) $$
++6.  **Forward Model with CFG:** Pass the latents, timestep, and context through the diffusion model, then apply Classifier-Free Guidance (CFG) by splitting the output into conditional and unconditional predictions and combining them [S1, unofficial].
++    $$ \text{noise\_pred} = \text{model}(\text{latents}, t, \text{context}) $$
+     $$ \text{noise\_pred\_uncond}, \text{noise\_pred\_cond} = \text{noise\_pred}.\text{chunk}(2) $$
+     $$ \text{noise\_pred} = \text{noise\_pred\_uncond} + \text{guidance\_scale} \times (\text{noise\_pred\_cond} - \text{noise\_pred\_uncond}) $$
+-7.  **Step Scheduler:** Use the DDIM scheduler to step the latents based on the predicted noise.
++7.  **Step Scheduler:** Use the DDIM scheduler to step the latents based on the predicted noise [S1, unofficial].
+     $$ \text{latents} = \text{scheduler}.\text{step}(\text{noise\_pred}, t, \text{latents}).\text{prev\_sample} $$
+ 
+ **Pseudocode**
+ ```python
+-def mvdream_guidance_step(model, scheduler, text_encoder, image_encoder, prompts, camera_poses, pred_rgb, guidance_scale=100.0, t_range=[0.02, 0.98]):
++import torch
++
++def normalize_camera(pose_matrix):
++    """Normalizes a 4x4 pose matrix and flattens it to a 16-dimensional vector."""
++    # Ensure the matrix is a valid rigid transformation and flatten to [B, 16]
++    # The source assumes the matrix is already a valid pose; this function handles the reshape.
++    return pose_matrix.flatten(1)
++
++def mvdream_guidance_step(text_encoder, image_encoder, model, scheduler, prompts, camera_poses, pred_rgb, guidance_scale=100.0, t_range=(0.02, 0.98)):
+     """
+     Performs one step of MVDream multi-view diffusion guidance.
+     
+     Args:
++        text_encoder: Text encoder (e.g., CLIP).
++        image_encoder: Image encoder (e.g., VAE encoder).
+         model: Multi-view diffusion UNet.
+         scheduler: DDIM scheduler.
+-        text_encoder: Text encoder (e.g., CLIP).
+-        image_encoder: Image encoder (e.g., VAE encoder).
+         prompts: List of text strings.
+         camera_poses: Tensor of shape [B, 4, 4] representing camera poses.
+         pred_rgb: Tensor of shape [B, 3, 256, 256] representing predicted RGB images.
+         guidance_scale: Float for CFG.
+-        t_range: List [min_t, max_t] for noise level sampling.
++        t_range: Tuple [min_t, max_t] for noise level sampling.
+         
+     Returns:
+-        Gradient signal (implicit via latent update, but here we return the noise prediction for gradient computation).
++        Updated latents for gradient computation.
+     """
+     batch_size = camera_poses.shape[0]
++    min_step = int(1000 * t_range[0])
++    max_step = int(1000 * t_range[1])
+     
+     # 1. Encode text prompts
+-    # Repeat embeddings for multi-view consistency (assuming 4 views per batch item or similar structure)
+-    # Note: The source repeats 4 times. This implies the batch might be structured as [N_scenes, 4_views]
+-    # or the model expects 4 views concatenated. We follow the source logic.
+-    pos_embeds = text_encoder.encode(prompts)
+-    pos_embeds = pos_embeds.repeat(4, 1, 1)
++    pos_embeds = text_encoder(prompts).repeat(4, 1, 1)
+     
+     # 2. Convert camera to Blender convention
+-    # camera[:, [0, 2, 1, 3]] reorders columns 0,2,1,3 from the 4x4 matrix (flattened or indexed appropriately)
+-    # Assuming camera_poses is [B, 16] or [B, 4, 4] flattened. 
+-    # The source uses indexing on the flattened/reshaped tensor.
+-    camera = camera_poses.view(batch_size, 16) # Ensure flat
+-    # Reorder: indices 0, 2, 1, 3 of the 4 columns? 
+-    # A 4x4 matrix has 16 elements. The source says `camera[:, [0, 2, 1, 3]]`. 
+-    # This likely refers to the first 4 elements (first column) or a specific layout.
+-    # However, standard Blender convention flip Y/Z usually involves specific axes.
+-    # Let's assume the source's indexing is on the 4x4 matrix rows/cols before flattening or a specific 16-dim layout.
+-    # Given `camera[:, [0, 2, 1, 3]]` and `camera[:, 1] *= -1`, it suggests a structure where these indices make sense.
+-    # If camera is [B, 4, 4], `camera[:, [0, 2, 1, 3]]` selects columns 0, 2, 1, 3.
+-    if camera_poses.dim() == 3:
+-        camera = camera_poses[:, :, [0, 2, 1, 3]] # Reorder columns
+-        camera[:, :, 1] *= -1 # Flip Y
+-    else:
+-        # Fallback if already flattened, assuming a specific layout defined by the source's internal logic
+-        # This is ambiguous without the exact `normalize_camera` definition. 
+-        # We will assume the source's `normalize_camera` handles the standard 4x4 to 16-dim conversion.
+-        # For implementation, one must replicate `normalize_camera` from the source repo.
+-        raise NotImplementedError("Camera normalization logic depends on source-specific `normalize_camera` function.")
+-        
++    camera = camera_poses[:, :, [0, 2, 1, 3]]
++    camera[:, :, 1] *= -1
++    
++    # 3. Normalize camera and flatten
+     camera = normalize_camera(camera).view(batch_size, 16)
+     
+-    # 3. Encode RGB to latents
+-    latents = image_encoder.encode(pred_rgb)
++    # 4. Encode RGB to latents
++    latents = image_encoder(pred_rgb)
+     
+-    # 4. Sample timestep
+-    min_step = int(1000 * t_range[0])
+-    max_step = int(1000 * t_range[1])
++    # 5. Sample timestep
+     t = torch.randint(min_step, max_step, (1,)).item()
+     
+-    # 5. Forward model with CFG
+-    context = {
+-        'context': pos_embeds,
+-        'camera': camera,
+-        'num_frames': 4
+-    }
+-    
+-    # Concatenate latents for multi-view input if required by model architecture
+-    # The source implies `latent_model_input` is passed directly.
++    # 6. Forward model with CFG
++    context = {'context': pos_embeds, 'camera': camera, 'num_frames': 4}
+     noise_pred = model.apply_model(latents, t, context)
+-    
+-    # Split and combine for CFG
+-    # The source chunks the output. This implies the model outputs concatenated conditional/unconditional predictions
+-    # or the input was duplicated.
+     noise_pred_uncond, noise_pred_cond = noise_pred.chunk(2)
+     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
+     
+-    # 6. Step scheduler
+-    latents_next = scheduler.step(noise_pred, t, latents).prev_sample
++    # 7. Step scheduler
++    latents = scheduler.step(noise_pred, t, latents).prev_sample
+     
+-    return noise_pred, latents_next
++    return latents
+ ```
+ 
+ **Edge Cases and Pitfalls**
+-*   **Camera Convention:** Incorrect conversion to Blender convention (flipping Y and Z) will result in inverted or rotated views, breaking multi-view consistency [S2, unofficial].
+-*   **Timestep Range:** Using the full range `[0, 1]` may lead to unstable gradients. The default `[0.02, 0.98]` avoids extreme noise levels [S2, unofficial].
+-*   **Guidance Scale:** A high guidance scale (e.g., 100) can lead to over-saturation or artifacts if not balanced with other losses [S2, unofficial].
++*   **CFG Chunking:** The model output must be chunkable along the batch dimension into exactly two equal parts for conditional and unconditional predictions [S1, unofficial].
++*   **Timestep Bounds:** Sampling outside the `[min_step, max_step]` range may produce unstable gradients or invalid noise predictions [S1, unofficial].
++*   **Camera Indexing:** The column reordering `[0, 2, 1, 3]` assumes a specific 4x4 pose layout; incorrect input dimensions will cause indexing errors [S1, unofficial].
++
++## Subtopics
++
++### RealmDreamer
++A method utilizing diffusion priors from inpainting and depth estimation models to generate different viewpoints of a scene iteratively [S2].
++
++### GALA3D
++A method leveraging object-level and scene-level models for 3D scene generation; it uses MVDream as an object-level text-to-3D model to generate realistic objects, and a scene-level diffusion model to compose them [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by the diffusion model inference and scheduler steps. Each guidance step requires a forward pass through the UNet and a scheduler step.
+-*   **Memory Complexity:** Requires storing latents, text embeddings, and camera tensors. The multi-view nature increases memory usage compared to single-view methods.
+-*   **Strengths:** Enforces multi-view consistency effectively, reducing the "frozen lake" or "multi-face" artifacts common in single-view diffusion-guided NeRF training.
+-*   **Limitations:** Computationally expensive due to the multi-view diffusion model. Requires careful tuning of `guidance_scale` and `t_range`.
+-*   **When to Use:** When multi-view consistency is critical and computational resources allow for multi-view diffusion inference.
+-*   **When Not to Use:** For real-time applications or when single-view consistency is sufficient.
++*   **Time Complexity:** Dominated by the diffusion model inference and scheduler steps [S1, unofficial].
++*   **Memory Complexity:** Requires storing latents, text embeddings, and camera tensors [S1, unofficial].
++*   **Strengths:** Enforces multi-view consistency during optimization [S1, unofficial].
++*   **Limitations:** Computationally expensive due to the multi-view diffusion model [S1, unofficial].
++*   **Scaling:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources.
++*   **When to Use:** When multi-view consistency is critical and computational resources allow for multi-view diffusion inference [S1, unofficial].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background
+-MVDream builds upon the DreamGaussian framework, which uses diffusion priors for text-to-3D generation [S1][S2, unofficial]. It specifically addresses the limitation of single-view guidance by incorporating multi-view diffusion models, such as Zero-1-to-3 XL, to generate consistent viewpoints [S1]. The method is part of the broader effort to improve the quality and consistency of 3D assets generated from text or single images.
++The method originated in the DreamGaussian repository [S1, unofficial]. It is used in text-to-3D and image-to-3D generation pipelines to improve the quality and consistency of 3D assets [S1, unofficial].
+ 
+ ## Sources
+-[S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+-[S2] dreamgaussian/dreamgaussian, https://github.com/dreamgaussian/dreamgaussian, fetched 2026-10-27 (unofficial)+[S1] dreamgaussian/dreamgaussian, https://github.com/dreamgaussian/dreamgaussian, fetched 2026-10-27 (unofficial)
++[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

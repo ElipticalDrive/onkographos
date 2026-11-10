@@ -1,0 +1,100 @@
+# Custom Adam Implementation
+
+Also called: Fused Custom Adam, Optimized PyTorch Adam, Fused Adam, Fused Adam optimizer
+
+## Overview
+A custom CUDA implementation of the Adam optimizer that precisely matches PyTorch's numerical behavior while eliminating CPU-GPU synchronization overhead and kernel launch latency by fusing the update step into the training kernel [S1, unofficial]. It differs from standard PyTorch Adam by exploiting fast math operations and fused-multiply-adds (FMA) to reduce instruction count, and from NVIDIA Apex Fused Adam by offering a drop-in replacement with potentially lower memory footprint and tighter integration with specific rendering pipelines [S1, unofficial].
+
+## How it works
+The method replaces the standard PyTorch `torch.optim.Adam` or `apex.optimizers.FusedAdam` with a custom CUDA kernel that performs the Adam state update (mean and variance accumulation, bias correction, and parameter scaling) in a single pass over the parameters [S1, unofficial].
+
+**Inputs and Outputs:**
+- Inputs: Parameter tensor $P$, Gradient tensor $G$, State tensors for first moment $M$ and second moment $V$, Hyperparameters $\beta_1, \beta_2, \epsilon, \alpha$ (learning rate).
+- Outputs: Updated Parameter tensor $P$.
+
+**Data Structures:**
+- Parameters are stored in contiguous device memory.
+- State tensors $M$ and $V$ are allocated per-parameter with the same shape as $P$.
+- [G] To ensure coalesced memory access during densification, Gaussians are regularly re-ordered using Z-ordering (Morton code) to keep spatially close Gaussians contiguous in memory [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Kernel Launch:** Launch a CUDA kernel where each thread block processes a chunk of parameters. The kernel is fused with the rendering or training step to avoid separate kernel launches for the optimizer step.
+2. **Gradient Loading:** Load gradient $G_i$ for parameter $P_i$.
+3. **Moment Updates:**
+   - Update first moment estimate: $M_i \leftarrow \beta_1 M_i + (1 - \beta_1) G_i$
+   - Update second moment estimate: $V_i \leftarrow \beta_2 V_i + (1 - \beta_2) G_i^2$
+   - [G] Use fast math operations (e.g., `__fmaf`) for these updates to reduce instruction count [S1, unofficial].
+4. **Bias Correction:**
+   - Compute bias correction factors: $b_1 = 1 - \beta_1^t$, $b_2 = 1 - \beta_2^t$ where $t$ is the current step.
+   - Corrected moments: $\hat{M}_i = M_i / b_1$, $\hat{V}_i = V_i / b_2$.
+5. **Parameter Update:**
+   - Update parameter: $P_i \leftarrow P_i - \alpha \frac{\hat{M}_i}{\sqrt{\hat{V}_i} + \epsilon}$.
+   - [G] Use fused-multiply-add instructions for the final update to minimize register pressure and latency [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode representing the fused CUDA kernel logic
+def fused_adam_step(P, G, M, V, beta1, beta2, eps, lr, step):
+    # Each thread handles one element or a small vector of elements
+    idx = thread_index()
+    
+    # Load current values
+    g = G[idx]
+    m = M[idx]
+    v = V[idx]
+    p = P[idx]
+    
+    # Update moments using fast math
+    m = beta1 * m + (1 - beta1) * g
+    v = beta2 * v + (1 - beta2) * g * g
+    
+    # Bias correction
+    bias_correction1 = 1 - beta1 ** step
+    bias_correction2 = 1 - beta2 ** step
+    
+    m_hat = m / bias_correction1
+    v_hat = v / bias_correction2
+    
+    # Parameter update using fused multiply-add
+    # p = p - lr * (m_hat / (sqrt(v_hat) + eps))
+    # [G] In CUDA, this is often done with __fmaf for precision/speed trade-off
+    denom = rsqrt(v_hat) + eps # rsqrt is fast inverse square root
+    update = lr * m_hat * denom
+    p = p - update
+    
+    # Store back
+    P[idx] = p
+    M[idx] = m
+    V[idx] = v
+```
+
+**Parameters:**
+- $\beta_1$: 0.9 (typical)
+- $\beta_2$: 0.999 (typical)
+- $\epsilon$: $10^{-8}$ (typical)
+- $\alpha$: Learning rate (scene-dependent)
+
+**Edge Cases:**
+- **Densification Memory Layout:** Adding new Gaussians at the end of buffers causes uncoalesced memory accesses. Z-ordering is required to maintain performance [S1, unofficial].
+- **Precision:** Fast math operations may introduce minor numerical differences compared to standard PyTorch, but the implementation aims to "precisely match" behavior [S1, unofficial].
+
+## Subtopics
+
+### CUDA-side Adam Optimizer for SH Coefficients
+A variant where a separate CUDA thread is launched for every spherical harmonic (SH) coefficient rather than per Gaussian [S2]. This differs from EPBRR by not fusing the forward and backward passes, which allows for SSIM loss and custom losses, and by using per-coefficient threads instead of per-Gaussian threads [S2].
+
+## Operating characteristics
+- **Time Complexity:** Reduced compared to standard PyTorch Adam due to kernel fusion and fewer instructions. On Mip-NeRF360 outdoor scenes with an RTX 4090, it achieves a 1.33x speedup over the baseline [S1, unofficial].
+- **Memory Complexity:** VRAM usage is comparable to standard PyTorch Adam (6.40 GiB on Mip-NeRF360) [S1, unofficial].
+- **Performance:** Outperforms PyTorch Fused Adam (1.22x speedup) and Apex Fused Adam (1.30x speedup) on Mip-NeRF360 outdoor scenes [S1, unofficial].
+- **Strengths:** High performance, low VRAM overhead, compatibility with custom loss functions (in SH variant).
+- **Limitations:** Requires custom CUDA implementation; potential numerical drift if fast math is not carefully managed [S1, unofficial].
+
+## Background
+Originated in the context of optimizing Gaussian Splatting training pipelines, specifically in "Faster-GS" [S1, unofficial]. It addresses the bottleneck of CPU-GPU synchronization and kernel launch overhead in standard PyTorch optimizers when training large-scale radiance fields.
+
+## Sources
+[S1] Faster-GS: Analyzing and Improving Gaussian Splatting Optimization, https://arxiv.org/abs/2602.09999v1, fetched 2026-10-26 (unofficial)
+[S2] GRay: Ray Tracing 3D Gaussians Near the Speed of Splats, https://doi.org/10.1145/3804496, fetched 2026-10-29
