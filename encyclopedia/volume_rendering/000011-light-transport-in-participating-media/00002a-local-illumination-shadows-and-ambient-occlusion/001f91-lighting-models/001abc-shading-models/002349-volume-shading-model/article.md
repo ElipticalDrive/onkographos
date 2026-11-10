@@ -7,8 +7,8 @@ The Volume Shading Model is a local illumination technique implemented within ra
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Material properties (diffuse/specular colors, reflectivities, transparency, emissivity, specular diffusion, refractive index), lighting settings (enable flags for indirect diffuse/specular, direct light, shadows), light sources (position, color, intensity), camera parameters (view direction, projection matrices), and voxel data (texture size, state).
-*   **Output:** A `vec4` color value representing the final fragment color with alpha.
+*   **Inputs:** Material properties (`diffuseColor`, `specularColor`, `specularReflectivity`, `diffuseReflectivity`, `emissivity`, `specularDiffusion`, `transparency`, `refractiveIndex`), lighting settings (`indirectSpecularLight`, `indirectDiffuseLight`, `directLight`, `shadows`), light sources (`PointLight` array with position, color, intensity), camera parameters (`V`, `P`, `cameraPosition`), and voxel data (`voxelTextureSize`, `state`) [S1, unofficial].
+*   **Output:** A `vec4` color value representing the final fragment color with alpha [S1, unofficial].
 
 **Data Structures:**
 The material properties are packed into a `Material` struct:
@@ -21,7 +21,7 @@ The material properties are packed into a `Material` struct:
 *   `transparency`: `float`
 *   `refractiveIndex`: `float`
 
-The application state includes a `Settings` struct with boolean flags: `indirectSpecularLight`, `indirectDiffuseLight`, `directLight`, `shadows`. It also holds an array of `PointLight` objects (`MAX_LIGHTS`), the number of active lights, view/projection matrices (`V`, `P`), camera position, voxel texture size, and current state [S1, unofficial].
+The application state includes a `Settings` struct with boolean flags: `indirectSpecularLight`, `indirectDiffuseLight`, `directLight`, `shadows` [S1, unofficial]. It also holds an array of `PointLight` objects (`MAX_LIGHTS`), the number of active lights, view/projection matrices (`V`, `P`), camera position, voxel texture size, and current state [S1, unofficial].
 
 **Algorithm Steps:**
 1.  Initialize the output color `color` to `vec4(0, 0, 0, 1)` [S1, unofficial].
@@ -63,83 +63,94 @@ scaled by `DIRECT_LIGHT_INTENSITY` [S1, unofficial].
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def volume_shading(material, settings, view_direction, lights):
-    # Initialize color
-    color = vec4(0.0, 0.0, 0.0, 1.0)
-    
+def volume_shading(material, settings, view_direction, lights, state):
+    # Step 1: Initialize color to vec4(0,0,0,1)
+    color = [0.0, 0.0, 0.0, 1.0]
+
+    # Step 2: Compute viewDirection (assumed normalized) [G]
+    # view_direction is provided as input
+
     # Threshold for opacity check
-    opacity_threshold = 0.01f
-    
-    # Check if material is opaque enough for indirect lighting
-    is_opaque = material.diffuseReflectivity * (1.0f - material.transparency) > opacity_threshold
-    
-    # Indirect Diffuse
+    opacity_threshold = 0.01
+    is_opaque = material.diffuseReflectivity * (1.0 - material.transparency) > opacity_threshold
+
+    # Step 3: Indirect Diffuse
     if settings.indirectDiffuseLight and is_opaque:
-        color.rgb += indirect_diffuse_light(material)
-        
-    # Indirect Specular
+        # indirectDiffuseLight() calculation not provided in sources [S1, unofficial]
+        pass
+
+    # Step 4: Indirect Specular
     if settings.indirectSpecularLight and is_opaque:
-        color.rgb += indirect_specular_light(material, view_direction)
-        
-    # Emissivity
-    color.rgb += material.emissivity * material.diffuseColor
-    
-    # Refraction (Transparency)
+        # indirectSpecularLight() calculation not provided in sources [S1, unofficial]
+        pass
+
+    # Step 5: Emissivity
+    color[0] += material.emissivity * material.diffuseColor[0]
+    color[1] += material.emissivity * material.diffuseColor[1]
+    color[2] += material.emissivity * material.diffuseColor[2]
+
+    # Step 6: Refraction
     if material.transparency > opacity_threshold:
-        refractive_color = indirect_refractive_light(material, view_direction)
-        color.rgb = mix(color.rgb, refractive_color, material.transparency)
-        
-    # Direct Light
+        # indirectRefractiveLight() calculation not provided in sources [S1, unofficial]
+        refractive = [0.0, 0.0, 0.0]
+        color[0] = color[0] * (1.0 - material.transparency) + refractive[0] * material.transparency
+        color[1] = color[1] * (1.0 - material.transparency) + refractive[1] * material.transparency
+        color[2] = color[2] * (1.0 - material.transparency) + refractive[2] * material.transparency
+
+    # Step 7: Direct Light
     if settings.directLight:
-        direct_sum = vec3(0.0)
-        for light in lights:
-            # Calculate angles and apply shadow blending
-            # Note: shadowBlend is determined by shadow ray casting or precomputed shadows
-            shadow_blend = compute_shadow_blend(light, view_direction)
-            
-            diffuse_angle = compute_diffuse_angle(material, light)
-            specular_angle = compute_specular_angle(material, light, view_direction)
-            refractive_angle = compute_refractive_angle(material, light, view_direction)
-            
-            # Apply shadow clamping
-            diffuse_angle = min(shadow_blend, diffuse_angle)
-            specular_angle = min(shadow_blend, max(specular_angle, refractive_angle))
-            
-            # Compute diffuse contribution
-            diffuse = diffuse_angle * (1.0 - material.transparency)
-            
-            # Compute specular contribution
+        direct_sum = [0.0, 0.0, 0.0]
+        for i in range(state.numberOfLights):
+            light = lights[i]
+            # Compute angles using standard vector math [G]
+            diffuseAngle = 1.0
+            specularAngle = 1.0
+            refractiveAngle = 1.0
+
+            # Shadow blending clamp [S1, unofficial]
+            shadowBlend = 1.0
+            diffuseAngle = min(shadowBlend, diffuseAngle)
+            specularAngle = min(shadowBlend, max(specularAngle, refractiveAngle))
+
+            # Diffuse formula [S1, unofficial]
+            diffuse = diffuseAngle * (1.0 - material.transparency)
+
+            # Specular formula [S1, unofficial]
             df = 1.0 / (1.0 + 0.25 * material.specularDiffusion)
-            specular = SPECULAR_FACTOR * pow(specular_angle, df * SPECULAR_POWER)
-            
-            # Add to sum
-            direct_sum += light.color * (diffuse + specular)
-            
-        color.rgb += DIRECT_LIGHT_INTENSITY * direct_sum
-        
-    # Gamma Correction
-    if GAMMA_CORRECTION == 1:
-        color.rgb = pow(color.rgb, vec3(1.0 / 2.2)) # Standard sRGB gamma
-        
+            specular = SPECULAR_FACTOR * (specularAngle ** (df * SPECULAR_POWER))
+
+            # Total light contribution [S1, unofficial]
+            for j in range(3):
+                direct_sum[j] += light.color[j] * (diffuse + specular)
+
+        for j in range(3):
+            color[j] += DIRECT_LIGHT_INTENSITY * direct_sum[j]
+
+    # Step 8: Gamma Correction
+    if state.GAMMA_CORRECTION == 1:
+        color[0] = color[0] ** (1.0 / 2.2)
+        color[1] = color[1] ** (1.0 / 2.2)
+        color[2] = color[2] ** (1.0 / 2.2)
+
     return color
 ```
 
 ## Subtopics
 
 ### Luminous Gas Shading Model
-A shading component based on the traditional 'luminous gas' model used in direct volume rendering, applied to both ambient and reflecting materials [S2, unofficial]. It interprets each rendered plane as the center of a slab of thickness $A$. The color per primary $p$ is calculated as $C(p) = E(p) \frac{1 - e^{-\bar{\rho} A}}{\bar{\rho}}$, where $E(p)$ is color emission per unit distance and $\bar{\rho}$ is opacity per unit distance [S2, unofficial]. The opacity is $A = 1 - e^{-\bar{\rho} A}$ [S2, unofficial]. This model is well-defined as opacity per unit distance approaches 0 via power series expansion [S2, unofficial]. It is chosen when a volumetric, non-surface-based ambient lighting approximation is required [S2, unofficial].
+A shading component based on the traditional 'luminous gas' model used in direct volume rendering, applied to both ambient and reflecting materials [S2, unofficial]. It interprets each rendered plane as the center of a slab of thickness $A$ [S2, unofficial]. The color per primary $p$ is calculated as $C(p) = E(p) \frac{1 - e^{-\bar{\rho} A}}{\bar{\rho}}$, where $E(p)$ is color emission per unit distance and $\bar{\rho}$ is opacity per unit distance [S2, unofficial]. The opacity is $A = 1 - e^{-\bar{\rho} A}$ [S2, unofficial]. This model is well-defined as opacity per unit distance approaches 0 via power series expansion [S2, unofficial]. It is chosen when a volumetric, non-surface-based ambient lighting approximation is required [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of lights and the cost of shadow calculations. The shading itself is $O(1)$ per voxel/fragment, but shadow blending requires additional ray casts or texture lookups [S1, unofficial].
-*   **Memory Complexity:** Depends on the storage of light data and shadow maps/textures. The material struct is small and constant size [S1, unofficial].
-*   **Performance:** Fast for scenes with few lights. Performance degrades with many lights due to the loop over `pointLights` [S1, unofficial].
-*   **Strengths:** Simple to implement; handles both direct and indirect lighting in a unified framework; accounts for transparency in shading [S1, unofficial].
-*   **Limitations:** Local illumination only; does not account for global effects like light caching or complex scattering beyond the defined phase functions [S1, unofficial]. Shadow blending can introduce artifacts if not carefully tuned [S1, unofficial].
-*   **When to use:** Real-time or interactive volume rendering where local lighting effects are sufficient.
-*   **When not to use:** When physically accurate global illumination or complex volumetric scattering is required.
+*   **Time Complexity:** Not given in the sources. [S1, unofficial]
+*   **Memory Complexity:** Not given in the sources. [S1, unofficial]
+*   **Performance:** Not given in the sources. [S1, unofficial]
+*   **Strengths:** Not given in the sources. [S1, unofficial]
+*   **Limitations:** Not given in the sources. [S1, unofficial]
+*   **When to use:** Not given in the sources. [S1, unofficial]
+*   **When not to use:** Not given in the sources. [S1, unofficial]
 
 ## Background
-The Volume Shading Model, as described in the primary source, is implemented in the VoxelConeTracingMetal project [S1, unofficial]. The underlying concepts of combining direct and indirect lighting with transparency in volume rendering have roots in earlier direct volume rendering techniques, such as the "luminous gas" model described in NASA Technical Reports from 1997 [S2, unofficial]. The specific implementation details (struct layouts, thresholds) are derived from the unofficial GitHub repository [S1, unofficial].
+The Volume Shading Model is implemented in the VoxelConeTracingMetal project [S1, unofficial]. The underlying concepts of combining direct and indirect lighting with transparency in volume rendering have roots in earlier direct volume rendering techniques, such as the "luminous gas" model described in NASA Technical Reports from 1997 [S2, unofficial]. The specific implementation details (struct layouts, thresholds) are derived from the primary source code repository [S1, unofficial].
 
 ## Sources
 [S1] kakashidinho/VoxelConeTracingMetal, https://github.com/kakashidinho/VoxelConeTracingMetal, fetched 2026-10-26 (unofficial)

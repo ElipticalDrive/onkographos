@@ -1,98 +1,148 @@
 # Design Gallery Interface
 
-Also called: Design Gallery
+Also called: Design Galleries
 
 ## Overview
-The Design Gallery Interface is a user interaction method for transfer function (TF) design that presents a gallery of predefined rendering thumbnails, allowing users to select and refine features of interest [S1, unofficial]. It distinguishes itself from direct manipulation widgets by abstracting the high-dimensional TF parameter space into a visual gallery of results, enabling selection based on perceptual quality rather than mathematical parameter tuning [S1, unofficial].
+The Design Gallery Interface is a user interaction method for computer graphics applications that presents a gallery of predefined transfer functions (TFs), allowing users to pick features of interest from the gallery and refine them [S1, unofficial]. It distinguishes itself from direct manipulation widgets by abstracting the high-dimensional feature space into a set of discrete, well-distributed visualizations, thereby reducing user effort while providing an understanding of multiple data aspects [S2, unofficial].
 
 ## How it works
-The method operates in two phases: gallery generation and user selection/refinement.
+The method operates in two main phases: a preprocessing phase that generates and organizes the gallery, and an interaction phase where the user selects and refines a visualization.
 
-**Inputs:**
-- A volume dataset $V$.
-- A rendering engine capable of generating thumbnails from 1D transfer functions.
-- A dispersion heuristic function $D(tf)$ that measures the visual distinctiveness of a transfer function $tf$.
-- A multidimensional scaling (MDS) algorithm $MDS(\{tf_i\})$ that maps transfer functions to 2D coordinates based on pairwise visual distances.
+**Inputs and Outputs**
+*   **Input:** A parametrizable TF model (e.g., a 1D TF defined by control points with color and opacity values) and a volume dataset.
+*   **Output:** A set of thumbnails representing distinct visualizations, arranged by similarity, and a refined TF selected by the user.
 
-**Outputs:**
-- A 2D gallery layout of thumbnails.
-- A selected transfer function $tf_{selected}$ for refinement.
+**Data Structures**
+*   **Parameter Instance:** A vector of values corresponding to the parameters of the TF model. For a standard 1D TF, this might be a list of $(color, opacity)$ pairs at specific domain positions.
+*   **Thumbnail:** A rendered image (e.g., $W \times H$ pixels) generated using a specific TF instance.
+*   **Gallery:** A collection of thumbnails, potentially indexed or arranged using a spatial mapping algorithm.
 
-**Data Structures:**
-- **Gallery Item**: A struct containing:
-  - `thumbnail`: Image data (rasterized volume slice or projection).
-  - `transfer_function`: The 1D TF parameters (e.g., control points, opacity curve) used to generate the thumbnail.
-  - `position`: 2D coordinates $(x, y)$ in the gallery layout.
+**Steps**
+1.  **Generate Parameter Instances:** Use a dispersion algorithm to generate multiple instances of the TF parameters. This ensures broad and well-distributed coverage of the parametric space [S2, unofficial].
+    *   *Note:* In the original volume rendering application, a set of random 1D transfer functions is defined [S1, unofficial].
+2.  **Generate Transfer Functions:** Based on the TF model and the generated parameter values, create the corresponding transfer functions [S2, unofficial].
+3.  **Produce Visualizations:** Render the volume dataset using each generated TF to produce a set of images (visualizations) [S2, unofficial].
+4.  **Group by Similarity:** Group the obtained images by visual similarity. This is achieved using a multidimensional scaling (MDS) algorithm to arrange the thumbnails in a 2D space where proximity reflects visual similarity [S1, unofficial].
+5.  **Present Gallery:** Display the grouped images to the user as expandable thumbnails [S2, unofficial].
+6.  **User Selection and Refinement:** The user selects a preferred thumbnail. The system then allows the user to fine-tune the associated transfer function [S1, unofficial].
 
-**Steps:**
-1. **Generate Random Transfer Functions**: Define a set of $N$ random 1D transfer functions $\{tf_1, tf_2, ..., tf_N\}$ within the valid parameter space [S1, unofficial].
-2. **Render Thumbnails**: For each $tf_i$, render a thumbnail image $img_i$ using the volume dataset $V$ [S1, unofficial].
-3. **Apply Dispersion Heuristic**: Evaluate the visual distinctiveness of each thumbnail. The source notes that thumbnails are generated "by the dispersion heuristic," implying a filtering or selection step to ensure the gallery contains visually diverse options rather than redundant ones [S1, unofficial]. *Note: The specific mathematical definition of the dispersion heuristic is not provided in the sources.*
-4. **Compute Pairwise Distances**: Calculate a distance matrix $D_{ij}$ representing the visual dissimilarity between every pair of thumbnails $(img_i, img_j)$. *Note: The specific metric for visual distance (e.g., MSE, perceptual hash) is not provided in the sources.*
-5. **Apply Multidimensional Scaling**: Use the MDS algorithm to map each transfer function $tf_i$ to a 2D coordinate $(x_i, y_i)$ such that the Euclidean distance between $(x_i, y_i)$ and $(x_j, y_j)$ approximates the visual distance $D_{ij}$ [S1, unofficial].
-6. **Display Gallery**: Render the thumbnails at their computed 2D positions $(x_i, y_i)$ in a user interface [S1, unofficial].
-7. **User Selection**: The user selects a preferred thumbnail $img_k$ corresponding to transfer function $tf_k$ [S1, unofficial].
-8. **Refinement**: The system exposes the parameters of $tf_k$ to the user for fine-tuning, allowing them to adjust the transfer function to better isolate the desired feature [S1, unofficial].
-
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def design_gallery_interface(volume, num_thumbnails=100):
-    # Step 1: Generate random 1D transfer functions
-    transfer_functions = []
-    for i in range(num_thumbnails):
-        tf = generate_random_1d_transfer_function()
-        transfer_functions.append(tf)
-
-    # Step 2: Render thumbnails
+def design_gallery_interface(volume_data, tf_model, num_samples):
+    """
+    Generates a gallery of visualizations for a volume dataset using a parametrizable TF model.
+    
+    Args:
+        volume_data: The input volume dataset.
+        tf_model: A parametrizable transfer function model (e.g., defined by control points).
+        num_samples: The number of parameter instances to generate.
+        
+    Returns:
+        gallery: A list of thumbnails arranged by similarity.
+        selected_tf: The refined transfer function selected by the user.
+    """
+    # Step 1: Generate parameter instances via dispersion algorithm
+    # The dispersion algorithm ensures well-distributed coverage of the parametric space.
+    # For a 1D TF, this might involve randomizing control point colors and opacities.
+    parameter_instances = dispersion_algorithm(tf_model, num_samples)
+    
+    # Step 2 & 3: Generate TFs and produce visualizations
     thumbnails = []
-    for tf in transfer_functions:
-        img = render_volume_thumbnail(volume, tf)
-        thumbnails.append({'tf': tf, 'img': img})
+    for params in parameter_instances:
+        tf = tf_model.instantiate(params)
+        # Render the volume with the current TF
+        image = render_volume(volume_data, tf)
+        thumbnails.append(image)
+        
+    # Step 4: Group images by similarity using Multidimensional Scaling
+    # MDS maps the high-dimensional visual differences to a 2D layout.
+    gallery_layout = multidimensional_scaling(thumbnails)
+    
+    # Step 5: Present gallery to user
+    display_gallery(gallery_layout, thumbnails)
+    
+    # Step 6: User interaction
+    # User selects a preferred thumbnail index
+    selected_index = user_select_thumbnail()
+    
+    # User refines the associated TF
+    # This step is interactive and depends on the specific refinement tool used
+    refined_tf = refine_transfer_function(thumbnails[selected_index], tf_model)
+    
+    return gallery_layout, refined_tf
 
-    # Step 3: Apply dispersion heuristic to filter/select diverse thumbnails
-    # Note: Specific heuristic logic is not detailed in sources [S1, unofficial]
-    diverse_thumbnails = apply_dispersion_heuristic(thumbnails)
+def dispersion_algorithm(tf_model, num_samples):
+    """
+    Generates well-distributed parameter values across the parametric space.
+    [G] Implementation detail: This typically involves sampling strategies like
+    Latin Hypercube Sampling or random sampling with rejection to ensure coverage.
+    """
+    # Not given in the sources. A common implementation would use a space-filling
+    # design or random sampling within the bounds of the TF parameters.
+    samples = []
+    for _ in range(num_samples):
+        params = generate_random_params(tf_model)
+        samples.append(params)
+    return samples
 
-    # Step 4: Compute pairwise visual distances
-    n = len(diverse_thumbnails)
-    distance_matrix = [[0.0] * n for _ in range(n)]
-    for i in range(n):
-        for j in range(i + 1, n):
-            dist = compute_visual_distance(diverse_thumbnails[i]['img'], diverse_thumbnails[j]['img'])
-            distance_matrix[i][j] = dist
-            distance_matrix[j][i] = dist
+def render_volume(volume_data, tf):
+    """
+    Renders the volume using the given transfer function.
+    [G] Standard volume rendering technique (e.g., ray casting).
+    """
+    # Not given in the sources. This is a standard volume rendering call.
+    return ray_cast(volume_data, tf)
 
-    # Step 5: Apply Multidimensional Scaling
-    positions = multidimensional_scaling(distance_matrix)
+def multidimensional_scaling(images):
+    """
+    Arranges images in a 2D layout based on visual similarity.
+    [G] Uses a distance metric (e.g., MSE, SSIM) to compute pairwise distances
+    and then applies MDS to embed them in 2D.
+    """
+    # Not given in the sources. Standard MDS algorithm.
+    distances = compute_visual_distances(images)
+    layout = mds_embed(distances, dimensions=2)
+    return layout
 
-    # Step 6: Display gallery
-    gallery_items = []
-    for i, thumb in enumerate(diverse_thumbnails):
-        gallery_items.append({
-            'thumbnail': thumb['img'],
-            'transfer_function': thumb['tf'],
-            'position': positions[i]
-        })
-    display_gallery(gallery_items)
-
-    # Step 7 & 8: User selection and refinement
-    selected_item = wait_for_user_selection(gallery_items)
-    refined_tf = refine_transfer_function(selected_item['transfer_function'])
-    return refined_tf
+def refine_transfer_function(thumbnail, tf_model):
+    """
+    Allows the user to adjust the TF associated with the selected thumbnail.
+    [G] This is an interactive process, often involving control point manipulation.
+    """
+    # Not given in the sources. This is an interactive refinement step.
+    # The user might adjust control points, and the visualization updates in real-time.
+    return tf_model
 ```
+
+**Parameters**
+*   `num_samples`: The number of parameter instances to generate. Not given in the sources.
+*   `tf_model`: The parametrizable transfer function model. Typically a 1D TF with control points [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Processing Time:** The method demands significant processing time due to the generation of multiple visualizations [S2, unofficial].
+*   **Parameter Space Coverage:** If the dispersion algorithm is not well-designed, the gallery may not cover the parametric space effectively, leading to missed features [S2, unofficial].
+*   **Visual Similarity:** The effectiveness of the MDS arrangement depends on the chosen visual similarity metric. Poor metrics may group dissimilar visualizations together [S1, unofficial].
 
 ## Subtopics
 
+### Two-Level Design Gallery Tool
+A two-level interaction interface tool that combines Design Galleries, Kindlmann and Durkin's technique, and manual control point adjustment [S2, unofficial]. The first level provides multiple visualizations as thumbnails generated with automatically specified transfer functions. The second level allows user adjustment of control points for a single visualization [S2, unofficial].
+*   **Step 1 (First Level):** Generate multiple visualizations as thumbnails using transfer functions specified automatically by choosing control points via the Kindlmann and Durkin method. Control points initially have random color and opacity values [S2, unofficial].
+*   **Step 2 (Second Level):** User adjusts control points for a single visualization [S2, unofficial].
+
 ## Operating characteristics
-- **Time Complexity**: Generating $N$ thumbnails requires $N$ render passes. MDS is typically $O(N^3)$ or $O(N^2)$ depending on the implementation, which becomes expensive for large $N$.
-- **Memory Complexity**: Requires storing $N$ thumbnail images and the distance matrix $O(N^2)$.
-- **Strengths**: Intuitive for users unfamiliar with TF mathematics; leverages perceptual feedback; reduces the search space from continuous parameters to discrete visual options.
-- **Limitations**: Relies on random initialization, which may miss optimal TFs; dispersion heuristic and visual distance metrics are not formally defined in the source; refinement step requires additional UI components not detailed in the source.
+*   **Time Complexity:** High. The method demands significant processing time due to the generation of multiple visualizations [S2, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Requires little user effort and provides an understanding of multiple data aspects simultaneously [S2, unofficial]. It offers total abstraction of the transfer function for the user [S2, unofficial].
+*   **Limitations:** High computational cost. The quality of the gallery depends on the dispersion algorithm and the visual similarity metric.
+*   **When to use:** When the user wants to explore a wide range of visual possibilities with minimal interaction and has sufficient computational resources.
+*   **When not to use:** When real-time interaction is required or computational resources are limited.
 
 ## Background
-The Design Gallery Interface was proposed by Marks et al. [67] as a general user interface for computer graphics applications [S1, unofficial]. In the context of volume rendering, it was adapted to automatically define random 1D transfer functions, generate thumbnails via a dispersion heuristic, and arrange them using multidimensional scaling [S1, unofficial]. It is cited alongside other interactive TF design methods such as spreadsheet-like interfaces [S1, unofficial] and parallel coordinates [S1, unofficial].
+The Design Gallery Interface was proposed by Marks et al. in 1997 [S2, unofficial]. It is a general user interface for computer graphics applications that provides a gallery of predefined transfer functions [S1, unofficial]. The technique has been extended and combined with other methods, such as the two-level tool by Prauchner et al. [S2, unofficial].
 
 ## Sources
 [S1] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)
+[S2] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

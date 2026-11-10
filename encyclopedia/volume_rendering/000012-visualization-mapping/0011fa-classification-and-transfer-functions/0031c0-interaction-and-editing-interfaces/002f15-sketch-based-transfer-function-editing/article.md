@@ -3,82 +3,110 @@
 Also called: Sketch-based TF Design, Sketch-based TF Design using Strokes, Sketch-based 1D Transfer Function Design (Strokes), Sketch-based Transfer Function Design (Slices)
 
 ## Overview
-Sketch-based Transfer Function Editing allows users to define volume rendering appearance by drawing strokes directly on spatial views (volume slices or rendered images) or via dedicated sketching interfaces, which are then automatically converted into mathematical transfer functions [S1, unofficial][S2, unofficial]. It solves the difficulty of manually adjusting numerical parameters in traditional interfaces by leveraging the user's intuitive understanding of spatial features [S1, unofficial]. It sets itself apart from [2D Transfer Function Widget](5735-2d-transfer-function-widget.md) by mapping interaction to the spatial domain (pixels/voxels) rather than the abstract parameter domain, and from [Image-based TF Design](7807-image-based-tf-design.md) by explicitly generating the underlying classification function from the sketch geometry rather than just using the image as a reference [S1, unofficial][S2, unofficial].
+Sketch-based Transfer Function (TF) Editing allows users to define or modify classification functions by drawing strokes directly on the volume rendering view or on dedicated 1D/2D parameter spaces, rather than manipulating abstract widgets [S1, unofficial][S2, unofficial]. Unlike [Automated Classification Widget Placement](5645-automated-classification-widget-placement.md) which optimizes widget positions, or [2D Transfer Function Widget](5735-2d-transfer-function-widget.md) which uses geometric handles on a 2D plot, sketch-based methods prioritize direct manipulation and intuitive mapping between visual intent and parameter space [S2, unofficial]. It solves the difficulty of manually tuning numerical parameters by enabling rapid, global definition of TF shapes and local refinement through free-form drawing [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** User-drawn strokes (2D coordinates in screen space or spatial coordinates in volume space) [S1, unofficial][S2, unofficial].
-*   **Output:** A 1D or multi-dimensional transfer function $T(v)$ mapping scalar values $v$ (intensity or gradient magnitude) to opacity $\alpha \in [0, 1]$ and color $C \in [0, 1]^3$ [S1, unofficial][S2, unofficial].
+*   **Input:** User-drawn strokes (2D coordinates in screen space or parameter space), initial volume data (scalar field $f(\mathbf{x})$ and optionally gradient magnitude $\|\nabla f(\mathbf{x})\|$), and current TF state.
+*   **Output:** A modified Transfer Function mapping scalar/gradient values to opacity $\alpha$ and color $C$ [S1, unofficial][S2, unofficial].
 
 **Data Structures:**
-The transfer function is typically represented as a piecewise linear function defined by a set of keypoints $(v_i, \alpha_i, C_i)$ or as a lookup table (LUT) [S2, unofficial]. In systems like Voxel TIPs, the interface maintains a state for each editing mode (sliding window, mixing table, ramp-like, sketching) [S2, unofficial].
+The TF is typically represented as a piecewise linear function defined by keypoints (nodes) in the parameter domain (intensity or gradient magnitude) [S2, unofficial]. In systems like Voxel TIPs, the domain is discretized into segments for specific tools (e.g., 10 equal segments for sliders) [S2, unofficial].
 
 **Steps:**
 1.  **Sketch Acquisition:** The user draws strokes on the interface.
-    *   *Spatial Sketching:* Strokes are drawn on volume slices or the rendered image [S1, unofficial].
-    *   *Interface Sketching:* Strokes are drawn on a dedicated 1D graph area or via specific tools (sliding window, sliders) [S2, unofficial].
-2.  **Feature Extraction/Mapping:**
-    *   If sketching on spatial views, the system analyzes the stroke locations to identify intensity/gradient ranges corresponding to the drawn features [S1, unofficial].
-    *   If using tools like the Sliding Window, a rectangular pulse is defined over a selected domain interval [S2, unofficial].
-    *   If using the Mixing Table, vertical sliders define rectangular pulses with adjustable height [S2, unofficial].
-3.  **Transfer Function Generation:**
-    *   *Direct Mapping:* For 1D TFs, strokes are converted into opacity/color ramps. For example, a stroke defining a foreground layer sets opacity to 1 and color to the selected value within the corresponding intensity range [S1, unofficial].
-    *   *Neural Network:* In some systems, high-dimensional TFs are generated using artificial neural networks based on the sketches [S1, unofficial].
-    *   *Fusion:* Multiple features from distinct rendering results can be fused into a comprehensive visualization based on user sketches [S1, unofficial].
-4.  **Refinement:** The user can manually fine-tune the function via free-form sketching or by adjusting handles (color, opacity) [S2, unofficial].
-5.  **Evaluation:** The resulting TF is applied during volume rendering (pre-classification or post-classification) [S2, unofficial].
+    *   *Spatial Sketching:* Strokes are drawn on the rendered volume image. The system maps screen coordinates to volume data features or parameter values [S1, unofficial].
+    *   *Parameter Sketching:* Strokes are drawn on a 1D graph (intensity/gradient axis) or 2D histogram [S2, unofficial].
+2.  **Interpretation/Conversion:** The raw strokes are converted into TF parameters.
+    *   *Direct Mapping:* In 1D sketching, the vertical position of the stroke relative to the axis determines opacity, and horizontal position determines the scalar value [S2, unofficial].
+    *   *Neural Network Generation:* In some systems (e.g., Tzeng et al.), strokes on volume slices are fed into an artificial neural network to generate high-dimensional TFs [S1, unofficial].
+    *   *Feature Fusion:* Strokes on rendered images can fuse multiple features from distinct rendering results into a comprehensive visualization [S1, unofficial].
+3.  **Refinement:** Users iteratively adjust the TF using specific interaction modes:
+    *   *Sliding Window:* A rectangular pulse with controlled amplitude scans the domain. Opacity is constant within the interval and zero outside. Height and width are adjusted via cursors [S2, unofficial].
+    *   *Mixing Table:* Vertical sliders associated with rectangular pulses. Ten equally sized sliders are placed side-by-side. Sliders are dragged to set height (opacity). Thumbnails act as toggle buttons for opacity (0 or 1) [S2, unofficial].
+    *   *Ramp-like Function:* Piecewise linear interpolation between nodes. Nodes are moved vertically to adjust opacity [S2, unofficial].
+    *   *Free-form Sketching:* Direct drawing on the TF graph updates the function values at the selected domain points [S2, unofficial].
+4.  **Adaptation:** When switching tools, the prior TF is adapted to the new tool type. For example, switching from sketching to multiple sliders converts the function into a rectangular pulse train based on the average values in each slider's range [S2, unofficial].
 
-**Formulas:**
-*   **Sliding Window:** A rectangular pulse $P(v)$ with controlled amplitude $A$ and width $W$ centered at $v_c$:
-    $$
-    P(v) = \begin{cases} 
-    A & \text{if } |v - v_c| \le W/2 \\
-    0 & \text{otherwise}
-    \end{cases}
-    $$
-    [S2, unofficial]
-*   **Mixing Table:** A sum of rectangular pulses $R_i(v)$ associated with sliders $i$:
-    $$
-    T(v) = \sum_{i} H_i \cdot R_i(v)
-    $$
-    where $H_i$ is the height (opacity) of the $i$-th slider [S2, unofficial].
-*   **Ramp-like Function:** Piecewise linear interpolation between nodes $(v_i, \alpha_i)$:
-    $$
-    \alpha(v) = \alpha_i + \frac{\alpha_{i+1} - \alpha_i}{v_{i+1} - v_i} (v - v_i) \quad \text{for } v_i \le v < v_{i+1}
-    $$
-    [S2, unofficial]
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_tf_from_stroke(stroke_points, current_tf, tool_mode):
+    """
+    Updates the transfer function based on user strokes.
+    stroke_points: List of (x, y) coordinates from user input.
+    current_tf: Current piecewise linear TF defined by nodes.
+    tool_mode: 'sliding_window', 'mixing_table', 'ramp', 'sketch', 'spatial'.
+    """
+    if tool_mode == 'sketch':
+        # Direct mapping: x is scalar value, y is opacity
+        new_nodes = []
+        for x, y in stroke_points:
+            # Normalize x to domain [0, 1], y to opacity [0, 1]
+            scalar = normalize(x, domain_min, domain_max)
+            opacity = normalize(y, 0, 1)
+            new_nodes.append(Node(scalar, opacity))
+        # Interpolate or replace existing nodes
+        current_tf = interpolate_nodes(new_nodes)
+        
+    elif tool_mode == 'sliding_window':
+        # Define a rectangular pulse
+        # stroke_points define the window boundaries and height
+        x_start, x_end, height = parse_window_stroke(stroke_points)
+        current_tf = apply_rectangular_pulse(current_tf, x_start, x_end, height)
+        
+    elif tool_mode == 'mixing_table':
+        # Map stroke to nearest slider bin
+        bin_index = get_slider_bin(stroke_points[0].x)
+        opacity = normalize(stroke_points[0].y, 0, 1)
+        current_tf.set_slider_height(bin_index, opacity)
+        
+    elif tool_mode == 'spatial':
+        # Map screen stroke to volume features
+        # Requires ray casting to map screen pixel to volume scalar
+        volume_scalars = map_screen_to_volume(stroke_points)
+        # Use NN or heuristic to generate TF from scalars
+        current_tf = generate_tf_from_scalars(volume_scalars)
+        
+    return current_tf
+```
 
 **Parameters:**
-*   **Thumbnail Interval Length:** 10% of the full parameter domain [S2, unofficial].
-*   **Mixing Table Sliders:** 10 equally sized sliders [S2, unofficial].
-*   **Hardware:** Samsung UE55F8000 55” TV, ZaagTech X Series 16 Touch Overlay [S2, unofficial].
+*   **Domain Resolution:** In Voxel TIPs, the mixing table uses 10 equally sized sliders [S2, unofficial].
+*   **Thumbnail Interval:** Thumbnails represent bounded intervals of length 10% of the full parameter domain [S2, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Tool Switching:** Switching from sketching to multiple sliders converts the function into a rectangular pulse train according to the average of values in the range of each slider [S2, unofficial]. Switching from ramp-like to sketching leaves the function unchanged [S2, unofficial].
-*   **Precision:** Touch gestures are preferred over mouse-based drawing for more accurate reproduction of user intentions [S2, unofficial].
+**Edge Cases:**
+*   **Tool Switching:** Switching from sketching to sliders requires averaging values to create a rectangular pulse train, which may lose fine details [S2, unofficial].
+*   **Precision:** Touch gestures on large screens (e.g., 55” TV) may have lower precision than mouse input, though users prefer them for intent reproduction [S2, unofficial].
 
 ## Subtopics
 
 ### [Interactive Volume Rendering with Multi-Dimensional TFs](6183-interactive-volume-rendering-with-multi-dimensional-tfs.md)
-This method enables users to define volume rendering appearance by directly manipulating a multi-dimensional transfer function (TF) in response to spatial interaction. It solves the limitation of 1D TFs, which cannot accurately capture complex material boundaries (e.g., distinguishing enamel, dentin, and pulp). It sets itself apart by allowing users to "paint" opacity and color into a 3D TF domain (value, 1st derivative, 2nd derivative) by pointing at spatial features, bridging the gap between the data space and the abstract TF domain.
+This method enables users to specify three-dimensional transfer functions (TFs) by interacting directly with a 2D histogram of scalar values versus gradient magnitudes. It solves the limitation of 1D TFs, which cannot accurately capture material boundaries where different materials share similar scalar values but differ in gradient characteristics (e.g., enamel vs. dentin). By allowing users to "paint" opacity regions in this 2D domain using geometric widgets, it provides a more intuitive specification process than manual parameter tuning.
 
 ### Sliding Window Scanning
-A technique to scan the intensity and gradient magnitude domains to sketch initial concepts for intensity-based and gradient-based transfer function terms. It applies a sliding window to scan the domains and configures multiple sliders to assign nonzero opacity values to the region of interest [S2, unofficial].
+A technique to scan the intensity and gradient magnitude domains to sketch initial concepts for intensity-based and gradient-based transfer function terms [S2, unofficial]. It applies a sliding window (rectangular pulse) to scan the domain, followed by configuring multiple sliders to assign nonzero opacity values to the region of interest [S2, unofficial].
 
 ### Sketch-based Feature Fusion
-A method where, based on user sketches on the rendered images, multiple features in distinct rendering results are fused into a comprehensive visualization [S1, unofficial].
+A method where, based on user sketches on the rendered images, multiple features in distinct rendering results are fused into a comprehensive visualization [S1, unofficial]. Wu and Qu [99] propose fusing these features directly from spatial sketches [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** In user tests with 15 participants, Voxel TIPs (sketch-based) was compared to VoTracer (WIMP/mouse). Users found it more difficult to sketch a function with a mouse, preferring touch gestures that more accurately reproduce user intentions [S2, unofficial]. Users preferred Voxel TIPs for both intensity-based (87%) and gradient-based (93%) function design over the conventional mouse approach [S2, unofficial].
-*   **Strengths:** Intuitive interaction; rapid design of initial concepts; supports both intensity and gradient-based TFs; integrates histograms and thumbnails for context [S2, unofficial].
-*   **Limitations:** Relies on user's ability to map spatial features to data values; may require refinement for complex TFs [S2, unofficial].
-*   **When to use:** When users have a clear visual idea of the desired appearance and want to quickly prototype TFs based on spatial features [S2, unofficial].
-*   **When not to use:** When precise numerical control over the TF shape is required without spatial reference [S2, unofficial].
+*   **Time Complexity:** Real-time interaction is supported. Stroke processing is $O(N)$ where $N$ is the number of stroke points. Rendering updates depend on the ray marching algorithm [S2, unofficial].
+*   **Memory Complexity:** Low. TFs are stored as small sets of keypoints or LUTs. Thumbnails require additional memory for pre-rendered particle representations [S2, unofficial].
+*   **Performance:** Voxel TIPs was tested on a Samsung UE55F8000 TV with ZaagTech X Series 16 Touch Overlay [S2, unofficial]. User tests showed that touch gestures were preferred over mouse-based drawing for sketching TFs, with users finding it more difficult to sketch with a mouse [S2, unofficial].
+*   **Strengths:** Intuitive, rapid initial definition, supports global and local editing, leverages direct manipulation metaphors (mixing table, sliding window) [S2, unofficial].
+*   **Limitations:** Precision may be lower on large touch surfaces compared to mouse. Spatial sketching requires complex mapping from screen to volume parameters [S1, unofficial][S2, unofficial].
+*   **When to use:** When users need to quickly explore TFs or have difficulty with abstract widget manipulation. Suitable for collaborative or standing interactions (tabletops) [S2, unofficial].
+*   **When not to use:** When high-precision, fine-grained control over specific TF segments is required without iterative refinement [S2, unofficial].
 
 ## Background
-Originating from research in interactive volume rendering, sketch-based TF editing was proposed by researchers such as Ropinski et al. [80], Guo et al. [30], Tzeng et al. [90, 91], and Wu and Qu [99] [S1, unofficial]. A notable implementation is Voxel TIPs, developed by Lopes et al., which uses a multi-touch tabletop interface [S2, unofficial]. The method is used in medical imaging and scientific visualization to facilitate the design of transfer functions by domain experts who may not be familiar with abstract parameter spaces [S2, unofficial].
+Sketch-based TF editing emerged as an alternative to traditional WIMP (Window, Icon, Menu, Pointer) interfaces, which were often considered tedious for TF design [S2, unofficial]. Key developments include:
+*   **Tzeng et al.:** Proposed systems allowing users to sketch volume slices to assign color and transparency, generating high-dimensional TFs using artificial neural networks [S1, unofficial].
+*   **Ropinski et al.:** Proposed a sketch-based UI for 1D TF design where users draw strokes to define foreground/background layers, refined by adjusting color and opacity [S1, unofficial].
+*   **Guo et al.:** Developed a system enabling direct manipulation of optical properties on the volume rendering view via user-drawn strokes, intelligently defining 1D TFs [S1, unofficial].
+*   **Wu and Qu:** Proposed fusing multiple features from distinct rendering results based on user sketches on rendered images [S1, unofficial].
+*   **Lopes et al. (Voxel TIPs):** Developed a sketch-based interface for a multi-touch tabletop, combining histograms, thumbnails, sliding windows, and mixing tables for intensity and gradient-based TF design [S2, unofficial].
 
 ## Sources
 [S1] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,116 @@
+# Color Bleeding via SH Projection
+
+Also called: Chromaticity Effects, Diffuse Shadowed Radiance Transfer
+
+## Overview
+This method computes indirect illumination (color bleeding) in direct volume rendering by projecting the accumulated radiance along random rays onto Spherical Harmonics (SH) basis functions. It solves the problem of capturing chromaticity effects—where the color of the medium changes as light travels through it—which simpler shading models ignore. Unlike sibling methods that rely solely on local gradient estimation or absorption-only models [S1], this approach evaluates the full volume rendering integral to capture how the medium's color influences the scattered light [S1].
+
+## How it works
+The method extends the standard direct volume ray casting loop by adding a pre-computation or offline phase to estimate the indirect lighting term, which is then used during the final rendering pass.
+
+### Inputs and Outputs
+*   **Input:** Scalar volume data $V$, transfer functions for color $C_{base}$ and opacity $\alpha$, material function $M$ (optional), light direction $\mathbf{l}$, and SH order $L$.
+*   **Output:** SH coefficients representing the indirect illumination field, or the final rendered image if integrated into the shading term.
+
+### Data Structures
+*   **SH Coefficients:** An array of size $(L+1)^2$ for each spatial location (or voxel) storing the coefficients $c_{lm}$ for the spherical harmonics basis functions $Y_{lm}$.
+*   **Ray Data:** Accumulated color $L_{mi}$ and direction $\omega_i$ for each sampled ray.
+
+### Steps
+1.  **Ray Casting:** For each voxel or sample point $\mathbf{x}$, cast $N$ rays in random directions $\omega_i$. The directions are sampled using a modified adaptive sampling scheme [S1].
+2.  **Volume Integration:** For each ray $\omega_i$, evaluate the front-to-back compositing volume rendering integral to obtain the accumulated color $L_{mi}(\mathbf{x}, \omega_i)$. This integral models the color and intensity changes (chromaticity) as the ray travels through the medium [S1].
+    *   The integration uses the base color $C_{base}$ and opacity $\alpha$ derived from the transfer functions.
+    *   Optionally, the material function $M$ can be included in the integration. If $M$ is evaluated during ray marching, it influences the bleeding color but requires re-computing the SH projection if $M$ changes [S1]. Alternatively, neglect $M$ during ray marching and use transfer function color to allow interactive exchange of material functions with similar hues [S1].
+3.  **SH Projection:** After completing the raycasting for the current sample, perform the SH projection. For each ray $i$ with direction $\omega_i$ (defined by angles $\vartheta_s, \phi_s$) and accumulated color $L_{mi}$, update the total sum of the SH projection.
+    *   The accumulated color channel values are used as weights for the SH basis functions $Y_{lm}(\vartheta_s, \phi_s)$ [S1].
+    *   The update rule for the SH coefficients $c_{lm}$ at location $\mathbf{x}$ is:
+        $$ c_{lm}(\mathbf{x}) \leftarrow c_{lm}(\mathbf{x}) + L_{mi}(\mathbf{x}, \omega_i) \cdot Y_{lm}(\vartheta_s, \phi_s) $$
+    *   Note: The weighting with the clamped cosine term (depending on the angle between $\nabla \tau$ and the light vector) is omitted because the modified sampling approach already incorporates similar behavior [S1].
+4.  **Normalization:** After all rays are processed, normalize the coefficients by the number of samples $N$ (or the total weight) to obtain the final SH representation of the indirect illumination [S1].
+5.  **Rendering:** During the final rendering pass, evaluate the SH function at each sample point using the computed coefficients and the view/light directions to modulate the final color.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_color_bleeding_sh(volume, transfer_functions, num_rays, sh_order):
+    """
+    Computes SH coefficients for color bleeding via volume ray casting.
+    """
+    # Initialize SH coefficients for all voxels
+    # Size: (num_voxels, (sh_order + 1)**2)
+    sh_coeffs = zeros((num_voxels, (sh_order + 1)**2))
+    
+    for each voxel x in volume:
+        # Accumulator for SH projection
+        local_sh_sum = zeros((sh_order + 1)**2)
+        
+        for i in range(num_rays):
+            # 1. Cast ray in random direction omega_i
+            omega_i = sample_random_direction()
+            
+            # 2. Evaluate front-to-back compositing integral
+            # L_mi is the accumulated color along the ray
+            L_mi = 0.0
+            transmittance = 1.0
+            current_pos = x
+            
+            while transmittance > epsilon:
+                # Sample volume at current_pos
+                v_val = volume[current_pos]
+                alpha = transfer_functions.opacity(v_val)
+                color = transfer_functions.color(v_val)
+                
+                # Optional: Include material function M
+                # If M is used, it must be re-evaluated if M changes
+                # material_factor = material_function(current_pos)
+                # color *= material_factor
+                
+                # Front-to-back compositing step
+                contribution = transmittance * alpha * color
+                L_mi += contribution
+                transmittance *= (1.0 - alpha)
+                
+                # Advance ray
+                current_pos += omega_i * step_size
+            
+            # 3. SH Projection
+            # Get spherical angles for omega_i
+            theta, phi = cartesian_to_spherical(omega_i)
+            
+            # Update SH sum with accumulated color as weight
+            for l in range(sh_order + 1):
+                for m in range(-l, l + 1):
+                    # Y_lm is the SH basis function
+                    y_lm = spherical_harmonic(l, m, theta, phi)
+                    local_sh_sum[index(l, m)] += L_mi * y_lm
+        
+        # 4. Normalize
+        sh_coeffs[x] = local_sh_sum / num_rays
+        
+    return sh_coeffs
+```
+
+### Parameters and Typical Values
+*   **Number of Rays ($N$):** Not given in the sources. Depends on desired noise reduction.
+*   **SH Order ($L$):** Not given in the sources. Higher orders capture more directional detail but increase memory and computation.
+*   **Step Size:** Not given in the sources. Typically determined by the voxel resolution or a fraction thereof.
+
+### Edge Cases and Pitfalls
+*   **Material Function Exchange:** If the material function $M$ is evaluated during ray marching, it is baked into the SH coefficients. Changing $M$ requires re-performing the SH projection [S1]. To allow interactive exchange, neglect $M$ during ray marching and use transfer function color, provided the new material has a similar hue [S1].
+*   **Cosine Weighting:** Do not apply a clamped cosine weighting based on the angle between the gradient and light vector, as the modified sampling scheme already accounts for this [S1].
+*   **Chromaticity:** Unlike methods that only consider absorption (e.g., Ritschel [Rit07]), this method captures chromaticity effects by evaluating the full volume rendering integral [S1].
+
+## Operating characteristics
+*   **Time Complexity:** $O(V \cdot N \cdot R \cdot L^2)$, where $V$ is the number of voxels, $N$ is the number of rays per voxel, $R$ is the average ray length (samples per ray), and $L$ is the SH order. The $L^2$ factor comes from the SH projection update.
+*   **Memory Complexity:** $O(V \cdot L^2)$ to store the SH coefficients for the entire volume.
+*   **Strengths:** Captures chromaticity effects (color changes through the medium) which gradient-based shading misses. Provides better depth separation compared to conventional gradient-based shading [S1].
+*   **Limitations:** High memory usage for storing SH coefficients. Non-interactive if material functions are baked into the SH projection. Computationally expensive due to multiple ray casts per voxel.
+*   **When to Use:** When accurate color bleeding and chromaticity effects are required, and interactive material editing is not needed or can be handled by using transfer function colors only.
+*   **When Not to Use:** When real-time interactive material changes are required and the performance cost of re-computing SH is prohibitive, or when memory is constrained.
+
+## Background
+This method was introduced by Lindemann and Ropinski in 2010 [S1]. It is an extension of diffuse shadowed radiance transfer, adapted for volume rendering. It differs from Ritschel's approach [Rit07] by considering the full volume rendering integral rather than just absorption, thereby capturing chromaticity effects [S1]. The method is part of the broader effort to improve lighting and shading in direct volume rendering beyond simple Phong models.
+
+## Sources
+[S1] Advanced Light Material Interaction for Direct Volume Rendering, https://doi.org/10.2312/vg/vg10/101-108, fetched 2026-10-26

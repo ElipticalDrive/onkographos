@@ -1,0 +1,201 @@
+# WKB-based Multiple Scattering Approximation
+
+Also called: Multiple Path Point (MPP) method, WKB expansion of the path integral
+
+## Overview
+The WKB-based Multiple Scattering Approximation is a method for simulating light transport in participating media that approximates the multiple scattering term by integrating contributions only over paths close to the Most Probable Path (MPP) [S2]. Unlike the diffusion approximation, which is restricted to dense, uniform media, this method is valid for sparse and inhomogeneous media, provided the scattering coefficients vary smoothly and the phase function is strongly forward-peaked [S1, S2]. It sets itself apart by replacing the full integration over the $(x_0, \vec{\omega}_0)$-space with a reduced integration over a subset of paths defined by MPPs, effectively modeling the spatial spreading and blurring of incident radiance without spawning secondary rays [S1, S3].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   Volume density field $\rho(x)$ and scattering coefficient $\sigma_b$ (or $b(x) = \sigma_b \rho(x)$) [S2].
+*   Absorption coefficient $a(x)$ and extinction coefficient $c(x) = a(x) + b(x)$ [S2].
+*   Phase function $P$, assumed strongly forward-scattering with a known mean square scattering angle $\langle \theta^2 \rangle$ [S2].
+*   Incident radiance field $L_0$ (e.g., from direct illumination or single scattering) [S3].
+*   Eye position $x_{eye}$ and viewing direction $\vec{\omega}$ [S2].
+
+**Outputs:**
+*   Multiple scattering radiance $L_{MS}(x, \vec{\omega})$ at the query point [S2].
+
+### Data Structures
+*   **MPP List:** A set of Most Probable Paths, indexed by the number of scattering events $\ell$ and path length $s$. Each MPP is approximated by two straight line segments: $\ell_{eye}$ (from eye to scattering point) and $\ell_{light}$ (from scattering point to light) [S2].
+*   **Pre-computed Attenuation:** A lookup table or volume texture storing light attenuation $T$ at all possible depths to speed up direct component calculation [S1].
+
+### Parameters
+*   $\ell$: Number of scattering events along the path [S2].
+*   $s$: Distance along the path (arclength) [S2].
+*   $w(\ell)$: Blurring width (standard deviation of the Gaussian filter) [S2].
+*   $\langle \theta^2 \rangle$: Mean square scattering angle [S2].
+*   $c(x)$: Extinction coefficient at point $x$ [S2].
+*   $b(x)$: Scattering coefficient at point $x$ [S2].
+*   $P_{MS}$: Multiple scattering phase function [S2].
+
+### Algorithm Steps
+1.  **Pre-compute Direct Attenuation:** Calculate and store the light attenuation in the volume at all possible depths. This allows for fast evaluation of the direct illumination component [S1].
+2.  **Construct MPPs:** For the given eye position and viewing direction, construct a set of Most Probable Paths (MPPs) corresponding to different values of $\ell$ (number of scattering events). These paths start at the eye and run towards the light source [S2].
+3.  **Approximate MPP Geometry:** Replace the generally curved MPPs with an approximation consisting of two straight line segments: one from the eye to the scattering point, and one from the scattering point to the light source [S2].
+4.  **March Along MPP:** Compute the indirect component by marching along the constructed MPP. The marching steps are chosen such that the number of scattering events is uniform [S1].
+5.  **Compute Contribution:** At each sampling point along the MPP, compute the contribution from the incident radiance. This is done by integrating Gaussian-weighted incident radiance over a plane perpendicular to the path direction. No rays are spawned; instead, the incident radiance is filtered [S1, S3].
+
+### Formulas
+The multiple scattering radiance $L_{MS}$ at point $x$ and direction $\vec{\omega}$ is calculated by integrating over MPPs with different $\ell$ [S2]:
+
+$$
+L_{MS}(x, \vec{\omega}) = \int d\ell \, \exp \left( - \int_0^s c(MPP_\ell(s')) ds' \right) \exp (-A_c(MPP_\ell)) \times P_{MS}(\ell, \vec{\omega} - \vec{\omega}_0) \int_{plane \perp MPP} \text{gauss}(\mathbf{x}', w(\ell)) L_0(\mathbf{x}', \vec{\omega}') d\mathbf{x}'
+$$
+
+Where:
+*   The outer integration is over $\ell$ (number of scattering events) [S2, S3].
+*   $\exp \left( - \int_0^s c(MPP_\ell(s')) ds' \right)$ represents the attenuation along the MPP [S3].
+*   $\exp (-A_c(MPP_\ell))$ is the curvature part of the action function [S3].
+*   $P_{MS}(\ell, \vec{\omega} - \vec{\omega}_0)$ is the multiple scattering phase function, giving the probability of light being scattered by a given angle after $\ell$ events [S3].
+*   The inner integral integrates the incident radiance $L_0$ weighted by a Gaussian function over the plane perpendicular to the MPP [S2, S3].
+*   $\text{gauss}(\mathbf{x}', w(\ell))$ is a Gaussian of width $w(\ell)$ [S3].
+
+The width $w(\ell)$ of the Gaussian is determined by the path's $\ell$, its physical length $s$, and media parameters [S2]:
+
+$$
+w(\ell) = \sqrt{\ell \cdot s \cdot \langle \theta^2 \rangle}
+$$
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_wkb_multiple_scattering(eye_pos, view_dir, volume, light_source, phase_func):
+    """
+    Computes the multiple scattering radiance using the WKB approximation.
+    
+    Args:
+        eye_pos: 3D vector, position of the eye/camera.
+        view_dir: 3D vector, normalized viewing direction.
+        volume: Object providing density rho(x), scattering_coeff sigma_b, absorption_coeff a(x).
+        light_source: Object providing incident radiance L0(x, omega).
+        phase_func: Function returning P_MS(l, omega_diff).
+        
+    Returns:
+        float: Radiance L_MS at eye_pos in view_dir.
+    """
+    
+    # 1. Pre-compute attenuation if not already done (assumed available in volume)
+    # volume.get_attenuation(depth) returns T
+    
+    # 2. Construct MPPs for a range of scattering events l
+    # MPPs are approximated by two segments: eye->scattering_point and scattering_point->light
+    # We iterate over possible values of l
+    l_max = estimate_max_scattering_events(volume, eye_pos, light_source)
+    l_values = linspace(1, l_max, num_steps=10) # Discretize l
+    
+    total_radiance = 0.0
+    
+    for l in l_values:
+        # 3. Find the Most Probable Path for this l
+        # The MPP minimizes the action. For strong forward scattering, it connects eye to light
+        # via a scattering point. We approximate the MPP geometry.
+        # Let s be the total length of the MPP.
+        # The scattering point is determined by minimizing the optical path length weighted by l.
+        # For simplicity, assume the MPP is a straight line from eye to light, 
+        # or a two-segment path where the vertex is found via optimization.
+        # Here we assume a generic MPP object is retrieved.
+        mpp = find_most_probable_path(eye_pos, light_source, volume, l)
+        
+        # 4. Calculate attenuation along the MPP
+        # Integral of c(x) along the MPP
+        attenuation_integral = 0.0
+        num_samples = 100
+        for i in range(num_samples):
+            t = i / (num_samples - 1)
+            point_on_mpp = mpp.get_point(t)
+            c_val = volume.get_extinction(point_on_mpp)
+            ds = mpp.get_segment_length() / num_samples
+            attenuation_integral += c_val * ds
+            
+        attenuation = exp(-attenuation_integral)
+        
+        # 5. Calculate curvature term A_c
+        # This accounts for the deviation from a straight line.
+        # If MPP is approximated by two straight lines, A_c might be zero or small.
+        # [S3] mentions A_c as the curvature part of the action function.
+        # For the two-segment approximation, this term is often neglected or computed based on the angle.
+        # Not given in the sources for the specific two-segment case. [G] Assume A_c = 0 for straight segments.
+        curvature_term = 1.0 # exp(-A_c)
+        
+        # 6. Calculate blurring width w(l)
+        s = mpp.get_length()
+        mean_square_angle = phase_func.get_mean_square_scattering_angle()
+        w = sqrt(l * s * mean_square_angle)
+        
+        # 7. Integrate Gaussian-weighted incident radiance
+        # Integrate over the plane perpendicular to the MPP at the scattering point.
+        # The scattering point is roughly where the MPP bends.
+        scattering_point = mpp.get_vertex()
+        
+        # Approximate the integral by sampling a grid in the perpendicular plane
+        plane_radiance = 0.0
+        grid_size = 5
+        step_size = w * 2.0 / grid_size # Sample within 2 sigma
+        
+        for dx in range(-grid_size//2, grid_size//2 + 1):
+            for dy in range(-grid_size//2, grid_size//2 + 1):
+                # Vector in the plane perpendicular to the MPP direction
+                # Need to construct basis vectors u, v perpendicular to mpp.direction
+                u, v = get_perpendicular_basis(mpp.direction)
+                
+                offset = dx * step_size * u + dy * step_size * v
+                sample_point = scattering_point + offset
+                
+                # Incident radiance at sample point
+                # Direction towards the light source or from the light source?
+                # L0 is incident radiance. Usually from the light.
+                # We need the direction from the sample point to the light.
+                light_dir = normalize(light_source.position - sample_point)
+                
+                l0 = light_source.get_radiance(sample_point, light_dir)
+                
+                # Gaussian weight
+                dist_sq = dot(offset, offset)
+                gauss_weight = exp(-dist_sq / (2 * w * w))
+                
+                plane_radiance += l0 * gauss_weight * (step_size * step_size)
+        
+        # 8. Combine terms
+        # P_MS depends on l and the angle between view_dir and the MPP direction (omega_0)
+        # omega_0 is the direction of the MPP at the scattering point.
+        mpp_direction = mpp.get_direction_at_vertex()
+        angle_diff = acos(dot(normalize(view_dir), normalize(mpp_direction)))
+        
+        p_ms = phase_func.get_multiple_scattering_phase(l, angle_diff)
+        
+        # Contribution for this l
+        # Note: The integral over l is replaced by a sum.
+        # The differential dl is approximated by the step size in l.
+        dl = l_values[1] - l_values[0]
+        
+        contribution = attenuation * curvature_term * p_ms * plane_radiance
+        total_radiance += contribution * dl
+        
+    return total_radiance
+```
+
+### Edge Cases and Pitfalls
+*   **Smoothness Assumption:** The method assumes smoothly varying scattering coefficients. It may fail in media with sharp discontinuities in density or coefficients [S1].
+*   **Forward Scattering:** The method relies on the phase function being strongly forward-peaked. It ignores backscattering, which can lead to inaccuracies in media with significant backscatter [S1, S2].
+*   **Boundary Artifacts:** While better than diffusion near boundaries, the approximation may still produce artifacts in very low-density areas or near complex geometry if the MPP construction is not robust [S2].
+*   **Curvature Approximation:** Approximating curved MPPs with two straight line segments introduces error. The curvature term $A_c$ is often neglected in this approximation, which may affect accuracy for highly curved paths [S2, S3].
+
+## Operating characteristics
+*   **Time Complexity:** The complexity depends on the number of MPPs (discretization of $\ell$) and the resolution of the Gaussian integration plane. It is generally faster than full path tracing for multiple scattering because it avoids spawning secondary rays and uses pre-computed attenuation [S1].
+*   **Memory Complexity:** Requires storage for the volume density, extinction coefficients, and pre-computed attenuation maps. The MPP list is small [S1, S2].
+*   **Strengths:** Valid for sparse and inhomogeneous media where diffusion fails. Handles general inhomogeneous media and avoids artifacts near boundaries and low-density areas [S2]. Computationally efficient compared to full multiple scattering simulation [S1].
+*   **Limitations:** Ignores backscattering. Assumes strongly forward-scattering phase functions. Accuracy degrades if the phase function is not forward-peaked or if coefficients vary rapidly [S1, S2].
+*   **When to Use:** Suitable for simulating scattering in clouds, subsurface scattering, and other media with strong forward scattering and inhomogeneous density [S1, S2].
+*   **When Not to Use:** Not suitable for media with significant backscattering or isotropic scattering where the forward-scattering assumption is invalid [S1, S2].
+
+## Background
+The method is based on the path integration framework introduced by Premože et al. [S1, S2]. It exploits the WKB (Wentzel-Kramers-Brillouin) approximation to compute multiply-scattered light by finding the most probable path and analytically integrating scattered radiance along this path and its neighborhood [S1]. The concept of the Most Probable Path (MPP) was introduced to computer graphics by Premože et al. [2003] [S2]. The approximation was further developed to handle general inhomogeneous media and replace curved MPPs with two straight line segments [S2]. It is applied to the simulation of scattering in clouds and subsurface scattering [S1].
+
+## Sources
+[S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S2] A lighting model for general participating media, https://doi.org/10.1145/1053427.1053446, fetched 2026-11-02
+[S3] PDF Practical Rendering of Multiple Scattering Effects in Participating Media, https://cseweb.ucsd.edu/~ravir/HRPIEG.pdf, fetched 2026-10-28

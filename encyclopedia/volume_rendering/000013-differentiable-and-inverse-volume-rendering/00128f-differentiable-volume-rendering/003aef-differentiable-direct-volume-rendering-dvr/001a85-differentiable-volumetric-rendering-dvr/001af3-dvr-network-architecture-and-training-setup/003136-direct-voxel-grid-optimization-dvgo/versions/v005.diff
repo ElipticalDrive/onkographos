@@ -1,0 +1,86 @@
+--- v004.md
++++ v005.md
+@@ -8,10 +8,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Ray origins $\mathbf{o}$ and directions $\mathbf{d}$, camera parameters (near/far planes), scene bounding box [S2, unofficial].
++- **Inputs:** Ray origins $\mathbf{o}$ and directions $\mathbf{d}$, camera parameters (near/far planes), and scene bounding box [S2, unofficial].
+ - **Outputs:** Rendered RGB color and depth for each ray [S2, unofficial].
+ 
+ **Data Structures:**
+-1.  **Density Voxel Grid:** A 3D tensor of shape $(N_x, N_y, N_z)$ with 1 channel. Stores raw density values. Initialized to a small positive value (e.g., 0.001) [S2, unofficial].
+-2.  **Color Voxel Grid:** A 3D tensor of shape $(N_x, N_y, N_z)$ with 3 channels (RGB). Stores color features. Initialized to a default color (e.g., BLUE) [S2, unofficial].
++1.  **Density Voxel Grid:** A 3D tensor of shape $(N_x, N_y, N_z)$ with 1 channel, storing raw density values [S2, unofficial]. Initialized to a small positive value (e.g., 0.001) [S2, unofficial].
++2.  **Color Voxel Grid:** A 3D tensor of shape $(N_x, N_y, N_z)$ with 3 channels (RGB), storing color features [S2, unofficial]. Initialized to a default color (e.g., BLUE) [S2, unofficial].
+ 3.  **Bounding Box Buffers:**
+     -   `min`: Tuple of floats $(x_{min}, y_{min}, z_{min})$ defining the scene bounding box minimum corner [S2, unofficial].
+@@ -31,5 +31,5 @@
+ -   `background`: Background color (default WHITE) [S2, unofficial].
+ -   `alpha_init`: Initial alpha value for density bias shift calculation (default None) [S1, unofficial].
+--   `rgbnet_dim`: Dimension of color feature vector. If $\le 0$, uses coarse stage (3-channel grid). If $> 0$, uses fine stage (feature grid + MLP) [S1, unofficial].
++-   `rgbnet_dim`: Dimension of color feature vector. If $\le 0$, uses coarse stage (3-channel grid) [S1, unofficial]. If $> 0$, uses fine stage (feature grid + MLP) [S1, unofficial].
+ -   `mask_cache_thres`: Threshold for mask cache occupancy [S1, unofficial].
+ -   `fast_color_thres`: Threshold for voxel occupancy based on alpha [S1, unofficial].
+@@ -83,9 +83,31 @@
+ 
+ def trilinear_interpolate(grid, points):
+-    # points: (N, 3) grid coordinates
+-    # grid: (Nx, Ny, Nz, C)
+-    # Returns: (N, C) interpolated values
+-    # Standard trilinear interpolation implementation omitted for brevity [G]
+-    pass
++    """Standard trilinear interpolation for grid of shape (Nx, Ny, Nz, C) and points (N, 3)."""
++    # Clamp coordinates to grid bounds
++    x = np.clip(points[:, 0], 0, grid.shape[0] - 1.001)
++    y = np.clip(points[:, 1], 0, grid.shape[1] - 1.001)
++    z = np.clip(points[:, 2], 0, grid.shape[2] - 1.001)
++    
++    # Floor and ceil indices
++    x0, y0, z0 = np.floor([x, y, z]).astype(int)
++    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
++    
++    # Interpolation weights
++    dx, dy, dz = x - x0, y - y0, z - z0
++    w000 = (1-dx)*(1-dy)*(1-dz)
++    w100 = dx*(1-dy)*(1-dz)
++    w010 = (1-dx)*dy*(1-dz)
++    w110 = dx*dy*(1-dz)
++    w001 = (1-dx)*(1-dy)*dz
++    w101 = dx*(1-dy)*dz
++    w011 = (1-dx)*dy*dz
++    w111 = dx*dy*dz
++    
++    # Gather and interpolate
++    vals = grid[x0, y0, z0] * w000 + grid[x1, y0, z0] * w100 + \
++           grid[x0, y1, z0] * w010 + grid[x1, y1, z0] * w110 + \
++           grid[x0, y0, z1] * w001 + grid[x1, y0, z1] * w101 + \
++           grid[x0, y1, z1] * w011 + grid[x1, y1, z1] * w111
++    return vals
+ 
+ class SimpleDVGO:
+@@ -97,5 +119,5 @@
+         self.max = np.array(config.max_corner, dtype=np.float32)
+         self.shape = np.array(config.shape, dtype=np.float32)
+-        self.background = config.background
++        self.background = np.array(config.background, dtype=np.float32)
+         
+         # Initialize t_values
+@@ -169,5 +191,5 @@
+ 
+ ### Naive Combination Baseline (DVGO-NeuS)
+-A straightforward combination of DVGO and NeuS, replacing the volume rendering in DVGO with the SDF-based volume rendering scheme. It serves as the naive baseline in this work, which can hardly produce satisfactory results [S4, unofficial]. In the baseline model, the color network tends to depend more on the additional under-constrained voxel feature grid input, thus breaking color-geometry dependency. Additionally, due to a high degree of freedom in optimizing a voxel grid, it is hard to maintain a globally coherent shape without additional constraints [S4, unofficial].
++A straightforward combination of DVGO and NeuS, replacing the volume rendering in DVGO with the SDF-based volume rendering scheme [S4, unofficial]. It serves as the naive baseline in this work, which can hardly produce satisfactory results [S4, unofficial]. In the baseline model, the color network tends to depend more on the additional under-constrained voxel feature grid input, thus breaking color-geometry dependency [S4, unofficial]. Additionally, due to a high degree of freedom in optimizing a voxel grid, it is hard to maintain a globally coherent shape without additional constraints [S4, unofficial].
+ 
+ ## Operating characteristics
+@@ -175,8 +197,8 @@
+ - **Memory Complexity:** Not given in the sources.
+ - **Measured Performance:** DVGO is significantly faster than NeRF in both training and inference due to the replacement of MLP queries with grid lookups [S1, unofficial]. It achieves 2-3x speedup with PyTorch CUDA extensions [S1, unofficial].
+-- **Scaling:** Scales linearly with grid resolution. Higher resolutions require more memory but offer better detail. Octree or hash encoding variants can be used for scaling to higher resolutions [S1, unofficial].
++- **Scaling:** Scales linearly with grid resolution. Higher resolutions require more memory but offer better detail [S1, unofficial]. Octree or hash encoding variants can be used for scaling to higher resolutions [S1, unofficial].
+ - **Strengths:** Fast training and inference, simple implementation, efficient memory usage for moderate resolutions [S1, unofficial].
+-- **Limitations:** Memory usage grows cubically with resolution. May suffer from aliasing artifacts at high resolutions if not properly filtered. Less flexible than MLPs for complex geometries [G].
+-- **When to Use:** When training speed is critical and the scene can be represented well with a voxel grid. Suitable for forward-facing and bounded scenes [G].
++- **Limitations:** Memory usage grows cubically with resolution. Less flexible than MLPs for complex geometries [G].
++- **When to Use:** When training speed is critical and the scene can be represented well with a voxel grid [S1, unofficial]. Suitable for forward-facing and bounded scenes [G].
+ - **When Not to Use:** For very large unbounded scenes where memory is a constraint, or when high-frequency details require very high grid resolutions [G].
+ 

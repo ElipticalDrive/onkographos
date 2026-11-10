@@ -1,0 +1,178 @@
+# Spectral Scattering Model for Atmosphere
+
+Also called: Physical Model for Atmospheric Light Transport, Spectral Scattering with Water Bodies and Tone Mapping
+
+## Overview
+This method provides a physically-based, fully spectral real-time rendering model for planetary atmospheres and large-scale water bodies, accounting for direct illumination, indirect scattered light, interreflections between surface and volume, and seabed reflections [S2]. It distinguishes itself from its siblings by utilizing fully spectral computations (rather than RGB) and supporting arbitrarily dense atmospheres and water bodies within a single precomputation framework, whereas [Sky View LUT with Angular Compression](6648-sky-view-lut-with-angular-compression.md) focuses on angular compression for sky views without the coupled water body simulation [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Observer position $P_O$, view direction $V$, light direction $L$, wavelength $\lambda$, atmospheric density parameters ($N_R, N_M, H_R, H_M$), water properties, and precomputed lookup tables.
+*   **Outputs:** Final spectral color $I_F$ per pixel.
+
+**Data Structures:**
+The method relies on precomputed lookup tables stored in GPU textures [S2]:
+1.  **Atmospheric Scattering Table:** 4D data packed into a $32 \times 128 \times 256$ 3D texture. The logical resolution is $32 \times 128 \times 32 \times 8$ [S2].
+2.  **Water Scattering Table:** 3D texture with resolution $32 \times 64 \times 64$ [S2].
+3.  **Extinction Texture:** 2D texture with resolution $256 \times 512$ [S2].
+4.  **Ambient Texture:** 1D texture with size 256 [S2].
+*   **Precision:** 16-bit floating-point values per channel. Total memory size is 10MB [S2].
+*   **Spectral Sampling:** 15 evenly distributed samples for the visible spectrum [S2].
+
+**Formulas:**
+
+1.  **Scattering Coefficients:**
+    The scattering coefficients for Rayleigh ($\sigma_R$) and Mie ($\sigma_M$) scattering are calculated as [S2]:
+    $$ \sigma_{\{R,M\}}(\lambda) = \alpha_{\{R,M\}} \cdot N_{\{R,M\}} \cdot \frac{8\pi^3 (n_e^2 - 1)^2}{3 N_e^2 \lambda^4} $$
+    Where $\alpha_{\{R,M\}}$ is the mean particle polarizability constant, $n_e$ is the index of refraction of the Earth's atmosphere at sea level, $N_{\{R,M\}}$ is the Rayleigh/Mie particle molecular number density at sea level, and $N_e$ is the Loschmidt number (implied by standard Rayleigh derivation, though not explicitly defined in sources, the formula structure is standard). Note: $\sigma_M$ is wavelength-independent [S2].
+
+2.  **Density Scale Function:**
+    The density at altitude $h$ is modeled exponentially [S2]:
+    $$ p_{\{R,M\}}(P) = \exp\left(-\frac{h}{H_{\{R,M\}}}\right) $$
+    Where $H_R \approx 8$km and $H_M \approx 1.2$km for Earth [S2].
+
+3.  **Phase Functions:**
+    *   **Rayleigh:**
+        $$ F_R(\theta) = \frac{3}{4}(1 + \cos^2(\theta)) $$
+        Where $\theta$ is the scattering angle [S2].
+    *   **Mie (Improved Henyey-Greenstein):**
+        $$ F_M(\theta, g) = \frac{3(1-g^2)}{2(2+g^2)} \frac{(1+\cos^2(\theta))}{(1+g^2-2g\cos(\theta))^{3/2}} $$
+        Where $g \in [-1, 1]$ describes Mie scattering anisotropy [S2].
+
+4.  **Optical Depth:**
+    The optical depth $t(S, \lambda)$ along path length $S$ is the sum over scattering types [S2]:
+    $$ t(S, \lambda) = \sum_{i \in \{R, M\}} \sigma_i(\lambda) \int_0^S p_i(s') ds' $$
+    Computed via regular trapezoidal evaluation rule with 30 samples per integral [S2].
+
+5.  **Single Scattering Intensity:**
+    The intensity $I_{S_{\{R,M\}}}^{(1)}$ reaching observer $P_O$ in direction $V$ from light $L$ is [S2]:
+    $$ I_{S_{\{R,M\}}}^{(1)}(P_O, V, L, \lambda) = R(P_O, V, L, \lambda) + I_I(\lambda) F_{\{R,M\}}(\theta) \cdot \frac{\sigma_{\{R,M\}}(\lambda)}{4\pi} \int_{P_a}^{P_b} \rho_{\{R,M\}}(P) e^{-t(P P_c, \lambda) - t(P_a P_b, \lambda)} ds $$
+    Where $I_I(\lambda)$ is incident light intensity, $\rho_{\{R,M\}}(P)$ is the density scale function, and $t$ represents optical depth between points [S2]. Note: The source provides conflicting versions of Eq. 8; the detailed integral form above is used [S2].
+
+6.  **Water Interaction:**
+    *   Refraction ray $V_{0R}$ is computed in the fragment shader using `refract()` [S2].
+    *   Incident light $I_0 I(P_g, V_R, \lambda)$ is determined: if $V_R$ hits the star disc, $I_0 I(P_g, V_R, \lambda) = I_0 I(P_g, L, \lambda)$; otherwise, it is zero [S2].
+    *   Water scattering $I_{water}^S$ is fetched from the water scattering texture using the depth $D$ of the intersection point with the seabed [S2].
+
+7.  **Final Color:**
+    The final color $I_F$ is the sum of surface color $I_S$ and the attenuated participating medium contribution $I_P$ [S2]:
+    $$ I_F = I_S + I_P \cdot e^{-t(P_a P_g, \lambda)} $$
+
+8.  **Tone Mapping:**
+    Due to high dynamic range, tone mapping is applied [S2]:
+    $$ I_F = 1 - \exp(-E \cdot I_F) $$
+    Where $E$ is the exposure constant [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Precomputation Phase (CPU)
+def precompute_lookup_tables():
+    # Spectral sampling: 15 evenly distributed samples for visible spectrum
+    wavelengths = sample_visible_spectrum(15)
+    
+    # Numerical sampling: 30 samples for each integral
+    num_samples = 30
+    
+    # Initialize textures
+    # Atmospheric: 32x128x256 3D texture (packed 32x128x32x8)
+    # Water: 32x64x64 3D texture
+    # Extinction: 256x512 2D texture
+    # Ambient: 256 1D texture
+    
+    scattering_orders = 6 # Sufficient for convergence; up to 10 for very dense atmospheres
+    
+    for order in range(scattering_orders):
+        for i in range(num_spectral_samples):
+            lambda_val = wavelengths[i]
+            
+            # Compute Optical Depth and Scattering Integrals
+            # Using trapezoidal rule with 30 samples
+            optical_depth = compute_optical_depth_trapezoidal(lambda_val, num_samples)
+            
+            # Compute Single Scattering Contribution
+            # Integrate from Pa to Pb
+            scattering_intensity = compute_single_scattering_integral(
+                lambda_val, 
+                num_samples, 
+                optical_depth
+            )
+            
+            # Store in lookup tables
+            store_in_atmospheric_texture(scattering_intensity, lambda_val, order)
+            
+            # Compute Water Scattering
+            # Fetch based on depth D of seabed intersection
+            water_scattering = compute_water_scattering(lambda_val, num_samples)
+            store_in_water_texture(water_scattering, lambda_val)
+
+# Rendering Phase (GPU Fragment Shader)
+def render_spectral_atmosphere(observer_pos, view_dir, light_dir, surface_color):
+    # 1. Compute Refraction Ray
+    # V0R is the refraction ray
+    V0R = refract(view_dir, normal, index_of_refraction)
+    
+    # 2. Determine Incident Light for Water
+    # Check if V0R hits the star disc
+    if hits_star_disc(V0R):
+        I_incident_water = I_incident(light_dir)
+    else:
+        I_incident_water = 0.0
+        
+    # 3. Fetch Water Scattering
+    # Get depth D of point where V0R intersects seabed
+    depth_D = get_seabed_depth(V0R)
+    I_water_scattering = fetch_water_scattering_texture(depth_D)
+    
+    # 4. Compute Atmospheric Scattering
+    # Fetch from precomputed tables based on geometry and wavelength
+    # Note: Full spectral integration is approximated by fetching precomputed values
+    # for the 15 spectral samples
+    I_atmospheric = 0.0
+    for i in range(15):
+        lambda_val = get_wavelength(i)
+        # Compute optical depth ta(Pg)
+        t_PaPg = compute_optical_depth(observer_pos, view_dir, lambda_val)
+        
+        # Fetch single scattering intensity from table
+        I_s = fetch_atmospheric_scattering_table(observer_pos, view_dir, light_dir, lambda_val)
+        
+        # Attenuate
+        I_atmospheric += I_s * exp(-t_PaPg)
+        
+    # 5. Combine Surface and Medium
+    # I_S is surface color, I_P is atmospheric contribution
+    I_F = surface_color + I_atmospheric
+    
+    # 6. Tone Mapping
+    E = exposure_constant
+    I_F_tone_mapped = 1.0 - exp(-E * I_F)
+    
+    return I_F_tone_mapped
+```
+
+**Edge Cases and Pitfalls:**
+*   **High Dynamic Range:** $I_F$ has a very high dynamic range, requiring tone mapping to correct [S2].
+*   **Convergence:** 6 scattering orders are sufficient for convergence; up to 10 may be necessary for very dense atmospheres [S2].
+*   **Water Depth:** The contribution of the color of the bottom of the sea is neglected due to its depth [S1].
+*   **Fog:** Fog is not wavelength selective and can be handled in RGB space, restricted to be lit by the sun without shadows, using parallel light rays and approximating the geometry by a flat earth [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Precomputation is CPU-bound. For the entire dataset with 6 scattering orders, precomputation takes approximately 1.5 hours on an Intel Core 2 Duo 1.86 GHz CPU [S2].
+*   **Memory Complexity:** The lookup tables consume 10MB of texture memory (16-bit floating-point values per channel) [S2].
+*   **Measured Performance:**
+    *   At 1024×768 resolution: Average 180 FPS, minimum 85 FPS, with ~1.1 million static triangles [S2].
+    *   At 2560×2048 resolution: Average 60 FPS, minimum 29 FPS, with ~1.1 million static triangles [S2] [S2].
+*   **Scaling:** Performance is real-time on tested hardware (Nvidia GeForce 8800GT) [S2].
+*   **Strengths:** Fully spectral computations increase realism; supports arbitrarily dense atmospheres and large-scale water bodies in a single framework [S2].
+*   **Limitations:** Slower than [Bruneton and Neyret 2008] because it evaluates reflection and scattering from water bodies, whereas Bruneton and Neyret report lower framerates because they account for terrain morphology, which this method does not [S2].
+*   **When to use:** Real-time applications such as flight simulators, games, virtual environments, and software like Google Earth (after simplifications) [S2].
+
+## Background
+The method builds on Klassen’s planar atmosphere model [44], which introduced spectral treatment (33 wavelengths, 10nm spacing) but suffered from large errors near the horizon due to planar approximation [S1]. It extends this to concentric spherical layers [S1]. It also builds on Nishita et al.'s method for visualizing Earth from outer space, which used lookup tables for atmospheric scattering and analytic solutions for water transmission [S1]. The specific implementation described in [S2] is a physically-based real-time rendering method that utilizes fully spectral scattering data, precomputed into lookup tables, to handle planetary atmospheres and water bodies simultaneously [S2]. It targets applications requiring both atmospheric and water rendering, such as flight simulators and Google Earth [S2].
+
+## Sources
+[S1] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S2] Real-time spectral scattering in large-scale natural participating media, https://doi.org/10.1145/1925059.1925074, fetched 2026-10-28

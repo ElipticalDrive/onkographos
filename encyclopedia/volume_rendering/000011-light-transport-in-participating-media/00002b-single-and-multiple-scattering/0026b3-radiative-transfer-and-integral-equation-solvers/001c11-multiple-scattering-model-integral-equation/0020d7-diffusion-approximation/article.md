@@ -1,209 +1,91 @@
 # Diffusion Approximation
 
-Also called: Classical Diffusion Approximation, Diffusion Approximation of RTE, Diffusion Theory, Radiative Diffusion Equation
+Also called: Diffusion Theory, Radiative Diffusion Equation, Diffusion Approximation of RTE, Classical Diffusion Approximation, Diffusion Approximation for Multiple Scattering
 
 ## Overview
-The Diffusion Approximation (DA) is a method for approximating multiple scattering in participating media by replacing the computationally expensive integral form of the Radiative Transport Equation (RTE) with a partial differential equation (PDE) [S2]. It expresses the medium radiance as the first two angular moments (fluence and flux) of the radiation field, solving for the fluence field to determine in-scattering [S1]. It is distinct from its siblings because it operates in the spatial domain using a PDE solver rather than angular expansions like the [P-N Method](1395-p-n-method-spherical-harmonics.md) or stochastic sampling like the [Monte Carlo Method](1940-monte-carlo-method-for-multiple-scattering.md) [G]. It is most effective in dense, highly opaque media where photons undergo long random walks, making path tracing intractable [S1].
+The Diffusion Approximation is a method for computing multiple scattering in participating media by replacing the computationally expensive integral form of the Radiative Transfer Equation (RTE) with a partial differential equation (PDE) [S1, S3]. It models the medium radiance as a function of the first two angular moments of the radiation field: the scalar irradiance (fluence) and the vector irradiance (flux) [S1, S4]. Unlike [Full Propagator Approximation for Multiply-Scattered Radiance](1298-full-propagator-approximation-for-multiply-scattered-radianc.md) or [Monte Carlo Method for Multiple Scattering](1940-monte-carlo-method-for-multiple-scattering.md), which track angular distribution or stochastic paths, the diffusion approximation assumes that in highly scattering media, light distribution becomes nearly isotropic, allowing angular dependence to be smoothed out [S3, S4]. It is particularly efficient for dense, high-opacity media where photons undergo long random walks [S1].
 
 ## How it works
 **Inputs:**
-*   Volume domain $\Omega$ with spatial coordinates $\mathbf{x}$ [S1].
-*   Optical coefficients: absorption $\sigma_a(\mathbf{x})$, scattering $\sigma_s(\mathbf{x})$, extinction $\sigma_t(\mathbf{x}) = \sigma_a(\mathbf{x}) + \sigma_s(\mathbf{x})$ [S1].
-*   Source fields: reduced incident light source $q_{ri}(\mathbf{x})$ (from unscattered external lighting) and self-emission $j(\mathbf{x})$ [S1].
-*   Boundary conditions for fluence $\phi$ on $\partial \Omega$ [S1].
+*   Medium properties: Absorption coefficient $\sigma_a(\mathbf{x})$, scattering coefficient $\sigma_s(\mathbf{x})$, extinction coefficient $\sigma_t(\mathbf{x}) = \sigma_a(\mathbf{x}) + \sigma_s(\mathbf{x})$.
+*   Source terms: Incident unscattered light field $q_{ri}(\mathbf{x})$ and self-emission field $j(\mathbf{x})$.
+*   Domain: Volume $\Omega$ with boundary $\partial \Omega$.
 
 **Outputs:**
-*   Fluence field $\phi(\mathbf{x})$ (scalar irradiance) [S1].
-*   Flux field $\mathbf{E}(\mathbf{x})$ (vector irradiance) [S1].
-*   Approximated medium radiance $L_m(\mathbf{x}, \boldsymbol{\omega})$ [S1].
+*   Fluence field $\phi(\mathbf{x})$.
+*   Flux field $\mathbf{E}(\mathbf{x})$.
+*   Approximated medium radiance $L_m(\mathbf{x}, \boldsymbol{\omega})$.
 
 **Data Structures:**
-*   **Grid:** A regular 3D grid (typically cube-like boundaries) storing scalar and vector fields [S2].
-*   **Fluence Field:** 3D array of floats, $\phi[i,j,k]$ [S1].
-*   **Flux Field:** 3D array of 3-component vectors, $\mathbf{E}[i,j,k]$ [S1].
-*   **Diffusion Coefficient:** 3D array of floats, $D[i,j,k]$ [S1].
+*   The method typically operates on a grid or a set of blobs representing the volume.
+*   For grid-based implementations, $\phi$ and $\mathbf{E}$ are stored as scalar and vector fields at grid nodes or cell centers.
+*   For blob-based implementations (e.g., [Stam 1999]), a system of linear equations is formed for each blob, solving for coefficients $J_0$ and $J_1$ [S2].
 
-**Assumptions:**
-*   Isotropic scattering is assumed in the standard derivation [S1].
-*   The method is limited to volume scenes without explicit surface models [S2].
-*   Data types are restricted to regular volume data [S2].
-
-**Steps:**
-
-1.  **Compute Diffusion Coefficient:**
-    Calculate the diffusion coefficient $D(\mathbf{x})$ at each grid point.
-    $$ D(\mathbf{x}) = \frac{1}{3\sigma_t(\mathbf{x})} $$
-    [S1]
-
-2.  **Define Source Term:**
-    Combine the reduced incident light source $q_{ri}(\mathbf{x})$ and self-emission $j(\mathbf{x})$ into the total source term for the diffusion equation.
-    $$ S(\mathbf{x}) = q_{ri}(\mathbf{x}) + j(\mathbf{x}) $$
-    [S1]
-
-3.  **Solve the Radiative Diffusion Equation:**
-    Solve the following partial differential equation for the fluence $\phi(\mathbf{x})$ over the volume domain $\Omega$:
-    $$ \nabla \cdot (D(\mathbf{x})\nabla \phi(\mathbf{x})) = \sigma_a(\mathbf{x})\phi(\mathbf{x}) - S(\mathbf{x}) $$
-    [S1]
-    
-    *Boundary Conditions:* Use Dirichlet boundary conditions where $\phi(\mathbf{x}) = 0$ on the boundary $\partial \Omega$ [S1].
-
-4.  **Compute Flux (Fick's First Law):**
-    Once $\phi(\mathbf{x})$ is known, compute the flux $\mathbf{E}(\mathbf{x})$ using the gradient of the fluence.
-    $$ \mathbf{E}(\mathbf{x}) = -D(\mathbf{x})\nabla \phi(\mathbf{x}) $$
-    [S1]
-
-5.  **Reconstruct Radiance:**
-    Approximate the medium radiance $L_m(\mathbf{x}, \boldsymbol{\omega})$ for any direction $\boldsymbol{\omega}$ using the first two angular moments.
+**Formulas:**
+1.  **Radiance Approximation:**
+    The medium radiance is approximated by the first two terms of the angular expansion [S1, S4]:
     $$ L_m(\mathbf{x}, \boldsymbol{\omega}) \approx \frac{1}{4\pi} \phi(\mathbf{x}) + \frac{3}{4\pi} \boldsymbol{\omega} \cdot \mathbf{E}(\mathbf{x}) $$
-    [S1]
+    where $\phi(\mathbf{x})$ is the fluence (scalar irradiance) and $\mathbf{E}(\mathbf{x})$ is the flux (vector irradiance).
 
-6.  **Final Rendering (Ray Marching):**
-    For a camera ray, compute the total radiance at the endpoint $\mathbf{x}_e$ by combining the attenuated incident light and the accumulated in-scattering from the diffusion approximation.
+2.  **Fick's First Law:**
+    The flux is related to the gradient of the fluence via the diffusion coefficient $D(\mathbf{x})$ [S1]:
+    $$ \mathbf{E}(\mathbf{x}) = -D(\mathbf{x}) \nabla \phi(\mathbf{x}) $$
+    where the diffusion coefficient is defined as:
+    $$ D(\mathbf{x}) = \frac{1}{3\sigma_t(\mathbf{x})} $$
+
+3.  **Radiative Diffusion Equation (Fick's Second Law):**
+    Substituting Fick's law into the energy conservation equation yields the governing PDE for fluence [S1]:
+    $$ \nabla \cdot (D(\mathbf{x}) \nabla \phi(\mathbf{x})) = \sigma_a(\mathbf{x}) \phi(\mathbf{x}) - q_{ri}(\mathbf{x}) - j(\mathbf{x}) $$
+    Here, $q_{ri}(\mathbf{x})$ is the source field from reduced incident light, and $j(\mathbf{x})$ is the emission source.
+
+4.  **Total Radiance at Ray Endpoint:**
+    The final radiance at a point $\mathbf{x}_e$ along a ray is computed by combining the attenuated incident light and the in-scattered light from the diffusion solution [S1]:
     $$ L(\mathbf{x}_e, \boldsymbol{\omega}) = L(\mathbf{x}_s, \boldsymbol{\omega}) T(\mathbf{x}_s, \mathbf{x}_e) + \Delta x \sum_n T(\mathbf{x}_n, \mathbf{x}_e) Q(\mathbf{x}_n) $$
-    [S1]
-    Where $T$ is transmittance, $\mathbf{x}_s$ is the start point, and $Q(\mathbf{x}_n)$ is the source term derived from the diffusion solution (specifically the in-scattering component) [S1]. Note: In practice, the diffusion solution provides the *multiply-scattered* component $L_m$, which is integrated along the ray [S1].
+    where $T$ is transmittance, $\mathbf{x}_s$ is the start point, and $Q(\mathbf{x}_n)$ is the source term derived from the diffusion approximation.
 
-**Pseudocode:**
+**Algorithm Steps:**
+1.  **Precompute Source Terms:** Calculate $q_{ri}(\mathbf{x})$ from the incident unscattered light and $j(\mathbf{x})$ from self-emission.
+2.  **Discretize the Diffusion Equation:**
+    *   *Grid-based:* Discretize the PDE $\nabla \cdot (D \nabla \phi) = \sigma_a \phi - q_{ri} - j$ using finite differences or finite elements to form a linear system $A\phi = b$.
+    *   *Blob-based:* Form a system of linear equations for each blob, restricting the source radiance to $J_m(\boldsymbol{\omega}) = J_0 + J_1 \cdot \boldsymbol{\omega}$ [S2].
+3.  **Solve for Fluence:**
+    *   Apply boundary conditions (e.g., Dirichlet: $\phi = 0$ on $\partial \Omega$) [S1].
+    *   Solve the linear system for $\phi(\mathbf{x})$.
+        *   If the number of unknowns $v < 1000$, use direct LU decomposition [S2].
+        *   If $v$ is larger, use an iterative relaxation scheme (convergence not guaranteed) [S2].
+4.  **Compute Flux:** Calculate $\mathbf{E}(\mathbf{x}) = -D(\mathbf{x}) \nabla \phi(\mathbf{x})$ using the solved fluence field.
+5.  **Render:** Compute the final radiance $L(\mathbf{x}, \boldsymbol{\omega})$ using the radiance approximation formula and ray marching.
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+**Parameters:**
+*   The method assumes isotropic scattering or requires an effective scattering coefficient $\sigma_s' = \sigma_s(1-g)$ if anisotropy is present [S4].
+*   The method is limited to volume scenes without surface models in some implementations [S3].
 
-```python
-import numpy as np
-
-def solve_diffusion_approximation(sigma_a, sigma_s, q_ri, j, grid_spacing):
-    """
-    Solves the Classical Diffusion Approximation for a regular 3D volume.
-    
-    Args:
-        sigma_a: 3D numpy array, absorption coefficient.
-        sigma_s: 3D numpy array, scattering coefficient.
-        q_ri: 3D numpy array, reduced incident light source.
-        j: 3D numpy array, self-emission source.
-        grid_spacing: float, spacing between grid cells (dx, dy, dz assumed equal).
-        
-    Returns:
-        phi: 3D numpy array, fluence field.
-        E: 3D numpy array, flux field (shape same as sigma_a, with 3 channels).
-        L_m_func: A function that returns radiance for a given direction omega.
-    """
-    # Step 1: Compute extinction and diffusion coefficient [S1]
-    sigma_t = sigma_a + sigma_s
-    D = 1.0 / (3.0 * sigma_t)
-    
-    # Step 2: Define Source Term [S1]
-    S = q_ri + j
-    
-    # Step 3: Solve PDE: div(D * grad(phi)) - sigma_a * phi = -S [S1]
-    N = sigma_a.shape
-    dx = grid_spacing
-    # Restrict solve to interior nodes to handle Dirichlet BC phi=0 on boundary [S1]
-    interior_shape = (N[0]-2, N[1]-2, N[2]-2)
-    num_interior = np.prod(interior_shape)
-    
-    rows, cols, vals = [], [], []
-    b = np.zeros(num_interior)
-    
-    for i in range(1, N[0]-1):
-        for j in range(1, N[1]-1):
-            for k in range(1, N[2]-1):
-                i_int, j_int, k_int = i-1, j-1, k-1
-                idx = i_int * (N[1]-2) * (N[2]-2) + j_int * (N[2]-2) + k_int
-                
-                # Diagonal term: -(sum of neighbor D) / dx^2 - sigma_a [S1]
-                diag = -(D[i+1,j,k] + D[i-1,j,k] + D[i,j+1,k] + D[i,j-1,k] + D[i,j,k+1] + D[i,j,k-1]) / dx**2 - sigma_a[i,j,k]
-                rows.append(idx); cols.append(idx); vals.append(diag)
-                b[idx] = -S[i,j,k]
-                
-                # Neighbors
-                neighbors = [
-                    (i+1, j, k), (i-1, j, k),
-                    (i, j+1, k), (i, j-1, k),
-                    (i, j, k+1), (i, j, k-1)
-                ]
-                D_avg = [
-                    (D[i,j,k] + D[ni,nj,nk]) / 2.0 for ni,nj,nk in neighbors
-                ]
-                for ni, nj, nk, d_avg in zip(*neighbors, D_avg):
-                    ni_int, nj_int, nk_int = ni-1, nj-1, nk-1
-                    n_idx = ni_int * (N[1]-2) * (N[2]-2) + nj_int * (N[2]-2) + nk_int
-                    rows.append(idx); cols.append(n_idx); vals.append(d_avg / dx**2)
-    
-    # Solve linear system A * phi = b using a standard sparse solver [G]
-    from scipy.sparse import csr_matrix
-    from scipy.sparse.linalg import spsolve
-    A = csr_matrix((vals, (rows, cols)), shape=(num_interior, num_interior))
-    phi_flat = spsolve(A, b)
-    phi = np.zeros(N)
-    phi[1:-1, 1:-1, 1:-1] = phi_flat.reshape(interior_shape)
-    
-    # Step 4: Compute Flux E = -D grad phi [S1]
-    E = np.zeros((*N, 3))
-    # Central differences for gradient
-    dphi_dx = np.zeros(N)
-    dphi_dx[1:-1, :, :] = (phi[2:, :, :] - phi[:-2, :, :]) / (2 * dx)
-    dphi_dx[0, :, :] = (phi[1, :, :] - phi[0, :, :]) / dx
-    dphi_dx[-1, :, :] = (phi[-1, :, :] - phi[-2, :, :]) / dx
-    
-    dphi_dy = np.zeros(N)
-    dphi_dy[:, 1:-1, :] = (phi[:, 2:, :] - phi[:, :-2, :]) / (2 * dx)
-    dphi_dy[:, 0, :] = (phi[:, 1, :] - phi[:, 0, :]) / dx
-    dphi_dy[:, -1, :] = (phi[:, -1, :] - phi[:, -2, :]) / dx
-    
-    dphi_dz = np.zeros(N)
-    dphi_dz[:, :, 1:-1] = (phi[:, :, 2:] - phi[:, :, :-2]) / (2 * dx)
-    dphi_dz[:, :, 0] = (phi[:, :, 1] - phi[:, :, 0]) / dx
-    dphi_dz[:, :, -1] = (phi[:, :, -1] - phi[:, :, -2]) / dx
-    
-    E[:,:,0] = -D * dphi_dx
-    E[:,:,1] = -D * dphi_dy
-    E[:,:,2] = -D * dphi_dz
-    
-    # Step 5: Radiance Reconstruction Function [S1]
-    def get_radiance(x, y, z, omega):
-        # Trilinear interpolation [G]
-        ix, iy, iz = np.floor(x).astype(int), np.floor(y).astype(int), np.floor(z).astype(int)
-        fx, fy, fz = x - ix, y - iy, z - iz
-        ix = np.clip(ix, 0, N[0]-2)
-        iy = np.clip(iy, 0, N[1]-2)
-        iz = np.clip(iz, 0, N[2]-2)
-        
-        # Interpolate phi
-        phi_val = (1-fx)*(1-fy)*(1-fz)*phi[ix,iy,iz] + fx*(1-fy)*(1-fz)*phi[ix+1,iy,iz] + \
-                  (1-fx)*fy*(1-fz)*phi[ix,iy+1,iz] + fx*fy*(1-fz)*phi[ix+1,iy+1,iz] + \
-                  (1-fx)*(1-fy)*fz*phi[ix,iy,iz+1] + fx*(1-fy)*fz*phi[ix+1,iy,iz+1] + \
-                  (1-fx)*fy*fz*phi[ix,iy+1,iz+1] + fx*fy*fz*phi[ix+1,iy+1,iz+1]
-        
-        # Interpolate E
-        E_val = np.zeros(3)
-        for c in range(3):
-            E_val[c] = (1-fx)*(1-fy)*(1-fz)*E[ix,iy,iz,c] + fx*(1-fy)*(1-fz)*E[ix+1,iy,iz,c] + \
-                       (1-fx)*fy*(1-fz)*E[ix,iy+1,iz,c] + fx*fy*(1-fz)*E[ix+1,iy+1,iz,c] + \
-                       (1-fx)*(1-fy)*fz*E[ix,iy,iz+1,c] + fx*(1-fy)*fz*E[ix+1,iy,iz+1,c] + \
-                       (1-fx)*fy*fz*E[ix,iy+1,iz+1,c] + fx*fy*fz*E[ix+1,iy+1,iz+1,c]
-        
-        # L_m = 1/(4pi) * phi + 3/(4pi) * omega . E [S1]
-        return (1.0 / (4.0 * np.pi)) * phi_val + (3.0 / (4.0 * np.pi)) * np.dot(omega, E_val)
-        
-    return phi, E, get_radiance
-```
+**Edge Cases and Pitfalls:**
+*   **Vacuum/Low Extinction:** The method breaks down in regions of low extinction ($\sigma_t \to 0$) or vacuum, where $D(\mathbf{x})$ diverges [S1]. This violates the physical constraint $|\mathbf{E}| \leq \phi$ [S1].
+*   **Thin Features:** Dipole variants of diffusion approximation tend to overestimate absorption by thin features (e.g., edges of a nose or helmet) [S4].
+*   **Complex Scenes:** For scenes with many surfaces, the cost of progressive shooting of energy from surface patches can be expensive, requiring hierarchical approaches [S2].
 
 ## Subtopics
 
 ### [Flux-Limited Diffusion](3239-flux-limited-diffusion.md)
-A variant that modifies the diffusion coefficient to handle heterogeneous media, vacuum regions, and transitions to the transport regime, preventing the divergence of $D$ when $\sigma_t \to 0$. Choose this when the scene contains transparent regions or vacuum.
+Modifies the classical diffusion coefficient to be flux-limited and fluence-dependent, handling heterogeneous media and vacuum regions where classical diffusion fails.
+
+### [Diffusion Approximation for Cloud Radiance](9971-diffusion-approximation-for-cloud-radiance.md)
+Specifically discretizes the diffusion equation for volumetric cloud rendering, using multigrid relaxation to solve for the isotropic radiance component.
 
 ## Operating characteristics
-*   **Time Complexity:** Solving the PDE is generally $O(N)$ to $O(N \log N)$ depending on the linear solver, where $N$ is the number of grid cells [G]. This is significantly faster than path tracing for high-opacity media, which scales poorly with optical depth [S1].
-*   **Memory Complexity:** $O(N)$ to store the fluence, flux, and coefficient fields [G].
-*   **Strengths:** Extremely efficient for dense, highly scattering media (e.g., fog, clouds, skin) where multiple scattering dominates [S3]. Avoids the noise and long computation times of Monte Carlo methods in these regimes [S3].
-*   **Limitations:** Breaks down in regions of low extinction (high mean free path) or vacuum, where the diffusion coefficient $D(\mathbf{x})$ diverges as $\sigma_t \to 0$ [S1]. It also assumes isotropic scattering in its basic form [S1]. It tends to overestimate absorption by thin features [S3].
-*   **When to use:** High-opacity, homogeneous or smoothly varying media where multiple scattering is the dominant light transport mechanism [S1].
-*   **When not to use:** Scenes with vacuum, low-opacity regions, or where single scattering/shadows are visually critical [S1].
+*   **Time Complexity:** Solving the linear system is generally faster than path tracing for dense media. Grid methods scale with the number of grid cells; blob methods scale with the number of blobs $v$ ($O(v^3)$ for direct solve, less for iterative) [S2].
+*   **Memory Complexity:** Uses far less memory than grid-based full RTE solvers [S2].
+*   **Strengths:** Very fast for dense, highly scattering media; includes both double and multiple scattering in a single model [S4].
+*   **Limitations:** Inaccurate in low-scattering regions, near boundaries, or for thin features; assumes near-isotropic radiance [S1, S4].
+*   **When to Use:** Dense participating media (e.g., fog, skin, milk) where multiple scattering dominates.
+*   **When Not to Use:** Sparse media, vacuum regions, or scenes requiring accurate single-scattering angular details.
 
 ## Background
-The Diffusion Approximation originates from radiative transfer theory in physics and astrophysics, where it is used to model light transport in dense media [S1]. In computer graphics, it was adapted to accelerate the simulation of multiple scattering in participating media, particularly for effects like subsurface scattering and volumetric fog [S1]. The "Classical Diffusion Approximation" (CDA) refers to the standard form using $D = 1/(3\sigma_t)$, which was found to be problematic for general volumetric media with varying opacity, leading to the development of variants like Flux-Limited Diffusion [S1].
+The diffusion approximation originates from the observation that in highly scattering media, the angular distribution of light becomes isotropic due to multiple scattering events [S3, S4]. It was applied to volume rendering by Stam [S2, S93, S94, S96] to solve multiple scattering between blobs modeling media, offering a significant speedup over path tracing. It is widely used in computer graphics for rendering subsurface scattering and dense participating media [S1, S4].
 
 ## Sources
 [S1] Flux-Limited Diffusion for Multiple Scattering in Participating Media, https://archive.org/details/arxiv-1403.8105, fetched 2026-10-26
-[S2] A Differential Diffusion Theory for Participating Media, https://doi.org/10.1111/cgf.14956, fetched 2026-10-30
-[S3] Precomputed Multiple Scattering for Rapid Light Simulation in Participating Media, https://doi.org/10.1109/TVCG.2018.2890466, fetched 2026-10-26
+[S2] A survey on participating media rendering techniques, https://doi.org/10.1007/s00371-005-0287-1, fetched 2026-10-26
+[S3] A Differential Diffusion Theory for Participating Media, https://doi.org/10.1111/cgf.14956, fetched 2026-10-30
+[S4] Precomputed Multiple Scattering for Rapid Light Simulation in Participating Media, https://doi.org/10.1109/TVCG.2018.2890466, fetched 2026-10-26

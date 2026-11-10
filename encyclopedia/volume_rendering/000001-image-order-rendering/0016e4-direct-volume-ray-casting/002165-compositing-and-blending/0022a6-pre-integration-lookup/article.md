@@ -1,110 +1,186 @@
 # Pre-Integration Lookup
-Also called: 2D Pre-Integration, 2D Pre-integration Lookup, 3D Pre-integration, 3D Pre-integration Table, Pre-integrated Transfer Functions
+Also called: 2D Pre-integration, 2D Pre-integration Lookup, 3D Pre-integration, 3D Pre-integration Table, Pre-integrated Transfer Functions
 
 ## Overview
-Pre-integration lookup is a technique that pre-computes the optical integration of light through a volume slab, replacing iterative per-sample compositing with a single texture fetch [S1, unofficial][S2]. It solves the problem of high computational cost and aliasing artifacts associated with low sampling rates in direct volume ray casting by assuming linear data evolution within each slab [S1, unofficial]. It sets itself apart from standard iterative compositing by moving the integration burden to the CPU or a pre-processing stage, and from sibling methods like [Binary Swap Compositing](3264-binary-swap-compositing.md) by relying on analytical integration of the transfer function rather than hierarchical data structures.
+Pre-integration Lookup is a direct volume ray casting optimization that replaces the iterative accumulation of color and opacity along a ray with a single texture fetch from a pre-computed table [S1, unofficial][S2]. It solves the performance bottleneck of evaluating the optical integration equation for every sample by assuming linear data evolution within a slab, allowing the final color and opacity contribution of a slab to be determined solely by its entry density, exit density, and thickness [S1, unofficial]. It sets itself apart from iterative compositing [Compositing and Blending](2515-compositing-and-blending.md) by collapsing multiple samples into a single lookup, and from simplified pre-integration [Simplified Pre-integration](6186-simplified-pre-integration.md) by accounting for color attenuation within the slab rather than neglecting it [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar volume dataset, a transfer function (TF) mapping scalar values to color $C$ and opacity $\alpha$, and ray parameters (entry/exit scalar values and slab thickness).
-*   **Output:** A pre-integration lookup table (LUT) stored in GPU memory, and final pixel colors composited from slab contributions.
+*   **Input:** A 3D volume dataset, a transfer function mapping scalar values to color and opacity, and ray parameters (entry point, direction, step size).
+*   **Output:** Final pixel color $(C_{final})$ and accumulated opacity $(\alpha_{acc})$.
 
 **Data Structures:**
-The core data structure is the pre-integration lookup table.
-*   **2D Pre-integration Table:** A 2D texture where dimensions correspond to the entry scalar value and exit scalar value (or density) of the slab. The stored value is the integrated color and opacity contribution of the slab [S3].
-*   **3D Pre-integration Table:** A 3D texture where dimensions correspond to entry scalar, middle scalar, and exit scalar values. This allows for higher accuracy by accounting for non-linearities within the slab [S2, S3].
-*   **Table Size:** For 8-bit scalar data, the domain size is 256. A 2D table has dimensions $256 \times 256$. A 3D table has dimensions $256 \times 256 \times 256$ [S2].
+The core data structure is the **Pre-integration Lookup Table** [S1, unofficial][S2].
+*   **3D Pre-integration Table:** A 3D texture of size $256 \times 256 \times 256$ (for 8-bit scalar data) [S2].
+    *   **Layout:** The three dimensions correspond to:
+        1.  Entry density/sample value ($s_f$)
+        2.  Middle/Exit density/sample value ($s_m$ or $s_b$)
+        3.  Slab thickness or optical depth parameter (often implicit or derived from step size) [S1, unofficial][S2].
+    *   **Content:** Each texel stores the pre-computed color $(C_{slab})$ and opacity $(\alpha_{slab})$ contribution of a slab defined by the entry and exit densities [S1, unofficial][S2].
+*   **2D Pre-integration Table:** A 2D texture used as an alternative to the 3D table [S3].
+    *   **Layout:** Dimensions typically map to entry density and exit density, with thickness handled via uniform variables or fixed step assumptions [S3].
+    *   **Content:** Stores the integrated color and opacity for a slab given the boundary densities [S3].
 
-**Method Steps:**
+**Numbered Steps:**
+1.  **Pre-computation (Offline/Initialization):**
+    *   Define the transfer function $TF(v) \rightarrow (c, \alpha)$ mapping scalar value $v$ to color $c$ and opacity $\alpha$ [S1, unofficial].
+    *   For every possible pair of scalar values $(v_{in}, v_{out})$ and slab thickness $d$, compute the integrated color and opacity assuming linear interpolation of the scalar field between $v_{in}$ and $v_{out}$ [S1, unofficial].
+    *   The integration follows the standard front-to-back compositing equations over the slab [S1, unofficial][S2]:
+        $$
+        C_{slab} = \int_{0}^{d} c(t) \alpha(t) e^{-\int_{0}^{t} \alpha(\tau) d\tau} dt
+        $$
+        $$
+        \alpha_{slab} = \int_{0}^{d} \alpha(t) e^{-\int_{0}^{t} \alpha(\tau) d\tau} dt
+        $$
+        where $c(t)$ and $\alpha(t)$ are derived from the linearly interpolated scalar values and the transfer function [S1, unofficial][S2].
+    *   Store $(C_{slab}, \alpha_{slab})$ in the lookup table indexed by $(v_{in}, v_{out}, d)$ [S1, unofficial][S2].
 
-1.  **Pre-computation (Table Generation):**
-    The pre-integration table is computed by integrating the optical properties over all possible scalar value combinations within a slab.
-    *   Assume a slab of thickness $d$.
-    *   Let the scalar field $s(t)$ evolve linearly from entry value $s_{in}$ to exit value $s_{out}$ across the slab, where $t \in [0, d]$.
-    *   The color and opacity contributions are integrated using the transfer function $T(s) = (C(s), \alpha(s))$.
-    *   The integrated color $C_{slab}$ and opacity $\alpha_{slab}$ for a slab with entry $s_{in}$ and exit $s_{out}$ are calculated as:
+2.  **Ray Casting (Per Ray):**
+    *   Initialize accumulated color $C_{acc} = 0$ and accumulated opacity $\alpha_{acc} = 0$ (or transmittance $T = 1.0$) [S1, G, unofficial][S2].
+    *   For each slab along the ray:
+        a.  Sample the volume at the slab's entry point ($s_f$) and exit point ($s_b$) [S2].
+        b.  Determine the slab thickness $d$ (often fixed by the step size) [S1, unofficial][S2].
+        c.  Perform a texture lookup in the pre-integration table using $(s_f, s_b, d)$ as coordinates [S2].
+            *   If using the 3D table: Fetch $(C_{slab}, \alpha_{slab})$ directly [S2].
+            *   If using the 2D table: Fetch $(C_{slab}, \alpha_{slab})$ using $(s_f, s_b)$ and apply thickness scaling if necessary [S3].
+        d.  Update the accumulators using the front-to-back compositing equation [S2]:
+            $$
+            C_{acc} \leftarrow C_{acc} + (1 - \alpha_{acc}) C_{slab}
+            $$
+            $$
+            \alpha_{acc} \leftarrow \alpha_{acc} + (1 - \alpha_{acc}) \alpha_{slab}
+            $$
+        e.  Check for early ray termination: if $\alpha_{acc} \geq 1.0$ (or $T \approx 0$), break the loop [S1, unofficial][S2].
+    *   Composite the final color over the background $C_{bg}$:
         $$
-        C_{slab}(s_{in}, s_{out}) = \int_0^d C(s(t)) e^{-\int_0^t \alpha(s(\tau)) d\tau} dt
+        C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}
         $$
-        $$
-        \alpha_{slab}(s_{in}, s_{out}) = \int_0^d \alpha(s(t)) e^{-\int_0^t \alpha(s(\tau)) d\tau} dt
-        $$
-        [S1, unofficial][S2].
-    *   These integrals are evaluated numerically or analytically for all pairs $(s_{in}, s_{out})$ (for 2D) or triplets $(s_{in}, s_{mid}, s_{out})$ (for 3D) and stored in the texture [S2].
 
-2.  **Ray Casting with Slabs:**
-    The volume is divided into slabs of thickness $2d$ (or similar fixed thickness) [S2].
-    *   For each ray, identify the sequence of slabs it traverses.
-    *   For each slab, determine the scalar values at the entry, middle, and exit points of the slab by sampling the volume [S2].
-    *   Let the samples be $s_f$ (front), $s_m$ (middle), and $s_b$ (back) [S2].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-3.  **Lookup:**
-    *   **2D Approach:** Fetch the pre-integrated color and opacity from the 2D LUT using $(s_f, s_b)$ as coordinates [S3].
-    *   **3D Approach:** Fetch from the 3D LUT using $(s_f, s_m, s_b)$ as coordinates [S2].
-    *   This fetch returns the total optical contribution $(C_{slab}, \alpha_{slab})$ of the entire slab, assuming linear interpolation of the scalar field within it [S1, unofficial].
+```python
+# Pre-computation (Offline)
+def compute_pre_integration_table(transfer_function, max_value, thickness):
+    """
+    Computes the 3D pre-integration lookup table.
+    transfer_function: function v -> (color, opacity)
+    max_value: maximum scalar value in the volume (e.g., 255 for 8-bit)
+    thickness: slab thickness (step size)
+    """
+    table_size = max_value + 1
+    table = zeros((table_size, table_size, 3)) # Store color
+    alpha_table = zeros((table_size, table_size)) # Store opacity
+    
+    for v_in in range(table_size):
+        for v_out in range(table_size):
+            # Assume linear interpolation of scalar values between v_in and v_out
+            # Integrate the optical properties over the slab thickness
+            c_slab, a_slab = integrate_slab(transfer_function, v_in, v_out, thickness)
+            table[v_in, v_out] = c_slab
+            alpha_table[v_in, v_out] = a_slab
+            
+    return table, alpha_table
 
-4.  **Compositing:**
-    *   Composite the slab contributions using the standard front-to-back compositing equation [S2]:
-        $$
-        C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) C_{slab}^{(i)}
-        $$
-        $$
-        \alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_{slab}^{(i)}
-        $$
-    *   The process repeats for all slabs along the ray [S2].
+def integrate_slab(transfer_function, v_in, v_out, thickness):
+    """
+    Integrates color and opacity for a slab with linearly varying scalar values.
+    """
+    # Discretize the slab into small steps for numerical integration
+    # or use analytical solution if transfer function allows
+    num_steps = 10 # [G] Sufficient for smooth transfer functions
+    c_acc = 0.0
+    a_acc = 0.0
+    t = 1.0 # Transmittance
+    
+    for i in range(num_steps):
+        # Linear interpolation of scalar value
+        t_param = i / num_steps
+        v = lerp(v_in, v_out, t_param)
+        
+        # Get color and opacity from transfer function
+        c, a = transfer_function(v)
+        
+        # Update accumulators
+        c_acc += t * c * a
+        a_acc += t * a
+        t *= (1.0 - a)
+        
+    return c_acc, a_acc
+
+# Ray Casting (Per Ray)
+def ray_cast_with_pre_integration(volume, pre_int_table, pre_int_alpha_table, ray_origin, ray_direction, step_size, background_color):
+    c_acc = 0.0
+    a_acc = 0.0
+    t = 1.0
+    pos = ray_origin
+    
+    while t > 0.01 and a_acc < 0.99: # Early termination threshold [G]
+        # Sample entry and exit densities
+        v_in = volume.sample(pos)
+        pos_next = pos + ray_direction * step_size
+        v_out = volume.sample(pos_next)
+        
+        # Lookup pre-integrated slab contribution
+        # Note: In practice, texture coordinates are normalized
+        c_slab, a_slab = lookup_pre_integration(pre_int_table, pre_int_alpha_table, v_in, v_out, step_size)
+        
+        # Composite slab
+        c_acc += t * c_slab
+        a_acc += t * a_slab
+        t *= (1.0 - a_slab)
+        
+        pos = pos_next
+        
+    # Composite over background
+    final_color = c_acc + t * background_color
+    return final_color
+```
 
 **Parameters:**
-*   **Slab Thickness:** Determines the granularity of the pre-integration. Thinner slabs reduce approximation errors but increase the number of lookups [S1, unofficial][S2].
-*   **Table Resolution:** Typically 256 entries per dimension for 8-bit data [S2].
+*   **Table Resolution:** Typically $256 \times 256 \times 256$ for 8-bit data [S2].
+*   **Slab Thickness:** Determined by the ray casting step size [S1, unofficial][S2].
+*   **Early Termination Threshold:** Typically 0.99 or 1.0 [G].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The accuracy depends on the linear assumption within the slab. If the scalar field varies non-linearly within a slab, artifacts occur [S1, unofficial].
-*   **Memory:** 3D pre-integration tables require significant memory ($256^3$ entries), which may exceed GPU texture limits [S2, S3].
-*   **Hardware Support:** 3D texturing was historically slower or less supported than 2D texturing, leading to a preference for 2D pre-integration despite potential artifacts [S3].
+*   **Precision:** Linear interpolation assumption may introduce errors if the transfer function is highly non-linear or the slab thickness is large [S1, unofficial].
+*   **Memory:** 3D tables consume significant memory ($256^3$ texels) [S2]. 2D tables are preferred for hardware performance [S3].
+*   **Boundary Conditions:** At clip boundaries, special handling may be required to avoid artifacts due to discontinuous sampling distances [7452-pre-integrated-volume-rendering-at-clip-boundaries.md].
 
 ## Subtopics
 
 ### [Pre-Integrated Diffuse Shading with Non-Linear Gradient Interpolation](4932-pre-integrated-diffuse-shading-with-non-linear-gradient-inte.md)
-This method computes the diffuse component of Blinn-Phong shading in pre-integrated volume rendering by decomposing the integral into four 2D look-up tables (I0 to I3) weighted by coefficients dependent on light direction and gradient angles. It avoids the prohibitive memory cost of full 4D normal-based pre-integration while reducing shading errors caused by large angles between consecutive sample gradients compared to linear interpolation.
+This method computes the diffuse component of Blinn-Phong shading in pre-integrated volume rendering by decomposing the integral into four 2D look-up tables weighted by coefficients dependent on light direction and gradient angles [4932-pre-integrated-diffuse-shading-with-non-linear-gradient-inte.md]. It avoids the prohibitive memory cost of full 4D normal-based pre-integration while reducing shading errors caused by large angles between consecutive sample gradients compared to linear interpolation [4932-pre-integrated-diffuse-shading-with-non-linear-gradient-inte.md].
 
 ### [Non-Linear Gradient Interpolation for Pre-Integrated Volume Rendering](4933-non-linear-gradient-interpolation-for-pre-integrated-volume-.md)
-Non-linear gradient interpolation is a technique for pre-integrated direct volume rendering that reduces shading errors by interpolating gradients between front and back samples along a quadratic curve instead of a linear segment, allowing accurate computation of 2D pre-integration look-up tables. It sets itself apart from linear gradient interpolation by approximating the non-linear path of a normalized gradient vector as a quadratic polynomial, thereby avoiding the energy loss and shading errors inherent in linear interpolation which assumes the normalization term $\eta(t)=1$.
+Non-linear gradient interpolation is a technique for pre-integrated direct volume rendering that reduces shading errors by interpolating gradients between front and back samples along a quadratic curve instead of a linear segment, allowing accurate computation of 2D pre-integration look-up tables [4933-non-linear-gradient-interpolation-for-pre-integrated-volume-.md]. It sets itself apart from linear gradient interpolation by approximating the non-linear path of a normalized gradient vector as a quadratic polynomial, thereby avoiding the energy loss and shading errors inherent in linear interpolation which assumes the normalization term $\eta(t)=1$ [4933-non-linear-gradient-interpolation-for-pre-integrated-volume-.md].
+
+### [Simplified Pre-integration](6186-simplified-pre-integration.md)
+Simplified Pre-integration is a faster approximation of full pre-integration used in direct volume ray casting. It solves the performance bottleneck of computing pre-integrated transfer function (TF) lookups by neglecting color attenuation inside volume slabs. It sets itself apart from full pre-integration by trading accuracy for speed, making it suitable for interactive interfaces where multiple TFs are modified simultaneously.
 
 ### [Pre-integrated Volume Rendering at Clip Boundaries](7452-pre-integrated-volume-rendering-at-clip-boundaries.md)
-This method corrects rendering artifacts that occur at clip boundaries when using pre-integrated volume rendering with low sampling rates. It computes the optical contribution of the ray segment between a clipping surface and the first volume slice behind it, avoiding the need for interleaved rendering or complex boundary layer models. It differs from sibling methods by specifically addressing the discontinuity in sampling distance at clip planes rather than general gradient interpolation errors.
+This method corrects rendering artifacts that occur at clip boundaries when using pre-integrated volume rendering with low sampling rates [7452-pre-integrated-volume-rendering-at-clip-boundaries.md]. It computes the optical contribution of the ray segment between a clipping surface and the first volume slice behind it, avoiding the need for interleaved rendering or complex boundary layer models [7452-pre-integrated-volume-rendering-at-clip-boundaries.md]. It differs from sibling methods by specifically addressing the discontinuity in sampling distance at clip planes rather than general gradient interpolation errors [7452-pre-integrated-volume-rendering-at-clip-boundaries.md].
 
 ### Pre-integrated Volume Rendering with Shading
-A method for efficiently reconstructing 3D medical images that combines pre-integrated volume rendering with the Shear-Warp algorithm to eliminate aliasing artifacts from under-sampling and improve reconstruction quality via Phong lighting shading [S4, unofficial]. It implements classification coding for volume data using the correlation of the opacity transfer function and a min-max Octree data structure, establishing a run-length encoded (RLE) data structure for fast reconstruction when the opacity transfer function and view angle change [S4, unofficial].
-
-### Simplified Pre-integration
-A faster approximation of pre-integration that neglects color attenuation inside volume slabs, used in the first level of interaction where multiple transfer functions are modified [S5]. It is applied when an action can modify several TFs simultaneously, while full pre-integration is applied in the second level where a single TF is under modification, to maintain quality without compromising interactivity [S5].
+A method for efficiently reconstructing 3D medical images that combines pre-integrated volume rendering with the Shear-Warp algorithm to eliminate aliasing artifacts from under-sampling and improve reconstruction quality via Phong lighting shading [S4, unofficial]. It implements classification coding for volume data by utilizing the correlation of the opacity transfer function (OTF) and a min-max Octree data structure, establishing a new run-length encoded (RLE) data structure for fast reconstruction when OTF and view angle change [S4, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-*   **Pre-computation:** $O(N^3)$ for 3D tables and $O(N^2)$ for 2D tables, where $N$ is the number of scalar value bins (e.g., 256) [S2]. This is a one-time cost.
-*   **Rendering:** $O(1)$ per slab per ray for the lookup, plus $O(K)$ for compositing $K$ slabs [S2, S3]. This is significantly faster than iterative per-sample integration.
-*   **Memory:** 2D table requires $256 \times 256 \times 4$ bytes (assuming RGBA) $\approx 256$ KB. 3D table requires $256^3 \times 4$ bytes $\approx 64$ MB [S2, S3].
-
-**Measured Performance:**
-*   On an ATI 9700 Pro with 5x5 tiles, rendering times for the spx1 dataset were 609-750 ms (2D) and 688-907 ms (3D) [S3].
-*   On a GeForce 6800 GT with 5x5 tiles, rendering times for the spx1 dataset were 312-531 ms (2D) and 313-547 ms (3D) [S3].
-*   2D pre-integration was chosen over 3D in some implementations because artifacts were minimal and 2D texturing was faster on current graphics hardware [S3].
-
-**Strengths and Limitations:**
-*   **Strengths:** High performance due to reduced per-ray computation; reduced aliasing artifacts from under-sampling [S4, unofficial].
-*   **Limitations:** Assumes linear scalar evolution within slabs, which can cause errors in complex data; 3D tables are memory-intensive; less flexible for dynamic transfer functions compared to iterative methods [S1, unofficial][S5].
-
-**When to Use:**
-*   Use when real-time performance is critical and the volume data can be approximated by linear slabs.
-*   Use when the transfer function is static or changes infrequently.
-*   Avoid when high accuracy is required for highly non-linear scalar fields or when memory is constrained.
+*   **Time Complexity:** $O(1)$ per slab for the lookup, reducing the per-ray cost from $O(N)$ to $O(N_{slabs})$ where $N_{slabs} \ll N$ [S1, unofficial][S2].
+*   **Memory Complexity:** $O(V^3)$ for 3D tables or $O(V^2)$ for 2D tables, where $V$ is the scalar value range (e.g., 256) [S2, S3].
+*   **Measured Performance:**
+    *   On ATI 9700 Pro with 5x5 tiles: 141-750 ms for datasets spx1, blunt, f117 [S3].
+    *   On GeForce 6800 GT with 5x5 tiles: 109-1094 ms for datasets spx1, blunt, f117 [S3].
+    *   2D pre-integration was chosen over 3D due to minimal artifacts and faster 2D texturing capabilities on hardware [S3].
+*   **Strengths:** High performance, suitable for interactive rendering, reduces aliasing artifacts from under-sampling when combined with Shear-Warp [S4, unofficial].
+*   **Limitations:** Assumes linear data evolution within slabs, which may not hold for all datasets; high memory usage for 3D tables; potential shading errors if gradient interpolation is not handled carefully [S1, unofficial][S2].
+*   **When to Use:** Interactive volume rendering, medical imaging, scenarios requiring frequent transfer function updates [S1, S4, unofficial].
+*   **When Not to Use:** High-fidelity offline rendering where accuracy is paramount, or when data varies non-linearly within slabs [S1, unofficial].
 
 ## Background
-Pre-integration lookup was introduced to address the computational demands of direct volume rendering on early GPU hardware [S1, unofficial]. It was implemented on GPU by researchers such as EKE01 and RE02 [S1, unofficial]. The technique was further developed and evaluated on various hardware platforms, including ATI 9700 Pro and GeForce 6800 GT, demonstrating its viability for real-time rendering [S3]. It has been used in medical image visualization and interactive volume exploration systems [S1, S4, unofficial].
+Pre-integration lookup was introduced to address the computational cost of direct volume ray casting [S1, unofficial]. It was implemented on GPU by researchers such as EKE01 and RE02 [S1, unofficial]. The method relies on the assumption that scalar values evolve linearly within a slab, allowing the optical properties to be pre-computed and stored in a lookup table [S1, unofficial]. It has been used in various visualization systems, including COVISE [S1, unofficial], and combined with algorithms like Shear-Warp for efficient medical image reconstruction [S4, unofficial].
 
 ## Sources
 [S1] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
 [S2] Second Order Pre-Integrated Volume Rendering, https://people.freedesktop.org/~marcheu/pacificvis08.pdf, fetched 2026-10-29
 [S3] PDF GPU-based Tiled Ray Casting using Depth Peeling, https://sci.utah.edu/~csilva/papers/gpu_volume_ray_casting.pdf, fetched 2026-10-29
 [S4] The Perspective Shear-Warp Algorithm in a Virtual Environment., https://www.researchgate.net/publication/220943822_The_Perspective_Shear-Warp_Algorithm_in_a_Virtual_Environment, fetched 2026-10-29 (unofficial)
-[S5] Volume visualization and exploration through flexible transfer function design, https://doi.org/10.1016/j.cag.2008.04.004, fetched 2026-10-27

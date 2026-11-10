@@ -1,115 +1,171 @@
 # Cloud Compositing & Tone Mapping
 
-Also called: ACES tone mapping, sky/ground/cloud blending
+Also called: ACES tone mapping, ACES-like Tone Mapping and Gamma Encoding, sky/ground/cloud blending
 
 ## Overview
-This method composites pre-resolved volumetric cloud data with a procedural sky and ground background, then applies tone mapping and gamma correction to produce a final displayable image [S1, unofficial]. It differs from [HDR Post-Processing Pipeline](4633-hdr-post-processing-pipeline.md) by handling spatial cloud-background interaction (horizon culling, procedural sky/ground generation) rather than global image adjustments, and from [Bloom](4906-bloom.md) by focusing on radiance compositing rather than luminance-based glow [S1, unofficial].
+Cloud Compositing & Tone Mapping blends resolved volumetric cloud radiance and transmittance with sky and ground background environments, then applies ACES-like tone mapping and gamma encoding to produce a display-ready image [S1, unofficial]. It differs from general HDR post-processing pipelines by integrating scene-specific background synthesis (sun disc, horizon gradients, checkerboard ground) directly into the compositing step, rather than treating the background as a pre-computed texture [S1, unofficial].
 
 ## How it works
-**Inputs:**
-*   `uClouds`: `sampler2D` containing resolved cloud radiance (RGB) and transmittance (Alpha) [S1, unofficial].
-*   `uCloudDepth`: `sampler2D` containing cloud pass depth for ray reconstruction context [S1, unofficial].
-*   `uInvViewProj`: `mat4` inverse view-projection matrix [S1, unofficial].
-*   `uCamPos`: `vec3` camera position [S1, unofficial].
-*   `uSunDir`: `vec3` sun direction vector [S1, unofficial].
-*   `uShape`: `sampler3D` (debug only) [S1, unofficial].
-*   `uShowNoise`: `int` debug flag [S1, unofficial].
-*   `vUv`: `vec2` fragment texture coordinates [S1, unofficial].
-
-**Outputs:**
-*   `outColor`: `vec4` final color output at location 0 [S1, unofficial].
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `uClouds` (`sampler2D`): Contains resolved cloud radiance in RGB channels and transmittance in the Alpha channel [S1, unofficial].
+    *   `uCloudDepth` (`sampler2D`): Depth buffer from the cloud rendering pass, used for ray reconstruction [S1, unofficial].
+    *   `uInvViewProj` (`mat4`): Inverse view-projection matrix [S1, unofficial].
+    *   `uCamPos` (`vec3`): Camera position [S1, unofficial].
+    *   `uSunDir` (`vec3`): Direction to the sun [S1, unofficial].
+    *   `uShape` (`sampler3D`): Debug-only 3D noise/shape texture [S1, unofficial].
+*   **Outputs:**
+    *   `outColor` (`vec4`): Final color output at location 0 [S1, unofficial].
 
 **Data Structures:**
-*   The cloud texture `uClouds` stores accumulated cloud radiance in the RGB channels and accumulated transmittance/opacity in the Alpha channel [S1, unofficial]. The compositing formula `background * clouds.a + clouds.rgb` treats `clouds.a` as the opacity coverage factor and `clouds.rgb` as the emitted radiance [S1, unofficial].
+The method operates on screen-space UV coordinates (`vUv`) derived from fragment shaders. The cloud texture layout is standard RGBA8 or similar, where `rgb` holds linear radiance and `a` holds transmittance (opacity of the cloud layer relative to the background).
 
 **Steps:**
-1.  **Ray Direction Reconstruction:** Compute the 3D ray direction for the current fragment using the inverse view-projection matrix and NDC coordinates [S1, unofficial].
-    *   Convert UV to NDC: $\text{ndc} = 2.0 \cdot \text{vUv} - 1.0$.
-    *   Project near and far points in clip space:
-        $$ p_{\text{near}} = uInvViewProj \cdot \begin{bmatrix} \text{ndc}_x \\ \text{ndc}_y \\ -1.0 \\ 1.0 \end{bmatrix}, \quad p_{\text{far}} = uInvViewProj \cdot \begin{bmatrix} \text{ndc}_x \\ \text{ndc}_y \\ 1.0 \\ 1.0 \end{bmatrix} $$
-    *   Transform to view space and normalize:
-        $$ \mathbf{rd} = \text{normalize}\left( \frac{p_{\text{far}}.xyz}{p_{\text{far}}.w} - \frac{p_{\text{near}}.xyz}{p_{\text{near}}.w} \right) $$
-2.  **Background Selection:** Determine if the ray points towards the sky or ground [S1, unofficial].
-    *   **Condition:** If the ray's vertical component is below the horizon and the camera is above the ground plane, select the ground background; otherwise, select the sky background [S1, unofficial].
-    *   **Ground Background:** Compute ground color using a checkerboard pattern modulated by exponential fog [S1, unofficial].
-    *   **Sky Background:** Compute sky color using a sunset gradient dependent on the sun's elevation and direction (`uSunDir`), including sun disc and glow effects [S1, unofficial].
-3.  **Cloud Compositing:** Sample the resolved cloud texture and blend it with the computed background [S1, unofficial].
-    *   Sample clouds: $\mathbf{C} = \text{texture}(uClouds, \text{vUv})$.
-    *   Composite:
-        $$ \mathbf{Color} = \mathbf{Background} \cdot \mathbf{C}.a + \mathbf{C}.rgb $$
-4.  **Tone Mapping and Gamma Correction:** Apply ACES tone mapping and convert to sRGB gamma [S1, unofficial].
-    *   Gamma correction:
-        $$ \mathbf{outColor} = \text{vec4}(\text{pow}(\mathbf{Color}, \frac{1.0}{2.2}), 1.0) $$
+
+1.  **Ray Direction Reconstruction:**
+    Compute the view ray direction in world space using the inverse view-projection matrix and the current fragment's NDC coordinates.
+    $$ \text{ndc} = \text{vUv} \times 2.0 - 1.0 $$
+    $$ p_{\text{near}} = \text{uInvViewProj} \times [\text{ndc}_x, \text{ndc}_y, -1.0, 1.0]^T $$
+    $$ p_{\text{far}} = \text{uInvViewProj} \times [\text{ndc}_x, \text{ndc}_y, 1.0, 1.0]^T $$
+    $$ \mathbf{rd} = \text{normalize}\left( \frac{p_{\text{far}}.xyz}{p_{\text{far}}.w} - \frac{p_{\text{near}}.xyz}{p_{\text{near}}.w} \right) $$
+    [S1, unofficial]
+
+2.  **Background Selection:**
+    Determine if the ray points below the horizon.
+    *   **Ground Case:** If the ray points below the horizon and the camera is above ground, compute ground color using a checkerboard pattern modulated by exponential fog.
+    *   **Sky Case:** Otherwise, compute sky color using a sunset gradient and a sun disc/glow model.
+    [S1, unofficial]
+
+3.  **Cloud Compositing:**
+    Sample the resolved cloud texture and blend it with the background using alpha compositing.
+    $$ \mathbf{c}_{\text{clouds}} = \text{texture}(\text{uClouds}, \text{vUv}) $$
+    $$ \mathbf{c}_{\text{final}} = \mathbf{c}_{\text{background}} \times \mathbf{c}_{\text{clouds}}.a + \mathbf{c}_{\text{clouds}}.rgb $$
+    [S1, unofficial]
+
+4.  **Tone Mapping and Gamma Encoding:**
+    Apply ACES-like tone mapping (or standard gamma correction as per the specific implementation variant) and convert to sRGB.
+    *   **Standard Gamma Variant:**
+        $$ \mathbf{c}_{\text{out}} = \mathbf{c}_{\text{final}}^{(1/2.2)} $$
+        [S1, unofficial]
+    *   **ACES-like Decode/Encode Variant:**
+        For display encoding (linear to sRGB), use the piecewise function defined in [S2, unofficial].
+        For decoding (sRGB to linear), use the inverse piecewise function.
+        [S2, unofficial]
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Inputs: vUv (vec2), uClouds (sampler2D), uInvViewProj (mat4), uCamPos (vec3), uShowNoise (int), uShape (sampler3D)
+# Inputs: vUv (vec2), uClouds (sampler2D), uInvViewProj (mat4), uCamPos (vec3), uSunDir (vec3)
 # Outputs: outColor (vec4)
 
-def main(vUv, uClouds, uInvViewProj, uCamPos, uShowNoise, uShape):
-    # 1. Ray Direction Reconstruction
+def main(vUv):
+    # 1. Ray Reconstruction
     ndc = vUv * 2.0 - 1.0
     p_near = uInvViewProj * vec4(ndc.x, ndc.y, -1.0, 1.0)
     p_far = uInvViewProj * vec4(ndc.x, ndc.y, 1.0, 1.0)
     
-    p_near_view = p_near.xyz / p_near.w
-    p_far_view = p_far.xyz / p_far.w
-    rd = normalize(p_far_view - p_near_view)
+    # Homogeneous division
+    p_near_world = p_near.xyz / p_near.w
+    p_far_world = p_far.xyz / p_far.w
+    
+    rd = normalize(p_far_world - p_near_world)
     
     # 2. Background Selection
-    # Ground if ray points below horizon (rd.y < 0) and camera is above ground
-    if rd.y < 0.0:
-        # Ground: checkerboard pattern modulated by exponential fog
-        # [Comment: Sources do not provide the exact checkerboard and exponential fog formulas]
-        background = vec3(0.0)
+    # Note: Horizon check logic depends on camera orientation and sun elevation.
+    # Simplified assumption: dot(rd, world_up) < horizon_threshold implies ground.
+    # For this implementation, we assume the source logic handles sky/ground selection.
+    if is_below_horizon(rd, uCamPos):
+        background = compute_ground_color(rd, uCamPos)
     else:
-        # Sky: sunset gradient dependent on sun elevation and uSunDir, plus sun disc/glow
-        # [Comment: Sources do not provide the exact sunset gradient and sun disc/glow formulas]
-        background = vec3(0.0)
+        background = compute_sky_color(rd, uSunDir)
         
     # 3. Cloud Compositing
     clouds = texture(uClouds, vUv)
+    # clouds.rgb is radiance, clouds.a is transmittance (alpha)
+    # Standard alpha compositing: Result = Foreground + Background * (1 - Alpha)
+    # However, source [S1, unofficial] specifies: background * clouds.a + clouds.rgb
+    # This implies clouds.a represents the opacity of the cloud blocking the background,
+    # or the source uses a specific blending convention where 'a' is the weight of the background.
+    # We follow the source formula exactly.
     color = background * clouds.a + clouds.rgb
     
-    # 4. Debug Mode
-    # Slices through the 3D shape texture using camera X position as Z-slice
-    if uShowNoise == 1:
-        z_slice = fract(uCamPos.x * 0.0001)
-        noise_sample = texture(uShape, vec3(vUv, z_slice))
-        # [Comment: Blend mode for debug noise sample is not specified in the sources]
-        
-    # 5. Tone Mapping and Gamma Correction
-    # ACES tone mapping is applied per pipeline alias [S1, unofficial]
-    # Gamma correction to sRGB
-    outColor = vec4(pow(color, vec3(1.0 / 2.2)), 1.0)
-    return outColor
+    # 4. Tone Mapping and Gamma
+    # Using the standard gamma correction from [S1, unofficial]
+    out_color = pow(color, vec3(1.0 / 2.2))
+    
+    return vec4(out_color, 1.0)
+
+def is_below_horizon(rd, cam_pos):
+    # Placeholder for specific horizon logic based on sun elevation and camera pos
+    # Source [S1, unofficial] mentions "if ray points below horizon and camera is above ground"
+    # This requires access to weather/sun state not passed as uniforms in the snippet.
+    # [G] Assuming a simple dot product with camera up vector for demonstration.
+    return dot(rd, vec3(0.0, 1.0, 0.0)) < 0.0
+
+def compute_ground_color(rd, cam_pos):
+    # Checkerboard with exponential fog
+    # [G] Standard procedural ground implementation
+    scale = 10.0
+    uv = rd.xz * scale
+    checker = mod(floor(uv.x) + floor(uv.y), 2.0)
+    fog_factor = exp(-length(rd.xz) * 0.01)
+    ground_color = mix(vec3(0.8), vec3(0.2), checker)
+    return mix(ground_color, vec3(0.5), fog_factor)
+
+def compute_sky_color(rd, sun_dir):
+    # Sunset gradient and sun disc
+    # [G] Simplified sky dome
+    sun_dot = dot(normalize(rd), sun_dir)
+    sun_disc = pow(max(sun_dot, 0.0), 100.0)
+    horizon_color = vec3(0.8, 0.4, 0.2)
+    zenith_color = vec3(0.1, 0.2, 0.5)
+    sky_color = mix(horizon_color, zenith_color, max(rd.y, 0.0))
+    return sky_color + sun_disc * vec3(1.0, 0.9, 0.8)
 ```
+
+**Parameters:**
+*   `uClouds`: Sampler2D. Layout: RGB = Radiance, A = Transmittance. [S1, unofficial]
+*   `uInvViewProj`: Mat4. Inverse view-projection matrix. [S1, unofficial]
+*   `uCamPos`: Vec3. Camera position. [S1, unofficial]
+*   `uSunDir`: Vec3. Sun direction. [S1, unofficial]
+*   `uShape`: Sampler3D. Debug only. [S1, unofficial]
+*   Decode Threshold: 0.04045. [S2, unofficial]
+*   Decode Exponent: 2.4. [S2, unofficial]
+*   Encode Threshold: 0.0031308. [S2, unofficial]
+*   Encode Exponent: 1/2.4. [S2, unofficial]
+
+**Edge Cases and Pitfalls:**
+*   **Debug Mode:** When `uShowNoise` is active, the shader slices the 3D shape texture using the camera's X position as the Z-slice index: `fract(uCamPos.x * 0.0001)`. This can lead to visual artifacts if the camera moves rapidly or if the Z-slice index wraps unexpectedly. [S1, unofficial]
+*   **Precision:** The ACES-like tone mapping functions involve power operations and linear segments. Care must be taken with floating-point precision near the thresholds (0.04045 and 0.0031308) to avoid discontinuities. [S2, unofficial]
+*   **Ray Direction:** If `p_near.w` or `p_far.w` is zero or near-zero, division will fail. This typically occurs if the inverse view-projection matrix is incorrect or if the camera is at the origin of the projection space. [S1, unofficial]
 
 ## Subtopics
 
 ### [ACES Filmic Tone Mapping](4228-aces-filmic-tone-mapping.md)
-A filmic tone mapping function that compresses HDR color into $[0, 1]$ using a characteristic shoulder curve to prevent highlight clipping. It differs from simple Reinhard tonemapping by providing a non-linear highlight roll-off rather than a basic division. It builds on [Cloud Compositing & Tone Mapping](3628-cloud-compositing-tone-mapping.md).
+ACES Filmic Tone Mapping is a filmic tone mapping function that compresses HDR color into $[0, 1]$ using a characteristic shoulder curve to prevent highlight clipping. It differs from simple Reinhard tonemapping by providing a non-linear highlight roll-off rather than a basic division. It builds on [Cloud Compositing & Tone Mapping](3628-cloud-compositing-tone-mapping.md).
 
 ### [Tonemapping and Gamma Correction](5076-tonemapping-and-gamma-correction.md)
-This method processes linear radiance values into a displayable sRGB image by applying exposure control, chroma preservation, black point correction, and gamma encoding. It solves the problem of high dynamic range (HDR) data exceeding display limits and the visual artifacts introduced by non-linear gamma encoding, such as shadow haze and desaturation of bright colors. It differs from [ACES Filmic Tone Mapping](4228-aces-filmic-tone-mapping.md) by using a simpler exponential compression and explicit post-processing steps for chroma and black level rather than a single parametric curve.
+Tonemapping and Gamma Correction compresses the high dynamic range (HDR) radiance values produced by volume rendering into a low dynamic range (LDR) range suitable for display devices, while correcting for the non-linear response of monitors. It differs from implicit tone mapping methods by explicitly separating exposure control, luminance-based desaturation, and gamma encoding, allowing for precise artistic control over shadow depth and color saturation.
 
 ### Temporal Reprojection
-A post-processing pass that performs temporal reprojection on the half-resolution cloud result [S2, unofficial]. Inputs are the color and velocity buffers from the previous two frames [S2, unofficial]. Outputs include color, emission (for bloom), and god rays [S2, unofficial].
+Temporal Reprojection is a post-processing pass that performs temporal reprojection on the half-resolution cloud result [S3, unofficial]. It differs from single-frame compositing by leveraging data from previous frames to reduce noise and increase resolution. It is chosen when performance is critical and motion vectors are available. Inputs are the Color buffer and velocity buffer from the previous two frames [S3, unofficial]. Outputs are Color, emission (for bloom), and god rays [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per fragment, as it involves a constant number of texture samples, matrix multiplications, and arithmetic operations [G].
-*   **Memory Complexity:** $O(1)$ additional memory, relying on the pre-resolved cloud texture and uniforms [G].
-*   **Performance:** The compositing pass is lightweight relative to the heavier cloud resolution step, which is measured separately in the rendering loop [S1, unofficial]. Temporal reprojection operates on a half-resolution cloud result to reduce fill-rate cost [S2, unofficial].
-*   **Strengths:** Simple integration of cloud data with background; handles horizon culling and procedural sky/ground generation efficiently [S1, unofficial].
-*   **Limitations:** Relies on pre-resolved cloud data; debug mode requires 3D texture sampling; gamma correction is hardcoded to 2.2 [S1, unofficial].
-*   **When to use:** When integrating pre-computed or pre-resolved volumetric clouds into a scene with a dynamic sky/ground background [S1, unofficial].
-*   **When not to use:** When real-time cloud resolution is required (use the cloud resolution pass instead) or when more sophisticated tone mapping is needed (use ACES Filmic Tone Mapping) [S1, unofficial].
+*   **Time Complexity:** $O(1)$ per pixel, as it involves a constant number of texture lookups and arithmetic operations.
+*   **Memory Complexity:** $O(1)$ auxiliary memory per pixel, excluding the storage for the cloud texture and depth buffer.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** The method scales linearly with screen resolution. Temporal reprojection variants (see Subtopics) can render at half resolution, effectively halving the pixel shader workload while maintaining visual quality through temporal accumulation [S3, unofficial].
+*   **Strengths:** Integrates background synthesis and compositing in a single pass, reducing memory bandwidth for background textures. ACES-like tone mapping provides a cinematic look.
+*   **Limitations:** Relies on pre-resolved cloud data. Debug mode can be visually confusing. Precision issues may arise near tone mapping thresholds.
+*   **When to Use:** When rendering volumetric clouds with dynamic sky/ground backgrounds and requiring cinematic tone mapping.
+*   **When Not to Use:** When real-time performance is extremely constrained and temporal reprojection is not viable, or when a simple linear tone mapping is sufficient.
 
 ## Background
-Originates from the Volumetric Cloud Renderer implementation [S1, unofficial]. It is integrated into the interactive rendering loop to composite cloud passes with dynamic weather parameters, allowing real-time adjustment of sun elevation, coverage, and noise visualization [S1, unofficial].
+Cloud Compositing & Tone Mapping is part of a volumetric cloud renderer implementation, likely derived from or inspired by the NadirRoGue/RenderEngine project [S3, unofficial]. The specific implementation details, including the ray reconstruction and compositing logic, are found in the `Volumetric-Cloud-Renderer` repository [S1, unofficial]. The ACES-like tone mapping functions are based on standard sRGB/ACES approximation formulas [S2, unofficial]. The method is used in real-time graphics applications requiring high-quality volumetric cloud rendering.
 
 ## Sources
 [S1] harkawataryan/Volumetric-Cloud-Renderer, https://github.com/harkawataryan/Volumetric-Cloud-Renderer, fetched 2026-10-27 (unofficial)
-[S2] [volumetric-clouds-v2][RenderEngine] 1:1 复刻 NadirRoGue/RenderEngine 体积云, https://github.com/ruochenhua/AetherEngine/issues/139, fetched 2026-10-28 (unofficial)
+[S2] aivv73/bend-voxel, https://github.com/aivv73/bend-voxel, fetched 2026-10-28 (unofficial)
+[S3] [volumetric-clouds-v2][RenderEngine] 1:1 复刻 NadirRoGue/RenderEngine 体积云, https://github.com/ruochenhua/AetherEngine/issues/139, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,179 @@
+# 3D Gaussian Splatting Rendering Pipeline (RViz Plugin)
+Also called: SplatCloud rendering
+
+## Overview
+This article describes the OpenGL-based rendering pipeline for visualizing 3D Gaussian Splatting data within the ROS RViz environment. It solves the problem of efficiently rendering millions of 2D-projected Gaussian splats as a single instanced draw call, handling depth sorting and view-dependent shading. It differs from pure software implementations by leveraging GPU-based sorting and texture buffer objects (TBOs) for data storage, and from other RViz plugins by supporting both exact back-to-front sorting and Order-Independent Transparency (WBOIT) approximations.
+
+## How it works
+The pipeline renders a cloud of 3D Gaussians by projecting them into 2D screen space, sorting them by depth, and accumulating their colors with transparency.
+
+### Inputs and Outputs
+*   **Input**: A set of $N$ 3D Gaussians defined by position, orientation (quaternion), scale, opacity, and spherical harmonic (SH) coefficients for color.
+*   **Output**: A 2D image frame rendered by the RViz viewport.
+
+### Data Structures
+The plugin uses specific GPU memory layouts to minimize bandwidth and decouple sorting from rendering.
+
+1.  **Base Splat Data (TBO)**:
+    *   Stored in a `GL_RGBA32UI` Texture Buffer Object (TBO) bound to texture unit 0.
+    *   Layout: 2 `uvec4` texels per splat.
+    *   Size: 32 bytes per splat.
+    *   Content: Packed `SplatGPU` data including position, covariance/rotation, scale, and opacity.
+    *   The TBO is bound immediately before the draw call via the `notifyRenderSingleObject` callback [S1, unofficial].
+
+2.  **Spherical Harmonics Data (TBO)**:
+    *   Stored in a separate RGBA16F TBO.
+    *   Number of coefficients per splat: $C = (d_{active} + 1)^2 - 1$, where $d_{active}$ is the active SH degree [S1, unofficial].
+    *   Coefficients are interleaved RGB, coefficient-major. The DC term (degree 0) is always present. Higher-order terms are stored if available in the source data [S1, unofficial].
+
+3.  **Sorted Indices (VBO)**:
+    *   A dedicated Vertex Buffer Object (`index_vbo_`) storing per-instance sorted indices.
+    *   This decouples the sorting process from the rendering pipeline, allowing the sort backend to be swapped without reloading base splat data [S1, unofficial].
+    *   Indices are sorted back-to-front for exact transparency or used for WBOIT weighting.
+
+4.  **Splat Centers Cache**:
+    *   A `std::vector` (`centers_cache_`) storing splat centers.
+    *   Used to allow swapping the sort backend (CPU/CUDA) without reloading the full base splat data [S1, unofficial].
+
+### Rendering Steps
+
+1.  **Data Upload**:
+    *   Convert raw PLY data (positions, quaternions, scales, opacity, SH coefficients) into the compact TBO layout.
+    *   Quaternions are normalized. Scales are exponentiated from log-space if necessary. Opacity is mapped to `uint8` [S1, unofficial].
+    *   Upload the base splat data to the primary TBO.
+
+2.  **Sorting**:
+    *   The `SplatCloud` class manages a worker thread that drives the sort backend.
+    *   Sorting can be performed on CPU or GPU (CUDA). The CUDA backend automatically falls back to CPU if no GPU device is available [S1, unofficial].
+    *   The sorter outputs a list of indices representing the back-to-front order of splats.
+    *   These indices are uploaded to the `index_vbo_`.
+
+3.  **Draw Call**:
+    *   Bind the base splat TBO to texture unit 0.
+    *   Bind the sorted indices VBO.
+    *   Execute `glDrawElementsInstanced`.
+    *   The vertex shader uses the instance index to fetch the sorted splat ID, then fetches the corresponding splat data from the TBO.
+
+4.  **Fragment Shading**:
+    *   The fragment shader evaluates the 2D Gaussian profile.
+    *   If the fragment's alpha is below `alpha_threshold_` (default 0.05), it is discarded [S1, unofficial].
+    *   Color is computed using the SH coefficients based on the view direction and `active_sh_degree_` (default 0, max constrained by data) [S1, unofficial].
+
+5.  **Transparency Accumulation**:
+    *   Two modes are supported, configurable at runtime [S1, unofficial]:
+        *   **Sorted**: Standard back-to-front alpha blending.
+        *   **WBOIT**: Order-Independent Transparency approximation using a weight function based on depth and alpha.
+
+### Formulas
+
+**Spherical Harmonics Coefficient Count**:
+$$ N_{coeffs} = (d_{active} + 1)^2 - 1 $$
+Where $d_{active}$ is the active SH degree [S1, unofficial].
+
+**WBOIT Weight Function**:
+The weight $w$ for a fragment in WBOIT mode is calculated as:
+$$ w = \alpha^{e} \cdot e^{-s \cdot d} $$
+Where:
+*   $\alpha$ is the fragment alpha.
+*   $d$ is the fragment depth.
+*   $s$ is `wboit_weight_scale_` (default 5.0, range [0.1, 50.0]) [S1, unofficial].
+*   $e$ is `wboit_weight_exponent_` (default 2.0, range [0.5, 6.0]) [S1, unofficial].
+
+**WBOIT Alpha Discard**:
+Fragments with alpha below `wboit_alpha_discard_` (default 0.01, range [0.0, 0.1]) are discarded in the accumulation pass [S1, unofficial].
+
+### Parameters
+
+| Parameter | Type | Default | Range/Notes |
+| :--- | :--- | :--- | :--- |
+| `alpha_threshold_` | float | 0.05 | Opacity threshold for discarding splat fragments [S1, unofficial]. |
+| `active_sh_degree_` | int | 0 | SH degree for view-dependent color. Max constrained by data [S1, unofficial]. |
+| `clip_min_` | vec3 | [-10, -10, -10] | AABB lower bound for ROI clipping [S1, unofficial]. |
+| `clip_max_` | vec3 | [10, 10, 10] | AABB upper bound for ROI clipping [S1, unofficial]. |
+| `wboit_weight_scale_` | float | 5.0 | Depth-discrimination strength [S1, unofficial]. |
+| `wboit_weight_exponent_` | float | 2.0 | Alpha-suppression power [S1, unofficial]. |
+| `wboit_alpha_discard_` | float | 0.01 | Fragment alpha cutoff in WBOIT pass [S1, unofficial]. |
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Simplified rendering loop for SplatCloud
+def render_splat_cloud(splat_cloud, camera, viewport):
+    # 1. Prepare Sorter
+    sorter = splat_cloud.get_sorter()
+    if sorter is None:
+        return # Sorting disabled
+
+    # 2. Trigger Sort (Async/Threaded)
+    # The sorter uses centers_cache_ to sort indices
+    sorted_indices = sorter.sort(splat_cloud.centers_cache_)
+    
+    # 3. Upload Indices
+    index_vbo = splat_cloud.index_vbo_
+    index_vbo.upload(sorted_indices)
+    
+    # 4. Setup OpenGL State
+    gl.use_program(splat_cloud.program)
+    
+    # Bind Base Splat Data TBO to Texture Unit 0
+    gl.active_texture(gl.TEXTURE0)
+    gl.bind_buffer(gl.TEXTURE_BUFFER, splat_cloud.base_tbo)
+    gl.uniform1i(gl.get_uniform_location(splat_cloud.program, "splat_data"), 0)
+    
+    # Bind SH Data TBO
+    gl.active_texture(gl.TEXTURE1)
+    gl.bind_buffer(gl.TEXTURE_BUFFER, splat_cloud.sh_tbo)
+    gl.uniform1i(gl.get_uniform_location(splat_cloud.program, "sh_data"), 1)
+    
+    # Set Parameters
+    gl.uniform1f(gl.get_uniform_location(splat_cloud.program, "alpha_threshold"), splat_cloud.alpha_threshold_)
+    gl.uniform1i(gl.get_uniform_location(splat_cloud.program, "active_sh_degree"), splat_cloud.active_sh_degree_)
+    
+    # Set WBOIT parameters if mode is WBOIT
+    if splat_cloud.transparency_mode == 'WBOIT':
+        gl.uniform1f(gl.get_uniform_location(splat_cloud.program, "wboit_weight_scale"), splat_cloud.wboit_weight_scale_)
+        gl.uniform1f(gl.get_uniform_location(splat_cloud.program, "wboit_weight_exponent"), splat_cloud.wboit_weight_exponent_)
+        gl.uniform1f(gl.get_uniform_location(splat_cloud.program, "wboit_alpha_discard"), splat_cloud.wboit_alpha_discard_)
+    else:
+        # Enable standard blending for Sorted mode
+        gl.enable(gl.BLEND)
+        gl.blend_func(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+
+    # 5. Draw Call
+    # Quad VBO (Source 0), Index VBO (Source 1), IBO (6 indices)
+    gl.bind_buffer(gl.ARRAY_BUFFER, splat_cloud.quad_vbo)
+    gl.bind_buffer(gl.ELEMENT_ARRAY_BUFFER, splat_cloud.ibo)
+    gl.bind_buffer(gl.ARRAY_BUFFER, index_vbo)
+    
+    # Set up vertex attributes for quad and instance indices
+    # ... attribute setup ...
+    
+    gl.draw_elements_instanced(
+        gl.TRIANGLES,
+        6, # IBO size
+        gl.UNSIGNED_INT,
+        0,
+        len(sorted_indices) # N instances
+    )
+```
+
+### Edge Cases and Pitfalls
+*   **Precision**: Opacity is stored as `uint8` in the TBO, which may limit dynamic range compared to float32 [S1, unofficial].
+*   **Boundaries**: ROI clipping is handled via `clip_min_` and `clip_max_`. Splats outside this AABB are not rendered [S1, unofficial].
+*   **SH Degree**: If the loaded data does not contain higher-order SH coefficients, `active_sh_degree_` must be set to 0 or a value lower than the maximum available to avoid reading garbage data [S1, unofficial].
+*   **Sort Backend**: If CUDA is selected but no GPU is available, the system falls back to CPU sorting, which may be significantly slower for large $N$ [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: Sorting is $O(N \log N)$ or $O(N)$ depending on the backend (CPU radix sort vs. CUDA thrust). Rendering is $O(N)$ for the draw call.
+*   **Memory Complexity**: $O(N)$ for TBOs and VBOs. 32 bytes per splat for base data plus SH coefficients.
+*   **Performance**: Depends heavily on the sort backend. GPU sorting (CUDA) is significantly faster for large clouds. WBOIT mode may be slower than sorted mode due to additional accumulation passes or complex fragment shader logic, but provides order-independent results.
+*   **Strengths**: Efficient instanced rendering, decoupled sorting, configurable transparency.
+*   **Limitations**: Requires OpenGL support. WBOIT is an approximation. CPU sorting is slow for large datasets.
+
+## Background
+This plugin is part of the `splat-ros` ecosystem, providing a visualization tool for 3D Gaussian Splatting data within ROS. It bridges the gap between offline reconstruction (e.g., from Gaussian Splatting training) and interactive 3D visualization in robotics workflows.
+
+## Sources
+[S1] splat-ros/RVizSplat, https://github.com/splat-ros/RVizSplat, fetched 2026-10-27 (unofficial)

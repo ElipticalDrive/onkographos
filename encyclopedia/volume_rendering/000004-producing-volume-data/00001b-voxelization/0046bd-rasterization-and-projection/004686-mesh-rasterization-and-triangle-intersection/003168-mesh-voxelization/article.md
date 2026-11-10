@@ -3,11 +3,11 @@
 Also called: STL Mesh Voxelization, Raycasting-based Voxelization, VoxelGrid from Mesh (Ray Method)
 
 ## Overview
-Mesh Voxelization converts a continuous triangular surface mesh (e.g., STL, OBJ) into a discrete 3D voxel grid by determining the occupancy of each grid cell via ray-mesh intersection tests [S1, S4, unofficial]. Unlike [Rasterization-based Voxelization](908-rasterization-based-voxelization.md), which projects geometry onto a 2D plane and extrudes coverage, this method evaluates the topological relationship (inside/outside) of the voxel center relative to the closed surface using the ray casting parity rule [S1, S2, unofficial]. It serves as the foundational technique for generating solid or surface-only voxel representations from polygonal models, distinct from [Point Cloud Voxelization](1000-point-cloud-voxelization.md) which operates on discrete samples rather than continuous geometry [S3, unofficial].
+Mesh Voxelization converts a continuous triangular surface mesh (e.g., STL, OBJ) into a discrete 3D voxel grid by determining the occupancy of each grid cell via ray-mesh intersection tests [S1, unofficial][S4, unofficial]. Unlike [Rasterization-based Voxelization](908-rasterization-based-voxelization.md), which projects geometry onto a 2D plane and extrudes coverage, this method evaluates the topological relationship (inside/outside) of the voxel center relative to the closed surface using the ray casting parity rule [S1, unofficial][S2, unofficial]. It serves as the foundational technique for generating solid or surface-only voxel representations from polygonal models, distinct from [Point Cloud Voxelization](1000-point-cloud-voxelization.md) which operates on discrete samples rather than continuous geometry [S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A triangular mesh defined by vertex positions and triangle indices; a grid resolution $N$ (or voxel size $s$); a bounding box $[B_{min}, B_{max}]$; and optional parameters for sampling and interior filling [S3, S4, unofficial].
+*   **Input:** A triangular mesh defined by vertex positions and triangle indices; a grid resolution $N$ (or voxel size $s$); a bounding box $[B_{min}, B_{max}]$; and optional parameters for sampling and interior filling [S3, unofficial][S4, unofficial].
 *   **Output:** A voxel grid where each cell $(i, j, k)$ contains a boolean occupancy flag, and optionally a Signed Distance Field (SDF) value or attribute data [S4, unofficial].
 
 **Data Structures:**
@@ -32,7 +32,7 @@ $$ C_{ijk} = B_{min} + (i + 0.5) \cdot s, \quad i \in [0, N_x-1] $$
     For each voxel center $C_{ijk}$:
     *   Cast a ray $R(t) = C_{ijk} + t \cdot D$ [S4, unofficial].
     *   Intersect the ray with all mesh triangles using the Möller–Trumbore algorithm [S2, unofficial].
-    *   Collect all intersection distances $t$. Sort them to handle precision errors [S4, unofficial].
+    *   Collect all intersection distances $t$ [S4, unofficial]. Sort them to handle precision errors [S4, unofficial].
     *   Count the number of intersections $N_{hits}$ [S4, unofficial].
     *   Determine parity: If $N_{hits}$ is odd, the voxel is inside; if even, it is outside [S4, unofficial].
     *   **Double-thick handling:** For meshes with double-sided geometry (e.g., thin shells), check if $(N_{hits} / 2) \% 2 == 1$ [S2, unofficial].
@@ -117,7 +117,7 @@ def voxelize_mesh(mesh_triangles, resolution, bounds_min, bounds_max, samples=1,
                         # Generate direction vector components
                         dir_x = math.sqrt(1 - z*z) * math.cos(theta)
                         dir_y = math.sqrt(1 - z*z) * math.sin(theta)
-                        dir_z = math.sqrt(1 - z*z) * math.cos(theta) # Implementation detail from source
+                        dir_z = math.sqrt(1 - z*z) * math.cos(theta) # Implementation detail from source [S2, unofficial]
                         direction = (dir_x, dir_y, dir_z)
                         
                         hits = count_intersections(origin, direction, mesh_triangles)
@@ -230,11 +230,11 @@ def determine_parity(hits, double_thick):
 Solid Voxelization based on Octree is a method for converting triangular surface meshes into a solid voxel representation using an adaptive octree structure. It determines the solid or empty status of leaf nodes by combining ray casting for sign determination with closest-point distance calculations. Unlike fixed-grid voxelization, this method adapts resolution to the geometry, potentially reducing node count for sparse scenes, while its reliance on ray casting for sign determination distinguishes it from exact geometric intersection methods like [Octree-based 3D Voxelization with SAT Pruning](2588-octree-based-3d-voxelization-with-sat-pruning.md).
 
 ### Solid Voxelization via 3D Scan-Fill
-An extension of surface voxelization for closed objects that fills the inner region of the object using a 3D scan-filling operation [S5, unofficial]. It traverses the volume slice by slice and line by line, maintaining an inside/outside flag that toggles when the scan line spans a voxel intersecting the object boundary. To eliminate errors from singular points, scan-filling is performed along all three axis directions, and the common voxels across all three results are retained [S5, unofficial].
+An extension of surface voxelization for closed objects that fills the inner region of the object using a 3D scan-filling operation [S5, unofficial]. It traverses the volume slice by slice and line by line, maintaining an inside/outside flag that toggles when the scan line spans a voxel intersecting the object boundary [S5, unofficial]. To eliminate errors from singular points, scan-filling is performed along all three axis directions, and the common voxels across all three results are retained [S5, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N^3 \cdot T)$, where $N$ is the grid resolution per axis and $T$ is the number of triangles. Each voxel center requires a ray-triangle intersection test against all triangles (or a subset via acceleration structures) [S2, unofficial].
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** $O(N^3 \cdot T)$, where $N$ is the grid resolution per axis and $T$ is the number of triangles [G]. Each voxel center requires a ray-triangle intersection test against all triangles (or a subset via acceleration structures) [G].
+*   **Memory Complexity:** Not given in the sources [G].
 *   **Performance:** On an NVIDIA GTX 970, a 64x64x64 voxelization of a 69,664 triangle bunny mesh takes 0.88 seconds with 1 sample, scaling to 51.96 seconds at 256x256x256. A 512x512x512 resolution for the same mesh takes 417.62 seconds [S2, unofficial].
 *   **Strengths:** Topologically robust for closed meshes; provides accurate inside/outside determination; supports SDF generation [S4, unofficial].
 *   **Limitations:** Computationally expensive for high resolutions and complex meshes ($O(T)$ per voxel); sensitive to open meshes without multiple sampling; generates large files (e.g., 4.7 GB for 256^3 resolution in OBJ format) [S2, unofficial].

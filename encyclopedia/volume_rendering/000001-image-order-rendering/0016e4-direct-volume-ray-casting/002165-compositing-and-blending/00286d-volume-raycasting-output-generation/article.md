@@ -1,0 +1,186 @@
+# Volume Raycasting Output Generation
+
+Also called: Final Compositing and Output, Front-to-Back Volume Ray Casting, RenderOutput Construction
+
+## Overview
+Volume Raycasting Output Generation is the final stage of direct volume rendering where accumulated color and opacity values are composited over a background to produce the final pixel color [S1, unofficial]. It solves the problem of converting volumetric sample data into a 2D image by applying the front-to-back compositing equation [S1, unofficial]. This method is distinguished from sibling techniques like Pre-Integration Lookup or Binary Swap Compositing by its direct, iterative application of the optical model per sample without intermediate data structures or hierarchical blending [S1, S2, unofficial].
+
+## How it works
+The method operates on a per-ray basis, traversing from the entry point to the exit point of the volume. It accumulates color and opacity using the standard front-to-back algorithm, applies transfer function mapping, and handles coordinate transformations for depth output [S1, S2, unofficial].
+
+### Inputs and Outputs
+**Inputs:**
+*   `texCoord`: 2D texture coordinate for the current pixel [S1, S2, unofficial].
+*   `frontTexture`: Sampler2d providing the entry position (`startPosition`) for the ray [S1, S2, unofficial].
+*   `backTexture`: Sampler2d providing the exit position (`endPosition`) for the ray [S1, S2, unofficial].
+*   `volumeTexture`: Sampler3d providing the scalar density values at 3D positions [S1, S2, unofficial].
+*   `transferTexture`: Sampler1d mapping density values to RGB color [S1, S2, unofficial].
+*   `stepSize`: Float defining the step length along the ray [S1, S2, unofficial].
+*   `numSteps`: Integer defining the maximum number of samples [S1, S2, unofficial].
+*   `u_material.opacity`: Float material property modulating sample opacity [S2, unofficial].
+*   `colorspace`: String parameter determining color space conversion ('srgb' or other) [S2, unofficial].
+*   `sizef`: Vector3 defining the volume dimensions in data space [S2, unofficial].
+*   `u_wobject.world_transform`: Matrix transforming data space to world space [S2, unofficial].
+*   `u_stdinfo.projection_transform`: Matrix for projection [S2, unofficial].
+*   `u_stdinfo.cam_transform`: Matrix for camera view [S2, unofficial].
+
+**Outputs:**
+*   `outColor`: Vec4 containing the final composited RGBA color [S1, S2, unofficial].
+*   `RenderOutput`: Struct containing `color` (Vec4), `coord` (Vec3, the final sampled coordinate), and `depth` (Float, NDC depth) [S2, unofficial].
+
+### Data Structures
+*   **Accumulator State**: `color` (Vec4), initialized to `(0.0, 0.0, 0.0, 0.0)`. `color.rgb` stores accumulated color, `color.a` stores accumulated opacity [S1, S2, unofficial].
+*   **Ray State**: `position` (Vec3), initialized to `startPosition` [S1, S2, unofficial].
+*   **Step Vector**: `delta` (Vec3), calculated as `normalize(startPosition - endPosition) * stepSize` [S1, S2, unofficial]. Note: The source code uses `direction` in the advance step, which is identified as a likely typo for `delta` [S1, unofficial].
+
+### Steps
+1.  **Initialization**:
+    *   Initialize `color` to `vec4(0.0)` [S1, S2, unofficial].
+    *   Sample `frontTexture` at `texCoord` to get `startPosition` [S1, S2, unofficial].
+    *   Sample `backTexture` at `texCoord` to get `endPosition` [S1, S2, unofficial].
+    *   Calculate `delta`: `delta = normalize(startPosition - endPosition) * stepSize` [S1, S2, unofficial].
+    *   Initialize `position` to `startPosition` [S1, S2, unofficial].
+
+2.  **Iteration Loop** (for `i` from 0 to `numSteps`):
+    *   **Boundary Check**: If `position.x > 1.0` OR `position.y > 1.0` OR `position.z > 1.0`, break the loop [S1, S2, unofficial]. This handles rays exiting the normalized volume bounds [0,1].
+    *   **Sampling**:
+        *   Sample `volumeTexture` at `position` to get `density` (float, r component) [S1, S2, unofficial].
+        *   Sample `transferTexture` at `density` to get `voxelColor` (vec3) [S1, S2, unofficial].
+    *   **Colormapping and Opacity Calculation** (from [S2, unofficial]):
+        *   `color_sampled = sampled_value_to_color(the_value)` (where `the_value` is the sampled density/value) [S2, unofficial].
+        *   If `colorspace == 'srgb'`, `physical_color = srgb2physical(color_sampled.rgb)`; else `physical_color = color_sampled.rgb` [S2, unofficial].
+        *   `opacity = color_sampled.a * u_material.opacity` [S2, unofficial].
+        *   `out_color = vec4<f32>(physical_color, opacity)` [S2, unofficial].
+        *   *Note*: In the simplified shader [S1, unofficial], `voxelColor` is used directly as RGB, and opacity is derived from `voxelColor.a` or a separate alpha channel. The formula in [S1, unofficial] uses `voxelColor.a` as the opacity $\alpha_i$.
+    *   **Accumulation** (Front-to-Back Blending):
+        *   Update accumulated alpha with sampling distance correction:
+            $$ color.a = 1.0 - pow((1.0 - color.a), stepSize \times 500.0) $$
+            [S1, unofficial]. *Note: The factor 500.0 is a specific implementation detail from [S1, unofficial] to scale the step size for opacity accumulation.*
+        *   Update accumulated RGB:
+            $$ color.rgb = color.rgb + (1.0 - color.a) \times voxelColor.a \times voxelColor.rgb $$
+            [S1, unofficial]. Here `voxelColor.a` is the opacity $\alpha_i$ of the current voxel.
+        *   Update accumulated alpha:
+            $$ color.a = color.a + (1.0 - color.a) \times voxelColor.a $$
+            [S1, unofficial].
+    *   **Early Ray Termination**: If `color.a >= 1.0`, break the loop [S1, S2, unofficial].
+    *   **Advance Position**: `position += delta` [S1, S2, unofficial]. (Source [S1, unofficial] uses `direction`, corrected to `delta` based on context).
+
+3.  **Final Output Construction**:
+    *   **Color Output**: `outColor = color` [S1, S2, unofficial].
+    *   **Depth and Coordinate Output** (from [S2, unofficial]):
+        *   Compute `data_pos = the_coord * sizef - vec3<f32>(0.5, 0.5, 0.5)` [S2, unofficial].
+        *   Compute `world_pos = u_wobject.world_transform * vec4<f32>(data_pos, 1.0)` [S2, unofficial].
+        *   Compute `ndc_pos = u_stdinfo.projection_transform * u_stdinfo.cam_transform * world_pos` [S2, unofficial].
+        *   Construct `RenderOutput`:
+            *   `out.color = out_color` [S2, unofficial].
+            *   `out.coord = the_coord` [S2, unofficial].
+            *   `out.depth = ndc_pos.z / ndc_pos.w` [S2, unofficial]. This is the standard perspective division for NDC depth.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_raycasting_output_generation(texCoord, frontTexture, backTexture, volumeTexture, transferTexture, stepSize, numSteps, u_material_opacity, colorspace, sizef, world_transform, projection_transform, cam_transform):
+    # Initialization
+    color = vec4(0.0, 0.0, 0.0, 0.0)
+    startPosition = texture(frontTexture, texCoord)
+    endPosition = texture(backTexture, texCoord)
+    
+    # Calculate step vector
+    # Note: normalize(startPosition - endPosition) points from end to start.
+    # Standard raycasting usually goes from start to end. 
+    # Source [S1, unofficial] uses normalize(startPosition - endPosition). 
+    # If startPosition is front and endPosition is back, this vector points backwards.
+    # However, the loop advances position += delta. 
+    # If delta points backwards, position moves out of bounds immediately if startPosition is inside.
+    # Assuming the source intends a forward ray, the direction should be normalize(endPosition - startPosition).
+    # We follow the source [S1, unofficial] literally but note the potential directionality issue.
+    delta = normalize(startPosition - endPosition) * stepSize
+    position = startPosition
+    
+    for i in range(numSteps):
+        # Boundary check
+        if position.x > 1.0 or position.y > 1.0 or position.z > 1.0:
+            break
+            
+        # Sampling
+        density = texture(volumeTexture, position).r
+        voxelColor = texture(transferTexture, density)
+        
+        # Colormapping and Opacity (from [S2, unofficial] logic adapted to [S1, unofficial] structure)
+        # In [S1, unofficial], voxelColor is vec3. Opacity is taken from voxelColor.a or implied.
+        # In [S2, unofficial], explicit opacity calculation is done.
+        # We merge: assume voxelColor has an alpha channel or use a separate alpha.
+        # Source [S1, unofficial] formula uses voxelColor.a.
+        
+        # Sampling distance correction for accumulated alpha
+        # Formula from [S1, unofficial]: color.a = 1.0 - pow((1.0 - color.a), stepSize * 500.0)
+        # This is applied BEFORE blending in the source snippet.
+        color.a = 1.0 - pow((1.0 - color.a), stepSize * 500.0)
+        
+        # Front-to-back blending
+        # color.rgb = color.rgb + (1.0 - color.a) * voxelColor.a * voxelColor.rgb
+        # color.a = color.a + (1.0 - color.a) * voxelColor.a
+        # Note: voxelColor.rgb is the color, voxelColor.a is the opacity.
+        
+        current_opacity = voxelColor.a
+        current_color = voxelColor.rgb
+        
+        color.rgb = color.rgb + (1.0 - color.a) * current_opacity * current_color
+        color.a = color.a + (1.0 - color.a) * current_opacity
+        
+        # Early ray termination
+        if color.a >= 1.0:
+            break
+            
+        # Advance position
+        position = position + delta
+        
+    # Final Output
+    outColor = color
+    
+    # Depth calculation (from [S2, unofficial])
+    # the_coord is the final position in texture space? 
+    # Source [S2, unofficial] uses the_coord from a search loop. 
+    # In [S1, unofficial], position is the last valid position.
+    # We use position for depth calculation if available, or the last sampled coord.
+    # Assuming position is in normalized coordinates [0,1] or similar.
+    # Source [S2, unofficial] converts the_coord to data_pos, then world, then ndc.
+    
+    # If we are just outputting color, we stop here.
+    # If we need RenderOutput:
+    # data_pos = position * sizef - vec3(0.5, 0.5, 0.5)
+    # world_pos = world_transform * vec4(data_pos, 1.0)
+    # ndc_pos = projection_transform * cam_transform * world_pos
+    # depth = ndc_pos.z / ndc_pos.w
+    
+    return outColor
+```
+
+### Parameters and Typical Values
+*   `stepSize`: Determines the distance between samples. Smaller values increase accuracy but decrease performance. [S1, S2, unofficial].
+*   `numSteps`: Maximum iterations. [S1, S2, unofficial].
+*   `u_material.opacity`: Modulates the alpha channel. [S2, unofficial].
+*   `colorspace`: 'srgb' triggers linearization. [S2, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Directionality**: The source [S1, unofficial] calculates `delta` as `normalize(startPosition - endPosition)`. If `startPosition` is the front (near) and `endPosition` is the back (far), this vector points towards the camera. Advancing `position` by this vector moves the ray backwards, potentially causing immediate boundary exit or incorrect sampling. The standard approach is `normalize(endPosition - startPosition)` [S1, unofficial].
+*   **Boundary Checks**: The check `position.x > 1.0` etc. assumes the volume is in normalized [0,1] space. If the volume is larger, this check is insufficient. [S1, unofficial].
+*   **Sampling Distance Correction**: The formula `1.0 - pow((1.0 - color.a), stepSize * 500.0)` includes a hardcoded factor `500.0`. This is non-standard and likely specific to the resolution or scale of the volume in [S1, unofficial]. Standard integration uses `alpha_i = 1 - exp(-density * stepSize)` or similar. [S1, unofficial].
+*   **Color Space**: Failure to convert sRGB to linear space before compositing can lead to incorrect lighting and blending results. [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(N)$ per pixel, where $N$ is the number of steps (`numSteps`). [S1, S2, unofficial].
+*   **Memory Complexity**: $O(1)$ per ray, as only the accumulator state is stored. [S1, S2, unofficial].
+*   **Performance**: Performance is limited by memory bandwidth (sampling `volumeTexture` and `transferTexture`) and arithmetic operations per sample. Early ray termination can significantly reduce average case performance for opaque volumes. [S1, S2, unofficial].
+*   **Strengths**: Simple to implement, accurate optical model, supports arbitrary transfer functions. [S1, S2, unofficial].
+*   **Limitations**: Slow for large volumes or high resolution due to per-sample texture lookups. Sensitive to step size. [S1, S2, unofficial].
+*   **When to use**: High-quality offline rendering or real-time rendering with small volumes or low resolution. [S1, S2, unofficial].
+*   **When not to use**: Large-scale volumes requiring high frame rates, where hierarchical methods (like Binary Swap or Pre-Integration) are preferred. [S1, S2, unofficial].
+
+## Background
+Volume Raycasting Output Generation is based on the fundamental principles of direct volume rendering, specifically the front-to-back compositing algorithm derived from the volume rendering integral [S1, S2, unofficial]. The specific implementation details, such as the use of front/back textures for ray entry/exit and the specific shader structure, are commonly found in WebGL/GLSL tutorials and modern GPU-based rendering frameworks like pygfx [S1, S2, unofficial]. The method is a direct application of the work by Levoy, Catmull, and others on volume rendering [S1, S2, unofficial].
+
+## Sources
+[S1] Volume ray casting doesn't work fine (Webgl + GLSL + Three.js), https://stackoverflow.com/questions/16274334/volume-ray-casting-doesnt-work-fine-webgl-glsl-three-js, fetched 2026-10-26 (unofficial)
+[S2] https://github.com/pygfx/pygfx/blob/main/pygfx/renderers/wgpu/wgsl/volume_ray.wgsl, https://github.com/pygfx/pygfx/blob/main/pygfx/renderers/wgpu/wgsl/volume_ray.wgsl, fetched 2026-10-29 (unofficial)

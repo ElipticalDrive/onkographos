@@ -1,0 +1,56 @@
+# Neural Body
+
+
+## Overview
+Neural Body is a method for synthesizing novel views of dynamic human avatars from sparse multi-view videos by combining NeRF volume rendering with a vertex-based deformable human body model (SMPL) [S1, S2]. It solves the problem of modeling articulated, moving bodies, which standard NeRF approaches struggle with due to pose changes [S1]. By anchoring latent variables to the vertices of a deformable mesh, it enables interpolation between frames and poses, establishing a foundational paradigm for neural field rendering of human avatars [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Sparse multi-view video frames of a human performer; initial human pose parameters $\mathcal{S}$ estimated from the video using a template human body model (SMPL) [S1, S2].
+*   **Outputs:** Photorealistic novel views of the dynamic character at arbitrary poses and viewpoints [S1, S2].
+
+**Data Structures:**
+*   **SMPL Model:** A vertex-based deformable human body model with a fixed mesh topology [S1, S2].
+*   **Latent Code:** A 16-dimensional latent vector $\mathbf{Z}$ attached to each vertex of the SMPL mesh [S1]. This vector encodes local geometry and appearance information [S2].
+
+**Network Topology:**
+The method uses neural networks to encode the local geometry and appearance based on the anchored latent variables [S2]. While the specific MLP architecture details for the deformation field are not fully specified in the provided notes, the core mechanism involves mapping the latent codes and pose parameters to a deformation field that warps the canonical SMPL mesh [S1].
+
+**Rendering Steps:**
+1.  **Pose Estimation:** Estimate initial human pose parameters $\mathcal{S}$ from the input video using the SMPL model [S1].
+2.  **Latent Initialization:** Attach a 16-dimensional latent code $\mathbf{Z}$ to each vertex of the SMPL mesh [S1].
+3.  **Deformation:** Use the pose parameters $\mathcal{S}$ and the latent codes $\mathbf{Z}$ to deform the baseline SMPL mesh, creating a dynamic 3D representation of the character [S1, S2].
+4.  **Ray Sampling:** For each pixel, cast a ray through the scene. Sample points along the ray in the deformed 3D space [S1].
+5.  **Density and Color Prediction:** At each sample point, predict density $\sigma$ and color $\mathbf{c}$ using the neural representation derived from the latent codes and the deformed geometry [S1, S2].
+6.  **Volume Rendering:** Compute the pixel color $C(\mathbf{r})$ using the standard NeRF volumetric rendering integral:
+    $$
+    C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i, \quad \text{where } \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
+    $$
+    where $\delta_i$ is the distance between samples [S1].
+
+**Parameters:**
+*   **Latent Dimension:** 16 dimensions per vertex [S1].
+*   **Body Model:** SMPL [S1, S2].
+
+**Edge Cases and Pitfalls:**
+*   **Pose Estimation Errors:** Inaccurate initial pose estimation can negatively impact the reconstruction, as the method relies on the SMPL model as a geometric prior [S1].
+*   **Self-occlusion:** Standard NeRF methods may perform poorly when the human model has self-occlusions, requiring robust handling of visibility [S1].
+
+## Subtopics
+
+### NECA
+NECA is a customizable neural avatar framework that enables photorealistic rendering under arbitrary pose, view, and lighting, with fine-grained editing of shape, texture, and shadow [S1]. It learns human representation jointly in a canonical space and a surface-based UV-tangent space to capture both shared structure and high-frequency pose-dependent detail [S1]. It predicts geometry, albedo, and shadow via separate MLPs, optimized with environmental lighting and trained via self-supervision using photometric and normal constraints [S1].
+
+## Operating characteristics
+*   **Strengths:** Capable of interpolating between frames and poses, which standard NeRF approaches struggle with for moving bodies [S1]. Establishes a foundational method for neural field rendering of human avatars using a baseline skeleton and neural deformation field [S1].
+*   **Limitations:** Performance is dependent on the accuracy of the SMPL pose estimation; inaccurate estimates can degrade reconstruction quality [S1].
+*   **Performance:** Not given in the sources.
+*   **When to use:** When synthesizing novel views of dynamic human characters from sparse multi-view videos is required, and interpolation between poses is necessary [S1, S2].
+*   **When not to use:** When high-fidelity static scene reconstruction is needed without dynamic elements, or when accurate initial pose estimation is unavailable [S1].
+
+## Background
+Neural Body was proposed by Peng et al. in 2021 [S2]. It applies NeRF volume rendering to human avatars with moving poses from videos, using a vertex-based deformable human body model (SMPL) [S1]. The method defines latent variables, uses neural networks to encode local geometry and appearance, and anchors these latent variables to the vertices of the deformable human model to represent dynamic characters [S2]. It was developed to address the challenges of modeling articulated bodies, which pose different difficulties than static scenes [S1]. The approach inspired a large number of subsequent works, including A-NeRF, Animatable NeRF, DoubleField, and HumanNeRF [S1].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31

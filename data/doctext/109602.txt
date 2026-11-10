@@ -1,0 +1,888 @@
+![voxlvoxl](resources/voxlvoxl.gif)
+
+# voxlvoxl
+A voxel hash chunk map using **Bonxai**(https://github.com/facontidavide/Bonxai), aiming for efficient memory management of point cloud maps. <br>
+
+Primarily designed for Mapping and Localization with LiDAR sensors, and a map representation for [ULAM](https://github.com/goguma426/ulam) LiDAR-Inertial odometry system.
+
+> ## IMPORTANT NOTE:
+> * `voxlvoxl` is currently in development stage. There are memory glitches lurking under the surface.
+> * The causes are known and a fix is on the way, but not right now!
+
+# What is this?
+**Voxel hash maps** are frequently used in mapping and localization applications for their computational advantages:
+* Typical time complexity of ***O(1)*** (for lookup and update) with reasonable hash functions.
+* Sparse memory usage: only occupied voxels take up memory.
+* Next-to-infinite spatial representation: **int32** coordinates with **1cm** voxel size can represent space larger than earth itself. <br>
+
+Nevertheless, **point cloud maps** created with range sensors such as 3D LiDARs can take up substantial memory space if you load it as a single instance. To mitigate this problem, `voxlvoxl` divides 3D space represented by the voxel map into **chunks**, which is simply a cube of *n x n x n* voxels(just like [Minecraft](https://www.minecraft.net/)!). <br>
+
+# How is it better?
+This representation has a number of advantages:
+* Chunks can be separately saved to/loaded from disk, saving memory space for regions that are not needed right now.
+* Since a chunk is actually an independent voxel hash map, we do not have to worry about coordinate conversions - just directly save the point coordinates to an appropriate voxel in a chunk.
+* The chunks are completely independent of one another, so we can summon or dismiss them using any policy that fits our needs - for example, one might want to pre-load the region that a robot is expected to enter soon. <br>
+
+`voxlvoxl` can be thought of as an alternative to **[Rolling Bonxai](https://github.com/mukundbala/Rolling-Bonxai)**, but with different chunk management. **Rolling Bonxai** indexes and activates chunks based on the current position in the map, and the number of chunks in the rolling window is hard-fixed to 27 (3 by 3 by 3 chunks). This may be undesirable for some applications and use-cases. <br>
+
+In contrast, `voxlvoxl` indexes chunks using another hash function. Internally, the active chunks are kept as `std::unordered_map` of `Bonxai::CoordT` integer 3-dimensional coordinates, with a hash function borrowed from https://niessnerlab.org/papers/2013/4hashing/niessner2013hashing.pdf. <br>
+As mentioned above, this allows unlimited degrees of freedom for chunk management(summon and dismiss), which of course includes **Rolling Bonxai** style behavior.
+
+# What can it do right now?
+The initial plan was to release `voxlvoxl` as a complete point cloud map representation including all convenience functions and even Ray-Tracing for dynamic object removal. However my personal circumstances forced me to pre-release this development version that just barely suits my needs for 3D LiDAR mapping. <br>
+As of now, `voxlvoxl` is capable of performing the following functions:
+* Asynchronous summon/dismiss of chunks from/to the disk based on chunk index
+* Chunk state tracking (UNINITIALIZED/UNTOUCHED/MODIFIED)
+* OpenMP-Parallelized radius search for a large number of query points(critical for SLAM applications)
+
+# Interesting technical details on optimization
+Voxel hash chunk maps are cool and all, but there are two elephants in the room if you plan on hardcore query/update tasks.
+* For point lookup/insertion, we need to calculate the chunk index in addition to the voxel index, which can really add up if we're talking about millions of points.
+* Calculating the voxel index often involves using the `std::floor()` function, which is actually more expensive than you might think(in computational terms). See [this link](https://stackoverflow.com/questions/824118/why-is-floor-so-slow).
+
+To mitigate these shortcomings, `voxlvoxl` has two tricks under the hood:
+* Use of [Bit-shift operations](https://www.geeksforgeeks.org/cpp/left-shift-right-shift-operators-c-cpp/) for chunk index calculation. The downside is that the size of the chunk must be 2<sup>n</sup> x 2<sup>n</sup> x 2<sup>n</sup>, but this is often negotiable since the voxel size is configurable.
+* Use of `Eigen::Vector3d::array()::floor()` that triggers the use of SIMD operations such as `_mm_floor_ps` for supported CPUs. This in theory accelerates voxel index calculation by a factor of 3 or more.
+```C++
+  Bonxai::CoordT V3DToVoxelCoord(const V3D& p) const {
+    // this allows SIMD operations such as _mm_floor_ps
+    // MUCH faster than std::floor()
+    Eigen::Vector3i coord =
+        (p * inv_resolution_).array().floor().template cast<int32_t>();
+
+    return {coord.x(), coord.y(), coord.z()};
+  }
+
+  Bonxai::CoordT getCorrespondingChunkIdx(const Bonxai::CoordT& coord) const {
+    // bitshift operations to calculate chunk index
+    // the downside is that chunk_size must be a power of two
+    return {coord.x >> chunk_bits_, coord.y >> chunk_bits_,
+            coord.z >> chunk_bits_};
+  }
+```
+
+# Roadmap
+- [ ] Implement initially planned convenience functions such as **PCL** conversions
+- [ ] Fix memory access glitches
+- [ ] Implement dynamic object removal with Ray-Tracing
+- [ ] Implement parallelized point insertion
+- [ ] Improve readme with examples
+
+### include/voxlvoxl/point_cloud_chunk_map.hpp
+```
+// clang-format off
+#pragma once
+
+#include "bonxai_map/probabilistic_map.hpp"
+#include "voxlvoxl.hpp"
+// clang-format on
+
+namespace voxlvoxl {
+
+static constexpr int32_t unknown_prob = Bonxai::ProbabilisticMap::logods(0.5);
+struct CellT {
+  uint32_t raytrace_id{0};
+  int32_t prob_log{unknown_prob};
+  std::array<P3D, 20> points;
+  int32_t num_points{0};
+};
+
+class PointCloudChunkMap : public ChunkMap<CellT> {
+ public:
+  template <typename Functor>
+  void RayIterator(const Bonxai::CoordT& key_origin,
+                   const Bonxai::CoordT& key_end, const Functor& func) {
+    if (key_origin == key_end) {
+      return;
+    }
+    if (!func(key_origin)) {
+      return;
+    }
+
+    Bonxai::CoordT error = {0, 0, 0};
+    Bonxai::CoordT coord = key_origin;
+    Bonxai::CoordT delta = (key_end - coord);
+    const Bonxai::CoordT step = {delta.x < 0 ? -1 : 1, delta.y < 0 ? -1 : 1,
+                                 delta.z < 0 ? -1 : 1};
+
+    delta = {delta.x < 0 ? -delta.x : delta.x, delta.y < 0 ? -delta.y : delta.y,
+             delta.z < 0 ? -delta.z : delta.z};
+
+    const int max = std::max(std::max(delta.x, delta.y), delta.z);
+
+    // maximum change of any coordinate
+    for (int i = 0; i < max - 1; ++i) {
+      // update errors
+      error = error + delta;
+      // manual loop unrolling
+      if ((error.x << 1) >= max) {
+        coord.x += step.x;
+        error.x -= max;
+      }
+      if ((error.y << 1) >= max) {
+        coord.y += step.y;
+        error.y -= max;
+      }
+      if ((error.z << 1) >= max) {
+        coord.z += step.z;
+        error.z -= max;
+      }
+      if (!func(coord)) {
+        return;
+      }
+    }
+  }
+
+  inline void ComputeRay(const Bonxai::CoordT& key_origin,
+                         const Bonxai::CoordT& key_end,
+                         std::vector<Bonxai::CoordT>& ray) {
+    ray.clear();
+    RayIterator(key_origin, key_end, [&ray](const Bonxai::CoordT& coord) {
+      ray.push_back(coord);
+      return true;
+    });
+  };
+
+  [[nodiscard]] static constexpr int32_t logods(float prob) {
+    return int32_t(1e6 * std::log(prob / (1.0 - prob)));
+  }
+
+  [[nodiscard]] static constexpr float prob(int32_t logods_fixed) {
+    float logods = float(logods_fixed) * 1e-6;
+    return (1.0 - 1.0 / (1.0 + std::exp(logods)));
+  }
+
+ public:
+  struct Config {
+    CommonConfig chunk_map_config;
+
+    bool do_raytracing = false;
+    int32_t occupancy_min_threshold = logods(0.12);
+    int32_t occupancy_max_threshold = logods(0.97);
+    int32_t occupancy_threshold = logods(0.5);
+    int32_t prob_hit = logods(0.7);
+    int32_t prob_miss = logods(0.4);
+  };
+
+  PointCloudChunkMap() = delete;
+  PointCloudChunkMap(const PointCloudChunkMap&) = delete;
+  PointCloudChunkMap& operator=(const PointCloudChunkMap&) = delete;
+
+  explicit PointCloudChunkMap(const Config& config)
+      : ChunkMap(config.chunk_map_config), cfg_(config) {}
+  ~PointCloudChunkMap() {}
+
+  bool initialize(const V3D& here) {
+    // unique lock for write operation
+    std::unique_lock<std::shared_mutex> lock(chunk_mtx_);
+
+    loadWindowAt(getCorrespondingChunkIdx(V3DToVoxelCoord(here)));
+
+    for (const auto& [idx, chunk] : chunk_map_) {
+      while (!chunk->ready) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+    }
+
+    return true;
+  }
+
+  const std::vector<Bonxai::CoordT> forEachActiveChunk(
+      std::function<void(const Bonxai::CoordT&, ChunkPtr)> visitor) {
+    std::shared_lock<std::shared_mutex> lock(chunk_mtx_);
+    std::vector<Bonxai::CoordT> coords;
+    for (const auto& [idx, chunk] : chunk_map_) {
+      if (chunk->state == Chunk::State::UNINITIALIZED or !chunk->ready) {
+        continue;
+      }
+      coords.push_back(idx);
+      visitor(idx, chunk);
+    }
+
+    return coords;
+  }
+
+  std::vector<std::vector<V3D>> radiusSearch(const std::vector<V3D>& points,
+                                             const double radius) {
+    // shared lock for read operation
+    std::shared_lock<std::shared_mutex> lock(chunk_mtx_);
+
+    std::vector<std::vector<V3D>> results(points.size());
+
+    // Sort points into chunk bins to ensure thread safety
+    std::unordered_map<Bonxai::CoordT, std::vector<std::pair<size_t, V3D>>,
+                       CoordTHash>
+        bins;
+    for (size_t i = 0; i < points.size(); ++i) {
+      const auto& p = points[i];
+      if (!p.allFinite()) {
+        continue;
+      }
+      const Bonxai::CoordT voxel_coord = V3DToVoxelCoord(p);
+      const Bonxai::CoordT chunk_idx = getCorrespondingChunkIdx(voxel_coord);
+      bins[chunk_idx].emplace_back(i, p);
+    }
+
+    std::vector<std::pair<Bonxai::CoordT, std::vector<std::pair<size_t, V3D>>>>
+        bin_vec;
+    bin_vec.reserve(bins.size());
+    for (auto& kv : bins) {
+      bin_vec.emplace_back(kv.first, std::move(kv.second));
+    }
+
+    const int32_t search_range = (radius * inv_resolution_) + 1;
+
+#pragma omp parallel for schedule(dynamic)
+    for (size_t i = 0; i < bin_vec.size(); ++i) {
+      const auto& chunk_idx = bin_vec[i].first;
+      const auto& points_in_chunk = bin_vec[i].second;
+
+      if (chunk_map_.find(chunk_idx) == chunk_map_.end()) {
+        continue;
+      }
+
+      const auto& chunk = chunk_map_.at(chunk_idx);
+      const auto wait_start = std::chrono::steady_clock::now();
+      bool timeout = false;
+      while (!chunk->ready) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (std::chrono::steady_clock::now() - wait_start >
+            std::chrono::milliseconds(10)) {
+          spdlog::error("ERROR: chunk load timeout");
+          timeout = true;
+          break;
+        }
+      }
+      if (timeout) {
+        continue;
+      }
+
+      for (const auto& [idx, point] : points_in_chunk) {
+        const Bonxai::CoordT query_voxel_coord = V3DToVoxelCoord(point);
+        auto& point_results = results[idx];
+
+        for (int32_t x = -search_range; x <= search_range; ++x) {
+          for (int32_t y = -search_range; y <= search_range; ++y) {
+            for (int32_t z = -search_range; z <= search_range; ++z) {
+              // WARN: accessor->value is NOT thread-safe
+              const auto* val = chunk->accessor->value(query_voxel_coord +
+                                                       Bonxai::CoordT{x, y, z});
+              if (val) {
+                for (int32_t k = 0; k < val->num_points; ++k) {
+                  V3D p{val->points[k][0], val->points[k][1],
+                        val->points[k][2]};
+                  if ((p - point).norm() < radius) {
+                    point_results.push_back(p);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return results;
+  }
+
+  std::vector<V3D> radiusSearch(const V3D& point, const double radius) {
+    // shared lock for read operation
+    std::shared_lock<std::shared_mutex> lock(chunk_mtx_);
+
+    const Bonxai::CoordT query_voxel_coord = V3DToVoxelCoord(point);
+    const Bonxai::CoordT query_chunk_idx =
+        getCorrespondingChunkIdx(query_voxel_coord);
+    if (chunk_map_.find(query_chunk_idx) == chunk_map_.end()) {
+      return {};
+    }
+
+    const auto& query_chunk = chunk_map_.at(query_chunk_idx);
+    const auto wait_start = std::chrono::steady_clock::now();
+    while (!query_chunk->ready) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      if (std::chrono::steady_clock::now() - wait_start >
+          std::chrono::milliseconds(10)) {
+        spdlog::error("ERROR: chunk load timeout");
+        return {};
+      }
+    }
+
+    const int32_t search_range = (radius * inv_resolution_) + 1;
+    std::vector<V3D> results;
+    for (int32_t x = -search_range; x <= search_range; ++x) {
+      for (int32_t y = -search_range; y <= search_range; ++y) {
+        for (int32_t z = -search_range; z <= search_range; ++z) {
+          // TODO: add chunk edge check?
+          // WARN: accessor->value is NOT thread-safe
+          const auto* val = query_chunk->accessor->value(
+              query_voxel_coord + Bonxai::CoordT{x, y, z});
+          if (val) {
+            // something is here!!
+            for (int32_t i = 0; i < val->num_points; ++i) {
+              V3D p{val->points[i][0], val->points[i][1], val->points[i][2]};
+              if ((p - point).norm() < radius) {
+                results.push_back(p);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return results;
+  }
+
+  bool update(const std::vector<V3D>& points, const V3D& origin) {
+    // unique lock for write operation
+    std::unique_lock<std::shared_mutex> lock(chunk_mtx_);
+
+    if (const auto new_source_chunk_idx =
+            getCorrespondingChunkIdx(V3DToVoxelCoord(origin));
+        new_source_chunk_idx != current_source_chunk_idx_) {
+      moveWindow(new_source_chunk_idx);
+      current_source_chunk_idx_ = new_source_chunk_idx;
+      spdlog::info("Source chunk updated: {} {} {}", new_source_chunk_idx.x,
+                   new_source_chunk_idx.y, new_source_chunk_idx.z);
+    }
+
+    size_t insert_count = 0;
+    size_t out_of_range_count = 0;
+    size_t rejected_count = 0;
+
+    // WIP: parallelize somehow
+    for (const auto& p : points) {
+      // safety check
+      if (!std::isfinite(p.x()) or !std::isfinite(p.y()) or
+          !std::isfinite(p.z())) {
+        continue;
+      }
+      const Bonxai::CoordT voxel_coord = V3DToVoxelCoord(p);
+      if (cfg_.do_raytracing) {
+        raytrace_hits_.push_back(voxel_coord);
+      }
+      const Bonxai::CoordT point_chunk_idx =
+          getCorrespondingChunkIdx(voxel_coord);
+      if (!isNeighborChunk(current_source_chunk_idx_, point_chunk_idx)) {
+        // point not inside window
+        ++out_of_range_count;
+        continue;
+      }
+      auto& point_chunk = chunk_map_.at(point_chunk_idx);
+      const auto wait_start = std::chrono::steady_clock::now();
+      while (!point_chunk->ready) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (std::chrono::steady_clock::now() - wait_start >
+            std::chrono::milliseconds(10)) {
+          spdlog::error("ERROR: chunk load timeout");
+          return false;
+        }
+      }
+      auto* val = point_chunk->accessor->value(voxel_coord);
+      if (val) {
+        if (val->num_points < common_cfg_.max_points_per_voxel) {
+          val->points[val->num_points] = {p.x(), p.y(), p.z()};
+          val->num_points += 1;
+          point_chunk->state = Chunk::State::MODIFIED;
+          ++insert_count;
+        } else {
+          ++rejected_count;
+        }
+      } else {
+        CellT cell;
+        cell.points[0] = {p.x(), p.y(), p.z()};
+        cell.num_points = 1;
+        point_chunk->accessor->setValue(voxel_coord, cell);
+        point_chunk->state = Chunk::State::MODIFIED;
+        ++insert_count;
+      }
+    }
+
+    // not intended for real-time performance
+    if (cfg_.do_raytracing) {
+      auto clear = [this](const Bonxai::CoordT& coord) {
+        const auto chunk_idx = getCorrespondingChunkIdx(coord);
+        if (isNeighborChunk(current_source_chunk_idx_, chunk_idx)) {
+          // only raytrace neighbor chunks
+          auto& chunk = chunk_map_.at(chunk_idx);
+          auto* val = chunk->accessor->value(coord);
+          if (val) {
+            if (val->raytrace_id != raytrace_iter_id_) {
+              val->raytrace_id = raytrace_iter_id_;
+              val->prob_log = std::max(val->prob_log + cfg_.prob_miss,
+                                       cfg_.occupancy_min_threshold);
+              chunk->state = Chunk::State::MODIFIED;
+            }
+          } else {
+            // TODO: add cell and mark it?
+            // will increase memory usage
+          }
+        }
+
+        return true;
+      };
+
+      const auto from = V3DToVoxelCoord(origin);
+      for (const auto& to : raytrace_hits_) {
+        const auto chunk_idx = getCorrespondingChunkIdx(to);
+        // increase cell occupancy probability
+        if (isNeighborChunk(current_source_chunk_idx_, chunk_idx)) {
+          // only raytrace neighbor chunks
+          auto& chunk = chunk_map_.at(chunk_idx);
+          auto* val = chunk->accessor->value(to);
+          if (val) {
+            if (val->raytrace_id != raytrace_iter_id_) {
+              val->raytrace_id = raytrace_iter_id_;
+              val->prob_log = std::min(val->prob_log + cfg_.prob_hit,
+                                       cfg_.occupancy_max_threshold);
+              chunk->state = Chunk::State::MODIFIED;
+            }
+          } else {
+            // should not happen...
+            spdlog::error("Cell missing during raytracing");
+          }
+        }
+        // decrease cell occupancy probability
+        RayIterator(from, to, clear);
+      }
+      raytrace_hits_.clear();
+      ++raytrace_iter_id_;
+    }
+
+    // spdlog::info("Inserted {} points", insert_count);
+    // spdlog::info("Rejected {} points", rejected_count);
+    // spdlog::info("Out of range {} points", out_of_range_count);
+
+    return true;
+  }
+
+ private:
+  std::vector<Bonxai::CoordT> miss_coords_;
+  std::vector<Bonxai::CoordT> raytrace_hits_;
+
+  uint32_t raytrace_iter_id_ = 1;
+
+  Config cfg_;
+};
+
+}  // namespace voxlvoxl
+```
+
+### include/voxlvoxl/probabilistic_vcmap.hpp
+```
+
+```
+
+### include/voxlvoxl/voxlvoxl.hpp
+```
+// clang-format off
+#pragma once
+
+#include <spdlog/spdlog.h>
+#include <Eigen/Core>
+
+#include <array>
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <filesystem>
+#include <iostream>
+#include <mutex>
+#include <shared_mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+
+#include "bonxai/bonxai.hpp"
+#include "bonxai/serialization.hpp"
+// clang-format on
+
+namespace voxlvoxl {
+
+using P3D = std::array<double, 3>;
+using V3D = Eigen::Vector3d;
+
+// https://niessnerlab.org/papers/2013/4hashing/niessner2013hashing.pdf
+struct CoordTHash {
+  std::size_t operator()(const Bonxai::CoordT& coord) const noexcept {
+    return ((1 << 20) - 1) &
+           (coord.x * 73856093 ^ coord.y * 19349663 ^ coord.z * 83492791);
+  }
+};
+
+struct Vector3iHash {
+  std::size_t operator()(const Eigen::Vector3i& vec) const noexcept {
+    return ((1 << 20) - 1) &
+           (vec.x() * 73856093 ^ vec.y() * 19349663 ^ vec.z() * 83492791);
+  }
+};
+
+template <typename CellT>
+class ChunkMap {
+ public:
+  struct CommonConfig {
+    double resolution = 0.2;
+
+    uint16_t max_points_per_voxel = 10;
+
+    uint16_t sliding_window_size = 3;  // must be odd number
+    uint16_t chunk_size = 128;         // must be a power of two
+    uint16_t chunk_life = 3;
+
+    bool perform_io = false;
+    bool update_files = false;
+    std::string chunk_directory = "";
+  };
+
+  ChunkMap() = delete;
+  ChunkMap(const ChunkMap&) = delete;
+  ChunkMap& operator=(const ChunkMap&) = delete;
+
+  explicit ChunkMap(const CommonConfig& config)
+      : common_cfg_(config), quit_(false) {
+    try {
+      std::filesystem::create_directories(config.chunk_directory);
+    } catch (const std::filesystem::filesystem_error& e) {
+      spdlog::error("Could not create directory: {}", e.what());
+      throw e;
+    }
+
+    const int chunk_size = config.chunk_size;
+    if (!((chunk_size > 0) && ((chunk_size & (chunk_size - 1)) == 0))) {
+      throw std::runtime_error("chunk_size must be a power of two");
+    }
+
+    inv_resolution_ = 1.0 / config.resolution;
+    chunk_bits_ = static_cast<int32_t>(std::log2(chunk_size));
+
+    window_threshold_ = config.sliding_window_size / 2;
+
+    summon_worker_ = std::thread(&ChunkMap<CellT>::summonLoop, this);
+    dismiss_worker_ = std::thread(&ChunkMap<CellT>::dismissLoop, this);
+  }
+
+  ~ChunkMap() {
+    for (const auto& [idx, chunk] : chunk_map_) {
+      dismissRequest(chunk);
+    }
+
+    while (true) {
+      if (dismiss_dq_.empty()) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    quit_ = true;
+    summon_flag_.notify_all();
+    dismiss_flag_.notify_all();
+    while (!summon_worker_.joinable() or !dismiss_worker_.joinable()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    summon_worker_.join();
+    dismiss_worker_.join();
+  }
+
+  virtual bool initialize(const V3D& here) = 0;
+
+  /*
+  void loadAllChunksFromFilesystem() {
+    for (const auto& entry :
+         std::filesystem::directory_iterator(common_cfg_.chunk_directory)) {
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+      const std::string filename = entry.path().filename().string();
+      const size_t first = filename.find('_');
+      const size_t second = filename.find('_', first + 1);
+      const size_t dot = filename.find('.', second + 1);
+      if (first == std::string::npos or second == std::string::npos or
+          dot == std::string::npos) {
+        continue;
+      }
+      const Bonxai::CoordT idx = filenameToChunkIdx(filename);
+      if (chunk_map_.find(idx) == chunk_map_.end()) {
+        auto chunk = std::make_shared<Chunk>();
+        chunk->idx = idx;
+        chunk->filename = filename;
+        chunk_map_.emplace(idx, chunk);
+        summonRequest(chunk);
+      }
+    }
+  }
+  */
+
+  virtual std::vector<V3D> radiusSearch(const V3D& point,
+                                        const double radius) = 0;
+
+  using Map = Bonxai::VoxelGrid<CellT>;
+  using MapPtr = std::unique_ptr<Map>;
+  struct Chunk {
+    // A chunk spans over (chunk_size * chunk_size * chunk_size) voxels,
+    // starting from voxel (idx * chunk_size).
+    // UNINITIALIZED: map and accessor is null.
+    // UNTOUCHED: map is unmodified since initial load/creation.
+    // MODIFIED: map is updated from initial loaded/created state.
+    enum class State { UNINITIALIZED, UNTOUCHED, MODIFIED };
+    std::atomic<State> state{State::UNINITIALIZED};
+    // chunk index
+    Bonxai::CoordT idx{0, 0, 0};
+    // file name to be used for serialization and deserialization.
+    std::string filename{""};
+    // Bonxai VDB structure
+    MapPtr map{nullptr};
+    // map data can be accessed using this accessor.
+    std::unique_ptr<typename Map::Accessor> accessor{nullptr};
+    // if false, this chunk is undergoing a disk I/O operation(load/save).
+    // hang on till it's over!!
+    std::atomic<bool> ready{false};
+    // if this counter reaches zero, this chunk is dismissed
+    // the count is decremented when a window slide is performed
+    // and this chunk is not inside the new window
+    uint16_t countdown{3};
+  };
+  using ChunkPtr = std::shared_ptr<Chunk>;
+
+ protected:
+  void loadWindowAt(const Bonxai::CoordT& new_source_chunk_idx) {
+    const auto half = common_cfg_.sliding_window_size / 2;
+
+    for (int32_t x = -half; x <= half; ++x) {
+      for (int32_t y = -half; y <= half; ++y) {
+        for (int32_t z = -half; z <= half; ++z) {
+          Bonxai::CoordT chunk_idx =
+              new_source_chunk_idx + Bonxai::CoordT{x, y, z};
+          if (chunk_map_.find(chunk_idx) == chunk_map_.end()) {
+            // load chunk if not loaded yet
+            auto rst = chunk_map_.emplace(chunk_idx, std::make_shared<Chunk>());
+            rst.first->second->idx = chunk_idx;
+            rst.first->second->filename = chunkIdxToFilename(chunk_idx);
+            summonRequest(chunk_map_.at(chunk_idx));
+          } else {
+            // reset chunk countdown
+            chunk_map_.at(chunk_idx)->countdown = common_cfg_.chunk_life;
+          }
+        }
+      }
+    }
+  }
+
+  void moveWindow(const Bonxai::CoordT& new_source_chunk_idx) {
+    // summon new chunks
+    loadWindowAt(new_source_chunk_idx);
+
+    // dismiss old chunks
+    for (const auto& [idx, chunk] : chunk_map_) {
+      if (!isNeighborChunk(idx, new_source_chunk_idx)) {
+        chunk->countdown -= 1;
+        if (chunk->countdown == 0) {
+          dismissRequest(chunk);
+        }
+      }
+    }
+
+    // finally, update current source chunk
+    current_source_chunk_idx_ = new_source_chunk_idx;
+  }
+
+  bool isNeighborChunk(const Bonxai::CoordT& src,
+                       const Bonxai::CoordT& tgt) const {
+    return (std::abs(src.x - tgt.x) <= window_threshold_) and
+           (std::abs(src.y - tgt.y) <= window_threshold_) and
+           (std::abs(src.z - tgt.z) <= window_threshold_);
+  }
+
+  Bonxai::CoordT V3DToVoxelCoord(const V3D& p) const {
+    // this allows SIMD operations such as _mm_floor_ps
+    // MUCH faster than std::floor()
+    Eigen::Vector3i coord =
+        (p * inv_resolution_).array().floor().template cast<int32_t>();
+
+    return {coord.x(), coord.y(), coord.z()};
+  }
+
+  Bonxai::CoordT getCorrespondingChunkIdx(const Bonxai::CoordT& coord) const {
+    // bitshift operations to calculate chunk index
+    // the downside is that chunk_size must be a power of two
+    return {coord.x >> chunk_bits_, coord.y >> chunk_bits_,
+            coord.z >> chunk_bits_};
+  }
+
+  std::string chunkIdxToFilename(const Bonxai::CoordT& idx) const {
+    std::string filename = "";
+    filename += std::to_string(idx.x);
+    filename += "_";
+    filename += std::to_string(idx.y);
+    filename += "_";
+    filename += std::to_string(idx.z);
+    filename += ".bin";
+    return filename;
+  }
+
+  /*
+  Bonxai::CoordT filenameToChunkIdx(const std::string& filename) const {
+    Bonxai::CoordT idx;
+    const size_t first = filename.find('_');
+    const size_t second = filename.find('_', first + 1);
+    const size_t dot = filename.find('.', second + 1);
+    idx.x = std::stoi(filename.substr(0, first));
+    idx.y = std::stoi(filename.substr(first + 1, second - first - 1));
+    idx.z = std::stoi(filename.substr(second + 1, dot - second - 1));
+    return idx;
+  }
+  */
+
+  void summonRequest(ChunkPtr chunk) {
+    std::unique_lock<std::mutex> lock(summon_mtx_);
+    chunk->ready = false;
+    summon_dq_.push_back(chunk);
+    summon_flag_.notify_one();
+  }
+
+  void dismissRequest(ChunkPtr chunk) {
+    std::unique_lock<std::mutex> lock(dismiss_mtx_);
+    chunk->ready = false;
+    dismiss_dq_.push_back(chunk);
+    dismiss_flag_.notify_one();
+  }
+
+  void summonLoop() {
+    while (true) {
+      std::unique_lock<std::mutex> lock(summon_mtx_);
+      summon_flag_.wait(lock, [&] { return !summon_dq_.empty() or quit_; });
+      if (quit_) {
+        break;
+      }
+
+      spdlog::info("Summon processing {} chunks", summon_dq_.size());
+
+      while (!summon_dq_.empty()) {
+        auto& chunk = summon_dq_.front();
+        if (common_cfg_.perform_io) {
+          if (chunkFileExists(chunk->filename)) {
+            chunk->ready = false;
+            loadChunk(chunk);
+          }
+        }
+        if (!chunk->map) {
+          // no file or no I/O
+          chunk->map = std::make_unique<Map>(common_cfg_.resolution);
+        }
+        chunk->accessor = std::make_unique<typename Map::Accessor>(
+            chunk->map->createAccessor());
+        chunk->state = Chunk::State::UNTOUCHED;
+        chunk->countdown = common_cfg_.chunk_life;
+        chunk->ready = true;
+        summon_dq_.pop_front();  // GO GO GO
+      }
+    }
+  }
+
+  void dismissLoop() {
+    while (true) {
+      std::unique_lock<std::mutex> lock(dismiss_mtx_);
+      dismiss_flag_.wait(lock, [&] { return !dismiss_dq_.empty() or quit_; });
+      if (quit_) {
+        break;
+      }
+
+      spdlog::info("Dismiss processing {} chunks", dismiss_dq_.size());
+
+      while (!dismiss_dq_.empty()) {
+        auto& chunk = dismiss_dq_.front();
+        if (common_cfg_.perform_io and common_cfg_.update_files and
+            chunk->state == Chunk::State::MODIFIED) {
+          if (chunkFileExists(chunk->filename)) {
+            removeChunkFile(chunk->filename);
+          }
+          saveChunk(chunk);
+        }
+        // chunk->map.reset();
+        // chunk->accessor.reset();
+        // chunk->state = Chunk::State::UNINITIALIZED;
+        // chunk->ready = true;
+        dismiss_dq_.pop_front();  // BYE
+        chunk_map_.erase(chunk->idx);
+      }
+    }
+  }
+
+  bool chunkFileExists(const std::string& filename) const {
+    std::filesystem::path path = common_cfg_.chunk_directory;
+    path /= filename;
+    return std::filesystem::exists(path);
+  }
+
+  void removeChunkFile(const std::string& filename) const {
+    std::filesystem::path path = common_cfg_.chunk_directory;
+    path /= filename;
+    std::filesystem::remove(path);
+  }
+
+  void loadChunk(const ChunkPtr& chunk) {
+    if (!chunk) {
+      spdlog::error("WARN: cannot load into null chunk...");
+      return;
+    }
+
+    std::unique_lock<std::mutex> lock(io_mtx_);
+
+    std::filesystem::path path = common_cfg_.chunk_directory;
+    path /= chunk->filename;
+    std::ifstream istr(path, std::ios::binary);
+    if (istr.is_open()) {
+      char header[256];
+      istr.getline(header, 256);
+      auto map =
+          Bonxai::Deserialize<CellT>(istr, Bonxai::GetHeaderInfo(header));
+      chunk->map = std::make_unique<Map>(std::move(map));
+      spdlog::info("Loaded chunk {}", chunk->filename);
+      return;
+    }
+
+    spdlog::error("Could not open file: {}", chunk->filename);
+  }
+
+  void saveChunk(const ChunkPtr& chunk) {
+    if (!chunk) {
+      spdlog::error("WARN: cannot save null chunk...");
+      return;
+    }
+
+    std::unique_lock<std::mutex> lock(io_mtx_);
+
+    if (!chunk->map) {
+      spdlog::error("WARN: chunk map is null...");
+      return;
+    }
+    std::filesystem::path path = common_cfg_.chunk_directory;
+    path /= chunk->filename;
+    std::ofstream ostr(path, std::ios::binary);
+    if (ostr.is_open()) {
+      Bonxai::Serialize(ostr, *(chunk->map));
+      spdlog::info("Saved chunk {}", chunk->filename);
+      return;
+    }
+
+    spdlog::error("Could not open file: {}", chunk->filename);
+  }
+
+  std::atomic<bool> quit_;
+
+  std::unordered_map<Bonxai::CoordT, ChunkPtr, CoordTHash> chunk_map_;
+  Bonxai::CoordT current_source_chunk_idx_;
+
+  int32_t window_threshold_;
+  double inv_resolution_ = 0.0;
+  int32_t chunk_bits_ = 0;
+
+  std::deque<ChunkPtr> summon_dq_, dismiss_dq_;
+  mutable std::mutex summon_mtx_, dismiss_mtx_, io_mtx_;
+  mutable std::shared_mutex chunk_mtx_;
+  std::condition_variable summon_flag_, dismiss_flag_;
+
+  std::thread summon_worker_, dismiss_worker_;
+
+  const CommonConfig common_cfg_;
+};
+}  // namespace voxlvoxl
+```

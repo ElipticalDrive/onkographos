@@ -1,0 +1,52 @@
+# Simplified Pre-integration
+
+Also called: Pré-integração Simplificada, Simplified Pre-integrated Volume Rendering
+
+## Overview
+Simplified Pre-integration is a faster approximation of full pre-integration used in direct volume ray casting [S1][S2, unofficial]. It solves the performance bottleneck of computing pre-integrated transfer function (TF) lookups by neglecting color attenuation inside volume slabs [S1][S2, unofficial]. It sets itself apart from full pre-integration [Pre-Integration Lookup](2854-pre-integration-lookup.md) by trading accuracy for speed, making it suitable for interactive interfaces where multiple TFs are modified simultaneously [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Scalar volume data (stored as 3D texture, 8-bit precision) [S1].
+- Input: Transfer Function (TF) parameters [S1].
+- Output: Pre-integrated lookup table (stored as 2D RGBA texture) [S1].
+
+**Data Structures:**
+- TFs: Lookup tables with 256 entries [S1].
+- Pre-integrated tables: 2D RGBA textures [S1].
+
+**Method:**
+The core distinction of Simplified Pre-integration is the omission of the Beer-Lambert law's color attenuation term during the table calculation [S1][S2, unofficial]. In full pre-integration, the color contribution $C$ along a ray segment is computed by integrating the product of the emitted color and the accumulated opacity (attenuation). Simplified Pre-integration disregards this attenuation within the ray segments [S2, unofficial].
+
+Mathematically, if $c(s)$ is the color emitted at position $s$ and $\alpha(s)$ is the opacity, the full pre-integrated color $C$ for a slab from $s_0$ to $s_1$ is:
+$$ C = \int_{s_0}^{s_1} c(s) e^{-\int_{s_0}^{s} \alpha(t) dt} \alpha(s) ds $$
+Simplified Pre-integration neglects the exponential attenuation term $e^{-\int_{s_0}^{s} \alpha(t) dt}$, effectively assuming that color contributions are additive without being dimmed by preceding opaque regions [S1][S2, unofficial].
+
+**Steps:**
+1. Define the TF with 256 entries [S1].
+2. Compute the pre-integrated lookup table using the simplified model (neglecting color attenuation) [S1][S2, unofficial].
+3. Store the result in a 2D RGBA texture [S1].
+4. During ray casting, sample the 2D texture based on the current TF parameters and slab thickness [S1].
+
+**Parameters:**
+- TF resolution: 256 entries [S1].
+- Volume data precision: 8-bit [S1].
+
+**Edge Cases and Pitfalls:**
+- The use of simplified pre-integration is penalized with a deviation in the calculation of the total color contribution at each pixel [S2, unofficial]. This error is most noticeable when opacity is high, as the lack of attenuation leads to over-brightening of colors behind dense regions.
+- It is recommended to use full pre-integration when a single TF is under modification to maintain quality, reserving simplified pre-integration for the first level of interaction where multiple TFs are modified [S1].
+
+## Operating characteristics
+- **Performance:** Guarantees superior performance compared to full pre-integration algorithms, such as the efficient algorithm of Lum et al. [S2, unofficial]. The performance gain is significant enough to support interactive modification of multiple TFs (e.g., 36 TFs with thumbnails) [S1].
+- **Complexity:** The complexity is of the same order of magnitude as full pre-integration, but with a lower constant factor due to the simplified calculation [S2, unofficial].
+- **Accuracy:** Lower accuracy than full pre-integration due to the deviation in total color contribution [S2, unofficial].
+- **Use Cases:** Ideal for the first level of interactive TF design interfaces where speed is prioritized over visual fidelity [S1]. Not recommended for final rendering or when a single TF is being fine-tuned [S1].
+
+## Background
+- **Origin:** The method is described in the context of a volume visualization tool with dual-domain interaction for transfer function design [S1][S2, unofficial].
+- **History:** It is presented as an alternative to the full pre-integration algorithm by Lum et al. [LUM 2004b] [S2, unofficial]. The approach was implemented in a system where volume data is stored in GPU memory as 3D textures and TFs are represented as lookup tables [S1].
+- **Usage:** Used in interactive volume visualization tools to allow real-time modification of multiple transfer functions [S1].
+
+## Sources
+[S1] Volume visualization and exploration through flexible transfer function design, https://doi.org/10.1016/j.cag.2008.04.004, fetched 2026-10-27
+[S2] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

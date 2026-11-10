@@ -3,139 +3,150 @@
 Also called: Dominant axis voxelization, Thin voxelization via single projection
 
 ## Overview
-Single 2D Projection Voxelization is a method for producing 6-separating (tunnel-free) voxelizations of planar triangles using only a single 2D rasterization pass along the dominant axis of the triangle's normal vector [S1, unofficial]. It leverages the "thinness" property of voxelization to avoid the multiple projections required by sibling methods like [Orthographic Multi-View Voxelization](3892-orthographic-multi-view-voxelization.md) or [3-Pass Voxelization](5300-3-pass-voxelization.md). By restricting the projection to one axis, it significantly reduces computational overhead while maintaining topological correctness for thin surfaces.
+This method produces a 6-separating (tunnel-free) voxelization of a planar triangle using only a single 2D projection along the dominant axis of the triangle's normal vector [S1, unofficial]. It leverages the "thinness" property of voxelization to avoid the multiple projections required by sibling methods like [Orthographic Multi-View Voxelization](3892-orthographic-multi-view-voxelization.md) or [3-Pass Voxelization](5300-3-pass-voxelization.md). By projecting along the normal's dominant axis, the algorithm ensures that every pixel whose center lies within the projected triangle yields a unique voxel in the corresponding column, while edge cases are resolved via crosshair-segment intersection tests [S1, unofficial].
 
 ## How it works
-**Inputs:** A single planar triangle defined by vertices $V_0, V_1, V_2$ in 3D space; a target voxel grid resolution; the scene bounding box.
-**Outputs:** A set of voxel coordinates $(i, j, k)$ that form a 6-separating representation of the triangle.
+**Inputs:** A single planar triangle defined by vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$ in 3D space; a target voxel grid resolution $R = (R_x, R_y, R_z)$; and a bounding box defining the mapping from world coordinates to voxel indices.
+**Outputs:** A set of voxel coordinates $(i, j, k)$ occupied by the triangle.
 
 **Data Structures:**
+*   **Voxel Grid:** A 3D array or hash map storing occupied voxels.
 *   **Triangle:** Defined by 3 vertices.
-*   **Voxel Grid:** 3D array or hash map of integer coordinates.
-*   **Pixel Buffer:** 2D buffer storing rasterization results (e.g., depth, edge flags).
+*   **Pixel:** Defined by integer screen coordinates $(u, v)$ and center $(u+0.5, v+0.5)$.
 
-**Algorithm Steps:**
+**Steps:**
 
-1.  **Identify Dominant Axis:**
-    Calculate the geometric normal vector $\mathbf{n} = (n_x, n_y, n_z)$ of the triangle. Determine the dominant axis $A$ as the component with the largest absolute value:
-    $$ A = \arg\max_{c \in \{x,y,z\}} |n_c| $$
-    The projection direction is parallel to axis $A$. The 2D rasterization plane is orthogonal to $A$.
-
-2.  **Project and Rasterize:**
-    Project the triangle vertices onto the 2D plane orthogonal to $A$. Rasterize the projected triangle into a 2D pixel buffer. For each pixel $p$ covered by the projection:
-    *   Determine if the pixel center $C_p$ lies inside the projected triangle.
-    *   Determine if the pixel contains an edge of the triangle but does not contain the center.
-
-3.  **Process Pixels Containing the Center:**
-    For any pixel $p$ where the projected triangle contains the pixel center $C_p$:
-    *   Evaluate the depth $d_{tri}$ of the triangle at $C_p$ along the projection axis $A$.
-    *   Determine the voxel index $k$ along axis $A$ corresponding to the voxel center closest to $d_{tri}$.
-    *   Output the voxel $(i, j, k)$ where $(i, j)$ are the 2D coordinates of pixel $p$.
-    *   *Note:* This corresponds to intersecting the triangle against the crosshair segment parallel to the projection axis [S1, unofficial].
-
-4.  **Process Pixels Containing Edges (Non-Center):**
-    For pixels $p$ that contain an edge of the triangle but do not contain the center:
-    *   **Horizontal Test:**
-        *   Find the intersection points of the triangle edges with the horizontal line bisecting the pixel. Let these points be $H_1$ and $H_2$.
-        *   Clamp $H_1$ and $H_2$ to the horizontal extents of the pixel.
-        *   Evaluate the depth of the triangle at $H_1$ and $H_2$ along axis $A$. Let these depths be $d_1$ and $d_2$.
-        *   Let $d_{vox}$ be the depth of the voxel center corresponding to pixel $p$ along axis $A$.
-        *   If $d_1$ and $d_2$ are on different sides of $d_{vox}$ (i.e., $(d_1 - d_{vox})(d_2 - d_{vox}) < 0$), output the voxel $(i, j, k)$.
-    *   **Vertical Test (if Horizontal Test fails):**
-        *   If the horizontal test does not result in a voxel output, repeat the process using the vertical line bisecting the pixel.
-        *   Find intersections $V_1, V_2$ with the vertical bisector.
-        *   Clamp to vertical pixel extents.
-        *   Evaluate depths $d_1, d_2$ at these points.
-        *   If $d_1$ and $d_2$ are on different sides of $d_{vox}$, output the voxel $(i, j, k)$.
-    *   *Note:* These tests correspond to testing the triangle against the two crosshair segments perpendicular to the projection axis [S1, unofficial].
+1.  **Identify Dominant Axis:** Compute the geometric normal vector $\mathbf{n} = (\mathbf{v}_1 - \mathbf{v}_0) \times (\mathbf{v}_2 - \mathbf{v}_0)$. Determine the dominant axis $A \in \{x, y, z\}$ corresponding to the component of $\mathbf{n}$ with the largest absolute magnitude. If $|n_A| < \epsilon$, the triangle is degenerate or perpendicular to all axes; handle as degenerate [G].
+2.  **Project and Rasterize:** Project the triangle onto the 2D plane perpendicular to axis $A$. Rasterize this 2D projection to identify all pixels $(u, v)$ that the triangle covers.
+3.  **Center Test (Primary Voxels):** For each pixel $(u, v)$ where the triangle contains the pixel center $C_{uv}$:
+    *   Evaluate the depth of the triangle at $C_{uv}$ along axis $A$. Let this be $d_{center}$.
+    *   Map $d_{center}$ to the voxel index $k$ along axis $A$.
+    *   Output the voxel $(i, j, k)$ where $(i, j)$ are the voxel indices corresponding to $(u, v)$ in the other two dimensions. This corresponds to intersecting the triangle against the crosshair segment parallel to the projection axis [S1, unofficial].
+4.  **Edge Test (Boundary Voxels):** For each pixel $(u, v)$ that contains an edge of the triangle but does *not* contain the pixel center:
+    *   **Horizontal Test:** Find the intersection of the triangle with the horizontal line bisecting the pixel (line $v+0.5$). This yields two extents (x-coordinates) $x_{min}$ and $x_{max}$ within the pixel bounds.
+    *   Clamp $x_{min}$ and $x_{max}$ to the horizontal pixel extents $[u, u+1]$.
+    *   Evaluate the depth of the triangle at these two clamped points, yielding $d_{left}$ and $d_{right}$.
+    *   Determine the voxel center depth $d_{voxel}$ for the voxel column at $(u, v)$.
+    *   If $d_{left}$ and $d_{right}$ are on different sides of $d_{voxel}$ (i.e., $(d_{left} - d_{voxel}) \times (d_{right} - d_{voxel}) < 0$), output the corresponding voxel.
+    *   **Vertical Test:** If the horizontal test fails (values are on the same side or one is equal), repeat the test using the vertical line bisecting the pixel (line $u+0.5$) to find vertical extents and evaluate depths [S1, unofficial]. This corresponds to testing the triangle against the two crosshair segments perpendicular to the projection axis [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def single_2d_projection_voxelization(triangle, grid_resolution, bounding_box):
+def single_2d_projection_voxelization(triangle, resolution, bounding_box):
+    """
+    Voxelize a single triangle using one 2D projection along the dominant normal axis.
+    Returns a set of voxel coordinates (i, j, k).
+    """
+    occupied_voxels = set()
+    
     # 1. Identify dominant axis
-    normal = compute_normal(triangle)
+    v0, v1, v2 = triangle.vertices
+    normal = cross(v1 - v0, v2 - v0)
     abs_normal = abs(normal)
-    dominant_axis = argmax(abs_normal) # 0 for x, 1 for y, 2 for z
     
-    # 2. Project and Rasterize
-    # Project vertices onto plane orthogonal to dominant_axis
-    projected_vertices = project_onto_plane(triangle.vertices, dominant_axis)
+    # Determine dominant axis index (0=x, 1=y, 2=z)
+    dominant_axis_idx = argmax(abs_normal)
     
-    # Rasterize to get pixel coverage and edge info
-    pixels = rasterize_triangle(projected_vertices, grid_resolution)
+    # Define projection plane axes (the two axes perpendicular to dominant)
+    other_axes = [i for i in range(3) if i != dominant_axis_idx]
     
-    voxels = set()
+    # 2. Project triangle to 2D
+    # Project vertices onto the plane defined by other_axes
+    projected_vertices = [project_onto_plane(v, dominant_axis_idx) for v in [v0, v1, v2]]
     
-    for pixel in pixels:
-        pixel_center = pixel.center
-        voxel_center_depth = get_voxel_center_depth(pixel, dominant_axis, bounding_box)
-        
-        # 3. Check if pixel center is inside projected triangle
-        if point_in_triangle(pixel_center, projected_vertices):
-            # Evaluate triangle depth at pixel center
-            tri_depth_at_center = evaluate_triangle_depth(triangle, pixel_center, dominant_axis)
+    # Determine 2D bounding box in screen space
+    min_u, max_u = min(p[other_axes[0]] for p in projected_vertices), max(p[other_axes[0]] for p in projected_vertices)
+    min_v, max_v = min(p[other_axes[1]] for p in projected_vertices), max(p[other_axes[1]] for p in projected_vertices)
+    
+    # 3. Rasterize and process pixels
+    for u in range(floor(min_u), ceil(max_u) + 1):
+        for v in range(floor(min_v), ceil(max_v) + 1):
+            pixel_center_2d = (u + 0.5, v + 0.5)
             
-            # Output voxel closest to this depth
-            voxel_index = round_to_voxel_index(tri_depth_at_center, dominant_axis, bounding_box)
-            voxels.add(pixel.grid_coords + (voxel_index,))
-            
-        else:
-            # 4. Check edges for pixels containing edges but not center
-            
-            # Horizontal test
-            h_points = get_edge_intersections_on_line(triangle, pixel, line='horizontal')
-            if h_points:
-                # Clamp to pixel horizontal extents
-                h_clamped = clamp_to_pixel_extents(h_points, pixel, axis='horizontal')
+            # Check if pixel center is inside projected triangle
+            if point_in_triangle(pixel_center_2d, projected_vertices):
+                # Center Test
+                # Reconstruct 3D point at pixel center
+                p3d_center = reconstruct_3d_from_2d_and_axis(pixel_center_2d, dominant_axis_idx, triangle)
+                depth_center = p3d_center[dominant_axis_idx]
                 
-                # Evaluate depths
-                d1 = evaluate_triangle_depth(triangle, h_clamped[0], dominant_axis)
-                d2 = evaluate_triangle_depth(triangle, h_clamped[1], dominant_axis)
+                # Map to voxel index
+                k = world_to_voxel_index(depth_center, dominant_axis_idx, resolution, bounding_box)
+                i = world_to_voxel_index(pixel_center_2d[0], other_axes[0], resolution, bounding_box)
+                j = world_to_voxel_index(pixel_center_2d[1], other_axes[1], resolution, bounding_box)
                 
-                # Check if depths are on different sides of voxel center
-                if (d1 - voxel_center_depth) * (d2 - voxel_center_depth) < 0:
-                    voxels.add(pixel.grid_coords + (voxel_index,)) # voxel_index derived from pixel grid coords
-                    continue # Voxel found, skip vertical test
-            
-            # Vertical test (if horizontal failed)
-            v_points = get_edge_intersections_on_line(triangle, pixel, line='vertical')
-            if v_points:
-                # Clamp to pixel vertical extents
-                v_clamped = clamp_to_pixel_extents(v_points, pixel, axis='vertical')
-                
-                # Evaluate depths
-                d1 = evaluate_triangle_depth(triangle, v_clamped[0], dominant_axis)
-                d2 = evaluate_triangle_depth(triangle, v_clamped[1], dominant_axis)
-                
-                # Check if depths are on different sides of voxel center
-                if (d1 - voxel_center_depth) * (d2 - voxel_center_depth) < 0:
-                    voxels.add(pixel.grid_coords + (voxel_index,))
+                occupied_voxels.add((i, j, k))
+            else:
+                # Edge Test: Check if triangle intersects pixel boundary
+                if triangle_intersects_pixel_edge(projected_vertices, u, v):
+                    # Horizontal Test
+                    # Find intersection of triangle with horizontal line v+0.5
+                    h_extents = get_triangle_line_intersection(projected_vertices, y_line=v+0.5)
+                    
+                    if h_extents:
+                        x1, x2 = h_extents
+                        # Clamp to pixel horizontal extents [u, u+1]
+                        x1_clamped = clamp(x1, u, u + 1)
+                        x2_clamped = clamp(x2, u, u + 1)
+                        
+                        # Evaluate depth at clamped points
+                        p3d_left = reconstruct_3d_from_2d_and_axis((x1_clamped, v+0.5), dominant_axis_idx, triangle)
+                        p3d_right = reconstruct_3d_from_2d_and_axis((x2_clamped, v+0.5), dominant_axis_idx, triangle)
+                        
+                        d_left = p3d_left[dominant_axis_idx]
+                        d_right = p3d_right[dominant_axis_idx]
+                        
+                        # Get voxel center depth for this column
+                        voxel_center_depth = get_voxel_center_depth(u, v, dominant_axis_idx, resolution, bounding_box)
+                        
+                        # Check if depths are on different sides of voxel center
+                        if (d_left - voxel_center_depth) * (d_right - voxel_center_depth) < 0:
+                            k = world_to_voxel_index(voxel_center_depth, dominant_axis_idx, resolution, bounding_box)
+                            i = world_to_voxel_index(u, other_axes[0], resolution, bounding_box)
+                            j = world_to_voxel_index(v, other_axes[1], resolution, bounding_box)
+                            occupied_voxels.add((i, j, k))
+                            continue # Skip vertical test if horizontal succeeded
+                    
+                    # Vertical Test (if horizontal failed)
+                    # Find intersection of triangle with vertical line u+0.5
+                    v_extents = get_triangle_line_intersection(projected_vertices, x_line=u+0.5)
+                    
+                    if v_extents:
+                        y1, y2 = v_extents
+                        # Clamp to pixel vertical extents [v, v+1]
+                        y1_clamped = clamp(y1, v, v + 1)
+                        y2_clamped = clamp(y2, v, v + 1)
+                        
+                        # Evaluate depth at clamped points
+                        p3d_top = reconstruct_3d_from_2d_and_axis((u+0.5, y1_clamped), dominant_axis_idx, triangle)
+                        p3d_bottom = reconstruct_3d_from_2d_and_axis((u+0.5, y2_clamped), dominant_axis_idx, triangle)
+                        
+                        d_top = p3d_top[dominant_axis_idx]
+                        d_bottom = p3d_bottom[dominant_axis_idx]
+                        
+                        voxel_center_depth = get_voxel_center_depth(u, v, dominant_axis_idx, resolution, bounding_box)
+                        
+                        if (d_top - voxel_center_depth) * (d_bottom - voxel_center_depth) < 0:
+                            k = world_to_voxel_index(voxel_center_depth, dominant_axis_idx, resolution, bounding_box)
+                            i = world_to_voxel_index(u, other_axes[0], resolution, bounding_box)
+                            j = world_to_voxel_index(v, other_axes[1], resolution, bounding_box)
+                            occupied_voxels.add((i, j, k))
 
-    return voxels
+    return occupied_voxels
 ```
 
-**Parameters:**
-*   **Dominant Axis Selection:** Based on the geometric normal. No tuning parameters.
-*   **Voxel Resolution:** Determined by the target grid resolution.
-
-**Edge Cases and Pitfalls:**
-*   **Degenerate Triangles:** Triangles with zero area or normal magnitude near zero may have ambiguous dominant axes. [G] In practice, such triangles should be skipped or handled via a fallback method.
-*   **Grazing Angles:** While the method relies on the dominant axis, extremely grazing angles might result in very thin projections. The edge tests (horizontal/vertical) are crucial here to ensure 6-separation.
-*   **Precision:** Depth evaluations must be precise enough to determine if they lie on different sides of the voxel center. Floating-point errors near the voxel center boundary can lead to missing or extra voxels.
-
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels covered by the triangle's projection. Significantly faster than multi-view methods which require $O(3N)$ or more.
-*   **Memory Complexity:** $O(1)$ auxiliary space per triangle (excluding the output voxel grid).
-*   **Strengths:** High performance due to single projection; produces topologically correct (6-separating) results for thin surfaces.
-*   **Limitations:** Only applicable to planar triangles or surfaces that can be approximated by planar triangles with well-defined dominant axes. Not suitable for complex, non-planar, or highly curved surfaces without significant tessellation.
-*   **When to use:** When performance is critical and the input geometry consists of planar triangles (e.g., meshes).
-*   **When not to use:** For non-planar primitives or when multiple views are already available for other reasons.
+*   **Time Complexity:** $O(N \cdot R^2)$ in the worst case, where $N$ is the number of triangles and $R$ is the resolution, as each triangle is rasterized to a 2D grid. However, it is significantly faster than multi-view methods because it performs only one projection pass per triangle instead of three.
+*   **Memory Complexity:** $O(R^3)$ for the voxel grid. The algorithm itself requires only $O(1)$ auxiliary space per triangle during rasterization.
+*   **Strengths:** Reduces computational cost by eliminating two of the three required projections. Guarantees 6-separating (tunnel-free) voxelization for planar triangles [S1, unofficial].
+*   **Limitations:** Only applicable to planar triangles. Non-planar geometry must be tessellated. Degenerate triangles (zero area) or those perpendicular to the dominant axis require special handling [G].
+*   **When to use:** When performance is critical and the input geometry consists of planar triangles. When tunnel-freeness is required but multi-view projection is too expensive.
 
 ## Background
-This method is derived from the topological approach to voxelization, specifically leveraging the "thinness" property and its equivalence to the crosshairs target [S1, unofficial]. It was presented as a corollary to the 3-axis rasterization methods [FBP09, CNS*11] in the paper "A Topological Approach to Voxelization" by Laine et al. (NVIDIA, 2013) [S1, unofficial]. The method simplifies the voxelization process by reducing the number of required projections from three to one, based on the observation that for thin surfaces, the dominant axis projection captures all necessary voxel information for 6-separation.
+This method is derived from the topological approach to voxelization, specifically leveraging the equivalence between 3-axis rasterization and the crosshairs target [S1, unofficial]. It was presented as a corollary to the thinness property of voxelization, allowing for 6-separating voxelization with a single projection [S1, unofficial]. The approach builds on earlier work in 3-axis rasterization [FBP09, CNS*11] but optimizes it by recognizing that the dominant axis projection covers the majority of voxel assignments, with edge cases handled by crosshair tests [S1, unofficial].
 
 ## Sources
 [S1] A Topological Approach to Voxelization, https://research.nvidia.com/sites/default/files/pubs/2013-06_A-Topological-Approach/laine2013egsr_paper.pdf, fetched 2026-10-29 (unofficial)

@@ -3,12 +3,12 @@
 Also called: Analytic Integration for 3D Gaussian Splatting
 
 ## Overview
-Analytic-Splatting is a rendering method that replaces the point-sampling of 2D Gaussians in 3D Gaussian Splatting (3DGS) with an analytical approximation of the integral of the Gaussian signal over the pixel window area [S2]. It solves the aliasing artifacts caused by treating pixels as isolated points, which leads to severe blurring or jaggies during zooming or resolution changes [S2]. Unlike [3D Gaussian Splatting MVP](3410-3d-gaussian-splatting-mvp.md) which samples at the center, or [Mip-Splatting](3410-3d-gaussian-splatting-mvp.md) which uses a hybrid low-pass filter that suppresses high frequencies, Analytic-Splatting preserves high-quality details by computing the exact integral response via a conditioned logistic function approximation of the Gaussian CDF [S2].
+Analytic-Splatting is a rendering method that replaces the point-sampling of 2D Gaussians in 3D Gaussian Splatting (3DGS) with an analytical approximation of the integral of the Gaussian signal over the pixel window area [S2]. It solves the aliasing artifacts caused by treating pixels as isolated points, which leads to severe blurring or jaggies during zooming or resolution changes [S2]. Unlike standard 3DGS which samples at the center, or Mip-Splatting which uses a hybrid low-pass filter that suppresses high frequencies, Analytic-Splatting preserves high-quality details by computing the integral response via a conditioned logistic function approximation of the Gaussian CDF [S2].
 
 ## How it works
-**Inputs:** A list of $N$ 3D Gaussians, each defined by a 3D mean $\mathbf{t}$, a 3D covariance matrix $\mathbf{\Sigma}$, a view-dependent color $\mathbf{c}$, and an opacity $\alpha$. For each pixel $\mathbf{u} = [u_x, u_y]^\top$ in the image, the method computes the projected 2D mean $\hat{\bm{\mu}}$ and 2D covariance $\hat{\bm{\Sigma}}$ using the affine approximation of the perspective projection [S2].
+**Inputs:** A list of $N$ 3D Gaussians, each defined by a 3D mean $\mathbf{t}$, a 3D covariance matrix $\mathbf{\Sigma}$, a view-dependent color $\mathbf{c}$, and an opacity $\alpha$ [G]. For each pixel $\mathbf{u} = [u_x, u_y]^\top$ in the image, the method computes the projected 2D mean $\hat{\bm{\mu}}$ and 2D covariance $\hat{\bm{\Sigma}}$ using the affine approximation of the perspective projection [S2].
 
-**Outputs:** The final color $\mathbf{C}(\mathbf{u})$ for each pixel.
+**Outputs:** The final color $\mathbf{C}(\mathbf{u})$ for each pixel [S2].
 
 **Data Structures:**
 *   $\hat{\bm{\mu}} \in \mathbb{R}^2$: Projected 2D mean.
@@ -24,7 +24,7 @@ Analytic-Splatting is a rendering method that replaces the point-sampling of 2D 
 **Steps:**
 
 1.  **Compute Inverse Covariance Coefficients:**
-    Calculate the determinant $|\hat{\bm{\Sigma}}| = \hat{\Sigma}_{11}\hat{\Sigma}_{22} - \hat{\Sigma}_{12}^2$.
+    Calculate the determinant $|\hat{\bm{\Sigma}}| = \hat{\Sigma}_{11}\hat{\Sigma}_{22} - \hat{\Sigma}_{12}^2$ [S2].
     Compute the inverse matrix coefficients:
     $$ a = \frac{\hat{\Sigma}_{22}}{|\hat{\bm{\Sigma}}|}, \quad b = -\frac{\hat{\Sigma}_{12}}{|\hat{\bm{\Sigma}}|}, \quad c = \frac{\hat{\Sigma}_{11}}{|\hat{\bm{\Sigma}}|} $$
     Thus, $\hat{\bm{\Sigma}}^{-1} = \begin{bmatrix} a & b \\ b & c \end{bmatrix}$ [S2].
@@ -32,11 +32,10 @@ Analytic-Splatting is a rendering method that replaces the point-sampling of 2D 
 2.  **Eigenvalue Decomposition:**
     Perform eigenvalue decomposition on $\hat{\bm{\Sigma}}$ to obtain eigenvalues $\{\lambda_1, \lambda_2\}$ and corresponding normalized eigenvectors $\{\mathbf{v}_1, \mathbf{v}_2\}$ [S2].
     Define the standard deviations $\sigma_1 = \sqrt{\lambda_1}$ and $\sigma_2 = \sqrt{\lambda_2}$ [S2].
-    Construct the rotation matrix $V = \begin{bmatrix} \mathbf{v}_1 & \mathbf{v}_2 \end{bmatrix} = \begin{bmatrix} v_{1x} & v_{2x} \\ v_{1y} & v_{2y} \end{bmatrix}$ [S2].
 
 3.  **Transform Pixel Center:**
     Transform the pixel center $\mathbf{u}$ into the diagonalized coordinate system defined by the eigenvectors:
-    $$ \tilde{\mathbf{u}} = V^\top (\mathbf{u} - \hat{\bm{\mu}}) $$
+    $$ \tilde{\mathbf{u}} = \begin{bmatrix} v_{1x} & v_{1y} \\ v_{2x} & v_{2y} \end{bmatrix} (\mathbf{u} - \hat{\bm{\mu}}) $$
     Component-wise:
     $$ \tilde{u}_x = v_{1x}(u_x - \hat{\mu}_x) + v_{1y}(u_y - \hat{\mu}_y) $$
     $$ \tilde{u}_y = v_{2x}(u_x - \hat{\mu}_x) + v_{2y}(u_y - \hat{\mu}_y) $$
@@ -51,10 +50,10 @@ Analytic-Splatting is a rendering method that replaces the point-sampling of 2D 
     [S2].
 
 5.  **Compute 2D Integral Approximation:**
-    Approximate the integral of the 2D Gaussian signal over the 1x1 pixel window centered at $\mathbf{u}$. The 2D integral $\mathcal{I}_g^{2D}(\mathbf{u})$ is decomposed into the product of two 1D integrals along the eigenvectors:
+    Approximate the integral of the 2D Gaussian signal over the 1x1 pixel window centered at $\mathbf{u}$ [S2]. The 2D integral $\mathcal{I}_g^{2D}(\mathbf{u})$ is decomposed into the product of two 1D integrals along the eigenvectors:
     $$ \mathcal{I}_g^{2D}(\mathbf{u}) = 2\pi \sigma_1 \sigma_2 \left[ S_{\sigma_1}\left(\tilde{u}_x + \frac{1}{2}\right) - S_{\sigma_1}\left(\tilde{u}_x - \frac{1}{2}\right) \right] \left[ S_{\sigma_2}\left(\tilde{u}_y + \frac{1}{2}\right) - S_{\sigma_2}\left(\tilde{u}_y - \frac{1}{2}\right) \right] $$
     [S2].
-    Let $\mathcal{I}_{\sigma_1} = \sigma_1 \left[ S_{\sigma_1}(\tilde{u}_x + 0.5) - S_{\sigma_1}(\tilde{u}_x - 0.5) \right]$ and $\mathcal{I}_{\sigma_2} = \sigma_2 \left[ S_{\sigma_2}(\tilde{u}_y + 0.5) - S_{\sigma_2}(\tilde{u}_y - 0.5) \right]$. Then $\mathcal{I}_g^{2D}(\mathbf{u}) = 2\pi \mathcal{I}_{\sigma_1} \mathcal{I}_{\sigma_2}$ [S2].
+    Let $\mathcal{I}_{\sigma_1} = \sigma_1 \left[ S_{\sigma_1}(\tilde{u}_x + 0.5) - S_{\sigma_1}(\tilde{u}_x - 0.5) \right]$ and $\mathcal{I}_{\sigma_2} = \sigma_2 \left[ S_{\sigma_2}(\tilde{u}_y + 0.5) - S_{\sigma_2}(\tilde{u}_y - 0.5) \right]$ [S2]. Then $\mathcal{I}_g^{2D}(\mathbf{u}) = 2\pi \mathcal{I}_{\sigma_1} \mathcal{I}_{\sigma_2}$ [S2].
 
 6.  **Volume Rendering:**
     Compute the final color using alpha blending, replacing the point sample $g^{2D}$ with the integral $\mathcal{I}_g^{2D}$:
@@ -183,8 +182,8 @@ def render_pixel_analytic(gaussians, pixel_u):
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Correlation Term:** The 2D Gaussian integral contains a correlation term $b(x-\hat{\mu}_x)(y-\hat{\mu}_y)$ which is intractable analytically in the original coordinate system. The method resolves this by diagonalizing the covariance matrix and rotating the integration domain to align with eigenvectors, approximating the 2D integral as a product of two independent 1D integrals [S2].
-*   **Precision:** The logistic approximation is highly accurate for standard deviations encountered in training and testing, but extreme values may deviate from the true Gaussian CDF [S2].
+*   **Correlation Term:** The 2D Gaussian integral contains a correlation term $b(x-\hat{\mu}_x)(y-\hat{\mu}_y)$ which is intractable analytically in the original coordinate system [S2]. The method resolves this by diagonalizing the covariance matrix and rotating the integration domain to align with eigenvectors, approximating the 2D integral as a product of two independent 1D integrals [S2].
+*   **Precision:** The pruning and densification schemes in 3DGS maintain standard deviations within an appropriate range for the logistic approximation during training and testing [S2].
 *   **Degenerate Input:** If the covariance matrix is singular (determinant is zero), the inverse and eigenvalue decomposition will fail. Standard 3DGS safeguards (e.g., clamping eigenvalues) should be applied before this step [G].
 
 ## Subtopics
@@ -193,11 +192,11 @@ def render_pixel_analytic(gaussians, pixel_u):
 Computes the exact gradient of the analytically integrated 2D Gaussian splat intensity with respect to the elements of the 2D covariance matrix $\hat{\Sigma}$. It enables differentiable training of Gaussian splat parameters by providing the necessary backpropagation signals for the covariance, which is critical for optimizing the shape and orientation of the Gaussians in 3D Gaussian Splatting.
 
 ## Operating characteristics
-*   **Time Complexity:** The method replaces the exponential function evaluation in the standard 2D Gaussian with a logistic function evaluation and basic arithmetic. The logistic function involves exponentials and polynomials, which are computationally comparable to the Gaussian exponential. The eigenvalue decomposition is performed per Gaussian per pixel (or cached if invariant), adding a constant overhead. It is significantly faster than Super Sampling which requires $N$ samples [S2].
-*   **Memory Complexity:** No additional memory is required beyond the standard 3DGS attributes. The method does not require storing multiple scale levels like Mip-Splatting [S2].
+*   **Time Complexity:** The method replaces the exponential function evaluation in the standard 2D Gaussian with a logistic function evaluation and basic arithmetic. The logistic function involves exponentials and polynomials, which are computationally comparable to the Gaussian exponential. The eigenvalue decomposition is performed per Gaussian per pixel (or cached if invariant), adding a constant overhead. It is significantly faster than Super Sampling which requires $N$ samples [S2]. [G]
+*   **Memory Complexity:** No additional memory is required beyond the standard 3DGS attributes. [G]
 *   **Performance:** Analytic-Splatting removes aliasing artifacts present in standard 3DGS and provides better detail preservation compared to Mip-Splatting, which can cause over-smoothing due to its low-pass filtering nature [S2].
 *   **Strengths:** Anti-aliasing capability that is sensitive to changes in pixel footprint at different resolutions; preserves high-frequency details better than convolution-based methods; closed-form solution avoids Monte Carlo noise [S2].
-*   **Limitations:** The approximation relies on the logistic function fitting the Gaussian CDF, which may have slight errors for very small or very large standard deviations, though experiments show it is effective within typical ranges [S2].
+*   **Limitations:** The approximation relies on the logistic function fitting the Gaussian CDF, which is effective within the standard deviation ranges maintained by 3DGS training and densification schemes [S2].
 
 ## Background
 Analytic-Splatting was introduced by Zhihao Liang, Qi Zhang, Wenbo Hu, Lei Zhu, Ying Feng, and Kui Jia in the paper "Analytic-Splatting: Anti-Aliased 3D Gaussian Splatting via Analytic Integration" (arXiv:2403.11056, 2024) [S2]. It addresses the limitation of 3D Gaussian Splatting (3DGS) which is not alias-free and produces severe blurring or jaggies when rendering at varying resolutions or during zooming [S2]. The method was developed to provide a more accurate intensity response by integrating the Gaussian signal over the pixel window area rather than sampling at the center [S2].

@@ -1,105 +1,177 @@
 # Orbit Camera Path Generation
 
-Also called: Cyclic rotation rendering, Orbit rendering, Rotation Rendering
+Also called: Camera Orbit Animation, Circular Camera Path, Cyclic rotation rendering, Orbit rendering, Orbiting Render, Rotation Rendering
 
 ## Overview
-Orbit Camera Path Generation creates a sequence of camera poses by rotating the viewpoint around a fixed axis to capture an object from multiple angles, primarily for video export or turn-table visualization [S1, unofficial]. It differs from [Spiral Camera Path Generation](1635-spiral-camera-path-generation.md) and [Elliptical Camera Path Generation](7627-elliptical-camera-path-generation.md) by maintaining a constant radius and a single-axis rotation constraint, ensuring a planar circular trajectory rather than a helical or elliptical one.
+Orbit Camera Path Generation creates a sequence of camera poses by rotating the viewpoint around a fixed focal point (or axis) at a constant radius, producing a smooth circular trajectory [S1, S2, unofficial]. It is the simplest form of parametric path generation, distinct from siblings like [Spiral Camera Path Generation](1635-spiral-camera-path-generation.md) (which varies radius/elevation) and [Elliptical Camera Path Generation](7627-elliptical-camera-path-generation.md) (which varies eccentricity). It is primarily used for turn-table visualization, video export, and generating training data for 3D reconstruction [S1, unofficial][S3].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A rendering window/camera context, a list of rotation angles `rotate_angles` (floats in degrees), and an axis selector `rotate_axis` (integer 0, 1, or 2).
-*   **Output:** A 4D NumPy array `rendered_image` of shape `(N, height, width, 3)` containing uint8 RGB frames, where $N$ is the number of angles.
+This method builds on [Parametric Path Generation](11476-parametric-path-generation.md). While the parent defines the general matrix assembly, Orbit Path Generation specifically constrains the position $\mathbf{c}(\theta)$ to a circle and the orientation to track the center.
+
+**Inputs:**
+*   `center`: 3D vector $(c_x, c_y, c_z)$ representing the focal point [S1, S2, unofficial][S3].
+*   `radius`: Scalar distance from `center` to the camera [S1, S2, unofficial].
+*   `num_frames`: Integer $N$, total number of output poses [S1, S2, unofficial].
+*   `start_angle`: Scalar $\theta_{start}$, initial azimuth in radians or degrees [S1, S2, unofficial].
+*   `axis`: 3D vector $\mathbf{a}$ or integer index indicating the rotation axis (e.g., 0=X, 1=Y, 2=Z) [S2, unofficial]. Typically $(0, 1, 0)$ for vertical orbits [S1, unofficial].
+*   `resolution`: Tuple $(W, H)$ for output image dimensions [S1, unofficial].
+
+**Outputs:**
+*   List of $N$ camera poses, where each pose is a $4 \times 4$ transformation matrix $\mathbf{P}_i$ or a tuple $(\mathbf{c}_i, \mathbf{R}_i)$.
 
 **Data Structures:**
-*   `rotate_axis`: Integer. 0 = Elevation, 1 = Roll, 2 = Azimuth [S1, unofficial].
-*   `rotate_angles`: List of floats.
-*   `rendered_image`: `np.zeros((len(rotate_angles), size[1], size[0], 3), np.uint8)` [S1, unofficial].
+*   Pose $\mathbf{P}$: $4 \times 4$ column-major or row-major matrix (implementation dependent).
+    $$
+    \mathbf{P} = \begin{bmatrix}
+    r_{11} & r_{12} & r_{13} & t_x \\
+    r_{21} & r_{22} & r_{23} & t_y \\
+    r_{31} & r_{32} & r_{33} & t_z \\
+    0 & 0 & 0 & 1
+    \end{bmatrix}
+    $$
+    Where $\mathbf{R}$ is the $3 \times 3$ rotation basis and $\mathbf{t}$ is the translation vector (camera position).
 
 **Steps:**
-1.  Initialize a `vtkWindowToImageFilter` instance connected to the rendering window.
-2.  Iterate through each angle $\alpha$ in `rotate_angles` with index $i$:
-    a. Apply rotation to the camera using `self._camera.Azimuth(angle)` (Note: The source code uses `Azimuth` regardless of the `rotate_axis` definition, implying a specific implementation detail or potential bug in the reference [S1, unofficial]).
-    b. Trigger a render update via `image_filter.Modified()` and `self._window.Render()`.
-    c. Extract the image buffer using `image_filter.GetOutput()`.
-    d. Convert the VTK output to a NumPy array `_image_to_numpy(...)`.
-    e. Store the result in `rendered_image[i, :]`.
-    f. **Crucial Step:** Reverse the rotation immediately using `self._camera.Azimuth(-angle)` to reset the camera state for the next iteration [S1, unofficial].
+1.  **Initialize**: Set current angle $\theta = \theta_{start}$. Define step size $\Delta \theta = \frac{2\pi}{N}$ [S1, S2, unofficial].
+2.  **Loop**: For $i$ from $0$ to $N-1$:
+    a.  **Compute Position**: Calculate camera position $\mathbf{c}(\theta)$ on the circle. If rotating around the Y-axis (standard azimuth):
+        $$
+        \mathbf{c}(\theta) = \begin{bmatrix}
+        c_x + r \cos(\theta) \\
+        c_y \\
+        c_z + r \sin(\theta)
+        \end{bmatrix}
+        $$
+        [S1, S2, unofficial]. For a general axis $\mathbf{a}$, use Rodrigues' rotation formula or a rotation matrix $\mathbf{M}_a(\theta)$ applied to the initial offset vector $\mathbf{v}_0 = \mathbf{c}_{start} - \mathbf{center}$:
+        $$
+        \mathbf{c}(\theta) = \mathbf{center} + \mathbf{M}_a(\theta) \mathbf{v}_0
+        $$
+        [S2, unofficial].
+    b.  **Compute Orientation**: The camera looks at `center`. The view direction is $\mathbf{z}_{view} = \text{normalize}(\mathbf{center} - \mathbf{c}(\theta))$ [S1, unofficial][S3].
+    c.  **Construct Basis**: Define the up vector $\mathbf{u}$. If rotating around Y, $\mathbf{u} = (0, 1, 0)$. Otherwise, ensure $\mathbf{u}$ is not parallel to $\mathbf{z}_{view}$ (e.g., use cross product with a world up vector) [S1, unofficial][S3].
+        $$
+        \mathbf{x}_{right} = \text{normalize}(\mathbf{u} \times \mathbf{z}_{view})
+        $$
+        $$
+        \mathbf{y}_{up} = \mathbf{z}_{view} \times \mathbf{x}_{right}
+        $$
+    d.  **Assemble Matrix**: Construct $\mathbf{R}$ from columns $\mathbf{x}_{right}, \mathbf{y}_{up}, \mathbf{z}_{view}$ and set $\mathbf{t} = \mathbf{c}(\theta)$ [S1, S3, S4].
+    e.  **Store**: Append $\mathbf{P}$ to the output list.
+    f.  **Increment**: $\theta \leftarrow \theta + \Delta \theta$ [S1, unofficial].
+
+**Parameters:**
+*   `Azimuth Increment`: $10^\circ$ per frame is typical for smooth video [S1, unofficial].
+*   `Frame Count`: 36 frames is a common default for a full $360^\circ$ orbit [S1, unofficial].
+*   `Resolution`: $[1000, 800]$ is a typical output size [S1, unofficial].
+
+**Edge Cases:**
+*   **Axis Alignment**: If the rotation axis is parallel to the view direction, the up vector cross-product becomes zero. A guard must select an alternative up vector [G].
+*   **Closed Loop**: The loop runs for $N$ frames. The final frame at $\theta_{start} + 2\pi$ is identical to the first and is excluded to avoid redundancy in the sequence [S1, S2, S3, S4].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
-import vtk
 
-def generate_orbit_path(camera, window, rotate_angles, size):
+def generate_orbit_path(center, radius, num_frames, start_angle=0.0, axis=(0, 1, 0)):
     """
-    Generates orbit camera path frames.
-    Note: This implementation follows the specific logic of [S1, unofficial], 
-    which uses Azimuth for rotation and resets the camera after each frame.
+    Generates a list of 4x4 camera transformation matrices for an orbit path.
+    
+    Args:
+        center: (3,) array-like, focal point.
+        radius: float, distance from center.
+        num_frames: int, number of poses.
+        start_angle: float, initial angle in radians.
+        axis: (3,) array-like, rotation axis.
+        
+    Returns:
+        List of (4, 4) numpy arrays representing camera-to-world matrices.
     """
-    # Initialize filter
-    image_filter = vtk.vtkWindowToImageFilter()
-    image_filter.SetInput(window)
-    image_filter.Update()
-
-    # Allocate output array: (num_frames, height, width, channels)
-    # size[0] is width, size[1] is height
-    rendered_image = np.zeros((len(rotate_angles), size[1], size[0], 3), dtype=np.uint8)
-
-    for i, angle in enumerate(rotate_angles):
-        # Rotate camera
-        # Note: Source [S1, unofficial] uses Azimuth for all rotations despite rotate_axis definition
-        camera.Azimuth(angle)
+    center = np.asarray(center)
+    axis = np.asarray(axis)
+    axis = axis / np.linalg.norm(axis)
+    
+    # Initial offset vector from center to start position
+    # Assume start at angle 0 relative to axis. 
+    # We need a vector perpendicular to axis.
+    # Pick an arbitrary vector not parallel to axis
+    arbitrary = np.array([1.0, 0.0, 0.0])
+    if np.abs(np.dot(axis, arbitrary)) > 0.9:
+        arbitrary = np.array([0.0, 1.0, 0.0])
         
-        # Render
-        image_filter.Modified()
-        window.Render()
+    # Orthogonal component
+    v0 = arbitrary - np.dot(arbitrary, axis) * axis
+    v0 = v0 / np.linalg.norm(v0)
+    v0 = v0 * radius
+    
+    # Second orthogonal vector for the plane
+    v1 = np.cross(axis, v0)
+    
+    poses = []
+    delta_theta = 2.0 * np.pi / num_frames
+    
+    for i in range(num_frames):
+        theta = start_angle + i * delta_theta
         
-        # Extract image
-        # Helper function _image_to_numpy is assumed to convert VTK image to numpy array
-        frame = _image_to_numpy(image_filter.GetOutput())
+        # Position on circle
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
+        camera_pos = center + cos_t * v0 + sin_t * v1
         
-        # Store frame
-        rendered_image[i, :] = frame
+        # View direction (camera looks at center)
+        z_view = center - camera_pos
+        z_view = z_view / np.linalg.norm(z_view)
         
-        # Reset camera to original orientation for next step
-        camera.Azimuth(-angle)
-
-    return rendered_image
-
-def _image_to_numpy(vtk_image):
-    """
-    Converts a VTK image data object to a numpy array.
-    Implementation details omitted as per [S1, unofficial] reference.
-    """
-    # [G] Standard VTK to NumPy conversion:
-    # 1. Get scalar data
-    # 2. Reshape to (height, width, channels)
-    # 3. Cast to uint8
-    pass
+        # Up vector
+        # Use the provided axis as the 'up' for the camera if it's vertical,
+        # or recompute to ensure orthogonality. 
+        # Standard approach: y_up is perpendicular to z_view and x_right.
+        # Let's define x_right first using a world-up approximation or the axis.
+        # If axis is Y, world_up is Y.
+        world_up = axis
+        
+        x_right = np.cross(world_up, z_view)
+        if np.linalg.norm(x_right) < 1e-6:
+            # Camera is looking directly up/down the axis, pick arbitrary right
+            x_right = np.cross(np.array([1.0, 0.0, 0.0]), z_view)
+            if np.linalg.norm(x_right) < 1e-6:
+                x_right = np.cross(np.array([0.0, 1.0, 0.0]), z_view)
+        x_right = x_right / np.linalg.norm(x_right)
+        
+        y_up = np.cross(z_view, x_right)
+        
+        # Construct Rotation Matrix R (columns are basis vectors)
+        R = np.column_stack((x_right, y_up, z_view))
+        
+        # Construct Transformation Matrix P
+        P = np.eye(4)
+        P[:3, :3] = R
+        P[:3, 3] = camera_pos
+        
+        poses.append(P)
+        
+    return poses
 ```
-
-**Edge Cases and Pitfalls:**
-*   **Camera State Reset:** The source explicitly resets the camera rotation after each frame (`Azimuth(-angle)`) [S1, unofficial]. Failure to do so will cause cumulative rotation, breaking the orbit path.
-*   **Axis Mismatch:** The source defines `rotate_axis` (0=Elevation, 1=Roll, 2=Azimuth) but the code snippet only calls `Azimuth` [S1, unofficial]. Implementers must map `rotate_axis` to the correct VTK method (`Elevation`, `Roll`, or `Azimuth`) if generalizing [S1, unofficial].
-*   **Duplicate Points:** As per [Parametric Path Generation](11476-parametric-path-generation.md) principles, the final angle should not duplicate the start angle to avoid redundant frames in a closed loop.
 
 ## Subtopics
 
 ### IM-3D
-A method that fine-tunes an image-to-video model based on Emu to generate turn-table-like videos rotating around an object, which are then used as input for 3D Gaussian Splatting (3DGS) reconstruction [S2]. It differs from standard orbit rendering by generating synthetic multi-view images via diffusion models rather than rendering a pre-existing 3D scene [S2].
+A method that finetunes an image-to-video model based on Emu to generate a turn-table like video rotating around an object, which are then taken as input for 3D Gaussian Splatting (3DGS) reconstruction [S3]. Unlike standard geometric path generation, this variant generates the visual content of the orbit frames using a learned model rather than a static scene, enabling 3D reconstruction from a single image [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of frames and $R$ is the cost of a single render pass.
-*   **Memory Complexity:** $O(N \cdot H \cdot W \cdot C)$ for storing the output video frames [S1, unofficial].
-*   **Strengths:** Simple to implement; produces consistent, planar rotation ideal for object inspection [S1, unofficial].
-*   **Limitations:** Limited to single-axis rotation; cannot capture complex viewpoints like spirals or ellipses [S1, unofficial].
-*   **Hardware:** Dependent on the rendering backend (VTK in source [S1, unofficial]).
+*   **Time Complexity**: $O(N)$, where $N$ is the number of frames. Each frame requires constant-time vector math.
+*   **Memory Complexity**: $O(N)$ to store the sequence of poses.
+*   **Performance**: Rendering time depends on the downstream renderer (e.g., VTK, OpenGL). The path generation itself is negligible.
+*   **Strengths**: Simple to implement; produces smooth, continuous rotation; ideal for objects with rotational symmetry or when viewing from all sides is required.
+*   **Limitations**: Cannot capture depth variations in elevation (unlike spiral); radius is fixed, so occlusion handling is static.
+*   **When to use**: Turn-table visualization, generating training data for 3D models, simple object inspection.
+*   **When not to use**: When elevation changes are needed (use Spiral), or when the camera path must follow complex scene geometry (use spline-based paths).
 
 ## Background
-Originating from VTK-based volume rendering implementations, this method is used for generating turn-table videos for visualization and 3D reconstruction pipelines [S1, unofficial]. It has been adapted in modern 3D generation workflows, such as IM-3D, to synthesize training data for Gaussian Splatting [S2].
+The technique is widely used in scientific visualization and computer graphics for creating animation sequences. It is implemented in tools like ParaView via `paraview.simple` [S1, unofficial] and VTK-based renderers [S2, unofficial]. In the context of modern 3D generation, it serves as a data augmentation or generation step for 3D Gaussian Splatting pipelines, such as in the IM-3D method [S3].
 
 ## Sources
-[S1] Volume Renderer with VTK - yuta-hi, https://github.com/yuta-hi/volume-renderer, fetched 2026-10-29 (unofficial)
-[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26
+[S1] cjcamp16/sciviz-paraview, https://github.com/cjcamp16/sciviz-paraview, fetched 2026-10-26 (unofficial)
+[S2] Volume Renderer with VTK - yuta-hi, https://github.com/yuta-hi/volume-renderer, fetched 2026-10-29 (unofficial)
+[S3] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

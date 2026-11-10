@@ -1,0 +1,420 @@
+# Scientific Visualization with ParaView
+
+A self-directed project: generate a 3D scientific dataset with NumPy, then
+build and script the whole visualization pipeline in **ParaView** via its
+Python API (`paraview.simple`).
+
+## Gallery
+
+| Volume rendering (concentration field) | Streamlines (ABC-flow velocity) |
+|---|---|
+| ![Volume rendering of the concentration field](outputs/01_volume.png) | ![ABC-flow streamline tubes colored by speed](outputs/04_streamlines.png) |
+
+![Orbiting render of the field](outputs/orbit.gif)
+
+## What it shows
+
+The dataset lives on a 64x64x64 regular grid and carries two fields:
+
+| Field | Type | Physics analog | Visualized with |
+|---|---|---|---|
+| `concentration` | scalar | sum of 3D Gaussian sources (diffusion/transport) | volume rendering, isosurfaces, slicing |
+| `velocity` | vector | ABC flow (Arnold-Beltrami-Childress analytic flow) | streamlines (Stream Tracer) + tubes |
+
+## ParaView / VTK techniques
+- **Volume rendering** of a scalar field with a transfer function (Viridis preset)
+- **Isosurfaces** via the Contour filter at multiple levels
+- **Slicing** with an axis-aligned cut plane
+- **Streamlines** via Stream Tracer over a vector field, rendered as Tubes and colored by speed
+- **Colormaps / transfer functions** and clean figure export
+- **Full pipeline automation** in Python (`paraview.simple`), reproducible and headless-capable
+- **Animation**: a 36-frame camera orbit exported to PNG (stitch with ffmpeg)
+
+## Tech
+NumPy · VTK (legacy STRUCTURED_POINTS format) · ParaView · `paraview.simple` (pvpython/pvbatch)
+
+## Two rendering layers
+1. **Preview layer** (`preview_matplotlib.py`): pure NumPy + matplotlib, no
+   ParaView needed. Produces slices, projections, an isosurface, a 2D
+   streamplot, and a 3D quiver. Use it to sanity-check the data and for quick
+   figures.
+2. **Production layer** (`visualize.py`): the real ParaView pipeline
+   (volume rendering, Contour, Slice, Stream Tracer, orbit animation) via
+   `paraview.simple`.
+
+## Run it
+
+```bash
+# 1) Generate the dataset (system Python + NumPy)
+python generate_field.py            # -> field.vtk
+
+# 2) Quick previews WITHOUT ParaView (numpy + matplotlib + scikit-image):
+pip install -r requirements.txt
+python preview_matplotlib.py        # -> outputs/preview/*.png
+
+# 3a) Explore interactively: open field.vtk in the ParaView GUI, then
+#     apply Volume / Contour / Slice / Stream Tracer by hand.
+
+# 3b) Or reproduce all production figures headlessly with ParaView's Python:
+pvpython visualize.py               # -> outputs/*.png, outputs/anim/*.png
+#   (use `pvbatch visualize.py` for fully offscreen rendering)
+
+# 4) Optional: stitch the orbit animation.
+#    (a) animated GIF, no extra tools (Pillow only):
+python -c "from PIL import Image; import glob; fr=[Image.open(f).convert('RGB') for f in sorted(glob.glob('outputs/anim/frame_*.png'))]; fr[0].save('outputs/orbit.gif', save_all=True, append_images=fr[1:], duration=80, loop=0, optimize=True)"
+#    (b) or MP4 if you have ffmpeg:
+ffmpeg -framerate 12 -i outputs/anim/frame_%03d.png -pix_fmt yuv420p outputs/orbit.mp4
+```
+
+`pvpython`/`pvbatch` ship inside ParaView (e.g.
+`C:\Program Files\ParaView 5.x\bin\pvpython.exe` on Windows). Add that `bin`
+folder to PATH or call the full path.
+
+## Notes
+- `field.vtk` is large (~8 MB ASCII); it's reproducible from `generate_field.py`,
+  so it's left out of version control.
+- Scripted against ParaView 5.11+. On other versions, the only likely tweaks
+  are the colormap preset name and the Stream Tracer seed type; both have
+  fallbacks noted in `visualize.py`.
+
+## Files
+```
+generate_field.py   NumPy -> VTK dataset generator (scalar + vector fields)
+visualize.py        paraview.simple pipeline: volume, contour, slice, streamlines, animation
+outputs/            generated figures + animation frames (after running)
+field.vtk           generated dataset (after running generate_field.py)
+```
+
+### generate_field.py
+```
+#!/usr/bin/env python
+"""
+generate_field.py — build a synthetic 3D scientific dataset with NumPy and
+export it to a ParaView-readable legacy VTK file (STRUCTURED_POINTS).
+
+The dataset combines two physically-motivated fields on a regular grid:
+
+  • concentration  (scalar) : superposition of 3D Gaussian "sources", as in a
+                              diffusion / transport problem. Good for volume
+                              rendering and isosurfaces.
+  • velocity       (vector) : an Arnold–Beltrami–Childress (ABC) flow, a
+                              classic analytic 3D velocity field. Good for
+                              streamlines.
+
+Only NumPy is required. Output: field.vtk
+"""
+import numpy as np
+
+# ---- grid ----------------------------------------------------------------
+N = 64                      # points per axis (64^3 = 262,144 points)
+L = 2.0 * np.pi             # domain length per axis
+x = np.linspace(0.0, L, N)
+X, Y, Z = np.meshgrid(x, x, x, indexing="ij")   # X[i,j,k] = x[i], etc.
+
+# ---- scalar field: sum of Gaussian concentration sources -----------------
+def gaussian(cx, cy, cz, amp, sigma):
+    r2 = (X - cx) ** 2 + (Y - cy) ** 2 + (Z - cz) ** 2
+    return amp * np.exp(-r2 / (2.0 * sigma ** 2))
+
+concentration = (
+    gaussian(2.0, 2.0, 3.0, amp=1.00, sigma=0.90)
+    + gaussian(4.5, 3.5, 3.0, amp=0.80, sigma=1.10)
+    + gaussian(3.0, 5.0, 4.0, amp=0.60, sigma=0.70)
+).astype(np.float32)
+
+# ---- vector field: ABC flow (Arnold–Beltrami–Childress) ------------------
+A = B = C = 1.0
+U = (A * np.sin(Z) + C * np.cos(Y)).astype(np.float32)
+V = (B * np.sin(X) + A * np.cos(Z)).astype(np.float32)
+W = (C * np.sin(Y) + B * np.cos(X)).astype(np.float32)
+
+# ---- write legacy VTK STRUCTURED_POINTS (ASCII) --------------------------
+# VTK iterates x fastest, then y, then z -> ravel with Fortran order.
+spacing = L / (N - 1)
+n_pts = N ** 3
+out = "field.vtk"
+
+with open(out, "w") as f:
+    f.write("# vtk DataFile Version 3.0\n")
+    f.write("Synthetic concentration (scalar) + ABC-flow velocity (vector)\n")
+    f.write("ASCII\n")
+    f.write("DATASET STRUCTURED_POINTS\n")
+    f.write(f"DIMENSIONS {N} {N} {N}\n")
+    f.write("ORIGIN 0 0 0\n")
+    f.write(f"SPACING {spacing:.6f} {spacing:.6f} {spacing:.6f}\n")
+    f.write(f"POINT_DATA {n_pts}\n")
+
+    # scalar
+    f.write("SCALARS concentration float 1\n")
+    f.write("LOOKUP_TABLE default\n")
+    np.savetxt(f, concentration.ravel(order="F"), fmt="%.5f")
+
+    # vector
+    f.write("VECTORS velocity float\n")
+    vec = np.column_stack([U.ravel("F"), V.ravel("F"), W.ravel("F")])
+    np.savetxt(f, vec, fmt="%.5f")
+
+print(f"Wrote {out}: {N}x{N}x{N} grid, {n_pts:,} points "
+      f"(concentration scalar + velocity vector).")
+```
+
+### preview_matplotlib.py
+```
+#!/usr/bin/env python
+"""
+preview_matplotlib.py — render the synthetic field with matplotlib so the data
+can be inspected (and portfolio figures produced) without ParaView installed.
+
+This is the "sanity-check / preview" layer; visualize.py is the production
+ParaView pipeline. Both operate on the same field defined in generate_field.py.
+
+Outputs -> outputs/preview/
+    slices.png        orthogonal mid-plane slices of the concentration field
+    projections.png   max-intensity projections along X, Y, Z
+    isosurface.png    marching-cubes isosurface of concentration (3D)
+    streamplot.png    2D streamlines of velocity on a mid-Z slice
+    quiver3d.png      subsampled 3D vector field (velocity)
+
+Deps: numpy, matplotlib, scikit-image (marching cubes).
+"""
+import os
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")               # headless / file output
+import matplotlib.pyplot as plt
+from skimage import measure
+
+OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs", "preview")
+os.makedirs(OUT, exist_ok=True)
+
+# ---- rebuild the same field as generate_field.py ------------------------
+N = 64
+L = 2.0 * np.pi
+x = np.linspace(0.0, L, N)
+X, Y, Z = np.meshgrid(x, x, x, indexing="ij")
+
+
+def gaussian(cx, cy, cz, amp, sigma):
+    r2 = (X - cx) ** 2 + (Y - cy) ** 2 + (Z - cz) ** 2
+    return amp * np.exp(-r2 / (2.0 * sigma ** 2))
+
+
+C = (gaussian(2.0, 2.0, 3.0, 1.00, 0.90)
+     + gaussian(4.5, 3.5, 3.0, 0.80, 1.10)
+     + gaussian(3.0, 5.0, 4.0, 0.60, 0.70))
+
+A = B = Cc = 1.0
+U = A * np.sin(Z) + Cc * np.cos(Y)
+V = B * np.sin(X) + A * np.cos(Z)
+W = Cc * np.sin(Y) + B * np.cos(X)
+mid = N // 2
+CMAP = "viridis"
+
+# ---- 1) orthogonal slices ----------------------------------------------
+fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+for a, (data, title) in zip(ax, [
+    (C[mid, :, :], "Slice  X = pi  (Y–Z plane)"),
+    (C[:, mid, :], "Slice  Y = pi  (X–Z plane)"),
+    (C[:, :, mid], "Slice  Z = pi  (X–Y plane)")]):
+    im = a.imshow(data.T, origin="lower", cmap=CMAP, extent=[0, L, 0, L])
+    a.set_title(title); a.set_xlabel("axis 1"); a.set_ylabel("axis 2")
+    fig.colorbar(im, ax=a, fraction=0.046, pad=0.04, label="concentration")
+fig.suptitle("Concentration field — orthogonal mid-plane slices", fontsize=14)
+fig.tight_layout()
+fig.savefig(os.path.join(OUT, "slices.png"), dpi=130)
+plt.close(fig)
+
+# ---- 2) max-intensity projections --------------------------------------
+fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+for a, (axis, title) in zip(ax, [(0, "along X"), (1, "along Y"), (2, "along Z")]):
+    im = a.imshow(C.max(axis=axis).T, origin="lower", cmap="inferno",
+                  extent=[0, L, 0, L])
+    a.set_title(f"Max-intensity projection {title}")
+    fig.colorbar(im, ax=a, fraction=0.046, pad=0.04, label="max concentration")
+fig.suptitle("Concentration field — max-intensity projections", fontsize=14)
+fig.tight_layout()
+fig.savefig(os.path.join(OUT, "projections.png"), dpi=130)
+plt.close(fig)
+
+# ---- 3) isosurface (marching cubes) ------------------------------------
+level = 0.45
+verts, faces, normals, _ = measure.marching_cubes(C, level=level, spacing=(L / (N - 1),) * 3)
+fig = plt.figure(figsize=(9, 8))
+ax = fig.add_subplot(111, projection="3d")
+ax.plot_trisurf(verts[:, 0], verts[:, 1], faces, verts[:, 2],
+                cmap="viridis", lw=0.1, alpha=0.9)
+ax.set_title(f"Concentration isosurface  (level = {level})")
+ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")
+ax.view_init(elev=22, azim=-60)
+fig.tight_layout()
+fig.savefig(os.path.join(OUT, "isosurface.png"), dpi=130)
+plt.close(fig)
+
+# ---- 4) 2D streamplot of velocity on a mid-Z slice ---------------------
+fig, ax = plt.subplots(figsize=(8, 7))
+xs = ys = np.linspace(0, L, N)
+speed = np.sqrt(U[:, :, mid] ** 2 + V[:, :, mid] ** 2)
+strm = ax.streamplot(xs, ys, U[:, :, mid].T, V[:, :, mid].T,
+                     color=speed.T, cmap="cool", density=1.6, linewidth=1.0)
+fig.colorbar(strm.lines, ax=ax, label="in-plane speed")
+ax.set_title("Velocity field (ABC flow) — streamlines on Z = pi slice")
+ax.set_xlabel("X"); ax.set_ylabel("Y")
+fig.tight_layout()
+fig.savefig(os.path.join(OUT, "streamplot.png"), dpi=130)
+plt.close(fig)
+
+# ---- 5) 3D quiver (subsampled) -----------------------------------------
+s = 6  # subsample stride
+fig = plt.figure(figsize=(9, 8))
+ax = fig.add_subplot(111, projection="3d")
+ax.quiver(X[::s, ::s, ::s], Y[::s, ::s, ::s], Z[::s, ::s, ::s],
+          U[::s, ::s, ::s], V[::s, ::s, ::s], W[::s, ::s, ::s],
+          length=0.35, normalize=True, color="#2b6cb0", linewidth=0.6)
+ax.set_title("Velocity field (ABC flow) — 3D quiver")
+ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")
+ax.view_init(elev=20, azim=-55)
+fig.tight_layout()
+fig.savefig(os.path.join(OUT, "quiver3d.png"), dpi=130)
+plt.close(fig)
+
+print("Wrote 5 preview figures to:", OUT)
+for f in ["slices.png", "projections.png", "isosurface.png", "streamplot.png", "quiver3d.png"]:
+    print("  -", f)
+```
+
+### visualize.py
+```
+#!/usr/bin/env pvpython
+"""
+visualize.py — scripted ParaView visualization of field.vtk.
+
+Run with ParaView's bundled Python (NOT system python):
+    pvpython visualize.py      # interactive-capable
+    pvbatch  visualize.py      # headless / offscreen
+
+Produces, in ./outputs/ :
+    01_volume.png        volume rendering of the concentration scalar
+    02_isosurfaces.png   Contour isosurfaces at several levels
+    03_slice.png         an axis-aligned slice colored by concentration
+    04_streamlines.png   Stream Tracer of the ABC-flow velocity, as tubes
+    anim/frame_###.png   a 36-frame orbiting animation
+
+Tested against ParaView 5.11+. If your version differs, the only likely
+tweaks are the colormap preset name and the Stream Tracer seed type
+(fallbacks are included).
+"""
+from paraview.simple import *
+import os
+import math
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(HERE, "outputs")
+os.makedirs(os.path.join(OUT, "anim"), exist_ok=True)
+PI = math.pi
+RES = [1600, 1200]
+
+paraview.simple._DisableFirstRenderCameraReset()
+
+# ---- load ---------------------------------------------------------------
+field = LegacyVTKReader(FileNames=[os.path.join(HERE, "field.vtk")])
+
+view = GetActiveViewOrCreate("RenderView")
+view.ViewSize = RES
+# force a flat white background (ParaView 6 defaults to a gray gradient palette)
+for attr, val in [("UseColorPaletteForBackground", 0),
+                  ("BackgroundColorMode", "Single Color")]:
+    try:
+        setattr(view, attr, val)
+    except Exception:
+        pass
+view.Background = [1, 1, 1]          # white background for clean figures
+view.OrientationAxesVisibility = 1
+
+
+def solo(src):
+    """Hide every source, then show `src`; return its display proxy."""
+    for s in GetSources().values():
+        try:
+            Hide(s, view)
+        except Exception:
+            pass
+    return Show(src, view)
+
+
+def apply_preset(array_name, preset="Viridis (matplotlib)"):
+    ctf = GetColorTransferFunction(array_name)
+    try:
+        ctf.ApplyPreset(preset, True)
+    except Exception:
+        pass
+    return ctf
+
+
+# ---- 1) volume rendering of concentration -------------------------------
+d = solo(field)
+ColorBy(d, ("POINTS", "concentration"))
+d.SetRepresentationType("Volume")
+apply_preset("concentration")
+ResetCamera(view)
+view.CameraPosition = [3 * PI, -2 * PI, 3 * PI]
+view.CameraFocalPoint = [PI, PI, PI]
+view.CameraViewUp = [0, 0, 1]
+Render()
+SaveScreenshot(os.path.join(OUT, "01_volume.png"), view, ImageResolution=RES)
+
+# ---- 2) isosurfaces (Contour) -------------------------------------------
+contour = Contour(Input=field)
+contour.ContourBy = ["POINTS", "concentration"]
+contour.Isosurfaces = [0.35, 0.70, 1.00]
+d = solo(contour)
+ColorBy(d, ("POINTS", "concentration"))
+apply_preset("concentration")
+d.Opacity = 0.65
+Render()
+SaveScreenshot(os.path.join(OUT, "02_isosurfaces.png"), view, ImageResolution=RES)
+
+# ---- 3) slice -----------------------------------------------------------
+sl = Slice(Input=field)
+sl.SliceType = "Plane"
+sl.SliceType.Origin = [PI, PI, PI]
+sl.SliceType.Normal = [0, 0, 1]
+d = solo(sl)
+ColorBy(d, ("POINTS", "concentration"))
+apply_preset("concentration")
+Render()
+SaveScreenshot(os.path.join(OUT, "03_slice.png"), view, ImageResolution=RES)
+
+# ---- 4) streamlines of the velocity field -------------------------------
+stream = StreamTracer(Input=field, Vectors=["POINTS", "velocity"])
+stream.MaximumStreamlineLength = 6 * PI
+try:                                   # ParaView 5.10+
+    stream.SeedType = "Point Cloud"
+    stream.SeedType.Center = [PI, PI, PI]
+    stream.SeedType.Radius = 2.2
+    stream.SeedType.NumberOfPoints = 300
+except Exception:                      # older fallback
+    stream.SeedType = "High Resolution Line Source"
+    stream.SeedType.Point1 = [0.5, 0.5, 0.5]
+    stream.SeedType.Point2 = [2 * PI - 0.5, 2 * PI - 0.5, 2 * PI - 0.5]
+    stream.SeedType.Resolution = 200
+tube = Tube(Input=stream)
+tube.Radius = 0.03
+d = solo(tube)
+ColorBy(d, ("POINTS", "velocity"))     # color by speed (vector magnitude)
+apply_preset("velocity", "Cool to Warm")
+Render()
+SaveScreenshot(os.path.join(OUT, "04_streamlines.png"), view, ImageResolution=RES)
+
+# ---- 5) orbiting animation (PNG frames) ---------------------------------
+cam = GetActiveCamera()
+for i in range(36):
+    cam.Azimuth(10)
+    Render()
+    SaveScreenshot(os.path.join(OUT, "anim", "frame_%03d.png" % i), view,
+                   ImageResolution=[1000, 800])
+
+print("Done. Figures + animation frames written to:", OUT)
+print("Stitch the animation with ffmpeg:")
+print("  ffmpeg -framerate 12 -i outputs/anim/frame_%03d.png "
+      "-pix_fmt yuv420p outputs/orbit.mp4")
+```

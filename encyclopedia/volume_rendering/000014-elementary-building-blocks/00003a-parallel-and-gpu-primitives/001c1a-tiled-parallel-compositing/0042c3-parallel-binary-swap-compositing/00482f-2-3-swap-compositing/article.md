@@ -1,0 +1,174 @@
+# 2-3 Swap Compositing
+
+Also called: 2-3 Swap
+
+## Overview
+2-3 Swap Compositing is a parallel compositing technique designed to combine independently rendered image tiles from multiple processors in a distributed-memory environment. It solves the limitation of its parent method, Parallel Binary-Swap Compositing, which requires the number of processors $N$ to be a power of two. By allowing any number of processors, it eliminates the need for padding or masking unused processors, thereby improving scalability and resource utilization for arbitrary hardware configurations [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** $N$ processors, each holding a partial image tile (or volume data region) to be composited.
+- **Output:** A single fully composited image distributed across the processors (or gathered to a root, depending on the specific implementation, but typically the result is distributed or gathered after the final round).
+
+**Data Structures:**
+- Each processor maintains a local buffer for the current image tile.
+- Communication buffers are used for sending and receiving data from peer processors.
+
+**Algorithm Steps:**
+The algorithm proceeds in multiple rounds. In each round, processors are grouped to exchange data.
+
+1.  **Initialization:** Each processor $p$ holds its initial image tile $I_p$.
+2.  **Round Loop:** The algorithm iterates through a sequence of rounds. The grouping strategy in each round is determined by the factorization of $N$.
+    -   For 2-3 Swap, the number of processors $N$ is decomposed into a product of 2s and 3s. Let the decomposition be $N = 2^a \cdot 3^b$.
+    -   The total number of rounds is $R = a + b$.
+    -   In each round $r$ (where $0 \le r < R$), processors are divided into groups.
+        -   If the current round corresponds to a factor of 2, processors are grouped in pairs (groups of size 2).
+        -   If the current round corresponds to a factor of 3, processors are grouped in triplets (groups of size 3).
+    -   The specific assignment of which rounds use size 2 and which use size 3 can vary, but the total count of size-2 groups and size-3 groups must match the exponents $a$ and $b$.
+3.  **Communication:** Within each group:
+    -   Processors exchange their current image tiles using a direct send approach.
+    -   For a group of size 2 (processors $A$ and $B$): $A$ sends its tile to $B$, and $B$ sends its tile to $A$. They then perform the compositing operation (e.g., front-to-back alpha compositing) on the received data combined with their local data.
+    -   For a group of size 3 (processors $A$, $B$, and $C$): Each processor sends its tile to the other two. Each processor receives two tiles and composites them with its local tile.
+    -   *Note:* The exact compositing order (e.g., front-to-back) must be consistent across all processors to ensure correct depth ordering.
+4.  **Result:** After all rounds are complete, each processor holds the fully composited image (or a portion thereof, depending on whether the result is distributed or gathered).
+
+**Parameters:**
+-   $N$: Number of processors. Must be a positive integer.
+-   $a$: Exponent of 2 in the prime factorization of $N$.
+-   $b$: Exponent of 3 in the prime factorization of $N$.
+
+**Edge Cases and Pitfalls:**
+-   **Prime Factors:** If $N$ has prime factors other than 2 or 3 (e.g., $N=5, 7, 10$), the basic 2-3 Swap algorithm as described by Yu et al. cannot be directly applied without modification or fallback to another method (like Radix-k or direct send) [S1]. The sources do not specify how to handle general $N$ with other prime factors within the strict 2-3 Swap definition.
+-   **Synchronization:** Although it reduces network congestion compared to binary swap, synchronization overhead still exists after each round [S1].
+-   **Compositing Order:** Incorrect handling of depth ordering during the exchange can lead to visual artifacts.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def two_three_swap_compositing(processor_id, N, local_image_tile):
+    """
+    Performs 2-3 Swap compositing for a given processor.
+    
+    Args:
+        processor_id: Unique ID of the current processor (0 to N-1).
+        N: Total number of processors.
+        local_image_tile: The initial image tile held by this processor.
+        
+    Returns:
+        The fully composited image tile (or the full image if gathered).
+    """
+    # Factorize N into 2s and 3s
+    # Note: This implementation assumes N is of the form 2^a * 3^b.
+    # If N has other prime factors, this method is not applicable as per [S1].
+    
+    temp_image = local_image_tile
+    
+    # Determine the sequence of group sizes.
+    # A simple strategy: perform all 3s first, then all 2s.
+    # The order of rounds (2s vs 3s) does not affect correctness 
+    # as long as the grouping is consistent and all processors follow the same schedule.
+    
+    # Count factors
+    num_3s = 0
+    temp_N = N
+    while temp_N % 3 == 0:
+        num_3s += 1
+        temp_N //= 3
+        
+    num_2s = 0
+    while temp_N % 2 == 0:
+        num_2s += 1
+        temp_N //= 2
+        
+    # Verify N is valid for 2-3 Swap
+    if temp_N != 1:
+        raise ValueError("N must be of the form 2^a * 3^b for 2-3 Swap")
+
+    # Process rounds for groups of 3
+    for _ in range(num_3s):
+        # Group size is 3
+        # Determine group index and position within group
+        group_size = 3
+        group_id = processor_id // group_size
+        position_in_group = processor_id % group_size
+        
+        # Identify peers in the same group
+        peers = []
+        for p in range(group_size):
+            peer_id = group_id * group_size + p
+            if peer_id != processor_id:
+                peers.append(peer_id)
+        
+        # Send and receive
+        # In a real MPI environment, this would be MPI_Sendrecv or similar
+        received_tiles = {}
+        for peer in peers:
+            # Send current temp_image to peer
+            send_data = temp_image
+            # Receive from peer
+            received_tiles[peer] = receive_from(peer)
+            
+        # Composite received tiles with local temp_image
+        # Assuming front-to-back compositing
+        for peer, tile in received_tiles.items():
+            temp_image = composite(temp_image, tile)
+            
+    # Process rounds for groups of 2
+    for _ in range(num_2s):
+        # Group size is 2
+        group_size = 2
+        group_id = processor_id // group_size
+        position_in_group = processor_id % group_size
+        
+        # Identify peer in the same group
+        peer_id = group_id * group_size + (1 - position_in_group)
+        
+        # Send and receive
+        send_data = temp_image
+        received_tile = receive_from(peer_id)
+        
+        # Composite
+        temp_image = composite(temp_image, received_tile)
+        
+    return temp_image
+
+def composite(image1, image2):
+    """
+    Performs front-to-back alpha compositing of two image tiles.
+    This is a placeholder for the actual compositing logic.
+    """
+    # Implementation depends on the specific compositing model (e.g., standard alpha compositing)
+    # [G] Standard front-to-back compositing:
+    # C_out = C_in * (1 - alpha_out) + C_out * alpha_out
+    # alpha_out = alpha_in + alpha_out * (1 - alpha_in)
+    # This function must handle the specific data structure of the image tiles.
+    pass
+
+def receive_from(peer_id):
+    """
+    Receives data from a specific peer.
+    [G] In a real implementation, this would use MPI_Recv or similar.
+    """
+    pass
+```
+
+## Subtopics
+
+### Radix-k Compositing
+Radix-k Compositing is a generalization proposed by Peterka et al. that combines the flexibility of direct send with the performance characteristics of binary swap [S1]. It divides communication into multiple rounds, defining a group size $k_i$ for each round $i$. The product of all group sizes must equal the number of processors $N$ ($\prod k_i = N$). Processors within each group exchange data using a direct send method, with each processor owning a region of the current image [S1]. This allows for arbitrary factorizations of $N$, not just 2s and 3s.
+
+## Operating characteristics
+-   **Time Complexity:** The number of rounds is determined by the sum of the exponents in the prime factorization of $N$. For 2-3 Swap, this is $a + b$ where $N = 2^a 3^b$. This is generally fewer rounds than binary swap for non-power-of-two $N$ (which would require padding to the next power of two).
+-   **Memory Complexity:** Each processor stores its local image tile and buffers for communication. No significant additional memory overhead compared to binary swap.
+-   **Scalability:** Scales well for $N$ that are products of 2s and 3s. Performance degrades or becomes inapplicable for $N$ with other prime factors unless combined with other strategies.
+-   **Strengths:** Eliminates the power-of-two constraint, reducing wasted resources. Reduces network congestion compared to direct send for large $N$.
+-   **Limitations:** Limited to $N$ with prime factors 2 and 3. Synchronization overhead per round remains.
+-   **When to use:** When $N$ is a product of 2s and 3s and the system supports distributed-memory parallel compositing.
+-   **When not to use:** When $N$ has prime factors other than 2 or 3, or when the overhead of multiple rounds is prohibitive for small $N$.
+
+## Background
+2-3 Swap Compositing was implemented by Yu et al. to overcome the limitation of Parallel Binary-Swap Compositing that the number of processors had to be a power of two [S1]. It is part of the broader field of distributed-memory parallel volume rendering, where load balancing and communication efficiency are critical [S1].
+
+## Sources
+[S1] A Scalable Hybrid Scheme for Ray-Casting of Unstructured Volume Data, https://doi.org/10.1109/tvcg.2018.2833113, fetched 2026-10-24

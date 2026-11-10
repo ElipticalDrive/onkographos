@@ -1,0 +1,139 @@
+# Scene Scaling and Contraction
+
+Also called: Contracted space parameterization, Scene Contraction
+
+## Overview
+This method adapts unbounded 360-degree scene data into a bounded unit sphere volume, enabling efficient voxel grid allocation and neural field training [Parent](957-unbounded-inward-facing-scene-parameterization.md). It combines a global scaling step to fit the region of interest into a unit cube with a non-linear contraction function that maps points outside a specific radius into a bounded space [S1]. This parameterization is critical for preventing training failure in unbounded scenes, as models without it "hardly learned anything" [S1].
+
+## How it works
+The method consists of two sequential transformations applied to input 3D coordinates $\mathbf{x}$.
+
+**Inputs and Outputs:**
+*   Input: 3D point $\mathbf{x} \in \mathbb{R}^3$.
+*   Output: Transformed 3D point $\mathbf{x}' \in \mathbb{R}^3$.
+
+**Data Structures:**
+No persistent data structures are required. The transformation is stateless and computed per-point.
+
+**Parameters:**
+*   $r$: Inner radius parameter. Default value: $10$ [S1].
+*   $b$: Boundary scaling parameter. Default value: $1$ [S1].
+
+**Steps:**
+1.  **Scaling:** Scale the scene frames such that the region of interest falls within a unit cube. This is a global linear scaling factor applied to the raw scene coordinates before contraction [S1].
+2.  **Contraction:** Apply the non-linear contraction function to the scaled coordinates.
+
+**Formula:**
+The contraction function $\text{contract}(\mathbf{x})$ is defined piecewise based on the L2 norm $\|\mathbf{x}\|$ relative to radius $r$ [S1]:
+
+$$
+\text{contract}(\mathbf{x}) = 
+\begin{cases} 
+\frac{\mathbf{x}}{r}, & \text{if } \|\mathbf{x}\| \le r \\
+\frac{\mathbf{x}}{b \left( 1 + \frac{b - \|\mathbf{x}\|}{\|\mathbf{x}\|} \right)}, & \text{otherwise}
+\end{cases}
+$$
+
+Where:
+*   $\|\mathbf{x}\|$ is the Euclidean norm of $\mathbf{x}$.
+*   $r$ is the radius parameter ($10$) [S1].
+*   $b$ is the boundary parameter ($1$) [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def scale_and_contract(points, r=10.0, b=1.0):
+    """
+    Applies global scaling (assumed pre-computed or identity if points are already normalized)
+    and the non-linear contraction function.
+    
+    Args:
+        points: numpy array of shape (N, 3) containing 3D coordinates.
+        r: Inner radius parameter.
+        b: Boundary scaling parameter.
+        
+    Returns:
+        Transformed points of shape (N, 3).
+    """
+    # Step 1: Scaling
+    # The source [S1] states: "scale the scene frames with a factor such that 
+    # the region of interest falls within a unit cube."
+    # This step is typically a global linear transform applied to the dataset 
+    # before per-point contraction. For the purpose of the contraction function 
+    # itself, we assume input points are already scaled or the scaling factor 
+    # is 1.0 if the points are already within the unit cube.
+    # [G] If the raw points are not scaled, a global scale factor s must be 
+    # determined such that max(|x|, |y|, |z|) <= 1.0 for all points.
+    # scaled_points = points * scale_factor 
+    # For this implementation, we operate on the input points directly, 
+    # assuming the "Scale" step is a preprocessing normalization.
+    
+    # Step 2: Contraction
+    norms = np.linalg.norm(points, axis=1, keepdims=True)
+    
+    # Avoid division by zero for points at origin
+    # [G] Standard practice: add epsilon or handle origin separately.
+    # The formula divides by norm in the denominator of the second case.
+    # If norm is 0, the first case applies (x/r), so division by zero is avoided 
+    # in the second branch.
+    
+    # Case 1: ||x|| <= r
+    mask_inner = norms <= r
+    
+    # Case 2: ||x|| > r
+    mask_outer = ~mask_inner
+    
+    result = np.zeros_like(points)
+    
+    # Inner region: linear scaling by 1/r
+    result[mask_inner] = points[mask_inner] / r
+    
+    # Outer region: non-linear contraction
+    # Formula: x / (b * (1 + (b - ||x||) / ||x||))
+    # Simplified denominator: b * (1 + b/norm - 1) = b * (b/norm) = b^2 / norm ?
+    # Let's re-read the source formula carefully:
+    # x / (b (1 + (b - ||x||) / ||x||))
+    # Denominator = b * (1 + b/||x|| - 1) = b * (b/||x||) = b^2 / ||x||
+    # So result = x * ||x|| / b^2
+    # However, we must implement exactly as written to avoid algebraic errors 
+    # if the source formula has a typo or specific intent.
+    
+    # Extract norms for outer points
+    norms_outer = norms[mask_outer]
+    
+    # Calculate denominator for outer points
+    # term = 1 + (b - norm) / norm
+    term = 1.0 + (b - norms_outer) / norms_outer
+    denominator = b * term
+    
+    result[mask_outer] = points[mask_outer] / denominator
+    
+    return result
+```
+
+**Edge Cases and Pitfalls:**
+*   **Training Failure:** Without this parameterization function, the model hardly learns anything [S1].
+*   **Precision:** The division by $\|\mathbf{x}\|$ in the outer case requires $\|\mathbf{x}\| > 0$. Points at the origin are handled by the inner case ($\|\mathbf{x}\| \le r$), so division by zero does not occur if $r > 0$.
+*   **Boundary Continuity:** The function is continuous at $\|\mathbf{x}\| = r$. Inner limit: $\mathbf{x}/r$. Outer limit: $\mathbf{x} / (b(1 + (b-r)/r)) = \mathbf{x} / (b(b/r)) = \mathbf{x} r / b^2$. For continuity, $1/r = r/b^2 \implies b^2 = r^2 \implies b=r$. With $r=10, b=1$, the function is **not** continuous at the boundary $r=10$ [S1]. The source does not specify if continuity is required or if the discontinuity is acceptable.
+
+## Subtopics
+
+### L2 Norm Sphere Contraction
+Contracts unbounded space into a bounded sphere of radius 2, mapping points at infinity to the surface of the sphere [S2, unofficial]. It computes the L2 norm of $\mathbf{x}$, calculates a scaling factor $(2 - 1/\|\mathbf{x}\|)$, and returns $\mathbf{x}$ normalized by its norm and multiplied by this factor [S2, unofficial]. This variant is simpler than the piecewise contraction but maps infinity to a finite boundary [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for $N$ points, involving norm calculation and conditional branching.
+*   **Memory Complexity:** $O(1)$ auxiliary space per point.
+*   **Strengths:** Enables training on unbounded scenes by bounding the coordinate space, allowing the use of voxel grids or bounded hash tables [S1].
+*   **Limitations:** The specific parameterization (with $r=10, b=1$) may introduce discontinuities or distortions at the boundary $r$ [S1]. The source notes that "Scale" and "Contract" achieve comparable results, suggesting the contraction function's specific benefit might be nuanced [S1].
+*   **When to use:** When training neural radiance fields on unbounded, 360-degree scenes where voxel grid allocation is required [Parent].
+
+## Background
+Originated in the context of LiDAR-NeRF, which ablated training strategies for novel LiDAR view synthesis [S1]. The contraction function is adapted from prior works [42, 5] (cited in [S1]). The method is used to stabilize training in unbounded environments, often combined with a cosine learning rate schedule warm-up [S1].
+
+## Sources
+[S1] LiDAR-NeRF: Novel LiDAR View Synthesis via Neural Radiance Fields, https://arxiv.org/abs/2304.10406v2, fetched 2026-10-26
+[S2] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)

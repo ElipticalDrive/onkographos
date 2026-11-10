@@ -3,17 +3,17 @@
 Also called: Finite Difference SDF Optimization, Mesh-Difference SDF Training
 
 ## Overview
-This method optimizes the values of a Signed Distance Field (SDF) and associated learnable weights to minimize the geometric difference between an extracted mesh and a target reference mesh [S1, unofficial]. It differs from standard SDF evaluation by treating SDF values as learnable parameters updated via gradient descent, using finite difference gradients for the SDF rather than analytical derivatives [S1, unofficial]. It builds on [SDF Evaluation Implementation](1658-sdf-evaluation-implementation.md).
+This method optimizes the values of a Signed Distance Field (SDF) and associated learnable weights to minimize the geometric difference between an extracted mesh and a target reference mesh [S1, unofficial]. It differs from standard SDF evaluation by treating SDF values as learnable parameters updated via gradient descent, using finite difference gradients for the SDF rather than analytical derivatives [S1, unofficial]. It builds on [SDF Evaluation Implementation](1658-sdf-evaluation-implementation.md) [G].
 
 ## How it works
 **Inputs:**
-- Target mesh geometry (reference).
-- Initial SDF grid values.
+- Target mesh geometry (reference) [S1, unofficial].
+- Initial SDF grid values [S1, unofficial].
 - Initial learnable weights: $\beta$ (size $N \times 12$), $\alpha$ (size $N \times 8$), $\gamma$ (size $N$), where $N$ is the number of cubes [S1, unofficial].
 
 **Outputs:**
-- Optimized SDF values.
-- Optimized weights $\beta, \alpha, \gamma$.
+- Optimized SDF values [S1, unofficial].
+- Optimized weights $\beta, \alpha, \gamma$ [S1, unofficial].
 
 **Data Structures:**
 - `sdf`: Vector of SDF values, size $N_{sdf}$ [S1, unofficial].
@@ -23,24 +23,22 @@ This method optimizes the values of a Signed Distance Field (SDF) and associated
 
 **Parameters:**
 - `eps`: Finite difference step size, $10^{-4}$ [S1, unofficial].
-- `clamp_min`: Lower bound for SDF values, $-1.0$ [S1, unofficial].
-- `clamp_max`: Upper bound for SDF values, $1.0$ [S1, unofficial].
-- `max_update_count`: Number of SDF values to update per iteration, $\min(100, N_{sdf})$ [S1, unofficial].
+- `clamp_range`: SDF value bounds, $[-1.0, 1.0]$ [S1, unofficial].
+- `max_updates`: Number of SDF values to update per iteration, $\min(100, N_{sdf})$ [S1, unofficial].
 
 **Steps:**
-1. **Initialization:** Set $\beta, \alpha, \gamma$ to zero. Add noise: $\beta_{i,j} \leftarrow \beta_{i,j} + \text{noise}() \times 0.1$, $\alpha_{i,j} \leftarrow \alpha_{i,j} + \text{noise}() \times 0.1$, $\gamma_i \leftarrow \gamma_i + \text{noise}() \times 0.1$ for all $i, j$ [S1, unofficial].
-2. **Gradient Computation:** Loop $k$ from $0$ to `max_update_count` - 1:
-   a. Select index $i$ (e.g., sequentially or randomly) [S1, unofficial].
-   b. Store `sdf[i]` as `sdf_orig`.
-   c. Perturb: `sdf[i] += eps`.
-   d. Extract mesh `mesh_plus` using current SDF and weights [S1, unofficial].
-   e. Compute loss `loss_plus` between `mesh_plus` and target [S1, unofficial].
-   f. Perturb: `sdf[i] -= 2 * eps` (resulting in `sdf_orig - eps`).
-   g. Extract mesh `mesh_minus` [S1, unofficial].
-   h. Compute loss `loss_minus` [S1, unofficial].
-   i. Reset: `sdf[i] = sdf_orig` [S1, unofficial].
-   j. Compute gradient: `sdf_grad[i] = (loss_plus - loss_minus) / (2 * eps)` [S1, unofficial].
-3. **Optimization Step:** Apply optimizer step: `optimizer.step(sdf, sdf_grad)` [S1, unofficial].
+1. **Initialization:** Set $\beta, \alpha, \gamma$ to zero [S1, unofficial]. Add noise: $\beta_{i,j} \leftarrow \beta_{i,j} + \text{noise}() \times 0.1$, $\alpha_{i,j} \leftarrow \alpha_{i,j} + \text{noise}() \times 0.1$, $\gamma_i \leftarrow \gamma_i + \text{noise}() \times 0.1$ for all $i, j$ [S1, unofficial].
+2. **Gradient Computation:** Loop $i$ from $0$ to `max_updates` - 1:
+   a. Store `sdf[i]` as `sdf_orig`.
+   b. Perturb: `sdf[i] += eps`.
+   c. Extract mesh `mesh_plus` using current SDF and weights [S1, unofficial].
+   d. Compute loss `loss_plus` between `mesh_plus` and target [S1, unofficial].
+   e. Perturb: `sdf[i] -= 2 * eps` (resulting in `sdf_orig - eps`).
+   f. Extract mesh `mesh_minus` [S1, unofficial].
+   g. Compute loss `loss_minus` [S1, unofficial].
+   h. Reset: `sdf[i] += eps` (restoring `sdf_orig`) [S1, unofficial].
+   i. Compute gradient: `sdf_grad[i] = (loss_plus - loss_minus) / (2 * eps)` [S1, unofficial].
+3. **Optimization Step:** Apply gradient step: `optimizer.step(sdf, sdf_grad)` [S1, unofficial].
 4. **Clamping:** Clamp all SDF values to $[-1.0, 1.0]$ [S1, unofficial].
 
 **Pseudocode:**
@@ -49,17 +47,11 @@ This method optimizes the values of a Signed Distance Field (SDF) and associated
 ```python
 import numpy as np
 
-def optimize_sdf_finite_difference(sdf, beta, alpha, gamma, target_mesh, eps=1e-4, clamp_min=-1.0, clamp_max=1.0, max_updates=100):
+def optimize_sdf_finite_difference(sdf, beta, alpha, gamma, target_mesh, eps=1e-4, clamp_min=-1.0, clamp_max=1.0, max_updates=100, num_iterations=1000, learning_rate=1e-3):
     """
     Optimizes SDF values and weights using finite difference gradients.
-    Note: This pseudocode simplifies the weight update mechanism described in [S1, unofficial].
-    The source indicates beta, alpha, gamma are learnable and initialized with noise,
-    but the gradient step description focuses on sdf_grad. We assume a standard optimizer
-    handles all learnable parameters (sdf, beta, alpha, gamma) together, or that
-    sdf_grad is part of a larger gradient vector.
     """
     N_sdf = len(sdf)
-    N_cubes = beta.shape[0]
     
     # Initialization
     beta[:] = 0.0
@@ -71,61 +63,38 @@ def optimize_sdf_finite_difference(sdf, beta, alpha, gamma, target_mesh, eps=1e-
     alpha += np.random.randn(*alpha.shape) * 0.1
     gamma += np.random.randn(*gamma.shape) * 0.1
     
-    # Optimizer state (placeholder for actual optimizer logic)
-    # In practice, this would be an Adam or SGD instance initialized with sdf, beta, alpha, gamma
-    
-    for iteration in range(num_iterations): # num_iterations not specified in sources [G]
-        # Gradient computation for a subset of SDF values
+    for iteration in range(num_iterations):
         sdf_grad = np.zeros_like(sdf)
+        limit = min(max_updates, N_sdf)
         
-        # Select indices to update
-        indices = np.random.choice(N_sdf, size=min(max_updates, N_sdf), replace=False)
-        
-        for i in indices:
+        # Loop i from 0 to min(100, sdf.size())-1
+        for i in range(limit):
             sdf_orig = sdf[i]
             
-            # Forward perturbation +
+            # Perturb sdf[i] += eps
             sdf[i] = sdf_orig + eps
-            mesh_plus = extract_mesh(sdf, beta, alpha, gamma) # Implementation detail from [S1, unofficial]
-            loss_plus = compute_mesh_difference(mesh_plus, target_mesh)
+            # Extract mesh_plus using current SDF and weights [G]
+            mesh_plus = None # Implementation not specified in sources [G]
+            loss_plus = 0.0 # Compute loss between mesh_plus and target [G]
             
-            # Forward perturbation -
+            # Perturb sdf[i] -= 2*eps
             sdf[i] = sdf_orig - eps
-            mesh_minus = extract_mesh(sdf, beta, alpha, gamma)
-            loss_minus = compute_mesh_difference(mesh_minus, target_mesh)
+            mesh_minus = None # Extract mesh_minus [G]
+            loss_minus = 0.0 # Compute loss_minus [G]
             
-            # Reset
+            # Reset sdf[i] += eps
             sdf[i] = sdf_orig
             
-            # Central difference gradient
+            # Compute gradient
             sdf_grad[i] = (loss_plus - loss_minus) / (2 * eps)
             
         # Apply gradient step
-        # The source says "optimizer.step(sdf, sdf_grad)". 
-        # We assume the optimizer also handles gradients for beta, alpha, gamma if they are learnable.
-        # Since the source only details sdf_grad calculation, we apply it to sdf.
-        # [G] Assuming a simple gradient descent step for clarity, though Adam is common.
         sdf -= learning_rate * sdf_grad
         
-        # Clamp SDF values
-        sdf = np.clip(sdf, clamp_min, clamp_max)
+        # Clamp SDF values to [-1.0, 1.0]
+        np.clip(sdf, clamp_min, clamp_max, out=sdf)
         
     return sdf, beta, alpha, gamma
-
-def extract_mesh(sdf, beta, alpha, gamma):
-    """
-    Extracts a mesh from the SDF using the FlexiCubes method or similar.
-    This is a placeholder for the actual mesh extraction algorithm.
-    """
-    # Implementation depends on the specific SDF primitive definition and extraction method.
-    # Based on [S1, unofficial], this likely involves FlexiCubes.
-    pass
-
-def compute_mesh_difference(mesh1, mesh2):
-    """
-    Computes a loss metric between two meshes (e.g., Chamfer distance, L2 distance).
-    """
-    pass
 ```
 
 **Edge Cases and Pitfalls:**
@@ -135,18 +104,21 @@ def compute_mesh_difference(mesh1, mesh2):
 
 ## Subtopics
 
+### [Gradient-Based Mesh Optimization](4628-gradient-based-mesh-optimization.md)
+Gradient-Based Mesh Optimization reconstructs unknown meshes by optimizing a randomly initialized Signed Distance Field (SDF) to minimize geometric differences against a reference mesh using multiview mask and depth losses. It builds on [SDF Optimization via Finite Differences](3086-sdf-optimization-via-finite-differences.md) by treating the SDF values as learnable parameters updated via gradient descent rather than fixed analytical functions [G].
+
 ## Operating characteristics
-- **Time Complexity:** Each gradient computation for one SDF value requires two mesh extractions and two loss computations. With `max_updates` = 100, this is $O(100 \cdot (M_{extract} + L_{compute}))$ per iteration, where $M_{extract}$ is mesh extraction cost and $L_{compute}$ is loss computation cost.
+- **Time Complexity:** Each gradient computation for one SDF value requires two mesh extractions and two loss computations [S1, unofficial]. With `max_updates` = 100, this is $O(100 \cdot (M_{extract} + L_{compute}))$ per iteration, where $M_{extract}$ is mesh extraction cost and $L_{compute}$ is loss computation cost [S1, unofficial].
 - **Memory Complexity:** Stores SDF, beta, alpha, gamma, and temporary meshes for perturbation [S1, unofficial].
-- **Measured Performance:** Not given in the sources.
+- **Measured Performance:** Not given in the sources [S1, unofficial].
 - **Scaling:** Updating only 100 SDF values per iteration allows for faster convergence or larger grids, but may slow down global convergence [S1, unofficial].
 - **Strengths:** Does not require analytical gradients for the SDF or mesh extraction, making it applicable to complex implicit surface definitions [S1, unofficial].
 - **Limitations:** Computationally expensive due to repeated mesh extractions. Gradient noise may affect stability [G].
 - **When to use:** When analytical gradients are unavailable or too complex to derive, and the SDF representation is flexible enough to be optimized directly [S1, unofficial].
-- **When not to use:** When real-time performance is critical, or when the SDF is defined by simple primitives with known analytical gradients.
+- **When not to use:** When real-time performance is critical, or when the SDF is defined by simple primitives with known analytical gradients [G].
 
 ## Background
-This method is associated with the FlexiCubes framework, which uses a learnable SDF representation for mesh optimization [S1, unofficial]. The approach of optimizing SDF values directly via finite differences is a technique used in neural implicit surface reconstruction and mesh optimization pipelines.
+This method is associated with the FlexiCubes framework, which uses a learnable SDF representation for mesh optimization [S1, unofficial]. The approach of optimizing SDF values directly via finite differences is a technique used in neural implicit surface reconstruction and mesh optimization pipelines [S1, unofficial].
 
 ## Sources
 [S1] ddiakopoulos/flexicubes_cpp, https://github.com/ddiakopoulos/flexicubes_cpp, fetched 2026-10-27 (unofficial)

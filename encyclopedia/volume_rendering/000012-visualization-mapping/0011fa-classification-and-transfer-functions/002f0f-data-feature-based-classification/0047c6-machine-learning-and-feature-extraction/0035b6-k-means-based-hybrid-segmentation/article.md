@@ -3,39 +3,53 @@
 Also called: hybrid segmentation
 
 ## Overview
-This method enhances ray casting object distinction in volume rendering by assigning object membership information (ID tags) to cubical vertices via a hybrid segmentation algorithm [S1, unofficial]. It differs from standard K-means by using a Self-Organizing Map (SOM) to initialize cluster centers, thereby avoiding local optima, and incorporating a Diagonal Busyness Factor (DF) for texture analysis [S1, unofficial]. It enables the use of binary, non-overlapping transfer functions for color and opacity assignment [S1, unofficial].
+K-means-based hybrid segmentation is an image processing approach that enhances ray casting object distinction by assigning object membership information (ID tags) to cubical vertices in the volume [S1, unofficial]. It differs from standard clustering by combining Self-Organizing Maps (SOM) for robust initialization, K-means for preliminary grouping, and Fisher discriminant analysis for statistical optimization, specifically designed to generate binary, non-overlapping transfer functions for color and opacity assignment [S1, unofficial].
 
 ## How it works
-**Inputs:** Volume data (RGB color bands); optional pre-processing parameters.
-**Outputs:** Segmented volume with ID tags assigned to cubical vertices.
+**Inputs:**
+*   Volume data (typically RGB color bands, though gray levels are supported) [S1, unofficial].
+*   Optional: Noise reduction filters and histogram equalization parameters [S1, unofficial].
+
+**Outputs:**
+*   Object membership ID tags assigned to cubical vertices [S1, unofficial].
+*   Optimum segments representing inherent color and formation characteristics [S1, unofficial].
 
 **Data Structures:**
-*   **Neural Map:** A 2D grid of nodes with dimensions `map_width` $\times$ `map_length`. Each node $v$ holds a weight vector $w_v$ (normalized to $[-1, 1]$).
-*   **Training Sample:** Input vector $D(t)$ representing a pixel's features.
-*   **Cluster Centers:** Derived from trained SOM nodes and refined by K-means.
+*   **Neural Map:** A 2D grid of nodes with dimensions `map_width` $\times$ `map_length`. Each node stores a weight vector $w_v$ [S1, unofficial].
+*   **Feature Vector:** For K-means, features are limited to three color bands and a Diagonal Busyness Factor (DF) [S1, unofficial].
+*   **DF Calculation:** Computed for each pixel using four diagonal neighbors $x_i$ and center $C$: $DF = \sum_{i=1}^{4} |C - x_i|$ [S1, unofficial].
+
+**Parameters:**
+*   **SOM Learning Rate:** Starts at 0.9, reduces to 0.1 in Stage 1; 0.01 in Stage 2 [S1, unofficial].
+*   **SOM Neighborhood Size:** Starts at half map size, reduces to 1 in Stage 1; remains 1 in Stage 2 [S1, unofficial].
+*   **Feature Normalization:** RGB values normalized from $[0, 255]$ to $[-1, 1]$ [S1, unofficial].
 
 **Steps:**
 
-1.  **Pre-processing (Optional):** If input quality is low (noise/intensity imbalance), apply high pass/low pass filters and histogram equalization [S1, unofficial].
+1.  **Pre-processing (Optional):** Apply high pass/low pass filters and histogram equalization to remove noise and rectify intensity imbalance [S1, unofficial].
 2.  **Neural Map Initialization:**
-    *   Calculate total nodes: $N = \text{map\_width} \times \text{map\_length}$ [S1, unofficial].
-    *   Find global min and max RGB values across the dataset: $V_{min}, V_{max}$ [S1, unofficial].
-    *   Calculate interval: $I = (V_{max} - V_{min}) / (N - 1)$ [S1, unofficial].
-    *   Initialize nodes by traversing from $V_{min}$ to $V_{max}$ using interval $I$ [S1, unofficial].
-3.  **SOM Training:**
-    *   **Stage 1 (Coarse):** Randomly select pixels. Find the Best Matching Unit (BMU). Adjust BMU and neighborhood. Learning rate $\alpha(s)$ reduces from 0.9 to 0.1. Neighborhood size reduces from half map size to 1 [S1, unofficial].
-    *   **Stage 2 (Refinement):** Stabilize feature vectors. Learning rate is 0.01. Neighborhood size is 1 (only BMU adjusted) [S1, unofficial].
-    *   Node adjustment formula:
+    *   Calculate `NumberofMapNodes` = `map_width` $\times$ `map_length` [S1, unofficial].
+    *   Find `SmallestAvailableColorValue` = $\min(R, G, B)$ and `LargestAvailableColorValue` = $\max(R, G, B)$ [S1, unofficial].
+    *   Calculate `Range` = `LargestAvailableColorValue` - `SmallestAvailableColorValue` [S1, unofficial].
+    *   Calculate `Interval` = `Range` / (`NumberofMapNodes` - 1) [S1, unofficial].
+    *   Initialize nodes by traversing from min to max using the interval [S1, unofficial].
+3.  **SOM Training Stage 1:**
+    *   Randomly select pixels as input vectors $D(t)$ [S1, unofficial].
+    *   Find Best Matching Unit (BMU) $u$ for each input [S1, unofficial].
+    *   Adjust BMU and neighborhood weights using:
         $$w_v(s+1) = w_v(s) + \theta(u,v,s)\alpha(s)(D(t) - w_v(s))$$
-        Where $w_v$ is weight vector, $s$ is step index, $u$ is BMU index, $v$ is neuron, $t$ is training sample index, $\alpha(s)$ is monotonically decreasing learning coefficient, $D(t)$ is input vector, and $\theta(u,v,s)$ is neighborhood function based on lattice distance [S1, unofficial].
-4.  **K-means Clustering:**
-    *   Use SOM centers as initial seeds for K-means [S1, unofficial].
-    *   Limit dimensions to 3 color bands and Diagonal Busyness Factor (DF) [S1, unofficial].
-    *   DF probes texture: $DF = \sum_{i=1}^{4} |C - x_i|$ [S1, unofficial].
-    *   Perform few rounds of clustering to produce preliminary groups [S1, unofficial].
-5.  **Statistical Optimization:**
+        where $\alpha(s)$ is the monotonically decreasing learning coefficient and $\theta(u,v,s)$ is the neighborhood function based on lattice distance [S1, unofficial].
+    *   Reduce learning rate from 0.9 to 0.1 and neighborhood size from half map size to 1 [S1, unofficial].
+4.  **SOM Training Stage 2 (Refinement):**
+    *   Stabilize feature vectors with a learning rate of 0.01 [S1, unofficial].
+    *   Neighborhood size remains 1 (only BMU adjusted) [S1, unofficial].
+5.  **K-means Clustering:**
+    *   Use SOM output as initial cluster centers [S1, unofficial].
+    *   Perform few rounds of K-means clustering using features: 3 color bands + DF [S1, unofficial].
+    *   Identify preliminary groups/elementary clusters [S1, unofficial].
+6.  **Statistical Optimization:**
     *   Apply Fisher discriminant ratio to convert preliminary groups into optimum segments [S1, unofficial].
-    *   Use edge detection to exempt boundary/pattern information from irrelevant recombination [S1, unofficial].
+    *   Use edge detection to exempt important boundary/pattern information from irrelevant recombination [S1, unofficial].
     *   Apply recombination and epsilon tolerance factor for spatial tuning [S1, unofficial].
 
 **Pseudocode:**
@@ -43,101 +57,73 @@ This method enhances ray casting object distinction in volume rendering by assig
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def k_means_hybrid_segmentation(volume_data, map_width, map_length, num_clusters):
+def kmeans_hybrid_segmentation(volume_data, map_width, map_length):
     # Phase 1.1: Optional Pre-processing
-    # Apply high pass/low pass filters and histogram equalization if needed [S1, unofficial]
+    # Apply high pass/low pass filters and histogram equalization if needed
     processed_data = volume_data
     
     # Phase 1.2: Neural Map Initialization
-    num_map_nodes = map_width * map_length
+    number_of_map_nodes = map_width * map_length
     min_val = min(processed_data.flatten())
     max_val = max(processed_data.flatten())
-    interval = (max_val - min_val) / (num_map_nodes - 1)
+    range_val = max_val - min_val
+    interval = range_val / (number_of_map_nodes - 1)
     
     # Initialize nodes linearly from min to max
-    # Note: Source describes 1D traversal for initialization values [S1, unofficial]
-    map_nodes = []
-    current_val = min_val
-    for i in range(num_map_nodes):
-        map_nodes.append([current_val, current_val, current_val]) # 3D weight vector
-        current_val += interval
-        
-    # Phase 1.2: Training Stage 1 (Coarse)
+    nodes = [min_val + i * interval for i in range(number_of_map_nodes)]
+    
+    # Phase 1.2: Training Stage 1
     learning_rate = 0.9
     neighborhood_size = map_width / 2
-    while learning_rate > 0.1:
-        for pixel in random_sample(processed_data):
-            bmu = find_bmu(pixel, map_nodes)
-            adjust_neighborhood(map_nodes, bmu, pixel, learning_rate, neighborhood_size)
-        learning_rate *= 0.95 # Monotonically decreasing
+    # Normalize data to [-1, 1]
+    normalized_data = normalize_to_minus_one_one(processed_data)
+    
+    for epoch in range(max_epochs_stage1):
+        for pixel in normalized_data:
+            # Find BMU
+            bmu_index = find_bmu(pixel, nodes)
+            # Adjust weights
+            for i, node in enumerate(nodes):
+                dist = lattice_distance(i, bmu_index, map_width, map_length)
+                theta = neighborhood_function(dist, neighborhood_size)
+                nodes[i] = node + theta * learning_rate * (pixel - node)
+        
+        # Decay parameters
+        learning_rate = decay(learning_rate, target=0.1)
         neighborhood_size = max(1, neighborhood_size / 2)
         
-    # Phase 1.2: Training Stage 2 (Refinement)
+    # Phase 1.2: Training Stage 2
     learning_rate = 0.01
     neighborhood_size = 1
-    for pixel in random_sample(processed_data):
-        bmu = find_bmu(pixel, map_nodes)
-        adjust_neighborhood(map_nodes, bmu, pixel, learning_rate, neighborhood_size)
-        
+    for epoch in range(max_epochs_stage2):
+        for pixel in normalized_data:
+            bmu_index = find_bmu(pixel, nodes)
+            # Only adjust BMU
+            nodes[bmu_index] = nodes[bmu_index] + learning_rate * (pixel - nodes[bmu_index])
+            
     # Phase 1.3: K-means Clustering
-    # Initialize K-means centers with SOM nodes
-    k_means_centers = map_nodes[:num_clusters]
+    # Features: 3 color bands + Diagonal Busyness Factor (DF)
+    features = extract_features(processed_data) # Includes DF calculation
+    initial_centers = nodes # From SOM
+    clusters = kmeans_clustering(features, initial_centers, rounds=3)
     
-    # Calculate Diagonal Busyness Factor (DF) for each pixel
-    # DF = sum(|C - x_i|) for 4 diagonal neighbors [S1, unofficial]
-    features = []
-    for pixel in processed_data:
-        df = calculate_df(pixel, processed_data)
-        features.append(pixel + [df])
-        
-    # Perform few rounds of K-means
-    for _ in range(3): # "Few rounds" [S1, unofficial]
-        assignments = assign_clusters(features, k_means_centers)
-        k_means_centers = update_centers(features, assignments, num_clusters)
-        
     # Statistical Optimization
-    # Apply Fisher discriminant ratio to refine clusters [S1, unofficial]
-    optimized_segments = apply_fisher_discriminant(assignments, features)
+    optimum_segments = apply_fisher_discriminant(clusters)
+    optimum_segments = apply_edge_detection_and_recombination(optimum_segments)
     
-    # Edge detection and spatial tuning [S1, unofficial]
-    final_tags = apply_edge_detection_and_recombination(optimized_segments)
-    
-    return final_tags
-
-def find_bmu(input_vec, nodes):
-    # Find node with minimum Euclidean distance to input_vec
-    min_dist = infinity
-    bmu_idx = -1
-    for i, node in enumerate(nodes):
-        dist = euclidean_distance(input_vec, node)
-        if dist < min_dist:
-            min_dist = dist
-            bmu_idx = i
-    return bmu_idx
-
-def adjust_neighborhood(nodes, bmu_idx, input_vec, lr, nb_size):
-    for i, node in enumerate(nodes):
-        # Neighborhood function based on lattice distance [S1, unofficial]
-        dist = lattice_distance(i, bmu_idx, map_width)
-        if dist <= nb_size:
-            theta = neighborhood_function(dist, nb_size)
-            nodes[i] = node + theta * lr * (input_vec - node)
-
-def calculate_df(pixel, volume):
-    # Sum of absolute differences with 4 diagonal neighbors [S1, unofficial]
-    # C is center pixel, x_i are diagonal neighbors
-    neighbors = get_diagonal_neighbors(pixel, volume)
-    return sum(abs(pixel - n) for n in neighbors)
+    return assign_id_tags(optimum_segments)
 ```
 
+## Subtopics
+
 ## Operating characteristics
-*   **Complexity:** Time complexity depends on the number of SOM nodes, training iterations, and K-means rounds. Memory complexity is proportional to the neural map size and volume data.
-*   **Strengths:** Avoids local optima common in random K-means initialization by using SOM [S1, unofficial]. Incorporates texture (DF) for better object distinction [S1, unofficial].
-*   **Limitations:** Requires careful tuning of map size and learning rates. Pre-processing is optional but recommended for low-quality data [S1, unofficial].
-*   **When to use:** When object distinction in ray casting is poor due to similar color intensities but different textures or boundaries [S1, unofficial].
+*   **Time Complexity:** Dominated by SOM training iterations and K-means convergence. The use of SOM for initialization reduces the risk of local optima, potentially reducing the number of K-means iterations required compared to random initialization [S1, unofficial].
+*   **Memory Complexity:** Requires storage for the neural map nodes and feature vectors (color + DF) for each voxel [S1, unofficial].
+*   **Strengths:** Improves clustering accuracy by avoiding random initialization pitfalls; handles noise via pre-processing; generates binary transfer functions suitable for clear object distinction [S1, unofficial].
+*   **Limitations:** Requires tuning of SOM parameters (map size, learning rates); DF calculation adds computational overhead per pixel; limited to 3 color bands + DF for K-means features [S1, unofficial].
 
 ## Background
-Originated in work by Azimzadeh & Pourgholi (2020) [S1, unofficial]. The method addresses the limitation of standard K-means in volume rendering where random initialization leads to non-representative clusters [S1, unofficial]. It integrates image processing techniques (filters, histogram equalization) with unsupervised neural networks and statistical optimization (Fisher discriminant) [S1, unofficial].
+The method was proposed by Azimzadeh & Pourgholi in 2020 to enhance ray casting object distinction by integrating image processing techniques with volume rendering [S1, unofficial]. It addresses the issue of K-means converging to local optima when initialized randomly by using a Self-Organizing Map (SOM) to provide rational initial cluster centers [S1, unofficial].
 
 ## Sources
 [S1] Segmentation Assisted Object Distinction for Direct Volume Rendering, https://doi.org/10.22044/jadm.2019.7207.1854, fetched 2026-10-29 (unofficial)

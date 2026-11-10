@@ -3,149 +3,158 @@
 Also called: HG Phase Function
 
 ## Overview
-The Henyey-Greenstein (HG) phase function is a parametric, anisotropic model used to describe the angular distribution of light scattering in participating media [S1, S10, unofficial][S19]. It solves the problem of efficiently approximating the complex angular scattering profiles of Mie scattering (e.g., by dust, water droplets, or biological tissue) using a single asymmetry parameter $g$ [S1, S8, unofficial][S19]. Unlike the [Isotropic Phase Function](5147-isotropic-phase-function.md), which scatters light equally in all directions, HG biases scattering forward ($g > 0$) or backward ($g < 0$) [S1, unofficial][S19]. It is distinguished from the [Rayleigh Phase Function](3721-rayleigh-phase-function.md) by its ability to model larger particles where scattering is strongly directional rather than symmetric [S8, S12, unofficial]. It is widely used in real-time rendering and production due to its computational simplicity and ease of sampling [S1, S23, S25, unofficial].
+The Henyey-Greenstein (HG) phase function is a parametric, anisotropic model used to describe the angular distribution of light scattering in participating media [S1, S10, unofficial][S20]. It solves the problem of efficiently approximating the complex angular scattering behavior of particles (such as interstellar dust, fog, or clouds) using a single asymmetry parameter $g$ [S1, S8, unofficial][S20]. Unlike the [Isotropic Phase Function](5147-isotropic-phase-function.md), which scatters light equally in all directions, the HG function biases scattering forward ($g > 0$) or backward ($g < 0$) [S1, S10, unofficial]. It is distinguished from the [Rayleigh Phase Function](3721-rayleigh-phase-function.md) by its ability to model larger particles where scattering is not symmetric with respect to the forward/backward axis, and from the [Cornette and Shanks Phase Function](1710-cornette-and-shanks-phase-function.md) by its simpler algebraic form lacking the $(1 + \mu^2)$ term [S1, S12, unofficial].
 
 ## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $g$: The asymmetry parameter, a scalar in the range $(-1, 1)$ [S1, S10, unofficial][S20].
+    *   $\omega_i$: The incoming light direction vector (unit length) [S12, unofficial][S21].
+    *   $\omega_o$: The outgoing (view) direction vector (unit length) [S12, unofficial][S21].
+    *   $u$: Two independent uniform random numbers in $[0, 1)$, denoted $u_0$ and $u_1$, used for sampling [S11, unofficial][S21].
+*   **Outputs:**
+    *   $p(\omega_i, \omega_o)$: The phase function value (probability density) [S11, unofficial][S21].
+    *   $\omega_s$: A sampled outgoing direction vector, if sampling is requested [S11, unofficial][S21].
 
-### Inputs and Outputs
-*   **Inputs**:
-    *   $g$: The asymmetry parameter, a scalar in the range $(-1, 1)$ [S1, unofficial][S19].
-    *   $\omega_i$: The incoming light direction (unit vector) [S12, unofficial][S20].
-    *   $\omega_o$: The outgoing (scattered) direction (unit vector) [S12, unofficial][S20].
-    *   $u$: Two independent uniform random numbers in $[0, 1]$ for sampling [S20].
-*   **Outputs**:
-    *   $p(\omega_i, \omega_o)$: The phase function value (probability density) [S19].
-    *   $\omega_s$: A sampled outgoing direction, if sampling is requested [S20].
+**Data Structures:**
+No complex data structures are required. The function is stateless and relies on standard floating-point arithmetic [S20].
 
-### Data Structures
-The phase function is typically stored as a class or struct containing a single floating-point member `g` [S19].
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```cpp
-struct HenyeyGreenstein {
-    float g; // Asymmetry parameter
-};
-```
-
-### Formulas
-The probability density function for the Henyey-Greenstein phase function is defined as [S1, S12, unofficial][S19]:
+**Formula:**
+The phase function value is defined as [S1, S12, unofficial][S20]:
 
 $$
 p(\cos \theta) = \frac{1}{4\pi} \frac{1 - g^2}{(1 + g^2 - 2g \cos \theta)^{\frac{3}{2}}}
 $$
 
 Where:
-*   $\theta$ is the scattering angle between $\omega_i$ and $\omega_o$.
-*   $\cos \theta = \omega_i \cdot \omega_o$ [S12, unofficial][S19].
-*   $g$ is the asymmetry parameter. $g=0$ is isotropic, $g>0$ is forward-scattering, $g<0$ is backward-scattering [S1, unofficial][S19].
+*   $\cos \theta = \omega_i \cdot \omega_o$ is the dot product of the incoming and outgoing directions [S11, S12, unofficial].
+*   $g$ is the asymmetry parameter [S1, S10, unofficial].
+*   $\theta$ is the scattering angle between $\omega_i$ and $\omega_o$ [S1, S12, unofficial].
 
-The asymmetry parameter $g$ is physically defined as the average cosine of the scattering angle [S19][S21, unofficial]:
+**Sampling Algorithm:**
+To sample a new scattering direction $\omega_s$ given an incoming direction $\omega_i$ and random numbers $u_0, u_1$, inverse transform sampling is applied to the cumulative distribution function of the phase function [S12, unofficial][S21].
 
-$$
-g = \int_{S^2} p(-\omega_o, \omega'_o) (\omega_o \cdot \omega'_o) d\omega'_o = 2\pi \int_0^\pi p(-\cos \theta) \cos \theta \sin \theta d\theta
-$$
-
-### Sampling Algorithm
-To sample a new direction $\omega_s$ given an incoming direction $\omega_i$ and random numbers $u = (u_0, u_1)$, inverse transform sampling is applied to the cumulative distribution function of the phase function [S12, unofficial][S20].
-
-1.  **Sample $\cos \theta$**:
-    *   If $|g| < \epsilon$ (typically $10^{-3}$), the distribution is effectively isotropic:
-        $$ \cos \theta = 1 - 2u_0 $$
+1.  **Sample $\cos \theta$:**
+    *   If $|g| < \epsilon$ (where $\epsilon$ is a small threshold, typically $10^{-3}$), the scattering is effectively isotropic:
+        $$ \cos \theta = 1 - 2 u_0 $$
     *   Otherwise:
-        $$ \text{temp} = \frac{1 - g^2}{1 - g + 2g u_0} $$
-        $$ \cos \theta = \frac{1 + g^2 - \text{temp}^2}{2g} $$
-    *   Clamp $\cos \theta$ to $[-1, 1]$ to handle floating-point errors [S5, S16, unofficial].
+        $$ \text{sqr} = \frac{1 - g^2}{1 - g + 2 g u_0} $$
+        $$ \cos \theta = \frac{1 + g^2 - \text{sqr}^2}{2 g} $$
+    [S5, S11, S12, unofficial][S21]
 
-2.  **Sample $\phi$**:
-    *   The azimuthal angle is uniformly distributed:
-        $$ \phi = 2\pi u_1 $$
+2.  **Sample $\phi$:**
+    The azimuthal angle is sampled uniformly:
+    $$ \phi = 2 \pi u_1 $$
+    [S5, S11, S12, unofficial]
 
-3.  **Construct Local Direction**:
-    *   Compute $\sin \theta = \sqrt{\max(0.0, 1 - \cos^2 \theta)}$ [S5, unofficial][S20].
-    *   Construct a local coordinate system where the z-axis aligns with $\omega_i$. Let $t$ and $b$ be the orthonormal basis vectors perpendicular to $\omega_i$ [S12, unofficial][S20].
-        *   To avoid numerical instability when $\omega_i$ is parallel to the world up vector (e.g., $(0,1,0)$), choose a helper vector $h$:
-            $$ h = \begin{cases} (0, 1, 0) & \text{if } |\omega_i.x| < 0.9 \\ (1, 0, 0) & \text{otherwise} \end{cases} $$
-        *   $t = \text{normalize}(h \times \omega_i)$
-        *   $b = \omega_i \times t$
-    *   The local scattered direction is:
-        $$ \omega_{local} = (\sin \theta \cos \phi) t + (\sin \theta \sin \phi) b + (\cos \theta) \omega_i $$
+3.  **Construct Local Direction:**
+    Compute $\sin \theta$:
+    $$ \sin \theta = \sqrt{\max(0.0, 1.0 - \cos^2 \theta)} $$
+    [S5, S11, unofficial][S21]
 
-### Pseudocode
+4.  **Transform to World Space:**
+    Construct an orthonormal basis $(t, b, \omega_i)$ where $\omega_i$ is the z-axis. A common robust method to find a tangent vector $t$ not parallel to $\omega_i$ is [S5, S11, S12, unofficial]:
+    *   Let $helper = (0, 1, 0)$ if $|\omega_i.x| < 0.9$, else $helper = (1, 0, 0)$.
+    *   $t = \text{normalize}(\omega_i \times helper)$
+    *   $b = \omega_i \times t$
+    
+    The sampled direction $\omega_s$ is:
+    $$ \omega_s = t (\sin \theta \cos \phi) + b (\sin \theta \sin \phi) + \omega_i (\cos \theta) $$
+    [S5, S11, S12, unofficial]
+
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
 
-def sample_henyey_greenstein(omega_in: Vector3, g: float, u: Point2) -> Tuple[Vector3, float]:
+def heney_greenstein_phase(cos_theta, g):
     """
-    Samples a new direction from the Henyey-Greenstein phase function.
+    Evaluates the Henyey-Greenstein phase function.
     
     Args:
-        omega_in: Incoming direction (unit vector).
-        g: Asymmetry parameter (-1 < g < 1).
-        u: Two uniform random numbers in [0, 1].
+        cos_theta (float): The dot product of incoming and outgoing directions.
+        g (float): The asymmetry parameter, must be in (-1, 1).
         
     Returns:
-        omega_out: Sampled outgoing direction (unit vector).
-        pdf: Probability density value of the sampled direction.
+        float: The phase function value.
     """
-    # 1. Sample cos_theta
+    g_sq = g * g
+    denom = 1.0 + g_sq - 2.0 * g * cos_theta
+    # Avoid division by zero or invalid sqrt for degenerate cases
+    denom = max(denom, 1e-6)
+    return (1.0 - g_sq) / (4.0 * math.pi * (denom ** 1.5))
+
+def sample_heney_greenstein(incident_direction, u0, u1, g):
+    """
+    Samples a new scattering direction using the Henyey-Greenstein phase function.
+    
+    Args:
+        incident_direction (Vector3): The incoming light direction (unit vector).
+        u0 (float): First uniform random number in [0, 1).
+        u1 (float): Second uniform random number in [0, 1).
+        g (float): The asymmetry parameter.
+        
+    Returns:
+        Vector3: The sampled outgoing scattering direction.
+    """
+    # 1. Sample cos(theta)
     if abs(g) < 1e-3:
-        cos_theta = 1.0 - 2.0 * u.x
+        cos_theta = 1.0 - 2.0 * u0
     else:
-        temp = (1.0 - g * g) / (1.0 - g + 2.0 * g * u.x)
-        cos_theta = (1.0 + g * g - temp * temp) / (2.0 * g)
-    
-    # Clamp to handle precision errors
-    cos_theta = max(-1.0, min(1.0, cos_theta))
-    
+        sqr = (1.0 - g * g) / (1.0 - g + 2.0 * g * u0)
+        cos_theta = (1.0 + g * g - sqr * sqr) / (2.0 * g)
+        
     # 2. Sample phi
-    phi = 2.0 * math.pi * u.y
+    phi = 2.0 * math.pi * u1
     
-    # 3. Compute sin_theta
-    sin_theta = math.sqrt(max(0.0, 1.0 - cos_theta * cos_theta))
+    # 3. Compute sin(theta)
+    sin_theta_sq = 1.0 - cos_theta * cos_theta
+    sin_theta = math.sqrt(max(0.0, sin_theta_sq))
     
-    # 4. Construct orthonormal basis aligned with omega_in
-    # Helper vector to avoid cross product with parallel vectors
-    if abs(omega_in.x) < 0.9:
+    # 4. Construct orthonormal basis
+    # Pick a helper vector not parallel to incident_direction
+    if abs(incident_direction.x) < 0.9:
         helper = Vector3(0, 1, 0)
     else:
         helper = Vector3(1, 0, 0)
         
-    t = normalize(cross(helper, omega_in))
-    b = cross(omega_in, t)
+    tangent = normalize(cross(incident_direction, helper))
+    bitangent = cross(incident_direction, tangent)
     
-    # 5. Construct outgoing direction
-    omega_out = (sin_theta * math.cos(phi)) * t + \
-                (sin_theta * math.sin(phi)) * b + \
-                (cos_theta) * omega_in
-                
-    # 6. Evaluate PDF
-    pdf = phase_henyey_greenstein(cos_theta, g)
+    # 5. Construct local direction and transform to world
+    # Local direction components: (sin_theta * cos(phi), sin_theta * sin(phi), cos_theta)
+    # mapped to (tangent, bitangent, incident_direction)
     
-    return omega_out, pdf
-
-def phase_henyey_greenstein(cos_theta: float, g: float) -> float:
-    """
-    Evaluates the Henyey-Greenstein phase function.
-    """
-    denom_sq = 1.0 + g * g - 2.0 * g * cos_theta
-    # Avoid division by zero if denom_sq is extremely small
-    denom = max(denom_sq, 1e-6)
-    return (1.0 / (4.0 * math.pi)) * ((1.0 - g * g) / (denom * math.sqrt(denom)))
+    cos_phi = math.cos(phi)
+    sin_phi = math.sin(phi)
+    
+    local_x = sin_theta * cos_phi
+    local_y = sin_theta * sin_phi
+    local_z = cos_theta
+    
+    # World space direction
+    outgoing_direction = (
+        tangent * local_x + 
+        bitangent * local_y + 
+        incident_direction * local_z
+    )
+    
+    return normalize(outgoing_direction)
 ```
 
-### Parameters
-*   **$g$ (Asymmetry Parameter)**:
-    *   Range: $(-1, 1)$ [S1, unofficial][S19].
-    *   $g = 0$: Isotropic scattering [S1, unofficial][S19].
-    *   $g > 0$: Forward scattering (light continues in roughly the same direction) [S1, unofficial][S19]. Typical for clouds ($g \approx 0.8$) and skin ($g \approx 0.8$) [S1, S27, unofficial].
-    *   $g < 0$: Backward scattering (light scatters back toward the source) [S1, unofficial][S19]. Typical for some dust or specific biological tissues [S1, S21, unofficial].
+**Parameters:**
+*   $g$ (Asymmetry Parameter): Controls the directionality of scattering [S1, S10, unofficial].
+    *   $g = 0$: Isotropic scattering [S1, S10, unofficial].
+    *   $g > 0$: Forward scattering (light continues in the general direction of travel) [S1, S10, unofficial]. Typical values for clouds and fog are $g \approx 0.8$ [S1, S24, unofficial].
+    *   $g < 0$: Backward scattering (light scatters back toward the source) [S1, S10, unofficial].
+    *   Range: $(-1, 1)$ [S1, S10, unofficial]. Values approaching $\pm 1$ create Dirac-delta-like peaks [S29, unofficial].
 
-### Edge Cases and Pitfalls
-*   **$g \to \pm 1$**: The function approaches a Dirac delta function. Numerical instability can occur in the denominator $(1 + g^2 - 2g \cos \theta)^{3/2}$ if $\cos \theta \approx \text{sign}(g)$ [S5, unofficial]. Clamping $\cos \theta$ and using a minimum denominator value is required [S16, unofficial].
-*   **$g = 0$**: The formula involves division by $g$ in the sampling step. A threshold (e.g., $10^{-3}$) is used to switch to isotropic sampling [S5, unofficial][S20].
-*   **Energy Conservation**: The function is normalized to integrate to 1 over the sphere, ensuring energy conservation [S24, unofficial].
+**Edge Cases and Pitfalls:**
+*   **$g = 0$**: The formula involves division by $g$ in the sampling step. A threshold (e.g., $|g| < 10^{-3}$) must be used to switch to isotropic sampling to avoid division by zero or numerical instability [S5, S11, unofficial][S21].
+*   **$g \to \pm 1$**: As $g$ approaches 1 or -1, the denominator $(1 + g^2 - 2g \cos \theta)$ can approach zero if $\cos \theta$ is close to 1 or -1 respectively, leading to overflow or invalid square roots. Clamping or adding a small epsilon to the denominator is recommended [S5, S17, unofficial].
+*   **Energy Conservation**: The HG phase function is normalized such that its integral over the sphere is 1, ensuring energy conservation [S25, unofficial].
 
 ## Subtopics
 
@@ -153,52 +162,95 @@ def phase_henyey_greenstein(cos_theta: float, g: float) -> float:
 The Cornette and Shanks phase function is an anisotropic scattering model used to approximate Mie scattering in participating media, specifically designed to produce a realistic forward-scattering halo. It is distinguished from the Henyey-Greenstein phase function by its specific algebraic form which includes a $(1 + \mu^2)$ term, providing a different angular distribution profile for the same asymmetry parameter $g$. It is commonly used in real-time volumetric rendering of clouds and fog.
 
 ### [Multiple Octaves Phase Function](4939-multiple-octaves-phase-function.md)
-The Multiple Octaves Phase Function is a composite model that generates complex scattering patterns by summing multiple Henyey-Greenstein lobes with varying asymmetry parameters and weights. It solves the limitation of single-parameter phase functions (like the parent [Henyey-Greenstein Phase Function](1010-henyey-greenstein-phase-function.md)) by allowing the creation of multi-lobed distributions, such as those found in clouds, without requiring more expensive physical models. It sets itself apart from the sibling [Cornette and Shanks Phase Function](1710-cornette-and-shanks-phase-function.md) by using a specific iterative octave-based construction rather than a fixed analytical approximation of Mie scattering.
+The Multiple Octaves Phase Function is a composite model that combines multiple Henyey-Greenstein lobes with varying asymmetry parameters and weights to create complex scattering patterns, specifically a two-lobed effect. It addresses the limitation of single-parameter phase functions by allowing multi-lobed distributions without requiring more expensive physical models. It sets itself apart from the sibling [Cornette and Shanks Phase Function](1710-cornette-and-shanks-phase-function.md) by using an iterative octave-based construction rather than a fixed analytical approximation.
+
+### [HG-Draine Blend Mie Approximation](10011-hg-draine-blend-mie-approximation.md)
+The HG-Draine Blend Mie Approximation is a parametric phase function model designed to approximate Mie scattering for water droplets in fog and clouds. It solves the problem of accurately simulating light transport in participating media without the computational cost of rigorous Lorenz-Mie theory or the lack of analytic sampling in previous approximations like Cornette-Shanks. It sets itself apart by providing a fully analytic evaluation and importance sampling method, fitting 95% of the energy of the forward Mie scattering lobe using a linear combination of a Henyey-Greenstein (HG) phase function and a Draine phase function.
 
 ### Schlick Approximation
-A simpler formula to approximate the Henyey-Greenstein phase function, avoiding the need to compute a root [S24, unofficial].
+A simpler formula to approximate the Henyey-Greenstein phase function, avoiding the need to compute a root [S25, unofficial].
 Formula:
 $$ phase_{Schlick}(\theta) = \frac{1}{4\pi} \cdot \frac{1 - k^2}{(1 - k\cos(\theta))^2} $$
-Parameter $k$ is an anisotropy parameter analogous to $g$ in Henyey-Greenstein. Positive $k$ causes forward-scattering; negative $k$ causes back-scattering [S24, unofficial].
+Parameter $k$ is an anisotropy parameter analogous to $g$ in Henyey-Greenstein. Positive $k$ causes forward-scattering; negative $k$ causes back-scattering [S25, unofficial].
 
 ### Volume Phase Feature Calculation
 Calculation of phase features for template points, integrating the phase function over the solid angle of the template point volume to account for its finite size [S3, unofficial].
 Formula:
 $$ f_i = f^*(\omega, s_i - p) \cdot f^*(s_i - p, l) $$
-Where $f^*$ is the volume phase function, $p$ is the medium particle position, $\omega$ is camera direction, $l$ is incident light direction, and $s_i$ is a template point [S3, unofficial]. The volume phase in a direction is the integral of the phase function over the solid angle $\Omega$ projected from the template point [S3, unofficial].
+Where $f_i$ is the phase value of template point $s_i$, $p$ is the medium particle position, $\omega$ is camera direction, $l$ is incident light direction, and $f^*$ is the volume phase function [S3, unofficial].
+The volume phase in the camera direction is:
+$$ f_{\omega}^* = \int_{\Omega} f(\omega, \phi) d\phi $$
+Where $\Omega = \{\phi \mid (\theta \cdot \phi) > \cos(\varrho/2)\}$, $\theta$ is incident angle, $\phi$ is emergent angle, and $\varrho$ is the solid angle projected from template point to $p$ [S3, unofficial].
+
+### Mie Scattering Similarity Theory Approximation
+A technique to handle the high gradient of the Mie phase function $F_M(\theta, g)$ at small angles between view $V$ and light $L$ by treating Mie scattering as isotropic during precomputation and using an effective scattering coefficient [S31].
+Steps:
+1. Precompute Mie scattering assuming it is isotropic, i.e., $F_M(\theta, g) = 1$ [S31].
+2. Precompute the actual Mie phase function $F_M(\theta, g)$ into a small 2D texture [S31].
+3. Evaluate $F_M(\theta, g)$ from the 2D texture in the fragment shader during rendering [S31].
+Formula:
+$$ \sigma'_M = (1-g)\sigma_M $$
+Where $\sigma'_M$ is the effective scattering coefficient, $g$ is the anisotropy parameter, and $\sigma_M$ is the original Mie scattering coefficient [S31].
+Pitfall: The approach is mathematically incorrect but reproduces effects well due to the dominance of the first order of Mie scattering [S31].
+
+### Jendersie-d’Eon Phase Function
+A phase function model that approximates the true Mie scattering of water droplets. It captures a more realistic forward peak than Henyey-Greenstein [S27].
 
 ## Operating characteristics
+**Time and Memory Complexity:**
+*   **Evaluation:** $O(1)$ time and $O(1)$ memory. The formula involves basic arithmetic operations and a power of 1.5 [S1, S12, unofficial].
+*   **Sampling:** $O(1)$ time and $O(1)$ memory. Requires generating two random numbers and basic vector operations [S5, S11, unofficial].
 
-*   **Time Complexity**: $O(1)$ for evaluation and sampling. It involves a few arithmetic operations and a square root [S1, unofficial][S19].
-*   **Memory Complexity**: $O(1)$, storing only the parameter $g$ [S19].
-*   **Performance**: Extremely fast, making it suitable for real-time rendering and GPU implementations [S1, S23, S25, unofficial].
-*   **Strengths**:
-    *   Simple to implement and sample [S1, S12, unofficial].
-    *   Physically plausible for a wide range of media (clouds, fog, tissue) [S1, S21, unofficial].
-    *   Captures forward/backward scattering effects like silver linings and god rays [S7, S25, unofficial].
-*   **Limitations**:
-    *   Single parameter $g$ limits the ability to model complex multi-modal scattering (e.g., strong forward peak with significant backward scattering) without extensions like Multiple Octaves [S1, S12, unofficial].
-    *   Does not accurately represent Mie scattering for all particle sizes, especially near the horizon or for very specific particle distributions [S12, unofficial].
-*   **When to Use**: General-purpose volumetric rendering, real-time clouds/fog, subsurface scattering approximation [S1, S23, S27, unofficial].
-*   **When Not to Use**: High-fidelity scientific visualization requiring exact Mie scattering solutions, or media with complex multi-lobed phase functions [S12, S24, unofficial].
+**Measured Performance:**
+The HG phase function is widely used in production rendering (movies) and real-time graphics because it is quick to compute and simple to sample [S24, S26, unofficial]. It is considered the "workhorse" for real-time rendering scattering calculations [S26, unofficial].
+
+**Scaling:**
+Performance is independent of scene complexity or resolution, as it is a local evaluation per scattering event [S1, S12, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Simple to implement, fast to evaluate, easy to sample, and fits a wide range of scattering behaviors with a single parameter $g$ [S1, S12, S24, unofficial]. It is normalized (energy conserving) [S25, unofficial].
+*   **Limitations:** It does not accurately represent Mie scattering for particles comparable in size to the wavelength, particularly the sharp forward peak and backscattering halo seen in water droplets [S12, unofficial][S27]. It cannot model multi-lobed scattering distributions on its own [S12, unofficial].
+
+**When to Use:**
+*   Use for general-purpose volumetric effects like fog, smoke, and clouds where computational efficiency is critical [S1, S24, unofficial].
+*   Use when a single anisotropy parameter is sufficient to describe the material's scattering behavior [S12, unofficial].
+
+**When Not to Use:**
+*   Do not use for high-fidelity simulation of water droplets or ice crystals where accurate Mie scattering features (like glories or rainbows) are required; use [Cornette and Shanks](1710-cornette-and-shanks-phase-function.md) or [HG-Draine Blend](10011-hg-draine-blend-mie-approximation.md) instead [S12, unofficial][S27].
+*   Do not use if multi-lobed scattering is required; use [Multiple Octaves](4939-multiple-octaves-phase-function.md) [S12, unofficial].
 
 ## Background
-
-The Henyey-Greenstein phase function was introduced by L.C. Henyey and J.L. Greenstein in 1941 in the paper "Diffuse radiation in the galaxy" [S1, unofficial][S19][S24, unofficial]. It was originally developed to model the scattering of light by intergalactic dust [S1, S10, unofficial][S19]. Due to its mathematical simplicity and ability to fit measured scattering data with a single parameter, it has become a standard workhorse in computer graphics for simulating participating media [S1, unofficial][S19][S25, unofficial]. It is widely used in production rendering for movies and real-time engines [S23, S25, unofficial].
+The Henyey-Greenstein phase function was introduced by L.C. Henyey and J.L. Greenstein in 1941 in the paper "Diffuse radiation in the galaxy," published in the Astrophysical Journal (Vol. 93, pp. 70-83) [S1, unofficial][S20, S27]. It was originally developed to model the scattering of light by intergalactic dust [S1, S10, S25, unofficial]. Due to its simplicity and ease of fitting to measured scattering data, it has been widely adopted in computer graphics for simulating various participating media, including clouds, fog, and skin [S1, unofficial][S20][S29, unofficial].
 
 ## Sources
-
 [S1] From the Radiative Transfer Equation to the Volume Rendering Equation, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-summary-equations.html, fetched 2026-10-25 (unofficial)
-[S19] 11.2 Phase Functions - pbr-book.org, https://pbr-book.org/3ed-2018/Volume_Scattering/Phase_Functions, fetched 2026-10-27
-[S12] Volumetric Rendering using Path Tracing, https://zydak.github.io/Clouds/index.html, fetched 2026-10-27 (unofficial)
-[S20] Light Transport II: Volume Rendering / Sampling Volume Scattering, https://www.pbr-book.org/3ed-2018/Light_Transport_II_Volume_Rendering/Sampling_Volume_Scattering.html, fetched 2026-10-28
-[S23] Ray Marching: Getting it Right!, https://www.scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers//ray-marching-get-it-right.html, fetched 2026-10-28 (unofficial)
-[S8] [PDF] Optical Models for Direct Volume Rendering - Duke Computer Science, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)
-[S10] [Graphics] Volume Rendering - GitHub Pages, https://leeyngdo.github.io/blog/computer-graphics/2024-03-28-volume-rendering/, fetched 2026-10-27 (unofficial)
-[S24] Volumetric Rendering - Computer Graphics Learning, https://cglearn.eu/pub/advanced-computer-graphics/volumetric-rendering, fetched 2026-10-28 (unofficial)
-[S25] Volumetric Lighting (God Rays) — How It Works - Moonjump, https://moonjump.com/game-dev-mechanics-volumetric-lighting-god-rays-how-it-works/, fetched 2026-10-28 (unofficial)
-[S16] nff747/volumetric-clouds-wgsl, https://github.com/nff747/volumetric-clouds-wgsl, fetched 2026-10-27 (unofficial)
-[S5] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)
-[S21] Volume Rendering Volume Rendering, https://docslib.org/doc/1400821/volume-rendering, fetched 2026-10-28 (unofficial)
-[S27] Path Traced Subsurface Scattering Model, https://www.scribd.com/document/965284472/Pixar-Path-Traced-SSS-Paper, fetched 2026-10-29 (unofficial)
+[S2] rokcej/volumetric-ray-casting, https://github.com/rokcej/volumetric-ray-casting, fetched 2026-10-26 (unofficial)
 [S3] A real-time rendering method for high albedo anisotropic materials with multiple scattering, https://doi.org/10.48550/arxiv.2401.14051, fetched 2026-10-26 (unofficial)
+[S4] l0exy1h/VolumetricPathTracing-public, https://github.com/l0exy1h/VolumetricPathTracing-public, fetched 2026-10-26 (unofficial)
+[S5] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)
+[S6] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)
+[S7] tzhazuma/Fluid_simulation, https://github.com/tzhazuma/Fluid_simulation, fetched 2026-10-26 (unofficial)
+[S8] [PDF] Optical Models for Direct Volume Rendering - Duke Computer Science, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)
+[S9] Volumetric rendering fundamental concepts and terminology, https://computergraphics.stackexchange.com/questions/145/volumetric-rendering-fundamental-concepts-and-terminology, fetched 2026-10-27 (unofficial)
+[S10] [Graphics] Volume Rendering - GitHub Pages, https://leeyngdo.github.io/blog/computer-graphics/2024-03-28-volume-rendering/, fetched 2026-10-27 (unofficial)
+[S11] GitHub - yumcyaWiz/volpt: Volumetric path tracer written in C++, https://github.com/yumcyaWiz/volpt, fetched 2026-10-27 (unofficial)
+[S12] Volumetric Rendering using Path Tracing, https://zydak.github.io/Clouds/index.html, fetched 2026-10-27 (unofficial)
+[S13] PDF Volumetric Path Tracing, https://jugoodma.github.io/docs/740-paper.pdf, fetched 2026-10-27 (unofficial)
+[S14] PDF Volume Rendering Methods for Computational Fluid Dynamics Visualization, https://www.researchgate.net/profile/David-Ebert-4/publication/220943451_Volume_Rendering_Methods_for_Computational_Fluid_Dynamics_Visualization/links/00b7d51a73e2892e23000000/Volume-Rendering-Methods-for-Computational-Fluid-Dynamics-Visualization.pdf, fetched 2026-10-27 (unofficial)
+[S15] erickTornero/realtime-volumetric-cloudscapes, https://github.com/erickTornero/realtime-volumetric-cloudscapes, fetched 2026-10-27 (unofficial)
+[S16] al-ro/volumetrics, https://github.com/al-ro/volumetrics, fetched 2026-10-27 (unofficial)
+[S17] nff747/volumetric-clouds-wgsl, https://github.com/nff747/volumetric-clouds-wgsl, fetched 2026-10-27 (unofficial)
+[S18] ldarnbr/volumetric-cloud-renderer, https://github.com/ldarnbr/volumetric-cloud-renderer, fetched 2026-10-27 (unofficial)
+[S19] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
+[S20] 11.2 Phase Functions - pbr-book.org, https://pbr-book.org/3ed-2018/Volume_Scattering/Phase_Functions, fetched 2026-10-27
+[S21] Light Transport II: Volume Rendering / Sampling Volume Scattering, https://www.pbr-book.org/3ed-2018/Light_Transport_II_Volume_Rendering/Sampling_Volume_Scattering.html, fetched 2026-10-28
+[S22] Volume Rendering Volume Rendering, https://docslib.org/doc/1400821/volume-rendering, fetched 2026-10-28 (unofficial)
+[S23] Real-time dreamy Cloudscapes with Volumetric Raymarching, https://blog.maximeheckel.com/posts/real-time-cloudscapes-with-volumetric-raymarching/, fetched 2026-10-28 (unofficial)
+[S24] Ray Marching: Getting it Right!, https://www.scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers//ray-marching-get-it-right.html, fetched 2026-10-28 (unofficial)
+[S25] Volumetric Rendering - Computer Graphics Learning, https://cglearn.eu/pub/advanced-computer-graphics/volumetric-rendering, fetched 2026-10-28 (unofficial)
+[S26] Volumetric Lighting (God Rays) — How It Works - Moonjump, https://moonjump.com/game-dev-mechanics-volumetric-lighting-god-rays-how-it-works/, fetched 2026-10-28 (unofficial)
+[S27] Introduction to Volumetric Rendering, https://help.maxon.net/c4d/2027/en-us/Content/html/What_is_Volumetric_Rendering.html, fetched 2026-10-29
+[S28] Volumetric Cloud Rendering - Jack Tollenaar, https://www.jacktollenaar.top/articles/clouds.html, fetched 2026-10-29 (unofficial)
+[S29] Path Traced Subsurface Scattering Model, https://www.scribd.com/document/965284472/Pixar-Path-Traced-SSS-Paper, fetched 2026-10-29 (unofficial)
+[S30] Lighting And Transmittance, https://sergeneren.com/2019/04/26/lighting-and-transmittance/, fetched 2026-10-30 (unofficial)
+[S31] Real-time spectral scattering in large-scale natural participating media, https://doi.org/10.1145/1925059.1925074, fetched 2026-10-28

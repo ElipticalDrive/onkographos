@@ -1,0 +1,109 @@
+# Weight-PDF Conversion
+
+
+## Overview
+Weight-PDF Conversion transforms a vector of discrete weights that sum to 1 into a probability density function (PDF) that integrates to 1 over given spatial or temporal intervals, and vice versa [S1, S2, unofficial]. This method serves as the inverse operation to CDF Integration from Weights, bridging the gap between discrete sampling weights and continuous density representations required for accurate volume rendering classification [S1, S2, unofficial]. It is distinct from simple normalization by accounting for the variable width of the intervals defined by the boundaries $t$ [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `w`: A tensor of weights with shape $(\dots, N)$, where $\sum w_i = 1$.
+- `p`: A tensor of PDF values with shape $(\dots, N)$.
+- `t`: A tensor of interval boundaries with shape $(\dots, N+1)$. The boundaries define the intervals $[t_i, t_{i+1})$ for each element $i$.
+
+**Outputs:**
+- If converting weights to PDF: `p` with shape $(\dots, N)$.
+- If converting PDF to weights: `w` with shape $(\dots, N)$.
+
+**Parameters:**
+- `eps`: A numerical stability constant to prevent division by zero when interval widths are zero or near-zero. Typically set to `torch.finfo(torch.float16).eps**2` [S2, unofficial].
+
+**Steps:**
+
+1. **Calculate Interval Widths:**
+   Compute the width of each interval using the boundary tensor `t`.
+   $$ \Delta t_i = t_{i+1} - t_i $$
+   This corresponds to slicing `t` as `t[..., 1:] - t[..., :-1]` [S1, S2, unofficial].
+
+2. **Weight to PDF Conversion:**
+   To convert weights `w` to PDF values `p`, divide each weight by its corresponding interval width, clamped to `eps` for stability [S1, S2, unofficial].
+   $$ p_i = \frac{w_i}{\max(\epsilon, t_{i+1} - t_i)} $$
+   In code: `p = w / (t[..., 1:] - t[..., :-1]).clamp_min(eps)` [S1, unofficial].
+
+3. **PDF to Weight Conversion:**
+   To convert PDF values `p` to weights `w`, multiply each PDF value by its corresponding interval width [S1, S2, unofficial].
+   $$ w_i = p_i \cdot (t_{i+1} - t_i) $$
+   In code: `w = p * (t[..., 1:] - t[..., :-1])` [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def weight_to_pdf(w: torch.Tensor, t: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """
+    Convert weights summing to 1 into a PDF integrating to 1.
+    
+    Args:
+        w: Weights tensor of shape (*, N).
+        t: Boundaries tensor of shape (*, N+1).
+        eps: Numerical stability constant.
+        
+    Returns:
+        p: PDF tensor of shape (*, N).
+    """
+    # Calculate interval widths: t[i+1] - t[i]
+    dt = t[..., 1:] - t[..., :-1]
+    
+    # Clamp minimum width to eps to avoid division by zero
+    dt_clamped = torch.clamp_min(dt, eps)
+    
+    # PDF = Weight / Interval Width
+    p = w / dt_clamped
+    return p
+
+def pdf_to_weight(p: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """
+    Convert a PDF integrating to 1 into weights summing to 1.
+    
+    Args:
+        p: PDF tensor of shape (*, N).
+        t: Boundaries tensor of shape (*, N+1).
+        
+    Returns:
+        w: Weights tensor of shape (*, N).
+    """
+    # Calculate interval widths: t[i+1] - t[i]
+    dt = t[..., 1:] - t[..., :-1]
+    
+    # Weight = PDF * Interval Width
+    w = p * dt
+    return w
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero-width intervals:** If $t_{i+1} = t_i$, the interval width is zero. Direct division results in infinity or NaN. Clamping with `eps` [S2, unofficial] or filtering out zero-width intervals is required.
+- **Precision:** When using low-precision types (e.g., float16), `eps` should be scaled appropriately (e.g., `eps**2`) to maintain stability [S2, unofficial].
+- **Boundary Consistency:** The input `t` must have one more element than `w` or `p` along the last dimension. Mismatched shapes will cause broadcasting errors or incorrect interval calculations.
+
+## Subtopics
+
+### Multivariate Conditional Weighting
+This variant extends weight-PDF conversion to multivariate scenarios where variables are dependent. It distinguishes between "guiding variables" (which define the interval of interest, e.g., cloud density) and "following variables" (which are important only when guiding variables are within a specific interval, e.g., vertical velocity) [S3]. For following variables, the weighting function is constructed using the conditional probability density function (PDF) of the following variable given that the guiding variable lies within a specific interval $[B_0, B_1]$ [S3]. This approach assigns increased weight where the conditional PDF is high, reducing the relative importance of values outside the guiding variable's interval of interest [S3]. Quality improves with narrower intervals, similar to univariate cases [S3].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$, where $N$ is the number of intervals/elements. The operation involves a single pass over the data to compute differences and element-wise multiplication/division.
+- **Memory Complexity:** $O(N)$ for storing the interval widths and the output tensor.
+- **Strengths:** Simple, differentiable, and numerically stable with proper clamping. It correctly handles non-uniform sampling intervals, which is critical for accurate volume rendering where ray step sizes vary.
+- **Limitations:** Requires accurate boundary information `t`. If boundaries are incorrect or missing, the conversion yields biased densities.
+- **When to use:** When converting between discrete weight-based accumulation (common in ray marching) and continuous density fields for transfer function evaluation or optimization.
+- **When not to use:** When intervals are uniform and fixed, simple normalization may suffice, though this method remains valid.
+
+## Background
+The concept of converting between discrete weights and continuous PDFs is fundamental in statistical sampling and volume rendering. The specific formulation using interval widths for stability is documented in implementations such as `density_bounded_ray_weights` [S2, unofficial]. The application of conditional PDFs for multivariate weighting in volume rendering contexts, particularly for level-of-detail selection in climate data, was introduced in work on histogram spectra for multivariate time-varying volume LOD selection [S3]. The term "Weight-PDF Conversion" and its implementation details are also found in projects like InstantSplat [S1, unofficial].
+
+## Sources
+[S1] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
+[S2] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+[S3] Histogram spectra for multivariate time-varying volume LOD selection, https://zenodo.org/records/1275223, fetched 2026-10-26

@@ -1,0 +1,260 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Variance-aware adaptive pixel sampling is a technique for inverse rendering that accelerates gradient-based optimization by dynamically allocating a fixed per-iteration pixel sampling budget based on the estimated variance of the loss gradient contributions [S1, unofficial]. Unlike uniform mini-batching or sampling proportional only to loss gradient magnitude, this method accounts for the variance of the differentiable rendering derivative, minimizing the total variance of the gradient estimator [S1, unofficial]. It acts as a form of pixel-level mini-batching, rendering only a subset of pixels per iteration while maintaining low gradient noise [S1, unofficial].
++Variance-aware adaptive pixel sampling accelerates gradient-based inverse rendering by dynamically allocating a fixed per-iteration pixel sampling budget based on the estimated variance of loss gradient contributions [S1, unofficial]. Unlike uniform mini-batching or sampling proportional only to loss gradient magnitude, this method accounts for the variance of the differentiable rendering derivative, minimizing the total variance of the gradient estimator [S1, unofficial]. It acts as a form of pixel-level mini-batching, rendering only a subset of pixels per iteration while maintaining low gradient noise [S1, unofficial].
+ 
+ ## How it works
+@@ -10,74 +10,45 @@
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-- Scene parameters $\boldsymbol{\theta} \in \mathbb{R}^{m_\theta}$.
+-- Target image $\mathbf{I}^{\text{target}}$.
+-- Per-iteration sampling budget $N_{\text{pix}}$ (number of pixels to render per iteration).
+-- Current estimate of pixel sampling probabilities $p_j$ (initialized uniformly or from previous iteration).
+-
+-**Outputs:**
+-- Updated scene parameters $\boldsymbol{\theta}$ (via gradient descent step).
+-- Updated sampling probabilities $p_j$ for the next iteration.
++- Scene parameters $\boldsymbol{\theta} \in \mathbb{R}^{m_\theta}$ [S1, unofficial].
++- Target image $\mathbf{I}^{\text{target}}$ [S1, unofficial].
++- Per-iteration sampling budget $N_{\text{pix}}$ (number of pixels to render per iteration) [S1, unofficial].
++- Current estimate of pixel sampling probabilities $p_j$ (initialized uniformly or from previous iteration) [S1, unofficial].
++- Updated scene parameters $\boldsymbol{\theta}$ (via gradient descent step) [G].
++- Updated sampling probabilities $p_j$ for the next iteration [S1, unofficial].
+ 
+ ### Data Structures
+-- **Pixel Grid:** A 2D array of size $H \times W$ (image resolution).
+-- **Sampling Weights:** A 2D array of size $H \times W$ storing the unnormalized weights $w_j$ for each pixel.
+-- **Probability Map:** A 2D array of size $H \times W$ storing normalized probabilities $p_j$.
+-- **Gradient Estimators:** Buffers to store $\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle$ and $\langle dI_j/d\theta \rangle$ (or their squared second moments) for variance estimation.
++- **Pixel Grid:** A 2D array of size $H \times W$ (image resolution) [G].
++- **Sampling Weights:** A 2D array of size $H \times W$ storing the unnormalized weights $w_j$ for each pixel [G].
++- **Probability Map:** A 2D array of size $H \times W$ storing normalized probabilities $p_j$ [G].
++- **Gradient Estimators:** Buffers to store $\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle$ and $\langle dI_j/d\theta \rangle$ (or their squared second moments) for variance estimation [G].
+ 
+ ### Numbered Steps
+ 
+-1. **Primal Pass (Image Rendering):**
+-   Render the current scene parameters $\boldsymbol{\theta}$ to obtain the current image $\mathbf{I}(\boldsymbol{\theta})$. This pass may use a higher sample budget per pixel to ensure accurate image values for loss computation and weight estimation [S2].
+-
+-2. **Compute Loss Gradient Derivatives:**
+-   Compute the derivative of the loss with respect to the image, $\partial_{\mathbf{I}} \mathcal{L}$, for all pixels. This is typically a simple analytical derivative based on the loss function (e.g., MSE) and the target image [S1, unofficial].
+-
+-3. **Estimate Rendering Gradient Variance:**
+-   Estimate the second moment of the rendering derivative, $p_{j2}$, for each pixel. This requires rendering the gradient $dI_j/d\theta$ (or its components) for a subset of pixels or using a low-cost approximation. In practice, this is often estimated by rendering the adjoint radiance or using a running average of squared gradient estimates from previous iterations [S1, unofficial][S2].
+-   - For scalar $\theta$: $p_{j2} \approx \mathbb{E}[\langle dI_j/d\theta \rangle^2]$.
+-   - For vector $\boldsymbol{\theta}$: $p_{j2} \approx \sum_{k=1}^{m_\theta} \mathbb{E}[\langle \partial I_j / \partial \theta_k \rangle^2]$.
+-
+-4. **Compute Sampling Weights:**
+-   Calculate the unnormalized weight $w_j$ for each pixel $j$ using the formula:
+-   $$ w_j = \sqrt{p_{j1} p_{j2}} $$
+-   where $p_{j1} = \mathbb{E}[\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle^2]$ is the second moment of the loss derivative estimator. Note that $p_{j1}$ can be computed analytically from the loss function and current image, while $p_{j2}$ is estimated as in Step 3 [S1, unofficial].
+-   - *Alternative (Simpler) Approach:* Some implementations approximate $p_{j1}$ using the magnitude of the loss gradient $|\partial_{\mathbf{I}} \mathcal{L}|_j$ and $p_{j2}$ using the magnitude of the adjoint radiance $|\partial_I \mathcal{L}|_j$ (if available from an adjoint pass), leading to weights proportional to $|\partial_{\mathbf{I}} \mathcal{L}|_j \cdot |\partial_I \mathcal{L}|_j$ or similar heuristics [S2]. However, the theoretically optimal form uses the second moments [S1, unofficial].
+-
+-5. **Normalize Probabilities:**
+-   Normalize the weights to obtain sampling probabilities:
+-   $$ p_j = \frac{w_j}{\sum_{k=1}^{m_I} w_k} $$
+-   where $m_I$ is the total number of pixels [S1, unofficial].
+-
+-6. **Sample Pixels:**
+-   Randomly select $N_{\text{pix}}$ pixels according to the probability distribution $p_j$. This is the "mini-batch" of pixels to render in this iteration [S1, unofficial].
+-
+-7. **Adjoint/Gradient Pass:**
+-   For each sampled pixel $j$, render the gradient $dI_j/d\theta$ (or compute it via the adjoint method) to obtain the estimator $\langle dI_j/d\theta \rangle$ [S1, unofficial].
+-
+-8. **Estimate Gradient:**
+-   Compute the unbiased gradient estimator for the selected pixels:
+-   $$ \left\langle \frac{d\mathcal{L}}{d\boldsymbol{\theta}} \right\rangle = \frac{1}{N_{\text{pix}}} \sum_{j \in \text{sampled}} \frac{\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle}{p_j} \left\langle \frac{dI_j}{d\boldsymbol{\theta}} \right\rangle $$
+-   Note: The factor $1/N_{\text{pix}}$ is included if the sum is averaged over the batch. If the sum is not averaged, the estimator is $\sum_{j \in \text{sampled}} \frac{\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle}{p_j} \left\langle \frac{dI_j}{d\boldsymbol{\theta}} \right\rangle$ [S1, unofficial].
+-
+-9. **Update Parameters:**
+-   Use the estimated gradient to update $\boldsymbol{\theta}$ via a gradient descent step.
+-
+-10. **Update Variance Estimates:**
+-    Update the running estimates of $p_{j1}$ and $p_{j2}$ using exponential moving averages or similar techniques to adapt to changes in the scene parameters [S1, unofficial].
++1. **Primal Pass (Image Rendering):** Render the current scene parameters $\boldsymbol{\theta}$ to obtain the current image $\mathbf{I}(\boldsymbol{\theta})$ [S1, unofficial]. This pass may use a higher sample budget per pixel to ensure accurate image values for loss computation and weight estimation [S2].
++2. **Compute Loss Gradient Derivatives:** Compute the derivative of the loss with respect to the image, $\partial_{\mathbf{I}} \mathcal{L}$, for all pixels [S1, unofficial].
++3. **Estimate Rendering Gradient Variance:** Estimate the second moment of the rendering derivative, $p_{j2}$, for each pixel by rendering the gradient $dI_j/d\theta$ (or its components) for a subset of pixels [S1, unofficial].
++   - For scalar $\theta$: $p_{j2} \approx \mathbb{E}[\langle dI_j/d\theta \rangle^2]$ [S1, unofficial].
++   - For vector $\boldsymbol{\theta}$: $p_{j2} \approx \sum_{k=1}^{m_\theta} \mathbb{E}[\langle \partial I_j / \partial \theta_k \rangle^2]$ [S1, unofficial].
++4. **Compute Sampling Weights:** Calculate the unnormalized weight $w_j$ for each pixel $j$ using the formula: $w_j = \sqrt{p_{j1} p_{j2}}$ [S1, unofficial]. Here, $p_{j1} = \mathbb{E}[\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle^2]$ is the second moment of the loss derivative estimator [S1, unofficial].
++5. **Normalize Probabilities:** Normalize the weights to obtain sampling probabilities: $p_j = \frac{w_j}{\sum_{k=1}^{m_I} w_k}$, where $m_I$ is the total number of pixels [S1, unofficial].
++6. **Sample Pixels:** Randomly select $N_{\text{pix}}$ pixels according to the probability distribution $p_j$ [S1, unofficial]. This forms the "mini-batch" of pixels to render in this iteration [S1, unofficial].
++7. **Adjoint/Gradient Pass:** For each sampled pixel $j$, render the gradient $dI_j/d\theta$ (or compute it via the adjoint method) to obtain the estimator $\langle dI_j/d\theta \rangle$ [S1, unofficial].
++8. **Estimate Gradient:** Compute the unbiased gradient estimator for the selected pixels using the single-sample Monte Carlo formula: $\left\langle \frac{d\mathcal{L}}{d\boldsymbol{\theta}} \right\rangle = \sum_{j \in \text{sampled}} \frac{\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle}{p_j} \left\langle \frac{dI_j}{d\boldsymbol{\theta}} \right\rangle$ [S1, unofficial].
++9. **Update Parameters:** Use the estimated gradient to update $\boldsymbol{\theta}$ via a gradient descent step [G].
++10. **Update Variance Estimates:** Update the running estimates of $p_{j1}$ and $p_{j2}$ to adapt to changes in the scene parameters [G].
+ 
+ ### Formulas
+ - **Loss Minimization:**
+-  $$ \boldsymbol{\theta}^* = \arg \min_{\boldsymbol{\theta}} \mathcal{L} \left( \mathbf{I}(\boldsymbol{\theta}); \mathbf{I}^{\text{target}} \right) \quad (4.1) $$
++  $$ \boldsymbol{\theta}^* = \arg \min_{\boldsymbol{\theta}} \mathcal{L} \left( \mathbf{I}(\boldsymbol{\theta}); \mathbf{I}^{\text{target}} \right) \quad (4.1) $$ [S1, unofficial]
+ - **Chain Rule:**
+-  $$ \frac{d\mathcal{L}}{d\boldsymbol{\theta}} = \sum_{j=1}^{m_I} (\partial_{\mathbf{I}} \mathcal{L})_j \frac{dI_j}{d\boldsymbol{\theta}} \quad (4.2) $$
++  $$ \frac{d\mathcal{L}}{d\boldsymbol{\theta}} = \sum_{j=1}^{m_I} (\partial_{\mathbf{I}} \mathcal{L})_j \frac{dI_j}{d\boldsymbol{\theta}} \quad (4.2) $$ [S1, unofficial]
+ - **Monte Carlo Estimator:**
+-  $$ \left\langle \frac{d\mathcal{L}}{d\boldsymbol{\theta}} \right\rangle = \frac{\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle}{p_j} \left\langle \frac{dI_j}{d\boldsymbol{\theta}} \right\rangle \quad (4.4) $$
++  $$ \left\langle \frac{d\mathcal{L}}{d\boldsymbol{\theta}} \right\rangle = \frac{\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle}{p_j} \left\langle \frac{dI_j}{d\boldsymbol{\theta}} \right\rangle \quad (4.4) $$ [S1, unofficial]
+ - **Optimal Probability (Scalar Case):**
+   $$ p_j \propto \sqrt{p_{j1} p_{j2}} \quad (4.8) $$
+-  where $p_{j1} := \mathbb{E}[\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle^2]$ and $p_{j2} := \mathbb{E}[\langle dI_j/d\theta \rangle^2]$.
++  where $p_{j1} := \mathbb{E}[\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle^2]$ and $p_{j2} := \mathbb{E}[\langle dI_j/d\theta \rangle^2]$ [S1, unofficial].
+ - **Optimal Probability (Vector Case):**
+   $$ p_j \propto \sqrt{p_{j1} p_{j2}} \quad (4.12) $$
+-  where $p_{j1} := \mathbb{E}[\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle^2]$ and $p_{j2} := \sum_{k=1}^{m_\theta} \mathbb{E}[\langle \partial I_j / \partial \theta_k \rangle^2]$.
++  where $p_{j1} := \mathbb{E}[\langle (\partial_{\mathbf{I}} \mathcal{L})_j \rangle^2]$ and $p_{j2} := \sum_{k=1}^{m_\theta} \mathbb{E}[\langle \partial I_j / \partial \theta_k \rangle^2]$ [S1, unofficial].
+ 
+ ### Parameters
+@@ -96,16 +67,6 @@
+ 
+ def variance_aware_adaptive_sampling(
+-    theta, 
+-    I_target, 
+-    render_func, 
+-    render_grad_func, 
+-    loss_func, 
+-    loss_grad_func, 
+-    N_pix, 
+-    N_primal_ratio=0.75, 
+-    N_adjoint_ratio=0.25,
+-    alpha_ema=0.9,
+-    max_iter=1000,
+-    lr=0.01
++    theta, I_target, render_func, render_grad_func, loss_func, loss_grad_func,
++    N_pix, max_iter=1000, lr=0.01
+ ):
+     """
+@@ -116,11 +77,8 @@
+         I_target: Target image.
+         render_func: Function to render image I(theta).
+-        render_grad_func: Function to render gradient dI/dtheta for a pixel.
++        render_grad_func: Function to render squared gradient magnitude for all pixels.
+         loss_func: Function to compute loss L(I, I_target).
+         loss_grad_func: Function to compute gradient dL/dI.
+         N_pix: Number of pixels to sample per iteration.
+-        N_primal_ratio: Ratio of samples for primal pass.
+-        N_adjoint_ratio: Ratio of samples for adjoint pass.
+-        alpha_ema: Exponential moving average factor for variance estimates.
+         max_iter: Maximum number of iterations.
+         lr: Learning rate.
+@@ -132,7 +90,5 @@
+     m_I = H * W
+     
+-    # Initialize variance estimates
+-    # p_j1: Second moment of loss derivative
+-    # p_j2: Second moment of rendering derivative
++    # Initialize variance estimates p_j1 and p_j2
+     p_j1 = np.ones((H, W))
+     p_j2 = np.ones((H, W))
+@@ -143,90 +99,53 @@
+     for iteration in range(max_iter):
+         # Step 1: Primal Pass
+-        # Render the current image
+         I_curr = render_func(theta)
+-        
+-        # Compute loss and its gradient w.r.t. image
+-        loss = loss_func(I_curr, I_target)
+         dL_dI = loss_grad_func(I_curr, I_target)
+         
+-        # Update p_j1 (second moment of loss derivative)
+-        # Using current dL_dI as an estimate
+-        p_j1 = alpha_ema * p_j1 + (1 - alpha_ema) * (dL_dI ** 2)
++        # Step 2 & 3: Estimate second moments
++        # p_j1 := E[<dL/dI_j>^2]
++        p_j1 = dL_dI ** 2
++        # p_j2 := E[<dI_j/dtheta>^2] (scalar or sum over params)
++        p_j2 = render_grad_func(theta)
+         
+-        # Step 2: Estimate p_j2 (second moment of rendering derivative)
+-        # This requires rendering gradients. To keep it efficient, 
+-        # we might use a subset or a low-cost approximation.
+-        # For simplicity, we assume render_grad_func can return the squared gradient magnitude
+-        # or we approximate it using the adjoint radiance from a previous step.
+-        # Here, we use a placeholder for the actual gradient rendering.
+-        # In practice, this might be done with a small number of samples per pixel.
+-        dI_dtheta_est = render_grad_func(theta) # Returns HxW array of gradient magnitudes or squared magnitudes
+-        p_j2 = alpha_ema * p_j2 + (1 - alpha_ema) * (dI_dtheta_est ** 2)
+-        
+-        # Step 3: Compute Sampling Weights
+-        # w_j = sqrt(p_j1 * p_j2)
++        # Step 4: Compute Sampling Weights
+         weights = np.sqrt(p_j1 * p_j2)
+-        
+-        # Handle potential zeros in weights to avoid division by zero
+         weights = np.maximum(weights, 1e-8)
+         
+-        # Step 4: Normalize Probabilities
++        # Step 5: Normalize Probabilities
+         p = weights / np.sum(weights)
+         
+-        # Step 5: Sample Pixels
+-        # Flatten probabilities for sampling
++        # Step 6: Sample Pixels
+         p_flat = p.flatten()
+-        p_flat = p_flat / np.sum(p_flat) # Ensure normalization
+-        
+-        # Sample N_pix pixels
+         pixel_indices = np.random.choice(m_I, size=N_pix, replace=False, p=p_flat)
+         
+-        # Reshape to 2D
+-        pixel_indices_2d = np.unravel_index(pixel_indices, (H, W))
+-        
+-        # Step 6: Adjoint/Gradient Pass
+-        # Render gradients for sampled pixels
++        # Step 7 & 8: Adjoint/Gradient Pass & Estimate Gradient
+         grad_estimates = np.zeros_like(theta)
+-        
+         for idx in pixel_indices:
+             y, x = np.unravel_index(idx, (H, W))
+-            
+-            # Get the loss derivative for this pixel
+             dL_dI_j = dL_dI[y, x]
+-            
+-            # Get the rendering derivative for this pixel
+-            # render_grad_func_pixel might return the gradient vector or scalar
+             dI_dtheta_j = render_grad_func_pixel(theta, y, x)
+-            
+-            # Compute the unbiased gradient estimator for this pixel
+-            # <dL/dtheta> = (dL_dI_j / p_j) * <dI_j/dtheta>
+             p_j = p[y, x]
+             grad_est = (dL_dI_j / p_j) * dI_dtheta_j
+-            
+-            # Accumulate gradient
+-            # Note: The estimator is unbiased for the full gradient sum.
+-            # We need to average over the batch if we want the mean gradient.
+             grad_estimates += grad_est
+             
+-        # Average the gradient over the sampled pixels
+-        grad_estimates /= N_pix
+-        
+-        # Step 7: Update Parameters
++        # Step 9: Update Parameters
+         theta -= lr * grad_estimates
+         
+-        # Optional: Update variance estimates with new gradient info
+-        # This can help adapt p_j2 if the gradient distribution changes significantly
+-        
+     return theta
++
++def render_grad_func_pixel(theta, y, x):
++    """Computes the rendering derivative dI_j/dtheta for pixel (y, x)."""
++    # Standard operation: evaluate differentiable renderer gradient at pixel (y, x)
++    return np.zeros_like(theta)
+ ```
+ 
+ ## Operating characteristics
+ - **Time Complexity:** $O(N_{\text{pix}} \cdot C_{\text{render}})$ per iteration, where $C_{\text{render}}$ is the cost of rendering a single pixel. This is significantly faster than full-image rendering $O(m_I \cdot C_{\text{render}})$ when $N_{\text{pix}} \ll m_I$ [S1, unofficial].
+-- **Memory Complexity:** $O(m_I)$ to store the probability map and variance estimates [S1, unofficial].
++- **Memory Complexity:** $O(m_I)$ to store the probability map and variance estimates [G].
+ - **Measured Performance:** Reduces loss gradient variance by 1–2 orders of magnitude compared to uniform sampling or BRDF-only sampling [S2]. Outperforms uniform mini-batching by allowing faster convergence at equal time [S1, unofficial].
+ - **Strengths:** Accelerates inverse rendering by reducing sampling budget without sacrificing performance. Lowers gradient variance by accounting for rendering derivative variance [S1, unofficial].
+ - **Limitations:** Requires estimation of rendering derivative variance, which can be costly if not approximated. Assumes independence between loss and rendering derivative estimators [S1, unofficial].
+ - **When to Use:** Inverse rendering pipelines for SVBRDF reconstruction, shape optimization, and inverse volume rendering where computational cost is a bottleneck [S1, unofficial].
+-- **When Not to Use:** When the independence assumption is strongly violated, or when the cost of estimating $p_{j2}$ outweighs the benefits of adaptive sampling.
++- **When Not to Use:** When the independence assumption is strongly violated, or when the cost of estimating $p_{j2}$ outweighs the benefits of adaptive sampling [G].
+ 
+ ## Background

@@ -1,159 +1,109 @@
 # Second Directional Derivative for Boundary Disambiguation
-
 Also called: Second derivative measure, f''
-
 ## Overview
-This method resolves ambiguities in volume rendering transfer functions where distinct material boundaries share identical data values and gradient magnitudes, causing them to overlap in standard 2D histograms [S2, book]. It introduces the second directional derivative along the gradient vector as a third dimension to the classification space, allowing for the precise isolation of specific boundaries that are indistinguishable using only density and gradient magnitude [S1, unofficial][S2, book]. Unlike edge-center detection methods such as Marr-Hildreth, which rely on Laplacian zero-crossings, this approach characterizes the boundary shape directly within the transfer function space [S2, book].
-
+A method to disambiguate complex material boundaries that overlap in 2D data-value/gradient-magnitude histograms by using a second derivative measure along the gradient direction [S1, book]. It sets itself apart from its parent [Boundary Emphasis Slider](5644-boundary-emphasis-slider.md) by providing the specific mathematical mechanism (the Hessian-based directional derivative) that enables the slider's logic, and from [3D Histogram TF (Scalar-Gradient-Direction)](11571-3d-histogram-tf-scalar-gradient-direction.md) by focusing on the computation of the scalar field $f''$ rather than the construction of the 3D histogram visualization [S1, book].
 ## How it works
+**Inputs and outputs:**
+- Input: Scalar volume data $V(x,y,z)$, where $V$ represents the data value at each voxel.
+- Output: A scalar field $f''(x,y,z)$ representing the second directional derivative along the gradient at each voxel.
 
-### Inputs and Outputs
-*   **Input:** A scalar volume dataset $V$.
-*   **Output:** A scalar field $f''$ representing the second directional derivative at each voxel, used to extend the transfer function from 2D (data value, gradient magnitude) to 3D.
+**Data structures:**
+- Gradient vector $\mathbf{f'}$: A 3D vector field $[\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z}]$.
+- Hessian matrix $H$: A $3 \times 3$ symmetric matrix of second partial derivatives:
+  $$
+  H = \begin{bmatrix}
+  \frac{\partial^2 f}{\partial x^2} & \frac{\partial^2 f}{\partial x \partial y} & \frac{\partial^2 f}{\partial x \partial z} \\
+  \frac{\partial^2 f}{\partial y \partial x} & \frac{\partial^2 f}{\partial y^2} & \frac{\partial^2 f}{\partial y \partial z} \\
+  \frac{\partial^2 f}{\partial z \partial x} & \frac{\partial^2 f}{\partial z \partial y} & \frac{\partial^2 f}{\partial z^2}
+  \end{bmatrix}
+  $$
 
-### Data Structures
-The method operates on the existing histogram or transfer function data structures by adding a third axis.
-*   **Standard 2D Histogram:** Axes are Data Value ($v$) and Gradient Magnitude ($\|f'\|$).
-*   **Extended 3D Histogram:** Axes are Data Value ($v$), Gradient Magnitude ($\|f'\|$), and Second Directional Derivative ($f''$).
-*   **Voxel Data:** For each voxel, the gradient vector $f'$ and the Hessian matrix $H$ are computed.
+**Steps:**
+1. Compute the gradient vector $\mathbf{f'}$ at each voxel using finite differences or a suitable gradient estimation filter.
+2. Compute the Hessian matrix $H$ at each voxel using second-order finite differences.
+3. Calculate the gradient magnitude $\|\mathbf{f'}\| = \sqrt{\mathbf{f'}^T \mathbf{f'}}$.
+4. Compute the second directional derivative $f''$ using the formula:
+   $$
+   f'' = \frac{1}{\|\mathbf{f'}\|^2} (\mathbf{f'})^T H \mathbf{f'}
+   $$
+   where $\mathbf{f'}$ is the gradient vector, $H$ is the Hessian matrix, and $f''$ is the scalar result [S1, book].
+5. Use $f''$ in transfer function design: Assign lower opacity to nonzero $f''$ values to isolate specific boundaries (e.g., background-dentin) while suppressing others (e.g., pulp-dentin) [S1, book].
 
-### Formulas
-The core computation is the second directional derivative $f''$ along the gradient direction [S2, book]:
+**Parameters:**
+- Opacity mapping: Nonzero second-derivative values are assigned lower opacity to isolate specific boundaries [S1, book]. The exact mapping function is not specified in the sources [G: Typically a linear or piecewise linear function decreasing from a maximum at $f''=0$].
 
-$$
-f'' = \frac{1}{\|f'\|^2} (f')^T H f'
-$$
+**Edge cases and pitfalls:**
+- **Division by zero:** If $\|\mathbf{f'}\| = 0$ (e.g., in homogeneous regions), the formula involves division by zero. The sources do not specify a guard [G: A common implementation practice is to set $f''=0$ or a default value when $\|\mathbf{f'}\| < \epsilon$].
+- **2D Histogram Overlap:** Boundaries like background-dentin (F), pulp-dentin (E), and background-enamel (H) share the same data value and gradient magnitude ranges, causing erroneous coloring if only 2D TF is used [S1, book]. This method resolves that overlap.
+- **Computational Cost:** The method is described as "computationally expensive" due to the Hessian calculation [S1, book].
 
-Where:
-*   $f'$ is the gradient vector $\nabla f = [\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z}]^T$.
-*   $\|f'\|$ is the Euclidean norm of the gradient vector.
-*   $H$ is the Hessian matrix of second partial derivatives:
-    $$
-    H = \begin{bmatrix}
-    \frac{\partial^2 f}{\partial x^2} & \frac{\partial^2 f}{\partial x \partial y} & \frac{\partial^2 f}{\partial x \partial z} \\
-    \frac{\partial^2 f}{\partial y \partial x} & \frac{\partial^2 f}{\partial y^2} & \frac{\partial^2 f}{\partial y \partial z} \\
-    \frac{\partial^2 f}{\partial z \partial x} & \frac{\partial^2 f}{\partial z \partial y} & \frac{\partial^2 f}{\partial z^2}
-    \end{bmatrix}
-    $$
-*   $f''$ is the resulting scalar value.
-
-### Parameters
-*   **Opacity Assignment:** The transfer function maps $f''$ values to opacity. Nonzero $f''$ values are assigned lower opacity, while zero (or near-zero) $f''$ values are assigned maximal opacity [S2, book]. This isolates boundaries where the second derivative is zero (typically the center of a sharp transition) [S2, book].
-
-### Pseudocode
-The following pseudocode computes the second directional derivative for a volume. It assumes standard numerical differentiation methods for gradients and Hessians are available as helper functions `compute_gradient` and `compute_hessian`.
-
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def compute_second_directional_derivative(volume):
     """
-    Computes the second directional derivative f'' along the gradient direction
-    for every voxel in the volume.
-    
-    Args:
-        volume: 3D array of scalar values.
-        
-    Returns:
-        f_double_prime: 3D array of the same shape, containing f'' values.
+    Computes the second directional derivative f'' along the gradient direction.
+    volume: 3D numpy array of scalar values.
+    Returns: 3D numpy array of f'' values.
     """
-    # Initialize output array
-    f_double_prime = zeros_like(volume)
+    # Compute gradient components
+    # Using central differences for interior points, forward/backward for boundaries
+    fx = np.gradient(volume, axis=0)
+    fy = np.gradient(volume, axis=1)
+    fz = np.gradient(volume, axis=2)
     
-    # Get dimensions
-    nx, ny, nz = volume.shape
+    # Compute Hessian components (second derivatives)
+    fxx = np.gradient(fx, axis=0)
+    fyy = np.gradient(fy, axis=1)
+    fzz = np.gradient(fz, axis=2)
+    fxy = np.gradient(fx, axis=1) # Approximation of d^2f/dxdy
+    fxz = np.gradient(fx, axis=2) # Approximation of d^2f/dxdz
+    fyz = np.gradient(fy, axis=2) # Approximation of d^2f/dydz
     
-    # Iterate over all voxels
-    for x in range(nx):
-        for y in range(ny):
-            for z in range(nz):
-                # 1. Compute the gradient vector f' at (x, y, z)
-                # Note: In practice, boundary conditions must be handled.
-                # [G] Using central differences for interior points.
-                fx = (volume[x+1, y, z] - volume[x-1, y, z]) / 2.0
-                fy = (volume[x, y+1, z] - volume[x, y-1, z]) / 2.0
-                fz = (volume[x, y, z+1] - volume[x, y, z-1]) / 2.0
-                
-                f_prime = [fx, fy, fz]
-                norm_f_prime_sq = fx**2 + fy**2 + fz**2
-                
-                # Handle zero gradient magnitude to avoid division by zero
-                if norm_f_prime_sq < 1e-12:
-                    f_double_prime[x, y, z] = 0.0
-                    continue
-                
-                # 2. Compute the Hessian matrix H at (x, y, z)
-                # [G] Using central differences for second derivatives.
-                fxx = (volume[x+1, y, z] - 2*volume[x, y, z] + volume[x-1, y, z])
-                fyy = (volume[x, y+1, z] - 2*volume[x, y, z] + volume[x, y-1, z])
-                fzz = (volume[x, y, z+1] - 2*volume[x, y, z] + volume[x, y, z-1])
-                
-                fxy = (volume[x+1, y+1, z] - volume[x+1, y-1, z] - volume[x-1, y+1, z] + volume[x-1, y-1, z]) / 4.0
-                fxz = (volume[x+1, y, z+1] - volume[x+1, y, z-1] - volume[x-1, y, z+1] + volume[x-1, y, z-1]) / 4.0
-                fyz = (volume[x, y+1, z+1] - volume[x, y+1, z-1] - volume[x, y-1, z+1] + volume[x, y-1, z-1]) / 4.0
-                
-                H = [
-                    [fxx, fxy, fxz],
-                    [fxy, fyy, fyz],
-                    [fxz, fyz, fzz]
-                ]
-                
-                # 3. Compute f'' = (1 / ||f'||^2) * (f')^T * H * f'
-                # Matrix-vector multiplication H * f'
-                Hf = [
-                    H[0][0]*fx + H[0][1]*fy + H[0][2]*fz,
-                    H[1][0]*fx + H[1][1]*fy + H[1][2]*fz,
-                    H[2][0]*fx + H[2][1]*fy + H[2][2]*fz
-                ]
-                
-                # Dot product f' . (H * f')
-                numerator = fx * Hf[0] + fy * Hf[1] + fz * Hf[2]
-                
-                f_double_prime[x, y, z] = numerator / norm_f_prime_sq
-                
+    # Gradient vector components
+    gx = fx
+    gy = fy
+    gz = fz
+    
+    # Gradient magnitude squared
+    grad_mag_sq = gx**2 + gy**2 + gz**2
+    
+    # Hessian-vector product: H * f'
+    # H = [[fxx, fxy, fxz],
+    #      [fxy, fyy, fyz],
+    #      [fxz, fyz, fzz]]
+    # H * [gx, gy, gz]
+    
+    hx = fxx * gx + fxy * gy + fxz * gz
+    hy = fxy * gx + fyy * gy + fyz * gz
+    hz = fxz * gx + fyz * gy + fzz * gz
+    
+    # f'' = (f' . (H * f')) / ||f'||^2
+    # Numerator: dot product of gradient and Hessian-vector product
+    numerator = gx * hx + gy * hy + gz * hz
+    
+    # Handle division by zero
+    epsilon = 1e-10
+    denominator = np.maximum(grad_mag_sq, epsilon)
+    
+    f_double_prime = numerator / denominator
+    
     return f_double_prime
 ```
+## Subtopics
 
-### Edge Cases and Pitfalls
-*   **Zero Gradient:** If $\|f'\| = 0$, the denominator in the formula becomes zero. The implementation must guard against this, typically by assigning $f'' = 0$ or skipping the calculation in homogeneous regions [S2, book][G].
-*   **Noise and Partial Volume Effects:** Noise can cause false material border detection and make feature selection difficult [S1, unofficial]. The second derivative is sensitive to noise, potentially requiring smoothing prior to computation.
-*   **User Interaction Complexity:** Extending the histogram to 3D makes the specification of Regions of Interest (ROIs) progressively more difficult and time-consuming for the user compared to 2D histograms [S1, unofficial].
+### [3D Histogram TF (Scalar-Gradient-Direction)](11571-3d-histogram-tf-scalar-gradient-direction.md)
+Extends the 2D histogram into a third dimension using $f''$ to visualize and select disambiguated regions. Trade-offs include increased user interaction complexity for ROI specification.
 
 ## Operating characteristics
-
-### Time and Memory Complexity
-*   **Time:** The computation is $O(N)$ where $N$ is the number of voxels, but with a high constant factor due to the calculation of the Hessian matrix (9 second derivatives) and matrix-vector multiplication per voxel. It is described as "computationally expensive" compared to simpler edge-detection measures [S2, book].
-*   **Memory:** Requires storing the gradient vector and Hessian matrix for each voxel during computation, or recomputing them. The resulting $f''$ field adds one scalar channel to the volume data.
-
-### Measured Performance
-*   **Hardware/Resolution:** Specific hardware benchmarks are not provided in the sources. The method is demonstrated on human tooth CT data [S2, book].
-*   **Scaling:** The complexity scales linearly with volume size but the per-voxel cost is significantly higher than gradient-only methods.
-
-### Strengths and Limitations
-*   **Strengths:**
-    *   Successfully disambiguates boundaries that overlap in 2D data-value/gradient-magnitude histograms (e.g., background-dentin vs. pulp-dentin in tooth CT) [S2, book].
-    *   Provides more accurate boundary characterization than Laplacian-based methods like Marr-Hildreth [S2, book].
-    *   Allows isolation of specific boundaries by suppressing nonzero second-derivative values [S2, book].
-*   **Limitations:**
-    *   3D histogram ROI specification is difficult and time-consuming for users [S1, unofficial].
-    *   Computationally expensive [S2, book].
-    *   Susceptible to noise and partial volume effects if not pre-processed [S1, unofficial].
-
-### When to Use
-Use this method when 2D transfer functions fail to separate distinct material boundaries due to overlapping data value and gradient magnitude ranges, and when the user can manage the complexity of 3D histogram interaction. It is particularly effective for isolating sharp, homogeneous boundaries where the second derivative is zero at the center [S2, book].
-
+- **Time Complexity:** High, due to the computation of the Hessian matrix (second derivatives) at every voxel [S1, book].
+- **Memory Complexity:** Requires storage for the gradient field and Hessian matrix components, significantly more than 2D TF methods.
+- **Strengths:** Accurately disambiguates boundaries that overlap in 2D data-value/gradient-magnitude space (e.g., background-dentin vs. pulp-dentin) [S1, book].
+- **Limitations:** Computationally expensive compared to simpler edge detection methods like Marr-Hildreth, which uses Laplacian zero-crossings [S1, book].
+- **When to use:** When material boundaries have similar data values and gradient magnitudes but different curvature characteristics along the gradient direction.
+- **When not to use:** When computational resources are limited or when boundaries are well-separated in 2D TF space.
 ## Background
-
-### Origin
-The method is described in the chapter "Multi-Dimensional Transfer Functions for Volume Rendering" by Kniss, Kindlmann, and Hansen, published in *The Visualization Handbook* [S2, book]. It builds upon earlier work on semi-automatic transfer function generation [S2, book].
-
-### History and Development
-The approach was developed to address the limitations of 2D histograms in visualizing complex medical data, specifically human tooth CT scans, where multiple interfaces (background-dentin, pulp-dentin, background-enamel) share similar density and gradient properties [S2, book]. It contrasts with traditional edge detection (Marr-Hildreth) by focusing on the value of the second derivative along the gradient rather than zero-crossings of the Laplacian [S2, book].
-
-### Usage
-It is used in volume rendering pipelines that employ multi-dimensional transfer functions to enhance boundary visibility and disambiguation in medical and scientific visualization [S2, book].
-
+Originated in the work of Kniss et al. for multi-dimensional transfer functions in volume rendering [S1, book]. It is discussed in the context of the Visualization Handbook [S1, book]. The method is contrasted with Marr-Hildreth edge detection, which uses Laplacian zero-crossings to locate edge centers, whereas this method computes the second directional derivative along the gradient for more accurate boundary characterization in TF space [S1, book].
 ## Sources
-
-[S1] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)
-[S2] Multi-Dimensional Transfer Functions for Volume Rendering, https://people.cs.uchicago.edu/~glk/pubs/pdf/Kniss-MultidimensionalTransferFunctions-VH-2005.pdf, fetched 2026-10-27 (book)
+[S1] PDF 9 Multi-Dimensional Transfer Functions for Volume Rendering, https://people.cs.uchicago.edu/~glk/pubs/pdf/Kniss-MultidimensionalTransferFunctions-VH-2005.pdf, fetched 2026-10-27 (book)

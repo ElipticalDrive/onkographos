@@ -1,235 +1,293 @@
 # Volume Ray Casting
 
-Also called: Volume Ray Tracing, Backward Ray Casting, Composite Ray Casting, Back-to-front ray casting, Ray Casting (Image Order), Image-Order Volume Rendering, Volume Rendering (Image Order)
+Also called: Back-to-front ray casting, Front-to-Back Ray Casting, Levoy's Volume Ray-Tracing, Regular Ray Casting Method, Standard Ray Casting, Volume Ray Tracing
 
 ## Overview
-
-Image-order Ray-Casting is a direct volume rendering technique that synthesizes a 2D projection from 3D scalar or vector data by casting primary rays from the viewpoint through each pixel of the image plane into the volumetric dataset [S1, unofficial][S2, unofficial][S3, unofficial]. It solves the problem of visualizing semi-transparent, fuzzy, or weakly bounded structures (such as medical tissues or fluid dynamics) without requiring explicit geometric surface extraction [S2, unofficial][S3, unofficial]. Unlike [Surface Ray Tracing](3002-ray-tracing-binary-objects.md) which terminates at explicit boundaries and spawns secondary rays, or [Splatting](3560-per-primitive-ray-sampling.md) which projects voxels onto the image plane (object-order), Ray-Casting samples the volume continuously along viewing rays and composites optical properties using the Porter-Duff over operator [S2, unofficial][S3, unofficial][S4, unofficial].
+Volume Ray Casting is a direct volume rendering technique that computes pixel colors by tracing rays from the image plane into the 3D volumetric dataset, accumulating color and opacity without converting the data to surface geometry [S1, S2, S4, unofficial]. It solves the problem of visualizing internal structures in scalar fields (e.g., CT scans) by simulating the optical projection of light through participating media [S11, unofficial][S27]. Unlike surface-based ray tracing which seeks discrete intersections, Volume Ray Casting samples the volume at regular intervals along the ray, making it an image-order method that naturally handles fuzzy data and transparency [S25, S30, unofficial]. It is distinguished from its siblings by its standard fixed-step traversal and direct compositing of interpolated voxel values, serving as the foundational baseline for more complex traversal or scattering variants [S23][S44, unofficial].
 
 ## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar field $V$ defined on a regular grid of dimensions $W \times H \times D$, where each voxel stores a density/value. Camera parameters (eye position, view direction, image plane dimensions, resolution). A transfer function mapping scalar values to color $C$ and opacity $\alpha$.
+*   **Output:** A 2D image where each pixel $(u,v)$ holds an accumulated color $C_{final}$ and opacity $\alpha_{final}$.
 
-### Inputs and Outputs
-*   **Input:** A 3D scalar field $f(x,y,z)$ defined on a voxel grid; a camera configuration (eye point $E$, near plane, projection type); a 1D transfer function mapping scalar values to RGBA color and opacity; and a step size $\Delta t$ [S2, unofficial][S3, unofficial][S5, unofficial].
-*   **Output:** A 2D image where each pixel $(u,v)$ holds an accumulated color value $C$ [S2, unofficial][S3, unofficial].
+**Data Structures:**
+*   **Volume Grid:** A 3D array or 3D texture storing scalar values. Indices are integer coordinates $(i,j,k)$.
+*   **Ray Structure:** Defined by origin $O$ and direction $D$.
+*   **Accumulators:** Per-pixel variables for accumulated color $C_{acc}$ (RGB) and accumulated opacity $\alpha_{acc}$ (float).
 
-### Data Structures
-*   **Volume Data:** A 3D array of scalar values $v_{ijk}$ indexed by integer coordinates $(i,j,k)$ [S2, unofficial][S5, unofficial].
-*   **Transfer Function:** A mapping $c(s) \to (R,G,B)$ and $\alpha(s) \to \alpha$ for scalar input $s$ [S2, unofficial][S5, unofficial].
-*   **Ray State:** For each pixel, a ray origin $E$ and direction $D$ [S2, unofficial][S3, unofficial].
-*   **Accumulators:** Per-pixel accumulated color $C$ (initialized to 0) and accumulated transmittance $T$ (initialized to 1) for front-to-back compositing [S2, unofficial][S5, unofficial].
+**Parameters:**
+*   **Step Size ($\Delta s$):** The distance between consecutive sampling points. Typically uniform. A common heuristic is $\Delta s \le 1.0$ voxel length to satisfy Nyquist criteria if frequency content is unknown [S40]. Default values in implementations often range from $1/512$ to $1/256$ of the volume diagonal or bounding box size [S24, unofficial].
+*   **Early Termination Threshold:** A maximum accumulated opacity (e.g., 0.95 or 1.0) at which ray traversal stops [S2, unofficial][S27].
 
-### Numbered Steps
+**Algorithm Steps:**
 
-1.  **Ray Generation:** For each pixel $(u,v)$ on the image plane, construct a ray. The ray origin is the eye point $E$. The direction $D$ is the normalized vector from $E$ to the projected pixel position $P$ on the near plane:
-    $$ D = \frac{P - E}{\|P - E\|} $$
-    [S2, unofficial][S3, unofficial]
+1.  **Coordinate Setup:**
+    *   Position the volume center at the world origin. If the volume has dimension $w$, translate local coordinates by $T(-w/2, -w/2, -w/2)$ [S1, unofficial].
+    *   Position the image plane at distance $D$ from the origin, centered at $(0,0,-D)$ [S1, unofficial].
+    *   Define the image plane basis vectors $U$ and $V$ based on camera rotation [S1, unofficial].
 
-2.  **Ray-Volume Intersection:** Determine the entry ($t_{min}$) and exit ($t_{max}$) points of the ray with the volume's Axis-Aligned Bounding Box (AABB) [S2, unofficial][S3, unofficial]. Using the slab method for a ray $X(t) = E + tD$: for each axis $i \in \{x, y, z\}$, calculate intersection parameters:
-    $$ t_{i,min} = \frac{\min_i - E_i}{D_i}, \quad t_{i,max} = \frac{\max_i - E_i}{D_i} $$
-    If $D_i = 0$, set $t_{i,min} = -\infty$ and $t_{i,max} = \infty$ (or handle via sign checks) [G]. Compute global entry and exit:
-    $$ t_{min} = \max(0, \max(t_{x,min}, t_{y,min}, t_{z,min})), \quad t_{max} = \min(t_{x,max}, t_{y,max}, t_{z,max}) $$
-    [S2, unofficial] If $t_{min} > t_{max}$, the ray misses the volume; output background color [S2, unofficial].
+2.  **Ray Generation:**
+    *   For each pixel $(u,v)$ in the image grid:
+        *   Calculate the pixel center position $P$ on the image plane:
+            $$ P = E + u \cdot \Delta u + v \cdot \Delta v $$
+            where $E$ is the eye position, and $\Delta u, \Delta v$ are the pixel step vectors derived from image plane dimensions and resolution [S1, S19, unofficial].
+        *   Compute the ray direction $R_{dir}$ as the normalized vector from $E$ to $P$:
+            $$ R_{dir} = \frac{P - E}{\|P - E\|} $$
+        *   Define the ray: $r(t) = E + t \cdot R_{dir}$ [S29].
 
-3.  **Traversal Loop:** Iterate along the ray from $t = t_{min}$ to $t = t_{max}$ with a fixed step size $\Delta t$ [S2, unofficial][S3, unofficial]. Update position: $X(t) = E + tD$. Increment $t \leftarrow t + \Delta t$ [S2, unofficial].
+3.  **Ray-Volume Intersection:**
+    *   Determine the entry point $t_{start}$ and exit point $t_{end}$ of the ray with the volume's bounding box (typically a cuboid) [S7, unofficial][S42, book].
+    *   If the ray does not intersect the volume, assign background color and terminate [S46].
+    *   The integration interval is $[t_{start}, t_{end}]$.
 
-4.  **Sampling and Interpolation:** At each sample point $X(t)$, map world coordinates to voxel indices and interpolate the scalar value $s$ [S2, unofficial][S3, unofficial]. Calculate fractional offsets: $dx = x - \lfloor x \rfloor$, $dy = y - \lfloor y \rfloor$, $dz = z - \lfloor z \rfloor$ [G]. Perform **Trilinear Interpolation** using the 8 surrounding voxels $v_{ijk}$:
-    $$
-    \begin{aligned}
-    s = & (1-dx)(1-dy)(1-dz)v_{000} + dx(1-dy)(1-dz)v_{100} \\
-        & + (1-dx)dy(1-dz)v_{010} + dx\,dy(1-dz)v_{110} \\
-        & + (1-dx)(1-dy)dz\,v_{001} + dx(1-dy)dz\,v_{101} \\
-        & + (1-dx)dy\,dz\,v_{011} + dx\,dy\,dz\,v_{111}
-    \end{aligned}
-    $$
-    where $v_{ijk}$ is the value at the voxel offset by $i,j,k$ from the base index $\lfloor x \rfloor, \lfloor y \rfloor, \lfloor z \rfloor$ [S2, unofficial][S39, unofficial].
+4.  **Sampling and Interpolation:**
+    *   Initialize accumulators: $C_{acc} = (0,0,0)$, $\alpha_{acc} = 0$.
+    *   Iterate along the ray from $t_{start}$ to $t_{end}$ with step size $\Delta s$. Let $t_i = t_{start} + i \cdot \Delta s$.
+    *   Calculate the 3D sample position $S_i = E + t_i \cdot R_{dir}$ [S43, unofficial].
+    *   **Trilinear Interpolation:** Since $S_i$ generally falls between voxel grid points, interpolate the scalar value $v$ and its gradient $\nabla v$ from the 8 neighboring voxels.
+        *   Let $(x,y,z)$ be the fractional coordinates within the voxel containing $S_i$.
+        *   The interpolated value $V_{xyz}$ is:
+            $$ V_{xyz} = \sum_{i,j,k \in \{0,1\}} V_{ijk} (1-x)^{1-i} x^i (1-y)^{1-j} y^j (1-z)^{1-k} z^k $$
+            where $V_{ijk}$ are the values at the voxel corners [S45, unofficial][S23].
+    *   **Classification:** Map the interpolated scalar value $V_{xyz}$ and gradient $\nabla V_{xyz}$ to color $c_i$ and opacity $\alpha_i$ using the transfer function [S3][S22, unofficial].
 
-5.  **Classification:** Map the interpolated scalar $s$ to color $c_s$ and opacity $\alpha_s$ using the transfer function:
-    $$ (c_s, \alpha_s) = \text{TransferFunction}(s) $$
-    [S2, unofficial][S5, unofficial]
+5.  **Shading (Optional but Common):**
+    *   Compute lighting contributions using the gradient as the surface normal. A common model is Blinn-Phong [S6, S21, unofficial]:
+        $$ c_i = c_{ambient} + c_{diffuse} (\mathbf{n} \cdot \mathbf{l}) + c_{specular} (\mathbf{n} \cdot \mathbf{h})^{n_s} $$
+        where $\mathbf{n}$ is the normalized gradient, $\mathbf{l}$ is the light direction, and $\mathbf{h}$ is the half-vector [S21, unofficial].
 
-6.  **Shading (Optional):** Estimate surface normals for lighting [S2, unofficial][S3, unofficial]. Compute the gradient $\nabla f$ using central differences on the scalar field $f$ at the sample location:
-    $$ \nabla f \approx \left( \frac{f(x+1)-f(x-1)}{2\Delta x}, \frac{f(y+1)-f(y-1)}{2\Delta y}, \frac{f(z+1)-f(z-1)}{2\Delta z} \right) $$
-    [S2, unofficial][S13, unofficial] Normalize to get normal $N = \frac{-\nabla f}{\|\nabla f\|}$ [G]. Apply a local illumination model (e.g., Blinn-Phong) to adjust $c_s$ [S2, unofficial][S5, unofficial].
+6.  **Compositing (Front-to-Back):**
+    *   Update accumulators using the Over-operator [Porter-1984-CDI] [S26, unofficial]:
+        $$ C_{acc} = C_{acc} + (1 - \alpha_{acc}) \cdot c_i \cdot \alpha_i $$
+        $$ \alpha_{acc} = \alpha_{acc} + (1 - \alpha_{acc}) \cdot \alpha_i $$
+    *   **Early Termination:** If $\alpha_{acc} \ge \text{Threshold}$, break the loop [S2, unofficial].
 
-7.  **Compositing:** Accumulate the sample into the pixel using **Front-to-Back** compositing (most common for early termination) [S2, unofficial][S5, unofficial]. Initialize $C = (0,0,0)$ and $T = 1$ [G]. Update:
-    $$ C \leftarrow C + T \cdot c_s \cdot \alpha_s, \quad T \leftarrow T \cdot (1 - \alpha_s) $$
-    [S2, unofficial][S5, unofficial] Alternatively, using the **Over Operator** $(C_a, \alpha_a) \circ (C_b, \alpha_b) = (C_a + (1-\alpha_a)C_b, \alpha_a + (1-\alpha_a)\alpha_b)$, where the current accumulation is the background [S2, unofficial][S4, unofficial].
+7.  **Final Assignment:**
+    *   Set the pixel color to $C_{acc}$ and opacity to $\alpha_{acc}$ [S22, unofficial].
 
-8.  **Early Termination:** If $T < \epsilon$ (e.g., $\epsilon = 0.01$) or accumulated opacity $1-T > 0.95$, terminate the loop early as further samples contribute negligibly [S2, unofficial][S5, unofficial].
-
-9.  **Output:** Write the final accumulated color $C$ to the pixel $(u,v)$ [S2, unofficial].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def volume_ray_casting(volume, transfer_function, camera, image_width, image_height, step_size, epsilon=0.01):
+def volume_ray_casting(volume, camera, transfer_function, step_size=0.01, threshold=0.95):
     """
-    Renders a 2D image from a 3D volume using image-order ray casting.
+    Renders a 3D volume using standard volume ray casting.
     
     Args:
         volume: 3D array of scalar values.
-        transfer_function: Function mapping scalar s to (color, opacity).
-        camera: Object containing eye point E and method to get ray direction D for pixel (u,v).
-        image_width, image_height: Dimensions of the output image.
-        step_size: Fixed step size Delta t for ray traversal.
-        epsilon: Threshold for early termination of transmittance.
+        camera: Object containing eye position (E), image plane dimensions, resolution, and view direction.
+        transfer_function: Function mapping (scalar, gradient) -> (color, opacity).
+        step_size: Distance between samples along the ray.
+        threshold: Opacity threshold for early ray termination.
         
     Returns:
-        2D array of RGB colors.
+        2D image array.
     """
-    import math
-    image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
+    width, height = camera.resolution
+    image = np.zeros((height, width, 3))
     
-    # Precompute volume bounds for AABB intersection in world space
-    vol_min = [0.0, 0.0, 0.0]
-    vol_max = [float(volume.shape[0]), float(volume.shape[1]), float(volume.shape[2])]
+    # Precompute ray directions and bounding box intersections if possible
+    # For simplicity, we compute per-pixel here
     
-    for v in range(image_height):
-        for u in range(image_width):
+    for y in range(height):
+        for x in range(width):
             # 1. Ray Generation
-            E = camera.eye_point
-            D = camera.get_ray_direction(u, v)
-            length = math.sqrt(sum(d*d for d in D))
-            D = [d/length for d in D]
+            # Calculate pixel position on image plane
+            # Assuming camera has methods to get ray origin and direction for pixel (x,y)
+            ray_origin = camera.get_ray_origin(x, y)
+            ray_direction = camera.get_ray_direction(x, y)
             
-            # 2. Ray-Volume Intersection (Slab Method)
-            t_min = 0.0
-            t_max = float('inf')
-            ray_misses = False
+            # 2. Ray-Volume Intersection
+            # Find t_start and t_end where ray enters and exits the volume bounding box
+            t_start, t_end = intersect_bounding_box(ray_origin, ray_direction, volume.bounding_box)
             
-            for axis in range(3):
-                if abs(D[axis]) > 1e-8:
-                    t1 = (vol_min[axis] - E[axis]) / D[axis]
-                    t2 = (vol_max[axis] - E[axis]) / D[axis]
-                    t_min = max(t_min, min(t1, t2))
-                    t_max = min(t_max, max(t1, t2))
-                else:
-                    if E[axis] < vol_min[axis] or E[axis] > vol_max[axis]:
-                        ray_misses = True
-                        break
+            if t_start > t_end:
+                continue # Ray misses volume
+                
+            # 3. Sampling and Compositing
+            accumulated_color = np.array([0.0, 0.0, 0.0])
+            accumulated_opacity = 0.0
             
-            if ray_misses or t_min > t_max:
-                continue
+            # Iterate from t_start to t_end
+            t = t_start
+            while t <= t_end:
+                # Sample position
+                sample_pos = ray_origin + t * ray_direction
                 
-            # 3. Traversal and 4. Sampling
-            accumulated_color = [0.0, 0.0, 0.0]
-            transmittance = 1.0
-            
-            t = t_min
-            while t <= t_max:
-                pos = [E[i] + t * D[i] for i in range(3)]
-                x, y, z = pos
+                # 4. Interpolation
+                # Get scalar value and gradient at sample_pos
+                scalar_val, gradient = trilinear_interpolate(volume, sample_pos)
                 
-                if x < 0 or x >= volume.shape[0] or \
-                   y < 0 or y >= volume.shape[1] or \
-                   z < 0 or z >= volume.shape[2]:
-                    t += step_size
-                    continue
+                # 5. Classification and Shading
+                color, opacity = transfer_function(scalar_val, gradient)
                 
-                ix, iy, iz = int(x), int(y), int(z)
-                dx, dy, dz = x - ix, y - iy, z - iz
+                # 6. Compositing (Front-to-Back)
+                # C_out = C_in + (1 - alpha_in) * alpha * C
+                # alpha_out = alpha_in + (1 - alpha_in) * alpha
+                accumulated_color = accumulated_color + (1.0 - accumulated_opacity) * opacity * color
+                accumulated_opacity = accumulated_opacity + (1.0 - accumulated_opacity) * opacity
                 
-                def get_voxel(i, j, k):
-                    if 0 <= i < volume.shape[0] and 0 <= j < volume.shape[1] and 0 <= k < volume.shape[2]:
-                        return volume[i, j, k]
-                    return 0.0
-
-                v000 = get_voxel(ix, iy, iz)
-                v100 = get_voxel(ix+1, iy, iz)
-                v010 = get_voxel(ix, iy+1, iz)
-                v110 = get_voxel(ix+1, iy+1, iz)
-                v001 = get_voxel(ix, iy, iz+1)
-                v101 = get_voxel(ix+1, iy, iz+1)
-                v011 = get_voxel(ix, iy+1, iz+1)
-                v111 = get_voxel(ix+1, iy+1, iz+1)
-                
-                s = ( (1-dx)*(1-dy)*(1-dz)*v000 +
-                      dx*(1-dy)*(1-dz)*v100 +
-                      (1-dx)*dy*(1-dz)*v010 +
-                      dx*dy*(1-dz)*v110 +
-                      (1-dx)*(1-dy)*dz*v001 +
-                      dx*(1-dy)*dz*v101 +
-                      (1-dx)*dy*d z*v011 +
-                      dx*dy*d z*v111 )
-                
-                color_s, alpha_s = transfer_function(s)
-                
-                accumulated_color = [
-                    accumulated_color[0] + transmittance * color_s[0] * alpha_s,
-                    accumulated_color[1] + transmittance * color_s[1] * alpha_s,
-                    accumulated_color[2] + transmittance * color_s[2] * alpha_s
-                ]
-                transmittance = transmittance * (1 - alpha_s)
-                
-                if transmittance < epsilon:
+                # Early Termination
+                if accumulated_opacity >= threshold:
                     break
                 
+                # Advance
                 t += step_size
             
-            image[v][u] = accumulated_color
+            # 7. Final Assignment
+            image[y, x] = accumulated_color
             
     return image
+
+def trilinear_interpolate(volume, pos):
+    """
+    Performs trilinear interpolation on the volume grid.
+    Returns interpolated scalar value and gradient.
+    """
+    # Map world position to grid coordinates
+    # This requires inverse transformation of volume's world-to-grid matrix
+    grid_x, grid_y, grid_z = world_to_grid(pos)
+    
+    # Determine base voxel indices
+    ix = int(floor(grid_x))
+    iy = int(floor(grid_y))
+    iz = int(floor(grid_z))
+    
+    # Fractional coordinates
+    fx = grid_x - ix
+    fy = grid_y - iy
+    fz = grid_z - iz
+    
+    # Fetch 8 neighbors (handle boundary checks)
+    v000 = volume[ix, iy, iz]
+    v100 = volume[ix+1, iy, iz]
+    v010 = volume[ix, iy+1, iz]
+    v001 = volume[ix, iy, iz+1]
+    v101 = volume[ix+1, iy, iz+1]
+    v011 = volume[ix, iy+1, iz+1]
+    v110 = volume[ix+1, iy+1, iz]
+    v111 = volume[ix+1, iy+1, iz+1]
+    
+    # Interpolate scalar
+    val = (v000 * (1-fx)*(1-fy)*(1-fz) +
+           v100 * fx*(1-fy)*(1-fz) +
+           v010 * (1-fx)*fy*(1-fz) +
+           v001 * (1-fx)*(1-fy)*fz +
+           v101 * fx*(1-fy)*fz +
+           v011 * (1-fx)*fy*fz +
+           v110 * fx*fy*(1-fz) +
+           v111 * fx*fy*fz)
+           
+    # Compute gradient using central differences on the grid values
+    # Note: In practice, gradients are often precomputed or computed from the interpolated field
+    # Here we approximate using neighbors for the gradient at the grid point
+    grad_x = (v100 - v000 + v101 - v001 + v110 - v010 + v111 - v011) / 2.0
+    grad_y = (v010 - v000 + v011 - v001 + v110 - v100 + v111 - v101) / 2.0
+    grad_z = (v001 - v000 + v011 - v010 + v101 - v100 + v111 - v110) / 2.0
+    
+    return val, np.array([grad_x, grad_y, grad_z])
 ```
 
-### Parameters
-*   **Step Size ($\Delta t$):** The distance between samples. Typically $\Delta t = \frac{\text{voxel\_size}}{n}$, where $n$ is samples per voxel (often 1-4). Smaller steps increase accuracy but cost more. [S2, unofficial]
-*   **Epsilon ($\epsilon$):** Threshold for early termination. Typical value 0.01. [S2, unofficial]
-
-### Edge Cases and Pitfalls
-*   **Precision:** Floating-point errors in ray position calculation can cause jitter or gaps in high-resolution volumes. [G]
-*   **Boundaries:** Rays hitting the volume boundary must be handled correctly to avoid out-of-bounds memory access during interpolation. [G]
-*   **Aliasing:** Fixed-step sampling can cause aliasing artifacts if the step size is too large relative to high-frequency details. Supersampling or adaptive step sizes mitigate this. [S2, unofficial]
-*   **Degenerate Input:** Empty volumes or volumes with no transfer function mapping should return background color. [G]
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point errors in ray position calculation can cause jittering or gaps in the volume, especially at oblique angles. Using double precision for ray traversal or correcting the ray position at each step (reprojection) mitigates this [G].
+*   **Aliasing:** If the step size is too large relative to the frequency content of the volume, aliasing artifacts appear. The step size should respect the Nyquist criterion [S40].
+*   **Boundary Conditions:** Interpolation at the volume boundaries requires handling out-of-bounds indices. Common strategies are clamping, wrapping, or treating out-of-bounds values as zero (transparent) [G].
+*   **Performance:** The method is memory-bandwidth bound because it reads from the 3D texture for every sample. Caching voxel data for neighboring rays can improve performance [S30, unofficial].
 
 ## Subtopics
 
-### [Two-Pass Depth Ray Casting](3377-two-pass-depth-ray-casting.md)
-Two-Pass Depth Ray Casting is a direct volume rendering technique that computes ray entry and exit points by rendering the volume's bounding box twice with different face culling and depth test modes, then uses these coordinates to cast rays through the volume in a subsequent pass. It solves the problem of efficiently determining the start and end of the integration interval for each pixel on the GPU without complex ray-volume intersection algorithms. Unlike [Van Hook-Levoy Ray-Casting](3594-van-hook-levoy-ray-casting.md) which may use different traversal strategies, this method relies on hardware rasterization of the bounding box to find intersections. It differs from [Koyamada's Algorithm](4148-koyamada-s-algorithm.md) by explicitly separating the depth determination phase from the accumulation phase using multiple render targets.
-
-### [Van Hook-Levoy Ray-Casting](3594-van-hook-levoy-ray-casting.md)
-Van Hook-Levoy Ray-Casting is a direct volume rendering technique that processes volume data without generating intermediate representations, assigning optical properties directly to voxels. It solves the problem of synthesizing 2D projections (such as Digital Radiographs) or shaded views from 3D scalar fields by casting rays from the image plane into the dataset. What sets it apart from its siblings, such as [Two-Pass Depth Ray Casting](3377-two-pass-depth-ray-casting.md) and [Koyamada's Algorithm](4148-koyamada-s-algorithm.md), is its feed-backward accumulation order and the specific early-termination optimization enabled when accumulated opacity reaches one.
-
-### [Koyamada's Algorithm](4148-koyamada-s-algorithm.md)
-Koyamada's Algorithm is an image-order ray-casting method for unstructured tetrahedral volumes that leverages image-space coherency to generate and compose ray-segments in object space. It differs from its siblings by explicitly constructing continuous ray-segments via scan-conversion of external faces and traversing them through the volume using cell connectivity, rather than sampling fixed intervals along a pixel ray. This approach avoids the redundant ray-segment generation that occurs when local clusters are treated as independent subvolumes, ensuring that segments crossing pseudo-boundary faces are composed into single continuous segments [4496-local-rendering-phase.md].
-
 ### [Volume Ray Casting with Barycentric Interpolation and Phong Lighting](2419-volume-ray-casting-with-barycentric-interpolation-and-phong-.md)
-A volume rendering technique that casts rays from a viewing plane through a 3D voxel grid, sampling voxel values using barycentric interpolation within the unit cube, and accumulating lighting contributions (ambient, diffuse, specular) along the ray path. It initializes the viewing plane and volume data structures, computes ray origin and direction for each pixel, iterates along the ray with a sample period, samples the voxel using barycentric interpolation, calculates lighting, and accumulates the result. The final value is clamped to [0, 1] and output as color.
+Uses barycentric interpolation within unit cubes and explicit Phong shading, differing from standard trilinear interpolation and simple transfer function mapping.
 
-### Backward Mapping (Ray Tracing)
-A volumetric rendering technique that uses computer graphics ray-tracing to form the image. For each pixel, a ray is projected through the data volume, and intersecting voxels influence the pixel value [S11, unofficial].
+### [Backward Mapping (Ray Tracing)](3009-backward-mapping-ray-tracing.md)
+A general image-space category; Volume Ray Casting is the specific implementation for volumes using equidistant sampling.
 
 ### [Hybrid Ray-Casting](3180-hybrid-ray-casting.md)
-A ray-casting variant that produces an intermediate image aligned with one of the volume faces and then transforms it to the view direction to achieve a one-to-one mapping of ray-samples onto the volume. It transforms the volume into an intermediate coordinate system (shear and scale for perspective), generates the intermediate image, and warps it onto the view plane.
+Decouples traversal from projection by rendering slices first, solving irregular memory access issues of standard ray casting.
+
+### [Two-Pass Depth Ray Casting](3377-two-pass-depth-ray-casting.md)
+Uses hardware rasterization of the bounding box to find entry/exit points, avoiding complex ray-volume intersection math.
+
+### [Van Hook-Levoy Ray-Casting](3594-van-hook-levoy-ray-casting.md)
+Focuses on feed-backward accumulation and early termination optimizations.
+
+### [Koyamada's Algorithm](4148-koyamada-s-algorithm.md)
+For unstructured tetrahedral volumes, using scan-conversion of external faces instead of fixed intervals.
+
+### [Single-pass Raycasting](6121-single-pass-raycasting.md)
+Optimized GPU implementation generating one ray per pixel in a single fragment shader pass.
+
+### [Object-Order Ray-Casting](6204-object-order-ray-casting.md)
+Transforms volume to align with view direction to use integer grid points, combining object-order speed with ray-casting quality.
+
+### [RaycastBrightnessControl](6526-raycastbrightnesscontrol.md)
+Modulates brightness based on thresholds, rendering back-facing polygons first.
+
+### [Volume Raycasting Pipeline](8376-volume-raycasting-pipeline.md)
+The standard framework separating reconstruction, classification, shading, and compositing stages.
 
 ## Operating characteristics
-
-*   **Time Complexity:** $O(N \cdot M \cdot S)$, where $N$ is the number of pixels, $M$ is the number of samples per ray, and $S$ is the cost of interpolation/shading. The number of samples $M$ is determined by the ray length (volume depth) divided by the step size, making complexity roughly linear with respect to volume size and resolution. [S2, unofficial]
-*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(P)$ for the image and per-pixel accumulators. [S2, unofficial]
-*   **Measured Performance:** Historically computationally expensive, requiring significant resources before GPU acceleration became standard. Modern GPU implementations (using fragment shaders) achieve real-time performance for moderate resolutions. [S2, unofficial][S6, unofficial]
-*   **Scaling:** Performance scales linearly with image resolution and volume depth. Early termination optimizes performance for opaque regions. [S2, unofficial]
-*   **Strengths:** High-fidelity visualization of fuzzy/weak boundaries; no need for surface extraction; flexible viewpoint and lighting; handles semi-transparency naturally. [S2, unofficial][S3, unofficial]
-*   **Limitations:** Computationally intensive compared to object-order methods like splatting for large volumes; aliasing artifacts if undersampled; requires careful tuning of transfer functions and step sizes. [S2, unofficial][S3, unofficial]
-*   **When to Use:** Medical imaging (CT/MRI), molecular graphics, fluid dynamics, and entertainment (smoke, fire, clouds) where visual quality and transparency handling are prioritized over raw speed. [S2, unofficial]
-*   **When Not to Use:** Real-time applications with extremely large volumes where performance is critical and lower-quality approximations (like splatting or texture-based methods) are acceptable. [S2, unofficial]
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of samples per ray. $M$ is proportional to the volume depth divided by the step size [S36, unofficial].
+*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(1)$ per pixel for accumulators. GPU implementations require 3D texture memory [S5, unofficial].
+*   **Performance:** Rendering time is relatively constant per frame for static volumes but depends heavily on step size and early termination effectiveness [S3]. On modern GPUs, it is highly parallelizable, with each pixel processed independently [S5, unofficial].
+*   **Strengths:** High visual quality, handles transparency and internal structures naturally, view-dependent, no intermediate geometry required [S4, unofficial][S27].
+*   **Limitations:** Computationally expensive due to high sampling rates required for smoothness; memory bandwidth bound; artifacts if step size is too large; no secondary effects (shadows, reflections) in basic form [S25, S31, unofficial].
+*   **When to Use:** High-quality offline rendering or interactive visualization where image quality is prioritized over speed, and the volume data is dense [S37, unofficial].
+*   **When Not to Use:** Real-time applications with very large volumes and strict latency constraints (consider texture-based or shear-warp methods); scenes requiring complex light transport (shadows/refractions) [S25, unofficial].
 
 ## Background
-
-*   **Origin:** Developed in the late 1980s. Marc Levoy introduced a practical algorithm in 1988 for displaying surfaces from volume data without intermediate geometric primitives [S2, unofficial]. James T. Kajiya and Brian P. Von Herzen developed algorithms for tracing rays through volume densities in 1984 [S2, unofficial]. The first ray casting algorithm for rendering was presented by Arthur Appel in 1968 [S7, unofficial].
-*   **History:** Early methods cast parallel or perspective rays to determine first intersection points with surfaces [S1, unofficial]. Levoy's approach used trilinear interpolation and back-to-front compositing. Subsequent refinements incorporated hierarchical spatial enumeration (octrees) and adaptive termination [S2, unofficial].
-*   **Usage:** Used in medical imaging, molecular graphics, fluid dynamics, geophysics, and entertainment. Implemented in VTK, Open Inventor, and hardware like VolumePro [S2, unofficial].
+Volume Ray Casting was introduced in the late 1980s as a foundational technique for Direct Volume Rendering (DVR). Key early papers include Tuy and Tuy (1984) [S1, unofficial], Levoy (1988) who popularized the front-to-back compositing approach, and Drebin, Carpenter, and Hanrahan (1988) who demonstrated efficient GPU implementations [S1, unofficial]. It emerged as a solution to the limitations of surface extraction (like Marching Cubes), which loses internal detail and requires thresholding [S4, unofficial]. The method is widely used in medical imaging (CT, MRI) and scientific visualization [S20, S29].
 
 ## Sources
-
-[S1] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
-[S2] Volume ray casting — Grokipedia, https://grokipedia.com/page/Volume_ray_casting, fetched 2026-10-26 (unofficial)
-[S3] PDF VOLUME RENDERING BY RAY CASTING - Warse, https://www.warse.org/IJATCSE/static/pdf/file/icetetssp47.pdf, fetched 2026-10-30 (unofficial)
-[S4] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
-[S5] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
-[S6] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27 (unofficial)
-[S7] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
-[S8] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29 (unofficial)
-[S9] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)
-[S10] Y-o-p/fog, https://github.com/Y-o-p/fog, fetched 2026-10-26 (unofficial)
-[S11] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
+[S1] PPT - Direct Volume Rendering (DVR): Ray-casting PowerPoint Presentation - ID:465503, https://slideserve.com/jariath/direct-volume-rendering-dvr-ray-casting, fetched 2026-10-24 (unofficial)
+[S2] PPT - Volume Rendering, Part 2 PowerPoint Presentation, free download - ID:2205448, https://slideserve.com/walter/volume-rendering-part-2-powerpoint-ppt-presentation, fetched 2026-10-24 (unofficial)
+[S3] A differential volume rendering method with second-order difference for time-varying volume data, https://doi.org/10.1016/s1045-926x(03)00020-x, fetched 2026-10-25
+[S4] Direct Volume Rendering Direct Volume Rendering. What is volume rendering?. Accumulate information along 1 dimension line through volume. Volume rendering vs. isosurfaces. No intermediate geometry No , https://www.slideserve.com/lenci/direct-volume-rendering, fetched 2026-10-25 (unofficial)
+[S5] Volume Rendering Computer Graphics Demo, https://www.youtube.com/watch?v=6wNd0C79AKY, fetched 2026-10-25 (unofficial)
+[S6] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S7] Direct Volume Rendering Techniques, https://www.scribd.com/presentation/380929057/10-raycasting, fetched 2026-10-25 (unofficial)
+[S8] Direct Volume Rendering Data, https://www.scribd.com/document/1050958395/Direct-Volume-Rendering-Data, fetched 2026-10-25 (unofficial)
+[S9] Direct Volume Rendering (DVR): Ray-casting | PPT - SlideShare, https://www.slideshare.net/slideshow/direct-volume-rendering-dvr-raycasting/265104120, fetched 2026-10-26 (unofficial)
+[S10] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S11] DTIC ADA248167: Distributed Ray Casting for High-Speed Volume Rendering, https://archive.org/details/DTIC_ADA248167, fetched 2026-10-26 (unofficial)
+[S12] GPU volume rendering, http://www.slideserve.com/hilliard/volume-rendering-using-graphics-hardware, fetched 2026-10-26 (unofficial)
+[S13] Antara: An Interactive 3D Volume Rendering and Visualization Framework, https://arxiv.org/abs/1812.04233v1, fetched 2026-10-26 (unofficial)
+[S14] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)
+[S15] GPU-Based Volume Rendering for Medical Imagery, https://inria.hal.science/inria-00461484v1, fetched 2026-10-26 (unofficial)
+[S16] K-Planes: Explicit Radiance Fields in Space, Time, and Appearance, https://doi.org/10.1109/cvpr52729.2023.01201, fetched 2026-10-26
+[S17] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
+[S18] DTIC ADA202661: Volumetric Rendering Techniques for the Display of Three-Dimensional Aerodynamic Flow Field Data, https://archive.org/details/DTIC_ADA202661, fetched 2026-10-26 (unofficial)
+[S19] examachine/promptspace, https://github.com/examachine/promptspace, fetched 2026-10-26 (unofficial)
+[S20] Cinematic Rendering in CT: A Novel, Lifelike 3D Visualization Technique, https://doi.org/10.2214/ajr.17.17850, fetched 2026-10-26
+[S21] Massive Data Management for Distributed Volume Visualization, http://hdl.handle.net/1951/47671, fetched 2026-10-26 (unofficial)
+[S22] Compressed volume rendering using deep learning, https://www.cs.umd.edu/sites/default/files/scholarly_papers/Jain.pdf, fetched 2026-10-26 (unofficial)
+[S23] Volume ray casting — Grokipedia, https://grokipedia.com/page/Volume_ray_casting, fetched 2026-10-26
+[S24] GPU Raycast Volume Rendering with Transfer ... - Visualization Library, https://visualizationlibrary.org/documentation/pag_guide_raycast_volume.html, fetched 2026-10-26 (unofficial)
+[S25] PDF VOLUME RENDERING BY RAY CASTING - Warse, https://www.warse.org/IJATCSE/static/pdf/file/icetetssp47.pdf, fetched 2026-10-30 (unofficial)
+[S26] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
+[S27] (PDF) A Comparison between GPU-based Volume Ray Casting ..., https://www.researchgate.net/publication/321454253_A_Comparison_between_GPU-based_Volume_Ray_Casting_Implementations_Fragment_Shader_Compute_Shader_OpenCL_and_CUDA, fetched 2026-10-26
+[S28] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
+[S29] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+[S30] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)
+[S31] PDF Direct Volume Rendering - KTH, https://www.kth.se/social/files/565e35dff27654457fb84363/08_VolumeRendering.pdf, fetched 2026-10-27 (unofficial)
+[S32] Volume Rendering, http://users.csc.calpoly.edu/~zwood/teaching/csc570/final13/jimuir/, fetched 2026-10-27 (unofficial)
+[S33] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S34] vispy.visuals.volume module — VisPy, https://vispy.org/api/vispy.visuals.volume.html, fetched 2026-10-27
+[S35] A data distributed, parallel algorithm for ray-traced volume ..., https://www.cs.ucdavis.edu/~ma/papers/PRS93.pdf, fetched 2026-10-27
+[S36] Volume ray casting techniques and applications using general purpose computations on graphics processing units, https://repository.rit.edu/cgi/viewcontent.cgi?article=6466&context=theses, fetched 2026-10-28 (unofficial)
+[S37] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)
+[S38] Voxel-Based Procedural Terrain Generation | PDF | Voxel | Rendering ..., https://www.scribd.com/document/840779393/Procedural-Terrain-Generation-Using-Voxels, fetched 2026-10-29 (unofficial)
+[S39] Volume Rendering using GPGPU - Halogenica, https://halogenica.net/graphics/volume-rendering-using-gpgpu/, fetched 2026-10-29 (unofficial)
+[S40] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29
+[S41] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S42] Chapter 7 - Advanced Computer Graphics - VTK, https://examples.vtk.org/site/VTKBook/07Chapter7/, fetched 2026-10-29 (book)
+[S43] The Implementation of a WebGPU-Based Volume Rendering Framework ... - MDPI, https://www.mdpi.com/2076-3417/15/5/2782, fetched 2026-10-29 (unofficial)
+[S44] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)
+[S45] Volume Rendering Lecture Nov-30-2005 (Spanish), https://www.ciroduran.com/personal2/wp-content/uploads/2009/07/clase-volumerendering.pdf, fetched 2026-10-29 (unofficial)
+[S46] VOLUME RENDERING Application by Thomas Lidy, https://www.cg.tuwien.ac.at/courses/Visualisierung/2001-2002/Ergebnisse/Beispiel1/LidyT/description.html, fetched 2026-10-29
+[S47] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29
+[S48] Introduction to volume rendering, https://slidetodoc.com/introduction-to-volume-rendering-presented-by-zvi-devir/, fetched 2026-10-29 (unofficial)
+[S49] Indirect volume rendering, https://slidetodoc.com/direct-volume-rendering-what-is-volume-rendering-accumulate/, fetched 2026-10-29 (unofficial)
+[S50] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)
+[S51] Volume visualization, https://dl.acm.org/doi/pdf/10.1145/234313.234383, fetched 2026-11-01

@@ -1,0 +1,285 @@
+--- v001.md
++++ v002.md
+@@ -1,136 +1,183 @@
+ # Max Dilation
+ 
++Also called: Max-Dilation of Step Functions
+ 
+ ## Overview
+-Max Dilation is a resampling technique for step functions that expands the support of non-negative values using max-pooling logic, effectively "blurring" sharp boundaries by considering neighboring intervals. It differs from standard sum-based resampling ([Step Function Resampling](7924-step-function-resampling.md)) by preserving the maximum value within an expanded kernel rather than aggregating mass, which is useful for preventing aliasing or smoothing discrete density fields without introducing negative artifacts.
++Max Dilation is a resampling technique for non-negative step functions or weight distributions that expands their support intervals via max-pooling, effectively smoothing or widening the distribution [S1, S2, unofficial]. It serves as a specific instance of Step Function Resampling where the aggregation function is the maximum rather than the sum or average [S1, S2, unofficial]. Unlike [CDF Integration from Weights](12191-cdf-integration-from-weights.md), which preserves the cumulative distribution shape through integration, Max Dilation introduces local maxima propagation, making it suitable for scenarios requiring support expansion or anti-aliasing via dilation [S1, S2, unofficial].
+ 
+ ## How it works
+-The method operates on a step function defined by boundaries $t$ and values $v$. It expands the influence of each interval by a dilation radius, computes the maximum value within these expanded regions, and maps the result back to the target grid.
++The method operates on a step function defined by boundaries $t$ and values (weights) $w$. It expands the intervals covered by each weight by a specified `dilation` amount and computes the new values by taking the maximum of overlapping original weights.
+ 
+-**Inputs:**
+-- $t$: Array of original step boundaries, shape $(N+1,)$.
+-- $v$: Array of step values, shape $(N,)$. Must be non-negative.
+-- $t_{target}$: Array of new boundaries for the resampled function, shape $(M+1,)$.
+-- $dilation$: Scalar radius for dilation.
+-- $domain$: Tuple $(min, max)$ for clipping boundaries.
++### Inputs and Outputs
++- **Inputs**:
++  - $t$: Tensor of shape $(..., N+1)$ containing the sorted boundaries of the original step function intervals.
++  - $w$: Tensor of shape $(..., N)$ containing the non-negative weights for each interval $(t_i, t_{i+1})$.
++  - `dilation`: Scalar or tensor specifying the expansion amount for each interval.
++  - `domain`: Optional tuple $(t_{min}, t_{max})$ to clip the resulting boundaries.
++  - `renormalize`: Boolean flag (default `False`) to renormalize weights to sum to 1.
++  - `eps`: Numerical stability constant for renormalization (default `torch.finfo(torch.float16).eps**2`).
+ 
+-**Outputs:**
+-- $v_{dilated}$: Resampled values on $t_{target}$.
++- **Outputs**:
++  - $t_{dilate}$: Tensor of shape $(..., M)$ containing the sorted boundaries of the dilated step function.
++  - $w_{dilate}$: Tensor of shape $(..., M-1)$ containing the weights for the dilated intervals.
+ 
+-**Data Structures:**
+-- No complex structures; relies on sorted arrays and vectorized max operations.
++### Data Structures
++- The implementation uses PyTorch tensors. The last dimension represents the spatial or temporal axis of the step function.
++- Intermediate boolean masks are used to determine interval coverage.
+ 
+-**Steps:**
+-1. **Compute Dilated Boundaries:** For each interval $i$ in the original grid, define the dilated range $[t_i - dilation, t_{i+1} + dilation]$.
+-   $$ t0_i = t_i - dilation $$
+-   $$ t1_i = t1_i = t_{i+1} + dilation $$
+-2. **Sort Combined Endpoints:** Concatenate original boundaries $t$, lower dilated boundaries $t0$, and upper dilated boundaries $t1$. Sort them to create a refined grid $t_{dilate}$.
+-   $$ t_{combined} = \text{sort}(\text{concat}(t, t0, t1)) $$
+-   $$ t_{dilate} = \text{clip}(t_{combined}, domain) $$
+-3. **Compute Dilated Weights/Values:** For each interval in $t_{dilate}$, determine which original intervals overlap with the dilated extent. The value is the maximum of $v$ for all original intervals that have non-zero intersection with the dilated region.
+-   *Note: The source [S1, unofficial] describes this as "taking max of weights where dilated points fall within original intervals."*
++### Steps
++1. **Compute Expanded Boundaries**:
++   For each original interval $i$ with boundaries $t_i$ and $t_{i+1}$, compute the expanded boundaries:
++   $$ t0_i = t_i - \text{dilation}_i $$
++   $$ t1_i = t_{i+1} + \text{dilation}_i $$
++   This results in tensors $t0$ and $t1$ of shape $(..., N)$.
+ 
+-**Pseudocode:**
++2. **Sort Combined Endpoints**:
++   Concatenate the original boundaries $t$, the lower expanded boundaries $t0$, and the upper expanded boundaries $t1$. Sort the combined tensor along the last axis to obtain $t_{dilate}$:
++   $$ t_{combined} = \text{concatenate}([t, t0, t1], \text{axis}=-1) $$
++   $$ t_{dilate}, \text{indices} = \text{sort}(t_{combined}, \text{axis}=-1) $$
++   If a `domain` is specified, clip $t_{dilate}$ to this domain:
++   $$ t_{dilate} = \text{clip}(t_{dilate}, t_{min}, t_{max}) $$
++
++3. **Compute Dilated Weights**:
++   For each interval in $t_{dilate}$, determine the weight by finding the maximum original weight $w_j$ such that the dilated interval overlaps with the original interval $j$.
++   Specifically, for each boundary $t_{dilate, k}$, identify all original intervals $j$ where:
++   $$ t0_j \le t_{dilate, k} < t1_j $$
++   The weight for the dilated interval $k$ is the maximum of $w_j$ for all such $j$. If no interval covers the point, the weight is 0.
++   $$ w_{dilate, k} = \max_{j} \{ w_j \mid t0_j \le t_{dilate, k} < t1_j \} $$
++   This is implemented efficiently using broadcasting and `torch.max` over a boolean mask.
++
++4. **Optional Renormalization**:
++   If `renormalize` is `True`, convert the weights to a probability density function (PDF), dilate the PDF, and convert back to weights, then renormalize:
++   $$ p = \text{weight\_to\_pdf}(t, w) $$
++   $$ t_{dilate}, p_{dilate} = \text{max\_dilate}(t, p, \text{dilation}) $$
++   $$ w_{dilate} = \text{pdf\_to\_weight}(t_{dilate}, p_{dilate}) $$
++   $$ w_{dilate} = \frac{w_{dilate}}{\max(\epsilon, \sum w_{dilate})} $$
++
++### Pseudocode
+ ```python
+-def max_dilate_step_function(t, v, t_target, dilation, domain):
++import torch
++
++def max_dilate(t: torch.Tensor, w: torch.Tensor, dilation: float, domain=None, renormalize=False, eps=1e-8) -> tuple:
+     """
+-    Resamples a step function using max dilation.
+-    t: original boundaries (N+1,)
+-    v: original values (N,)
+-    t_target: new boundaries (M+1,)
+-    dilation: float
+-    domain: (min, max) tuple
++    Dilates a non-negative step function via max-pooling.
++    
++    Args:
++        t: Tensor of shape (..., N+1) containing sorted boundaries.
++        w: Tensor of shape (..., N) containing non-negative weights.
++        dilation: Scalar or tensor specifying dilation amount.
++        domain: Optional tuple (min, max) to clip boundaries.
++        renormalize: Boolean flag to renormalize weights.
++        eps: Numerical stability constant.
++        
++    Returns:
++        t_dilate: Tensor of shape (..., M) containing dilated boundaries.
++        w_dilate: Tensor of shape (..., M-1) containing dilated weights.
+     """
+-    N = len(t) - 1
+-    M = len(t_target) - 1
++    # Step 1: Compute expanded boundaries
++    # t0 and t1 have shape (..., N)
++    t0 = t[..., :-1] - dilation
++    t1 = t[..., 1:] + dilation
+     
+-    # 1. Compute dilated boundaries for each original interval
+-    # t0[i] is the left edge of interval i dilated left
+-    # t1[i] is the right edge of interval i dilated right
+-    t0 = t[:-1] - dilation
+-    t1 = t[1:] + dilation
++    # Step 2: Sort combined endpoints
++    # Concatenate t (..., N+1), t0 (..., N), t1 (..., N)
++    # Resulting shape (..., 3N+1) before sorting
++    t_combined = torch.cat([t, t0, t1], dim=-1)
++    t_dilate, _ = torch.sort(t_combined, dim=-1)
+     
+-    # 2. Create a unified set of critical points
+-    # Combine original, dilated-left, and dilated-right boundaries
+-    all_points = np.concatenate([t, t0, t1])
+-    t_dilate = np.sort(all_points)
++    # Clip to domain if specified
++    if domain is not None:
++        t_dilate = torch.clamp(t_dilate, min=domain[0], max=domain[1])
++        
++    # Step 3: Compute dilated weights
++    # We need to find the max weight for each interval in t_dilate
++    # Create a grid of dilated boundaries and original boundaries
++    # t_dilate shape: (..., M)
++    # t0, t1 shape: (..., N)
+     
+-    # 3. Clip to domain
+-    t_dilate = np.clip(t_dilate, domain[0], domain[1])
++    # Broadcast t0 and t1 to compare with t_dilate
++    # t0[..., None, :] shape: (..., 1, N)
++    # t_dilate[..., None] shape: (..., M, 1)
++    # Mask shape: (..., M, N)
++    mask = (t0[..., None, :] <= t_dilate[..., None]) & (t1[..., None, :] > t_dilate[..., None])
+     
+-    # 4. Compute values on the dilated grid
+-    # For each interval in t_dilate, find the max v from original intervals
+-    # that overlap with the dilated extent of any original interval covering this point.
+-    # More precisely: for each point x in t_dilate, find max(v[i]) such that
+-    # the dilated interval [t[i]-d, t[i+1]+d] contains x.
++    # Replace w with 0 where mask is False, then take max over N
++    # w[..., None, :] shape: (..., 1, N)
++    # masked_w shape: (..., M, N)
++    masked_w = torch.where(mask, w[..., None, :], torch.zeros_like(w[..., None, :]))
+     
+-    v_dilated_grid = np.zeros(len(t_dilate) - 1)
++    # Max over the last dimension (N)
++    w_dilate, _ = torch.max(masked_w, dim=-1)
+     
+-    for j in range(len(t_dilate) - 1):
+-        # Interval in dilated grid
+-        x_start = t_dilate[j]
+-        x_end = t_dilate[j+1]
++    # w_dilate shape: (..., M)
++    # The weights correspond to intervals (t_dilate[i], t_dilate[i+1])
++    # So we need to drop the last element if we want weights for intervals
++    # However, the standard output for step function resampling is weights for intervals
++    # The number of intervals is M-1
++    w_dilate = w_dilate[..., :-1]
++    
++    # Step 4: Optional Renormalization
++    if renormalize:
++        # Convert weights to PDF
++        # PDF = weight / interval_width
++        interval_widths = t_dilate[..., 1:] - t_dilate[..., :-1]
++        # Avoid division by zero
++        interval_widths = torch.clamp(interval_widths, min=eps)
++        p = w_dilate / interval_widths
+         
+-        max_val = 0.0
+-        for i in range(N):
+-            # Dilated extent of original interval i
+-            d_start = t[i] - dilation
+-            d_end = t[i+1] + dilation
+-            
+-            # Check if dilated extent overlaps with current dilated grid interval
+-            # Overlap exists if max(x_start, d_start) < min(x_end, d_end)
+-            if max(x_start, d_start) < min(x_end, d_end):
+-                if v[i] > max_val:
+-                    max_val = v[i]
+-        v_dilated_grid[j] = max_val
+-
+-    # 5. Map back to t_target
+-    # Since t_target is a subset or different grid, we need to aggregate.
+-    # However, the source [S1, unofficial] implies the output is directly on t_target.
+-    # If t_target != t_dilate, we must resample v_dilated_grid onto t_target.
+-    # Using the same max-dilation logic recursively or simply sampling.
+-    # Given the complexity, a common implementation is to treat t_target as the
+-    # final query grid and apply the max-overlap logic directly against original t.
+-    
+-    # Simplified direct mapping to t_target:
+-    v_out = np.zeros(M)
+-    for j in range(M):
+-        x_start = t_target[j]
+-        x_end = t_target[j+1]
+-        max_val = 0.0
+-        for i in range(N):
+-            d_start = t[i] - dilation
+-            d_end = t[i+1] + dilation
+-            if max(x_start, d_start) < min(x_end, d_end):
+-                if v[i] > max_val:
+-                    max_val = v[i]
+-        v_out[j] = max_val
++        # Dilate PDF (recursive call or inline)
++        # For simplicity, assuming max_dilate works on PDFs similarly
++        # Note: This part is complex because dilation on PDF changes the domain
++        # The source [S2, unofficial] suggests a specific pipeline: weight_to_pdf -> max_dilate -> pdf_to_weight
++        # We will implement a simplified version assuming the same max_dilate logic applies
++        # But strictly, max_dilate on PDF might require different handling of boundaries
++        # For the purpose of this article, we follow the source's high-level description
++        t_dilate, p_dilate = max_dilate(t, p, dilation, domain, renormalize=False, eps=eps)
+         
+-    return v_out
++        # Convert back to weights
++        interval_widths_dilate = t_dilate[..., 1:] - t_dilate[..., :-1]
++        interval_widths_dilate = torch.clamp(interval_widths_dilate, min=eps)
++        w_dilate = p_dilate * interval_widths_dilate
++        
++        # Renormalize
++        sum_w = torch.sum(w_dilate, dim=-1, keepdim=True)
++        sum_w = torch.maximum(sum_w, torch.tensor(eps, device=w_dilate.device))
++        w_dilate = w_dilate / sum_w
++        
++    return t_dilate, w_dilate
+ ```
+ 
+-**Parameters:**
+-- `dilation`: Typically small relative to grid spacing. Not given in sources.
++### Parameters
++- `dilation`: The amount by which to expand each interval. Can be a scalar or a tensor of the same shape as $w$ [S1, S2, unofficial].
++- `domain`: Optional tuple $(t_{min}, t_{max})$ to clip the resulting boundaries [S1, S2, unofficial].
++- `renormalize`: Boolean flag to renormalize dilated weights to sum to 1 after dilation [S2, unofficial].
++- `eps`: Numerical stability constant for renormalization, default `torch.finfo(torch.float16).eps**2` [S2, unofficial].
+ 
+-**Edge Cases:**
+-- If $v$ contains negative values, the "max" logic may preserve negatives, violating the non-negative assumption often required for density.
+-- If $dilation$ is very large, the entire domain may collapse to the global maximum.
++### Edge Cases and Pitfalls
++- **Precision**: When computing interval widths for PDF conversion, ensure division by zero is avoided by using `eps` [S2, unofficial].
++- **Boundaries**: If `dilation` is large, expanded intervals may overlap significantly, leading to multiple original weights contributing to the same dilated interval. The max operation handles this correctly [S1, S2, unofficial].
++- **Degenerate Input**: If $w$ contains negative values, the behavior is undefined as the method assumes non-negative weights [S1, S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Max Dilation (Morton)
+-Performs max pooling with Morton coordinates (dilation) on the density grid [S2, unofficial]. It ensures the grid is a contiguous CUDA tensor, calculates $H = \sqrt[3]{H^3}$ (where $H$ is the grid dimension), and calls a backend CUDA kernel `_backend.morton3D_dilation(grid, C, H, grid_dilation)` [S2, unofficial]. The input `grid` is a float tensor of shape $[C, H \times H \times H]$ with $H \% 2 == 0$ [S2, unofficial]. The output `grid_dilation` has the same shape [S2, unofficial]. This variant is optimized for 3D volumetric data using spatial locality via Morton ordering.
++Performs max pooling with Morton coordinates (dilation) on the density grid [S3, unofficial]. It ensures the grid is a contiguous CUDA tensor, calculates $H = \sqrt[3]{H^3}$, and calls a backend CUDA kernel `_backend.morton3D_dilation(grid, C, H, grid_dilation)` [S3, unofficial]. The input `grid` is a float tensor of shape $[C, H \times H \times H]$ assuming $H \% 2 == 0$ [S3, unofficial]. The output `grid_dilation` is a float tensor of the same shape [S3, unofficial].
++
++### Blurpool Resampling
++A variant that combines max pooling with averaging to create a blurpool effect [S2, unofficial]. It pads weights, computes max pooling, averages adjacent max values, adds resample padding, and optionally stops gradients [S2, unofficial]. It then samples new $t$ values using `sorted_piecewise_constant_pdf` and casts rays [S2, unofficial]. Parameters include `stop_grad` (boolean) and `resample_padding` (float) [S2, unofficial]. Input weights are tensor $[batch\_size, num\_samples]$, output $t\_samples$ is $[batch\_size, num\_samples+1]$, and output points are $[batch\_size, num\_samples, 3]$ [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot M)$ for the naive implementation where $N$ is original intervals and $M$ is target intervals. The Morton variant uses CUDA kernels for parallelization, likely $O(1)$ per voxel with high constant overhead for setup.
+-- **Memory Complexity:** $O(N + M)$ for the naive implementation. The Morton variant requires contiguous memory for the CUDA kernel.
+-- **Strengths:** Preserves peak values; prevents "bleeding" of low values into high-value regions; suitable for non-negative density fields.
+-- **Limitations:** Can introduce blockiness if dilation is coarse; computationally expensive if $N$ and $M$ are large without spatial indexing.
+-- **When to use:** When smoothing discrete density fields without losing high-density peaks, or in Gaussian Splatting contexts for initialization [S1, unofficial].
++- **Time Complexity**: Sorting the combined boundaries takes $O(N \log N)$ where $N$ is the number of original intervals [S1, S2, unofficial]. Computing the weights involves broadcasting and max operations, which are $O(M \times N)$ where $M$ is the number of dilated boundaries [S1, S2, unofficial].
++- **Memory Complexity**: Requires storing intermediate tensors for boundaries and masks, proportional to $O(M \times N)$ [S1, S2, unofficial].
++- **Strengths**: Effective for smoothing and widening distributions, useful in anti-aliasing and support expansion [S1, S2, unofficial].
++- **Limitations**: May introduce artifacts if dilation is too large, as it propagates local maxima [S1, S2, unofficial].
++- **When to Use**: When support expansion or smoothing of step functions is required [S1, S2, unofficial].
++- **When Not to Use**: When preserving the exact cumulative distribution is critical, in which case [CDF Integration from Weights](12191-cdf-integration-from-weights.md) is preferred [S1, S2, unofficial].
+ 
+ ## Background
+-Max Dilation is used in sparse-view Gaussian Splatting pipelines, specifically in InstantSplat, to handle geometry initialization and density field resampling [S1, unofficial]. The Morton variant is used in ER-NeRF for efficient 3D grid processing [S2, unofficial].
++Max Dilation originates from the field of volume rendering and Gaussian Splatting, where it is used to manage density and weight distributions during resampling [S1, S2, unofficial]. It was introduced in the context of InstantSplat for sparse-view Gaussian Splatting [S1, unofficial] and further developed in density-bounded ray weights for improved rendering quality [S2, unofficial]. The Morton coordinate variant is used in ER-NeRF for efficient 3D grid dilation [S3, unofficial].
+ 
+ ## Sources
+ [S1] InstantSplat: Sparse-view Gaussian Splatting in Seconds, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
+-[S2] ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)+[S2] density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
++[S3] ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)
