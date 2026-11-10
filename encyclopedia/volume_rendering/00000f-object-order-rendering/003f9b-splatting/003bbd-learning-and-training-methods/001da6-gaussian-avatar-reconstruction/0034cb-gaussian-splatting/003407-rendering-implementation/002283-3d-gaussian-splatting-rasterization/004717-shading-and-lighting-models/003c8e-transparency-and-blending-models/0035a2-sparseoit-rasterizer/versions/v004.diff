@@ -1,0 +1,310 @@
+--- v003.md
++++ v004.md
+@@ -4,180 +4,144 @@
+ 
+ ## Overview
+-The SparseOIT Rasterizer is a rendering algorithm for 3D Gaussian Splatting that computes a blended image using Order-Independent Transparency (OIT) without sorting Gaussians by depth [S1, unofficial]. It simultaneously produces a final color image and a pre-rendered state using a blend-and-normalize (BAN) function and a blend-and-update (BAU) function [S1, unofficial]. Unlike standard 3DGS rasterization, which requires sorting by distance to camera to correctly accumulate transmittance, this method eliminates the sorting step entirely in favor of a weighted average that approximates the order-dependent result [S1, unofficial]. It builds on [Transparency and Blending Models](9274-transparency-and-blending-models.md).
++SparseOIT Rasterizer is a rendering technique for 3D Gaussian Splatting that computes a blended image using Order-Independent Transparency (OIT) without sorting Gaussians by depth [S1, unofficial]. It differs from standard 3DGS rasterization, which requires sorting by distance to camera to correctly accumulate transmittance, by eliminating the sorting step entirely in favor of a weighted average that approximates the order-dependent result [S1, unofficial]. It achieves this by simultaneously computing a final OIT color and a pre-rendered image state using Blend-and-Normalize (BAN) and Blend-and-Update (BAU) functions [S1, unofficial].
+ 
+ ## How it works
++The method operates on 3D Gaussian primitives defined by mean $\boldsymbol{\mu}$, covariance $\boldsymbol{\Sigma}$ (or scales and orientation), opacity $o$, and color $\mathbf{c}$ [S1, unofficial]. The core challenge is computing the pixel color $C$ and accumulated alpha $\alpha$ given a camera ray. Standard splatting projects 3D Gaussians to 2D ellipses, computes a 2D alpha mask, and blends them in screen space. These models modify the blending or shading stage: some refine the depth metric used for sorting, others integrate the 3D density function directly along the ray, and others use weighted averages to bypass sorting. All assume the Gaussians are sorted or processed in a manner that approximates front-to-back accumulation to ensure correct occlusion.
++
++### Inputs and Outputs
+ **Inputs:**
+ *   Image dimensions: width $w$, height $h$.
+-*   Gaussian attributes: 3D means $\mathbf{M}$, covariances $\mathbf{S}$, colors $\mathbf{C}$, opacities $\mathbf{A}$.
+-*   View matrix: $\mathbf{V}$.
++*   Gaussian attributes: 3D means $M$, covariances $S$, colors $C$, opacities $A$.
++*   View matrix $V$.
+ 
+ **Outputs:**
+-*   Rendered image: $\mathbf{I}$ (final color).
+-*   Pre-rendered image: $\mathbf{I}_{pre}$ (intermediate state for accumulation).
++*   Rendered image $I$.
++*   Pre-rendered image state $I_{pre}$ (used for accumulation/updates).
+ 
+-**Data Structures:**
+-*   **Tiles ($\mathbf{T}$):** A grid partitioning the image into square tiles. The specific tile size is not given in the sources [G].
+-*   **Gaussian List ($\mathbf{L}$):** A list of Gaussian data structures, duplicated per tile they overlap. Each entry contains projected mean $\mathbf{M}'$, projected covariance $\mathbf{S}'$, color $\mathbf{c}$, opacity $\alpha$, and a tile key $k$.
+-*   **Keys ($\mathbf{K}$):** An array of tile IDs corresponding to entries in $\mathbf{L}$.
+-*   **Ranges ($\mathbf{R}$):** An array mapping each tile ID to the start and end indices in $\mathbf{L}$ for that tile.
++### Data Structures
++*   **Tiles ($T$):** A grid partitioning the image of size $w \times h$. The specific tile size is not given in the sources [S1, unofficial].
++*   **Gaussian List ($L$):** A list of Gaussian data structures duplicated and keyed by tile ID.
++*   **Keys ($K$):** Tile IDs assigned to each Gaussian entry in $L$.
++*   **Ranges ($R$):** Start and end indices in $L$ for each tile $t$.
+ 
+-**Parameters:**
+-*   **Weight ($w_i$):** A learnable or fixed weight for the $i$-th Gaussian. The sources do not specify the initial value or update rule for $w_i$ in the rasterization step itself, only its use in the forward and backward passes [S1, unofficial].
+-*   **Background Color ($\mathbf{c}_0$):** The color of the background.
++### Steps
++1.  **Cull:** Remove Gaussians outside the view frustum or too small to contribute [S1, unofficial].
++2.  **Project:** Project 3D means $M$ and covariances $S$ to screen space using view $V$, resulting in $M'$ and $S'$ [S1, unofficial].
++3.  **Tile:** Create a tile grid $T$ for the image dimensions $w, h$ [S1, unofficial].
++4.  **Assign Keys:** Duplicate Gaussian data into list $L$ and assign tile keys $K$ based on which tile each Gaussian's center falls into [S1, unofficial].
++5.  **Sort:** Sort the list $L$ only by the tile keys $K$. This groups Gaussians by tile but does *not* sort by depth within the tile [S1, unofficial].
++6.  **Identify Ranges:** Compute the range $R_t$ of indices in $L$ corresponding to each tile $t$ [S1, unofficial].
++7.  **Initialize:** Initialize the rendered image $I$ to zero [S1, unofficial].
++8.  **Loop Tiles:** For each tile $t$ in $T$:
++    9.  **Loop Pixels:** For each pixel $i$ in tile $t$:
++        10. **Get Range:** Retrieve the range $r$ of Gaussians in $L$ that cover tile $t$ [S1, unofficial].
++        11. **BAN:** Compute the final color $I[i]$ using the Blend-and-Normalize function [S1, unofficial].
++        12. **BAU:** Update the pre-rendered state $I_{pre}[i]$ using the Blend-and-Update function [S1, unofficial].
+ 
+-**Algorithm Steps:**
+-1.  **Cull:** Remove Gaussians outside the view frustum defined by $\mathbf{V}$ [S1, unofficial].
+-2.  **Project:** Compute 2D screen-space means $\mathbf{M}'$ and covariances $\mathbf{S}'$ for the remaining Gaussians using $\mathbf{V}$ [S1, unofficial].
+-3.  **Tile:** Create a tile grid $\mathbf{T}$ for the image dimensions $w, h$ [S1, unofficial].
+-4.  **Duplicate & Key:** For each Gaussian, determine which tiles it overlaps. Duplicate the Gaussian data for each overlapping tile and assign the corresponding tile ID as a key $k$ [S1, unofficial]. Store these in list $\mathbf{L}$ and keys $\mathbf{K}$.
+-5.  **Sort:** Sort $\mathbf{L}$ and $\mathbf{K}$ based on the tile keys $k$ [S1, unofficial]. This is the only sorting step; no depth sorting is performed.
+-6.  **Range:** Identify the start and end indices in $\mathbf{L}$ for each tile, storing them in $\mathbf{R}$ [S1, unofficial].
+-7.  **Initialize:** Set $\mathbf{I}$ to zero. Initialize $\mathbf{I}_{pre}$ (details of initialization not given, assumed zero or background) [S1, unofficial].
+-8.  **Rasterize:** Iterate over each tile $t \in \mathbf{T}$:
+-    9.  Iterate over each pixel $i$ in tile $t$:
+-    10. Get the range $r$ of Gaussians in $\mathbf{L}$ belonging to tile $t$ [S1, unofficial].
+-    11. Compute final color $\mathbf{I}[i]$ using the BAN function [S1, unofficial].
+-    12. Update pre-rendered state $\mathbf{I}_{pre}[i]$ using the BAU function [S1, unofficial].
++### Formulas
++The final color $\mathbf{C}$ is computed as [S1, unofficial]:
+ 
+-**Formulas:**
+-The final color $\mathbf{C}$ (stored in $\mathbf{I}$) is computed as [S1, unofficial]:
+ $$
+ \mathbf{C} = T \mathbf{c}_0 + (1-T)F
+ $$
+-where $T$ is the accumulated opacity/transmittance factor. The sources do not explicitly define $T$ in the forward pass formula, but in standard OIT, $T$ is often the sum of opacities or a transmittance term. However, the provided formula for $F$ and the gradients suggest $T$ might be a constant or derived from the pre-render state. The sources define $F$ as [S1, unofficial]:
++
++where:
++*   $\mathbf{c}_0$ is the background color.
++*   $T$ is the accumulated opacity/transmittance factor.
++*   $F$ is the weighted average color:
++    $$
++    F = \frac{P}{Q}
++    $$
++    $$
++    P = \sum_{i=1}^{N} \mathbf{c}_i \alpha_i w_i
++    $$
++    $$
++    Q = \sum_{i=1}^{N} \alpha_i w_i
++    $$
++*   $\mathbf{c}_i$ is the color of the $i$-th Gaussian.
++*   $\alpha_i$ is the opacity of the $i$-th Gaussian.
++*   $w_i$ is the weight of the $i$-th Gaussian.
++
++The gradients for backpropagation are [S1, unofficial]:
++
+ $$
+-F = \frac{P}{Q}, \quad P = \sum_{i=1}^{N} \mathbf{c}_i \alpha_i w_i, \quad Q = \sum_{i=1}^{N} \alpha_i w_i
++\frac{\partial \mathbf{C}}{\partial \mathbf{c}_i} = (1-T)\frac{\alpha_i w_i}{Q}
+ $$
+-Here, the sum is over all Gaussians $i$ contributing to the pixel (within the tile range $r$). $\mathbf{c}_i$ is the color, $\alpha_i$ is the opacity, and $w_i$ is the weight of the $i$-th Gaussian.
+ 
+-**Pseudocode:**
++$$
++\frac{\partial \mathbf{C}}{\partial \alpha_i} = \frac{T}{1-\alpha_i}(F-\mathbf{c}_0) + (1-T)\frac{w_i}{Q}(\mathbf{c}_i - F)
++$$
++
++$$
++\frac{\partial \mathbf{C}}{\partial w_i} = (1-T)\frac{\alpha_i}{Q}(\mathbf{c}_i - F)
++$$
++
++### Parameters
++*   **BAN (Blend and Normalize):** Function that computes the final OIT color [S1, unofficial].
++*   **BAU (Blend and Update):** Function that updates the pre-rendered image state for subsequent blending or accumulation [S1, unofficial].
++*   **Update Interval:** In most cases, the update interval is not specified, but for scenes like train, room, and bonsai, it is set to 600 to ensure correct execution [S1, unofficial].
++
++### Pseudocode
+ ```python
+ def SparseOITRasterizer(w, h, M, S, C, A, V):
+     # 1. Cull Gaussians
++    # [G] Implementation detail: CullGaussian(p, V) removes Gaussians outside view frustum.
+     valid_indices = CullGaussian(M, V)
+-    M_proj = M[valid_indices]
+-    S_proj = S[valid_indices]
+-    C_proj = C[valid_indices]
+-    A_proj = A[valid_indices]
++    M_culled = M[valid_indices]
++    S_culled = S[valid_indices]
++    C_culled = C[valid_indices]
++    A_culled = A[valid_indices]
+ 
+-    # 2. Create Tiles
++    # 2. Project to Screen Space
++    M_prime, S_prime = ScreenspaceGaussians(M_culled, S_culled, V)
++
++    # 3. Create Tiles
+     T = CreateTiles(w, h)
+ 
+-    # 3. Duplicate with Keys
+-    L = []
+-    K = []
+-    for i, (mean, cov, color, alpha) in enumerate(zip(M_proj, S_proj, C_proj, A_proj)):
+-        # Determine overlapping tiles for this Gaussian
+-        # Note: Exact overlap test logic is not provided in sources [G]
+-        overlapping_tiles = GetOverlappingTiles(mean, cov, T)
+-        for tile_id in overlapping_tiles:
+-            L.append({
+-                'M_prime': mean,
+-                'S_prime': cov,
+-                'C': color,
+-                'A': alpha,
+-                'W': 1.0 # Default weight, assumed 1.0 if not learned [G]
+-            })
+-            K.append(tile_id)
++    # 4. Duplicate with Keys
++    # [G] Implementation detail: DuplicateWithKeys assigns each Gaussian to the tile containing its center.
++    L, K = DuplicateWithKeys(M_prime, T)
+ 
+-    # 4. Sort by Tile ID
+-    # Sort L and K based on K
+-    combined = list(zip(K, L))
+-    combined.sort(key=lambda x: x[0])
+-    K_sorted, L_sorted = zip(*combined) if combined else ([], [])
+-    K_sorted = list(K_sorted)
+-    L_sorted = list(L_sorted)
++    # 5. Sort by Keys (Tile ID only)
++    SortByKeys(K, L)
+ 
+-    # 5. Identify Tile Ranges
+-    R = {}
+-    current_tile = None
+-    start_idx = 0
+-    for idx, tile_id in enumerate(K_sorted):
+-        if tile_id != current_tile:
+-            if current_tile is not None:
+-                R[current_tile] = (start_idx, idx)
+-            current_tile = tile_id
+-            start_idx = idx
+-    if current_tile is not None:
+-        R[current_tile] = (start_idx, len(K_sorted))
++    # 6. Identify Tile Ranges
++    R = IdentifyTileRanges(T, K)
+ 
+-    # 6. Initialize Images
+-    I = np.zeros((h, w, 3))
+-    I_pre = np.zeros((h, w, 3)) # Assumed initialization [G]
++    # 7. Initialize Images
++    I = zeros((h, w, 3))
++    I_pre = zeros((h, w, 3)) # Pre-rendered state
+ 
+-    # 7. Rasterize
++    # 8. Loop over Tiles
+     for t in T:
+-        tile_id = t.id
+-        if tile_id not in R:
+-            continue
+-        start, end = R[tile_id]
+-        tile_gaussians = L_sorted[start:end]
+-
+-        for pixel in t.pixels:
+-            # Compute BAN and BAU
+-            # Note: The exact implementation of BAN and BAU is not provided in the sources [G]
+-            # Based on the formula, BAN computes the weighted average F
+-            # and BAU likely accumulates weights/opacities for T
++        # 9. Loop over Pixels in Tile
++        for i in t.pixels:
++            # 10. Get Range
++            r = GetTileRange(R, t)
+             
+-            # Extract attributes for this pixel
+-            # Note: Gaussian contribution to a specific pixel requires 
+-            # evaluating the 2D Gaussian function at the pixel coordinate.
+-            # This step is missing from the high-level algorithm [G]
++            # 11. BAN: Compute Final Color
++            I[i] = BAN(i, L, r, K, M_prime, S_prime, C_culled, A_culled, I_pre[i])
+             
+-            # Placeholder for Gaussian evaluation and accumulation
+-            P = 0
+-            Q = 0
+-            T_factor = 0 # Accumulated opacity/transmittance
+-            
+-            for g in tile_gaussians:
+-                # Evaluate 2D Gaussian at pixel position
+-                # alpha_pixel = alpha * exp(-0.5 * (x-M')^T S'^-1 (x-M'))
+-                # This evaluation is standard in 3DGS but not detailed in SparseOIT notes [G]
+-                # Assuming alpha_i in the formula refers to the projected alpha at the pixel
+-                alpha_i = EvaluateGaussian(g['M_prime'], g['S_prime'], pixel)
+-                c_i = g['C']
+-                w_i = g['W']
+-                
+-                P += c_i * alpha_i * w_i
+-                Q += alpha_i * w_i
+-                T_factor += alpha_i # Assumption for T, not explicitly defined [G]
+-            
+-            if Q > 0:
+-                F = P / Q
+-            else:
+-                F = 0
+-            
+-            # Final Color
+-            # Note: T in the formula C = T*c0 + (1-T)*F is ambiguous. 
+-            # In standard OIT, T is often sum(alpha). 
+-            # The sources do not define T's calculation in the forward pass [G]
+-            # Assuming T is the sum of alphas for demonstration
+-            if T_factor > 0:
+-                T_val = 1.0 - np.exp(-T_factor) # Standard alpha compositing assumption [G]
+-            else:
+-                T_val = 0
+-                
+-            I[pixel] = T_val * c0 + (1 - T_val) * F
+-            
+-            # BAU Update
+-            # Updates I_pre for subsequent blending or accumulation
+-            # Exact logic not provided [G]
+-            I_pre[pixel] = P # Example update
++            # 12. BAU: Update Pre-rendered State
++            I_pre[i] = BAU(i, L, r, K, M_prime, S_prime, C_culled, A_culled, I_pre[i])
+ 
+     return I, I_pre
++
++def BAN(i, L, r, K, M_prime, S_prime, C_culled, A_culled, I_pre):
++    # [G] Implementation detail: BAN computes the weighted average color F and transmittance T.
++    # It sums alpha_i * w_i and c_i * alpha_i * w_i for all Gaussians in range r covering pixel i.
++    # The specific weighting function w_i is not detailed in the source, but is part of the OIT formulation.
++    # Returns the final blended color C.
++    pass
++
++def BAU(i, L, r, K, M_prime, S_prime, C_culled, A_culled, I_pre):
++    # [G] Implementation detail: BAU updates the pre-rendered state I_pre.
++    # This likely accumulates alpha and color contributions for iterative refinement or active set updates.
++    pass
+ ```
+ 
+-**Backward Propagation:**
+-The gradients for optimization are computed as [S1, unofficial]:
+-$$
+-\frac{\partial \mathbf{C}}{\partial \mathbf{c}_i} = (1-T)\frac{\alpha_i w_i}{Q}
+-$$
+-$$
+-\frac{\partial \mathbf{C}}{\partial \alpha_i} = \frac{T}{1-\alpha_i}(F-\mathbf{c}_0) + (1-T)\frac{w_i}{Q}(\mathbf{c}_i - F)
+-$$
+-$$
+-\frac{\partial \mathbf{C}}{\partial w_i} = (1-T)\frac{\alpha_i}{Q}(\mathbf{c}_i - F)
+-$$
+-The variables of each Gaussian are mutually independent in the backward propagation equation, allowing for parallel computation [S1, unofficial].
++### Edge Cases and Pitfalls
++*   **Gradient Independence:** The variables of each Gaussian are mutually independent in the backward propagation equation, allowing for parallel computation [S1, unofficial].
++*   **Update Interval:** For specific scenes (train, room, bonsai), the update interval must be set to 600 to ensure correct execution, exceeding twice the number of training views [S1, unofficial].
+ 
+ ## Subtopics
+@@ -187,13 +151,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The sorting step is reduced to sorting by tile ID, which is significantly faster than full depth sorting. However, the BAN and BAU functions must be computed per pixel for all overlapping Gaussians. The complexity is $O(N \cdot T)$ where $N$ is the number of Gaussians and $T$ is the average number of Gaussians per tile/pixel, but without the $O(N \log N)$ sorting cost.
+-*   **Memory Complexity:** Requires storing duplicated Gaussian data for each tile they overlap, increasing memory usage compared to non-duplicated approaches.
+-*   **Strengths:** Eliminates the expensive depth sorting step. Order-independent, avoiding artifacts from incorrect sorting.
+-*   **Limitations:** The approximation of order-dependent transparency via weighted averages may introduce visual artifacts in complex scenes. The exact definition of $T$ and the BAU function are not fully specified, potentially leading to implementation ambiguity.
+-*   **When to use:** When sorting overhead is a bottleneck and approximate transparency is acceptable.
+-*   **When not to use:** When exact order-dependent transparency is required.
++*   **Time Complexity:** The sorting step is reduced to sorting by tile ID only, which is significantly faster than full depth sorting [S1, unofficial]. The blending process is independent of depth order, allowing for parallel computation of gradients [S1, unofficial].
++*   **Memory Complexity:** Requires storing the rendered image $I$ and pre-rendered state $I_{pre}$ [S1, unofficial].
++*   **Strengths:** Eliminates the expensive depth sorting step required by standard 3DGS rasterization [S1, unofficial]. Allows for parallel computation of gradients due to mutual independence of Gaussian variables in the backward propagation [S1, unofficial].
++*   **Limitations:** The specific tile size and the exact implementation of the BAN and BAU functions are not detailed in the sources [S1, unofficial]. The quality of the OIT approximation depends on the weight function $w_i$, which is not explicitly defined [S1, unofficial].
++*   **When to Use:** When order-independent transparency is desired and the computational cost of depth sorting is prohibitive [S1, unofficial].
++*   **When Not to Use:** When exact order-dependent transparency is required and the approximation error of OIT is unacceptable [S1, unofficial].
+ 
+ ## Background
+-The SparseOIT Rasterizer was introduced in the paper "SparseOIT: Improving Order-Independent Transparency 3DGS via Active Set Method" [S1, unofficial]. It is part of the development of 3D Gaussian Splatting rendering techniques, aiming to improve efficiency and quality by removing the sorting dependency.
++The SparseOIT Rasterizer was introduced in the paper "SparseOIT: Improving Order-Independent Transparency 3DGS via Active Set Method" [S1, unofficial]. It builds on the principles of 3D Gaussian Splatting and extends them with order-independent transparency techniques. The method is part of the broader family of transparency and blending models for Gaussian Splatting.
+ 
+ ## Sources

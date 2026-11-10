@@ -1,0 +1,88 @@
+# MultiPlaneNeRF
+
+Also called: MultiPlaneNeRF
+
+## Overview
+MultiPlaneNeRF is a radiance field representation that replaces the trainable implicit encoding of vanilla NeRF with a non-trainable 2D image-based representation [S1]. It solves the problems of long training times and poor generalization to unseen data by projecting 3D points onto a fixed set of 2D training images to create an aggregate feature vector, which is then processed by a small, generalizable implicit decoder [S1]. Unlike vanilla NeRF, which encodes object-specific geometry and color in network weights, MultiPlaneNeRF allows the representation to be swapped for new objects without retraining the decoder [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $n$ 2D training images $\{I_1, \dots, I_n\}$ with known camera poses, and a 3D query point $\mathbf{x} = (x, y, z)$.
+*   **Output:** Volume density $\sigma$ and color $\mathbf{c} = (R, G, B)$.
+
+**Data Structures:**
+*   **2D Representation:** A collection of $n$ 2D images. These are static and non-trainable.
+*   **Aggregate Vector:** $Z(\mathbf{x}) \in \mathbb{R}^{5k}$, where $k$ is a parameter related to the number of images or channels [S1]. The source specifies the dimension as $5k$ [S1].
+*   **Implicit Decoder:** A small Multi-Layer Perceptron (MLP) with trainable weights. It takes $Z(\mathbf{x})$ as input and outputs $\sigma$ and $\mathbf{c}$ [S1].
+
+**Steps:**
+1.  **Dataset Splitting:** Split the initial set of $n$ 2D training images into two subsets:
+    *   Subset 1: Used to build the 2D representation (the non-trainable input).
+    *   Subset 2: Used as the training set to calculate the weights of the implicit decoder [S1].
+2.  **Projection (Feature Aggregation):** For a 3D point $\mathbf{x}$, project it onto the 2D images in Subset 1. This produces an aggregate information vector $Z(\mathbf{x})$ [S1]. The projection step is not parametrized [S1].
+3.  **Decoding:** Pass $Z(\mathbf{x})$ through the small implicit decoder (MLP) to predict the volume density $\sigma$ and color $\mathbf{c}$ [S1].
+4.  **Rendering:** Use the predicted $\sigma$ and $\mathbf{c}$ in the standard volumetric rendering equation to compute pixel color [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_plane_nerf_decode(xyz, images, decoder):
+    """
+    Decode density and color for a 3D point using MultiPlaneNeRF.
+    
+    Args:
+        xyz: Tensor of shape (..., 3), 3D coordinates.
+        images: List of 2D images (tensors) used as the non-trainable representation.
+        decoder: Small MLP model.
+        
+    Returns:
+        sigma: Volume density.
+        color: RGB color.
+    """
+    # Step 1: Project 3D points onto 2D images to create aggregate vector Z
+    # The source states: "apply projection on the given 2D images to produce 
+    # an aggregate information vector Z(x,y,z)" [S1].
+    # The dimension of Z is R^{5k} [S1].
+    # Note: The exact projection mechanism (e.g., interpolation, sampling) 
+    # is not detailed in the provided text, but it is a non-parametric step [S1].
+    Z = project_onto_images(xyz, images) 
+    
+    # Step 2: Decode using the small implicit MLP
+    # The decoder takes Z and predicts RGB and sigma [S1].
+    sigma, color = decoder(Z)
+    
+    return sigma, color
+
+def project_onto_images(xyz, images):
+    """
+    Placeholder for the projection step.
+    The source does not specify the exact mathematical operation for 
+    projecting 3D points to 2D images, only that it produces Z(x,y,z) [S1].
+    [G] In practice, this likely involves unprojecting rays to find 
+    corresponding pixels in the input images and aggregating their values.
+    """
+    # Implementation detail not provided in source [S1].
+    # Returns a tensor of shape (..., 5k)
+    pass
+```
+
+**Parameters:**
+*   $k$: A parameter related to the number of images or channels, determining the dimension of the aggregate vector $Z$ ($5k$) [S1].
+*   Number of images $n$: The source uses $n$ images for the representation [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Generalization vs. Quality:** Training on a large dataset results in slightly worse rendering quality compared to training each object separately [S1].
+*   **Interpolation:** The model can mix images from two objects (using $k$ images from the first and $n-k$ from the second) to produce transitions/interpolations between objects [S1].
+
+## Operating characteristics
+*   **Training Time:** Significantly reduced compared to vanilla NeRF because the 3D structure is not encoded in the network weights; only a small implicit decoder is trained [S1].
+*   **Generalization:** Can generalize to unseen objects and classes by simply changing the 2D image representation without additional training of the decoder [S1].
+*   **Quality:** Achieves results comparable to state-of-the-art models (vanilla NeRF, voxel-based NSFV) with fewer parameters [S1].
+*   **Limitations:** Trade-off between rendering quality and generalization properties; large dataset training yields slightly worse quality than per-object training [S1].
+
+## Background
+MultiPlaneNeRF was proposed to address the limitations of vanilla NeRF, specifically long training times and poor generalization to unseen data [S1]. It was introduced in the paper "MultiPlaneNeRF: Neural radiance field with non-trainable representation" [S1]. The model uses existing 2D images as a non-trainable representation, allowing it to be used as a component in large generative models like GANs (e.g., MultiPlaneGAN) [S1].
+
+## Sources
+[S1] MultiPlaneNeRF: Neural radiance field with non-trainable representation, https://doi.org/10.1016/j.eswa.2025.127350, fetched 2026-10-29

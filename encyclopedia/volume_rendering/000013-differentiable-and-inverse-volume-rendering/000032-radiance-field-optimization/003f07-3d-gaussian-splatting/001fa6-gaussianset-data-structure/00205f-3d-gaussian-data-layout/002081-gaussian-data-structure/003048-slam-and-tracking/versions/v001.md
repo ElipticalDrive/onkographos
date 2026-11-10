@@ -1,0 +1,41 @@
+# SLAM and Tracking
+
+Also called: 3DGS-SLAM, Gaussian SLAM, Gaussian Tracking
+
+## Overview
+SLAM and Tracking in the context of 3D Gaussian Splatting (3DGS) refers to the simultaneous estimation of camera poses and the optimization of the Gaussian scene representation from a stream of images or video. It solves the problem of building a consistent, real-time 3D model while tracking the camera's trajectory in dynamic or static environments. What sets this family apart from standard offline 3DGS reconstruction is the online, incremental nature of the optimization, requiring efficient keyframe management, robust tracking against dynamic objects, and real-time rendering feedback for pose correction.
+
+## Shared principles
+The core mechanism involves coupling a visual odometry or SLAM backend with the differentiable rasterization of 3D Gaussians. Unlike traditional SLAM systems that rely on sparse feature points or dense depth maps for pose estimation, Gaussian SLAM uses the rendered image or depth from the Gaussian representation as the primary observation model.
+
+1.  **Differentiable Rendering as Observation Model**: The system renders a predicted image $I_{pred}$ from the current camera pose $P$ and Gaussian set $\mathcal{G}$. The error between $I_{pred}$ and the observed image $I_{obs}$ drives the optimization.
+2.  **Joint Optimization**: Camera poses and Gaussian parameters (position, covariance, opacity, color) are optimized jointly or alternately. The gradient of the loss with respect to the camera pose is derived via the chain rule through the differentiable splatting operation [S2, unofficial].
+3.  **Incremental Mapping**: New Gaussians are inserted to cover unobserved or poorly reconstructed regions, and existing Gaussians are pruned or densified based on visibility and error metrics. This maintains a compact and accurate representation as the camera moves [S2, unofficial].
+4.  **Keyframe Management**: To avoid the computational cost of optimizing all historical data, a sliding window of keyframes is maintained. Pose optimization is performed over this window, while non-keyframe poses are marginalized or fixed [S2, unofficial].
+
+## Subtopics
+
+### WildGS-SLAM
+A robust monocular RGB 3DGS-SLAM method designed for dynamic in-the-wild scenes. It distinguishes itself by explicitly handling dynamic objects, which typically break standard SLAM assumptions. It uses a shallow MLP over DINOv2 features to predict an uncertainty map. This map guides the removal of dynamic objects during tracking and mapping, feeding into an uncertainty-aware dense bundle adjustment and Gaussian-map optimization. This allows the system to reconstruct a clean static Gaussian map while ignoring moving distractors.
+*   **When to choose**: Use when tracking in environments with significant dynamic objects (people, vehicles) using only monocular RGB input.
+*   **Link**: [WildGS-SLAM](2773-wildgs-slam.md) (Note: No separate article exists in the provided tree, but it is a minor variant defined in the notes).
+
+### Keyframe Management
+A strategy for maintaining a small window $W_k$ of keyframes based on inter-frame covisibility to avoid the overhead of joint optimization over all frames. It relies on Gaussian covisibility estimation, which leverages the visibility ordering of 3D Gaussians. A Gaussian is considered visible if it is used in rasterization and the accumulated $\alpha$ along the ray has not reached 0.5. This allows occlusion handling without additional heuristics.
+*   **Selection Criteria**: A frame $i$ is registered as a keyframe if the covisibility (IoU of observed Gaussians) with the last keyframe $j$ drops below a threshold, OR if the relative translation $t_{ij}$ is large relative to median depth.
+*   **Management**: A keyframe is removed from $W_k$ if its overlap coefficient with the latest keyframe drops below a threshold.
+*   **When to choose**: Use as the default keyframe management strategy for online Gaussian SLAM to balance accuracy and computational efficiency.
+*   **Link**: [Keyframe Management](2773-keyframe-management.md) (Note: No separate article exists in the provided tree, but it is a minor variant defined in the notes).
+
+### GPS-SLAM
+An RGB-D SLAM method that combines a truncated Signed Distance Function (SDF) volume with a thin layer of 3D Gaussians near the surface. The SDF provides a stable geometric backbone for depth and base color, while the Gaussians model high-frequency appearance residuals. At render time, it raycasts the SDF for depth and base color, then splats only surface-near Gaussians with SDF-guided depth culling and order-independent blending. This hybrid approach avoids expensive NeRF-style volumetric sampling and removes the need for Gaussian depth sorting.
+*   **When to choose**: Use when RGB-D input is available and high-frequency appearance details are critical, or when real-time performance is required with high reconstruction quality.
+*   **Link**: [GPS-SLAM](2773-gps-slam.md) (Note: No separate article exists in the provided tree, but it is a minor variant defined in the notes).
+
+## Background
+The integration of 3D Gaussian Splatting into SLAM systems emerged as a response to the limitations of NeRF-based SLAM (e.g., NICE-SLAM, NeRF-SLAM), which struggled with real-time performance and local editing capabilities [S1, unofficial]. Early Gaussian SLAM systems, such as those described in [S2, unofficial], adapted the keyframe management and optimization strategies from traditional visual SLAM (like DSO) to the differentiable Gaussian representation. The use of DINOv2 features for dynamic object handling, as seen in WildGS-SLAM [S1, unofficial], represents a more recent advancement aimed at robustness in unstructured environments. GPS-SLAM [S3] illustrates the trend of hybridizing implicit fields (SDF) with explicit Gaussian representations to leverage the strengths of both for geometry and appearance.
+
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)
+[S2] Gaussian Splatting SLAM, https://arxiv.org/abs/2312.06741, fetched 2026-10-27 (unofficial)
+[S3] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

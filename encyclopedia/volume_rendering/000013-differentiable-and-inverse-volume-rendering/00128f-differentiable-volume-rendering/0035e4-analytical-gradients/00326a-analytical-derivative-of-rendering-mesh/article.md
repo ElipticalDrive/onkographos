@@ -1,151 +1,85 @@
 # Analytical Derivative of Rendering (Mesh)
 Also called: Analytical Differentiable Mesh Rendering
-
 ## Overview
-This method computes the exact gradients of the rendered image with respect to input parameters (shape, camera, material, lighting) by analytically differentiating the continuous steps of the mesh rendering pipeline [S1, unofficial]. It sets itself apart from siblings like [Differentiable Volume Rendering via Box Splines](2449-differentiable-volume-rendering-via-box-splines.md) and [Differentiable Volume Rendering with Analytical Gradients](5983-differentiable-volume-rendering-with-analytical-gradients.md) by operating on explicit triangle meshes rather than volumetric fields, and from [DIB-R](6798-dib-r.md) by relying on the standard rasterization logic for the differentiable components without explicitly separating foreground/background regions in its core definition [S1, unofficial]. The primary limitation is that it yields zero gradients for geometry optimization when vertex movements do not change the selected triangle for a pixel, as the discrete triangle selection step is non-differentiable [S1, unofficial].
-
+A differentiable rendering technique for meshes that computes exact gradients of the output image with respect to input parameters (shape, camera, material, lighting) by analytically differentiating the continuous components of the rendering pipeline, excluding the discrete triangle selection step [S1, unofficial]. It sets itself apart from [Differentiable Volume Rendering via Box Splines](2449-differentiable-volume-rendering-via-box-splines.md) and [Differentiable Volume Rendering with Analytical Gradients](5983-differentiable-volume-rendering-with-analytical-gradients.md) by applying these principles to mesh rasterization rather than volume density fields. Unlike [Neural 3D Mesh Renderer (NMR)](7042-neural-3d-mesh-renderer-nmr.md) which approximates visibility changes via linear interpolation to allow non-local gradient flow, this method relies on exact analytical derivatives for the selected geometry, resulting in zero gradients for occluded or background triangles [S1, unofficial].
 ## How it works
-The method assumes a standard rasterization pipeline where triangles are projected, sorted, and shaded. The differentiability holds for all steps except the discrete selection of the front-most triangle per pixel.
-
 **Inputs:**
-- Mesh geometry: Set of triangles defined by vertex positions $\mathbf{V} = \{\mathbf{v}_1, \dots, \mathbf{v}_N\}$ in world space.
-- Camera parameters: Projection matrix $\mathbf{P}$ and view matrix $\mathbf{V}_{iew}$.
-- Material parameters: Vertex colors $\mathbf{C}_v$, vertex normals $\mathbf{N}_v$, and material coefficients.
-- Lighting: Light positions $\mathbf{L}$ and intensities.
+- Mesh geometry: Set of triangles defined by vertex positions $\mathbf{v}_i \in \mathbb{R}^3$ and associated vertex attributes (color $\mathbf{c}_i$, normal $\mathbf{n}_i$).
+- Camera parameters: Projection matrix $\mathbf{P}$ and view matrix $\mathbf{V}$.
+- Lighting parameters: Light positions and intensities.
+- Material parameters: Coefficients for the reflection model (e.g., Phong, Lambertian).
 
 **Outputs:**
-- Rendered image $I$ and its analytical gradients $\nabla_{\mathbf{V}} I$, $\nabla_{\mathbf{C}_v} I$, etc.
+- Rendered image color $\mathbf{C}$ and depth $Z$.
+- Gradients $\frac{\partial \mathbf{C}}{\partial \mathbf{v}}$, $\frac{\partial \mathbf{C}}{\partial \mathbf{P}}$, $\frac{\partial \mathbf{C}}{\partial \text{material}}$, etc.
 
 **Data Structures:**
-- Triangle: Defined by three vertices $\mathbf{v}_i, \mathbf{v}_j, \mathbf{v}_k$.
-- Barycentric coordinates: $\omega_1, \omega_2, \omega_3$ such that $\sum \omega_m = 1$ and $\omega_m \ge 0$.
+- Triangle representation: List of indices $(i, j, k)$ mapping to vertex attributes.
+- Barycentric coordinates $(\alpha, \beta, \gamma)$ for each pixel within a triangle.
 
 **Steps:**
-
-1. **World to Camera Space Transformation:**
-   Transform vertex positions $\mathbf{v}_w$ from world space to camera space $\mathbf{v}_c$ using the view matrix $\mathbf{V}_{iew}$:
-   $$ \mathbf{v}_c = \mathbf{V}_{iew} \mathbf{v}_w $$
-   Transform light positions similarly. These are matrix multiplications, which are differentiable [S1, unofficial].
-
-2. **Camera to Screen Space Projection:**
-   Project camera-space vertices $\mathbf{v}_c = (x_c, y_c, z_c)^T$ to screen space (homogeneous coordinates) using the projection matrix $\mathbf{P}$:
-   $$ \begin{pmatrix} x_s \\ y_s \\ z_s \\ w_s \end{pmatrix} = \mathbf{P} \mathbf{v}_c $$
-   Normalize to get screen coordinates $(x_{scr}, y_{scr}) = (x_s/w_s, y_s/w_s)$ and depth $z_{scr} = z_s/w_s$. This step is differentiable with respect to vertex positions and camera parameters [S1, unofficial].
-
-3. **Triangle Selection (Non-Differentiable):**
-   For each pixel, determine the visible triangle based on depth $z_{scr}$. This discrete selection is **not** differentiable [S1, unofficial]. The analytical derivative is computed only for the selected triangle.
-
-4. **Barycentric Coordinate Computation:**
-   For a pixel $p$ inside the selected triangle with vertices $\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3$ in screen space, compute barycentric weights $\omega_1, \omega_2, \omega_3$.
-   The pixel position $\mathbf{p}_{scr}$ is expressed as:
-   $$ \mathbf{p}_{scr} = \omega_1 \mathbf{v}_{1,scr} + \omega_2 \mathbf{v}_{2,scr} + \omega_3 \mathbf{v}_{3,scr} $$
-   subject to $\omega_1 + \omega_2 + \omega_3 = 1$.
-   The weights are computed by solving a differentiable linear program or via explicit geometric formulas (e.g., area ratios) [S1, unofficial].
-
-5. **Depth Interpolation:**
-   Compute the pixel depth $z_p$ by interpolating the camera-space depths of the vertices:
-   $$ z_p = \omega_1 z_{1,c} + \omega_2 z_{2,c} + \omega_3 z_{3,c} $$
-   This is a weighted sum, which is differentiable [S1, unofficial].
-
-6. **Attribute Interpolation:**
-   Interpolate material properties (color $\mathbf{C}_p$) and normals $\mathbf{N}_p$ at the pixel using the same barycentric weights:
-   $$ \mathbf{C}_p = \omega_1 \mathbf{C}_1 + \omega_2 \mathbf{C}_2 + \omega_3 \mathbf{C}_3 $$
-   $$ \mathbf{N}_p = \frac{\omega_1 \mathbf{N}_1 + \omega_2 \mathbf{N}_2 + \omega_3 \mathbf{N}_3}{\|\omega_1 \mathbf{N}_1 + \omega_2 \mathbf{N}_2 + \omega_3 \mathbf{N}_3\|} $$
-   (Note: Normal interpolation requires renormalization, which is differentiable [G]).
-
-7. **Shading:**
-   Compute pixel color $\mathbf{I}_p$ using a differentiable local illumination model (e.g., Phong, Lambertian, Spherical Harmonics) given $\mathbf{C}_p$, $\mathbf{N}_p$, and lighting parameters [S1, unofficial].
+1. **World to Camera Space:** Transform triangle vertices $\mathbf{v}_i$ and light directions from world space to camera space using matrix multiplication with the view matrix $\mathbf{V}$. This operation is differentiable [S1, unofficial].
+   $$ \mathbf{v}_i^{cam} = \mathbf{V} \mathbf{v}_i $$
+2. **Camera to Screen Space:** Project camera-space vertices to screen space using the projection matrix $\mathbf{P}$.
+   $$ \mathbf{v}_i^{screen} = \mathbf{P} \mathbf{v}_i^{cam} $$
+   Perform perspective division to obtain normalized device coordinates (NDC) and map to pixel coordinates [S1, unofficial].
+3. **Triangle Selection:** Determine which triangle covers each pixel. This step is discrete and non-differentiable [S1, unofficial].
+4. **Barycentric Coordinates:** For a pixel $p$ covered by triangle $t$ with vertices $\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3$, compute barycentric weights $\alpha, \beta, \gamma$ such that $\mathbf{p} = \alpha \mathbf{v}_1 + \beta \mathbf{v}_2 + \gamma \mathbf{v}_3$ and $\alpha + \beta + \gamma = 1$. These are computed by solving a differentiable linear program [S1, unofficial].
+5. **Depth Interpolation:** Compute pixel depth $Z_p$ by interpolating the depth values of the three vertices in camera space:
+   $$ Z_p = \alpha Z_1 + \beta Z_2 + \gamma Z_3 $$
+6. **Attribute Interpolation:** Compute pixel normal $\mathbf{n}_p$ and material properties as a weighted sum of vertex attributes:
+   $$ \mathbf{n}_p = \alpha \mathbf{n}_1 + \beta \mathbf{n}_2 + \gamma \mathbf{n}_3 $$
+   (Note: Normals may require renormalization, which is differentiable where non-zero).
+7. **Color Computation:** Compute pixel color $\mathbf{C}_p$ using a differentiable local illumination reflection model (e.g., Phong, Lambertian, Spherical Harmonics) given $\mathbf{n}_p$, material parameters, and lighting [S1, unofficial].
+   $$ \mathbf{C}_p = \text{ReflectionModel}(\mathbf{n}_p, \text{material}, \text{lighting}) $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def analytical_gradient_mesh_rendering(vertices_world, camera_matrix, projection_matrix, 
-                                       vertex_colors, vertex_normals, lights):
-    """
-    Computes rendered image and gradients w.r.t. vertices and colors.
-    Assumes a single visible triangle per pixel for simplicity.
-    """
-    # 1. Transform to camera space
-    vertices_cam = apply_view_transform(vertices_world, camera_matrix)
+def render_mesh_analytical(vertices, camera_matrix, light_params, material_params):
+    # 1. Project vertices to camera space
+    cam_vertices = camera_matrix @ vertices
     
-    # 2. Project to screen space
-    vertices_homo = apply_projection(vertices_cam, projection_matrix)
-    vertices_screen = homogeneous_to_screen(vertices_homo)
-    depths_cam = vertices_cam[:, 2] # z-coordinate in camera space
+    # 2. Project to screen space (simplified 2D projection for illustration)
+    screen_vertices = project_to_screen(cam_vertices)
     
-    # 3. Rasterization (Non-differentiable selection)
-    # Identify visible triangle for each pixel. 
-    # For gradient computation, we assume the triangle selection is fixed.
-    visible_triangles = rasterize_depth_test(vertices_screen, depths_cam)
+    # 3. Rasterize: Identify triangles covering pixels (Discrete, non-differentiable)
+    # For each pixel p, find the front-most triangle t
+    pixel_triangle_map = rasterize(screen_vertices)
     
-    image = zeros_like(screen_resolution)
-    grad_vertices = zeros_like(vertices_world)
-    grad_colors = zeros_like(vertex_colors)
+    image = zeros_like(pixel_triangle_map)
     
-    for pixel in screen_resolution:
-        tri = visible_triangles[pixel]
-        if tri is None: continue
+    for p in pixels:
+        t = pixel_triangle_map[p]
+        if t is None:
+            continue
+            
+        # 4. Compute barycentric coordinates (Differentiable linear program solution)
+        alpha, beta, gamma = compute_barycentric(p, t.vertices)
         
-        v1, v2, v3 = vertices_screen[tri]
-        d1, d2, d3 = depths_cam[tri]
-        c1, c2, c3 = vertex_colors[tri]
-        n1, n2, n3 = vertex_normals[tri]
+        # 5. Interpolate depth
+        z_p = alpha * t.vertices[0].z + beta * t.vertices[1].z + gamma * t.vertices[2].z
         
-        # 4. Compute Barycentric Coordinates
-        # Solve for w1, w2, w3 such that p = w1*v1 + w2*v2 + w3*v3 and sum(w)=1
-        w1, w2, w3 = compute_barycentric_coords(pixel, v1, v2, v3)
+        # 6. Interpolate normal
+        n_p = alpha * t.normals[0] + beta * t.normals[1] + gamma * t.normals[2]
+        n_p = normalize(n_p) # Differentiable if n_p != 0
         
-        # 5. Interpolate Depth (for completeness, though not used in shading directly here)
-        z_p = w1*d1 + w2*d2 + w3*d3
+        # 7. Compute color using differentiable reflection model
+        color = phong_model(n_p, light_params, material_params)
+        image[p] = color
         
-        # 6. Interpolate Attributes
-        c_p = w1*c1 + w2*c2 + w3*c3
-        n_p_raw = w1*n1 + w2*n2 + w3*n3
-        n_p = normalize(n_p_raw)
-        
-        # 7. Shading
-        color_p = shading_model(c_p, n_p, lights)
-        image[pixel] = color_p
-        
-        # 8. Backpropagation (Chain Rule)
-        # Gradient of color w.r.t. interpolated attributes
-        grad_c_p = d_shading_d_color(color_p, n_p, lights)
-        grad_n_p = d_shading_d_normal(color_p, n_p, lights)
-        
-        # Gradient w.r.t. barycentric weights
-        # dc_p/dw_i = c_i - c_p (since sum(w)=1, one weight is dependent)
-        # dn_p/dw_i involves Jacobian of normalization
-        grad_w1 = grad_c_p * (c1 - c_p) + dot(grad_n_p, d_normalize_d_input(n_p_raw) * n1)
-        grad_w2 = grad_c_p * (c2 - c_p) + dot(grad_n_p, d_normalize_d_input(n_p_raw) * n2)
-        grad_w3 = grad_c_p * (c3 - c_p) + dot(grad_n_p, d_normalize_d_input(n_p_raw) * n3)
-        
-        # Gradient w.r.t. vertex positions (via barycentric coords)
-        # dw/dp is computed from the linear system solution
-        # This part is complex and depends on the specific barycentric solver
-        # [G] In practice, this requires the Jacobian of the barycentric coordinate solver
-        # w.r.t. the vertex screen positions.
-        grad_v1_screen = d_barycentric_d_vertex(w1, w2, w3, v1, v2, v3) * grad_w1
-        grad_v2_screen = d_barycentric_d_vertex(w1, w2, w3, v1, v2, v3) * grad_w2
-        grad_v3_screen = d_barycentric_d_vertex(w1, w2, w3, v1, v2, v3) * grad_w3
-        
-        # Accumulate gradients back to world space vertices
-        # [G] Chain rule through projection and view transform matrices
-        grad_vertices[tri[0]] += d_screen_d_cam(grad_v1_screen) * d_cam_d_world(camera_matrix)
-        grad_vertices[tri[1]] += d_screen_d_cam(grad_v2_screen) * d_cam_d_world(camera_matrix)
-        grad_vertices[tri[2]] += d_screen_d_cam(grad_v3_screen) * d_cam_d_world(camera_matrix)
-        
-        # Gradient w.r.t. vertex colors
-        grad_colors[tri[0]] += grad_c_p * w1
-        grad_colors[tri[1]] += grad_c_p * w2
-        grad_colors[tri[2]] += grad_c_p * w3
-
-    return image, grad_vertices, grad_colors
+    return image, z_p
 ```
 
+**Parameters:**
+- Reflection model type: Phong, Lambertian, or Spherical Harmonics [S1, unofficial].
+- Barycentric solver: Standard linear algebra solver for $2 \times 2$ systems [S1, unofficial].
+
 **Edge Cases and Pitfalls:**
-- **Zero Gradient for Geometry:** If a pixel's color is determined by a single triangle, the gradient of the pixel color with respect to the vertices of *other* triangles is zero. This prevents optimization of occluded or background triangles [S1, unofficial].
-- **Discrete Selection:** The derivative with respect to vertex position is zero for all pixels and vertices if the triangle selection does not change. Analytical derivatives alone do not help optimize geometry when vertex movement changes which triangle is selected [S1, unofficial].
+- **Zero Gradient for Occluded Geometry:** If a pixel's color is determined solely by a single triangle, the gradient with respect to vertices of *other* triangles is zero. This prevents geometry optimization for occluded or background triangles [S1, unofficial].
+- **Vertex Position Derivative:** The derivative of pixel color with respect to vertex position is zero for all pixels and vertices in the pure analytical formulation if the triangle selection does not change. This means vertex movement that does not alter the set of covered pixels yields no gradient, hindering geometry optimization [S1, unofficial].
+- **Discrete Selection:** The triangle selection step is not differentiable. Gradients cannot flow through the visibility decision [S1, unofficial].
 
 ## Subtopics
 
@@ -156,15 +90,15 @@ DIB-R is a differentiable rendering technique for meshes that computes exact gra
 Neural 3D Mesh Renderer (NMR) is a differentiable rendering method that approximates the non-differentiable rasterization step by replacing sudden visibility changes with linear interpolation, allowing gradients to flow from pixels to mesh vertices beyond the immediate boundary. It addresses the "localness" limitation of prior methods like OpenDR, where gradients only flowed from boundary pixels, by using non-local approximated gradients that are aware of the optimization objective.
 
 ## Operating characteristics
-- **Time Complexity:** Dominated by rasterization and shading, similar to standard rendering. Gradient computation adds overhead proportional to the number of pixels and the complexity of the shading model.
-- **Memory Complexity:** Requires storing intermediate values (barycentric coordinates, interpolated attributes) for backpropagation.
-- **Strengths:** Provides exact gradients for the differentiable parts of the pipeline (projection, interpolation, shading). Efficient for optimizing camera parameters, lighting, and material colors.
-- **Limitations:** Fails to provide gradients for geometry optimization when the triangle selection is stable (zero gradient for non-selected triangles). Cannot handle topological changes or visibility changes analytically [S1, unofficial].
-- **When to Use:** Optimizing camera poses, lighting, or material properties given a fixed mesh geometry.
-- **When Not to Use:** Optimizing mesh geometry where vertex movements cause visibility changes, unless combined with approximated gradient methods [S1, unofficial].
+- **Time Complexity:** Dominated by rasterization (triangle selection) and per-pixel shading. The analytical gradient computation adds overhead proportional to the number of differentiable parameters but is generally efficient as it avoids finite differences.
+- **Memory Complexity:** Requires storing intermediate differentiable states (barycentric coordinates, interpolated normals/depths) for backpropagation.
+- **Strengths:** Provides exact gradients for the selected geometry and shading model. Computationally efficient compared to stochastic or finite-difference methods.
+- **Limitations:** Fails to provide gradients for occluded or background triangles due to the discrete selection step. Cannot optimize geometry that does not directly affect the current pixel coverage [S1, unofficial].
+- **When to use:** When the geometry is known and stable, and optimization focuses on parameters that directly affect visible surfaces (e.g., camera pose, material properties, or visible vertex positions).
+- **When not to use:** When optimizing full mesh geometry where occlusion changes are frequent, or when gradients for occluded parts are required.
 
 ## Background
-The concept of analytical derivatives in rendering was explored in early differentiable rendering surveys, noting that while the rasterization step (triangle selection) is discrete, the subsequent operations (interpolation, shading) are differentiable [S1, unofficial]. The limitation of zero gradients for geometry optimization due to discrete selection was highlighted as a key challenge in differentiable mesh rendering [S1, unofficial].
+Originating from the broader field of differentiable rendering, this method applies the chain rule to the continuous components of the mesh rendering pipeline. It was highlighted in surveys of differentiable rendering techniques as a foundational approach that distinguishes between differentiable (shading, projection) and non-differentiable (rasterization/visibility) steps [S1, unofficial]. The limitation of zero gradients for occluded geometry is a well-known issue in this family, leading to variants like DIB-R and NMR that introduce approximations to handle visibility changes [S1, unofficial][S2].
 
 ## Sources
 [S1] Differentiable Rendering: A Survey, https://doi.org/10.48550/arxiv.2006.12057, fetched 2026-10-26 (unofficial)

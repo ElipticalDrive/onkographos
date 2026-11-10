@@ -3,62 +3,45 @@
 Also called: Intersection Occupancy
 
 ## Overview
-Flexible Dual Grid Occupancy computes the set of sparse voxel coordinates intersected by a triangle mesh, serving as the foundational occupancy stage for Flexible Dual Grid Mesh Voxelization. It differs from its sibling [O-Voxel](3835-o-voxel.md) by strictly returning only occupied indices without solving the Quadratic Error Function (QEF) for dual vertex positions or computing edge intersection data [S1, unofficial]. This method isolates the geometric containment check, enabling downstream stages to compute surface approximations only within the active voxel set.
+Flexible Dual Grid Occupancy computes the set of sparse voxel coordinates intersected by a triangle mesh, serving as the foundational occupancy stage for Flexible Dual Grid Mesh Voxelization [S1, unofficial]. It differs from its sibling [O-Voxel](3835-o-voxel.md) by strictly returning only occupied indices without solving the Quadratic Error Function (QEF) for dual vertex positions or computing edge intersection data [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `vertices`: Tensor of shape $(N, 3)$ containing mesh vertex coordinates.
-- `faces`: Tensor of shape $(M, 3)$ containing triangle face indices.
-- `aabb`: Optional Axis-Aligned Bounding Box of shape $(2, 3)$, specifying $[min, max]$ coordinates. If not provided, it is derived from `vertices`.
-- `voxel_size`: Optional scalar or $(3,)$ tensor defining voxel dimensions.
-- `grid_size`: Optional scalar or $(3,)$ tensor defining the number of voxels per dimension.
-- One of `voxel_size` or `grid_size` must be provided.
+- `vertices`: Tensor of shape $(N, 3)$ containing mesh vertex coordinates [S1, unofficial].
+- `faces`: Tensor of shape $(M, 3)$ containing triangle face indices [S1, unofficial].
+- `aabb`: Optional Axis-Aligned Bounding Box of shape $(2, 3)$, specifying $[min, max]$ coordinates [S1, unofficial]. If not provided, it is derived from `vertices` [S1, unofficial].
+- `voxel_size`: Optional scalar or $(3,)$ tensor defining voxel dimensions [S1, unofficial].
+- `grid_size`: Optional scalar or $(3,)$ tensor defining the number of voxels per dimension [S1, unofficial].
+- One of `voxel_size` or `grid_size` must be provided [S1, unofficial].
 
 **Outputs:**
-- `occupied_indices`: Tensor of shape $(K, 3)$ containing the $(x, y, z)$ coordinates of all voxels intersected by at least one triangle.
+- `occupied_indices`: Tensor of shape $(K, 3)$ containing the $(x, y, z)$ coordinates of all voxels intersected by at least one triangle [S1, unofficial].
 
 **Data Structures:**
-- The grid is defined by an origin (AABB minimum) and a resolution (`grid_size`). Voxels are indexed by integer coordinates relative to this origin.
-- No persistent data structures (like VDB or sparse hash maps) are described in the source for the intermediate state; the output is a flat list of occupied coordinates.
+- The grid is defined by an origin (AABB minimum) and a resolution (`grid_size`) [S1, unofficial]. Voxels are indexed by integer coordinates relative to this origin [S1, unofficial].
+- No persistent data structures (like VDB or sparse hash maps) are described for the intermediate state; the output is a flat list of occupied coordinates [S1, unofficial].
 
 **Steps:**
-1. **Compute AABB:** If `aabb` is not provided, calculate the minimum and maximum coordinates across all vertices in `vertices`. If `voxel_size` or `grid_size` is provided, align the AABB boundaries to the grid. Specifically, if `grid_size` is provided, the AABB is used to derive `voxel_size`. If `voxel_size` is provided, `grid_size` is derived as:
-   $$ \text{grid\_size}_i = \left\lfloor \frac{\text{aabb}_{max, i} - \text{aabb}_{min, i}}{\text{voxel\_size}_i} + 0.5 \right\rfloor $$
-   The source code implies rounding to the nearest integer for grid dimensions [S1, unofficial].
-
-2. **Local Coordinate Transformation:** Shift mesh vertices into the grid-local coordinate system by subtracting the AABB minimum:
-   $$ v'_{j} = v_{j} - \text{aabb}_{min} $$
-   where $v_{j}$ is the $j$-th vertex and $\text{aabb}_{min}$ is the $(3,)$ vector of minimum coordinates [S1, unofficial].
-
-3. **Triangle Assembly:** Map face indices to local vertex coordinates:
-   $$ T_{i} = [v'_{f_{i,0}}, v'_{f_{i,1}}, v'_{f_{i,2}}] $$
-   where $T_{i}$ is the $i$-th triangle and $f_{i,k}$ are the vertex indices from the `faces` tensor [S1, unofficial].
-
-4. **Intersection Computation:** Invoke the backend function `intersect_occ_cuda` (or `intersect_occ_cpu`) with the transformed triangles, `voxel_size`, and `grid_range` (derived from AABB and grid_size). This function performs ray/voxel or triangle/voxel intersection tests to determine which voxels contain any part of the mesh geometry [S1, unofficial].
-
-5. **Output Generation:** Return the list of unique voxel coordinates identified in step 4.
+1. **Compute AABB:** If `aabb` is not provided, calculate the minimum and maximum coordinates across all vertices in `vertices` [S1, unofficial]. If `voxel_size` or `grid_size` is provided, align the AABB boundaries to the grid, then stack min and max [S1, unofficial].
+2. **Derive Grid Parameters:** If `voxel_size` is provided, derive `grid_size` as:
+   $$ \text{grid\_size} = \left\lfloor \frac{\text{aabb}_{\text{max}} - \text{aabb}_{\text{min}}}{\text{voxel\_size}} + 0.5 \right\rfloor $$
+   rounded to `int32` [S1, unofficial]. If `grid_size` is provided, derive `voxel_size` using the same division and rounding logic [S1, unofficial].
+3. **Local Coordinate Transformation:** Shift mesh vertices into the grid-local coordinate system by subtracting the AABB minimum:
+   $$ v' = v - \text{aabb}_{\text{min}} $$
+   [S1, unofficial].
+4. **Triangle Assembly:** Map face indices to local vertex coordinates:
+   $$ T = v'[\text{faces}] $$
+   [S1, unofficial].
+5. **Intersection Computation:** Invoke the backend function `intersect_occ_cuda` (or `intersect_occ_cpu`) with the transformed triangles, `voxel_size`, and `grid_range` (derived from AABB and grid_size) to compute occupied voxels [S1, unofficial].
+6. **Output Generation:** Return the list of unique voxel coordinates identified in step 5 [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import torch
-import numpy as np
 
 def flexible_dual_grid_occupancy(vertices, faces, aabb=None, voxel_size=None, grid_size=None):
-    """
-    Compute occupied voxels for a triangle mesh.
-    
-    Args:
-        vertices: (N, 3) tensor of vertex positions.
-        faces: (M, 3) tensor of face indices.
-        aabb: Optional (2, 3) tensor [min, max].
-        voxel_size: Optional scalar or (3,) tensor.
-        grid_size: Optional scalar or (3,) tensor.
-        
-    Returns:
-        occupied_indices: (K, 3) tensor of voxel coordinates.
-    """
     # 1. Compute AABB if not provided
     if aabb is None:
         aabb_min = torch.min(vertices, dim=0).values
@@ -66,81 +49,66 @@ def flexible_dual_grid_occupancy(vertices, faces, aabb=None, voxel_size=None, gr
         aabb = torch.stack([aabb_min, aabb_max], dim=0)
     else:
         aabb = torch.as_tensor(aabb)
-        
-    # Ensure AABB is on CPU for derivation logic to avoid implicit CUDA sync issues [S1, unofficial]
+
+    # Ensure AABB is on CPU to avoid implicit CUDA sync issues [S1, unofficial]
     aabb_cpu = aabb.cpu()
     vertices_cpu = vertices.cpu()
-    
+
     # 2. Derive voxel_size or grid_size
     if voxel_size is None and grid_size is None:
         raise ValueError("Either voxel_size or grid_size must be provided.")
-        
+
     if voxel_size is not None:
         voxel_size = torch.as_tensor(voxel_size).float()
         if voxel_size.dim() == 0:
             voxel_size = voxel_size.expand(3)
-        # Derive grid_size from AABB and voxel_size
         grid_size = ((aabb_cpu[1] - aabb_cpu[0]) / voxel_size).round().to(torch.int32)
     else:
         grid_size = torch.as_tensor(grid_size).long()
         if grid_size.dim() == 0:
             grid_size = grid_size.expand(3)
-        # Derive voxel_size from AABB and grid_size
         voxel_size = ((aabb_cpu[1] - aabb_cpu[0]) / grid_size.float()).round().to(torch.int32).float()
 
     # 3. Shift vertices to local coordinates
     aabb_min = aabb_cpu[0]
     local_vertices = vertices_cpu - aabb_min.reshape(1, 3)
-    
+
     # 4. Map faces to local vertices
     local_faces = local_vertices[faces.to(torch.long)]
-    
+
     # 5. Call backend intersection function
-    # Note: The exact signature of intersect_occ_cuda is implementation-specific.
-    # It expects triangles, voxel_size, and grid_range.
-    # grid_range is typically [aabb_min, aabb_max] or [origin, size].
-    # Based on source, it uses voxel_size_arg and grid_range_arg.
-    
+    # The sources do not provide the internal algorithm for the backend intersection function [G]
     occupied_indices = intersect_occ_cuda(
         triangles=local_faces,
         voxel_size=voxel_size,
         grid_range=torch.stack([aabb_min, aabb_max], dim=0)
     )
-    
     return occupied_indices
 
 def intersect_occ_cuda(triangles, voxel_size, grid_range):
-    """
-    Placeholder for the C++/CUDA backend function described in [S1, unofficial].
-    Performs voxel traversal/intersection to find occupied voxels.
-    Returns a tensor of (K, 3) integer coordinates.
-    """
-    # Implementation detail: This function iterates over triangles and marks
-    # voxels in a sparse structure or list that intersect the triangle.
-    # The specific algorithm (e.g., AABB culling + ray casting, or slab method)
-    # is encapsulated in the backend.
+    # The sources do not provide the implementation details for the backend intersection algorithm.
+    # It performs voxel traversal or triangle-voxel intersection tests to return occupied coordinates.
     pass
 ```
 
 **Parameters:**
-- `voxel_size`: Size of each voxel. Can be float, list, tuple, np.ndarray, or torch.Tensor. Must be 1D with 3 elements if tensor [S1, unofficial].
-- `grid_size`: Size of the grid (number of voxels). Can be int, list, tuple, np.ndarray, or torch.Tensor. Must be 1D with 3 elements if tensor [S1, unofficial].
-- `aabb`: Axis-aligned bounding box. If not provided, computed from vertices [S1, unofficial].
+- `voxel_size`: Size of each voxel [S1, unofficial]. Can be float, list, tuple, np.ndarray, or torch.Tensor [S1, unofficial]. Must be 1D with 3 elements if tensor [S1, unofficial].
+- `grid_size`: Size of the grid (number of voxels) [S1, unofficial]. Can be int, list, tuple, np.ndarray, or torch.Tensor [S1, unofficial]. Must be 1D with 3 elements if tensor [S1, unofficial].
+- `aabb`: Axis-aligned bounding box [S1, unofficial]. If not provided, computed from vertices [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 - **CUDA Sync:** If `aabb` is on CUDA and not provided as a CPU tensor, it must be detached to CPU before derivation to avoid implicit CUDA synchronization overhead [S1, unofficial].
 - **Missing Parameters:** One of `voxel_size` or `grid_size` must be provided; otherwise, the grid resolution cannot be determined [S1, unofficial].
-- **Precision:** Grid size derivation uses rounding. Small discrepancies in AABB boundaries or voxel sizes may lead to off-by-one errors in grid dimensions [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not explicitly stated in the sources. The complexity is dominated by the intersection test between triangles and voxels, likely $O(N \cdot V)$ in the worst case where $N$ is the number of triangles and $V$ is the number of voxels, but optimized by spatial culling using the AABB.
-- **Memory Complexity:** Proportional to the number of occupied voxels $K$. The output is a sparse list of indices.
-- **Performance:** The method is implemented in C++/CUDA for performance [S1, unofficial]. It is used as a preprocessing step for [Flexible Dual Grid Mesh Voxelization](2640-flexible-dual-grid-mesh-voxelization.md), which adds QEF solving.
-- **Strengths:** Efficiently identifies active geometry regions without the overhead of surface approximation.
-- **Limitations:** Does not provide surface position or normal information; only occupancy.
+- **Time Complexity:** Not explicitly stated in the sources [S1, unofficial]. The complexity is dominated by the intersection test between triangles and voxels, optimized by spatial culling using the AABB [S1, unofficial].
+- **Memory Complexity:** Proportional to the number of occupied voxels $K$ [S1, unofficial]. The output is a sparse list of indices [S1, unofficial].
+- **Performance:** The method is implemented in C++/CUDA for performance [S1, unofficial]. It is used as a preprocessing step for [Flexible Dual Grid Mesh Voxelization](2640-flexible-dual-grid-mesh-voxelization.md), which adds QEF solving [S1, unofficial].
+- **Strengths:** Efficiently identifies active geometry regions without the overhead of surface approximation [S1, unofficial].
+- **Limitations:** Does not provide surface position or normal information; only occupancy [S1, unofficial].
 
 ## Background
-Flexible Dual Grid Occupancy is part of the O-Voxel pipeline, specifically the geometry voxelization stage. It is implemented in the `o-voxel-gpu` library [S1, unofficial]. The method serves as the first step in converting triangle meshes into flexible dual grid representations, which are then used for material voxelization and rendering.
+Flexible Dual Grid Occupancy is part of the O-Voxel pipeline, specifically the geometry voxelization stage [S1, unofficial]. It serves as the first step in converting triangle meshes into flexible dual grid representations, which are then used for material voxelization and rendering [S1, unofficial].
 
 ## Sources
 [S1] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)

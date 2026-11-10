@@ -3,168 +3,131 @@
 Also called: PR-DPT, Differentiable Path Tracing with Derivative-Kernel (Our∂κP), Convolutional Gradient Estimation, Our∂κP
 
 ## Overview
-Plateau-Reduced Differentiable Path Tracing (PR-DPT) is an inverse rendering method that alleviates optimization plateaus (regions of zero gradient) by convolving the rendering equation with a smoothing kernel over the parameter space [S1]. Unlike standard differentiable renderers that suffer from discontinuous gradients due to visibility changes, PR-DPT ensures that small parameter changes continuously influence the objective function in expectation, allowing gradient-based optimizers to converge on problems with intricate light transport like caustics [S1]. It sets itself apart from its siblings by requiring only a forward path tracer and skipping the computation of the renderer's internal gradient tape or adjoint scattering, making it significantly faster than adjoint-based methods while remaining compatible with non-differentiable renderers [S1].
+Plateau-Reduced Differentiable Path Tracing (PR-DPT) is an inverse rendering technique that alleviates optimization plateaus (regions of zero gradient) by convolving the rendering equation with a smoothing kernel over the parameter space [S1]. Unlike standard differentiable path tracers that suffer from discontinuous gradients due to visibility changes, PR-DPT ensures that scene parameters continuously influence the objective function in expectation, allowing gradient-based optimizers to converge on problems with intricate light transport (e.g., caustics) where other methods fail [S1]. It achieves this by estimating gradients using a derivative kernel, enabling the use of non-differentiable forward renderers without requiring internal gradient tapes or special integrators for visibility discontinuities [S1].
 
 ## How it works
-**Inputs and Outputs:**
-- **Inputs:** Scene function $f(x, \theta)$ (the renderer), current parameters $\theta \in \Theta$, kernel standard deviation $\sigma$, number of samples $N$.
-- **Outputs:** Gradient estimate $\nabla_\theta Q(\theta)$.
+### Inputs and Outputs
+- **Inputs**: 
+  - Scene function $f(x, \theta)$, where $x \in \Omega$ are light paths and $\theta \in \Theta$ are scene parameters.
+  - Smoothing kernel $\kappa(\tau)$, typically Gaussian.
+  - Number of samples $N$ (perturbations per iteration).
+  - Kernel bandwidth $\sigma$.
+- **Outputs**: 
+  - Gradient estimate $\frac{\partial Q}{\partial \theta}$ of the plateau-reduced objective $Q(\theta)$.
 
-**Data Structures:**
-- $\theta$: Vector of scene parameters (e.g., position, rotation, texture values).
-- $\tau$: Parameter offset vector, sampled from the kernel distribution.
-- $x$: Light path sample.
-- $P(\theta)$: The rendered image (or scalar loss) for parameters $\theta$.
+### Data Structures
+- **Parameter Space $\Theta$**: Normalized to $[0, 1]$ where possible (e.g., rotation parameters) [S1].
+- **Kernel $\kappa(\tau)$**: Gaussian distribution $\mathcal{N}(0, \sigma^2)$.
+- **Samples**: Pairs of parameter offsets $\tau_i$ and their antitheses $-\tau_i$.
 
-**Formulas:**
-The plateau-reduced rendering equation $Q(\theta)$ is defined as the convolution of the original rendering equation $P(\theta)$ with a kernel $\kappa$ over the parameter space $\Theta$ [S1]:
+### Formulas
+The plateau-reduced rendering equation $Q(\theta)$ is the convolution of the original rendering equation $P(\theta)$ with kernel $\kappa$ over the parameter space $\Theta$ [S1]:
 $$
 Q(\theta) = \kappa * P(\theta) = \int_{\Theta} \int_{\Omega} \kappa(\tau) f(x, \theta - \tau) dx d\tau
 $$
-where $f(x, \theta)$ is the scene function, $x \in \Omega$ are light paths, $\theta \in \Theta$ are scene parameters, and $\tau$ is a parameter offset [S1].
-
 The Monte Carlo estimator for $Q(\theta)$ is [S1]:
 $$
 \hat{Q} \approx \frac{1}{N} \sum_{i=1}^{N} \kappa(\tau_i) f(x_i, \theta - \tau_i)
 $$
+The gradient can be computed in two ways depending on renderer differentiability [S1]:
+1. **Differentiable Renderer**:
+   $$
+   \frac{\partial Q}{\partial \theta} = \frac{1}{N} \sum_{i=1}^{N} \kappa(\tau_i) \frac{\partial P}{\partial \theta}(\theta - \tau_i)
+   $$
+2. **Non-Differentiable Renderer** (used for efficiency):
+   $$
+   \frac{\partial Q}{\partial \theta} \approx \frac{1}{N} \sum_{i=1}^{N} \frac{\partial \kappa}{\partial \theta}(\tau_i) P(\theta - \tau_i)
+   $$
+   The gradient of the Gaussian kernel is [S1]:
+   $$
+   \frac{\partial \kappa}{\partial \theta}(\tau) = \sqrt{\frac{2}{\sigma^2 \pi}} \frac{-\tau}{\sigma^2} \exp\left(\frac{-\tau^2}{2\sigma^2}\right)
+   $$
 
-The gradient of the estimator can be computed in two ways depending on renderer differentiability [S1]:
-1.  **Differentiable Renderer:**
-    $$
-    \frac{\partial Q}{\partial \theta} = \frac{1}{N} \sum_{i=1}^{N} \kappa(\tau_i) \frac{\partial P}{\partial \theta}(\theta - \tau_i)
-    $$
-2.  **Non-Differentiable Renderer (Primary Method):**
-    $$
-    \frac{\partial Q}{\partial \theta} \approx \frac{1}{N} \sum_{i=1}^{N} \frac{\partial \kappa}{\partial \theta}(\tau_i) P(\theta - \tau_i)
-    $$
-    This method skips the renderer's gradient computation $\frac{\partial P}{\partial \theta}$ and only requires a forward model [S1].
+### Parameters
+- **$\sigma$**: Standard deviation of the blur kernel. Decays from $\sigma_0$ to $\sigma_m$.
+- **$\sigma_0$**: Initial kernel spread. Typical default: 0.5 (roughly 50% of the domain) [S1].
+- **$\sigma_m$**: Minimum $\sigma$ to avoid numerical instability. Set to 0.01 [S1].
+- **$N$**: Number of perturbations. Typical values: 2, 4, 8, 16, 32. $N=2$ is often sufficient [S1].
+- **spp**: Samples per pixel for the underlying path tracer. Set so rendering noise is less than the optimization signal [S1].
+- **LR**: Optimizer learning rate (Adam). Varies by task (0.125 to 0.800) [S1].
 
-The Gaussian kernel gradient used in the non-differentiable case is [S1]:
-$$
-\frac{\partial \kappa}{\partial \theta}(\tau) = \sqrt{\frac{2}{\sigma^2 \pi}} \frac{-\tau}{\sigma^2} \exp\left(\frac{-\tau^2}{2\sigma^2}\right)
-$$
+### Steps
+1. **Initialize**: Set $\sigma = \sigma_0$. Normalize parameters to $[0, 1]$.
+2. **Annealing Schedule**: Linearly decay $\sigma$ over optimization iterations $t$:
+   $$
+   \sigma_{t+1} = \sigma_0 - t(\sigma_0 - \sigma_m)
+   $$
+   Warm-start the decay after 50% of total iterations [S1].
+3. **Sample Offsets**: For $i = 1$ to $N/2$:
+   - Generate $\xi \sim U(0, 1)$.
+   - Compute $\tau = \sqrt{-2\sigma^2 \log(\xi)}$.
+   - Use antithetic sampling: evaluate at $\theta + \tau$ and $\theta - \tau$.
+4. **Evaluate**: Render $P(\theta + \tau)$ and $P(\theta - \tau)$ using a forward path tracer.
+5. **Accumulate Gradient**:
+   - If using non-differentiable renderer (Eq. 10), the gradient contribution for the pair is proportional to $P(\theta + \tau) - P(\theta - \tau)$ weighted by the kernel gradient magnitude. The implementation in [S1] simplifies this via antithetic sampling of the positivized kernel gradient.
+   - Specifically, for Eq. 10, the estimator uses the difference in renderings scaled by the kernel properties. The provided pseudocode in [S1] implements the non-differentiable case directly.
+6. **Update**: Apply gradient descent using the accumulated gradient.
 
-**Parameters:**
-- $\kappa(\tau)$: Symmetric monotonous decreasing function. Gaussian is used by default [S1].
-- $\sigma$: Standard deviation of the blur kernel. Initial value $\sigma_0 \in [0, 1]$ (typical default 0.5, recommended ~50% of domain). Minimum $\sigma_m = 0.01$ to avoid numerical instability [S1].
-- $N$: Number of perturbations (samples) per iteration. Typical values: 2, 4, 8, 16, 32. $N=2$ is often sufficient [S1].
-- $\sigma_0$: Initial kernel spread.
-- $\sigma_m$: Minimum $\sigma$ during annealing.
+### Pseudocode
+The following implements the non-differentiable case (Eq. 10) with antithetic sampling and importance sampling of the kernel gradient magnitude, as described in Algorithm 1 of [S1].
 
-**Steps:**
-1.  **Normalize Parameters:** Normalize parameter spaces to $[0, 1]$ where possible (e.g., rotation) [S1].
-2.  **Initialize $\sigma$:** Set $\sigma = \sigma_0$.
-3.  **Loop for Gradient Estimation:** For each optimization step:
-    a. Initialize gradient accumulator $G = 0$.
-    b. Loop $i$ from $1$ to $N/2$:
-        i. Sample $\xi \sim U(0, 1)$.
-        ii. Compute offset magnitude $\tau_{mag} = \sqrt{-2\sigma^2 \log(\xi)}$.
-        iii. Generate antithetic offsets $\tau = \tau_{mag}$ and $-\tau$ [S1].
-        iv. Evaluate renderer at shifted parameters: $P_+ = P(\theta + \tau)$ and $P_- = P(\theta - \tau)$ [S1].
-        v. Accumulate gradient contribution: $G \leftarrow G + (P_+ - P_-)$ [S1].
-    c. Return $G / N$ [S1].
-4.  **Adaptive Bandwidth Decay:** After approximately 50% of total iterations, decay $\sigma$ linearly from $\sigma_0$ to $\sigma_m$ using $\sigma_{t+1} = \sigma_0 - t(\sigma_0 - \sigma_m)$ [S1].
-
-**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def estimate_gradient(P, theta, sigma, N):
+import math
+
+def estimate_gradient_non_diff(P, theta, sigma, N):
     """
-    Estimates the gradient of the plateau-reduced objective using the 
-    derivative-kernel method (Eq. 10) with antithetic sampling.
-    
-    P: Function that renders an image/loss given parameters theta.
-    theta: Current scene parameters.
-    sigma: Standard deviation of the smoothing kernel.
-    N: Total number of samples (must be even).
+    Estimate gradient of plateau-reduced objective using non-differentiable renderer.
+    P: Forward rendering function P(theta)
+    theta: Current scene parameters
+    sigma: Current kernel bandwidth
+    N: Total number of samples (perturbations)
+    Returns: Gradient estimate
     """
     G = 0.0
-    # Loop N/2 times to generate N samples via antithetic pairs
+    # Loop runs for N/2 iterations to generate N samples via antithetic pairs
     for i in range(1, N // 2 + 1):
-        # Sample from the distribution proportional to |d_kappa/d_theta|
-        # Inverse CDF method for positivized gradient of Gaussian
+        # Sample tau proportional to |d_kappa/d_theta| using inverse CDF
+        # CDF inversion for positivized gradient magnitude yields:
         xi = uniform(0, 1)
-        tau_mag = sqrt(-2 * sigma**2 * log(xi))
+        tau = math.sqrt(-2 * sigma**2 * math.log(xi))
         
-        # Antithetic sampling: generate tau and -tau
-        # This provides a zero-variance estimator for the point-symmetric function
-        tau = tau_mag
-        
-        # Evaluate renderer at shifted parameters
-        # Note: P is the forward renderer (non-differentiable or differentiable)
-        P_plus = P(theta + tau)
-        P_minus = P(theta - tau)
-        
-        # Accumulate gradient contribution
-        # The kernel gradient term is absorbed into the sampling distribution
-        G = G + (P_plus - P_minus)
+        # Antithetic sampling: evaluate at theta + tau and theta - tau
+        # The gradient estimator for Eq. 10 with antithetic sampling simplifies to:
+        # G += P(theta + tau) - P(theta - tau)
+        # This effectively samples the derivative kernel's influence
+        val_plus = P(theta + tau)
+        val_minus = P(theta - tau)
+        G += val_plus - val_minus
         
     return G / N
 
-def optimize(P, theta_init, sigma_0, sigma_m, N, total_iterations):
-    """
-    Optimization loop with adaptive bandwidth decay.
-    """
-    theta = theta_init
-    sigma = sigma_0
-    
-    for t in range(total_iterations):
-        # Compute gradient using PR-DPT
-        grad = estimate_gradient(P, theta, sigma, N)
-        
-        # Update parameters (e.g., using Adam)
-        theta = update_parameters(theta, grad)
-        
-        # Adaptive bandwidth decay
-        # Warm-start decay after 50% of iterations
-        if t > total_iterations / 2:
-            # Linear schedule from sigma_0 to sigma_m over the second half
-            progress = (t - total_iterations / 2) / (total_iterations / 2)
-            sigma = sigma_0 - progress * (sigma_0 - sigma_m)
-            
-    return theta
+def uniform(low, high):
+    return low + (high - low) * random.random()
 ```
+*Note: The pseudocode above reflects the specific implementation detail in [S1] where the antithetic difference $P(\theta+\tau) - P(\theta-\tau)$ serves as the gradient estimator component when sampling from the positivized kernel gradient distribution. The weighting by the kernel gradient magnitude is implicitly handled by the sampling distribution of $\tau$.*
 
-**Edge Cases and Pitfalls:**
-- **$\sigma_0$ too small:** If $\sigma_0 < 0.2$, optimization fails to converge. As $\sigma_0 \to 0$, the method approaches rigid optimization, and the loss landscape is not smoothed, causing stagnation [S1].
-- **$\sigma_0$ too large:** If $\sigma_0 \to 1$, perturbation samples may fall outside the view frustum. With $N=2$, it is unlikely to sample near the true parameter position, producing noisy gradients that cause divergence. This can be alleviated by enlarging the camera FOV (e.g., from $40^\circ$ to $60^\circ$) [S1].
-- **High Dimensions:** Variance increases with higher dimensions, mitigated by increasing $N$ [S1].
-
-## Subtopics
-
-### Reparameterized Volume Sampling
-Uses reparameterization trick for volume rendering. [Link](3309-reparameterized-volume-sampling.md)
-
-### Boundary Path Integral Formulation
-Handles discontinuities via boundary terms. [Link](3389-boundary-path-integral-formulation.md)
-
-### Reparameterized Monte Carlo Volume Rendering
-Applies reparameterization to MC volume rendering. [Link](4798-reparameterized-monte-carlo-volume-rendering.md)
-
-### Differential path integral estimator with MIS and NEE
-Uses MIS and NEE for differentiable path tracing. [Link](6332-differential-path-integral-estimator-with-mis-and-nee.md)
-
-### Reparametrized Integral Gradients
-Computes gradients via integral reparameterization. [Link](6785-reparametrized-integral-gradients.md)
-
-### Monte Carlo Estimation of Differentiable Path Integrals
-General MC approach for differentiable path integrals. [Link](10814-monte-carlo-estimation-of-differentiable-path-integrals.md)
-
-### Reparameterization
-General reparameterization trick. [Link](11557-reparameterization.md)
+### Edge Cases and Pitfalls
+- **$\sigma_0$ too small**: If $\sigma_0 < 0.2$, optimization fails to converge. As $\sigma_0 \to 0$, the method approaches rigid optimization, leading to stagnation [S1].
+- **$\sigma_0$ too large**: If $\sigma_0 \to 1$, samples may fall outside the view frustum, causing noisy gradients and divergence. Alleviated by enlarging camera FOV (e.g., 40° to 60°) [S1].
+- **High Dimensions**: Variance increases with parameter dimensionality. Mitigated by increasing $N$ [S1].
+- **Numerical Instability**: $\sigma$ must not reach 0. Use $\sigma_m = 0.01$ [S1].
 
 ## Operating characteristics
-- **Time Complexity:** Runtime scales linearly with $N$. The bulk of time is spent evaluating $f$ (rendering). Sampling and gradient computation overhead is negligible [S1]. At $N \approx 16$, runtime equals Mitsuba's constant baseline (which uses re-parametrization/adjoint methods for 1 sample) [S1].
-- **Measured Performance:** On average 8x faster than differentiable rendering with Mitsuba (Our∂κP) [S1].
-- **Scaling:** Convergence improves with $N$ up to $\sim 10$, then stagnates. Final parameter MSE decreases slightly ($9.5 \times 10^{-5}$ for $N=2$ vs $4.7 \times 10^{-6}$ for $N=16$), but no visible rendering improvement occurs due to the small error scale. $N>2$ yields no net benefit for tested tasks due to offsetting runtime [S1].
-- **Strengths:** Does not require a gradient tape or compute graph. Compatible with alternative differentiable path tracers (e.g., Redner) and non-differentiable renderers. Resolves plateaus in optimization landscapes.
-- **Limitations:** Variance increases with higher dimensions. Requires careful tuning of $\sigma_0$.
-- **When to use:** Inverse rendering tasks with intricate light transport (caustics, global illumination) where standard differentiable renderers fail to converge due to plateaus.
-- **When not to use:** When the renderer is already differentiable and converges well, or when extremely high-dimensional parameter spaces require very large $N$ for acceptable variance.
+- **Time Complexity**: Runtime scales linearly with $N$. The bulk of time is spent evaluating $f$ (rendering). Overhead of sampling/gradient computation is negligible [S1].
+- **Memory Complexity**: Not given in the sources.
+- **Performance**: On average 8x faster than differentiable rendering with Mitsuba (Our∂κP) [S1]. At $N \approx 16$, runtime equals Mitsuba's constant baseline (which uses re-parametrization/adjoint methods for 1 sample) [S1].
+- **Convergence**: Convergence improves with $N$ up to $\sim 10$, then stagnates. Final parameter MSE decreases slightly (9.5×10⁻⁵ for $N=2$ vs 4.7×10⁻⁶ for $N=16$), but no visible rendering improvement occurs due to small error scale. $N>2$ yields no net benefit for tested tasks due to offsetting runtime [S1].
+- **Strengths**: Works with black-box renderers; no gradient tape required; handles visibility discontinuities via convolution; fast convergence on caustics/global illumination.
+- **Limitations**: Variance increases with dimension; requires careful tuning of $\sigma_0$; not suitable for real-time rendering due to multiple forward passes.
+- **When to use**: Inverse rendering tasks with plateaus (caustics, shadows, occlusion) where differentiable renderers fail or are too slow.
+- **When not to use**: Real-time applications; problems with very high-dimensional parameter spaces without sufficient $N$; when $\sigma_0$ cannot be tuned appropriately.
 
 ## Background
-Originated in the paper "Plateau-Reduced Differentiable Path Tracing" by M. Fischer et al. (CVPR 2023) [S1]. The method addresses the issue of optimization plateaus in inverse rendering, where regions of zero gradient prevent convergence. It combines strengths of differentiable rasterization (smoothing) and differentiable path tracing (accuracy) by convolving the rendering equation with a smoothing kernel [S1]. It has been tested on tasks including light source optimization (caustics), shadow optimization, and geometry optimization [S1].
+- **Origin**: Proposed by Fischer et al. in "Plateau-Reduced Differentiable Path Tracing" (CVPR 2023) [S1].
+- **History**: Addresses limitations of differentiable rasterizers (SoftRas) and differentiable path tracers (Mitsuba, Redner) which suffer from plateaus due to visibility discontinuities. Connects variational optimization with inverse rendering [S1].
+- **Usage**: Tested on texture optimization, light source optimization (caustics), shadow optimization, and geometry optimization [S1]. Compatible with Redner and Mitsuba backends [S1].
 
 ## Sources
 [S1] Plateau-Reduced Differentiable Path Tracing, https://doi.org/10.1109/cvpr52729.2023.00417, fetched 2026-10-26

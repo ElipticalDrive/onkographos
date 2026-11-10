@@ -74,10 +74,11 @@ $$ L_{\text{all}}(\theta) = \lambda_{\text{recon}} L_{\text{recon}} + \lambda_{\
 *   **Topology:** While DEFTET can represent arbitrary topology, the initial mesh topology is fixed. Complex topological changes require adaptive subdivision or re-meshing [S1, unofficial].
 
 ## Operating characteristics
-*   **Memory Efficiency:** DEFTET achieves high fidelity with a significantly smaller grid size than alternative volumetric approaches (voxels) by deforming vertices to align with surfaces, bypassing the need for high-resolution uniform grids [S1, unofficial].
-*   **Computational Cost:** Inference involves a forward pass through a neural network followed by simple geometric operations (barycentric interpolation, sorting). Training requires back-propagation through the differentiable renderer and loss functions, which can be computationally intensive but allows for end-to-end learning [S1, unofficial].
-*   **Flexibility:** Unlike DMC, DEFTET vertices are not constrained to grid edges, allowing for more flexible representation of geometric details and avoiding corner cases associated with regular grid topologies [S1, unofficial].
-*   **Use Cases:** Suitable for 3D reconstruction from noisy point clouds, single images, and multi-view images. It outputs an explicit mesh representation suitable for downstream tasks like physics simulation or artistic editing [S1, unofficial].
+*   **Time and Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Achieves high fidelity with a significantly smaller grid size than alternative volumetric approaches (voxels) by deforming vertices to align with surfaces [S1, unofficial].
+*   **Scaling:** Not given in the sources.
+*   **Strengths and Limitations:** Unlike DMC, DEFTET vertices are not constrained to grid edges, allowing for more flexible representation of geometric details and avoiding corner cases associated with regular grid topologies [S1, unofficial]. Requires tetrahedra to remain non-degenerate and non-flipped during deformation [S1, unofficial].
+*   **When to use:** Suitable for 3D reconstruction from noisy point clouds, single images, and multi-view images. Outputs an explicit mesh representation suitable for downstream tasks like physics simulation or artistic editing [S1, unofficial].
 
 ## Background
 DEFTET was introduced by Jun Gao, Wenzheng Chen, Tommy Xiang, Alec Jacobson, Morgan McGuire, and Sanja Fidler from NVIDIA, University of Toronto, and Vector Institute [S1, unofficial]. The work builds upon the idea of deforming regular grid geometry to represent structures in images, extending it to 3D geometric reasoning [S1, unofficial]. It addresses limitations of previous neural 3D reconstruction methods, including point clouds, voxel grids, surface meshes, and implicit functions, by providing a representation that is simultaneously high-precision, volumetric, and amenable to learning-based neural architectures [S1, unofficial].

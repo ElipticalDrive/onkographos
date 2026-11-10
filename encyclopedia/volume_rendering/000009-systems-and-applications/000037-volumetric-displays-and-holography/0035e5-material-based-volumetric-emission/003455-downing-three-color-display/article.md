@@ -3,132 +3,151 @@
 Also called: Two-photon absorption volumetric display, Volumetric Display
 
 ## Overview
-The Downing Three-Color Display is a volumetric display technique that generates true 3D images by illuminating voxels within a rare-earth ion doped glass medium using two intersecting infrared laser beams [S1, S2, unofficial]. It solves the lack of ocular accommodation in 2D displays by creating physical light emission at specific 3D coordinates, allowing the eye to focus at different depths and the image to be viewed from any angle [S1, unofficial]. It is distinguished from sibling methods like [Inkjet Printing-Based Volumetric Display](6810-inkjet-printing-based-volumetric-display.md) by its use of non-linear optical upconversion in solid glass rather than discrete printed layers, and from [Quantum-Dot-Based Volumetric Display](6943-quantum-dot-based-volumetric-display.md) by its reliance on two-photon absorption of infrared light rather than single-photon excitation of nanomaterials.
+The Downing Three-Color Display is a volumetric imaging technique that generates true 3D colored pictures by addressing voxels within a rare-earth ion doped glass medium using two intersecting infrared laser beams [S1, unofficial]. Unlike 2D representations with depth cues, this method allows the eye to focus at different depths (ocular accommodation) and be viewed from any angle [S1, unofficial]. It sets itself apart from sibling methods like [Inkjet Printing-Based Volumetric Display](6810-inkjet-printing-based-volumetric-display.md) by using optical addressing of a transparent solid medium rather than mechanical deposition, and from [Quantum-Dot-Based Volumetric Display](6943-quantum-dot-based-volumetric-display.md) by relying on two-photon upconversion in doped glass rather than fluorescence in suspended particles [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A 3D scene description (voxel coordinates and color values); infrared laser sources (typically 800 nm and 1,550 nm) [S2, unofficial].
-*   **Output:** A volumetric image composed of fluorescent voxels visible in the visible spectrum [S1, S2, unofficial].
+*   **Input:** A 3D scene description; two infrared laser sources (wavelengths $\lambda_{12}$ and $\lambda_{23}$); a display medium composed of stacked layers of rare-earth doped glass.
+*   **Output:** A visible 3D image formed by fluorescent voxels at the intersection of the laser beams, viewable from any direction with natural ocular accommodation [S1, unofficial].
 
 **Data Structures**
-The display medium consists of a stack of thin glass layers [S1, unofficial].
-*   **Layer Structure:** Alternating layers of glass doped with different rare-earth ions [S1, unofficial].
-*   **Dopant Layout:**
-    *   Red-emitting layers: Doped with Praseodymium (Pr) [S1, S2, unofficial].
-    *   Green-emitting layers: Doped with Erbium (Er) [S1, S2, unofficial].
-    *   Blue-emitting layers: Doped with Thulium (Tm) [S1, S2, unofficial].
-*   **Voxel Definition:** A voxel is defined as the spatial intersection point of the two scanning infrared beams within a specific doped layer [S1, S2, unofficial].
+The display medium is not a single monolithic block but a stack of thin glass layers [S1, unofficial].
+*   **Layer Structure:** Alternating layers of glass doped with specific rare-earth ions are stacked to prevent optical cross-talk between voxels in different depth planes [S1, unofficial].
+*   **Dopant Assignment:** Each layer (or set of layers) is doped with a specific ion to produce a primary color:
+    *   Praseodymium (Pr): Red emission [S1, unofficial].
+    *   Erbium (Er): Green emission [S1, unofficial].
+    *   Thulium (Tm): Blue emission [S1, unofficial].
+*   **Laser Arrays:** Instead of single scanning beams, linear arrays of infrared diode lasers are used to increase refresh rate and manage power density [S1, unofficial].
 
-**Method Steps**
-1.  **Beam Generation:** Two infrared laser beams are generated. Typical wavelengths are 800 nm and 1,550 nm [S2, unofficial].
-2.  **Scanning:** The beams are scanned across the volume. To achieve video rates and manage power, linear arrays of infrared diode lasers are used instead of a single pair [S1, unofficial].
-3.  **Intersection:** The beams intersect at a specific point $(x, y, z)$ within the glass medium [S1, unofficial].
+**Step-by-Step Method**
+1.  **Beam Generation:** Two infrared laser beams are generated. Typical excitation wavelengths are 800 nm and 1,550 nm [S2, unofficial].
+2.  **Scanning:** The beams are scanned throughout the display volume. The system uses linear arrays of lasers rather than a single pair to allow faster scanning and lower power per voxel [S1, unofficial].
+3.  **Intersection:** The two beams intersect at a specific 3D coordinate $(x, y, z)$ within the glass medium.
 4.  **Two-Photon Absorption (Upconversion):**
-    *   An active ion in the glass, initially at energy level $E_1$, absorbs a photon from the first infrared beam (wavelength $\lambda_{12}$) [S1, unofficial].
-    *   The ion is excited to energy level $E_2$ [S1, unofficial].
-    *   The ion remains at $E_2$ for a lifetime $t_2$ [S1, unofficial].
-    *   If the second infrared beam (wavelength $\lambda_{23}$) illuminates the ion during lifetime $t_2$, the ion absorbs a second photon [S1, unofficial].
-    *   The ion is further excited to energy level $E_3$ [S1, unofficial].
-    *   The ion remains at $E_3$ for a lifetime $t_3$ [S1, unofficial].
-    *   The ion relaxes back to level $E_1$, emitting a visible photon [S1, unofficial].
-5.  **Color Selection:** The color of the emitted photon is determined by the specific dopant in the layer where the intersection occurs (Pr for Red, Er for Green, Tm for Blue) [S1, S2, unofficial].
-6.  **Refresh:** Voxels are refreshed frequently by the scanning beams to maintain persistence of vision [S1, unofficial].
+    *   An active ion in the glass, initially at energy level $E_1$, absorbs a photon from the first infrared beam (wavelength $\lambda_{12}$).
+    *   The ion is excited to energy level $E_2$.
+    *   The ion remains at $E_2$ for a lifetime $t_2$.
+    *   If the second infrared beam (wavelength $\lambda_{23}$) illuminates the ion during this lifetime $t_2$, the ion absorbs a second photon and is further excited to energy level $E_3$ [S1, unofficial].
+5.  **Emission:** The ion remains at $E_3$ for a lifetime $t_3$, then relaxes back to level $E_1$, emitting a photon of visible light [S1, unofficial].
+6.  **Voxel Definition:** Visible light is generated *only* where the two beams intersect. Scanning both beams draws the 3D pattern [S1, unofficial].
+
+**Formulas**
+The energy level transitions are defined as:
+$$ E_1 + h\nu_{12} \rightarrow E_2 $$
+$$ E_2 + h\nu_{23} \rightarrow E_3 $$
+$$ E_3 \rightarrow E_1 + h\nu_{visible} $$
+Where:
+*   $E_1, E_2, E_3$ are energy levels of the active ion.
+*   $h$ is Planck's constant.
+*   $\nu_{12}$ is the frequency of the first infrared beam ($\lambda_{12}$).
+*   $\nu_{23}$ is the frequency of the second infrared beam ($\lambda_{23}$).
+*   $\nu_{visible}$ is the frequency of the emitted visible light.
+*   The condition for emission is that the second photon arrives within the lifetime $t_2$ of the intermediate state $E_2$ [S1, unofficial].
+
+**Parameters**
+*   **Excitation Wavelengths:** 800 nm and 1,550 nm [S2, unofficial].
+*   **Dopants:** Praseodymium (Red), Erbium (Green), Thulium (Blue) [S1, unofficial].
+*   **Medium:** Rare-earth ion doped glass, transparent to visible light [S1, unofficial].
+
+**Pitfalls and Edge Cases**
+*   **Glass Damage:** High power is required for single-pair scanning to achieve video rates. The power density needed would exceed the damage threshold of most glasses [S1, unofficial].
+    *   *Mitigation:* Use many lasers (linear arrays) to refresh voxels more frequently with lower individual power [S1, unofficial].
+*   **Cross-talk:** If the entire volume were fully doped with the same ions, light emitted from one voxel could excite neighbors or scatter, causing cross-talk.
+    *   *Mitigation:* Stack thin layers of alternately doped glass [S1, unofficial].
+*   **Precision:** The voxel size is determined by the intersection volume of the beams. Beam focusing and alignment are critical for resolution [S1, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants for wavelengths (example values from sources)
-WAVELENGTH_1 = 800e-9  # meters
-WAVELENGTH_2 = 1550e-9 # meters
+# Downing Three-Color Display Rendering Loop
+# Assumes a stack of glass layers, each associated with a specific dopant color
+# and a set of laser arrays capable of scanning the volume.
 
-# Dopant definitions mapping layer index to color
-DOPANTS = {
-    0: "Red",   # Praseodymium
-    1: "Green", # Erbium
-    2: "Blue"   # Thulium
-}
-
-def process_voxel(ion_state, beam_1_intensity, beam_2_intensity, time_since_excitation):
+def downing_display_render(scene_data, laser_arrays, glass_stack):
     """
-    Simulates the two-photon absorption process for a single ion.
+    Renders a 3D scene by scanning laser beams through a doped glass medium.
     
     Args:
-        ion_state: Current energy level of the ion (1, 2, or 3)
-        beam_1_intensity: Intensity of the first IR beam
-        beam_2_intensity: Intensity of the second IR beam
-        time_since_excitation: Time elapsed since last absorption event
-        
-    Returns:
-        photon_energy: Energy of emitted visible photon, or 0 if no emission
+        scene_data: List of (x, y, z, color) tuples representing desired voxels.
+        laser_arrays: Object containing linear arrays of IR diode lasers.
+        glass_stack: List of glass layers, each with a dopant type (Pr, Er, Tm).
     """
-    # Lifetime t2: Time ion stays at E2 waiting for second photon
-    # Lifetime t3: Time ion stays at E3 before emitting
-    # Note: Exact lifetime values not given in sources [G: Placeholder constants for logic]
-    LIFETIME_T2 = 1e-6 
-    LIFETIME_T3 = 1e-3
     
-    if ion_state == 1:
-        # Ion at E1. Absorb photon from Beam 1.
-        # Probability depends on beam intensity and cross-section.
-        if beam_1_intensity > THRESHOLD:
-            return excite_to_level(2, time.time())
+    # Map color names to required dopants
+    color_to_dopant = {
+        "red": "Praseodymium",
+        "green": "Erbium",
+        "blue": "Thulium"
+    }
+    
+    # Wavelengths for two-photon upconversion (example values)
+    lambda_1 = 800e-9  # 800 nm
+    lambda_2 = 1550e-9 # 1550 nm
+    
+    for voxel in scene_data:
+        x, y, z, color = voxel
+        
+        # Determine which layer(s) contain this z-coordinate
+        target_layers = get_layers_at_depth(z, glass_stack)
+        
+        # Check if the target layers have the correct dopant for the color
+        required_dopant = color_to_dopant.get(color)
+        valid_layers = [layer for layer in target_layers if layer.dopant == required_dopant]
+        
+        if not valid_layers:
+            continue # Skip if no appropriate dopant layer exists at this depth
             
-    elif ion_state == 2:
-        # Ion at E2. Check if Beam 2 arrives within lifetime t2.
-        if time_since_excitation < LIFETIME_T2:
-            if beam_2_intensity > THRESHOLD:
-                return excite_to_level(3, time.time())
-        else:
-            # Lifetime t2 expired, relax back to E1 without emission
-            return relax_to_level(1)
-            
-    elif ion_state == 3:
-        # Ion at E3. Wait for lifetime t3, then emit visible light.
-        if time_since_excitation > LIFETIME_T3:
-            color = get_dopant_color(current_layer)
-            return emit_visible_photon(color)
-        else:
-            return 0 # Still waiting
-
-def get_dopant_color(layer_index):
-    return DOPANTS[layer_index % 3]
-
-def excite_to_level(level, timestamp):
-    # Update ion state and timestamp
+        # Calculate beam intersection point
+        intersection_point = (x, y, z)
+        
+        # Scan the laser arrays to intersect at the point
+        # In a real system, this involves galvanometric mirrors or MEMS scanners
+        # controlled by the laser array drivers.
+        scan_lasers(laser_arrays, intersection_point, lambda_1, lambda_2)
+        
+        # The physical process occurs automatically:
+        # 1. Ion at E1 absorbs photon from lambda_1 -> moves to E2
+        # 2. Ion at E2 absorbs photon from lambda_2 (within lifetime t2) -> moves to E3
+        # 3. Ion at E3 relaxes to E1, emitting visible light
+        
+    # Refresh loop for dynamic scenes
+    # The linear arrays allow parallel addressing, refreshing voxels frequently
+    # to maintain brightness without exceeding glass damage thresholds.
     pass
 
-def relax_to_level(level):
-    # Update ion state
-    pass
-
-def emit_visible_photon(color):
-    # Return visible photon data
-    pass
+def scan_lasers(laser_arrays, point, lambda_1, lambda_2):
+    """
+    Directs the two laser beams to intersect at the specified point.
+    """
+    # Implementation depends on specific scanner hardware (galvo, MEMS, etc.)
+    # This step ensures the spatial intersection condition is met.
+    laser_arrays.beam_1.align_to(point, lambda_1)
+    laser_arrays.beam_2.align_to(point, lambda_2)
 ```
 
-**Parameters**
-*   **Excitation Wavelengths:** 800 nm and 1,550 nm [S2, unofficial].
-*   **Dopants:** Praseodymium (Red), Erbium (Green), Thulium (Blue) [S1, S2, unofficial].
-*   **Layer Thickness:** Thin layers to prevent cross-talk [S1, unofficial].
-
-**Edge Cases and Pitfalls**
-*   **Glass Damage:** High power required for single-pair scanning to achieve video rates exceeds the damage threshold of most glasses [S1, unofficial]. This is mitigated by using linear arrays of lasers to refresh voxels more frequently with lower individual power [S1, unofficial].
-*   **Cross-talk:** Using a single large fully doped volume causes cross-talk between colors. This is solved by stacking thin layers of alternately doped glass [S1, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not explicitly defined in sources, but the use of linear laser arrays instead of single beams suggests an attempt to improve refresh rates for video-capable performance [S1, unofficial].
+*   **Memory Complexity:** The display medium is static (doped glass); no dynamic memory is required for the medium itself. Scene data is processed in real-time to drive scanners [S1, unofficial].
 *   **Measured Performance:** A prototype system developed at Stanford created 3D color pictures in a one-inch cube [S1, unofficial].
-*   **Scaling:** Estimated cost for a ten-inch cube was $80,000 [S1, unofficial].
-*   **Strengths:** Allows ocular accommodation (eye can focus at different depths); viewable from any angle; creates true 3D pictures [S1, unofficial].
-*   **Limitations:** High cost; transparent medium lacks ability to block background light (drawback mentioned but not detailed in sources); requires complex laser scanning systems [S1, unofficial].
-*   **When to use:** Applications requiring true 3D visualization with natural depth cues, such as medical imaging (MRI, CAT), aircraft tracking, and CAD [S1, unofficial].
-*   **When not to use:** Cost-sensitive applications or where background light blocking is critical without additional optical engineering.
+*   **Scaling:** Estimated cost for a ten-inch cube was $80,000, indicating significant cost barriers to scaling [S1, unofficial].
+*   **Strengths:**
+    *   True 3D with ocular accommodation (eye can focus at different depths) [S1, unofficial].
+    *   Viewable from any angle [S1, unofficial].
+    *   Dynamic scene rendering capability [S1, unofficial].
+*   **Limitations:**
+    *   High cost [S1, unofficial].
+    *   Transparent medium lacks opacity, potentially making it difficult to view in bright ambient light compared to opaque displays [S1, unofficial].
+    *   Limited by the availability of suitable rare-earth dopants and laser sources [S1, unofficial].
+*   **When to use:** Applications requiring true 3D visualization with natural depth perception, such as medical imaging (MRI, CAT), aircraft tracking, and CAD [S1, unofficial].
+*   **When not to use:** Cost-sensitive applications or environments where ambient light washes out the transparent display [S1, unofficial].
 
 ## Background
-The technique was proposed by Downing et al. in 1996 [S1, S2, unofficial]. Research groups had addressed the possibility of such an endeavor as early as the early 1970s, but lacked the required excitation sources or display materials [S1, unofficial]. The solution came from the fiber optic industry in the form of high-quality rare-earth ion doped glasses [S1, unofficial]. A prototype system was developed at Stanford University [S1, unofficial].
+*   **Origin:** The technique was proposed by Downing et al. in 1996 [S1, unofficial]. Research groups had addressed the possibility as early as the early 1970s but lacked the required excitation sources or display materials [S1, unofficial].
+*   **Development:** The solution came from the fiber optic industry in the form of high-quality rare-earth ion doped glasses [S1, unofficial]. A prototype system was developed at Stanford University [S1, unofficial].
+*   **History:** The method is based on two-photon absorption (upconversion) processes in rare-earth ions [S1, unofficial]. It builds on the shared principles of [Material-Based Volumetric Emission](7614-material-based-volumetric-emission.md) by using a solid glass medium and infrared excitation to generate visible fluorescence at the intersection of beams [S1, unofficial].
+*   **Usage:** Proposed for medical imaging, tracking, and CAD [S1, unofficial].
 
 ## Sources
 [S1] "Volumetric Display", https://web.archive.org/web/20050909205829/http://www.stanford.edu/~matteoja/volume.html, fetched 2026-10-26 (unofficial)
-[S2] ボリュメトリックディスプレイ, https://www.jstage.jst.go.jp/article/jvrsj/29/3/27/_pdf/-char/ja, fetched 2026-10-30 (unofficial)
+[S2] ボリュメトリックディスプレイ, https://www.jstage.jst.go.jp/article/jvrsj/29/3/29_27/_pdf/-char/ja, fetched 2026-10-30 (unofficial)

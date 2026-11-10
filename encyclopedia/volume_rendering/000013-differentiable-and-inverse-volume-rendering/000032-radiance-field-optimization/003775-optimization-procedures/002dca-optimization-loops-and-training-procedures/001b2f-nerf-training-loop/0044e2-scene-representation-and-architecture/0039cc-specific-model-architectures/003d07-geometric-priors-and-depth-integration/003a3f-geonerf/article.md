@@ -1,0 +1,97 @@
+# GeoNeRF
+
+Also called: GeoNeRF, A model with two parts: a geometric morphology reasoner and a renderer. The reasoner builds a cascaded cost volume for source view sequences. The renderer infers geometric and appearance representations using a Transformer-based attention mechanism and cascaded cost volumes, then renders fine images
+
+## Overview
+GeoNeRF is a multi-view stereo and novel view synthesis method that replaces the standard neural radiance field MLP with a geometric morphology reasoner and a renderer [S1, S2]. It extracts 2D image features using a pretrained Feature Pyramid Network (FPN), constructs a cascading 3D cost volume via plane sweeping, and refines features using a Transformer and AutoEncoder [S1]. Unlike standard NeRF which relies on a single MLP for density and color, GeoNeRF explicitly models geometric priors through cost volumes and attention mechanisms, allowing it to generalize well to new scenes and outperform methods like pixelNeRF and MVSNeRF on datasets such as DTU, NeRF synthetic, and LLF Forward Facing [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A sequence of $N$ source views (images) with known camera poses.
+*   **Outputs:** Rendered images for novel viewpoints.
+
+**Data Structures:**
+1.  **2D Image Features:** Extracted from each source view using a pretrained FPN.
+2.  **Cascaded 3D Cost Volume:** Constructed using plane sweeping over the source view sequences [S1, S2].
+3.  **Feature Tokens:** For each of the $N$ query points along a ray, one view-independent token and multiple view-dependent tokens are extracted from the cost volume and image features [S1].
+
+**Algorithm Steps:**
+1.  **Feature Extraction:** Extract 2D image features from every view using a pretrained Feature Pyramid Network [S1].
+2.  **Cost Volume Construction:** Construct a cascading 3D cost volume using plane sweeping for the source view sequences [S1, S2].
+3.  **Token Extraction:** For each of the $N$ query points along a ray, extract one view-independent feature token and multiple view-dependent feature tokens from the cost volume and image features [S1].
+4.  **Transformer Refinement:** Refine the extracted tokens using a Transformer-based attention mechanism [S1, S2].
+5.  **Density Prediction:** Refine the $N$ view-independent tokens through an AutoEncoder, which returns the $N$ densities along the ray [S1].
+6.  **Color Prediction:** Feed the $N$ sets of view-dependent tokens into separate MLPs to extract color [S1].
+7.  **Rendering:** Use volume rendering technology to render fine images from the predicted densities and colors [S1, S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def GeoNeRF(source_views, camera_poses, query_points):
+    """
+    source_views: List of images from N source views.
+    camera_poses: Camera poses corresponding to source_views.
+    query_points: N 3D points along the ray for which to predict density and color.
+    """
+    # Step 1: Extract 2D image features using pretrained FPN
+    # Note: FPN is pretrained and not defined here.
+    image_features = extract_fpn_features(source_views)
+
+    # Step 2: Construct cascading 3D cost volume using plane sweeping
+    # Note: Plane sweeping details depend on the specific FPN output and depth hypothesis.
+    cost_volume = construct_cascaded_cost_volume(image_features, camera_poses)
+
+    # Step 3: Extract tokens for each query point
+    view_independent_tokens = []
+    view_dependent_tokens_list = []
+
+    for point in query_points:
+        # Extract tokens from cost volume and image features at the projected location
+        vi_token, vd_tokens = extract_tokens_from_cost_volume(cost_volume, point, image_features)
+        view_independent_tokens.append(vi_token)
+        view_dependent_tokens_list.append(vd_tokens)
+
+    # Step 4: Refine tokens using Transformer
+    # Note: Transformer architecture details (layers, heads) are not specified in sources.
+    refined_vi_tokens = transformer_refine(view_independent_tokens)
+    refined_vd_tokens_list = [transformer_refine(vd_tokens) for vd_tokens in view_dependent_tokens_list]
+
+    # Step 5: Predict densities using AutoEncoder
+    # Note: AutoEncoder architecture details are not specified in sources.
+    densities = autoencoder_predict_density(refined_vi_tokens)
+
+    # Step 6: Predict colors using MLPs
+    colors = []
+    for refined_vd_tokens in refined_vd_tokens_list:
+        # Note: MLP architecture details are not specified in sources.
+        color = mlp_predict_color(refined_vd_tokens)
+        colors.append(color)
+
+    # Step 7: Volume Rendering
+    # Note: Standard volume rendering formula applies, but specific sampling strategy 
+    # for query_points is not detailed beyond "N query points along a ray".
+    rendered_image = volume_render(densities, colors)
+
+    return rendered_image
+```
+
+**Parameters and Edge Cases:**
+*   **Pretrained Components:** The FPN and potentially other components can be pretrained and generalized to new scenes [S1].
+*   **Fine-tuning:** The model can be fine-tuned per scene to achieve better results [S1].
+*   **Generalization:** The method generalizes well to new scenes [S1].
+*   **Edge Cases:** Not given in the sources.
+
+## Operating characteristics
+*   **Performance:** Outperforms pixelNeRF and MVSNeRF on DTU, NeRF synthetic, and LLF Forward Facing datasets [S1].
+*   **Generalization:** Can generalize well to new scenes without per-scene optimization, though fine-tuning improves results [S1].
+*   **Complexity:** Not given in the sources.
+*   **Strengths:** Allows for complex occlusion reasoning and extends to RGB-D images [S2].
+*   **Limitations:** Not given in the sources.
+
+## Background
+GeoNeRF was proposed by Johari et al. in November 2021 [S1, S2]. It was developed as a concurrent method to LOLNeRF (November 2021) and RegNeRF (December 2021) [S1]. The method is part of the broader effort to improve NeRF's ability to handle sparse views and generalize to new scenes by incorporating geometric priors [S1, S2]. It is used in novel view synthesis tasks and has been evaluated on standard datasets like DTU, NeRF synthetic, and LLF Forward Facing [S1].
+
+## Sources
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31

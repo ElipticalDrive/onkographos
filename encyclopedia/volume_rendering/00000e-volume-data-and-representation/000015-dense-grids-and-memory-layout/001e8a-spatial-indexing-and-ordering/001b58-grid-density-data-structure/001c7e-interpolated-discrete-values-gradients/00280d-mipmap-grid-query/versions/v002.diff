@@ -1,0 +1,191 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,7 @@
+ # Mipmap Grid Query
+ 
+-Also called: Distance-based Mipmap Selection, AABB-relative Mipmap Query
+ 
+ ## Overview
+-Mipmap Grid Query retrieves values from a hierarchical grid structure by selecting a mip level based on the spatial distance of the query point from the center of the base axis-aligned bounding box (AABB). It solves the problem of adaptive resolution sampling in dense grids, ensuring that points far from the center use coarser representations while points near the center use the finest resolution. It differs from [Grid Cell Collection via Corner Indices](1518-grid-cell-collection-via-corner-indices.md) by dynamically selecting the grid resolution based on distance rather than fixed cell geometry, and from [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md) by using a hierarchical mip-chain rather than a single periodic grid.
++Mipmap Grid Query retrieves values from a hierarchical grid structure by selecting a mip level based on the spatial distance of the query point from the center of the base axis-aligned bounding box (AABB) [S1, unofficial]. It solves the problem of adaptive resolution sampling in dense grids, ensuring that points far from the center use coarser representations while points near the center use the finest resolution [S1, unofficial].
+ 
+ ## How it works
+@@ -13,120 +12,87 @@
+ 
+ **Data Structures:**
+-- The `data` tensor is assumed to be a mip-chain where each subsequent level is a 2x downsampled version of the previous one. The source assumes the AABBs of multiple grids are 2x scaled relative to the base [S1, unofficial].
++- The `data` tensor is assumed to be a mip-chain where each subsequent level is a 2x downsampled version of the previous one [S1, unofficial]. The source assumes the AABBs of multiple grids are 2x scaled relative to the base [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Normalize Coordinates:** Transform query points `x` from world space to normalized space $[0, 1]$ relative to `base_aabb`.
+-    $$ x_{norm} = \frac{x - base\_aabb[0:3]}{base\_aabb[3:6] - base\_aabb[0:3]} $$
+-2.  **Compute Distance Metric:** Calculate the maximum absolute distance from the center $(0.5, 0.5, 0.5)$ in the normalized coordinates.
+-    $$ maxval = \max(|x_{norm} - 0.5|) $$
+-    Clamp `maxval` to a minimum of $0.1$ to avoid numerical issues with the exponent calculation (specifically to prevent `frexpf` from returning an exponent of 0 for very small values) [S1, unofficial].
+-3.  **Determine Mip Level:** Compute the mip level index using the floating-point exponent of `maxval`.
+-    $$ level = \lfloor \log_2(maxval) \rfloor + 1 $$
+-    In implementation, this is often done using `frexp` or bit manipulation on the exponent. The level is clamped to a minimum of $0$ [S1, unofficial].
+-4.  **Select Valid Mip:** Create a boolean selector for mips where $level < data.shape[0]$. If the computed level exceeds the available mip levels, the query should return zero or handle the out-of-bounds case [S1, unofficial].
+-5.  **Re-normalize for Selected Mip:** Adjust the normalized coordinates to match the resolution of the selected mip level. Since each mip level is 2x smaller, the coordinates must be scaled.
+-    $$ x_{mip} = x_{norm} \times 2^{level} $$
+-    Note: The source describes re-normalizing to $[0, 1]$ using a scale factor of $2^{level}$. This implies the coordinates are effectively expanded to cover the larger domain of the coarser grid, or the grid indices are computed directly from this scaled value.
+-6.  **Map to Grid Indices:** Convert the scaled coordinates to integer grid indices using the base resolution $R$.
+-    $$ idx = \lfloor x_{mip} \times R \rfloor $$
+-    Clamp indices to the range $[0, R - 1]$ [S1, unofficial].
+-7.  **Query and Return:** Retrieve the value from `data[level]` at `idx`. If the mip level was invalid (out of bounds), return 0. Otherwise, return the queried value [S1, unofficial].
++1. **Normalize Coordinates:** Transform query points `x` from world space to normalized space $[0, 1]$ relative to `base_aabb` [S1, unofficial].
++   $$ x_{norm} = \frac{x - base\_aabb[0:3]}{base\_aabb[3:6] - base\_aabb[0:3]} $$
++2. **Compute Distance Metric:** Calculate the maximum absolute distance from the center $(0.5, 0.5, 0.5)$ in the normalized coordinates [S1, unofficial].
++   $$ maxval = \max(|x_{norm} - 0.5|) $$
++   Clamp `maxval` to a minimum of $0.1$ to avoid numerical issues with the exponent calculation (specifically to prevent `frexpf` from returning an exponent of 0 for very small values) [S1, unofficial].
++3. **Determine Mip Level:** Compute the mip level index using the floating-point exponent of `maxval` plus 1 [S1, unofficial].
++   $$ level = \lfloor \log_2(maxval) \rfloor + 1 $$
++   In implementation, this is done using `frexp` or bit manipulation on the exponent [S1, unofficial]. The level is clamped to a minimum of $0$ [S1, unofficial].
++4. **Select Valid Mip:** Create a boolean selector for mips where $level < data.shape[0]$ [S1, unofficial].
++5. **Re-normalize for Selected Mip:** Adjust the normalized coordinates to match the resolution of the selected mip level [S1, unofficial]. Since each mip level is 2x smaller, the coordinates must be scaled [S1, unofficial].
++   $$ x_{mip} = x_{norm} \times 2^{level} $$
++   This implies the coordinates are effectively expanded to cover the larger domain of the coarser grid, or the grid indices are computed directly from this scaled value [S1, unofficial].
++6. **Map to Grid Indices:** Convert the scaled coordinates to integer grid indices using the base resolution $R$ [S1, unofficial].
++   $$ idx = \lfloor x_{mip} \times R \rfloor $$
++   Clamp indices to the range $[0, R - 1]$ [S1, unofficial].
++7. **Query and Return:** Retrieve the value from `data[level]` at `idx` [S1, unofficial]. If the mip level was invalid (out of bounds), return 0 [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ import torch
+-import math
+ 
+-def mipmap_grid_query(x, data, base_aabb):
+-    """
+-    x: Tensor [N, 3]
+-    data: Tensor [m, Rx, Ry, Rz]
+-    base_aabb: Tensor [6] [min_x, min_y, min_z, max_x, max_y, max_z]
+-    """
+-    # 1. Normalize points to [0, 1] relative to base_aabb
+-    min_vals = base_aabb[0:3]
+-    max_vals = base_aabb[3:6]
++def mipmap_grid_query(x: torch.Tensor, data: torch.Tensor, base_aabb: torch.Tensor) -> torch.Tensor:
++    # x: [N, 3], data: [m, Rx, Ry, Rz], base_aabb: [6]
++    # 1. Normalize points x to [0, 1] range relative to base_aabb
++    min_vals = base_aabb[:3]
++    max_vals = base_aabb[3:]
+     extents = max_vals - min_vals
+     x_norm = (x - min_vals) / extents
+-    
+-    # 2. Compute maxval: max absolute distance from 0.5
+-    # Clamp to min 0.1 to avoid frexpf exponent 0
++
++    # 2. Compute maxval as the maximum absolute distance from 0.5 in normalized coordinates
+     dist_from_center = torch.abs(x_norm - 0.5)
+     maxval = torch.max(dist_from_center, dim=1, keepdim=True).values
++    # Clamp to min 0.1 to avoid frexpf exponent 0
+     maxval = torch.clamp(maxval, min=0.1)
+-    
+-    # 3. Compute mip level using log2(maxval) + 1
+-    # Equivalent to frexp exponent logic
+-    # level = floor(log2(maxval)) + 1
+-    # Using log2 for clarity, clamped to min 0
+-    level_float = torch.log2(maxval) + 1.0
+-    level = torch.clamp(level_float.floor().long(), min=0)
+-    
+-    # 4. Create selector for valid mips
++
++    # 3. Compute mip level using frexp exponent plus 1, clamped to min 0
++    _, exp = torch.frexp(maxval)
++    mip = exp + 1
++    mip = torch.clamp(mip, min=0)
++
++    # 4. Create selector for valid mips (mip < data.shape[0])
+     num_mips = data.shape[0]
+-    valid_mask = level < num_mips
+-    
++    selector = (mip < num_mips)
++
+     # 5. Re-normalize points to [0, 1] using scale factor 2^mip
+-    # The source says "Re-normalize points to [0, 1] using scale factor 2^mip"
+-    # This implies scaling the normalized coordinates by 2^level
+-    scale_factors = 2.0 ** level.float()
+-    x_mip = x_norm * scale_factors
+-    
+-    # 6. Map normalized points to grid indices using resolution
+-    # Clamp to max resolution - 1
+-    Rx, Ry, Rz = data.shape[1], data.shape[2], data.shape[3]
+-    indices = (x_mip * torch.tensor([Rx, Ry, Rz], device=x.device).float()).long()
+-    indices = torch.clamp(indices, min=0, max=torch.tensor([Rx-1, Ry-1, Rz-1], device=x.device))
+-    
+-    # 7. Clamp mip to max data.shape[0] - 1 and return queried values
+-    # Note: The selector handles the out-of-bounds logic, but we must clamp level for indexing
+-    level_clamped = torch.clamp(level, max=num_mips - 1)
+-    
+-    # Gather values
+-    # Assuming data is indexed as [level, x, y, z]
+-    # We need to gather for each point
+-    # This is a simplified representation; actual implementation requires gathering
+-    # along the batch dimension
+-    
+-    # Initialize output
+-    out = torch.zeros_like(x_norm[..., 0]) # Scalar output assumed or channel dim
+-    
+-    # For a full implementation, one would gather from data[level_clamped, indices]
+-    # Since data is 4D [m, Rx, Ry, Rz], and x is [N, 3], we need to handle the batch
+-    # This pseudocode assumes a simplified scalar query or requires advanced gathering
+-    
+-    # Correct gathering logic:
+-    # data[level_clamped[i], indices[i,0], indices[i,1], indices[i,2]]
+-    # This requires scatter/gather operations
+-    
+-    # Placeholder for the actual gather operation which depends on specific tensor library
+-    # In PyTorch:
+-    # values = data[level_clamped, indices[:,0], indices[:,1], indices[:,2]]
+-    # out = values * valid_mask.float()
+-    
+-    return out # Placeholder return
++    scale = 2.0 ** mip.float()
++    x_mip = x_norm * scale
++
++    # 6. Map normalized points to grid indices using resolution, clamping to max resolution - 1
++    res = data.shape[1:]  # [resx, resy, resz]
++    indices = torch.floor(x_mip * res).long()
++    indices = torch.clamp(indices, min=0, max=res - 1)
++
++    # 7. Clamp mip to max data.shape[0] - 1 and return queried values multiplied by selector
++    mip_clamped = torch.clamp(mip, max=num_mips - 1)
++    values = data[mip_clamped, indices[:, 0], indices[:, 1], indices[:, 2]]
++    return values * selector.float()
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+--   **Precision:** Clamping `maxval` to 0.1 is critical to prevent `log2` or `frexp` from producing extreme exponents for points very close to the center, which could result in negative mip levels or underflow [S1, unofficial].
+--   **Boundaries:** Points outside the `base_aabb` will have normalized coordinates $> 1$ or $< 0$. The re-normalization step $x_{mip} = x_{norm} \times 2^{level}$ can push indices far outside the grid bounds. Clamping indices to $[0, R-1]$ is required [S1, unofficial].
+--   **Degenerate Input:** If `base_aabb` has zero extent, division by zero occurs. This is not handled in the source notes [G].
++- **Precision:** Clamping `maxval` to 0.1 is critical to prevent `log2` or `frexp` from producing extreme exponents for points very close to the center, which could result in negative mip levels or underflow [S1, unofficial].
++- **Boundaries:** Points outside the `base_aabb` will have normalized coordinates $> 1$ or $< 0$ [S1, unofficial]. The re-normalization step $x_{mip} = x_{norm} \times 2^{level}$ can push indices far outside the grid bounds [S1, unofficial]. Clamping indices to $[0, R-1]$ is required [S1, unofficial].
++- **Degenerate Input:** If `base_aabb` has zero extent, division by zero occurs [G].
+ 
+ ## Subtopics
+ 
+ ### Ripmap Encoding with Tetra-Linear Interpolation
+-A 4D interpolation method used in Rip-NeRF to query feature values from Ripmaps (R) based on position $(p_x, p_y)$ and level $(l_x, l_y)$. It uses tetra-linear interpolation over 16 neighboring vertices in the 4D space to handle the anisotropic nature of the Gaussian footprint [S2]. Given a query point $(p_x, p_y, l_x, l_y)$, it identifies 16 neighboring vertices $(p_{xi}, p_{yj}, l_{xk}, l_{ym})$ where $i,j,k,m \in \{0,1\}$. The feature value $f$ is computed as a weighted sum: $f = \sum_{i,j,k,m} w_{ijklm} f_{ijklm}$, where $f_{ijklm} = R_{l_x^k, l_y^m}(p_{xi}, p_{yj})$ and the weight $w_{ijklm} = \prod_{d \in \{x,y\}} \prod_{t \in \{p,l\}} (1 - |t_d - t_{d,i,j}|)$ [S2]. The Ripmap R has a shape of $512 \times 512 \times 16$, corresponding to 10 unparalleled icosahedron faces [S2]. This method allows efficient querying while considering anisotropic Gaussian footprints [S2].
++A 4D interpolation method used in Rip-NeRF to query feature values from Ripmaps (R) based on position $(p_x, p_y)$ and level $(l_x, l_y)$ [S2]. It uses tetra-linear interpolation over 16 neighboring vertices in the 4D space to handle the anisotropic nature of the Gaussian footprint [S2]. Given a query point $(p_x, p_y, l_x, l_y)$, it identifies 16 neighboring vertices $(p_{xi}, p_{yj}, l_{xk}, l_{ym})$ where $i,j,k,m \in \{0,1\}$ [S2]. The feature value $f$ is computed as a weighted sum: $f = \sum_{i,j,k,m} w_{ijklm} f_{ijklm}$, where $f_{ijklm} = R_{l_x^k, l_y^m}(p_{xi}, p_{yj})$ and the weight $w_{ijklm} = \prod_{d \in \{x,y\}} \prod_{t \in \{p,l\}} (1 - |t_d - t_{d,i,j}|)$ [S2]. The Ripmap R has a shape of $512 \times 512 \times 16$, corresponding to 10 unparalleled icosahedron faces [S2]. This method allows efficient querying while considering anisotropic Gaussian footprints [S2].
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(1)$ per query point, assuming constant-time arithmetic and array access. The computation involves normalization, log/exp operations, and a single grid lookup.
+--   **Memory Complexity:** $O(m \cdot R_x R_y R_z)$ to store the mip-chain.
+--   **Performance:** Efficient for large scenes where adaptive resolution is needed. The use of `frexp` or bit manipulation for level selection is fast [S1, unofficial].
+--   **Strengths:** Provides smooth transitions between resolutions based on spatial distance. Simple to implement.
+--   **Limitations:** The distance-based selection may not align perfectly with view-dependent aliasing requirements compared to more complex anti-aliasing methods. It assumes a regular 2x downsampling hierarchy [S1, unofficial].
+--   **When to use:** When querying dense grids with a known hierarchical structure and where distance from the center is a good proxy for required resolution.
+--   **When not to use:** When the grid does not have a regular 2x mip-chain structure or when view-dependent sampling is required (e.g., use [Ripmap Encoding with Tetra-Linear Interpolation](#ripmap-encoding-with-tetra-linear-interpolation) for 4D anisotropic cases).
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Not given in the sources.
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
++- **When to use:** Not given in the sources.
++- **When not to use:** Not given in the sources.
+ 
+ ## Background
+-Mipmap Grid Query is a technique used in volume rendering and neural radiance fields to manage memory and computational cost by adapting the resolution of grid queries based on the query point's location. It is implemented in libraries such as `nerfacc` [S1, unofficial]. The method relies on the assumption that mip levels are 2x scaled relative to the base AABB [S1, unofficial].
++Not given in the sources.
+ 
+ ## Sources

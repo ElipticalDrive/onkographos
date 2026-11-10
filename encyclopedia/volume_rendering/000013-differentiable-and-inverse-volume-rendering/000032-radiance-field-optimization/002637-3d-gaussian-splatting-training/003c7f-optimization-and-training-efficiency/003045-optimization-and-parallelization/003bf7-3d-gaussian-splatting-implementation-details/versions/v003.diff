@@ -1,0 +1,207 @@
+--- v002.md
++++ v003.md
+@@ -4,132 +4,69 @@
+ 
+ ## Overview
+-This article details the specific hyperparameters, data structures, and optimization strategies required to implement 3D Gaussian Splatting (3DGS) training and rendering pipelines effectively. It addresses common implementation pitfalls such as scene extent bias, half-precision instability, and redundant SH computations. While the parent article [Optimization and Parallelization](6233-optimization-and-parallelization.md) covers the general differentiable rasterization framework, this article provides the concrete configuration values and code-level modifications necessary for stable convergence and performance optimization.
++This article details the specific hyperparameters, data structures, and optimization strategies required to implement 3D Gaussian Splatting (3DGS) training and rendering pipelines effectively. It addresses common implementation pitfalls such as scene extent bias, half-precision instability, and redundant SH computations. While the parent article [Optimization and Parallelization](6233-optimization-and-parallelization.md) covers the general differentiable rasterization and gradient flow, this article provides the concrete configuration values and code-level adjustments necessary for stable convergence and performance optimization.
+ 
+ ## How it works
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: Camera poses ($C_i$), intrinsics, initial Structure-from-Motion (SfM) point cloud ($p_i$), and target images.
+-*   **Outputs**: Rendered images, Gaussian parameters (position $\mu$, covariance $\Sigma$, opacity $\alpha$, spherical harmonics coefficients $\mathbf{c}$, scale $\mathbf{s}$), and gradients for optimization.
++*   **Inputs**: Initial SfM point cloud (position, normal, color), camera poses (extrinsics, intrinsics), and training image pairs.
++*   **Outputs**: Optimized set of 3D Gaussians (position $\mathbf{x}$, covariance $\Sigma$, opacity $\alpha$, spherical harmonic coefficients $\mathbf{c}$, scale $\mathbf{s}$) and rendered images.
+ 
+ ### Data Structures and Layouts
+-The implementation relies on specific libraries and data layouts:
+-*   **Gaussian Rasterization**: Uses `gsplat` [S2] with the 3DGUT formulation [S1]. Custom CUDA kernels are added for forward and backward logic to reduce register pressure [S1].
+-*   **Sparse Convolution**: Uses `torchsparse` for 3D sparse convolution operations [S2].
+-*   **Neural Networks**: Uses `tiny-cuda-nn` JIT-compiled cooperative vector MLPs [S1].
+-*   **Memory Precision**: Feature vectors are fetched in half-precision (FP16) during rasterization for both forward and backward passes to reduce register pressure [S1]. MLPs are trained and evaluated in FP16 [S1].
++The core data structure is the Gaussian primitive. In standard implementations (e.g., `gsplat`), Gaussians are stored in a Structure of Arrays (SoA) layout for efficient vectorization during rasterization [S1].
+ 
+-### Optimization Steps and Parameters
++1.  **Position**: `float3` (x, y, z).
++2.  **Rotation**: `float4` (quaternion, normalized).
++3.  **Scale**: `float3` (log-scale storage is common to ensure positivity).
++4.  **Opacity**: `float` (sigmoid output).
++5.  **SH Coefficients**: `float` array. For degree $d$, there are $(d+1)^2$ coefficients per RGB channel.
++    *   Degree 0: 1 coeff/channel.
++    *   Degree 1: 4 coeffs/channel.
++    *   Degree 3: 16 coeffs/channel.
++6.  **Covariance**: Derived from Rotation and Scale. $\Sigma = R S S^T R^T$.
+ 
+-#### 1. Scene Extent Calculation (Corrected)
+-The default 3DGS scene extent calculation is biased by camera distribution. A corrected extent must be calculated based on the SfM point cloud to avoid incorrect splitting/pruning [S3].
++**Memory Optimization**: To reduce register pressure in CUDA kernels, feature vectors (including SH coefficients) are fetched in half-precision (FP16) during both forward and backward passes [S1].
+ 
+-1.  Calculate the average camera position $\bar{C}$:
+-    $$ \bar{C} = \frac{1}{N_{\text{cam}}} \sum_{i=1}^{N_{\text{cam}}} C_i $$
+-    where $N_{\text{cam}}$ is the number of camera views and $C_i$ is the position of the $i$-th camera [S3].
+-2.  Calculate the corrected scene extent $e'_{\text{scene}}$:
+-    $$ e'_{\text{scene}} = \frac{1}{N_{\text{SfM}}} \sum_{i=1}^{N_{\text{SfM}}} \|\bar{C} - p_i\|_2 $$
+-    where $N_{\text{SfM}}$ is the number of SfM points and $p_i$ is the $i$-th SfM point [S3].
++### Parameters and Configuration
+ 
+-#### 2. Training Loop Configuration
+-*   **Optimizer**: Adam with learning rate $1 \times 10^{-3}$ [S2].
+-*   **Supervision**: Randomly select a single image from a random scene as supervision for each iteration [S2].
+-*   **Spherical Harmonics (SH) Degree**: Set to 1 for simplicity and speed, as higher-degree coefficients for color often remain unchanged during training [S2][S7, unofficial]. Setting max degree to 0 yields a ~16.25–16.57% training speed improvement with negligible quality loss [S7, unofficial].
+-*   **Background Color**: Change default white background (RGB 1.0) to a gray value in the range $0.3 \le \text{bg} \le 0.5$. A value of $\text{bg}=0.4$ reduces processing time by ~21.85% compared to white [S7, unofficial].
++#### Optimizer and Learning Rate
++*   **Optimizer**: Adam [S2].
++*   **Learning Rate**: $1 \times 10^{-3}$ for Gaussian parameters [S2].
++*   **Loss Scaling**: An automatic scaling factor is applied to loss values to improve stability during half-precision (FP16) training [S1].
+ 
+-#### 3. Dynamic Optimization Strategy (4D/Deformable)
+-For deformable scenes (e.g., 4DGS), the optimization is split into phases [S4, unofficial]:
+-1.  **Warm-up**: Optimize static Gaussians for the initial 3000 iterations.
+-2.  **Joint Optimization**: Jointly optimize Gaussians and the deformation field.
+-3.  **Loss Function**:
+-    $$ \mathcal{L} = \mathcal{L}_{\text{color}} + \lambda_1 \cdot \mathcal{L}_{\text{scales}} $$
+-    where $\lambda_1 = 0.1$ [S4, unofficial]. Another weight $\lambda_v = 0.2$ is used for additional terms [S4, unofficial].
++#### Spherical Harmonics (SH) Degree
++*   **Standard**: Degree 3 is default in original 3DGS.
++*   **Optimization**: Setting SH degree to 0 can improve training speed by ~16.25–16.57% with negligible quality loss, as higher-degree color coefficients often remain unchanged during training [S7, unofficial].
++*   **Alternative**: Degree 1 is used in some urban scene implementations (e.g., EVolSplat) to balance fidelity and speed [S2].
+ 
+-#### 4. Half-Precision Stability
+-When using FP16 for rasterization and MLPs, apply an automatic scaling factor to loss values to improve training stability [S1].
++#### Background Color
++*   **Default**: White (RGB 1.0).
++*   **Optimization**: Setting background to gray (RGB $bg$ where $0.3 \le bg \le 0.5$) improves training speed. Specifically, $bg=0.4$ reduces processing time by ~21.85% on certain datasets without degrading PSNR [S7, unofficial].
+ 
+-### Pseudocode: Corrected Scene Extent and Training Setup
++#### Scene Extent Calculation
++The default 3DGS scene extent $e_{\text{scene}}$ is calculated based on camera positions:
++$$ e_{\text{scene}} = 1.1 \cdot \max_{i=1}^{N_{\text{cam}}} \|\bar{C} - C_i\|_2 $$
++where $\bar{C} = \frac{1}{N_{\text{cam}}} \sum_{i=1}^{N_{\text{cam}}} C_i$ [S3].
+ 
+-```python
+-import torch
+-import torch.nn as nn
+-from torchsparse import SparseTensor
+-from gsplat import rasterize_gaussians # Pseudocode for library call
++**Pitfall**: This formula biases the extent towards camera distribution. If cameras orbit a small object in a large environment, $e_{\text{scene}}$ becomes artificially small, causing incorrect splitting/pruning of Gaussians [S3].
+ 
+-def calculate_corrected_scene_extent(camera_positions, sfm_points):
+-    """
+-    Calculates the corrected scene extent based on SfM points to avoid camera bias.
+-    camera_positions: Tensor of shape (N_cam, 3)
+-    sfm_points: Tensor of shape (N_SfM, 3)
+-    """
+-    N_cam = camera_positions.shape[0]
+-    N_SfM = sfm_points.shape[0]
+-    
+-    # Average camera position
+-    C_bar = torch.mean(camera_positions, dim=0)
+-    
+-    # Corrected scene extent: mean distance from avg camera to SfM points
+-    distances = torch.norm(sfm_points - C_bar, dim=1)
+-    e_prime_scene = torch.mean(distances)
+-    
+-    return e_prime_scene
++**Correction**: Use the SfM point cloud to calculate extent:
++$$ e'_{\text{scene}} = \frac{1}{N_{\text{SfM}}} \sum_{i=1}^{N_{\text{SfM}}} \|\bar{C} - p_i\|_2 $$
++where $p_i$ are SfM points and $N_{\text{SfM}}$ is the number of SfM points [S3].
+ 
+-def setup_training_config():
+-    """
+-    Returns optimized hyperparameters for 3DGS training.
+-    """
+-    config = {
+-        "optimizer": "Adam",
+-        "learning_rate": 1e-3,
+-        "sh_degree": 1, # Or 0 for max speed
+-        "background_color": torch.tensor([0.4, 0.4, 0.4]), # Gray background
+-        "half_precision": True,
+-        "loss_scaling": True, # Automatic scaling factor for FP16 stability
+-        "warmup_iterations": 3000,
+-        "lambda_scale": 0.1,
+-        "lambda_v": 0.2
+-    }
+-    return config
++### Training Steps and Strategies
+ 
+-def train_step(gaussians, camera, image, config):
+-    """
+-    Single training step with optimized parameters.
+-    """
+-    # 1. Rasterize using gsplat with half-precision fetches
+-    # Custom CUDA kernels handle forward/backward logic
+-    rendered_image, info = rasterize_gaussians(
+-        gaussians, 
+-        camera, 
+-        background=config["background_color"],
+-        half_precision=config["half_precision"]
+-    )
+-    
+-    # 2. Compute Loss
+-    # L_color (e.g., L1 or SSIM)
+-    loss_color = compute_color_loss(rendered_image, image)
+-    
+-    # For deformable scenes, add scale loss after warmup
+-    if current_iter > config["warmup_iterations"]:
+-        loss_scales = compute_scale_loss(gaussians)
+-        loss = loss_color + config["lambda_scale"] * loss_scales
+-    else:
+-        loss = loss_color
+-        
+-    # 3. Apply loss scaling for FP16 stability
+-    if config["loss_scaling"]:
+-        loss = loss * loss_scaling_factor
+-        
+-    # 4. Backpropagate
+-    loss.backward()
+-    
+-    # 5. Update parameters (Adam)
+-    optimizer.step()
+-    optimizer.zero_grad()
+-```
++1.  **Initialization**: Initialize Gaussians from SfM points. Apply corrected scene extent if cameras are clustered [S3].
++2.  **Warm-up Phase**: Optimize static Gaussians for the first 3000 iterations [S4, unofficial].
++3.  **Joint Optimization**: After warm-up, jointly optimize Gaussians and any deformation fields (for 4DGS) [S4, unofficial].
++4.  **Supervision**: Randomly select a single image from a random scene as supervision per iteration (in multi-scene settings) [S2].
++5.  **Loss Function**:
++    $$ \mathcal{L} = \mathcal{L}_{\text{color}} + \lambda_1 \mathcal{L}_{\text{scales}} $$
++    where $\lambda_1 = 0.1$ [S4, unofficial]. Additional weights like $\lambda_v = 0.2$ may apply to specific terms [S4, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Scene Extent Bias**: Using the default extent formula ($e_{\text{scene}} = 1.1 \cdot \max \|\bar{C} - C_i\|_2$) causes issues when cameras are clustered (e.g., orbiting a small object), leading to incorrect Gaussian splitting/pruning [S3]. Always use the SfM-based corrected extent [S3].
+-*   **Redundant SH Operations**: In standard 3DGS, SH coefficients with degree > 0 for color are often unchanged during training. Removing these operations improves speed by ~16% [S7, unofficial].
+-*   **Background Color**: Extreme background values (e.g., pure black or white) can negatively impact learning rate and PSNR states. Stick to the $0.3-0.5$ range [S7, unofficial].
+-*   **Potentially Over-large Gaussians (POG)**: Allowing Gaussians to grow too large based on error can degrade PSNR by creating redundant Gaussians in already learned areas. Use Hard Gaussian Growing (HG) instead [S6].
++
++*   **Potentially Over-large Gaussians (POG)**: Allowing Gaussians to grow excessively large can degrade PSNR by creating redundant Gaussians in already learned areas. Use Hard Gaussian growing (HGS) instead to target hard areas without overgrowth [S6].
++*   **Half-Precision Instability**: FP16 rasterization requires loss scaling to prevent gradient underflow/overflow [S1].
++*   **Scene Bias**: Using camera-based extent for scenes with clustered cameras leads to poor reconstruction [S3].
+ 
+ ## Subtopics
+@@ -159,17 +96,17 @@
+ This method accelerates data transmission during the training of 3D Gaussian Splatting models by compressing floating-point and integer values into ASCII strings. It distinguishes itself from sibling methods by targeting the I/O bottleneck of training speed rather than rendering quality or memory footprint, achieving approximately 6% training speed improvement.
+ 
++### DAVIGS
++DAVIGS is a plug-and-play appearance modeling method for 3D Gaussian Splatting that mitigates appearance variation-induced floaters and color distortions by transforming rendered images at the image level using 3D consistent features [S1]. Unlike coupled methods that manipulate Gaussian properties (slowing rendering) or decoupled methods that only account for mild global variations, DAVIGS decouples global view-dependent appearance variations (e.g., daylight, ISPs) from local spatial changes (e.g., street lamps) by querying multi-resolution hash grids based on back-projected 3D coordinates [S1]. It builds 3D consistency across views implicitly while maintaining real-time rendering speeds by discarding the appearance module after optimization [S1].
++
+ ## Operating characteristics
+ 
+-*   **Time Complexity**: The core rasterization is $O(N \cdot T)$ where $N$ is the number of Gaussians and $T$ is the number of tiles/pixels. Optimizations like SH degree reduction (to 0 or 1) and background color tuning can improve training speed by 16–22% [S7, unofficial].
+-*   **Memory Complexity**: Single GPU memory limits constrain training to approximately 11.2M Gaussians on an A100 [S5, unofficial]. Distributed training is required for larger scenes (e.g., 106.7M Gaussians) [S5, unofficial].
+-*   **Measured Performance**:
+-    *   Distributed training (4 to 8 nodes) on Richtmyer-Meshkov dataset (106.7M Gaussians, 5.3 GB) at 2048×2048 resolution achieved a 3.1× speedup with PSNR 30.04, SSIM 0.97, LPIPS 0.019 [S5, unofficial].
+-    *   Moderate datasets (Rayleigh-Taylor, 18.2M Gaussians) showed limited scaling gains (1.4× speedup from 2 to 4 nodes) [S5, unofficial].
+-*   **Strengths**: Half-precision rasterization reduces register pressure [S1]. Corrected scene extent prevents optimization bias [S3].
+-*   **Limitations**: Potentially Over-large Gaussians (POG) can degrade PSNR [S6]. Distributed training faces load balancing challenges for uneven distributions [S5, unofficial].
++*   **Memory**: Single GPU (e.g., A100) limits training to ~11.2M Gaussians [S5, unofficial]. Distributed training across HPC nodes is required for larger scenes (e.g., 106.7M Gaussians) [S5, unofficial].
++*   **Speed**: SH Degree 0 optimization yields ~16.25% speedup [S7, unofficial]. Background color optimization (bg=0.4) yields ~21.85% speedup [S7, unofficial].
++*   **Scaling**: Distributed training shows 3.1× speedup scaling from 4 to 8 nodes for large datasets (106.7M Gaussians) [S5, unofficial]. Moderate datasets show limited gains (1.4× from 2 to 4 nodes) [S5, unofficial].
++*   **Quality**: POG (Potentially Over-large Gaussians) degrades PSNR significantly compared to HGS (Hard Gaussians) [S6]. Corrected scene extent prevents bias in splitting/pruning [S3].
+ 
+ ## Background
+ 
+-3D Gaussian Splatting was introduced as a real-time radiance field representation. Subsequent implementations have focused on optimizing the training pipeline for stability, speed, and scalability. Key developments include the integration of `gsplat` for efficient CUDA-based rasterization [S1, S2], the correction of scene extent biases for better densification control [S3], and distributed training frameworks for scientific volumes [S5, unofficial]. The method is widely used in urban view synthesis [S2], deformable scene reconstruction [S4, unofficial], and SLAM [S1].
++3D Gaussian Splatting was introduced by Kerbl et al. [12] (cited in [S7, unofficial] as "original code of 3D Gaussian Splatting model [12]"). The method uses explicit 3D Gaussian primitives for real-time radiance field rendering. Subsequent implementations have focused on optimizing the training pipeline, including half-precision rasterization [S1], distributed training [S5, unofficial], and hyperparameter tuning for SH and background colors [S7, unofficial]. The `gsplat` library is a common implementation target [S1, S2].
+ 
+ ## Sources

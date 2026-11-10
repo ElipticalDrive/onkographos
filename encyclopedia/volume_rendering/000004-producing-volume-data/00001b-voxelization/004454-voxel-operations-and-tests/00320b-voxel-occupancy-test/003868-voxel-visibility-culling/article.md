@@ -3,101 +3,163 @@
 Also called: Inside/Outside Clipping
 
 ## Overview
-Voxel Visibility Culling is a post-processing step in voxel-based rendering that discards voxels which do not contribute to the final image, thereby reducing the instance count and rendering load. It operates by evaluating the scalar field value at the voxel center relative to a target isovalue to determine if the voxel lies on the visible surface. It is distinct from [Voxel Occupancy Test](1281-voxel-occupancy-test.md), which only determines if a point is within the occupied volume, by specifically filtering for surface-adjacent or surface-contained voxels based on scalar thresholds.
+Voxel Visibility Culling is a preprocessing step in volume rendering that discards voxels determined to be occluded or geometrically irrelevant before the final rendering pass. It solves the problem of unnecessary computation by reducing the set of active voxels to only those contributing to the final image. It differs from sibling methods like [Voxel Occupancy Test](1281-voxel-occupancy-test.md) (which tests point containment) and [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) (which tests bounding box intersections) by specifically targeting voxels that do not contribute to the visible surface or camera view based on scalar field values or spatial proximity.
 
 ## How it works
-**Inputs and Outputs:**
-- Input: A list of occupied voxels, where each voxel has a 3D integer coordinate $(x, y, z)$ and an associated scalar field value $f$ (isovalue) at its center.
-- Output: A filtered list of voxels retained for rendering.
+The method consists of two primary variants: scalar-based clipping (Inside/Outside Clipping) and geometric culling (Interior and Near Plane culling).
 
-**Data Structures:**
-- `voxels`: A list or array of objects/structs containing fields `x` (int), `y` (int), `z` (int), and `isovalue` (float).
+### Inputs and Outputs
+*   **Inputs**:
+    *   Scalar field values at voxel centers ($\phi$).
+    *   Voxel coordinates $(x, y, z)$.
+    *   Camera parameters (position, lookat vector, near plane distance).
+    *   Occupancy map (for interior culling).
+*   **Outputs**:
+    *   A boolean mask or a filtered list of voxels retained for rendering.
 
-**Steps:**
-1. Initialize an empty list `visible_voxels`.
-2. Iterate through each voxel $v$ in the input `voxels` list.
-3. Retrieve the scalar field value $f_v$ at the center of voxel $v$.
-4. Apply the culling condition based on the clipping mode:
-   - **Inside Clipping:** If $f_v < 0.0$, discard $v$ [S1, unofficial].
-   - **Outside Clipping:** If $f_v > 0.0$, discard $v$ [S1, unofficial].
-   - *Note:* The threshold $0.0$ implies the scalar field is normalized or centered around the isosurface. If a different isovalue $I$ is used, the condition becomes $f_v < I$ or $f_v > I$ respectively.
-5. If the voxel is not discarded, append $v$ to `visible_voxels`.
-6. Return `visible_voxels`.
+### Data Structures
+*   **Scalar Field**: Array of floats, indexed by voxel coordinate.
+*   **Occupancy Hash Set**: A hash set of packed 64-bit integers representing occupied voxel coordinates.
+*   **Visibility Mask**: Boolean array or list of retained voxel indices.
 
-**Pseudocode:**
+### Steps
+
+#### 1. Scalar-Based Inside/Outside Clipping
+This variant discards voxels based on the sign of the isovalue at the voxel center relative to a threshold of 0.0 [S1, unofficial].
+
+1.  **Inside Clipping**: For each voxel, evaluate the scalar field value $\phi$ at the voxel center. If $\phi < 0.0$, discard the voxel [S1, unofficial].
+2.  **Outside Clipping**: For each voxel, evaluate the scalar field value $\phi$ at the voxel center. If $\phi > 0.0$, discard the voxel [S1, unofficial].
+
+*Note: The specific direction of clipping (inside vs. outside) depends on the sign convention of the scalar field (e.g., SDF vs. density).*
+
+#### 2. Interior Voxel Culling
+This variant removes voxels completely surrounded by other occupied voxels on all 6 faces, reducing instance count without visual impact [S2, unofficial].
+
+1.  **Pack Coordinates**: Convert each voxel's integer coordinates $(x, y, z)$ into a unique 64-bit key. To handle negative coordinates and ensure uniqueness, add an offset of $1,000,000$ to each coordinate before packing [S2, unofficial].
+    $$
+    \text{key} = (x + 10^6) \ll 42 \mid (y + 10^6) \ll 21 \mid (z + 10^6)
+    $$
+    *   $x, y, z$ are assumed to fit within 20 bits each (range $\approx \pm 10^6$) [S2, unofficial].
+2.  **Build Occupancy Set**: Insert all packed keys of occupied voxels into a hash set `occupied`.
+3.  **Check Neighbors**: For each voxel $v$ with coordinates $(x, y, z)$, check if all 6 immediate neighbors exist in `occupied`:
+    *   $(x \pm 1, y, z)$
+    *   $(x, y \pm 1, z)$
+    *   $(x, y, z \pm 1)$
+4.  **Mark and Exclude**: If all 6 neighbors are present, mark $v$ as fully enclosed and exclude it from the visible list [S2, unofficial].
+
+#### 3. Near Plane Visibility Culling
+This variant determines if voxels are too close to the camera (near plane) to be visible, returning a boolean mask [S3, unofficial].
+
+1.  **Identify Visible Voxels**: Filter voxels where the duplicate count $n_{\text{duplicates}} > 0$. Let these indices be $vis\_idx$ [S3, unofficial].
+2.  **Calculate Z-Distance**: Compute the distance from the voxel centers to the camera position along the camera's lookat vector:
+    $$
+    z_{\text{dist}} = \sum_{d \in \{x,y,z\}} (\mathbf{c}_{vis\_idx}[d] - \mathbf{p}_{\text{cam}}[d]) \cdot \mathbf{l}_{\text{cam}}[d]
+    $$
+    Where $\mathbf{c}$ is the voxel center, $\mathbf{p}_{\text{cam}}$ is the camera position, and $\mathbf{l}_{\text{cam}}$ is the normalized lookat vector [S3, unofficial].
+3.  **Apply Threshold**: Mark voxels as near (and thus culled) if:
+    $$
+    z_{\text{dist}} \leq d_{\text{near}} + \ell_{\text{voxel}}
+    $$
+    Where $d_{\text{near}}$ is the near plane distance (default 0.2) and $\ell_{\text{voxel}}$ is the voxel length [S3, unofficial].
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def voxel_visibility_culling(voxels, mode="inside"):
+def cull_interior_voxels(voxels):
     """
-    Cull voxels based on their scalar field value at the center.
-    
-    Args:
-        voxels: List of dicts/objects with keys 'x', 'y', 'z', 'isovalue'.
-        mode: 'inside' to keep voxels with isovalue >= 0.0, 
-              'outside' to keep voxels with isovalue <= 0.0.
-    
-    Returns:
-        List of retained voxels.
+    Culls voxels completely surrounded by 6 neighbors.
+    voxels: List of (x, y, z) tuples.
+    Returns: List of retained voxels.
     """
-    visible_voxels = []
+    OFFSET = 1_000_000
+    occupied_keys = set()
     
-    for v in voxels:
-        f = v['isovalue']
+    # Step 1: Pack and store occupied keys
+    for x, y, z in voxels:
+        xi = x + OFFSET
+        yi = y + OFFSET
+        zi = z + OFFSET
+        # Pack into 64-bit integer: 20 bits per coordinate
+        key = (xi << 42) | (yi << 21) | zi
+        occupied_keys.add(key)
+
+    retained = []
+    # Step 2: Check neighbors for each voxel
+    for x, y, z in voxels:
+        is_enclosed = True
+        # Check 6 neighbors
+        neighbors = [
+            (x + 1, y, z), (x - 1, y, z),
+            (x, y + 1, z), (x, y - 1, z),
+            (x, y, z + 1), (x, y, z - 1)
+        ]
+        for nx, ny, nz in neighbors:
+            nxi = nx + OFFSET
+            nyi = ny + OFFSET
+            nzi = nz + OFFSET
+            nkey = (nxi << 42) | (nyi << 21) | nzi
+            if nkey not in occupied_keys:
+                is_enclosed = False
+                break
         
-        if mode == "inside":
-            # Discard if isovalue at center is less than 0.0 [S1, unofficial]
-            if f < 0.0:
-                continue
-        elif mode == "outside":
-            # Discard if isovalue at center is greater than 0.0 [S1, unofficial]
-            if f > 0.0:
-                continue
-        else:
-            raise ValueError("Mode must be 'inside' or 'outside'")
+        if not is_enclosed:
+            retained.append((x, y, z))
             
-        visible_voxels.append(v)
-        
-    return visible_voxels
+    return retained
+
+def cull_near_plane(voxel_centers, cam_pos, cam_lookat, near_plane=0.2, voxel_length=1.0):
+    """
+    Culls voxels too close to the camera.
+    voxel_centers: Array of shape (N, 3)
+    cam_pos: Array of shape (3,)
+    cam_lookat: Normalized array of shape (3,)
+    Returns: Boolean mask of shape (N,) where True means visible.
+    """
+    # Step 1: Calculate vector from camera to voxel centers
+    diff = voxel_centers - cam_pos
+    
+    # Step 2: Project onto lookat vector (dot product)
+    z_dist = np.sum(diff * cam_lookat, axis=1)
+    
+    # Step 3: Apply threshold
+    # Voxels are culled if z_dist <= near_plane + voxel_length
+    is_near = z_dist <= (near_plane + voxel_length)
+    
+    return ~is_near
 ```
 
-**Parameters:**
-- `mode`: String, either "inside" or "outside". Default is "inside".
-- Threshold: Fixed at $0.0$ in the source implementation [S1, unofficial].
+### Parameters
+*   **Near Plane Distance**: Default 0.2 [S3, unofficial].
+*   **Voxel Length**: Depends on scene scale; used in near plane calculation [S3, unofficial].
+*   **Coordinate Offset**: 1,000,000 for interior culling packing [S2, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Precision:** Floating-point comparisons should account for epsilon if the scalar field is noisy. The source uses strict inequality ($< 0.0$, $> 0.0$) [S1, unofficial].
-- **Boundary Voxels:** Voxels on the boundary of the volume may have undefined neighbors if neighbor-based culling is used (see Subtopics).
-- **Degenerate Input:** Empty voxel lists return empty lists.
+### Edge Cases and Pitfalls
+*   **Coordinate Overflow**: Interior culling packing assumes coordinates fit in 20 bits. Coordinates outside $\approx \pm 10^6$ will cause collisions or overflow [S2, unofficial].
+*   **Sign Convention**: Inside/Outside clipping requires consistent sign convention for the scalar field. Incorrect application leads to culling the entire volume or none of it [S1, unofficial].
+*   **Boundary Voxels**: Interior culling may incorrectly cull boundary voxels if the occupancy map is incomplete or noisy [S2, unofficial].
 
 ## Subtopics
 
-### Interior Voxel Culling
-A variant that removes voxels completely surrounded by other occupied voxels on all 6 faces (top, bottom, left, right, front, back) to reduce instance count without visual impact [S2, unofficial]. It is chosen when the rendering pipeline can handle occluded internal voxels or when the goal is to minimize draw calls for solid objects. It differs from basic scalar culling by using spatial topology rather than scalar values.
-- **Definition:** A voxel is marked as fully enclosed if all 6 immediate neighbors exist in the occupied set [S2, unofficial].
-- **Data Structures:**
-  - `occupied`: A `HashSet<Long>` storing packed coordinate keys of all initially occupied voxels [S2, unofficial].
-  - `visible`: A `List<Voxel>` storing retained voxels [S2, unofficial].
-- **Steps:**
-  1. Build `occupied` by packing each voxel's $(x, y, z)$ into a unique long key.
-  2. For each voxel, check if all 6 neighbors $(x\pm1, y, z)$, $(x, y\pm1, z)$, $(x, y, z\pm1)$ exist in `occupied`.
-  3. If all 6 neighbors are present, mark the voxel as fully enclosed and exclude it from `visible` [S2, unofficial].
-- **Packing Formula:**
-  $$ \text{key} = (x_{\text{offset}} \ll 42) \mid (y_{\text{offset}} \ll 21) \mid z_{\text{offset}} $$
-  Where $x_{\text{offset}} = x + 1,000,000$, $y_{\text{offset}} = y + 1,000,000$, $z_{\text{offset}} = z + 1,000,000$ [S2, unofficial].
-- **Pitfall:** Coordinate packing assumes coordinates fit in 20 bits each (up to ~1M per axis). Negative coordinates are handled by adding a 1,000,000 offset before packing [S2, unofficial].
-- **Complexity:** $O(N)$ time for building the hash set and $O(N)$ for culling, where $N$ is the number of voxels [S2, unofficial].
+### [Visible Bounds Calculation](12016-visible-bounds-calculation.md)
+Visible Bounds Calculation determines the physical-space bounding box of voxels with composited opacity above a specific threshold, allowing the camera to frame only the visible content rather than the full volume extent. It differs from sibling methods by using a downsampled, peak-based Gaussian approximation of opacity to achieve significant performance gains (from ~1-2s to ~10ms) while maintaining sufficient accuracy for camera framing.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ for scalar-based culling, where $N$ is the number of voxels. Interior culling is also $O(N)$ but with higher constant factors due to hash set lookups.
-- **Memory Complexity:** $O(N)$ for storing the voxel list. Interior culling requires an additional $O(N)$ for the hash set.
-- **Strengths:** Reduces the number of primitives sent to the GPU, improving rendering performance for large volumes. Interior culling significantly reduces instance count for solid objects.
-- **Limitations:** Scalar culling may remove voxels that are technically inside the volume but contribute to surface detail if the scalar field is noisy. Interior culling requires a complete set of occupied voxels and may fail for sparse or hollow structures.
-- **When to use:** Use scalar culling when the scalar field accurately represents the surface. Use interior culling for solid, closed manifolds where internal voxels are not visible.
+*   **Time Complexity**:
+    *   Interior Culling: $O(N)$ for building the hash set and $O(N)$ for culling, where $N$ is the number of voxels [S2, unofficial].
+    *   Near Plane Culling: $O(N)$ for distance calculation [S3, unofficial].
+    *   Scalar Clipping: $O(N)$ for field evaluation.
+*   **Memory Complexity**:
+    *   Interior Culling: $O(N)$ for the hash set of keys [S2, unofficial].
+*   **Performance**: Visible Bounds Calculation using Gaussian approximation reduces computation time from ~1-2s to ~10ms [S1, unofficial].
+*   **Strengths**: Reduces rendering load by eliminating irrelevant voxels; efficient for large sparse volumes.
+*   **Limitations**: Interior culling may remove voxels that are technically "inside" but contribute to subtle surface details if the field is noisy. Near plane culling requires accurate camera parameters.
 
 ## Background
-Voxel visibility culling is a common optimization in voxel-based rendering pipelines. The specific "Inside/Outside Clipping" method described here is implemented in the `vinceniko/Isosurface` project [S1, unofficial]. The "Interior Voxel Culling" variant is implemented in the `Il-castor/VoxelRenderer` project [S2, unofficial]. Both are unofficial implementations found in GitHub repositories.
+Voxel visibility culling is a standard optimization in voxel-based rendering pipelines. The specific implementations cited originate from unofficial repositories: `vinceniko/Isosurface` for scalar clipping [S1, unofficial], `Il-castor/VoxelRenderer` for interior culling [S2, unofficial], and `leonhardrobin/svraster-win10` for near plane culling [S3, unofficial]. These methods are commonly used in real-time voxel renderers and neural rendering pipelines to optimize memory bandwidth and compute.
 
 ## Sources
 [S1] vinceniko/Isosurface, https://github.com/vinceniko/Isosurface, fetched 2026-10-27 (unofficial)
 [S2] Il-castor/VoxelRenderer, https://github.com/Il-castor/VoxelRenderer, fetched 2026-10-26 (unofficial)
+[S3] leonhardrobin/svraster-win10, https://github.com/leonhardrobin/svraster-win10, fetched 2026-10-27 (unofficial)

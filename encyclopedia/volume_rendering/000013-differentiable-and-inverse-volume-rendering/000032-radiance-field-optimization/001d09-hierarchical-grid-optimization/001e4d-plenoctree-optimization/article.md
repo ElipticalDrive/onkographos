@@ -3,150 +3,147 @@
 Also called: Structure Refinement (Octree Optimization)
 
 ## Overview
-PlenOctree Optimization is a post-training refinement process that finetunes a converted PlenOctree on original training images using Stochastic Gradient Descent (SGD) to improve image quality [S1, unofficial]. It solves the residual approximation errors introduced during the conversion from a neural network to a sparse voxel grid [S1, unofficial]. It builds on the differentiable volume rendering operator and analytic derivatives of the rendering equation to update leaf attributes directly [S1360].
+PlenOctree Optimization is a post-processing stage that refines a pre-converted PlenOctree representation by optimizing its leaf node parameters (density and spherical harmonics coefficients) against original training images using stochastic gradient descent (SGD) [S1, unofficial]. It solves the issue of approximation errors introduced during the initial conversion from a neural network to a sparse voxel grid, thereby improving final image quality without altering the tree structure [S1, unofficial]. Unlike [PlenOctree Conversion](1359-plenoctree-conversion.md), which focuses on the construction and tabulation of the view-dependent volume, this method focuses on the differentiable optimization of the already-sparse structure [S1, unofficial]. It is distinct from [Structure Refinement](929-plenoxels-optimization-configuration.md) in that it operates on a fixed tree topology, whereas the latter dynamically merges, splits, and culls nodes [S1, unofficial][S2].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A converted PlenOctree containing density $\sigma$ and spherical harmonic (SH) coefficients for Red, Green, and Blue channels at each leaf node [S1, unofficial].
-*   **Input:** Training images and corresponding camera poses [S1, unofficial].
-*   **Output:** Optimized PlenOctree attributes (density and SH coefficients) [S1, unofficial].
+*   **Input:** A converted PlenOctree containing density $\sigma$ and spherical harmonics (SH) coefficients for color $\mathbf{c}$ at each leaf node; the original training dataset (images and camera poses); validation subset (optional, for early stopping).
+*   **Output:** Optimized PlenOctree with updated leaf node parameters.
 
 **Data Structures:**
 The PlenOctree is a sparse octree. Each leaf node stores:
 *   Density $\sigma$ (scalar).
-*   SH coefficients for Red, Green, and Blue channels (vectors) [S1, unofficial].
-*   The tree structure is fixed during optimization; only the attribute values change [S1, unofficial].
+*   Color coefficients: A vector of SH coefficients for each RGB channel. The dimension depends on the SH degree used during conversion (typically degree 3 or 4 in NeRF-SH).
+*   [G] The tree structure (parent pointers, child indices) remains fixed during this optimization phase.
 
 **Parameters:**
-*   **Learning Rate:** $1 \times 10^7$ for NeRF-synthetic dataset; $1.5 \times 10^6$ for Tanks&Temples dataset [S1, unofficial].
-*   **Maximum Epochs:** 80 for NeRF-synthetic; 40 for Tanks&Temples [S1, unofficial].
-*   **Precision:** Float32 for optimization stability; Float16 for storage after optimization [S1, unofficial].
-*   **Validation Set:** 10% of training set held out for Tanks&Temples [S1, unofficial].
+*   **Learning Rate:**
+    *   NeRF-synthetic dataset: $1 \times 10^{-7}$ [S1, unofficial].
+    *   Tanks&Temples dataset: $1.5 \times 10^{-6}$ [S1, unofficial].
+*   **Maximum Epochs:**
+    *   NeRF-synthetic: 80 [S1, unofficial].
+    *   Tanks&Temples: 40 [S1, unofficial].
+*   **Optimization Precision:** Float32 [S1, unofficial].
+*   **Storage Precision:** Float16 (applied after optimization) [S1, unofficial].
+*   **Validation Set:** For Tanks&Temples, 10% of the training set is held out [S1, unofficial].
 
 **Loss Function:**
-The optimization minimizes the RGB reconstruction loss:
+The optimization minimizes the mean squared error between the rendered color $\hat{C}(\mathbf{r})$ and the ground truth color $C(\mathbf{r})$ [S1, unofficial]:
+
 $$
-L_{RGB} = \sum_{\mathbf{r} \in R} \| \mathbf{C}(\mathbf{r}) - \hat{\mathbf{C}}(\mathbf{r}) \|_2^2
+\mathcal{L} = \sum_{\mathbf{r} \in \mathcal{R}} \| C(\mathbf{r}) - \hat{C}(\mathbf{r}) \|_2^2
 $$
-where $\mathbf{C}(\mathbf{r})$ is the ground truth color and $\hat{\mathbf{C}}(\mathbf{r})$ is the rendered color [S1, unofficial]. Sparsity loss is not applied because the octree is already sparse [S1, unofficial].
+
+where $\mathcal{R}$ is the set of sampled rays. The rendering equation $\hat{C}(\mathbf{r})$ is computed using the standard emission-absorption model defined in the parent article. Note that no sparsity loss is applied because the octree is already sparse [S1, unofficial].
 
 **Steps:**
-1.  **Initialize:** Start with the PlenOctree converted from the NeRF-SH model [S1, unofficial].
-2.  **Iterate:** For each epoch up to the maximum limit:
-    a. Sample rays from the training set [S1, unofficial].
-    b. Render $\hat{\mathbf{C}}(\mathbf{r})$ using the current PlenOctree attributes [S1, unofficial].
-    c. Compute $L_{RGB}$ [S1, unofficial].
-    d. Compute gradients of $L_{RGB}$ with respect to the leaf attributes using analytic derivatives [S1, unofficial].
-    e. Update attributes using SGD with the specified learning rate [S1, unofficial].
-3.  **Early Stopping:** Monitor PSNR on the validation set for Tanks&Temples. Stop optimization if PSNR does not improve [S1, unofficial].
-4.  **Storage:** Convert optimized attributes to Float16 [S1, unofficial].
+1.  **Initialize:** Load the converted PlenOctree and the training dataset.
+2.  **Setup Optimizer:** Configure an SGD optimizer with the specified learning rate for the dataset type.
+3.  **Iterate:** For each epoch up to the maximum limit:
+    a.  Sample a batch of rays from the training views.
+    b.  Render the rays using the current PlenOctree parameters. This involves traversing the octree and evaluating the SH coefficients for the viewing direction.
+    c.  Compute the loss $\mathcal{L}$ using the formula above.
+    d.  Compute gradients. The analytic derivatives of the volume rendering equation with respect to $\sigma$ and $\mathbf{c}$ are used [S1, unofficial]. These are typically implemented in custom CUDA kernels for efficiency [S1, unofficial].
+    e.  Update the leaf node parameters ($\sigma$ and SH coefficients) using the SGD step.
+4.  **Early Stopping:** Monitor the PSNR on the validation set (if available). Stop optimization if the validation PSNR does not improve [S1, unofficial].
+5.  **Finalize:** Convert the optimized parameters to Float16 for storage to reduce model size [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def plenoctree_optimization(plenoctree, training_data, dataset_type, max_epochs):
-    # Set learning rate and epochs based on dataset
-    if dataset_type == "NeRF-synthetic":
-        lr = 1e7
+def plenoctree_optimization(plenoctree, training_data, validation_data, dataset_type):
+    # 1. Setup parameters
+    if dataset_type == "nerf_synthetic":
+        lr = 1e-7
         max_epochs = 80
-        val_set = None
-    elif dataset_type == "Tanks&Temples":
-        lr = 1.5e6
+        use_validation = False
+    elif dataset_type == "tanks_temples":
+        lr = 1.5e-6
         max_epochs = 40
-        # Hold out 10% for validation
-        split_idx = int(len(training_data) * 0.9)
-        train_set = training_data[:split_idx]
-        val_set = training_data[split_idx:]
-    else:
-        raise ValueError("Unknown dataset type")
-
-    best_psnr = -1.0
+        use_validation = True
+        # Hold out 10% of training_data for validation
+        validation_data = split_validation(training_data, ratio=0.1)
+    
+    # 2. Initialize optimizer
+    # Parameters are the leaf node sigma and SH coefficients
+    optimizer = SGD(parameters=plenoctree.leaf_params, lr=lr)
+    
+    best_val_psnr = -infinity
+    patience_counter = 0
+    
+    # 3. Optimization loop
     for epoch in range(max_epochs):
-        # Sample rays from training set
-        rays = [(ray, gt_color) for ray, gt_color in train_set]
+        # Sample batch of rays from training data
+        rays = sample_rays(training_data)
         
-        # Render using current PlenOctree attributes
-        # Uses analytic derivatives implemented in custom CUDA kernels [S1, unofficial]
-        rendered_colors = [render_ray(plenoctree, ray) for ray, _ in rays]
+        # Forward pass: Render rays
+        # Uses analytic derivatives for gradient computation
+        rendered_colors = render_plenoctree(plenoctree, rays)
+        ground_truth_colors = get_ground_truth(rays)
         
-        # Compute loss
-        loss = sum((gt - pred)**2 for gt, pred in zip([gt for _, gt in rays], rendered_colors))
+        # Compute Loss
+        loss = mean_squared_error(rendered_colors, ground_truth_colors)
         
-        # Compute gradients and update attributes (SGD)
-        gradients = compute_gradients(loss, plenoctree.attributes)
-        for attr in plenoctree.attributes:
-            attr -= lr * gradients[attr]
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
         
         # Early stopping check
-        if val_set is not None:
-            val_rays = [(ray, gt_color) for ray, gt_color in val_set]
-            val_rendered = [render_ray(plenoctree, ray) for ray, _ in val_rays]
-            val_loss = sum((gt - pred)**2 for gt, pred in zip([gt for _, gt in val_rays], val_rendered))
-            val_psnr = compute_psnr(val_loss, len(val_rays))
-            if val_psnr > best_psnr:
-                best_psnr = val_psnr
-                save_checkpoint(plenoctree)
+        if use_validation:
+            val_rays = sample_rays(validation_data)
+            val_rendered = render_plenoctree(plenoctree, val_rays)
+            val_gt = get_ground_truth(val_rays)
+            val_psnr = compute_psnr(val_rendered, val_gt)
+            
+            if val_psnr > best_val_psnr:
+                best_val_psnr = val_psnr
+                patience_counter = 0
+                save_best_model(plenoctree)
             else:
-                break
-
-    # Convert to Float16 for storage
-    plenoctree.attributes = convert_to_float16(plenoctree.attributes)
+                patience_counter += 1
+                # Note: Specific patience value not given in sources [G]
+                if patience_counter > 10: 
+                    break
+        else:
+            # For NeRF-synthetic, just run for max epochs
+            pass
+            
+    # 4. Finalize
+    # Convert to float16 for storage
+    plenoctree.convert_to_float16()
     return plenoctree
-
-def render_ray(plenoctree, ray):
-    # Standard volume rendering integration along ray
-    samples = sample_along_ray(ray, plenoctree)
-    return volume_render(samples)
-
-def compute_gradients(loss, attributes):
-    # Standard backpropagation through the rendering graph
-    return {attr: grad(loss, attr) for attr in attributes}
-
-def compute_psnr(mse, num_samples):
-    return 10 * (1.0 / mse) ** 0.5
-
-def save_checkpoint(plenoctree):
-    # Store current attributes
-    pass
-
-def convert_to_float16(attributes):
-    # Cast attribute tensors to float16
-    return {attr: attr.float16() for attr in attributes}
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Optimization must be done in Float32 to ensure stability; using lower precision may lead to convergence issues [S1, unofficial].
-*   **Sparsity Loss:** Do not apply sparsity loss during this phase as the structure is already sparse [S1, unofficial].
+*   **Precision:** Optimization must be performed in Float32 to ensure stability [S1, unofficial].
+*   **Sparsity Loss:** Do not apply sparsity regularization (e.g., $L_1$ on density) as the tree structure is already sparse and fixed [S1, unofficial].
+*   **Validation Set:** For Tanks&Temples, a validation set is required for early stopping; for NeRF-synthetic, it is not used [S1, unofficial].
 
 ## Subtopics
 
 ### [PlenOctree Conversion](1359-plenoctree-conversion.md)
-PlenOctree Conversion is a pipeline that transforms a trained NeRF-SH model into a sparse octree representation for real-time volume rendering. It solves the performance bottleneck of conventional NeRFs, which require dense sampling and neural network inference for every ray step dependent on viewing direction. Unlike [Analytic Derivatives of PlenOctree Rendering](1360-analytic-derivatives-of-plenoctree-rendering.md), which focuses on differentiable optimization of the octree structure, this method focuses on the construction and tabulation of the view-dependent volume from a pre-trained network.
+The preceding step that creates the initial sparse octree from a NeRF-SH model. It focuses on construction and tabulation rather than optimization.
 
 ### [Analytic Derivatives of PlenOctree Rendering](1360-analytic-derivatives-of-plenoctree-rendering.md)
-This method provides the closed-form gradients of the NeRF piecewise constant volume rendering equation with respect to the density ($\boldsymbol{\sigma}$) and color ($\mathbf{c}$) parameters. It enables direct optimization of PlenOctree attributes using gradient-based methods (e.g., SGD) to refine image quality.
+The mathematical foundation for the gradients used in this optimization. It provides closed-form derivatives for the volume rendering equation.
 
-### PlenOctree Fine-tuning
-PlenOctree Fine-tuning is a variant where training of the initial NeRF model is stopped early, converted into a PlenOctree, and then trained significantly faster as it no longer involves neural networks [S1, unofficial]. This approach accelerates NeRF-based rendering by 5 orders of magnitude without loss in image quality [S1, unofficial].
+### [PlenOctree Fine-tuning](1465-plenoctree-fine-tuning.md)
+A related approach that also optimizes leaf parameters but is distinguished by its reliance on numerical gradient descent rather than analytic derivatives and its focus on accelerating training by 5 orders of magnitude.
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-*   **Speed:** PlenOctree optimization operates at about 3 million rays per second, compared to about 9,000 for NeRF training [S1, unofficial].
-*   **Optimization Time:** Around 10 minutes to finish PlenOctree optimization for each scene on a single NVIDIA V100 GPU [S1, unofficial].
-*   **Memory:** The sparse octree structure reduces memory usage compared to dense grids, but intermediate memory consumption during training can be higher than some explicit representations because all feature volumes need to be decoded to trace rays [S2].
-
-**Measured Performance:**
-*   **NeRF-synthetic:** 80 epochs, LR $1 \times 10^7$ [S1, unofficial].
-*   **Tanks&Temples:** 40 epochs, LR $1.5 \times 10^6$ [S1, unofficial].
-*   **Quality:** State-of-the-art level performance for image quality, comparable to original NeRF [S1, unofficial].
-
-**Strengths and Limitations:**
-*   **Strengths:** Significant speedup in rendering (3500x+ faster than NeRF) [S1, unofficial]; fast optimization time (10 mins) [S1, unofficial]; no loss in image quality [S1, unofficial].
-*   **Limitations:** Requires a pre-trained NeRF model; optimization is only applicable after conversion [S1, unofficial].
+*   **Time Complexity:** The optimization is significantly faster than training a standard NeRF. It operates at approximately 3 million rays per second, compared to ~9,000 rays per second for NeRF training [S1, unofficial].
+*   **Memory Complexity:** Memory usage is dominated by the storage of the PlenOctree parameters and the gradients during backpropagation. Since the tree is sparse, memory usage is proportional to the number of leaf nodes.
+*   **Performance:** On a single NVIDIA V100 GPU, optimization takes approximately 10 minutes per scene [S1, unofficial].
+*   **Strengths:** Improves image quality over the initial conversion; very fast convergence compared to full NeRF training; reduces model size via Float16 storage [S1, unofficial].
+*   **Limitations:** Requires a pre-converted PlenOctree; does not adapt the tree structure (no splitting/merging); performance depends on the quality of the initial conversion [S1, unofficial].
+*   **When to use:** When a high-quality real-time rendering representation is needed from a pre-trained NeRF-SH model and the initial conversion quality is insufficient [S1, unofficial].
+*   **When not to use:** When the scene geometry is unknown or requires structural adaptation (use [Structure Refinement](929-plenoxels-optimization-configuration.md) instead); when computational resources for initial conversion are unavailable.
 
 ## Background
-PlenOctree Optimization was introduced in the PlenOctrees paper [S1, unofficial]. It was developed to address the slow rendering speed of Neural Radiance Fields (NeRFs) by converting them into a sparse octree representation [S1, unofficial]. The method leverages the differentiability of the volume rendering equation to refine the octree attributes using standard gradient descent [S1, unofficial].
+PlenOctree Optimization was introduced as part of the PlenOctrees method for real-time rendering of Neural Radiance Fields [S1, unofficial]. The method addresses the bottleneck of conventional NeRFs, which require dense sampling and neural network inference for every ray step [S1, unofficial]. By converting the NeRF to a sparse octree and then fine-tuning it, the method achieves rendering speeds over 3500x faster than the original NeRF with no significant loss in image quality [S1, unofficial]. The optimization process leverages analytic derivatives to enable efficient gradient-based refinement of the spherical harmonics coefficients and density values [S1, unofficial].
 
 ## Sources
 [S1] PlenOctrees For Real-time Rendering of Neural Radiance Fields (NeRFs), http://alexyu.net/plenoctrees/, fetched 2026-10-28 (unofficial)

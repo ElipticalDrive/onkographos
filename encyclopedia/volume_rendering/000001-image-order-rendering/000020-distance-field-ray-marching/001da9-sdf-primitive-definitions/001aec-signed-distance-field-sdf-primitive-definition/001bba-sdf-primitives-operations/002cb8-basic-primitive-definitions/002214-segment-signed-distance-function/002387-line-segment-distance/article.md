@@ -34,7 +34,7 @@ def line_segment_distance(p, l0, l1):
     return length(p - pb)
 ```
 
-**Edge cases:** If `l0 == l1`, `c2` is zero, causing division by zero in step 5. Guard against `c2 < epsilon` by returning `length(p - l0)` [G].
+**Edge cases:** If `l0 == l1`, `c2` is zero, causing division by zero in step 5. Guard against `c2 < \epsilon` by returning `length(p - l0)` [G].
 
 ## Subtopics
 
@@ -52,10 +52,10 @@ def point_to_line_distance(p, o, d):
 ```
 
 ## Operating characteristics
-Time and memory complexity are constant, $O(1)$, as the method performs a fixed number of arithmetic operations [G]. Measured performance, hardware scaling, and specific use cases are Not given in the sources.
+Time and memory complexity are constant, $O(1)$, as the method performs a fixed number of arithmetic operations [G]. Measured performance, hardware scaling, and specific use cases are Not given in the sources. [G]
 
 ## Background
-Origin and historical development are Not given in the sources.
+Origin and historical development are Not given in the sources. [G]
 
 ## Sources
 [S1] Amory0709/geresim-spike, https://github.com/Amory0709/geresim-spike, fetched 2026-10-27 (unofficial)

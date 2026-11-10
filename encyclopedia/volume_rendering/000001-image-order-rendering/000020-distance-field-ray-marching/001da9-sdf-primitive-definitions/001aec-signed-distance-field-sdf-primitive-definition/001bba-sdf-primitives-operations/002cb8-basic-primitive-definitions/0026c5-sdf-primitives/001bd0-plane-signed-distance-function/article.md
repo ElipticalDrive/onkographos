@@ -3,86 +3,62 @@
 Also called: Plane SDF, Plane distance, Signed Distance Function (SDF) for Plane, Signed Plane, sdPlane
 
 ## Overview
-The Plane Signed Distance Function (SDF) computes the exact Euclidean distance from a query point to an infinite plane defined by a normal vector and an offset. It serves as a fundamental building block in constructive solid geometry (CSG) and ray marching, providing a differentiable, closed-form distance metric that is computationally cheaper than curved primitives. Unlike the [Sphere SDF](1237-sphere-signed-distance-function.md) which measures radial deviation, the Plane SDF measures linear deviation along a single axis, making it ideal for defining ground planes, clipping boundaries, or combining with other primitives via min/max operators.
+The Plane Signed Distance Function (SDF) computes the exact Euclidean distance from a query point to an infinite plane defined by a normal vector and an offset [S1, unofficial][S3, unofficial][S5, unofficial][S6]. It serves as a fundamental building block in constructive solid geometry (CSG) and ray marching, providing a differentiable, closed-form distance metric that is computationally cheaper than curved primitives [S4, unofficial]. Unlike the [Sphere SDF](1237-sphere-signed-distance-function.md) which measures radial deviation, the Plane SDF measures linear deviation along a single axis, making it ideal for defining ground planes, clipping boundaries, or combining with other primitives via min/max operators [S4, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 - Input: A query point $\mathbf{p} \in \mathbb{R}^3$ and plane definition parameters.
-- Output: A scalar $d \in \mathbb{R}$ representing the signed distance. $d < 0$ indicates the point is on the side opposite to the normal (inside/negative half-space), $d > 0$ indicates the point is on the normal side (outside/positive half-space), and $d = 0$ lies on the plane.
+- Output: A scalar $d \in \mathbb{R}$ representing the signed distance. $d < 0$ indicates the point is on the side opposite to the normal (inside/negative half-space), $d > 0$ indicates the point is on the normal side (outside/positive half-space), and $d = 0$ lies on the plane [S2, unofficial].
 
 **Data Structures:**
 The plane is defined by two common parameterizations, both requiring a unit normal vector:
-1.  **Normal-Offset Form:** A unit normal vector $\mathbf{n} \in \mathbb{R}^3$ and a scalar offset $h \in \mathbb{R}$. The plane equation is $\mathbf{x} \cdot \mathbf{n} + h = 0$.
-2.  **Point-Normal Form:** A unit normal vector $\mathbf{n} \in \mathbb{R}^3$ and a point $\mathbf{r} \in \mathbb{R}^3$ lying on the plane. The offset is derived as $h = -\mathbf{r} \cdot \mathbf{n}$.
+1. **Normal-Offset Form:** A unit normal vector $\mathbf{n} \in \mathbb{R}^3$ and a scalar offset $h \in \mathbb{R}$ [S1, unofficial][S2, unofficial][S3, unofficial]. The plane equation is $\mathbf{x} \cdot \mathbf{n} + h = 0$ [S2, unofficial][S3, unofficial].
+2. **Point-Normal Form:** A unit normal vector $\mathbf{n} \in \mathbb{R}^3$ and a point $\mathbf{r} \in \mathbb{R}^3$ lying on the plane [S6]. The offset is derived as $h = -\mathbf{r} \cdot \mathbf{n}$ [G].
 
 **Formulas:**
-The signed distance $d$ is calculated as the projection of the vector from the plane to the point onto the normal.
+The signed distance $d$ is calculated as the projection of the vector from the plane to the point onto the normal [S6].
 
-Using Normal-Offset form [S1, S2, S3, unofficial]:
+Using Normal-Offset form [S1, unofficial][S2, unofficial][S3, unofficial]:
 $$ d = \mathbf{p} \cdot \mathbf{n} + h $$
 
 Using Point-Normal form [S6]:
-$$ d = \mathbf{p} \cdot \mathbf{n} - \mathbf{r} \cdot \mathbf{n} = (\mathbf{p} - \mathbf{r}) \cdot \mathbf{n} $$
+$$ d = (\mathbf{p} - \mathbf{r}) \cdot \mathbf{n} $$
 
-Note: Some sources define the offset sign differently. Hart [S5, unofficial] defines $f(\mathbf{x}) = \mathbf{x} \cdot \mathbf{n} - h$, where $h$ is the distance from the origin along $\mathbf{n}$. This is equivalent to the offset form if $h_{offset} = -h_{Hart}$. The implementation below uses the standard GLSL convention [S2, unofficial] where $d = \mathbf{p} \cdot \mathbf{n} + h$.
+Note: Some sources define the offset sign differently. Hart [S5, unofficial] defines $f(\mathbf{x}) = \mathbf{x} \cdot \mathbf{n} - h$, where $h$ is the distance from the origin along $\mathbf{n}$. This is equivalent to the offset form if $h_{\text{offset}} = -h_{\text{Hart}}$ [G]. The implementation below uses the standard GLSL convention [S2, unofficial] where $d = \mathbf{p} \cdot \mathbf{n} + h$.
 
 **Parameters:**
-- $\mathbf{n}$: Unit normal vector. Must be normalized ($\|\mathbf{n}\| = 1$).
-- $h$: Offset from the origin.
-- $\mathbf{r}$: A point on the plane (alternative to $h$).
+- $\mathbf{n}$: Unit normal vector. Must be normalized ($\|\mathbf{n}\| = 1$) [S2, unofficial].
+- $h$: Offset from the origin [S1, unofficial][S3, unofficial].
+- $\mathbf{r}$: A point on the plane (alternative to $h$) [S6].
 
 **Pitfalls:**
-- **Normalization:** The normal vector $\mathbf{n}$ must be normalized. If $\mathbf{n}$ is not unit length, the result is scaled by $\|\mathbf{n}\|$, producing incorrect distances [S2, unofficial][S6].
-- **Sign Convention:** The sign of the distance depends on the direction of $\mathbf{n}$. Ensure consistency with the rest of the scene's SDF composition (e.g., CSG unions/intersections).
+- **Normalization:** The normal vector $\mathbf{n}$ must be normalized. If $\mathbf{n}$ is not unit length, the result is scaled by $\|\mathbf{n}\|$, producing incorrect distances [S2, unofficial].
+- **Sign Convention:** The sign of the distance depends on the direction of $\mathbf{n}$ [G]. Ensure consistency with the rest of the scene's SDF composition (e.g., CSG unions/intersections) [G].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
 def sd_plane(p, n, h):
-    """
-    Computes the signed distance from point p to a plane defined by unit normal n and offset h.
-    
-    Args:
-        p: tuple or list of 3 floats (x, y, z), the query point.
-        n: tuple or list of 3 floats (nx, ny, nz), the unit normal vector.
-        h: float, the offset of the plane from the origin.
-        
-    Returns:
-        float: The signed distance.
-    """
-    # Dot product of p and n
-    dot_pn = p[0] * n[0] + p[1] * n[1] + p[2] * n[2]
-    
-    # Signed distance
-    d = dot_pn + h
-    
-    return d
+    """Computes the signed distance from point p to a plane defined by unit normal n and offset h."""
+    return p[0] * n[0] + p[1] * n[1] + p[2] * n[2] + h
 
 def sd_plane_from_point(p, n, r):
-    """
-    Computes the signed distance from point p to a plane defined by unit normal n and a point r on the plane.
-    
-    Args:
-        p: tuple or list of 3 floats (x, y, z), the query point.
-        n: tuple or list of 3 floats (nx, ny, nz), the unit normal vector.
-        r: tuple or list of 3 floats (rx, ry, rz), a point on the plane.
-        
-    Returns:
-        float: The signed distance.
-    """
-    # Vector from point on plane to query point
-    dx = p[0] - r[0]
-    dy = p[1] - r[1]
-    dz = p[2] - r[2]
-    
-    # Dot product of (p - r) and n
-    d = dx * n[0] + dy * n[1] + dz * n[2]
-    
-    return d
+    """Computes the signed distance from point p to a plane defined by unit normal n and point r on the plane."""
+    return (p[0] - r[0]) * n[0] + (p[1] - r[1]) * n[1] + (p[2] - r[2]) * n[2]
+
+def ray_march_plane(o, d, n, h, maxt=100.0, eps=1e-4):
+    """Ray marches along direction d from origin o using the plane SDF."""
+    t = 0.0  # Initialize step distance
+    for _ in range(100):  # Fixed iteration limit
+        p = (o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t)
+        dist = sd_plane(p, n, h)
+        if abs(dist) < eps:  # Convergence check
+            return t, p
+        if t + dist > maxt:  # Boundary check
+            return maxt, None
+        t += dist  # Advance ray
+    return t, None
 ```
 
 ## Subtopics
@@ -91,15 +67,15 @@ def sd_plane_from_point(p, n, r):
 Extends the basic SDF by explicitly exposing the distance parameter and shortest distance vector calculation to support iterative constraint solving in dual contouring algorithms.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$. Requires 3 multiplications and 2 additions (dot product + offset).
-- **Memory Complexity:** $O(1)$. Stores only the normal vector (3 floats) and offset (1 float), or normal and point (6 floats).
-- **Strengths:** Exact, differentiable, and extremely fast. Ideal for infinite boundaries and ground planes.
-- **Limitations:** Represents only infinite planes. Cannot model finite planar patches (like triangles) without additional logic (e.g., bounding box checks or combining with other primitives).
-- **When to use:** Defining ground planes, clipping volumes, or as a component in CSG operations.
-- **When not to use:** When a finite planar surface is required (use Triangle SDF or mesh-based methods).
+- **Time Complexity:** $O(1)$. Requires 3 multiplications and 2 additions (dot product + offset) [G].
+- **Memory Complexity:** $O(1)$. Stores only the normal vector (3 floats) and offset (1 float), or normal and point (6 floats) [G].
+- **Strengths:** Exact, differentiable, and extremely fast. Ideal for infinite boundaries and ground planes [G].
+- **Limitations:** Represents only infinite planes. Cannot model finite planar patches (like triangles) without additional logic (e.g., bounding box checks or combining with other primitives) [G].
+- **When to use:** Defining ground planes, clipping volumes, or as a component in CSG operations [S4, unofficial].
+- **When not to use:** When a finite planar surface is required (use Triangle SDF or mesh-based methods) [G].
 
 ## Background
-The Plane SDF is one of the basic primitives in the repertoire of analytic distance functions used in ray marching. It appears in foundational works on implicit surfaces and sphere tracing. Hart [S5, unofficial] cites it as a standard primitive for defining ground planes in ray marching scenes. The GLSL implementation `sdPlane` by Inigo Quilez [S2, unofficial] popularized the normal-offset formulation in real-time graphics. The formulation is consistent with the geometric definition of distance from a point to a hyperplane in Euclidean space.
+The Plane SDF is one of the basic primitives in the repertoire of analytic distance functions used in ray marching [S4, unofficial]. It appears in foundational works on implicit surfaces and sphere tracing [S6]. Hart [S5, unofficial] cites it as a standard primitive for defining ground planes in ray marching scenes. The GLSL implementation `sdPlane` [S2, unofficial] provides the normal-offset formulation commonly used in real-time graphics. The formulation is consistent with the geometric definition of distance from a point to a hyperplane in Euclidean space [G].
 
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

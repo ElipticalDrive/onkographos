@@ -3,28 +3,39 @@
 Also called: GMM-based TF Generation, GMM-based TF Initialization, Gaussian Mixture Model-based Transfer Function Initialization, TF Sampling, Training Data Generation
 
 ## Overview
-An automated method to initialize transfer functions by modeling the data value space using the Gaussian mixture model and rendering the extracted volume with preintegrated volume rendering [S2, unofficial]. It generates random opacity and color transfer functions to create a diverse set of volume renderings, primarily used for generating training data for generative models [S1]. Unlike [Histogram-Based Transfer Function Generation](6182-histogram-based-transfer-function-generation.md) which derives parameters from data statistics, this method is data-independent, imposing few limitations on the space of possible volume renderings to show generality [S1].
+An automated method to initialize transfer functions by modeling the data value space using the Gaussian mixture model and rendering the extracted volume with preintegrated volume rendering [S2, unofficial]. It generates random opacity and color transfer functions to create a diverse set of visualizations, primarily used for training data generation in machine learning pipelines [S1]. Unlike histogram-based methods that rely on data statistics, this approach is data-independent, imposing few limitations on the space of possible volume renderings [S1].
 
 ## How it works
-**Inputs:** Scalar field data range $[min, max]$.
-**Outputs:** Opacity transfer function $T_o(v)$ and Color transfer function $T_c(v)$ defined over scalar values $v$.
+**Inputs:**
+*   Scalar field range $[v_{min}, v_{max}]$ of the volume data [S1].
+*   (Optional) Manual bounds for mean values if the volume tends to be too opaque or empty at scalar field boundaries [S1].
+
+**Outputs:**
+*   Opacity Transfer Function (TF): Defined by a mixture of Gaussians.
+*   Color Transfer Function (TF): Defined by piecewise linear interpolation of sampled colors.
 
 **Data Structures:**
-*   **GMM Component:** A tuple $(\mu, \sigma, A)$ where $\mu$ is the mean, $\sigma$ is the standard deviation, and $A$ is the amplitude.
-*   **Color Sample:** A tuple $(v, \mathbf{c})$ where $v$ is a scalar value and $\mathbf{c}$ is an RGB color vector.
+*   **GMM Parameters:** A list of $K$ modes. Each mode $k$ is defined by:
+    *   Mean $\mu_k \in [v_{min}, v_{max}]$
+    *   Standard deviation $\sigma_k > 0$
+    *   Amplitude $A_k \in [0, 1]$
+*   **Color Samples:** A set of $(v, C)$ pairs where $v$ is a scalar value and $C$ is an RGB color vector.
 
 **Steps:**
-1.  **Sample Number of Modes:** Randomly sample an integer $K$ from the uniform distribution $\{1, 2, 3, 4, 5\}$ [S1].
-2.  **Generate Opacity GMM Parameters:** For each mode $k \in \{1, \dots, K\}$:
-    *   Sample mean $\mu_k$ uniformly from $[min, max]$. If the volume is known to be too opaque or empty at boundaries, manually adjust the sampling bounds for $\mu_k$ to avoid $min$ and $max$ [S1].
-    *   Sample standard deviation $\sigma_k$ relative to the scalar field range $R = max - min$. The exact distribution is not specified, but it must be positive [S1].
-    *   Sample amplitude $A_k$ uniformly from $[0, 1]$ [S1].
-3.  **Construct Opacity Transfer Function:** Define $T_o(v)$ as the sum of Gaussian components:
-    $$ T_o(v) = \sum_{k=1}^{K} A_k \cdot \exp\left( -\frac{(v - \mu_k)^2}{2\sigma_k^2} \right) $$
-    Clamp $T_o(v)$ to $[0, 1]$ [G].
-4.  **Sample Color Control Points:** Create a list of control points. Include the global extrema $(min, \mathbf{c}_{min})$ and $(max, \mathbf{c}_{max})$. For each GMM mean $\mu_k$, add a point $(\mu_k, \mathbf{c}_k)$ [S1].
-5.  **Generate Random Colors:** For each control point, sample a random RGB color $\mathbf{c}$. Bias the lightness such that colors at $\mu_k$ have higher lightness and colors at $min/max$ have lower lightness [S1].
-6.  **Construct Color Transfer Function:** Define $T_c(v)$ using piecewise linear interpolation between the sorted control points $(v_i, \mathbf{c}_i)$ [S1].
+1.  **Sample Number of Modes:** Randomly sample an integer $K$ from the range $[1, 5]$ [S1].
+2.  **Generate Opacity TF:**
+    *   For each mode $k \in \{1, \dots, K\}$:
+        *   Sample mean $\mu_k$ uniformly from $[v_{min}, v_{max}]$. If manual bounds are specified for edge cases, restrict $\mu_k$ to those bounds [S1].
+        *   Sample standard deviation $\sigma_k$ relative to the scalar field range (e.g., uniform or log-uniform distribution over a fraction of $v_{max} - v_{min}$) [S1].
+        *   Sample amplitude $A_k$ uniformly from $[0, 1]$ [S1].
+    *   The opacity function $\alpha(v)$ is the sum of the Gaussian components:
+        $$ \alpha(v) = \sum_{k=1}^{K} A_k \cdot \exp\left(-\frac{(v - \mu_k)^2}{2\sigma_k^2}\right) $$
+    *   Clamp $\alpha(v)$ to $[0, 1]$ [G].
+3.  **Generate Color TF:**
+    *   Identify key scalar values: the global extrema $v_{min}, v_{max}$ and the means $\{\mu_1, \dots, \mu_K\}$ from the opacity TF [S1].
+    *   Sample a random color $C_i$ for each key value $v_i$.
+    *   Bias the lightness of the colors: assign higher lightness to colors at $\mu_k$ and lower lightness to colors at $v_{min}, v_{max}$ [S1].
+    *   Construct the color function $C(v)$ by performing piecewise linear interpolation between the sampled $(v_i, C_i)$ pairs [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -33,108 +44,119 @@ An automated method to initialize transfer functions by modeling the data value 
 import random
 import math
 
-def generate_gmm_tf(scalar_min, scalar_max):
-    # Step 1: Sample number of modes
+def generate_gmm_tf(v_min, v_max, manual_bounds=None):
+    """
+    Generates a GMM-based opacity TF and a corresponding color TF.
+    """
+    # 1. Sample number of modes
     K = random.randint(1, 5)
     
-    gmm_components = []
-    
-    # Step 2: Generate Opacity GMM Parameters
+    modes = []
     for _ in range(K):
-        # Sample mean within range. 
-        # [G]: In practice, bounds might be tightened to avoid extreme opacity/emptiness
-        mu = random.uniform(scalar_min, scalar_max)
-        
-        # Sample standard deviation relative to range
-        # [G]: A common heuristic is a fraction of the range, e.g., 0.1 to 0.5
-        sigma = random.uniform(0.0, (scalar_max - scalar_min) * 0.5)
-        if sigma == 0:
-            sigma = 1e-6 # Guard against division by zero
+        # Sample mean
+        if manual_bounds:
+            mu = random.uniform(manual_bounds[0], manual_bounds[1])
+        else:
+            mu = random.uniform(v_min, v_max)
             
-        amplitude = random.uniform(0.0, 1.0)
-        gmm_components.append((mu, sigma, amplitude))
+        # Sample standard deviation relative to range
+        # Not given in sources: specific distribution for sigma. 
+        # Implementation note: typically a small fraction of the range.
+        sigma = random.uniform(0.05 * (v_max - v_min), 0.5 * (v_max - v_min))
         
-    # Step 4 & 5: Sample Color Control Points
-    control_points = []
-    
-    # Add global extrema
-    c_min = sample_biased_color(lightness='low')
-    control_points.append((scalar_min, c_min))
-    
-    c_max = sample_biased_color(lightness='low')
-    control_points.append((scalar_max, c_max))
-    
-    # Add GMM means
-    for mu, sigma, amp in gmm_components:
-        c_mean = sample_biased_color(lightness='high')
-        control_points.append((mu, c_mean))
+        # Sample amplitude
+        A = random.uniform(0.0, 1.0)
         
-    # Sort by scalar value for interpolation
-    control_points.sort(key=lambda x: x[0])
+        modes.append({'mu': mu, 'sigma': sigma, 'A': A})
+        
+    # 2. Generate Color TF
+    # Key points: extrema and means
+    key_values = [v_min, v_max]
+    for m in modes:
+        key_values.append(m['mu'])
+    key_values.sort()
     
-    return gmm_components, control_points
+    # Remove duplicates if any (unlikely with continuous random, but safe)
+    key_values = sorted(list(set(key_values)))
+    
+    color_samples = []
+    for v in key_values:
+        # Sample random color
+        r = random.random()
+        g = random.random()
+        b = random.random()
+        
+        # Bias lightness
+        # Check if v is a mean (approximate match due to float precision)
+        is_mean = False
+        for m in modes:
+            if abs(v - m['mu']) < 1e-6:
+                is_mean = True
+                break
+        
+        if is_mean:
+            # Higher lightness: boost the minimum component
+            min_rgb = min(r, g, b)
+            # Simple bias: add a constant to all channels to increase lightness
+            # Not given in sources: exact bias formula. 
+            # Implementation note: e.g., r += 0.3, g += 0.3, b += 0.3
+            r = min(1.0, r + 0.3)
+            g = min(1.0, g + 0.3)
+            b = min(1.0, b + 0.3)
+        else:
+            # Low lightness at extrema: keep dark or reduce lightness
+            # Not given in sources: exact bias formula.
+            # Implementation note: e.g., r *= 0.5, g *= 0.5, b *= 0.5
+            r *= 0.5
+            g *= 0.5
+            b *= 0.5
+            
+        color_samples.append((v, (r, g, b)))
+        
+    return modes, color_samples
 
-def evaluate_opacity(v, gmm_components):
-    opacity = 0.0
-    for mu, sigma, amplitude in gmm_components:
-        exponent = -((v - mu) ** 2) / (2 * sigma ** 2)
-        opacity += amplitude * math.exp(exponent)
-    return max(0.0, min(1.0, opacity))
+def evaluate_opacity(v, modes):
+    alpha = 0.0
+    for m in modes:
+        alpha += m['A'] * math.exp(-((v - m['mu'])**2) / (2 * m['sigma']**2))
+    return min(1.0, max(0.0, alpha))
 
-def evaluate_color(v, control_points):
-    if not control_points:
-        return (0.0, 0.0, 0.0)
-        
+def evaluate_color(v, color_samples):
     # Piecewise linear interpolation
-    if v <= control_points[0][0]:
-        return control_points[0][1]
-    if v >= control_points[-1][0]:
-        return control_points[-1][1]
+    if not color_samples:
+        return (0.0, 0.0, 0.0)
+    if v <= color_samples[0][0]:
+        return color_samples[0][1]
+    if v >= color_samples[-1][0]:
+        return color_samples[-1][1]
         
-    for i in range(len(control_points) - 1):
-        v0, c0 = control_points[i]
-        v1, c1 = control_points[i+1]
-        
+    for i in range(len(color_samples) - 1):
+        v0, c0 = color_samples[i]
+        v1, c1 = color_samples[i+1]
         if v0 <= v <= v1:
-            if v1 == v0:
-                return c0
             t = (v - v0) / (v1 - v0)
-            # Linear interpolation for RGB
             r = c0[0] + t * (c1[0] - c0[0])
             g = c0[1] + t * (c1[1] - c0[1])
             b = c0[2] + t * (c1[2] - c0[2])
             return (r, g, b)
-            
-    return control_points[-1][1]
-
-def sample_biased_color(lightness):
-    # [G]: Implementation detail for lightness bias.
-    # High lightness: sample from lighter part of color space.
-    # Low lightness: sample from darker part.
-    # This is a placeholder for the specific color sampling strategy.
-    return (random.random(), random.random(), random.random())
+    return color_samples[-1][1]
 ```
-
-**Edge Cases and Pitfalls:**
-*   **Sigma Zero:** If $\sigma_k$ is sampled as 0, the Gaussian becomes a Dirac delta, causing numerical instability. A small epsilon should be added [G].
-*   **Boundary Opacity:** If means are sampled exactly at $min$ or $max$, the volume may render as fully opaque or empty. Manual adjustment of mean bounds is recommended [S1].
-*   **Color Correlation:** The method biases colors to correlate high opacity with high lightness to mimic user intent, but this is a heuristic and may not suit all data [S1].
 
 ## Subtopics
 
 ### [Mixture of Gaussian Mixture Models (MoGMM)](8332-mixture-of-gaussian-mixture-models-mogmm.md)
-A non-parametric method that fits a mixture of GMMs to histogram space to eliminate the need for a priori knowledge of the number of distributions. It performs localized fitting to create generative models for locally selected data, enabling probabilistic class membership assignment without interaction. Choose this when dealing with complex, overlapping probability density functions where global GMM fitting produces excessive small Gaussians.
+Mixture of Gaussian Mixture Models (MoGMM) is a non-parametric method for estimating complex, overlapping probability density functions in histogram space by fitting a mixture of Gaussian Mixture Models (GMMs). It solves the problem of automatic transfer function generation for volume rendering by eliminating the need for a priori knowledge of the number of distributions within local data clusters. Unlike global GMM fitting which often produces excessive small Gaussians in high-density regions requiring manual clipping, MoGMM performs localized fitting to create generative models for locally selected data, enabling probabilistic class membership assignment without interaction in histogram space.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(K)$ to generate parameters, $O(K)$ to evaluate opacity per sample point, $O(M)$ to evaluate color where $M$ is the number of control points. Overall rendering cost is dominated by the volume integration, not the TF generation.
-*   **Memory Complexity:** $O(K + M)$ to store the GMM components and color control points.
-*   **Strengths:** Data-independent; generates a wide variety of transfer functions quickly; suitable for generating large training datasets for machine learning models [S1].
-*   **Limitations:** Not adaptive to specific data features; requires manual adjustment of bounds for problematic volumes; the resulting transfer functions may not be semantically meaningful without post-processing or optimization [S1].
-*   **When to use:** When generating training data for generative models or when a diverse set of initial transfer functions is needed without user interaction.
-*   **When not to use:** When the goal is to automatically extract meaningful semantic regions from the data itself (use [Histogram-Based Transfer Function Generation](6182-histogram-based-transfer-function-generation.md) or [Valley Cell-Based Clustering Transfer Function Design](7418-valley-cell-based-clustering-transfer-function-design.md) instead).
+*   **Time Complexity:** Generating a single TF instance is $O(K)$ where $K$ is the number of modes (max 5). Evaluating the TF for a volume is $O(N)$ where $N$ is the number of samples.
+*   **Memory Complexity:** $O(K)$ to store GMM parameters. $O(K)$ to store color sample points.
+*   **Strengths:** Data-independent; generates a wide variety of visualizations quickly; suitable for generating large training datasets for machine learning [S1].
+*   **Limitations:** Does not guarantee semantically meaningful classifications; relies on random sampling which may produce poor visualizations (e.g., too opaque/empty) requiring manual adjustment of bounds [S1].
+*   **When to use:** When generating training data for deep learning models or exploring the space of possible renderings without user interaction [S1].
+*   **When not to use:** When specific semantic features need to be highlighted automatically based on data statistics [S1].
 
 ## Background
-The method was introduced by Wang et al. [96] as cited in [S2, unofficial], who initialized transfer functions by modeling the data value space using the Gaussian mixture model and rendering the extracted volume with preintegrated volume rendering. It was further detailed in [S1] for generating training data for a generative model for volume rendering. The approach is part of a broader effort to automate user interactions in transfer function space, contrasting with interactive widgets [S2, unofficial].
+The method was introduced by Wang et al. [96] as cited in Zhou's dissertation [S2, unofficial]. It is used in the context of generating training data for generative models of volume rendering, such as the work by Ip et al. [S1]. The approach builds on the idea of automating transfer function design to reduce user interaction time [S2, unofficial].
 
 ## Sources
 [S1] A Generative Model for Volume Rendering, https://doi.org/10.1109/tvcg.2018.2816059, fetched 2026-10-26

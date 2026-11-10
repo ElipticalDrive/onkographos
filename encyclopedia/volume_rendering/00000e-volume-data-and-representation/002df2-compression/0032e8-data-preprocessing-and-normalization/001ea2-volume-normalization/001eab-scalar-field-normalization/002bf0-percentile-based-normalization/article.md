@@ -1,76 +1,145 @@
 # Percentile-based Normalization
+
 Also called: DRR Image Normalization, Grayscale Mapping
+
 ## Overview
-Percentile-based Normalization scales scalar field data to a target range (typically [0, 1] or [0, 255]) using robust statistical bounds rather than global extrema. It solves the problem of outlier sensitivity in volume rendering, where extreme values (e.g., bone in CT scans) can compress the visible contrast of softer tissues. Unlike [Scaling](2287-scaling.md), which uses global min/max, this method clips data to specified percentiles (e.g., 5th and 95th) to focus visualization on significant data ranges [S1, unofficial].
+Percentile-based normalization scales scalar field data to a target range (typically [0, 1] or [0, 255]) by using robust statistical bounds (percentiles) rather than global extrema. This method solves the problem of outlier-induced contrast loss, where a few extreme values compress the visible range of the majority of the data. It differs from [Scaling](2287-scaling.md) and the parent [Scalar Field Normalization](1842-scalar-field-normalization.md) by ignoring values outside the chosen percentile interval, thereby preventing outliers from dominating the normalization bounds.
+
 ## How it works
-**Inputs and Outputs:**
-- Input: A scalar field image (e.g., DRR projection or volume voxel grid) as a floating-point array.
-- Output: A normalized array scaled to [0, 1] or cast to uint8 [0, 255].
+**Inputs:** A scalar field dataset (e.g., image or volume voxels) $I$.
+**Outputs:** A normalized dataset $N$ in the range $[0, 1]$ or an 8-bit integer representation.
 
 **Data Structures:**
-- `image`: Input array of shape $(H, W)$ or $(D, H, W)$.
-- `min_val`, `max_val`: Scalar floats representing the lower and upper percentile bounds.
-- `image_clipped`: Array with values bounded by `min_val` and `max_val`.
-- `image_normalized`: Array in range [0, 1].
+- Input: Array of floating-point values.
+- Output: Array of floating-point values in $[0, 1]$ or `uint8` array.
 
 **Steps:**
-1. **Calculate Percentiles:** Compute the lower ($P_{low}$) and upper ($P_{high}$) percentiles of the input image data. Common values are 5 and 95 to exclude outliers [S1, unofficial].
-   $$ min\_val = P_{low}(image) $$
-   $$ max\_val = P_{high}(image) $$
-2. **Clip Values:** Restrict all pixel/voxel values to the range $[min\_val, max\_val]$. Values below $min\_val$ become $min\_val$; values above $max\_val$ become $max\_val$.
-   $$ image\_clipped = \text{clip}(image, min\_val, max\_val) $$
-3. **Normalize:** Linearly scale the clipped data to $[0, 1]$. A small epsilon ($\epsilon$) is added to the denominator to prevent division by zero if $min\_val \approx max\_val$.
-   $$ image\_normalized = \frac{image\_clipped - min\_val}{max\_val - min\_val + \epsilon} $$
-   Where $\epsilon = 10^{-8}$ [S1, unofficial].
-4. **Scale and Cast (Optional):** Multiply by 255 and cast to `uint8` for 8-bit display.
-   $$ image\_8bit = \text{astype}((image\_normalized \times 255), \text{uint8}) $$
+1. **Compute Bounds:** Calculate the lower bound $min\_val$ and upper bound $max\_val$ as specific percentiles (e.g., 5th and 95th) of the finite values in the input data. This excludes outliers [S1, unofficial].
+2. **Clip:** Clip the input values to the range $[min\_val, max\_val]$. Values below $min\_val$ become $min\_val$; values above $max\_val$ become $max\_val$ [S1, unofficial].
+3. **Normalize:** Apply linear scaling to the clipped data:
+   $$ N = \frac{I_{clipped} - min\_val}{max\_val - min\_val + \epsilon} $$
+   where $\epsilon$ is a small constant (e.g., $1e-8$) to prevent division by zero if $min\_val == max\_val$ [S1, unofficial].
+4. **Scale (Optional):** Multiply by 255 and cast to `uint8` for 8-bit grayscale representation:
+   $$ I_{8bit} = \lfloor N \times 255 \rfloor $$ [S1, unofficial].
+
+**Parameters:**
+- Percentiles: Commonly 5 and 95 [S1, unofficial].
+- Epsilon: $1e-8$ [S1, unofficial].
+
+**Pitfalls:**
+- If the dataset contains only one unique value, $max\_val - min\_val = 0$. The epsilon term prevents division by zero, resulting in all normalized values being 0 [S1, unofficial].
+- Using global min/max (as in parent method) fails when outliers are present [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def percentile_normalize(image: np.ndarray, low_percentile: float = 5.0, high_percentile: float = 95.0, epsilon: float = 1e-8) -> np.ndarray:
-    # Step 1: Calculate bounds
-    min_val = np.percentile(image, low_percentile)
-    max_val = np.percentile(image, high_percentile)
+import numpy as np
+
+def percentile_normalize(image: np.ndarray, lower_pct: float = 5.0, upper_pct: float = 95.0) -> np.ndarray:
+    """
+    Normalize image data using percentile-based clipping and scaling.
     
-    # Step 2: Clip
+    Args:
+        image: Input scalar field (numpy array).
+        lower_pct: Lower percentile bound (default 5).
+        upper_pct: Upper percentile bound (default 95).
+        
+    Returns:
+        Normalized image as float32 in [0, 1].
+    """
+    # 1. Calculate bounds using finite values to ignore NaNs/Infs
+    finite_vals = image[np.isfinite(image)]
+    if finite_vals.size == 0:
+        return np.zeros_like(image)
+        
+    min_val = np.percentile(finite_vals, lower_pct)
+    max_val = np.percentile(finite_vals, upper_pct)
+    
+    # 2. Clip values to bounds
     image_clipped = np.clip(image, min_val, max_val)
     
-    # Step 3: Normalize
-    # Handle case where min_val == max_val to avoid division by zero
+    # 3. Normalize with epsilon to prevent division by zero
+    epsilon = 1e-8
     denominator = max_val - min_val + epsilon
-    image_normalized = (image_clipped - min_val) / denominator
+    normalized = (image_clipped - min_val) / denominator
     
-    # Step 4: Scale to 8-bit (optional, depends on output requirement)
-    image_8bit = (image_normalized * 255).astype(np.uint8)
-    
-    return image_8bit
+    return normalized
 ```
-
-**Parameters:**
-- `low_percentile`: Default 5.0.
-- `high_percentile`: Default 95.0.
-- `epsilon`: Default $10^{-8}$ [S1, unofficial].
-
-**Edge Cases:**
-- If the image contains uniform values, $min\_val = max\_val$. The epsilon prevents NaN results, resulting in all zeros or a constant value depending on implementation [S1, unofficial].
-- Outliers significantly outside the percentile range are discarded, which is the intended behavior but may hide relevant data if percentiles are chosen poorly [S1, unofficial].
 
 ## Subtopics
 
-### [Weighted Percentile Computation](7031-weighted-percentile-computation.md)
-Incorporates voxel weights (e.g., opacity) into percentile calculation for robust normalization bounds.
+### Intensity-to-Grayscale Mapping
+Maps absolute field intensity values to 8-bit grayscale luminance indices [0, 255] using percentile normalization combined with gamma compression. This variant is used in astrophysical visualization to improve contrast at low-field regions [S2, unofficial]. It differs from standard linear normalization by applying a non-linear gamma transform after normalization [S2, unofficial].
+
+**Definition:**
+- Maps field magnitude to an 8-bit grayscale luminance index [S2, unofficial].
+- Applies gamma compression to the normalized intensity [S2, unofficial].
+
+**Steps:**
+1. Calculate saturation threshold $b_{max}$ as the 99th percentile of finite intensity values plus a small epsilon: $b_{max} = \text{percentile}(I, 99) + 1e-9$ [S2, unofficial].
+2. Normalize intensity to $[0, 1]$: $norm = \text{clip}(I / b_{max}, 0, 1)$ [S2, unofficial].
+3. Apply gamma compression and scale to 8-bit: $result = \text{int}(\text{power}(norm, \gamma) \times 255)$ [S2, unofficial].
+
+**Formula:**
+$$ norm = \max(0.0, \min(1.0, \frac{I - i_{min}}{\max(i_{max} - i_{min}, 1e-9)})) $$
+$$ compressed = norm^\gamma $$
+$$ result = \text{int}(\text{round}(compressed \times 255)) $$ [S2, unofficial].
+
+**Parameters:**
+- $\gamma$: Gamma compression exponent. Default 0.55 for Earth model, 0.7 for Saturn model [S2, unofficial]. Values $< 1$ expand the mid-range and brighten the low end [S2, unofficial].
+- $i_{min}$: Global minimum intensity [S2, unofficial].
+- $i_{max}$: Global maximum intensity [S2, unofficial].
+
+**Pitfalls:**
+- Denominator clamped to $1e-9$ to prevent division by zero if $i_{max} == i_{min}$ [S2, unofficial].
+- Normalized value must be clamped to $[0.0, 1.0]$ before gamma application [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def intensity_to_grayscale(intensity: np.ndarray, gamma: float = 0.55) -> np.ndarray:
+    """
+    Map intensity to 8-bit grayscale with gamma compression.
+    
+    Args:
+        intensity: Input scalar field.
+        gamma: Gamma exponent (default 0.55).
+        
+    Returns:
+        8-bit grayscale image (uint8).
+    """
+    # Calculate saturation threshold using 99th percentile
+    finite_vals = intensity[np.isfinite(intensity)]
+    if finite_vals.size == 0:
+        return np.zeros(intensity.shape, dtype=np.uint8)
+        
+    b_max = np.percentile(finite_vals, 99) + 1e-9
+    
+    # Normalize to [0, 1]
+    norm = np.clip(intensity / b_max, 0, 1)
+    
+    # Apply gamma compression and scale to 8-bit
+    compressed = np.power(norm, gamma)
+    result = (compressed * 255).astype(np.uint8)
+    
+    return result
+```
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \log N)$ or $O(N)$ depending on the percentile algorithm implementation, where $N$ is the number of voxels/pixels.
-- **Memory Complexity:** $O(N)$ for storing the input and intermediate arrays.
-- **Strengths:** Robust against outliers; improves contrast for soft tissues in medical imaging [S1, unofficial].
-- **Limitations:** Computationally more expensive than global min/max scaling; requires sorting or selection algorithms.
-- **When to Use:** When the data contains extreme outliers that would otherwise compress the dynamic range of the primary interest [S1, unofficial].
+- **Time Complexity:** $O(N)$ for computing percentiles and clipping, where $N$ is the number of voxels/pixels.
+- **Memory Complexity:** $O(N)$ for storing the normalized output.
+- **Strengths:** Robust to outliers; improves contrast for the majority of the data; simple to implement [S1, S2, unofficial].
+- **Limitations:** Loses information about values outside the percentile range; requires a pass over the data to compute statistics [S1, S2, unofficial].
+- **When to Use:** When the data contains significant outliers or when the dynamic range is dominated by extreme values [S1, S2, unofficial].
+- **When Not to Use:** When preserving the absolute relationship between all values is critical, or when the data distribution is uniform and outliers are meaningful [S1, S2, unofficial].
 
 ## Background
-Originating from medical imaging workflows, specifically Digital Radiograph (DRR) generation, this method mimics the windowing techniques used in diagnostic displays. It is widely used in volume rendering preprocessing to ensure that the most visually significant data ranges are mapped to the full display gamut [S1, unofficial].
+Percentile-based normalization is widely used in medical imaging (e.g., DRR generation) and astrophysical visualization to handle high-dynamic-range data [S1, S2, unofficial]. The method was adapted from standard image processing techniques to volume rendering to ensure that subtle features are not washed out by extreme values [S1, S2, unofficial].
 
 ## Sources
 [S1] 医疗影像开发实战:如何用光线投射算法快速生成DRR图像(附Python代码), https://un.csdn.net/98nhkcg5t04h, fetched 2026-10-26 (unofficial)
+[S2] VitorFigueiredoResearch/AstroSplat-Browser-native-volumetric-visualization-for-astrophysical-vector-fields, https://github.com/VitorFigueiredoResearch/AstroSplat-Browser-native-volumetric-visualization-for-astrophysical-vector-fields, fetched 2026-10-26 (unofficial)

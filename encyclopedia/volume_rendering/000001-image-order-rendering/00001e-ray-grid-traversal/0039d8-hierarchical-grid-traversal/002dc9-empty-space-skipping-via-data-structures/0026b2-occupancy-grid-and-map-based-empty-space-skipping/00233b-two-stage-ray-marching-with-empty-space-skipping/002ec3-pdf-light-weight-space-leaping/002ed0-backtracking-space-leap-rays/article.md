@@ -22,11 +22,11 @@ Backtracking Space Leap Rays is a correction mechanism applied to space leap ray
 **Steps**
 1.  **Leap Check:** Determine the tentative new origin of the space leap ray based on the leap buffer value [S1].
 2.  **Boundary Condition Check:** If the leap buffer value is zero, do not leap the ray at all; proceed with standard ray marching from the previous position [S1, S2].
-3.  **Leap Adjustment:** When leaping, leap one sample less than the value stored in the leap buffer. This ensures that the sample immediately preceding the leap target is the last sample in an empty cell [S1].
+3.  **Leap Adjustment:** When leaping, leap one sample less than the value stored in the leap buffer [S1]. This ensures that the sample immediately preceding the leap target is the last sample in an empty cell [S1].
 4.  **Empty Cell Verification:** Evaluate the volume data at the first sample point of the (adjusted) space leap ray [S1, S2].
 5.  **Backtracking Decision:**
-    *   If the first sample point is inside an empty cell, the ray is correctly positioned before the cell group. Proceed to standard ray marching from this point [S1, S2].
-    *   If the first sample point is inside a non-empty cell, the ray has jumped too far and missed the object boundary. Initiate backtracking [S1, S2].
+    *   If the first sample point is inside an empty cell, the ray is correctly positioned before the cell group [S1]. Proceed to standard ray marching from this point [S1, S2].
+    *   If the first sample point is inside a non-empty cell, the ray has jumped too far and missed the object boundary [S1]. Initiate backtracking [S1, S2].
 6.  **Backtracking Execution:**
     *   Move the ray origin backwards by one sample distance ($\delta$) at a time [S1, S2].
     *   Sample the volume at each backtracked position [S1, S2].
@@ -61,7 +61,7 @@ def backtracking_space_leap_ray(ray_origin, ray_direction, leap_buffer_value,
         leap_buffer_value: Number of empty samples from the detector ray.
         cell_group_dims: Tuple (mu_x, mu_y, mu_z) of the cell group dimensions.
         sampling_distance: Step size delta.
-        volume_data: Function to sample volume at a 3D point.
+        volume_data: Object providing volume access methods.
         
     Returns:
         corrected_origin: The new ray origin guaranteed to be in empty space.
@@ -91,7 +91,7 @@ def backtracking_space_leap_ray(ray_origin, ray_direction, leap_buffer_value,
     
     # Calculate upper limit for backtracking [S1, S2]
     max_edge = max(cell_group_dims)
-    m_max = 2 * (max_edge / sampling_distance)
+    m_max = int(2 * (max_edge / sampling_distance))
     
     # Step 6: Backtracking Execution
     # We backtrack until we find an empty cell.
@@ -117,7 +117,7 @@ def backtracking_space_leap_ray(ray_origin, ray_direction, leap_buffer_value,
 **Edge Cases and Pitfalls**
 *   **Zero Leap Buffer:** If the leap buffer value is zero, the ray must not be leaped at all [S1, S2].
 *   **Image Plane Boundary:** Backtracking must not exceed the leap buffer value, otherwise the ray origin moves behind the image plane [S1, S2].
-*   **Off-by-One Leap:** Leaping exactly the buffer value would land on the first non-empty sample. Leaping one less ensures the first sample checked is the last empty one, but if that is still non-empty (due to interpolation or data structure granularity), backtracking is required [S1].
+*   **Off-by-One Leap:** Leaping exactly the buffer value would land on the first non-empty sample [S1]. Leaping one less ensures the first sample checked is the last empty one, but if that is still non-empty (due to interpolation or data structure granularity), backtracking is required [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** Backtracking causes no additional overhead because the ray would have been sampled at those missed points anyway [S1, S2].

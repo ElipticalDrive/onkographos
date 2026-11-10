@@ -3,12 +3,12 @@
 Also called: u-coordinate derivation, wallX calculation
 
 ## Overview
-This method computes the horizontal texture coordinate (often called `wallX` or the "u" coordinate) for a raycast hit against a grid-aligned wall [S1, unofficial]. It translates the 3D intersection point into a 2D texture space value in the range $[0, 1)$, enabling correct texture mapping on vertical and horizontal faces [G]. It differs from standard 3D texture coordinate calculation by exploiting the axis-aligned nature of the grid: the coordinate depends strictly on which face type (vertical or horizontal) was hit, using the perpendicular distance and the ray direction to determine the position along the wall's local axis [G].
+This method computes the horizontal texture coordinate (commonly `wallX` or the "u" coordinate) for a raycast intersection against an axis-aligned grid wall [S1, unofficial]. It converts the 3D hit point into a normalized $[0, 1)$ texture space value by exploiting the grid's axis alignment: the coordinate depends strictly on the hit face type (vertical or horizontal), using the perpendicular distance and ray direction to determine the position along the wall's local axis [G]. It differs from general 3D texture mapping by avoiding full projection matrices and instead deriving the coordinate directly from DDA traversal state [G].
 
 ## How it works
 **Inputs:**
 - `side`: Integer indicating the hit face type. `0` for vertical face (constant-X grid line), `1` for horizontal face (constant-Y grid line) [S1, unofficial].
-- `px`, `py`: The player/camera position in world coordinates ($x, y$) [G].
+- `px`, `py`: The camera position in world coordinates ($x, y$) [G].
 - `dirX`, `dirY`: The ray direction vector components [G].
 - `perpDist`: The perpendicular distance from the camera to the hit wall plane [S1, unofficial].
 - `mapX`, `mapY`: The integer grid coordinates of the cell where the hit occurred [G].
@@ -19,7 +19,7 @@ This method computes the horizontal texture coordinate (often called `wallX` or 
 - `texX`: The integer column index in the texture image [S1, unofficial].
 
 **Data Structures:**
-No complex data structures are required. The calculation uses scalar values derived from the raycasting traversal (typically DDA) [G].
+No complex data structures are required; the calculation uses scalar values derived from the raycasting traversal [G].
 
 **Steps:**
 1. **Determine the varying axis:** Identify which world-space coordinate varies along the hit face [S1, unofficial].
@@ -33,7 +33,7 @@ No complex data structures are required. The calculation uses scalar values deri
    \end{cases}
    $$
    [S1, unofficial]
-3. **Wrap to [0, 1):** Remove the integer part to get the fractional position within the specific wall segment [S1, unofficial].
+3. **Wrap to $[0, 1)$:** Remove the integer part to get the fractional position within the specific wall segment [S1, unofficial].
    $$
    wallX = wallX_{raw} - \lfloor wallX_{raw} \rfloor
    $$
@@ -112,12 +112,12 @@ A variant for handling thin walls recessed to the midline of a cell (tile id 5) 
 5. Return hit with `wallX: wx` and `doorShift: -slide` [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- Time complexity: Not given in the sources. [G]
+- Memory complexity: Not given in the sources. [G]
+- Strengths: Not given in the sources. [G]
+- Limitations: Not given in the sources. [G]
+- When to use: Not given in the sources. [G]
+- When not to use: Not given in the sources. [G]
 
 ## Background
 This method is fundamental to early raycasting engines, particularly those used in first-person shooters like Wolfenstein 3D [S2, unofficial]. It leverages the simplicity of grid-based collision detection to derive texture coordinates without full 3D projection matrices [G]. The technique is often associated with the implementation details of DDA-based ray traversal, where the side of the hit face is known immediately upon intersection [S1, S2, unofficial].

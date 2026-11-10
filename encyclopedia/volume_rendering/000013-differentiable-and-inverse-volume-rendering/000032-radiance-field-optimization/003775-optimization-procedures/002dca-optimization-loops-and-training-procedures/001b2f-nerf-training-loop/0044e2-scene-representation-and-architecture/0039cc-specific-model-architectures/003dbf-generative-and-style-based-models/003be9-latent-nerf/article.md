@@ -1,132 +1,72 @@
 # Latent-NeRF
-
-
 ## Overview
-Latent-NeRF is a method for optimizing Neural Radiance Fields (NeRF) by integrating pre-trained latent diffusion models to improve novel view synthesis quality, particularly in scenarios with limited input data [S1]. It differs from standard NeRF training by operating in a compact latent space rather than direct RGB space, using score distillation from a stable diffusion model to guide the optimization of the radiance field [S1]. This approach allows for the generation of high-fidelity textures and structures guided by text and shape priors, addressing the ambiguity often found in sparse-view reconstruction [S1].
-
+Latent-NeRF is a method for optimizing Neural Radiance Fields (NeRF) by integrating a pre-trained latent diffusion model, enabling text-guided and shape-guided 3D generation [S1, S2]. It differs from standard NeRF training by replacing photometric reconstruction loss with score distillation from a diffusion model operating on a compact latent space [S2]. Unlike [HyperNeRFGAN](8765-hypernerfgan.md), which uses adversarial training, Latent-NeRF leverages the generative priors of Stable Diffusion to synthesize high-resolution details that are otherwise lost in low-resolution NeRF outputs [S1].
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** A set of input images (or a single image for some variants), camera poses, and optionally text prompts or shape guidance. The core input to the NeRF MLP is 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$.
-*   **Outputs:** A rendered feature map $\mathbf{z}$ in the latent space, which corresponds to the output of the pre-trained autoencoder's encoder. The final RGB image is obtained by decoding $\mathbf{z}$ using the pre-trained autoencoder's decoder.
+**Inputs:**
+*   A pre-trained latent diffusion model (specifically Stable Diffusion [S1, S2]).
+*   A pre-trained autoencoder for the latent space [S2].
+*   Text prompts and/or shape constraints (e.g., depth maps or silhouettes) for guidance [S1, S2].
+*   Initial NeRF parameters (MLP weights) [S2].
+
+**Outputs:**
+*   Optimized NeRF representation (MLP weights) [S2].
+*   Rendered RGB images at arbitrary viewpoints [S1, S2].
 
 **Data Structures:**
-1.  **NeRF MLP ($F_{\theta}$):** A multi-layer perceptron that takes encoded position $\gamma(\mathbf{x})$ and direction $\mathbf{d}$ as input.
-    *   **Output:** Volume density $\sigma$ and a latent feature vector $\mathbf{z} \in \mathbb{R}^4$. The dimension 4 corresponds to the four latent features used in the specific stable diffusion model implementation referenced in the source [S1].
-2.  **Pre-trained Autoencoder:** Consists of an encoder $E$ and a decoder $D$.
-    *   **Encoder $E$:** Maps RGB images to latent space.
-    *   **Decoder $D$:** Maps latent features $\mathbf{z}$ back to RGB space.
-3.  **Stable Diffusion Model ($\epsilon_{\theta}$):** A pre-trained text-to-image diffusion model used for score distillation.
+*   **NeRF MLP:** Takes 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ as input. Outputs volume density $\sigma$ and four pseudo-color channels $\mathbf{c}_{latent}$ [S2]. The four channels correspond to the four latent features required by the diffusion model [S2].
+*   **Latent Feature Map $z$:** A 2D tensor of shape $H \times W \times 4$ rendered from the NeRF, where $H=64, W=64$ [S1].
+*   **Diffusion Model:** Operates on the latent space of the autoencoder [S2].
 
-**Algorithm Steps:**
-1.  **Positional Encoding:** Encode the 3D position $\mathbf{x}$ using positional encoding $\gamma(\mathbf{x})$ as defined in the parent article [Parent].
-2.  **NeRF Forward Pass:** Pass $\gamma(\mathbf{x})$ and $\mathbf{d}$ through the NeRF MLP $F_{\theta}$ to obtain density $\sigma$ and latent feature $\mathbf{z}$ [S1].
-3.  **Volumetric Rendering:** Render the latent feature map $\mathbf{z}$ and density $\sigma$ along rays using standard volumetric rendering to produce a pixel-wise latent feature $\mathbf{z}_{rendered}$ [S1].
-    $$
-    \mathbf{z}_{rendered}(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{z}_i, \quad \alpha_i = 1 - \exp(-\sigma_i \delta_i), \quad T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)
-    $$
-4.  **Noise Addition:** Add noise to the rendered latent feature map $\mathbf{z}_{rendered}$ to create a noisy latent representation $\mathbf{z}_t$ at timestep $t$ [S1].
-5.  **Diffusion Denoising:** Use the pre-trained stable diffusion model to predict the noise or score for $\mathbf{z}_t$, conditioned on the text prompt and/or shape guidance [S1].
-6.  **Score Distillation Loss:** Compute the loss by comparing the predicted noise from the diffusion model with the actual noise added to $\mathbf{z}_{rendered}$. This gradient is backpropagated through the diffusion model, through the noise addition, and into the NeRF parameters $\theta$ [S1].
-7.  **Optimization:** Update the NeRF MLP parameters $\theta$ using gradient descent to minimize the diffusion loss [S1].
+**Steps:**
+1.  **NeRF Rendering:** For a given camera viewpoint, render the scene using the NeRF MLP. The MLP outputs density $\sigma$ and the four latent features $\mathbf{c}_{latent}$ [S2].
+2.  **Volume Rendering:** Perform standard volume rendering to composite the latent features into a 2D feature map $z$ of size $64 \times 64 \times 4$ [S1, S2].
+3.  **Latent Encoding (Optional/Implicit):** The feature map $z$ is treated as the input to the diffusion process. In some implementations, this may involve encoding $z$ into the autoencoder's latent space if the diffusion model expects encoded latents, though the source notes describe operating directly on the rendered latent features [S1, S2].
+4.  **Noise Addition:** Add noise to the rendered feature map $z$ to create a noisy latent image $\mathbf{z}_t$ at timestep $t$ [S2].
+5.  **Diffusion Denoising:** Use the pre-trained Stable Diffusion model to predict the noise or clean the latent image. This step is guided by:
+    *   **Text Guidance:** Text embeddings from the prompt [S1, S2].
+    *   **Shape Guidance:** Optional constraints to enforce geometric consistency [S1, S2].
+6.  **Score Distillation:** Compute the gradient of the diffusion model's prediction with respect to the noisy latent $\mathbf{z}_t$ [S2].
+7.  **Backpropagation:** Backpropagate the gradient from the diffusion model through the noise addition and volume rendering steps to update the NeRF MLP weights [S2].
+8.  **Optimization Loop:** Repeat steps 1-7 for multiple iterations, optimizing the NeRF parameters to minimize the diffusion loss [S2].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def latent_nerf_training_step(nerf_mlp, autoencoder, diffusion_model, 
-                              ray_batch, text_prompt, shape_guidance, 
-                              t, noise_scheduler):
-    """
-    Performs one training step for Latent-NeRF.
-    
-    Args:
-        nerf_mlp: The NeRF MLP model (F_theta).
-        autoencoder: Pre-trained autoencoder (E, D).
-        diffusion_model: Pre-trained stable diffusion model (epsilon_theta).
-        ray_batch: Batch of rays with origins and directions.
-        text_prompt: Text string for conditioning.
-        shape_guidance: Optional shape guidance tensor.
-        t: Diffusion timestep.
-        noise_scheduler: Scheduler for noise addition.
-        
-    Returns:
-        loss: The computed diffusion loss.
-    """
-    # 1. Sample points along rays
-    points_3d, directions = sample_points_along_rays(ray_batch)
-    
-    # 2. Encode positions (using positional encoding from parent article)
-    encoded_points = positional_encoding(points_3d)
-    
-    # 3. Forward pass through NeRF MLP
-    # Output: density (sigma) and latent features (z)
-    sigma, z_latent = nerf_mlp(encoded_points, directions)
-    
-    # 4. Volumetric rendering to get rendered latent feature map
-    # z_rendered has shape (batch_size, height, width, 4)
-    z_rendered = volumetric_render(z_latent, sigma, ray_batch)
-    
-    # 5. Add noise to the rendered latent feature
-    # noise = noise_scheduler.sample_noise()
-    # z_noisy = noise_scheduler.add_noise(z_rendered, noise, t)
-    # Note: In practice, this often involves encoding the rendered RGB 
-    # if the diffusion model operates on image space, but the source 
-    # specifies operating in the compact latent space of the autoencoder.
-    # The source states: "The output here differs from the basic NeRF in 
-    # that the four pseudo color channels correspond to the four latent 
-    # features used in the diffusion model."
-    
-    # Assuming z_rendered is already in the latent space compatible with 
-    # the diffusion model's input (or encoded via E if not):
-    z_noisy = noise_scheduler.add_noise(z_rendered, torch.randn_like(z_rendered), t)
-    
-    # 6. Predict noise using diffusion model with guidance
-    # The diffusion model predicts the noise component
-    predicted_noise = diffusion_model(
-        z_noisy, 
-        t, 
-        text_cond=text_prompt, 
-        shape_cond=shape_guidance
-    )
-    
-    # 7. Compute loss (Mean Squared Error between predicted and actual noise)
-    # Actual noise is the noise added in step 5
-    actual_noise = (z_noisy - z_rendered) / noise_scheduler.alphas_cumprod[t]**0.5 # Simplified
-    # More standard: loss = MSE(predicted_noise, noise_added)
-    loss = torch.mean((predicted_noise - torch.randn_like(z_noisy))**2)
-    
-    # 8. Backpropagate
-    loss.backward()
-    
-    return loss
-```
+**Formulas:**
+The core loss is derived from the score distillation sampling (SDS) loss, adapted for the latent space. Let $\epsilon_\theta(\mathbf{z}_t, t, \text{text}, \text{shape})$ be the noise predicted by the diffusion model. The gradient used for updating the NeRF parameters $\theta_{NeRF}$ is:
+$$ \nabla_{\theta_{NeRF}} \mathcal{L} = \mathbb{E}_{t, \epsilon} \left[ w(t) (\epsilon_\theta(\mathbf{z}_t, t, \text{text}, \text{shape}) - \epsilon) \frac{\partial \mathbf{z}_t}{\partial \theta_{NeRF}} \right] $$
+where $w(t)$ is a weighting function, $\epsilon$ is the added noise, and $\frac{\partial \mathbf{z}_t}{\partial \theta_{NeRF}}$ is the gradient through the volume rendering and noise addition [S2].
 
 **Parameters:**
-*   **Latent Dimension:** 4 (as specified in the source for the four pseudo color channels) [S1].
-*   **Diffusion Model:** Stable Diffusion [S1].
-*   **Guidance:** Text and shape [S1].
+*   Latent feature dimensions: 4 [S2].
+*   Rendered latent resolution: $64 \times 64$ [S1].
+*   Output image resolution: $512 \times 512$ [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Latent Space Compatibility:** The NeRF output must match the input dimensionality expected by the diffusion model's encoder or the latent space it operates in. The source specifies 4 channels, which is non-standard for typical image latent spaces (often 4 for SD v1.5/2.1 but derived from 512x512 images) [S1].
-*   **Gradient Flow:** Backpropagating through the diffusion model requires careful handling of the computational graph, as the diffusion model is frozen [S1].
-*   **Precision:** Operating in latent space may introduce reconstruction artifacts if the autoencoder's decoder is not accurate [S1].
+*   **Low-Resolution Artifacts:** Standard NeRFs trained on low-resolution inputs lack fine details. Latent-NeRF addresses this by leveraging the high-resolution priors of Stable Diffusion [S1].
+*   **Mode Collapse:** Without proper regularization, the model may collapse to trivial poses or textures. Conditional adversarial objectives or shape constraints help prevent this [S1].
+*   **Precision:** The mapping from 4-channel latent features to RGB images relies on the decoder's accuracy. Errors in the latent space can lead to distorted colors [S1].
 
 ## Subtopics
 
-### [Points2NeRF](9389-points2nerf.md)
-Points2NeRF is a method for generating Neural Radiance Field (NeRF) representations directly from 3D point clouds using a hypernetwork-based auto-encoder architecture. It solves the problem of reconstructing high-quality radiance fields from sparse 3D input data by learning a mapping from point clouds to NeRF network weights, rather than optimizing a NeRF for each object individually. Unlike standard NeRF training which optimizes per-object parameters, Points2NeRF trains a single hypernetwork to produce weights for any input point cloud, enabling the generation of various NeRF functions at test time.
+### Points2NeRF
+Points2NeRF generates NeRF representations directly from 3D point clouds using a hypernetwork-based auto-encoder [S1]. It solves the problem of reconstructing high-quality radiance fields from sparse 3D input by learning a mapping from point clouds to NeRF network weights, rather than optimizing a NeRF for each object individually [S1]. Unlike standard NeRF training, it trains a single hypernetwork to produce weights for any input point cloud, enabling generation of various NeRF functions at test time [S1].
+
+### [DiSR-NeRF](11945-disr-nerf.md)
+DiSR-NeRF generates high-fidelity, super-resolved NeRFs from low-resolution multi-view images without requiring high-resolution training data. It addresses the inconsistency of details across views inherent in naive 2D super-resolution approaches. It differs from [Points2NeRF](9389-points2nerf.md) by utilizing a diffusion-based generative prior rather than point cloud initialization, and builds on [Latent-NeRF](9110-latent-nerf.md) by employing latent space optimization for efficient training.
+
+### Pix2NeRF
+Not given in the sources.
 
 ## Operating characteristics
-*   **Time Complexity:** Training is slower than standard NeRF due to the need to compute gradients through the pre-trained diffusion model and autoencoder. Each step involves a forward pass through the NeRF, volumetric rendering, noise addition, and a forward pass through the diffusion model.
-*   **Memory Complexity:** Requires storing the pre-trained diffusion model and autoencoder in memory, in addition to the NeRF MLP.
-*   **Performance:** Achieves impressive results in novel view synthesis, particularly in generating coherent textures and structures from limited input views [S1].
-*   **Strengths:** Leverages powerful pre-trained generative priors; allows text and shape guidance; improves quality over basic NeRF [S1].
-*   **Limitations:** Computationally expensive; relies on the quality of the pre-trained diffusion model and autoencoder; limited to the latent space dimensionality supported by the diffusion model [S1].
-*   **When to Use:** When high-quality texture synthesis is needed from sparse views or when text/shape guidance is beneficial [S1].
-*   **When Not to Use:** When computational resources are limited or when real-time rendering is required [S1].
+*   **Time Complexity:** Training is computationally expensive due to the iterative diffusion denoising process and backpropagation through the diffusion model [S2].
+*   **Memory Complexity:** Requires storing the NeRF MLP, the diffusion model, and the autoencoder [S2].
+*   **Performance:** Achieves impressive results in text-guided 3D generation, producing high-resolution images ($512 \times 512$) from low-resolution latent features ($64 \times 64$) [S1].
+*   **Strengths:** Enables text and shape guidance for 3D generation; overcomes the low-resolution limitations of standard NeRFs [S1, S2].
+*   **Limitations:** Relies on the quality of the pre-trained diffusion model; may suffer from mode collapse without proper constraints [S1].
+*   **When to Use:** When text-guided 3D generation or high-fidelity detail synthesis from sparse/low-res data is required.
+*   **When Not to Use:** When fast training or low computational resources are available; when precise photometric reconstruction is more important than generative quality.
 
 ## Background
-Latent-NeRF was introduced as an extension of NeRF to improve image rendering quality by using pre-trained models [S1]. It applies score distillation to a latent diffusion model and the compact latent space of a pre-trained autoencoder [S1]. It is cited as the first approach that allows coloring of the grid under the guidance of a pre-trained diffusion model [S1]. The method is discussed in the context of adjusting model structures for improving novel view synthesis quality [S1].
+Latent-NeRF was introduced in November 2022 [S1]. It was inspired by advances in generative 2D computer vision, specifically the use of 2D generative models to create images of scenes [S1]. It is the first approach to allow coloring of the grid under the guidance of a pre-trained diffusion model [S2]. It builds upon the concept of score distillation sampling (SDS) used in DreamFusion [S1, S2].
 
 ## Sources
-[S1] Methods and Strategies for Improving the Novel View Synthesis Quality of Neural Radiation Field, https://doi.org/10.1109/access.2024.3382997, fetched 2026-10-30
+[S1] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28
+[S2] Methods and Strategies for Improving the Novel View Synthesis Quality of Neural Radiation Field, https://doi.org/10.1109/access.2024.3382997, fetched 2026-10-30

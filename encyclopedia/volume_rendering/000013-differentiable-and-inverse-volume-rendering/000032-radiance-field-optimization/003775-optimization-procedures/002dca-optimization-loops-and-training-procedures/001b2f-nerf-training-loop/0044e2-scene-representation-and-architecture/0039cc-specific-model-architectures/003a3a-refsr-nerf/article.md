@@ -1,0 +1,125 @@
+# RefSR-NeRF
+
+Also called: Reference-guided super-resolution neural radiation field
+
+## Overview
+RefSR-NeRF is a framework that combines Neural Radiance Fields (NeRF) with a Reference-guided Super-Resolution CNN (RefSR-CNN) to achieve high-quality novel view synthesis at high resolutions [S1]. It addresses the challenges of parameter explosion, computational complexity, and data misalignment inherent in training NeRF directly on high-resolution images [S1]. Unlike methods that rely on generative priors or GANs, RefSR-NeRF balances memory and speed by using a two-stage process: first optimizing a low-resolution NeRF via patch-based sampling, and then using a CNN to fuse detail and degradation features from a high-resolution reference image to reconstruct the final output [S1].
+
+## How it works
+**Inputs:**
+1.  A set of low-resolution input images (obtained by downsampling high-resolution inputs).
+2.  Camera poses corresponding to the input images.
+3.  One high-resolution reference image (guidance image) for the scene.
+
+**Outputs:**
+1.  A trained NeRF model (density $\sigma$ and color $\mathbf{c}$ networks).
+2.  High-resolution rendered images for novel viewpoints.
+
+**Data Structures:**
+*   **NeRF Model:** Standard MLP architecture mapping 6D coordinates $(\mathbf{x}, \mathbf{d})$ to density and color [S1, Parent].
+*   **RefSR-CNN:** A convolutional network containing two specific modules:
+    *   Detail-dominant information module.
+    *   Degradation-dominant information module.
+
+**Steps:**
+
+1.  **Patch Ray Sampling (Low-Res NeRF Training):**
+    *   Modify the standard NeRF batch ray sampling strategy.
+    *   Instead of sampling rays for the entire high-resolution image, adopt **patch ray sampling** on the high-resolution input image to generate a low-resolution image [S1].
+    *   Train the NeRF model using these low-resolution patches. This reduces memory storage requirements and improves training speed [S1].
+
+2.  **Feature Extraction via RefSR-CNN:**
+    *   Input the obtained low-resolution image (from the NeRF rendering or input) and the provided high-resolution guidance image into the RefSR-CNN [S1].
+    *   The CNN processes these inputs to yield two distinct feature maps:
+        *   $F_{detail}$: Features from the detail-dominant information module.
+        *   $F_{deg}$: Features from the degradation-dominant information module [S1].
+
+3.  **Feature Fusion and Reconstruction:**
+    *   Fuse $F_{detail}$ and $F_{deg}$ to reconstruct the high-resolution image [S1].
+    *   The fusion process integrates the structural consistency learned by the NeRF with the high-frequency details extracted from the reference image via the CNN [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_refsr_nerf(input_images_hr, camera_poses, reference_image_hr):
+    """
+    Trains RefSR-NeRF using patch-based sampling and RefSR-CNN fusion.
+    
+    Args:
+        input_images_hr: List of high-resolution input images.
+        camera_poses: Camera poses for input_images_hr.
+        reference_image_hr: Single high-resolution reference image for the scene.
+        
+    Returns:
+        nerf_model: Trained NeRF model.
+        refsr_cnn: Trained RefSR-CNN for reconstruction.
+    """
+    
+    # Stage 1: Low-Resolution NeRF Training via Patch Sampling
+    # Convert HR inputs to LR patches for efficient training
+    input_images_lr = [downsample(img) for img in input_images_hr]
+    
+    # Initialize NeRF model (MLP for sigma and c)
+    nerf_model = initialize_nerf()
+    
+    # Train NeRF using patch ray sampling on LR images
+    # This reduces memory and increases speed compared to full HR sampling
+    for epoch in range(num_epochs):
+        for patch in get_patches(input_images_lr):
+            rays = sample_patch_rays(patch, camera_poses)
+            # Render low-res color using standard volumetric rendering
+            color_lr = render_nerf(nerf_model, rays)
+            # Compute loss against ground truth LR patch
+            loss = compute_loss(color_lr, patch)
+            update_nerf(nerf_model, loss)
+            
+    # Stage 2: Reference-Guided Super-Resolution
+    # Initialize RefSR-CNN with detail and degradation modules
+    refsr_cnn = initialize_refsr_cnn()
+    
+    # The CNN takes the LR rendered image and HR reference as input
+    # It extracts features from two modules
+    # F_detail: from detail-dominant information module
+    # F_deg: from degradation-dominant information module
+    F_detail, F_deg = refsr_cnn.extract_features(input_image_lr, reference_image_hr)
+    
+    # Fuse features to reconstruct high-resolution image
+    output_image_hr = fuse_and_reconstruct(F_detail, F_deg)
+    
+    # Optimize RefSR-CNN to minimize difference between output_image_hr and reference_image_hr
+    # (Note: Specific loss function for CNN fusion is not detailed in sources [S1])
+    loss_cnn = compute_loss(output_image_hr, reference_image_hr)
+    update_cnn(refsr_cnn, loss_cnn)
+    
+    return nerf_model, refsr_cnn
+```
+
+**Parameters:**
+*   **Patch Size:** Not given in the sources.
+*   **Downsampling Factor:** Not given in the sources.
+*   **RefSR-CNN Architecture:** Not given in the sources, other than the existence of detail-dominant and degradation-dominant modules [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Misalignment:** The source notes that data misalignment is a challenge in high-resolution NeRF processing [S1]. RefSR-NeRF mitigates this by using a reference image, but precise alignment between the NeRF-rendered LR view and the HR reference is critical for effective feature fusion.
+*   **Memory Constraints:** While patch sampling reduces memory, the choice of patch size and batch size must be balanced to avoid out-of-memory errors during the initial NeRF training phase [S1].
+
+## Subtopics
+
+### NeRF-SR
+A super-resolution method that attacks the problem by deterministic supersampling that enforces sub-pixel multi-view consistency and by a depth guided patch warp and refine network that reuses one high-resolution reference image [S2]. It stays closer to classical supersampling and patch based refinement, in contrast to Super-NeRF which couples NeRF with a GAN based 2D super-resolution backbone [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Improved speed compared to full high-resolution NeRF training due to the use of patch ray sampling on low-resolution images [S1].
+*   **Memory Complexity:** Reduced memory storage requirements compared to training NeRF directly on high-resolution images [S1].
+*   **Performance:** On the NeRF-LLFF dataset, the PSNR index is nearly one point higher than the best paper at the time of publication [S1].
+*   **Strengths:** Balances memory and speed while achieving high-quality new perspective synthesis [S1].
+*   **Limitations:** Relies on the availability of a high-resolution reference image for the scene [S1].
+
+## Background
+RefSR-NeRF was introduced to address the challenges of parameter explosion, computational complexity, and data misalignment in high-resolution NeRF processing [S1]. It combines the structural consistency of NeRF with the detail-reconstruction capabilities of RefSR-CNN [S1]. The method is cited in reviews of techniques for improving novel view synthesis quality [S1].
+
+## Sources
+[S1] Methods and Strategies for Improving the Novel View Synthesis Quality of Neural Radiation Field, https://doi.org/10.1109/access.2024.3382997, fetched 2026-10-30
+[S2] Neural Radiance Fields in 3D Vision: A Comprehensive Review, https://doi.org/10.26599/cvm.2026.9450535, fetched 2026-10-28

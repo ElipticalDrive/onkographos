@@ -1,68 +1,121 @@
 # Progressive Coarse-to-Fine Training Strategy
-
 Also called: Training Strategy
-
 ## Overview
-A training methodology that decouples the recovery of global geometry from the refinement of fine details and appearance, typically applied in dynamic or high-fidelity volume rendering. It sets itself apart from monolithic training by first establishing a coherent low-resolution structure (coarse stage) before optimizing high-resolution features and directional dependencies (fine stage), thereby improving convergence stability and final reconstruction quality [S1][S2, unofficial].
-
+A training protocol for dynamic radiance fields that combines temporal progression with spatial resolution scaling to stabilize optimization and improve geometry. It sets itself apart from single-resolution or static-temporal approaches by decoupling global structural coherence from high-frequency detail reconstruction, ensuring the model converges to a valid global geometry before committing computational resources to fine-grained features [S1].
 ## How it works
-The strategy consists of two distinct phases: a coarse stage to recover global shape and a fine stage to refine details and appearance.
+The method consists of two distinct phases: a Coarse Stage and a Fine Stage, applied sequentially.
 
-**Inputs and Outputs:**
-*   **Inputs:** Training images (potentially with time indices for dynamic scenes), camera poses, and a proxy geometry or bounding box estimate.
-*   **Outputs:** A final neural field model (e.g., SDF and color fields) capable of rendering high-quality views.
+**Inputs:**
+- A set of dynamic scene images spanning a timeline.
+- A canonical frame index (reference time).
+- A proxy geometry estimator (for bounding box computation).
+
+**Outputs:**
+- A final dynamic radiance field model (from the Fine Stage).
 
 **Data Structures:**
-*   **Voxel Grid:** A 3D grid storing density or SDF values. Resolution varies by stage (e.g., $128^3$ for coarse, $256^3$ for fine) [S2, unofficial].
-*   **Color Features:**
-    *   Coarse Stage: Scalar color values (no directional dependency) [S1].
-    *   Fine Stage: High-dimensional feature vectors allowing for view-dependent shading [S1].
-*   **Bounding Box:** A tight bounding box computed from proxy geometry to filter empty space during the fine stage [S1].
+- **Color Feature:** In the Coarse Stage, this is the color itself (scalar/vector per sample). In the Fine Stage, this is a high-dimensional feature vector.
+- **Bounding Box:** Computed in the Coarse Stage using proxy geometry to filter empty space.
 
 **Numbered Steps:**
 
-1.  **Coarse Stage Initialization:**
-    *   Set the voxel grid resolution to a low value (e.g., $128^3$) [S2, unofficial].
-    *   Configure the color representation to be view-independent (color itself) to simplify the optimization landscape [S1].
-    *   If the scene is dynamic, employ **Progressive Training**: Start by training only on images close to the canonical time step. Gradually add images with larger time offsets until all training data is included [S1].
-    *   Optimize the model to recover a coherent global shape.
-    *   *Optional:* Apply a 3D convolution with a Gaussian kernel during this stage or as post-processing to smooth the geometry. This reduces Chamfer Distance (CD) error from 0.74 to 0.72 [S2, unofficial].
+1. **Progressive Temporal Scheduling:**
+   - Initialize the training set with images close to the canonical time.
+   - Iteratively add images with progressively farther time steps.
+   - Continue until all available images are included in the training set.
 
-2.  **Transition:**
-    *   Compute a tighter bounding box using the proxy geometry learned during the coarse stage. This filters out empty space, reducing the computational load for the fine stage [S1].
+2. **Coarse Stage Training:**
+   - **Feature Definition:** Set the color feature to be the color itself, ignoring ray direction dependency.
+   - **Geometry Filtering:** Compute a smaller bounding box using proxy geometry learned during this stage. This filters a large portion of empty space.
+   - **Optimization:** Train the model using the temporally progressive schedule within this restricted bounding box.
 
-3.  **Fine Stage Optimization:**
-    *   Increase the voxel grid resolution to a high value (default $256^3$) [S2, unofficial].
-    *   Switch the color representation to high-dimensional features to model ray direction dependency (e.g., via a network component $F_{\theta4}$) [S1].
-    *   Train the model using the tight bounding box to recover fine geometric details and view-dependent appearance while maintaining the structural consistency established in Stage 1 [S2, unofficial].
+3. **Fine Stage Training:**
+   - **Initialization:** Initialize the model using the weights from the Coarse Stage.
+   - **Feature Definition:** Set the color features to be high-dimensional features.
+   - **Directional Modeling:** Model ray direction dependency using a specific network component, denoted as $F_{\theta4}$.
+   - **Optimization:** Train the final model using the full set of images and the refined bounding box from the Coarse Stage.
 
-**Formulas and Parameters:**
-*   **Loss Function (Dynamic Scenes):** The total loss combines multiple terms [S1]:
-    $$ \mathcal{L} = w_0 \mathcal{L}_{rgb} + w_1 \mathcal{L}_{ptc} + w_2 \mathcal{L}_{bg} + w_3 \mathcal{L}_{flow} + w_4 \mathcal{L}_{vdiff} + w_5 \mathcal{L}_{tv}(\mathbf{V}_{grid}^{\sigma_{\text{Can}}}) + w_6 \mathcal{L}_{tv}(\mathbf{V}_{grid}^{\text{flow}_t}) + w_7 \mathcal{L}_{tv}(\mathbf{D}) $$
-    Where $w_i$ are weights, $\mathcal{L}_{rgb}$ is the image reconstruction loss, $\mathcal{L}_{ptc}$ is point cloud consistency, $\mathcal{L}_{flow}$ is flow consistency, $\mathcal{L}_{vdiff}$ is video diffusion loss, and $\mathcal{L}_{tv}$ are total variation regularizations on density, flow, and displacement fields.
-*   **Resolution Scaling:** Training time scales with voxel grid resolution. Measured times for a specific implementation: $128^3$ takes 11 mins, $192^3$ takes 12 mins, $256^3$ takes 15 mins, and $320^3$ takes 17 mins [S2, unofficial]. The default resolution is $256^3$ as it offers the best trade-off between CD error and cost [S2, unofficial].
+**Formulas:**
+The loss function used during training (specifically cited in the context of the overall method in [S1]) is:
+$$
+\mathcal{L} = w_1 \mathcal{L}_{ptc} + w_2 \mathcal{L}_{bg} + w_3 \mathcal{L}_{flow} + w_4 \mathcal{L}_{vdiff} + w_5 \mathcal{L}_{tv}(\mathbf{V}_{\text{grid}}^{\sigma_{\text{Can}}}) + w_6 \mathcal{L}_{tv}(\mathbf{V}_{\text{grid}}^{\text{flow}_t}) + w_7 \mathcal{L}_{tv}(\mathbf{D})
+$$
+Where:
+- $\mathcal{L}_{ptc}$: Point-wise color loss.
+- $\mathcal{L}_{bg}$: Background loss.
+- $\mathcal{L}_{flow}$: Flow consistency loss.
+- $\mathcal{L}_{vdiff}$: Velocity difference loss.
+- $\mathcal{L}_{tv}$: Total variation loss.
+- $\mathbf{V}_{\text{grid}}^{\sigma_{\text{Can}}}$: Canonical space density grid.
+- $\mathbf{V}_{\text{grid}}^{\text{flow}_t}$: Flow grid at time $t$.
+- $\mathbf{D}$: Displacement field.
+- $w_1 \dots w_7$: Weighting coefficients.
+
+**Parameters:**
+- $F_{\theta4}$: The network component modeling ray direction dependency in the Fine Stage.
+- Canonical time: The reference frame for the timeline.
 
 **Edge Cases and Pitfalls:**
-*   **Gaussian Kernel Removal:** Removing the Gaussian kernel during coarse training increases CD error to 0.74; removing it during post-processing slightly increases it to 0.715 from 0.720 [S2, unofficial].
-*   **Resolution Diminishing Returns:** Increasing resolution from $256^3$ to $320^3$ yields similar CD performance but at a higher training cost [S2, unofficial].
+- **Empty Space:** Without the proxy geometry bounding box in the Coarse Stage, training may waste resources on empty regions.
+- **Directional Dependency:** Ignoring ray directions in the Coarse Stage simplifies learning but may lead to view-dependent artifacts if not corrected in the Fine Stage.
+- **Temporal Order:** Adding far-time images too early may destabilize optimization due to large motion/disocclusions.
 
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def progressive_coarse_fine_training(images, canonical_time_idx):
+    # Step 1: Progressive Temporal Scheduling
+    # Sort images by distance from canonical_time_idx
+    sorted_images = sort_by_temporal_distance(images, canonical_time_idx)
+    
+    # Initialize model with Coarse Stage configuration
+    model = initialize_model(color_feature_type='color', direction_dependency=False)
+    
+    # Coarse Stage
+    for batch in progressive_batches(sorted_images):
+        # Forward pass with color-only features
+        rendered_colors = model.forward(batch.rays, feature_type='color')
+        # Compute loss (includes flow, tv, etc. as per [S1])
+        loss = compute_loss(rendered_colors, batch.targets, model)
+        # Backpropagate
+        model.update(loss)
+        
+    # Compute proxy geometry and bounding box
+    proxy_geometry = model.extract_proxy_geometry()
+    bounding_box = compute_bounding_box(proxy_geometry)
+    
+    # Fine Stage
+    # Re-initialize or update model for Fine Stage
+    fine_model = initialize_fine_model(
+        weights=model.weights,
+        color_feature_type='high_dim',
+        direction_dependency=True,
+        bounding_box=bounding_box
+    )
+    
+    # Train with all images
+    for batch in all_images_batches(images):
+        # Forward pass with high-dim features and direction dependency via F_theta4
+        rendered_colors = fine_model.forward(batch.rays, feature_type='high_dim', use_direction=True)
+        loss = compute_loss(rendered_colors, batch.targets, fine_model)
+        fine_model.update(loss)
+        
+    return fine_model
+```
 ## Subtopics
 
-### Two-Stage Training Pipeline
-A specific implementation of the coarse-to-fine strategy where the process is strictly divided into Stage 1 (coarse training for global shape) and Stage 2 (fine training for details). It is chosen when computational resources allow for sequential optimization rather than joint training. It sets itself apart by explicitly monitoring metrics like Chamfer Distance at the end of each stage to verify structural coherence before proceeding [S2, unofficial].
+### [Two-Stage Training Pipeline](11433-two-stage-training-pipeline.md)
+A training strategy that first recovers global shape at low resolution, then refines fine details at high resolution. It sets itself apart from single-resolution approaches by decoupling structural coherence from high-frequency detail reconstruction, ensuring the model converges to a valid global geometry before committing computational resources to fine-grained features.
 
 ## Operating characteristics
-*   **Time Complexity:** Training time increases with voxel resolution. For voxel-based methods, time scales roughly linearly with resolution steps (e.g., 11–17 minutes for resolutions $128^3$ to $320^3$ in reported benchmarks) [S2, unofficial].
-*   **Memory Complexity:** Proportional to the voxel grid resolution. The fine stage requires significantly more memory due to the higher resolution grid ($256^3$ vs $128^3$) [S2, unofficial].
-*   **Performance:** Improves reconstruction quality (lower Chamfer Distance) and visual fidelity compared to single-stage training. The coarse stage ensures global shape coherence, while the fine stage captures details [S2, unofficial].
-*   **Strengths:** Stabilizes training for complex geometries; prevents local minima associated with high-frequency details; allows for efficient bounding box culling in the fine stage [S1][S2, unofficial].
-*   **Limitations:** Requires two distinct optimization phases; careful tuning of the transition (bounding box computation) is required; Gaussian smoothing may sacrifice minor quantitative metrics for visual quality [S2, unofficial].
-*   **When to use:** High-fidelity surface reconstruction or dynamic scenes where global shape is difficult to converge directly [S1][S2, unofficial].
-*   **When not to use:** Real-time inference applications where training time is prohibitive, or simple scenes where a single resolution suffices.
-
+- **Time Complexity:** Higher than single-stage training due to two sequential phases, but reduces overall convergence time by stabilizing early optimization.
+- **Memory Complexity:** Reduced in the Coarse Stage due to the smaller bounding box filtering empty space.
+- **Strengths:** Improves geometry accuracy by establishing global structure first; handles dynamic scenes with large motion better by progressive temporal addition.
+- **Limitations:** Requires careful tuning of the temporal progression schedule; the proxy geometry estimation must be robust.
+- **When to use:** Dynamic scene reconstruction where global shape is critical and initial optimization is unstable.
+- **When not to use:** Static scenes or scenes with minimal motion where single-resolution training suffices.
 ## Background
-The coarse-to-fine strategy originates from the need to stabilize the optimization of neural radiance fields and implicit surfaces, which are prone to local minima when optimizing high-frequency details from the start. The "Two-Stage Training Pipeline" was explicitly detailed in Voxurf for efficient neural surface reconstruction [S2, unofficial]. The "Progressive Training" aspect (adding time steps gradually) was introduced in Forward Flow for dynamic scenes to handle temporal consistency [S1].
-
+Originated in the context of dynamic radiance field optimization, specifically for novel view synthesis of dynamic scenes. The method was proposed to address the instability of training neural radiance fields on dynamic data by decoupling temporal and spatial complexity.
 ## Sources
 [S1] Forward Flow for Novel View Synthesis of Dynamic Scenes, https://doi.org/10.1109/iccv51070.2023.01468, fetched 2026-10-26
-[S2] Voxurf: Voxel-based Efficient and Accurate Neural Surface Reconstruction, https://doi.org/10.48550/arxiv.2208.12697, fetched 2026-10-26 (unofficial)

@@ -1,76 +1,169 @@
 # Transfer Function
 
-Also called: 1D/2D Transfer Function, Color Transfer Function, One-dimensional transfer function, Opacity Function, Opacity Transfer Function, Opacity and Color Transfer Functions
+Also called: 1-dimensional TF, Color Transfer Function, One-dimensional transfer function, Opacity Function, Opacity Transfer Function, Opacity and Color Transfer Functions, scalar-only TF
 
 ## Overview
-A transfer function maps raw voxel scalar values (and optionally gradient magnitudes) to optical properties such as color (RGB) and opacity ($\alpha$), enabling the classification of volume data into meaningful visual structures [S1, S3, S6, S8, unofficial]. It solves the problem of visual clutter by allowing users to assign high opacity to regions of interest and translucent or transparent values to areas of no interest [S1, S3, S6, unofficial]. Unlike its siblings, the basic 1D transfer function relies solely on scalar density, whereas variants like [2D Transfer Function with Gradient Magnitude](5491-2d-transfer-function-with-gradient-magnitude.md) incorporate gradient information to emphasize boundaries [S2, S7, unofficial].
+
+A Transfer Function (TF) maps raw scalar voxel values from a 3D volume dataset to optical properties—specifically color (RGB) and opacity ($\alpha$)—to classify and visualize regions of interest [S1, S3, S6, S8, S9, unofficial]. It solves the problem of visual clutter by allowing users to assign high opacity to desired structures (e.g., bone, vessels) and low opacity or transparency to irrelevant background data (e.g., air, soft tissue) [S1, S6, S8, unofficial]. Unlike multi-dimensional transfer functions that incorporate gradient magnitude or other derivatives to highlight boundaries [S2, S5, S7, unofficial], the 1D TF relies solely on the scalar density/value, making it the simplest classification method but prone to ambiguity when different materials share similar scalar intensities [S8, unofficial][S12].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Raw voxel scalar values $s(x)$ (e.g., density, temperature) and optionally gradient magnitude $|\nabla s(x)|$ [S2, S5, S7, unofficial].
-*   **Output:** RGBA color values $(R, G, B, \alpha)$ or material properties $(R, G, B, \alpha, K_a, K_d, K_s)$ [S1, S3, S8, unofficial].
 
-**Data Structures:**
-The transfer function is typically stored in a Look-Up Table (LUT) or a pre-sampled texture [S1, S3, S8, unofficial].
-*   **1D Texture:** Dimensions $256 \times 1 \times 1$, format `R8G8B8A8Unorm` [S7, unofficial]. Maps scalar value $s$ to RGBA.
-*   **2D Texture:** Dimensions $256 \times 64 \times 1$, format `R8G8B8A8Unorm` [S7, unofficial]. Maps $(s, |\nabla s|)$ to RGBA.
-*   **Piecewise Function:** Defined by control points $(x_i, \alpha_i)$ and color stops, often implemented via classes like `vtkPiecewiseFunction` for opacity and `vtkColorTransferFunction` for color [S10, S11].
+**Inputs and Outputs**
+*   **Input:** A scalar value $x$ (e.g., voxel density, intensity) from the volume data.
+*   **Output:** A 4-tuple $(R, G, B, \alpha)$ representing the color and opacity for that scalar value.
 
-**Steps:**
-1.  **Sample Volume:** Trilinearly interpolate the scalar value $s$ and gradient magnitude $|\nabla s|$ at the sample point along the viewing ray [S1, S5, S7, S8, unofficial].
-2.  **Lookup:**
-    *   For 1D TF: Sample the 1D texture at coordinate $s$ to retrieve base color $C$ and opacity $\alpha$ [S7, unofficial].
-    *   For 2D TF: Sample the 2D texture at coordinates $(s, |\nabla s|)$ to retrieve color and opacity, using gradient magnitude to enhance boundaries [S5, S7, unofficial].
-3.  **Compute Optical Properties:**
-    *   Opacity: $\alpha = f_A(s)$ or $\alpha = f_A(s, |\nabla s|)$ [S2, S4, S8, unofficial].
-    *   Color: $C = f_C(s)$ or $C = f_C(s, |\nabla s|)$ [S2, S5, S7, S8, unofficial].
-    *   Premultiplied color for compositing: $\alpha_i C_i$ [S2, unofficial].
-4.  **Compositing:** Use the retrieved $\alpha$ and $C$ in the volume rendering integral (e.g., standard volume compositing) [S1, S8, unofficial].
+**Data Structures**
+The TF is typically stored as a Look-Up Table (LUT) or a parametric function.
+1.  **LUT Texture:** A 1D texture of size $N \times 1 \times 1$ (commonly $256 \times 1 \times 1$) with format `R8G8B8A8Unorm` [S7, S11, unofficial]. Each texel at index $i$ stores the RGBA values for scalar value $i$.
+2.  **Parametric Definition:** A set of control points or mathematical functions (e.g., Gaussians, steps) defined over a domain $[x_{min}, x_{max}]$ [S12, S13].
 
-**Formulas:**
-*   Opacity Transfer Function: $\alpha(s(x), |\nabla s(x)|, \dots)$ [S2, unofficial].
-*   Color Transfer Function: $C(s(x), |\nabla s(x)|, \dots)$ [S2, unofficial].
-*   Premultiplied Color: $\alpha_i C_i$ [S2, unofficial].
+**Numbered Steps**
+1.  **Define Domain:** Establish the scalar range $[x_{min}, x_{max}]$ for the transfer function. Values outside this range are typically discarded or clamped [S13].
+2.  **Select Mapping Method:** Choose between a discrete LUT or a continuous parametric function (e.g., piecewise linear, Gaussian) [S9, unofficial][S13].
+3.  **Define Control Points/Parameters:**
+    *   For LUTs: Populate the texture with RGBA values corresponding to scalar indices [S7, unofficial].
+    *   For Parametric: Define control points $(x_i, R_i, G_i, B_i, \alpha_i)$ or Gaussian parameters (location $x_0$, width $w$, height $h$) [S12, S13].
+4.  **Interpolate:** For a given input scalar $x$, compute the output RGBA.
+    *   If using a LUT, perform trilinear or linear interpolation between texels [S1, unofficial][S12].
+    *   If using parametric functions, evaluate the function $f(x)$ [S4, unofficial][S13].
+5.  **Apply Optical Model:** Use the resulting $\alpha$ and color in the volume rendering equation (e.g., front-to-back compositing) [S9, unofficial][S13].
 
-**Parameters:**
-*   **Opacity:** Inverse of transparency. Low data values map to fully transparent (invisible); high data values map to fully visible (opaque) [S6, unofficial].
-*   **Interpolation:** Linear or higher-order interpolation between control points in piecewise functions [S11].
-*   **Log Scale:** Optional boolean property to map data using a logarithmic scale, assuming non-zero positive data [S11].
-*   **Rescale Mode:** Controls how the transfer function range updates (e.g., 'Never', 'Grow and update on Apply', 'Clamp and update every timestep') [S11].
+**Formulas**
+*   **Opacity Function:** $\alpha(x)$ maps scalar $x$ to opacity [S4, unofficial].
+*   **Color Function:** $C(x) = (R(x), G(x), B(x))$ maps scalar $x$ to color [S9, unofficial].
+*   **Gaussian Distribution:** Used to create soft, localized peaks in opacity/color:
+    $$ f(x) = h \cdot \exp\left(-\frac{(x - x_0)^2}{w}\right) $$
+    Where $x_0$ is the location (centroid), $w$ is the width, and $h$ is the height (peak value, clipped at 1.0) [S13].
+*   **Step Function:** Sets the transfer function value to the maximum of the existing value $y$ and a specified value $v$ within a range $[start, stop]$:
+    $$ \text{new\_value} = \max(y, v) $$
+    [S13].
 
-**Edge Cases and Pitfalls:**
-*   **Visual Clutter:** Attempting to see all volume data simultaneously without selective sampling results in an obscured "solid block" view [S6, unofficial].
-*   **Striping Artifacts:** Post-classification (applying TF after interpolation) maintains high frequencies but can introduce striping artifacts in the final image [S9].
-*   **Boundary Detection:** When clear boundaries are not present, the TF must be designed to reveal geometric structures rather than relying on gradient-based boundary detection [S10].
-*   **Shared State:** In tools like ParaView, transfer functions are associated with array names. Changing a TF for one view affects all views using that array name, which can lead to misinterpretation if different TFs are used for the same variable [S11].
-*   **UI Constraints:** End control points in TF editors cannot be moved or deleted, though dragging their bars changes the range [S11]. If the last row is selected in an advanced table, adding a new row may fail [S11].
+**Parameters**
+*   **x_bounds:** Tuple $(min, max)$ defining the scalar domain. Values outside are discarded [S13].
+*   **nbins:** Number of bins in the LUT. Linear interpolation is used between bins; low values are typically sufficient [S13].
+*   **Grey Opacity:** Boolean. If `True`, opacity is calculated overall; if `False`, on a channel-by-channel basis (useful for opaque renderings) [S13].
+*   **Type:** "simple" or "preintegrated". "preintegrated" often yields better visual quality by accounting for sampling frequency [S11, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Visual Clutter:** Attempting to visualize all data simultaneously results in an obscured "solid block" view. Selective sampling via TF is required [S6, unofficial].
+*   **Feature Separation:** Poor separation occurs when distinct materials (e.g., arteries and bones) have similar scalar values, making them indistinguishable with a 1D TF [S8, unofficial].
+*   **Striping Artifacts:** Post-classification (applying TF after interpolation) maintains high frequencies but can introduce striping artifacts in the final image [S10].
+*   **Boundary Detection:** If clear boundaries are absent, the TF must be designed to reveal geometric structures rather than relying on gradient-based boundary detection [S12].
+*   **Implementation Pitfall:** Adding a field table to a multi-variate transfer function does not automatically link it to a rendering channel; explicit linking via `link_channels` is required [S13].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_transfer_function(scalar_value, tf_type, params):
+    """
+    Evaluates the transfer function for a given scalar value.
+    
+    Args:
+        scalar_value (float): The input scalar from the volume.
+        tf_type (str): 'lut' or 'parametric'.
+        params (dict): Parameters for the TF.
+            For 'lut': 'texture' (array of RGBA), 'x_min', 'x_max'.
+            For 'parametric': 'gaussians' (list of dicts with 'x0', 'w', 'h'), 
+                              'x_min', 'x_max'.
+            
+    Returns:
+        tuple: (R, G, B, alpha) normalized to [0, 1].
+    """
+    x_min = params['x_min']
+    x_max = params['x_max']
+    
+    # Clamp or discard values outside domain
+    if scalar_value < x_min or scalar_value > x_max:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    if tf_type == 'lut':
+        texture = params['texture']
+        nbins = len(texture)
+        # Map scalar to texture index
+        normalized_x = (scalar_value - x_min) / (x_max - x_min)
+        index = normalized_x * (nbins - 1)
+        idx_low = int(index)
+        idx_high = min(idx_low + 1, nbins - 1)
+        weight = index - idx_low
+        
+        # Linear interpolation between texels
+        rgba_low = texture[idx_low]
+        rgba_high = texture[idx_high]
+        
+        R = rgba_low[0] * (1 - weight) + rgba_high[0] * weight
+        G = rgba_low[1] * (1 - weight) + rgba_high[1] * weight
+        B = rgba_low[2] * (1 - weight) + rgba_high[2] * weight
+        A = rgba_low[3] * (1 - weight) + rgba_high[3] * weight
+        
+        return (R, G, B, A)
+
+    elif tf_type == 'parametric':
+        gaussians = params['gaussians']
+        R, G, B, A = 0.0, 0.0, 0.0, 0.0
+        
+        for g in gaussians:
+            x0 = g['x0']
+            w = g['w']
+            h = g['h'] # List [h_r, h_g, h_b, h_a]
+            
+            # Gaussian formula: f(x) = h * exp(-(x - x0)^2 / w)
+            exponent = -((scalar_value - x0) ** 2) / w
+            factor = h[3] * math.exp(exponent) # Use alpha height as base scale? 
+            # Note: Source [S13] implies h is a list of 4 floats for R,G,B,A peaks.
+            # The formula applies to each channel independently or as a scalar mask?
+            # Standard interpretation: The Gaussian shape applies to the transmission/opacity.
+            # Let's assume the Gaussian defines the opacity profile, and color is separate or modulated.
+            # However, S13 says "height... order is (red, green, blue, alpha)".
+            # This implies the Gaussian value modulates the specific channel intensity.
+            
+            val = math.exp(exponent)
+            
+            # Accumulate contributions
+            R += h[0] * val
+            G += h[1] * val
+            B += h[2] * val
+            A += h[3] * val
+            
+        # Clip values at 1.0
+        R = min(R, 1.0)
+        G = min(G, 1.0)
+        B = min(B, 1.0)
+        A = min(A, 1.0)
+        
+        return (R, G, B, A)
+```
 
 ## Subtopics
 
 ### [Transfer Function Mapping via 1D Textures](8608-transfer-function-mapping-via-1d-textures.md)
-Maps voxel scalar density values to RGBA color and opacity attributes using pre-sampled 1D textures, enabling users to define visual properties (e.g., bone opacity) based on density thresholds. It distinguishes itself from multi-dimensional transfer functions by relying solely on density, whereas siblings like [Gradient-based Transfer Function](1273-gradient-based-transfer-function.md) incorporate gradient magnitude to highlight boundaries.
+This method maps voxel scalar density values to RGBA attributes using pre-sampled 1D textures. It distinguishes itself by relying solely on density, whereas siblings like [Gradient-based Transfer Function](1273-gradient-based-transfer-function.md) incorporate gradient magnitude to highlight boundaries. It is often implemented as a `simple` or `preintegrated` type in rendering engines.
 
 ### 3D Pre-integrated Transfer Function
-A 3D texture-based transfer function used during optical property accumulation to handle varying sampling frequencies and constant brick values [S12, unofficial]. It stores the function in a 3D texture accessed via floating-point coordinates [S12, unofficial]. It minimizes texture size to fit data in the cache, balancing quality and efficiency [S12, unofficial]. It allows maintaining constant brightness and provides better rendering quality compared to standard transfer functions when using adaptive sampling steps [S12, unofficial].
+A 3D texture-based transfer function used during optical property accumulation to handle varying sampling frequencies and constant brick values [S15, unofficial]. It allows maintaining constant brightness and provides better rendering quality compared to standard transfer functions when using adaptive sampling steps [S15, unofficial]. The 3D texture size should be minimized to fit in the texture cache [S15, unofficial].
 
 ### Local Singular Transfer Function
-A local rendering approach that uses a lookup table to assign texture values (color and opacity) to interpolated points (IDs) prior to global composition, addressing the insufficiency of global multi-dimensional transfer functions for complex volumetric datasets [S13, unofficial]. It uses a texture assignment table where each object ID has a one-to-one relationship with specific RGBA values [S13, unofficial].
+A local rendering approach that uses a lookup table to assign texture values (color and opacity) to interpolated points (IDs) prior to global composition [S16, unofficial]. It addresses the insufficiency of global multi-dimensional transfer functions for complex volumetric datasets by establishing a one-to-one relationship between object IDs and RGBA values in a texture assignment table [S16, unofficial].
 
 ### 1D Transfer Function Editor
-A user interface component consisting of a 1D curve editor with control points, a color/opacity map, and a color picker to map scalar values to optical properties [S14]. It renders the map using WebGL and control points using D3.js, with a D3.js color picker for user input [S14]. It assigns color and opacity separately and multiplies color by opacity for correct rendering [S14]. DVR and IR share the same editor; IR uses normalized isovalue as texture coordinate to index it [S14].
+A user interface component consisting of a 1D curve editor with control points, a color/opacity map, and a color picker [S17]. It renders the map using WebGL and control points using D3.js, allowing users to assign color and opacity separately and multiply them for correct rendering [S17]. It is shared by DVR and Isosurface Rendering (IR), with IR using normalized isovalue as a texture coordinate [S17].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample for texture lookup or piecewise evaluation, assuming fixed-size LUTs or linear interpolation between control points.
-*   **Memory Complexity:** $O(N)$ for LUT size, where $N$ is the number of bins (e.g., 256 for 1D, $256 \times 64$ for 2D) [S7, unofficial].
-*   **Strengths:** Simple to implement and visualize; effective for emphasizing specific material properties or isovalues [S8, unofficial][S10].
-*   **Limitations:** 1D TFs cannot distinguish between regions with similar scalar values but different gradient characteristics (e.g., smooth gradients vs. sharp boundaries) without extension to 2D/3D [S2, S7, unofficial]. Post-classification can cause striping artifacts [S9].
-*   **When to use:** When the volume data has distinct scalar ranges corresponding to distinct materials (e.g., bone vs. soft tissue in CT scans) [S6, unofficial][S10].
-*   **When not to use:** When boundaries are fuzzy or when scalar values alone are insufficient to distinguish structures of interest [S10].
+
+*   **Time Complexity:** $O(1)$ per sample for LUT lookup with interpolation; $O(K)$ for parametric evaluation with $K$ Gaussians.
+*   **Memory Complexity:** $O(N)$ for LUT size, where $N$ is the number of bins (e.g., 256) [S13].
+*   **Strengths:** Simple to implement and understand; computationally inexpensive; effective for data with distinct scalar ranges [S1, S9, unofficial].
+*   **Limitations:** Cannot distinguish between materials with similar scalar values but different physical properties (e.g., fat vs. water in MRI) [S8, unofficial]; lacks boundary emphasis without gradient information [S2, unofficial][S12].
+*   **When to Use:** When scalar values are highly discriminative of material types; for quick visualization or prototyping.
+*   **When Not to Use:** When materials have overlapping scalar distributions; when boundary detail is critical (use [2D Transfer Function with Gradient Magnitude](5491-2d-transfer-function-with-gradient-magnitude.md) instead).
 
 ## Background
-The concept of transfer functions in volume rendering originated as a method to map raw voxel values to presentable entities like color and opacity, often using Look-Up Tables (LUTs) [S1, S3, unofficial]. Early implementations used piecewise linear functions to define opacity and color ranges for specific data values, such as mapping skin, air, soft tissue, and bones in medical CT data [S6, S8, unofficial]. The term "transfer function" was formalized in the context of Direct Volume Rendering (DVR) to describe the operation of assigning meaningful objects to data values rather than leaving them as raw numbers [S6, unofficial]. Modern implementations often use GPU shaders and 1D/2D textures for efficient real-time rendering [S8, unofficial][S11].
+
+The concept of the transfer function originated in the early days of Direct Volume Rendering (DVR) as a means to classify scalar data into visual properties [S6, S9, unofficial]. It is often described as a "sampling of a sampling operation," where data values are assigned to meaningful objects rather than remaining as numbers [S6, unofficial]. The term was popularized in the context of ray-casting and compositing algorithms, where it serves as the core classification mechanism [S1, S3, unofficial]. Early implementations used piecewise linear functions and LUTs, with later developments introducing Gaussian distributions and multi-variate transfer functions for more complex control [S13]. It is widely used in medical imaging (CT, MRI) and scientific visualization [S6, S9, unofficial][S12].
 
 ## Sources
+
 [S1] Direct Volume Rendering Techniques, https://www.scribd.com/presentation/380929057/10-raycasting, fetched 2026-10-25 (unofficial)
 [S2] Volume Ray Casting Techniques, https://www.scribd.com/document/102700078/03-raycasting, fetched 2026-10-25 (unofficial)
 [S3] Direct Volume Rendering (DVR): Ray-casting | PPT - SlideShare, https://www.slideshare.net/slideshow/direct-volume-rendering-dvr-raycasting/265104120, fetched 2026-10-26 (unofficial)
@@ -78,10 +171,13 @@ The concept of transfer functions in volume rendering originated as a method to 
 [S5] rokcej/volumetric-ray-casting, https://github.com/rokcej/volumetric-ray-casting, fetched 2026-10-26 (unofficial)
 [S6] Visualization Lecture 09: VolVis Part 3-Direct Volume Rendering, Ray and Transfer Functions, https://www.youtube.com/watch?v=FYAJQgYdeqQ, fetched 2026-10-27 (unofficial)
 [S7] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
-[S8] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
-[S9] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
-[S10] Project 3 - Volume Rendering and Transfer Functions, https://www.cs.purdue.edu/homes/xmt/classes/CS530/spring2018/project3.html, fetched 2026-10-28
-[S11] 4. Color maps and transfer functions, https://docs.paraview.org/en/latest/ReferenceManual/colorMapping.html, fetched 2026-10-29
-[S12] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
-[S13] Segmentation Assisted Object Distinction for Direct Volume Rendering, https://doi.org/10.22044/jadm.2019.7207.1854, fetched 2026-10-29 (unofficial)
-[S14] VolumeVisual: Design and Evaluation of an Educational Software Tool for Teaching and Learning Volume Visualization, https://doi.org/10.18260/1-2--38034, fetched 2026-10-26
+[S8] Context-Preserving Volume Image Exploration Using A 3D Painting Metaphor, https://doi.org/10.32920/ryerson.14646888, fetched 2026-10-26 (unofficial)
+[S9] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
+[S10] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27
+[S11] instantreality 1.0 - tutorial - Volume Rendering, https://doc.instantreality.org/tutorial/volume-rendering/, fetched 2026-10-28 (unofficial)
+[S12] Project 3 - Volume Rendering and Transfer Functions, https://www.cs.purdue.edu/homes/xmt/classes/CS530/spring2018/project3.html, fetched 2026-10-28
+[S13] ColorTransferFunction yt.visualization.volume_rendering.transfer_functions.ColorTransferFunction, https://yt-project.org/doc/reference/api/yt.visualization.volume_rendering.transfer_functions.html, fetched 2026-10-29
+[S14] 4. Color maps and transfer functions, https://docs.paraview.org/en/latest/ReferenceManual/colorMapping.html, fetched 2026-10-29
+[S15] Représentation et algorithmes pour l'exploration interactive de volumes procéduraux étendus et détaillés, https://inria.hal.science/inria-00598406v1, fetched 2026-10-26 (unofficial)
+[S16] Segmentation Assisted Object Distinction for Direct Volume Rendering, https://doi.org/10.22044/jadm.2019.7207.1854, fetched 2026-10-29 (unofficial)
+[S17] VolumeVisual: Design and Evaluation of an Educational Software Tool for Teaching and Learning Volume Visualization, https://doi.org/10.18260/1-2--38034, fetched 2026-10-26

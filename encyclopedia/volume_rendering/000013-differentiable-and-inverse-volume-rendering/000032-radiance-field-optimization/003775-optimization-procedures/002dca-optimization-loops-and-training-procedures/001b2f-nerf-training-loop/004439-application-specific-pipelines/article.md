@@ -2,30 +2,24 @@
 
 
 ## Overview
-Application-Specific Pipelines are specialized training and optimization procedures designed to address distinct downstream tasks—such as rapid reconstruction, pose estimation, or scene editing—rather than generic radiance field optimization. They diverge from standard NeRF training by integrating external priors (e.g., multi-view stereo data, diffusion models, or dynamics models) and modifying the loss landscape or rendering loop to suit specific constraints like speed, geometric accuracy, or semantic control.
+Application-Specific Pipelines are specialized training and optimization procedures tailored to distinct downstream tasks, diverging from the standard NeRF reconstruction loop to address specific constraints such as monocular pose estimation or text-guided scene editing. Unlike the general [NeRF Training Loop](970-nerf-training-loop.md) which optimizes a single radiance field for novel view synthesis, these pipelines decouple or augment the optimization objectives to handle tasks like 6-DoF camera pose recovery in Plenoxels environments or compositional object insertion into existing NeRF scenes.
 
 ## Shared principles
-The family shares the principle of decoupling the general radiance field representation from the task-specific optimization objective. While standard NeRF training minimizes photometric error between rendered and ground-truth images for a fixed camera pose, these pipelines introduce auxiliary objectives or structural modifications:
-1.  **Auxiliary Priors:** Incorporation of non-photometric signals, such as depth from Multi-View Stereo (MVS) [S1], text prompts via Score Distillation Sampling (SDS) [S1], or physical dynamics constraints [S1].
-2.  **Modified Optimization Targets:** The loss function may include regularization terms (e.g., saturation alignment [S1]) or alternative error metrics (e.g., pose estimation via photometric gradient approximation [S1]).
-3.  **Structural Decomposition:** Some methods separate the scene into static background and dynamic/semantic foreground components, optimizing them with distinct representations or constraints (e.g., compositional rendering in GO-NeRF [S1]).
+The children of this family share the principle of task-specific objective functions and data structures that extend beyond standard RGB photometric loss. They utilize pre-trained scene representations as a fixed or partially fixed background, optimizing only specific parameters (camera poses or local object fields) rather than the entire scene. They often employ numerical gradient approximations or compositional rendering formulations to handle tasks where analytical derivatives are unavailable or insufficient for the specific application constraints.
 
 ## Subtopics
 
-### [MVSNeRF](6197-mvsnerf.md)
-A feedforward pipeline that accelerates radiance field reconstruction by learning a data prior from multi-view stereo images, eliminating the need for per-scene iterative optimization. It is chosen when training speed is critical and a large dataset of similar scenes is available to train the prior.
-
 ### [DPPE (Dense Pose Estimation in a Plenoxels Environment)](9640-dppe-dense-pose-estimation-in-a-plenoxels-environment.md)
-A 6-DoF monocular pose estimation method that uses numerical gradient approximation on a Plenoxels grid to minimize photometric error. It is chosen when analytical derivatives are unavailable or when the speed of Plenoxels rendering allows full-image re-rendering at each optimization step, unlike standard NeRF-based pose estimators.
+DPPE is a 6-DoF monocular RGB-only pose estimation procedure for Plenoxels environments that recovers the ground truth camera pose after a perturbation by minimizing errors in re-rendering using stochastic gradient descent and numerical gradient approximation. It sets itself apart from analytical derivative-based methods (like Teigen et al. [30]) by using numerical central differencing, making it generalizable to any scene representation where re-renderings are not prohibitively expensive, and from iNeRF by leveraging Plenoxels' speed to render the full image at each step rather than subsampled rays.
 
 ### [GO-NeRF](11181-go-nerf.md)
-A compositional pipeline for text-controlled 3D object generation within an existing NeRF scene. It uses optimized 3D-aware opacity maps to handle occlusions and integrates SDS loss with saturation regularization. It is chosen for scene editing tasks requiring semantic control and seamless integration with pre-existing environments.
+GO-NeRF is a pipeline for generating text-prompt-controlled 3D virtual objects at user-specified locations within an existing 3D environment represented as a NeRF, while preserving unchanged scene content. It sets itself apart from standard NeRF training by decoupling the object generation from the scene representation, using a compositional rendering formulation with 3D-aware opacity maps to handle occlusions and prevent unintended modifications to the original scene. Unlike methods that retrain the entire scene, GO-NeRF optimizes a new NeRF representation only within a user-defined 3D bounding box.
 
 ### Dynamically-informed iNeRF Estimator
-A state estimation method that initializes an iNeRF with a dynamics prior and optimizes only via photometric loss, acting as a recursive Bayesian filter with infinite state covariance. It is chosen for robot navigation in NeRF environments where a dynamics model is available to prevent divergence. A key pitfall is that an iNeRF estimator initialized without a dynamics prior will diverge very quickly [S1]. The process loss is set to 0 [S1].
+A state estimation method that uses an iNeRF initialized with a dynamics prior, optimized only via photometric loss, acting as a recursive Bayesian filter with infinite state covariance [S1]. The process loss is set to 0 [S1]. An iNeRF estimator initialized without a dynamics prior will very quickly diverge [S1].
 
 ## Background
-The concept of application-specific pipelines emerged as NeRF and radiance field techniques matured from static novel view synthesis to interactive and dynamic applications. Early work focused on generic optimization [S1], but subsequent research identified bottlenecks in training speed (addressed by MVSNeRF), pose estimation (DPPE), and semantic editing (GO-NeRF). The dynamically-informed iNeRF estimator was proposed to address the instability of NeRF-based state estimation in robotics, leveraging dynamics priors to maintain filter consistency [S1].
+The concept of application-specific pipelines in radiance field optimization emerged as NeRF and its variants were applied to robotics and interactive editing. DPPE was developed to enable vision-only robot navigation in neural radiance worlds, specifically addressing the need for robust pose estimation in Plenoxels environments [S1]. GO-NeRF was introduced to facilitate text-guided 3D editing, allowing users to insert objects into existing scenes without retraining the entire field [S1]. The dynamically-informed iNeRF estimator was proposed as a baseline for robot state estimation in NeRF environments, highlighting the instability of standard iNeRF estimators without dynamics priors [S1].
 
 ## Sources
 [S1] Vision-Only Robot Navigation in a Neural Radiance World, https://doi.org/10.1109/lra.2022.3150497, fetched 2026-10-26

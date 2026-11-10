@@ -22,7 +22,7 @@ The method evaluates the ray origin's position relative to the convex bounding v
 
 **Steps:**
 
-1. **Evaluate Bounding Volume:** Compute the distance from the ray origin to the bounding volume: $t_g = g(\mathbf{o})$.
+1. **Evaluate Bounding Volume:** Compute the distance from the ray origin to the bounding volume: $t_g = g(\mathbf{o})$ [S1].
 2. **Determine Case:**
    - **Case 1:** $t_g > 0$. The ray origin is outside the bounding volume [S1].
    - **Case 2:** $t_g \le 0$ and $f(\mathbf{o}) > 0$. The ray origin is inside the bounding volume but outside the object [S1].
@@ -30,15 +30,15 @@ The method evaluates the ray origin's position relative to the convex bounding v
 3. **Handle Case 1 (Outside Bounding Volume):**
    - Find the intersection of the ray with the bounding volume using sphere tracing [S1].
    - If no intersection with the bounding volume is found within $t_{max}$, return null [G].
-   - Set the current position $\mathbf{p} = \mathbf{o} + t_{entry} \mathbf{d}$.
+   - Set the current position $\mathbf{p} = \mathbf{o} + t_{entry} \mathbf{d}$ [S1].
    - Perform standard sphere tracing using $f(\mathbf{x})$ starting from $\mathbf{p}$ to find the object intersection [S1].
 4. **Handle Case 2 (Inside Bounding Volume, Outside Object):**
    - Perform standard sphere tracing using $f(\mathbf{x})$ starting from the ray origin $\mathbf{o}$ to find the object intersection [S1].
 5. **Handle Case 3 (Inside Bounding Volume, Inside Object):**
    - Advance the ray to its intersection with the bounding geometry in the forward direction [S1].
    - If no intersection with the bounding volume is found within $t_{max}$, return null [G].
-   - Set the starting point for inverse tracing: $\mathbf{p}_{inv} = \mathbf{o} + t_{exit\_bound} \mathbf{d}$.
-   - Perform sphere tracing in the **inverse ray direction** (i.e., direction $-\mathbf{d}$) starting from $\mathbf{p}_{inv}$ using the bounding volume function $g(\mathbf{x})$ [S1].
+   - Set the starting point for inverse tracing: $\mathbf{p}_{inv} = \mathbf{o} + t_{exit\_bound} \mathbf{d}$ [S1].
+   - Perform sphere tracing in the **inverse ray direction** (i.e., direction $-\mathbf{d}$) starting from $\mathbf{p}_{inv}$ using the object function $f(\mathbf{x})$ [S1].
    - The intersection found in the inverse direction corresponds to the object intersection [S1].
 
 **Pseudocode:**
@@ -72,7 +72,7 @@ def convex_object_optimization(ray_o, ray_d, f, g, t_max):
         if t_exit_bound is None:
             return None
         p_inv_start = ray_o + t_exit_bound * ray_d
-        t_inv = sphere_trace(p_inv_start, -ray_d, g, t_exit_bound)
+        t_inv = sphere_trace(p_inv_start, -ray_d, f, t_exit_bound)
         if t_inv is None:
             return None
         return t_exit_bound - t_inv
@@ -94,7 +94,7 @@ def sphere_trace(origin, direction, sdf, max_t):
 
 **Edge Cases and Pitfalls:**
 - Precision: The inverse trace relies on accurate intersection with the bounding volume. [G] Floating point errors may cause the ray to be slightly outside the bounding volume at the start of the inverse trace.
-- Degenerate Input: If the bounding volume is not strictly convex, the sphere tracing may fail or produce incorrect results.
+- Degenerate Input: If the bounding volume is not strictly convex, the sphere tracing may fail or produce incorrect results [S1].
 - Tightness: The optimization is most effective when the bounding volume is tight to the object.
 
 ## Operating characteristics
@@ -102,7 +102,7 @@ def sphere_trace(origin, direction, sdf, max_t):
 - **Memory Complexity:** No additional memory required [G].
 - **Measured Performance:** In a test scene with 3 spheres, a ground plane, and a dodecahedron with a bounding sphere, using two reflection bounces and eight refraction bounces, the convex optimization provided a speedup of around 10% (2.73 ms with optimization vs. 3.03 ms without) [S1][S2, unofficial].
 - **Strengths:** Avoids costly marching through the inside of the object, requiring far fewer iterations [S1][S2, unofficial]. Avoids the often costly computation of the gradient per iteration step, which is not feasible in real-time applications [S1][S2, unofficial].
-- **Limitations:** Requires a convex bounding volume that encloses the object. The optimization is specific to convex objects.
+- **Limitations:** Requires a convex bounding volume that encloses the object. The optimization is specific to convex objects [S1].
 - **When to use:** Real-time rendering of scene representations with a signed distance bound where objects are convex and enclosed by a convex bounding volume [S1][S2, unofficial].
 
 ## Background

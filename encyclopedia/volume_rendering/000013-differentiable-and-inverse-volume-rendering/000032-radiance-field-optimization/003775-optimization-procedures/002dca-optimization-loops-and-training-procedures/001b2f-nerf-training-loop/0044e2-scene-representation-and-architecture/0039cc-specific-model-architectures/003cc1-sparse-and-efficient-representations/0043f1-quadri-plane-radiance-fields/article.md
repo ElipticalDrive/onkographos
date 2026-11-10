@@ -1,0 +1,174 @@
+# Quadri-Plane Radiance Fields
+
+Also called: 4-Plane Representation, Quadri-Plane Model
+
+## Overview
+Quadri-Plane Radiance Fields represent a 3D scene using four multi-channel 2D feature planes coupled with a lightweight decoder MLP, designed to enable computationally efficient volumetric super-resolution by leveraging 2D image super-resolution techniques [S1, unofficial]. Unlike standard NeRF which uses a dense MLP for all queries, this method decouples spatial and directional information into explicit planar grids, allowing for faster training and inference while maintaining high-fidelity reconstruction of general scenes [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The method takes a set of training images (low-resolution or high-resolution) and their corresponding camera poses as input. It outputs a differentiable scene representation that can render novel views via volumetric rendering. The core output of the query function is the volume density $\sigma$ and the emitted radiance $\mathbf{c} = \{r, g, b\}$ for a given 3D position $\mathbf{p}$ and viewing direction.
+
+**Data Structures:**
+The scene representation $P_s$ consists of four 2D feature planes, each with dimensions $N \times N \times C$ (or $N_{dir} \times N_{dir} \times C$ for the directional plane).
+1.  **Positional Planes:** Three planes $P_{xy}, P_{xz}, P_{yz}$ aligned with the coordinate axes. Each has size $N \times N \times C$.
+2.  **View-Direction Plane:** One plane $P_{dir}$ representing the spherical coordinate space of viewing directions. It has size $N_{dir} \times N_{dir} \times C$.
+
+**Parameters:**
+*   $N$: Spatial resolution of positional planes. Typical value for low-resolution (LR) training (100px images) is $N=200$ [S1, unofficial].
+*   $N_{dir}$: Resolution of the view-direction plane. Set smaller than $N$ (e.g., $N_{dir}=32$) because each pixel's information is relevant to only one point on $P_{dir}$ (same viewing direction for all points on a ray), whereas it is relevant to many points on positional planes [S1, unofficial].
+*   $C$: Number of channels per plane. Typical value is $C=48$ [S1, unofficial].
+*   Decoder MLPs: Fully-connected networks with 128 channels and 4 layers [S1, unofficial].
+
+**Steps:**
+1.  **Positional Feature Retrieval:** For a query point $\mathbf{p} = (x, y, z)$, project $\mathbf{p}$ onto the three positional planes to get 2D coordinates $(x, y)$, $(x, z)$, and $(y, z)$. Retrieve the feature vectors $v_{xy}, v_{xz}, v_{yz}$ from $P_{xy}, P_{xz}, P_{yz}$ respectively using bilinear interpolation.
+2.  **Directional Feature Retrieval:** Compute the viewing direction $(\theta_p, \phi_p)$ (azimuth and elevation) for the ray passing through $\mathbf{p}$. Project this direction onto $P_{dir}$ to get 2D coordinates corresponding to $(\theta_p, \phi_p)$. Retrieve the feature vector $v_{dir}$ from $P_{dir}$ using bilinear interpolation [S1, unofficial].
+3.  **Positional Feature Aggregation:** Compute the aggregated positional feature vector $v_p$ by averaging the three positional feature vectors:
+    $$
+    v_p = \frac{1}{3} (v_{xy} + v_{xz} + v_{yz})
+    $$
+4.  **Density Prediction:** Feed $v_p$ into the coarse density decoder $D_c$ and the fine density decoder $D_f$ to obtain density values $\sigma_c$ and $\sigma_f$. Both $D_c$ and $D_f$ are identical MLPs (128 channels, 4 layers) [S1, unofficial].
+5.  **Radiance Prediction:** Concatenate all four feature vectors ($v_{xy}, v_{xz}, v_{yz}, v_{dir}$) to form the input vector $v_{all}$. Feed $v_{all}$ into the radiance decoder MLP (identical structure to density decoders) to predict the RGB radiance $\mathbf{c}$ [S1, unofficial]. Note that $v_{dir}$ affects radiance but not density, as volume density is view-independent [S1, unofficial].
+6.  **Volumetric Rendering:** Use the predicted $\sigma$ and $\mathbf{c}$ values along sampled rays to compute pixel colors via standard volumetric rendering equations [Parent].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def quadri_plane_query(p, direction, planes, N, N_dir, C):
+    """
+    Query the quadri-plane representation for a single point.
+    
+    Args:
+        p: numpy array of shape (3,), 3D position (x, y, z)
+        direction: numpy array of shape (3,), viewing direction vector
+        planes: dict containing 'P_xy', 'P_xz', 'P_yz', 'P_dir'
+                Each plane is a numpy array of shape (N, N, C) or (N_dir, N_dir, C)
+        N: spatial resolution of positional planes
+        N_dir: resolution of directional plane
+        C: number of channels
+        
+    Returns:
+        sigma: float, volume density
+        c: numpy array of shape (3,), RGB radiance
+    """
+    
+    # 1. Retrieve positional features via bilinear interpolation
+    # Project p onto xy, xz, yz planes
+    # Coordinates are normalized to [0, 1] or [-1, 1] depending on convention.
+    # Assuming standard NeRF normalization: map [-1, 1] to [0, N-1]
+    
+    def bilinear_interp(plane, u, v):
+        """
+        Bilinear interpolation on a 2D plane.
+        plane: (H, W, C)
+        u, v: normalized coordinates in [0, 1]
+        """
+        H, W, C = plane.shape
+        # Map [0, 1] to [0, H-1], [0, W-1]
+        y = u * (H - 1)
+        x = v * (W - 1)
+        
+        y0 = int(np.floor(y))
+        x0 = int(np.floor(x))
+        y1 = min(y0 + 1, H - 1)
+        x1 = min(x0 + 1, W - 1)
+        
+        y_frac = y - y0
+        x_frac = x - x0
+        
+        # Interpolate
+        val00 = plane[y0, x0, :]
+        val01 = plane[y0, x1, :]
+        val10 = plane[y1, x0, :]
+        val11 = plane[y1, x1, :]
+        
+        top = val00 * (1 - x_frac) + val01 * x_frac
+        bottom = val10 * (1 - x_frac) + val11 * x_frac
+        result = top * (1 - y_frac) + bottom * y_frac
+        
+        return result
+
+    # Normalize p to [0, 1] for interpolation indices
+    # Assuming p is in [-1, 1]
+    p_norm = (p + 1.0) / 2.0
+    
+    # xy plane: use x, y
+    v_xy = bilinear_interp(planes['P_xy'], p_norm[0], p_norm[1])
+    # xz plane: use x, z
+    v_xz = bilinear_interp(planes['P_xz'], p_norm[0], p_norm[2])
+    # yz plane: use y, z
+    v_yz = bilinear_interp(planes['P_yz'], p_norm[1], p_norm[2])
+    
+    # 2. Retrieve directional feature
+    # Convert direction vector to azimuth (theta) and elevation (phi)
+    # theta = atan2(y, x), phi = asin(z) or similar spherical mapping
+    # The paper uses (theta, phi) to index P_dir
+    # Assuming P_dir is indexed by [theta, phi] normalized to [0, 1]
+    
+    theta = np.arctan2(direction[1], direction[0])
+    phi = np.arcsin(direction[2])
+    
+    # Map theta, phi to [0, 1]
+    # theta in [-pi, pi] -> [0, 1]
+    # phi in [-pi/2, pi/2] -> [0, 1]
+    u_dir = (theta + np.pi) / (2 * np.pi)
+    v_dir = (phi + np.pi / 2) / np.pi
+    
+    v_dir_feat = bilinear_interp(planes['P_dir'], u_dir, v_dir)
+    
+    # 3. Aggregate positional features
+    v_p = (v_xy + v_xz + v_yz) / 3.0
+    
+    # 4. Predict density
+    # D_c and D_f are MLPs with 128 channels, 4 layers
+    # Input: v_p
+    sigma_c = density_decoder_c(v_p)
+    sigma_f = density_decoder_f(v_p)
+    
+    # 5. Predict radiance
+    # Concatenate all 4 features
+    v_all = np.concatenate([v_xy, v_xz, v_yz, v_dir_feat], axis=0)
+    c = radiance_decoder(v_all)
+    
+    return sigma_c, sigma_f, c
+
+def density_decoder_c(v_p):
+    # MLP: 128 channels, 4 layers
+    # Simplified implementation
+    x = v_p
+    for i in range(4):
+        x = np.maximum(0, x @ W[i] + b[i]) # ReLU
+    return x @ W_out + b_out # Linear output
+
+def density_decoder_f(v_p):
+    # Same structure as D_c
+    return density_decoder_c(v_p)
+
+def radiance_decoder(v_all):
+    # MLP: 128 channels, 4 layers
+    x = v_all
+    for i in range(4):
+        x = np.maximum(0, x @ W[i] + b[i]) # ReLU
+    return x @ W_out + b_out # Linear output, shape (3,)
+```
+
+**Edge Cases and Pitfalls:**
+*   **View-Direction Dependency:** Omitting $P_{dir}$ significantly degrades performance, especially for shiny/reflective objects with non-uniform lighting. PSNR drops from ~29.6 dB to ~23.7 dB in reported experiments [S1, unofficial].
+*   **Plane Resolution:** Using $N$ too small prohibits high-frequency representation. Using $N$ too large causes artifacts due to insufficient information in low-resolution training images [S1, unofficial].
+*   **Directional Plane Resolution:** $N_{dir}$ must be smaller than $N$ to avoid overfitting to sparse directional information [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Query time is dominated by bilinear interpolation on four planes and a small MLP inference. This is significantly faster than dense MLP-based NeRFs for high-resolution scenes, as the MLP is shallow (4 layers, 128 channels) and the feature lookup is $O(1)$ [S1, unofficial].
+*   **Memory Complexity:** Memory usage is proportional to $4 \times N^2 \times C$. For $N=200, C=48$, this is $4 \times 40000 \times 48 \approx 7.68$ MB, which is very compact compared to dense voxel grids or large MLPs [S1, unofficial].
+*   **Scaling:** The representation scales well with scene size by increasing $N$, but is limited by the resolution of the training images. It is specifically designed for volumetric super-resolution, where the planes are upsampled using 2D SR techniques [S1, unofficial].
+*   **Strengths:** Efficient training and inference; leverages mature 2D SR algorithms; compact memory footprint; good reconstruction quality for general scenes [S1, unofficial].
+*   **Limitations:** Performance depends heavily on the resolution of training images; may struggle with very high-frequency details if $N$ is not sufficiently large; requires careful tuning of $N$ and $N_{dir}$ [S1, unofficial].
+
+## Background
+Quadri-Plane Radiance Fields were introduced in "Neural Volume Super-Resolution" (2022) by [S1, unofficial]. The method builds on the feature plane representation proposed by Chan et al. [9] for human faces and extends it to general scenes by adding a view-direction plane and using coarse/fine decoders inspired by NeRF [32]. It aims to bridge the gap between neural rendering and 2D image super-resolution, allowing for efficient upscaling of 3D scenes from low-resolution inputs.
+
+## Sources
+[S1] Neural Volume Super-Resolution, https://doi.org/10.48550/arXiv.2212.04666, fetched 2026-10-30 (unofficial)
