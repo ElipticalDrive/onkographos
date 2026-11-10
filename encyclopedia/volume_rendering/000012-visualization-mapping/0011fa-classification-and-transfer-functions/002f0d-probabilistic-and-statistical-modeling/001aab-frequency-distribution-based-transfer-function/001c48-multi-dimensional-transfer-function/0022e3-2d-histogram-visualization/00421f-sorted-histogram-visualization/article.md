@@ -1,0 +1,175 @@
+# Sorted Histogram Visualization
+
+Also called: 2D histogram with sorted second attribute, Relative Sorted Histogram, Sorted Histogram
+
+## Overview
+Sorted Histogram Visualization is a Multi-Dimensional Transfer Function (MDTF) design tool that displays a 2D histogram where voxels are sorted by a second attribute value within each intensity bin [S1, unofficial]. It solves the problem that traditional 2D histograms obscure the primary intensity distribution and smear intensity peaks across the second dimension, making it difficult to assess voxel counts at a glance [S1, unofficial]. Unlike traditional 2D histograms, which can be cluttered in medical imaging, sorted histograms maintain a consistent 1D histogram shape when changing the second attribute, facilitating an exploratory workflow [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 3D volume dataset; a primary scalar attribute (typically Intensity); a secondary scalar attribute (e.g., Gradient Magnitude, Local Variance, Range Weight) [S1, unofficial].
+*   **Output:** A 2D visual representation (the sorted histogram) where the x-axis represents intensity bins, the y-axis represents the sorted secondary attribute values, and color encodes the secondary attribute value [S1, unofficial].
+
+**Data Structures**
+The visualization is constructed as a 2D grid or image.
+*   **X-axis:** Discrete bins of the primary attribute (Intensity). Let $N_I$ be the number of intensity bins.
+*   **Y-axis:** Represents the rank or normalized value of the secondary attribute within each intensity bin.
+*   **Pixel/Cell Content:** Each cell $(i, j)$ corresponds to the $j$-th voxel (sorted by secondary attribute) in the $i$-th intensity bin. The color of the cell is determined by the secondary attribute value of that voxel [S1, unofficial].
+
+**Steps**
+1.  **Binning:** Divide the range of the primary attribute (Intensity) into $N_I$ bins. Assign each voxel in the volume to the bin corresponding to its primary attribute value [S1, unofficial].
+2.  **Sorting:** For each intensity bin $i$, collect all voxels belonging to that bin. Sort these voxels based on their secondary attribute value $A_2$. The sorting order places voxels with higher secondary attribute values at higher positions (top) within the bin's vertical space [S1, unofficial].
+3.  **Relative Distribution (Optional Variant):** In the "Relative Sorted Histogram" variant, the vertical space for each intensity bin is normalized to a fixed height. The sorted secondary attribute values are mapped linearly to this fixed height, ensuring every intensity bin occupies the same rectangular vertical space regardless of the number of voxels in that bin [S1, unofficial].
+4.  **Color Mapping:** Assign a color to each voxel based on its secondary attribute value $A_2$. A specific mapping used in the source is Blue-Green-Yellow-White, where White represents the maximum attribute value and Black represents the background or minimum value [S1, unofficial].
+5.  **Rendering:** Display the colored voxels arranged in their sorted positions. The resulting image resembles a 1D histogram where the "bars" are filled with a vertical gradient or distribution of colors representing the secondary attribute [S1, unofficial].
+6.  **Overlay (Optional):** Display the traditional 1D histogram (count of voxels per intensity bin) as an overlay or above the sorted histogram to provide a frame of reference for the intensity distribution [S1, unofficial].
+7.  **Interaction:** The user selects a rectangular region in the 2D histogram. This selection defines a 2D Transfer Function (TF) criterion: voxels with intensity in the selected x-range and secondary attribute value in the selected y-range are classified [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def create_sorted_histogram(volume, primary_attr, secondary_attr, num_intensity_bins):
+    """
+    Creates a sorted histogram visualization for a volume.
+    
+    Args:
+        volume: 3D array of voxel data.
+        primary_attr: Function or array mapping voxel index to primary value (e.g., Intensity).
+        secondary_attr: Function or array mapping voxel index to secondary value (e.g., Gradient).
+        num_intensity_bins: Number of bins for the primary attribute.
+        
+    Returns:
+        histogram_image: 2D array representing the sorted histogram.
+        intensity_histogram: 1D array representing the standard 1D histogram counts.
+    """
+    # Determine intensity range
+    min_int = min(primary_attr(v) for v in volume)
+    max_int = max(primary_attr(v) for v in volume)
+    bin_width = (max_int - min_int) / num_intensity_bins
+    
+    # Initialize data structures
+    # bins[i] will store a list of (secondary_value, voxel_index) tuples
+    bins = [[] for _ in range(num_intensity_bins)]
+    intensity_counts = [0] * num_intensity_bins
+    
+    # Step 1: Assign voxels to bins
+    for voxel in volume:
+        idx = voxel.index
+        p_val = primary_attr(voxel)
+        s_val = secondary_attr(voxel)
+        
+        # Calculate bin index
+        bin_idx = int((p_val - min_int) / bin_width)
+        # Handle edge case for max value
+        if bin_idx >= num_intensity_bins:
+            bin_idx = num_intensity_bins - 1
+            
+        bins[bin_idx].append((s_val, idx))
+        intensity_counts[bin_idx] += 1
+        
+    # Step 2: Sort voxels within each bin by secondary attribute
+    for i in range(num_intensity_bins):
+        # Sort by secondary value. 
+        # Source specifies high attribute values end up near the top.
+        # Assuming image coordinates: y=0 is top.
+        bins[i].sort(key=lambda x: x[0], reverse=True)
+        
+    # Step 3: Construct the image
+    # Determine max height needed (max voxels in any bin)
+    max_voxels_per_bin = max(len(b) for b in bins)
+    
+    # For Relative Sorted Histogram, we might normalize height.
+    # Here we assume a fixed height per bin for visualization consistency,
+    # or dynamic height based on count. The source emphasizes "rectangular space"
+    # for the relative variant. Let's assume a fixed display height H for simplicity
+    # in the relative variant, or max_voxels for absolute.
+    # The source says "always fills a rectangular space" for relative.
+    # Let's implement the Relative variant as described: fixed vertical space.
+    display_height = 100 # Arbitrary fixed height for the relative histogram
+    
+    histogram_image = np.zeros((num_intensity_bins, display_height, 3))
+    
+    for i in range(num_intensity_bins):
+        voxels = bins[i]
+        count = len(voxels)
+        
+        if count == 0:
+            continue
+            
+        # Map sorted secondary values to display rows
+        # High secondary values -> Top (row 0)
+        # Low secondary values -> Bottom (row display_height-1)
+        
+        # Normalize secondary values to [0, 1] for color mapping
+        # Note: Source uses a specific color map. We'll define a placeholder for color mapping.
+        min_s = min(v[0] for v in voxels)
+        max_s = max(v[0] for v in voxels)
+        
+        for row, (s_val, v_idx) in enumerate(voxels):
+            if row >= display_height:
+                break
+                
+            # Calculate color based on s_val
+            # Blue-Green-Yellow-White mapping
+            color = map_secondary_to_color(s_val, min_s, max_s)
+            
+            # Place in image
+            # x-coordinate is bin index
+            # y-coordinate is row
+            histogram_image[i, row] = color
+            
+    return histogram_image, intensity_counts
+
+def map_secondary_to_color(s_val, min_s, max_s):
+    """
+    Maps a secondary attribute value to a Blue-Green-Yellow-White color.
+    White is max, Black is background/min.
+    """
+    if max_s == min_s:
+        return (0, 0, 0) # Black for constant value
+        
+    normalized = (s_val - min_s) / (max_s - min_s)
+    
+    # Simplified linear interpolation for demonstration
+    # Blue (0,0,1) -> Green (0,1,0) -> Yellow (1,1,0) -> White (1,1,1)
+    # This is a rough approximation of the source's description.
+    if normalized < 0.33:
+        # Blue to Green
+        t = normalized / 0.33
+        return (0, t, 1 - t)
+    elif normalized < 0.66:
+        # Green to Yellow
+        t = (normalized - 0.33) / 0.33
+        return (t, 1, 1 - t)
+    else:
+        # Yellow to White
+        t = (normalized - 0.66) / 0.34
+        return (1, 1, t)
+```
+
+**Parameters**
+*   **Number of Intensity Bins:** Not given in the sources.
+*   **Color Mapping:** Blue-Green-Yellow-White is specified as the example used in the paper. The paper notes it does not address finding the perceptually optimal color map [S1, unofficial].
+*   **Secondary Attribute:** Can be Gradient Magnitude, Local Variance, or Range Weight [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Scale Variation:** The 1D histogram curve (voxel count per intensity bin) often has very different scales across the intensity range. This makes it hard to see changes in the distribution of the second dimension values in low-count regions [S1, unofficial].
+*   **Logarithmic Scale:** Using a logarithmic scale for the 1D histogram overlay can help mitigate scale differences, but it may still make it hard to see distinct materials hidden in low-count ranges [S1, unofficial].
+*   **Perceptual Optimization:** The choice of color map is critical for interpreting the secondary attribute, but the source does not provide a method for optimizing it [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \log K)$, where $N$ is the number of voxels and $K$ is the average number of voxels per intensity bin (sorting within bins). In the worst case, if all voxels fall into one bin, it is $O(N \log N)$.
+*   **Memory Complexity:** $O(N)$ to store the voxel data and the sorted bins.
+*   **Strengths:** Maintains the intuitive appearance of a 1D histogram, allowing at-a-glance assessment of the primary intensity distribution. The shape remains consistent when switching the second attribute, facilitating exploratory workflow.
+*   **Limitations:** Traditional 2D histograms are cluttered for medical images; sorted histograms solve this but still suffer from scale variations in the 1D overlay. The relative variant requires normalization which may obscure absolute counts.
+*   **When to use:** When designing MDTFs for complex datasets (e.g., medical imaging) where the primary intensity distribution is critical, and a second attribute (like gradient or homogeneity) needs to be explored without losing the context of the intensity histogram.
+*   **When not to use:** When the absolute count of voxels in the secondary attribute distribution is more important than the relative distribution within intensity bins, or when the intensity distribution is extremely sparse and uniform.
+
+## Background
+*   **Origin:** The method was introduced by C. Lundström, P. Ljung, and A. Ynnerman in the paper "Multi-Dimensional Transfer Function Design Using Sorted Histograms" [S1, unofficial].
+*   **Context:** It addresses the limitation of existing MDTF design tools being too complex for wide usage outside research contexts, particularly in clinical medical imaging. The goal is to provide a simple, exploratory design concept based on improved histogram display [S1, unofficial].
+*   **Development:** The work extends previous MDTF research by incorporating classifying attributes like range weight and local variance, which capture domain knowledge beyond gradients [S1, unofficial].
+
+## Sources
+[S1] Multi-Dimensional Transfer Function Design Using Sorted Histograms, https://doi.org/10.2312/vg/vg06/001-008, fetched 2026-10-26 (unofficial)

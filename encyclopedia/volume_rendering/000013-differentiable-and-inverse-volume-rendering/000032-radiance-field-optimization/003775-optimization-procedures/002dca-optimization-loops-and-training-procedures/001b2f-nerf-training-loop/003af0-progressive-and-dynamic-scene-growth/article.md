@@ -1,24 +1,50 @@
 # Progressive and Dynamic Scene Growth
 
+Also called: Dynamic Growth Parameters, Progressive View Synthesis Training, CityNeRF, Incremental Registration, Online Incremental NeRF Optimization
 
 ## Overview
-Progressive and Dynamic Scene Growth covers training procedures that iteratively expand the neural representation's capacity or the training dataset during optimization to solve the problem of reconstructing complex or large-scale scenes with limited initial data or fixed network topologies. This family sets itself apart from sibling methods like [Adaptive Ray Sampling](8870-adaptive-ray-sampling.md) and [Sparse View and Initialization Methods](9394-sparse-view-and-initialization-methods.md) by actively modifying the model's topology or supervision signals during training rather than relying on static priors or fixed sampling schedules [G].
+Progressive and Dynamic Scene Growth addresses the limitations of static neural radiance field (NeRF) architectures by iteratively expanding the model's capacity or training data during optimization. This family of methods solves the problem of representing complex, large-scale, or dynamically changing scenes with a single fixed network by coupling network topology or view selection to training uncertainty and geometric coherence [S1]. It sets itself apart from static NeRF variants by dynamically adding capacity where the current model exhibits high uncertainty or by progressively incorporating new views to resolve occlusions and scale to urban environments [S1, S2].
 
 ## Shared principles
+The core mechanism involves an iterative loop where the scene representation is modified based on feedback from the current training state. This feedback is typically derived from uncertainty metrics, geometric conflicts, or spatial coverage requirements. The process generally follows a cycle of: (1) training the current representation, (2) evaluating a metric (e.g., uncertainty, pose confidence, or view utility), (3) modifying the representation (growing network branches, adding views, or registering new poses), and (4) retraining with the expanded configuration. This approach allows the model to focus computational resources on areas of high complexity or ambiguity, preventing overfitting in simple regions and underfitting in complex ones [S1, S2].
 
 ## Subtopics
 
 ### [Dynamic Growth Parameters](2968-dynamic-growth-parameters.md)
-An adaptive training strategy that expands network capacity based on local scene complexity and prediction uncertainty. It distinguishes itself from static variants by coupling the network topology directly to the training error, growing $k$ new branches per step based on k-means clustering of high-uncertainty query points. It is chosen when a scene requires fine-grained detail recovery in specific regions without pre-defining the entire network hierarchy.
+Dynamic Growth Parameters define the configuration for the iterative expansion of a neural radiance field's network architecture during training. This method solves the problem of representing complex scenes with a single static network by dynamically adding capacity where the current model exhibits high uncertainty. It sets apart from static NeRF variants by coupling the network topology directly to the training error, growing $k$ new branches per step based on k-means clustering of high-uncertainty query points [2968-dynamic-growth-parameters.md].
 
 ### [Progressive View Synthesis Training](8666-progressive-view-synthesis-training.md)
-A training strategy for Panoramic NeRF that reconstructs a 3D scene from a single input panorama by progressively adding synthetic reference views to resolve occlusions and improve semantic coherence. It distinguishes itself by replacing generic depth constraints with a collaborative RGBD inpainting and progressive inpainting-and-erasing pipeline, explicitly synthesizing plausible content for occluded regions rather than relying on geometric priors or feature matching alone. It is chosen for single-view panoramic reconstruction where standard NeRF methods suffer from foggy effects or invalid floating densities.
+Progressive View Synthesis Training (PERF) is a training strategy for Panoramic Neural Radiance Fields (NeRF) that synthesizes novel views from a single input panorama by progressively adding reference views to improve geometry and semantic coherence in occluded regions [8666-progressive-view-synthesis-training.md]. It distinguishes itself from sibling methods like DS-NeRF, DietNeRF, and SinNeRF by replacing generic semantic regularization or depth constraints with collaborative RGBD inpainting and a progressive inpainting-and-erasing strategy, which prevents the "foggy effects" and redundant geometry artifacts common in single-panorama NeRF optimization [8666-progressive-view-synthesis-training.md].
 
 ### CityNeRF
-A progressive learning paradigm that synchronously grows the NeRF model and training set. It distinguishes itself by starting with shallow basic blocks for distant views and continuously attaching new blocks as training iterates to adapt to far-near view details. It is chosen for large-scale urban reconstruction where scene complexity varies significantly across space. It effectively activates high-frequency channels in position encoding and unfolds more complex details as training progresses [S1].
+#### definition
+- [S1] A progressive learning paradigm that synchronously grows the NeRF model and training set.
+#### step
+- [S1] Starts by fitting distant views with shallow basic blocks.
+- [S1] New blocks are continuously attached as training iterates to adapt to details in far-near views.
+- [S1] Effectively activates high-frequency channels in position encoding and unfolds more complex details as training progresses.
+
+### Incremental Registration
+#### definition
+- [S2] A training strategy that registers frames incrementally following temporal order, leveraging the intuition that camera motions in videos are smooth and adjacent poses are close.
+#### step
+- [S2] At the start of training, jointly optimize NeRF parameters $\Theta$ and poses $\{P_1, P_2\}$ from the first two frames $\{I_1, I_2\}$.
+- [S2] After every $k$ iterations, add a new frame $I_i$ and initialize its pose $P_i$ by the previous pose $P_{i-1}$.
+- [S2] Freeze the learning rate on poses $\{P_i\}$ and NeRF $\Theta$ until all frames are registered. A learning rate decay schedule may be applied after all $N$ images are added.
+#### parameter
+- [S2] $k$: The iteration interval for adding new frames. Value: 1k iterations for CO3D/HO3D datasets; 500 iterations for LLFF dataset.
+- [S2] Freeze duration: The number of iterations to freeze learning rates after registration. Value: 100k iterations for HO3D and CO3D; 30k for LLFF.
+
+### Online Incremental NeRF Optimization
+#### step
+- [S3, unofficial] Plan for the next best views. Perceive new observations based on the current scene representation. Add new observations into the training set incrementally to optimize the representation.
+#### comparison
+- [S3, unofficial] Differs from offline methods like DVGO by updating the representation online as new views are collected, rather than optimizing based on a fixed, pre-collected set of images.
 
 ## Background
-The concept of progressive learning in NeRF was introduced by Xiangli et al. in 2021 with CityNeRF, which proposed synchronously growing the NeRF model and training set to handle large-scale urban environments [S1]. This approach was developed alongside related scene decomposition methods like Block-NeRF (Tancik et al., 2022), which uses a "total-part-total" method to decompose scenes into blocks for separate training and decouples rendering time from scene size [S1]. These methods are primarily used in large-scale urban reconstruction where scene complexity varies significantly across space [S1].
+The concept of progressive learning in NeRF was introduced by Xiangli et al. in 2021 with CityNeRF, which addressed the rendering of large urban environments by synchronously growing the model and training set [S1]. This was followed by developments in dynamic scene representation, such as Block-NeRF (Tancik et al., 2022), which decomposed scenes into blocks [S1]. Incremental registration strategies, such as those used in ICON (Wang et al., 2024), leverage smooth camera motion assumptions to optimize poses and NeRF parameters jointly [S2]. Online incremental optimization methods, like ActiveRMAP (2022), extend this by actively planning viewpoints to build 3D models in real-time [S3, unofficial].
 
 ## Sources
 [S1] Overview of NeRF technology and applications, https://www.jcad.cn/en/article/doi/10.3724/SP.J.1089.2023-00759, fetched 2026-10-31
+[S2] ICON: Incremental CONfidence for Joint Pose and Radiance Field Optimization, https://doi.org/10.1109/cvpr52733.2024.00517, fetched 2026-10-26
+[S3] ActiveRMAP: Radiance Field for Active Mapping And Planning, https://doi.org/10.48550/arxiv.2211.12656, fetched 2026-10-26 (unofficial)

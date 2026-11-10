@@ -1,0 +1,525 @@
+--- v002.md
++++ v003.md
+@@ -1,300 +1,269 @@
+ # Palette-based compression for chunked discrete voxel data
+ 
+-Also called: BlockStorage, Minecraft 1.13 compression
++Also called: BlockStorage, Indices Bit-Compression, Minecraft 1.13 compression, Palette Compression via Bit-Packing, Variable-length-integer buffer for indices
+ 
+ ## Overview
+-Palette-based compression for chunked discrete voxel data is a lossless compression technique for discrete voxel data (e.g., Minecraft blocks) that separates block groups/chunks from their actual storage using a structure called `BlockStorage` [S1, unofficial]. It uses a palette of block types/states and variable-bit-length indices pointing to that palette, similar to GIF color palettes [S1, unofficial]. It achieves memory reduction where regions with few block types (e.g., air/stone) use only 1-2 bits per block, while high-entropy regions (forests, structures) use more bits, balanced by the palette size [S1, unofficial].
++This method compresses discrete voxel volume chunks by decoupling voxel identity (block type) from usage (indices), storing types in a sparse palette and indices in a variable-bit-length buffer [S2, unofficial]. It differs from fixed-size array storage by reducing memory footprint to 1–2 bits per voxel in low-entropy regions (e.g., air/stone) while supporting thousands of block types, a technique famously implemented in Minecraft 1.13 [S2, unofficial]. It builds on [Palette Compression](1873-palette-compression.md) by implementing the specific bit-packing and dynamic palette management required for chunked discrete data.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A chunk of discrete voxel data of size $N = \text{CHUNK\_SIZE}^3$.
+-*   **Output:** A compressed representation consisting of a bit buffer of indices and a palette array.
+-
+-**Data Structures:**
+-1.  **Chunk:** Contains a static constant `CHUNK_SIZE` and a `BlockStorage` instance initialized with size $\text{CHUNK\_SIZE}^3$ [S1, unofficial]. Methods `setBlock(x,y,z,type)` and `getBlock(x,y,z)` convert coordinates to an index and delegate to storage [S1, unofficial].
+-2.  **BlockStorage:**
+-    *   `size` (int): Total number of blocks in the chunk ($N$).
+-    *   `data` (BitBuffer): A buffer holding variable-bit-length indices.
+-    *   `palette` (PaletteEntry[]): Array of palette entries.
+-    *   `paletteCount` (int): Number of active entries in the palette.
+-    *   `indicesLength` (int): Bit width of each index in the `BitBuffer` [S1, unofficial]. Starts at 1. Grows exponentially (powers of two) when palette fills. Shrinks when palette is less than half full [S1, unofficial].
+-3.  **PaletteEntry:**
+-    *   `refcount` (int): Default 0. Tracks usage frequency [S1, unofficial].
+-    *   `type` (BlockType): The actual block type/state data [S1, unofficial].
+-    *   Recommended to be implemented as a struct/value-type [S1, unofficial].
+-4.  **BitBuffer:**
+-    *   Represents a memory region (array of bytes/ints/longs) allowing arbitrary bit-range access [S1, unofficial].
+-    *   Methods: `set(int bitIndex, int bitLength, int bits)` and `get(int bitIndex, int bitLength)` [S1, unofficial].
+-
+-**Initialization:**
+-`BlockStorage` is initialized with `indicesLength=1`, `paletteCount=0`, `palette` size $2^1$, and `data` size $size \times 1$ bits [S1, unofficial].
+-
+-**Algorithm Steps:**
+-
+-1.  **Reading a Block (`getBlock`):**
+-    1.  Read palette index from `data` at `index * indicesLength` with length `indicesLength` [S1, unofficial].
+-    2.  Return `palette[paletteIndex].type` [S1, unofficial].
+-
+-2.  **Writing a Block (`setBlock`):**
+-    1.  Read current palette index from `data` at `index * indicesLength` with length `indicesLength` [S1, unofficial].
+-    2.  Get current `PaletteEntry` from `palette[paletteIndex]` [S1, unofficial].
+-    3.  Decrement current entry's `refcount` [S1, unofficial].
+-    4.  Search palette for existing entry matching `type` [S1, unofficial].
+-    5.  If found:
+-        *   Update `data` at `index * indicesLength` with that index, length `indicesLength` [S1, unofficial].
+-        *   Increment its `refcount` [S1, unofficial].
+-        *   Return [S1, unofficial].
+-    6.  If not found and current entry `refcount` is 0:
+-        *   Overwrite current entry with `type` [S1, unofficial].
+-        *   Set `refcount` to 1 [S1, unofficial].
+-        *   Return [S1, unofficial].
+-    7.  If not found and current `refcount` > 0:
+-        *   Call `newPaletteEntry()` to get a free slot (growing if necessary) [S1, unofficial].
+-        *   Create new `PaletteEntry` with `refcount` 1 and `type` [S1, unofficial].
+-        *   Set `data` at `index * indicesLength` to new entry index, length `indicesLength` [S1, unofficial].
+-        *   Increment `paletteCount` [S1, unofficial].
+-
+-3.  **Finding a New Palette Entry (`newPaletteEntry`):**
+-    1.  Find first free entry in `palette` (entry is null or `refcount` is 0) [S1, unofficial].
+-    2.  If found, return its index [S1, unofficial].
+-    3.  If not found, call `growPalette()` [S1, unofficial].
+-    4.  Recursively call `newPaletteEntry()` to find the new free slot [S1, unofficial].
+-
+-4.  **Growing the Palette (`growPalette`):**
+-    1.  Decode all indices from current `data` into an int array `indices` of size `size` [S1, unofficial].
+-    2.  Double `indicesLength` (`indicesLength << 1`) [S1, unofficial].
+-    3.  Create new `palette` array of size $2^{\text{indicesLength}}$ [S1, unofficial].
+-    4.  Copy existing palette entries to new array [S1, unofficial].
+-    5.  Allocate new `BitBuffer` of size `size * indicesLength` bits [S1, unofficial].
+-    6.  Encode all indices from `indices` array into new `data` buffer [S1, unofficial].
+-
+-5.  **Fitting/Shrinking the Palette (`fitPalette`):**
+-    1.  Iterate palette, setting entries with `refcount` 0 to null and decrementing `paletteCount` [S1, unofficial].
+-    2.  If `paletteCount` is not less than half of its closest power of two, return (do not shrink) [S1, unofficial].
+-    3.  Decode all indices from current `data` into `indices` [S1, unofficial].
+-    4.  Halve `indicesLength` (`indicesLength >> 1`) [S1, unofficial].
+-    5.  Create new `palette` array of size $2^{\text{indicesLength}}$ [S1, unofficial].
+-    6.  Iterate old palette, copying non-null entries to new palette at `paletteCounter` [S1, unofficial].
+-    7.  For each moved entry, re-encode indices: if old index matches current old palette index, update `indices[di]` to `paletteCounter` and increment `fc` (found count) until `fc` equals entry's `refcount` [S1, unofficial].
+-    8.  Allocate new `BitBuffer` of size `size * indicesLength` bits [S1, unofficial].
+-    9.  Encode all indices from `indices` array into new `data` buffer [S1, unofficial].
+-
+-**Pseudocode:**
+-
++**Inputs:** A voxel chunk of size $N = \text{CHUNK\_SIZE}^3$ (typically $32^3$ or $64^3$) [S2, unofficial].
++**Outputs:** A compressed representation consisting of a `Palette` array and a `BitBuffer` of indices.
++
++### Data Structures
++1.  **PaletteEntry**: A struct containing:
++    *   `type`: The discrete voxel/block type (e.g., `ushort` or `BlockType`) [S1][S2, unofficial].
++    *   `refcount`: An integer tracking how many voxels in the current chunk reference this entry (default 0) [S1][S2, unofficial].
++2.  **BlockStorage**: The core container for a chunk, containing:
++    *   `size`: Total number of voxels ($N$) [S2, unofficial].
++    *   `palette`: An array of `PaletteEntry` objects, sized to $2^{\text{indicesLength}}$ [S2, unofficial].
++    *   `paletteCount`: The number of currently active (non-zero refcount) entries in the palette [S2, unofficial].
++    *   `indicesLength`: The bit-width of each index in the buffer. Starts at 1. Grows/shrinks exponentially [S2, unofficial].
++    *   `data`: A `BitBuffer` storing the indices. Size is $N \times \text{indicesLength}$ bits [S2, unofficial].
++3.  **BitBuffer**: An interface for arbitrary bit-range access:
++    *   `set(bitIndex, bitLength, bits)`: Writes `bits` into the buffer starting at `bitIndex` [S2, unofficial].
++    *   `get(bitIndex, bitLength)`: Reads `bitLength` bits starting at `bitIndex` [S2, unofficial].
++
++### Algorithm Steps
++
++#### 1. Initialization
++Initialize `BlockStorage` with `size` voxels. Set `indicesLength = 1`, `paletteCount = 0`. Allocate `palette` of size $2^1$ and `data` of size `size * 1` bits [S2, unofficial].
++
++#### 2. Reading a Voxel (`getBlock`)
++Given a voxel index $i$:
++1.  Read the palette index $p$ from `data` at bit offset $i \times \text{indicesLength}$ with length `indicesLength` [S2, unofficial].
++2.  Return `palette[p].type` [S2, unofficial].
++*Complexity: O(1)* [S2, unofficial].
++
++#### 3. Writing a Voxel (`setBlock`)
++Given voxel index $i$ and new `type`:
++1.  Read current palette index $p_{old}$ from `data` at $i \times \text{indicesLength}$ with length `indicesLength` [S2, unofficial].
++2.  Decrement `palette[p_old].refcount` [S2, unofficial].
++3.  Search `palette` for an existing entry $p_{new}$ where `palette[p_new].type == type` [S2, unofficial].
++    *   **If found:**
++        1.  Write $p_{new}$ to `data` at $i \times \text{indicesLength}$ with length `indicesLength` [S2, unofficial].
++        2.  Increment `palette[p_new].refcount` [S2, unofficial].
++        3.  Return.
++    *   **If not found:**
++        1.  If `palette[p_old].refcount == 0`:
++            *   Overwrite `palette[p_old].type` with `type` [S2, unofficial].
++            *   Set `palette[p_old].refcount = 1` [S2, unofficial].
++            *   Write $p_{old}$ to `data` at $i \times \text{indicesLength}$ with length `indicesLength` [S2, unofficial].
++            *   Return.
++        2.  If `palette[p_old].refcount > 0`:
++            *   Call `newPaletteEntry()` to get a free slot $p_{free}$ [S2, unofficial].
++            *   Set `palette[p_free].type = type` and `palette[p_free].refcount = 1` [S2, unofficial].
++            *   Write $p_{free}$ to `data` at $i \times \text{indicesLength}$ with length `indicesLength` [S2, unofficial].
++            *   Increment `paletteCount` [S2, unofficial].
++
++#### 4. Managing Palette Entries (`newPaletteEntry`)
++1.  Find the first index $k$ in `palette` where `palette[k]` is null or `palette[k].refcount == 0` [S2, unofficial].
++2.  If found, return $k$ [S2, unofficial].
++3.  If not found, call `growPalette()` [S2, unofficial].
++4.  Recursively call `newPaletteEntry()` to find the new free slot [S2, unofficial].
++
++#### 5. Growing the Palette (`growPalette`)
++1.  Decode all indices from `data` into an integer array `indices` of size `size` [S2, unofficial].
++2.  Double `indicesLength` (`indicesLength << 1`) [S2, unofficial].
++3.  Allocate `newPalette` of size $2^{\text{indicesLength}}$ [S2, unofficial].
++4.  Copy existing `palette` entries to `newPalette` [S2, unofficial].
++5.  Allocate new `BitBuffer` of size `size * indicesLength` bits [S2, unofficial].
++6.  Encode all indices from `indices` array into the new `data` buffer [S2, unofficial].
++7.  Update `palette` to `newPalette` [S2, unofficial].
++
++#### 6. Shrinking the Palette (`fitPalette`)
++Called when `paletteCount` drops significantly.
++1.  Iterate `palette`, setting entries with `refcount == 0` to null and decrementing `paletteCount` [S2, unofficial].
++2.  If `paletteCount` is not less than half of its closest power of two, return (do not shrink) [S2, unofficial].
++3.  Decode all indices from `data` into `indices` [S2, unofficial].
++4.  Halve `indicesLength` (`indicesLength >> 1`) [S2, unofficial].
++5.  Allocate `newPalette` of size $2^{\text{indicesLength}}$ [S2, unofficial].
++6.  Iterate old `palette`, copying non-null entries to `newPalette` at `paletteCounter` [S2, unofficial].
++7.  For each moved entry, re-encode indices: if old index matches current old palette index, update `indices[di]` to `paletteCounter` and increment found count `fc` until `fc` equals entry's refcount [S2, unofficial].
++8.  Allocate new `BitBuffer` of size `size * indicesLength` bits [S2, unofficial].
++9.  Encode all indices from `indices` array into new `data` buffer [S2, unofficial].
++10. Update `palette` to `newPalette` [S2, unofficial].
++
++### Bit-Packing Strategies
++When `indexbits` (calculated as $\lceil \log_2(\text{palettesize}) \rceil$) does not divide 64 evenly, three packing options exist [S1]:
++1.  **Round Up:** Round `indexbits` to the nearest power of two. Simple but wastes bits (e.g., 15 wasted bits for 3-bit size) [S1].
++2.  **Aligned Per-Cell:** Pack as many indices as fit in each 64-bit cell, zeroing remaining MSBs. Minimal waste and no performance penalty for access [S1].
++3.  **Unaligned Cross-Cell:** Pack bits tightly across cell boundaries. Best space efficiency but high CPU cost due to complex bit-offset/mask calculations [S1].
++*Recommendation:* Aligned Per-Cell is preferred for runtime performance [S1].
++
++### Pseudocode
+ ```python
+-class Chunk:
+-    CHUNK_SIZE = 32  # Example value
+-    
+-    def __init__(self):
+-        self.storage = BlockStorage(self.CHUNK_SIZE ** 3)
+-
+-    def set_block(self, x, y, z, block_type):
+-        index = self._xyz_to_index(x, y, z)
+-        self.storage.set_block(index, block_type)
+-
+-    def get_block(self, x, y, z):
+-        index = self._xyz_to_index(x, y, z)
+-        return self.storage.get_block(index)
+-
+-    def _xyz_to_index(self, x, y, z):
+-        # Standard 3D-to-1D mapping for row-major layout [G]
+-        size = self.CHUNK_SIZE
+-        return x + y * size + z * size * size
++class PaletteEntry:
++    type: int  # Voxel type ID
++    refcount: int = 0
+ 
+ class BlockStorage:
+-    def __init__(self, size):
++    def __init__(self, size: int):
+         self.size = size
+-        self.indices_length = 1
+-        self.palette_count = 0
+-        self.palette = [None] * (2 ** self.indices_length)
+-        self.data = BitBuffer(self.size * self.indices_length)
+-
+-    def set_block(self, index, block_type):
+-        palette_index = self.data.get(index * self.indices_length, self.indices_length)
++        self.indicesLength = 1
++        self.paletteCount = 0
++        self.palette = [PaletteEntry() for _ in range(2 ** self.indicesLength)]
++        self.data = BitBuffer(size * self.indicesLength)
++
++    def get_block(self, index: int) -> int:
++        palette_index = self.data.get(index * self.indicesLength, self.indicesLength)
++        return self.palette[palette_index].type
++
++    def set_block(self, index: int, type: int):
++        # 1. Get current entry and decrement refcount
++        palette_index = self.data.get(index * self.indicesLength, self.indicesLength)
+         current_entry = self.palette[palette_index]
+-
+-        # Whatever block is there will cease to exist in but a moment...
+         current_entry.refcount -= 1
+ 
+-        # Is the block-type already in the palette?
+-        replace = -1
+-        for i, entry in enumerate(self.palette):
+-            if entry is not None and entry.type == block_type:
+-                replace = i
++        # 2. Search for existing type
++        replace_index = -1
++        for i, entry in enumerate(self.palette):
++            if entry.type == type:
++                replace_index = i
+                 break
+         
+-        if replace != -1:
+-            # YES: Use the existing palette entry.
+-            self.data.set(index * self.indices_length, self.indices_length, replace)
+-            self.palette[replace].refcount += 1
++        if replace_index != -1:
++            # Found existing type
++            self.data.set(index * self.indicesLength, self.indicesLength, replace_index)
++            self.palette[replace_index].refcount += 1
+             return
+ 
+-        # If not found and current refcount is 0, overwrite current entry
++        # 3. Type not found
+         if current_entry.refcount == 0:
+-            current_entry.type = block_type
++            # Reuse the empty slot we just decremented
++            current_entry.type = type
+             current_entry.refcount = 1
++            self.data.set(index * self.indicesLength, self.indicesLength, palette_index)
+             return
+ 
+-        # A new palette entry is needed!
++        # Need a new entry
+         new_entry_index = self.new_palette_entry()
+-        self.palette[new_entry_index] = PaletteEntry(refcount=1, type=block_type)
+-        self.data.set(index * self.indices_length, self.indices_length, new_entry_index)
+-        self.palette_count += 1
+-
+-    def get_block(self, index):
+-        palette_index = self.data.get(index * self.indices_length, self.indices_length)
+-        return self.palette[palette_index].type
+-
+-    def new_palette_entry(self):
+-        first_free = -1
+-        for i, entry in enumerate(self.palette):
+-            if entry is None or entry.refcount == 0:
+-                first_free = i
+-                break
+-        
+-        if first_free != -1:
+-            return first_free
+-
+-        # No free entry? Grow the palette, and thus the BitBuffer
++        self.palette[new_entry_index] = PaletteEntry(type=type, refcount=1)
++        self.data.set(index * self.indicesLength, self.indicesLength, new_entry_index)
++        self.paletteCount += 1
++
++    def new_palette_entry(self) -> int:
++        # Find first free slot
++        for i, entry in enumerate(self.palette):
++            if entry.refcount == 0:
++                return i
++        
++        # No free slot, grow
+         self.grow_palette()
+-        
+-        # Just try again now!
++        # Recursively find the new free slot
+         return self.new_palette_entry()
+ 
+     def grow_palette(self):
+-        # Decode the indices
++        # Decode all indices
+         indices = []
+         for i in range(self.size):
+-            indices.append(self.data.get(i * self.indices_length, self.indices_length))
+-
+-        # Create new palette, doubling it in size
+-        self.indices_length = self.indices_length << 1
+-        new_palette = [None] * (2 ** self.indices_length)
+-        
+-        # We gotta compress the palette entries!
++            indices.append(self.data.get(i * self.indicesLength, self.indicesLength))
++        
++        # Double indices length
++        self.indicesLength = self.indicesLength << 1
++        
++        # Grow palette
++        new_palette = [PaletteEntry() for _ in range(2 ** self.indicesLength)]
++        for i in range(len(self.palette)):
++            new_palette[i] = self.palette[i]
++        self.palette = new_palette
++        
++        # Re-encode indices (simplified: just write back old indices with new bit width)
++        # Note: In a real implementation, indices might need remapping if palette entries were compacted,
++        # but growPalette typically just expands capacity. 
++        # The source [S2, unofficial] implies re-encoding into the new buffer.
++        self.data = BitBuffer(self.size * self.indicesLength)
++        for i in range(self.size):
++            self.data.set(i * self.indicesLength, self.indicesLength, indices[i])
++
++    def fit_palette(self):
++        # Clean up zero refcount entries
++        for i, entry in enumerate(self.palette):
++            if entry.refcount == 0:
++                self.palette[i] = PaletteEntry() # Null out
++                self.paletteCount -= 1
++        
++        # Check if we should shrink
++        # "half of its closest power of two" logic
++        # Simplified: if paletteCount < (2^indicesLength) / 2
++        if self.paletteCount >= (2 ** self.indicesLength) / 2:
++            return
++
++        # Decode indices
++        indices = []
++        for i in range(self.size):
++            indices.append(self.data.get(i * self.indicesLength, self.indicesLength))
++        
++        # Halve indices length
++        self.indicesLength = self.indicesLength >> 1
++        
++        # Create new smaller palette
++        new_palette = [PaletteEntry() for _ in range(2 ** self.indicesLength)]
+         palette_counter = 0
+-        for pi in range(len(self.palette)):
+-            entry = self.palette[pi]
+-            if entry is not None:
++        
++        # Copy non-null entries and re-map indices
++        for i, entry in enumerate(self.palette):
++            if entry.refcount > 0:
+                 new_palette[palette_counter] = entry
+-                # Re-encode the indices (find and replace; with limit)
+-                fc = 0
+-                for di in range(len(indices)):
+-                    if fc < entry.refcount and indices[di] == pi:
+-                        indices[di] = palette_counter
+-                        fc += 1
++                # Update indices that pointed to 'i' to point to 'palette_counter'
++                for j in range(self.size):
++                    if indices[j] == i:
++                        indices[j] = palette_counter
+                 palette_counter += 1
+-
++        
+         self.palette = new_palette
+-
+-        # Allocate new BitBuffer
+-        self.data = BitBuffer(self.size * self.indices_length)
+-
+-        # Encode the indices
+-        for i in range(len(indices)):
+-            self.data.set(i * self.indices_length, self.indices_length, indices[i])
+-
+-    def fit_palette(self):
+-        # Iterate palette, setting entries with refcount 0 to null and decrementing paletteCount
+-        new_palette_count = 0
+-        for i, entry in enumerate(self.palette):
+-            if entry is None or entry.refcount == 0:
+-                self.palette[i] = None
+-            else:
+-                new_palette_count += 1
+-        self.palette_count = new_palette_count
+-
+-        # If paletteCount is not less than half of its closest power of two, return (do not shrink)
+-        if self.palette_count >= (2 ** (self.indices_length - 1)):
+-            return
+-
+-        # Decode all indices from current data into indices
+-        indices = []
+-        for i in range(self.size):
+-            indices.append(self.data.get(i * self.indices_length, self.indices_length))
+-
+-        # Halve indicesLength
+-        self.indices_length = self.indices_length >> 1
+-
+-        # Create new palette array
+-        new_palette = [None] * (2 ** self.indices_length)
+-        
+-        # Iterate old palette, copying non-null entries to new palette at paletteCounter
+-        palette_counter = 0
+-        for pi in range(len(self.palette)):
+-            entry = self.palette[pi]
+-            if entry is not None:
+-                new_palette[palette_counter] = entry
+-                # Re-encode the indices
+-                fc = 0
+-                for di in range(len(indices)):
+-                    if fc < entry.refcount and indices[di] == pi:
+-                        indices[di] = palette_counter
+-                        fc += 1
+-                palette_counter += 1
+-        
+-        self.palette = new_palette
+-
+-        # Allocate new BitBuffer
+-        self.data = BitBuffer(self.size * self.indices_length)
+-
+-        # Encode all indices from indices array into new data buffer
+-        for i in range(len(indices)):
+-            self.data.set(i * self.indices_length, self.indices_length, indices[i])
+-
+-class PaletteEntry:
+-    def __init__(self, refcount=0, type=None):
+-        self.refcount = refcount
+-        self.type = type
++        self.paletteCount = palette_counter
++        
++        # Re-encode
++        self.data = BitBuffer(self.size * self.indicesLength)
++        for i in range(self.size):
++            self.data.set(i * self.indicesLength, self.indicesLength, indices[i])
+ 
+ class BitBuffer:
+-    def __init__(self, size_in_bits):
+-        # Standard bit buffer implementation [G]
+-        self.size = size_in_bits
+-        self.buffer = [0] * ((size_in_bits + 31) // 32)
+-
+-    def get(self, bit_index, bit_length):
+-        # Extract bit_length bits starting at bit_index [G]
++    def __init__(self, size_bits: int):
++        self.size_bits = size_bits
++        self.cells = (size_bits + 63) // 64
++        self.data = [0] * self.cells
++
++    def get(self, bit_index: int, bit_length: int) -> int:
++        # Extract bit_length bits starting at bit_index
++        # Implementation depends on cell alignment
++        # [G] Standard bit extraction logic:
++        start_cell = bit_index // 64
++        offset = bit_index % 64
+         val = 0
+         for i in range(bit_length):
+-            word_idx = (bit_index + i) // 32
+-            bit_offset = (bit_index + i) % 32
+-            val |= ((self.buffer[word_idx] >> bit_offset) & 1) << i
++            bit_pos = offset + i
++            cell_idx = start_cell + (bit_pos // 64)
++            bit_in_cell = bit_pos % 64
++            if cell_idx < len(self.data):
++                if self.data[cell_idx] & (1 << bit_in_cell):
++                    val |= (1 << i)
+         return val
+ 
+-    def set(self, bit_index, bit_length, bits):
+-        # Set bit_length bits starting at bit_index to value bits [G]
++    def set(self, bit_index: int, bit_length: int, value: int):
++        # Write bit_length bits from value starting at bit_index
++        # [G] Standard bit insertion logic:
+         for i in range(bit_length):
+-            word_idx = (bit_index + i) // 32
+-            bit_offset = (bit_index + i) % 32
+-            mask = 1 << bit_offset
+-            if (bits >> i) & 1:
+-                self.buffer[word_idx] |= mask
+-            else:
+-                self.buffer[word_idx] &= ~mask
++            bit_pos = bit_index + i
++            cell_idx = bit_pos // 64
++            bit_in_cell = bit_pos % 64
++            if cell_idx < len(self.data):
++                if (value >> i) & 1:
++                    self.data[cell_idx] |= (1 << bit_in_cell)
++                else:
++                    self.data[cell_idx] &= ~(1 << bit_in_cell)
+ ```
+ 
+-**Parameters:**
+-*   `indicesLength`: The bit width of each index in the `BitBuffer` [S1, unofficial]. Starts at 1. Grows exponentially (powers of two) when palette fills. Shrinks when palette is less than half full [S1, unofficial].
+-*   `CHUNK_SIZE`: The dimension of the chunk [S1, unofficial]. Recommended limit is $32^3$ or $64^3$ [S1, unofficial]. Larger chunks reduce performance [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   Using a Dictionary/HashMap for the palette is discouraged [S1, unofficial]. Linear search over a small array of structs is faster than dictionary index calculation [S1, unofficial].
+-*   Delta-compression is pointless because block types fit the bit-length of indices, and it would make reading blocks O(n) in the worst case [S1, unofficial].
+-*   Chunk size must be limited [S1, unofficial]. Too large chunks reduce performance and increase memory usage worse than plain arrays [S1, unofficial].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** Reading blocks (`getBlock`) is O(1) time [S1, unofficial]. Writing blocks (`setBlock`) involves linear search through the palette (O(P) where P is palette size) to find existing types or free slots [S1, unofficial]. Palette growth/shrinkage involves O(N) bit operations where N is chunk size [S1, unofficial].
+-*   **Memory Complexity:** Reduces memory footprint for low-entropy regions (air/stone) to 1-2 bits per block, while supporting thousands of block types [S1, unofficial].
+-*   **Strengths:** Massively reduces memory footprint of blocks as a whole [S1, unofficial]. A single block ideally takes up one single bit of memory [S1, unofficial]. The common case is three to four bits [S1, unofficial]. This leads to less RAM usage and faster transmission of block groups (chunks) across network connections [S1, unofficial]. Supports practically infinite block types & states as long as not every single block in a block group is completely different from one another [S1, unofficial].
+-*   **Limitations:** Writing blocks is more expensive than reading due to palette management [S1, unofficial]. Performance degrades if chunk size is too large [S1, unofficial].
+-*   **When to use:** When discrete voxel data has high spatial coherence (large areas of identical block types) and a need for lossless compression with variable block types [S1, unofficial].
+-*   **When not to use:** When block types are completely random (high entropy) or when chunk sizes are very large [S1, unofficial].
++*   **Time Complexity:** Reading is O(1) [S2, unofficial]. Writing is O(P) where P is palette size due to linear search [S2, unofficial]. Palette growth/shrinkage is O(N) where N is chunk size [S2, unofficial].
++*   **Memory Complexity:** Memory usage scales with $N \times \lceil \log_2(P) \rceil$ bits plus palette overhead. For low-entropy regions, this approaches 1 bit per voxel [S2, unofficial].
++*   **Performance:** Best suited for "earth-like" scenes with large uniform areas (air/stone) [S1]. Performance degrades if chunks are too large (>64³) or if entropy is extremely high (random noise) [S2, unofficial].
++*   **Strengths:** Massive memory reduction for sparse data; supports thousands of block types; lossless [S2, unofficial].
++*   **Limitations:** Write operations are slower than direct array access due to palette management; non-power-of-two bit sizes require careful handling [S1].
+ 
+ ## Background
+-*   **Origin:** Implemented in Minecraft 1.13 for lossless compression of voxel/block data [S1, unofficial].
+-*   **History:** Released with Minecraft 1.13 by Mojang [S1, unofficial].
+-*   **Usage:** Used in Minecraft for storing chunk data [S1, unofficial].
++This technique was introduced in Minecraft 1.13 (the "Village & Pillage" update) as a lossless compression method for voxel data [S2, unofficial]. It is based on the concept of color palettes used in formats like GIF [S2, unofficial]. The method separates block types from their indices, allowing for efficient storage of discrete voxel data [S1].
+ 
+ ## Sources
+-[S1] Palette-based compression for chunked discrete voxel data, https://www.longor.net/articles/voxel-palette-compression-reddit, fetched 2026-10-27 (unofficial)+[S1] Palette Storage: Indices Bit-Compression, https://voxel.wiki/wiki/palettes/indices-bit-compression, fetched 2026-10-27
++[S2] Palette-based compression for chunked discrete voxel data, https://www.longor.net/articles/voxel-palette-compression-reddit, fetched 2026-10-27 (unofficial)

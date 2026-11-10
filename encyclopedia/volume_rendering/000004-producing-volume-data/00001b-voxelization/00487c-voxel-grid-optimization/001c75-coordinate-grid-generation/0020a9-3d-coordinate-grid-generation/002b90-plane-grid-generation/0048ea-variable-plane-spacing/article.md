@@ -1,0 +1,180 @@
+# Variable Plane Spacing
+
+Also called: Bin-based Plane Distribution, Density-proportional Plane Allocation, Variable plane spacing grid construction
+
+## Overview
+Variable Plane Spacing is a coordinate grid construction method that concentrates sampling planes in regions of high data density by distributing planes proportionally across coordinate bins [S1, unofficial]. It solves the problem of inefficient sampling in sparse regions by adapting grid resolution to input data distribution, contrasting with the uniform resolution of [Constant Plane Spacing](5069-constant-plane-spacing.md). Unlike its sibling [Structured Grid Triangle List Generation](8189-structured-grid-triangle-list-generation.md), which focuses on mesh topology, this method specifically addresses the geometric placement of sampling planes to optimize data capture [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A set of scattered 3D data points with coordinates $(x, y, z)$; the desired number of planes $P$ for each axis.
+*   **Output:** A rectangular sampling grid defined by non-uniform plane positions along each axis.
+
+**Data Structures**
+*   **Bins:** An array of bin boundaries. For an axis with $P$ planes, the number of bins $B$ is $P/2$. Each bin $i$ has a boundary value $v_i$.
+*   **Bin Counts:** An integer array $C$ of size $B$, where $C[i]$ stores the count of unique coordinate values falling into bin $i$.
+*   **Plane Counts:** An integer array $N$ of size $B$, where $N[i]$ stores the number of planes to be placed within bin $i$.
+
+**Steps**
+1.  **Determine Extremes:** Find the minimum ($min$) and maximum ($max$) coordinate values for the axis from the input data [S1, unofficial].
+2.  **Calculate Bin Parameters:**
+    *   Set the number of bins $B = \lfloor P / 2 \rfloor$.
+    *   Calculate bin step $s = (max - min) / B$.
+    *   Assign bin boundaries: $v_0 = min + s$, and $v_i = v_{i-1} + s$ for $i > 0$. The last bin boundary $v_{B-1}$ must equal $max$ [S1, unofficial].
+3.  **Populate Bins:**
+    *   Initialize $C[i] = 0$ for all $i$.
+    *   For each unique coordinate value $c$ in the input data:
+        *   Find the bin index $i$ such that $v_{i-1} < c < v_i$ (with $v_{-1} = min$).
+        *   Increment $C[i]$.
+    *   Calculate total unique points $T = \sum_{i=0}^{B-1} C[i]$ [S1, unofficial].
+4.  **Allocate Planes:**
+    *   For each bin $i$ where $C[i] > 0$:
+        *   Calculate planes for bin: $N[i] = \text{round}\left( \frac{C[i]}{T} \cdot P + 0.5 \right)$.
+        *   Note: The addition of 0.5 and rounding mitigates integer conversion errors that might result in one more or one less plane than specified [S1, unofficial].
+5.  **Position Planes:**
+    *   Traverse the bins. For each bin $i$ with $N[i] > 0$:
+        *   Start position $start = v_{i-1}$ (where $v_{-1} = min$).
+        *   End position $end = v_i$.
+        *   Place $N[i]$ planes evenly spaced between $start$ and $end$ (excluding $end$).
+        *   Formula for plane $j$ ($0 \le j < N[i]$): $pos_j = start + \frac{j}{N[i]} (end - start)$.
+    *   **Boundary Enforcement:** If a user option is enabled, force planes at exactly $min$ and $max$ regardless of bin counts to prevent grid range shrinkage [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def variable_plane_spacing(points, num_planes):
+    """
+    points: list of floats (coordinates along one axis)
+    num_planes: int (total planes to allocate for this axis)
+    returns: list of floats (plane positions)
+    """
+    if not points:
+        return []
+
+    # Step 1: Determine extremes
+    min_val = min(points)
+    max_val = max(points)
+    
+    # Step 2: Calculate bin parameters
+    # Number of bins is half the number of planes
+    num_bins = num_planes // 2
+    if num_bins == 0:
+        # Fallback if fewer than 2 planes requested
+        return [min_val + (max_val - min_val) / max(1, num_planes - 1) * i for i in range(num_planes)]
+        
+    bin_step = (max_val - min_val) / num_bins
+    
+    # Create bin boundaries
+    # v[0] = min + step, v[1] = v[0] + step, ..., v[-1] = max
+    bin_boundaries = [min_val + bin_step * (i + 1) for i in range(num_bins)]
+    # Ensure last boundary is exactly max_val to close the range
+    bin_boundaries[-1] = max_val
+    
+    # Step 3: Populate bins with unique values
+    unique_points = sorted(list(set(points)))
+    bin_counts = [0] * num_bins
+    
+    for p in unique_points:
+        # Find bin index i such that bin_boundaries[i-1] < p < bin_boundaries[i]
+        # Note: bin_boundaries[-1] is max_val. 
+        # We need to handle the range carefully.
+        # Bin 0 range: (min, bin_boundaries[0]]
+        # Bin i range: (bin_boundaries[i-1], bin_boundaries[i]]
+        # However, the source says "less than the bin value, but greater than the previous bin value"
+        # and "first bin is assigned min + step".
+        # Let's map p to bin index.
+        
+        # Find first boundary > p
+        idx = 0
+        while idx < num_bins and bin_boundaries[idx] <= p:
+            idx += 1
+        
+        if idx < num_bins:
+            bin_counts[idx] += 1
+            
+    # Calculate total unique points
+    total_points = sum(bin_counts)
+    
+    if total_points == 0:
+        return [min_val + (max_val - min_val) / max(1, num_planes - 1) * i for i in range(num_planes)]
+
+    # Step 4: Allocate planes
+    plane_counts = [0] * num_bins
+    for i in range(num_bins):
+        if bin_counts[i] > 0:
+            # np = (bp / tp) * pi + 0.5, rounded
+            # Using standard rounding (add 0.5 and floor)
+            np_val = int((bin_counts[i] / total_points) * num_planes + 0.5)
+            plane_counts[i] = np_val
+            
+    # Step 5: Position planes
+    planes = []
+    prev_boundary = min_val
+    
+    for i in range(num_bins):
+        count = plane_counts[i]
+        if count > 0:
+            current_boundary = bin_boundaries[i]
+            # Place planes from prev_boundary up to (but not including) current_boundary
+            # Evenly spaced
+            if count == 1:
+                # Single plane in the middle? Or at start?
+                # "stepped through the bin range" implies uniform distribution
+                # If count is 1, position is typically start + step/2 or just start?
+                # Constant spacing logic: first plane at min, step units apart.
+                # Here: "starting at the previous bin's value, stepped through... up to but not including"
+                # This implies the first plane is at prev_boundary?
+                # Let's assume uniform spacing within the bin range [prev, curr)
+                # pos_j = prev + (j / count) * (curr - prev)
+                # If j=0, pos=prev.
+                for j in range(count):
+                    pos = prev_boundary + (j / count) * (current_boundary - prev_boundary)
+                    planes.append(pos)
+            else:
+                for j in range(count):
+                    pos = prev_boundary + (j / count) * (current_boundary - prev_boundary)
+                    planes.append(pos)
+            
+        prev_boundary = current_boundary
+        
+    # Boundary Enforcement [G]
+    # The source mentions a user option to force min and max. 
+    # Without this option, the grid range might shrink if first/last bins are empty.
+    # We will return the calculated planes as per the core algorithm.
+    
+    return planes
+```
+
+**Parameters**
+*   $P$: Total planes per axis. Typical values depend on desired resolution.
+*   $B = P/2$: Number of bins.
+*   Rounding: Add 0.5 before integer conversion to bias towards rounding up [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+*   **Integer Conversion Error:** The formula $np = \frac{bp}{tp} \cdot pi + 0.5$ can still result in one more or one less plane than $P$ due to integer truncation [S1, unofficial].
+*   **Grid Range Shrinkage:** If insufficient points fall in the first or last bins, the calculated planes may not cover the full $[min, max]$ range. A user option is available to force planes at exact $min$ and $max$ coordinates [S1, unofficial].
+*   **Extreme Size Variance:** The algorithm places too much emphasis on dense areas, causing loss of information in less dense areas and creating cells with extreme size variances [S1, unofficial].
+
+## Subtopics
+
+### Constant Plane Spacing
+Places planes at uniform intervals. Preferred for accuracy when data distribution is not highly clustered. [Link](5069-constant-plane-spacing.md)
+
+### Structured Grid Triangle List Generation
+Generates mesh topology from the grid. Does not determine plane positions. [Link](8189-structured-grid-triangle-list-generation.md)
+
+## Operating characteristics
+*   **Time Complexity:** Higher than constant spacing. Requires maintaining linked lists of unique coordinate values and multiple traversals of the bin list [S1, unofficial].
+*   **Memory Complexity:** Higher than constant spacing due to storage of bin structures and unique value lists [S1, unofficial].
+*   **Measured Performance:** In tests, variable spacing required significantly more CPU time to sample data compared to constant spacing [S1, unofficial].
+*   **Strengths:** Samples data well in areas where planes are closely located to data points (high density) [S1, unofficial].
+*   **Limitations:** Samples poorly in sparse areas; information from less dense areas is lost; extreme cell size variances reduce overall quality [S1, unofficial].
+*   **When to Use:** When data is highly clustered and preserving detail in dense regions is prioritized over uniform coverage.
+*   **When Not to Use:** When uniform accuracy across the entire volume is required, or when computational resources are limited [S1, unofficial].
+
+## Background
+The method was described in a report by the Defense Technical Information Center (DTIC) in the late 1980s/early 1990s [S1, unofficial]. It was developed as an alternative to constant plane spacing for sampling scattered data onto rectangular grids for volume visualization. The report notes that while variable spacing has merit, the specific implementation described placed too much emphasis on dense areas, suggesting that a "smarter algorithm" for spreading plane locations could yield better results [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA215533: Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)

@@ -8,7 +8,7 @@ Hemisphere Illumination is a local shading model for volume rendering that simul
 ## How it works
 **Inputs:**
 - Volume data $\Omega(x,y,z)$ (albedo/density) [S2, unofficial].
-- Orientation field $N(x,y,z) = (N_x, N_y, N_z)$, typically derived from the gradient of the volume data [S2, unofficial].
+- Orientation field $N(x,y,z) = (N_x, N_y, N_z)$ [S2, unofficial].
 - Lighting direction $L = (L_x, L_y, L_z)$, a unit vector [S2, unofficial].
 - Source intensity $I_s$ (constant) [S2, unofficial].
 - Viewing direction $V$ (normalized, pointing away from the eye) [S2, unofficial].
@@ -26,23 +26,36 @@ Hemisphere Illumination is a local shading model for volume rendering that simul
 ```python
 def precompute(volume_omega, orientation_N, source_intensity):
     # Create four copies of Is * Omega
-    spec_x = fft3d(source_intensity * volume_omega * orientation_N.x)
-    spec_y = fft3d(source_intensity * volume_omega * orientation_N.y)
-    spec_z = fft3d(source_intensity * volume_omega * orientation_N.z)
-    spec_c = fft3d(source_intensity * volume_omega)
+    vol_x = source_intensity * volume_omega * orientation_N.x
+    vol_y = source_intensity * volume_omega * orientation_N.y
+    vol_z = source_intensity * volume_omega * orientation_N.z
+    vol_c = source_intensity * volume_omega
+    # Compute 3D Fourier Transform of each to yield four 3D spectra
+    spec_x = fft3d(vol_x)
+    spec_y = fft3d(vol_y)
+    spec_z = fft3d(vol_z)
+    spec_c = fft3d(vol_c)
     return spec_x, spec_y, spec_z, spec_c
 
 def render(spec_x, spec_y, spec_z, spec_c, viewing_direction_V, lighting_direction_L):
-    # Extract slices along viewing direction V
-    slice_x = extract_slice(spec_x, V)
-    slice_y = extract_slice(spec_y, V)
-    slice_z = extract_slice(spec_z, V)
-    slice_c = extract_slice(spec_c, V)
+    # Extract slices from spectra along viewing direction V
+    slice_x = extract_slice(spec_x, viewing_direction_V)
+    slice_y = extract_slice(spec_y, viewing_direction_V)
+    slice_z = extract_slice(spec_z, viewing_direction_V)
+    slice_c = extract_slice(spec_c, viewing_direction_V)
     # Compute constant c2
-    c2 = pi/2 - pi/2 * (L.x + L.y + L.z)
+    c2 = pi/2 - pi/2 * (lighting_direction_L.x + lighting_direction_L.y + lighting_direction_L.z)
     # Combine slices
-    intensity = L.x * slice_x + L.y * slice_y + L.z * slice_z + c2 * slice_c
+    intensity = lighting_direction_L.x * slice_x + lighting_direction_L.y * slice_y + lighting_direction_L.z * slice_z + c2 * slice_c
     return intensity
+
+def fft3d(volume):
+    # Standard 3D discrete Fourier transform
+    return transform_3d_fft(volume)
+
+def extract_slice(spectrum, direction):
+    # Projection-slice operation: extract 2D slice from 3D spectrum along direction
+    return project_slice(spectrum, direction)
 ```
 
 **Steps:**
@@ -71,7 +84,7 @@ This integral is decomposed into the linear combination shown above to allow eff
 - **Viewing Direction:** $V$ points away from the eye [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Zero Padding:** To avoid aliasing in the frequency domain, the input volume may need to be zero-padded. Increasing the volume width by a factor of $k^2$ (surrounding data with a margin of zeros of width $N(k^2-1)/2$) increases per-view processing time by a factor of $k^2$, memory by $k^3$, and preprocessing time by a factor of $k^2$ [S2, unofficial].
+- **Zero Padding:** To avoid aliasing in the frequency domain, the input volume may need to be zero-padded [S2, unofficial]. Increasing the volume width by a factor of $k^2$ (surrounding data with a margin of zeros of width $N(k^2-1)/2$) increases per-view processing time by a factor of $k^2$, memory by $k^3$, and preprocessing time by a factor of $k^2$ [S2, unofficial].
 - **Orientation Field:** The accuracy of the shading depends on the quality of the orientation field $N$ [S2, unofficial].
 - **No Occlusion:** The method does not account for occlusion between volume elements [S1, unofficial].
 
@@ -81,7 +94,7 @@ This integral is decomposed into the linear combination shown above to allow eff
 A global illumination solution that models single-bounce light contribution from the sky by creating a virtual skybox of infinite directional lights and sampling it over the hemisphere directed away from the surface normal. Unlike typical raster renderers that model the sky as one or more directional lights (causing inaccurate shadowing and dark scenes), this method provides accurate shadowing and illumination by integrating radiance over the hemisphere.
 
 ## Operating characteristics
-- **Time Complexity:** Preprocessing time is proportional to the size of the zero-padded volume. Per-view processing time increases with the amount of zero padding [S2, unofficial].
+- **Time Complexity:** Preprocessing time is proportional to the size of the zero-padded volume [S2, unofficial]. Per-view processing time increases with the amount of zero padding [S2, unofficial].
 - **Memory Complexity:** Memory requirements increase with the size of the zero-padded volume [S2, unofficial].
 - **Strengths:** Provides strong directional shading cues that enhance shape perception and spatial relationships in volume data [S1, unofficial]. Computed efficiently in the frequency domain via 3D Fourier transforms [S2, unofficial].
 - **Limitations:** Does not model occlusion or global illumination effects like inter-reflections [S1, unofficial]. Accuracy depends on the quality of the orientation field [S2, unofficial].

@@ -1,0 +1,39 @@
+# Denoising via Neural Auxiliary Features
+
+Also called: Neural denoising for path-traced volume rendering, Volumetric neural denoising
+
+## Overview
+Denoising via Neural Auxiliary Features addresses the high-variance noise inherent in low-sample Monte Carlo path-traced volume rendering, enabling interactive frame rates by trading unbiased convergence for biased neural reconstruction [S1, unofficial]. Unlike surface-only denoisers which rely on well-defined geometric features like normals and albedo, this family exploits spatial and volumetric correlations using auxiliary features derived from scattering events, which are often ill-defined or unavailable throughout participating media [S1, unofficial].
+
+## Shared principles
+The core mechanism replaces the traditional texture lookup and interpolation step of the neural query stage with a post-processing reconstruction network [S1, unofficial]. The method operates on the output of the [Neural volume rendering](1576-neural-volume-rendering.md) pipeline, specifically targeting the noise introduced by low sample counts (1–16 samples per pixel) [S1, unofficial].
+
+The process relies on auxiliary features that characterize the volumetric state at each pixel. For participating media, these features are derived from the first surface-like interaction or the first scattering event along the ray [S1, unofficial]. Common auxiliary features include:
+*   Depth
+*   Model-space position
+*   World-space normal
+*   Gradient magnitude
+*   Optical thickness
+
+These features are concatenated with the noisy rendered image and passed to a neural network (e.g., autoencoder, bilateral grid, or U-Net) to predict the clean color [S1, unofficial]. The network learns to separate high-frequency direct lighting effects from low-frequency indirect lighting, often using transmittance-weighted decomposition to stabilize temporal consistency [S1, unofficial].
+
+## Subtopics
+
+### Dual autoencoder denoising
+A dual autoencoder architecture that separates high-frequency direct lighting effects from low-frequency indirect lighting to denoise path-traced medical volumetric data. It distinguishes itself by processing direct lighting via primary features from first scatter events (model-space position, world-space normal, gradient magnitude, optical thickness) and indirect lighting via secondary features from subsequent scatters, combined with a relativistic discriminator. It is chosen when anatomical detail preservation is critical for medical interpretation, though it is not suitable for interactive visualization due to latency. [Dual autoencoder denoising](1988-dual-autoencoder-denoising.md)
+
+### Neural bilateral grid denoising
+A denoising method employing neural bilateral grids with volumetric auxiliary features for path-traced volume rendering. It is distinguished by its use of depths, positions, and normals from the first surface-like interaction and first scattering event to achieve high-quality denoising with low latency. It is chosen when real-time performance is required for 1024×1024 resolutions. [Neural bilateral grid denoising](1989-neural-bilateral-grid-denoising.md)
+
+### Dual-input feature fusion denoising
+A method introducing dual-input feature fusion with radiance decomposition weighted by transmittance to separate low-noise SDF components from high-noise quotient components. It is distinguished by its use of learned weight map blending for superior temporal stability. It is chosen for real-time applications at higher resolutions (e.g., 2560×1440). [Dual-input feature fusion denoising](1990-dual-input-feature-fusion-denoising.md)
+
+### U-Net Based Denoising
+A 2D U-Net architecture used for image enhancement or denoising, consisting of an encoder and a decoder. It is distinguished by its slice-by-slice processing of volumetric data, making it suitable for post-reconstruction enhancement of CT volumes rather than real-time ray-casting denoising. It is chosen for offline physics-aware CT reconstruction pipelines. [U-Net Based Denoising](1991-u-net-based-denoising.md)
+
+## Background
+Hofmann et al. [66] pioneered neural denoising for path-traced medical volumetric data, identifying that existing surface-only denoisers fail on participating media because auxiliary features are ill-defined [S1, unofficial]. Subsequent work by Jabbireddy et al. [70] introduced neural bilateral grids, and Xu et al. [169] proposed dual-input feature fusion [S1, unofficial]. Engel and Ropinski [31] explored 3D convolutional encoder-decoders for per-voxel ambient occlusion prediction [S1, unofficial]. These methods build upon architectural foundations from computer graphics surface rendering denoising [15, 179] but require adaptation for volumetric media [S1, unofficial].
+
+## Sources
+[S1] Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+[S2] ayush-chauhan-1202/physics-aware-ct-reconstruction, https://github.com/ayush-chauhan-1202/physics-aware-ct-reconstruction, fetched 2026-10-27 (unofficial)

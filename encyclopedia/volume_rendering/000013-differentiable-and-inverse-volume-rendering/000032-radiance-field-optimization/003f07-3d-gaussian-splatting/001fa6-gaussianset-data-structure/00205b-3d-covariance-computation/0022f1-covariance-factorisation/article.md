@@ -3,120 +3,143 @@
 Also called: Covariance Decomposition, RQ Decomposition for Covariance, Rotation and Scale Parameterization
 
 ## Overview
-Covariance Factorisation is a parameterization technique for 3D Gaussian splats that decomposes the covariance matrix into a rotation matrix and a scaling matrix, ensuring the covariance remains positive semi-definite under unconstrained gradient descent [S1, unofficial]. It sets itself apart from direct covariance optimization by embedding geometric constraints directly into the parameter space, and from Cholesky parameterization by explicitly separating rotation and scale for physical interpretability [S1, unofficial][S2].
+Covariance Factorisation is a parameterization technique for 3D Gaussian splats that decomposes the covariance matrix $\Sigma$ into a rotation component and a scale component, ensuring the resulting matrix remains positive semi-definite (PSD) during unconstrained gradient descent optimization [S1, unofficial]. It sets itself apart from direct covariance optimization by embedding geometric constraints directly into the parameter space, preventing the physical invalidity of non-PSD matrices [S5]. This method is the foundational mechanism in 3D Gaussian Splatting (3DGS) that allows for stable, differentiable training of anisotropic Gaussian primitives [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Unconstrained learnable parameters for rotation (typically a quaternion or axis-angle) and scale (3D vector).
-- Output: The 3D covariance matrix $\boldsymbol{\Sigma}$.
+*   **Inputs:** Unconstrained learnable parameters representing rotation (typically a quaternion $\mathbf{q}$) and scale (a 3D vector $\mathbf{s}$).
+*   **Outputs:** A valid, positive semi-definite 3D covariance matrix $\Sigma$ and its inverse $\Sigma^{-1}$ (or Cholesky factor) required for rendering and gradient computation.
 
 **Data Structures:**
-- Rotation $\mathbf{R}$: A $3 \times 3$ orthonormal matrix derived from a 4D quaternion $\mathbf{q} = [w, x, y, z]$ or similar representation.
-- Scale $\mathbf{S}$: A $3 \times 3$ diagonal matrix $\text{diag}(s_x, s_y, s_z)$ where $s_i > 0$.
+The method operates on two primary learnable tensors per Gaussian primitive:
+1.  **Rotation ($\mathbf{q}$):** A 4-element vector representing a unit quaternion.
+2.  **Scale ($\mathbf{s}$):** A 3-element vector containing positive scale factors.
 
 **Steps:**
-1. **Parameterize Rotation:** Convert the learnable rotation parameters (e.g., quaternion) into a $3 \times 3$ rotation matrix $\mathbf{R}$. Ensure $\mathbf{R}$ is orthonormal ($\mathbf{R}^T \mathbf{R} = \mathbf{I}$).
-2. **Parameterize Scale:** Convert the learnable scale parameters into a diagonal scaling matrix $\mathbf{S} = \text{diag}(s_x, s_y, s_z)$. To ensure positive scale, apply an exponential or absolute value function if the raw parameters are unconstrained [G].
-3. **Compute Covariance:** Calculate the covariance matrix using the formula:
-   $$ \boldsymbol{\Sigma} = \mathbf{R} \mathbf{S} \mathbf{S}^T \mathbf{R}^T $$
-   Since $\mathbf{S}$ is diagonal, $\mathbf{S} \mathbf{S}^T = \text{diag}(s_x^2, s_y^2, s_z^2)$. Thus:
-   $$ \boldsymbol{\Sigma} = \mathbf{R} \begin{bmatrix} s_x^2 & 0 & 0 \\ 0 & s_y^2 & 0 \\ 0 & 0 & s_z^2 \end{bmatrix} \mathbf{R}^T $$
-4. **Optimization:** During gradient descent, optimize the unconstrained rotation and scale parameters. The factorization guarantees that $\boldsymbol{\Sigma}$ remains positive semi-definite by construction [S1, unofficial].
+1.  **Initialize Parameters:** Initialize $\mathbf{q}$ as a unit quaternion (e.g., identity rotation) and $\mathbf{s}$ as small positive values (e.g., derived from initial point cloud density) [S5].
+2.  **Reconstruct Rotation Matrix:** Convert the quaternion $\mathbf{q}$ into a $3 \times 3$ rotation matrix $\mathbf{R}$ [S5].
+    *   Let $\mathbf{q} = [w, x, y, z]^T$.
+    *   $\mathbf{R}$ is computed using standard quaternion-to-matrix conversion formulas [G].
+3.  **Construct Scale Matrix:** Create a diagonal scaling matrix $\mathbf{S}$ from the scale vector $\mathbf{s}$:
+    $$ \mathbf{S} = \text{diag}(\mathbf{s}) = \begin{bmatrix} s_x & 0 & 0 \\ 0 & s_y & 0 \\ 0 & 0 & s_z \end{bmatrix} $$
+    where $s_x, s_y, s_z > 0$ [S5].
+4.  **Compute Covariance:** Calculate the covariance matrix $\Sigma$ using the factorization:
+    $$ \Sigma = \mathbf{R} \mathbf{S} \mathbf{S}^T \mathbf{R}^T $$
+    Since $\mathbf{S}$ is diagonal, $\mathbf{S} \mathbf{S}^T = \mathbf{S}^2 = \text{diag}(s_x^2, s_y^2, s_z^2)$ [S2, S5].
+5.  **Ensure Positive Definiteness:** The structure $\mathbf{R} \mathbf{S}^2 \mathbf{R}^T$ guarantees $\Sigma$ is symmetric and positive semi-definite because $\mathbf{S}^2$ has non-negative eigenvalues and $\mathbf{R}$ is orthogonal [S1, unofficial].
+6.  **Gradient Derivation (Optimization):** To avoid the computational cost and potential instability of automatic differentiation through the complex graph $\mathbf{q}, \mathbf{s} \rightarrow \Sigma \rightarrow \Sigma' \rightarrow \alpha$, 3DGS derives analytical gradients for $\mathbf{q}$ and $\mathbf{s}$ directly [S5].
+    *   The gradient of the loss $\mathcal{L}$ with respect to $\Sigma$ is assumed to be available from the rendering pipeline.
+    *   Gradients for $\mathbf{q}$ and $\mathbf{s}$ are computed via the chain rule: $\frac{\partial \mathcal{L}}{\partial \mathbf{q}} = \frac{\partial \mathcal{L}}{\partial \Sigma} : \frac{\partial \Sigma}{\partial \mathbf{q}}$ and $\frac{\partial \mathcal{L}}{\partial \mathbf{s}} = \frac{\partial \mathcal{L}}{\partial \Sigma} : \frac{\partial \Sigma}{\partial \mathbf{s}}$ [S5].
+    *   Note: The exact analytical derivatives for quaternion-to-matrix and scale-to-covariance mappings are implemented to bypass autograd overhead [S5].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_covariance(quaternion: Tuple[float, float, float, float], scales: Tuple[float, float, float]) -> Matrix3x3:
+import numpy as np
+
+def quaternion_to_rotation_matrix(q):
     """
-    Computes the 3D covariance matrix from quaternion and scale parameters.
-    
-    Args:
-        quaternion: (w, x, y, z) normalized quaternion representing rotation.
-        scales: (sx, sy, sz) positive scale factors.
-        
-    Returns:
-        3x3 covariance matrix Sigma.
+    Converts a unit quaternion [w, x, y, z] to a 3x3 rotation matrix.
+    q: array-like of shape (4,)
+    Returns: R, shape (3, 3)
     """
-    # 1. Convert quaternion to rotation matrix R
-    w, x, y, z = quaternion
-    # Ensure normalization
-    norm = sqrt(w*w + x*x + y*y + z*z)
-    w, x, y, z = w/norm, x/norm, y/norm, z/norm
-    
+    w, x, y, z = q[0], q[1], q[2], q[3]
     # Standard quaternion to rotation matrix conversion
-    R = Matrix3x3(
-        1 - 2*(y*y + z*z), 2*(x*y - w*z),     2*(x*z + w*y),
-        2*(x*y + w*z),     1 - 2*(x*x + z*z), 2*(y*z - w*x),
-        2*(x*z - w*y),     2*(y*z + w*x),     1 - 2*(x*x + y*y)
-    )
+    R = np.array([
+        [1 - 2*(y*y + z*z), 2*(x*y - w*z),     2*(x*z + w*y)],
+        [2*(x*y + w*z),     1 - 2*(x*x + z*z), 2*(y*z - w*x)],
+        [2*(x*z - w*y),     2*(y*z + w*x),     1 - 2*(x*x + y*y)]
+    ])
+    return R
+
+def compute_covariance(q, s):
+    """
+    Computes the covariance matrix Sigma from quaternion q and scale vector s.
+    q: array-like of shape (4,), unit quaternion
+    s: array-like of shape (3,), positive scale factors
+    Returns: Sigma, shape (3, 3)
+    """
+    # Step 1: Get rotation matrix R
+    R = quaternion_to_rotation_matrix(q)
     
-    # 2. Construct scaling matrix S (diagonal)
-    sx, sy, sz = scales
-    # Ensure positive scales for physical significance [G]
-    sx = exp(sx)
-    sy = exp(sy)
-    sz = exp(sz)
+    # Step 2: Construct diagonal scaling matrix S
+    # S = diag(s)
+    # S @ S.T = diag(s^2)
+    s_sq = s * s
     
-    # 3. Compute Sigma = R * S * S^T * R^T
-    # S * S^T is diagonal with squared scales
-    S_sq = Matrix3x3(
-        sx*sx, 0, 0,
-        0, sy*sy, 0,
-        0, 0, sz*sz
-    )
-    
-    # Matrix multiplication: R @ S_sq @ R^T
-    # First compute R @ S_sq
-    R_S_sq = Matrix3x3(
-        R[0][0]*sx*sx, R[0][1]*sy*sy, R[0][2]*sz*sz,
-        R[1][0]*sx*sx, R[1][1]*sy*sy, R[1][2]*sz*sz,
-        R[2][0]*sx*sx, R[2][1]*sy*sy, R[2][2]*sz*sz
-    )
-    
-    # Then (R @ S_sq) @ R^T
-    Sigma = Matrix3x3(
-        R_S_sq[0][0]*R[0][0] + R_S_sq[0][1]*R[1][0] + R_S_sq[0][2]*R[2][0],
-        R_S_sq[0][0]*R[0][1] + R_S_sq[0][1]*R[1][1] + R_S_sq[0][2]*R[2][1],
-        R_S_sq[0][0]*R[0][2] + R_S_sq[0][1]*R[1][2] + R_S_sq[0][2]*R[2][2],
-        
-        R_S_sq[1][0]*R[0][0] + R_S_sq[1][1]*R[1][0] + R_S_sq[1][2]*R[2][0],
-        R_S_sq[1][0]*R[0][1] + R_S_sq[1][1]*R[1][1] + R_S_sq[1][2]*R[2][1],
-        R_S_sq[1][0]*R[0][2] + R_S_sq[1][1]*R[1][2] + R_S_sq[1][2]*R[2][2],
-        
-        R_S_sq[2][0]*R[0][0] + R_S_sq[2][1]*R[1][0] + R_S_sq[2][2]*R[2][0],
-        R_S_sq[2][0]*R[0][1] + R_S_sq[2][1]*R[1][1] + R_S_sq[2][2]*R[2][1],
-        R_S_sq[2][0]*R[0][2] + R_S_sq[2][1]*R[1][2] + R_S_sq[2][2]*R[2][2]
-    )
+    # Step 3: Compute Sigma = R @ S @ S.T @ R.T
+    # Since S is diagonal, S @ S.T is diag(s^2)
+    # We can compute this efficiently as R @ diag(s^2) @ R.T
+    Sigma = R @ np.diag(s_sq) @ R.T
     
     return Sigma
+
+def update_parameters(q, s, grad_Sigma, learning_rate):
+    """
+    Updates q and s using analytical gradients derived from grad_Sigma.
+    Note: The exact analytical derivatives for dq and ds are complex and 
+    specific to the 3DGS implementation to avoid autograd overhead [S5].
+    This pseudocode represents the conceptual update step.
+    """
+    # Placeholder for analytical gradient computation
+    # In practice, one computes dSigma/dq and dSigma/ds explicitly
+    # and contracts with grad_Sigma.
+    
+    # grad_q = ... (analytical derivative)
+    # grad_s = ... (analytical derivative)
+    
+    # q = q - learning_rate * grad_q
+    # s = s - learning_rate * grad_s
+    
+    # For the purpose of this article, we note that direct optimization 
+    # of Sigma is avoided [S5].
+    pass
 ```
 
+**Parameters:**
+*   **Learning Rate:** Typical values for $\mathbf{q}$ and $\mathbf{s}$ are tuned separately or jointly; standard 3DGS uses Adam optimizer [S1, unofficial].
+*   **Scale Clamping:** Scales are often clamped to a minimum value to prevent degenerate Gaussians [G].
+
 **Edge Cases and Pitfalls:**
-- **Degenerate Scales:** If any scale parameter approaches zero, the Gaussian becomes degenerate (flat). Exponential parameterization prevents negative scales but can lead to numerical underflow if scales are too small [G].
-- **Quaternion Ambiguity:** Quaternions $\mathbf{q}$ and $-\mathbf{q}$ represent the same rotation. Optimization may jump between these, causing discontinuities. Use a consistent convention or local parameterization [G].
-- **Orthonormality Drift:** If $\mathbf{R}$ is not strictly orthonormal, $\boldsymbol{\Sigma}$ may not be positive semi-definite. Re-orthonormalization (e.g., via SVD) may be needed after updates [G].
+*   **Non-PSD Matrices:** Directly optimizing $\Sigma$ can result in non-PSD matrices, violating physical interpretation [S5]. Factorisation prevents this.
+*   **Quaternion Ambiguity:** Quaternions $\mathbf{q}$ and $-\mathbf{q}$ represent the same rotation. Optimization must handle this sign ambiguity to ensure smooth gradients [G].
+*   **Scale Positivity:** Scales must remain positive. If optimized unconstrained, negative scales can flip orientation. Clamping or exponential parameterization ($s = \exp(\hat{s})$) is often used [G].
 
 ## Subtopics
 
 ### [Cholesky Parameterisation for Gaussian Splats](3120-cholesky-parameterisation-for-gaussian-splats.md)
-Cholesky Parameterisation represents the covariance matrix using the lower triangular Cholesky factor, guaranteeing positive-definiteness by construction. It sets itself apart from quaternion-based factorizations by storing fewer parameters ($D(D+1)/2$) and from unconstrained optimization by embedding geometric constraints directly into the parameter space. It is primarily used in Luxar for microscopy data visualization to ensure stable optimization of Gaussian splats.
+Cholesky Parameterisation is a method for representing the covariance matrix of a 3D Gaussian splat that guarantees positive-definiteness by construction. It sets itself apart from quaternion-based factorizations by storing fewer parameters ($D(D+1)/2$) and from unconstrained optimization by embedding geometric constraints directly into the parameter space. It is primarily used in Luxar for microscopy data visualization to ensure stable optimization of Gaussian splats.
 
 ### Gamma-Decomposed Covariance Update
 A numerical stability technique for computing the new covariance matrix after recycling, replacing the unsupported $\beta()$ function with $\Gamma()$ and $\ln(\Gamma())$ to prevent overflow [S3].
 
+### Covariance Matrix Normalization
+A technique to transform a covariance matrix $\Sigma$ into a normalized form $\hat{\Sigma}$ by dividing it by its trace, separating the scaling vector $\mathbf{s}$ from the rotation matrix $\mathbf{R}$ [S4].
+Formula:
+$$ \hat{\Sigma} = \frac{\Sigma}{\text{Tr}(\Sigma)} = \mathbf{R} \frac{\mathbf{S}^2}{\|\mathbf{s}\|_2^2} \mathbf{R}^T = \mathbf{R} \hat{\mathbf{S}}^2 \mathbf{R}^T $$
+where $\|\mathbf{s}\|_2^2 = \text{Tr}(\Sigma)$ [S4].
+
+### Quaternion-Scale Covariance Parameterization
+A parameterization of the 3D Gaussian covariance matrix $\Sigma$ using a quaternion $\mathbf{q}$ and a 3D scale vector $\mathbf{s}$ to ensure the matrix remains positive semi-definite during optimization [S5].
+*   **Step:** Optimize quaternion $\mathbf{q}$ and scale vector $\mathbf{s}$ directly via back-propagation instead of optimizing $\Sigma$ directly [S5].
+*   **Step:** Derive gradients for $\mathbf{q}$ and $\mathbf{s}$ directly during optimization to avoid the computational cost of automatic differentiation through the complex graph $\mathbf{q}, \mathbf{s} \rightarrow \Sigma \rightarrow \Sigma' \rightarrow \alpha$ [S5].
+*   **Pitfall:** Directly optimizing the covariance matrix $\Sigma$ can result in a non-positive semi-definite matrix, violating physical interpretation [S5].
+
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per Gaussian for covariance computation (constant size matrix operations).
-- **Memory Complexity:** $O(1)$ per Gaussian for storing rotation (4 floats) and scale (3 floats) instead of 6 floats for the full covariance matrix.
-- **Strengths:** Ensures positive semi-definiteness without projection; physically interpretable rotation and scale; efficient gradient computation.
-- **Limitations:** Requires careful handling of rotation parameterization to avoid singularities; scale parameterization must ensure positivity.
-- **When to Use:** Standard 3D Gaussian Splatting optimization where physical interpretability and stability are required.
-- **When Not to Use:** When memory is extremely constrained and Cholesky parameterization is preferred for fewer parameters.
+*   **Time Complexity:** The factorization itself is $O(1)$ per Gaussian (constant number of operations for $3 \times 3$ matrix multiplication). The primary cost is the gradient derivation, which is also $O(1)$ if analytical gradients are used [S5].
+*   **Memory Complexity:** Stores 4 floats for $\mathbf{q}$ and 3 floats for $\mathbf{s}$ per Gaussian, totaling 7 floats, compared to 6 floats for a symmetric $\Sigma$ (if stored as 6 values) or 9 floats for a full matrix. However, the quaternion representation is slightly larger than the minimal symmetric representation [S5].
+*   **Strengths:** Guarantees PSD property, enabling stable unconstrained optimization. Compatible with standard differentiable rendering pipelines.
+*   **Limitations:** Requires careful handling of quaternion normalization and scale positivity. Analytical gradient derivation is complex to implement correctly [S5].
+*   **When to use:** When training 3D Gaussian Splatting models where stability and speed of optimization are critical.
+*   **When not to use:** If memory is extremely constrained and the minimal symmetric parameterization is preferred, though stability may suffer.
 
 ## Background
-Originated in the 3D Gaussian Splatting paper [S1, unofficial] as a core component of the rendering pipeline. It enables efficient optimization of anisotropic 3D Gaussians by decoupling rotation and scale. The method has been adopted in various extensions and implementations of 3DGS [S2].
+Covariance Factorisation is a core component of 3D Gaussian Splatting (3DGS), introduced by Kerbl et al. in 2023 [S1, unofficial]. It was developed to address the instability of optimizing covariance matrices directly in differentiable rendering. The method leverages the mathematical property that any positive semi-definite matrix can be decomposed into a rotation and a scaling component. This approach has become the standard for 3DGS implementations, enabling high-quality novel view synthesis at interactive frame rates [S1, unofficial].
 
 ## Sources
 [S1] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26 (unofficial)
 [S2] EVolSplat: Efficient Volume-based Gaussian Splatting for Urban View Synthesis, https://doi.org/10.1109/CVPR52734.2025.01054, fetched 2026-11-03
 [S3] 3D Student Splatting and Scooping, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29
+[S4] Compressed 3D Gaussian Splatting for Accelerated Novel View Synthesis, https://doi.org/10.1109/cvpr52733.2024.00985, fetched 2026-10-26
+[S5] A Survey on 3D Gaussian Splatting, https://doi.org/10.1145/3807511, fetched 2026-10-27

@@ -1,0 +1,183 @@
+# Efficient Local kNN
+
+Also called: Local k-nearest neighbors, O(N) local kNN
+
+## Overview
+Efficient Local kNN is a drop-in replacement for global brute-force k-nearest neighbors search that exploits the multi-view grid structure of point clouds to reduce computational complexity from $O(N^2)$ to $O(N)$ [S1]. It differs from global kNN by constraining the candidate search space to spatially adjacent pixels in the source view and corresponding projected pixels in other views, rather than scanning all $N$ points [S1]. This method is designed for high-resolution point cloud representations, such as Gaussian splatting, where standard kNN attention becomes a bottleneck [S1].
+
+## How it works
+**Inputs:**
+*   $N$: Total number of 3D points (e.g., Gaussians) in the scene.
+*   $K$: Number of neighbors to retrieve.
+*   $V$: Set of $M$ available camera views.
+*   For each view $v \in V$:
+    *   $P_v$: 2D pixel coordinates of points projected into view $v$.
+    *   $X_v$: 3D coordinates of points in view $v$.
+    *   $K_v$: $3 \times 3$ camera intrinsic matrix for view $v$.
+    *   $T_v$: $4 \times 4$ camera pose (extrinsic) matrix for view $v$, transforming world coordinates to camera coordinates.
+*   $r_s$: Spatial radius for same-view window (default: 3) [S1].
+*   $r_c$: Spatial radius for cross-view window (default: 3) [S1].
+*   $C$: Compression factor for depth maps (default: 16, implying 1/4 resolution depth maps) [S1].
+
+**Outputs:**
+*   For each query point $i$, a list of $K$ indices corresponding to its nearest neighbors in 3D Euclidean space.
+
+**Data Structures:**
+*   Points are stored in a grid or hash map structure indexed by 2D pixel coordinates $(u, v)$ for efficient spatial window lookup.
+*   Depth maps are stored at reduced resolution if compression is applied (e.g., 1/4 resolution for 16x compression) [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialize Candidate Sets:** For each query point $i$ with 3D position $X_i$, initialize an empty candidate set $\mathcal{C}_i$.
+
+2.  **Generate Same-View Candidates:**
+    *   Identify the view $v_{src}$ where point $i$ is currently being processed or is most visible.
+    *   Determine the 2D pixel coordinate $p_i = (u_i, v_i)$ of point $i$ in view $v_{src}$.
+    *   Define a square spatial window centered at $p_i$ with side length $2r_s + 1$.
+    *   Retrieve all 3D points $j$ whose projected pixel coordinates $p_j$ in view $v_{src}$ fall within this window.
+    *   Add these points to $\mathcal{C}_i$.
+
+3.  **Gather Cross-View Candidates:**
+    *   For each other available camera view $v_{other} \in V \setminus \{v_{src}\}$:
+        *   Transform the 3D query point $X_i$ into the camera coordinate system of $v_{other}$ using the pose matrix $T_{other}$:
+            $$ X_{cam} = T_{other} \cdot [X_i, 1]^T $$
+            Let $X_{cam} = (x_c, y_c, z_c, w_c)$.
+        *   Project $X_{cam}$ to 2D pixel coordinates $p_{proj}$ using the intrinsic matrix $K_{other}$:
+            $$ \begin{bmatrix} u_{proj} \\ v_{proj} \\ 1 \end{bmatrix} \propto K_{other} \cdot \begin{bmatrix} x_c/w_c \\ y_c/w_c \\ 1 \end{bmatrix} $$
+            (Note: Handle division by zero or points behind the camera by discarding them) [S1].
+        *   Define a square spatial window centered at $p_{proj}$ with side length $2r_c + 1$.
+        *   Retrieve all 3D points $j$ whose projected pixel coordinates $p_j$ in view $v_{other}$ fall within this window.
+        *   Add these points to $\mathcal{C}_i$.
+
+4.  **Select Top-K Neighbors:**
+    *   Compute the 3D Euclidean distance $d_{ij} = \| X_i - X_j \|_2$ for all candidate points $j \in \mathcal{C}_i$.
+    *   Sort candidates by distance.
+    *   Select the $K$ points with the smallest distances.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def efficient_local_knn(points_3d, projections, intrinsics, poses, k, rs=3, rc=3):
+    """
+    Efficient Local kNN implementation.
+    
+    Args:
+        points_3d: Array of shape (N, 3) containing 3D coordinates of all points.
+        projections: Dictionary mapping view_id to array of shape (N, 2) containing 2D pixel coords.
+                     Note: projections[v][i] is the 2D coord of point i in view v.
+                     Points not visible in a view may have NaN or be excluded.
+        intrinsics: Dictionary mapping view_id to 3x3 intrinsic matrix K.
+        poses: Dictionary mapping view_id to 4x4 pose matrix T (world to camera).
+        k: Number of neighbors to find.
+        rs: Same-view spatial radius.
+        rc: Cross-view spatial radius.
+        
+    Returns:
+        neighbors: List of arrays, where neighbors[i] contains indices of k nearest neighbors for point i.
+    """
+    N = points_3d.shape[0]
+    views = list(projections.keys())
+    neighbors = [None] * N
+    
+    # Pre-compute grid indices for fast spatial lookup if needed.
+    # For simplicity, we assume a helper function `get_points_in_window` exists
+    # which takes a view_id, center_pixel, radius, and returns indices of points
+    # within that 2D window.
+    
+    for i in range(N):
+        candidates = []
+        current_point = points_3d[i]
+        
+        # Step 2: Same-view candidates
+        # Assume point i is primarily associated with the first view or a specific source view.
+        # In practice, this might be determined by visibility or a fixed assignment.
+        # Here we assume a fixed source view for demonstration, or iterate all if not specified.
+        # The source text implies "source view" singular per point processing.
+        # We will use view 0 as the source view for point i for this example, 
+        # but in a real implementation, the source view is likely the one where the point is active.
+        src_view = views[0] 
+        
+        if src_view in projections and not np.isnan(projections[src_view][i]).any():
+            p_src = projections[src_view][i]
+            # Get points in same-view window
+            same_view_indices = get_points_in_window(src_view, p_src, rs)
+            for idx in same_view_indices:
+                dist = np.linalg.norm(current_point - points_3d[idx])
+                candidates.append((dist, idx))
+        
+        # Step 3: Cross-view candidates
+        for v_other in views:
+            if v_other == src_view:
+                continue
+                
+            # Project point i into view v_other
+            # Transform to camera coordinates
+            point_homogeneous = np.array([current_point[0], current_point[1], current_point[2], 1.0])
+            cam_coords = poses[v_other] @ point_homogeneous
+            
+            # Check if point is in front of camera
+            if cam_coords[2] <= 0:
+                continue
+                
+            # Project to 2D
+            K = intrinsics[v_other]
+            u_proj = (K[0,0] * cam_coords[0] / cam_coords[2]) + K[0,2]
+            v_proj = (K[1,1] * cam_coords[1] / cam_coords[2]) + K[1,2]
+            p_proj = np.array([u_proj, v_proj])
+            
+            # Get points in cross-view window
+            cross_view_indices = get_points_in_window(v_other, p_proj, rc)
+            for idx in cross_view_indices:
+                dist = np.linalg.norm(current_point - points_3d[idx])
+                candidates.append((dist, idx))
+                
+        # Step 4: Select top-k
+        candidates.sort(key=lambda x: x[0])
+        neighbors[i] = [idx for _, idx in candidates[:k]]
+        
+    return neighbors
+
+def get_points_in_window(view_id, center_pixel, radius):
+    """
+    [G] Helper function to retrieve point indices within a 2D spatial window.
+    In a real implementation, this would use a grid or hash map for O(1) or O(log N) lookup.
+    For the purpose of this algorithm description, it returns indices of points
+    whose 2D projections fall within [center - radius, center + radius].
+    """
+    # This is a placeholder for the actual spatial indexing structure.
+    # The source [S1] mentions exploiting the grid structure.
+    # We assume a global grid `grid[view_id][u][v]` stores point indices.
+    # Since we cannot define the full grid structure here without more context,
+    # we note that this step relies on the spatial locality of projections.
+    pass
+```
+
+**Parameters:**
+*   $r_s = 3$: Spatial radius for the same-view window [S1].
+*   $r_c = 3$: Spatial radius for the cross-view window [S1].
+*   Compression Factor: 16x by default, using depth maps at 1/4 resolution [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Visibility:** Points may not be visible in all views. The algorithm must handle cases where a point's projection falls outside the image bounds or is occluded (depth test) in a cross-view [S1].
+*   **Precision:** Floating-point precision in projection calculations should be sufficient to accurately locate the 2D pixel [S1].
+*   **Boundary Conditions:** Points near the edge of the image may have fewer candidates in their spatial window.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$, compared to $O(N^2)$ for global brute-force search [S1]. This is achieved by vectorizing cross-view reprojections and limiting the search space to local windows [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** On 8 views at 512x960 resolution with 246K Gaussians, Local kNN takes 0.591s, compared to Global kNN's 0.816s [S1].
+*   **Quality Impact:** Negligible quality loss. PSNR is 27.65 for Local kNN vs 27.70 for Global kNN [S1]. SSIM is 0.867 vs 0.868, and LPIPS is 0.163 vs 0.160 [S1].
+*   **Strengths:** Significant speedup for high-resolution point clouds; maintains high visual fidelity [S1].
+*   **Limitations:** Relies on the assumption that nearby pixels project to nearby 3D points, which holds for surfaces but may fail for highly non-planar or self-occluding structures if the windows are too small [S1].
+*   **When to Use:** When processing high-resolution point clouds (e.g., Gaussian Splatting) where global kNN is too slow [S1].
+*   **When Not to Use:** When extreme precision is required and the speedup is not critical, or if the scene geometry violates the local planarity assumption significantly [S1].
+
+## Background
+Efficient Local kNN was introduced in the context of Gaussian Splatting, specifically in the ReSplat method, to address the computational bottleneck of kNN attention in high-resolution point clouds [S1]. The standard kNN attention implementation relies on a global brute-force search, which imposes an $O(N^2)$ complexity bottleneck [S1]. The authors attribute the need for this optimization to the patch-based architecture of underlying models (like DINOv2) which may result in coarser spatial information, making local search more effective [S1]. The method was evaluated on 8 views at 512x960 resolution [S1].
+
+## Sources
+[S1] ReSplat: Learning Recurrent Gaussian Splatting, https://arxiv.org/abs/2510.08575v4, fetched 2026-10-26

@@ -1,0 +1,171 @@
+--- v004.md
++++ v005.md
+@@ -8,21 +8,21 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and an octree node defined by its center $\mathbf{c}$, half-extent $h$, and depth. The ray entry ($t_{enter}$) and exit ($t_{exit}$) parameters relative to the node's bounding box are pre-computed [S5, unofficial].
++*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and an octree node defined by its center $\mathbf{c}$, half-extent $h$, and depth [G]. The ray entry ($t_{enter}$) and exit ($t_{exit}$) parameters relative to the node's bounding box are pre-computed [S5, unofficial].
+ *   **Output:** A sequence of child octant indices (0–7) to visit, and potentially the values of voxels at leaf/cap nodes for isosurface reconstruction [S2][S4, unofficial].
+ 
+ **Data Structures:**
+ *   **Node:** Contains depth, node index, and pointers to children or scalar data [S3][S5, unofficial].
+-*   **`axis_isects[]`:** An array of size 3 storing the sorted $t$-values where the ray intersects the X, Y, and Z mid-planes of the current node [S3][S5, unofficial].
++*   **`axis_isects[]`:** An array of size 3 storing the sorted $t_{center}$ intersection distances for the X, Y, and Z mid-planes [S3][S5, unofficial].
+ *   **`axisbit`:** A bitmask (integer) representing the current child octant index [S3][S5, unofficial].
+ 
+ **Steps:**
+ 1.  **Ray-Node Intersection:** Perform a box test to determine if the ray intersects the current node. If not, terminate. Compute $t_{enter}$ and $t_{exit}$ for the node's bounding box [S5, unofficial].
+-2.  **Mid-Plane Computation:** Compute the octree-space coordinates of the three mid-planes (X, Y, Z) that divide the node into 8 equal child octants. The mid-plane positions are at $\mathbf{c} + \{0, h\}$ along each axis [S3][S5, unofficial].
+-3.  **Intersection Evaluation:** Evaluate the $t$-parameter where the ray intersects each of the three mid-planes. Let these be $t_x, t_y, t_z$ [S3][S5, unofficial].
+-4.  **Sorting:** Sort $t_x, t_y, t_z$ and store them in `axis_isects[]` in ascending order. This array dictates the order in which the ray crosses the boundaries between child octants [S3][S5, unofficial].
+-5.  **First Child Determination:** Compute the index of the first child octant intersected by the ray. This is done using constant shifting and binary-OR operations based on the ray's position relative to the node center, identical to point location [S3][S5, unofficial]. Let this initial index be `axisbit` [S3][S5, unofficial].
++2.  **Mid-Plane Computation:** Compute the octree-space coordinates of the three mid-planes (X, Y, Z) that divide the node into 8 equal child octants [S3][S5, unofficial].
++3.  **Intersection Evaluation:** Evaluate the $t$-parameter where the ray intersects each of the three mid-planes [S3][S5, unofficial].
++4.  **Sorting:** Sort the $t_{center}$ intersection distances and store them in `axis_isects[]` in ascending order [S3][S5, unofficial].
++5.  **First Child Determination:** Compute the index of the first child octant intersected by the ray using constant shifting and binary-OR operations based on the ray's position relative to the node center, identical to point location [S3][S5, unofficial]. Let this initial index be `axisbit` [S3][S5, unofficial].
+ 6.  **Sequential Marching:** Iterate through the sorted `axis_isects[]`. For each mid-plane intersection:
+     *   Determine which axis (X, Y, or Z) corresponds to the current smallest $t$ value in `axis_isects[]` [S3][S5, unofficial].
+-    *   Update `axisbit` by inverting the bit corresponding to that axis. For example, if the ray crosses the X mid-plane, flip the X-bit in `axisbit` [S3][S5, unofficial].
++    *   Update `axisbit` by inverting the bit corresponding to that axis [S2].
+     *   Visit the child octant indicated by the new `axisbit` [S3][S5, unofficial].
+ 7.  **Leaf/Cap Handling:** If a child is a leaf or cap node, handle it using specialized routines (see Subtopics) [S2, S3].
+@@ -31,82 +31,62 @@
+ ```python
+ def traverse_octree_node(ray_origin, ray_direction, node_center, node_half_extent, t_enter, t_exit):
+-    # Step 1: Compute mid-plane positions relative to node center
+-    # Mid-planes are at center + 0 and center + half_extent for each axis
+-    # However, for traversal order, we only need the t-values of intersection
++    # Compute local ray parameters relative to node center and half-extent
++    local_origin = [(ray_origin[i] - node_center[i]) / node_half_extent for i in range(3)]
++    local_direction = [ray_direction[i] / node_half_extent for i in range(3)]
+     
+-    # Step 2 & 3: Compute t-values for X, Y, Z mid-planes
+-    # The mid-planes are at x=0, x=1, y=0, y=1, z=0, z=1 in local node space [-1, 1]
+-    # Or more simply, the ray intersects the plane x=0 (local) at t_x, etc.
+-    # Local ray: p(t) = (ray_origin - node_center) / node_half_extent + ray_direction * t / node_half_extent
+-    # Simplified: We compute t for planes at 0 and 1 in local coordinates.
+-    # Since the ray is linear, we can compute t for the plane at 0 (center) and 1 (edge).
+-    # But the algorithm sorts the mid-planes dividing the children.
+-    # The children are divided by planes at 0.5 in local space if node is [0,1], 
+-    # or 0 if node is [-1,1]. Let's assume local space [-1, 1].
+-    # Mid-planes are at 0.
++    # Compute t-values for intersection with mid-planes at 0 for each axis
++    axis_isects = []
++    for i in range(3):
++        if local_direction[i] == 0.0:
++            axis_isects.append((float('inf'), i))
++        else:
++            axis_isects.append((-local_origin[i] / local_direction[i], i))
++            
++    # Sort t-values ascending to determine traversal order
++    axis_isects.sort(key=lambda x: x[0])
+     
+-    # Local ray parameters
+-    local_origin = (ray_origin - node_center) / node_half_extent
+-    local_direction = ray_direction / node_half_extent
++    # Compute first child octant index based on local origin position
++    axisbit = 0
++    if local_origin[0] >= 0: axisbit |= 1
++    if local_origin[1] >= 0: axisbit |= 2
++    if local_origin[2] >= 0: axisbit |= 4
+     
+-    # Intersection with mid-plane at 0 for each axis
+-    # t = (0 - local_origin[i]) / local_direction[i]
+-    t_x = -local_origin.x / local_direction.x
+-    t_y = -local_origin.y / local_direction.y
+-    t_z = -local_origin.z / local_direction.z
+-    
+-    # Step 4: Sort t-values
+-    # We need to know which axis corresponds to each t-value
+-    isects = [
+-        {'t': t_x, 'axis': 0}, # 0 for X
+-        {'t': t_y, 'axis': 1}, # 1 for Y
+-        {'t': t_z, 'axis': 2}  # 2 for Z
+-    ]
+-    isects.sort(key=lambda k: k['t'])
+-    
+-    # Step 5: Compute first child octant
+-    # Determine which octant the ray enters first based on local_origin
+-    # If local_origin[i] < 0, we are in the lower half (bit 0), else upper (bit 1)
+-    # Child index bits: X is LSB, Y is middle, Z is MSB (or similar convention)
+-    # Convention from [S3][S5, unofficial]: binary-or as point location
+-    child_index = 0
+-    if local_origin.x >= 0: child_index |= 1
+-    if local_origin.y >= 0: child_index |= 2
+-    if local_origin.z >= 0: child_index |= 4
+-    
+-    current_child = child_index
+-    
+-    # Step 6: Sequential Marching
+-    for i in range(3):
+-        # Visit current child
+-        visit_child(current_child)
++    # Visit the first child
++    child_node = get_child_node(axisbit)
++    if child_node is not None:
++        visit_child(child_node)
+         
+-        # Determine which axis we are crossing
+-        axis = isects[i]['axis']
+-        
+-        # Update child index by flipping the bit for this axis
+-        # Bit 0 for X, Bit 1 for Y, Bit 2 for Z
+-        if axis == 0:
+-            current_child ^= 1
+-        elif axis == 1:
+-            current_child ^= 2
+-        elif axis == 2:
+-            current_child ^= 4
+-            
+-    # Visit the last child after crossing all mid-planes
+-    visit_child(current_child)
++    # Sequentially march across child octants by crossing mid-planes
++    for t, axis in axis_isects:
++        if t < t_enter or t > t_exit:
++            continue
++        if axis == 0: axisbit ^= 1
++        elif axis == 1: axisbit ^= 2
++        elif axis == 2: axisbit ^= 4
++        child_node = get_child_node(axisbit)
++        if child_node is not None:
++            visit_child(child_node)
+ 
+-def visit_child(child_index):
+-    # Retrieve child node
+-    child_node = get_child_node(child_index)
+-    if child_node.is_leaf:
+-        handle_leaf(child_node)
+-    elif child_node.is_cap:
+-        handle_cap(child_node)
++def get_child_node(index):
++    # [G] Standard operation: retrieve child node from octree structure
++    return node.children[index] if node.has_children else None
++
++def visit_child(child):
++    # [G] Standard operation: process child node
++    if child.is_leaf:
++        handle_leaf(child)
++    elif child.is_cap:
++        handle_cap(child)
+     else:
+         # Recurse or continue traversal
+-        # Compute new t_enter/t_exit for child
+-        # This requires bounding box intersection for the child
+         pass
++
++def handle_leaf(leaf):
++    # [G] Standard operation: sample or process leaf value
++    pass
++
++def handle_cap(cap):
++    # [G] Standard operation: process cap node values
++    pass
+ ```
+ 
+@@ -132,5 +112,5 @@
+ 
+ ### Cap Node Neighbor Finding
+-For cap nodes, the algorithm skips the isovalue min/max range check and recursive child traversal. Instead, it determines the values of eight forward-neighbor voxels. It checks if a neighbor lies within the same cap node using the bitwise AND of the current child octant index (`child`) and the neighbor direction (`dir`): `if (child & dir)`. If false, the value is retrieved directly from `cap.scalars[dir_idx]`. If true, neighbor-finding logic is used [S2]. A pitfall is that 1 to 8 voxels in the neighborhood may lie within the same cap node, requiring efficient local access [S2].
++For cap nodes, the algorithm skips the isovalue min/max range check and recursive child traversal [S2]. Instead, it determines the values of eight forward-neighbor voxels [S2]. It checks if a neighbor lies within the same cap node using the bitwise AND of the current child octant index (`child`) and the neighbor direction (`dir`): `if (child & dir)` [S2]. If false, the value is retrieved directly from `cap.scalars[dir_idx]` [S2]. If true, neighbor-finding logic is used [S2]. A pitfall is that 1 to 8 voxels in the neighborhood may lie within the same cap node, requiring efficient local access [S2].
+ 
+ ## Operating characteristics

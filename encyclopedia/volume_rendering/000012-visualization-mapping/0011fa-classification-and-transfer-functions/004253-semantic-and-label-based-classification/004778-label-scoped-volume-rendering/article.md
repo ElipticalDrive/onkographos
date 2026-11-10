@@ -1,0 +1,174 @@
+# Label-Scoped Volume Rendering
+
+Also called: Label-aware banding, bandLabeledHuValues, label-scoped volume
+
+## Overview
+Label-Scoped Volume Rendering is a technique for rendering labeled volumes using a single 1D VTK transfer function by packing label rows into distinct scalar bands, allowing per-class opacity scaling without multi-dimensional transfer functions [S1, unofficial]. It transforms raw Hounsfield Unit (HU) values into label-specific bands so that a single transfer function table can be partitioned per anatomical class [S1, unofficial]. Unlike general semantic classification which may use multi-dimensional functions or hash-based color generation for arbitrary IDs, this method relies on a fixed, large scalar offset (`LABEL_BAND`) to isolate classes within a 1D lookup, ensuring that the transfer function's opacity and color ramps apply strictly to their designated semantic region [S1, unofficial].
+
+## How it works
+The method operates in two phases: scalar banding (preprocessing the volume data) and transfer function application (configuring the renderer).
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   `values`: Array of raw HU values (float32).
+    *   `labels`: Array of integer class labels (int32), aligned with `values`.
+    *   `CENTER_RANGE`: Array `[lo, hi]` defining the HU clamp bounds.
+    *   `LABEL_BAND`: Constant scalar offset width (default 4096.0).
+    *   `tfTable`: Transfer function table containing opacity and RGB parameters per label row.
+*   **Outputs:**
+    *   `banded_array`: Float32 array where each voxel's value is shifted into its label's scalar band.
+    *   VTK `ColorTransferFunction` and `PiecewiseFunction` instances configured with points mapped to the banded scalar space.
+
+### Data Structures
+*   **Banded Volume Cache:** An `OrderedDict` mapping the tuple `(id(volume), id(labels))` to a tuple `(volume_ref, labels_ref, banded_array)`. This cache stores pre-computed banded volumes to avoid redundant computation. It evicts the oldest entry when the cache size exceeds `MASKED_VOLUME_CACHE_SIZE` (default 8) [S1, unofficial].
+*   **Transfer Function Parameters:** A structured array or object containing rows of opacity and RGB values for each label. The length of the parameter array is expected to equal `TOTAL_PARAMS` [S1, unofficial].
+
+### Algorithm Steps
+
+#### Phase 1: Scalar Banding
+1.  **Smoothing:** Apply Gaussian smoothing to the raw HU values before banding. Use standard deviation $\sigma=1.0$ and radius $r=2.0$. This step is critical to prevent blending of label rows during subsequent rendering [S1, unofficial].
+2.  **Clamping:** For each voxel index $i$, clamp the smoothed HU value $v_i$ to the `CENTER_RANGE` $[lo, hi]$:
+    $$ v'_i = \max(lo, \min(hi, v_i)) $$
+3.  **Banding:** Compute the banded scalar value $b_i$ by subtracting the lower bound and adding the label-specific offset:
+    $$ b_i = v'_i - lo + (labels[i] \times LABEL\_BAND) $$
+4.  **Storage:** Store $b_i$ in a `Float32Array` output. The result is cast to float32 [S1, unofficial].
+
+#### Phase 2: Transfer Function Application
+1.  **Initialization:** Create instances of VTK `ColorTransferFunction` (`ctf`) and `PiecewiseFunction` (`otf`) [S1, unofficial].
+2.  **Iteration:** Iterate over each label row $k$ in the transfer function table (where $k=0$ is unlabelled, $k \ge 1$ are canonical classes) [S1, unofficial].
+3.  **Scale and Offset Calculation:**
+    *   Calculate the scale factor $s_k$: $1.0$ if $k=0$ (unlabelled), otherwise the normalized opacity for class $k$.
+    *   Calculate the offset $o_k$: $k \times LABEL\_BAND - lo$ [S1, unofficial].
+4.  **Point Addition:** For each HU sample $j$ in the `CENTER_RANGE` (or the defined sample set):
+    *   Compute the banded scalar coordinate $x_{j,k}$:
+        $$ x_{j,k} = hu[j] + o_k $$
+    *   Add RGB point to `ctf`:
+        $$ ctf.AddRGBPoint(x_{j,k}, r_{j,k}, g_{j,k}, b_{j,k}) $$
+    *   Add opacity point to `otf`:
+        $$ otf.AddPoint(x_{j,k}, \alpha_{j,k} \times s_k) $$
+    *   Where $(r_{j,k}, g_{j,k}, b_{j,k})$ and $\alpha_{j,k}$ are the color and opacity parameters for sample $j$ of class $k$ [S1, unofficial].
+5.  **Assignment:** Set the configured `ctf` and `otf` on the volume property.
+6.  **Notification:** Notify transfer function listeners and trigger a render window update (unless in XR mode) [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def band_volume(values, labels, center_range, label_band):
+    """
+    Transforms raw HU values into label-specific scalar bands.
+    
+    Args:
+        values: List[float] - Raw HU values.
+        labels: List[int] - Integer class labels.
+        center_range: List[float] - [lo, hi] clamp bounds.
+        label_band: float - Width of the scalar band per label (e.g., 4096.0).
+        
+    Returns:
+        List[float] - Banded scalar values.
+    """
+    lo, hi = center_range
+    banded = [0.0] * len(values)
+    
+    # Note: Smoothing is assumed to be applied to 'values' before this call
+    # as per source requirements [S1, unofficial].
+    
+    for index in range(len(values)):
+        # Clamp HU value to center range
+        hu_clamped = max(lo, min(hi, values[index]))
+        
+        # Compute banded value
+        # Formula: clamped_hu - lo + label * LABEL_BAND
+        banded[index] = hu_clamped - lo + (labels[index] * label_band)
+        
+    return banded
+
+def configure_transfer_function(tf_table, center_range, label_band, has_labels):
+    """
+    Configures VTK ColorTransferFunction and PiecewiseFunction based on label bands.
+    
+    Args:
+        tf_table: Object/Dict - Transfer function table with rows of params.
+        center_range: List[float] - [lo, hi].
+        label_band: float - LABEL_BAND constant.
+        has_labels: bool - Whether the volume contains label data.
+        
+    Returns:
+        tuple: (ctf, otf) - Configured VTK transfer function objects.
+    """
+    lo, hi = center_range
+    
+    # Initialize VTK functions (pseudo-code for VTK API)
+    ctf = VTKColorTransferFunction()
+    otf = VTKPiecewiseFunction()
+    
+    # Iterate over rows in the transfer function table
+    # tfTable.tfRows(params, activeLayers, hasLabels)
+    for row_index, params in enumerate(tf_table.rows):
+        # Retrieve opacity and RGB from policy params
+        # params structure assumed to contain rgb and alpha for samples
+        samples = params.samples 
+        
+        # Calculate scale
+        if row_index == 0:
+            scale = 1.0
+        else:
+            # Normalized opacity for that class
+            scale = params.normalized_opacity 
+            
+        # Calculate offset
+        offset = (row_index * label_band) - lo
+        
+        # Iterate over HU samples
+        for sample in samples:
+            hu_val = sample.hu
+            rgb = sample.rgb
+            alpha = sample.alpha
+            
+            # Compute banded scalar coordinate
+            if has_labels:
+                x = (row_index * label_band) + hu_val - lo
+            else:
+                x = hu_val
+                
+            # Add points to VTK functions
+            ctf.addRGBPoint(x, rgb[0], rgb[1], rgb[2])
+            otf.addPoint(x, alpha * scale)
+            
+    return ctf, otf
+```
+
+### Parameters
+*   **LABEL_BAND:** The width of the scalar band assigned to each label row. Must exceed the span of `CENTER_RANGE` (3050 HU) to prevent overlap between label rows. Default value: 4096.0 [S1, unofficial].
+*   **CENTER_RANGE:** The HU range $[lo, hi]$ used for clamping and defining the span within each label band. Default span: 3050 HU (implied from source comments) [S1, unofficial].
+*   **MASKED_VOLUME_CACHE_SIZE:** Maximum number of cached banded volumes. Default: 8 [S1, unofficial].
+*   **TOTAL_PARAMS:** Expected length of the transfer function parameter array [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Smoothing Order:** Smoothing must occur on raw HU values *before* banding. Smoothing the banded scalar values would blend label rows into each other, causing semantic corruption [S1, unofficial].
+*   **Interpolation:** Labelled volumes must use nearest-neighbor interpolation during ray casting. Linear interpolation between two label bands lands in a third class's band, corrupting label semantics [S1, unofficial].
+*   **XR Rendering:** In XR mode, calling `render()` immediately after setting transfer functions would ray-march into the bound XR framebuffer unnecessarily. Rendering is deferred to the next frame loop [S1, unofficial].
+*   **Band Overlap:** If `LABEL_BAND` is not sufficiently large (specifically, if it is less than the `CENTER_RANGE` span), label rows will overlap in the scalar space, causing incorrect color/opacity mapping [S1, unofficial].
+
+## Subtopics
+
+### Label-aware Transfer Function Application
+This variant specifically refers to the configuration step where banded scalar values are mapped to VTK color and opacity transfer functions. It partitions the transfer function table per label band, ensuring that the 1D lookup table correctly addresses the shifted scalar coordinates. It is chosen when using VTK-based renderers with label-aware volumes. It differs from general transfer function design by enforcing the `LABEL_BAND` offset logic during point addition [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Banding is $O(N)$ where $N$ is the number of voxels. Transfer function configuration is $O(M \times S)$ where $M$ is the number of labels and $S$ is the number of samples per label.
+*   **Memory Complexity:** $O(N)$ for the banded volume array. The cache adds $O(K \times N)$ where $K$ is the cache size (8) [S1, unofficial].
+*   **Performance:** The method allows efficient 1D lookup during rendering, avoiding the overhead of multi-dimensional transfer functions. However, it requires storing a separate banded volume if labels change.
+*   **Strengths:** Simple implementation using standard 1D VTK transfer functions; avoids color bleeding between semantic regions if nearest-neighbor interpolation is used; supports per-class opacity scaling.
+*   **Limitations:** Requires fixed `LABEL_BAND` size; not suitable for continuous scalar fields without labels; interpolation artifacts if nearest-neighbor is not enforced [S1, unofficial].
+*   **When to use:** When rendering CT volumes with discrete semantic labels (e.g., TotalSegmentator) and using VTK-based rendering pipelines.
+*   **When not to use:** When continuous scalar interpolation is required for semantic boundaries, or when labels are not available [S1, unofficial].
+
+## Background
+Label-Scoped Volume Rendering originated in the context of reinforcement learning for volume rendering transfer function optimization, specifically in the `reinforcement-learning-volume-rendering-transfer-function` repository by Kevin Kunkel [S1, unofficial]. It was developed to enable efficient policy evaluation and planning in VR/AR environments where rapid re-rendering of labeled anatomical structures (skeleton, lungs, heart, etc.) was required. The method leverages VTK's transfer function capabilities to map discrete labels to visual properties without the complexity of multi-dimensional transfer functions, facilitating the use of automated policy-based transfer function adjustment [S1, unofficial].
+
+## Sources
+[S1] kevinkunkel98/reinforcement-learning-volume-rendering-transfer-function, https://github.com/kevinkunkel98/reinforcement-learning-volume-rendering-transfer-function, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,102 @@
+# Volumetric Lighting via Gradient Normals
+
+Also called: Gradient Normal Lighting, Gradient-based Lighting in MRT Raycasting
+
+## Overview
+A technique to compute lighting normals in volume data by approximating the gradient vector, which points in the direction of greatest change and whose magnitude indicates surface intersection [S1, unofficial]. It sets itself apart from standard gradient-based shading by using the gradient magnitude to gate computation, avoiding unnecessary texture lookups for empty space [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Ray start/stop positions (from [Volume Raycasting with MRT Endpoints](1584-volume-raycasting-with-mrt-endpoints.md)), volume texture, step length, threshold.
+- Output: Final fragment color with diffuse lighting.
+
+**Data Structures:**
+- `Volume`: 3D texture sampler.
+- `RayStart`, `RayStop`: 2D textures storing object-space coordinates.
+
+**Parameters:**
+- `StepLength`: Distance between samples. Typical value: 0.01 [S1, unofficial].
+- `Threshold`: Minimum voxel value to trigger gradient computation. Typical value: 0.45 [S1, unofficial].
+
+**Steps:**
+1. For each pixel, retrieve `rayStart` and `rayStop`. If they are equal, discard the pixel.
+2. Compute ray direction and length. Calculate `stepVector` as `StepLength * ray / rayLength`.
+3. Initialize `pos = rayStart`, `dst = vec4(0)`, and `rayLength` to the total ray length.
+4. Loop while `dst.a < 1.0` and `rayLength > 0`:
+   a. Sample voxel value `V = lookup(pos)`.
+   b. If `V > Threshold`:
+      i. Compute gradient components using central differences with step size `L = StepLength`:
+         $$E = lookup(pos + vec3(L, 0, 0))$$
+         $$N = lookup(pos + vec3(0, L, 0))$$
+         $$U = lookup(pos + vec3(0, 0, L))$$
+      ii. Compute normal:
+         $$\mathbf{n} = \text{normalize}(\text{NormalMatrix} \times \text{vec3}(E - V, N - V, U - V))$$
+      iii. Compute diffuse factor:
+         $$df = |\mathbf{n} \cdot \mathbf{light}|$$
+      iv. Set source color:
+         $$\mathbf{c}_{src} = df \times \text{DiffuseMaterial}$$
+         $$\alpha_{src} = 1.0$$
+      v. Update destination using front-to-back blending:
+         $$\mathbf{c}_{dst} = (1.0 - \alpha_{dst}) \times \mathbf{c}_{src} + \mathbf{c}_{dst}$$
+         $$\alpha_{dst} = 1.0$$
+      vi. Break loop.
+   c. Advance position: `pos += stepVector`, `rayLength -= StepLength`.
+5. Output `dst`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volumetric_lighting_gradient_normals(ray_start, ray_stop, volume_sampler, step_length, threshold, light_position, diffuse_material, normal_matrix):
+    if ray_start == ray_stop:
+        return vec4(0)
+
+    ray = ray_stop - ray_start
+    ray_length = length(ray)
+    step_vector = step_length * ray / ray_length
+
+    pos = ray_start
+    dst = vec4(0)
+
+    while dst.a < 1.0 and ray_length > 0:
+        V = volume_sampler.sample(pos).x
+
+        if V > threshold:
+            L = step_length
+            E = volume_sampler.sample(pos + vec3(L, 0, 0)).x
+            N = volume_sampler.sample(pos + vec3(0, L, 0)).x
+            U = volume_sampler.sample(pos + vec3(0, 0, L)).x
+
+            grad = vec3(E - V, N - V, U - V)
+            normal = normalize(normal_matrix * grad)
+            light = normalize(light_position)
+            df = abs(dot(normal, light))
+
+            src_color = df * diffuse_material
+            src_alpha = 1.0
+
+            dst = (1.0 - dst.a) * vec4(src_color, src_alpha) + dst
+            break
+
+        pos += step_vector
+        ray_length -= step_length
+
+    return dst
+```
+
+## Subtopics
+
+### [On-the-fly Opacity Gradient Shading](11068-on-the-fly-opacity-gradient-shading.md)
+A shading technique for categorical volume labels where surface normals are estimated from opacity gradients because the volume gradient cannot be used as a normal. It sets itself apart from standard gradient-based shading by pre-filtering light contributions through a Mixture Graph rather than averaging normals, which avoids artifacts in discrete segmentations.
+
+## Operating characteristics
+- Time Complexity: Proportional to the number of samples until the first surface intersection above the threshold is found.
+- Memory Complexity: O(1) additional memory per pixel.
+- Strengths: Simple to implement; avoids lighting calculations in empty space.
+- Limitations: Gradient approximation is coarse; sensitive to step size and threshold selection.
+
+## Background
+Originated in early volume rendering techniques for real-time visualization. The method leverages the gradient vector's properties to approximate surface normals without explicit isosurface extraction [S1, unofficial].
+
+## Sources
+[S1] Volumetric Splatting at The Little Grasshopper, https://prideout.net/blog/old/blog/index.html%40p%3D60.html, fetched 2026-10-28 (unofficial)

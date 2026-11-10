@@ -3,47 +3,143 @@
 Also called: Joint Histogram
 
 ## Overview
-A precomputed 2D histogram used as a visual aid to convey sparse regions of the range space, colored by the number of voxels in each bin [S1]. It sets itself apart from continuous scatterplots by using discrete bins for ease of implementation and better conveyance of sparse data [S1].
+2D Histogram Visualization is a precomputed visual aid used to convey the distribution of voxel counts across sparse regions of a two-dimensional feature space, such as scalar value pairs. It differs from continuous scatterplots by using discrete bins, which simplifies implementation and better highlights sparse data regions [S1]. It serves as an exploratory tool for designing transfer functions or analyzing multi-field correlations, distinct from sibling methods like Spatialized Transfer Functions which focus on spatial context [5387-spatialized-transfer-functions.md] or Gray-Gradient Mode Histogram Clustering which focuses on clustering [5459-gray-gradient-mode-histogram-clustering-transfer-function.md].
 
 ## How it works
-**Inputs:** A dataset of scalar fields (e.g., distance fields, scalar values).
-**Outputs:** A 2D histogram image where pixel intensity or color represents voxel counts.
+**Inputs:**
+1.  A set of scalar fields sampled over the volume domain.
+2.  A 2D binning grid defined by the range of the two scalar attributes (e.g., scalar value $S_1$ and scalar value $S_2$).
+
+**Outputs:**
+1.  A 2D image (histogram) where each pixel represents a bin in the feature space.
+2.  The color of each pixel encodes the number of voxels (or samples) falling into that bin.
 
 **Data Structures:**
-*   **Histogram Grid:** A 2D array of integer counters. The dimensions correspond to the discretized ranges of the two scalar fields being compared.
-*   **Bin Mapping:** A mapping function that assigns a scalar value pair $(s_1, s_2)$ to a specific bin index $(i, j)$ based on the defined range and resolution of the histogram.
+*   **Histogram Grid:** A 2D array of integer counters. The dimensions correspond to the number of bins for each attribute.
+*   **Color Map:** A mapping from bin counts to RGBA values.
 
 **Steps:**
-1.  **Initialize:** Create a 2D histogram grid of size $W \times H$ (width and height corresponding to the number of bins for each scalar dimension) and initialize all counters to zero.
-2.  **Sample:** Iterate through the input dataset. For each voxel or sample point, extract the pair of scalar values $(s_1, s_2)$.
-3.  **Bin Assignment:** Map the scalar pair $(s_1, s_2)$ to the corresponding bin $(i, j)$ in the histogram grid. This involves clamping the values to the valid range and scaling them to the bin indices.
-4.  **Increment:** Increment the counter at `histogram[i][j]` by one for each sample falling into that bin.
-5.  **Visualization:** Render the histogram grid. Each pixel $(i, j)$ is colored based on the value of `histogram[i][j]`. Typically, higher counts are mapped to brighter or more saturated colors to highlight dense regions, while sparse regions are shown with lower intensity or distinct colors.
+1.  **Initialize:** Create a 2D array `hist` of size $W \times H$ (width and height in bins), initialized to zero.
+2.  **Iterate:** For each voxel $v$ in the volume:
+    a.  Retrieve the scalar values $s_1$ and $s_2$ for the voxel.
+    b.  Map $s_1$ to a bin index $i$ along the horizontal axis.
+    c.  Map $s_2$ to a bin index $j$ along the vertical axis.
+    d.  Increment `hist[i][j]`.
+3.  **Colorize:** For each bin $(i, j)$ in `hist`:
+    a.  Retrieve the count $c = \text{hist}[i][j]$.
+    b.  Map $c$ to a color using a color map (e.g., intensity or hue proportional to $c$).
+    c.  Set the pixel color at $(i, j)$ to the mapped color.
+
+**Formulas:**
+Let $N$ be the total number of voxels. Let $B_x$ and $B_y$ be the number of bins in the x and y dimensions respectively.
+The bin index $i$ for a scalar value $s_1 \in [min_1, max_1]$ is:
+$$ i = \left\lfloor \frac{s_1 - min_1}{max_1 - min_1} \times B_x \right\rfloor $$
+Similarly for $j$ and $s_2$.
 
 **Parameters:**
-*   **Histogram Resolution:** The number of bins along each axis. Not given in the sources.
-*   **Scalar Range:** The minimum and maximum values for each scalar dimension that define the histogram's domain. Not given in the sources.
+*   **Bin Resolution:** The number of bins $B_x, B_y$. Not given in the sources.
+*   **Scalar Fields:** The specific attributes being binned (e.g., distance field and fiber orientation). Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **Floating Point Error:** For very small segment sizes or fine discretizations, floating-point errors may affect bin assignment [S1].
-*   **Discretization:** The choice of bin size affects the granularity of the visualization. Too coarse may obscure details; too fine may result in sparse, noisy histograms [S1].
+*   **Floating Point Error:** For very small segment sizes or precise boundaries, floating-point errors may affect bin assignment [S1].
+*   **Discretization:** The choice of discrete bins may obscure fine-grained distributions compared to continuous scatterplots, but this is a deliberate trade-off for clarity in sparse regions [S1].
+*   **Performance:** Histogram computation is $O(N)$, where $N$ is the number of voxels. For large datasets, this can take seconds, but it is generally not a bottleneck compared to rendering [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_2d_histogram(voxels, bin_ranges, bin_counts):
+    """
+    Compute a 2D histogram of voxel scalar values.
+    
+    Args:
+        voxels: List of tuples (s1, s2) representing scalar pairs for each voxel.
+        bin_ranges: Tuple of tuples ((min1, max1), (min2, max2)) defining the range for each dimension.
+        bin_counts: Tuple of ints (B_x, B_y) defining the number of bins for each dimension.
+        
+    Returns:
+        2D list of integers representing the histogram.
+    """
+    B_x, B_y = bin_counts
+    (min1, max1), (min2, max2) = bin_ranges
+    
+    # Initialize histogram grid
+    hist = [[0 for _ in range(B_x)] for _ in range(B_y)]
+    
+    for s1, s2 in voxels:
+        # Map s1 to bin index i
+        # Clamp to avoid out-of-bounds due to floating point errors
+        i = int((s1 - min1) / (max1 - min1) * B_x)
+        i = max(0, min(i, B_x - 1))
+        
+        # Map s2 to bin index j
+        j = int((s2 - min2) / (max2 - min2) * B_y)
+        j = max(0, min(j, B_y - 1))
+        
+        # Increment bin count
+        hist[j][i] += 1
+        
+    return hist
+
+def colorize_histogram(hist, bin_counts):
+    """
+    Convert histogram counts to a color image.
+    
+    Args:
+        hist: 2D list of integers.
+        bin_counts: Tuple of ints (B_x, B_y).
+        
+    Returns:
+        2D list of tuples (R, G, B, A) representing the color image.
+    """
+    B_x, B_y = bin_counts
+    # Find max count for normalization
+    max_count = 0
+    for row in hist:
+        for count in row:
+            if count > max_count:
+                max_count = count
+                
+    # If max_count is 0, return black image
+    if max_count == 0:
+        return [[(0, 0, 0, 255) for _ in range(B_x)] for _ in range(B_y)]
+        
+    color_image = [[(0, 0, 0, 255) for _ in range(B_x)] for _ in range(B_y)]
+    
+    for j in range(B_y):
+        for i in range(B_x):
+            count = hist[j][i]
+            # Normalize count to 0-1 range
+            normalized = count / max_count
+            
+            # Simple grayscale color map: intensity proportional to count
+            # Alpha can be set to 255 for full opacity
+            color = (int(normalized * 255), int(normalized * 255), int(normalized * 255), 255)
+            color_image[j][i] = color
+            
+    return color_image
+```
 
 ## Subtopics
 
 ### [Line-based Histogram for 2D Scalar Pairs](6702-line-based-histogram-for-2d-scalar-pairs.md)
-A visualization method for displaying the 2D histogram of scalar value pairs sampled along the gradient direction, using lines instead of point primitives to make material boundaries intuitive. It sets itself apart from standard 2D histogram visualizations (which use colored bins or points) by mapping histogram entries to geometric primitives that explicitly connect the scalar values of the two materials at a boundary, allowing users to directly perceive homogeneous regions and material interfaces.
+A visualization method for displaying the 2D histogram of scalar value pairs $(S_1, S_2)$ sampled along the gradient direction, using lines instead of point primitives to make material boundaries intuitive. It differs from standard 2D histograms by mapping bin counts to line intensity and bin coordinates to axis positions, explicitly revealing the transition between two material types.
+
+### [Sorted Histogram Visualization](10660-sorted-histogram-visualization.md)
+Sorted Histogram Visualization is a Multi-Dimensional Transfer Function (MDTF) design tool that displays a 2D histogram where voxels are sorted by a second attribute value within each intensity bin. It solves the problem that traditional 2D histograms obscure the primary intensity distribution and smear intensity peaks across the second dimension, making it difficult to assess voxel counts at a glance. Unlike traditional 2D histograms, which can be cluttered in medical imaging, sorted histograms maintain a consistent 1D histogram shape when changing the second attribute, facilitating an exploratory workflow.
 
 ## Operating characteristics
-*   **Time Complexity:** Histogram computation is $O(N)$, where $N$ is the number of samples [S1].
-*   **Performance:** Histogram computation is generally on the order of seconds for large datasets and is not a bottleneck [S1]. It can be computed simultaneously alongside other preprocessing steps like macrocell generation [S1].
-*   **Memory:** Requires memory proportional to the product of the histogram dimensions ($W \times H$). Not given in the sources.
-*   **Strengths:** Ease of implementation; effectively conveys sparse regions of the range space [S1].
-*   **Limitations:** Discrete nature may lose some continuity compared to scatterplots; binning artifacts may occur [S1].
-*   **When to Use:** When a quick visual overview of the joint distribution of two scalar fields is needed, particularly to identify sparse regions or material boundaries [S1].
-*   **When Not to Use:** When continuous distribution details are critical or when the dataset is too small to benefit from binning [S1].
+*   **Time Complexity:** $O(N)$ for histogram computation, where $N$ is the number of voxels [S1].
+*   **Memory Complexity:** $O(B_x \times B_y)$ for the histogram grid, where $B_x, B_y$ are the number of bins [S1].
+*   **Performance:** Histogram computation is generally on the order of seconds for large datasets and is not a bottleneck for interactive rendering [S1]. It can be computed simultaneously with other preprocessing steps like macrocell generation [S1].
+*   **Strengths:** Discrete histograms are easier to implement than continuous scatterplots and better convey sparse regions of the range space [S1].
+*   **Limitations:** The discretization may lose fine-grained detail compared to continuous methods [S1]. Floating-point errors can affect bin assignment for very small segment sizes [S1].
+*   **When to Use:** When exploring multi-field correlations or designing transfer functions where understanding the distribution of voxel counts in sparse regions is critical [S1].
+*   **When Not to Use:** When fine-grained continuous distribution details are required, or when real-time histogram updates are needed for every frame (though it can be precomputed) [S1].
 
 ## Background
-Originated in the context of fiber surface visualization, specifically in the paper "Direct Multifield Volume Ray Casting of Fiber Surfaces" [S1]. It was introduced as an alternative to continuous scatterplots to provide a more efficient and intuitive way to explore fiber surfaces by highlighting material interfaces [S1].
+The method was introduced in the context of direct multifield volume ray casting of fiber surfaces [S1]. It was chosen over continuous scatterplots (as used in the original fiber surface paper [5]) for ease of implementation and better visualization of sparse regions [S1]. The approach is part of a broader effort to enable interactive exploration of fiber surfaces, where the histogram serves as a visual aid for the Fiber Surface Control Polygon (FSCP) editor [S1].
 
 ## Sources
 [S1] Direct Multifield Volume Ray Casting of Fiber Surfaces, https://doi.org/10.1109/tvcg.2016.2599040, fetched 2026-10-26

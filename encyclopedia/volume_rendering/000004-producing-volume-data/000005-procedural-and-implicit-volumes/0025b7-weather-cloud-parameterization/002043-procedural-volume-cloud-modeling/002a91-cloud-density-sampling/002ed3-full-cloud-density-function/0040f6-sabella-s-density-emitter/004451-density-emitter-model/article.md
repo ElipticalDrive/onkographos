@@ -1,0 +1,151 @@
+# Density Emitter Model
+
+Also called: Density Emitters
+
+## Overview
+The Density Emitter Model simulates light from translucent objects by treating volumetric data samples representing density values as a field of density emitters, where each emitter is a tiny particle that emits and scatters light [S1, unofficial]. It sets itself apart from its parent, Sabella's Density Emitter, by explicitly defining the intensity accumulation formula and the mapping of ray-cast statistics (maximum density, distance, center of gravity) to color parameters for visual effects [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Volumetric data where samples represent density values; ray parameters ($t_1, t_2$) defining the traversal interval within the volume.
+- **Output:** Pixel intensity $I$ and optional color parameters derived from ray statistics.
+
+**Data Structures:**
+Not given in the sources.
+
+**Parameters:**
+- **Attenuation parameter $\tau$:** Modifiable. Controls attenuation; higher values specify a medium which darkens more rapidly [S1, unofficial].
+- **Spread parameter $\beta$:** Modifiable. Controls the spread of density values. Low values produce a diffuse cloud appearance; higher values highlight dense portions of the data [S1, unofficial].
+- **Number of density emitters:** Proportional to the scalar value in that region [S1, unofficial].
+
+**Steps:**
+1. Cast rays from the eye point through each pixel on the image plane into the volume [S1, unofficial].
+2. For each ray, traverse from $t_1$ to $t_2$.
+3. Calculate the intensity $I$ for the pixel using the formula below.
+4. If pixel opacity reaches unity, set a flag and stop processing that pixel further (front-to-back optimization) [S1, unofficial].
+5. Compute three additional values for the ray:
+   - Maximum density value encountered.
+   - Distance at which the maximum occurred.
+   - Center of gravity of density emitters along the ray.
+6. Map these three values to color parameters (e.g., hue, saturation, lightness) to achieve visual effects [S1, unofficial].
+
+**Formula:**
+The intensity $I$ is calculated by traversing the ray from $t_1$ to $t_2$:
+
+$$
+I = \frac{t_2}{t_1} \int_{t_1}^{t_2} \frac{\rho(t) dt}{e^{\tau(t)}}
+$$
+
+Where:
+- $\rho(t)$ is the density at location $t$.
+- $\tau(t)$ is the attenuation parameter at location $t$.
+- The term $e^{-\tau(t)}$ represents the probability that light will be scattered before reaching the eye [S1, unofficial].
+
+*Note on Formula Interpretation:* The source text presents the formula as $I = \frac{t_2}{t_1} \frac{\rho(t) dt}{e^{\tau(t)}}$ with integral notation implied by the context of "accumulating at each location". The standard interpretation of such volume rendering integrals involves integrating the density weighted by the attenuation probability. The factor $\frac{t_2}{t_1}$ appears explicitly in the source equation (12).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def density_emitter_model(volume_data, ray_origin, ray_direction, t1, t2, tau_param, beta_param):
+    """
+    Simulates light intensity using the Density Emitter Model.
+    
+    Args:
+        volume_data: Function or array providing density rho(t) at position t.
+        ray_origin: 3D vector, eye position.
+        ray_direction: 3D vector, normalized direction.
+        t1: Start distance along ray.
+        t2: End distance along ray.
+        tau_param: Attenuation parameter (scalar).
+        beta_param: Spread parameter (scalar).
+        
+    Returns:
+        intensity: Float, calculated pixel intensity.
+        max_density: Float, maximum density encountered.
+        max_dist: Float, distance where max density occurred.
+        center_of_gravity: 3D vector, center of gravity of emitters.
+    """
+    # Initialize accumulators
+    intensity = 0.0
+    max_density = -infinity
+    max_dist = t1
+    total_density_weight = 0.0
+    weighted_position_sum = 0.0
+    
+    # Determine step size or use adaptive sampling. 
+    # Source does not specify discretization method. [G]
+    # Assuming a fixed small step dt for integration.
+    dt = 0.01 
+    t = t1
+    
+    while t <= t2:
+        # Sample density at current position
+        pos = ray_origin + ray_direction * t
+        rho = volume_data(pos)
+        
+        # Apply spread parameter to modify effective density?
+        # Source says beta controls spread of density values.
+        # Implementation detail: [G] rho_effective = rho * exp(-beta * |rho - mean_rho|) 
+        # or similar smoothing. Source does not give exact formula for beta.
+        rho_effective = rho 
+        
+        # Calculate attenuation factor
+        # Source: e^(-tau(t)) is probability light reaches eye.
+        # Formula in source: I = (t2/t1) * integral( rho(t) dt / e^(tau(t)) )
+        # This implies the integrand is rho(t) * e^(-tau(t)) * (t2/t1)
+        # Note: Source formula has e^(tau(t)) in denominator, which is e^(-tau(t)).
+        
+        attenuation = exp(-tau_param) # Assuming constant tau for simplicity if not spatially varying
+        
+        # Accumulate intensity
+        # The factor t2/t1 is applied to the total integral or per step?
+        # Source: "I = t2/t1 ... integral ...". Usually global factor.
+        # We accumulate the integral part first.
+        intensity += rho_effective * attenuation * dt
+        
+        # Track max density
+        if rho_effective > max_density:
+            max_density = rho_effective
+            max_dist = t
+            
+        # Track center of gravity
+        # Center of gravity of density emitters.
+        # Weighted by density?
+        weighted_position_sum += rho_effective * pos
+        total_density_weight += rho_effective
+        
+        t += dt
+        
+    # Apply global scaling factor
+    intensity = (t2 / t1) * intensity
+    
+    # Calculate center of gravity
+    if total_density_weight > 0:
+        center_of_gravity = weighted_position_sum / total_density_weight
+    else:
+        center_of_gravity = ray_origin + ray_direction * t1
+        
+    return intensity, max_density, max_dist, center_of_gravity
+```
+
+**Edge Cases and Pitfalls:**
+- Shadowing and color variation due to differences in scattering at different wavelengths are ignored to avoid complicating the image and detracting from density variation perception [S1, unofficial].
+- If the ray does not intersect the volume, intensity is 0.
+- Precision issues may arise if $t_1$ is close to 0, causing division by zero in the $\frac{t_2}{t_1}$ factor. [G] Ensure $t_1 > 0$.
+
+## Subtopics
+None.
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of samples along the ray. Front-to-back rendering allows early termination if opacity reaches unity [S1, unofficial].
+- **Memory Complexity:** Depends on the storage of volumetric data. No additional large buffers mentioned beyond standard ray-casting accumulators.
+- **Strengths:** Correctly models occlusion of deeper parts of the volume by closer parts. Allows for interesting visual effects by mapping ray statistics to color parameters [S1, unofficial].
+- **Limitations:** Ignores shadowing and wavelength-dependent scattering, which may reduce physical accuracy but simplifies the image [S1, unofficial].
+- **When to use:** When simulating translucent objects where density variation perception is prioritized over physical light transport accuracy.
+
+## Background
+The Density Emitter Model is described in the context of volume visualization principles. It is related to the work of Arie Kaufman. The basic idea is that a beam of "virtual" particles is sent through the volume, with the user selecting the particle properties and the laws of interaction. Krueger [60] showed that various existing volume rendering models can be described as special cases of an underlying transport theory model of the transfer of particles in inhomogeneous media [S1, unofficial].
+
+## Sources
+[S1] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)

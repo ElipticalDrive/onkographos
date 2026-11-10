@@ -1,0 +1,123 @@
+--- v002.md
++++ v003.md
+@@ -4,36 +4,30 @@
+ 
+ ## Overview
+-Decoupled SVO Compression is a memory optimization technique for Sparse Voxel Octrees (SVOs) that separates the geometric topology from voxel attributes (such as color, normals, or reflectance) to allow independent, specialized compression of each component [S1]. Unlike standard SVOs or naive colored DAGs that store attributes redundantly with every node, this method achieves significant memory reduction by compressing the sparse geometry structure and applying lossless palette-based compression to the decoupled attribute array, outperforming existing methods like PSVOs, ESVOs, and CDAGs in both memory footprint and visual quality [S1].
++Decoupled SVO Compression is a memory optimization technique for Sparse Voxel Octrees (SVOs) that separates geometric topology from voxel attributes (such as color, normals, or reflectance) to allow independent, specialized compression of each component [S1]. Unlike standard SVOs or naive colored DAGs that store attributes redundantly with every node, this method achieves significant memory reduction by compressing the sparse geometry structure and applying lossless palette-based compression to the decoupled attribute data, outperforming existing methods like PSVOs, ESVOs, and CDAGs in both memory footprint and visual quality [S1].
+ 
+ ## How it works
+ ### Inputs and Outputs
+-*   **Input:** A Sparse Voxel Octree (SVO) or Directed Acyclic Graph (DAG) representing a voxel scene, where each leaf or internal node may possess associated attributes (e.g., RGB color, surface normals) [S1].
+-*   **Output:** A compressed data structure consisting of a compacted geometry array and a separate, compressed attribute array, along with metadata required for traversal and index reconstruction [S1].
++*   **Input:** A Sparse Voxel Octree (SVO) or Directed Acyclic Graph (DAG) representing a voxel scene, where nodes may possess associated attributes (e.g., RGB color, surface normals) [S1].
++*   **Output:** A compressed data structure consisting of a compacted geometry array and a separate, compressed attribute representation (palette and indices), along with metadata required for traversal and index reconstruction [S1].
+ 
+ ### Data Structures
+ #### 1. Geometry Structure
+-The topology is stored in a linearized array to minimize overhead [S1]. Each node in the geometry array contains:
++The topology is stored in a compacted array using the following fields and techniques [S1]:
+ *   **Child Pointers:** Compressed using implicit first-child offsets and per-level byte-precise offset compression [S1].
+ *   **Childmasks:** Reduced from the standard 24-bit padding to 8-bit masks, indicating the presence of children [S1].
+-*   **Layout:** The geometry array contains nodes with fields for the compressed child pointer offset, the 8-bit childmask, and an index pointing to the attribute array if the node is a leaf or contains attributes [S1].
++*   **Pointer Encoding:** Further compressed and entropy-encoded [S1].
++*   **Layout:** Exact bit-packing layouts for the geometry nodes are not given in the sources [G].
+ 
+ #### 2. Attribute Structure
+-Attributes are decoupled from the geometry and stored in a dense array [S1].
+-*   **Attribute Array:** A linear array of attribute values (e.g., 24-bit colors, 32-bit normals) [S1].
+-*   **Indexing:** Each geometry node that has an attribute stores an index into this attribute array [S1]. In the context of the parent method [Voxel Attribute Decoupling](1761-voxel-attribute-decoupling.md), this index is often stored as a child index minus parent index offset, but the core compression here focuses on the attribute array itself [S1].
++Attributes are decoupled from the geometry and organized into a palette-based representation that exploits spatial coherence [S1]:
++*   **Attribute Values:** Quantized to a specified precision (e.g., 12-bit or 24-bit colors, 32-bit normals) [S1].
++*   **Palette & Indices:** Unique attribute values are stored in a palette, and each geometry node references an attribute via an index into this palette rather than storing raw values [G].
++*   **Layout:** The attribute structure consists of the palette array and a parallel index array mapping nodes to palette entries [G].
+ 
+ ### Steps
+-1.  **Decoupling:** Traverse the original SVO/DAG and separate the geometric topology (child pointers, masks) from the voxel attributes (colors, normals) [S1]. Store attributes in a linear array during traversal to exploit spatial coherence [S1].
+-2.  **Topology Compression:** Apply the following compression techniques to the geometry array [S1]:
+-    *   **Implicit First Child Offset:** Store the offset to the first child implicitly rather than explicitly for every node [S1].
+-    *   **Per-Level Byte-Precise Offset Compression:** Compress the offsets for child pointers on a per-level basis [S1].
+-    *   **Pointer Compression:** Further compress the pointer values [S1].
+-    *   **8-bit Childmasks:** Replace 24-bit padding masks with 8-bit masks [S1].
+-    *   **Pointer Entropy Encoding:** Apply entropy encoding to the compressed pointer data [S1].
+-3.  **Attribute Compression:** Compress the decoupled attribute array using a lossless palette compression scheme [S1]:
+-    *   **Quantization:** Quantize attribute values (e.g., 12-bit or 24-bit colors, 32-bit normals) to a manageable precision [S1].
+-    *   **Palette Construction:** Identify unique attribute values within localized blocks of the attribute array [S1].
+-    *   **Indexing:** Replace attribute values with indices pointing to a global or local palette of unique values [S1].
+-4.  **Storage Assembly:** Combine the compressed geometry array and the compressed attribute array (palette + indices) into the final data structure [S1].
++1.  **Decoupling:** Traverse the original SVO/DAG and separate the geometric topology (child pointers, masks) from the voxel attributes (colors, normals) [S1].
++2.  **Topology Compression:** Apply implicit first-child offset storage, per-level byte-precise offset compression, pointer compression, 8-bit childmasks, and pointer entropy encoding to the geometry data [S1].
++3.  **Attribute Compression:** Quantize attribute values and apply a lossless palette compression scheme that exploits spatial coherence [S1].
++4.  **Storage Assembly:** Combine the compressed geometry array and the compressed attribute palette/indices into the final data structure [S1].
+ 
+ ### Formulas and Parameters
+@@ -52,8 +46,8 @@
+     """
+     Compresses an SVO by decoupling geometry and attributes.
+-    Returns: compressed_geometry_bytes, compressed_attributes_bytes
++    Returns: compressed_geometry_bytes, attribute_palette, attribute_indices
+     """
+     geometry_nodes = []
+-    attribute_list = []
++    attribute_values = []
+     
+     # Step 1: Decoupling via traversal
+@@ -76,7 +70,7 @@
+         # Extract attribute if present
+         if node.has_attribute:
+-            # Quantize attribute if necessary (e.g., to 12-bit or 24-bit)
+-            quantized_attr = quantize(node.attribute_value)
+-            attribute_list.append(quantized_attr)
++            # Quantize attribute if necessary
++            quantized_attr = quantize(node.attribute_value, bits=12)
++            attribute_values.append(quantized_attr)
+         
+         # Add children to queue for traversal
+@@ -87,18 +81,14 @@
+     # Step 2: Topology Compression
+     # Apply implicit offsets, per-level compression, 8-bit masks, and entropy encoding
+-    # Note: Exact entropy coding and offset packing algorithms are not specified in the sources [G].
+     compressed_geometry = pack_topology(geometry_nodes)
+ 
+     # Step 3: Attribute Compression
+     # Use palette compression
+-    compressed_attributes = compress_attributes_palette(attribute_list)
++    attribute_palette, attribute_indices = compress_attributes_palette(attribute_values)
+ 
+-    return compressed_geometry, compressed_attributes
++    return compressed_geometry, attribute_palette, attribute_indices
+ 
+ def quantize(value, bits=12):
+-    """
+-    Quantizes a value to a specified bit depth.
+-    """
+-    # Implementation depends on the data type (color, normal)
++    """Quantizes a value to a specified bit depth."""
+     # Standard quantization logic [G]
+     return int(value * (2**bits - 1))
+@@ -107,4 +97,5 @@
+     """
+     Compresses the geometry nodes using specific techniques.
++    The sources do not specify the exact bit-packing or entropy coder implementation [G].
+     """
+     # 1. Implicit first child offset
+@@ -113,9 +104,8 @@
+     # 4. 8-bit childmasks
+     # 5. Pointer entropy encoding
+-    # The sources do not specify the exact bit-packing or entropy coder implementation [G].
+     # This function returns the byte stream of the compressed geometry.
+     return b""
+ 
+-def compress_attributes_palette(attribute_list):
++def compress_attributes_palette(attribute_values):
+     """
+     Compresses attributes using a lossless palette approach.
+@@ -125,6 +115,6 @@
+     # 3. Compress the palette and the indices
+     # The sources do not specify the exact palette construction or index encoding algorithm [G].
+-    palette = list(dict.fromkeys(attribute_list))
+-    indices = [palette.index(attr) for attr in attribute_list]
++    palette = list(dict.fromkeys(attribute_values))
++    indices = [palette.index(attr) for attr in attribute_values]
+     return palette, indices
+ ```

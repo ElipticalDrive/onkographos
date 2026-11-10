@@ -1,111 +1,62 @@
 # Plane Grid Generation
 
-Also called: Axis-Aligned Plane Vertex Generation
+Also called: Rectangular Grid Construction, Coordinate Plane Placement
 
 ## Overview
-Plane Grid Generation constructs the vertex connectivity for surfaces aligned with the principal coordinate planes (xy, yz, xz) on a regular 3D grid. It solves the problem of efficiently defining planar geometry for isosurface slicing or structured volume rendering without performing geometric intersection tests. Unlike general isosurface extraction methods such as Marching Cubes, this method assumes fixed axis-aligned topology, enabling $O(1)$ index computation per triangle based on grid coordinates [S1, unofficial].
+Plane Grid Generation constructs a regular 3D sampling grid by defining a set of parallel planes along each coordinate axis (X, Y, Z) [S2, unofficial]. It solves the problem of mapping scattered or arbitrarily shaped input data onto a structured rectangular grid suitable for volume visualization and SDF evaluation [S2, unofficial]. It differs from its sibling [Tetrahedral Grid Generation](3509-tetrahedral-grid-generation.md) by enforcing axis-aligned planar topology rather than volumetric tessellation, and from [3D Coordinate Grid Generation](2333-3d-coordinate-grid-generation.md) by explicitly defining the geometric placement of the sampling planes themselves rather than just the sample points [S2, unofficial].
 
 ## How it works
 **Inputs:**
-- Grid dimensions: $X, Y, Z$ (number of vertices along each axis).
-- Current vertex index: $currIndex$ (linear index of the first vertex of the plane).
-- Vertex stride: $xVerts$ (number of vertices along the X-axis, typically equal to $X$).
+- A set of scattered data points or an existing arbitrarily shaped grid with coordinate values $(x, y, z)$.
+- The desired number of planes $N_x, N_y, N_z$ for each axis.
 
 **Outputs:**
-- A triangle defined by three vertex indices: $A, B, C$.
-- A plane normal vector $N$.
+- A rectangular grid defined by $N_x$ planes parallel to the YZ plane, $N_y$ planes parallel to the XZ plane, and $N_z$ planes parallel to the XY plane.
+- The position of each plane along its respective axis.
 
 **Data Structures:**
-- Vertex indices are integers representing positions in a linear vertex buffer.
-- Vectors are 3D Cartesian coordinates.
+- Arrays `plane_positions_x`, `plane_positions_y`, `plane_positions_z` of size $N_x, N_y, N_z$ respectively, storing the scalar coordinate value of each plane.
 
 **Steps:**
-1. **Calculate Edge Vector U:** Compute the vector from vertex $A$ to vertex $B$.
-   $$ U = \text{Position}(currIndex + xVerts) - \text{Position}(currIndex) $$
-   In a regular grid with unit spacing, this vector typically aligns with the X-axis.
+1. **Determine Extents:** Scan the input data to find the minimum and maximum coordinate values for each axis:
+   $$ x_{min} = \min(x_i), \quad x_{max} = \max(x_i) $$
+   $$ y_{min} = \min(y_i), \quad y_{max} = \max(y_i) $$
+   $$ z_{min} = \min(z_i), \quad z_{max} = \max(z_i) $$
+   [S2, unofficial]
 
-2. **Calculate Edge Vector V:** Compute the vector from vertex $A$ to vertex $C$.
-   $$ V = \text{Position}(currIndex + xVerts + 1) - \text{Position}(currIndex) $$
-   In a regular grid, this vector typically aligns with the Y-axis (for an xy-plane slice).
+2. **Calculate Step Size:** Compute the uniform spacing (step) for each axis. For axis $A \in \{x, y, z\}$, with $N_A$ planes:
+   $$ step_A = \frac{A_{max} - A_{min}}{N_A - 1} $$
+   [S2, unofficial]
 
-3. **Compute Normal N:** Calculate the cross product of $U$ and $V$ to determine the plane's orientation.
-   $$ N = U \times V $$
-   The direction of $N$ depends on the winding order of vertices $A, B, C$.
-
-4. **Define Face Vertices:** Assign the vertex indices for the triangle.
-   $$ A = currIndex $$
-   $$ B = currIndex + xVerts $$
-   $$ C = currIndex + xVerts + 1 $$
-
-5. **Initialize Plane State:** Set the plane's position and rotation parameters to zero or their base grid coordinates [S1, unofficial].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def generate_plane_triangle(curr_index, x_verts, get_vertex_position):
-    """
-    Generates a single triangle for an axis-aligned plane grid.
-    
-    Args:
-        curr_index (int): The linear index of the first vertex (A).
-        x_verts (int): The number of vertices along the X-axis (stride).
-        get_vertex_position (function): Returns (x, y, z) for a given linear index.
-        
-    Returns:
-        tuple: (indices, normal) where indices is (A, B, C) and normal is (nx, ny, nz).
-    """
-    # Step 1: Get positions for vertices A, B, and C
-    pos_A = get_vertex_position(curr_index)
-    pos_B = get_vertex_position(curr_index + x_verts)
-    pos_C = get_vertex_position(curr_index + x_verts + 1)
-    
-    # Step 2: Calculate edge vectors U and V
-    # U is vector from A to B
-    u = [pos_B[i] - pos_A[i] for i in range(3)]
-    
-    # V is vector from A to C
-    v = [pos_C[i] - pos_A[i] for i in range(3)]
-    
-    # Step 3: Compute normal N as cross product of U and V
-    # N = U x V
-    n = [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0]
-    ]
-    
-    # Step 4: Define face vertices
-    indices = (curr_index, curr_index + x_verts, curr_index + x_verts + 1)
-    
-    # Step 5: Return results
-    return indices, n
-```
+3. **Place Planes:** Initialize the first plane at the minimum coordinate. Place subsequent planes at intervals of $step_A$:
+   $$ Plane_k^A = A_{min} + k \cdot step_A \quad \text{for } k = 0, \dots, N_A - 1 $$
+   [S2, unofficial]
 
 **Parameters:**
-- $xVerts$: Must match the grid width. If the grid is not uniform, this value must be adjusted accordingly [G].
-- $currIndex$: Must be within valid bounds such that $currIndex + xVerts + 1$ does not exceed the total vertex count.
+- $N_x, N_y, N_z$: Number of planes per axis. Typical values depend on the desired resolution of the volume; higher values increase accuracy but also memory and computation cost [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Boundary Conditions:** Ensure $currIndex$ does not refer to vertices on the far edge of the grid if the plane is meant to be internal.
-- **Winding Order:** The order $A, B, C$ determines the normal direction. Reversing $B$ and $C$ flips the normal. Consistency is required for correct culling or lighting [S1, unofficial].
-- **Degenerate Input:** If $U$ or $V$ is zero (e.g., grid dimension is 1), the normal will be zero. This should be handled by skipping such planes or using a default normal [G].
+- **Single Plane:** If $N_A = 1$, the denominator in the step calculation becomes zero. The step is undefined, and only one plane is placed at $A_{min}$ (which equals $A_{max}$ if all data points share that coordinate, or arbitrarily at the min) [S2, unofficial].
+- **Sparse Regions:** Constant spacing may waste samples in empty regions of the bounding box, leading to inefficient memory usage compared to variable spacing methods [S2, unofficial].
 
 ## Subtopics
 
-### [Structured Grid Triangle List Generation](8189-structured-grid-triangle-list-generation.md)
-Precomputes vertex index arrays for triangle lists representing surfaces parallel to the xy, yz, and xz planes on a regular 3D grid. It solves the problem of efficiently generating the connectivity for isosurface or slice rendering by providing static index buffers that can be offset for different grid depths. It differs from general isosurface extraction (e.g., Marching Cubes) by assuming axis-aligned planar topology, allowing for $O(1)$ index computation per triangle without geometric intersection tests.
+### Constant Plane Spacing
+A specific implementation of Plane Grid Generation where planes are placed at uniform intervals along each axis [S2, unofficial]. It is chosen when computational speed is prioritized over adaptive resolution, as it avoids the overhead of sorting and binning data [S2, unofficial]. It produces more accurate images than variable spacing methods for the same number of planes but requires significantly less CPU time because it does not maintain linked lists of unique coordinate values [S2, unofficial].
+
+### [Variable Plane Spacing](12359-variable-plane-spacing.md)
+A variant that distributes planes proportionally to data density by creating coordinate bins and placing planes where data is concentrated. It is chosen when the input data is highly non-uniform and capturing details in dense regions is critical. It differs from Constant Plane Spacing by adapting resolution to the data distribution, though it requires an order of magnitude more CPU time and memory due to the complexity of maintaining lists of unique coordinates and binning logic.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per triangle for index calculation. Generating a full plane of size $W \times H$ requires $O(W \cdot H)$ operations.
-- **Memory Complexity:** $O(1)$ additional memory if indices are computed on the fly. $O(W \cdot H)$ if storing a precomputed index buffer.
-- **Strengths:** Extremely fast index generation; no geometric intersection tests; simple implementation.
-- **Limitations:** Only works for axis-aligned planes; cannot handle curved or arbitrary isosurfaces.
-- **When to use:** When rendering slices of a volume along principal axes or generating structured grid surfaces.
-- **When not to use:** When arbitrary isosurface extraction is required.
+- **Time Complexity:** $O(N)$ to scan data for min/max, where $N$ is the number of input points. Constant spacing is $O(1)$ for placement after min/max calculation. Variable spacing is significantly slower, requiring sorting and linked list management [S2, unofficial].
+- **Memory Complexity:** $O(N_x + N_y + N_z)$ to store plane positions. Variable spacing may require additional memory for bin structures and linked lists [S2, unofficial].
+- **Strengths:** Constant spacing is fast and simple to implement. It guarantees a regular grid structure suitable for efficient texture-based volume rendering or SDF evaluation [S2, unofficial].
+- **Limitations:** Inefficient for sparse data, as it samples empty space uniformly. Variable spacing can lose information in less dense areas if the binning algorithm over-emphasizes dense regions [S2, unofficial].
+- **When to use:** Use Constant Plane Spacing for general-purpose volume visualization where performance is key and data is reasonably uniform. Use Variable Plane Spacing only when data density varies drastically and capturing fine details in sparse regions is not the primary concern [S2, unofficial].
 
 ## Background
-The method is derived from techniques used in voxel-based game engines and volume rendering systems where axis-aligned slicing is common. The specific implementation details, including the calculation of edge vectors and normals for plane generation, are documented in the context of a Minecraft-like voxel engine implementation [S1, unofficial].
+The method originates from techniques for sampling scattered data onto rectangular grids for volume visualization [S2, unofficial]. It was developed to handle data on arbitrarily shaped grids by converting it into a structured format [S2, unofficial]. The distinction between constant and variable spacing was documented in early volume visualization research, with constant spacing noted for producing more accurate images at lower computational cost compared to variable spacing methods [S2, unofficial].
 
 ## Sources
 [S1] mayakeele/bad-minecraft, https://github.com/mayakeele/bad-minecraft, fetched 2026-10-27 (unofficial)
+[S2] DTIC ADA215533: Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)

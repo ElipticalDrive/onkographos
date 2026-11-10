@@ -1,81 +1,76 @@
 # Mammen's Technique
-Also called: Per-pixel transparent fragment sorting
+
+Also called: A-buffer, A-buffer visibility sort, Carpenter's A-buffer, Per-pixel transparent fragment sorting
+
 ## Overview
-Mammen's Technique is a software algorithm to sort per-pixel transparent fragments in front of the front-most opaque one [S1, unofficial]. It addresses the visibility ordering problem in object-order rendering where transparent surfaces must be composited from back to front [G]. Unlike incremental methods that exploit spatial coherence between adjacent pixels, Mammen's Technique performs independent, complete sorts for each pixel from scratch [S1, unofficial].
+Mammen's Technique is a software algorithm that sorts per-pixel transparent fragments in front of the front-most opaque one [S1, unofficial]. It solves the visibility ordering problem for transparent volume rendering by rasterizing all objects into sets of pixel fragments, saving them in per-pixel linked lists, and sorting the lists after rasterization using fragment depth [S2]. Unlike object-space methods that require global ordering, it allows objects to be rasterized in any order [S2]. It is distinguished from its siblings by operating on pixel fragments rather than object fragments, and from hardware variants like the R-Buffer by performing the sorting logic in software [S1, unofficial][S2].
+
 ## How it works
-**Inputs and Outputs:**
-- Input: A set of polygonal fragments projected onto a specific pixel, each containing a depth value ($z$) and an opacity attribute [G].
-- Output: A sorted list of transparent fragments ordered from back to front, followed by the front-most opaque fragment [S1, unofficial].
+**Inputs:** A set of geometric primitives (polygons) defining the volume.
+**Outputs:** A sorted list of fragments per pixel, ready for compositing.
 
 **Data Structures:**
-- A list of fragments projecting onto the current pixel [G]. Each fragment stores its depth $z$ and rendering attributes [G].
+*   **A-Buffer:** An array of linked lists, one per pixel.
+*   **Fragment Node:** Contains:
+    *   `depth`: The z-depth of the fragment.
+    *   `color`: The accumulated color/transparency.
+    *   `next`: Pointer to the next fragment in the list.
 
 **Steps:**
-1. **Projection:** Project all scene polygons onto the current pixel and identify fragments that cover it [G].
-2. **Opaque Identification:** Identify the front-most opaque fragment and record its depth as $z_{opaque}$ [G].
-3. **Transparent Filtering:** Collect all transparent fragments with depth $z < z_{opaque}$ (assuming $z$ increases away from the camera) [G]. Fragments with $z > z_{opaque}$ are occluded by the opaque fragment and discarded [G].
-4. **Sorting:** Sort the collected transparent fragments by depth $z$ in ascending order (back to front) [S1, unofficial].
-5. **Compositing:** Composite the sorted transparent fragments in order, then composite the front-most opaque fragment [G].
-
-**Formulas:**
-- Depth comparison: $z < z_{opaque}$ [G]
-- Compositing order: $\text{Result} = \text{Composite}(\text{Sorted Transparent Fragments}, \text{Front-most Opaque Fragment})$ [G]
-
-**Parameters:**
-- Not given in the sources.
-
-**Edge Cases and Pitfalls:**
-- **Multiple Opaque Fragments:** The algorithm assumes a single front-most opaque fragment [G].
-- **Precision:** Depth comparison precision must be sufficient to correctly determine occlusion by the front-most opaque fragment [G].
-- **Performance:** The method requires multiple passes through the polygons in the scene if implemented naively, as it does not incrementally update the sort from the previous pixel [S1, unofficial].
+1.  **Rasterization:** Rasterize all objects into the A-buffer. For each primitive, generate pixel fragments.
+2.  **Storage:** Save each fragment in the per-pixel linked list corresponding to its screen position [S2].
+3.  **Sorting:** After all objects are rasterized, sort each per-pixel linked list by fragment depth [S2].
+4.  **Compositing:** Composite the sorted fragments from front to back.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def mammen_sort(fragments):
-    """
-    Sorts transparent fragments for a single pixel using Mammen's Technique.
-    fragments: List of fragment objects with attributes .z (depth) and .opaque (boolean).
-    Returns: List of transparent fragments sorted back-to-front, followed by the front-most opaque fragment.
-    """
-    # Step 1: Identify the front-most opaque fragment
-    opaque_fragments = [f for f in fragments if f.opaque]
-    if not opaque_fragments:
-        front_most_opaque_z = float('inf')
-        front_most_opaque = None
-    else:
-        front_most_opaque = min(opaque_fragments, key=lambda f: f.z)
-        front_most_opaque_z = front_most_opaque.z
+# Initialize A-buffer with empty linked lists for each pixel
+a_buffer = [None] * (width * height)
 
-    # Step 2: Filter transparent fragments
-    transparent_fragments = []
-    for f in fragments:
-        if not f.opaque and f.z < front_most_opaque_z:
-            transparent_fragments.append(f)
+# Rasterize all objects
+for object in objects:
+    for fragment in rasterize(object):
+        pixel_index = fragment.x + fragment.y * width
+        # Insert fragment into the linked list at pixel_index
+        # Note: Initial insertion order does not matter for correctness
+        # as sorting happens later [S2]
+        insert_fragment(a_buffer[pixel_index], fragment)
 
-    # Step 3: Sort transparent fragments back-to-front (ascending z)
-    transparent_fragments.sort(key=lambda f: f.z)
-
-    # Step 4: Return sorted list
-    result = transparent_fragments
-    if front_most_opaque is not None:
-        result.append(front_most_opaque)
-    return result
+# Sort and composite
+for pixel_index in range(width * height):
+    head = a_buffer[pixel_index]
+    if head is None:
+        continue
+    
+    # Sort the linked list by depth
+    sorted_head = sort_linked_list_by_depth(head)
+    
+    # Composite from front to back
+    result_color = composite(sorted_head)
+    set_pixel_color(pixel_index, result_color)
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Memory Requirements:** The A-buffer has substantial memory requirements due to storing linked lists for every pixel [S2].
+*   **Multiple Passes:** Current hardware implementations require multiple passes through the polygons in the scene [S1, unofficial].
+*   **Software Performance:** A software version does more work than incremental methods because sorts are repeated from scratch independently at each pixel, instead of incrementally updating a sort from the previous pixel to the left [S1, unofficial].
+
 ## Subtopics
 
 ### [R-Buffer](2357-r-buffer.md)
-The R-Buffer is a hardware architectural proposal for implementing order-independent transparency (OIT) by storing fragments in a large, unordered, recirculating buffer separate from the Z-buffer and frame buffer. It solves the problem of correctly compositing an arbitrary number of transparent layers per pixel without requiring multiple passes of geometry or per-pixel linked lists. Unlike software-based sorting methods that repeat work for every pixel, the R-buffer amortizes storage costs across the entire screen, allowing fragments to be processed in successive passes until the framebuffer is fully composited.
+A hardware architecture proposal for implementing order-independent transparency (OIT) by storing fragments in a large, unordered, recirculating buffer shared across the entire screen, rather than using fixed-size per-pixel buffers. It implements a sorting and compositing method similar to Mammen's software algorithm to handle transparent fragments in front of the front-most opaque one. Unlike previous hardware implementations that required multiple passes through the geometry, the R-Buffer scan-converts all polygons only once, storing uncomposited fragments in the recirculating buffer for subsequent depth-comparison passes. It is distinguished from its sibling [Mammen's Technique](1279-mammen-s-technique.md) by moving the sorting logic from software to dedicated hardware logic, and from [k-Buffer](1280-k-buffer.md) by using a single global FIFO buffer instead of fixed-size per-pixel arrays, thereby amortizing storage costs over the screen.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \log N)$ per pixel for sorting $N$ transparent fragments, plus $O(N)$ for filtering and identification [G]. Since the sort is performed independently for each pixel without exploiting coherence, the total time is proportional to the number of pixels times the average number of fragments per pixel [S1, unofficial].
-- **Memory Complexity:** $O(N)$ per pixel to store the fragments [G].
-- **Measured Performance:** Not given in the sources [G].
-- **Scaling:** Performance degrades linearly with the number of fragments per pixel. It does not scale well with high fragment density compared to incremental methods [G].
-- **Strengths:** Simple to implement; handles visibility cycles gracefully per pixel; correctly handles occlusion by the front-most opaque fragment [G].
-- **Limitations:** Computationally expensive due to repeated sorting; does not exploit spatial coherence; requires multiple passes through polygons in naive implementations [S1, unofficial].
+*   **Time Complexity:** Sorting is performed independently at each pixel from scratch, which is less efficient than incremental sorting methods [S1, unofficial].
+*   **Memory Complexity:** Substantial memory requirements due to per-pixel linked lists [S2].
+*   **Strengths:** Objects can be rasterized in any order; no object-space ordering required [S2].
+*   **Limitations:** High memory usage; software implementation is slow due to repeated sorting; hardware implementations may require multiple passes [S1, unofficial][S2].
+
 ## Background
-Mammen's Technique was described in the context of comparing software algorithms for per-pixel transparent fragment sorting with proposed hardware solutions like the R-Buffer [S1, unofficial]. It serves as a baseline for understanding the computational cost of per-pixel sorting without coherence exploitation [G]. The technique is cited in discussions about the trade-offs between software sorting and hardware-based OIT solutions [S1, unofficial].
+Carpenter proposed the A-buffer, a technique that operates on pixel fragments instead of object fragments [S2]. The basic idea is to rasterize all the objects into sets of pixel fragments, then save those fragments in per-pixel linked lists. Each fragment stores its depth, which can be used to sort the lists after all the objects have been rasterized [S2]. A nice property of the A-buffer is that the objects can be rasterized in any order and, thus, do not require any object-space ordering [S2]. A main shortcoming of the A-buffer is that the memory requirements are substantial [S2]. Recently, there have been proposals for implementing the A-buffer in hardware [S2]. The R-buffer [23] is a pointerless A-buffer hardware architecture that implements a method similar to a software algorithm described in [24] for sorting transparent fragments in front of the frontmost opaque fragment [S2]. Current hardware implementations of this technique require multiple passes through the polygons in the scene [25] [S2].
+
 ## Sources
 [S1] PDF 0078-0903-2 1..13, https://sci.utah.edu/~csilva/papers/tvcg2004cr.pdf, fetched 2026-10-28 (unofficial)
+[S2] PDF Hardware-Assisted Visibility Sorting for Unstructured Volume Rendering, https://www.sci.utah.edu/~stevec/papers/havs.pdf, fetched 2026-10-29

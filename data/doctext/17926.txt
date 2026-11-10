@@ -1,0 +1,1486 @@
+# voxl
+
+voxl is a real time sparse voxel octree renderer. It is mainly made as an experiment inspired by [Euclideon](https://www.youtube.com/watch?v=00gAbgBu8R4). Due to the shortage of high resolution voxel models it supports loading of polygon models in the .obj format.
+
+## Screenshots
+
+![voxl screenshot of dragon](https://raw.githubusercontent.com/rools/voxl/assets/voxl1.png)
+![voxl screenshot of bunnies](https://raw.githubusercontent.com/rools/voxl/assets/voxl2.png)
+
+## License
+
+    Copyright 2012 Robert Olsson
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+### include/voxl.h
+```
+#ifndef VOXL_H
+#define VOXL_H
+
+#include <cstdio>
+#include <cstdint>
+
+#define MODEL_LIMIT 16
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846264338327950288
+#endif
+
+#ifndef M_PI_2
+#define M_PI_2 1.57079632679489661923132169163975144
+#endif
+
+/**
+ * Error codes
+ */
+typedef enum vx_error {
+    VX_ERROR_OK = 0, // No error
+    VX_ERROR_INVALID_DETAIL_LEVEL = 1, // Unvalid detail level specifier
+    VX_ERROR_TEXTURE_NOT_FOUND = 2, // Referenced texture not found
+    VX_ERROR_INVALID_OCTREE = 3, // The octree was invalid
+    VX_ERROR_CANT_OPEN_FILE = 4, // The specified file can't be opened
+    VX_ERROR_POLYGON_FILE_ERROR = 5, // The polygon file isn't valid
+    VX_ERROR_INVALID_MODEL = 6, // The specified model is invalid
+    VX_ERROR_INVALID_IMAGE = 7, // The specified image is invalid
+    VX_ERROR_UNSUPPORTED_IMAGE = 8  // The specified image is unsupported
+} vx_error;
+
+/**
+ * An octree
+ */
+struct vx_octree {
+    struct vx_node *root;
+    uint32_t size;
+    uint32_t allocated_size;
+
+    // Pointers to loaded models in the octree.
+    uint32_t models[MODEL_LIMIT];
+
+    int model_count;
+};
+
+/**
+ * Camera
+ */
+struct vx_camera {
+    float position[3];
+    float direction[3];
+    float rotation_vector[3];
+    float rotation;
+
+    float tan_fov;
+
+    int resolution[2];
+};
+
+/**
+ * A render context associated with a specific octree and camera.
+ */
+
+// Initialize an empty octree.
+void vx_init_octree(struct vx_octree *octree);
+
+// Generate a frame and save it to buffer.
+void vx_render_frame(struct vx_octree *octree, struct vx_camera *camera, char *buffer);
+
+// Rasterize the polygon model with the specified level of detail and save it to octree.
+vx_error vx_poly_to_octree(const char *file_name, struct vx_octree *octree, int detail);
+
+// Write the octree to the specified file.
+vx_error vx_write_octree(FILE *file, struct vx_octree octree);
+
+// Load an octree as a model to another octree and return model id.
+int vx_load_model(struct vx_octree *octree, struct vx_octree *model);
+
+// Place a loaded model in an octree.
+vx_error vx_place_model(struct vx_octree *octree, int model, float x, float y, float z, int detail);
+
+#endif
+```
+
+### samples/benchmark.cpp
+```
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <sys/time.h>
+#include <GLFW/glfw3.h>
+#include <climits>
+#include <cstdlib>
+
+#include "voxl.h"
+
+const int WINDOW_WIDTH = 800;
+const int WINDOW_HEIGHT = 600;
+
+const float MOVEMENT_SPEED = 0.01f;
+
+const int FRAME_COUNT = 100;
+
+double benchmark(GLFWwindow *window, struct vx_octree *octree, int draw);
+
+void print_help(FILE *stream, const char *name) {
+    fprintf(stream, "usage: %s [--draw] obj_file\n", name);
+}
+
+double get_time() {
+    struct timeval t;
+    gettimeofday(&t, NULL);
+    return t.tv_sec + 1.0e-6 * t.tv_usec;
+}
+
+void glfw_error_callback(int error, const char *description) {
+    fputs(description, stderr);
+}
+
+// A simple benchmark routine to make quick performance tests.
+double benchmark(GLFWwindow *window, struct vx_octree *octree, int draw) {
+    char *buffer = (char *) malloc(WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(uint32_t));
+    struct vx_camera camera;
+    double start_time, end_time;
+    GLuint texture;
+
+    camera.resolution[0] = WINDOW_WIDTH;
+    camera.resolution[1] = WINDOW_HEIGHT;
+    camera.position[1] = 0.51f;
+    camera.direction[0] = 1.0f;
+    camera.direction[1] = 0.0f;
+    camera.direction[2] = 0.0f;
+    camera.rotation_vector[0] = 0.0f;
+    camera.rotation_vector[1] = 1.0f;
+    camera.rotation_vector[2] = 0.0f;
+    camera.rotation = 0.0f;
+    camera.tan_fov = tanf(M_PI * 0.25);
+
+    if (draw) {
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    }
+
+    start_time = get_time();
+
+    for (int i = 0; i < FRAME_COUNT; ++i) {
+        float progress = (float) i / FRAME_COUNT;
+
+        // Rotate the camera around the center, always facing the center.
+        camera.position[0] = 0.7f * cos(progress * M_PI * 2) + 0.5f;
+        camera.position[2] = 0.7f * sin(progress * M_PI * 2) + 0.5f;
+        camera.rotation = -progress * M_PI * 2 - 0.5 * M_PI;
+
+        vx_render_frame(octree, &camera, buffer);
+
+        if (draw) {
+            glClear(GL_COLOR_BUFFER_BIT);
+
+            glLoadIdentity();
+
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, WINDOW_WIDTH, WINDOW_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, buffer);
+            glColor3f(1, 1, 1);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0.0, 0.0);
+            glVertex2f(-1, -1);
+            glTexCoord2f(0.0, 1.0);
+            glVertex2f(-1, 1);
+            glTexCoord2f(1.0, 1.0);
+            glVertex2f(1, 1);
+            glTexCoord2f(1.0, 0.0);
+            glVertex2f(1, -1);
+            glEnd();
+
+            glfwSwapBuffers(window);
+            glfwPollEvents();
+        }
+    }
+
+    end_time = get_time();
+
+    if (draw)
+        glDeleteTextures(1, &texture);
+
+    return end_time - start_time;
+}
+
+int main(int argc, const char *argv[]) {
+    int draw = 0;
+    struct vx_octree octree;
+
+    // Read command line options.
+    {
+        int arg = 1;
+
+        while (arg < (argc - 1)) {
+            if (strcmp(argv[arg], "--draw") == 0) {
+                draw = 1;
+                arg++;
+            } else {
+                print_help(stderr, argv[0]);
+                exit(1);
+            }
+        }
+
+        if (arg == argc) {
+            print_help(stderr, argv[0]);
+            exit(1);
+        }
+    }
+
+    {
+        vx_error e = vx_poly_to_octree(argv[argc - 1], &octree, 8);
+
+        if (e == VX_ERROR_CANT_OPEN_FILE) {
+            fprintf(stderr, "%s: %s: Could not open file\n", argv[0], argv[argc - 1]);
+            exit(1);
+        }
+    }
+
+    GLFWwindow *window = NULL;
+
+    if (draw) {
+        glfwSetErrorCallback(glfw_error_callback);
+
+        if (!glfwInit()) {
+            fprintf(stderr, "Could not initialize GLFW\n");
+            exit(1);
+        }
+
+        window = glfwCreateWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "voxl benchmark", NULL, NULL);
+        if (!window) {
+            fprintf(stderr, "Could not open GLFW window\n");
+            glfwTerminate();
+            exit(1);
+        }
+
+        glfwMakeContextCurrent(window);
+
+        int framebuffer_width, framebuffer_height;
+        glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
+        glViewport(0, 0, framebuffer_width, framebuffer_height);
+
+        glEnable(GL_TEXTURE_2D);
+
+        glMatrixMode(GL_PROJECTION);
+        glOrtho(-1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f);
+        glMatrixMode(GL_MODELVIEW);
+
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    }
+
+    {
+        double time = benchmark(window, &octree, draw);
+        printf("benchmark time: %f s (%f fps)\n", time, FRAME_COUNT / time);
+    }
+
+    if (draw) {
+        glfwDestroyWindow(window);
+        glfwTerminate();
+    }
+
+    return 0;
+}
+```
+
+### samples/objviewer.cpp
+```
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <GLFW/glfw3.h>
+#include <climits>
+#include <cstdlib>
+
+#include "voxl.h"
+
+const float MOVEMENT_SPEED = 0.1f;
+
+const int DEFAULT_WINDOW_WIDTH = 800;
+const int DEFAULT_WINDOW_HEIGHT = 600;
+const int DEFAULT_DETAIL_LEVEL = 8;
+const float DEFAULT_FOV = 90;
+const int FORMATION_SIZE = 4;
+
+const int FORMATION_LINE = 1;
+const int FORMATION_PLANE = 2;
+const int FORMATION_PYRAMID = 3;
+
+void print_help(FILE *stream, const char *name) {
+    fprintf(stream, "usage: %s [OPTION] obj_file\n", name);
+    fprintf(stream, "  --detail       detail level (default %i)\n", DEFAULT_DETAIL_LEVEL);
+    fprintf(stream, "  --width        window width (default %i)\n", DEFAULT_WINDOW_WIDTH);
+    fprintf(stream, "  --height       window height (default %i)\n", DEFAULT_WINDOW_HEIGHT);
+    fprintf(stream, "  --fov          camera field of view (default %.1f)\n", DEFAULT_FOV);
+    fprintf(stream, "  --formation    line, plane, pyramid\n");
+    fprintf(stream, "  -h, --help     display this help and exit\n");
+}
+
+void glfw_error_callback(int error, const char *description) {
+    fputs(description, stderr);
+}
+
+int main(int argc, const char *argv[]) {
+    int running = GL_TRUE;
+    struct vx_camera camera;
+    struct vx_octree octree;
+
+    int detail_level = DEFAULT_DETAIL_LEVEL;
+    int window_width = DEFAULT_WINDOW_WIDTH;
+    int window_height = DEFAULT_WINDOW_HEIGHT;
+    float tan_fov = tan((DEFAULT_FOV * 0.5f * M_PI) / 180.0f);
+    int formation = 0;
+
+    // Read command line options.
+    {
+        int arg = 1;
+
+        while (arg < (argc - 1)) {
+            if (strcmp(argv[arg], "--detail") == 0) {
+                detail_level = atoi(argv[arg + 1]);
+                if (detail_level < 1 || detail_level > 20) {
+                    fprintf(stderr, "Invalid detail level\n");
+                    exit(1);
+                }
+                arg += 2;
+            } else if (strcmp(argv[arg], "--width") == 0) {
+                window_width = atoi(argv[arg + 1]);
+                if (window_width < 1) {
+                    fprintf(stderr, "Invalid window width\n");
+                    exit(1);
+                }
+                arg += 2;
+            } else if (strcmp(argv[arg], "--height") == 0) {
+                window_height = atoi(argv[arg + 1]);
+                if (window_height < 1) {
+                    fprintf(stderr, "Invalid field of view\n");
+                    exit(1);
+                }
+                arg += 2;
+            } else if (strcmp(argv[arg], "--fov") == 0) {
+                float fov = atof(argv[arg + 1]);
+                if (fov <= 0 || fov >= 180) {
+                    fprintf(stderr, "Invalid field of view\n");
+                    exit(1);
+                }
+                tan_fov = tan((fov * 0.5f * M_PI) / 180.0f);
+                arg += 2;
+            } else if (strcmp(argv[arg], "--formation") == 0) {
+                ++arg;
+                if (strcmp(argv[arg], "line") == 0)
+                    formation = FORMATION_LINE;
+                else if (strcmp(argv[arg], "plane") == 0)
+                    formation = FORMATION_PLANE;
+                else if (strcmp(argv[arg], "pyramid") == 0)
+                    formation = FORMATION_PYRAMID;
+                else {
+                    fprintf(stderr, "Invalid formation\n");
+                    exit(1);
+                }
+                ++arg;
+            } else if (strcmp(argv[arg], "--help") == 0 || strcmp(argv[arg], "-h") == 0) {
+                print_help(stdout, argv[0]);
+                exit(0);
+                ++arg;
+            } else {
+                print_help(stderr, argv[0]);
+                exit(1);
+            }
+        }
+
+        if (arg == argc) {
+            print_help(stderr, argv[0]);
+            exit(1);
+        }
+    }
+
+    camera.resolution[0] = window_width;
+    camera.resolution[1] = window_height;
+    camera.direction[0] = 1.0f;
+    camera.direction[1] = 0.0f;
+    camera.direction[2] = 0.0f;
+    camera.rotation_vector[0] = 0.0f;
+    camera.rotation_vector[1] = 1.0f;
+    camera.rotation_vector[2] = 0.0f;
+    camera.rotation = M_PI * 0.75f;
+    camera.tan_fov = tan_fov;
+
+    vx_init_octree(&octree);
+
+    int model;
+
+    {
+        struct vx_octree m;
+        vx_error e = vx_poly_to_octree(argv[argc - 1], &m, detail_level);
+
+        if (e == VX_ERROR_CANT_OPEN_FILE) {
+            fprintf(stderr, "%s: %s: Could not open file\n", argv[0], argv[argc - 1]);
+            exit(1);
+        }
+
+        model = vx_load_model(&octree, &m);
+    }
+
+    float step = 1.0f / (1 << FORMATION_SIZE);
+
+    if (formation == FORMATION_LINE) {
+        camera.position[0] = 0.05f;
+        camera.position[1] = 0.50f;
+        camera.position[2] = 0.6f;
+
+        for (float x = 0.0f; x <= 1.0f; x += step) {
+            vx_place_model(&octree, model, x, 0.5f, 0.5f, FORMATION_SIZE);
+        }
+    } else if (formation == FORMATION_PLANE) {
+        camera.position[0] = 0.05f;
+        camera.position[1] = 0.55f;
+        camera.position[2] = 0.95f;
+
+        for (float x = 0.0f; x <= 1.0f; x += step) {
+            for (float z = 0.0f; z <= 1.0f; z += step) {
+                vx_place_model(&octree, model, x, 0.5f, z, FORMATION_SIZE);
+            }
+        }
+    } else if (formation == FORMATION_PYRAMID) {
+        camera.position[0] = 0.05f;
+        camera.position[1] = 0.2f;
+        camera.position[2] = 0.95f;
+
+        for (float y = 0.0f; y <= 1.0f; y += step) {
+            for (float x = y; x <= (1.0f - y); x += step) {
+                for (float z = y; z <= (1.0f - y); z += step) {
+                    vx_place_model(&octree, model, x, y, z, FORMATION_SIZE);
+                }
+            }
+        }
+    } else {
+        camera.position[0] = 0.40f;
+        camera.position[1] = 0.48f;
+        camera.position[2] = 0.55f;
+
+        vx_place_model(&octree, model, 0.5f, 0.5f, 0.5f, FORMATION_SIZE);
+    }
+
+    glfwSetErrorCallback(glfw_error_callback);
+
+    if (!glfwInit()) {
+        fprintf(stderr, "Could not initialize GLFW\n");
+        exit(1);
+    }
+
+    GLFWwindow *window = glfwCreateWindow(window_width, window_height, "voxl obj viewer", NULL, NULL);
+    if (!window) {
+        fprintf(stderr, "Could not open GLFW window\n");
+        glfwTerminate();
+        exit(1);
+    }
+
+    glfwMakeContextCurrent(window);
+
+    int framebuffer_width, framebuffer_height;
+    glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
+    glViewport(0, 0, framebuffer_width, framebuffer_height);
+
+    glEnable(GL_TEXTURE_2D);
+
+    glMatrixMode(GL_PROJECTION);
+    glOrtho(-1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f);
+    glMatrixMode(GL_MODELVIEW);
+
+    GLuint texture;
+    char *buffer = (char *) malloc(window_width * window_height * sizeof(uint32_t));
+
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+    double lastTime = glfwGetTime();
+
+    float totFramerate = 0;
+    int frameCount = 0;
+
+    while (running) {
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glLoadIdentity();
+
+        vx_render_frame(&octree, &camera, buffer);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, window_width, window_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, buffer);
+        glColor3f(1, 1, 1);
+        glBegin(GL_QUADS);
+        glTexCoord2f(0.0, 0.0);
+        glVertex2f(-1, -1);
+        glTexCoord2f(0.0, 1.0);
+        glVertex2f(-1, 1);
+        glTexCoord2f(1.0, 1.0);
+        glVertex2f(1, 1);
+        glTexCoord2f(1.0, 0.0);
+        glVertex2f(1, -1);
+        glEnd();
+
+        glfwSwapBuffers(window);
+        glfwPollEvents();
+
+        double time = glfwGetTime();
+        float dtime = time - lastTime;
+        float framerate = 1 / dtime;
+        if (frameCount % 30 == 0)
+            printf("%f fps\n", framerate);
+        lastTime = time;
+
+        totFramerate += framerate;
+        ++frameCount;
+
+        running = !glfwGetKey(window, GLFW_KEY_ESCAPE) && !glfwWindowShouldClose(window);
+
+        if (glfwGetKey(window, 'W')) {
+            camera.position[0] += dtime * MOVEMENT_SPEED * sinf(camera.rotation);
+            camera.position[2] += dtime * MOVEMENT_SPEED * cosf(camera.rotation);
+        } else if (glfwGetKey(window, 'S')) {
+            camera.position[0] -= dtime * MOVEMENT_SPEED * sinf(camera.rotation);
+            camera.position[2] -= dtime * MOVEMENT_SPEED * cosf(camera.rotation);
+        }
+
+        if (glfwGetKey(window, 'A')) {
+            camera.position[0] -= dtime * MOVEMENT_SPEED * sinf(camera.rotation + M_PI_2);
+            camera.position[2] -= dtime * MOVEMENT_SPEED * cosf(camera.rotation + M_PI_2);
+        } else if (glfwGetKey(window, 'D')) {
+            camera.position[0] += dtime * MOVEMENT_SPEED * sinf(camera.rotation + M_PI_2);
+            camera.position[2] += dtime * MOVEMENT_SPEED * cosf(camera.rotation + M_PI_2);
+        }
+
+        if (camera.position[0] < 0.0f)
+            camera.position[0] = 0.0f;
+        else if (camera.position[0] > 1.0f)
+            camera.position[0] = 1.0f;
+
+        if (camera.position[2] < 0.0f)
+            camera.position[2] = 0.0f;
+        else if (camera.position[2] > 1.0f)
+            camera.position[2] = 1.0f;
+
+        if (glfwGetKey(window, GLFW_KEY_SPACE)) {
+            camera.position[1] += dtime * MOVEMENT_SPEED;
+        } else if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL)) {
+            camera.position[1] -= dtime * MOVEMENT_SPEED;
+        }
+
+        if (camera.position[1] < 0.0f)
+            camera.position[1] = 0.0f;
+        else if (camera.position[1] > 1.0f)
+            camera.position[1] = 1.0f;
+
+        double mouse_x, mouse_y;
+        glfwGetCursorPos(window, &mouse_x, &mouse_y);
+
+        camera.rotation = mouse_x / 90.0f;
+    }
+
+    printf("avgerage framerate: %f\n", totFramerate / frameCount);
+
+    glfwDestroyWindow(window);
+    glfwTerminate();
+
+    return 0;
+}
+```
+
+### src/internal.h
+```
+#ifndef VOXL_INTERNAL_H
+#define VOXL_INTERNAL_H
+
+#include <cstdint>
+
+#include "voxl.h"
+
+// An octree node.
+struct vx_node {
+    uint32_t child_pointers[8];
+    uint8_t valid_masks;
+    uint8_t leaf_mask;
+
+    uint16_t padding;
+};
+
+// An octree leaf (a voxel).
+struct vx_voxel {
+    int8_t normals[3];
+
+    uint8_t colors[4];
+
+    // TODO: This padding causes a lot of wasted memory.
+    int8_t padding;
+    uint32_t padding2[7];
+};
+
+struct vx_render_context {
+    struct vx_octree *octree;
+    struct vx_camera *camera;
+
+    uint32_t *buffer;
+
+    int current_row;
+};
+
+struct vx_image {
+    int width;
+    int height;
+
+    // 8 bit per channel RGBA pixel information.
+    unsigned char *data;
+};
+
+// Return the largest argument.
+float vx_max(float a, float b, float c);
+
+// Return the smallest argument.
+float vx_min(float a, float b, float c);
+
+// Render the row in the context. This function is thread safe.
+void *vx_render_row(void *render_context);
+
+// Append nodes and/or voxels to the octree and return pointer to it.
+uint32_t vx_append_to_octree(struct vx_octree *octree, void *data, int size);
+
+// Returns the specified voxel, and creates it if it doesn't exist.
+struct vx_voxel *vx_get_octree_voxel(struct vx_octree *octree, float x, float y, float z, int detail);
+
+// Get the parent of the node or voxel that is or would have been at the specified position.
+void vx_get_parent(
+        struct vx_octree *octree, struct vx_node **parent, int *index, float x, float y, float z, int detail);
+
+// Load an image. Only supports PNG RGBA images with a bit depth of 8 at the moment.
+vx_error vx_load_image(char *file_name, struct vx_image *image);
+
+#endif
+```
+
+### src/polyconv.cpp
+```
+#include <cstdio>
+#include <cstring>
+#include <cfloat>
+#include <cstdlib>
+
+#include "internal.h"
+#include "voxl.h"
+#include "tribox.h"
+
+#include <png.h>
+
+vx_error vx_load_image(char *file_name, struct vx_image *image) {
+    png_byte header[8];
+    png_structp png_ptr;
+    png_infop info_ptr;
+
+    // Open file and check if it is a PNG file.
+    FILE *fp = fopen(file_name, "rb");
+    if (!fp)
+        return VX_ERROR_CANT_OPEN_FILE;
+    if (fread(header, 1, 8, fp) != 8)
+        return VX_ERROR_INVALID_IMAGE;
+    if (png_sig_cmp(header, 0, 8))
+        return VX_ERROR_UNSUPPORTED_IMAGE;
+
+    // Initialize PNG structures.
+    png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+    if (!png_ptr)
+        return VX_ERROR_INVALID_IMAGE;
+    info_ptr = png_create_info_struct(png_ptr);
+    if (!info_ptr)
+        return VX_ERROR_INVALID_IMAGE;
+    if (setjmp(png_jmpbuf(png_ptr)))
+        return VX_ERROR_INVALID_IMAGE;
+    png_init_io(png_ptr, fp);
+    png_set_sig_bytes(png_ptr, 8);
+    png_read_info(png_ptr, info_ptr);
+
+    // Only accept RGBA images with bit depth of 8 for simplicity.
+    if (png_get_color_type(png_ptr, info_ptr) != PNG_COLOR_TYPE_RGB_ALPHA || png_get_bit_depth(png_ptr, info_ptr) != 8)
+        return VX_ERROR_INVALID_IMAGE;
+
+    image->width = png_get_image_width(png_ptr, info_ptr);
+    image->height = png_get_image_height(png_ptr, info_ptr);
+
+    if (setjmp(png_jmpbuf(png_ptr)))
+        return VX_ERROR_INVALID_IMAGE;
+
+    // Read the image data.
+    unsigned char **row_pointers = (unsigned char **) malloc(sizeof(png_bytep) * image->height);
+    image->data = (unsigned char *) malloc(png_get_rowbytes(png_ptr, info_ptr) * image->height);
+    for (int y = 0; y < image->height; y++)
+        row_pointers[y] = image->data + y * png_get_rowbytes(png_ptr, info_ptr);
+    png_read_image(png_ptr, (png_bytepp) row_pointers);
+
+    free(row_pointers);
+
+    fclose(fp);
+
+    return VX_ERROR_OK;
+}
+
+struct vx_voxel *vx_get_octree_voxel(struct vx_octree *octree, float x, float y, float z, int detail) {
+    uint32_t node = 0;
+
+    float mid_point[3] = {0.5f, 0.5f, 0.5f};
+    float node_size = 0.5f;
+
+    struct vx_voxel *voxel = NULL;
+
+    for (int i = detail - 1; i >= 0; --i) {
+        int octant = x > mid_point[0] ? 1 : 0;
+        octant |= y > mid_point[1] ? 2 : 0;
+        octant |= z > mid_point[2] ? 4 : 0;
+
+        node_size *= 0.5f;
+
+        mid_point[0] += x > mid_point[0] ? node_size : -node_size;
+        mid_point[1] += y > mid_point[1] ? node_size : -node_size;
+        mid_point[2] += z > mid_point[2] ? node_size : -node_size;
+
+        if (i == 0) {
+            // The final level contains a voxel.
+            if (octree->root[node].valid_masks & (1 << octant) && octree->root[node].leaf_mask & (1 << octant)) {
+                voxel = (struct vx_voxel *) &octree->root[octree->root[node].child_pointers[octant]];
+            } else {
+                struct vx_voxel new_voxel;
+                int pointer = vx_append_to_octree(octree, &new_voxel, 1);
+                octree->root[node].valid_masks |= (1 << octant);
+                octree->root[node].leaf_mask |= (1 << octant);
+                octree->root[node].child_pointers[octant] = pointer;
+                voxel = (struct vx_voxel *) &octree->root[pointer];
+            }
+        } else {
+            // This level contains a node.
+            if (octree->root[node].valid_masks & (1 << octant)) {
+                node = octree->root[node].child_pointers[octant];
+            } else {
+                struct vx_node new_node;
+                new_node.leaf_mask = 0;
+                new_node.valid_masks = 0;
+
+                int pointer = vx_append_to_octree(octree, &new_node, 1);
+                octree->root[node].child_pointers[octant] = pointer;
+                octree->root[node].valid_masks |= (1 << octant);
+                node = pointer;
+            }
+        }
+    }
+
+    return voxel;
+}
+
+vx_error vx_poly_to_octree(const char *file_name, struct vx_octree *octree, int detail) {
+    float offset[3];
+    float scale;
+
+    int vertex_count = 0;
+    int face_count = 0;
+    int uv_count = 0;
+    int normal_count = 0;
+
+    float **vertices;
+    float **uvs;
+    int **faces;
+    float **normals;
+
+    FILE *file = fopen(file_name, "r");
+
+    if (file == NULL)
+        return VX_ERROR_CANT_OPEN_FILE;
+
+    // Start with checking the bounds of the model and size needed for arrays.
+    {
+        float min[3] = {FLT_MAX, FLT_MAX, FLT_MAX};
+        float max[3] = {FLT_MIN, FLT_MIN, FLT_MIN};
+
+        while (!feof(file)) {
+            char line[1024];
+            if (!fgets(line, 1024, file) && ferror(file))
+                return VX_ERROR_CANT_OPEN_FILE;
+
+            if (!strncmp(line, "v ", 2)) {
+                float x, y, z;
+
+                sscanf(line, "v %f %f %f\n", &x, &y, &z);
+
+                min[0] = x < min[0] ? x : min[0];
+                min[1] = y < min[1] ? y : min[1];
+                min[2] = z < min[2] ? z : min[2];
+                max[0] = x > max[0] ? x : max[0];
+                max[1] = y > max[1] ? y : max[1];
+                max[2] = z > max[2] ? z : max[2];
+
+                ++vertex_count;
+            } else if (!strncmp(line, "vt ", 3)) {
+                ++uv_count;
+            } else if (!strncmp(line, "vn ", 3)) {
+                ++normal_count;
+            } else if (!strncmp(line, "f ", 2)) {
+                ++face_count;
+            }
+        }
+
+        offset[0] = -min[0];
+        offset[1] = -min[1];
+        offset[2] = -min[2];
+
+        // Scale factor so that the model is kept within the octree.
+        scale = 1.0f / vx_max(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+    }
+
+    // TODO: Free these allocations when done.
+    vertices = (float **) malloc(vertex_count * sizeof(float *));
+    uvs = (float **) malloc(uv_count * sizeof(float *));
+    faces = (int **) malloc(face_count * sizeof(int *));
+    normals = (float **) malloc(normal_count * sizeof(float *));
+
+    vertex_count = 0;
+    face_count = 0;
+    uv_count = 0;
+    normal_count = 0;
+
+    rewind(file);
+
+    // Load the actual vertices, texture normals and faces from file.
+    while (!feof(file)) {
+        char line[1024];
+        if (!fgets(line, 1024, file) && ferror(file))
+            return VX_ERROR_CANT_OPEN_FILE;
+
+        if (!strncmp(line, "v ", 2)) {
+            float *vertex = (float *) malloc(3 * sizeof(float));
+            sscanf(line, "v %f %f %f\n", vertex, vertex + 1, vertex + 2);
+
+            vertex[0] = (vertex[0] + offset[0]) * scale;
+            vertex[1] = (vertex[1] + offset[1]) * scale;
+            vertex[2] = (vertex[2] + offset[2]) * scale;
+
+            vertices[vertex_count++] = vertex;
+        } else if (!strncmp(line, "vt ", 3)) {
+            float *uv = (float *) malloc(2 * sizeof(float));
+
+            sscanf(line, "vt %f %f\n", uv, uv + 1);
+
+            uvs[uv_count++] = uv;
+        } else if (!strncmp(line, "vn ", 3)) {
+            float *normal = (float *) malloc(3 * sizeof(float));
+
+            sscanf(line, "vn %f %f %f\n", normal, normal + 1, normal + 2);
+
+            normals[normal_count++] = normal;
+        } else if (!strncmp(line, "f ", 2)) {
+            int *face = (int *) malloc(9 * sizeof(int));
+
+            sscanf(line,
+                   "f %i/%i/%i %i/%i/%i %i/%i/%i\n",
+                   face, face + 3, face + 6, face + 1, face + 4, face + 7, face + 2, face + 5, face + 8);
+
+            for (int i = 0; i < 9; ++i)
+                face[i] -= 1;
+
+            faces[face_count++] = face;
+        }
+    }
+
+    //if (vertex_count == 0 || face_count == 0 || uv_count == 0 || normal_count == 0)
+    //	return VX_ERROR_POLYGON_FILE_ERROR;
+
+    // Build the octree from the faces.
+    octree->allocated_size = 4096;
+    octree->root = (struct vx_node *) malloc(octree->allocated_size * sizeof(struct vx_node));
+    octree->size = 1;
+
+    octree->root->leaf_mask = 0;
+    octree->root->valid_masks = 0;
+
+    const float step = 1.0f / (1 << detail);
+
+    // TODO: Optimize rasterization process, this is a pretty slow way of doing it.
+    for (int i = 0; i < face_count; ++i) {
+        int *face = faces[i];
+
+        float *normal = normals[face[6]];
+        float *triangle_vertices[3] = {vertices[face[0]], vertices[face[1]], vertices[face[2]]};
+
+        // The bounding box of the polygon.
+        float min[3], max[3];
+        min[0] = vx_min(triangle_vertices[0][0], triangle_vertices[1][0], triangle_vertices[2][0]) - step;
+        min[1] = vx_min(triangle_vertices[0][1], triangle_vertices[1][1], triangle_vertices[2][1]) - step;
+        min[2] = vx_min(triangle_vertices[0][2], triangle_vertices[1][2], triangle_vertices[2][2]) - step;
+        max[0] = vx_max(triangle_vertices[0][0], triangle_vertices[1][0], triangle_vertices[2][0]) + step;
+        max[1] = vx_max(triangle_vertices[0][1], triangle_vertices[1][1], triangle_vertices[2][1]) + step;
+        max[2] = vx_max(triangle_vertices[0][2], triangle_vertices[1][2], triangle_vertices[2][2]) + step;
+
+        for (float x = min[0]; x <= max[0]; x += step) {
+            for (float y = min[1]; y <= max[1]; y += step) {
+                for (float z = min[2]; z <= max[2]; z += step) {
+                    float box_center[3] = {x, y, z};
+                    float box_half_size[3] = {0.5f * step, 0.5f * step, 0.5f * step};
+
+                    if (triBoxOverlap(box_center, box_half_size, triangle_vertices)) {
+                        struct vx_voxel *voxel = vx_get_octree_voxel(octree, x, y, z, detail);
+
+                        voxel->colors[0] = 255;
+                        voxel->colors[1] = 255;
+                        voxel->colors[2] = 255;
+
+                        voxel->normals[0] = normal[0] * 128;
+                        voxel->normals[1] = normal[1] * 128;
+                        voxel->normals[2] = normal[2] * 128;
+                    }
+                }
+            }
+        }
+    }
+
+    return VX_ERROR_OK;
+}
+```
+
+### src/tribox.cpp
+```
+/********************************************************/
+/* AABB-triangle overlap test code                      */
+/* by Tomas Akenine-Möller                              */
+/* Function: int triBoxOverlap(float boxcenter[3],      */
+/*          float boxhalfsize[3],float triverts[3][3]); */
+/* History:                                             */
+/*   2001-03-05: released the code in its first version */
+/*   2001-06-18: changed the order of the tests, faster */
+/*                                                      */
+/* Acknowledgement: Many thanks to Pierre Terdiman for  */
+/* suggestions and discussions on how to optimize code. */
+/* Thanks to David Hunt for finding a ">="-bug!         */
+/********************************************************/
+#include <cmath>
+#include <cstdio>
+
+#include "tribox.h"
+
+#define X 0
+#define Y 1
+#define Z 2
+
+#define CROSS(dest,v1,v2) \
+dest[0]=v1[1]*v2[2]-v1[2]*v2[1]; \
+dest[1]=v1[2]*v2[0]-v1[0]*v2[2]; \
+dest[2]=v1[0]*v2[1]-v1[1]*v2[0]; 
+
+#define DOT(v1,v2) (v1[0]*v2[0]+v1[1]*v2[1]+v1[2]*v2[2])
+
+#define SUB(dest,v1,v2) \
+dest[0]=v1[0]-v2[0]; \
+dest[1]=v1[1]-v2[1]; \
+dest[2]=v1[2]-v2[2]; 
+
+#define FINDMINMAX(x0,x1,x2,min,max) \
+min = max = x0;   \
+if(x1<min) min=x1;\
+if(x1>max) max=x1;\
+if(x2<min) min=x2;\
+if(x2>max) max=x2;
+
+int planeBoxOverlap(float normal[3],float d, float maxbox[3])
+{
+	int q;
+	float vmin[3],vmax[3];
+	for(q=X;q<=Z;q++)
+	{
+		if(normal[q]>0.0f)
+		{
+			vmin[q]=-maxbox[q];
+			vmax[q]=maxbox[q];
+		}
+		else
+		{
+			vmin[q]=maxbox[q];
+			vmax[q]=-maxbox[q];
+		}
+	}
+	if(DOT(normal,vmin)+d>0.0f) return 0;
+	if(DOT(normal,vmax)+d>=0.0f) return 1;
+	
+	return 0;
+}
+
+
+/*======================== X-tests ========================*/
+#define AXISTEST_X01(a, b, fa, fb)			   \
+p0 = a*v0[Y] - b*v0[Z];			       	   \
+p2 = a*v2[Y] - b*v2[Z];			       	   \
+if(p0<p2) {min=p0; max=p2;} else {min=p2; max=p0;} \
+rad = fa * boxhalfsize[Y] + fb * boxhalfsize[Z];   \
+if(min>rad || max<-rad) return 0;
+
+#define AXISTEST_X2(a, b, fa, fb)			   \
+p0 = a*v0[Y] - b*v0[Z];			           \
+p1 = a*v1[Y] - b*v1[Z];			       	   \
+if(p0<p1) {min=p0; max=p1;} else {min=p1; max=p0;} \
+rad = fa * boxhalfsize[Y] + fb * boxhalfsize[Z];   \
+if(min>rad || max<-rad) return 0;
+
+/*======================== Y-tests ========================*/
+#define AXISTEST_Y02(a, b, fa, fb)			   \
+p0 = -a*v0[X] + b*v0[Z];		      	   \
+p2 = -a*v2[X] + b*v2[Z];	       	       	   \
+if(p0<p2) {min=p0; max=p2;} else {min=p2; max=p0;} \
+rad = fa * boxhalfsize[X] + fb * boxhalfsize[Z];   \
+if(min>rad || max<-rad) return 0;
+
+#define AXISTEST_Y1(a, b, fa, fb)			   \
+p0 = -a*v0[X] + b*v0[Z];		      	   \
+p1 = -a*v1[X] + b*v1[Z];	     	       	   \
+if(p0<p1) {min=p0; max=p1;} else {min=p1; max=p0;} \
+rad = fa * boxhalfsize[X] + fb * boxhalfsize[Z];   \
+if(min>rad || max<-rad) return 0;
+
+/*======================== Z-tests ========================*/
+
+#define AXISTEST_Z12(a, b, fa, fb)			   \
+p1 = a*v1[X] - b*v1[Y];			           \
+p2 = a*v2[X] - b*v2[Y];			       	   \
+if(p2<p1) {min=p2; max=p1;} else {min=p1; max=p2;} \
+rad = fa * boxhalfsize[X] + fb * boxhalfsize[Y];   \
+if(min>rad || max<-rad) return 0;
+
+#define AXISTEST_Z0(a, b, fa, fb)			   \
+p0 = a*v0[X] - b*v0[Y];				   \
+p1 = a*v1[X] - b*v1[Y];			           \
+if(p0<p1) {min=p0; max=p1;} else {min=p1; max=p0;} \
+rad = fa * boxhalfsize[X] + fb * boxhalfsize[Y];   \
+if(min>rad || max<-rad) return 0;
+
+int triBoxOverlap(float boxcenter[3],float boxhalfsize[3],float *triverts[3])
+{
+	
+	/*    use separating axis theorem to test overlap between triangle and box */
+	/*    need to test for overlap in these directions: */
+	/*    1) the {x,y,z}-directions (actually, since we use the AABB of the triangle */
+	/*       we do not even need to test these) */
+	/*    2) normal of the triangle */
+	/*    3) crossproduct(edge from tri, {x,y,z}-directin) */
+	/*       this gives 3x3=9 more tests */
+	float v0[3],v1[3],v2[3];
+	float min,max,d,p0,p1,p2,rad,fex,fey,fez;  
+	float normal[3],e0[3],e1[3],e2[3];
+	
+	/* This is the fastest branch on Sun */
+	/* move everything so that the boxcenter is in (0,0,0) */
+	SUB(v0,triverts[0],boxcenter);
+	SUB(v1,triverts[1],boxcenter);
+	SUB(v2,triverts[2],boxcenter);
+	
+	/* compute triangle edges */
+	SUB(e0,v1,v0);      /* tri edge 0 */
+	SUB(e1,v2,v1);      /* tri edge 1 */
+	SUB(e2,v0,v2);      /* tri edge 2 */
+	
+	/* Bullet 3:  */
+	/*  test the 9 tests first (this was faster) */
+	fex = fabs(e0[X]);
+	fey = fabs(e0[Y]);
+	fez = fabs(e0[Z]);
+	AXISTEST_X01(e0[Z], e0[Y], fez, fey);
+	AXISTEST_Y02(e0[Z], e0[X], fez, fex);
+	AXISTEST_Z12(e0[Y], e0[X], fey, fex);
+	
+	fex = fabs(e1[X]);
+	fey = fabs(e1[Y]);
+	fez = fabs(e1[Z]);
+	AXISTEST_X01(e1[Z], e1[Y], fez, fey);
+	AXISTEST_Y02(e1[Z], e1[X], fez, fex);
+	AXISTEST_Z0(e1[Y], e1[X], fey, fex);
+	
+	fex = fabs(e2[X]);
+	fey = fabs(e2[Y]);
+	fez = fabs(e2[Z]);
+	AXISTEST_X2(e2[Z], e2[Y], fez, fey);
+	AXISTEST_Y1(e2[Z], e2[X], fez, fex);
+	AXISTEST_Z12(e2[Y], e2[X], fey, fex);
+	
+	/* Bullet 1: */
+	/*  first test overlap in the {x,y,z}-directions */
+	/*  find min, max of the triangle each direction, and test for overlap in */
+	/*  that direction -- this is equivalent to testing a minimal AABB around */
+	/*  the triangle against the AABB */
+	
+	/* test in X-direction */
+	FINDMINMAX(v0[X],v1[X],v2[X],min,max);
+	if(min>boxhalfsize[X] || max<-boxhalfsize[X]) return 0;
+	
+	/* test in Y-direction */
+	FINDMINMAX(v0[Y],v1[Y],v2[Y],min,max);
+	if(min>boxhalfsize[Y] || max<-boxhalfsize[Y]) return 0;
+	
+	/* test in Z-direction */
+	FINDMINMAX(v0[Z],v1[Z],v2[Z],min,max);
+	if(min>boxhalfsize[Z] || max<-boxhalfsize[Z]) return 0;
+	
+	/* Bullet 2: */
+	/*  test if the box intersects the plane of the triangle */
+	/*  compute plane equation of triangle: normal*x+d=0 */
+	CROSS(normal,e0,e1);
+	d=-DOT(normal,v0);  /* plane eq: normal.x+d=0 */
+	if(!planeBoxOverlap(normal,d,boxhalfsize)) return 0;
+	
+	return 1;   /* box and triangle overlaps */
+}
+```
+
+### src/tribox.h
+```
+#ifndef TRIBOX_H
+#define TRIBOX_H
+
+int planeBoxOverlap(float normal[3], float d, float maxbox[3]);
+int triBoxOverlap(float boxcenter[3], float boxhalfsize[3], float *triverts[3]);
+
+#endif
+```
+
+### src/voxl.cpp
+```
+#define _USE_MATH_DEFINES
+
+#include <cstring>
+#include <cmath>
+#include <pthread.h>
+#include <cstdlib>
+
+#include <hwy/highway.h>
+
+#include "internal.h"
+#include "voxl.h"
+
+HWY_BEFORE_NAMESPACE();
+
+hwy::HWY_NAMESPACE::ScalableTag<float> df;
+using VecF = hwy::HWY_NAMESPACE::Vec<decltype(df)>;
+using MaskF = hwy::HWY_NAMESPACE::Mask<decltype(df)>;
+
+// How many threads to use when rendering a frame.
+const int RENDERING_THREADS = 8;
+
+// The maximum level of detail level for any octree.
+const int MAX_DETAIL_LEVEL = 20;
+
+float vx_max(float a, float b, float c) {
+    return a > b ? (a > c ? a : c) : (b > c ? b : c);
+}
+
+float vx_min(float a, float b, float c) {
+    return a < b ? (a < c ? a : c) : (b < c ? b : c);
+}
+
+void vx_init_octree(struct vx_octree *octree) {
+    octree->allocated_size = 128;
+    octree->root = (vx_node *) malloc(octree->allocated_size * sizeof(struct vx_node));
+    octree->size = 1;
+    octree->model_count = 0;
+    octree->root->leaf_mask = 0;
+    octree->root->valid_masks = 0;
+}
+
+uint32_t vx_ray_cast(struct vx_octree *octree, VecF ray_origin, VecF ray_direction) {
+    VecF box = Zero(df);
+    MaskF ray_sign = ray_direction >= Zero(df);
+    VecF half_size = Set(df, 0.5f);
+    MaskF moctant = ray_origin > (box + half_size);
+
+    // The potential X, Y and Z-planes that the ray will collide with next.
+    VecF planes = IfThenElseZero(moctant, half_size) + IfThenElseZero(ray_sign, half_size) + box;
+
+    // Stacks to keep track of nodes during traversal of the octree.
+    struct vx_node *node_stack[MAX_DETAIL_LEVEL];
+    uint64_t octant_stack[MAX_DETAIL_LEVEL];
+    int stack_pos = 0;
+
+    node_stack[0] = octree->root;
+
+    // What octant are we in?
+    StoreMaskBits(df, moctant, (uint8_t *) octant_stack);
+
+    MaskF mask[3];
+    {
+        uint64_t tmp;
+        mask[0] = LoadMaskBits(df, (uint8_t *) &(tmp = 1));
+        mask[1] = LoadMaskBits(df, (uint8_t *) &(tmp = 2));
+        mask[2] = LoadMaskBits(df, (uint8_t *) &(tmp = 4));
+    }
+
+    while (stack_pos >= 0) {
+        // Have we reached a child?
+        if (node_stack[stack_pos]->valid_masks & (1 << octant_stack[stack_pos])) {
+            // Is this child a voxel?
+            if (node_stack[stack_pos]->leaf_mask & (1 << octant_stack[stack_pos])) {
+                struct vx_voxel *voxel = (struct vx_voxel *) &octree->root[node_stack[stack_pos]->child_pointers[octant_stack[stack_pos]]];
+
+                // The direction of the directional light source.
+                float light[3] = {-0.039030f, -0.866792f, 0.497139f};
+
+                float brightness = acosf(
+                        (voxel->normals[0] / 128.0f) * light[0] +
+                        (voxel->normals[1] / 128.0f) * light[1] +
+                        (voxel->normals[2] / 128.0f) * light[2]) / M_PI;
+
+                return ((unsigned int) (voxel->colors[1] * brightness) << 16) |
+                       ((unsigned int) (voxel->colors[1] * brightness) << 8) |
+                       (unsigned int) (voxel->colors[0] * brightness);
+            }
+
+            // This was a node, push it to the stack.
+            node_stack[stack_pos + 1] = &octree->root[node_stack[stack_pos]->child_pointers[octant_stack[stack_pos]]];
+
+            box = box + IfThenElseZero(moctant, half_size);
+
+            half_size = half_size * Set(df, 0.5f);
+
+            ++stack_pos;
+
+            moctant = ray_origin > box + half_size;
+            StoreMaskBits(df, moctant, (uint8_t *) &octant_stack[stack_pos]);
+
+            planes = IfThenElseZero(moctant, half_size) + IfThenElseZero(ray_sign, half_size) + box;
+
+            continue;
+        }
+
+        // Calculate intersection t values.
+        float t[4];
+        Store((planes - ray_origin) / ray_direction, df, t);
+
+        // What plane will the ray intersect with first?
+        const int intersection_plane = t[0] < t[1] ? (t[0] < t[2] ? 0 : 2) : (t[1] < t[2] ? 1 : 2);
+        uint64_t dir_sign = 0;
+        StoreMaskBits(df, ray_sign, (uint8_t *) &dir_sign);
+        dir_sign = (dir_sign >> intersection_plane) & 1;
+
+        ray_origin = ray_origin + Set(df, t[intersection_plane]) * ray_direction;
+
+        // Check if the ray left the node.
+        if ((octant_stack[stack_pos] & (1 << intersection_plane)) >> intersection_plane == dir_sign) {
+            // Pop all nodes that the ray left.
+            do {
+                --stack_pos;
+
+                half_size = half_size * Set(df, 2.0f);
+
+                moctant = LoadMaskBits(df, (uint8_t *) &octant_stack[stack_pos]);
+
+                box = box - IfThenElseZero(moctant, half_size);
+            } while (stack_pos >= 0 && (((octant_stack[stack_pos] >> intersection_plane) & 1) == dir_sign));
+
+            // Update octant.
+            octant_stack[stack_pos] &= ~(1 << intersection_plane);
+            octant_stack[stack_pos] |= dir_sign << intersection_plane;
+
+            moctant = LoadMaskBits(df, (uint8_t *) &octant_stack[stack_pos]);
+
+            planes = IfThenElseZero(moctant, half_size) + IfThenElseZero(ray_sign, half_size) + box;
+
+            continue;
+        }
+
+        // Update octant.
+        octant_stack[stack_pos] &= ~(1 << intersection_plane);
+        octant_stack[stack_pos] |= dir_sign << intersection_plane;
+
+        moctant = LoadMaskBits(df, (uint8_t *) &octant_stack[stack_pos]);
+
+        // Move the plane that the ray hit.
+        planes = dir_sign ? planes + IfThenElseZero(mask[intersection_plane], half_size)
+                          : planes - IfThenElseZero(mask[intersection_plane], half_size);
+    }
+
+    // The ray didn't hit any voxel.
+    return 0xFF000000;
+}
+
+void vx_render_frame(struct vx_octree *octree, struct vx_camera *camera, char *buffer) {
+    pthread_t threads[RENDERING_THREADS];
+    struct vx_render_context context;
+
+    context.octree = octree;
+    context.camera = camera;
+    context.buffer = (uint32_t *) buffer;
+    context.current_row = 0;
+
+    // Start rendering threads.
+    for (int t = 0; t < RENDERING_THREADS; ++t)
+        pthread_create(&threads[t], NULL, vx_render_row, &context);
+
+    // Wait for all threads to complete.
+    for (int t = 0; t < RENDERING_THREADS; ++t)
+        pthread_join(threads[t], NULL);
+}
+
+void *vx_render_row(void *render_context) {
+    struct vx_render_context *rc = (struct vx_render_context *) render_context;
+
+    float cosa = cosf(rc->camera->rotation);
+    float sina = sinf(rc->camera->rotation);
+
+    float *rv = rc->camera->rotation_vector;
+
+    // x and y factors for ray vector to get correct field of view.
+    float x_factor = rc->camera->tan_fov / (rc->camera->resolution[0] / 2);
+    float y_factor = (rc->camera->tan_fov / (rc->camera->resolution[1] / 2)) *
+                     ((float) rc->camera->resolution[1] / rc->camera->resolution[0]);
+
+    float ray_origin[4];
+    ray_origin[0] = rc->camera->position[0]; // - sina * 0.4f;
+    ray_origin[1] = rc->camera->position[1];
+    ray_origin[2] = rc->camera->position[2]; // - cosa * 0.4f;
+    ray_origin[3] = 0;
+
+    for (int32_t y = (rc->current_row)++; y < rc->camera->resolution[1]; y = (rc->current_row)++) {
+        for (int x = 0; x < rc->camera->resolution[0]; ++x) {
+            float ray_direction[4];
+
+            {
+                float rx = ((float) (x - rc->camera->resolution[0] / 2)) * x_factor;
+                float ry = ((float) (y - rc->camera->resolution[1] / 2)) * y_factor;
+                float rz = 1.0f; // This gives a rectilinear perspective.
+                // float rz = 2.0f * cosf(0.5f * sqrtf(rx * rx + ry * ry)); // This gives a fisheye perspective.
+
+                // Rotate the ray around the rotation vector.
+                ray_direction[0] = rv[0] * (rv[0] * rx + rv[1] * ry + rv[2] * rz) * (1 - cosa) + rx * cosa +
+                                   (-rv[2] * ry + rv[1] * rz) * sina;
+                ray_direction[1] = rv[1] * (rv[0] * rx + rv[1] * ry + rv[2] * rz) * (1 - cosa) + ry * cosa +
+                                   (rv[2] * rx + rv[0] * rz) * sina;
+                ray_direction[2] = rv[2] * (rv[0] * rx + rv[1] * ry + rv[2] * rz) * (1 - cosa) + rz * cosa +
+                                   (-rv[1] * rx + rv[0] * ry) * sina;
+            }
+
+            uint32_t color = vx_ray_cast(rc->octree, Load(df, ray_origin), Load(df, ray_direction));
+
+            rc->buffer[y * rc->camera->resolution[0] + x] = color;
+        }
+    }
+
+    return NULL;
+}
+
+uint32_t vx_append_to_octree(struct vx_octree *octree, void *data, int size) {
+    // Check if we need to allocate more memory to fit the new data.
+    if ((octree->size + size) > octree->allocated_size) {
+        // Allocate at least double the memory. (Is this really desirable when the octree grows very large?)
+        uint32_t new_allocated_size = octree->size + size;
+        if (2 * octree->allocated_size > new_allocated_size)
+            new_allocated_size = 2 * octree->allocated_size;
+        octree->root = (vx_node *) realloc(octree->root, new_allocated_size * sizeof(struct vx_node));
+        octree->allocated_size = new_allocated_size;
+    }
+
+    uint32_t pointer = octree->size;
+
+    memcpy(&octree->root[octree->size], data, sizeof(struct vx_node) * size);
+    octree->size += size;
+
+    return pointer;
+}
+
+void vx_get_parent(
+        struct vx_octree *octree, struct vx_node **parent, int *index, float x, float y, float z, int detail) {
+    uint32_t node = 0;
+
+    float mid_point[3] = {0.5f, 0.5f, 0.5f};
+    float node_size = 0.5f;
+
+    for (int i = detail - 1; i >= 0; --i) {
+        int octant = x > mid_point[0] ? 1 : 0;
+        octant |= y > mid_point[1] ? 2 : 0;
+        octant |= z > mid_point[2] ? 4 : 0;
+
+        node_size *= 0.5f;
+
+        mid_point[0] += x > mid_point[0] ? node_size : -node_size;
+        mid_point[1] += y > mid_point[1] ? node_size : -node_size;
+        mid_point[2] += z > mid_point[2] ? node_size : -node_size;
+
+        if (i == 0) {
+            // We found the parent of the node or voxel we wanted.
+            *parent = &octree->root[node];
+            *index = octant;
+        } else {
+            // This level contains a node.
+            if (octree->root[node].valid_masks & (1 << octant)) {
+                node = octree->root[node].child_pointers[octant];
+            } else {
+                struct vx_node new_node;
+                new_node.leaf_mask = 0;
+                new_node.valid_masks = 0;
+
+                int pointer = vx_append_to_octree(octree, &new_node, 1);
+                octree->root[node].child_pointers[octant] = pointer;
+                octree->root[node].valid_masks |= (1 << octant);
+                node = pointer;
+            }
+        }
+    }
+}
+
+// TODO: Fix this temporary solution (eg. by switching to relative pointers).
+void add_pointer(struct vx_octree *octree, uint32_t node, int amount) {
+    for (int i = 0; i < 8; ++i) {
+        if (octree->root[node].valid_masks & (1 << i)) {
+            octree->root[node].child_pointers[i] += amount;
+            if ((octree->root[node].leaf_mask & (1 << i)) == 0)
+                add_pointer(octree, octree->root[node].child_pointers[i] - amount, amount);
+        }
+    }
+}
+
+int vx_load_model(struct vx_octree *octree, struct vx_octree *model) {
+    if (octree->model_count == MODEL_LIMIT)
+        return -1;
+
+    int model_index = octree->model_count;
+
+    // TODO: Fix better solution... This destroys the model octree.
+    add_pointer(model, 0, octree->size);
+
+    octree->models[octree->model_count++] = vx_append_to_octree(octree, model->root, model->size);
+
+    return model_index;
+}
+
+vx_error vx_place_model(struct vx_octree *octree, int model, float x, float y, float z, int detail) {
+    struct vx_node *parent;
+    int index;
+
+    if (model < 0 || model >= octree->model_count)
+        return VX_ERROR_INVALID_MODEL;
+
+    vx_get_parent(octree, &parent, &index, x, y, z, detail);
+
+    parent->child_pointers[index] = octree->models[model];
+    parent->valid_masks |= (1 << index);
+
+    return VX_ERROR_OK;
+}
+
+HWY_AFTER_NAMESPACE();
+```

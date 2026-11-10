@@ -1,11 +1,8 @@
 # Image-order rendering
-
 ## Overview
 Image-order rendering generates images by iterating over pixels and computing the contribution of volumetric data along rays cast from the camera through each pixel [G]. It sets itself apart from [Object-order rendering](22-object-order-rendering.md) by processing pixels rather than voxels, ensuring correct depth sorting and occlusion handling without explicit z-buffering of primitives [G].
-
 ## Shared principles
 All image-order methods share the fundamental loop structure: for each pixel, a ray is defined in world space, intersected with the volume domain, and sampled/composited along its path [G]. The ray is parameterized as $r(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the origin and $\mathbf{d}$ is the direction [G]. The traversal order is determined by the pixel's position in the image plane [G].
-
 ## Subtopics
 
 ### [Ray-grid traversal](17-ray-grid-traversal.md)
@@ -24,6 +21,6 @@ Renders a volume by tracing rays from the eye and stopping at the first voxel (o
 Finds surfaces by moving along a ray in repeated steps, using a signed distance field (SDF) to choose each step size adaptively, avoiding the tradeoff of fixed-step marching. Unlike naive fixed-step marching which uses a constant increment, sphere tracing uses the SDF value as the step size, ensuring the step is as large as possible without risk of overshooting. Unlike traditional rasterization, the visible shape is defined mathematically by a scene function, not by a triangle mesh. Choose it when rendering implicit geometry or procedural volumes without explicit voxel grids.
 
 ## Background
-Origin and history are not given in the sources. It is widely used in medical imaging, scientific visualization, and computer graphics for rendering volumetric datasets such as CT scans and MRI data [G].
+Not given in the sources. Widely used in medical imaging, scientific visualization, and computer graphics for rendering volumetric datasets such as CT scans and MRI data [G].
 
 ## Sources
