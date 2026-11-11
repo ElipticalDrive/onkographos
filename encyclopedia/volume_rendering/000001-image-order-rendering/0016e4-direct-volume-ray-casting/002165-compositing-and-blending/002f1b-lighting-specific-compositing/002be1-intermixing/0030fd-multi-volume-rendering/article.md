@@ -2,40 +2,38 @@
 
 Also called: Multiple Volume Display
 ## Overview
-Multi-volume rendering refers to the simultaneous rendering of multiple co-registered or deformed volume datasets [S1, unofficial][S2]. It solves the problem of visualizing complex interactions between distinct volumetric data sources (e.g., different tissue types, simulation states, or anatomical atlases) within a single unified view [S1, unofficial][S2]. Unlike single-volume rendering, it requires specific strategies for combining data from multiple textures, categorized into classification-level, accumulation-level, and image-level intermixing [S1, unofficial]. It builds on [Intermixing](5139-intermixing.md) by providing the structural mechanisms to handle multiple data channels during the ray-casting process.
+Multi-volume rendering refers to the simultaneous rendering of multiple co-registered or deformed volume datasets [S1, unofficial][S2]. It solves the problem of visualizing complex interactions between distinct volumetric data sources (e.g., different tissue types, simulation states, or anatomical atlases) within a single unified view [S1, unofficial][S2]. Unlike single-volume rendering, it requires specific strategies for combining data from multiple textures, categorized into classification-level, accumulation-level, and image-level intermixing [S1, unofficial]. It builds on [Intermixing](5139-intermixing.md) by providing the structural mechanisms to handle multiple data channels during the ray-casting process [G].
 
 ## How it works
 ### Inputs and outputs
 **Inputs:**
-*   $N$ volume textures (3D textures), where $N$ is the number of channels/volumes.
-*   Viewing ray parameters (origin $\mathbf{o}$, direction $\mathbf{d}$).
-*   Sampling step size $\Delta s$.
-*   Weighting factor $\omega$ (for classification-level intermixing).
-*   Combination strategy (for accumulation-level intermixing).
+*   $N$ volume textures (3D textures), where $N$ is the number of channels/volumes [S1, unofficial][S2].
+*   Viewing ray parameters (origin $\mathbf{o}$, direction $\mathbf{d}$) [G].
+*   Sampling step size $\Delta s$ [G].
+*   Weighting factor $\omega$ (for classification-level intermixing) [S1, unofficial].
+*   Combination strategy (for accumulation-level intermixing) [S1, unofficial][S2].
 
 **Outputs:**
-*   A single composite color and opacity value per pixel.
+*   A single composite color and opacity value per pixel [G].
 
 ### Data structures
-*   **Volume Textures:** $N$ separate 3D texture objects. In out-of-core implementations, these may be stored in bricks mapped to octree nodes, where each node stores information for up to $n$ channels (e.g., $n=4$) [S1, unofficial]. The number of channels is typically implementation-defined and fixed at runtime [S1, unofficial].
+*   **Volume Textures:** $N$ separate 3D texture objects. In out-of-core implementations, octree nodes and bricks store information on up to $n$ channels (e.g., $n=4$) [S1, unofficial]. The number of channels is implementation-defined and cannot be changed at run-time [S1, unofficial].
 *   **Proxy Geometry:** For deformed volumes, a standard proxy geometry (e.g., a mesh) is used to sample the volumes [S2].
 
 ### Steps
-1.  **Ray Casting Setup:** For each pixel, generate a viewing ray.
-2.  **Sampling:** For each sample point along the ray:
-    *   Determine the 3D coordinates in the volume space.
-    *   Sample all $N$ volume textures at these coordinates.
+1.  **Ray Casting Setup:** For each pixel, generate a viewing ray [G].
+2.  **Sampling:** For each sample point along the ray, determine the 3D coordinates in volume space and sample all $N$ volume textures at these coordinates [S1, unofficial][S2].
 3.  **Intermixing:** Combine the sampled values based on the chosen intermixing strategy:
     *   **Classification-level intermixing:** Linearly interpolate the sampled values of two channels using a weighting factor $\omega$ (e.g., $\omega = 0.5$) before evaluating the illumination model [S1, unofficial].
     *   **Accumulation-level intermixing:** Evaluate the illumination model (emission and absorption) separately for each channel at each sample point, then combine the results [S1, unofficial].
     *   **Image-level intermixing:** Render a complete image for each channel independently, then mix the final images using alpha blending [S1, unofficial].
-4.  **Compositing:** Accumulate the results along the ray to produce the final pixel color.
+4.  **Compositing:** Accumulate the results along the ray to produce the final pixel color [G].
 
 ### Formulas
 **Classification-level intermixing:**
-Let $v_1$ and $v_2$ be the sampled values from two channels. The combined value $v_{comb}$ is:
+Let $v_1$ and $v_2$ be the sampled values from two channels. The combined value is:
 $$ v_{comb} = (1 - \omega) v_1 + \omega v_2 $$
-The illumination model is then evaluated using $v_{comb}$ [S1, unofficial].
+The illumination model is evaluated using the interpolation result [S1, unofficial].
 
 **Accumulation-level intermixing:**
 Let $E_i$ and $A_i$ be the emission and absorption coefficients for channel $i$ at a sample point. The combined emission $E_{comb}$ and absorption $A_{comb}$ are computed based on the chosen strategy (e.g., sum, difference, emitted color mixing) [S1, unofficial][S2].
@@ -47,136 +45,117 @@ Let $E_i$ and $A_i$ be the emission and absorption coefficients for channel $i$ 
 ### Edge cases and pitfalls
 *   **Occlusion handling:** Image-level intermixing cannot handle occlusions between different channels correctly because depth information is missing in the accumulated intermediate results [S1, unofficial].
 *   **Proxy geometry sampling:** When rendering multiple deformed volumes using proxy geometries, samples cannot overlap. Techniques that adaptively tessellate proxy geometries based on deformation must find a tessellation that satisfies the deformations of all volumes simultaneously [S2].
-*   **Runtime flexibility:** The number of channels is often fixed at runtime and cannot be changed dynamically [S1, unofficial].
+*   **Runtime flexibility:** The number of channels cannot be changed at run-time [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def multi_volume_rendering(ray_origin, ray_direction, volumes, strategy, omega=0.5):
+def multi_volume_rendering(ray_origin, ray_direction, volumes, volume_bounds, step_size, strategy, omega=0.5):
     """
     Render multiple volumes using the specified intermixing strategy.
-    
     Args:
         ray_origin: 3D vector, origin of the ray.
         ray_direction: 3D vector, direction of the ray.
         volumes: List of 3D texture objects.
+        volume_bounds: Object with min and max 3D vectors defining the volume extent.
+        step_size: Float, distance between samples.
         strategy: String, one of 'classification', 'accumulation', 'image'.
         omega: Float, weighting factor for classification-level intermixing.
-        
     Returns:
         Tuple (color, opacity) for the final pixel.
     """
-    if strategy == 'image':
-        # Render each volume independently and blend
-        images = []
-        for vol in volumes:
-            img = render_single_volume(ray_origin, ray_direction, vol)
-            images.append(img)
-        # Alpha blend images
-        final_color = images[0].color
-        final_opacity = images[0].opacity
-        for i in range(1, len(images)):
-            c = images[i].color
-            a = images[i].opacity
-            final_color = final_color * (1 - a) + c * a
-            final_opacity = final_opacity + a * (1 - final_opacity)
-        return final_color, final_opacity
-    
-    elif strategy == 'classification':
-        # Interpolate values before illumination
-        color = vec3(0.0)
-        opacity = 0.0
-        step = 0.01 # Example step size
-        for t in range(0, 100): # Example steps
-            pos = ray_origin + ray_direction * t * step
-            # Sample all volumes
-            samples = [sample_volume(vol, pos) for vol in volumes]
-            # Linear interpolation for two channels (assuming N=2 for simplicity)
+    t = 0.0
+    final_color = [0.0, 0.0, 0.0]
+    final_opacity = 0.0
+    alpha = 0.0
+
+    # March along ray until exit or fully opaque
+    while t < volume_bounds.max_dist and final_opacity < 1.0:
+        pos = [ray_origin[i] + ray_direction[i] * t for i in range(3)]
+
+        # Check if position is inside volume bounds
+        if not (volume_bounds.min[i] <= pos[i] <= volume_bounds.max[i] for i in range(3)):
+            t += step_size
+            continue
+
+        # Sample all volumes at current position
+        samples = [trilinear_sample(vol, pos) for vol in volumes]
+
+        if strategy == 'classification':
+            # Interpolate values before illumination (assume 2 channels for simplicity)
             if len(samples) == 2:
-                combined_val = (1 - omega) * samples[0] + omega * samples[1]
+                combined_val = (1.0 - omega) * samples[0] + omega * samples[1]
             else:
-                combined_val = samples[0] # Fallback for N > 2 not specified in sources
-            
-            # Evaluate illumination model
-            emission, absorption = evaluate_illumination(combined_val)
-            
-            # Accumulate
-            alpha = 1.0 - exp(-absorption * step)
-            color = color * (1 - alpha) + emission * alpha
-            opacity = opacity + alpha * (1 - opacity)
-            
-            if opacity >= 1.0:
-                break
-        return color, opacity
-    
-    elif strategy == 'accumulation':
-        # Evaluate illumination separately for each channel
-        color = vec3(0.0)
-        opacity = 0.0
-        step = 0.01 # Example step size
-        for t in range(0, 100): # Example steps
-            pos = ray_origin + ray_direction * t * step
-            # Sample all volumes
-            samples = [sample_volume(vol, pos) for vol in volumes]
-            
-            # Evaluate illumination for each channel
+                combined_val = samples[0]
+            emission, absorption = transfer_function(combined_val)
+            alpha = 1.0 - exp(-absorption * step_size)
+            final_color = [final_color[i] * (1.0 - alpha) + emission[i] * alpha for i in range(3)]
+            final_opacity = final_opacity + alpha * (1.0 - final_opacity)
+
+        elif strategy == 'accumulation':
+            # Evaluate illumination separately for each channel
             emissions = []
             absorptions = []
-            for sample in samples:
-                emission, absorption = evaluate_illumination(sample)
-                emissions.append(emission)
-                absorptions.append(absorption)
-            
-            # Combine emissions and absorptions
-            # Example: Sum of emissions, sum of absorptions
-            combined_emission = sum(emissions)
+            for s in samples:
+                e, a = transfer_function(s)
+                emissions.append(e)
+                absorptions.append(a)
+            # Combine: sum of emissions, sum of absorptions
+            combined_emission = [sum(e[i] for e in emissions) for i in range(3)]
             combined_absorption = sum(absorptions)
-            
-            # Accumulate
-            alpha = 1.0 - exp(-combined_absorption * step)
-            color = color * (1 - alpha) + combined_emission * alpha
-            opacity = opacity + alpha * (1 - opacity)
-            
-            if opacity >= 1.0:
-                break
-        return color, opacity
-    
-    else:
-        raise ValueError("Unknown strategy")
+            alpha = 1.0 - exp(-combined_absorption * step_size)
+            final_color = [final_color[i] * (1.0 - alpha) + combined_emission[i] * alpha for i in range(3)]
+            final_opacity = final_opacity + alpha * (1.0 - final_opacity)
 
-def sample_volume(volume, pos):
-    """Sample a 3D volume at position pos."""
+        elif strategy == 'image':
+            # Image-level requires rendering complete images per channel separately.
+            # For a single-ray function, we approximate by compositing volumes sequentially.
+            vol_color = [0.0, 0.0, 0.0]
+            vol_opacity = 0.0
+            for vol in volumes:
+                s = trilinear_sample(vol, pos)
+                e, a = transfer_function(s)
+                alpha_v = 1.0 - exp(-a * step_size)
+                vol_color = [vol_color[i] * (1.0 - alpha_v) + e[i] * alpha_v for i in range(3)]
+                vol_opacity = vol_opacity + alpha_v * (1.0 - vol_opacity)
+            # Blend volume result with current final
+            final_color = [final_color[i] * (1.0 - vol_opacity) + vol_color[i] * vol_opacity for i in range(3)]
+            final_opacity = final_opacity + vol_opacity * (1.0 - final_opacity)
+
+        t += step_size
+
+    return final_color, final_opacity
+
+def trilinear_sample(texture, pos):
+    # Standard trilinear interpolation [G]
     # Implementation depends on texture format and interpolation method
-    return volume.sample(pos)
+    return 0.0  # Not given in the sources.
 
-def evaluate_illumination(value):
-    """Evaluate illumination model for a single value."""
+def transfer_function(value):
+    # Maps scalar value to emission color and absorption coefficient [G]
     # Implementation depends on transfer function and lighting model
-    emission = vec3(0.0)
-    absorption = 0.0
-    # Placeholder for actual illumination logic
-    return emission, absorption
+    return [0.0, 0.0, 0.0], 0.0  # Not given in the sources.
 ```
 
 ## Subtopics
 
 ### Classification-level intermixing
-Combines channel values before illumination evaluation. Best for simple blending where channel interaction is linear. [Link](5139-intermixing.md#classification-level-intermixing)
+Combines channel values before illumination evaluation. Best for simple blending where channel interaction is linear [S1, unofficial]. [Link](5139-intermixing.md#classification-level-intermixing)
 
 ### Accumulation-level intermixing
-Evaluates illumination separately for each channel and combines results. More flexible but computationally expensive. [Link](5139-intermixing.md#accumulation-level-intermixing)
+Evaluates illumination separately for each channel and combines results. More flexible but computationally expensive [S1, unofficial]. [Link](5139-intermixing.md#accumulation-level-intermixing)
 
 ### Image-level intermixing
-Renders each channel separately and blends images. Simple but fails with occlusions. [Link](5139-intermixing.md#image-level-intermixing)
+Renders each channel separately and blends images. Simple but fails with occlusions [S1, unofficial]. [Link](5139-intermixing.md#image-level-intermixing)
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the intermixing strategy. Classification-level is similar to single-volume rendering. Accumulation-level is more expensive as illumination is evaluated for each channel. Image-level requires rendering $N$ full images.
+*   **Time Complexity:** Depends on the intermixing strategy. Classification-level is similar to single-volume rendering. Accumulation-level is more expensive as illumination is evaluated for each channel. Image-level requires rendering $N$ full images [S1, unofficial].
 *   **Memory Complexity:** Requires storing $N$ volume textures. In out-of-core implementations, this may involve managing bricks for multiple channels per octree node [S1, unofficial].
-*   **Strengths:** Allows visualization of complex interactions between multiple data sources.
+*   **Strengths:** Allows visualization of complex interactions between multiple data sources [S1, unofficial][S2].
 *   **Limitations:** Image-level intermixing cannot handle occlusions correctly. Accumulation-level is computationally expensive. Proxy geometry tessellation for deformed volumes must satisfy all volumes simultaneously [S2].
-*   **When to use:** When visualizing co-registered or deformed volumes is necessary.
-*   **When not to use:** When occlusion handling is critical and image-level intermixing is used.
+*   **When to use:** When visualizing co-registered or deformed volumes is necessary [S1, unofficial][S2].
+*   **When not to use:** When occlusion handling is critical and image-level intermixing is used [S1, unofficial].
 
 ## Background
 Multi-volume rendering was introduced to handle multiple co-registered volumes [S1, unofficial]. Schubert and Scholl [SS11] provided an overview of combining multiple channels during rendering, differentiating between classification-level, accumulation-level, and image-level intermixing [S1, unofficial]. Brix et al. [BPH14] presented an out-of-core rendering approach for multi-channel volume data sets based on Crassin et al.’s [CNLE09] octree-based memory virtualization scheme [S1, unofficial]. The concept of multiple volume display using proxy geometries was also explored for deformed volumes [S2].

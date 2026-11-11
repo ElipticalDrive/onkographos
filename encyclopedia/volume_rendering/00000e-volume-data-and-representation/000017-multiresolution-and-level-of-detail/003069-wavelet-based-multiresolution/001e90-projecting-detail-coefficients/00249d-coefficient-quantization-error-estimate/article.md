@@ -1,22 +1,20 @@
 # Coefficient Quantization Error Estimate
-
-
 ## Overview
-The Coefficient Quantization Error Estimate calculates the expected $L^2$ error introduced by rounding localized difference coefficients $\hat{s}_{kd}$ to discrete multiples of a value quantum in wavelet-based volume rendering [S1]. It serves as a component of the total quantization error, balancing the value quantum $\varsigma$ against the positional quantum $\tau$ to optimize computational cost and visual fidelity [S1]. Unlike the sibling [Quantized Knot Position and Coefficient Computation](4958-quantized-knot-position-and-coefficient-computation.md), which focuses on the algorithmic generation of quantized values, this method isolates the error caused by value discretization [S1].
+The Coefficient Quantization Error Estimate calculates the expected $L^2$ error introduced by rounding localized difference coefficients $\hat{s}_{kd}$ to discrete multiples of a value quantum in wavelet-based volume rendering [S1]. It serves as a component of the total quantization error, balancing the value quantum $\varsigma$ against the positional quantum $\tau$ through the combined error formula [S1]. Unlike the sibling [Quantized Knot Position and Coefficient Computation](4958-quantized-knot-position-and-coefficient-computation.md), which focuses on the algorithmic generation of quantized values, this method isolates the error caused by value discretization [S1].
 
 ## How it works
 **Inputs and Outputs**
 *   **Inputs:**
-    *   $d$: The approximation order ($0 \le d \le D$).
-    *   $\varsigma$: The base value quantum.
-    *   $\tau$: The positional quantum.
-    *   $q$: The upper bound of the SPH kernel function's support.
-    *   $\kappa$: The $L^2$ norm of the normalized particle contribution.
+    *   $d$: The approximation order ($0 \le d \le D$) [S1].
+    *   $\varsigma$: The base value quantum [S1].
+    *   $\tau$: The positional quantum [S1].
+    *   $q$: The upper bound of the SPH kernel function's support [S1].
+    *   $\kappa$: The $L^2$ norm of the normalized particle contribution [S1].
 *   **Output:**
-    *   $Q_{\text{val } d}(\varsigma_d)$: The estimated $L^2$ error for order $d$.
+    *   $Q_{\text{val } d}(\varsigma_d)$: The estimated $L^2$ error for order $d$ [S1].
 
 **Data Structures**
-No specific data structures are required; the method is a closed-form analytical calculation.
+No specific data structures are required; the method is a closed-form analytical calculation [S1].
 
 **Parameters**
 *   $\varsigma_d$: The quantum value for order $d$, defined as $\varsigma_d = \frac{\varsigma}{\tau^d}$ [S1].
@@ -27,14 +25,14 @@ No specific data structures are required; the method is a closed-form analytical
     $$ \varsigma_d = \frac{\varsigma}{\tau^d} $$
     [S1]
 
-2.  **Determine the mean shift:** Assume the rounding shift of the localized difference coefficient $\hat{s}_{kd}$ follows a uniform probability distribution over the interval $[0, \zeta_d]$. The mean error shift is taken as $\frac{1}{4}\zeta_d$ [S1].
+2.  **Determine the mean shift:** Assume the rounding shift of the localized difference coefficient $\hat{s}_{kd}$ follows a uniform probability distribution over the interval $[0, \varsigma_d]$. The mean error shift is taken as $\frac{1}{4}\varsigma_d$ [S1].
 
 3.  **Define the error function:** The approximation differs from the original by the shift applied to the localized coefficient difference. For $t > \theta_k$ (where $\theta_k$ is the knot position), the error contribution is:
-    $$ \frac{\zeta_d}{4} (t - \theta_k)^d $$
+    $$ \frac{\varsigma_d}{4} (t - \theta_k)^d $$
     [S1]
 
 4.  **Calculate the $L^2$ norm on bounded support:** The error has a bounded support of length $2\theta_{\lceil \kappa/2 \rceil}$, where $\theta_{\lceil \kappa/2 \rceil}$ is the outermost knot position. The $L^2$ norm is calculated as:
-    $$ \frac{\zeta_d}{4} \sqrt{\frac{2\theta_{\lceil \kappa/2 \rceil}^{2d+1}}{2d+1}} $$
+    $$ \frac{\varsigma_d}{4} \sqrt{\frac{2\theta_{\lceil \kappa/2 \rceil}^{2d+1}}{2d+1}} $$
     [S1]
 
 5.  **Approximate the outermost knot position:** Relate the outermost knot position to the kernel support bound $q$ and the impact parameter $\Lambda$:
@@ -61,16 +59,21 @@ The Positional Quantization Error Estimate calculates the expected $L^2$ error i
 ### [Approximation Dimension Selection](4957-approximation-dimension-selection.md)
 Approximation Dimension Selection determines the optimal approximation order $D$, number of polynomial pieces $K$, and integer bit length $\text{INT\_MAX}$ for quantized higher-order SPH field approximations by minimizing a combined error measure. It sets apart from its sibling [Coefficient Quantization Error Estimate](3334-coefficient-quantization-error-estimate.md) by integrating quantization error $Q_D$ with the analytical per-particle approximation error $E_{K,D}$ to select the global configuration $(D, K, \text{INT\_MAX})$.
 
+### Combined Quantization Error Estimate
+A combined error estimate $Q_D$ that sums the squares of positional and value quantization components and takes the square root, assuming the underlying difference fields are orthogonal [S1]. Unlike simple summation which causes overestimation bias, this method assumes orthogonality of error fields, providing a more realistic measure [S1]. The formula is:
+$$ Q_D(\tau, \varsigma) = \sqrt{Q_{\text{pos}}^2(\tau) + \sum_{d=0}^D Q_{\text{val } d}^2 \left( \frac{\varsigma}{\tau^d} \right)} = \frac{1}{4\kappa} \sqrt{\kappa^2 \tau^2 + \sum_{d=0}^D \frac{2q^{2d+3}}{(2d+1)(2d+3)} \cdot \frac{\varsigma^2}{\tau^{2d}}} $$
+[S1]
+
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ for a single order $d$. The combined estimate requires $O(D)$ operations to sum over all orders.
-*   **Memory Complexity:** $O(1)$.
+*   **Time Complexity:** $O(1)$ for a single order $d$ [G]. The combined estimate requires $O(D)$ operations to sum over all orders [G].
+*   **Memory Complexity:** $O(1)$ [G].
 *   **Strengths:** Provides a closed-form analytical estimate that is independent of the specific data model or kernel function, relying only on geometric parameters ($q, \kappa$) and quantization settings ($\tau, \varsigma$) [S1].
 *   **Limitations:** It is an estimate based on assumptions (uniform distribution, orthogonality in combined form, constant error between knots) and may not reflect exact errors in specific scenes [S1].
 *   **When to use:** When optimizing quantization parameters ($\tau, \varsigma$) for wavelet-based volume rendering to balance fidelity and performance [S1].
-*   **When not to use:** When exact error metrics are required rather than estimates, or when the underlying assumptions (e.g., orthogonality of error fields) are known to be violated significantly.
+*   **When not to use:** When exact error metrics are required rather than estimates, or when the underlying assumptions (e.g., orthogonality of error fields) are known to be violated significantly [G].
 
 ## Background
-The method originates from the work on Particle-Wise Higher-Order SPH Field Approximation for DVR, published in 2024 [S1]. It is part of a broader framework for quantizing higher-order Smoothed Particle Hydrodynamics (SPH) field approximations in volume rendering, aiming to reduce memory and computational costs while maintaining visual quality [S1].
+The method originates from the work on Particle-Wise Higher-Order SPH Field Approximation for DVR [S1]. It is used within frameworks for quantizing higher-order SPH field approximations to estimate quantization errors [S1].
 
 ## Sources
 [S1] Particle-Wise Higher-Order SPH Field Approximation for DVR, https://arxiv.org/abs/2401.02896v1, fetched 2026-10-26

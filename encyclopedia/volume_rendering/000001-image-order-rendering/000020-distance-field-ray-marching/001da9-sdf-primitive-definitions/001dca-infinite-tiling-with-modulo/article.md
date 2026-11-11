@@ -19,7 +19,7 @@ Infinite Tiling with Modulo is a technique for rendering infinite, repeating pat
 - None required beyond standard floating-point variables [G].
 
 **Steps:**
-1. **Fold Space:** Transform the query point $\mathbf{p}$ into the fundamental tile domain. The standard approach centers the tile at the origin [S1, unofficial].
+1. **Fold Space:** Transform the query point $\mathbf{p}$ into the fundamental tile domain [S1, unofficial]. The standard approach centers the tile at the origin [S1, unofficial].
    $$ \mathbf{q} = \text{mod}(\mathbf{p} + \mathbf{o}, T) - \frac{T}{2} $$
    Where $\text{mod}(x, T)$ returns the remainder of $x/T$ such that the result is in $[0, T)$ [G]. The offset $\mathbf{o}$ is typically $T/2$ to center the tile at $\mathbf{0}$ [S1, unofficial].
    
@@ -27,8 +27,8 @@ Infinite Tiling with Modulo is a technique for rendering infinite, repeating pat
    $$ d = d_{\text{prim}}(\mathbf{q}) $$
 
 **Parameters:**
-- Tile Size $T$: The period of the modulo operation. In [S1, unofficial], $T=3.0$.
-- Offset $\mathbf{o}$: Added before modulo to center the tile. In [S1, unofficial], $\mathbf{o} = (1.5, 1.5, 1.5)$ for $T=3.0$.
+- Tile Size $T$: The period of the modulo operation [S1, unofficial]. In [S1, unofficial], $T=3.0$.
+- Offset $\mathbf{o}$: Added before modulo to center the tile [S1, unofficial]. In [S1, unofficial], $\mathbf{o} = (1.5, 1.5, 1.5)$ for $T=3.0$.
 
 **Edge Cases and Pitfalls:**
 - **Boundary Precision:** Points exactly on the tile boundary may suffer from floating-point precision issues, causing visual artifacts or incorrect distances [G].
@@ -42,9 +42,9 @@ def infinite_tiling_modulo(p, tile_size, offset, sdf_prim):
     """
     Computes the SDF for an infinitely tiled primitive using modulo folding.
     Operations are component-wise on vectors.
+    Python's % operator matches GLSL mod(a, p) for positive p: a - p * floor(a/p).
     """
     # Step 1: Fold space into the fundamental domain centered at origin
-    # Python's % operator matches GLSL mod(a, p) for positive p: a - p * floor(a/p)
     q = (p + offset) % tile_size - (tile_size / 2.0)
     
     # Step 2: Evaluate the primitive SDF at the folded coordinate
@@ -66,7 +66,7 @@ A variant of Infinite Tiling which produces a finite number of repetitions of a 
 - **Limitations:** Only supports periodic tiling. Cannot easily create non-repeating or irregular patterns without combining with other techniques [G]. Normal estimation at tile boundaries can be noisy due to derivative discontinuities [G].
 
 ## Background
-The technique is foundational to ray-marched fractal rendering, enabling the creation of Mandelbulbs and Menger sponges [S2, unofficial]. It leverages the mathematical property of periodicity to reuse a single SDF definition across an infinite domain. The method is widely used in demoscene productions and real-time ray marching demos due to its efficiency and visual impact [S1, S2, unofficial].
+The technique is foundational to ray-marched fractal rendering, enabling the creation of Mandelbulbs and Menger sponges [S2, unofficial]. It leverages the mathematical property of periodicity to reuse a single SDF definition across an infinite domain [S1, unofficial]. The method is widely used in demoscene productions and real-time ray marching demos due to its efficiency and visual impact [S1, S2, unofficial].
 
 ## Sources
 [S1] arguskern/lumina-graphics-lab, https://github.com/arguskern/lumina-graphics-lab, fetched 2026-10-26 (unofficial)

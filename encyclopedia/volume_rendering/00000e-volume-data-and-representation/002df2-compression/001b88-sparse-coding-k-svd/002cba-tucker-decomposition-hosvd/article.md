@@ -10,23 +10,23 @@ Tucker Decomposition (HOSVD) is a tensor factorization method that generalizes t
 **Outputs:** A core tensor $\mathcal{B} \in \mathbb{R}^{R_1 \times R_2 \times \dots \times R_N}$ and N factor matrices $\mathbf{U}^{(n)} \in \mathbb{R}^{I_n \times R_n}$ for $n=1, \dots, N$ [S1, unofficial].
 
 **Data Structures:**
-*   **Input Tensor $\mathcal{A}$:** Stored as a dense N-dimensional array. For computation, it is unfolded into matrices $\mathbf{A}^{(n)}$.
-*   **Factor Matrices $\mathbf{U}^{(n)}$:** Each $\mathbf{U}^{(n)}$ has dimensions $I_n \times R_n$. Columns are orthonormal vectors representing the principal components for mode $n$ [S1, unofficial].
-*   **Core Tensor $\mathcal{B}$:** An N-dimensional array of size $R_1 \times R_2 \times \dots \times R_N$. It contains the coefficients representing the relationship between the original data and the bases [S1, unofficial].
+*   **Input Tensor $\mathcal{A}$:** Stored as a dense N-dimensional array [S1, unofficial]. For computation, it is unfolded into matrices $\mathbf{A}^{(n)}$ [S1, unofficial].
+*   **Factor Matrices $\mathbf{U}^{(n)}$:** Each $\mathbf{U}^{(n)}$ has dimensions $I_n \times R_n$ [S1, unofficial]. Columns are orthonormal vectors representing the principal components for mode $n$ [S1, unofficial].
+*   **Core Tensor $\mathcal{B}$:** An N-dimensional array of size $R_1 \times R_2 \times \dots \times R_N$ [S1, unofficial]. It contains the coefficients representing the relationship between the original data and the bases [S1, unofficial].
 
 **Definitions:**
 *   **Unfolding (Matricization) $\mathbf{A}^{(n)}$:** The tensor $\mathcal{A}$ is reorganized into a matrix where the $n$-th mode vectors form the columns. For a 3rd-order tensor, $\mathbf{A}^{(1)} \in \mathbb{R}^{I_1 \times (I_2 I_3)}$, $\mathbf{A}^{(2)} \in \mathbb{R}^{I_2 \times (I_1 I_3)}$, etc. [S1, unofficial].
-*   **n-mode Product ($\times_n$):** The product of a tensor $\mathcal{T}$ and a matrix $\mathbf{M}$ along mode $n$, denoted $\mathcal{T} \times_n \mathbf{M}$, results in a tensor where the $n$-mode fibers are linearly transformed by $\mathbf{M}$ [S1, unofficial].
+*   **n-mode Product ($\times_n$):** The product of a tensor $\mathcal{T}$ and a matrix $\mathbf{M}$ along mode $n$, denoted $\mathcal{T} \times_n \mathbf{M}$, is used in the Tucker decomposition model to combine the core tensor with factor matrices [S1, unofficial].
 
 **Algorithm Steps:**
 
 1.  **Initialize:** Set the target multilinear rank $(R_1, \dots, R_N)$. Typical initial rank $R_n$ is $I_n / 2$ [S2][S3].
 2.  **Compute Basis Matrices:** For each mode $n$ from 1 to N:
-    a. Unfold $\mathcal{A}$ into matrix $\mathbf{A}^{(n)}$.
+    a. Unfold $\mathcal{A}$ into matrix $\mathbf{A}^{(n)}$ [S1, unofficial].
     b. Compute the matrix SVD of $\mathbf{A}^{(n)}$:
        $$ \mathbf{A}^{(n)} = \mathbf{U}^{(n)} \mathbf{\Sigma}^{(n)} \mathbf{V}^{(n)T} $$
        where $\mathbf{U}^{(n)}$ contains the left singular vectors, $\mathbf{\Sigma}^{(n)}$ is the diagonal matrix of singular values, and $\mathbf{V}^{(n)}$ contains the right singular vectors [S1, unofficial].
-    c. Select the $R_n$ leading left singular vectors from $\mathbf{U}^{(n)}$ to form the basis matrix for mode $n$. Let this truncated matrix be $\mathbf{U}^{(n)}_{trunc} \in \mathbb{R}^{I_n \times R_n}$ [S1, unofficial].
+    c. Select the $R_n$ leading left singular vectors from $\mathbf{U}^{(n)}$ to form the basis matrix for mode $n$ [S1, unofficial].
 3.  **Compute Core Tensor:** Calculate the core tensor $\mathcal{B}$ by projecting $\mathcal{A}$ onto the transposes of the computed basis matrices:
     $$ \mathcal{B} = \mathcal{A} \times_1 \mathbf{U}^{(1)T} \times_2 \mathbf{U}^{(2)T} \times_3 \cdots \times_N \mathbf{U}^{(N)T} $$
     Since the factor matrices have orthonormal columns, the inverse n-mode product is the transpose [S1, unofficial].
@@ -47,14 +47,14 @@ def hosvd(tensor_A, ranks):
     Computes the Higher-Order SVD (HOSVD) of a tensor.
     
     Args:
-        tensor_A: N-dimensional numpy array of shape (I1, I2, ..., IN).
+        tensor_A: N-dimensional array of shape (I1, I2, ..., IN).
         ranks: List of integers [R1, R2, ..., RN] specifying the target rank for each mode.
         
     Returns:
-        core_B: N-dimensional numpy array of shape (R1, R2, ..., RN).
+        core_B: N-dimensional array of shape (R1, R2, ..., RN).
         U_list: List of N matrices, where U_list[n] is of shape (In, Rn).
     """
-    N = tensor_A.ndim
+    N = len(tensor_A.shape)
     I = tensor_A.shape
     U_list = []
     
@@ -62,13 +62,12 @@ def hosvd(tensor_A, ranks):
     for n in range(N):
         # Unfold tensor along mode n
         # The shape of A_n is (In, product of all other dimensions)
-        A_n = numpy.moveaxis(tensor_A, n, 0)
+        A_n = moveaxis(tensor_A, n, 0)
         A_n = A_n.reshape(I[n], -1)
         
         # Compute SVD of the unfolded matrix
         # We only need the left singular vectors (U)
-        # Using a standard SVD routine
-        U_full, S, Vt = numpy.linalg.svd(A_n, full_matrices=False)
+        U_full, S, Vt = svd(A_n, full_matrices=False)
         
         # Truncate to the first Rn columns
         Rn = ranks[n]
@@ -90,7 +89,7 @@ def hosvd(tensor_A, ranks):
         
         # Reshape to perform matrix multiplication efficiently
         # Move mode n to the front
-        core_B_moved = numpy.moveaxis(core_B, n, 0)
+        core_B_moved = moveaxis(core_B, n, 0)
         current_shape = core_B_moved.shape
         In = current_shape[0]
         other_dims = current_shape[1:]
@@ -100,7 +99,7 @@ def hosvd(tensor_A, ranks):
         
         # Multiply by U_n^T: (Rn, In) @ (In, Others) -> (Rn, Others)
         # U_n is (In, Rn), so U_n.T is (Rn, In)
-        core_B_2d_new = numpy.dot(U_list[n].T, core_B_2d)
+        core_B_2d_new = dot(U_list[n].T, core_B_2d)
         
         # Reshape back to N dimensions
         new_shape = list(other_dims)
@@ -135,11 +134,11 @@ Truncated Tensor Decomposition is a rank-reduction technique applied to an exist
 The n-rank of a tensor $\mathcal{A}$, denoted $R_n = \text{rank}_n(\mathcal{A})$, is the dimension of the vector space spanned by mode-n vectors, which are the column vectors of the unfolding $\mathbf{A}^{(n)}$ [S1, unofficial]. A higher-order tensor has a multilinear rank $(R_1, R_2, \dots, R_N)$ if its mode-1 rank through mode-N rank are equal to $R_1, R_2, \dots, R_N$ [S1, unofficial]. A rank-one tensor (Kruskal tensor) is an N-way tensor expressible as the outer product of N vectors: $\mathcal{A} = \mathbf{b}^{(1)} \circ \mathbf{b}^{(2)} \circ \dots \circ \mathbf{b}^{(N)}$ [S1, unofficial]. The tensor rank $R = \text{rank}(\mathcal{A})$ is the minimal number of rank-one tensors that yield $\mathcal{A}$ in a linear combination. It always holds that $R_n \le R$ [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The dominant cost is computing the SVD for each of the N modes. For an N-dimensional tensor of size $I_1 \times \dots \times I_N$, unfolding and SVD on mode $n$ takes $O(I_n \cdot \prod_{j \ne n} I_j \cdot \min(I_n, \prod_{j \ne n} I_j))$ or similar depending on implementation. Overall, it is expensive for large N and large dimensions.
-*   **Memory Complexity:** Storing the factor matrices requires $\sum_{n=1}^N I_n R_n$ and the core tensor requires $\prod_{n=1}^N R_n$. If $R_n = I_n$, memory usage increases significantly compared to the original tensor due to the core tensor size and factor matrices. Truncation reduces this.
 *   **Performance:** In volume rendering, HOSVD combined with multiresolution octrees allows for efficient rendering by storing only small core tensors per node and global basis matrices [S2]. Quantization (8-bit core, 16-bit basis) further reduces bandwidth [S3].
-*   **Strengths:** Preserves orthonormal bases, allows for multiresolution structures, captures multi-linear correlations better than CP decomposition for some data types.
-*   **Limitations:** Computationally intensive for large datasets; core tensor size can grow exponentially with N if ranks are not truncated; non-uniqueness requires careful handling if specific core properties are needed.
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Not given in the sources.
 
 ## Background
 Tucker Decomposition, also known as the Tucker Model, is a higher-order generalization of the matrix SVD [S1, unofficial]. It was introduced by Ledyard R. Tucker in the 1960s and 1970s [S1, unofficial]. The Higher-Order SVD (HOSVD) algorithm for computing this decomposition was formalized by De Lathauwer, De Moor, and Vandewalle in 2000 [S1, unofficial]. In the context of volume rendering, it has been adapted for compressed direct volume rendering (DVR) by researchers such as Suter et al. (2011, 2013) to create multiresolution structures and global bases [S2][S3].

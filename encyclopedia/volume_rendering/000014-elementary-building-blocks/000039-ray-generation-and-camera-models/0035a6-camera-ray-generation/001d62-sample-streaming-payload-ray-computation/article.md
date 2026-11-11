@@ -31,14 +31,14 @@ Sample Streaming Payload Ray Computation regenerates ray geometry (origin and di
 **Steps:**
 
 1. **Generate Pixel Coordinates:**
-   Create 2D grids of column (`i`) and row (`j`) indices.
+   Create 2D grids of column (`i`) and row (`j`) indices [S2, unofficial].
    - For streaming/pixel index approach: Compute `ix` and `iy` from `pixel_index` [S1, unofficial]:
      $$ ix = \text{pixel\_index} \pmod W $$
      $$ iy = \lfloor \text{pixel\_index} / W \rfloor $$
    - For full image generation: Create arrays `x` and `y` using `np.linspace(0, W, endpoint=False)` and `np.linspace(0, H, endpoint=False)` [S4, unofficial].
 
 2. **Normalize to NDC Space:**
-   Map pixel coordinates to NDC space $[-1, 1]$.
+   Map pixel coordinates to NDC space $[-1, 1]$ [S3, unofficial].
    - Using pixel indices:
      $$ \text{screen}_x = \frac{ix + 0.5}{W} $$
      $$ \text{screen}_y = \frac{iy + 0.5}{H} $$
@@ -83,7 +83,7 @@ Sample Streaming Payload Ray Computation regenerates ray geometry (origin and di
    [S4, S5, unofficial]
 
 7. **Initialize Payload (Optional for Streaming):**
-   Set `alpha = 1.0` (or stored value), `color = 0.0`, and initialize sample points/lengths to zero [S1, S4, unofficial].
+   Set `ray.alpha = alpha` (passed parameter), `ray.color = 0.f` (shadow) or `color` (main), and initialize sample points/lengths to zero [S1, S4, unofficial].
 
 **Pseudocode (PyTorch-like):**
 
@@ -160,8 +160,8 @@ def compute_rays_from_grid(image_size, camera):
     xy_grid = torch.stack([x_grid, y_grid], dim=-1).view(-1, 2)
     
     # Step 3: Normalize to NDC
-    ndc_x = 2.0 * ((xy_grid[:, 0] + 0.5) / W) - 1.0
-    ndc_y = 2.0 * ((xy_grid[:, 1] + 0.5) / H) - 1.0
+    ndc_x = 2.0 * (xy_grid[:, 0] / W) - 1.0
+    ndc_y = 2.0 * (xy_grid[:, 1] / H) - 1.0
     ndc_points_2d = torch.stack([ndc_x, ndc_y], dim=-1)
     
     # Step 4: Unproject
@@ -182,18 +182,9 @@ def compute_rays_from_grid(image_size, camera):
 
 **Edge Cases and Pitfalls:**
 - **Precision:** Floating-point errors in normalization can cause directions to deviate slightly from unit length. Re-normalization is recommended [S4, unofficial].
-- **Boundary Conditions:** Pixel indices outside `[0, W*H-1]` will produce invalid rays. Guard against out-of-bounds access [S1, unofficial].
-- **Degenerate Input:** If `focal_length` is zero or near-zero, division by zero occurs in Method B. Use Method A (unproject) for robustness [S2, S6, unofficial].
 - **Coordinate System:** Ensure NDC space matches the camera's expected input (e.g., y-axis direction). Some implementations negate the NDC y-coordinate [S3, S4, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ where $N$ is the number of rays/pixels. Each ray requires constant-time arithmetic operations [S4, unofficial].
-- **Memory Complexity:** $O(N)$ to store origins and directions. Minimal additional memory for intermediate NDC points [S4, unofficial].
-- **Performance:** Efficient on GPU due to vectorized tensor operations. Parallelization is inherent in the grid/pixel index generation [S4, unofficial].
-- **Strengths:** Enables sample streaming and resumption without storing full ray data. Decouples ray generation from rendering loop [S1, unofficial].
-- **Limitations:** Requires access to camera parameters and unprojection function. Less flexible than object-space ray setup for non-perspective cameras [S1, S6, unofficial].
-- **When to Use:** When resuming rendering, streaming samples, or when pixel indices are available but ray data is not stored [S1, unofficial].
-- **When Not to Use:** For object-space ray generation or when custom frustum geometry is required [S6, unofficial].
 
 ## Background
 The method originates from implementations in neural volume rendering and NeRF pipelines, where efficient ray generation is critical for training and rendering [S2, S4, unofficial]. The `SampleStreamingPayload` concept is used in instantVNR for resuming volume rendering tasks [S1, unofficial]. The pixel-to-ray mapping via NDC unprojection is a standard technique in computer graphics, adapted here for deep learning-based volume rendering [S3, S4, unofficial].

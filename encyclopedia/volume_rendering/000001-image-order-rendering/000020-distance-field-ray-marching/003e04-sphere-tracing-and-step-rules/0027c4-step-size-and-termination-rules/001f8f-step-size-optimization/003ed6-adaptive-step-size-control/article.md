@@ -1,25 +1,9 @@
 # Adaptive Step Size Control
-
-
 ## Overview
-Adaptive Step Size Control is a family of ray marching techniques that dynamically adjust the step size $\Delta t_i$ based on local scene properties (such as density, gradient, or distance field values) to optimize the trade-off between rendering performance and visual quality. Unlike fixed-step methods, it reduces computational cost by taking larger steps in empty or low-detail regions and smaller steps in high-detail areas. It distinguishes itself from siblings like [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by explicitly using noise buffers or temporal accumulation to drive variation, and from [Gap-Limited Ray Marching](4412-gap-limited-ray-Marching.md) by its continuous adaptive scaling rather than discrete gap skipping.
+Adaptive Step Size Control is a family of ray marching techniques that dynamically adjust the step size $\Delta t_i$ based on local scene properties to optimize the trade-off between rendering performance and visual quality [S1, unofficial][S2, unofficial]. It distinguishes itself from siblings like [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by explicitly using noise buffers or temporal accumulation to drive variation, and from [Gap-Limited Ray Marching](4412-gap-limited-ray-Marching.md) by its continuous adaptive scaling rather than discrete gap skipping [G].
 
 ## Shared principles
-The method operates on the principle that the step size $\Delta t_i$ at iteration $i$ is a function of the current state:
-$$ \Delta t_i = f(\mathbf{p}_i, \mathbf{d}, \text{context}) $$
-where $\mathbf{p}_i = \mathbf{o} + t_i \mathbf{d}$ is the current position [Parent].
-
-The general update rule is:
-$$ \mathbf{p}_{i+1} = \mathbf{p}_i + \Delta t_i \mathbf{d} $$
-$$ t_{i+1} = t_i + \Delta t_i $$
-
-The step size $\Delta t_i$ is determined by a function $f(\mathbf{p}_i, \mathbf{d}, \text{context})$ [Parent]. This function must satisfy safety constraints: it must not cause the ray to overshoot geometry or density features that require sampling. For Signed Distance Fields (SDFs), this typically implies $\Delta t_i \le f(\mathbf{p}_i)$ (assuming Lipschitz constant 1) [Parent]. For volumetric data, it implies sufficient sampling density to satisfy the Nyquist criterion or capture gradients [Parent].
-
-Termination occurs when one or more of the following conditions are met:
-1.  **Convergence/Hit:** The ray has reached the surface or sufficient density. For SDFs, this is often $f(\mathbf{p}_i) < \epsilon$ [Parent]. For volumes, this may be based on accumulated opacity or density thresholds [Parent].
-2.  **Escape/Miss:** The ray has exited the scene or bounding volume, typically when accumulated distance $t > t_{max}$ [Parent].
-3.  **Resource Limit:** A maximum number of iterations $N_{max}$ is reached to prevent infinite loops [Parent].
-4.  **Oscillation/Stagnation:** The step size or distance value fails to decrease significantly, indicating the ray is stuck or oscillating near a surface or in noise [Parent].
+Builds on [Step Size Optimization](2054-step-size-optimization.md).
 
 ## Subtopics
 
@@ -31,7 +15,7 @@ A heuristic optimization for distance-field ray marching that accelerates traver
 
 ### Adaptive Stepsize Rendering
 - **Definition**: A rendering method where the ray marching step size is provided per-pixel via an input tensor, allowing for variable sampling density across the image [S1, unofficial].
-- **Step**: The PyTorch wrapper `adaptiveStepsizeRendering` asserts that the input `stepsizes` tensor has shape B*1*H*W and C=1. The stepsizes tensor is moved to the CUDA device. For each batch item, the renderer settings are sent to update the renderer state. The viewport dimensions are extracted from settings and asserted to match the H and W of the stepsizes tensor. The stepsizes tensor is padded to match the viewport requirements [S1, unofficial].
+- **Step**: The PyTorch wrapper `adaptiveStepsizeRendering` asserts that the input `stepsizes` tensor has shape B*1*H*W and C=1 [S1, unofficial]. The stepsizes tensor is moved to the CUDA device [S1, unofficial]. For each batch item, the renderer settings are sent to update the renderer state [S1, unofficial]. The viewport dimensions are extracted from settings and asserted to match the H and W of the stepsizes tensor [S1, unofficial]. The stepsizes tensor is padded to match the viewport requirements [S1, unofficial].
 - **Parameter**: `fd_epsilon`: A float parameter with default value 1e-5, used for gradient propagation support [S1, unofficial].
 - **Layout**: Input tensor `stepsize` is a float tensor on the GPU of size HxW with only positive values. Output tensor `output` is a float tensor on the GPU of size BxHxW with B=8 channels: 0=mask, 1=normalX, 2=normalY, 3=normalZ, 4=depth, 5=ao, 6=flowX, 7=flowY [S1, unofficial].
 - **Comparison**: Unlike standard rendering which uses a uniform or pre-computed step size, this method accepts a per-pixel tensor of step sizes, enabling adaptive sampling based on importance maps [S1, unofficial].
@@ -42,7 +26,7 @@ A heuristic optimization for distance-field ray marching that accelerates traver
 - **Usage**: Described in Hadwiger and Rezk Salama, 2004 [S2, unofficial].
 
 ## Background
-The concept of adaptive step sizing in volume rendering emerged as a response to the high computational cost of fixed-step ray marching, particularly for large datasets. Early work focused on "empty space skipping" and "space leaping" to accelerate traversal through homogeneous regions [S2, unofficial]. The specific integration of adaptive step sizes with temporal accumulation and noise buffers for GPU-based direct volume rendering was detailed in unofficial sources related to adaptive sampling and reconstruction for volume visualization [S1, unofficial]. The technique of dynamically increasing step size during user interaction to maintain frame rates, while restoring quality for still images, was documented by Hadwiger and Rezk Salama in 2004 [S2, unofficial].
+The concept of adaptive step sizing in volume rendering emerged as a response to the high computational cost of fixed-step ray marching, particularly for large datasets [S2, unofficial]. Early work focused on "empty space skipping" and "space leaping" to accelerate traversal through homogeneous regions [S2, unofficial]. The technique of dynamically increasing step size during user interaction to maintain frame rates, while restoring quality for still images, was documented by Hadwiger and Rezk Salama in 2004 [S2, unofficial].
 
 ## Sources
 [S1] Learning adaptive sampling and reconstruction for Volume Visualization, https://github.com/shamanDevel/AdaptiveSampling, fetched 2026-10-27 (unofficial)

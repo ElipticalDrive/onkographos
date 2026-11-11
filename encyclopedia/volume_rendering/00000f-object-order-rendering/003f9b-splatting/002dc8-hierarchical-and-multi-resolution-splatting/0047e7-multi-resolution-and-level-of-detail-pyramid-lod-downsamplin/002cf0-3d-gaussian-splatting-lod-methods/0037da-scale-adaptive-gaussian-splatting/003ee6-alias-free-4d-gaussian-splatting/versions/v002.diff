@@ -1,0 +1,153 @@
+--- v001.md
++++ v002.md
+@@ -8,110 +8,74 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** 4D Gaussian primitives (defined by opacity $\alpha_k$, center $p_k$, covariance $\Sigma_k$, and temporal scale variations $\Delta s(t)$), camera parameters (distance $d$, focal length $f$), and a temporal smoothing factor $\lambda_v$.
+-*   **Outputs:** Anti-aliased rendered images with constrained maximum sampling frequency.
++*   **Inputs:** 4D Gaussian primitives (opacity $\alpha_k$, center $p_k$, covariance $\Sigma_k$, temporal scale variations $\Delta s(t)$), camera parameters (distance $d$, focal length $f$), and temporal smoothing factor $\lambda_v$ [S1, unofficial].
++*   **Outputs:** Anti-aliased rendered images with constrained maximum sampling frequency [S1, unofficial].
+ 
+ **Data Structures:**
+-The method operates on the standard 4D Gaussian representation. The covariance matrix $\Sigma_k$ is decomposed as $\Sigma_k = R S S^T R^T$, where $R$ is a rotation matrix and $S$ is a scaling matrix [S1, unofficial]. The method tracks the maximum sampling rate $\hat{\nu}_k$ for each primitive $k$.
++The method operates on the standard 4D Gaussian representation where the covariance matrix $\Sigma_k$ is decomposed as $\Sigma_k = R S S^T R^T$ with rotation matrix $R$ and scaling matrix $S$ [S1, unofficial]. Each primitive tracks its maximum sampling rate $\hat{\nu}_k$ and sampling interval $\hat{T}_k$ [S1, unofficial].
+ 
+ **Parameters:**
+-*   $\lambda_v$: Temporal smoothing factor for the sampling interval update. Typical value not specified in sources [G].
+-*   $\sigma_s$: Standard deviation parameter for the Gaussian regularization term. Not specified in sources [G].
++*   $\lambda_v$: Temporal smoothing factor for the sampling interval update (typical value not specified in sources) [S1, G, unofficial].
++*   $\sigma_s$: Standard deviation parameter for the Gaussian regularization term (value not specified in sources) [S1, G, unofficial].
+ 
+ **Steps:**
+ 
+ 1.  **Compute Maximum Sampling Frequency:**
+-    Calculate the maximum sampling frequency $\hat{\nu}_k$ for each primitive $k$. This is the reciprocal of the sampling interval $\hat{T}_k$ [S1, unofficial]:
+-    $$ \hat{\nu}_k = \frac{1}{\hat{T}_k} $$
+-    The sampling interval $\hat{T}_k$ is updated temporally using the distance $d_n(t)$ and frequency $f_n(t)$ components:
+-    $$ \hat{T}_k = (1 - \lambda_v) \cdot \hat{T}_k + \lambda_v \cdot \min \left( \hat{T}_k, \frac{d_n(t)}{f_n(t)} \right) $$
+-    Note: $d_n(t)$ is computed during the CUDA rendering process, making the overhead of this update negligible [S1, unofficial].
++    Calculate $\hat{\nu}_k$ as the reciprocal of the sampling interval $\hat{T}_k$: $\hat{\nu}_k = 1 / \hat{T}_k$ [S1, unofficial]. Update $\hat{T}_k$ temporally using distance $d_n(t)$ and frequency $f_n(t)$ components: $\hat{T}_k = (1 - \lambda_v) \cdot \hat{T}_k + \lambda_v \cdot \min \left( \hat{T}_k, \frac{d_n(t)}{f_n(t)} \right)$ [S1, unofficial]. The distance component $d_n(t)$ is computed during the CUDA rendering process, making the update overhead negligible [S1, unofficial].
+ 
+ 2.  **Apply 4D Scale-adaptive Filter:**
+-    At the maximum sampling frequency $\hat{\nu}_k$, apply the 4D scale-adaptive filter. This filter adjusts the dilation scale based on the ratio of Gaussian scales before and after temporal changes to preserve dimensional proportions and reduce the impact on anisotropy [S1, unofficial].
+-    *   If the 4D Gaussian primitive $k$ is invisible at a specific time $t$, dilation is avoided [S1, unofficial].
+-    *   The filter adjusts the dilation coefficient based on scale variations $\Delta s(t)$ to prevent distortion when the scale $s_t = s + \Delta s(t)$ becomes smaller than or approaches the dilation factor $\hat{\nu}_k$ [S1, unofficial].
++    At frequency $\hat{\nu}_k$, apply the 4D scale-adaptive filter [S1, unofficial]. If the primitive is invisible at time $t$, dilation is avoided [S1, unofficial]. The filter adjusts the dilation coefficient based on the ratio of Gaussian scales before and after temporal changes $\Delta s(t)$ to preserve dimensional proportions and reduce anisotropy impact when $s_t = s + \Delta s(t)$ approaches $\hat{\nu}_k$ [S1, unofficial].
+ 
+ 3.  **Incorporate 2D Mip Filter:**
+-    Integrate the 2D Mip filter [56] to address Gaussian scale mismatch in 4DGS, providing a general anti-aliasing solution [S1, unofficial].
++    Integrate the 2D Mip filter to address Gaussian scale mismatch in 4DGS, providing a general anti-aliasing solution [S1, unofficial].
+ 
+ 4.  **Apply Scale Loss:**
+-    Propose a scale loss to constrain the Gaussian's own scale. This reduces filtering errors when the Gaussian scale is smaller than the filter scale. The regularization term for the Gaussian is defined as:
+-    $$ G_k(x)_{reg} = \frac{e^{-\frac{1}{2}(x-p_k)^T (\Sigma_k + \sigma_s^2 \cdot I)^{-1} (x-p_k)}}{\sigma_s \sqrt{|\Sigma_k + \hat{\nu}_k^2 \cdot I|}} $$
+-    where $\hat{\nu}_k$ is the maximal sampling rate for primitive $k$ [S1, unofficial]. By distributing constraints between the filter and the Gaussian scale, the method reduces the minimum dilation scale of the filter [S1, unofficial].
++    Constrain the Gaussian's own scale to reduce filtering errors when the Gaussian scale is smaller than the filter scale [S1, unofficial]. The regularization term is $G_k(x)_{reg} = \frac{e^{-\frac{1}{2}(x-p_k)^T (\Sigma_k + \sigma_s^2 \cdot I)^{-1} (x-p_k)}}{\sigma_s \sqrt{|\Sigma_k + \hat{\nu}_k^2 \cdot I|}}$, where $I$ is the identity matrix and $\hat{\nu}_k$ is the maximal sampling rate [S1, unofficial]. Distributing constraints between the filter and Gaussian scale reduces the minimum dilation scale [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def update_max_sampling_interval(T_hat, d_n_t, f_n_t, lambda_v):
+-    """
+-    Update the maximum sampling interval for a Gaussian primitive.
+-    """
+-    # Compute the new interval based on distance and frequency
+-    # Note: d_n_t is assumed to be available from CUDA rendering process
+-    new_interval_candidate = d_n_t / f_n_t
+-    
+-    # Temporal smoothing
+-    T_hat_new = (1 - lambda_v) * T_hat + lambda_v * min(T_hat, new_interval_candidate)
+-    return T_hat_new
++def update_sampling_interval(T_hat, d_n_t, f_n_t, lambda_v):
++    """Update maximum sampling interval using temporal smoothing."""
++    candidate = d_n_t / f_n_t
++    return (1.0 - lambda_v) * T_hat + lambda_v * min(T_hat, candidate)
+ 
+-def compute_max_sampling_frequency(T_hat):
+-    """
+-    Compute the maximum sampling frequency from the interval.
+-    """
+-    if T_hat == 0:
+-        return 0 # Avoid division by zero
+-    return 1.0 / T_hat
++def compute_sampling_frequency(T_hat):
++    """Compute maximum sampling frequency as reciprocal of interval."""
++    return 1.0 / T_hat if T_hat > 0 else 0.0
+ 
+-def apply_4d_scale_adaptive_filter(gaussian_scale, dilation_factor, temporal_scale_variation):
+-    """
+-    Adjust dilation scale based on Gaussian scale ratios.
+-    gaussian_scale: Current scale of the Gaussian.
+-    dilation_factor: The base dilation factor (related to max sampling freq).
+-    temporal_scale_variation: Change in scale over time.
+-    """
+-    # Adjust dilation coefficient based on scale variations
+-    # to preserve dimensional proportions and reduce anisotropy impact
+-    # If gaussian_scale becomes smaller than or approaches dilation_factor,
+-    # the filter adapts to prevent distortion.
+-    # Exact adaptive formula not fully detailed in sources, 
+-    # but relies on ratio of scales before/after temporal changes.
+-    adjusted_dilation = dilation_factor * (gaussian_scale / (gaussian_scale + temporal_scale_variation))
+-    return adjusted_dilation
++def apply_scale_adaptive_filter(base_dilation, scale_before, scale_after):
++    """Adjust dilation based on ratio of Gaussian scales before and after temporal changes."""
++    # The exact adaptive scaling formula is not fully detailed in the sources.
++    # It computes a ratio of scales to preserve dimensional proportions.
++    ratio = scale_after / scale_before
++    return base_dilation * ratio
+ 
+-def compute_scale_loss_regularization(gaussian_cov, max_sampling_freq, sigma_s):
+-    """
+-    Compute the regularization term for the scale loss.
+-    """
+-    I = identity_matrix(3)
+-    Sigma_k = gaussian_cov
+-    nu_hat = max_sampling_freq
+-    
+-    # Compute the determinant and inverse for the regularized Gaussian
+-    # Term: |Sigma_k + nu_hat^2 * I|
+-    det_term = determinant(Sigma_k + (nu_hat ** 2) * I)
+-    
+-    # Term: (x - p_k)^T (Sigma_k + sigma_s^2 * I)^-1 (x - p_k)
+-    # This is computed per pixel during splatting
+-    # For the loss definition, we focus on the normalization factor
+-    normalization_factor = sigma_s * sqrt(det_term)
+-    
+-    return normalization_factor
++def compute_scale_loss_normalization(Sigma_k, nu_hat, sigma_s):
++    """Compute the normalization factor for the scale loss regularization term."""
++    I = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
++    # Regularized covariance: Sigma_k + nu_hat^2 * I
++    reg_cov = [[Sigma_k[i][j] + (nu_hat ** 2) * I[i][j] for j in range(3)] for i in range(3)]
++    # 3x3 determinant
++    det = (reg_cov[0][0] * (reg_cov[1][1] * reg_cov[2][2] - reg_cov[1][2] * reg_cov[2][1]) -
++           reg_cov[0][1] * (reg_cov[1][0] * reg_cov[2][2] - reg_cov[1][2] * reg_cov[2][0]) +
++           reg_cov[0][2] * (reg_cov[1][0] * reg_cov[2][1] - reg_cov[1][1] * reg_cov[2][0]))
++    return sigma_s * (det ** 0.5)
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Invisible Primitives:** If a 4D Gaussian primitive is invisible at a specific time $t$, dilation must be avoided to prevent artifacts [S1, unofficial].
+-*   **Scale Mismatch:** Filtering errors become significant when the Gaussian scale is smaller than the filter scale. The scale loss is critical in this regime [S1, unofficial].
+-*   **Anisotropy:** Fixed-scale dilation can distort the scale ratio between dimensions. The adaptive filter is necessary to preserve dimensional proportions [S1, unofficial].
++*   **Scale Mismatch:** Filtering errors become significant when the Gaussian scale is smaller than the filter scale [S1, unofficial].
++*   **Anisotropy:** Fixed-scale dilation can distort the scale ratio between dimensions; the adaptive filter is necessary to preserve dimensional proportions [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The update of $\hat{T}_k$ involves a simple arithmetic operation per primitive per frame. Since $d_n(t)$ is computed during the CUDA rendering process, the overhead is negligible [S1, unofficial].
+-*   **Memory Complexity:** No additional significant memory structures are introduced beyond the standard 4D Gaussian parameters and the tracking of $\hat{T}_k$ and $\hat{\nu}_k$ per primitive.
+-*   **Strengths:** Eliminates high-frequency artifacts under increased rendering frequencies; effectively reduces redundant Gaussians in multi-view video reconstruction; improves rendering quality at various resolutions without sacrificing full-resolution reconstruction quality [S1, unofficial].
++*   **Time Complexity:** Updating $\hat{T}_k$ requires simple arithmetic per primitive per frame, with negligible overhead since $d_n(t)$ is computed during CUDA rendering [S1, unofficial].
++*   **Memory Complexity:** No additional significant memory structures beyond standard 4D Gaussian parameters and tracking $\hat{T}_k$, $\hat{\nu}_k$ per primitive [S1, unofficial].
++*   **Strengths:** Eliminates high-frequency artifacts under increased rendering frequencies; reduces redundant Gaussians in multi-view video reconstruction; improves rendering quality at various resolutions without sacrificing full-resolution quality [S1, unofficial].
+ *   **Limitations:** Requires integration with specific reconstruction algorithms (D3DGS, 4DGaussian); relies on accurate estimation of $d_n(t)$ and $f_n(t)$ [S1, unofficial].
+-*   **When to use:** When reconstructing dynamic scenes from monocular or multi-view videos where camera focal length or distance changes, leading to aliasing artifacts [S1, unofficial].
+-*   **When not to use:** For static scenes where 3D Gaussian Splatting is sufficient, or when computational resources are extremely limited and the overhead of temporal smoothing and adaptive filtering is prohibitive (though sources claim negligible overhead) [S1, unofficial].
++*   **When to use:** Reconstructing dynamic scenes from monocular or multi-view videos where camera focal length or distance changes cause aliasing [S1, unofficial].
++*   **When not to use:** For static scenes where standard 3D Gaussian Splatting is sufficient [S1, unofficial].
+ 
+ ## Background
+-Alias-free 4D Gaussian Splatting was introduced to address the limitations of existing anti-aliasing methods like Mip-Splatting in the context of 4D Gaussian Splatting. Mip-Splatting's fixed dilation scale limits flexibility and degrades reconstruction quality in 4DGS [S1, unofficial]. The method was validated through monocular and multi-view video reconstruction experiments, integrating into D3DGS [55] and 4DGaussian [50] [S1, unofficial].
++Introduced to address limitations of existing anti-aliasing methods like Mip-Splatting in 4DGS, specifically Mip-Splatting's fixed dilation scale which limits flexibility and degrades reconstruction quality [S1, unofficial]. Validated through monocular and multi-view video reconstruction experiments, integrating into D3DGS [55] and 4DGaussian [50] [S1, unofficial].
+ 
+ ## Sources

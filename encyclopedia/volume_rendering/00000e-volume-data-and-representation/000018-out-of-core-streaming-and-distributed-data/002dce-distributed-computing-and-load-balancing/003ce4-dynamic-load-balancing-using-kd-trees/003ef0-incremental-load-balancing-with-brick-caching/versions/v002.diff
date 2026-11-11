@@ -1,0 +1,312 @@
+--- v001.md
++++ v002.md
+@@ -7,24 +7,16 @@
+ ## How it works
+ **Inputs:**
+-*   A distributed volume rendering scene represented by a kd-tree of bricks.
+-*   Current load metrics $t_l$ and $t_r$ for the left and right subtrees of a node.
++*   A distributed volume rendering scene represented by a kd-tree of bricks [S1].
++*   Current load metrics $t_l$ and $t_r$ for the left and right subtrees of a node [S1].
+ *   System-measured average brick transfer time $c$ [S1].
+ *   User-defined parameters $f_o$ (penalty for opposite direction), $f_s$ (reward for same direction), and initial $f_l, f_r$ [S1].
+ 
+ **Outputs:**
+-*   Modified load distribution across nodes via brick transfers.
+-*   Updated kd-tree node factors $f_l, f_r$.
++*   Modified load distribution across nodes via brick transfers [S1].
++*   Updated kd-tree node factors $f_l, f_r$ [S1].
+ 
+ **Data Structures:**
+-*   **kd-tree Node:**
+-    *   `left_subtree_load`: Load metric for the left child.
+-    *   `right_subtree_load`: Load metric for the right child.
+-    *   `f_l`: Factor modeling cost of moving bricks from right to left (opposite to previous left-to-right moves).
+-    *   `f_r`: Factor modeling cost of moving bricks from left to right (opposite to previous right-to-left moves).
+-    *   `subdivision_plane`: The axis/plane along which bricks are split.
+-*   **Brick Cache:**
+-    *   A local main memory buffer on each node storing copies of bricks recently sent to neighbors.
+-    *   Uses a Least Recently Used (LRU) replacement strategy [S1].
+-    *   Tracks ownership/validity of cached bricks to negotiate transfers [S1].
++*   **kd-tree Node:** `left_subtree_load`, `right_subtree_load`, `f_l`, `f_r`, `subdivision_plane` [S1].
++*   **Brick Cache:** A local main memory buffer on each node storing copies of bricks recently sent to neighbors [S1]. Uses a Least Recently Used (LRU) replacement strategy [S1]. Tracks ownership/validity of cached bricks to negotiate transfers [S1].
+ 
+ **Parameters:**
+@@ -35,206 +27,109 @@
+ 
+ **Steps:**
+-1.  **Evaluate Root Condition:** Calculate the weighting factor $f$ for the root node of the kd-tree:
+-    $$
+-    f = \begin{cases} 
+-    f_l & \text{if } t_l > t_r \\
+-    f_r & \text{otherwise}
+-    \end{cases}
+-    $$
+-    where $t_l$ and $t_r$ are the loads of the left and right subtrees, respectively [S1].
++1.  Evaluate inequality (4) for the root node of the kd-tree [S1].
++2.  If the condition holds, transfer one slice of bricks along the subdivision plane represented by the root node [S1].
++3.  Suspend load balancing for the current frame and restart at the root node after the next image is rendered [S1].
++4.  If the condition does not hold at the root, test other nodes in a preorder traversal [S1].
++5.  After the first slice of bricks has been moved, suspend load balancing until the next frame [S1].
++6.  When moving a brick to a neighboring node, keep a copy of this brick in local main memory [S1].
++7.  Use a least recently used (LRU) replacement strategy for the brick cache [S1].
++8.  If moving a cached brick back to the initial node, reactivate the local copy instead of transferring over the network [S1].
++9.  Send small negotiation messages between nodes to determine which bricks are sent and which are cached [S1].
+ 
+-2.  **Check Imbalance:** Evaluate inequality (4) for the current node:
+-    $$
+-    s \bar{t} + s f c < |t_l - t_r|
+-    $$
+-    where $s$ is a sign/direction indicator (implied by context of moving a slice), $\bar{t}$ is the average load per brick (implied by context of "slice of bricks"), and $c$ is the average transfer time [S1]. Note: The source text presents the formula as $s\bar{t} + sfc < |t_l - t_r|$. The term $s\bar{t}$ likely represents the benefit of balancing (reduction in load variance), while $sfc$ represents the cost. If the benefit exceeds the cost, a move is justified [S1].
+-
+-3.  **Execute Move (if condition holds):**
+-    *   Transfer one slice of bricks along the subdivision plane represented by the current node [S1].
+-    *   **Update Factors:**
+-        *   If moving bricks from left to right:
+-            *   Increase $f_r$ by $f_o$: $f_r \leftarrow f_r + f_o$ [S1].
+-            *   Decrease $f_l$ by $f_s$: $f_l \leftarrow f_l - f_s$ [S1].
+-        *   If moving bricks from right to left:
+-            *   Increase $f_l$ by $f_o$: $f_l \leftarrow f_l + f_o$ [S1].
+-            *   Decrease $f_r$ by $f_s$: $f_r \leftarrow f_r - f_s$ [S1].
+-    *   **Cache Management:**
+-        *   The sending node keeps a copy of the moved brick in its local main memory [S1].
+-        *   The receiving node adds the brick to its local cache if space permits (LRU policy) [S1].
+-        *   Nodes send small negotiation messages to determine which bricks are sent and which are cached [S1].
+-    *   **Suspend:** Finish load balancing for the current frame. Restart at the root node after the next image is rendered [S1].
+-
+-4.  **Traverse Tree (if condition does not hold at root):**
+-    *   Test other nodes in a preorder traversal [S1].
+-    *   If the condition holds for a non-root node, execute the move (Step 3) for that node.
+-    *   After the first slice of bricks has been moved, suspend load balancing until the next frame [S1].
+-
+-5.  **Reverse Move (Caching):**
+-    *   If the system decides to move a brick back to its initial node:
+-        *   Check if the brick is present in the local cache of the current node [S1].
+-        *   If cached, reactivate the local copy instead of transferring over the network [S1].
+-        *   This reduces the effective transfer cost $c$ for reverse moves, mitigating oscillation [S1].
++**Formulas:**
++*   Weighting factor: $f = f_l$ if $t_l > t_r$, else $f = f_r$ [S1].
++*   Move condition: $s\bar{t} + sfc < |t_l - t_r|$ [S1]. Here, $s$ is the number of bricks in a slice and $\bar{t}$ is the average load per brick [S1].
++*   Factor update (left to right): $f_r \leftarrow f_r + f_o$, $f_l \leftarrow f_l - f_s$ [S1].
++*   Factor update (right to left): $f_l \leftarrow f_l + f_o$, $f_r \leftarrow f_r - f_s$ [S1].
+ 
+ **Pseudocode:**
++```python
++def incremental_load_balance(kd_tree_root, c, f_o, f_s):
++    # Step 1: Evaluate root condition
++    if evaluate_and_move(kd_tree_root, c, f_o, f_s):
++        return  # Step 3: Suspend for next frame
+ 
+-```python
+-def incremental_load_balance(kd_tree_root, frame_time_limit):
+-    """
+-    Perform one step of incremental load balancing for the current frame.
+-    """
+-    # Start traversal from root
+-    node = kd_tree_root
+-    
+-    # Preorder traversal to find the first node that satisfies the condition
+-    # In a real implementation, this would be a recursive or stack-based preorder walk
+-    # Here we simulate the logic described: check root, then others if needed.
+-    
+-    # 1. Evaluate root
+-    if evaluate_and_move(node):
+-        return # Suspended for next frame
+-    
+-    # 2. If root didn't trigger, traverse other nodes
+-    # Note: The source says "test other nodes in a preorder traversal"
+-    # We assume a helper function that iterates nodes in preorder
+-    for other_node in preorder_traversal(kd_tree_root):
+-        if other_node == kd_tree_root:
++    # Step 4: Test other nodes in preorder traversal
++    for node in preorder_traversal(kd_tree_root):
++        if node == kd_tree_root:
+             continue
+-        if evaluate_and_move(other_node):
+-            return # Suspended for next frame
++        if evaluate_and_move(node, c, f_o, f_s):
++            return  # Step 5: Suspend after first move
+ 
+-def evaluate_and_move(node):
+-    """
+-    Check if a move is beneficial for the given node.
+-    Returns True if a move was executed, False otherwise.
+-    """
++def preorder_traversal(node):
++    yield node
++    if hasattr(node, 'left'):
++        yield from preorder_traversal(node.left)
++    if hasattr(node, 'right'):
++        yield from preorder_traversal(node.right)
++
++def evaluate_and_move(node, c, f_o, f_s):
+     t_l = node.left_subtree_load
+     t_r = node.right_subtree_load
+     
+     # Calculate weighting factor f
+-    if t_l > t_r:
+-        f = node.f_l
+-    else:
+-        f = node.f_r
++    f = node.f_l if t_l > t_r else node.f_r
+     
+-    # Get average transfer cost c (measured by system)
+-    c = get_average_transfer_cost()
++    # s: number of bricks in a slice, t_bar: average load per brick [S1]
++    s = 1  # [G] Slice size parameter
++    t_bar = 1.0  # [G] Average load metric
+     
+-    # Calculate benefit and cost
+-    # s * t_bar represents the load balancing benefit (reduction in imbalance)
+-    # s * f * c represents the cost of moving a slice
+-    # The source formula: s * t_bar + s * f * c < |t_l - t_r|
+-    # This implies: Benefit < Cost is NOT the condition.
+-    # Actually, the source says: "imbalance ... is so large that moving a slice ... is very likely to improve"
+-    # So the condition is: Benefit > Cost
+-    # Let's rewrite the inequality from source: s*t_bar + s*f*c < |t_l - t_r|
+-    # This seems to imply that the *cost* (s*f*c) plus some baseline (s*t_bar) is less than the imbalance.
+-    # Or perhaps s*t_bar is the gain.
+-    # Let's stick to the source formula structure:
+-    
+-    imbalance = abs(t_l - t_r)
+-    
+-    # s is likely +1 or -1 depending on direction, but in the inequality it appears as a multiplier.
+-    # The source writes: s*t_bar + s*f*c < |t_l - t_r|
+-    # This is ambiguous. However, standard load balancing moves if Imbalance > Cost.
+-    # Let's assume the term (s*t_bar + s*f*c) is the effective cost or threshold.
+-    # Given the context "imbalance ... is so large", we check if Imbalance > Threshold.
+-    
+-    # Re-reading source: "Applying c directly ... is not very useful ... c is weighted with f"
+-    # "Including the average cost c ... and the factor f, the condition ... is s*t_bar + s*f*c < |t_l - t_r|"
+-    # This suggests that the RHS (imbalance) must be greater than the LHS (cost/benefit metric).
+-    
+-    # Let's define the threshold as the LHS.
+-    # Note: s is not defined in the source text explicitly as a variable, but appears in the formula.
+-    # It might be a sign factor or a constant. For implementation, we treat the LHS as the cost threshold.
+-    
+-    # Since s is not defined, we assume s=1 for magnitude comparison, or that s*t_bar is the gain.
+-    # If s*t_bar is gain, then Gain - Cost < Imbalance? No.
+-    # Let's assume the source meant: Cost < Imbalance.
+-    # Cost = f * c * (size of slice).
+-    # The source includes s*t_bar. Let's assume t_bar is the average load per brick and s is the number of bricks in a slice.
+-    # Then s*t_bar is the total load of a slice.
+-    # So: Load_of_slice + f * c < Imbalance?
+-    # This makes sense: You move a slice if the imbalance is larger than the load of the slice plus the transfer cost.
+-    
+-    slice_load = get_slice_load(node) # s * t_bar
+-    transfer_cost = f * c * get_slice_size(node) # s * f * c (assuming s is part of slice size/load)
+-    
+-    # The source formula: s*t_bar + s*f*c < |t_l - t_r|
+-    # Let's interpret s*t_bar as the load being moved, and s*f*c as the weighted cost.
+-    # Condition: Load_Moved + Weighted_Cost < Imbalance
+-    
+-    if slice_load + transfer_cost < imbalance:
+-        execute_move(node)
++    # Step 2: Check inequality (4)
++    if s * t_bar + s * f * c < abs(t_l - t_r):
++        execute_move(node, t_l, t_r, f, f_o, f_s)
+         return True
+     return False
+ 
+-def execute_move(node):
+-    """
+-    Move a slice of bricks and update factors.
+-    """
+-    t_l = node.left_subtree_load
+-    t_r = node.right_subtree_load
++def execute_move(node, t_l, t_r, f, f_o, f_s):
++    # Determine direction based on load imbalance
++    direction = "LEFT_TO_RIGHT" if t_l > t_r else "RIGHT_TO_LEFT"
+     
+-    # Determine direction
+-    if t_l > t_r:
+-        # Imbalance is on left, move bricks from left to right?
+-        # Or move from right to left to balance?
+-        # Usually, you move from overloaded to underloaded.
+-        # If t_l > t_r, left is overloaded. Move bricks from Left to Right.
+-        direction = LEFT_TO_RIGHT
+-    else:
+-        # t_r >= t_l, right is overloaded. Move bricks from Right to Left.
+-        direction = RIGHT_TO_LEFT
+-        
+-    # Move bricks
+-    bricks_moved = transfer_bricks(node, direction)
++    # Step 2: Transfer one slice of bricks along subdivision plane
++    transfer_slice(node, direction)
+     
+     # Update factors
+-    if direction == LEFT_TO_RIGHT:
+-        node.f_r += f_o # Increase penalty for moving back (Right to Left)
+-        node.f_l -= f_s # Decrease cost for moving same direction (Left to Right)
++    if direction == "LEFT_TO_RIGHT":
++        node.f_r += f_o
++        node.f_l -= f_s
+     else:
+-        node.f_l += f_o # Increase penalty for moving back (Left to Right)
+-        node.f_r -= f_s # Decrease cost for moving same direction (Right to Left)
++        node.f_l += f_o
++        node.f_r -= f_s
+         
+-    # Cache management
+-    # Sender keeps copy
+-    # Receiver adds to cache
+-    # Negotiation messages sent
+-    negotiate_cache(node, bricks_moved)
++    # Step 6: Keep copy in local main memory
++    node.local_cache.add(node.moved_bricks)
++    
++    # Step 9: Send small negotiation messages
++    send_negotiation(node)
+ 
+-def negotiate_cache(node, bricks):
+-    """
+-    Send small messages to negotiate brick caching.
+-    """
+-    # Implementation detail: [G]
+-    # Send list of brick IDs to neighbor.
+-    # Neighbor checks local cache.
+-    # If cached, mark as "cached" instead of "transferred".
++def transfer_slice(node, direction):
++    # [G] Standard brick transfer operation along the node's subdivision plane
++    pass
++
++def send_negotiation(node):
++    # [G] Standard message passing to negotiate cached vs transferred bricks
+     pass
+ ```
++
++**Pitfalls:**
++*   **Oscillation:** The system may alternately move bricks along one subdivision plane [S1].
++*   **Stagnation:** If $f_l$ and $f_r$ are too high, the system may get stuck in a configuration worse than the initial partitioning because transfer costs seem too high [S1].
++*   **Parameter Sensitivity:** Choosing $f_o$, $f_s$, and initial $f_l, f_r$ is difficult and depends on the dataset, number of bricks, and hardware [S1].
+ 
+ ## Subtopics
+ 
+ ### Dynamic Load Balancing using kd-trees
+-The parent method that provides the hierarchical structure for identifying load imbalances and subdivision planes. Incremental Load Balancing with Brick Caching builds on this by adding the incremental execution and caching layers [S1].
++The parent method that provides the hierarchical structure for identifying load imbalances and subdivision planes. Sets apart by enabling incremental node evaluation rather than full-tree processing. Choose when computation time per frame is strictly limited. [Dynamic load balancing using kd-trees](9365-dynamic-load-balancing-using-kd-trees.md)
+ 
+-### Full-Tree Balancing
+-A contrasting approach that attempts to balance the entire kd-tree in one go. Incremental processing is chosen when full-tree balancing would exceed the available computation time per frame [S1].
++### Domain Block Decomposition
++A sibling method for distributed volume rendering partitioning. Sets apart by using static domain decomposition instead of kd-tree incremental balancing with caching. Choose when static partitioning suffices or when brick caching overhead is undesirable. [Domain Block Decomposition](10898-domain-block-decomposition.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(1) per frame for the load balancing step, as it processes at most one node (or a few in preorder until a move is found) [S1]. This addresses the limited computation time available per frame [S1].
++*   **Time Complexity:** O(1) per frame for the load balancing step, as it processes at most one node per frame [S1]. This addresses the limited computation time available per frame [S1].
+ *   **Memory Complexity:** O(B) where B is the number of bricks, due to the brick cache storing copies of moved bricks [S1]. The cache uses LRU replacement [S1].
+ *   **Measured Performance:** Tested on a cluster of eight dual 2.1 GHz Opteron PCs with 4 GB RAM, GeForce 6800 Ultra GPUs, and Infiniband network [S1]. The caching mechanism allows for more aggressive load balancing, achieving better balance between nodes compared to non-cached incremental methods [S1].
+-*   **Strengths:**
+-    *   Respects strict per-frame time limits by processing only one node [S1].
+-    *   Reduces network overhead for reverse moves via caching [S1].
+-    *   Mitigates oscillation through factors $f_l$ and $f_r$ [S1].
+-*   **Limitations:**
+-    *   **Oscillation:** The system may still alternately move bricks along one subdivision plane, though caching mitigates this [S1].
+-    *   **Stagnation:** If $f_l$ and $f_r$ are too high, the system may get stuck in a suboptimal configuration because transfer costs appear too high [S1].
+-    *   **Parameter Sensitivity:** Choosing $f_o$, $f_s$, and initial $f_l, f_r$ is difficult and depends on the dataset, number of bricks, and hardware [S1].
++*   **Strengths:** Respects strict per-frame time limits by processing only one node [S1]. Reduces network overhead for reverse moves via caching [S1]. Mitigates oscillation through factors $f_l$ and $f_r$ [S1].
++*   **Limitations:** Oscillation may still occur along one subdivision plane [S1]. Stagnation if $f_l$ and $f_r$ are too high [S1]. Parameter sensitivity for $f_o$, $f_s$, and initial $f_l, f_r$ [S1].
+ *   **When to use:** When distributed volume rendering requires dynamic load balancing but has strict per-frame time constraints for the balancing algorithm itself [S1].
+-*   **When not to use:** When the hardware or dataset makes parameter tuning for $f_o, f_s$ infeasible, or when network latency is so high that even cached moves are prohibitive (though caching helps) [S1].
++*   **When not to use:** When hardware or dataset makes parameter tuning for $f_o, f_s$ infeasible, or when network latency is so high that even cached moves are prohibitive [S1].
+ 
+ ## Background

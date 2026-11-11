@@ -1,0 +1,163 @@
+# Diffusion-regularized NeRF
+
+Also called: DDM-regularized NeRF, Diffusion-Regularized NeRF Training, Diffusion-based Regularization for Neural Radiance Fields, Denoising Diffusion Model Regularization
+
+## Overview
+Diffusion-regularized NeRF (often referred to as DiffusioNeRF) is a training procedure that improves the geometry and color reconstruction of Neural Radiance Fields (NeRFs) in limited-view scenarios by incorporating a Denoising Diffusion Model (DDM) as a learned prior [S1, S2]. Unlike standard photometric optimization which often leads to artifacts like "floaters" or blurry geometry when views are sparse, this method backpropagates the gradient of the log-probability of RGBD (color and depth) patches—estimated by the DDM—directly to the NeRF's density and color fields [S1]. It distinguishes itself from siblings like [RegNeRF](8582-regnerf.md) by regularizing geometry directly via RGBD patches rather than indirectly via RGB patches, and from [Depth and Geometry Supervision](8727-depth-and-geometry-supervision.md) by using a generative diffusion prior rather than explicit geometric constraints [S1].
+
+## How it works
+The method operates within the augmented loss structure defined in [Regularization and Loss Functions](8586-regularization-and-loss-functions.md), where the total loss combines photometric reconstruction with regularization terms [S1, 7475-geometric-baseline-regularization.md, 8582-regnerf.md].
+
+### Inputs and Outputs
+*   **Inputs:** A set of training images $I$ with known camera poses and intrinsics; a pre-trained DDM $\epsilon_\theta$ trained on RGBD patches from a synthetic dataset (e.g., Hypersim) [S1].
+*   **Outputs:** Optimized NeRF parameters (density $\sigma$ and color $\mathbf{c}$ fields) [S1].
+
+### Data Structures
+The NeRF representation uses Instant NGP, which employs multi-scale hash tables to store feature encodings of coordinates in a fixed memory block, allowing varying spatial resolutions and reducing MLP size [S1]. The DDM is a neural network $\epsilon_\theta(\mathbf{x}_\tau, \tau)$ that estimates noise given a noised input $\mathbf{x}_\tau$ and noise level $\tau$ [S1].
+
+### Numbered Steps
+
+1.  **DDM Pre-training:** Train a DDM on RGBD patches extracted from a synthetic dataset (e.g., Hypersim) to predict the gradient of the logarithm of the joint probability distribution of color and depth [S1]. The DDM is optimized for 650,000 steps with a batch size of 32 [S1].
+2.  **Ray Sampling and Rendering:** During NeRF training, cast rays through the scene. For each ray $r(t) = o + td$, sample $N$ points $t_{0:N}$ [S1]. Compute the expected color $\mathbf{C}(r)$ and expected depth $\mathbf{D}(r)$ using differentiable volume rendering [S1]:
+    $$ \mathbf{C}(r) \approx \sum_{i=1}^N w_i \mathbf{c}(\mathbf{r}(t_i), \mathbf{d}) + \left ( 1 - \sum_{i=1}^N w_i \right ) \mathbf{c}_\text {bg} $$
+    $$ \mathbf{D}(r) = \frac {\sum_{i=1}^N w_i t_i}{\sum_{i=1}^N w_i} $$
+    where $\mathbf{c}_\text {bg}$ is the background color (set to white) [S1]. The weights are defined as $w_i = T(t_i)\rho(t_i)$, with opacity $\rho(t_i) = 1 - \exp(-\sigma(\mathbf{r}(t_i))(t_{i+1} - t_i))$ and accumulated transmittance $T(t_i) = \prod_{j=1}^{i-1} (1 - \rho(t_j))$ [S1].
+3.  **Patch Extraction:** Extract random RGBD patches from the rendered color and depth maps. The patch size is typically $48 \times 48$ pixels, enabled by the fast rendering of Instant NGP, though $24 \times 24$ patches may be used for specific datasets like LLFF [S1].
+4.  **DDM Gradient Estimation:** Pass the rendered RGBD patches $\mathbf{x}_\tau$ (noised at time step $\tau$) into the trained DDM to obtain the noise estimate $\epsilon_\theta(\mathbf{x}_\tau, \tau)$ [S1]. This estimate is proportional to the negative score function (gradient of the log-probability) of the RGBD patch distribution:
+    $$ \epsilon_\theta(\mathbf{x}_\tau, \tau) \propto -\nabla_\mathbf{x} \log p(\mathbf{x}) $$
+    [S1].
+5.  **Loss Computation and Backpropagation:** Compute the total loss gradient. The optimization gradient combines the photometric loss, geometric regularizers (foreground, foreground-ray, distance), and the DDM regularizer [S1]:
+    $$ \nabla \mathcal{L} = \nabla \mathcal{L}_{\text{photo}} + \lambda_{\text{fg}} \nabla \mathcal{L}_{\text{fg}} + \lambda_{\text{fr}} \nabla \mathcal{L}_{\text{fr}} + \lambda_{\text{dist}} \nabla \mathcal{L}_{\text{dist}} - \lambda_{\text{DDM}} \epsilon_\theta $$
+    [S1]. Backpropagate this gradient to update the NeRF's density and color field parameters [S1].
+
+### Formulas and Parameters
+*   **Forward Diffusion Process:** Adds Gaussian noise to data samples:
+    $$ \mathbf{x}_\tau = \sqrt{\alpha_\tau} \mathbf{x}_{\tau-1} + \sqrt{\beta_\tau} \epsilon_{\tau-1} $$
+    where $\epsilon_{\tau-1} \sim \mathcal{N}(0, I)$ and $\alpha_\tau = 1 - \beta_\tau$ [S1].
+*   **Reparameterization:**
+    $$ q(\mathbf{x}_\tau | \mathbf{x}_{0}) = \mathcal{N}(\mathbf{x}_\tau ; \sqrt{\bar{\alpha}_\tau} \mathbf{x}_{0}, (1-\bar{\alpha}_\tau)\mathbf{I}) $$
+    where $\bar{\alpha}_\tau = \prod_{s=0}^\tau \alpha_s$ [S1].
+*   **Reverse Process Mean:**
+    $$ \mu(\mathbf{x}_\tau, \tau) = \frac{1}{\sqrt{\alpha_\tau}} \left ( \mathbf{x}_\tau - \frac{\beta_\tau}{\sqrt{1 - \bar{\alpha}_\tau}} \epsilon_\theta(\mathbf{x}_\tau, \tau) \right ) $$
+    [S1].
+*   **DDM Training Loss:**
+    $$ \mathbb{E}_{\mathbf{x}_0, \epsilon} \left [ \frac{\beta_\tau}{2\alpha_\tau (1-\bar{\alpha}_\tau)} || \epsilon - \epsilon_\theta \left ( \sqrt{\bar{\alpha}_\tau} \mathbf{x}_0 + \sqrt{1 - \bar{\alpha}_\tau} \epsilon, \tau \right ) || \right ] $$
+    [S1].
+*   **Parameters:**
+    *   $\lambda_{\text{DDM}}$: Weight for the DDM regularizer. It trades off reconstruction accuracy around thin structures against overall depth smoothness [S1].
+    *   $\tau$: Diffusion time parameter. It smoothly interpolates from 0.1 to 0 during the first 2500 steps of NeRF optimization. $\bar{\alpha}_\tau = \cos(0.5\pi(\tau + 0.008)/1.008)$ [S1].
+    *   $\lambda_{\text{dist}}$: Distance regularizer weight. Linearly increases from 0 to a maximum value (e.g., $1 \times 10^{-4}$ for DTU, $1.5 \times 10^{-5}$ for LLFF) between steps 3000 and 8000 [S1].
+    *   Patch Size: $48 \times 48$ or $24 \times 24$ pixels [S1].
+    *   NeRF Optimization Steps: 12,000 steps [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pre-training phase (DDM)
+def train_ddm(ddm_model, hypersim_dataset, steps=650000, batch_size=32):
+    optimizer = Adam(ddm_model.parameters())
+    for step in range(steps):
+        batch = hypersim_dataset.sample(batch_size) # Sample RGBD patches
+        x_0 = batch.rgb_depth_patches
+        tau = random.randint(1, T) # Random diffusion time step
+        epsilon = torch.randn_like(x_0)
+        # Forward diffusion
+        x_tau = sqrt(alpha_tau) * x_0 + sqrt(beta_tau) * epsilon
+        # Predict noise
+        predicted_noise = ddm_model(x_tau, tau)
+        # Loss
+        loss = mean((beta_tau / (2 * alpha_tau * (1 - alpha_bar_tau))) * 
+                    (epsilon - predicted_noise)**2)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+# NeRF Training phase
+def train_nerf_with_ddm(nerf_model, ddm_model, training_images, 
+                        num_steps=12000, patch_size=48):
+    optimizer = Adam(nerf_model.parameters())
+    
+    for step in range(num_steps):
+        # 1. Sample training pose or random pose
+        if step < 3000 and random.random() < 0.25:
+            # Use training pose and ground truth RGB for early stability
+            pose = get_training_pose()
+            gt_rgb = get_gt_image(pose)
+            # Render depth only, use GT RGB for patch
+            depth_map = render_depth(nerf_model, pose)
+            rgb_patch = extract_patch(gt_rgb, patch_size)
+            depth_patch = extract_patch(depth_map, patch_size)
+        else:
+            pose = get_random_pose()
+            rgb_map = render_color(nerf_model, pose)
+            depth_map = render_depth(nerf_model, pose)
+            rgb_patch = extract_patch(rgb_map, patch_size)
+            depth_patch = extract_patch(depth_map, patch_size)
+            
+        # 2. Combine into RGBD patch
+        rgbd_patch = concatenate(rgb_patch, depth_patch)
+        
+        # 3. DDM Regularization
+        # Schedule tau: interpolate from 0.1 to 0 in first 2500 steps
+        if step < 2500:
+            tau = 0.1 - (0.1 * step / 2500)
+        else:
+            tau = 0.0
+            
+        # Noisy input for DDM
+        epsilon = torch.randn_like(rgbd_patch)
+        x_tau = sqrt(alpha_tau) * rgbd_patch + sqrt(1 - alpha_bar_tau) * epsilon
+        
+        # Get DDM gradient (noise estimate)
+        ddm_grad = ddm_model(x_tau, tau)
+        
+        # 4. Compute Total Loss
+        # Photometric loss (MSE)
+        rendered_rgb = render_color(nerf_model, pose)
+        gt_rgb = get_gt_image(pose)
+        l_photo = mse(rendered_rgb, gt_rgb)
+        
+        # Geometric regularizers (example placeholders for standard terms)
+        l_fg = compute_foreground_regularization(nerf_model)
+        l_fr = compute_foreground_ray_regularization(nerf_model)
+        
+        # Distance regularizer schedule
+        if step < 3000:
+            l_dist = 0
+        elif step < 8000:
+            l_dist = linear_interpolate(0, max_dist_lambda, step, 3000, 8000)
+        else:
+            l_dist = max_dist_lambda
+            
+        # Total Loss Gradient
+        # Note: In practice, gradients are accumulated or combined before backward()
+        loss = l_photo + lambda_fg * l_fg + lambda_fr * l_fr + lambda_dist * l_dist
+        loss = loss - lambda_ddm * ddm_grad # DDM term acts as gradient
+        
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+```
+
+### Edge Cases and Pitfalls
+*   **Early Training Instability:** NeRF renderings are inaccurate early in training. To mitigate this, 25% of the time, a training pose is used, and the RGB component is sampled directly from the training image [S1].
+*   **Over-smoothing:** The DDM regularizer can cause over-smoothing of thin structures and hallucinate details in scene regions not visible in any training view, which significantly impacts reconstruction scores [S1].
+*   **Scheduling Sensitivity:** The diffusion time parameter $\tau$ and DDM gradient weights require careful scheduling to produce good results; improper scheduling leads to poor convergence [S1].
+*   **Shiny Objects:** The density-based approach struggles with shiny objects while excelling on diffuse/textured surfaces [S1].
+
+## Operating characteristics
+*   **Time Complexity:** NeRF optimization takes approximately 12,000 steps. On a single Nvidia A100 GPU, training takes approximately 30 minutes per scene [S1]. The use of Instant NGP allows for fast rendering of large patches ($48 \times 48$), which is critical for the efficiency of this method compared to methods using smaller patches [S1].
+*   **Memory Complexity:** Uses multi-scale hash tables (Instant NGP) which store feature encodings in a fixed memory block, reducing the MLP size compared to standard coordinate-based MLPs [S1].
+*   **Performance:** Improves reconstruction quality on LLFF and DTU datasets compared to baselines without DDM regularization [S1]. It mitigates artifacts like "floaters" and improves generalization to novel views [S1].
+*   **Strengths:** Directly regularizes geometry via RGBD patches; leverages strong priors from synthetic data (Hypersim); fast rendering allows larger context patches [S1].
+*   **Limitations:** Can over-smooth thin structures; hallucinates details in occluded regions; sensitive to hyperparameter scheduling; struggles with shiny objects [S1].
+*   **When to Use:** Limited-view scenarios where standard NeRFs produce poor geometry or artifacts; scenes with diffuse/textured surfaces [S1, S2].
+*   **When Not to Use:** Scenes with significant specular/shiny surfaces; when computational resources for DDM pre-training are unavailable; when exact preservation of thin structures is critical without post-processing [S1].
+
+## Background
+Diffusion-regularized NeRF (DiffusioNeRF) was introduced to address the under-constrained nature of NeRF geometry and color fields, particularly with few input views [S1]. The method leverages Denoising Diffusion Models (DDMs), which were originally developed for image generation, as score function estimators for RGBD patch distributions [S1]. It was trained on the Hypersim synthetic dataset [S1]. The approach was implemented using torch-ngp (Instant NGP) with the tiny-cuda-tc backend [S1]. It is used for novel-view synthesis and 3D reconstruction [S1]. A related generalizable framework using DDM regularization was also evaluated on the DTU dataset [S2].
+
+## Sources
+[S1] DiffusioNeRF: Regularizing Neural Radiance Fields with Denoising Diffusion Models, https://doi.org/10.1109/cvpr52729.2023.00407, fetched 2026-10-26
+[S2] Rugularizing generalizable neural radiance field with limited-view images, https://link.springer.com/article/10.1007/s40747-024-01696-6, fetched 2026-10-29

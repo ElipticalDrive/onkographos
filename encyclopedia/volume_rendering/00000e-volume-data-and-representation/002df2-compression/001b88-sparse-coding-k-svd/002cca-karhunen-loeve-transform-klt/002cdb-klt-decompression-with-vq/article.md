@@ -3,60 +3,53 @@
 Also called: Codebook-based KLT, KLT Decoding with VQ, KLT Decompression with Precomputed Reprojection, KLT Fast Decompression, KLT volume rendering, Karhunen-Loeve Transform (KLT) Rendering, Karhunen-Loève Transform with Vector Quantization
 
 ## Overview
-KLT Decompression with VQ is a rendering method that accelerates Karhunen-Loève Transform (KLT) decoding by precomputing partial reprojections during compression and storing them in an auxiliary codebook [S1][S2][S3, unofficial]. It solves the problem of slow KLT reconstruction during visualization by allowing direct lookup of precomputed values, thereby reducing memory pressure and avoiding full decompression of the data [S3, unofficial]. Unlike standard KLT decoding which requires computing linear combinations of eigenvectors at runtime, this method shifts the computational burden to the preprocessing stage [S2].
+KLT Decompression with VQ is a rendering method that accelerates Karhunen-Loève Transform (KLT) decoding by precomputing partial reprojections during compression and storing them in an auxiliary codebook [S1][S2][S3, unofficial]. It solves the problem of slow KLT reconstruction during visualization by allowing direct lookup of precomputed values, thereby reducing memory pressure and avoiding full decompression of the data [S3, unofficial]. Unlike methods requiring full decompression, this technique reduces memory pressure during rendering because it does not need to fully decompress the data [S3, unofficial].
 
 ## How it works
-The method operates in two distinct phases: a compression/preprocessing phase and a visualization/rendering phase. It builds on the linear decorrelation of [Karhunen-Loeve Transform (KLT)](5365-karhunen-loeve-transform-klt.md) by optimizing the reconstruction step.
+The method operates in two distinct phases: a compression/preprocessing phase and a visualization/rendering phase [S3, unofficial]. It builds on the linear decorrelation of [Karhunen-Loeve Transform (KLT)](5365-karhunen-loeve-transform-klt.md) by optimizing the reconstruction step [S2][S3, unofficial].
 
 ### Inputs and Outputs
-*   **Input (Compression Phase):** The original volume data (or a partitioned subset thereof) and the KLT basis (eigenvectors) derived from the data statistics.
-*   **Input (Visualization Phase):** The compressed bitstream containing VQ-encoded indices and the precomputed auxiliary codebook.
-*   **Output:** Rendered image or intermediate volume representation suitable for direct volume rendering.
+*   **Input (Compression Phase):** Original volume data and the KLT basis [G].
+*   **Input (Visualization Phase):** Compressed data containing VQ indices and the auxiliary codebook [S2][S3, unofficial].
+*   **Output:** Rendered image or intermediate volume representation suitable for direct volume rendering [S3, unofficial].
 
 ### Data Structures
-1.  **Auxiliary Codebook ($C^*$):** A lookup table storing precomputed partial reprojection values. For a volume partitioned into $P$ parts, the codebook contains entries $C^*_p(k)$, where $p$ is the partition index and $k$ is the VQ codeword index [S1].
+1.  **Auxiliary Codebook ($C^*$):** A lookup table storing precomputed partial reprojection values for each volume partition [S1][S3, unofficial].
 2.  **Compressed Data:** Stores the VQ indices (codeword IDs) corresponding to each volume partition or voxel block [S2].
 
 ### Steps
-
-#### 1. Compression Phase (Preprocessing)
 1.  **Partition the Volume:** Divide the volume data into $P$ partitions or blocks [S1].
-2.  **Compute KLT Basis:** Calculate the covariance matrix for the data and derive the eigenvectors (KLT basis) [S1][S3, unofficial].
-3.  **Precompute Partial Reprojections:** For each partition $p$, compute the partial reprojection values. These values represent the contribution of specific KLT coefficients or basis vectors to the final volume data. Store these values in the auxiliary codebook $C^*$ [S2][S3, unofficial].
-    *   The precomputation is performed at processing time, not runtime [S2].
-4.  **Vector Quantization (VQ):** Encode the original data (or the transformed coefficients) using VQ. This involves finding the best-matching codeword from a codebook for each partition/voxel and storing the index [S2][S3, unofficial].
-
-#### 2. Visualization Phase (Rendering)
-1.  **Retrieve Indices:** For the current view or working set, retrieve the VQ indices for the relevant partitions [S3, unofficial].
-2.  **Lookup Precomputed Values:** Use the retrieved indices to look up the corresponding precomputed partial reprojection values from the auxiliary codebook $C^*$ [S3, unofficial].
-3.  **Reconstruct Volume Data:** Compute the volume portion representation $x_i$ for each voxel or block by summing the retrieved partial reprojections [S1].
+2.  **Precompute Partial Reprojections:** For each partition $p$, compute the partial reprojection values and store them in the auxiliary codebook $C^*$ [S3, unofficial]. This precomputation is performed at processing time, not runtime [S2].
+3.  **Vector Quantization (VQ):** Encode the data using VQ by finding the best-matching codeword for each partition and storing the index [S2][S3, unofficial].
+4.  **Retrieve Indices:** During visualization, retrieve the VQ indices for the current working set [S3, unofficial].
+5.  **Lookup and Reconstruct:** Use the retrieved indices to look up the corresponding precomputed partial reprojection values from $C^*$ and compute the volume portion representation [S1].
     *   Formula:
         $$x_i = \sum_{p=1}^{P} C^*_p(k_{p,i})$$
         Where:
-        *   $x_i$ is the reconstructed value for voxel/block $i$.
-        *   $P$ is the total number of partitions.
-        *   $C^*_p(k_{p,i})$ is the precomputed partial reprojection value from the auxiliary codebook for partition $p$ and codeword index $k_{p,i}$.
-4.  **Render:** Pass the reconstructed data to the volume rendering pipeline [S3, unofficial].
+        *   $x_i$ is the reconstructed value for voxel/block $i$ [S1].
+        *   $P$ is the total number of partitions [S1].
+        *   $C^*_p(k_{p,i})$ is the precomputed partial reprojection value from the auxiliary codebook for partition $p$ and codeword index $k_{p,i}$ [S1].
+6.  **Render:** Pass the reconstructed data to the volume rendering pipeline [S3, unofficial].
 
 ### Parameters
 *   **Progressive Levels:** The method can support multiple levels of approximation. An example implementation uses four progressive levels [S1].
 *   **Partition Count ($P$):** The number of volume partitions. Not given in the sources.
 
 ### Edge Cases and Pitfalls
-*   **Memory Pressure:** While the method reduces memory pressure during rendering by avoiding full decompression, it requires storing the auxiliary codebook [S3, unofficial]. The size of the codebook depends on the number of partitions and codewords.
-*   **Precomputation Cost:** The preprocessing phase is computationally intensive as it requires computing partial reprojections for all possible codewords [S2].
-*   **Accuracy:** The accuracy depends on the resolution of the VQ codebook and the number of progressive levels used [S1].
+*   **Memory Pressure:** The method reduces memory pressure during rendering by avoiding full decompression, but requires storing the auxiliary codebook [S3, unofficial]. The size of the codebook depends on the number of partitions and codewords [S3, unofficial].
+*   **Precomputation Timing:** Partial reprojections are computed at processing time, not runtime [S2].
+*   **Accuracy:** Accuracy details are not explicitly stated in the sources. Not given in the sources.
 
 ## Operating characteristics
-*   **Time Complexity:** Decompression is fast, primarily involving table lookups and summation, as the heavy lifting (KLT basis computation and partial reprojection calculation) is done offline [S3, unofficial].
-*   **Memory Complexity:** Requires storage for the compressed data (VQ indices) and the auxiliary codebook [S3, unofficial].
-*   **Strengths:** Fast decoding speed; reduced memory pressure during rendering; suitable for interactive visualization [S3, unofficial].
+*   **Time Complexity:** Decompression is fast, primarily involving table lookups and summation, as the heavy lifting is done offline [S3, unofficial].
+*   **Memory Complexity:** Requires storage for compressed VQ indices and the auxiliary codebook [S1][S3, unofficial].
+*   **Strengths:** Fast decoding speed; reduced memory pressure during rendering; supports random voxel reconstruction via codebook lookup [S3, unofficial].
 *   **Limitations:** High preprocessing time; requires significant storage for the codebook if high fidelity is needed [S3, unofficial].
 *   **When to use:** When interactive visualization speed is critical and preprocessing time is acceptable [S3, unofficial].
-*   **When not to use:** When memory is extremely constrained and the codebook size is prohibitive, or when real-time adaptation of the KLT basis is required [S3, unofficial].
+*   **When not to use:** When memory is extremely constrained and the codebook size is prohibitive, or when real-time adaptation of the KLT basis is required. Not given in the sources.
 
 ## Background
-The method was proposed by Fout et al. [FM07] [S1]. It is part of the broader field of compressed GPU-based direct volume rendering, where efficient decoding is crucial for interactive performance [S2]. The approach combines the redundancy removal capabilities of KLT with the compact representation of VQ, optimizing the reconstruction step for rendering [S2][S3, unofficial].
+The method was proposed by Fout et al. [FM07] [S1]. It combines the redundancy removal capabilities of KLT with the compact representation of VQ, optimizing the reconstruction step for rendering [S2][S3, unofficial].
 
 ## Sources
 [S1] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

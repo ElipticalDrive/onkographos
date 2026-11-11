@@ -3,18 +3,18 @@
 Also called: IJK to RAS Corner Projection, Volume Bounding Box Clipping
 
 ## Overview
-Computes the near and far clipping distances for ray marching by projecting the eight corners of the volume bounding box onto the camera view direction, then taking the minimum and maximum of these projected distances [S1, unofficial]. This method ensures that all sample points generated along a ray fall within the volume's spatial extent, preventing out-of-bounds memory access and unnecessary computation outside the volume [S1, unofficial]. It differs from sibling methods like [Ray Point Sampling](2382-ray-point-sampling.md) by explicitly handling the coordinate transformation from volume-local (IJK) to world/camera (RAS) space before determining the clipping bounds, whereas siblings may assume pre-computed bounds or different sampling strategies.
+Computes the near and far clipping distances for ray marching by projecting the eight corners of the volume bounding box onto the camera view direction, then taking the minimum and maximum of these projected distances [S1, unofficial]. This method ensures that all sample points generated along a ray fall within the volume's spatial extent, preventing out-of-bounds memory access and unnecessary computation outside the volume [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- Camera matrix $M_{cam}$ (4x4).
-- Volume bounding box dimensions in IJK space: $I, J, K$ (number of voxels along each axis).
-- IJK-to-RAS transformation matrix $M_{ijk2ras}$ (4x4).
+- Camera matrix $M_{cam}$ (4x4) [S1, unofficial].
+- Volume bounding box dimensions in IJK space: $I, J, K$ (number of voxels along each axis) [S1, unofficial].
+- IJK-to-RAS transformation matrix $M_{ijk2ras}$ (4x4) [S1, unofficial].
 - Margin parameter $\delta$ (default 30.0 mm) [S1, unofficial].
 
 **Outputs:**
-- Near clipping distance $d_{near}$.
-- Far clipping distance $d_{far}$.
+- Near clipping distance $d_{near}$ [S1, unofficial].
+- Far clipping distance $d_{far}$ [S1, unofficial].
 
 **Data Structures:**
 - Camera matrix $M_{cam}$: 4x4 matrix. If the norm of the translation column (last column, first 3 rows) is less than 1.0, it is treated as a world-to-camera matrix and inverted to obtain the camera-to-world matrix $M_{world}$. Otherwise, it is used directly as $M_{world}$ [S1, unofficial].
@@ -22,106 +22,87 @@ Computes the near and far clipping distances for ray marching by projecting the 
 - Volume corners in RAS space: 8 points $\mathbf{p}_{ras}^{(n)}$ for $n=0..7$ [S1, unofficial].
 
 **Steps:**
-1. **Extract Camera Pose:** Determine the camera position $\mathbf{c}$ and view direction $\mathbf{v}$ from $M_{cam}$. If $\|M_{cam}[0:3, 3]\| < 1.0$, invert $M_{cam}$ to get $M_{world}$. Extract $\mathbf{c} = M_{world}[0:3, 3]$ and $\mathbf{v} = -M_{world}[0:3, 2]$ (assuming standard OpenGL-style camera where -Z is view direction) or appropriate axis based on convention. Normalize $\mathbf{v}$ [S1, unofficial].
-2. **Generate IJK Corners:** Create the 8 corners of the volume bounding box in IJK space. The indices are $0$ and $I-1$ for the first dimension, $0$ and $J-1$ for the second, and $0$ and $K-1$ for the third [S1, unofficial].
-3. **Transform to RAS Space:** For each corner $\mathbf{p}_{ijk} = (i, j, k, 1)^T$, compute $\mathbf{p}_{ras} = M_{ijk2ras} \cdot \mathbf{p}_{ijk}$. Take the first three components of the result to get the 3D position in RAS space [S1, unofficial].
-4. **Project Corners:** For each RAS corner $\mathbf{p}_{ras}^{(n)}$, compute the vector $\mathbf{d}^{(n)} = \mathbf{p}_{ras}^{(n)} - \mathbf{c}$. Project this vector onto the normalized view direction $\mathbf{v}$ to get the scalar distance $t^{(n)} = \mathbf{d}^{(n)} \cdot \mathbf{v}$ [S1, unofficial].
+1. **Extract Camera Pose:** Determine the camera position $\mathbf{c}$ and view direction $\mathbf{v}$ from $M_{cam}$ [S1, unofficial]. If $\|M_{cam}[0:3, 3]\| < 1.0$, invert $M_{cam}$ to get $M_{world}$ [S1, unofficial]. Extract $\mathbf{c}$ and $\mathbf{v}$ from $M_{world}$ and normalize $\mathbf{v}$ [S1, unofficial].
+2. **Generate IJK Corners:** Create the 8 corners of the volume bounding box in IJK space using indices $0$ and $I-1$, $0$ and $J-1$, and $0$ and $K-1$ [S1, unofficial].
+3. **Transform to RAS Space:** For each corner $\mathbf{p}_{ijk} = (i, j, k, 1)^T$, compute $\mathbf{p}_{ras} = M_{ijk2ras} \cdot \mathbf{p}_{ijk}$ and take the first three components to get the 3D position in RAS space [S1, unofficial].
+4. **Project Corners:** For each RAS corner $\mathbf{p}_{ras}^{(n)}$, compute the vector $\mathbf{d}^{(n)} = \mathbf{p}_{ras}^{(n)} - \mathbf{c}$ and project this vector onto the normalized view direction $\mathbf{v}$ to get the scalar distance $t^{(n)} = \mathbf{d}^{(n)} \cdot \mathbf{v}$ [S1, unofficial].
 5. **Compute Clipping Distances:** Set $t_{min} = \min_n(t^{(n)})$ and $t_{max} = \max_n(t^{(n)})$. Set $d_{near} = t_{min} - \delta$ and $d_{far} = t_{max} + \delta$. Clamp $d_{near}$ to a minimum of 0.1 [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import torch
+import math
 
 def compute_clipping_distances(camera_matrix, ijk2ras, volume_dims, margin=30.0):
     """
     Compute near and far clipping distances for volume ray marching.
-    
-    Args:
-        camera_matrix: (4, 4) tensor, camera matrix.
-        ijk2ras: (4, 4) tensor, IJK to RAS transformation matrix.
-        volume_dims: tuple (I, J, K), number of voxels in each dimension.
-        margin: float, safety margin in mm.
-        
-    Returns:
-        d_near: float, near clipping distance.
-        d_far: float, far clipping distance.
+    Expects camera_matrix and ijk2ras as list of lists (4x4).
+    volume_dims is a tuple (I, J, K).
     """
     I, J, K = volume_dims
-    
+
     # Step 1: Extract Camera Pose
-    # Check if translation norm is less than 1.0 to determine if inversion is needed
-    translation = camera_matrix[:3, 3]
-    translation_norm = torch.norm(translation)
-    
-    # Use torch.where to avoid branching
-    # If norm < 1.0, invert camera_matrix; else use as is
-    # Note: Inverting a 4x4 matrix in PyTorch can be done via torch.inverse
-    # However, for efficiency, we might only need the relevant parts. 
-    # Assuming full inversion for correctness as per source description.
-    is_world_to_cam = translation_norm < 1.0
-    camera_matrix_world = torch.where(
-        is_world_to_cam,
-        torch.inverse(camera_matrix),
-        camera_matrix
-    )
-    
-    # Extract camera position (translation part of world matrix)
-    cam_pos = camera_matrix_world[:3, 3]
-    
-    # Extract view direction (negative Z axis of world matrix, assuming standard convention)
-    # Source does not specify exact axis, but standard is -Z. 
-    # We assume the third column (index 2) is the view direction vector in world space.
-    view_dir = -camera_matrix_world[:3, 2]
-    view_dir = view_dir / torch.norm(view_dir)
-    
+    # Get translation column (last column, first 3 rows)
+    translation = [camera_matrix[0][3], camera_matrix[1][3], camera_matrix[2][3]]
+    translation_norm = math.sqrt(sum(t * t for t in translation))
+
+    # Invert if world-to-camera (norm < 1.0), else use directly
+    # A full 4x4 inverse routine is required; here we assume a helper `invert_4x4` exists.
+    if translation_norm < 1.0:
+        camera_matrix_world = invert_4x4(camera_matrix)
+    else:
+        camera_matrix_world = camera_matrix
+
+    # Extract camera position
+    cam_pos = [camera_matrix_world[0][3], camera_matrix_world[1][3], camera_matrix_world[2][3]]
+
+    # Extract view direction (typically -Z axis of the world matrix)
+    view_dir = [-camera_matrix_world[0][2], -camera_matrix_world[1][2], -camera_matrix_world[2][2]]
+    v_norm = math.sqrt(sum(v * v for v in view_dir))
+    view_dir = [v / v_norm for v in view_dir]
+
     # Step 2: Generate IJK Corners
-    # Indices: 0 and I-1, 0 and J-1, 0 and K-1
-    i_vals = torch.tensor([0, I - 1], dtype=torch.float32)
-    j_vals = torch.tensor([0, J - 1], dtype=torch.float32)
-    k_vals = torch.tensor([0, K - 1], dtype=torch.float32)
-    
-    # Create meshgrid for all 8 combinations
-    # Shape: (2, 2, 2) for each dimension
-    i_grid, j_grid, k_grid = torch.meshgrid(i_vals, j_vals, k_vals, indexing='ij')
-    
-    # Flatten to (8,)
-    i_flat = i_grid.flatten()
-    j_flat = j_grid.flatten()
-    k_flat = k_grid.flatten()
-    
-    # Stack to form (8, 3)
-    corners_ijk = torch.stack([i_flat, j_flat, k_flat], dim=1)
-    
-    # Append homogeneous coordinate 1.0 to make (8, 4)
-    corners_ijk_homo = torch.cat([corners_ijk, torch.ones(8, 1)], dim=1)
-    
+    corners_ijk = []
+    for i in [0, I - 1]:
+        for j in [0, J - 1]:
+            for k in [0, K - 1]:
+                corners_ijk.append([float(i), float(j), float(k)])
+
     # Step 3: Transform to RAS Space
-    # p_ras = ijk2ras @ p_ijk_homo^T for each point
-    # Matrix multiplication: (4, 4) @ (8, 4)^T -> (4, 8) -> transpose to (8, 4)
-    corners_ras_homo = (ijk2ras @ corners_ijk_homo.t()).t()
-    
-    # Take first 3 components
-    corners_ras = corners_ras_homo[:, :3]
-    
+    corners_ras = []
+    for p in corners_ijk:
+        x, y, z = p
+        # Homogeneous multiplication: p_ras = M * [x, y, z, 1]^T
+        wx = ijk2ras[0][0] * x + ijk2ras[0][1] * y + ijk2ras[0][2] * z + ijk2ras[0][3]
+        wy = ijk2ras[1][0] * x + ijk2ras[1][1] * y + ijk2ras[1][2] * z + ijk2ras[1][3]
+        wz = ijk2ras[2][0] * x + ijk2ras[2][1] * y + ijk2ras[2][2] * z + ijk2ras[2][3]
+        corners_ras.append([wx, wy, wz])
+
     # Step 4: Project Corners
-    # Vector from camera to corner
-    vec_to_corner = corners_ras - cam_pos
-    # Project onto view direction
-    distances = torch.sum(vec_to_corner * view_dir, dim=1)
-    
+    distances = []
+    for p in corners_ras:
+        dx = p[0] - cam_pos[0]
+        dy = p[1] - cam_pos[1]
+        dz = p[2] - cam_pos[2]
+        t = dx * view_dir[0] + dy * view_dir[1] + dz * view_dir[2]
+        distances.append(t)
+
     # Step 5: Compute Clipping Distances
-    t_min = torch.min(distances)
-    t_max = torch.max(distances)
-    
+    t_min = min(distances)
+    t_max = max(distances)
+
     d_near = t_min - margin
     d_far = t_max + margin
-    
-    # Clamp near to minimum of 0.1
-    d_near = torch.clamp(d_near, min=0.1)
-    
-    return d_near.item(), d_far.item()
+    d_near = max(d_near, 0.1)
+
+    return d_near, d_far
+
+def invert_4x4(m):
+    """Placeholder for a standard 4x4 matrix inverse implementation."""
+    # In practice, use a linear algebra library or a full cofactor expansion.
+    # Returns the inverted matrix.
+    return m
 ```
 
 **Parameters:**
@@ -135,20 +116,20 @@ def compute_clipping_distances(camera_matrix, ijk2ras, volume_dims, margin=30.0)
 ## Subtopics
 
 ### Volume Bounding Box Projection for Ray Marching
-A vertex shader implementation that projects the world-space axis-aligned bounding box (AABB) of a fire volume to enable fragment shader ray marching [S2, unofficial]. It transforms volume-space corners (unit cube $[0,1]^3$) to world space using a `volume_to_world` matrix, then to clip space using view and projection matrices [S2, unofficial]. It outputs the world position of the corners for use in the fragment shader [S2, unofficial]. This variant is specific to GPU-based rendering pipelines using Vulkan/DirectX-style push constants and shaders, unlike the CPU-based PyTorch implementation in the main method [S2, unofficial]. It is chosen when real-time rendering of volumetric effects like fire is required [S2, unofficial].
+A vertex shader implementation that projects the world-space axis-aligned bounding box (AABB) of a fire volume to enable fragment shader ray marching [S2, unofficial]. It transforms volume-space corners (unit cube $[0,1]^3$) to world space using a `volume_to_world` matrix, then to clip space using view and projection matrices [S2, unofficial]. It outputs the world position of the corners for use in the fragment shader [S2, unofficial]. This variant uses GPU-based rendering pipelines with push constants and shaders [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ with respect to volume resolution, as it only processes 8 corners. The cost is dominated by matrix multiplications and vector operations, which are constant time for a fixed number of corners.
-- **Memory Complexity:** $O(1)$, storing only 8 corners and a few scalar values.
+- **Time Complexity:** $O(1)$ with respect to volume resolution, as it processes a fixed 8 corners [G].
+- **Memory Complexity:** $O(1)$, storing only 8 corners and a few scalar values [G].
 - **Measured Performance:** Not given in the sources.
 - **Scaling:** Scales linearly with the number of rays if applied per-ray, but since the volume bounds are global, it can be computed once per volume and reused for all rays [G].
-- **Strengths:** Simple, robust, and efficient. Ensures all samples are within the volume bounds.
-- **Limitations:** Assumes the volume is axis-aligned in IJK space and convex. Does not account for internal structures or non-convex shapes. The margin parameter needs to be tuned to avoid excessive empty space sampling or clipping errors.
-- **When to use:** When a quick and reliable method to determine ray clipping bounds is needed for volume rendering, especially in differentiable rendering pipelines where gradients are required [S1, unofficial].
-- **When not to use:** For non-convex volumes or when more precise ray-box intersection is required (e.g., for sparse volumes with complex shapes) [G].
+- **Strengths:** Simple, robust, and efficient. Ensures all samples are within the volume bounds [G].
+- **Limitations:** Assumes the volume is axis-aligned in IJK space and convex. Does not account for internal structures or non-convex shapes [G].
+- **When to use:** When a quick and reliable method to determine ray clipping bounds is needed for volume rendering [G].
+- **When not to use:** For non-convex volumes or when more precise ray-box intersection is required [G].
 
 ## Background
-This method is used in differentiable volume raycasting for digitally reconstructed radiographs (DRRs) [S1, unofficial]. It was implemented in the `flashdrr` library by pcarnah [S1, unofficial]. The approach is based on projecting the volume bounding box corners onto the camera view direction to determine the integration range for ray marching [S1, unofficial].
+This method is used in differentiable volume raycasting for digitally reconstructed radiographs (DRRs) [S1, unofficial]. The approach is based on projecting the volume bounding box corners onto the camera view direction to determine the integration range for ray marching [S1, unofficial].
 
 ## Sources
 [S1] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)
