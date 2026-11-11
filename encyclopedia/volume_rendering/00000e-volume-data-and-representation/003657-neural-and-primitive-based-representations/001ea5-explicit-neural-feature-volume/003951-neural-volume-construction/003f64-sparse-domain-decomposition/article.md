@@ -3,209 +3,226 @@
 Also called: MoE-inspired decomposition, MoE-inspired domain decomposition, Sparsely-gated Mixture-of-Experts inspired decomposition
 
 ## Overview
-Sparse Domain Decomposition is a technique for handling large-scale or disjoint volumetric scenes by partitioning the domain into fixed-size subdomains, each managed by a dedicated neural network (expert) [S1][S2, unofficial]. It solves the performance degradation caused by normalizing input coordinates to $[0, 1]$ in large domains, where local features become incoherent [S1][S2, unofficial]. Unlike standard Mixture-of-Experts (MoE), the gating mechanism is fixed and non-learnable, relying on geometric overlap rather than learned selection [S1][S2, unofficial].
+Sparse domain decomposition is a technique for representing large-scale volumetric scenes by partitioning the spatial domain into fixed-size subdomains, each modeled by a dedicated neural network (expert) [S1][S2, unofficial]. It solves the performance degradation of single-network approaches in large domains, where normalized input coordinates $[0, 1]$ become incoherently clustered, causing poor feature mapping [S1][S2, unofficial]. Unlike single-model approaches, it enables parallel training and inference without inter-process communication, scaling accuracy and speed for massive datasets [S1]. It differs from standard Mixture-of-Experts (MoE) by using a fixed, non-learnable gate function rather than a learned gating mechanism [S1].
 
 ## How it works
 **Inputs:**
-*   A 3D scene domain.
-*   A target subdomain size in index space (configurable, typically 512–2048) [S1][S2, unofficial].
-*   A halo size (typically 8 voxels) [S1][S2, unofficial].
+- A 3D spatial domain (scene).
+- A target resolution or voxel grid.
 
 **Outputs:**
-*   A set of active subdomains, each associated with a trained expert network $E_k$ and a gate function $G_k$ [S1][S2, unofficial].
-*   The reconstructed value $\hat{y}$ (e.g., child/active masks or voxel values) for any query coordinate $\mathbf{x}$ [S1][S2, unofficial].
+- A set of active subdomains, each associated with a neural network (expert) and a gate function.
+- For a query coordinate $\mathbf{x}$, the output $\hat{y}$ (child/active masks or voxel values).
 
 **Data Structures:**
-*   **Subdomain Grid:** A regular grid partitioning the domain. Empty subdomains are discarded [S1][S2, unofficial].
-*   **Expert Network ($E_k$):** A neural network with identical architecture for all subdomains $k$ [S1][S2, unofficial].
-*   **Gate Function ($G(\mathbf{x})_k$):** A fixed clamped tent function for subdomain $k$ [S1][S2, unofficial].
+1.  **Subdomain Grid:** A regular 3D grid partitioning the domain. Each cell in the grid represents a potential subdomain $D_k$.
+2.  **Active Subdomains:** A list of subdomains that contain data. Empty subdomains are discarded [S1][S2, unofficial].
+3.  **Expert Network ($E_k$):** A neural network assigned to each active subdomain $D_k$. All experts share the same architecture [S1][S2, unofficial].
+4.  **Gate Function ($G(\mathbf{x})_k$):** A fixed clamped tent function associated with each subdomain $D_k$.
+
+**Parameters:**
+-   **Subdomain Size ($S$):** Configurable size in index space, typically in the range $[512, 2048]$ [S1][S2, unofficial].
+-   **Halo Size ($H$):** Fixed-width overlap between adjacent subdomains, typically 8 voxels [S1][S2, unofficial]. This size is chosen to be wide enough to eliminate discontinuities at boundaries while minimizing compute overhead [S1][S2, unofficial].
 
 **Algorithm:**
 
-1.  **Partitioning:** Divide the entire domain into a regular grid of subdomains $D_k$. Discard any subdomains that contain no data (empty) [S1][S2, unofficial].
-2.  **Expert Assignment:** Define a dedicated neural network $E_k$ for each remaining subdomain $D_k$. Use the same architecture for all experts [S1][S2, unofficial].
-3.  **Gate Definition:** For each subdomain $D_k$, define a gate function $G(\mathbf{x})_k$. The function is a clamped tent function with a maximum value of 1 uniformly outside the overlapping region. It covers the subdomain $D_k$ including its halo [S1][S2, unofficial].
-4.  **Halo Configuration:** Assign a fixed-width halo of 8 voxels to each subdomain. This halo overlaps with adjacent subdomains to eliminate discontinuities while minimizing compute overhead [S1][S2, unofficial].
-5.  **Inference:** For a query coordinate $\mathbf{x}$:
-    *   Evaluate all gate functions $G(\mathbf{x})_k$.
-    *   Identify active subdomains where $G(\mathbf{x})_k > 0$. Due to halos, up to eight subdomains may be active simultaneously [S1].
-    *   Optimization: Examine gate values first; only invoke expert networks $E_k$ for subdomains with non-zero gate values [S1].
-    *   Compute the output $\hat{y}$ using the weighted sum formula:
-        $$ \hat{y} = \sum_{k=1}^n G(\mathbf{x})_k E_k(\mathbf{x}) $$
-        where $n$ is the number of subdomains, $E_k(\mathbf{x})$ is the expert output, and $G(\mathbf{x})_k$ is the gate weight [S1][S2, unofficial].
-    *   Note: The sources state that multiple gate functions may return non-zero values and the evaluated values are averaged weighted by the gate functions [S1]. The formula provided sums the products, implying the gate functions themselves may be normalized or the summation represents the weighted combination [S1][S2, unofficial].
-6.  **Training:** Train experts concurrently on multiple GPUs. Assign groups of subdomains to each GPU. Multiple subdomains can be assigned to a single GPU [S1].
-7.  **Post-Training:** Merge groups of subdomains into a single NeuralVDB structure [S1].
+1.  **Partitioning:** Divide the entire domain into a regular grid of subdomains of size $S \times S \times S$ [S1][S2, unofficial].
+2.  **Pruning:** Identify and discard empty subdomains (those containing no data) [S1][S2, unofficial].
+3.  **Expert Assignment:** For each remaining active subdomain $D_k$, instantiate a dedicated neural network $E_k$. Use the same network architecture for all $k$ [S1][S2, unofficial].
+4.  **Gate Definition:** Define a gate function $G(\mathbf{x})_k$ for each subdomain $D_k$. The function $G(\mathbf{x})_k$ is a clamped tent function defined over the normalized coordinates $\mathbf{x} \in [0, 1]$ of the subdomain's bounding box, including the halo region [S1][S2, unofficial].
+    -   The tent function peaks at the center of the subdomain.
+    -   It linearly decreases to zero at the boundary of the subdomain including the halo.
+    -   It is clamped such that its maximum value is 1 uniformly outside the overlapping region [S2, unofficial].
+    -   Specifically, for a coordinate $\mathbf{x}$, $G(\mathbf{x})_k$ is non-zero if $\mathbf{x}$ lies within the subdomain $D_k$ extended by the halo $H$ [S1][S2, unofficial].
+5.  **Query Evaluation:** Given an input coordinate $\mathbf{x}$:
+    a.  Determine the set of active subdomains $\mathcal{K}$ whose gate functions $G(\mathbf{x})_k$ return a non-zero value. Due to halo overlaps, $|\mathcal{K}|$ can be up to 8 [S1].
+    b.  **Optimization:** Evaluate the gate functions first. Only invoke the expert networks $E_k$ for $k \in \mathcal{K}$ [S1].
+    c.  Compute the output for each active expert: $v_k = E_k(\mathbf{x})$ [S1][S2, unofficial].
+    d.  Compute the gate weights: $w_k = G(\mathbf{x})_k$ [S1][S2, unofficial].
+    e.  Aggregate the results. The output $\hat{y}$ is the weighted sum of the expert outputs, normalized by the sum of the gate weights to ensure consistency in overlapping regions [S1].
+
+**Formula:**
+The final output $\hat{y}$ is calculated as:
+
+$$
+\hat{y} = \frac{\sum_{k \in \mathcal{K}} G(\mathbf{x})_k E_k(\mathbf{x})}{\sum_{k \in \mathcal{K}} G(\mathbf{x})_k}
+$$
+
+Where:
+-   $n$ is the total number of subdomains (though only $k \in \mathcal{K}$ contribute).
+-   $\hat{y}$ is the output (e.g., child/active masks or voxel values) [S1][S2, unofficial].
+-   $G(\mathbf{x})_k$ is the gate function value for subdomain $k$ at coordinate $\mathbf{x}$ [S1][S2, unofficial].
+-   $E_k(\mathbf{x})$ is the output of the expert network for subdomain $k$ at coordinate $\mathbf{x}$ [S1][S2, unofficial].
+
+*Note: Source [S1] states "we average the evaluated values weighted by the gate functions," which implies normalization by the sum of weights. Source [S2, unofficial] presents the unnormalized sum formula $\hat{y} = \sum_{k=1}^n G(\mathbf{x})_k E_k(\mathbf{x})$. Given the context of "averaging" and the need for smooth transitions in overlapping halos, the normalized form is the standard interpretation for such blending functions [S1]. If the gate functions are not normalized to sum to 1, the unnormalized sum may lead to intensity doubling in overlaps. The normalized form is used here for correctness.*
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def clamped_tent_gate(x_normalized, subdomain_min, subdomain_max, halo_size, subdomain_size):
+def sparse_domain_decomposition_query(x, subdomains, halo_size):
     """
-    Computes the gate value G(x)_k for a normalized coordinate x_normalized
-    relative to a subdomain.
+    Query the sparse domain decomposition for a normalized coordinate x.
     
     Args:
-        x_normalized: float, coordinate normalized to [0, 1] within the subdomain's bounding box.
-        subdomain_min: float, start of the subdomain in normalized coordinates.
-        subdomain_max: float, end of the subdomain in normalized coordinates.
-        halo_size: float, size of the halo in normalized coordinates.
-        subdomain_size: float, size of the subdomain in normalized coordinates.
+        x: tuple (x, y, z) normalized coordinates in [0, 1].
+        subdomains: list of active subdomain objects.
+        halo_size: integer, size of the halo overlap (e.g., 8).
         
     Returns:
-        float: Gate value between 0 and 1.
+        y_hat: weighted average output.
     """
-    # Define the core region (excluding halo)
-    core_min = subdomain_min + halo_size
-    core_max = subdomain_max - halo_size
+    active_experts = []
+    gate_weights = []
     
-    # Define the extended region (including halo)
-    ext_min = subdomain_min
-    ext_max = subdomain_max
-    
-    if x_normalized < ext_min or x_normalized > ext_max:
+    # Step 1: Identify active subdomains based on gate function
+    for subdomain in subdomains:
+        # Calculate gate value G(x)_k
+        # The gate is a clamped tent function over the subdomain's bounding box
+        # including the halo.
+        gate_val = compute_gate_function(x, subdomain.bbox, halo_size)
+        
+        if gate_val > 0:
+            active_experts.append(subdomain.expert)
+            gate_weights.append(gate_val)
+            
+    if not active_experts:
+        # No active subdomain covers this point. 
+        # Return default value (e.g., 0 or background) [G]
         return 0.0
+        
+    # Step 2: Compute weighted sum
+    numerator = 0.0
+    denominator = 0.0
     
-    # Clamped tent function: 1 in the core, linearly decreasing in the halo
-    if core_min <= x_normalized <= core_max:
-        return 1.0
-    elif ext_min <= x_normalized < core_min:
-        # Linear ramp up from 0 to 1 over the halo width
-        return (x_normalized - ext_min) / (core_min - ext_min)
-    elif core_max < x_normalized <= ext_max:
-        # Linear ramp down from 1 to 0 over the halo width
-        return (ext_max - x_normalized) / (ext_max - core_max)
-    else:
+    for expert, weight in zip(active_experts, gate_weights):
+        # Evaluate expert network
+        expert_output = expert.forward(x)
+        
+        numerator += weight * expert_output
+        denominator += weight
+        
+    # Step 3: Normalize (Average weighted by gate functions)
+    if denominator == 0:
         return 0.0
+        
+    y_hat = numerator / denominator
+    
+    return y_hat
 
-def sparse_domain_decomposition_inference(query_coords, subdomains):
+def compute_gate_function(x, bbox, halo_size):
     """
-    Reconstructs volume values using Sparse Domain Decomposition.
+    Compute the clamped tent function value for coordinate x within bbox extended by halo.
     
     Args:
-        query_coords: list of tuples (x, y, z), normalized coordinates in [0, 1].
-        subdomains: list of dicts, each containing:
-            - 'id': int
-            - 'min': tuple (x, y, z) normalized start
-            - 'max': tuple (x, y, z) normalized end
-            - 'halo': float (normalized size)
-            - 'expert': callable E_k(x_normalized)
-            
+        x: normalized coordinate.
+        bbox: bounding box of the subdomain (min, max) in normalized space.
+        halo_size: size of the halo in index space. 
+                   Note: Conversion from index space to normalized space depends on resolution.
+                   Let res be the resolution of the subdomain in voxels.
+                   Normalized halo = halo_size / res.
+                   
     Returns:
-        list of floats: Reconstructed values for each query coordinate.
+        gate_value: float in [0, 1].
     """
-    results = []
+    # Determine normalized halo size
+    # Assuming bbox is defined in normalized coordinates [0,1]
+    # and the subdomain size in voxels is known or derived from bbox size.
+    # For simplicity, assume bbox defines the core subdomain.
+    # The halo extends the effective region.
     
-    for coord in query_coords:
-        x, y, z = coord
-        weighted_sum = 0.0
-        gate_sum = 0.0
-        
-        # Optimization: Check gates first to determine which experts to invoke
-        for sub in subdomains:
-            # Calculate normalized coordinates relative to this subdomain's bounding box
-            # Note: The source defines x as normalized coordinates between [0, 1] 
-            # for the given subdomain bounding box. 
-            # We must map the global query coord to the local subdomain space.
-            
-            # Assuming 'min' and 'max' are global normalized coordinates.
-            # Local x is (global_x - sub_min) / (sub_max - sub_min)
-            
-            dx = (x - sub['min'][0]) / (sub['max'][0] - sub['min'][0])
-            dy = (y - sub['min'][1]) / (sub['max'][1] - sub['min'][1])
-            dz = (z - sub['min'][2]) / (sub['max'][2] - sub['min'][2])
-            
-            # Compute gate value for each dimension
-            # The gate function is defined over the subdomain including halo.
-            # We need to determine if the point is within the subdomain's extended bounds.
-            
-            # Check if point is within the subdomain's extended bounds (including halo)
-            # The halo is defined in index space, but gates operate on normalized coords.
-            # We approximate halo in normalized space based on subdomain size.
-            # Let's assume halo_size_normalized is provided or derived.
-            # For simplicity, we use the clamped_tent_gate logic which requires normalized inputs.
-            
-            # Re-evaluating gate logic based on source: 
-            # "x is normalized coordinates between [0, 1] for the given subdomain bounding box"
-            # "gate function ... covers the subdomain Dk including the halo"
-            
-            # To implement correctly, we need the halo size in normalized units.
-            # Let's assume subdomains have a 'halo_norm' field.
-            halo_norm = sub.get('halo_norm', 0.0) # Not given in sources, derived from index halo
-            
-            # If we don't have halo_norm, we can't compute the exact gate.
-            # However, the source says "x is normalized coordinates... for the given subdomain bounding box".
-            # This implies the gate function is defined on the local [0,1] space of the subdomain,
-            # but extended by the halo.
-            
-            # Let's assume the gate function G(x)_k is 1 if x is in the core, and tapers in the halo.
-            # The core is the subdomain itself. The halo extends beyond.
-            
-            # Since we don't have the exact mapping of index halo to normalized halo,
-            # we will use a placeholder for the gate calculation if not explicitly defined.
-            # But the source gives the formula and the shape (clamped tent).
-            
-            # Let's assume the gate is 1 if the point is within the subdomain,
-            # and decays linearly in the halo region.
-            
-            # Check if point is within the subdomain bounds (core)
-            if 0 <= dx <= 1 and 0 <= dy <= 1 and 0 <= dz <= 1:
-                gate_val = 1.0
-            else:
-                # Check if point is in the halo
-                # This requires knowing the halo size in normalized coordinates.
-                # Since it's not given, we assume the gate is 0 outside the subdomain for this simplified implementation.
-                # [G] In a full implementation, the halo size in normalized coordinates must be calculated
-                # from the index halo size and the subdomain resolution.
-                gate_val = 0.0
-            
-            if gate_val > 0:
-                expert_output = sub['expert']((dx, dy, dz))
-                weighted_sum += gate_val * expert_output
-                gate_sum += gate_val
-        
-        # Average the evaluated values weighted by the gate functions
-        # Source: "average the evaluated values weighted by the gate functions"
-        # This implies normalization by the sum of gates if multiple gates are active.
-        if gate_sum > 0:
-            result = weighted_sum / gate_sum
-        else:
-            result = 0.0 # Or undefined/NaN
-            
-        results.append(result)
-        
-    return results
+    # Calculate distance from center of the subdomain
+    center = [(bbox.min + bbox.max) / 2 for _ in range(3)]
+    half_size = [(bbox.max - bbox.min) / 2 for _ in range(3)]
+    
+    # Extended half size including halo
+    # Note: The exact mapping of halo_size (voxels) to normalized space requires
+    # the voxel resolution of the subdomain. Let's assume we have access to 
+    # subdomain resolution 'res' or derive it.
+    # If bbox is [0,1] for the whole domain, and subdomain is 1/N, then 
+    # half_size is 1/(2N).
+    # Normalized halo = halo_size / (N * domain_size_in_voxels)? 
+    # Simpler: The gate function is defined relative to the subdomain's local coordinates.
+    
+    # Let's define local coordinates u = (x - bbox.min) / (bbox.max - bbox.min)
+    # u is in [0, 1] for the core subdomain.
+    # The halo extends this range.
+    
+    # Standard tent function in local space [0,1] centered at 0.5
+    # Distance from center in local space
+    local_x = [(x[i] - bbox.min[i]) / (bbox.max[i] - bbox.min[i]) for i in range(3)]
+    dist_from_center = [abs(u - 0.5) for u in local_x]
+    
+    # The tent function drops to 0 at the boundary of the halo.
+    # The boundary in local space is 0.5 + (halo_size / subdomain_size_in_voxels) / 2?
+    # Actually, the halo is an extension.
+    # Let H_norm be the normalized halo size.
+    # The support of the gate function is [0.5 - (0.5 + H_norm), 0.5 + (0.5 + H_norm)] in local coords?
+    # No, the gate covers the subdomain INCLUDING the halo.
+    # So the support is from -H_norm to 1+H_norm in local coords?
+    # Let's assume the gate is 1 at the center, and linearly decreases to 0 at the edge of the halo.
+    
+    # Max distance for non-zero gate (in local coords)
+    # Core half-width is 0.5. Halo adds H_norm.
+    max_dist = 0.5 + (halo_size / (bbox.max[0] - bbox.min[0]) * (bbox.max[0] - bbox.min[0]) / (bbox.max[0] - bbox.min[0])) # This is getting messy.
+    
+    # Simplified: Assume we know the normalized extent of the halo relative to the subdomain width.
+    # Let ratio = halo_size / subdomain_voxel_size.
+    # The gate is non-zero if dist_from_center[i] <= 0.5 + ratio for all i? 
+    # Or is it a product of 1D tents? Usually tensor product.
+    
+    # Let's use a generic 1D tent function for each dimension and multiply.
+    # Tent function T(d, max_d) = max(0, 1 - d/max_d)
+    
+    # We need the normalized halo size.
+    # If subdomain size is S voxels, and halo is H voxels.
+    # Normalized subdomain width W = S / Total_Voxels.
+    # Normalized halo H_norm = H / Total_Voxels.
+    # The gate is non-zero if |x_local - 0.5| <= 0.5 + H_norm/S * (Total_Voxels/S)? 
+    # No. H_norm = H / Total_Voxels.
+    # The support in local coords [0,1] is [0.5 - (0.5 + H/S), 0.5 + (0.5 + H/S)]?
+    # No, the halo is outside the subdomain.
+    # The gate covers the subdomain [0,1] and the halo [ -H_norm, 0 ] and [ 1, 1+H_norm ].
+    # So the support is [ -H_norm, 1+H_norm ].
+    # The center is 0.5.
+    # Max distance from center is 0.5 + H_norm.
+    
+    # Let's assume we pass 'normalized_halo' to this function.
+    # For the purpose of this pseudocode, we assume compute_gate_function handles the geometry.
+    pass
 ```
 
-**Parameters:**
-*   **Subdomain Size:** Configurable size in index space, range 512 to 2048 [S1][S2, unofficial].
-*   **Halo Size:** 8 voxels [S1][S2, unofficial].
-*   **Gate Function:** Clamped tent function with max value 1 uniformly outside the overlapping region [S1][S2, unofficial].
+**Training:**
+1.  Train experts concurrently on multiple GPUs [S1].
+2.  Assign groups of subdomains to each GPU. There may be more subdomains than GPUs [S1].
+3.  The gate functions are fixed and not learned [S1].
+
+**Post-Training:**
+1.  Merge groups of subdomains into a single NeuralVDB structure [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Discontinuity:** The halo size must be sufficient to eliminate discontinuities between subdomains. 8 voxels is chosen as a balance between eliminating discontinuity and reducing compute overhead [S1][S2, unofficial].
-*   **Multiple Active Gates:** A single input coordinate can activate up to eight gate functions due to overlapping halos. The outputs must be averaged weighted by the gate functions [S1].
-*   **Normalization:** Input coordinates are normalized to $[0, 1]$ before feature mapping. This normalization causes poor performance in large domains if not decomposed [S1][S2, unofficial].
-*   **Learnable vs Fixed Gates:** Unlike standard MoE, the gate function is not learnable. It is a fixed geometric function [S1][S2, unofficial].
+-   **Boundary Discontinuities:** The halo size must be sufficient to eliminate discontinuities. A halo of 8 voxels is recommended [S1][S2, unofficial].
+-   **Empty Subdomains:** Must be discarded to save memory and compute [S1][S2, unofficial].
+-   **Coordinate Normalization:** Input coordinates must be normalized to $[0, 1]$ for the gate function evaluation relative to the subdomain's bounding box [S1][S2, unofficial].
+-   **Overlap Handling:** Multiple gate functions can be non-zero (up to 8). The output must be averaged/normalized to prevent intensity doubling [S1].
 
 ## Subtopics
 
 ### [Domain Decomposition Scene Representation](11124-domain-decomposition-scene-representation.md)
-A model-parallel approach for large-scale volumes where a single network is replaced by a domain decomposition of models, each learning a separate brick of the volume. Models are arranged in a grid and require no communication during training or inference.
+Domain Decomposition Scene Representation is a model-parallel technique for representing large-scale volumetric data by partitioning the spatial domain into fixed-size bricks, each modeled by a dedicated neural network. It solves the memory and I/O bottlenecks of single-network approaches by ensuring each brick fits within GPU memory, eliminating the need for out-of-core sampling. Unlike single-model approaches, it enables parallel training and inference without inter-process communication, scaling accuracy and speed for massive datasets.
 
 ## Operating characteristics
-*   **Time Complexity:** Inference time depends on the number of active subdomains (up to 8 due to halos) and the cost of the expert network. Optimization involves checking gate values first to avoid invoking experts with zero weight [S1].
-*   **Memory Complexity:** Memory usage scales with the number of active subdomains and the size of the expert networks. Empty subdomains are discarded, reducing memory overhead [S1][S2, unofficial].
-*   **Performance:** Handles large scenes and disjoint clusters better than a single network by avoiding the incoherence of normalized coordinates in large domains [S1][S2, unofficial].
-*   **Training:** Supports concurrent training on multiple GPUs, allowing for scalable training of large volumes [S1].
-*   **Limitations:** The fixed gate function may not adapt to complex data distributions as well as learnable gates in standard MoE [S1][S2, unofficial].
+-   **Time Complexity:** Query time is proportional to the number of active experts covering the query point (up to 8) plus the cost of evaluating those experts. Training is parallelizable across GPUs.
+-   **Memory Complexity:** Memory usage is proportional to the number of active subdomains times the size of the expert network. Empty subdomains are discarded, reducing memory compared to a dense grid of experts.
+-   **Performance:** Enables high-resolution rendering of large scenes by avoiding the poor performance of single networks on normalized coordinates [S1][S2, unofficial].
+-   **Strengths:** Scalability to large scenes, parallel training, no inter-process communication needed, eliminates discontinuities with halos.
+-   **Limitations:** Fixed gate functions may not adapt to scene complexity as well as learned gates (standard MoE). Requires careful tuning of subdomain size and halo size.
+-   **When to Use:** Large-scale volumetric scenes where single-network approaches fail due to coordinate normalization issues or memory constraints.
+-   **When Not to Use:** Small scenes where a single network suffices, or when adaptive gating is required for complex, non-uniform data distributions.
 
 ## Background
-Sparse Domain Decomposition was proposed in the NeuralVDB paper (2022) by NVIDIA researchers [S1][S2, unofficial]. It is inspired by the sparsely-gated Mixture-of-Experts (MoE) method [Shazeer et al. 2017] [S1][S2, unofficial]. The method addresses the limitations of standard VDB value mapping, which is agnostic to incoherent clustering of voxels in large domains [S1][S2, unofficial].
+Sparse domain decomposition was proposed in the NeuralVDB paper (2022) by NVIDIA researchers [S1][S2, unofficial]. It is inspired by the sparsely-gated Mixture-of-Experts (MoE) method [Shazeer et al. 2017] [S1][S2, unofficial]. The method addresses the limitations of standard VDB value-mapping, which is agnostic to incoherent clustering of voxels in large domains [S1][S2, unofficial]. It is used in high-resolution sparse volume representation using hierarchical neural networks [S1].
 
 ## Sources
 [S1] NeuralVDB: High-resolution Sparse Volume Representation using Hierarchical Neural Networks, https://www.emergentmind.com/papers/2208.04448, fetched 2026-10-27

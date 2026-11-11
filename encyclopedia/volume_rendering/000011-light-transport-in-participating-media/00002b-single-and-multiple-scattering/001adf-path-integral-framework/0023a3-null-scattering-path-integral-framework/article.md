@@ -17,7 +17,7 @@ The path $\bar{p}_n$ is a sequence of $n$ vertices $p_1, \dots, p_n$ [S1]. Each 
 * $c_i = 1$: Real scattering vertex ($p_i \in V$).
 * $c_i = 2$: Null-scattering vertex ($p_i \in V_\emptyset$) [S1].
 
-The subset of vertices representing real scattering is denoted $r_i$. Note that the index of a real-scattering vertex in the full path $\bar{p}_n$ may differ from its index in the subset $r$ [S1].
+The subset of vertices representing real scattering is denoted $r_i$ [S1]. Note that the index of a real-scattering vertex in the full path $\bar{p}_n$ may differ from its index in the subset $r$ [S1].
 
 ### Formulas
 The set of paths for a specific configuration $\mathbf{c}$ is the Cartesian product:
@@ -28,9 +28,9 @@ The set of all paths of length $n$ is the union over all configuration vectors:
 $$
 \mathcal{P}_n = \bigcup_{\mathbf{c} \in \{0, 1, 2\}^n} \mathcal{P}_n^{\mathbf{c}}
 $$
-The measure $\mu_n$ for a domain $D \subseteq \mathcal{P}_n$ sums over configurations $\mathbf{c} \in \{0, 1\}^n$ [S1]:
+The measure $\mu_n$ for a domain $D \subseteq \mathcal{P}_n$ sums over configurations $\mathbf{c} \in \{0, 1, 2\}^n$ [S1]:
 $$
-\mu_n(D) = \sum_{\mathbf{c} \in \{0, 1\}^n} \mu_n^{\mathbf{c}}(D \cap \mathcal{P}_n^{\mathbf{c}})
+\mu_n(D) = \sum_{\mathbf{c} \in \{0, 1, 2\}^n} \mu_n^{\mathbf{c}}(D \cap \mathcal{P}_n^{\mathbf{c}})
 $$
 where the differential measure $d\mu_n^{\mathbf{c}}$ uses $dA(p_i)$ if $c_i=0$, $dV(p_i)$ if $c_i=1$, and $dV_\emptyset(p_i)$ if $c_i=2$ [S1]. The measure $dV_\emptyset$ incorporates a Dirac delta distribution to restrict integration to the line segment between successive real-scattering vertices [S1].
 
@@ -58,7 +58,7 @@ The generalized geometric term $\hat{G}$ is:
 $$
 \hat{G}(p \leftrightarrow p') = V(p \leftrightarrow p') \frac{C_p(p, p') C_{p'}(p', p)}{\|p - p'\|}
 $$
-where $C_p(p, p') = |n_p \cdot \frac{p - p'}{\|p - p'\|}|$ if $p \in A$, and $1$ if $p \in V$. Note that $C_p$ is only evaluated for real-scattering vertices $r_i$ [S1].
+where $C_p(p, p') = |n_p \cdot \frac{p - p'}{\|p - p'\|}|$ if $p \in A$, and $1$ if $p \in V$ [S1]. Note that $C_p$ is only evaluated for real-scattering vertices $r_i$ [S1].
 
 The Monte Carlo estimator is:
 $$
@@ -72,7 +72,7 @@ $$
 $$ [S1].
 
 ### Pseudocode
-The following pseudocode outlines the evaluation of the path throughput and weight for a given path $\bar{p}_n$ and its configuration $\mathbf{c}$ [S1]. It assumes access to scene queries for $\sigma_a, \sigma_s, \sigma_{maj}, T_{maj}$, and surface normals [G].
+The following pseudocode outlines the evaluation of the path throughput and emitted radiance term for a given path $\bar{p}_n$ and its configuration $\mathbf{c}$ [S1]. It assumes access to scene queries for $\sigma_a, \sigma_s, \sigma_{maj}, T_{maj}$, and surface normals [G].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -90,8 +90,8 @@ def evaluate_null_scattering_path_integral(path, config):
     Evaluates the path throughput and emitted radiance term for a path in the null-scattering framework.
     
     Args:
-        path: List of vertices p_1, ..., p_n. Each vertex is a dict with 'pos' (vector), 'type' (int: 0=surface, 1=real, 2=null), 'normal' (vector, if surface).
-        config: List of integers c_1, ..., c_n matching vertex types.
+        path: List of vertices p_0, ..., p_{n-1}. Each vertex is a dict with 'pos' (vector), 'type' (int: 0=surface, 1=real, 2=null), 'normal' (vector, if surface), 'emitted_radiance' (float), 'bsdf' (float), 'phase_function' (float), 'absorption_coefficient' (float), 'scattering_coefficient' (float), 'null_scattering_coefficient' (float).
+        config: List of integers c_0, ..., c_{n-1} matching vertex types.
         
     Returns:
         T_hat: Generalized path throughput.
@@ -101,7 +101,7 @@ def evaluate_null_scattering_path_integral(path, config):
     if n < 2:
         return 1.0, 0.0
 
-    # 1. Calculate Emitted Radiance Term L_hat_e at p_n
+    # 1. Calculate Emitted Radiance Term L_hat_e at the last vertex p_{n-1}
     p_n = path[-1]
     c_n = config[-1]
     
@@ -116,7 +116,8 @@ def evaluate_null_scattering_path_integral(path, config):
     # 2. Calculate Generalized Path Throughput T_hat
     T_hat = 1.0
     
-    # Product 1: Generalized Scattering Distribution f_hat
+    # Product 1: Generalized Scattering Distribution f_hat over intermediate vertices
+    # Corresponds to \prod_{i=1}^{n-2} \hat{f}(p_{i+1} \to p_i \to p_{i-1}) in 0-based indexing
     for i in range(1, n - 1):
         p_prev = path[i-1]
         p_curr = path[i]
@@ -131,7 +132,7 @@ def evaluate_null_scattering_path_integral(path, config):
             f_hat = sigma_s * phase
         elif c_curr == 2: # Null Volume
             sigma_n = p_curr.get('null_scattering_coefficient', 0.0)
-            # Heaviside function H checks if the direction is consistent
+            # Heaviside function H checks if the direction is consistent (no backtracking)
             dot_product = dot(p_curr['pos'] - p_next['pos'], p_curr['pos'] - p_prev['pos'])
             H = 1.0 if dot_product >= 0 else 0.0
             f_hat = sigma_n * H
@@ -140,15 +141,17 @@ def evaluate_null_scattering_path_integral(path, config):
             
         T_hat *= f_hat
 
-    # Product 2: Majorant Transmittance T_maj
-    for i in range(0, n - 1):
+    # Product 2: Majorant Transmittance T_maj over all segments
+    # Corresponds to \prod_{i=0}^{n-2} T_{maj}(p_i \to p_{i+1})
+    for i in range(n - 1):
         p_curr = path[i]
         p_next = path[i+1]
         dist = distance(p_curr['pos'], p_next['pos'])
+        # Majorant extinction is typically constant or per-segment; here assumed per-vertex for simplicity [G]
         sigma_maj = p_curr.get('majorant_extinction', 0.0)
         T_hat *= math.exp(-dist * sigma_maj)
 
-    # Product 3: Generalized Geometric Term G_hat for real scattering vertices
+    # Product 3: Generalized Geometric Term G_hat for consecutive real scattering vertices
     real_scatter_indices = [i for i, c in enumerate(config) if c == 1]
     for j in range(len(real_scatter_indices) - 1):
         idx_curr = real_scatter_indices[j]
@@ -158,8 +161,8 @@ def evaluate_null_scattering_path_integral(path, config):
         
         dist = distance(p_curr['pos'], p_next['pos'])
         if dist > 0:
-            # C_p is only evaluated for real-scattering vertices, so C_p = 1 and C_p_prime = 1
-            # Visibility V is assumed 1 for this evaluation
+            # C_p and C_p' are 1 for volume vertices. Visibility V is scene-dependent [G].
+            # Assuming V=1 and cosines=1 for the base framework evaluation.
             T_hat *= 1.0 / dist
         else:
             T_hat *= 0.0
@@ -181,9 +184,9 @@ An unbiased algorithm that uses the framework to sample distances from the major
 A sibling method that uses a WKB expansion to approximate the path contribution, differing in its approach to handling multiple scattering and variance reduction.
 
 ## Operating characteristics
-*   **Complexity**: The complexity depends on the sampling strategy. The framework itself is a formulation, not a specific sampler. The number of path vertices $n$ and the number of real-scattering vertices $m$ affect the cost of evaluating $\hat{T}$ [S1].
+*   **Complexity**: The complexity depends on the sampling strategy [S1]. The framework itself is a formulation, not a specific sampler [S1]. The number of path vertices $n$ and the number of real-scattering vertices $m$ affect the cost of evaluating $\hat{T}$ [S1].
 *   **Performance**: The framework enables variance reduction techniques like MIS, which can significantly improve performance in complex scenes with heterogeneous media [S1].
-*   **Strengths**: Rigorous path-space formulation allows for bidirectional and multi-bounce integrators in participating media. Handles heterogeneous media via the majorant and null-scattering terms [S1].
+*   **Strengths**: Rigorous path-space formulation allows for bidirectional and multi-bounce integrators in participating media [S1]. Handles heterogeneous media via the majorant and null-scattering terms [S1].
 
 ## Background
 The framework was introduced in the context of the Path Tracing book (PBR Book), specifically in Section 14.1.4, to express the null-scattering integral equation of transfer as a sum over paths [S1]. It builds on the surface path space formulation from Section 13.1.4 and extends it to include volume and null-scattering vertices [S1].

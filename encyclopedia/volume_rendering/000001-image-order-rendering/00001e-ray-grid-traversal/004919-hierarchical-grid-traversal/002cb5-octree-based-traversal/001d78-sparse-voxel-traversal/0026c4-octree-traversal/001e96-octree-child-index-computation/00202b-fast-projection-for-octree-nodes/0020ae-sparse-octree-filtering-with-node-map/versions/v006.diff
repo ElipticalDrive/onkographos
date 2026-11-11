@@ -1,0 +1,226 @@
+--- v005.md
++++ v006.md
+@@ -4,98 +4,114 @@
+ 
+ ## Overview
+-Sparse Octree Filtering with Node Map reduces the computational overhead of MIP-map generation for sparse voxel octrees by eliminating redundant thread execution during the filtering pass [S1, S2]. It achieves this by constructing a 2D hierarchical node map derived from the light-view map, which allows threads to detect when they are targeting the same octree node and terminate all but one [S1, S2]. This method sets itself apart from naive parallel filtering by explicitly handling the spatial coherence of photon distribution in the light-view map, yielding a speedup of greater than 2x compared to methods without this heuristic [S1, S2].
++Sparse Octree Filtering with Node Map is a thread-scheduling heuristic for MIP-map generation in sparse voxel octrees that reduces redundant computation by terminating duplicate threads [S1, S2]. It solves the problem of multiple threads performing identical filtering work on the same octree node, which is frequent at higher MIP-map levels [S1, S2]. It differs from standard parallel MIP-map generation by using a 2D auxiliary structure, the node map, to detect common ancestors among threads before computation begins [S1, S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** The light-view map (a 2D texture where each pixel corresponds to a photon or light sample) and the sparse voxel octree structure [S1, S2].
+-*   **Output:** A filtered MIP-map pyramid for the octree, computed with reduced thread count [S1, S2].
++The method optimizes the parallel generation of MIP-map levels for a sparse voxel octree by preventing redundant thread execution. It relies on a 2D node map derived from the light-view map to identify which threads are targeting the same 3D octree node.
+ 
+-**Data Structures:**
+-1.  **Light-View Map:** A 2D array where each pixel $(u, v)$ stores a photon index or position [S2].
++**Inputs and Outputs**
++*   **Input:** The sparse voxel octree structure, the light-view map (a 2D array of photon indices), and the target MIP-map level for the current pass.
++*   **Output:** Updated MIP-map level data for the octree nodes, with redundant threads terminated.
++
++**Data Structures**
++1.  **Light-View Map:** A 2D array where each pixel stores the index of a 3D leaf node in the sparse voxel octree that contains the corresponding photon [S1, S2].
+ 2.  **Node Map:** A 2D MIP-map pyramid derived from the light-view map [S1, S2].
+-    *   **Level 0 (Lowest/Highest Resolution):** Each pixel $(u, v)$ stores the index of the 3D leaf node in the sparse voxel octree that contains the photon corresponding to the light-view map pixel at $(u, v)$ [S1, S2].
+-    *   **Level $L > 0$ (Higher/Lower Resolution):** Each pixel stores the index of the lowest common ancestor (LCA) node in the octree for all leaf nodes referenced by the pixels in the previous level ($L-1$) that map to this pixel [S1, S2].
++    *   **Lowest Level:** Pixels store the indices of the 3D leaf nodes containing the corresponding photons, identical to the light-view map [S1, S2].
++    *   **Higher Levels:** Each pixel stores the index of the lowest common ancestor (LCA) node in the octree for the set of nodes referenced by the corresponding pixels in the previous (lower) level [S1, S2].
+ 
+-**Algorithm Steps:**
+-1.  **Construct Node Map:**
+-    *   For the lowest level of the node map, iterate through all pixels of the light-view map and store the corresponding 3D leaf node index in the node map pixel [S1, S2].
+-    *   For each subsequent level $L$ of the node map, aggregate the leaf node indices from level $L-1$ [S1, S2].
+-    *   For each pixel in level $L$, compute the lowest common ancestor of all non-empty leaf node indices from the corresponding region in level $L-1$ and store the LCA index in the node map pixel [S1, S2].
+-2.  **Filtering Pass (Parallel Execution):**
+-    *   Launch one thread per pixel of the lowest level of the node map for each MIP-mapping pass [S1, S2].
+-    *   Each thread $T$ corresponding to pixel $(u, v)$ at the current node map level performs the following:
+-        1.  Determine the target octree node for the filtering operation by looking up the node map at the current level [S1, S2].
+-        2.  **Redundancy Check:** Before computing the filtered value, the thread checks if another thread has already claimed or is computing the same target node by inspecting the node map at the current level to identify if the target node is a common ancestor for multiple threads [S1, S2].
+-        3.  **Termination Heuristic:** If a common ancestor is detected (i.e., multiple threads are targeting the same node), terminate all threads detecting this common ancestor except the one with the "upper left" position (lowest row index, then lowest column index) [S1, S2].
+-        4.  **Computation:** If the thread is not terminated, it computes the filtered MIP-map value for the target octree node using standard filtering logic [S1, S2].
++**Algorithm Steps**
++1.  **Launch Threads:** Launch one thread per pixel of the lowest level of the node map for the current MIP-mapping pass [S1, S2].
++2.  **Node Lookup:** For each thread, determine the target octree node for the current MIP-map level. This involves traversing the octree structure from the leaf node indicated in the light-view map up to the required level [S1, S2].
++3.  **Common Ancestor Detection:** Before computing the filtered value, the thread checks the current level of the node map to see if another thread has already detected or is computing the same common ancestor node [S1, S2].
++    *   This check verifies if the node index stored in the node map at the current thread's position (or a related position in the hierarchy) matches the target node of another active thread [S1, S2].
++4.  **Termination Heuristic:** If a common ancestor is detected among multiple threads:
++    *   Terminate all threads detecting this common ancestor, except for the thread corresponding to the "upper left" pixel in the node map [S1, S2].
++    *   The surviving "upper left" thread is responsible for computing the filtered values for the remaining threads [S1, S2].
++5.  **Computation:** The surviving threads compute the MIP-mapped values for their respective octree nodes [S1, S2].
+ 
+-**Pseudocode:**
++**Pseudocode**
+ ```python
+-def build_node_map(light_view_map, octree):
+-    # Level 0: Map light-view pixels to leaf node indices
+-    level_0 = [[None] * light_view_map.width for _ in range(light_view_map.height)]
+-    for y in range(light_view_map.height):
+-        for x in range(light_view_map.width):
+-            photon = light_view_map[y, x]
+-            if photon is not None:
+-                level_0[y][x] = octree.find_leaf_node(photon)
+-    node_map = [level_0]
++# Assume node_map is a 2D array of octree node indices, structured as a MIP-map pyramid.
++# Assume octree is the sparse voxel octree structure.
++# Assume light_view_map is the 2D array of leaf node indices.
+ 
+-    # Higher levels: Map to Lowest Common Ancestor (LCA)
+-    for level in range(1, len(light_view_map.levels)):
+-        prev_level = node_map[-1]
+-        curr_h = (len(prev_level) + 1) // 2
+-        curr_w = (len(prev_level[0]) + 1) // 2
+-        curr_level = [[None] * curr_w for _ in range(curr_h)]
+-        for y in range(curr_h):
+-            for x in range(curr_w):
+-                leaf_indices = []
+-                for dy in range(2):
+-                    for dx in range(2):
+-                        py, px = y * 2 + dy, x * 2 + dx
+-                        if py < len(prev_level) and px < len(prev_level[0]):
+-                            idx = prev_level[py][px]
+-                            if idx is not None:
+-                                leaf_indices.append(idx)
+-                curr_level[y][x] = octree.compute_lca(leaf_indices) if leaf_indices else None
+-        node_map.append(curr_level)
+-    return node_map
++def sparse_octree_filtering_with_node_map(node_map, octree, light_view_map, mip_level):
++    # Get dimensions of the lowest level of the node map
++    width, height = node_map[0].shape
++    
++    # Launch one thread per pixel of the lowest node map level
++    threads = []
++    for y in range(height):
++        for x in range(width):
++            threads.append(Thread(target=filter_thread, args=(x, y, node_map, octree, light_view_map, mip_level)))
++            
++    for thread in threads:
++        thread.start()
++        
++    for thread in threads:
++        thread.join()
+ 
+-def filter_pass(mip_level, node_map, octree, mip_map):
+-    # Launch one thread per pixel of the lowest node map level
+-    # Each thread corresponds to pixel (y, x) at mip_level
+-    for y in range(len(node_map[mip_level])):
+-        for x in range(len(node_map[mip_level][0])):
+-            target_node = node_map[mip_level][y][x]
+-            if target_node is None:
+-                continue
+-
+-            # Redundancy check: only the "upper left" thread computes
+-            is_leader = True
+-            for other_y in range(y):
+-                for other_x in range(len(node_map[mip_level][0])):
+-                    if node_map[mip_level][other_y][other_x] == target_node:
+-                        is_leader = False
+-                        break
+-                if not is_leader:
+-                    break
+-            if is_leader:
+-                for other_x in range(x):
+-                    if node_map[mip_level][y][other_x] == target_node:
+-                        is_leader = False
+-                        break
+-
+-            if is_leader:
+-                filtered_value = octree.compute_filtered_value(target_node)
+-                mip_map[target_node] = filtered_value
++def filter_thread(x, y, node_map, octree, light_view_map, mip_level):
++    # 1. Get the leaf node index from the light-view map for this pixel
++    leaf_node_idx = light_view_map[y, x]
++    
++    # 2. Find the target node in the octree for the specified MIP-map level
++    # This involves traversing up from the leaf node to the desired level
++    target_node = octree.get_node_at_level(leaf_node_idx, mip_level)
++    
++    # 3. Check the current level of the node map for common ancestors
++    # The node map at the current mip_level stores LCAs for the previous level
++    # We need to check if another thread has already claimed this target_node
++    
++    # Determine the position in the node map corresponding to the current mip_level
++    # Assuming node_map is a list of 2D arrays, where index 0 is lowest level
++    current_node_map_level = node_map[mip_level]
++    
++    # Check if this node has been marked as processed by another thread
++    # The heuristic checks if the node map indicates a common ancestor
++    # If multiple threads map to the same node, only the "upper left" one proceeds
++    
++    # To implement "upper left" tie-breaking, we check if there is another thread
++    # with a smaller (x, y) coordinate that targets the same node.
++    # In a parallel implementation, this requires synchronization or a shared state.
++    # For simplicity, we assume a shared 'processed_nodes' set or atomic check.
++    
++    is_upper_left = True
++    # Check if any other thread with x' < x or (x' == x and y' < y) targets the same node
++    # This part is complex to implement purely in pseudocode without a shared data structure
++    # [G] In practice, this is often implemented using atomic operations on a shared 
++    # 'processed' flag or by checking a shared 'node_owner' map.
++    
++    # Simplified logic: Check if the node map at the current level indicates 
++    # that this specific node is already being handled by a "higher priority" thread.
++    # The node map itself helps identify *which* node is the LCA, but the 
++    # "upper left" rule requires comparing thread coordinates.
++    
++    # Let's assume a shared dictionary 'node_to_thread' that maps node_idx to (x, y)
++    # If node_idx is not in node_to_thread, or if current (x,y) is upper-left of stored (x',y'),
++    # then this thread proceeds.
++    
++    if target_node not in node_to_thread:
++        node_to_thread[target_node] = (x, y)
++    else:
++        owner_x, owner_y = node_to_thread[target_node]
++        if (x, y) > (owner_x, owner_y):
++            # This thread is not the upper-left one, terminate
++            return
++    
++    # 4. Compute the filtered value for the target node
++    filtered_value = compute_mip_value(octree, target_node, mip_level)
++    
++    # 5. Store the result
++    octree.set_mip_value(target_node, mip_level, filtered_value)
+ ```
+ 
+-**Parameters:**
+-*   **Node Map Resolution:** Matches the resolution of the light-view map at the lowest level [S1, S2].
+-*   **Thread Launch Count:** One thread per pixel of the lowest node map level [S1, S2].
++**Parameters**
++*   **MIP Level:** The current level of the MIP-map being generated. Typical values depend on the octree depth.
++*   **Node Map Levels:** The number of levels in the node map pyramid corresponds to the number of MIP-map levels.
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Empty Pixels:** If a light-view map pixel contains no photon, the corresponding leaf node index is undefined and stored as null/sentinel [S1, S2].
+-*   **Boundary Conditions:** The "upper left" heuristic must be consistently defined (e.g., smallest row index, then smallest column index) to ensure exactly one thread computes the value [S1, S2].
++**Edge Cases and Pitfalls**
++*   **Precision:** Not given in the sources.
++*   **Boundaries:** The "upper left" tie-breaking rule must be consistently defined to avoid race conditions or missed computations [S1, S2].
++*   **Degenerate Input:** If the light-view map is empty, no threads are launched. If the octree has no nodes at the target level, the lookup fails.
+ 
+ ## Subtopics
+@@ -105,17 +121,17 @@
+ 
+ ### [Distribution over Levels (MIP-mapping)](3045-distribution-over-levels-mip-mapping.md)
+-Distribution over Levels propagates radiance values from leaf nodes to internal nodes of a sparse voxel octree to create a MIP-map pyramid for cone tracing. It distinguishes itself from standard isotropic downsampling by using a three-pass strategy to balance thread cost and explicitly handling shared boundary voxels in a $3 \times 3 \times 3$ brick structure.
++Distribution over Levels (MIP-mapping) filters radiance values from the lowest level of a sparse voxel octree and stores the results in higher levels to form a MIP-map hierarchy. It differs from regular grid MIP-mapping by explicitly handling the boundary sharing of 3x3x3 voxel bricks in an octree structure, requiring weighted averaging to account for overlapping voxels.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S1, S2].
+-*   **Memory Complexity:** Not given in the sources [S1, S2].
+-*   **Measured Performance:** The strategy yields a speedup of greater than 2x compared to not using the heuristic to terminate threads [S1, S2].
+-*   **Strengths:** Significantly reduces redundant computation in sparse octrees where many photons map to the same or nearby nodes [S1, S2].
+-*   **Limitations:** Requires the construction and maintenance of the node map. The "upper left" heuristic may not be optimal for all thread scheduling architectures [G].
+-*   **When to Use:** When filtering sparse voxel octrees for cone tracing, especially when the light-view map has high coherence (many photons in the same node) [G].
+-*   **When Not to Use:** If the octree is dense and the overhead of the node map construction outweighs the savings from thread termination [G].
++*   **Time Complexity:** The method reduces the number of threads launched, leading to a speedup of > 2x compared to not using the heuristic [S1, S2]. The complexity per thread remains similar, but the total work is reduced.
++*   **Memory Complexity:** Requires additional memory for the 2D node map, which is a MIP-map pyramid of the same dimensions as the light-view map [S1, S2].
++*   **Measured Performance:** Yields > 2x speedup compared to not using the heuristic to terminate threads [S1, S2].
++*   **Strengths:** Significantly reduces redundant computation in parallel MIP-map generation for sparse octrees [S1, S2].
++*   **Limitations:** Requires the construction and maintenance of the 2D node map [S1, S2]. The "upper left" tie-breaking rule adds complexity to the synchronization logic [S1, S2].
++*   **When to Use:** When generating MIP-maps for sparse voxel octrees in a parallel environment where redundant thread execution is a bottleneck [S1, S2].
++*   **When Not to Use:** When memory is constrained, or when the overhead of maintaining the node map outweighs the benefits of thread termination (e.g., very small octrees).
+ 
+ ## Background
+-This method was introduced in the GIVoxels algorithm [S2] for interactive indirect illumination using voxel cone tracing [S1, S2]. It addresses the inefficiency of parallel MIP-map generation for sparse voxel octrees, where many threads would otherwise perform the same work due to the spatial coherence of light samples [S1, S2].
++The method was introduced in the paper "Interactive Indirect Illumination Using Voxel Cone Tracing" by Bensen et al. [S1, S2]. It is part of the voxel cone tracing technique for real-time global illumination. The node map heuristic was developed to optimize the MIP-map generation step, which is critical for the performance of voxel cone tracing [S1, S2].
+ 
+ ## Sources

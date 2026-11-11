@@ -2,154 +2,166 @@
 Also called: DART (Distance-Aware Replication and Training), distance-aware augmentation
 
 ## Overview
-DART is a depth-free, geometry-only augmentation technique that enriches the Structure-from-Motion (SfM) initialization for 3D Gaussian Splatting by replicating points on their local tangent planes within a distance-aware radius [S1]. It solves the problem of sparse SfM seeding in the periphery of scenes (e.g., outdoor environments or defocus-blurry regions) by adding coverage where the initial point cloud is typically sparsest, without relying on depth estimation or learned models [S1]. Unlike GeoGaussian, which reshapes Gaussians and depends on reliable normals, DART uses the tangent plane solely to add new primitives, making it a deterministic, backbone-agnostic plug-in that improves fidelity at the cost of a larger initial primitive budget [S1].
+Distance-Aware Replication on Tangent-planes (DART) is a geometry-only initialization augmentation for 3D Gaussian Splatting that enriches the Structure-from-Motion (SfM) point cloud by replicating points on local tangent planes, specifically targeting sparsely seeded regions in the scene periphery [S1]. Unlike depth-based or learned enrichment methods, DART is deterministic and relies solely on the geometric relationship between points and the scene center, adding coverage where SfM extraction is typically poor without modifying the rasterizer or pruning criteria [S1]. It serves as a precursor to densification strategies like Age-Gated Densification (AGE), providing a denser initial seed that improves fidelity in sparse areas at the cost of increased primitive count and training time [S1].
 
 ## How it works
+DART operates as a single, pre-optimization pass over the input SfM point cloud. It does not use depth maps, learned models, or normal estimation [S1]. Instead, it constructs a local tangent frame for each point and samples new points on a disk within that plane, where the disk's radius scales with the point's distance from the scene center [S1].
+
 **Inputs and Outputs:**
-*   **Input:** The initial SfM point cloud (positions $\mathbf{p}_i$ and optional normals $\mathbf{n}_i$ if available, though DART does not strictly require them for replication logic, it uses a tangent frame).
-*   **Output:** An augmented point cloud with additional Gaussian primitives added before optimization begins.
+*   **Input:** A set of $N$ SfM points $P = \{p_i\}_{i=1}^N$, where each $p_i$ has a 3D position $\mathbf{x}_i \in \mathbb{R}^3$.
+*   **Output:** An augmented set of points $P'$, which includes the original points and newly replicated points.
 
 **Data Structures:**
-*   SfM Points: List of 3D positions.
-*   Scene Center: A robustly estimated center point $\mathbf{c}$ for the entire scene.
-*   Parameters:
-    *   $m$: Replication multiplier (integer). Typical value: 10. Range swept: $\{1, 3, 5, 7, 10\}$ [S1].
-    *   $\rho_{min}$: Minimum density threshold. Value: 0.008 [S1].
-    *   $\rho_{max}$: Maximum density threshold. Value: 0.04 [S1].
-    *   $K_{nn}$: Number of nearest neighbors for density estimation. Value: 20 [S1].
+*   The SfM points are stored as a list or array of 3D coordinates.
+*   No persistent data structures are required beyond the temporary storage of the new points during the augmentation phase.
 
-**Method Steps:**
-1.  **Estimate Scene Center:** Compute a robust scene center $\mathbf{c}$ from the SfM points.
-2.  **Iterate SfM Points:** For each SfM point $\mathbf{p}_i$:
-    a.  **Compute Distance:** Calculate the Euclidean distance $d_i = \|\mathbf{p}_i - \mathbf{c}\|$ from the scene center.
-    b.  **Determine Radius:** Define a replication radius $R_i$ that grows with $d_i$. The exact functional form is not specified in the sources, but it is distance-dependent [S1].
-    c.  **Estimate Local Density:** Estimate the local point density $\rho_i$ using the $K_{nn}$ nearest neighbors of $\mathbf{p}_i$.
-    d.  **Check Density Thresholds:** If $\rho_{min} \le \rho_i \le \rho_{max}$, proceed to replication. If $\rho_i < \rho_{min}$ or $\rho_i > \rho_{max}$, skip replication for this point (or handle as per specific implementation details not fully detailed, but the thresholds define the active zone) [S1].
-    e.  **Build Tangent Frame:** Construct a local tangent frame at $\mathbf{p}_i$. If a normal $\mathbf{n}_i$ is available, use it. If not, estimate it from neighbors [G]. Let the tangent plane be defined by two orthogonal basis vectors $\mathbf{u}_i, \mathbf{v}_i$ perpendicular to $\mathbf{n}_i$.
-    f.  **Replicate Points:** Generate $m-1$ new points on the tangent disk of radius $R_i$ centered at $\mathbf{p}_i$. The positions $\mathbf{p}_{i,j}$ for $j=1 \dots m-1$ are sampled uniformly or deterministically within the disk:
-        $$ \mathbf{p}_{i,j} = \mathbf{p}_i + r_j \cos(\theta_j) \mathbf{u}_i + r_j \sin(\theta_j) \mathbf{v}_i $$
-        where $r_j \in [0, R_i]$ and $\theta_j \in [0, 2\pi)$ are sampled parameters [S1].
-    g.  **Add Primitives:** Add the new points as new Gaussian primitives to the scene, inheriting initial properties (opacity, color, scale) from the parent SfM point or initialized with default values [G].
+**Parameters:**
+*   $m$: Replication multiplier. Controls the number of extra samples drawn per SfM point. Typical value: $m=10$ (conservative setting for sparse outdoor scenes). Range swept: $\{1, 3, 5, 7, 10\}$ [S1].
+*   $\rho_{\min}$: Minimum density threshold for replication. Value: $0.008$ [S1].
+*   $\rho_{\max}$: Maximum density threshold for replication. Value: $0.04$ [S1].
+*   $K_{nn}$: Number of nearest neighbors used for density estimation. Value: $20$ [S1].
+*   $T_{mat}$: Not a parameter of DART itself, but the maturity threshold for AGE, which works in conjunction with DART. Fixed at $T_{mat} = 2\Delta_d$ by design [S1].
+
+**Algorithm Steps:**
+
+1.  **Estimate Scene Center:** Compute a robustly estimated scene center $\mathbf{c}$. The sources do not specify the exact method for robust estimation (e.g., centroid, median), but it is used to determine distances [S1].
+2.  **Compute Distances:** For each SfM point $p_i$ with position $\mathbf{x}_i$, compute its distance from the scene center: $d_i = \|\mathbf{x}_i - \mathbf{c}\|_2$ [S1].
+3.  **Estimate Local Density:** For each point $p_i$, estimate its local point cloud density $\rho_i$ using the $K_{nn}$ nearest neighbors [S1].
+    *   Let $N_{nn}(i)$ be the set of indices of the $K_{nn}$ nearest neighbors of $p_i$.
+    *   The density $\rho_i$ is derived from the distances to these neighbors. The exact formula for $\rho_i$ is not provided in the sources, but it is compared against $\rho_{\min}$ and $\rho_{\max}$ [S1].
+4.  **Determine Replication Radius:** Define a radius $r_i$ for the tangent disk at $p_i$. The radius grows with distance $d_i$. The exact functional form of $r_i(d_i)$ is not provided in the sources, but it is described as "distance-aware" [S1].
+5.  **Construct Tangent Frame:** For each point $p_i$, construct a local tangent frame. Since DART does not use reliable normals (unlike GeoGaussian), the tangent plane is likely defined by an arbitrary orthonormal basis or a principal component analysis of the local neighborhood, though the specific method is not detailed [S1]. Let the tangent plane be defined by two orthonormal vectors $\mathbf{u}_i, \mathbf{v}_i \in \mathbb{R}^3$ such that $\mathbf{u}_i \perp \mathbf{v}_i$ and both are orthogonal to the local surface normal (or an approximation thereof) [S1].
+6.  **Replicate Points:** For each point $p_i$:
+    *   If $\rho_{\min} \le \rho_i \le \rho_{\max}$, generate $m-1$ new points on the tangent disk of radius $r_i$ centered at $\mathbf{x}_i$ [S1].
+    *   The new points are sampled uniformly or deterministically within the disk. The exact sampling distribution is not specified, but "replicates... on a tangent disk" implies uniform sampling within the radius [S1].
+    *   If $m=1$, no new points are added (DART draws $m-1=0$ extra samples) [S1].
+    *   The new points are added to the point set $P'$ with the same attributes as the original SfM point (e.g., color, opacity, initial scale and rotation if applicable, though DART focuses on position augmentation) [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dart_augment(sfm_points, scene_center, m=10, rho_min=0.008, rho_max=0.04, knn=20):
+import math
+import numpy as np
+
+def dart_augment(sfm_points, m=10, rho_min=0.008, rho_max=0.04, knn=20):
     """
     Augments SfM points using Distance-Aware Replication on Tangent-planes.
     
     Args:
-        sfm_points: List of tuples (position, [normal])
-        scene_center: 3D vector (robustly estimated)
-        m: Replication multiplier
-        rho_min: Minimum density threshold
-        rho_max: Maximum density threshold
-        knn: Number of nearest neighbors for density estimation
+        sfm_points: List of 3D coordinates (N, 3).
+        m: Replication multiplier.
+        rho_min: Minimum density threshold.
+        rho_max: Maximum density threshold.
+        knn: Number of nearest neighbors for density estimation.
         
     Returns:
-        augmented_points: List of 3D positions (including original and new)
+        augmented_points: List of 3D coordinates (N', 3).
     """
+    N = len(sfm_points)
+    points = np.array(sfm_points)
+    
+    # Step 1: Estimate Scene Center
+    # Robust estimation method not specified in sources [S1].
+    # Using centroid as a common default, but note this is a gap [G].
+    scene_center = np.mean(points, axis=0)
+    
+    # Step 2: Compute Distances
+    distances = np.linalg.norm(points - scene_center, axis=1)
+    
+    # Step 3: Estimate Local Density
+    # KNN search is required. Using a placeholder for KNN search logic [G].
+    # In practice, this would use a KDTree or similar structure.
+    # The exact formula for density rho is not provided [S1].
+    # We assume a standard inverse-distance or count-based density estimate.
+    # Since the formula is missing, we cannot implement the exact check [G].
+    # However, the sources state rho is compared to rho_min and rho_max.
+    # We will assume a placeholder function for density estimation.
+    densities = estimate_density(points, knn)
+    
+    # Step 4 & 5 & 6: Replicate Points
     augmented_points = []
     
-    # Precompute distances and sort for efficient neighbor search if needed
-    # For simplicity, assume a spatial index or brute force for KNN
-    for point in sfm_points:
-        pos = point.position
-        normal = point.normal if hasattr(point, 'normal') else None
+    for i in range(N):
+        p_i = points[i]
+        d_i = distances[i]
+        rho_i = densities[i]
         
-        # 1. Compute distance from scene center
-        dist = vector_norm(pos - scene_center)
-        
-        # 2. Estimate local density using KNN
-        neighbors = get_k_nearest_neighbors(pos, sfm_points, k=knn)
-        density = estimate_density(neighbors) # Implementation detail [G]
-        
-        # 3. Check density thresholds
-        if rho_min <= density <= rho_max:
-            # 4. Build tangent frame
-            if normal is None:
-                normal = estimate_normal_from_neighbors(neighbors) # [G]
-            u, v = build_tangent_basis(normal)
+        # Check density threshold
+        if rho_min <= rho_i <= rho_max:
+            # Determine radius r_i based on distance d_i
+            # Exact function r_i(d_i) is not provided [S1].
+            # We assume a linear or proportional scaling [G].
+            r_i = compute_radius(d_i)
             
-            # 5. Determine radius based on distance
-            # Exact formula not given, assume a function R(dist)
-            radius = compute_radius(dist) # [G] placeholder for distance-aware function
-            
-            # 6. Replicate points
-            # Original point is kept
-            augmented_points.append(pos)
+            # Construct tangent frame
+            # Exact method for tangent frame without normals is not provided [S1].
+            # We assume an arbitrary orthonormal basis [G].
+            u_i, v_i = construct_tangent_frame(p_i)
             
             # Generate m-1 new points
-            for j in range(m - 1):
-                # Sample angle and radius within the disk
-                theta = random_uniform(0, 2 * pi)
-                r = random_uniform(0, radius) # Uniform sampling in disk requires sqrt for uniform area
+            num_new = m - 1
+            for j in range(num_new):
+                # Sample point on tangent disk
+                # Exact sampling distribution not specified [S1].
+                # Uniform sampling in disk is a reasonable assumption [G].
+                theta = 2 * math.pi * (j / num_new) # Deterministic spread
+                # Or random: theta = random.uniform(0, 2*pi)
+                # Radius within disk: r_sample = r_i * sqrt(random()) for uniform area
+                r_sample = r_i * math.sqrt((j + 1) / num_new) # Deterministic spread
                 
-                # Calculate new position on tangent plane
-                offset = r * cos(theta) * u + r * sin(theta) * v
-                new_pos = pos + offset
-                augmented_points.append(new_pos)
-        else:
-            # If density is outside thresholds, do not replicate?
-            # Sources say DART adds coverage where SfM is sparse.
-            # High density areas might not need augmentation.
-            # We keep the original point regardless.
-            augmented_points.append(pos)
-            
+                offset = r_sample * (math.cos(theta) * u_i + math.sin(theta) * v_i)
+                new_point = p_i + offset
+                augmented_points.append(new_point)
+        
+        # Add original point
+        augmented_points.append(p_i)
+        
     return augmented_points
 
-def compute_radius(dist):
-    """
-    Placeholder for the distance-aware radius function.
-    Sources state radius grows with distance.
-    """
-    # Not given in the sources.
-    # A linear growth is a common assumption: R = k * dist
-    return dist # [G]
+def estimate_density(points, knn):
+    """Placeholder for density estimation using KNN."""
+    # Exact formula not provided in sources [S1].
+    # This is a gap that must be filled by the implementer [G].
+    # A common approach is inverse of average distance to KNN.
+    pass
 
-def estimate_density(neighbors):
-    """
-    Placeholder for density estimation.
-    """
-    # Not given in the sources.
-    # Could be inverse of average distance, or voxel-based count.
-    # [G]
-    return 0.0
+def compute_radius(distance):
+    """Placeholder for radius computation based on distance."""
+    # Exact function not provided in sources [S1].
+    # This is a gap that must be filled by the implementer [G].
+    pass
 
-def build_tangent_basis(normal):
-    """
-    Constructs two orthogonal vectors u, v perpendicular to normal.
-    """
-    # [G] Standard Gram-Schmidt or cross-product method
-    if abs(normal.x) < 0.9:
-        u = normalize(cross(normal, [1, 0, 0]))
-    else:
-        u = normalize(cross(normal, [0, 1, 0]))
-    v = cross(normal, u)
-    return u, v
+def construct_tangent_frame(point):
+    """Placeholder for tangent frame construction."""
+    # Exact method not provided in sources [S1].
+    # This is a gap that must be filled by the implementer [G].
+    # Return two orthonormal vectors perpendicular to an arbitrary normal.
+    pass
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Boundary Conditions:** The method acts once before optimization. If the SfM cloud is extremely sparse everywhere, the density thresholds might exclude all points or include all points depending on the global density scale.
-*   **Precision:** The radius growth function is critical. If it grows too fast, it may cause excessive overlap in the center; if too slow, it may fail to cover the periphery.
-*   **Normal Estimation:** If normals are not provided by the SfM pipeline, they must be estimated from neighbors, which can be noisy in sparse regions [G].
+*   **Sparse SfM:** DART is designed for scenes where SfM points are sparse, particularly in the periphery. In densely reconstructed scenes (e.g., Deep Blending's `drjohnson`), DART has essentially no effect on quality [S1].
+*   **Density Estimation:** The exact formula for local density $\rho_i$ is not provided. Implementers must define a robust density estimator that yields values comparable to the thresholds $\rho_{\min}=0.008$ and $\rho_{\max}=0.04$ [S1].
+*   **Tangent Frame:** Since DART does not use normals, the tangent frame construction is ambiguous. Implementers must define a consistent method for generating orthonormal vectors on the tangent plane [S1].
+*   **Radius Function:** The exact relationship between distance $d_i$ and radius $r_i$ is not specified. Implementers must define a scaling function that grows with distance [S1].
 
 ## Subtopics
 
 ### [Age-Gated Densification (AGE)](12510-age-gated-densification-age.md)
-An add-on for 3D Gaussian Splatting that improves reconstruction quality by combining two components: DART (Distance-Aware Replication) which augments the initial point cloud with distance-dependent replicas, and AGE (Age-Gated Densification) which acts as a maturity gate to prune unnecessary primitives during training.
+AGE is a maturity gate for 3D Gaussian Splatting training that prevents densification (splitting and cloning) until a specified training step threshold is reached, thereby pruning unnecessary primitives and controlling memory and time costs. It is designed to work in conjunction with Distance-Aware Replication on Tangent-planes (DART), where DART augments the initial point cloud to improve coverage in sparse regions, and AGE trims the resulting inflated primitive count without degrading reconstruction quality. While competitors like FastGS-Big and Taming-3DGS modify densification criteria or schedules *during* training, AGE acts as a static maturity gate, deferring eligibility for densification operations.
 
 ## Operating characteristics
-*   **Time and Memory Complexity:** DART increases the final Gaussian set by 18.6% (from 2.91M to 3.45M primitives on Mip-NeRF 360 scenes) [S1]. This leads to a rise in training time from 24.9 to 31.8 minutes and peak memory usage from 5.04 to 6.04 GB on the same benchmark [S1].
-*   **Measured Performance:** On Mip-NeRF 360 scenes, DART (config 2→4) raises PSNR by 0.22 dB (27.53→27.75), SSIM by 0.013 (0.834→0.847), and LPIPS falls by 0.025 (0.228→0.203) [S1]. The gain is largest on sparsely seeded scenes: LPIPS falls 0.044 on the bicycle scene and 0.024–0.026 on counter and stump scenes [S1]. On densely reconstructed scenes like Deep Blending's drjohnson, quality is essentially unchanged [S1].
-*   **Scaling:** The method is deterministic and does not depend on learned models or depth estimation, making it scalable in terms of inference overhead during training setup, but it increases the computational load during the subsequent optimization phase due to the higher primitive count [S1].
-*   **Strengths and Limitations:** Strengths include being depth-free, geometry-only, and effective in sparse periphery regions without requiring external cues or normals [S1]. Limitations include the increased memory and training time due to the larger primitive budget, which may require complementary techniques like AGE to trim the excess [S1].
-*   **When to Use/Not Use:** Use when SfM initialization is sparse in the scene periphery (e.g., outdoor scenes, defocus blurry scenes). Do not use when the SfM cloud is already dense, as it provides negligible quality improvement while increasing computational cost [S1].
+*   **Time and Memory Complexity:** DART adds a pre-processing step that scales linearly with the number of SfM points $N$ and the multiplier $m$. The final Gaussian set is enlarged by 18.6% (from 2.91M to 3.45M points on Mip-NeRF 360 scenes) [S1].
+*   **Measured Performance:** On Mip-NeRF 360 scenes, DART (config 2→4) raises PSNR by 0.22 dB (27.53→27.75), SSIM by 0.013 (0.834→0.847), and LPIPS falls by 0.025 (0.228→0.203) [S1]. On sparsely seeded Mip-NeRF 360 scenes, LPIPS falls 0.044 on bicycle and 0.024–0.026 on counter and stump [S1].
+*   **Scaling:** The gain is largest on sparsely seeded scenes. On densely reconstructed scenes like Deep Blending's `drjohnson`, quality is essentially unchanged [S1].
+*   **Strengths and Limitations:** DART is deterministic and does not require depth or external cues [S1]. It improves fidelity in sparse regions. However, it increases the final primitive count by 18.6%, raising training time from 24.9 to 31.8 minutes and peak memory from 5.04 to 6.04 GB on Mip-NeRF 360 [S1]. This increased budget is trimmed by AGE [S1].
+*   **When to Use:** Use DART when the SfM point cloud is sparse, particularly in the scene periphery, and when depth information is unavailable or unreliable. It is most effective when combined with AGE to manage the increased primitive count [S1].
+*   **When Not to Use:** Avoid DART for densely reconstructed scenes where SfM coverage is already high, as it provides no quality benefit and only increases computational cost [S1].
 
 ## Background
-DART was introduced in the paper "DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting" [S1]. It is designed as a backbone-agnostic plug-in for 3D Gaussian Splatting and anchor-based methods like Scaffold-GS, acting at the initialization stage to address the limitations of sparse SfM seeding [S1]. The method was developed to complement Age-Gated Densification (AGE), which handles the densification budget during optimization [S1].
+DART was introduced in the paper "DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting" [S1]. It addresses the issue of adaptive density-control rules in 3D Gaussian Splatting that can inflate primitive count, memory, and training time [S1]. DART acts as a backbone-agnostic add-on that enriches the seed at initialization, replicating each SfM point on its tangent plane within a distance-aware radius [S1]. It is distinct from GeoGaussian, which reshapes Gaussians and depends on reliable normals, and from learned or depth-based enrichment methods [S1].
 
 ## Sources
 [S1] DART-3DGS: Distance-Aware Replication and Age-Gated Densification for 3D Gaussian Splatting, https://europepmc.org/article/PMC/PMC13705904, fetched 2026-10-27

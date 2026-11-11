@@ -1,135 +1,128 @@
 # Supplementary Point Addition for Sparse Point Clouds
-Also called: Uniform Sampling with KNN Color Interpolation and Distance Filtering
+
+Also called: Supplementary Point Addition
 
 ## Overview
-A densification technique designed to compensate for the sparsity of 3D Gaussians at the far end of defocus-blurry scenes where Structure-from-Motion (SfM) extraction fails [S1]. It supplements the initial point cloud by sampling new points uniformly within the scene bounds and assigning them colors via K-Nearest-Neighbor (KNN) interpolation, filtering out points that fall into empty space [S1]. It addresses the specific limitation of SfM in large-depth-of-field scenarios where far-end geometry is missing, distinguishing it from gradient-based densification methods like [Exponentially Ascending Gradient Threshold](9684-exponentially-ascending-gradient-threshold.md) which rely on training dynamics rather than geometric initialization [S1].
+A densification technique designed to compensate for the sparsity of 3D Gaussians at the far end of scenes in defocus-blurry environments, where Structure-from-Motion (SfM) extraction is typically poor [S1]. It supplements the initial point cloud with synthetic points to ensure adequate coverage in regions where SfM fails to extract features, thereby improving reconstruction fidelity in large-depth-of-field scenarios [S1].
 
 ## How it works
 **Inputs:**
-*   Existing 3D Gaussian point cloud $P_{existing}$ with positions $\mathbf{x}_i$ and colors $\mathbf{c}_i$.
-*   Scene bounding box defined by minimum position $\alpha$ and maximum position $\beta$ across all dimensions of $P_{existing}$ [S1].
-*   Hyperparameters: Start iteration $N_{st}$, number of points $N_p$, neighbor count $K$, distance threshold $t_d$ [S1].
+- Existing 3D Gaussian point cloud (positions and colors).
+- Hyperparameters: $N_{st}$ (start iteration), $N_p$ (number of points), $K$ (neighbors), $t_d$ (distance threshold).
 
 **Outputs:**
-*   Updated point cloud $P_{new} = P_{existing} \cup P_{supp}$, where $P_{supp}$ are the added supplementary points with interpolated colors [S1].
+- Updated point cloud including newly added supplementary points.
 
 **Data Structures:**
-*   $P_{existing}$: List of points, each containing position vector $\mathbf{x} \in \mathbb{R}^3$ and color vector $\mathbf{c} \in \mathbb{R}^3$ (or $\mathbb{R}^4$).
-*   $P_{supp}$: List of new points generated during this step.
+- Point Cloud: A list of points, each containing a 3D position vector $\mathbf{p}$ and a color vector $\mathbf{c}$.
+
+**Parameters:**
+- $N_{st}$: Iteration number at which addition begins. Value: 2,500 [S1].
+- $N_p$: Number of supplementary points. Value: Proportional to the extent of the point cloud, capped at 200,000 [S1].
+- $K$: Number of neighbors for KNN interpolation. Value: 4 [S1].
+- $t_d$: Minimum distance threshold for discarding points. Value: 2 [S1].
 
 **Steps:**
-1.  **Check Iteration:** If current training iteration $t < N_{st}$, terminate. No points are added [S1].
-2.  **Define Bounds:** Compute $\alpha = \min_{\mathbf{x} \in P_{existing}} (\mathbf{x})$ and $\beta = \max_{\mathbf{x} \in P_{existing}} (\mathbf{x})$ element-wise or as scalar bounds for the uniform distribution range [S1].
-3.  **Sample Positions:** Generate $N_p$ candidate points $\{\mathbf{p}_j\}_{j=1}^{N_p}$ by sampling from a uniform distribution $U(\alpha, \beta)$ [S1].
-4.  **Interpolate Colors:** For each candidate point $\mathbf{p}_j$:
-    a. Find the $K$ nearest neighbors $P_{knn} = \{\mathbf{x}_{n_1}, ..., \mathbf{x}_{n_K}\}$ from $P_{existing}$ based on Euclidean distance [S1].
-    b. Compute the interpolated color $\mathbf{c}_j$ using the colors of $P_{knn}$ [S1].
-5.  **Filter by Distance:** Calculate the distance $d_j$ from $\mathbf{p}_j$ to its nearest neighbor in $P_{existing}$ [S1].
-    a. If $d_j > t_d$, discard $\mathbf{p}_j$ [S1].
-    b. Otherwise, add $\mathbf{p}_j$ with color $\mathbf{c}_j$ to $P_{supp}$ [S1].
-6.  **Merge:** Add all points in $P_{supp}$ to the active 3D Gaussian set [S1].
+1. **Check Iteration:** If the current training iteration $i < N_{st}$, terminate. Otherwise, proceed [S1].
+2. **Determine Bounds:** Calculate $\alpha$ and $\beta$, the minimum and maximum values across all dimensions of the positions of the existing point cloud [S1].
+3. **Sample Positions:** Generate $N_p$ candidate points by sampling uniformly from the distribution $U(\alpha, \beta)$ for each coordinate dimension [S1].
+4. **Interpolate Colors:** For each candidate point $\mathbf{p}$, identify the $K$ nearest neighbors $P_{knn}$ from the existing point cloud based on Euclidean distance [S1].
+5. **Assign Color:** Compute the color $\mathbf{c}_p$ for $\mathbf{p}$ by interpolating the colors of the points in $P_{knn}$ [S1].
+6. **Filter by Distance:** Calculate the distance $d$ from $\mathbf{p}$ to its nearest neighbor in the existing point cloud. If $d > t_d$, discard $\mathbf{p}$. Otherwise, add $\mathbf{p}$ with color $\mathbf{c}_p$ to the point cloud [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def supplementary_point_addition(existing_points, current_iteration, Nst, Np, K, td):
+def add_supplementary_points(existing_points, Nst, current_iteration, Np, K, td):
     """
-    Adds supplementary points to the 3D Gaussian cloud if the current iteration
-    has reached Nst. Points are sampled uniformly within the bounds of the
-    existing cloud and filtered by distance to existing points.
+    Adds supplementary points to the existing point cloud if the current iteration
+    has reached Nst.
     
     Args:
-        existing_points: List of dicts with 'pos' (np.array) and 'color' (np.array).
-        current_iteration: int, current training step.
-        Nst: int, iteration threshold to start adding points.
-        Np: int, number of points to sample.
-        K: int, number of neighbors for color interpolation.
-        td: float, distance threshold to discard points.
+        existing_points: List of dicts with 'pos' (vec3) and 'color' (vec3).
+        Nst: Start iteration threshold.
+        current_iteration: Current training iteration.
+        Np: Number of points to sample.
+        K: Number of neighbors for KNN.
+        td: Distance threshold for filtering.
         
     Returns:
-        List of new points with 'pos' and 'color'.
+        Updated list of points.
     """
     if current_iteration < Nst:
-        return []
+        return existing_points
 
-    # Step 2: Define Bounds
-    # Extract positions
-    positions = np.array([p['pos'] for p in existing_points])
+    # Step 2: Determine bounds
+    # Extract all positions
+    positions = [p['pos'] for p in existing_points]
     
-    # Compute min and max bounds for uniform sampling
-    # Note: Sources define alpha and beta as min/max values of position.
-    # Assuming element-wise min/max for 3D box or scalar range.
-    # Given "U(alpha, beta)" where alpha/beta are min/max values, 
-    # we interpret this as sampling each coordinate independently 
-    # within the global min/max of that coordinate across the cloud.
-    alpha = np.min(positions, axis=0)
-    beta = np.max(positions, axis=0)
-    
-    # Step 3: Sample Positions
-    # Sample Np points from uniform distribution U(alpha, beta)
-    # Shape: (Np, 3)
-    new_positions = np.random.uniform(low=alpha, high=beta, size=(Np, 3))
+    # Calculate min and max for each dimension
+    # Assuming positions are 3D vectors [x, y, z]
+    mins = [min(p[d] for p in positions) for d in range(3)]
+    maxs = [max(p[d] for p in positions) for d in range(3)]
     
     new_points = []
     
-    # Precompute existing positions for KNN
-    existing_pos_array = np.array([p['pos'] for p in existing_points])
-    existing_color_array = np.array([p['color'] for p in existing_points])
-    
-    for i in range(Np):
-        p_candidate = new_positions[i]
+    # Step 3: Sample Np points
+    for _ in range(Np):
+        # Sample uniform distribution U(alpha, beta) for each dimension
+        # alpha is min, beta is max
+        sample_pos = [random.uniform(mins[d], maxs[d]) for d in range(3)]
         
-        # Step 4a: Find K-Nearest Neighbors
-        # Compute distances to all existing points
-        dists = np.linalg.norm(existing_pos_array - p_candidate, axis=1)
+        # Step 4: Find K nearest neighbors
+        # Calculate distances to all existing points
+        distances = []
+        for i, p in enumerate(existing_points):
+            dist = euclidean_distance(sample_pos, p['pos'])
+            distances.append((dist, i))
         
-        # Get indices of K nearest neighbors
-        k_indices = np.argsort(dists)[:K]
+        # Sort by distance and take K nearest
+        distances.sort(key=lambda x: x[0])
+        k_nearest_indices = [idx for _, idx in distances[:K]]
+        k_nearest_points = [existing_points[idx] for idx in k_nearest_indices]
         
-        # Step 4b: Interpolate Color
-        # Sources state "interpolated color pc from the nearest neighbors".
-        # Standard interpolation (e.g., inverse distance weighting or mean) is not explicitly detailed.
-        # We assume simple mean of K neighbors as a baseline implementation [G].
-        neighbor_colors = existing_color_array[k_indices]
-        interpolated_color = np.mean(neighbor_colors, axis=0)
+        # Step 5: Interpolate color
+        # Simple average of K nearest neighbors' colors
+        avg_color = [0.0, 0.0, 0.0]
+        for np_point in k_nearest_points:
+            for d in range(3):
+                avg_color[d] += np_point['color'][d]
+        avg_color = [c / K for c in avg_color]
         
-        # Step 5: Filter by Distance
-        nearest_neighbor_dist = dists[k_indices[0]]
+        # Step 6: Filter by distance
+        # Distance to nearest neighbor is the first element in sorted distances
+        nearest_dist = distances[0][0]
         
-        if nearest_neighbor_dist <= td:
-            new_points.append({
-                'pos': p_candidate,
-                'color': interpolated_color
-            })
+        if nearest_dist <= td:
+            new_points.append({'pos': sample_pos, 'color': avg_color})
             
-    return new_points
+    # Append new points to existing
+    updated_points = existing_points + new_points
+    return updated_points
+
+def euclidean_distance(p1, p2):
+    return sum((a - b) ** 2 for a, b in zip(p1, p2)) ** 0.5
 ```
 
-**Parameters:**
-*   $N_{st}$: Start iteration. Value: 2,500 [S1].
-*   $N_p$: Number of supplementing points. Value: Proportional to the extent of the point cloud, at most 200,000 [S1].
-*   $K$: Number of neighbors for KNN. Value: 4 [S1].
-*   $t_d$: Distance threshold for discarding points. Value: 2 [S1].
-
 **Edge Cases and Pitfalls:**
-*   **Empty Cloud:** If $P_{existing}$ is empty, $\alpha$ and $\beta$ are undefined. The method assumes a non-empty SfM initialization [S1].
-*   **Precision:** The distance threshold $t_d=2$ is absolute. In scenes with different scales, this may require normalization [S1].
-*   **Color Interpolation:** The exact interpolation formula (e.g., inverse distance weighting vs. simple mean) is not specified in the source, only that it uses KNN colors [S1].
+- **Empty Point Cloud:** If the existing point cloud is empty, bounds $\alpha$ and $\beta$ are undefined. The method assumes a non-empty initialization from SfM [S1].
+- **Precision:** Uniform sampling over large extents may result in points far from any existing geometry, which are filtered by $t_d$. If $t_d$ is too small, few points are added; if too large, noise may be introduced [S1].
+- **Boundary Conditions:** The bounds $\alpha$ and $\beta$ are derived strictly from the existing point cloud. If the scene extends beyond the SfM reconstruction, these points will not be covered unless the bounds are manually expanded or the method is iterated [S1].
 
 ## Subtopics
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N_p \cdot N_{existing})$ for naive KNN search, or $O(N_p \log N_{existing})$ with spatial indexing [G].
-*   **Memory Complexity:** $O(N_p)$ for storing new points [S1].
-*   **Performance:** Specifically effective in defocus-blurry scenes with large depth of field where SfM fails to extract far-end points [S1].
-*   **Strengths:** Directly addresses initialization sparsity in specific failure modes of SfM [S1].
-*   **Limitations:** Relies on uniform sampling which may not capture complex geometry; requires careful tuning of $t_d$ [S1].
-*   **When to use:** When training 3D Gaussian Splatting on defocus-blurry images where SfM point clouds are sparse at the periphery [S1].
-*   **When not to use:** For sharp scenes with good SfM initialization, where standard densification suffices [S1].
+- **Time Complexity:** $O(N_p \cdot N)$, where $N$ is the number of existing points, due to the KNN search for each of the $N_p$ sampled points.
+- **Memory Complexity:** $O(N + N_p)$ to store the updated point cloud.
+- **Performance:** Effective in defocus-blurry scenes where SfM fails to extract points at the far end of the scene [S1].
+- **Strengths:** Simple to implement; does not require depth estimation or learned models; improves fidelity in sparse regions [S1].
+- **Limitations:** Adds a fixed number of points regardless of local geometry density; may introduce noise if $t_d$ is not tuned correctly; does not adapt to dynamic scene content [S1].
+- **When to Use:** Defocus-blurry scenes with large depth of field where SfM extraction is poor at the far end [S1].
+- **When Not to Use:** Scenes with dense SfM initialization; real-time applications where the overhead of KNN search is prohibitive [S1].
 
 ## Background
-Originated in the context of Deblurring 3D Gaussian Splatting to handle the poor SfM extraction in defocus-blurry scenes [S1]. The method was introduced to ensure dense representation of objects in the far end of the scene, which are typically missed by standard SfM pipelines due to blur [S1]. It is part of a broader strategy including depth-based pruning to manage the increased number of Gaussians [S1].
+Originated in the context of deblurring 3D Gaussian Splatting, specifically to address the issue of sparse point clouds produced by blurry images in the DeblurNeRF dataset [S1]. The method was introduced to handle scenes with large depth of field, where SfM hardly extracts points on the far end of the scene [S1]. It builds on the standard 3D Gaussian Splatting framework, which manages Gaussian count through adaptive density control, but adds a proactive supplementation step [S1].
 
 ## Sources
 [S1] Deblurring 3D Gaussian Splatting, https://doi.org/10.1007/978-3-031-73636-0_8, fetched 2026-10-26

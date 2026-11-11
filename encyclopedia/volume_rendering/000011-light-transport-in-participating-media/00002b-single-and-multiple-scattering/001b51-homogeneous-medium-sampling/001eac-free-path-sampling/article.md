@@ -2,7 +2,7 @@
 Also called: Homogeneous Volume Tracking, Single Scattering Volume Path Tracing with Transmittance Sampling, Single Scattering with Surface Emission, Tracking in Homogeneous Volumes, Vol Path Tracing 1
 
 ## Overview
-Free-path sampling determines the distance a ray travels in a homogeneous participating medium before interacting, avoiding explicit distance and spherical integrations by letting the ray randomly bounce within the medium before potentially hitting a surface [S1, unofficial]. It differs from [Majorant Iterator Ray Sampling](3075-majorant-iterator-ray-sampling.md) by directly sampling the interaction distance from the extinction coefficient rather than iterating through a majorant bound, and it serves as the foundational step for [Homogeneous Medium Sampling](980-homogeneous-medium-sampling.md).
+Free-path sampling determines the distance a ray travels in a homogeneous participating medium before interacting, avoiding explicit distance and spherical integrations by letting the ray randomly bounce within the medium before potentially hitting a surface [S1, unofficial].
 
 ## How it works
 **Inputs:** Ray origin $\mathbf{x}$, direction $\boldsymbol{\omega}$, maximum travel distance $t_{\max}$, medium extinction coefficient $\sigma_t = \sigma_a + \sigma_s$, and scene geometry providing the nearest surface intersection distance $d_{\text{surf}}$ along $\boldsymbol{\omega}$ [S1, unofficial].
@@ -14,7 +14,7 @@ Free-path sampling determines the distance a ray travels in a homogeneous partic
 *   `Intersection`: `point` (vec3), `distance` (float), `valid` (bool).
 
 **Steps:**
-1.  **Sample Free Flight Distance:** Generate a uniform random number $\xi \in [0, 1)$. Calculate the free flight distance $t_{\text{free}}$ using the inverse cumulative distribution function of the exponential distribution: $t_{\text{free}} = -\ln(\xi) / \sigma_t$ [S1, unofficial].
+1.  **Sample Free Flight Distance:** Generate a uniform random number $\xi \in [0, 1)$ and calculate the free flight distance $t_{\text{free}}$ using the inverse cumulative distribution function of the exponential distribution: $t_{\text{free}} = -\ln(\xi) / \sigma_t$ [S1, unofficial].
 2.  **Determine Interaction Type:** Compare $t_{\text{free}}$ with the distance to the nearest surface intersection $d_{\text{surf}}$ [S1, unofficial].
     *   If $t_{\text{free}} < d_{\text{surf}}$: The ray interacts with the volume [S1, unofficial].
     *   If $t_{\text{free}} \ge d_{\text{surf}}$: The ray hits the surface before interacting with the volume [S1, unofficial].
@@ -28,69 +28,54 @@ Free-path sampling determines the distance a ray travels in a homogeneous partic
 import random
 import math
 
-class Ray:
-    def __init__(self, origin, direction):
-        self.origin = origin
-        self.direction = direction
-
-class Medium:
-    def __init__(self, sigma_a, sigma_s):
-        self.sigma_a = sigma_a
-        self.sigma_s = sigma_s
-        self.sigma_t = sigma_a + sigma_s
-
-class Intersection:
-    def __init__(self, point, distance, valid):
-        self.point = point
-        self.distance = distance
-        self.valid = valid
-
-def free_path_sample(ray, medium, scene):
+def free_path_sample(origin, direction, sigma_t, sigma_s, sigma_a, phase_func, scene_intersect, lights):
     # Step 1: Sample free flight distance
     xi = random.random()
-    sigma_t = medium.sigma_t
-    
-    # Guard against zero extinction coefficient [G]
     if sigma_t == 0.0:
         t_free = float('inf')
     else:
         t_free = -math.log(xi) / sigma_t
         
     # Step 2: Find nearest surface intersection
-    intersection = scene.intersect(ray)
-    d_surf = intersection.distance if intersection.valid else float('inf')
+    hit = scene_intersect(origin, direction)
+    d_surf = hit.distance if hit.valid else float('inf')
     
     # Step 3: Determine interaction type
     if t_free < d_surf:
         # Volume interaction
         t = t_free
-        x_t = [ray.origin[i] + t * ray.direction[i] for i in range(3)]
-        
-        # Calculate transmittance to interaction point
+        x_t = [origin[i] + t * direction[i] for i in range(3)]
         transmittance = math.exp(-sigma_t * t)
         
         # Sample phase function for new direction [G]
-        # omega_new = sample_phase_function(medium.phase, ray.direction)
+        omega_new = phase_func(direction)
         
         # Compute in-scattered radiance (NEE for each light) [S1, unofficial]
         radiance = 0.0
-        for light in scene.lights:
+        for light in lights:
             # Standard NEE geometry term and PDF evaluation [G]
-            radiance += light.sample_and_eval(x_t, ray.direction)
+            radiance += light.sample_and_eval(x_t, omega_new)
             
         # Recursive call for indirect lighting
-        new_ray = Ray(x_t, ray.direction) # Placeholder direction for recursion [G]
-        radiance += free_path_sample(new_ray, medium, scene)
+        radiance += free_path_sample(x_t, omega_new, sigma_t, sigma_s, sigma_a, phase_func, scene_intersect, lights)
         
         return radiance * transmittance
     else:
         # Surface interaction
         # Standard path tracing logic for BRDF/NEE/MIS [G]
-        return scene.surface_path_trace(intersection)
+        return surface_path_trace(hit)
+
+def scene_intersect(origin, direction):
+    # Standard ray-scene intersection routine [G]
+    return type('Hit', (), {'valid': False, 'distance': float('inf')})()
+
+def surface_path_trace(hit):
+    # Standard path tracing logic for BRDF/NEE/MIS [G]
+    return 0.0
 ```
 
 **Parameters:**
-*   $\sigma_t$: Extinction coefficient. Typical values depend on the medium density. Not given in the sources.
+*   $\sigma_t$: Extinction coefficient. Not given in the sources.
 *   $\xi$: Uniform random number.
 *   Anisotropy: Parameter for the Henyey-Greenstein phase function ranging from $-1$ to $1$ [S1, unofficial].
 
@@ -104,7 +89,7 @@ def free_path_sample(ray, medium, scene):
 A method to construct paths by incrementally adding vertices from one endpoint until a light source or sensor is hit, sampling propagation distance proportional to transmittance [S2]. It differs from standard free-path sampling by explicitly building the path vertex-by-vertex with direction sampled proportionally to the phase function and distance sampled proportionally to transmittance, rather than tracking a single ray bounce [S2]. Choose this when constructing paths from a specific endpoint with transmittance-weighted sampling is required [S2].
 
 ## Operating characteristics
-Time complexity is not given in the sources. Memory complexity is not given in the sources. The method was considered unbiased but produced noticeable noise; it was abandoned in the referenced implementation because it handles multiple scattering, which was not the project's focus [S1, unofficial]. Strengths include simple implementation for single scattering events [S1, unofficial]. Limitations include high noise in multiple scattering scenarios [S1, unofficial]. It should be used for single scattering dominated scenes [S1, unofficial]. It should not be used for scenes requiring efficient multiple scattering handling [S1, unofficial].
+Time complexity is not given in the sources [S1, unofficial]. Memory complexity is not given in the sources [S1, unofficial]. The method was considered unbiased but produced noticeable noise; it was abandoned in the referenced implementation because it handles multiple scattering, which was not the project's focus [S1, unofficial]. Strengths include simple implementation for single scattering events [S1, unofficial]. Limitations include high noise in multiple scattering scenarios [S1, unofficial]. It should be used for single scattering dominated scenes [S1, unofficial]. It should not be used for scenes requiring efficient multiple scattering handling [S1, unofficial].
 
 ## Background
 Free-path sampling originates from fundamental light transport principles in participating media, specifically the Beer-Lambert law governing transmittance [S1, unofficial]. It is a core component of volumetric path tracing algorithms for simulating light interacting with homogeneous volumes [S1, unofficial]. The method was discussed in the context of implementing volumetric effects in path tracers, where it was ultimately abandoned due to noise from multiple scattering handling [S1, unofficial].

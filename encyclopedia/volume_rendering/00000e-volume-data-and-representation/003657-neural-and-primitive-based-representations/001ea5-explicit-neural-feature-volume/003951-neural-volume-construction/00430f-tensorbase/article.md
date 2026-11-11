@@ -1,0 +1,214 @@
+# TensorBase
+
+Also called: Tensor-based volume rendering base class
+
+## Overview
+TensorBase is a base class for tensor-based volume rendering that manages the axis-aligned bounding box (AABB), grid size, Singular Value Decomposition (SVD) volume initialization, and rendering module selection [S1, unofficial]. It serves as the foundational infrastructure for neural volume construction, handling the geometric mapping from ray space to the feature grid and selecting the appropriate shading function (e.g., MLP, Spherical Harmonics) based on configuration [S1, unofficial]. It distinguishes itself from sibling methods like Neural Inpainting for Holes and Sparse Domain Decomposition by providing the core tensor management and ray sampling logic upon which those specialized techniques build [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- `aabb`: Axis-aligned bounding box defined by two 3D points (min and max corners).
+- `gridSize`: 3D integer tuple defining the resolution of the feature grid.
+- `device`: Target device for tensor operations (e.g., 'cuda').
+- `dtype`: Data type for tensors (default `torch.float32`).
+- `shadingMode`: String specifying the rendering module (e.g., 'MLP_PE', 'MLP', 'SH', 'RGB').
+- `near`, `far`: Floating point values defining the near and far clipping planes for ray sampling.
+- `is_train`: Boolean flag indicating training mode (enables noise injection).
+- `simulate_euclid_sample`: Boolean flag to simulate Euclidean sampling in NDC space.
+- `ndc_near_plane`: Depth of the near plane in NDC coordinates.
+
+**Outputs:**
+- Internal state variables (`aabbSize`, `invaabbSize`, `gridSize`, `units`, `stepSize`, `nSamples`, `aabbDiag`).
+- Sampled ray points and depths via `sample_ray_ndc`.
+- Normalized coordinates via `normalize_coord`.
+
+### Data Structures
+The class maintains the following internal state variables, all implemented as PyTorch tensors where applicable:
+
+1.  **`self.aabb`**: Tensor of shape `(2, 3)`, dtype `self.dtype`. Stores the min and max corners of the bounding box.
+2.  **`self.aabbSize`**: Tensor of shape `(3,)`, dtype `self.dtype`. Computed as `self.aabb[1] - self.aabb[0]`.
+3.  **`self.invaabbSize`**: Tensor of shape `(3,)`, dtype `self.dtype`. Computed as `2.0 / self.aabbSize`. Used for normalization.
+4.  **`self.gridSize`**: Tensor of shape `(3,)`, dtype `torch.long`. The resolution of the volume grid.
+5.  **`self.units`**: Tensor of shape `(3,)`, dtype `self.dtype`. Computed as `self.aabbSize / (self.gridSize - 1)`. Represents the physical size of one grid cell.
+6.  **`self.stepSize`**: Scalar, dtype `self.dtype`. Computed as `mean(self.units) * self.step_ratio`.
+7.  **`self.aabbDiag`**: Scalar, dtype `self.dtype`. Computed as `sqrt(sum(self.aabbSize^2))`. The diagonal length of the AABB.
+8.  **`self.nSamples`**: Integer. Computed as `int(self.aabbDiag / self.stepSize) + 1`. The default number of samples per ray.
+9.  **`self.matMode`**: List of lists `[[0,1], [0,2], [1,2]]`. Defines the mode matrices for tensor decomposition.
+10. **`self.vecMode`**: List `[2, 1, 0]`. Defines the vector modes for tensor decomposition.
+11. **`self.comp_w`**: List `[1, 1, 1]`. Component weights.
+
+### Parameters
+The following parameters are typically initialized in the constructor or configuration:
+
+| Parameter | Default Value | Description |
+| :--- | :--- | :--- |
+| `density_n_comp` | 8 | Number of components for density. |
+| `appearance_n_comp` | 24 | Number of components for appearance. |
+| `app_dim` | 27 | Appearance dimension. |
+| `shadingMode` | 'MLP_PE' | Rendering module selector. |
+| `alphaMask` | None | Alpha mask object for sparse rendering. |
+| `near_far` | `[2.0, 6.0]` | Default near and far clipping distances. |
+| `density_shift` | -10 | Shift applied to density values. |
+| `alphaMask_thres` | 0.001 | Threshold for alpha mask activation. |
+| `distance_scale` | 25 | Scale factor for distance. |
+| `rayMarch_weight_thres` | 0.0001 | Threshold for ray marching weight. |
+| `pos_pe` | 6 | Positional encoding frequency for position. |
+| `view_pe` | 6 | Positional encoding frequency for view. |
+| `fea_pe` | 6 | Positional encoding frequency for feature. |
+| `featureC` | 128 | Feature channel dimension. |
+| `step_ratio` | 2.0 | Multiplier for step size calculation. |
+| `fea2denseAct` | 'softplus' | Activation function for feature-to-dense. |
+| `dtype` | `torch.float32` | Tensor data type. |
+| `volume_init_scale` | 0.1 | Initialization scale for volume. |
+| `volume_init_bias` | 0.1 | Initialization bias for volume. |
+
+### Numbered Steps
+
+1.  **Initialize Mode Matrices**: Set `self.matMode = [[0,1], [0,2], [1,2]]`, `self.vecMode = [2, 1, 0]`, and `self.comp_w = [1,1,1]` [S1, unofficial].
+2.  **Reset AABB**: In the `reset()` method, convert the input `aabb` to a tensor: `self.aabb = torch.tensor(aabb, dtype=self.dtype)` [S1, unofficial].
+3.  **Update Step Size and Grid Info**: In `update_stepSize()`:
+    a. Compute AABB size: `self.aabbSize = self.aabb[1] - self.aabb[0]` [S1, unofficial].
+    b. Compute inverse AABB size: `self.invaabbSize = 2.0 / self.aabbSize` [S1, unofficial].
+    c. Set grid size tensor: `self.gridSize = torch.LongTensor(gridSize).to(self.device)` [S1, unofficial].
+    d. Compute unit size: `self.units = self.aabbSize / (self.gridSize - 1)` [S1, unofficial].
+    e. Compute step size: `self.stepSize = torch.mean(self.units) * self.step_ratio` [S1, unofficial].
+    f. Compute AABB diagonal: `self.aabbDiag = torch.sqrt(torch.sum(torch.square(self.aabbSize)))` [S1, unofficial].
+    g. Compute number of samples: `self.nSamples = int((self.aabbDiag / self.stepSize).item()) + 1` [S1, unofficial].
+4.  **Initialize Rendering Function**: In `init_render_func()`, select the rendering module based on `shadingMode`:
+    - `'MLP_PE'` -> `MLPRender_PE`
+    - `'MLP'` -> `MLPRender`
+    - `'SH'` -> `SHRender`
+    - `'RGB'` -> `RGBRender` [S1, unofficial].
+5.  **Normalize Coordinates**: In `normalize_coord(xyz_sampled)`, map sampled points to [-1, 1] range:
+    `return (xyz_sampled - self.aabb[0]) * self.invaabbSize - 1` [S1, unofficial].
+6.  **Sample Ray NDC**: In `sample_ray_ndc(rays_o, rays_d, near, far, N_samples, is_train, simulate_euclid_sample, ndc_near_plane)`:
+    a. If `N_samples < 0`, set `N_samples = self.nSamples` [S1, unofficial].
+    b. Compute linear interpolation between `near` and `far`:
+       `interpx = torch.linspace(near, far, N_samples, device=self.device, dtype=self.dtype).unsqueeze(0)` [S1, unofficial].
+    c. If training (`is_train`), add uniform noise:
+       `interpx += torch.rand_like(interpx).to(rays_o) * ((far - near) / N_samples)` [S1, unofficial].
+    d. Compute NDC depth:
+       `ndc_depth = 2 * ndc_near_plane / (1 - ndc_near_plane - interpx)` [S1, unofficial].
+    e. If `simulate_euclid_sample` is true, simulate Euclidean sample:
+       `simulated_interpx = util.grad_rescale(interpx, ndc_depth)` [S1, unofficial].
+    f. If `simulate_euclid_sample` is true, compute ray points:
+       `rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * simulated_interpx[..., None]` [S1, unofficial].
+    g. Otherwise, compute ray points using `interpx` directly (implied by standard ray marching logic when simulation is off):
+       `rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * interpx[..., None]` [G].
+7.  **Save Parameter State**: In `save_param_state()`, save reset kwargs and alpha mask state if present:
+    `ckpt = {'tensorf_reset_kwargs': reset_kwargs}` [S1, unofficial].
+8.  **Load Parameter State**: In `load_param_state(ckpt)`:
+    a. If `alphaMask.aabb` is in checkpoint, unpack bits and create `AlphaGridMask`:
+       `alpha_volume = torch.from_numpy(np.unpackbits(ckpt['alphaMask.mask'])[:length].reshape(ckpt['alphaMask.shape']))` [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import numpy as np
+
+class TensorBase:
+    def __init__(self, aabb, gridSize, device, dtype=torch.float32, step_ratio=2.0, shadingMode='MLP_PE'):
+        self.device = device
+        self.dtype = dtype
+        self.step_ratio = step_ratio
+        self.shadingMode = shadingMode
+        
+        # Initialize mode matrices
+        self.matMode = [[0,1], [0,2], [1,2]]
+        self.vecMode = [2, 1, 0]
+        self.comp_w = [1,1,1]
+        
+        self.reset(aabb)
+        self.update_stepSize(gridSize)
+        self.init_render_func()
+
+    def reset(self, aabb):
+        self.aabb = torch.tensor(aabb, dtype=self.dtype)
+
+    def update_stepSize(self, gridSize):
+        self.aabbSize = self.aabb[1] - self.aabb[0]
+        self.invaabbSize = 2.0 / self.aabbSize
+        self.gridSize = torch.LongTensor(gridSize).to(self.device)
+        self.units = self.aabbSize / (self.gridSize - 1)
+        self.stepSize = torch.mean(self.units) * self.step_ratio
+        self.aabbDiag = torch.sqrt(torch.sum(torch.square(self.aabbSize)))
+        self.nSamples = int((self.aabbDiag / self.stepSize).item()) + 1
+
+    def init_render_func(self):
+        # Mapping based on shadingMode
+        if self.shadingMode == 'MLP_PE':
+            self.render_module = MLPRender_PE()
+        elif self.shadingMode == 'MLP':
+            self.render_module = MLPRender()
+        elif self.shadingMode == 'SH':
+            self.render_module = SHRender()
+        elif self.shadingMode == 'RGB':
+            self.render_module = RGBRender()
+        else:
+            raise ValueError(f"Unknown shadingMode: {self.shadingMode}")
+
+    def normalize_coord(self, xyz_sampled):
+        return (xyz_sampled - self.aabb[0]) * self.invaabbSize - 1
+
+    def sample_ray_ndc(self, rays_o, rays_d, near, far, N_samples, is_train, simulate_euclid_sample, ndc_near_plane):
+        if N_samples < 0:
+            N_samples = self.nSamples
+        
+        interpx = torch.linspace(near, far, N_samples, device=self.device, dtype=self.dtype).unsqueeze(0)
+        
+        if is_train:
+            interpx += torch.rand_like(interpx).to(rays_o) * ((far - near) / N_samples)
+            
+        ndc_depth = 2 * ndc_near_plane / (1 - ndc_near_plane - interpx)
+        
+        if simulate_euclid_sample:
+            simulated_interpx = util.grad_rescale(interpx, ndc_depth)
+            rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * simulated_interpx[..., None]
+        else:
+            rays_pts = rays_o[..., None, :] + rays_d[..., None, :] * interpx[..., None]
+            
+        return rays_pts, interpx
+
+    def save_param_state(self, reset_kwargs):
+        ckpt = {'tensorf_reset_kwargs': reset_kwargs}
+        return ckpt
+
+    def load_param_state(self, ckpt, length, alphaMask):
+        if 'alphaMask.aabb' in ckpt:
+            alpha_volume = torch.from_numpy(np.unpackbits(ckpt['alphaMask.mask'])[:length].reshape(ckpt['alphaMask.shape']))
+            # Create AlphaGridMask from alpha_volume [G]
+```
+
+### Edge Cases and Pitfalls
+- **Division by Zero**: `self.invaabbSize` involves division by `self.aabbSize`. If the AABB has zero extent in any dimension, this will result in infinity or NaN. Ensure `aabb[1] != aabb[0]` in all dimensions [S1, unofficial].
+- **Grid Size 1**: `self.units` divides by `self.gridSize - 1`. If any grid dimension is 1, this results in division by zero. Grid dimensions must be > 1 [S1, unofficial].
+- **NDC Depth Singularity**: `ndc_depth` calculation `2 * ndc_near_plane / (1 - ndc_near_plane - interpx)` can become unstable if `interpx` approaches `1 - ndc_near_plane`. Ensure `interpx` stays within valid bounds [S1, unofficial].
+- **Precision**: SVD operations in related utilities (e.g., `procrustes_analysis`) recommend using double precision for intermediate steps to avoid float32 precision loss, though the main class uses `self.dtype` [S1, unofficial].
+
+## Subtopics
+
+### [Neural Inpainting for Holes](8918-neural-inpainting-for-holes.md)
+A method for filling missing data in volumes. Choose when dealing with incomplete scans.
+
+### [Sparse Domain Decomposition](9993-sparse-domain-decomposition.md)
+A method for decomposing large volumes into sparse domains. Choose for memory-constrained large scenes.
+
+## Operating characteristics
+- **Time Complexity**: Initialization is $O(1)$ relative to grid size for setting up dimensions, but $O(N)$ for grid tensor creation where $N$ is the total number of grid cells. Ray sampling is $O(S)$ where $S$ is the number of samples per ray.
+- **Memory Complexity**: $O(G)$ where $G$ is the total number of grid cells ($gridSize_x \times gridSize_y \times gridSize_z$) for storing grid metadata. The actual feature storage depends on the specific tensor decomposition (e.g., TensorRF) which is not detailed in TensorBase itself.
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Scales linearly with grid resolution for memory and initialization time. Ray sampling scales linearly with the number of samples.
+- **Strengths**: Provides a unified interface for ray sampling, coordinate normalization, and rendering module selection. Handles NDC space conversion and Euclidean simulation.
+- **Limitations**: Does not define the actual tensor decomposition or feature storage, only the infrastructure. Relies on external modules for rendering.
+- **When to use**: Use as the base class for implementing tensor-based volume rendering methods that require AABB management, grid-based sampling, and modular rendering.
+- **When not to use**: Do not use if you need a complete, self-contained rendering pipeline without custom tensor decomposition. Do not use for methods that do not rely on grid-based feature volumes.
+
+## Background
+TensorBase originates from the Joint-TensoRF project, an unofficial implementation of tensor-based volume rendering techniques [S1, unofficial]. It serves as the foundational class for managing the geometric and rendering aspects of neural volume construction, specifically focusing on tensor-based representations [S1, unofficial].
+
+## Sources
+[S1] Nemo1999/Joint-TensoRF, https://github.com/Nemo1999/Joint-TensoRF, fetched 2026-10-27 (unofficial)

@@ -7,7 +7,7 @@ Voxel Occupancy Mask is an optimization for brick-level ray traversal that repla
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Ray origin, direction, inverse direction, DDA delta values, current brick cell coordinates, and texture/buffer resources.
+- Input: Ray origin, direction, inverse direction, DDA delta values, current brick cell coordinates, and texture/buffer resources [S1, unofficial].
 - Output: Palette index of the first occupied voxel hit, or 0 if the brick is empty or the ray exits without hitting occupied voxels [S1, unofficial].
 
 **Data Structures:**
@@ -80,8 +80,7 @@ def voxel_occupancy_mask_traversal(origin, dir, brick_cell, voxel_masks, voxels,
         word = mask[voxel_idx >> 5]
         bit = 1 << (voxel_idx & 31)
         if (word & bit) != 0:
-            color_idx = voxels[brick_min[0] + local[0], brick_min[1] + local[1], brick_min[2] + local[2]]
-            return palette_rgba[color_idx]
+            return voxels[voxel[0], voxel[1], voxel[2]]
 
         # Advance DDA [G]
         min_t = min(t_max)
@@ -106,8 +105,8 @@ def voxel_occupancy_mask_traversal(origin, dir, brick_cell, voxel_masks, voxels,
 - **Performance:** In the specific implementation cited, this method performed worse than the parent commit in every scene [S1, unofficial]. The smaller brick granularity (4×4×4) resulted in more bricks being visited along the ray, slowing down rendering, especially when viewing the model from afar [S1, unofficial].
 - **Strengths:** Eliminates texture lookups for occupancy checks within bricks [S1, unofficial].
 - **Limitations:** Increased number of bricks visited due to smaller size [S1, unofficial]. The overhead of managing smaller bricks outweighed the benefit of skipping empty voxels in the tested scenes [S1, unofficial].
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **When to use:** Not given in the sources [G].
+- **When not to use:** Not given in the sources [G].
 
 ## Background
 This method was introduced as an exploration in a voxel raytracer development log [S1, unofficial]. It was implemented in commit `fdf44f3` on 2026-08-04 and reverted in commit `8cb6aae` on 2026-08-05 due to poor performance [S1, unofficial]. The author noted that while it performed better in some scenes with `VX_BRICK_EXT` set to 4, the overall impact was negative, suggesting potential for future reconsideration [S1, unofficial].

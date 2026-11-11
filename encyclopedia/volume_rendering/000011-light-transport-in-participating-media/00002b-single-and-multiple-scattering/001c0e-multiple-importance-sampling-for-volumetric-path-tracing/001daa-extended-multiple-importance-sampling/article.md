@@ -7,17 +7,17 @@ Extended Multiple Importance Sampling (Extended MIS) is a framework for combinin
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** $n$ sampling techniques; $u$ regular techniques ($1 \leq i \leq u$) sampling from domain $\mathcal{D}_x$; $n-u$ extended techniques ($u < i \leq n$) sampling from $\mathcal{D}_x \times \mathcal{D}_{y_i}$; $n_i$ samples per technique $i$.
-*   **Outputs:** Combined estimator value $F^C$ and weights $\tilde{w}_i$.
+*   **Inputs:** $n$ sampling techniques; $u$ regular techniques ($1 \leq i \leq u$) sampling from domain $\mathcal{D}_x$; $n-u$ extended techniques ($u < i \leq n$) sampling from $\mathcal{D}_x \times \mathcal{D}_{y_i}$; $n_i$ samples per technique $i$ [S1].
+*   **Outputs:** Combined estimator value $F^C$ and weights $\tilde{w}_i$ [S1].
 
 **Data Structures:**
-*   **Technique Index:** Integer $i \in [1, n]$.
-*   **Sample Index:** Integer $j \in [1, n_i]$.
-*   **Regular Sample:** $X_{i,j} \in \mathcal{D}_x$.
-*   **Extended Sample:** $(X_{i,j}, Y_{i,j}) \in \mathcal{D}_x \times \mathcal{D}_{y_i}$.
-*   **Contribution Function:** $f_i(x)$ for regular; $f_i(x, y_i)$ for extended.
-*   **PDF:** $p_i(x)$ for regular; $p_i(x, y_i)$ for extended.
-*   **Kernel:** $K_i(x, y_i)$ for extended techniques.
+*   **Technique Index:** Integer $i \in [1, n]$ [S1].
+*   **Sample Index:** Integer $j \in [1, n_i]$ [S1].
+*   **Regular Sample:** $X_{i,j} \in \mathcal{D}_x$ [S1].
+*   **Extended Sample:** $(X_{i,j}, Y_{i,j}) \in \mathcal{D}_x \times \mathcal{D}_{y_i}$ [S1].
+*   **Contribution Function:** $f_i(x)$ for regular; $f_i(x, y_i)$ for extended [S1].
+*   **PDF:** $p_i(x)$ for regular; $p_i(x, y_i)$ for extended [S1].
+*   **Kernel:** $K_i(x, y_i)$ for extended techniques [S1].
 *   **Helper Function:** $h_i(x, y_i) = f_i(x, y_i) / K_i(x, y_i)$ [S1].
 
 **Numbered Steps:**
@@ -31,7 +31,7 @@ Extended Multiple Importance Sampling (Extended MIS) is a framework for combinin
     $$
     F_{i,j}^C = w_i(X_{i,j}) \frac{f_i(X_{i,j}, Y_{i,j})}{p_i(X_{i,j}, Y_{i,j})}
     $$
-    For regular techniques ($1 \leq i \leq u$), $Y_{i,j}$ is undefined/ignored, and $f_i, p_i$ depend only on $X_{i,j}$. For extended techniques ($u < i \leq n$), the term uses the extended space formulation [S1].
+    For regular techniques ($1 \leq i \leq u$), $Y_{i,j}$ is undefined and $f_i, p_i$ depend only on $X_{i,j}$ [S1]. For extended techniques ($u < i \leq n$), the term uses the extended space formulation [S1].
 
 2.  **Compute Theoretical Weights (Extended Balance Heuristic):**
     Determine the optimal weight $\tilde{w}_i(x)$ for a point $x$ by minimizing variance [S1]:
@@ -45,10 +45,10 @@ Extended Multiple Importance Sampling (Extended MIS) is a framework for combinin
     \int_{\mathcal{D}_{y_i}} \frac{f_i^2(x, y_i)}{p_i(x, y_i)} dy_i & \text{if } u < i \leq n
     \end{cases}
     $$
-    For extended techniques, $\kappa_i(x)$ includes an integral over the kernel support $\mathcal{D}_{y_i}$ [S1].
+    For extended techniques, $\kappa_i(x)$ includes an integral over the kernel support $\mathcal{D}_{y_i}$ to account for the variance contribution of MC sampling over that domain [S1].
 
 3.  **Approximate $\kappa_i(x)$ for Extended Techniques:**
-    The integral in $\kappa_i(x)$ is impractical to evaluate exactly. Assume $h_i(x, y_i)$ and $p_i(x, y_i)$ are constant within the kernel support $K_i$ [S1]. Let $y_i^*$ be a representative sample (e.g., the actual photon location) [S1]. The approximation is [S1]:
+    The exact integral in $\kappa_i(x)$ is impractical to evaluate [S1]. Assume $h_i(x, y_i)$ and $p_i(x, y_i)$ are constant within the kernel support $K_i$ [S1]. Let $y_i^*$ be a representative sample (e.g., the actual photon location) [S1]. The approximation is [S1]:
     $$
     \kappa_i(x) \approx \frac{h_i^2(x, y_i^*)}{p_i(x, y_i^*)} \int_{\mathcal{D}_{y_i}} K_i^2(x, y_i) dy_i
     $$
@@ -59,201 +59,128 @@ Extended Multiple Importance Sampling (Extended MIS) is a framework for combinin
     $$
     \tilde{w}_i'(x, y_i^*) = \frac{n_i p_i'(x, y_i^*)}{\sum_{k=1}^n n_k p_k'(x, y_k^*)}
     $$
-    where the effective PDF $p_i'$ is defined as [S1]:
+    The effective term $p_i'(x, y_i^*)$ is defined as [S1]:
     $$
     p_i'(x, y_i^*) = \begin{cases} 
     p_i(x) & \text{if } 1 \leq i \leq u \\
     \frac{p_i(x, y_i^*)}{\int_{\mathcal{D}_{y_i}} K_i^2(x, y_i) dy_i} & \text{if } u < i \leq n
     \end{cases}
     $$
-    In practice, for extended techniques, $y_i^*$ is set to the actual realization of the random variable (e.g., photon location) [S1]. For regular techniques, $y_i^*$ corresponds to the kernel center or is irrelevant as $p_i'$ depends only on $x$ [S1].
+    In practice, for extended techniques, $y_i^*$ is set to the actual realization of the random variable (e.g., photon location) [S1]. For regular techniques, $y_i^*$ is irrelevant as $p_i'$ depends only on $x$ [S1].
 
 5.  **Final Estimator Evaluation:**
-    For each sample $j$ of technique $i$, compute the weight $\tilde{w}_i'$ using the appropriate $p_i'$ and the sample location. Multiply the raw contribution of the sample by this weight and sum all weighted contributions [S1].
+    For each sample $j$ of technique $i$, compute the weight $\tilde{w}_i'$ using the appropriate $p_i'$ and the sample location [S1]. Multiply the raw contribution of the sample by this weight and sum all weighted contributions [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def extended_mis_combine(samples, techniques, n_samples_per_technique):
+def extended_mis_combine(x, techniques, samples_per_technique):
     """
     Combines contributions from regular and extended sampling techniques using Extended MIS.
     
     Args:
-        samples: List of lists. samples[i] contains n_samples_per_technique[i] samples.
-                 For regular techniques (i < u), sample is a point x.
-                 For extended techniques (i >= u), sample is a tuple (x, y).
+        x: Point in D_x where estimators are evaluated.
         techniques: List of technique objects. Each has:
             - is_extended: bool
             - pdf(x, y=None): returns p_i(x) or p_i(x, y)
             - kernel_integral_sq(x): returns integral of K_i^2 over D_yi for extended techniques.
             - contribution(x, y=None): returns f_i(x) or f_i(x, y).
-        n_samples_per_technique: List of integers n_i.
-        
+        samples_per_technique: List of lists. samples_per_technique[i] contains n_i samples.
+                 For regular techniques (i < u), sample is a point x.
+                 For extended techniques (i >= u), sample is a tuple (x, y).
+                 
     Returns:
         float: The combined estimator value F^C.
     """
-    u = len([t for t in techniques if not t.is_extended])
     n = len(techniques)
-    total_weighted_sum = 0.0
+    n_i_list = [len(s) for s in samples_per_technique]
     
-    # Precompute denominator terms for the weight heuristic
-    # We need to compute sum_{k=1}^n n_k * p_k'(x, y_k*)
-    # However, the weight depends on the specific sample's location.
-    # The standard MIS application applies weights per sample.
-    # The formula for weight w_i' depends on x and y_i*.
-    # We must compute the denominator for each sample individually or group by x if applicable.
-    # In volumetric path tracing, x is often the same for multiple techniques (e.g. scattering event).
-    # Here we assume we process samples for a specific x.
-    
-    # To implement strictly from the formula:
-    # For each sample j of technique i:
-    #   1. Determine x and y*
-    #   2. Compute p_i'
-    #   3. Compute weight w_i' = (n_i * p_i') / sum_k(n_k * p_k')
-    #   4. Add w_i' * (f_i / p_i) to sum
-    
-    # Note: The source defines F^C as sum over i,j. The weight w_i is applied to the term f/p.
-    # The term f/p is the raw estimator. The weight normalizes it.
-    
+    # Step 1: Determine representative y_i* for each technique
+    rep_y = []
     for i in range(n):
-        n_i = n_samples_per_technique[i]
-        technique = techniques[i]
-        is_extended = technique.is_extended
-        
-        # Collect all samples for this technique to compute the denominator sum?
-        # No, the weight w_i'(x, y_i*) depends on the specific sample's y_i*.
-        # The denominator sum_{k} n_k p_k'(x, y_k*) also depends on the specific y_k* of each technique k.
-        # This implies the weights are computed per-sample, but the denominator aggregates 
-        # the "representative" y_k* for each technique k.
-        
-        # In practice, for a given x, each technique provides one or more samples.
-        # The "y_k*" for technique k is the sample used to evaluate the weight.
-        
-        # Let's assume we are evaluating the contribution of a specific set of samples 
-        # for a single point x.
-        
-        # Step 1: Compute the denominator D = sum_{k=1}^n n_k * p_k'(x, y_k*)
-        # We need a representative y_k* for each technique k.
-        # For regular techniques, y_k* is not used, p_k' = p_k(x).
-        # For extended techniques, y_k* is the sample location y.
-        
-        # If we have multiple samples per technique, which y_k* to use?
-        # The source says "y_i* can be set to an arbitrary y_i within the kernel support".
-        # In practice, use the actual realization. If multiple samples, we might average 
-        # or pick one. The source implies one representative per technique for the weight calculation.
-        
-        # Let's assume samples[i] is a list of samples. We pick the first one as y_i* for weight calculation?
-        # Or we compute weights for each sample individually?
-        # The formula w_i'(x, y_i*) suggests the weight depends on y_i*.
-        # If we have multiple samples, do we use the same weight for all?
-        # The source says "y_i* appears... because we have pulled the terms".
-        # It seems the weight is constant for all samples of technique i for a given x,
-        # determined by the representative y_i*.
-        
-        # Let's pick the first sample as the representative y_i* for weight calculation.
-        if len(samples[i]) == 0:
-            continue
-            
-        rep_y_i = None
-        if is_extended:
-            rep_y_i = samples[i][0][1] # (x, y)
-            
-        # Compute denominator
-        denominator = 0.0
-        for k in range(n):
-            n_k = n_samples_per_technique[k]
-            tech_k = techniques[k]
-            is_ext_k = tech_k.is_extended
-            
-            if is_ext_k:
-                # Need rep_y_k for technique k
-                if len(samples[k]) == 0:
-                    p_k_prime = 0.0
-                else:
-                    rep_y_k = samples[k][0][1]
-                    # p_k' = p_k(x, y_k*) / integral K_k^2
-                    p_k_val = tech_k.pdf(samples[i][0][0], rep_y_k) # x is same for all techniques at this event
-                    int_k_sq = tech_k.kernel_integral_sq(samples[i][0][0])
-                    if int_k_sq == 0:
-                        p_k_prime = 0.0
-                    else:
-                        p_k_prime = p_k_val / int_k_sq
+        if len(samples_per_technique[i]) > 0:
+            if techniques[i].is_extended:
+                rep_y.append(samples_per_technique[i][0][1])
             else:
-                # Regular technique
-                # p_k' = p_k(x)
-                p_k_prime = tech_k.pdf(samples[i][0][0])
-                
-            denominator += n_k * p_k_prime
-            
-        if denominator == 0:
-            continue
-            
-        # Step 2: Compute weight for technique i
-        if is_extended:
-            # p_i' = p_i(x, y_i*) / integral K_i^2
-            p_i_val = technique.pdf(samples[i][0][0], rep_y_i)
-            int_i_sq = technique.kernel_integral_sq(samples[i][0][0])
-            if int_i_sq == 0:
-                p_i_prime = 0.0
-            else:
-                p_i_prime = p_i_val / int_i_sq
+                rep_y.append(None)
         else:
-            p_i_prime = technique.pdf(samples[i][0][0])
+            rep_y.append(None)
             
-        weight_i = (n_i * p_i_prime) / denominator
-        
-        # Step 3: Sum contributions
-        for sample in samples[i]:
-            if is_extended:
-                x, y = sample
-                f_val = technique.contribution(x, y)
-                p_val = technique.pdf(x, y)
+    # Step 2: Compute p_i' for each technique
+    p_prime = []
+    for i in range(n):
+        if rep_y[i] is None:
+            p_prime.append(techniques[i].pdf(x))
+        else:
+            int_k_sq = techniques[i].kernel_integral_sq(x)
+            if int_k_sq == 0.0:
+                p_prime.append(0.0)
             else:
-                x = sample
-                f_val = technique.contribution(x)
-                p_val = technique.pdf(x)
+                p_prime.append(techniques[i].pdf(x, rep_y[i]) / int_k_sq)
                 
-            if p_val == 0:
+    # Step 3: Compute denominator D = sum_{k=1}^n n_k * p_k'
+    denominator = sum(n_i_list[k] * p_prime[k] for k in range(n))
+    
+    if denominator == 0.0:
+        return 0.0
+        
+    # Step 4: Compute weights and sum contributions
+    total = 0.0
+    for i in range(n):
+        n_i = n_i_list[i]
+        if n_i == 0:
+            continue
+            
+        weight_i = (n_i * p_prime[i]) / denominator
+        
+        for sample in samples_per_technique[i]:
+            if techniques[i].is_extended:
+                _, y = sample
+                f_val = techniques[i].contribution(x, y)
+                p_val = techniques[i].pdf(x, y)
+            else:
+                f_val = techniques[i].contribution(x)
+                p_val = techniques[i].pdf(x)
+                
+            if p_val == 0.0:
                 continue
                 
             raw_estimator = f_val / p_val
-            total_weighted_sum += weight_i * raw_estimator
+            total += (1.0 / n_i) * weight_i * raw_estimator
             
-    return total_weighted_sum
+    return total
 ```
 
 **Parameters:**
-*   $n$: Total number of sampling techniques.
-*   $u$: Number of regular sampling techniques ($1 \leq i \leq u$).
-*   $n-u$: Number of extended space sampling techniques ($u < i \leq n$).
-*   $n_i$: Number of samples for technique $i$.
+*   $n$: Total number of sampling techniques [S1].
+*   $u$: Number of regular sampling techniques ($1 \leq i \leq u$) [S1].
+*   $n-u$: Number of extended space sampling techniques ($u < i \leq n$) [S1].
+*   $n_i$: Number of samples for technique $i$ [S1].
 
 **Edge Cases and Pitfalls:**
 *   **Kernel Integral Zero:** If $\int K_i^2 = 0$, the weight calculation divides by zero. Guard against this [S1].
 *   **PDF Zero:** If $p_i(x, y_i) = 0$, the raw estimator is undefined. Guard against division by zero [S1].
-*   **Approximation Validity:** The approximation $h_i(x, y_i^*) \approx f(x)$ assumes the contribution function and PDF are constant within the kernel support. This may fail for highly varying functions or large kernels [S1].
+*   **Approximation Validity:** The approximation $h_i(x, y_i^*) \approx f(x)$ assumes the contribution function and PDF are constant within the kernel support [S1].
 *   **Dimension Mismatch:** Standard MIS cannot be applied directly because extended techniques integrate over $\mathcal{D}_{y_i}$, changing the effective dimension of the estimator [S1].
 
 ## Subtopics
 
 ### [Multi-View Path Tracing with MWIS](1834-multi-view-path-tracing-with-mwis.md)
-Uses Multiple Weighted Importance Sampling for combining views.
+Uses Multiple Weighted Importance Sampling to combine views. It sets itself apart by weighting samples based on view-dependent coverage rather than dimensionality, and is chosen when rendering multi-camera or light-field scenes.
 
 ### [Weighted Importance Sampling](1849-weighted-importance-sampling.md)
-General WIS method.
+General WIS method for combining estimators with known importance weights. It sets itself apart by not requiring a balance heuristic derivation, and is chosen when weights are analytically known or precomputed.
 
 ### [Direct Lighting with MIS in VolPathIntegrator](1877-direct-lighting-with-mis-in-volpathintegrator.md)
-Applies MIS to direct lighting in volumetric path tracing.
+Applies MIS to direct lighting in volumetric path tracing. It sets itself apart by focusing specifically on the phase function vs. next-event estimation trade-off, and is chosen for efficient direct illumination in participating media.
 
 ## Operating characteristics
 *   **Time Complexity:** Linear in the number of samples $n_i$ and techniques $n$. The approximation avoids the expensive integration over $\mathcal{D}_{y_i}$ during runtime by precomputing or caching $\int K_i^2$ [S1].
-*   **Memory Complexity:** Depends on storing samples and technique data. No significant additional memory for the heuristic itself [S1].
 *   **Strengths:** Allows combining unbiased path tracing with biased density estimators (photon/beam tracing) without reformulating all estimators to the same space [S1]. Provides provably good weights [S1].
-*   **Limitations:** The approximation of $\kappa_i(x)$ may introduce bias or suboptimal weights if the kernel support is large or the function varies rapidly [S1].
 *   **When to Use:** When mixing path tracing with photon mapping or beam tracing in participating media [S1].
-*   **When Not to Use:** When all techniques operate on the same space (use standard MIS) or when high accuracy of weights is critical and the approximation assumptions are violated [S1].
+*   **When Not to Use:** When all techniques operate on the same space (use standard MIS) [S1].
 
 ## Background
 Extended Multiple Importance Sampling was introduced in the paper "Unifying points, beams, and paths in volumetric light transport simulation" [S1]. It extends the MIS framework to handle estimators on spaces of different dimensions, specifically addressing the integration over kernel supports in photon and beam density estimators [S1]. Prior work [Hachisuka et al. 2012; Georgiev et al. 2012] reformulated estimators to the same space; Extended MIS avoids this by extending the heuristic directly [S1].

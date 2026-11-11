@@ -19,21 +19,20 @@ This method implements direct volume rendering on an interactive light field dis
 The method uses the following structures [S1]:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-```cpp
-struct ray_t {
-    float3 org;
-    float3 dir;
-    float len;
-};
-struct fragment_out {
-    float4 color; // COLOR0
-};
+```python
+# Ray structure
+org = (0.0, 0.0, 0.0)
+dir = (0.0, 0.0, 0.0)
+length = 0.0
+
+# Output structure
+color = (0.0, 0.0, 0.0, 0.0)
 ```
 
 **Steps:**
 
 1.  **Proxy Geometry Setup:** Render a coarsely tessellated proxy geometry (8x8 quads) of a slightly enlarged bounding volume [S1]. This avoids the interpolation errors inherent in standard fixed-function pipelines for MCOP projections [S1].
-2.  **Vertex Shader Projection:** In the vertex shader, perform MCOP projection on the proxy vertices. Pass both normalized and unnormalized projected coordinates to the fragment stage [S1].
+2.  **Vertex Shader Projection:** In the vertex shader, perform MCOP projection on the proxy vertices [S1]. Pass both normalized and unnormalized projected coordinates to the fragment stage [S1].
 3.  **Ray Origin Computation:** In the fragment shader, receive the unnormalized projected position $S$ from the vertex stage. $S$ represents the screen pixel’s position in the display reference frame [S1].
 4.  **Ray Direction Calculation:** Compute the ray direction $d$ passing through point $S$ using the MCOP projection parameterized by emitter $E$ and virtual viewer parameters $V$ [S1]:
     $$
@@ -44,7 +43,7 @@ struct fragment_out {
     \text{ray\_d} = \left[ -\frac{E_{w,x} - x}{E_{w,z}}, \frac{V_h - y}{V_d}, -1, 0 \right]
     $$
 5.  **Coordinate Transformation:** Transform the infinite ray defined by $S$ and $d$ into local volume coordinates (coincident with texture coordinates) by applying the world-to-texture homogeneous transform matrix (inverse model-view matrix) [S1].
-6.  **Ray Clipping and Validation:** Clip the line against the unit box to compute the ray entry point and integration lengths. If the ray length is null (or less than epsilon), discard the fragment as invalid [S1].
+6.  **Ray Clipping and Validation:** Clip the line against the unit box to compute the ray entry point and integration lengths [S1]. If the ray length is null (or less than epsilon), discard the fragment as invalid [S1].
 7.  **Ray Marching Loop:** Step through the ray in a loop, performing volume resampling and compositing until the volume is exited or full opacity is reached [S1].
 8.  **Mipmap Level Selection:** At each sampling step, compute the depth $z$ of the current sample by transforming its position in texture space to world (screen-aligned) space using a single dot product [S1]. Compute the mipmap level $l$ using the equation [S1]:
     $$
@@ -59,111 +58,94 @@ struct fragment_out {
 11. **Transfer Function:** Apply the transfer function and shading to get color $C_i$ and opacity $\alpha_i$ [S1].
 
 **Pseudocode:**
-The following pseudocode is derived from Appendix A of [S1]. Helper functions `clip_to_unit_box` and `mipmap_value` are assumed to be defined. `glstate.matrix.modelview` refers to the current model-view matrix.
+The following pseudocode is derived from Appendix A of [S1]. Helper functions `clip_to_unit_box` and `mipmap_value` are assumed to be defined. `modelview_matrix` refers to the current model-view matrix.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Uniforms
-Ew: float3          # Projector position
-Vd: float           # Virtual observer distance
-Vh: float           # Virtual observer height
-log2V: float        # log2 voxel size
-DL: float           # stepsize
-S0: float           # screen pixel size
-tanPhi: float       # angular spread factor
-a_max: float        # termination threshold (typically 0.95 or 1.0) [G]
+import math
 
-# Structures
-struct ray_t:
-    org: float3
-    dir: float3
-    len: float
+# Uniforms [S1]
+Ew = (0.0, 0.0, 0.0)  # Projector position
+Vd = 0.0               # Virtual observer distance
+Vh = 0.0               # Virtual observer height
+log2V = 0.0            # log2 voxel size
+DL = 0.0               # stepsize
+S0 = 0.0               # screen pixel size
+tanPhi = 0.0           # angular spread factor
+a_max = 1.0            # termination threshold [G]
 
-struct fragment_out:
-    color: float4
-
-# Helper: Clip ray to unit box [S1]
-# Returns float2 {tmin, tmax}
-function clip_to_unit_box(origin: float3, direction: float3) -> float2:
-    # Implementation details omitted in source, standard slab method assumed [G]
+def clip_to_unit_box(origin, direction):
+    # Standard slab method to clip ray to unit box [G]
     pass
 
-# Helper: Sample texture with LOD [S1]
-function mipmap_value(uvw: float3, level: float) -> float4:
+def mipmap_value(uvw, level):
     # Uses tex3Dlod intrinsic [S1]
     pass
 
-# Main Ray Casting Function
-function ray_at_xy(x: float, y: float, mv_inv: float4x4) -> ray_t:
-    result: ray_t
-    
+def ray_at_xy(x, y, mv_inv):
     # Compute ray passing through pixel in world coords [S1]
-    ray_o: float4 = float4(x, y, 0, 0)
-    ray_d: float4 = float4(-(Ew.x - x) / Ew.z, (Vh - y) / Vd, -1, 0)
+    ray_o = (x, y, 0.0, 0.0)
+    ray_d = (-(Ew[0] - x) / Ew[2], (Vh - y) / Vd, -1.0, 0.0)
     
     # Transform from world to texture coordinates [S1]
-    tex_o: float3 = mul(mv_inv, ray_o).xyz
-    tex_e: float3 = mul(mv_inv, ray_o + ray_d).xyz
+    tex_o = mul(mv_inv, ray_o)[:3]
+    tex_e = mul(mv_inv, (ray_o[0]+ray_d[0], ray_o[1]+ray_d[1], ray_o[2]+ray_d[2], ray_o[3]))[:3]
     
     # Clip ray to volume box [S1]
-    result.dir = normalize(tex_e - tex_o)
-    tmin_tmax: float2 = clip_to_unit_box(tex_o, result.dir)
+    dir_norm = normalize(tex_e - tex_o)
+    tmin_tmax = clip_to_unit_box(tex_o, dir_norm)
     
-    result.org = tex_o + result.dir * tmin_tmax.x
-    result.len = tmin_tmax.y - tmin_tmax.x
+    org = (tex_o[0] + dir_norm[0] * tmin_tmax[0],
+           tex_o[1] + dir_norm[1] * tmin_tmax[1],
+           tex_o[2] + dir_norm[2] * tmin_tmax[2])
+    length = tmin_tmax[1] - tmin_tmax[0]
     
-    return result
+    return org, dir_norm, length
 
-function fragment_shader(Qw: vertex_out) -> fragment_out:
-    OUT: fragment_out
-    
+def fragment_shader(Qw, inverse_modelview_matrix):
     # Compute ray in tex coords [S1]
-    # IN.Qw.x and IN.Qw.y are the projected coordinates from vertex shader
-    ray: ray_t = ray_at_xy(Qw.x, Qw.y, inverse_modelview_matrix)
+    org, dir, length = ray_at_xy(Qw[0], Qw[1], inverse_modelview_matrix)
     
-    # If ray length is less than epsilon, discard fragment [S1]
-    if ray.len < epsilon:
-        discard
+    if length < 1e-6:
+        return None  # Out of bounds [S1]
     
-    else:
-        # Ray composition initialization [S1]
-        delta_dir: float3 = ray.dir * DL
-        N: int = int(ray.len / DL)
-        uvw: float3 = ray.org
-        I: float3 = float3(0, 0, 0)
-        a: float = 0.0
+    # Ray composition initialization [S1]
+    delta_dir = (dir[0] * DL, dir[1] * DL, dir[2] * DL)
+    N = int(length / DL)
+    uvw = org
+    I = (0.0, 0.0, 0.0)
+    a = 0.0
+    
+    for i in range(N):
+        if a >= a_max:
+            break
+            
+        # Find distance from screen [S1]
+        # Transform uvw to world space to get z
+        z = abs(dot(modelview_matrix[2], (uvw[0], uvw[1], uvw[2], 1.0)))
         
-        for i from 0 to N-1:
-            # Check early termination [S1]
-            if a >= a_max:
-                break
-            
-            # Find distance from screen [S1]
-            # Transform uvw to world space to get z
-            z: float = abs(dot(glstate.matrix.modelview[0][2], float4(uvw.xyz, 1.0)))
-            
-            # Compute mipmap level [S1]
-            mipmap_l: float = log2(S0 + 2 * tanPhi * z) - log2V
-            
-            # Sample texture [S1]
-            gggv: float4 = mipmap_value(uvw.xyz, mipmap_l)
-            
-            # Apply transfer function and shading [S1]
-            # C_i and a_i are derived from gggv (RGB=gradient, A=voxel value)
-            C_i: float3 = ... # Implementation details omitted in source [S1]
-            a_i: float = ...  # Implementation details omitted in source [S1]
-            
-            # Accumulate color and opacity [S1]
-            I = I + (1.0 - a) * C_i
-            a = a + (1.0 - a) * a_i
-            
-            # Step along ray [S1]
-            uvw += delta_dir
-            
-        OUT.color = float4(I, a)
-    
-    return OUT
+        # Compute mipmap level [S1]
+        mipmap_l = math.log2(S0 + 2 * tanPhi * z) - log2V
+        
+        # Sample texture [S1]
+        gggv = mipmap_value(uvw, mipmap_l)
+        
+        # Apply transfer function and shading [S1]
+        # C_i and a_i derivation omitted in source [S1]
+        C_i = (0.0, 0.0, 0.0)
+        a_i = 0.0
+        
+        # Accumulate color and opacity [S1]
+        I = (I[0] + (1.0 - a) * C_i[0],
+             I[1] + (1.0 - a) * C_i[1],
+             I[2] + (1.0 - a) * C_i[2])
+        a = a + (1.0 - a) * a_i
+        
+        # Step along ray [S1]
+        uvw = (uvw[0] + delta_dir[0], uvw[1] + delta_dir[1], uvw[2] + delta_dir[2])
+        
+    return (I[0], I[1], I[2], a)
 ```
 
 **Edge Cases and Pitfalls:**
@@ -173,7 +155,7 @@ function fragment_shader(Qw: vertex_out) -> fragment_out:
 *   **Performance:** At full resolution (1 ray/pixel, 1 sample/voxel), millions of rays require hundreds of steps, limiting interactive frame rates. The method suggests lowering sampling rate during interaction by reducing pixel count (2.5mm precision) and doubling the integration step-size [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of rays (pixels). The number of samples $N$ is determined by the ray length divided by the step size $DL$ [S1].
+*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of rays (pixels). The number of samples $N$ is determined by the ray length divided by the step size $DL$ [G].
 *   **Memory Complexity:** Dominated by the storage of the 3D volume texture (4-component) and the 1D LUT [S1].
 *   **Measured Performance:** The method was demonstrated on a display with 96 projectors. Performance was limited by single GPU volume renderer performance at full resolution, necessitating reduced sampling rates for interactivity [S1].
 *   **Strengths:** Provides a fully continuous perceived image for multiple viewers, unlike discrete multiview systems. Supports parallax, accommodation, and stereo cues [S1].
