@@ -1,0 +1,48 @@
+# Separable 3D Transfer Function Editor
+
+Also called: 2D+1D Transfer Function Editor, Separable Transfer Function Editor
+
+## Overview
+The Separable 3D Transfer Function Editor is a user interface technique that decomposes a 3D transfer function space into a primary 2D domain and associated 1D domains to improve usability while maintaining classification precision [S1, unofficial]. It addresses the difficulty of interacting with true 3D transfer function widgets by allowing users to define regions in a 2D space (e.g., scalar vs. gradient magnitude) and then refine classification using a tertiary attribute (e.g., occlusion) via a linked 1D editor [S1, unofficial]. It differs from its parent, the Separable Transfer Function, by providing the specific interactive UI mechanics (lasso tools, histogram-linked 1D editors) to implement this separation, and from siblings like [Sequential 2D/1D Transfer Function Combination](9506-sequential-2d-1d-transfer-function-combination.md) by allowing simultaneous, independent 1D refinements for multiple 2D widgets rather than a strict sequential pipeline [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volume dataset containing scalar values, gradient magnitude, and a tertiary attribute (e.g., occlusion or size) [S1, unofficial].
+*   **Output:** A composite transfer function defined by a set of 2D widgets and their associated 1D transfer functions [S1, unofficial].
+
+**Data Structures:**
+*   **2D Widget:** Defined by a shape (ellipse, rectangle, triangle, or lasso boundary) in the scalar vs. gradient magnitude plane [S1, unofficial]. Exact bit packing and memory layout are not given in the sources.
+*   **1D Editor State:** For each active 2D widget, a histogram of the tertiary attribute for all voxels selected by that widget [S1, unofficial].
+*   **1D Transfer Function:** A mapping from the tertiary attribute to opacity/color, defined by control points or a piecewise function [S1, unofficial].
+*   **UI Layout:** The top part contains the 2D transfer function domain with 2D widgets, while the bottom part contains the 1D transfer function editor and histogram for the active widget [S1, unofficial]. A selector box on the left of the 1D editor allows choosing the tertiary attribute [S1, unofficial].
+
+**Steps:**
+1.  **Initialize 2D Space:** Display the 2D transfer function domain (typically scalar vs. gradient magnitude) [S1, unofficial].
+2.  **Select Region:** User places a 2D widget (ellipse, rectangle, triangle) or draws a lasso boundary to select a region in the 2D space [S1, unofficial].
+3.  **Compute Histogram:** For the selected region defined by the widget, compute the histogram of the tertiary attribute for all voxels falling within the widget's boundary [S1, unofficial].
+4.  **Display 1D Editor:** Show a 1D transfer function editor and the computed histogram at the bottom of the UI, linked to the active widget [S1, unofficial].
+5.  **Refine 1D:** User designs the 1D transfer function for the tertiary attribute using the histogram as a guide, which strictly affects only voxels selected by the 2D widget [S1, unofficial].
+
+**Formulas:**
+Not given in the sources.
+
+**Parameters:**
+*   **Tertiary Attributes:** Commonly occlusion or size [S1, unofficial].
+*   **Widget Shapes:** Ellipse, rectangle, triangle, lasso [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Independence:** Separation can cause decreased classification precision if the 1D space is highly dependent on the 2D space [S1, unofficial].
+*   **Mitigation:** Combination selection rules rule out highly dependent 1D transfer function spaces to preserve precision [S1, unofficial].
+*   **Precision:** Standard 2D widgets may lack precision for subtle structures, which is why a lasso tool is provided for intuitive, arbitrary region selection [S1, unofficial].
+
+## Operating characteristics
+*   **Usability:** Significantly more intuitive than true 3D widgets, which remain difficult to interact with robustly [S1, unofficial].
+*   **Precision:** Potentially lower than true 3D transfer functions if the chosen 1D attribute correlates with the 2D attributes, though selection rules mitigate this [S1, unofficial].
+*   **Complexity:** Adds minimal complexity to standard 1D and 2D editors in existing volume visualization systems [S1, unofficial].
+*   **Learning Curve:** Requires users to be familiar with the specific interaction techniques [S1, unofficial].
+
+## Background
+The method was proposed by Zhou et al. in their dissertation on Multivariate Transfer Function Design [S1, unofficial]. It builds on the concept of separable transfer functions [9014-separable-transfer-function.md] and similar separation methods by Haidacher et al. for multimodal visualization [S1, unofficial]. It is implemented in volume visualization systems such as Voreen and ImageVis3D [S1, unofficial].
+
+## Sources
+[S1] MULTIVARIATE TRANSFER FUNCTION DESIGN, https://www.sci.utah.edu/~lzhou/dissertation_final_zhoul.pdf, fetched 2026-10-27 (unofficial)

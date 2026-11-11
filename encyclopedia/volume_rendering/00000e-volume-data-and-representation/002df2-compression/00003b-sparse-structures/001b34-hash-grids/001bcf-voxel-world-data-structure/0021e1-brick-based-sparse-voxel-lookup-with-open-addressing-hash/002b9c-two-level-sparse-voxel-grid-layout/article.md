@@ -1,107 +1,81 @@
 # Two-Level Sparse Voxel Grid Layout
 
-Also called: BrickMap, BrickPool, two-level grids, brickgrid
+Also called: BrickMap, BrickPool, Brickmaps / two-level grids, brickgrid, two-level grids
 
 ## Overview
-Two-Level Sparse Voxel Grid Layout stores a sparse voxel world using an outer grid of cells that point to fixed-size inner bricks of packed voxels [S1, unofficial]. It uses a fixed-size outer grid for coordinate mapping instead of a hash-based lookup, trading collision resolution for predictable memory layout and direct arithmetic access [S1, unofficial].
+Two-Level Sparse Voxel Grid Layout stores a sparse voxel world using an outer grid of cells pointing to fixed-size inner bricks of packed voxels [S1, unofficial]. It differs from its parent [Brick-based Sparse Voxel Lookup with Open-Addressing Hash](2587-brick-based-sparse-voxel-lookup-with-open-addressing-hash.md) by using a uniform grid for the top level rather than a hash table, trading the hash collision resolution overhead for simpler, direct indexing at the cost of potential empty top-level cells [S2].
 
 ## How it works
-**Inputs:** World dimensions in voxels (`WORLDSIZE`), brick dimensions (`BRICKSIZE`), and a set of active voxel coordinates with associated data (e.g., material ID) [S1, unofficial].
-**Outputs:** An outer grid array and a dynamic pool of brick structures [S1, unofficial].
+**Inputs and Outputs**
+- Input: World dimensions in voxels (`WORLDSIZE`), brick dimensions (`BRICKSIZE`), and voxel data (occupancy, material, color).
+- Output: A memory layout consisting of a top-level grid of pointers and a pool of brick structures.
 
-**Data Structures:**
-1. **Outer Grid:** A 3D array of size `GRIDSIZE³`. Each cell stores either a null pointer or a pointer to a brick [S1, unofficial]. `GRIDSIZE = WORLDSIZE / BRICKSIZE` [S1, unofficial].
-2. **Brick:** A contiguous block of memory containing `BRICKSIZE³` packed `uint32_t` voxels [S1, unofficial]. Default brick size is 8×8×8, yielding 512 voxels per brick [S1, unofficial].
+**Data Structures**
+1.  **Top-Level Grid**: A 3D array of size $GRIDSIZE^3$. Each cell stores a pointer (or index) to a brick, or `null` if the region is empty [S1, unofficial].
+    -   $GRIDSIZE = \lceil WORLDSIZE / BRICKSIZE \rceil$ [S1, unofficial].
+    -   Default `WORLDSIZE` is 512, default `GRIDSIZE` is 64 [S1, unofficial].
+2.  **Brick (BrickMap)**: A fixed-size structure representing an $8 \times 8 \times 8$ block of voxels [S2].
+    -   **Occupancy Mask**: A 512-bit bitset indicating which of the 512 voxels are active [S2].
+    -   **Voxel Data**: Packed `uint32_t` values for active voxels. The exact layout of these packed values is not specified in the sources, but they are stored contiguously following the mask [S1, unofficial].
+    -   **Size**: The occupancy mask alone is "exactly 71 bytes, not counting shading attributes" [S2].
+    -   **Color**: Stored separately, DXT1-compressed to ~4 bits per voxel. Each brick also stores an LOD color [S2].
 
-**Algorithm:**
-1. Initialize the outer grid of size `GRIDSIZE³` with null pointers [G].
-2. Initialize an empty dynamic brick pool [S1, unofficial].
-3. For each active voxel at world coordinates $(x, y, z)$ with data $D$:
-   a. Calculate brick coordinates: $bx = \lfloor x / BRICKSIZE \rfloor$, $by = \lfloor y / BRICKSIZE \rfloor$, $bz = \lfloor z / BRICKSIZE \rfloor$ [G].
-   b. Clamp $(bx, by, bz)$ to $[0, GRIDSIZE-1]$ to handle boundary conditions [G].
-   c. Compute the linear index in the outer grid: $idx = (bz \times GRIDSIZE + by) \times GRIDSIZE + bx$ [G].
-   d. If `grid.cells[idx]` is null, allocate a new brick from the dynamic pool. Safety-clamp the pool size to `GRIDSIZE³` to prevent overflow [S1, unofficial].
-   e. Initialize the new brick's voxel array to default values [G].
-   f. Store the pointer to the new brick in `grid.cells[idx]` [G].
-   g. Calculate local voxel coordinates: $lx = x \pmod{BRICKSIZE}$, $ly = y \pmod{BRICKSIZE}$, $lz = z \pmod{BRICKSIZE}$ [G].
-   h. Compute the local linear index: $local\_idx = (lz \times BRICKSIZE + ly) \times BRICKSIZE + lx$ [G].
-   i. Store $D$ in `brick.voxels[local_idx]` [G].
+**Algorithm Steps**
+1.  **Initialization**:
+    -   Calculate `GRIDSIZE` from `WORLDSIZE` and `BRICKSIZE` [S1, unofficial].
+    -   Allocate the top-level grid of size $GRIDSIZE^3$ initialized to `null` [S1, unofficial].
+    -   Initialize an empty dynamic brick pool [S1, unofficial].
+2.  **Insertion/Update**:
+    -   Given a voxel coordinate $(x, y, z)$, calculate the brick coordinate:
+        $$ b_x = \lfloor x / BRICKSIZE \rfloor, \quad b_y = \lfloor y / BRICKSIZE \rfloor, \quad b_z = \lfloor z / BRICKSIZE \rfloor $$
+    -   Access the top-level grid cell at $(b_x, b_y, b_z)$ [S1, unofficial].
+    -   If the cell is `null`:
+        -   Allocate a new brick from the dynamic pool [S1, unofficial].
+        -   Set the cell pointer to the new brick.
+        -   Safety clamp the pool growth to $GRIDSIZE^3$ to prevent exceeding the world bounds [S1, unofficial].
+    -   If the cell points to an existing brick:
+        -   Retrieve the brick.
+    -   Set the corresponding bit in the brick's 512-bit occupancy mask for the local voxel index:
+        $$ local\_index = (x \pmod{BRICKSIZE}) + BRICKSIZE \cdot ((y \pmod{BRICKSIZE}) + BRICKSIZE \cdot (z \pmod{BRICKSIZE})) $$
+        $$ brick.occupancy\_mask[local\_index] = 1 $$
+    -   Store the voxel data (material, color) in the brick's packed voxel array at the position corresponding to `local_index` among active voxels [S1, unofficial].
+3.  **Access**:
+    -   To read voxel $(x, y, z)$, compute brick coordinates $(b_x, b_y, b_z)$ [S1, unofficial].
+    -   Check if `top_level_grid[b_x][b_y][b_z]` is `null`. If so, the voxel is empty [S1, unofficial].
+    -   Otherwise, retrieve the brick and check `brick.occupancy_mask[local_index]` [S1, unofficial].
+    -   If set, retrieve the voxel data from the brick [S1, unofficial].
 
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+**Parameters**
+-   `WORLDSIZE`: World dimension in voxels. Default: 512 [S1, unofficial].
+-   `BRICKSIZE`: Brick dimension. Default: 8 (implied by $8 \times 8 \times 8$ bricks) [S2].
+-   `GRIDSIZE`: Outer grid dimension. Calculated as $WORLDSIZE / BRICKSIZE$. Default: 64 [S1, unofficial].
 
-```python
-WORLDSIZE = 512
-BRICKSIZE = 8
-GRIDSIZE = WORLDSIZE // BRICKSIZE  # 64
-
-class Brick:
-    voxels: list[int]  # Size BRICKSIZE^3, stores uint32_t values
-
-class Grid:
-    cells: list[Brick | None]  # Size GRIDSIZE^3
-
-def init_world() -> Grid:
-    grid = Grid()
-    grid.cells = [None] * (GRIDSIZE ** 3)
-    return grid
-
-def add_voxel(grid: Grid, x: int, y: int, z: int, data: int) -> None:
-    bx = x // BRICKSIZE
-    by = y // BRICKSIZE
-    bz = z // BRICKSIZE
-    bx = max(0, min(bx, GRIDSIZE - 1))
-    by = max(0, min(by, GRIDSIZE - 1))
-    bz = max(0, min(bz, GRIDSIZE - 1))
-    idx = (bz * GRIDSIZE + by) * GRIDSIZE + bx
-    if grid.cells[idx] is None:
-        grid.cells[idx] = Brick()
-        grid.cells[idx].voxels = [0] * (BRICKSIZE ** 3)
-    lx = x % BRICKSIZE
-    ly = y % BRICKSIZE
-    lz = z % BRICKSIZE
-    local_idx = (lz * BRICKSIZE + ly) * BRICKSIZE + lx
-    grid.cells[idx].voxels[local_idx] = data
-
-def get_voxel(grid: Grid, x: int, y: int, z: int) -> int:
-    bx = x // BRICKSIZE
-    by = y // BRICKSIZE
-    bz = z // BRICKSIZE
-    bx = max(0, min(bx, GRIDSIZE - 1))
-    by = max(0, min(by, GRIDSIZE - 1))
-    bz = max(0, min(bz, GRIDSIZE - 1))
-    idx = (bz * GRIDSIZE + by) * GRIDSIZE + bx
-    brick = grid.cells[idx]
-    if brick is None:
-        return 0
-    lx = x % BRICKSIZE
-    ly = y % BRICKSIZE
-    lz = z % BRICKSIZE
-    local_idx = (lz * BRICKSIZE + ly) * BRICKSIZE + lx
-    return brick.voxels[local_idx]
-```
-
-**Parameters:** `WORLDSIZE`: World dimension in voxels. Default: 512 [S1, unofficial]. `BRICKSIZE`: Brick dimension in voxels. Default: 8 [S1, unofficial]. `GRIDSIZE`: Outer grid dimension. Calculated as `WORLDSIZE / BRICKSIZE`. Default: 64 [S1, unofficial].
-
-**Edge Cases and Pitfalls:** Boundary conditions require clamping coordinates to $[0, GRIDSIZE-1]$ to prevent out-of-bounds access [G]. The dynamic brick pool is safety-clamped to `GRIDSIZE³` to prevent infinite growth [S1, unofficial]. A dense top-level grid consumes 64 MB of static memory against at most ~50 MB of bricks and colour, making it the largest cost on planetary scales [S2]. On a Planet the top level must be sparse too [S2].
+**Edge Cases and Pitfalls**
+-   **Top-Level Memory Cost**: On planet-scale worlds, the dense top-level grid becomes the largest memory cost (e.g., 64 MB static grid vs ~50 MB bricks/color) [S2]. The top level must be sparse for large worlds [S2].
+-   **Precision**: The sources do not specify floating-point precision requirements.
+-   **Boundaries**: The dynamic brick pool is safety-clamped to $GRIDSIZE^3$ [S1, unofficial].
 
 ## Subtopics
 
-### Brick with Sparse Top-Level
-A variant using 8×8×8 voxel bricks compressed with an occupancy mask and material palette, organized under a sparse top-level index (hash map or shallow 64-tree) instead of a dense outer grid [S2]. It trades edit triviality for excellent streaming/disk unit properties and lower memory [S2]. Recommended architecture matching Gustafsson's next engine (2024) and van Wingerden's brickmaps [S2]. Per-brick raw cost is 512 B (1 B material/voxel) + ~8 B header ≈ 520 B, while compact cost is 64 B mask + ~128 B (2-bit palette avg) + ~18 B palette/header ≈ 210 B [S2]. Cost per surface voxel is compact ≈ 3.3 B, raw ≈ 8 B [S2]. Material indices use 1, 2, 4, or 8 bits per voxel [S2]. Uniform bricks (all-solid or all-empty) cost 0 bytes, marked by a parent flag [S2]. Colours are stored separately and DXT1-compressed to about 4 bits per voxel, with each brick storing an LOD colour [S2].
+### [Brick with Sparse Top-Level](6925-brick-with-sparse-top-level.md)
+This method stores planet-scale voxel data using sparse $8^3$ (512 voxel) bricks organized under a sparse top-level index, combining an occupancy mask with palette-compressed material IDs to minimize memory usage. It differs from dense grid approaches by trading trivial random access for excellent streaming properties and significantly lower memory footprint, while avoiding the split/relink complexity of full sparse trees.
+
+### Debris and Fluid Grid Handling
+Debris and Fluids maintain their own small grids and convert to and from the main brick format [S3, unofficial]. There is no heightfield or mesh fallback [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Outer grid consumes $GRIDSIZE^3 \times \text{pointer\_size}$ bytes. Brick pool consumes $N_{bricks} \times BRICKSIZE^3 \times \text{voxel\_size}$ bytes. Total memory is proportional to the number of active bricks, not the total world volume [S1, unofficial].
-*   **Performance:** Measured 40–164 MRays/s on a Radeon HD 7970, beating its ESVO comparison (43.8 and 22.5 MRays/s) on the same scenes [S2].
-*   **Strengths:** Data stays in raw form, making it directly editable. Supports streaming from disk and basic LOD [S2].
-*   **Limitations:** Dense top-level grid becomes the largest cost on planetary scales (64 MB static grid vs ~50 MB bricks and colour) [S2].
-*   **When to use:** When implementation simplicity and direct editability are prioritized, and the world size is moderate [S1, unofficial].
-*   **When not to use:** When the world is extremely large and sparse, a hash-based top level is more memory efficient [S2].
+-   **Time Complexity**: Lookup is $O(1)$ for the top-level grid access, assuming constant-time pointer dereference. Brick access is $O(1)$ given the fixed size.
+-   **Memory Complexity**: $O(GRIDSIZE^3)$ for the top-level grid plus $O(N)$ for active bricks, where $N$ is the number of active bricks. The top-level grid is dense, leading to high memory usage for large worlds if not sparse [S2].
+-   **Measured Performance**: 40–164 MRays/s on a Radeon HD 7970 [S2]. This beat the ESVO comparison (43.8 and 22.5 MRays/s) on the same scenes [S2].
+-   **Strengths**: Data stays in raw form, making it directly editable [S2]. Supports streaming from disk and basic LOD [S2]. Updates are fast [S2].
+-   **Limitations**: The dense top-level grid does not scale to planet-scale worlds without becoming the dominant memory cost [S2].
+-   **When to Use**: Suitable for worlds where the top-level sparsity is low or the world size is small enough that the top-level grid fits in memory [S2].
+-   **When Not to Use**: Planet-scale worlds where the top-level grid would consume excessive memory (e.g., >64 MB) [S2].
 
 ## Background
-Not given in the sources.
+The method is described in van Wingerden's thesis (2015) [S2]. It uses a uniform "brickgrid" of pointers to $8 \times 8 \times 8$ "brickmaps" [S2]. The thesis supports rendering "potentially infinite landscapes while using a finite amount of memory" [S2]. The dense top-level grid was identified as a bottleneck, with 64 MB of static grid against at most ~50 MB of bricks and color [S2]. The "Hybrid Voxel Formats" study (Arbore et al. 2024) notes that raw grids that are too fine can be detrimental on sparse models [S2].
 
 ## Sources
 [S1] NiekMSoftware/bad-apple-voxel-raytracer, https://github.com/NiekMSoftware/bad-apple-voxel-raytracer, fetched 2026-10-24 (unofficial)
 [S2] https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, https://github.com/theHimanshuShekhar/bhayanakvoxel/blob/research/voxel-data-structures/docs/research/voxel-data-structures.md, fetched 2026-10-28
+[S3] Choose voxel data structure & LOD scheme #9, https://github.com/theHimanshuShekhar/bhayanakvoxel/issues/9, fetched 2026-10-28 (unofficial)

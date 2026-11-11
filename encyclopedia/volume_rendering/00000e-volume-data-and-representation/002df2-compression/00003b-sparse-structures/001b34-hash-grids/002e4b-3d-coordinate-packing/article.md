@@ -1,0 +1,119 @@
+# 3D Coordinate Packing
+
+Also called: Voxel Key Generation, getKey
+
+## Overview
+3D Coordinate Packing is a method for encoding three-dimensional spatial coordinates into a single integer key to serve as an index in hash maps or sparse data structures. It solves the problem of efficiently mapping 3D voxel positions to a 1D bucket index for sparse volume representation. Unlike general-purpose hash functions like those in [Hash Grids](936-hash-grids.md), this method preserves spatial locality through bit-shifting, allowing for deterministic reconstruction of coordinates from the key. It differs from [Voxel World Data Structure](1101-voxel-world-data-structure.md) by focusing on the low-level bit manipulation for hashing rather than high-level world management.
+
+## How it works
+**Inputs:** Three integer coordinates $(x, y, z)$.
+**Outputs:** A single packed integer key.
+
+**Data Structures:**
+The primary implementation relies on a 64-bit integer. The source describes a memory-overlap technique using a union of a struct and a 64-bit integer, but the logical operation is defined by bit shifts.
+
+**Steps:**
+1.  Validate that $x, y, z$ fit within the required bit widths (typically 16-bit signed for the primary method).
+2.  Shift the $z$ coordinate to the most significant bits.
+3.  Shift the $y$ coordinate to the middle bits.
+4.  Place the $x$ coordinate in the least significant bits.
+5.  Combine using bitwise OR.
+
+**Formula:**
+The key $K$ is calculated as:
+$$ K = (z \ll 32) \mid (y \ll 16) \mid x $$
+Where $\ll$ denotes left bitwise shift and $\mid$ denotes bitwise OR.
+
+**Parameters:**
+*   **Bit Width:** 16 bits per coordinate.
+*   **Range:** $-32768 \le x, y, z \le 32767$ (signed 16-bit integer range).
+*   **Key Size:** 64-bit integer.
+
+**Edge Cases and Pitfalls:**
+*   **Endianness:** The union-based implementation relies on little-endian architecture. If the struct fields are laid out in memory as `[x, y, z]` (lowest address to highest), and the system is little-endian, the integer representation matches the shift formula above. On big-endian systems, this specific union trick fails without byte-swapping or explicit masking [S1, unofficial].
+*   **Overflow:** Coordinates outside the 16-bit signed range will overflow or wrap, corrupting the key.
+*   **Padding:** The union method assumes no struct padding between fields. Explicit bit-shifting is safer and portable.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pack_coordinates(x: int, y: int, z: int) -> int:
+    """
+    Packs three 16-bit signed coordinates into a 64-bit integer key.
+    Assumes little-endian logic via explicit bit shifts for portability.
+    """
+    # Mask to ensure 16-bit signed behavior if inputs are larger
+    x_masked = x & 0xFFFF
+    y_masked = y & 0xFFFF
+    z_masked = z & 0xFFFF
+    
+    # Combine using bit shifts
+    # Note: In Python, integers have arbitrary precision. 
+    # The result is treated as a 64-bit signed integer in C/C++ contexts.
+    key = (z_masked << 32) | (y_masked << 16) | x_masked
+    
+    return key
+
+def unpack_coordinates(key: int) -> tuple:
+    """
+    Unpacks a 64-bit integer key back into (x, y, z).
+    """
+    x = key & 0xFFFF
+    y = (key >> 16) & 0xFFFF
+    z = (key >> 32) & 0xFFFF
+    
+    # Convert to signed 16-bit if necessary for the application
+    if x >= 32768: x -= 65536
+    if y >= 32768: y -= 65536
+    if z >= 32768: z -= 65536
+    
+    return (x, y, z)
+```
+
+## Subtopics
+
+### Grid Index Packing & Unpacking
+Maps 3D grid coordinates $(ix, iy, iz)$ to a single 32-bit integer index for compact sparse grid storage, reversing the operation for retrieval [S2, unofficial]. It sets itself apart by using a 32-bit key with asymmetric bit allocation (10-11-11 bits) compared to the symmetric 16-16-16 packing of the parent method, optimizing for specific grid dimensions [S2, unofficial]. Choose this when memory is constrained to 32-bit keys and grid dimensions are known to fit within 1024x2048x2048 [S2, unofficial].
+
+**Formula:**
+$$ \text{index} = (ix \ll 22) \mid (iy \ll 11) \mid iz $$
+$$ ix = \text{packed} \gg 22 $$
+$$ iy = (\text{packed} \gg 11) \ \& \ 0x7FF $$
+$$ iz = \text{packed} \ \& \ 0x7FF $$
+
+**Parameters:**
+*   $ix$: 10 bits (max 1024)
+*   $iy$: 11 bits (max 2048)
+*   $iz$: 11 bits (max 2048)
+*   Total: 32 bits [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pack_index(ix: int, iy: int, iz: int) -> int:
+    return (ix << 22) | (iy << 11) | iz
+
+def unpack_index(packed: int) -> tuple:
+    mask_11 = (1 << 11) - 1  # 0x7FF
+    ix = packed >> 22
+    iy = (packed >> 11) & mask_11
+    iz = packed & mask_11
+    return (ix, iy, iz)
+```
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ for both packing and unpacking.
+*   **Memory Complexity:** $O(1)$ auxiliary space.
+*   **Strengths:** Extremely fast; preserves spatial locality (nearby voxels have similar keys, which can help with cache coherence in some hash table implementations); no collision resolution logic required for the packing step itself.
+*   **Limitations:** Fixed coordinate range; endianness dependency if using union-based implementations; not a hash function itself (collisions occur if coordinates exceed bit limits or if distinct coordinates map to the same key due to overflow).
+*   **When to use:** Sparse voxel grids with known, bounded dimensions; when deterministic coordinate retrieval from a hash key is required.
+*   **When not to use:** When coordinates exceed the bit capacity (e.g., >16-bit); when spatial locality is not desired and uniform distribution is preferred (use [Hash Grids](936-hash-grids.md) instead).
+
+## Background
+This technique is a fundamental building block in sparse voxel octrees and hash-based volume renderers. It allows 3D positions to be used as keys in hash maps (like `std::unordered_map` or `gpust::hash_map`) without the overhead of complex hashing algorithms. The specific 16-bit signed variant is documented in the [AfterHumanDeclined](https://github.com/nustxujun/AfterHumanDeclined) repository [S1, unofficial], while the 32-bit asymmetric variant appears in [Volumetric-display](https://github.com/quertzuiop/Volumetric-display) [S2, unofficial].
+
+## Sources
+[S1] nustxujun/AfterHumanDeclined, https://github.com/nustxujun/AfterHumanDeclined, fetched 2026-10-26 (unofficial)
+[S2] quertzuiop/Volumetric-display, https://github.com/quertzuiop/Volumetric-display, fetched 2026-10-26 (unofficial)

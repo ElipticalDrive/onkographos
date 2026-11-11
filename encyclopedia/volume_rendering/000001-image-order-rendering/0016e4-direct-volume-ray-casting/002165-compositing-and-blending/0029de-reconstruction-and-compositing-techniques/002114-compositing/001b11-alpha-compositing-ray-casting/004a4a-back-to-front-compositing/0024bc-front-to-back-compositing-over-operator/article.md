@@ -1,138 +1,135 @@
 # Front-to-Back Compositing (Over Operator)
 
-Also called: Backward Rendering, Front-to-Back Accumulation, Front-to-Front Compositing, Image Order Approach, Over Operator, Recursive Front-to-Back Compositing, over-operator compositing
+Also called: Front-to-Back Accumulation, Front-to-Front Compositing, Lewoy's Technique, Over Operator, over-operator compositing
 
 ## Overview
-Front-to-Back Compositing is a volume rendering technique that determines the final pixel color by accumulating samples along a viewing ray from the camera (front) to the far boundary (back) using the alpha compositing "over" operator [S1, S4, S13, unofficial]. It solves the problem of blending semi-transparent layers to produce a coherent image while enabling **early ray termination**, a significant performance optimization where ray traversal stops once the accumulated opacity exceeds a threshold [S3, S4, S14, unofficial]. Unlike its sibling [Back-to-Front Compositing](2078-back-to-front-compositing.md), which does not require tracking accumulated opacity for color calculation but lacks early termination, front-to-back compositing explicitly maintains accumulated opacity to drive the termination condition [S2, unofficial][S6, book].
+Front-to-Back Compositing is a volume rendering technique that determines the final pixel color by accumulating samples along a viewing ray from the camera (front) to the far boundary (back) using the alpha compositing "over" operator [S1, unofficial][S4, unofficial][S13, unofficial]. It solves the problem of blending semi-transparent layers to produce a coherent image while enabling early ray termination, a significant performance optimization where ray traversal stops once the accumulated opacity exceeds a threshold [S3, unofficial][S4, unofficial][S14, unofficial]. Unlike its sibling [Back-to-Front Compositing](2078-back-to-front-compositing.md), which does not require tracking accumulated opacity for color calculation but lacks early termination, front-to-back compositing explicitly maintains accumulated opacity to drive the termination condition [S2][S6, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A ray defined by origin and direction; a volume dataset; a transfer function mapping scalar values to color ($C$) and opacity ($\alpha$); a background color ($C_{bg}$) and opacity ($\alpha_{bg}=1$).
-*   **Output:** A final pixel color $C_{out}$ and accumulated opacity $\alpha_{out}$ (typically discarded after color computation).
+*   **Input:** A ray defined by origin and direction; a volume dataset; a transfer function mapping scalar values to color ($C$) and opacity ($\alpha$); a background color ($C_{bg}$) and opacity ($\alpha_{bg}=1$) [S1, unofficial][S5, unofficial].
+*   **Output:** A final pixel color $C_{out}$ and accumulated opacity $\alpha_{out}$ (typically discarded after color computation) [S2][S16, unofficial].
 
 **Data Structures:**
-*   **Accumulators:** Two variables, $C_{acc}$ (accumulated color) and $\alpha_{acc}$ (accumulated opacity), initialized to $0$ and $0$ respectively [S16].
-*   **Sample:** A tuple $(c_i, \alpha_i)$ representing the color and opacity of the $i$-th sample along the ray, derived from the transfer function applied to the interpolated volume value [S12, S14, unofficial].
+*   **Accumulators:** Two variables, $C_{acc}$ (accumulated color) and $\alpha_{acc}$ (accumulated opacity), initialized to $0$ and $0$ respectively [S16, unofficial].
+*   **Sample:** A tuple $(c_i, \alpha_i)$ representing the color and opacity of the $i$-th sample along the ray, derived from the transfer function applied to the interpolated volume value [S12, unofficial][S14, unofficial].
+
+**Numbered Steps:**
+1. Initialize accumulators $C_{acc} = 0$, $\alpha_{acc} = 0$.
+2. Compute ray intersection with volume bounds to determine entry $t_{near}$ and exit $t_{far}$.
+3. For each sample position $t$ from $t_{near}$ to $t_{far}$ with step size $d$:
+   a. Sample the volume value at $t$ and apply the transfer function to obtain color $c$ and opacity $\alpha$.
+   b. Correct the opacity for the step size: $\alpha_{corr} = 1 - (1 - \alpha)^d$.
+   c. Update accumulators: $C_{acc} \leftarrow C_{acc} + (1 - \alpha_{acc}) c \alpha_{corr}$ and $\alpha_{acc} \leftarrow \alpha_{acc} + (1 - \alpha_{acc}) \alpha_{corr}$.
+   d. If $\alpha_{acc} > 1 - \epsilon$, terminate the ray early.
+4. Composite the accumulated result with the background: $C_{final} = C_{acc} + (1 - \alpha_{acc}) C_{bg}$.
 
 **Formulas:**
 The compositing step updates the accumulators using the current sample $(c_i, \alpha_i)$:
-$$
-C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \cdot c_i \cdot \alpha_i
-$$
-$$
-\alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \cdot \alpha_i
-$$
+$$C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \cdot c_i \cdot \alpha_i$$
+$$\alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \cdot \alpha_i$$
 Where:
-*   $C_{acc}^{(i)}$ is the accumulated color after sample $i$.
-*   $\alpha_{acc}^{(i)}$ is the accumulated opacity after sample $i$.
+*   $C_{acc}^{(i)}$ is the accumulated color after sample $i$ [S16, unofficial].
+*   $\alpha_{acc}^{(i)}$ is the accumulated opacity after sample $i$ [S16, unofficial].
 *   $c_i$ is the color of sample $i$.
-*   $\alpha_i$ is the opacity of sample $i$.
-*   $(1 - \alpha_{acc}^{(i-1)})$ represents the transmittance (probability the ray reaches sample $i$) [S12, S15, unofficial].
+*   $\alpha_i$ is the opacity of sample $i$ [S12, unofficial][S14, unofficial].
+*   $(1 - \alpha_{acc}^{(i-1)})$ represents the transmittance (probability the ray reaches sample $i$) [S12, unofficial][S15, unofficial].
 
 **Opacity Correction:**
-The standard formulas assume samples are taken at unit distance. If the object sample distance $d$ differs from 1, the opacity must be corrected to account for the integration interval [S14, unofficial]:
-$$
-\alpha_{corrected} = 1 - (1 - \alpha_{original})^d
-$$
-Where $\alpha_{original}$ is the opacity value from the transfer function [S14, unofficial]. Some implementations use a fixed exponent multiplier based on sampling density, e.g., $\alpha_{corrected} = 1.0 - (1.0 - \alpha_{in})^{stepsize \times 200.0}$ [S8, unofficial].
+The standard formulas assume samples are taken at unit distance [S16, unofficial]. If the object sample distance $d$ differs from 1, the opacity must be corrected to account for the integration interval [S14, unofficial]:
+$$\alpha_{corrected} = 1 - (1 - \alpha_{original})^d$$
+Where $\alpha_{original}$ is the opacity value from the transfer function [S14, unofficial]. Some implementations use a fixed exponent multiplier based on sampling density, e.g., $\alpha_{corrected} = 1.0 - (1.0 - \alpha_{in})^{stepsize \times 200.0}$ [S9, unofficial].
 
 **Parameters:**
-*   **Early Termination Threshold ($\epsilon$):** A small value (e.g., $0.01$ or $0.001$). If $\alpha_{acc} > 1 - \epsilon$, the ray is terminated [S3, S14, unofficial].
-*   **Step Size / Sample Distance ($d$):** The distance between consecutive samples along the ray [S14, unofficial].
+*   **Early Termination Threshold ($\epsilon$):** A small value (e.g., $0.01$ or $0.001$). If $\alpha_{acc} > 1 - \epsilon$, the ray is terminated [S4, unofficial][S12, unofficial].
+*   **Step Size / Sample Distance ($d$):** The distance between consecutive samples along the ray [S16, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def front_to_back_compositing(ray_origin, ray_direction, volume, transfer_function, background_color, epsilon=0.01):
-    # Initialize accumulators
+def front_to_back_compositing(ray_origin, ray_direction, volume_bounds_min, volume_bounds_max, step_size, transfer_function, background_color, epsilon=0.01):
+    # Slab intersection to find t_near and t_far
+    t_min = 0.0
+    t_max = float('inf')
+    for axis in range(3):
+        if abs(ray_direction[axis]) < 1e-8:
+            if ray_origin[axis] < volume_bounds_min[axis] or ray_origin[axis] > volume_bounds_max[axis]:
+                return background_color, 1.0
+        else:
+            t1 = (volume_bounds_min[axis] - ray_origin[axis]) / ray_direction[axis]
+            t2 = (volume_bounds_max[axis] - ray_origin[axis]) / ray_direction[axis]
+            t_enter = min(t1, t2)
+            t_exit = max(t1, t2)
+            t_min = max(t_min, t_enter)
+            t_max = min(t_max, t_exit)
+    if t_min > t_max:
+        return background_color, 1.0
+
     acc_color = vec3(0.0, 0.0, 0.0)
     acc_alpha = 0.0
-    
-    # Determine ray bounds and step size
-    t_near, t_far = intersect_volume(ray_origin, ray_direction)
-    if t_near > t_far:
-        return background_color, 1.0
-        
-    # Calculate step size based on desired sample count or fixed distance
-    # Note: d is the object sample distance used for opacity correction
-    step_size = (t_far - t_near) / num_samples
-    d = step_size 
-    
-    t = t_near
-    
-    while t < t_far:
-        # 1. Sample the volume
+    t = t_min
+
+    while t < t_max:
         sample_pos = ray_origin + ray_direction * t
         value = volume.sample(sample_pos)
-        
-        # 2. Apply transfer function to get color and opacity
-        # Assume transfer function returns (color, alpha)
         c_sample, alpha_sample = transfer_function(value)
-        
-        # 3. Correct opacity for sample distance
-        # If d=1, alpha_corrected = alpha_sample
-        alpha_corrected = 1.0 - pow(1.0 - alpha_sample, d)
-        
-        # 4. Composite (Over Operator)
-        # C_out = C_in + (1 - alpha_in) * c_sample * alpha_corrected
-        # alpha_out = alpha_in + (1 - alpha_in) * alpha_corrected
-        
-        contribution = (1.0 - acc_alpha) * alpha_corrected
-        acc_color = acc_color + contribution * c_sample
-        acc_alpha = acc_alpha + contribution * alpha_corrected
-        
-        # 5. Early Ray Termination
-        # If accumulated opacity is sufficiently close to 1, stop
+
+        # Opacity correction for step size
+        alpha_corrected = 1.0 - pow(1.0 - alpha_sample, step_size)
+
+        # Accumulate
+        transmittance = 1.0 - acc_alpha
+        acc_color = acc_color + transmittance * c_sample * alpha_corrected
+        acc_alpha = acc_alpha + transmittance * alpha_corrected
+
         if acc_alpha > (1.0 - epsilon):
             break
-            
         t += step_size
-        
-    # 6. Composite with background
-    # The background is effectively at infinity with alpha=1
-    # Final Color = acc_color + (1 - acc_alpha) * background_color
+
     final_color = acc_color + (1.0 - acc_alpha) * background_color
-    
     return final_color, acc_alpha
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Opacity Interpretation:** Opacity values from transfer functions are often defined for a specific sampling rate. If the sampling density changes (e.g., doubling the number of samples), the opacity per sample must be adjusted, otherwise the volume appears too opaque [S1, S14, unofficial].
-*   **Associativity vs Commutativity:** Compositing is associative but not commutative; the order of samples (front-to-back) is critical [S13, unofficial].
-*   **Precision:** Accumulating many small opacities can lead to floating-point precision issues, though standard `float` precision is usually sufficient for typical ray lengths [S1, unofficial].
+*   **Opacity Interpretation:** Opacity values from transfer functions are often defined for a specific sampling rate. If the sampling density changes, the opacity per sample must be adjusted, otherwise the volume appears too opaque [S1, unofficial][S16, unofficial].
+*   **Associativity vs Commutativity:** Compositing is associative but not commutative; the order of samples (front-to-back) is critical [S15, unofficial].
+*   **Precision:** Accumulating many small opacities can lead to floating-point precision issues, though standard `float` precision is usually sufficient for typical ray lengths [G].
 
 ## Subtopics
 
 ### [Importance-Based Accumulated Transparency Modulation](4360-importance-based-accumulated-transparency-modulation.md)
-A variant that modulates accumulated transparency based on feature importance, decoupling transparency from color accumulation to avoid tone-mapping issues.
+A variant that modulates accumulated transparency based on feature importance differences, decoupling transparency from color accumulation to avoid tone-mapping issues and keep opacity bounded by 1. Choose when high dynamic range color preservation is needed without complex tone-mapping.
 
 ### [Visibility Field Computation](7508-visibility-field-computation.md)
-A technique that explicitly stores per-voxel visibility weights to analyze occlusion and contribution, rather than just accumulating color.
+A technique that explicitly stores per-voxel visibility weights accounting for self-opacity and occlusion by preceding voxels. Choose when analyzing tissue occlusion or voxel contribution to the final image is required.
 
 ### [Cube-4 COM Unit Implementation](9820-cube-4-com-unit-implementation.md)
-A hardware accelerator implementation using slice-by-slice front-to-back compositing on the Teramac machine, handling skewing and partial beam dependencies.
+A dedicated hardware accelerator on the Teramac machine that composes shaded samples slice-by-slice, storing intermediate results in a base-plane buffer for parallel processing across pipelines. Choose for custom computing hardware implementations requiring skewing and partial-beam dependency management.
+
+### [Importance-Based Accumulated Transparency Modulation](4360-importance-based-accumulated-transparency-modulation.md)
+Merges subimages using the over operator in a front-to-back order determined hierarchically by recursive k-D tree traversal, visiting the front child before the back child. Choose when parallelizing image compositing across distributed nodes using spatial partitioning.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. However, with early ray termination, the average case is significantly faster, often $O(1)$ for opaque regions [S3, S14, unofficial].
-*   **Memory Complexity:** $O(1)$ per ray for accumulators. The volume data requires $O(V)$ memory.
-*   **Performance:** Highly efficient for volumes with opaque structures due to early ray termination [S3, unofficial]. Performance degrades for highly transparent volumes where rays must traverse the entire volume [S3, unofficial].
-*   **Strengths:** Supports early ray termination; intuitive physical model (emission-absorption); widely supported in hardware via alpha blending (with specific blend factors) [S6, book].
-*   **Limitations:** Requires maintaining and updating accumulated opacity; sensitive to sampling density (requires opacity correction); computationally expensive compared to MIP or average projection [S7, S14, unofficial].
-*   **When to use:** When realistic translucency and internal structure visibility are required, and performance optimization via early termination is beneficial.
-*   **When not to use:** When maximum intensity projection (MIP) is sufficient for highlighting high-intensity structures (e.g., angiography) [S9, unofficial], or when hardware alpha blending constraints (like fixed blend factors) cannot be easily overridden [S6, book].
+*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. However, with early ray termination, the average case is significantly faster, often $O(1)$ for opaque regions [G].
+*   **Memory Complexity:** $O(1)$ per ray for accumulators. The volume data requires $O(V)$ memory [G].
+*   **Performance:** Highly efficient for volumes with opaque structures due to early ray termination [S4, unofficial]. Performance degrades for highly transparent volumes where rays must traverse the entire volume [S3, unofficial].
+*   **Strengths:** Supports early ray termination; intuitive physical model (emission-absorption); widely supported in hardware via alpha blending (with specific blend factors) [S4, unofficial][S6, unofficial][S12, unofficial].
+*   **Limitations:** Requires maintaining and updating accumulated opacity; sensitive to sampling density (requires opacity correction); computationally expensive compared to MIP or average projection [S1, unofficial][S16, unofficial].
+*   **When to use:** When realistic translucency and internal structure visibility are required, and performance optimization via early termination is beneficial [S4, unofficial][S12, unofficial].
+*   **When not to use:** When maximum intensity projection (MIP) is sufficient for highlighting high-intensity structures (e.g., angiography) [S9, unofficial], or when hardware alpha blending constraints (like fixed blend factors) cannot be easily overridden [S6, unofficial].
 
 ## Background
-Front-to-back compositing is derived from the alpha compositing equations introduced by Porter and Duff [S2, unofficial]. It is a discrete implementation of the volume rendering integral, specifically the emission-absorption model [S4, S12, unofficial]. The method is fundamental to direct volume ray casting, where it is the most common compositing scheme due to its support for early ray termination [S2, S13, unofficial]. It is also used in neural rendering frameworks like NeRF, where the differentiable nature of the front-to-back blending allows gradients to flow back to scene parameters [S15, unofficial].
+Front-to-back compositing is a discrete implementation of the volume rendering integral, specifically the emission-absorption model [S5, unofficial][S10, unofficial][S14, unofficial]. The method is fundamental to direct volume ray casting, where it is the most common compositing scheme due to its support for early ray termination [S2][S13, unofficial]. It is also used in neural rendering frameworks like NeRF, where the differentiable nature of the front-to-back blending allows gradients to flow back to scene parameters [S17, unofficial].
 
 ## Sources
 [S1] PPT - Volume Rendering, Part 2 PowerPoint Presentation, free download - ID:2205448, https://slideserve.com/walter/volume-rendering-part-2-powerpoint-ppt-presentation, fetched 2026-10-24 (unofficial)
-[S2] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25 (unofficial)
+[S2] Direct Volume Rendering Techniques, https://www.scribd.com/document/853597780/VIS-Modules-06-Direct-Volume-Rendering, fetched 2026-10-25
 [S3] Direct Volume Rendering Techniques, https://www.scribd.com/presentation/380929057/10-raycasting, fetched 2026-10-25 (unofficial)
 [S4] Volume Ray Casting Techniques, https://www.scribd.com/document/102700078/03-raycasting, fetched 2026-10-25 (unofficial)
 [S5] Direct Volume Rendering (DVR): Ray-casting | PPT - SlideShare, https://www.slideshare.net/slideshow/direct-volume-rendering-dvr-raycasting/265104120, fetched 2026-10-26 (unofficial)
-[S6] Chapter 39. Volume Rendering Techniques | NVIDIA Developer, https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques, fetched 2026-10-26 (book)
-[S7] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
+[S6] Chapter 39. Volume Rendering Techniques | NVIDIA Developer, https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques, fetched 2026-10-26 (unofficial)
+[S7] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (book)
 [S8] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
 [S9] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
 [S10] [PDF] Optical Models for Direct Volume Rendering - Duke Computer Science, https://courses.cs.duke.edu/spring03/cps296.8/papers/max95opticalModelsForDirectVolumeRendering.pdf, fetched 2026-10-26 (unofficial)
@@ -141,4 +138,7 @@ Front-to-back compositing is derived from the alpha compositing equations introd
 [S13] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (unofficial)
 [S14] Compositing - TU Wien, https://users.cg.tuwien.ac.at/bruckner/homepage/content/mastersthesis/html/node35.html, fetched 2026-10-28 (unofficial)
 [S15] Differentiable Ray Marching: Definition & How It Works, https://inferensys.com/glossary/neural-radiance-fields-and-spatial-computing/implicit-surface-representations/differentiable-ray-marching, fetched 2026-10-28 (unofficial)
-[S16] GPU-Enabled Volume Renderer for Use with MATLAB, https://doi.org/10.3390/digital4040049, fetched 2026-10-29
+[S16] GPU-Enabled Volume Renderer for Use with MATLAB, https://doi.org/10.3390/digital4040049, fetched 2026-10-29 (unofficial)
+[S17] A data distributed, parallel algorithm for ray-traced volume ..., https://www.cs.ucdavis.edu/~ma/papers/PRS93.pdf, fetched 2026-10-27 (unofficial)
+[S18] A data distributed, parallel algorithm for ray-traced volume rendering, https://doi.org/10.1109/prs.1993.586080, fetched 2026-10-24
+[S19] A data distributed, parallel algorithm for ray-traced volume ..., https://www.cs.ucdavis.edu/~ma/papers/PRS93.pdf, fetched 2026-10-27

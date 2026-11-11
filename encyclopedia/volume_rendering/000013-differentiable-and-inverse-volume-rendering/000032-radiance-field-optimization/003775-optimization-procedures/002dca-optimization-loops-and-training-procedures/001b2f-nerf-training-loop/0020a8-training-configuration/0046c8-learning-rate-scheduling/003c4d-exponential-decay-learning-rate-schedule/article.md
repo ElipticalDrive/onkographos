@@ -1,0 +1,102 @@
+# Exponential Decay Learning Rate Schedule
+
+Also called: Adam with Exponential Decay, Exponential Decay Schedule, ExponentialSchedule, Instant NGP LR Schedule, Training Optimizer and Schedule
+
+## Overview
+An exponentially decaying schedule that transitions from an initial value to a final value using a base raised to a normalized step exponent [S1, unofficial]. It is used in NeRF training to gradually reduce the learning rate after an initial warm-up or stable period, preventing overshooting during the fine-tuning phase of the radiance field optimization [S2]. It differs from linear schedules by providing a non-linear, accelerating reduction in step size, which is often preferred for stabilizing the convergence of MLP weights in neural radiance fields [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Current training step ($step$), initial learning rate ($lr_{init}$), final learning rate ($lr_{final}$), decay interval ($decay\_interval$), decay factor ($decay\_factor$), and start step ($start\_step$).
+*   **Output:** The current learning rate value ($lr$).
+
+**Data Structures:**
+No complex data structures are required. The state is maintained implicitly by the training loop's step counter.
+
+**Parameters:**
+*   $lr_{init}$: Initial learning rate. Typical values vary by parameter group. For Instant NGP-style training: positions $10^{-4}$, features $5 \times 10^{-3}$, MLP weights $5 \times 10^{-5}$ [S2].
+*   $decay\_factor$: The multiplicative factor applied per decay interval. Typical value: $0.33$ [S2].
+*   $decay\_interval$: Number of steps between each decay. Typical value: $10,000$ [S2].
+*   $start\_step$: The step at which decay begins. Typical value: $20,000$ [S2].
+
+**Steps:**
+1.  If $step < start\_step$, return $lr_{init}$ [S2].
+2.  Calculate the number of decay intervals elapsed: $n = \lfloor (step - start\_step) / decay\_interval \rfloor$ [S1, unofficial][S2].
+3.  Compute the decayed learning rate: $lr = lr_{init} \times decay\_factor^n$ [S1, unofficial][S2].
+4.  Return $lr$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_exponential_decay_lr(step, lr_init, start_step, decay_interval, decay_factor):
+    """
+    Computes the learning rate using an exponential decay schedule.
+    
+    Args:
+        step (int): Current training step.
+        lr_init (float): Initial learning rate for the parameter group.
+        start_step (int): Step number after which decay begins.
+        decay_interval (int): Number of steps between each decay.
+        decay_factor (float): Multiplicative factor applied per decay.
+        
+    Returns:
+        float: The current learning rate.
+    """
+    # If before the start step, use initial learning rate
+    if step < start_step:
+        return lr_init
+    
+    # Calculate how many decay intervals have passed
+    # Using integer division to determine the phase
+    phase = (step - start_step) // decay_interval
+    
+    # Apply exponential decay
+    # lr = lr_init * (decay_factor ^ phase)
+    lr = lr_init * (decay_factor ** phase)
+    
+    return lr
+```
+
+**Edge Cases and Pitfalls:**
+*   **Redundant Checks:** In some implementations (e.g., Nerfies), the condition `step >= self.num_steps` (or equivalent start-step check) may be checked twice, causing redundant execution paths [S1, unofficial].
+*   **Zero Division:** Not applicable as no division by zero occurs in the standard formula, but ensure `decay_interval` is non-zero.
+*   **Precision:** For very large `phase` values, `decay_factor ** phase` may underflow to zero. This is generally acceptable as it effectively freezes the learning rate at zero.
+
+## Subtopics
+
+### Step Decay Learning Rate Schedule
+A step-wise decay schedule that reduces a value by a fixed factor at regular intervals until a maximum number of decays is reached [S1, unofficial]. It is similar to exponential decay but explicitly bounded by a maximum number of decays, ensuring the learning rate does not vanish indefinitely [S1, unofficial]. Choose this when a hard lower bound on the learning rate is desired or when the training duration is fixed and known in advance [S1, unofficial].
+*   **Definition:** Reduces learning rate by `decay_factor` every `decay_interval` steps, up to `max_decays` [S1, unofficial].
+*   **Formula:** $lr = lr_{init} \times decay\_factor^{\min(\lfloor (step - start\_step) / decay\_interval \rfloor, max\_decays)}$ [S1, unofficial].
+*   **Parameters:** `decay_interval`, `decay_factor`, `max_decays`, `final_value` (optional, defaults to $lr_{init} \times decay\_factor^{max\_decays}$) [S1, unofficial].
+*   **Pseudocode:**
+    ```python
+    def get_step_decay_lr(step, lr_init, start_step, decay_interval, decay_factor, max_decays, final_value=None):
+        if step < start_step:
+            return lr_init
+        
+        phase = (step - start_step) // decay_interval
+        if phase >= max_decays:
+            if final_value is None:
+                return lr_init * (decay_factor ** max_decays)
+            return final_value
+        
+        return lr_init * (decay_factor ** phase)
+    ```
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per step. The calculation involves basic arithmetic operations and a power function.
+*   **Memory Complexity:** $O(1)$. No additional memory is required beyond storing the hyperparameters.
+*   **Performance:** In Instant NGP-style training, this schedule is applied after 20,000 iterations with a factor of 0.33 every 10,000 steps [S2]. It helps stabilize the training of MLP weights and features, which have different learning rate requirements [S2].
+*   **Strengths:** Simple to implement, computationally cheap, effective for gradual convergence in later stages of training.
+*   **Limitations:** Requires careful tuning of `start_step`, `decay_interval`, and `decay_factor`. May reduce the learning rate too quickly if parameters are not set correctly, leading to premature convergence.
+*   **When to Use:** When training neural radiance fields with Adam optimizer and separate parameter groups, particularly after an initial phase of rapid learning [S2].
+*   **When Not to Use:** When a smooth, continuous decay is preferred over step-wise changes (consider [Linear Learning Rate Schedule](11850-linear-learning-rate-schedule.md) or [Annealing Schedules](11839-annealing-schedules.md)).
+
+## Background
+The exponential decay schedule is a common technique in optimization, widely used in deep learning. In the context of NeRF, it was adopted from Instant NGP [49] to manage the learning rates of different parameter groups (positions, features, MLP weights) separately [S2]. The specific parameters (start at 20,000 steps, factor 0.33 every 10,000 steps) are cited from Instant NGP [S2]. The implementation details and potential pitfalls (redundant checks) are documented in the Nerfies repository [S1, unofficial].
+
+## Sources
+[S1] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
+[S2] Neural Harmonic Textures for High-Quality Primitive Based Neural Reconstruction, https://doi.org/10.1007/978-3-032-37032-7_18, fetched 2026-10-26

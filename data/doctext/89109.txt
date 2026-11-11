@@ -1,0 +1,998 @@
+Volumetric Isosurface Rendering
+with Deep Learning-Based Super-Resolution
+arXiv:1906.06520v1 [cs.GR] 15 Jun 2019
+Sebastian Weiss, Mengyu Chu, Nils Thuerey, Rüdiger Westermann
+(a)
+(b)
+(c)
+Fig. 1: Our super-resolution network can upscale (a) an input sampling of isosurface normals and depths at low resolution (i.e.,
+320x240), to (b) a high-resolution normal and depth map (i.e., 1280x960) with ambient occlusion. For ease of interpretation, only
+the shaded output is shown. (c) The ground truth is rendered at 1280x960. Samples are from a 10243 grid, ground truth renders at
+0.16 and 18.6 secs w/ and w/o ambient occlusion, super-resolution takes 0.07 sec
+Abstract—Rendering an accurate image of an isosurface in a volumetric field typically requires large numbers of data samples.
+Reducing the number of required samples lies at the core of research in volume rendering. With the advent of deep learning networks,
+a number of architectures have been proposed recently to infer missing samples in multi-dimensional fields, for applications such as
+image super-resolution and scan completion. In this paper, we investigate the use of such architectures for learning the upscaling of
+a low-resolution sampling of an isosurface to a higher resolution, with high fidelity reconstruction of spatial detail and shading. We
+introduce a fully convolutional neural network, to learn a latent representation generating a smooth, edge-aware normal field and
+ambient occlusions from a low-resolution normal and depth field. By adding a frame-to-frame motion loss into the learning stage, the
+upscaling can consider temporal variations and achieves improved frame-to-frame coherence. We demonstrate the quality of the
+network for isosurfaces which were never seen during training, and discuss remote and in-situ visualization as well as focus+context
+visualization as potential applications.
+Index Terms—Machine Learning ; Extraction of Surfaces (Isosurfaces, Material Boundaries) ; Volume Rendering.
+1
+I NTRODUCTION
+In this work, we investigate a novel approach to further reduce the
+number of samples in isosurface ray-casting with ambient occlusion.
+This strategy is orthogonal to the use of an acceleration structure,
+meaning that it works in tandem with this structure to even more
+aggressively reduce the number of samples. In our investigations,
+we address the following questions which are paramount in volumetric
+isosurface rendering: First, we shed light on the question whether
+an accurate high-resolution image of the surface—a super-resolution
+image—can be inferred from only the unshaded surface points at a
+far lower image resolution. Second, we aim at investigating whether
+ambient occlusions can be inferred from the surface geometry without
+the need to explicitly compute occlusions on that geometry.
+At first, it seems questionable whether the aforementioned goals
+can be achieved. From a signal theoretical point of view, it can be
+argued that new structures—beyond what can be predicted by classical up-scaling filters like bi-linear or -cubic interpolation—cannot be
+inferred without any further assumptions about their occurrence. On
+the other hand, recent works in deep learning have demonstrated that
+such assumptions can be learned by an artificial neural network from
+corresponding pairs of low- and high-resolution color images. Learned
+assumptions can then be transferred to a new low-resolution input,
+to generate a high-resolution variant that adheres to the data seen at
+traininig time. Learning-based image and video super-resolution have
+achieved remarkable results over the last years, by training networks using low- and high-resolution color images of the same scene [9,25]. The
+proposed recurrent neural network architectures train on high-resolution
+color images and low-resolution copies that have been generated from
+these high-resolution images via filtering. Even though similar in spirit
+to classical super-resolution techniques, it is worth noting that we strive
+for a conceptually very different approach in this work: Instead of using
+Over the last decades, much of the research related to volumetric raycasting for isosurface rendering has been devoted to the investigation
+of efficient search structures, i.e., data structures that enable to reduce
+the number of data samples required to determine where a view ray
+intersects the surface. Despite the high degree of sophistication of
+these acceleration structures, for large volumes—and in particular for
+volumes with heterogeneous material distribution—the traversal of
+these data structures becomes increasingly costly. Since the workload
+of ray-casting is linear in the number of pixels, frame rates can drop
+significantly when isosurfaces in large volumes are rendered on highresolution display systems.
+This effect is greatly intensified if global illumination effects are
+considered. One of the most important global illumination effects for
+isosurfaces is ambient occlusion. Ambient occlusion (AO) estimates
+for every surface point the attenuation of ambient light from the surrounding, and uses this information to enhance cavities and locations
+closely surrounded by other surface parts. Ambient occlusion is simulated by testing along many secondary rays per surface point whether
+the isosurface is hit. These tests can be greatly accelerated by using
+a ray-casting acceleration structure, yet in general the number of data
+samples that need to be accessed increases so strongly that interactive
+frame rates cannot be maintained.
+All authors are with Technical University of Munich.
+• Sebastian Weiss: sebastian13.weiss@tum.de.
+• Mengyu Chu: mengyu.chu@tum.de.
+• Nils Thuerey: nils.thuerey@tum.de.
+• Rüdiger Westermann: westermann@tum.de.
+1
+2
+color images and down-scaled ground truth images for training, we
+aim at incorporating 3D scene information in the form of per-frame
+depth and normal fields into the training and reconstruction process. It
+is our goal to let the network learn the relations between the isosurface
+geometry sampled at a low and a high resolution, and to infer on the
+relations between the geometry and shading.
+1.1
+R ELATED W ORK
+Our approach works in combination with established acceleration techniques for volumetric ray-casting of isosurfaces, and builds upon recent
+developments in image and video super-resolution via artificial neural
+networks to further reduce the number of data access operations.
+Volumetric Ray-Casting of Isosurfaces Over the last decades,
+considerable effort has been put into the development of acceleration
+techniques for isosurface ray-casting in 3D scalar fields. Direct volume
+ray-casting of isosurfaces was proposed by Levoy [31]. Classical fixedstep ray-casting traverses the volume along a ray using equidistant steps
+in the order of the voxel size. Acceleration structures for isosurface
+ray-casting encode larger areas were the surface cannot occur, and raycasting uses this information to skip these areas with few steps. One
+of the most often used acceleration structure is the min-max pyramid
+[8], a tree data structure that stores at every interior node the interval
+of data values in the corresponding part of the volume. Pyramidal data
+structures are at the core of most volumetric ray-casting techniques to
+effectively reduce the number of data samples that need to be accessed
+during ray traversal.
+Because the min-max pyramid is independent of the selected isovalue, it can be used to loop through the pencil of iso-surfaces without
+any further adaptations. For pre-selected isosurfaces, bounding cells or
+simple geometries were introduced to restrict ray-traversal to a surface’s
+interior [45, 51]. Adaptive step-size control according to pre-computed
+distance information aimed at accelerating first-hit determination [46].
+Recently, SparseLeap [15] introduced pyramidal occupancy histograms
+to generate geometric structures representing non-empty regions. They
+are then rasterized into per-pixel fragment lists to obtain those segments
+that need to be traversed.
+Significant performance improvements have been achieved by approaches which exploit high memory bandwidth and texture mapping
+hardware on GPUs for sampling and interpolation in 3D scalar fields
+[16, 28]. For isosurface ray-casting, frame to frame depth buffer coherence on the GPU was employed to speed up first-hit determination [5,27]. A number of approaches have shown the efficiency of GPU
+volume ray-casting when paired with compact isosurface representations, brick-based or octree subdivision, and out-of-core strategies for
+handling data sets too large to be stored on the GPU [11, 13, 40, 50].
+For a thorough overview of GPU approaches for large-scale volume
+rendering, let us refer to the report by Beyer et al. [3].
+Related to isosurface rendering is the simulation of realistic surface
+shading effects. Ambient occlusion estimates for every surface point
+the integral of the visibility function over the hemisphere [53]. Ambient
+occlusion can greatly improve isosurface visualization, by enhancing
+the perception of small surface details. A number of approximations
+for ambient occlusion simulation in volumetric data sets have been
+proposed, for instance, local and moment-based approximations of
+occluding voxels [18, 38] or pre-computed visibility information [41].
+The survey by Ropinski et al. [23] provides a thorough overview of the
+use of global illumination in volume visualization. Even though very
+efficient screen-space approximations of ambient occlusion exist [1,35],
+we decided to consider ray-traced ambient occlusion in object-space to
+achieve high quality.
+Contribution
+Building upon prior works in deep learning and network architectures
+for image and video super-resolution, we present an artificial neural
+network that learns to upscale a sampled representation of geometric
+properties of an isosurface at low resolution to a higher resolution.
+We introduce a fully convolutional neural network, using the FRVSRNet [43] as a basis, to learn a latent representation that can generate a
+smooth, edge-aware depth and normal field, as well as ambient occlusions, from a low-resolution depth and normal field. To support user
+navigation in the exploration of complex isosurfaces, we integrate a loss
+function into the training pass that penalizes frame-to-frame inconsistencies and achieves improved temporal coherence in the reconstruction
+step.
+We use the network architecture to infer images of isosurfaces with
+four times the resolution of the input images. Fig. 1 demonstrates the
+reconstruction quality of the upscaling process. Since the network is designed to learn high-resolution ambient occlusions from low-resolution
+depth and normal images, computations of ambient occlusions at runtime are entirely avoided. Compared to volumetric ray-casting at full
+resolution, the number of samples from the volumetric field can be reduced drastically about a factor of 16 (without ambient occlusions) and
+16 x NAO (with ambient occlusions and NAO samples per surface point).
+A performance gain of one to two orders of magnitude compared to
+full resolution ray-casting is achieved.
+Our specific contributions are:
+• We show that it is beneficial to train the network based on depth
+and normal images instead of color. Our results indicate that
+this training process results in an improved learning of geometric
+surface properties, and avoids that the network implicitly learns
+an internal color representation (see Fig. 2).
+• Instead of letting the network learn to infer AO in the highresolution output from AO in the low-resolution inputs, it is
+solely learned from low-resolution depth and normal maps. Corresponding training data with AOs at high resolution is provided
+at training time. At runtime, AO then never needs to be simulated
+when rendering the low-resolution input images, but is instead
+inferred by the network.
+• We show that training and evaluating the network with a differentiable screen-space shading step greatly enhances the visual
+quality when compared to super-resolution on RGB-images only.
+Our networks learn to anticipate the influence of shading, and
+produce geometry information such that the desired final color
+content is obtained.
+• To let the network learn to maintain frame-to-frame coherence,
+we additionally add a motion loss for the generated image content.
+In this way, the network achieves improved reconstruction quality
+and becomes well suited for interactive exploration tasks.
+Deep Learning of Super-Resolution and Shading For superresolution of natural images, deep learning based methods have progressed rapidly since the very first method [9] surpassed traditional
+techniques in terms of peak signal-to-noise ratio (PSNR). Regarding
+network architectures, Kim et al. introduced a very deep network [26],
+Lai et al. designed the Laplacian pyramid network [29], and advanced
+network structures have been applied, such as the ResNet [17, 30] and
+DenseNet [20, 49] architectures. Regarding loss formulations, realistic
+high-frequency detail is significantly improved by using adversarial
+and perceptual losses based on pretrained networks [30, 42]. Compared
+to single-image methods, video super-resolution tasks introduce the
+time dimensions, and as such require temporal coherence and consistent image content across multiple frames. While many methods
+use multiple low-resolution frames [21, 33, 47], the FRVSR-Net [43]
+We analyse the quality of the network for isosurfaces that were never
+shown to the network during the training pass. The quality of upscaling
+seems to indicate that not a specific isosurface is learned, but rather
+that the network is able to infer the geometric properties of isocontours
+in scalar fields. On the other hand, it is not possible in general to
+quantify the reconstruction error that can be introduced by the network.
+In an upcoming evaluation we will thoroughly study the error and
+investigate whether it impacts the fidelity by which certain features are
+reconstructed. We also outline applications where the error is either
+acceptable, e.g., during interactive navigation, or is even intentionally
+integrated, for example in focus+context visualization.
+2
+(a)
+(b)
+(c)
+(d)
+Fig. 2: Super-resolution on depth and normal maps with screen-space shading (a,c) leads to superior reconstruction quality compared to
+super-resolution on color images (b,d). These images exhibit color bleeding and shifts, while our screen-space shading approach successfully
+prevents these artifacts. (b) was converted to gray-scale to emphasize geometric differences.
+reuses the previously generated high-resolution image to achieves better temporal coherence. By using a spatio-temporal discriminator, the
+TecoGAN [7] network produced results with spatial detail without
+sacrificing temporal coherence. Overall, motion compensation represents a critical component when taking into account multiple input
+frames. Methods either use explicit motion estimation and rely on
+its accuracy [7, 32, 43, 52], or spend extra efforts implicitly such as
+detail fusion [47] and dynamic upsampling [21]. In our setting, we can
+instead leverage the computation of reliable screen-space motions via
+raytracing.
+FtLR
+ItLR
+Shading
+est
+Ot−1
+···
+Warp
+est
+Õt−1
+Of
+Flatten
+SRNet
+Otest
+Ctest
+···
+Fig. 4: Schematic illustration of the processing steps. Blue: lowresolution inputs, green: high-resolution outputs, yellow: fixed processing steps, red: trained network.
+In a different scenario, neural networks were trained to infer images
+from a noisy input generated via path-tracing with low number of paths,
+of the same resolution as the target, but with significantly reduced variance in the color samples [34, 39]. Deep shading [37] utilized a neural
+network to infer shading from rendered images, targeting attributes like
+position, normals, and reflections for color images of the same resolution. None of these techniques used neural networks for upscaling as
+we do, yet they are related in that they use additional parameter buffers
+to improve reconstruction quality of global illumination.
+3
+Upscaling
+3.1
+Input Data
+Both the low- and high-resolution input and ground truth maps are
+generated via volumetric ray-casting. AO in the high-resolution image
+is simulated by spawning 512 additional secondary rays per surface
+point, and testing each of them for an intersection with the surface.
+Since we aim at supporting temporally coherent super-resolution, all
+images have a time subscript t, starting with t = 1 at the first frame.
+The following low-resolution input maps of size H ×W are used in
+the training step:
+I SOSURFACE L EARNING
+• MtLR ∈ [−1, +1]H×W : The binary input mask that specifies for
+every pixel whether the isosurface is hit (mask=1) or not (mask=1). Internally, the network learns continuous values, and uses these
+values to smoothly blend the final color over the background.
+Our method consists of a pre-process in which an artifical neural network is trained, and the upscaling process which receives a new lowresolution isosurface image and uses the trained network to perform
+the upscaling of this image. Our network is designed to perform 4x
+upscaling, i.e. from input images of size H ×W to output images of size
+4H × 4W . Note, however, that other upscaling factors can be realized
+simply be adapting the architecture to these factors and re-training the
+network.
+• NtLR ∈ [−1, +1]3×H×W : The normal map with the normal vectors
+in screen-space.
+• DtLR ∈ [0, 1]H×W : The depth map, in which 0 indicates that no hit
+was found.
+The network is trained on unshaded surface points. It receives the
+low-resolution input image in the form of a normal and depth map
+for a selected view, as well as corresponding high-resolution maps
+with an additional AO map that is generated for that view. A low- and
+high-resolution binary mask indicate those pixels where the surface
+is hit. Once a new low-resolution input image is upscaled, i.e., highresolution normal and AO maps are reconstructed, screen-space shading
+is computed and added to AO in a post-process to generate the final
+color.
+Thus, the low-resolution input to the network can be written as
+ItLR := {MtLR , NtLR , DtLR } ∈ R5×H×W . We subsequently call this the
+low-resolution input image.
+Additionally, we generate
+the following map during raycasting:
+• FtLR ∈ [−1, +1]2×H×W : A
+map of 2D displacement
+vectors, indicating the
+screen-space flow from
+the previous view to the
+current view.
+The network, given many low- and high-resolution pairs of input
+maps for different isosurfaces and views, internally builds a so-called
+latent representation that aims at mapping the low-resolution inputs to
+their high-resolution counterparts. A loss function is used to penalize
+differences between the high-resolution learned and ground-truth variants. The networks we use are trained with collections of randomly
+sampled views from a small number of exemplary datasets from which
+meaningful ground-truth renderings of isosurfaces were generated as
+training data. We will analyze the behaviour of differently trained networks on test data with isosurfaces the models have never seen during
+training in Sect. 5.
+The screen-space flow is Fig. 3: Dense screen-space flow
+used to align the previous high- from rotational movement. 2D disresolution results with the cur- placement vectors are color coded.
+rent low-resolution input maps.
+Under the assumption of temporal coherence, the network can then
+minimize for the deviation of the currently predicted high-resolution
+3
+and +1 (inside), Mtest can take on any values. Hence, Mtest is clamped
+first to [−1, +1] and then rescaled to [0, 1], leading to Mt0 est . This
+map then acts exactly like an alpha-channel and allows the network to
+smooth out edges, i.e.,
+map from the temporally extrapolated previous one in the training process. To compute the screen-space flow, assume that the current ray hits
+the isosurface at world position xt , in the low-resolution image. Let Mt
+and Mt−1 be the current and previous model-view-projection matrix,
+respectively. Then, we can project the point xt into the screen-space
+0 . The
+corresponding to the current and the previous view, giving xt0 , xt−1
+0
+0
+flow is then computed as ft := xt − xt−1 , indicating how to displace the
+previous mask, depth and normal maps at time t − 1 to align them with
+the frame at time t. Since the described method provides the displacement vectors only at locations in the low-resolution input image where
+the isosurface is hit in the current frame, we use a Navier-Stokes-based
+image inpainting [2] via OpenCV [4] to obtain a dense displacement
+field (see Fig. 3). The inpainting algorithm fills the empty areas in such
+a way that the resulting flow is as incompressible as possible.
+For aligning the previous maps, we first upscale the current flow
+field via bi-linear interpolation to high-resolution. In a semi-lagrangian
+fashion, we generate new high-resolution maps where every pixel in the
+upscaled maps retrieves the value in the corresponding high-resolution
+map from the previous frame, by using the inverse flow vector to
+determine the target location.
+The high-resolution input data, which is used as ground truth in
+the training process, is comprised of the same maps as the lowresolution input, plus an AO map AOtGT ∈ [0, 1]4H×4W . Here, a
+value of one indicates no occlusion and a value of zero total occlusion. Thus, the ground truth image can be written as OtGT :=
+{MtGT , NtGT , DtGT , AOtGT } ∈ R6×4H×4W . Once the network is trained
+with ItLR and OtGT , it can be used to predict a new high-resolution output image Otest := {Mtest , Ntest , Dtest , AOtest } ∈ R6×4H×4W from a given
+low-resolution image and the high-resolution output of the previous
+frame.
+3.2
+Ctest = lerp(cbg ,Crgb , Mt0 est ).
+3.3 Loss Functions
+In the following, we describe the loss functions we have included into
+the network. The loss functions are used by the network during training
+to calculate the model error in the optimization process. They allow
+for controlling the importance of certain features and, thus, the fidelity
+by which these features can be predicted by the network. The losses
+we describe are commonly used in artificial neural networks, yet in our
+case they are applied separately to different channels of the predicted
+and ground truth images. The total loss function we used for training
+the network is a weighted sum of the losses functions below. In Sect. 5,
+we analyze the effects of different loss functions on prediction quality.
+1. Spatial loss As a baseline, we employ losses with regular
+vector norms, i.e. L1 or L2 , on the different outputs of the network. Let
+X be either the mask M, the normal N, the ambient occlusion AO or the
+shaded output C. Then the L1 and L2 losses are given by:
+LX,l1 = ||Xtest − XtGT ||1 , LX,l2 = ||Xtest − XtGT ||22 .
+2.
+Perceptual loss Perceptual losses, as proposed by
+Gatys et al. [12], Dosovitskiy and Brox [10] and Johnson et al. [22],
+have been widely adopted to guide learning tasks towards detailed
+outputs instead of smoothed mean values. The idea is that two images
+are similar if they have similar activations in the latent space of a pretrained network. Let φ be the function that extracts the layer activations
+when feeding the image into the feature network. Then the distance is
+computed by
+LX,P = ||φ (Xtest ) − φ (XtGT )||22 .
+(4)
+As feature network φ , the pretrained VGG-19 network [44] is used. We
+used all convolution layers in all spatial dimensions as features, with
+weights scaled so that each layer has the same average activation when
+evaluated over all input images.
+Since the VGG network was trained to recognize objects in color
+images in the space [0, 1]3 , the shaded output C can be directly used.
+This perceptual loss on the color space can be backpropagated to the
+network outputs, i.e. normals and ambient occlusions, with the help
+of the differentiable Phong shading. This shading is part of the loss
+function, and is implemented such that gradients can flow from the
+loss evaluation into the weight update of the neural network during
+training. Hence, with our architecture the network receives a gradient
+so that it can learn how the output, e.g., the generated normals, should
+be modified such that the shaded color matches the look of the target
+image. When applying the perceptual loss on other entries, the input
+has to be transformed first. The normal map is rescaled from scale
+[−1, +1]3 to [0, 1]3 , and depth and masking maps are converted to
+grayscale RGB images. We did not use additional texture or style loss
+terms [12, 42], since these introduce artificial details and roughness in
+the image which is not desired in smooth isosurface renderings.
+3. Temporal loss All previous loss functions worked only on
+the current image. To strengthen the temporal coherence and reduce
+flickering, we employ a temporal L2 loss [6]. We penalize differences between the current high-resolution image Otest and the previous,
+warped high-resolution image Ow with
+Super-Resolution Surface Prediction
+Once the network has been trained, new low-resolution images are
+processed by the stages illustrated in Fig. 4 to predict high-resolution
+output maps. For the inference step, we build upon the frame-recurrent
+neural network architecture of Sajjadi et al. [43]. At the current timestep
+t, the network is given the input ItLR and the previous high-resolution
+est , warped using the image-space flow, for temporal
+prediction Ot−1
+coherence. It produces the current prediction Otest , and after a postprocessing step also the final color Ctest ∈ [0, 1]3×4H×4W .
+1. Upscaling and Warping: After upscaling the screen-space
+flow FtLR , it is used as described to warp all previous estimated maps
+est , leading to Õest ∈ R6×4H×4H .
+Ot−1
+t−1
+est are flattened
+2. Flattening: Next, the warped previous maps Õt−1
+into the low resolution by applying a space-to-depth transformation [43]
+2
+Ss : R6×4H×4W → R4 6×H×W .
+(1)
+I.e., every 4x4 block of the high-resolution image is mapped to a single
+pixel in the low-resolution image. The channels of these 4x4 = 16
+pixels are concatenated, resulting in a new low-resolution image with
+16-times the number of channels: O f .
+3. Super-Resolution: The super-resolution network then receives
+the current low resolution input ItLR (5 channels) and the flattened,
+warped prediction from the previous frame O f (i.e., 16*6 channels).
+The network then estimates the six channels of the output Otest , the
+high-resolution mask, normal, depth, and ambient occlusion.
+est 2
+LX,temp = ||Xtest − X̃t−1
+||2 ,
+4. Shading: To generate a color image, we apply screen-space
+Phong shading with ambient occlusion as a post-processing step,
+Crgb = Phong(ca , cd , cs cm , Ntest ) ∗ AOtest ,
+(3)
+(5)
+where X can be M, N, AO or C.
+In the literature, more sophistic approaches to improve the temporal
+coherence are available, e.g. using temporal discriminators [7]. These
+architectures give impressive result, but are quite hard to train. We
+found that already with the proposed simple temporal loss, good temporal coherence can be achieved in our current application. We refer the
+readers to the accompanying video for a sequence of a reconstruction
+over time.
+(2)
+with the ambient color ca , diffuse color cd , specular color cs and material color cm as parameters.
+The network also produces a high-resolution mask Mtest as output.
+While the input mask MtLR was comprised only of values -1 (outside)
+4
+ReLU
+ReLU
+Conv, 64
+Conv, 64
+ReLU
+2x Upsampling
+Conv, 64
+2x Upsampling
+ReLU
++ ···
+Conv, 6
+4x
+Upsampling
+96
+Of
+channels
+Conv, 64
+DtLR
+Conv, 64
+NtLR
+ReLU
+ItLR
+5 channels
+Conv, 64
+MtLR
+Otest
+6 channels
+Mtest
++
+Ntest
+Dtest
+AOtest
+10 residual blocks
+Fig. 5: Network architecture for the SRNet. Within the network, ⊕ indicates component-wise addition of the residual. All convolutions use 3x3
+kernels with stride 1. Bilinear interpolation was used for the upsampling layers.
+4 L EARNING M ETHODOLOGY
+In this chapter, we describe our used network architecture, as well as
+the training and inference steps in more detail.
+4. Loss masking During screen-space shading in the post-process
+(see Sect. 3.2), the output color is modulated with the mask indicating
+hits with surface points. Pixels where the mask is -1 are set to the
+background color. Hence, the normal and ambient occlusion values
+produced by the network in these areas are irrelevant for the final color.
+To reflect this in the loss function, loss terms that do not act on the
+mask (i.e. normals, ambient occlusions, colors) are itself modulated
+with the mask so that areas that are masked out don’t contribute to the
+loss. We found this to be a crucial step that simplifies the network’s
+task: In empty regions, the ground truth images are filled with default
+values in the non-mask channels, while with loss masking, the network
+does not have to match these values.
+4.1 Network Architecture
+Our network architecture employs a modified frame-recurrent neural
+network consisting of a series of residual blocks [43]. A visual overview
+is given in Fig. 5. The generator network starts with one convolution
+layer to reduce the 101 input channels (5 from ItLR , 6 ∗ 42 from O f )
+into 64 channels. Next, 10 residual blocks are used, each of which
+contains 2 convolutional layers. These are followed by two upscaling
+blocks (2x bilinear upscaling, a convolution and a ReLU) arriving at a
+4x resolution, still with 64 channels. In a final step, two convolutions
+process these channels to reduce the latent feature space to the desired
+6 output channels. The network is fully convolutional, and all layers
+use 3x3 kernels with stride 1.
+The network as a whole is a residual network, i.e. it only learns
+changes to the input. As shown by previous work [17], this improves the
+generalizing capabilities of the network, as it can focus on generating
+the residual content. Hence, the 5 channels of the input are bilinearly
+upsampled and added to the first five channels of the output, producing
+Mtest , Ntest and Dtest . The only exception is AOtest , which is inferred from
+scratch, as there is no low-resolution input for this map.
+5. Adversarial Training Lastly, we also employed an adversarial
+loss as inspired by Chu et al. [7]. In adversarial training, a discriminator
+network is trained parallel to the super-resolution network generator.
+The discriminator receives ground truth images and predicted images,
+and is trained to classify whether the input was ground truth or not.
+This discriminator is then used in the loss function of the generator
+network. For further details of adversarial training and GANs let us
+refer to, e.g., Goodfellow et al. [14].
+In more detail, for evaluating the predicted images, the discriminator
+is provided with
+• the high-resolution output Otest , and optionally the color Ctest ,
+4.2 Training and Inference
+The overall loss for training the super-resolution network is a weighted
+sum of the loss terms described in Sect. 3.3:
+• the input image ItLR as a conditional input to learn and penalize
+the mismatching between input and output,
+Lfull
+LR , Oest , and optionally Cest to learn to
+• the previous frames It−1
+t−1
+t−1
+penalize for temporal coherence.
+To evaluate the discriminator score of the ground truth images, the
+predicted images ◦est are replaced by ◦GT .
+As a loss function we use the binary cross entropy loss. Formally,
+let z be the input over all timesteps and G(z) the generated results, i.e.
+the application of our super-resolution prediction on all timesteps. Let
+D(x) be the discriminator that takes the high-resolution outputs as input
+and produces a single scalar score. Then the discriminator is trained to
+distinguish fake from real data by minimizing
+LGAN,D = − log(D(x)) − log(1 − D(G(z))).
+λM LM,l1 + λAO LAO,l1 + λN LN,l1
+(8)
++λG LGAN,G + λN,P LN,P + λC,P LC,P
++λAOtemp LAO,temp + λNtemp LN,temp + λCtemp LC,temp .
+For a comparison of three networks with different weights on the loss
+functions, see Sect. 5, the corresponding details of the λ weights are
+given in Table 1.
+Our training and validation suite consists of 20 volumes of clouds
+[24], smoke plumes simulated with Mantaflow [48], and example volumes from OpenVDB [36], see Fig. 6. From these datasets, we rendered
+(6)
+Network
+GAN 1
+GAN 2
+(7)
+L1-normal
+The generator is trained to minimize
+LGAN,G = − log(D(G(z)))
+=
+Losses
+LM,l1 + LAO,l1 + 0.1LC,P + LGAN,G
+LM,l1 + LAO,l1 + 0.1LN,P + LGAN,G
+No AO in the shading for the GAN
+LM,l1 + LAO,l1 + 10LN,l1 + 0.1LC,temp
+PSNR
+19.095
+17.175
+21.659
+Table 1: Loss weights for three selected networks that are used to
+generate the result images. The PSNR of our methods are much higher
+than the ones of nearest-neighbor and bilinear interpolations which are
+14.282 and 14.045 respectively.
+When using the adversarial loss, we found that it is important to
+use a network that is pre-trained with different loss terms, e.g. L2 or
+perceptual, as a starting point. Otherwise the discriminator becomes
+too good too quickly so that no gradients are available for the generator.
+5
+ambient occlusion maps to be preferable. Strong weights on the color
+losses typically degrade the image quality and smooths out results. For
+a comparison between two networks trained with L1 loss on the color
+and one with L1 loss on the normal, see Fig. 7. It can be seen that the
+version with L1 loss on the normal produces much sharper results. A
+comparison between a network with a perceptual loss on the color as
+dominating term yields the same outcome. We think that this is caused
+by ambiguities in the shading: a darker color can be achieved by a
+normal more orthogonal to the light, more ambient occlusion or a lower
+value for the mask. Furthermore, this makes the training depend on the
+material and light settings, which we aimed to avoid.
+The perceptual loss for the normal field LN,P provides more pronounced details in the output. For the mask and ambient occlusion
+this is not desirable, as both contain much smoother content in general.
+Hence, we employ a L1 loss for the mask and ambient occlusion.
+The temporal losses LX,temp successfully reduce flickering between
+frames, but can lead to smoothing due to the warping of the previous
+image. By changing the weighting between temporal losses and e.g.
+perceptual loss on the normal, more focus is put on either sharp details
+or improved temporal coherence. Since our adversarial loss includes
+temporal supervision, we do not include the explicit temporal losses
+when using LGAN,G .
+The adversarial loss generally gives the most details, as can be seen
+in Sect. 5.1. Only the GAN loss, however, is typically not sufficient. To
+overcome plateaus if the discriminator fails to provide gradients or to
+stabilize the optimization in the beginning, we combine the GAN loss
+with a perceptual loss on the normals and an L1 loss on the mask and
+ambient occlusion with a small weighting factor. We also found that
+the GAN loss improves in quality if the discriminator is provided with
+the shaded color in addition to masks, normals and depths. This stands
+in contrast to the spatial or perceptual loss terms, which did not benefit
+from the shaded color.
+Fig. 6: Datasets used for training.
+(a)
+(b)
+Fig. 7: Comparison: L1 loss on color (a) vs. on normal (b)
+5
+E VALUATION
+For the evaluation we identified the three best performing networks,
+two GAN architectures and one dominated by only a L1 loss on the
+normals, see Table 1 for the exact combinations of the losses. In the
+following, we evaluate the three architectures in more detail.
+To quantify the accuracy of the super-resolution network, we compute the Peak signal-to-noise ratio (PSNR) of the different networks on
+the validation data, see also Table 1. From this table, one can see that
+the network “L1-normal”-network performs best. This is further supported by the visual comparison in the following section. The PSNR for
+nearest-neighbor interpolation is 14.282 and for bilinear interpolation
+14.045.
+500 sequences of 10 frames each with a low resolution of 1282 and
+random camera movement. Out of these sequences, 5000 random crops
+of low resolution size of 322 were taken with the condition of being
+filled to at least 50%. These 5000 smaller sequences were then split
+into training (80%) and validation (20%) data.
+The ground truth ambient occlusion at each surface point was generated by sampling random directions on the hemisphere and testing
+if rays along these directions again collide with the isosurface. This
+gives a much higher visual quality than screen-space ambient occlusion,
+which test samples against screen-space depth.
+We further want to stress that our low-resolution input is directly
+generated by the raytracer, not a blurred and downscaled version of the
+original high-resolution image as it is common practice in image and
+video super-resolution [7, 42]. Therefore, the input image is very noisy,
+and poses a challenging task for the network.
+To estimate the current frame, the network takes the previous highest as input. Since the previous frame is not
+resolution prediction Ot−1
+available for the first frame of a sequence, we evaluated different ways
+to initialize the first previous high-resolution input:
+5.1
+Comparisons with Test Data
+To validate how good the trained networks generalize to new data, we
+compare the three networks on new volumes that were never be shown
+to the network during training. First, a CT scan of a human skull with
+a resolution of 2563 is shown in Fig. 8, followed by a CT scan of a
+human thorax (Fig. 9) at 2563 . Third, Fig. 10 shows an isosurface in a
+10243 Richtmyer-Meshkov instability.
+From these three examples, we found that the network trained with a
+spatial L1 loss on the normals (LN,l1 ) gives the most reliable inference
+results. This “L1-normal”-network is the most strictly supervised
+variant among our three versions, and as such the one that stays closest
+to image structures that were provided at training time. Hence, we
+consider it as the preferred model. In contrast, networks trained with
+adversarial losses like our two GAN architectures tend to generate a
+larger amount of detailed features. While this can be preferable e.g. for
+super-resolution of live-action movies, this is typically not desirable for
+visualizations of isosurfaces.
+The teaser (Fig. 1) demonstrates the “L1-normal”-network again on
+the Ejecta dataset, a particle-based fluid simulation resampled to a grid
+with resolution 10243 . For a comparison of all three networks on a
+different isosurface of the same model, see Fig. 11. The accompanying
+video also shows results generated with the “L1-normal”-network for
+the Ejecta and Richtmyer-Meshkov datasets in motion.
+1. All entries set to zero,
+2. Default values: mask=0, normal=[0, 0, 1], AO=1,
+3. An upscaled version of the current input.
+In the literature, the first approach is used most of the time. We found
+that there is hardly any visual difference in the first frame between
+networks trained with these three options. For the final networks, we
+thus used the simplest option 1.
+4.3 Training Characteristics of the Loss Terms
+Now we give some insights into the effects of the different loss term
+combinations. We found that it is not advisable to use losses on the
+color output, and found losses working with the mask, normal and
+6
+Dataset
+Skull 2563
+Thorax 2563
+R.-M. 10243
+Ejecta 10243
+High-res
+(no AO)
+0.057
+0.069
+0.088
+0.163
+High-res
+(with AO)
+4.2
+9.1
+14.5
+18.6
+Low-res
+Super-res
+0.0077
+0.010
+0.014
+0.031
+0.071
+0.071
+0.072
+0.072
+weaken this limitation, modern remote visualization systems perform
+sophisticated image-processing operations, like frame-to-frame change
+identification, temporal change encoding as well as image compression
+for bandwidth reduction.
+We see one application of deep learning-based super-resolution
+along this streaming pipeline. During interaction, compressed lowresolution images can be streamed to the client-side, and decompressed
+and upscaled using trained networks. We are confident that during
+interaction the reconstruction error does not lead to the suppression
+of relevant surface features, and for a selected view a full resolution
+version can then be streamed.
+In the imagined scenario, the networks need to be specialized on
+certain data types, such as images of certain physical simulations or
+visualization output from systems for specific use-cases like terrain
+rendering. We believe that custom networks need to be developed,
+which take into account specific properties of the data that is remotely
+visualized, as well as application-specific display parameters like color
+tables and feature-enhancements. Even though our method can so far
+only be used to upscale renderings of isosurfaces in volumetric scalar
+fields, we are convinced that the basic methodology can also be used
+for other types of visualizations. In particular the application to direct
+volume rendering using transparency and color will be an extremely
+challenging yet rewarding research direction.
+As a second use case we see in-situ visualization. Since often the
+data from supercomputer simulations can only be saved at every n-th
+time step due to memory bandwidth limitations, in-between frames
+need to be extrapolated from these given key frames. In such scenarios,
+it needs to be investigated whether the network can infer in-between
+isosurface images or even volumetric scalar fields to perform temporal
+super-resolution.
+Our third use case is focus+context volume visualization. Images
+of isosurfaces often include a barrage of 3D information like shape,
+appearance and topology of complex structures, quickly overwhelming
+the user. Thus, often the user prefers to focus on particular areas in the
+data while preserving context information at a coarser, less detailed
+scale. In this situation, our proposed network can be used to reconstruct
+the image from a sparse set of samples in the context region, merged
+with an accurate rendering of the surface in the focus region. To
+achieve this, we will investigate the adaptations to let the network infer
+the surface from a sparse set of samples, and smoothly embed the image
+of the focus region.
+Table 2: Timings in seconds for rendering an isosurface in FullHD
+(1920x1080) resolution, averaged over 10 frames.
+5.2
+Timings
+To evaluate the performance of isosurface super-resolution, we compare
+it to volumetric ray-casting on the GPU using an empty-space acceleration structure. Rendering times for the isosurfaces shown in the four
+test data sets are given in Table 2, for a view port size of 1920x1080.
+The table shows the time to render the ground truth image at full
+resolution with ambient occlusion, the rendering times for the lowresolution input without ambient occlusion, and the time to perform
+super-resolution upscaling of the input using the network. As the
+evaluation time for all three networks is the same, only the average time
+is reported. The time to warp the previous image, perform screen-space
+shading and IO between the renderer and the network are not included.
+For rendering the ground truth ambient occlusion, 128 samples were
+taken. This gives reasonable results, but noise is still visible.
+As one can see from Table 2, the time to compute ambient occlusion
+drastically increases the computational cost. Because the Ejecta dataset
+contains less empty blocks that can be skipped during rendering than
+the Richtmyer-Meshkov dataset, the computation time for the first
+hit (high-resolution image without AO) is twice as high that for the
+Richtmyer-Meshkov dataset. As expected, the time to evaluate the
+super-resolution network stays constant for all four datasets as it only
+depends on the screen size.
+As an example, the total time to render the input and perform
+the super-resolution on the Richtmyer-Meshkov dataset is 0.014s +
+0.072s = 0.086s. Hence the network approximately takes the same time
+as rendering the full resolution without ambient occlusion (0.088s), but
+produces a smooth ambient occlusion map in addition. Once ambient
+occlusion is included in the high-resolution rendering, the rendering
+time drastically increases to 14.5s, hence the super-resolution outperforms the high-resolution renderer by two orders of magnitudes.
+The isosurface renderer is implemented with Nvidia’s GVDB library [19], an optimized GPU raytracer written in CUDA. The superresolution network uses Pytorch. The timings were performed on a
+workstation running Windows 10, equipped with an Intel Xeon W-2123,
+3.60Ghz, 8 logical cores, 64GB RAM, and a Nvidia RTX Titan GPU.
+6
+6.2 Conclusion and Future Work
+We have investigated a first deep learning technique for isosurface
+super-resolution with ambient occlusion. Our network yields detailed
+high-resolution images of isosurfaces at a performance that is two
+orders of magnitudes faster than that of an optimized ray-caster at full
+resolution. Our recurrent network architecture with temporally coherent
+adversarial training make it possible to retrieve detailed images from
+highly noisy low-resolution input renderings.
+Despite these improvements in runtime and quality, our method only
+represents a very first step towards the use of deep learning methods
+for scientific visualization, and there are numerous promising and
+interesting avenues for future work. Among others, it will be important
+to analyze how sparse the input data can be so that a network can
+still infer on the geometry of the underlying structures. In addition,
+additional rendering effects such as soft shadows could be included in
+future versions of our approach. While we have focused on isosurface
+super-resolution networks in the current work, the extension to support
+transparency and multiple-scattering effects is not straight forward and
+needs to be investigate in the future.
+D ISCUSSION
+Our results demonstrate that deep learning-based methods have great
+potential for upscaling tasks beyond classical image-based approaches.
+The trained network seems to infer well the geometric properties of
+isosurfaces in volumetric scalar fields. We believe this result is of
+theoretical interest on its own, and has potential to spawn further research, e.g. towards the upscaling of the volumetric parameter fields
+themselves. Furthermore, we immediately see a number of real-world
+scenarios where the proposed super-resolution isosurface rendering
+technique can be applied.
+6.1
+Use Cases
+An interesting use case is remote visualization. As designers and
+engineers in today’s supercomputing environments are working with
+increasingly complex models and simulations, remote visualization
+services are becoming an indispensable part of these environment. Recent advances in GPU technology, virtualization software, and remote
+protocols including image compression support high quality and responsiveness of remote visualization systems. However, in practice
+the bandwidth of the communication channel across which rendered
+images are transmitted often limits the streaming performance. Thus,
+the degree of interactivity often falls below what a user expects. To
+ACKNOWLEDGMENTS
+This work is supported by the ERC Starting Grant realFlow (StG-2015637014).
+7
+(a) Low-resolution input
+(b) Bilinear upscaling
+(e) GAN 1
+(c) Ground truth without AO
+(f) GAN 2
+(d) Ground truth with AO
+(g) L1 loss on normals
+Fig. 8: Comparison of different network outputs on a CT scan of the human skull.
+(a) Low-resolution input
+(b) Bilinear upscaling
+(e) GAN 1
+(c) Ground truth without AO
+(f) GAN 2
+(d) Ground truth with AO
+(g) L1 loss on normals
+Fig. 9: Comparison of different network outputs on a CT scan of the human thorax.
+8
+(a) Low-resolution input
+(b) Bilinear upscaling
+(e) GAN 1
+(c) Ground truth without AO
+(f) GAN 2
+(d) Ground truth with AO
+(g) L1 loss on normals
+Fig. 10: Comparison of different network outputs on an iso-surface of a Richtmyer-Meshkov process.
+(a) Low-resolution input
+(e) GAN 1
+(b) Bilinear upscaling
+(c) Ground truth without AO
+(f) GAN 2
+(d) Ground truth with AO
+(g) L1 loss on normals
+Fig. 11: Comparison of different network outputs on an different iso-surface of the Ejecta dataset than the one shown throughout the paper.
+9
+R EFERENCES
+[22] J. Johnson, A. Alahi, and L. Fei-Fei. Perceptual losses for real-time style
+transfer and super-resolution. In European conference on computer vision,
+pp. 694–711. Springer, 2016.
+[23] D. Jönsson, E. Sundén, A. Ynnerman, and T. Ropinski. A survey of volumetric illumination techniques for interactive volume rendering. Comput.
+Graph. Forum, 33:27–51, 2014.
+[24] S. Kallweit, T. Müller, B. McWilliams, M. Gross, and J. Novák. Deep
+scattering: Rendering atmospheric clouds with radiance-predicting neural
+networks. ACM Trans. Graph. (Proc. of Siggraph Asia), 36(6), Nov. 2017.
+doi: 10.1145/3130800.3130880
+[25] A. Kappeler, S. Yoo, Q. Dai, and A. K. Katsaggelos. Video superresolution with convolutional neural networks. IEEE Transactions on
+Computational Imaging, 2(2):109–122, 2016.
+[26] J. Kim, J. Kwon Lee, and K. Mu Lee. Accurate image super-resolution
+using very deep convolutional networks. In Proceedings of the IEEE
+conference on computer vision and pattern recognition, pp. 1646–1654,
+2016.
+[27] T. Klein, M. Strengert, S. Stegmaier, and T. Ertl. Exploiting frame-to-frame
+coherence for accelerating high-quality volume raycasting on graphics
+hardware. In IN: PROCEEDINGS OF IEEE VISUALIZATION ’05, pp.
+223–230. IEEE, 2005.
+[28] J. Kruger and R. Westermann. Acceleration techniques for gpu-based
+volume rendering. In Proceedings of the 14th IEEE Visualization 2003
+(VIS’03), VIS ’03, pp. 38–. IEEE Computer Society, Washington, DC,
+USA, 2003. doi: 10.1109/VIS.2003.10001
+[29] W.-S. Lai, J.-B. Huang, N. Ahuja, and M.-H. Yang. Deep laplacian pyramid networks for fast and accurate superresolution. In IEEE Conference
+on Computer Vision and Pattern Recognition, vol. 2, p. 5, 2017.
+[30] C. Ledig, L. Theis, F. Huszár, J. Caballero, A. Cunningham, A. Acosta,
+A. Aitken, A. Tejani, J. Totz, Z. Wang, et al. Photo-realistic single image
+super-resolution using a generative adversarial network. In Proceedings
+of the IEEE conference on computer vision and pattern recognition, pp.
+4681–4690, 2017.
+[31] M. Levoy. Display of surfaces from volume data. IEEE Comput. Graph.
+Appl., 8(3):29–37, May 1988. doi: 10.1109/38.511
+[32] R. Liao, X. Tao, R. Li, Z. Ma, and J. Jia. Video super-resolution via
+deep draft-ensemble learning. In Proceedings of the IEEE International
+Conference on Computer Vision, pp. 531–539, 2015.
+[33] D. Liu, Z. Wang, Y. Fan, X. Liu, Z. Wang, S. Chang, and T. Huang. Robust
+video super-resolution with learned temporal dynamics. In Computer
+Vision (ICCV), 2017 IEEE International Conference on, pp. 2526–2534.
+IEEE, 2017.
+[34] M. Mara, M. McGuire, B. Bitterli, and W. Jarosz. An efficient denoising
+algorithm for global illumination. In Proceedings of High Performance
+Graphics. ACM, New York, NY, USA, jul 2017. doi: 10.1145/3105762.
+3105774
+[35] M. Mittring. Finding next gen: Cryengine 2. In ACM SIGGRAPH 2007
+Courses, SIGGRAPH ’07, pp. 97–121. ACM, New York, NY, USA, 2007.
+doi: 10.1145/1281500.1281671
+[36] K. Museth, J. Lait, J. Johanson, J. Budsberg, R. Henderson, M. Alden,
+P. Cucka, D. Hill, and A. Pearce. Openvdb: An open-source data structure and toolkit for high-resolution volumes. In ACM SIGGRAPH 2013
+Courses, SIGGRAPH ’13, pp. 19:1–19:1. ACM, New York, NY, USA,
+2013. doi: 10.1145/2504435.2504454
+[37] O. Nalbach, E. Arabadzhiyska, D. Mehta, H.-P. Seidel, and T. Ritschel.
+Deep shading: Convolutional neural networks for screen space shading.
+Comput. Graph. Forum, 36(4):65–78, July 2017. doi: 10.1111/cgf.13225
+[38] E. Penner and R. Mitchell. Isosurface ambient occlusion and soft shadows
+with filterable occlusion maps. In Proceedings of the Fifth Eurographics /
+IEEE VGTC Conference on Point-Based Graphics, SPBG’08, pp. 57–64.
+Eurographics Association, Aire-la-Ville, Switzerland, Switzerland, 2008.
+doi: 10.2312/VG/VG-PBG08/057-064
+[39] C. R. Alla Chaitanya, A. S. Kaplanyan, C. Schied, M. Salvi, A. Lefohn,
+D. Nowrouzezahrai, and T. Aila. Interactive reconstruction of monte
+carlo image sequences using a recurrent denoising autoencoder. ACM
+Transactions on Graphics, 36:1–12, 07 2017. doi: 10.1145/3072959.
+3073601
+[40] F. Reichl, M. G. Chajdas, K. Bürger, and R. Westermann. Hybrid Samplebased Surface Rendering. In M. Goesele, T. Grosch, H. Theisel, K. Toennies, and B. Preim, eds., Vision, Modeling and Visualization. The Eurographics Association, 2012. doi: 10.2312/PE/VMV/VMV12/047-054
+[41] T. Ropinski, J. Meyer-Spradow, S. Diepenbrock, J. Mensmann, and K. Hinrichs. Interactive volume rendering with dynamic ambient occlusion and
+[1] L. Bavoil, M. Sainz, and R. Dimitrov. Image-space horizon-based ambient
+occlusion. In ACM SIGGRAPH 2008 Talks, SIGGRAPH ’08, pp. 22:1–
+22:1. ACM, New York, NY, USA, 2008. doi: 10.1145/1401032.1401061
+[2] M. Bertalmio, A. L. Bertozzi, and G. Sapiro. Navier-stokes, fluid dynamics, and image and video inpainting. In Proceedings of the 2001 IEEE
+Computer Society Conference on Computer Vision and Pattern Recognition. CVPR 2001, vol. 1, pp. I–I. IEEE, 2001.
+[3] J. Beyer, M. Hadwiger, and H. Pfister. State-of-the-art in gpu-based largescale volume visualization. Computer Graphics Forum, 34(8):13–37, 2015.
+doi: 10.1111/cgf.12605
+[4] G. Bradski. The OpenCV Library. Dr. Dobb’s Journal of Software Tools,
+2000.
+[5] C. Braley, R. Hagan, Y. Cao, and D. Gračanin. Gpu accelerated isosurface
+volume rendering using depth-based coherence. In ACM SIGGRAPH ASIA
+2009 Posters, pp. 42:1–42:1, 2009.
+[6] D. Chen, J. Liao, L. Yuan, N. Yu, and G. Hua. Coherent online video
+style transfer. In Proceedings of the IEEE International Conference on
+Computer Vision, pp. 1105–1114, 2017.
+[7] M. Chu, Y. Xie, L. Leal-Taixé, and N. Thuerey. Temporally coherent gans
+for video super-resolution (tecogan). arXiv preprint arXiv:1811.09393,
+2018.
+[8] J. Danskin and P. Hanrahan. Fast algorithms for volume ray tracing. In
+Proceedings of the 1992 Workshop on Volume Visualization, VVS ’92, pp.
+91–98. ACM, New York, NY, USA, 1992. doi: 10.1145/147130.147155
+[9] C. Dong, C. C. Loy, K. He, and X. Tang. Image super-resolution using
+deep convolutional networks. IEEE transactions on pattern analysis and
+machine intelligence, 38(2):295–307, 2016.
+[10] A. Dosovitskiy and T. Brox. Generating images with perceptual similarity
+metrics based on deep networks. In D. D. Lee, M. Sugiyama, U. V.
+Luxburg, I. Guyon, and R. Garnett, eds., Advances in Neural Information
+Processing Systems 29, pp. 658–666. Curran Associates, Inc., 2016.
+[11] T. Fogal, A. Schiewe, and J. Kruger. An analysis of scalable gpu-based
+ray-guided volume rendering. In 2013 IEEE Symposium on Large-Scale
+Data Analysis and Visualization (LDAV), vol. 2013, pp. 43–51, 10 2013.
+doi: 10.1109/LDAV.2013.6675157
+[12] L. A. Gatys, A. S. Ecker, and M. Bethge. Image style transfer using
+convolutional neural networks. In Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition, pp. 2414–2423, 2016.
+[13] E. Gobbetti, F. Marton, and J. A. Iglesias Guitián. A single-pass gpu
+ray casting framework for interactive out-of-core rendering of massive
+volumetric datasets. The Visual Computer, 24(7):797–806, Jul 2008. doi:
+10.1007/s00371-008-0261-9
+[14] I. Goodfellow, J. Pouget-Abadie, M. Mirza, B. Xu, D. Warde-Farley,
+S. Ozair, A. Courville, and Y. Bengio. Generative adversarial nets. In
+Advances in neural information processing systems, pp. 2672–2680, 2014.
+[15] M. Hadwiger, A. K. Al-Awami, J. Beyer, M. Agus, and H. Pfister. Sparseleap: Efficient empty space skipping for large-scale volume rendering.
+IEEE Transactions on Visualization and Computer Graphics, 24(1):974–
+983, Jan 2018. doi: 10.1109/TVCG.2017.2744238
+[16] M. Hadwiger, C. Sigg, H. Scharsach, K. Bühler, and M. H. Gross. Realtime ray-casting and advanced shading of discrete isosurfaces. Comput.
+Graph. Forum, 24:303–312, 2005.
+[17] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning for image
+recognition. In Proceedings of the IEEE conference on computer vision
+and pattern recognition, pp. 770–778, 2016.
+[18] F. Hernell, P. Ljung, and A. Ynnerman. Efficient ambient and emissive tissue illumination using local occlusion in multiresolution volume rendering.
+In Proceedings of the Sixth Eurographics / Ieee VGTC Conference on Volume Graphics, VG’07, pp. 1–8. Eurographics Association, Aire-la-Ville,
+Switzerland, Switzerland, 2007. doi: 10.2312/VG/VG07/001-008
+[19] R. K. Hoetzlein. GVDB: Raytracing Sparse Voxel Database Structures
+on the GPU. In U. Assarsson and W. Hunt, eds., Eurographics/ ACM
+SIGGRAPH Symposium on High Performance Graphics. The Eurographics
+Association, 2016. doi: 10.2312/hpg.20161197
+[20] G. Huang, Z. Liu, L. Van Der Maaten, and K. Q. Weinberger. Densely
+connected convolutional networks. In Proceedings of the IEEE conference
+on computer vision and pattern recognition, pp. 4700–4708, 2017.
+[21] Y. Jo, S. W. Oh, J. Kang, and S. J. Kim. Deep video super-resolution
+network using dynamic upsampling filters without explicit motion compensation. In Proceedings of the IEEE Conference on Computer Vision
+and Pattern Recognition, pp. 3224–3232, 2018.
+10
+color bleeding. Computer Graphics Forum, 27(2):567–576, 2008. doi: 10.
+1111/j.1467-8659.2008.01154.x
+[42] M. S. Sajjadi, B. Scholkopf, and M. Hirsch. Enhancenet: Single image
+super-resolution through automated texture synthesis. In Proceedings of
+the IEEE International Conference on Computer Vision, pp. 4491–4500,
+2017.
+[43] M. S. Sajjadi, R. Vemulapalli, and M. Brown. Frame-recurrent video
+super-resolution. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pp. 6626–6634, 2018.
+[44] K. Simonyan and A. Zisserman. Very deep convolutional networks for
+large-scale image recognition. arXiv preprint arXiv:1409.1556, 2014.
+[45] L. M. Sobierajski and A. E. Kaufman. Volumetric ray tracing. In Proceedings of the 1994 Symposium on Volume Visualization, VVS ’94, pp. 11–18.
+ACM, New York, NY, USA, 1994. doi: 10.1145/197938.197949
+[46] M. Sramek. Fast surface rendering from raster data by voxel traversal
+using chessboard distance. In Proceedings Visualization ’94, pp. 188–195,
+Oct 1994. doi: 10.1109/VISUAL.1994.346320
+[47] X. Tao, H. Gao, R. Liao, J. Wang, and J. Jia. Detail-revealing deep video
+super-resolution. In The IEEE International Conference on Computer
+Vision (ICCV), Oct 2017.
+[48] N. Thuerey and T. Pfaff. MantaFlow, 2018. http://mantaflow.com.
+[49] T. Tong, G. Li, X. Liu, and Q. Gao. Image super-resolution using dense
+skip connections. In Proceedings of the IEEE International Conference
+on Computer Vision, pp. 4799–4807, 2017.
+[50] M. Treib, K. Bürger, F. Reichl, C. Meneveau, A. Szalay, and R. Westermann. Turbulence visualization at the terascale on desktop pcs. IEEE
+Transactions on Visualization and Computer Graphics, 18(12):2169–2177,
+Dec 2012. doi: 10.1109/TVCG.2012.274
+[51] M. Wan, A. Kaufman, and S. Bryson. High performance presenceaccelerated ray casting. In Proceedings of the conference on Visualization
+’99, pp. 379–386, 1999.
+[52] Y. Xie, E. Franz, M. Chu, and N. Thuerey. tempoGAN: A temporally
+coherent, volumetric GAN for super-resolution fluid flow. ACM Trans.
+Graph., 37(4), 2018.
+[53] S. Zhukov, A. Iones, and G. Kronin. An ambient light illumination model.
+In G. Drettakis and N. Max, eds., Rendering Techniques ’98, pp. 45–55.
+Springer Vienna, Vienna, 1998.
+11

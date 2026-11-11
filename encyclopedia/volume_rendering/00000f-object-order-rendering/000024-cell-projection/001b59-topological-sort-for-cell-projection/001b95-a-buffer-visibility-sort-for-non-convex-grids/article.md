@@ -9,42 +9,42 @@ This method extends the [Topological Sort for Cell Projection](999-topological-s
 The algorithm integrates an A-buffer into the topological sort pipeline to extract "gap relations" between boundary cells [S3, unofficial].
 
 **Inputs:**
-*   A non-convex curvilinear or unstructured grid [S3, unofficial].
-*   A list of exterior faces (faces belonging to boundary cells that are not shared with another cell) [S1].
-*   Image dimensions $w \times h$.
-*   Camera parameters defining viewing rays corresponding to pixel centers [G].
+* A non-convex curvilinear or unstructured grid [S3, unofficial].
+* A list of exterior faces (faces belonging to boundary cells that are not shared with another cell) [S1].
+* Image dimensions $w \times h$.
+* Camera parameters defining viewing rays corresponding to pixel centers [G].
 
 **Outputs:**
-*   A directed acyclic graph (DAG) of cell ordering relations, including both shared-face relations (from the parent method) and gap relations (from the A-buffer) [S1][S3, unofficial].
+* A directed acyclic graph (DAG) of cell ordering relations, including both shared-face relations (from the parent method) and gap relations (from the A-buffer) [S1][S3, unofficial].
 
 **Data Structures:**
-1.  **A-Buffer:** A 2D array of size $w \times h$ [G]. Each element `A[y][x]` is a pointer to a sorted linked list of fragments [S2, unofficial].
-2.  **Fragment:** A structure stored in the linked lists containing:
-    *   `depth`: The distance from the viewpoint to the intersection point along the viewing ray [S2, unofficial].
-    *   `face_id`: Identifier of the exterior face intersected [G].
-    *   `next`: Pointer to the next fragment in the list [G].
-    *   The lists are maintained in increasing order of `depth` (front-to-back) [G].
+1. **A-Buffer:** A 2D array of size $w \times h$ [G]. Each element `A[y][x]` is a pointer to a sorted linked list of fragments [S2, unofficial].
+2. **Fragment:** A structure stored in the linked lists containing:
+   * `depth`: The distance from the viewpoint to the intersection point along the viewing ray [S2, unofficial].
+   * `face_id`: Identifier of the exterior face intersected [G].
+   * `next`: Pointer to the next fragment in the list [G].
+   * The lists are maintained in increasing order of `depth` (front-to-back) [G].
 
 **Steps:**
 
-1.  **Sort Exterior Faces:** Sort the list of all exterior faces by the depth of their centroids relative to the viewpoint. This heuristic ensures that when rasterizing, new intersections are likely to occur at the head of the A-buffer lists, minimizing list maintenance cost [S1][S3, unofficial].
+1. **Sort Exterior Faces:** Sort the list of all exterior faces by the depth of their centroids relative to the viewpoint [S1][S3, unofficial]. This heuristic ensures that when rasterizing, new intersections are likely to occur at the head of the A-buffer lists, minimizing list maintenance cost [S1][S3, unofficial].
 
-2.  **Initialize A-Buffer:** Allocate the $w \times h$ array. Initialize all pixel entries to `NULL` or an empty list. This step incurs an overhead proportional to the number of pixels $wh$ [S1][S3, unofficial].
+2. **Initialize A-Buffer:** Allocate the $w \times h$ array [S1][S3, unofficial]. Initialize all pixel entries to `NULL` or an empty list [G]. This step incurs an overhead proportional to the number of pixels $wh$ [S1][S3, unofficial].
 
-3.  **Rasterize and Collect Intersections:** For each exterior face in the sorted order:
-    a.  Scan-convert the face into the image space.
-    b.  For each pixel $(x, y)$ covered by the face, compute the intersection of the viewing ray for that pixel with the face.
-    c.  Calculate the intersection depth $d$.
-    d.  Insert a new fragment with `depth = d` and `face_id` into the linked list at `A[y][x]`.
-    e.  Maintain the sorted order of the list by depth. Since faces are processed in centroid-depth order, insertion is typically efficient [S1][S3, unofficial].
+3. **Rasterize and Collect Intersections:** For each exterior face in the sorted order:
+   a. Scan-convert the face into the image space [S1].
+   b. For each pixel $(x, y)$ covered by the face, compute the intersection of the viewing ray for that pixel with the face [S1].
+   c. Calculate the intersection depth $d$.
+   d. Insert a new fragment with `depth = d` and `face_id` into the linked list at `A[y][x]` [S2, unofficial].
+   e. Maintain the sorted order of the list by depth [S2, unofficial]. Since faces are processed in centroid-depth order, insertion is typically efficient [S1][S3, unofficial].
 
-4.  **Extract Gap Relations:** Iterate through every pixel $(x, y)$ that has a non-empty A-buffer list.
-    a.  Traverse the linked list of fragments.
-    b.  For every pair of successive fragments in the list, let $F_i$ be the fragment with depth $d_i$ and $F_{i+1}$ be the fragment with depth $d_{i+1}$, where $d_i < d_{i+1}$.
-    c.  The face $F_i$ is in front of face $F_{i+1}$ along this specific viewing ray.
-    d.  Add a directed edge (relation) from the cell containing face $F_i$ to the cell containing face $F_{i+1}$ in the topological sort graph. This represents the occlusion across the gap [S1][S3, unofficial].
+4. **Extract Gap Relations:** Iterate through every pixel $(x, y)$ that has a non-empty A-buffer list [S1].
+   a. Traverse the linked list of fragments.
+   b. For every pair of successive fragments in the list, let $F_i$ be the fragment with depth $d_i$ and $F_{i+1}$ be the fragment with depth $d_{i+1}$, where $d_i < d_{i+1}$ [S1].
+   c. The face $F_i$ is in front of face $F_{i+1}$ along this specific viewing ray [S1].
+   d. Add a directed edge (relation) from the cell containing face $F_i$ to the cell containing face $F_{i+1}$ in the topological sort graph [S1]. This represents the occlusion across the gap [S1].
 
-5.  **Process Topological Sort:** Combine the relations extracted from shared faces (as defined in [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md)) with the gap relations extracted in Step 4. Perform the topological sort on the resulting graph to obtain the final visibility ordering [S1][S3, unofficial].
+5. **Process Topological Sort:** Combine the relations extracted from shared faces (as defined in [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md)) with the gap relations extracted in Step 4 [S3, unofficial]. Perform the topological sort on the resulting graph to obtain the final visibility ordering [S1][S3, unofficial].
 
 **Pseudocode:**
 
@@ -52,39 +52,30 @@ The algorithm integrates an A-buffer into the topological sort pipeline to extra
 
 ```python
 def a_buffer_visibility_sort(exterior_faces, grid, w, h, get_viewing_ray, intersect_face):
-    """
-    exterior_faces: List of exterior face objects.
-    grid: Grid data structure to map face_id to cell_id.
-    w, h: Image dimensions.
-    get_viewing_ray(x, y): Returns the ray for pixel (x, y).
-    intersect_face(face, ray): Returns intersection depth d, or None if no intersection.
-    """
-    
     # Step 1: Sort exterior faces by centroid depth
-    # Source does not specify centroid computation [G].
+    # Source specifies sorting by centroid depth to keep insertion at head inexpensive [S1][S3, unofficial].
     for face in exterior_faces:
-        face.centroid_depth = compute_centroid_depth(face)
+        face.centroid_depth = compute_centroid_depth(face) # [G]
     exterior_faces.sort(key=lambda f: f.centroid_depth)
 
     # Step 2: Initialize A-Buffer
-    # A[y][x] is a linked list of fragments
-    a_buffer = [[None for _ in range(w)] for _ in range(h)]
+    # Overhead proportional to number of pixels wh [S1][S3, unofficial].
+    a_buffer = [[None] * w for _ in range(h)]
 
     # Step 3: Rasterize exterior faces
     for face in exterior_faces:
-        # Scan-convert face to determine which pixels it covers
-        # Source does not specify rasterization algorithm [G].
-        covered_pixels = scan_convert_face(face, w, h)
+        # Scan-convert face into image space [S1].
+        covered_pixels = scan_convert_face(face, w, h) # [G]
         
         for (x, y) in covered_pixels:
             ray = get_viewing_ray(x, y)
-            depth = intersect_face(face, ray)
+            depth = intersect_face(face, ray) # [G]
             
             if depth is not None:
                 fragment = Fragment(depth=depth, face_id=face.id)
-                insert_into_sorted_list(a_buffer[y][x], fragment)
+                a_buffer[y][x] = insert_into_sorted_list(a_buffer[y][x], fragment)
 
-    # Step 4: Extract gap relations
+    # Step 4: Extract Gap Relations
     gap_relations = []
     
     for y in range(h):
@@ -93,26 +84,27 @@ def a_buffer_visibility_sort(exterior_faces, grid, w, h, get_viewing_ray, inters
             if head is None:
                 continue
             
-            # Traverse the sorted list
             prev = head
             curr = head.next
             
             while curr is not None:
-                # prev is in front of curr along this ray
-                cell_prev = grid.face_to_cell(prev.face_id)
-                cell_curr = grid.face_to_cell(curr.face_id)
+                # Successive fragments F_i (prev) and F_{i+1} (curr) with d_i < d_{i+1} [S1].
+                # Face F_i is in front of F_{i+1} along this viewing ray [S1].
+                cell_prev = grid.face_to_cell(prev.face_id) # [G]
+                cell_curr = grid.face_to_cell(curr.face_id) # [G]
                 
-                # Add relation: cell_prev -> cell_curr
+                # Add directed edge from cell containing F_i to cell containing F_{i+1} [S1].
                 gap_relations.append((cell_prev, cell_curr))
                 
                 prev = curr
                 curr = curr.next
 
-    # Step 5: Combine with shared-face relations and sort
-    # Source does not specify shared-face relation extraction or topological sort implementation [G].
-    shared_relations = get_shared_face_relations(grid)
+    # Step 5: Process Topological Sort
+    # Combine gap relations with shared-face relations from parent method [S3, unofficial].
+    # Perform topological sort to obtain final ordering [S1][S3, unofficial].
+    shared_relations = get_shared_face_relations(grid) # [G]
     all_relations = shared_relations + gap_relations
-    return topological_sort(grid.cells, all_relations)
+    return topological_sort(grid.cells, all_relations) # [G]
 
 class Fragment:
     def __init__(self, depth, face_id):
@@ -140,28 +132,12 @@ def insert_into_sorted_list(head, new_fragment):
     new_fragment.next = curr.next
     curr.next = new_fragment
     return head
-
-def compute_centroid_depth(face):
-    # Source does not specify centroid computation [G].
-    return 0.0
-
-def scan_convert_face(face, w, h):
-    # Source does not specify rasterization algorithm [G].
-    return []
-
-def get_shared_face_relations(grid):
-    # Source does not specify shared-face relation extraction [G].
-    return []
-
-def topological_sort(cells, relations):
-    # Source does not specify topological sort implementation [G].
-    return []
 ```
 
 **Parameters and Edge Cases:**
-*   **Sorting Heuristic:** Sorting by centroid depth is critical for performance. The source states that this ensures "a new intersection almost always occurs at the head of the A-buffer list for each pixel, so maintaining the list per pixel is inexpensive" [S1][S3, unofficial].
-*   **Non-Planar Faces:** In curvilinear grids, quadrilateral faces may be non-planar. A viewing ray can leave and re-enter the same cell across the same face, making a strict visibility sort impossible for that specific ray [S1][S3, unofficial].
-*   **Approximation:** The method does not produce a true global visibility sort because occlusions along rays not passing through pixel centers are ignored. However, since the A-buffer rays match the pixel sample rays used in final hardware rendering, the resulting image is correct [S1][S3, unofficial].
+* **Sorting Heuristic:** Sorting by centroid depth is critical for performance [S1]. The source states that this ensures "a new intersection almost always occurs at the head of the A-buffer list for each pixel, so maintaining the list per pixel is inexpensive" [S1][S3, unofficial].
+* **Non-Planar Faces:** In curvilinear grids, quadrilateral faces may be non-planar [S1]. A viewing ray can leave and re-enter the same cell across the same face, making a strict visibility sort impossible for that specific ray [S1].
+* **Approximation:** The method does not produce a true global visibility sort because occlusions along rays not passing through pixel centers are ignored [S1]. However, since the A-buffer rays match the pixel sample rays used in final hardware rendering, the resulting image is correct [S1][S3, unofficial].
 
 ## Subtopics
 
@@ -175,14 +151,14 @@ k*-Buffer Analysis is a software-based diagnostic method that determines the opt
 The k-buffer is a fixed-depth fragment sorting structure used in image-space volume rendering to manage visibility for non-convex grids. It acts as a hardware-efficient alternative to the unbounded A-buffer by storing only a constant number $k$ of fragments per pixel, combining incoming fragments with stored ones and discarding the farthest (for front-to-back) or closest (for back-to-front) to manage memory. It is chosen when the fragment stream is approximately sorted (k-nearly sorted), allowing exact visibility sorting on the GPU with $O(n)$ complexity, whereas the unbounded A-buffer requires potentially unbounded memory and the Z-buffer only handles single-layer visibility.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(b \log b + wh + a + n)$, where $b$ is the number of exterior faces, $w$ and $h$ are image dimensions, $a$ is the projected area of external faces in pixels, and $n$ is the number of relations across shared faces (or number of cells) [S1][S3, unofficial].
-    *   $b \log b$: Sorting exterior faces.
-    *   $wh$: Overhead for setting up and checking A-buffer lists.
-    *   $a$: Cost of scan-converting faces and extracting relations.
-    *   $n$: Processing shared-face relations.
-*   **Memory Complexity:** Substantial. The A-buffer requires storing a linked list of fragments for every pixel [S2, unofficial].
-*   **Strengths:** Faster than pairwise occlusion tests ($O(b^2)$) or BSP-tree based methods for general non-convex grids. It avoids complex preprocessing [S1][S3, unofficial].
-*   **Limitations:** High memory consumption due to per-pixel linked lists. It is an approximation; it does not guarantee true visibility for rays not aligned with pixel centers, though it guarantees image correctness for the rendered pixels [S1][S3, unofficial].
+* **Time Complexity:** $O(b \log b + wh + a + n)$, where $b$ is the number of exterior faces, $w$ and $h$ are image dimensions, $a$ is the projected area of external faces in pixels, and $n$ is the number of relations across shared faces (or number of cells) [S1][S3, unofficial].
+    * $b \log b$: Sorting exterior faces.
+    * $wh$: Overhead for setting up and checking A-buffer lists.
+    * $a$: Cost of scan-converting faces and extracting relations.
+    * $n$: Processing shared-face relations.
+* **Memory Complexity:** Substantial. The A-buffer requires storing a linked list of fragments for every pixel [S2, unofficial].
+* **Strengths:** Faster than pairwise occlusion tests ($O(b^2)$) or BSP-tree based methods for general non-convex grids. It avoids complex preprocessing [S1][S3, unofficial].
+* **Limitations:** High memory consumption due to per-pixel linked lists. It is an approximation; it does not guarantee true visibility for rays not aligned with pixel centers, though it guarantees image correctness for the rendered pixels [S1][S3, unofficial].
 
 ## Background
 The A-buffer was originally proposed by Loren Carpenter in 1984 to resolve visibility and aliasing problems by using multiple fragments per pixel [S4, unofficial]. It was extended in the context of volume rendering for unstructured grids by Silva et al. to handle non-convex grids where simple topological sorts fail due to gaps between boundary cells [S1][S3, unofficial]. The approach shifts the visibility determination from object-space geometric tests to image-space rasterization, leveraging the hardware's rasterization capabilities (or software equivalents) to implicitly sort fragments [S2, unofficial].

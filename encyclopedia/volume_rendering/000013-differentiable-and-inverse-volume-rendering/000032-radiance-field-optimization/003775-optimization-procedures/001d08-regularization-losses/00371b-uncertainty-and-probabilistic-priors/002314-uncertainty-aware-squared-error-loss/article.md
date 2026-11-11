@@ -3,96 +3,86 @@
 Also called: Squared Error Loss, Uncertainty-weighted MSE
 
 ## Overview
-This method minimizes the squared error between rendered and ground-truth values by incorporating a predicted uncertainty parameter $\delta$ for each sample point. It differs from standard Mean Squared Error (MSE) by dynamically weighting the error based on the model's confidence, and from [Uncertainty Prediction Loss](2961-uncertainty-prediction-loss.md) by using a specific max-based formulation that penalizes uncertainty less than the raw squared error to prevent $\delta$ from exploding. It builds on [Uncertainty and Probabilistic Priors](7917-uncertainty-and-probabilistic-priors.md).
+This method penalizes the difference between rendered and ground-truth values by subtracting the predicted uncertainty from the squared error, effectively ignoring errors smaller than the model's confidence. It differs from standard MSE by dynamically adjusting the loss magnitude based on learned uncertainty, and from simple uncertainty weighting by using a max-difference formulation rather than a multiplicative weight.
 
 ## How it works
-**Inputs:**
-- Set of rays $\mathcal{R}$.
-- For each ray $r \in \mathcal{R}$, $N$ sample points $c_i$.
-- Ground truth color $C(r)$ and rendered color $\hat{C}(r)$.
-- Predicted uncertainty $\delta_{c_i}$ for each sample point $c_i$.
-
-**Outputs:**
-- Scalar loss value $\mathcal{L}_{SE}$.
+**Inputs and Outputs:**
+*   Input: Rendered color $C(r)$ for ray $r$, ground truth color $C_{gt}(r)$, predicted uncertainty $\delta_{c_i}$ for sample point $c_i$ along the ray.
+*   Output: Scalar loss value $\mathcal{L}_{SE}$.
 
 **Data Structures:**
-- $\delta_{c_i}$: Scalar float representing predicted uncertainty (variance proxy) at coordinate $c_i$.
+*   $\delta_{c_i}$: A scalar float representing the predicted uncertainty at query coordinate $c_i$.
 
 **Steps:**
-1. Calculate the squared error $E(r)$ for each ray $r$:
-   $$E(r) = \left\| \hat{C}(r) - C(r) \right\|_2^2$$
-2. For each sample point $i$ along ray $r$, compute the term $\max(E(r) - \delta_{c_i}, 0)$. This ensures that if the predicted uncertainty $\delta_{c_i}$ exceeds the squared error, the contribution to the loss is zero.
-3. Sum these terms over all sample points $i=1 \dots N$ and all rays $r \in \mathcal{R}$:
-   $$\mathcal{L}_{SE} = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(E(r) - \delta_{c_i}, 0)$$
+1.  Compute the squared error $E(r)$ for each ray $r$:
+    $$E(r) = \left\| \hat{C}(r) - C(r) \right\|_2^2$$
+    where $\hat{C}(r)$ is the rendered color and $C(r)$ is the ground truth color [S1].
+2.  For each sample point $c_i$ along the ray, calculate the term $\max(E(r) - \delta_{c_i}, 0)$ [S1].
+3.  Sum these terms over all sample points $i=1 \dots N$ and all rays $r \in \mathcal{R}$:
+    $$\mathcal{L}_{SE} = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(E(r) - \delta_{c_i}, 0)$$
+    [S1].
 
 **Regularization:**
-To prevent $\delta_{c_i}$ from growing indefinitely (blowing up) to minimize the loss, a regularization term $\mathcal{L}_0$ is added:
+To prevent the predicted uncertainty $\delta_i$ from growing indefinitely to minimize the loss, a regularization term $\mathcal{L}_0$ is added:
 $$\mathcal{L}_0 = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(\delta_{c_i}, 0)$$
-The total loss is a weighted sum of $\mathcal{L}_{SE}$ and $\mathcal{L}_0$ [S1].
+[S1]. The total loss is a weighted sum of $\mathcal{L}_{SE}$ and $\mathcal{L}_0$ [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def uncertainty_aware_squared_error_loss(rendered_colors, ground_truth_colors, uncertainties):
+def uncertainty_aware_squared_error_loss(rendered_color, ground_truth_color, predicted_uncertainty):
     """
-    rendered_colors: Tensor of shape (num_rays, num_samples, 3)
-    ground_truth_colors: Tensor of shape (num_rays, num_samples, 3)
-    uncertainties: Tensor of shape (num_rays, num_samples)
+    rendered_color: Tensor of shape (R, N, 3) or (R, 3) depending on aggregation level.
+                    Assuming per-ray aggregation for E(r) as per source [S1].
+    ground_truth_color: Tensor of shape (R, 3).
+    predicted_uncertainty: Tensor of shape (R, N) or (R, N, 1).
     """
-    # Step 1: Calculate squared error per ray
-    # Note: E(r) is typically computed per ray, but the formula sums over samples.
-    # Assuming rendered_colors and ground_truth_colors are aggregated per ray 
-    # or the error is computed per sample. The source formula E(r) suggests ray-level error,
-    # but the sum is over i=1..N. We assume E(r) is constant for all samples on ray r,
-    # or the error is computed per sample. Given "E(r) is the squared error of ray r",
-    # we compute ray-level MSE first.
+    # Calculate squared error per ray
+    # Source [S1] defines E(r) as the squared error of ray r.
+    # Assuming rendered_color is aggregated per ray or we compute per-ray error.
+    # If rendered_color is per-sample, we first aggregate to ray level or assume E(r) is computed per sample?
+    # Source [S1] Eq 7 sums over i=1 to N of max(E(r) - delta, 0).
+    # This implies E(r) is constant for all samples on ray r.
     
-    # Compute per-ray squared error
-    # If inputs are per-sample, we might need to aggregate. 
-    # Standard NeRF rendering produces one color per ray. 
-    # However, the loss is summed over samples i. 
-    # This implies E(r) is broadcast or the error is per-sample.
-    # Let's assume the standard interpretation: E(r) is the error for the final rendered pixel.
-    # But the sum is over N samples. This is ambiguous. 
-    # Re-reading S1: "E(r) is the squared error of ray r... ci is the sample point... delta_ci is predicted uncertainty for query coordinates ci".
-    # It is likely that E(r) is computed once per ray, and applied to all samples, 
-    # OR the error is computed per sample. 
-    # Given "max(E(r) - delta_ci, 0)", if E(r) is scalar per ray, it applies to all samples.
+    # Compute Ray-level Squared Error
+    # E(r) = || C_hat(r) - C_gt(r) ||^2
+    ray_error = torch.sum((rendered_color - ground_truth_color) ** 2, dim=-1) # Shape (R,)
     
-    # Let's assume E(r) is the MSE for the entire ray's rendered color vs GT color.
-    # rendered_colors shape: (num_rays, 3)
-    # ground_truth_colors shape: (num_rays, 3)
+    # Expand ray_error to match uncertainty dimensions (R, N)
+    ray_error_expanded = ray_error.unsqueeze(-1) # Shape (R, 1)
     
-    ray_error = torch.sum((rendered_colors - ground_truth_colors) ** 2, dim=1) # Shape: (num_rays,)
+    # Calculate loss term
+    # L_SE = sum_r sum_i max(E(r) - delta_ci, 0)
+    diff = ray_error_expanded - predicted_uncertainty
+    loss_se = torch.sum(torch.clamp(diff, min=0.0))
     
-    # Expand to match uncertainty shape (num_rays, num_samples)
-    ray_error_expanded = ray_error.unsqueeze(1) # Shape: (num_rays, 1)
+    # Regularization term L_0
+    # L_0 = sum_r sum_i max(delta_ci, 0)
+    loss_reg = torch.sum(torch.clamp(predicted_uncertainty, min=0.0))
     
-    # Step 2 & 3: Compute L_SE
-    # max(E(r) - delta_ci, 0)
-    diff = ray_error_expanded - uncertainties # Shape: (num_rays, num_samples)
-    l_se = torch.sum(torch.clamp(diff, min=0))
-    
-    # Regularization L_0
-    l_0 = torch.sum(torch.clamp(uncertainties, min=0))
-    
-    return l_se, l_0
+    # Total loss (weights not specified in source, assume alpha, beta)
+    # Total = alpha * L_SE + beta * L_0
+    return loss_se, loss_reg
 ```
+
+**Edge Cases:**
+*   If $\delta_{c_i}$ is negative, the regularization term $\max(\delta_{c_i}, 0)$ handles it by ignoring negative uncertainties [S1].
+*   If $E(r) < \delta_{c_i}$, the loss contribution is zero, effectively ignoring the sample [S1].
 
 ## Subtopics
 
 ### Pixelwise Uncertainty Weighting
-A training technique that uses rendered uncertainties to weight the regression loss, encouraging the network to memorize well-rendered regions and ignore uncertain/noisy regions [S2]. It involves ignoring pixels with RGB-D uncertainties exceeding predefined thresholds and weighing remaining pixels using $\kappa = e^{-2(\sigma_c^2 + \sigma_z^2)}$, where $\sigma_c^2$ and $\sigma_z^2$ are color and depth variances [S2]. This replaces the error term $(q - \gamma)$ with $\kappa (q - \gamma)$ in the loss equation [S2].
+A technique where rendered RGB-D uncertainties weight the regression loss, encouraging memorization of well-rendered regions and ignoring noisy ones [S2]. Pixels with uncertainties exceeding predefined thresholds are ignored [S2]. Remaining pixels are weighted by $\kappa = e^{-2(\sigma_c^2 + \sigma_z^2)}$, where $\sigma_c^2$ and $\sigma_z^2$ are color and depth variances [S2]. The error term $(q - \gamma)$ is replaced with $\kappa (q - \gamma)$ in the loss equation [S2].
 
 ## Operating characteristics
-- **Complexity:** $O(N \cdot R)$ where $N$ is samples per ray and $R$ is number of rays.
-- **Strengths:** Robust to noise by down-weighting uncertain predictions; prevents overfitting to noisy data points.
-- **Limitations:** Requires predicting uncertainty $\delta$; sensitive to threshold selection in pixelwise variants.
-- **When to use:** When training data contains significant noise or artifacts.
+*   **Complexity:** $O(R \cdot N)$ for computing the loss, where $R$ is the number of rays and $N$ is the number of samples per ray.
+*   **Strengths:** Robust to noise by ignoring samples where uncertainty exceeds the error [S1].
+*   **Limitations:** Requires predicting uncertainty alongside the scene representation.
+*   **Performance:** Not given in the sources.
 
 ## Background
-Originated in Recursive-NeRF [S1] as an efficient dynamically growing NeRF optimization procedure. It was later adapted in U-NeRF/E-SCRNet pipelines for uncertainty-aware visual localization [S2].
+Originated in Recursive-NeRF [S1]. It is used in differentiable volume rendering to handle noisy data or ambiguous regions by leveraging predicted uncertainty.
 
 ## Sources
 [S1] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26

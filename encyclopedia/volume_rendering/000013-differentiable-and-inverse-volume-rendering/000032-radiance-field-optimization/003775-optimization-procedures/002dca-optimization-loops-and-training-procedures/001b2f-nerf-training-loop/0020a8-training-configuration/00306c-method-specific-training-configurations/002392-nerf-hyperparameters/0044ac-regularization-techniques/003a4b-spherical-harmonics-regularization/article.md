@@ -1,0 +1,127 @@
+# Spherical Harmonics Regularization
+
+Also called: SH coefficient masking, SH curriculum training, SH degree regularization
+
+## Overview
+Spherical Harmonics (SH) Regularization is a training strategy for differentiable volume rendering that stabilizes optimization by restricting the frequency of view-dependent appearance representation during early training stages [S1, S2]. It prevents high-frequency overfitting and mitigates ambiguity between view-independent diffuse reflectance and view-dependent specularities, particularly in harsh input conditions or few-shot scenarios [S1, S2]. Unlike positional encoding regularization, this method applies frequency constraints directly to the SH coefficients within a voxel grid representation [S2].
+
+## How it works
+**Inputs and Outputs**
+- **Input:** A voxel grid radiance field model where each voxel stores opacity and SH coefficients for color/feature representation; training epoch counter; maximum SH degree $D_{max}$ (typically 2 or 3) [S1, S2].
+- **Output:** Updated SH coefficients with masked gradients or restricted degree updates during specific training phases [S1, S2].
+
+**Data Structures**
+- **Voxel Grid:** Each voxel contains opacity $\alpha$ and SH coefficients $c_{l,m}$ for $l \in \{0, \dots, D_{max}\}$ and $m \in \{-l, \dots, l\}$ [S1, S2].
+- **SH Coefficients:** Stored as a flat array or tensor indexed by degree $l$ and order $m$ [S1].
+
+**Algorithm Steps**
+1. **Initialize** the SH degree limit $D_{current} = 0$ (or lowest non-zero degree) at the start of training [S2].
+2. **For each training epoch** $e$:
+   a. **Determine Masking Rate:** Calculate the masking rate $r_e$ based on the epoch index. For the early five epochs, decrease the masking rate by $1/5$ per epoch [S1].
+      - Let $r_0 = 1.0$ (fully masked high frequencies).
+      - For $e < 5$: $r_e = 1 - \frac{e}{5}$ [S1].
+      - For $e \ge 5$: $r_e = 0$ (no masking, full SH update) [S1].
+   b. **Apply SH Masking:** During gradient computation, restrict updates to SH coefficients of degree $l \le D_{current}$ [S2].
+      - Specifically, mask coefficients for degrees 2 and 3 if $D_{current} < 3$ [S1].
+      - High-frequency reflectance (subtle view direction changes causing drastic reflectance ratio changes, e.g., glossy materials) is suppressed [S1].
+   c. **Update Degree Limit:** Gradually increase $D_{current}$ as training progresses according to a curriculum schedule [S2].
+      - The exact schedule for increasing $D_{current}$ beyond the initial masking phase is not specified in the sources, but the goal is to allow higher degrees as coarse geometry stabilizes [S2].
+   d. **Optimize:** Perform standard gradient descent on opacity, SH coefficients, white balance, and CRF (if applicable) using the masked gradients [S1].
+   e. **Loss Function:** Minimize $\mathcal{L} = \mathcal{L}_{recon} + \lambda_{reg} \mathcal{L}_{reg}$, where $\mathcal{L}_{recon}$ is reconstruction loss and $\mathcal{L}_{reg}$ may include regularization terms [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def spherical_harmonics_regularization(voxel_grid, epochs, max_degree=3):
+    """
+    Applies SH regularization during training.
+    
+    Args:
+        voxel_grid: Object containing SH coefficients c[l][m] and opacity alpha.
+        epochs: Total number of training epochs.
+        max_degree: Maximum SH degree to eventually allow (default 3).
+        
+    Returns:
+        Updated voxel_grid with regularized SH coefficients.
+    """
+    current_degree = 0  # Start with lowest degree (diffuse)
+    
+    for epoch in range(epochs):
+        # Step 1: Determine masking rate for early epochs
+        if epoch < 5:
+            # Decrease masking rate by 1/5 per epoch
+            # At epoch 0, rate=1.0 (full mask); at epoch 4, rate=0.2
+            masking_rate = 1.0 - (epoch / 5.0)
+        else:
+            # After 5 epochs, no masking
+            masking_rate = 0.0
+            
+        # Step 2: Determine which SH degrees are active
+        # If masking_rate > 0, restrict to current_degree
+        # If masking_rate == 0, allow up to max_degree
+        active_degree = current_degree if masking_rate > 0 else max_degree
+        
+        # Step 3: Compute gradients with masking
+        # During backpropagation, zero out gradients for degrees > active_degree
+        gradients = compute_gradients(voxel_grid)
+        
+        for l in range(active_degree + 1, max_degree + 1):
+            for m in range(-l, l + 1):
+                gradients.sh_coeffs[l][m] = 0.0
+                
+        # Step 4: Update voxel grid
+        voxel_grid.update(gradients)
+        
+        # Step 5: Gradually increase current_degree (Curriculum)
+        # Note: Exact schedule for increasing current_degree is not specified
+        # in the sources. A common approach is to increase it after a fixed
+        # number of epochs or when validation loss plateaus.
+        # [G] Placeholder for curriculum schedule logic:
+        # if epoch % curriculum_step == 0 and current_degree < max_degree:
+        #     current_degree += 1
+        pass
+        
+    return voxel_grid
+```
+
+**Parameters**
+- **Early Epochs:** 5 epochs for masking schedule [S1].
+- **Masking Rate Decay:** $1/5$ per epoch [S1].
+- **SH Degrees Masked:** Degrees 2 and 3 specifically mentioned for masking [S1].
+- **Max Degree:** Typically 2 or 3 for Plenoxels-based methods [S1, S2].
+
+**Edge Cases and Pitfalls**
+- **Precision:** High-frequency SH coefficients can cause numerical instability if updated too early [S1].
+- **Boundaries:** Ensure masking is applied consistently across all voxels [S1].
+- **Degenerate Input:** In harsh input conditions (e.g., low light, high dynamic range), early high-frequency updates can lead to ambiguity between white balance and SH coefficients [S1].
+
+## Subtopics
+
+### SH Coefficient Masking
+The specific technique of zeroing out gradients for high-degree SH coefficients [S1].
+
+### SH Curriculum Training
+The broader strategy of gradually increasing the allowable SH degree [S2].
+
+### SH Degree Regularization
+The general concept of limiting frequency content in SH representations [S2].
+
+## Operating characteristics
+- **Time Complexity:** Negligible additional computational cost during training, as masking is a simple gradient zeroing operation [S2].
+- **Memory Complexity:** No additional memory overhead [S2].
+- **Measured Performance:** Improves coarse geometry reconstruction and reduces high-frequency overfitting, particularly in few-shot view synthesis [S2]. Stabilizes optimization in harsh input conditions [S1].
+- **Scaling:** Effective for voxel grid representations; inspired by frequency regularization in positional encoding (FreeNeRF) and Fourier coefficients (FourieRF) [S2].
+- **Strengths:** Prevents overfitting to noise, improves geometry accuracy, stabilizes training [S1, S2].
+- **Limitations:** Requires careful scheduling of degree increase; may slow down convergence if degree is increased too slowly [S2].
+- **When to Use:** Few-shot view synthesis, harsh input conditions, when geometry accuracy is critical [S1, S2].
+- **When Not to Use:** When high-frequency detail is the primary goal and sufficient data is available [S2].
+
+## Background
+- **Origin:** Introduced in HDR-Plenoxels [S1] and F2Plenoxels [S2].
+- **History:** Inspired by FreeNeRF [S2] and FourieRF [S2], which use frequency regularization for positional encoding and Fourier coefficients, respectively. Applied directly to SH coefficients in voxel grids [S2].
+- **Usage:** Used in differentiable volume rendering, particularly for few-shot view synthesis and high dynamic range radiance fields [S1, S2].
+
+## Sources
+[S1] HDR-Plenoxels: Self-Calibrating High Dynamic Range Radiance Fields, https://doi.org/10.1007/978-3-031-19824-3_23, fetched 2026-10-26
+[S2] F2Plenoxels: fast voxel radiance fields without neural networks for few-shot view synthesis, https://doi.org/10.1007/s44443-026-00491-2, fetched 2026-10-26

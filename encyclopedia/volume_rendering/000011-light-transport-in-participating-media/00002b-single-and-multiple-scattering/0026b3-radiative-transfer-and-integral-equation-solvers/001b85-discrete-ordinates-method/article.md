@@ -11,7 +11,7 @@ The Discrete Ordinates Method (DOM) solves the Radiative Transfer Equation by ap
 *   **Output:** The steady-state directional intensity distribution $I(\mathbf{X}_i, \boldsymbol{\omega}_j)$ for all voxels $i$ and directions $j$, or the final rendered image after a gathering pass [S1, S3, unofficial].
 
 **Data Structures**
-*   **Voxel Grid:** 3D array of size $n \times n \times n$ storing optical properties per voxel [S1, S3, unofficial].
+*   **Voxel Grid:** 3D array of size $n \times n \times n$ storing optical properties (extinction, emission, albedo) per voxel [S1, S3, unofficial].
 *   **Direction Bins:** $M$ discrete directions arranged on the 96 exterior faces of a $4 \times 4 \times 4$ block of cubes [S1, S3, unofficial]. The bins have unequal solid angles, which are incorporated into the phase function matrix [S1, S3, unofficial].
 *   **Intensity Buffer:** Array of size $N \times M$ storing $I(\mathbf{X}_i, \boldsymbol{\omega}_j)$ [S1, S3, unofficial].
 *   **Temporary Flux Array:** Array of size $N$ for accumulating received flux during propagation [S1, S3, unofficial].
@@ -22,13 +22,13 @@ The method solves for intensities iteratively, similar to progressive radiosity 
 
 1.  **Initialization:** Initialize intensity buffer $I(\mathbf{X}_i, \boldsymbol{\omega}_j)$ with emission sources and incoming boundary conditions [G]. Set iteration counter $k=0$.
 2.  **Flux Propagation (Shooting):** For each direction bin $j \in \{1, \dots, M\}$:
-    a.  **Layer-wise Propagation:** Process voxels layer by layer along direction $\boldsymbol{\omega}_j$. For each voxel $\mathbf{X}_i$ in the layer:
-        i.  Calculate the flux entering $\mathbf{X}_i$ from the previous voxel in direction $\boldsymbol{\omega}_j$.
+    a.  **Layer-wise Propagation:** Process voxels layer by layer along direction $\boldsymbol{\omega}_j$ [G]. For each voxel $\mathbf{X}_i$ in the layer:
+        i.  Calculate the flux entering $\mathbf{X}_i$ from the previous voxel in direction $\boldsymbol{\omega}_j$ [G].
         ii. Multiply this flux by the voxel's transparency $T_i$ [G].
         iii. Distribute the attenuated flux to the four adjacent voxels determined by the direction bin $\boldsymbol{\omega}_j$ [S1, S3, unofficial]. This approximation avoids computing exact form factors $F_{klij}$ for all pairs, reducing complexity from $O(N^2 M)$ to $O(N \log N)$ per direction [S1, S3, unofficial].
         iv. Deposit the received flux into a temporary array at the target voxel $\mathbf{X}_k$ [S1, S3, unofficial].
     b.  **Scattering:** After all voxels have received flux for direction $\boldsymbol{\omega}_j$:
-        i.  For each voxel $\mathbf{X}_k$, take the total received flux from the temporary array.
+        i.  For each voxel $\mathbf{X}_k$, take the total received flux from the temporary array [G].
         ii. Scatter this flux into all $M$ outgoing direction bins $\boldsymbol{\omega}_l$ using the phase function matrix row $P_{jl}$ [S1, S3, unofficial].
         iii. Update the intensity buffer: $I(\mathbf{X}_k, \boldsymbol{\omega}_l) \leftarrow I(\mathbf{X}_k, \boldsymbol{\omega}_l) + \text{scattered flux}$ [S1, S3, unofficial].
 3.  **Convergence Check:** Compute the change in intensity between iterations. If the change is below a threshold, stop. Otherwise, increment $k$ and repeat Step 2 [G].
@@ -49,10 +49,44 @@ The method solves for intensities iteratively, similar to progressive radiosity 
 *   **Mitigation:** Spreading intensity into direction bins reduces ray effects but increases computational cost [S1, S3, unofficial]. Modifications to avoid ray effects result in equations mathematically equivalent to the P-N method [S1, S3, unofficial].
 *   **Precision:** The approximation of form factors by layer-wise propagation assumes straight-line propagation between voxel centers [S1, S3, unofficial].
 
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def discrete_ordinates_method(voxels, directions, phase_matrix, max_iter, threshold):
+    N = len(voxels)
+    M = len(directions)
+    I = zeros((N, M))  # Intensity buffer
+    temp_flux = zeros(N)  # Temporary flux array
+    
+    for k in range(max_iter):
+        for j in range(M):
+            # Layer-wise propagation for direction bin j
+            for layer in sorted_layers_along(directions[j]):
+                for voxel in layer:
+                    flux_in = get_flux_from_previous(voxel, directions[j])
+                    flux_in *= voxel.transparency
+                    distribute_to_adjacent(voxel, flux_in, directions[j], temp_flux)
+            
+            # Scattering step
+            for voxel in voxels:
+                received = temp_flux[voxel.id]
+                for l in range(M):
+                    scattered = received * phase_matrix[j, l]
+                    I[voxel.id, l] += scattered
+            temp_flux[:] = 0  # Clear temporary array
+            
+        # Convergence check
+        if compute_intensity_change(I) < threshold:
+            break
+            
+    return final_gathering(I, viewing_rays)
+```
+
 ## Subtopics
 
 ### [Direction Bin Method for Multiple Scattering](1690-direction-bin-method-for-multiple-scattering.md)
-A variant that arranges direction bins on the exterior faces of a 3D grid of cubes to compute higher-order scattering via a global flux transfer matrix. It differs from shooting algorithms by using precomputed or approximated form factors between bins. Choose when global multiple scattering is required and anisotropic scattering is significant.
+The Direction Bin Method is a technique for computing higher-order (multiple) scattering in volume rendering by discretizing the sphere of directions into bins arranged on the exterior faces of a 3D grid of cubes, solving for flux transfer between these bins. It builds on the [Discrete Ordinates Method](1046-discrete-ordinates-method.md) by optimizing the directional discretization to handle unequal solid angles within a bin-based flux spreading model. It differs from [Light Propagation for Multiple Anisotropic Volume Scattering](6627-light-propagation-for-multiple-anisotropic-volume-scattering.md) by using a discrete bin-based flux spreading model rather than continuous light transport volumes.
 
 ## Operating characteristics
 *   **Time Complexity:**
@@ -64,7 +98,7 @@ A variant that arranges direction bins on the exterior faces of a 3D grid of cub
 *   **Strengths:** Handles multiple scattering efficiently via iterative global updates. Avoids the complexity of full radiosity form factor computation through layer-wise approximation [S1, S3, unofficial].
 *   **Limitations:** Susceptible to ray effects. High memory usage for large $N$ and $M$. Convergence can be slow for highly scattering media (high albedo), though flux exit at boundaries can accelerate it [S1, S3, unofficial].
 *   **When to Use:** Suitable for offline volume rendering of participating media (e.g., clouds, smoke) where multiple scattering is important and view-independent solutions are beneficial [S1, S3, unofficial].
-*   **When Not to Use:** Real-time applications due to high computational cost. Scenes with very low scattering (single scattering dominant) where simpler methods suffice [S1, S3, unofficial].
+*   **When Not to Use:** Real-time applications due to high computational cost. Scenes with very low scattering (single scattering dominant) where simpler methods suffice [G].
 
 ## Background
 The Discrete Ordinates Method originates from neutron transport theory, where it is known as the S-N method [S3, unofficial]. It was adapted for optical volume rendering by William T. Max in his 1995 paper "Optical Models for Direct Volume Rendering" [S1, unofficial][S2][S3, unofficial]. Lathrop identified the ray effect problem in DOM, and Languénou et al. applied DOM to cloud rendering [S1, unofficial]. The method is mathematically equivalent to the P-N method if directions are properly placed [S1, S3, unofficial].

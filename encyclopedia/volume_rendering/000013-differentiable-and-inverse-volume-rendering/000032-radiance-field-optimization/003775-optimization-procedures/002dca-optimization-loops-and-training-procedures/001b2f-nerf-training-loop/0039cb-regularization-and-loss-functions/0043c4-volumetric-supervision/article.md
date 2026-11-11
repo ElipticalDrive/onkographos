@@ -1,0 +1,105 @@
+# Volumetric Supervision
+
+Also called: CT-Guided Training, Hybrid Supervision
+
+## Overview
+Volumetric Supervision is a training strategy that leverages high-quality volumetric reconstructions from conventional tomography to supervise neural network training at intermediate time steps where only sparse projection data is available [S1, unofficial]. It solves the problem of reconstructing dynamic scenes in sparse-view regimes by using dense ground-truth volumes from the start and end of an experiment as anchors [S1, unofficial]. Unlike sibling methods that rely on photometric or geometric consistency alone, this method explicitly minimizes the discrepancy between the predicted volume and a physically reconstructed target volume using a normalized correlation coefficient [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   Sparse projection data at intermediate time steps $t \in (0, 1)$ [S1, unofficial].
+    *   Dense projection data at boundary time steps $t=0$ and $t=1$ [S1, unofficial].
+    *   A neural network model predicting a 3D volume (e.g., density and color fields) [S1, unofficial].
+*   **Outputs:**
+    *   A trained neural network capable of rendering intermediate volumes [S1, unofficial].
+    *   The volumetric loss value $\mathcal{L}_{\text{vol}}$ used for backpropagation [S1, unofficial].
+
+**Data Structures:**
+*   **Target Volume ($\mathbf{y}$):** A 3D grid representing the ground-truth density/color field reconstructed via conventional tomography from the dense projections at $t=0$ or $t=1$ [S1, unofficial].
+*   **Predicted Volume ($\hat{\mathbf{y}}$):** The 3D grid output by the neural network at the current intermediate time step $t$ [S1, unofficial].
+
+**Steps:**
+1.  **Reconstruct Ground Truth:** At the start ($t=0$) and end ($t=1$) of the experiment, use conventional tomography algorithms to reconstruct high-quality 3D volumes from the rich projection data [S1, unofficial].
+2.  **Predict Intermediate Volume:** For an intermediate time step $t$, pass the current camera parameters and time encoding to the neural network to predict the volume $\hat{\mathbf{y}}$ [S1, unofficial].
+3.  **Compute Normalized Correlation:** Calculate the normalized correlation coefficient $C_{\text{cor}}$ between the target volume $\mathbf{y}$ (from the nearest boundary time step) and the predicted volume $\hat{\mathbf{y}}$ [S1, unofficial].
+4.  **Compute Loss:** Calculate the volumetric loss $\mathcal{L}_{\text{vol}}$ as the negative correlation [S1, unofficial].
+5.  **Update:** Minimize $\mathcal{L}_{\text{vol}}$ via gradient descent to update the network parameters [S1, unofficial].
+
+**Formulas:**
+The volumetric loss is defined as:
+$$ \mathcal{L}_{\text{vol}} = -C_{\text{cor}}(\mathbf{y}, \hat{\mathbf{y}}) $$
+where $C_{\text{cor}}$ is the normalized correlation coefficient between the target CT volume $\mathbf{y}$ and the predicted volume $\hat{\mathbf{y}}$ [S1, unofficial].
+
+The normalized correlation coefficient $C_{\text{cor}}$ is typically defined as:
+$$ C_{\text{cor}}(\mathbf{y}, \hat{\mathbf{y}}) = \frac{\sum_i (y_i - \bar{y})(\hat{y}_i - \bar{\hat{y}})}{\sqrt{\sum_i (y_i - \bar{y})^2 \sum_i (\hat{y}_i - \bar{\hat{y}})^2}} $$
+where $y_i$ and $\hat{y}_i$ are the voxel values at index $i$, and $\bar{y}$ and $\bar{\hat{y}}$ are the mean values of the target and predicted volumes, respectively [S1, unofficial].
+
+**Parameters:**
+*   **Time Boundary Selection:** The target volume $\mathbf{y}$ is selected from $t=0$ or $t=1$ based on proximity to the current intermediate time $t$ [S1, unofficial].
+*   **Weighting:** The loss $\mathcal{L}_{\text{vol}}$ is combined with other losses (e.g., photometric) in the total loss function, weighted by $\lambda_{\text{vol}}$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Scale Mismatch:** The density scales in the canonical volume and the CT-reconstructed volume may differ. Using the normalized correlation coefficient $C_{\text{cor}}$ mitigates this issue by being invariant to linear scaling [S1, unofficial].
+*   **Sparse Regime:** This method is specifically designed for the "sparse few-projection regime" at intermediate times [S1, unofficial]. It requires the availability of dense data at the boundaries.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_volumetric_loss(predicted_volume: Tensor, target_volume: Tensor) -> Tensor:
+    """
+    Computes the volumetric loss using normalized correlation coefficient.
+    
+    Args:
+        predicted_volume: 3D Tensor of shape (D, H, W) representing the network's output.
+        target_volume: 3D Tensor of shape (D, H, W) representing the CT-reconstructed ground truth.
+        
+    Returns:
+        Tensor: The volumetric loss value (scalar).
+    """
+    # Compute means
+    mean_pred = predicted_volume.mean()
+    mean_target = target_volume.mean()
+    
+    # Compute centered volumes
+    pred_centered = predicted_volume - mean_pred
+    target_centered = target_volume - mean_target
+    
+    # Compute numerator (covariance-like term)
+    numerator = (pred_centered * target_centered).sum()
+    
+    # Compute denominator (product of norms)
+    denom_pred = (pred_centered ** 2).sum().sqrt()
+    denom_target = (target_centered ** 2).sum().sqrt()
+    
+    # Compute correlation coefficient
+    # Add small epsilon to avoid division by zero if variance is zero
+    epsilon = 1e-8
+    correlation = numerator / (denom_pred * denom_target + epsilon)
+    
+    # Volumetric loss is negative correlation
+    loss = -correlation
+    
+    return loss
+```
+
+## Subtopics
+
+### Monte Carlo Estimation for Volumetric Supervision
+An optimization strategy that approximates the dense voxel objective using a subset of voxels while preserving consistency with the full-volume optimization [S2]. It uses importance-weighted Monte Carlo estimation to approximate dense reconstruction objectives from sparse voxel subsets [S2]. Instead of computing the reconstruction loss over the full voxel grid, it uses a Monte Carlo estimator to approximate the objective [S2]. Importance-weighted sampling improves coverage of informative regions while remaining consistent with the dense reconstruction objective [S2]. This updates Gaussian parameters using more representative voxel samples and stabilizes optimization [S2]. However, without slice supervision, the model lacks structured planar constraints and shows lower performance in rendered views than methods combining sparse voxel sampling with slice-based sampling [S2].
+
+## Operating characteristics
+*   **Time Complexity:** The computation of the normalized correlation coefficient requires iterating over all voxels in the volume, resulting in $O(N)$ complexity where $N$ is the number of voxels [S1, unofficial]. Monte Carlo variants reduce this to $O(k)$ where $k \ll N$ [S2].
+*   **Memory Complexity:** Requires storing the full 3D volume for both the prediction and the target, resulting in $O(N)$ memory usage [S1, unofficial].
+*   **Strengths:** Effective in sparse-view regimes where photometric loss alone is insufficient [S1, unofficial]. Robust to scale differences between canonical and reconstructed volumes [S1, unofficial].
+*   **Limitations:** Requires dense projection data at the start and end of the experiment [S1, unofficial]. Computationally expensive for large volumes if full-grid correlation is used [S1, unofficial]. May exhibit slight blurring near sharp boundaries due to the smooth nature of Gaussian primitives if used with Gaussian representations [S2].
+*   **When to Use:** When reconstructing dynamic scenes with sparse intermediate projections and dense boundary data is available [S1, unofficial].
+*   **When Not to Use:** When boundary data is not available or when computational resources are severely limited for large volumes [S1, unofficial].
+
+## Background
+Volumetric Supervision was introduced in the context of dynamic tomography, where neural rendering is used to enable reconstruction from sparse projections [S1, unofficial]. The method leverages the fact that rich projection data is often available at the start and end of an experiment, allowing conventional tomography to provide high-quality ground truth volumes [S1, unofficial]. This approach was developed to address the challenges of reconstructing dynamic scenes in the sparse few-projection regime [S1, unofficial].
+
+## Sources
+[S1] Neural rendering enables dynamic tomography, https://doi.org/10.48550/arxiv.2410.20558, fetched 2026-10-26 (unofficial)
+[S2] Gaussian Volumetric Representation for Efficient Shear-Warp Visualization, https://doi.org/10.1007/978-3-032-37461-5_35, fetched 2026-10-26

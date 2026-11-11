@@ -1,0 +1,78 @@
+# Perspective Warping
+
+Also called: F2-NeRF, Fast-Free-NeRF
+
+## Overview
+Perspective warping is a space-warping technique for unbounded scenes that ensures axis-aligned grids in the warped space align closely with camera rays, mapping unbounded space to a bounded space [S2]. It enables arbitrary input camera trajectories in grid-based NeRF frameworks, addressing the limitation of existing fast grid-based NeRFs that rely on space warping designed only for forward-facing or 360° object-centric trajectories [S1]. It generalizes [NDC Warping](7267-ndc-warping.md) (for forward-facing scenes) and inverse sphere warping (for 360° object-centric scenes), automatically degenerating to them when the trajectory matches those specific patterns [S1].
+
+## How it works
+**Inputs:** A set of input images with known camera poses $\{C_i\}_{i=1}^{n_c}$, where $n_c$ is the number of cameras [S1]. A spatial region $S \subset \mathbb{R}^3$ (typically defined by an octree node) [S2].
+**Outputs:** A warped coordinate $F(p) \in \mathbb{R}^3$ for any 3D point $p \in S$, and a hierarchical grid structure for density/color storage [S1, S2].
+
+**Data Structures:**
+1. **Octree:** Subdivides the unbounded space [S2]. Each node stores a local warping function and a grid of density/color values [S1, S2].
+2. **Local Warping Function:** For a specific octree node, a function $F: \mathbb{R}^3 \rightarrow \mathbb{R}^3$ derived from the subset of cameras observing that node [S2].
+3. **Grid:** Axis-aligned grid in the warped space [S2]. Density $\sigma$ and color $c$ are stored at grid vertices or cells [S1].
+
+**Step 1: Space Subdivision**
+Subdivide the unbounded space using an octree [S2]. For each octree node, identify the subset of cameras $\{C_i\}$ that observe the corresponding region $S$ [S2]. This ensures that foreground regions (observed with dense/near views) can use fine grids, while background regions (sparse/far views) use coarse grids [S1].
+
+**Step 2: Constructing the Proper Warping Function**
+A warping function $F$ is defined as "proper" if the squared Euclidean distance in the warped space between any two points $x_1, x_2 \in S$ equals the sum of squared distances between their projections on all visible cameras [S1]:
+$$ \|F(x_1) - F(x_2)\|_2^2 = \sum_{i=1}^{n_c} \|C_i(x_1) - C_i(x_2)\|_2^2 $$
+Note: Source [S2] defines the proper warping condition using the L1 norm (sum of distances) rather than the sum of squared distances:
+$$ \|F(p_1) - F(p_2)\| = \sum_{i=1}^{n_c} \|C_i(p_1) - C_i(p_2)\| $$
+The implementation follows the L2 squared definition from [S1] as it is the primary source for the F2-NeRF algorithm.
+
+**Step 3: Computing the Warping via PCA**
+To implement the warping function $F(p)$ for a point $p$:
+1. Project $p$ into each visible camera $C_i$ to obtain 2D coordinates $u_i = C_i(p) \in \mathbb{R}^2$ [S1].
+2. Concatenate these 2D coordinates into a high-dimensional vector $v \in \mathbb{R}^{2n_c}$:
+   $$ v = [u_1^x, u_1^y, u_2^x, u_2^y, \dots, u_{n_c}^x, u_{n_c}^y]^T $$
+3. Compute the Principal Component Analysis (PCA) of the distribution of these vectors $v$ for points in the region $S$ [S1]. Let $U \in \mathbb{R}^{2n_c \times 3}$ be the matrix containing the top 3 principal components (eigenvectors corresponding to the largest eigenvalues) [G].
+4. The warped coordinate is the projection of $v$ onto this 3D subspace:
+   $$ F(p) = U^T v $$
+   This maps the 3D point to a compact 3D subspace where axis-aligned grids align with camera rays [S1].
+
+**Step 4: Perspective Sampling**
+During rendering, sample points along the camera ray to ensure uniform sampling in the warped space (perspective sampling) [S1]:
+1. Let the camera ray be $r(t) = o + t \cdot d$, where $o$ is the origin and $d$ is the direction [G].
+2. Start with an initial sample point $x_i$ [G].
+3. Compute the Jacobian matrix $J_i \in \mathbb{R}^{3 \times 3}$ of the warping function $F$ at $x_i$ [S1].
+4. Calculate the next sample point $x_{i+1}$ using a linear approximation:
+   $$ x_{i+1} = x_i + l \cdot \|J_i d\|_2 \cdot d $$
+   where $l$ is a preset parameter controlling the sampling interval [S1].
+
+**Step 5: Rendering**
+1. Warp the sampled points $x_i$ to the warp space using $F(x_i)$ [S1].
+2. Query the neural representation (grid) at $F(x_i)$ to obtain density $\sigma_i$ and color $c_i$ [S1].
+3. Composite colors using the volume rendering formula [S1]:
+   $$ \hat{c} = \sum_i T_i \alpha_i c_i $$
+   where $T_i = \prod_{j=0}^{i-1}(1 - \alpha_j)$ is the accumulated transmittance, $\alpha_i = 1 - \exp(-\delta_i\sigma_i)$ is the opacity of the point, and $\delta_i$ is the distance between consecutive samples $x_i$ and $x_{i+1}$ [S1].
+
+**Parameters:**
+* $l$: Preset parameter controlling the sampling interval in perspective sampling [S1]. Value not given in the sources.
+* Octree depth/levels: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+* **Arbitrary Trajectories:** Existing methods (NDC, inverse sphere) fail on long, narrow trajectories with multiple foreground objects ("free trajectories"), causing severe quality degradation [S1]. Perspective warping handles these by adapting to the local camera subset [S2].
+* **Grid Allocation:** In free trajectories, dense grids should be allocated for foreground objects and coarse grids for background. Standard methods allocate grids evenly, causing inefficient use of representation capacity [S1]. The octree subdivision addresses this [S1].
+* **Scene Scale:** The method is primarily designed for small-scale scenes [S2].
+
+## Subtopics
+
+### Perspective Sampling
+A point sampling strategy for perspective warping that ensures approximately uniform sampling on images, improving sampling efficiency and convergence stability [S1]. It computes the next sample point $x_{i+1}$ along the ray direction $d$ using the Jacobian $J_i$ of the warping function at the current point $x_i$: $x_{i+1} = x_i + l \cdot \|J_i d\|_2 \cdot d$, where $l$ is a preset parameter controlling the sampling interval [S1].
+
+## Operating characteristics
+* **Training Time:** ~12 minutes on a 2080Ti GPU for the Free dataset [S1].
+* **Performance:** Outperforms NDC warping and inverse-sphere warping, especially for representing fine details in tree scenes, as it does not rely on specific camera trajectory patterns [S2].
+* **Limitations:** Primarily designed for small-scale scenes [S2]. Requires accurate camera poses (standard NeRF dependency) [S2].
+* **Strengths:** Handles arbitrary camera trajectories; automatically degenerates to NDC or inverse-sphere warping for standard trajectories; adaptive grid allocation improves representation capacity efficiency [S1].
+
+## Background
+Perspective warping was introduced in the paper "F2-NeRF: Fast Neural Radiance Field Training with Free Camera Trajectories" by Chen et al. (CVPR 2023) [S1]. It addresses the limitations of existing fast grid-based NeRFs (like Instant-NGP, Plenoxels, DVGO, TensoRF) which rely on space warping designed only for forward-facing or 360° object-centric trajectories [S1]. It is a generalization of NDC warping [S1] and inverse sphere warping [S1].
+
+## Sources
+[S1] F2-NeRF: Fast Neural Radiance Field Training with Free Camera Trajectories, https://doi.org/10.1109/cvpr52729.2023.00404, fetched 2026-10-26
+[S2] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

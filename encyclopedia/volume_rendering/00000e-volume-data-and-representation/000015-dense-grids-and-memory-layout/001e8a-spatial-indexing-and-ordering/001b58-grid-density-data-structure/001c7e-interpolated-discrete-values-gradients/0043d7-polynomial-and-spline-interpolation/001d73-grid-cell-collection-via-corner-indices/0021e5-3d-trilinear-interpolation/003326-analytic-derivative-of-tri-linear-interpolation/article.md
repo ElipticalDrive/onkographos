@@ -6,18 +6,18 @@ This method computes the exact partial derivatives of a tri-linearly interpolate
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** Sample location $p_i = (x_i, y_i, z_i)$ within a voxel; the eight vertex values $v_{000}, \dots, v_{111}$ at the corners of the voxel containing $p_i$.
-- **Output:** The gradient vector $\nabla f(p_i) = \left[ \frac{\partial f}{\partial x_i}, \frac{\partial f}{\partial y_i}, \frac{\partial f}{\partial z_i} \right]$.
+- **Input:** Sample location $p_i = (x_i, y_i, z_i)$ within a voxel; the eight vertex values $v_{000}, \dots, v_{111}$ at the corners of the voxel containing $p_i$ [S1].
+- **Output:** The gradient vector $\nabla f(p_i) = \left[ \frac{\partial f}{\partial x_i}, \frac{\partial f}{\partial y_i}, \frac{\partial f}{\partial z_i} \right]$ [S1].
 
 **Data Structures:**
-The method relies on an $8 \times 8$ linear system to determine the coefficients of the tri-linear polynomial.
-- **Matrix $V$:** An $8 \times 8$ matrix where each row corresponds to one of the 8 voxel corners. The columns correspond to the basis functions: $1, x, y, z, xy, xz, yz, xyz$.
-- **Vector $v$:** An $8 \times 1$ vector containing the vertex values $[v_{000}, v_{001}, v_{010}, v_{011}, v_{100}, v_{101}, v_{110}, v_{111}]^T$.
-- **Vector $a$:** An $8 \times 1$ vector of coefficients $[a_0, \dots, a_7]^T$.
+The method relies on an $8 \times 8$ linear system to determine the coefficients of the tri-linear polynomial [S1].
+- **Matrix $V$:** An $8 \times 8$ matrix where each row corresponds to one of the 8 voxel corners [S1]. The columns correspond to the basis functions: $1, x, y, z, xy, xz, yz, xyz$ [S1].
+- **Vector $v$:** An $8 \times 1$ vector containing the vertex values $[v_{000}, v_{001}, v_{010}, v_{011}, v_{100}, v_{101}, v_{110}, v_{111}]^T$ [S1].
+- **Vector $a$:** An $8 \times 1$ vector of coefficients $[a_0, \dots, a_7]^T$ [S1].
 
 **Steps:**
-1. **Coordinate Simplification:** To simplify the linear system, treat the lower lattice points of the voxel as the origin. Let $(x_0, y_0, z_0) = (0, 0, 0)$ and $(x_1, y_1, z_1) = (1, 1, 1)$. The sample location $p_i$ is treated as relative coordinates $(x_i, y_i, z_i)$ within the unit cube $[0,1]^3$ [S1].
-2. **Construct Matrix $V$:** Build the $8 \times 8$ matrix $V$ using the coordinates of the 8 corners. The rows are ordered corresponding to the vertex indices $000$ to $111$. The columns are $1, x, y, z, xy, xz, yz, xyz$.
+1. **Coordinate Simplification:** To simplify the linear system, treat the lower lattice points of the voxel as the origin. Let $(x_0, y_0, z_0) = (0, 0, 0)$ and $(x_1, y_1, z_1) = (1, 1, 1)$ [S1]. The sample location $p_i$ is treated as relative coordinates $(x_i, y_i, z_i)$ within the voxel [S1].
+2. **Construct Matrix $V$:** Build the $8 \times 8$ matrix $V$ using the coordinates of the 8 corners. The rows are ordered corresponding to the vertex indices $000$ to $111$. The columns are $1, x, y, z, xy, xz, yz, xyz$ [S1].
    $$
    V = \begin{bmatrix}
    1 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
@@ -30,9 +30,9 @@ The method relies on an $8 \times 8$ linear system to determine the coefficients
    1 & 1 & 1 & 1 & 1 & 1 & 1 & 1
    \end{bmatrix}
    $$
-   Note: The source provides a general form for arbitrary $(x_0, y_0, z_0)$ and $(x_1, y_1, z_1)$, but explicitly states that treating lower points as $(0,0,0)$ simplifies the equations [S1]. The matrix above reflects this simplification where $x_0=y_0=z_0=0$ and $x_1=y_1=z_1=1$.
-3. **Solve for Coefficients $a$:** Solve the linear system $V \cdot a = v$ for the coefficient vector $a$. Since $V$ is constant for a unit voxel, it can be pre-inverted or solved via direct substitution due to its triangular structure if ordered correctly, but generally, it is solved as a linear system [S1].
-4. **Compute Partial Derivatives:** Calculate the gradient components using the derived coefficients $a_0, \dots, a_7$ and the sample location $(x_i, y_i, z_i)$:
+   The matrix above reflects the simplification where $x_0=y_0=z_0=0$ and $x_1=y_1=z_1=1$ [S1].
+3. **Solve for Coefficients $a$:** Solve the linear system $V \cdot a = v$ for the coefficient vector $a$ [S1].
+4. **Compute Partial Derivatives:** Calculate the gradient components using the derived coefficients $a_0, \dots, a_7$ and the sample location $(x_i, y_i, z_i)$ [S1]:
    $$
    \frac{\partial f}{\partial x_i} = a_1 + a_4 y_i + a_5 z_i + a_7 y_i z_i
    $$
@@ -100,19 +100,18 @@ def analytic_trilinear_gradient(v_vertices, p_local):
 - $v_{000}, \dots, v_{111}$: The eight closest vertices of $p_i$ in the grid [S1].
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Solving the linear system directly is stable for unit voxels due to the triangular structure. For arbitrary voxel coordinates, condition number issues may arise if the voxel is highly skewed, but standard volume grids are axis-aligned [S1].
-- **Boundaries:** The method assumes $p_i$ is strictly inside the voxel defined by the 8 vertices. If $p_i$ is on a boundary, the derivative is still well-defined as the tri-linear function is continuous and differentiable everywhere except potentially at the grid boundaries if discontinuities exist between voxels, but within a voxel, it is smooth [S1].
+- **Precision:** Solving the linear system directly is stable for unit voxels due to the triangular structure [G].
+- **Boundaries:** The method assumes $p_i$ is strictly inside the voxel defined by the 8 vertices. If $p_i$ is on a boundary, the derivative is still well-defined as the tri-linear function is continuous and differentiable within a voxel [G].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per sample. Solving for coefficients $a$ involves a fixed number of arithmetic operations (subtractions and additions) if the unit voxel simplification is used, or a fixed $8 \times 8$ linear solve otherwise. Computing the gradient is also $O(1)$.
-- **Memory Complexity:** $O(1)$ auxiliary memory. Requires storing 8 vertex values and 8 coefficients.
-- **Strengths:** Provides exact analytical gradients, which are crucial for optimization algorithms like Gauss-Newton or Levenberg-Marquardt used in SLAM and NeRF training. It is more accurate than numerical differentiation and faster than interpolated gradient methods if the vertex values are already available.
-- **Limitations:** Requires access to the 8 vertex values of the containing voxel. It does not handle non-axis-aligned or irregular grids without modification to the matrix $V$.
-- **When to use:** When gradient-based optimization is required for neural implicit representations using tri-linear interpolation on dense grids.
-- **When not to use:** If only the interpolated value is needed (use standard tri-linear interpolation), or if the grid is sparse and accessing 8 vertices is expensive (consider sparse voxel structures).
+Time and memory complexity: Not given in the sources.
+Measured performance with hardware, resolution and scene: Not given in the sources.
+Scaling: Not given in the sources.
+Strengths and limitations: Not given in the sources.
+When to use it and when not: Not given in the sources.
 
 ## Background
-This method is described in the context of Vox-Fusion, a dense tracking and mapping system using voxel-based neural implicit representations [S1]. It is also referenced in the context of NICE-SLAM, which uses neural implicit scalable encoding for SLAM [S1]. The approach leverages the polynomial nature of tri-linear interpolation to derive closed-form gradients, avoiding the need for automatic differentiation frameworks or numerical approximations during the optimization process.
+This method is described in the context of Vox-Fusion, a dense tracking and mapping system using voxel-based neural implicit representations [S1]. It is also referenced in the context of NICE-SLAM, which uses neural implicit scalable encoding for SLAM [S1]. The approach leverages the polynomial nature of tri-linear interpolation to derive closed-form gradients, avoiding the need for automatic differentiation frameworks or numerical approximations during the optimization process [S1].
 
 ## Sources
 [S1] RGB-D Mapping and Tracking in a Plenoxel Radiance Field, https://doi.org/10.1109/wacv57701.2024.00331, fetched 2026-10-26

@@ -15,16 +15,17 @@ This method approximates the Euclidean norm of a gradient vector using a linear 
 - Binary edge mask based on thresholding [S1, unofficial].
 
 **Data Structures:**
-- The method operates on scalar values derived from Sobel kernel convolutions [S1, unofficial]. No complex data structures are required beyond the input components $x$ and $y$ [S1, unofficial].
+- The method operates on scalar values derived from Sobel kernel convolutions applied to a 3×3 window [S1, unofficial].
 
 **Steps:**
-1. **Identify Components:** Determine the absolute values of the gradient components in the primary direction ($x$) and the perpendicular direction ($y$), ensuring $x \ge y$ [S1, unofficial].
-2. **Apply Approximation Formula:** Calculate the magnitude $A$ using the linear approximation $A = x + K y$ [S1, unofficial].
-3. **Thresholding:** If the calculated magnitude $A$ exceeds a specified threshold $T$, classify the pixel as an edge [S1, unofficial].
-4. **Assignment:** Assign a foreground value (255) to edge pixels and a background value (0) to non-edge pixels [S1, unofficial].
+1. **Identify Components:** Compute the absolute values of the gradient components in the primary direction ($x$) and the perpendicular direction ($y$), ensuring $x \ge y$ [S1, unofficial].
+2. **Assign Direction:** Determine the gradient direction from a template of eight angle directions based on the selected maximum measure and its corresponding sign [S1, unofficial].
+3. **Apply Approximation:** Calculate the magnitude $A$ using the linear approximation $A = x + K y$ [S1, unofficial].
+4. **Thresholding:** If the calculated magnitude $A$ exceeds a specified threshold $T$, classify the center pixel as an edge [S1, unofficial].
+5. **Assignment:** Assign a foreground value (255) to edge pixels and a background value (0) to non-edge pixels [S1, unofficial].
 
 **Formula Details:**
-The exact Euclidean magnitude is $A(\theta) = \sqrt{x^2 + y^2}$ [S1, unofficial]. The approximation assumes the gradient direction $\theta$ falls within a specific range relative to the grid axes, specifically $0 < \theta < \frac{\pi}{4}$ where $x > y$ [S1, unofficial]. The error percentage $E(\theta, K)$ of this approximation relative to the true Euclidean norm is $E(\theta, K) = 100 \left( \frac{\tan \theta}{\tan \theta + K} + K - 1 \right)$ [S1, unofficial]. This formula assumes normalized components or derives from the geometric relationship where the error depends on the angle $\theta$ and the constant $K$ [S1, unofficial].
+The exact Euclidean magnitude is $A(\theta) = \sqrt{x^2 + y^2}$ [S1, unofficial]. The approximation assumes the gradient direction $\theta$ falls within a specific range relative to the grid axes, specifically $0 < \theta < \frac{\pi}{4}$ where $x > y$ [S1, unofficial]. The error percentage $E(\theta, K)$ of this approximation relative to the true Euclidean norm is $E(\theta, K) = 100(\cos \theta + K \sin \theta - 1)$ [S1, unofficial].
 
 **Parameters:**
 - $K$: The optimal value for $K$ is $1/4$ (0.25) [S1, unofficial]. This value minimizes the maximum error for both the 0–22.5° range (associated with four Sobel operators) and the 0–45° range (associated with two Sobel operators) [S1, unofficial].
@@ -33,13 +34,15 @@ The exact Euclidean magnitude is $A(\theta) = \sqrt{x^2 + y^2}$ [S1, unofficial]
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sobel_gradient_magnitude_approx(x_abs, y_abs, k=0.25, threshold=None):
-    # Ensure x is the larger component
-    if x_abs < y_abs:
-        x_abs, y_abs = y_abs, x_abs
-    # Calculate approximation
-    magnitude = x_abs + k * y_abs
-    # Thresholding and assignment
+def sobel_gradient_magnitude_approx(x, y, k=0.25, threshold=None):
+    # Step 1: Identify components (ensure x >= y)
+    if abs(x) < abs(y):
+        x, y = y, x
+    x, y = abs(x), abs(y)
+    # Step 2: Direction assignment is handled by the calling pipeline using an 8-angle template based on the sign of the original max component [S1, unofficial].
+    # Step 3: Apply approximation formula
+    magnitude = x + k * y
+    # Step 4 & 5: Thresholding and assignment
     if threshold is not None:
         if magnitude > threshold:
             return 255
@@ -51,7 +54,7 @@ def sobel_gradient_magnitude_approx(x_abs, y_abs, k=0.25, threshold=None):
 **Edge Cases and Pitfalls:**
 - **Boundary Conditions:** The formula assumes $x \ge y$ [S1, unofficial]. If the components are equal, the error is maximized for the given $K$ [G].
 - **Degenerate Input:** If both $x$ and $y$ are zero, the magnitude is zero [G].
-- **Time Complexity:** $O(1)$ per pixel/voxel [G].
+- **Time Complexity:** $O(1)$ per pixel or voxel [G].
 
 ## Subtopics
 
@@ -59,7 +62,7 @@ def sobel_gradient_magnitude_approx(x_abs, y_abs, k=0.25, threshold=None):
 Gradient Magnitude Modulation is a post-processing step that uses the computed gradient magnitude to modulate sample opacity and illumination values. It emphasizes surface boundaries by increasing opacity and brightness where gradients are high, while de-emphasizing homogeneous regions and noise where gradients are small. It differs from the underlying [Sobel Gradient Magnitude Approximation](1429-sobel-gradient-magnitude-approximation.md) by adding a lookup-based mapping and the final multiplication step, rather than just computing the raw magnitude value. Choose this when you need to enhance surface detail in volume rendering.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per pixel/voxel [G].
+- **Time Complexity:** $O(1)$ per pixel or voxel [G].
 - **Memory Complexity:** $O(1)$ auxiliary space [G].
 - **Performance:** Significantly faster than exact Euclidean norm calculation on hardware without dedicated square root units or when integer arithmetic is preferred [G].
 - **Strengths:** Low computational cost, simple implementation, isotropic response when combined with appropriate Sobel kernels [G].
@@ -68,7 +71,7 @@ Gradient Magnitude Modulation is a post-processing step that uses the computed g
 - **When not to use:** Applications requiring high-precision gradient magnitudes for scientific visualization where error bounds are strict [G].
 
 ## Background
-The method originates from early volume rendering systems, specifically the Shear-warp factorization approach [S1, unofficial]. It was developed to optimize the computation of gradient magnitudes for edge detection and shading in real-time visualization [S1, unofficial]. The specific choice of $K=1/4$ was derived from error analysis to balance accuracy across different gradient orientations [S1, unofficial].
+The method is detailed in literature on shear-warp factorization volume rendering systems, where it optimizes gradient magnitude computation for edge detection and shading [S1, unofficial]. The specific choice of $K=1/4$ was derived from error analysis to balance accuracy across different gradient orientations [S1, unofficial].
 
 ## Sources
 [S1] Shear-warp factorization volume rendering visualization system, https://archive.org/details/0162018299360, fetched 2026-10-26 (unofficial)
