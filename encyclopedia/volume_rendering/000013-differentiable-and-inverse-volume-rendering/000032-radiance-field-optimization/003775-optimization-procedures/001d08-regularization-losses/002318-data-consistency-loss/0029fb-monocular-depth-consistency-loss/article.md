@@ -3,163 +3,139 @@
 Also called: Monocular Depth Loss
 
 ## Overview
-Monocular Depth Consistency Loss enforces geometric consistency between the depth rendered from a neural radiance field and depth predicted by a monocular depth estimation network [S1]. It solves the problem of scale and shift ambiguity inherent in monocular depth priors by applying a closed-form least-squares alignment per batch [S1]. It differs from [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md) by using a parametric scale/shift fit rather than reprojection error to handle outliers, and from [Pseudo-depth Supervised Loss](7487-pseudo-depth-supervised-loss.md) by relying on dense monocular predictions rather than sparse Structure-from-Motion points [S1, S3].
+Monocular Depth Consistency Loss enforces geometric consistency between the depth estimated by a volume rendering network and the depth predicted by a pre-trained monocular depth estimation network. It solves the problem of scale ambiguity and geometric artifacts in single-view or sparse-view neural radiance field (NeRF) optimization by treating monocular depth as a relative cue rather than an absolute metric [S1]. Unlike sibling methods that may rely on sparse Structure-from-Motion (SfM) points or multi-view reprojection consistency, this method directly aligns the rendered depth distribution with dense monocular predictions using a closed-form least-squares alignment per batch [S1].
 
 ## How it works
-**Inputs:**
-- $\hat{D}(\mathbf{r})$: Rendered depth for ray $\mathbf{r}$, derived from the volume rendering process (e.g., weighted average of sample depths).
-- $\bar{D}(\mathbf{r})$: Predicted monocular depth for the corresponding image pixel, output by a pre-trained monocular depth estimator.
-- $\mathcal{B}$: A batch of rays/images.
-
-**Outputs:**
-- $\mathcal{L}_{Mono}$: The scalar loss value.
-- $\eta, \epsilon$: Scale and shift parameters used for alignment.
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $\hat{D}(\mathbf{r})$: The depth value estimated by the volume rendering network for a ray $\mathbf{r}$.
+    *   $\bar{D}(\mathbf{r})$: The depth value predicted by a monocular depth estimation network for the corresponding image pixel.
+    *   $\boldsymbol{\theta}, \boldsymbol{\phi}$: The parameters of the radiance field and depth estimation networks.
+*   **Outputs:**
+    *   $\mathcal{L}_{Mono}$: The scalar loss value.
 
 **Data Structures:**
-- Depth maps are treated as 2D arrays or flattened vectors per batch. No specific bit-packing is mandated; standard floating-point precision is assumed for the depth values.
+*   **Batch:** A set of rays $\{\mathbf{r}_k\}$ sampled for a single training step. The parameters $\eta$ and $\epsilon$ are computed independently for each batch to handle scale/shift variations across batches [S1].
+
+**Formulas:**
+The loss is defined as the squared $L_2$ distance between the scaled/shifted rendered depth and the monocular depth prediction:
+
+$$
+\mathcal{L}_{Mono}(\boldsymbol{\theta}, \boldsymbol{\phi}) = \sum_i \mathbb{E}_{\mathbf{r} \sim \bar{D}_i} \left\| (\eta \hat{D}(\mathbf{r}) + \epsilon) - \bar{D}(\mathbf{r}) \right\|^2
+$$
+
+where $\eta$ (scale) and $\epsilon$ (shift) are the closed-form least-squares solutions calculated per batch:
+
+$$
+\eta = \left( \hat{D}(\mathbf{r})^T \hat{D}(\mathbf{r}) \right)^{-1} \hat{D}(\mathbf{r})^T \bar{D}(\mathbf{r})
+$$
+
+$$
+\epsilon = \bar{D}(\mathbf{r}) - \eta \hat{D}(\mathbf{r})
+$$
+
+Here, $\hat{D}(\mathbf{r})$ and $\bar{D}(\mathbf{r})$ are treated as vectors over the batch dimension for the calculation of $\eta$ and $\epsilon$ [S1].
 
 **Steps:**
-1. For each batch $i$, collect the set of rendered depths $\hat{D}_i$ and monocular predictions $\bar{D}_i$ for all valid rays/pixels in the batch.
-2. Calculate the scale parameter $\eta_i$ using the closed-form least-squares solution:
-   $$ \eta_i = \left( \hat{D}_i^T \hat{D}_i \right)^{-1} \hat{D}_i^T \bar{D}_i $$
-   This minimizes $\| \eta \hat{D}_i - \bar{D}_i \|^2$ with respect to $\eta$ assuming zero shift, or serves as the first step in the joint optimization. Note: The source defines $\eta$ this way, and $\epsilon$ subsequently [S1].
-3. Calculate the shift parameter $\epsilon_i$:
-   $$ \epsilon_i = \bar{D}_i - \eta_i \hat{D}_i $$
-   *Note: The source formula for $\epsilon$ implies a global shift for the batch based on the calculated $\eta$. In implementation, this often means $\epsilon$ is a scalar or a mean shift, or the formula represents the residual after optimal scaling. The source states $\epsilon = \bar{D}(\mathbf{r}) - \eta \hat{D}(\mathbf{r})$ which suggests $\epsilon$ might be treated as a vector or the formula is simplified. However, standard least squares for $y = ax+b$ yields specific scalar $a,b$. The source text says "calculated separately for each batch" and gives the formula. We follow the source's explicit formula [S1].*
-4. Compute the loss for the batch:
-   $$ \mathcal{L}_{Mono} = \sum_i \mathbb{E}_{\mathbf{r} \sim \bar{D}_i} \left\| (\eta_i \hat{D}(\mathbf{r}) + \epsilon_i) - \bar{D}(\mathbf{r}) \right\|^2 $$
-   In practice, this is the Mean Squared Error (MSE) between the scaled/shifted rendered depth and the monocular prediction.
+1.  For the current training batch, collect all rendered depth values $\hat{D}(\mathbf{r})$ and corresponding monocular depth predictions $\bar{D}(\mathbf{r})$.
+2.  Compute the scale parameter $\eta$ using the closed-form least-squares solution:
+    $$ \eta = \frac{\sum \hat{D}(\mathbf{r}) \bar{D}(\mathbf{r})}{\sum \hat{D}(\mathbf{r})^2} $$
+    *(Note: The vector notation in the source implies a standard linear regression fit without an intercept term for $\eta$, followed by an offset calculation for $\epsilon$. The source formula $\eta = (\hat{D}^T \hat{D})^{-1} \hat{D}^T \bar{D}$ corresponds to this.)*
+3.  Compute the shift parameter $\epsilon$:
+    $$ \epsilon = \bar{D}(\mathbf{r}) - \eta \hat{D}(\mathbf{r}) $$
+    *(Note: The source defines $\epsilon$ as a vector residual $\bar{D}(\mathbf{r}) - \eta \hat{D}(\mathbf{r})$ inside the loss term, but typically in such alignment losses, $\epsilon$ is a scalar bias. However, the source explicitly writes $\epsilon = \bar{D}(\mathbf{r}) - \eta \hat{D}(\mathbf{r})$ as part of the definition. Given the loss term $\| (\eta \hat{D} + \epsilon) - \bar{D} \|^2$, if $\epsilon$ is defined as the residual, the loss would be zero. The standard interpretation of "scale and shift" implies $\epsilon$ is a scalar constant for the batch. The source text says "parameters are calculated separately for each batch". We assume $\eta$ and $\epsilon$ are scalars derived from the batch statistics. The formula $\epsilon = \bar{D}(\mathbf{r}) - \eta \hat{D}(\mathbf{r})$ in the source likely represents the element-wise residual used to *define* the alignment, but for the loss to be non-trivial, $\epsilon$ must be a scalar mean shift. A common least-squares solution for $y \approx ax+b$ is $a = \frac{\sum (x-\bar{x})(y-\bar{y})}{\sum (x-\bar{x})^2}$ and $b = \bar{y} - a\bar{x}$. The source formula for $\eta$ is for a zero-intercept model. We follow the source's explicit formula for $\eta$ and assume $\epsilon$ is the mean residual or a scalar shift derived similarly. However, to be strictly faithful to the provided text which states $\epsilon = \bar{D}(\mathbf{r}) - \eta \hat{D}(\mathbf{r})$, we note this ambiguity. In implementation, $\epsilon$ is typically the mean of $(\bar{D} - \eta \hat{D})$ over the batch.)*
+    *Correction based on standard practice and source context:* The source defines $\epsilon$ in the formula block. If $\epsilon$ were a vector equal to the residual, the loss would be 0. Thus, $\epsilon$ is a scalar. The source likely omits the mean operator for brevity or implies $\epsilon$ is the optimal scalar shift. We will implement $\epsilon$ as the mean residual.
+4.  Compute the loss $\mathcal{L}_{Mono}$ by summing the squared differences between the aligned rendered depth and the monocular depth over the batch.
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def monocular_depth_consistency_loss(rendered_depth, mono_depth):
     """
-    Calculates the Monocular Depth Consistency Loss for a single batch.
+    Computes the Monocular Depth Consistency Loss for a batch.
     
     Args:
-        rendered_depth (Tensor): Shape (H, W) or (N,). Rendered depth values D_hat.
-        mono_depth (Tensor): Shape (H, W) or (N,). Monocular predicted depth values D_bar.
+        rendered_depth (Tensor): Shape (N,), depth values estimated by volume rendering.
+        mono_depth (Tensor): Shape (N,), depth values predicted by monocular network.
         
     Returns:
         Tensor: Scalar loss value.
     """
-    # Flatten to 1D vectors for batch-wise calculation
-    d_hat = rendered_depth.flatten().float()
-    d_bar = mono_depth.flatten().float()
-    
-    # Filter out invalid pixels (e.g., NaN or zero depth) if necessary
-    valid_mask = (d_hat > 0) & (d_bar > 0)
-    d_hat = d_hat[valid_mask]
-    d_bar = d_bar[valid_mask]
-    
-    if d_hat.numel() == 0:
-        return torch.tensor(0.0)
-
-    # Calculate scale eta using closed-form least squares
-    # eta = (D_hat^T * D_hat)^-1 * D_hat^T * D_bar
-    # In scalar/vector form: sum(d_hat * d_bar) / sum(d_hat^2)
-    numerator = torch.sum(d_hat * d_bar)
-    denominator = torch.sum(d_hat * d_hat)
+    # 1. Calculate scale parameter eta using closed-form least squares
+    # eta = (D_hat^T D_hat)^-1 D_hat^T D_bar
+    # In vector form for a batch:
+    dot_product = torch.sum(rendered_depth * mono_depth)
+    norm_squared = torch.sum(rendered_depth ** 2)
     
     # Guard against division by zero
-    if denominator < 1e-8:
-        eta = torch.tensor(1.0)
+    if norm_squared < 1e-8:
+        eta = 0.0
     else:
-        eta = numerator / denominator
+        eta = dot_product / norm_squared
         
-    # Calculate shift epsilon
-    # epsilon = D_bar - eta * D_hat
-    # The source formula implies epsilon is computed per ray or as a residual.
-    # However, standard affine alignment usually computes a single scalar shift for the batch.
-    # The source says: "epsilon = D_bar(r) - eta D_hat(r)". 
-    # If epsilon is a vector, the loss term (eta * D_hat + epsilon) - D_bar becomes:
-    # (eta * D_hat + (D_bar - eta * D_hat)) - D_bar = 0.
-    # This implies the source formula for epsilon might be describing the residual 
-    # or there is a misunderstanding of the "closed-form" joint solution.
-    # Standard least squares for y = ax + b:
-    # a = (N sum(xy) - sum(x)sum(y)) / (N sum(x^2) - sum(x)^2)
-    # b = (sum(y) - a sum(x)) / N
+    # 2. Calculate shift parameter epsilon
+    # The source defines epsilon = D_bar - eta * D_hat. 
+    # To get a scalar shift for the batch, we take the mean of the residuals.
+    residuals = mono_depth - eta * rendered_depth
+    epsilon = torch.mean(residuals)
     
-    # Re-evaluating Source [S1]: 
-    # "eta = (D_hat^T D_hat)^-1 D_hat^T D_bar" -> This is the solution for b=0 (no shift).
-    # "epsilon = D_bar - eta D_hat" -> This calculates the residual vector.
-    # If the loss is || (eta D_hat + epsilon) - D_bar ||^2, and epsilon is the residual, the loss is 0.
-    # This suggests the source might define epsilon as a *global* scalar shift, 
-    # or the formula for eta includes the shift implicitly in a different way, 
-    # OR the "closed-form" refers to solving for both.
-    # Given the text "calculated separately for each batch", and the standard practice 
-    # in such papers (e.g., MonoSDF, NeRF-W), it is highly likely that 
-    # eta and epsilon are SCALARS computed via standard 2-parameter least squares.
-    # The source text's formula for eta is strictly for scaling (1-param).
-    # Let's implement the standard 2-param least squares which is the robust interpretation 
-    # of "scale and shift parameters" [S1].
-    
-    N = d_hat.numel()
-    sum_x = torch.sum(d_hat)
-    sum_y = torch.sum(d_bar)
-    sum_xy = torch.sum(d_hat * d_bar)
-    sum_x2 = torch.sum(d_hat * d_hat)
-    
-    denom = N * sum_x2 - sum_x * sum_x
-    if denom < 1e-8:
-        # Fallback if all depths are constant
-        eta = torch.tensor(1.0)
-        epsilon = torch.mean(d_bar - d_hat)
-    else:
-        eta = (N * sum_xy - sum_x * sum_y) / denom
-        epsilon = (sum_y - eta * sum_x) / N
-        
-    # Apply scale and shift
-    aligned_depth = eta * d_hat + epsilon
-    
-    # Compute MSE loss
-    loss = torch.mean((aligned_depth - d_bar) ** 2)
+    # 3. Compute the loss
+    # L_Mono = sum || (eta * D_hat + epsilon) - D_bar ||^2
+    aligned_depth = eta * rendered_depth + epsilon
+    loss = torch.sum((aligned_depth - mono_depth) ** 2)
     
     return loss
 ```
-*Note on Pseudocode: The source [S1] explicitly gives $\eta = (\hat{D}^T \hat{D})^{-1} \hat{D}^T \bar{D}$ which is the OLS estimator for a model with NO intercept (shift). It then defines $\epsilon = \bar{D} - \eta \hat{D}$. If $\epsilon$ is used as a vector in the loss, the loss is identically zero. This is a contradiction in the source notation or implies $\epsilon$ is a global scalar derived differently. However, the text says "scale and shift parameters". Standard interpretation in this field (e.g., [S3]) uses a global scale and shift. The pseudocode above implements the standard 2-parameter least squares to ensure the loss is non-trivial and aligns with the "scale and shift" description [S1]. If strict adherence to the source's $\eta$ formula is required, $\epsilon$ would likely be the mean of $(\bar{D} - \eta \hat{D})$ [G].*
 
 **Parameters:**
-- $\eta$: Scale parameter. Typical value: 1.0 initially, converges to the ratio of scene depth to monocular depth scale.
-- $\epsilon$: Shift parameter. Typical value: 0.0 initially.
+*   $\eta$: Scale parameter. Typical value depends on the relative scale of the rendered vs. monocular depth.
+*   $\epsilon$: Shift parameter. Typical value depends on the offset between the two depth maps.
+*   Batch size: Must be sufficient to provide stable statistics for $\eta$ and $\epsilon$ [S1].
 
 **Edge Cases and Pitfalls:**
-- **Batch Variation:** Predicted depth maps vary in scale and shift across different batches. $\eta$ and $\epsilon$ must be calculated separately for each batch [S1].
-- **Invalid Depth:** Handle NaN or zero values in rendered or monocular depth maps before computing statistics [G].
-- **Degenerate Input:** If rendered depth is constant, the least-squares solution for scale is undefined. A guard is required [G].
+*   **Scale Variation:** Predicted depth maps can vary in scale and shift across different batches. Therefore, $\eta$ and $\epsilon$ must be calculated separately for each batch [S1].
+*   **Relative Cue:** Depth should be treated as a relative cue, especially in challenging scenarios like endoscopic sequences where absolute metric depth is difficult to obtain [S1].
+*   **Zero Norm:** If the rendered depth is zero or near-zero, the calculation of $\eta$ becomes unstable. A guard is required [G].
 
 ## Subtopics
 
 ### [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md)
-This method provides a data consistency mechanism for monocular depth estimation in radiance fields by leveraging geometric reprojection to identify reliable depth estimates and filter outliers [7293-reliable-depth-estimation-via-reprojection.md]. It solves the problem of noisy or incorrect depth predictions in sparse-view settings by verifying consistency across multiple camera viewpoints [7293-reliable-depth-estimation-via-reprojection.md]. It differs from [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md) by using reprojection error of image intensities to determine reliability rather than a closed-form least-squares scale/shift fit, and from [Pseudo-depth Supervised Loss](7487-pseudo-depth-supervised-loss.md) by explicitly filtering unreliable pixels via multi-view geometric checks [7293-reliable-depth-estimation-via-reprojection.md].
+This method determines the reliability of monocular depth estimates by reprojecting them into a nearest training view and comparing the resulting image intensities against the actual captured view. It solves the problem of noisy or incorrect depth predictions (e.g., in specular regions or textureless areas) by generating a binary mask that selects only those depth values where the reprojection error is low. It differs from its siblings, [Pseudo-depth Supervised Loss](7487-pseudo-depth-supervised-loss.md) and [Depth Prior Loss](10801-depth-prior-loss.md), by using geometric consistency via reprojection error rather than direct pixel-wise regression or static priors to weight the supervision signal [7293-reliable-depth-estimation-via-reprojection.md].
 
 ### [Pseudo-depth Supervised Loss](7487-pseudo-depth-supervised-loss.md)
 Pseudo-depth Supervised Loss is a regularization technique that mitigates floating artifacts and enforces geometric consistency in neural radiance fields by comparing rendered depth against pseudo-depth targets derived from Structure-from-Motion (SfM) data. Unlike standard photometric losses that only constrain color, this method explicitly constrains the density distribution along rays. It distinguishes itself from sibling methods like [Reliable Depth Estimation via Reprojection](7293-reliable-depth-estimation-via-reprojection.md) by relying on sparse SfM point clouds rather than dense multi-view stereo consistency, making it suitable for scenarios where dense depth priors are unavailable but camera poses are known.
 
+### [Depth Prior Loss](10801-depth-prior-loss.md)
+A regularization term using monocular depth priors to constrain geometry during training [10801-depth-prior-loss.md].
+
+### [Patch-level Scale-Shift Alignment](12336-patch-level-scale-shift-alignment.md)
+A loss alignment technique that computes per-patch scale and shift parameters to adaptively align predicted monocular depth maps to reference or ground truth depths, reducing local misalignment errors [12336-patch-level-scale-shift-alignment.md].
+
 ### MonoSDF
-MonoSDF uses monocular depth and normal constraints to address weak texture area reconstruction [S2, unofficial]. It extends the basic monocular depth consistency by incorporating surface normal information from monocular estimators to guide the implicit surface reconstruction, particularly in regions where photometric cues are insufficient [S2, unofficial].
+MonoSDF uses Monocular depth and normal for constraints to address weak texture area reconstruction [S2, unofficial].
 
 ### Scale Alignment of Depth Priors
-This variant aligns the scale of a predicted monocular depth map with sparse COLMAP depths to enable supervision during NeRF optimization [S3]. It uses a log-space alignment factor $\alpha$:
-$$ \alpha (D^i_p, D^i_{Sparse}) = \frac {1}{n} \sum _j(\log D^i_p(j) - \log D^i_{Sparse}(j)) $$
-where $D^i_p$ is the predicted depth, $D^i_{Sparse}$ is the sparse depth, and $n$ is the number of valid pixels [S3]. This approach is used when sparse geometric priors are available to anchor the scale of the monocular prior [S3].
+Scale Alignment of Depth Priors aligns the scale of a predicted monocular depth map with sparse COLMAP depths to enable supervision during NeRF optimization [S3]. The scale factor $\alpha$ is computed by averaging the difference over all valid pixels:
+$$
+\alpha (D^i_p, D^i_{Sparse}) = \frac {1}{n} \sum _j(\log D^i_p(j) - \log D^i_{Sparse}(j))
+$$
+where $D^i_p$ is the predicted depth for view $i$, $D^i_{Sparse}$ is the sparse depth for view $i$, $n$ is the number of valid pixels, and $j$ indexes the pixels [S3].
 
 ### Self-Supervised Depth Losses
-This approach includes auxiliary losses ($L_{smooth}$ and $L_{std}$) that constrain the estimated depth and confidence interval in a self-supervised manner using monocular depth estimates and image gradients [S4]. It focuses on smoothness and consistency with image edges rather than direct pixel-wise depth matching [S4].
+Self-Supervised Depth Losses are two auxiliary losses ($L_{smooth}$ and $L_{std}$) that constrain the estimated depth and confidence interval in a self-supervised manner using monocular depth estimates and image gradients [S4].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ per batch, where $N$ is the number of pixels/rays, due to the linear algebra operations for scale/shift calculation and MSE computation.
-- **Memory Complexity:** $O(N)$ to store the depth maps for the batch.
-- **Performance:** Effective in monocular endoscopic sequences where stereo depth is unavailable [S1]. It improves reconstruction quality in challenging surgical scenarios with nonrigid deformation [S1].
-- **Strengths:** Handles scale ambiguity of monocular depth; simple to implement; works with any pre-trained monocular depth network.
-- **Limitations:** Relies on the accuracy of the monocular depth estimator; sensitive to outliers if not filtered (unlike reprojection methods); requires batch-wise parameter calculation which may vary during training [S1].
-- **When to use:** Monocular video sequences (e.g., endoscopy) where ground truth depth is unavailable and stereo is not possible [S1].
-- **When not to use:** When sparse SfM points are available and more robust scale alignment is needed (use Pseudo-depth Supervised Loss); when multi-view consistency is available (use Reprojection methods).
+*   **Time Complexity:** The calculation of $\eta$ and $\epsilon$ is $O(N)$ where $N$ is the number of rays in the batch. The loss computation is also $O(N)$.
+*   **Memory Complexity:** $O(N)$ to store the depth values for the batch.
+*   **Strengths:** Effective for monocular sequences where multi-view consistency is not available or reliable. It handles scale ambiguity by learning a per-batch alignment.
+*   **Limitations:** Relies on the quality of the monocular depth estimator. Noisy monocular predictions can introduce errors if not masked or weighted [S1].
+*   **When to use:** Monocular endoscopic sequences or single-view reconstruction tasks [S1].
+*   **When not to use:** When high-quality multi-view stereo data is available, as multi-view consistency losses are generally more robust.
 
 ## Background
-The Monocular Depth Consistency Loss was introduced in the context of efficient deformable tissue reconstruction using orthogonal neural planes [S1]. It addresses the challenge of reconstructing scenes from monocular endoscopic sequences where depth is a relative cue [S1]. The method leverages the fact that while absolute scale is unknown, the relative depth structure provided by monocular networks is beneficial [S1]. It is part of the broader family of regularization losses in differentiable volume rendering, specifically under Data Consistency Loss [2976-data-consistency-loss.md].
+Monocular Depth Consistency Loss was introduced in the context of efficient deformable tissue reconstruction via orthogonal neural planes, specifically for endoscopic sequences [S1]. The method addresses the challenge that depth in such sequences is often a relative cue rather than an absolute metric, yet relative depth information is beneficial even over larger distances [S1]. The loss replaces the standard depth loss $L_D$ during training for these specific applications [S1].
 
 ## Sources
 [S1] Efficient Deformable Tissue Reconstruction via Orthogonal Neural Plane, https://doi.org/10.1109/tmi.2024.3388559, fetched 2026-10-26

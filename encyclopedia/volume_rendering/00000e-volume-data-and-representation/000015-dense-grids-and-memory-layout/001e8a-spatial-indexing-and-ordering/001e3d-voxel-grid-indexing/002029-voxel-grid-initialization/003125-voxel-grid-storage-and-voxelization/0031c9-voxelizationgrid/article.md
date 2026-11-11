@@ -11,14 +11,14 @@
 **Parameters:** `align_bounds_max` (`bool`, default `True`) determines if the maximum bound is aligned to the grid cell boundary (`computed_max`) or kept at the requested padded maximum (`padded_requested_max`) [S1, unofficial]. `padding` (`float` or `tuple`, default `0.0`) is added to the bounding box extent during grid construction [S1, unofficial].
 
 **Numbered Steps:**
-1. **Initialization (`__post_init__`)**: Convert `bounds_min_xyz`, `bounds_max_xyz`, and `voxel_size_xyz` to contiguous `Float32Array` reshaped to `(3,)`. Convert `grid_size_xyz` to contiguous `Int32Array` reshaped to `(3,)`. Validate that `grid_size_xyz` elements are $> 0$, `voxel_size_xyz` elements are $> 0$, and `bounds_max_xyz` is strictly larger than `bounds_min_xyz` [S1, unofficial].
-2. **Construction from mesh (`from_mesh`)**: Apply an optional transform matrix to the input mesh vertices. Compute `bounds_min_xyz` as the axis-wise minimum of the transformed vertices. Compute `bounds_max_xyz` as the axis-wise maximum of the transformed vertices. Call `from_bounds` with these computed bounds, the provided `voxel_size`, `padding`, and `pixel_size` [S1, unofficial].
-3. **Construction from bounds (`from_bounds`)**: Convert inputs to `Float32`/`Int32` arrays. Expand `padding` to a 3D vector. Compute `padded_min = bounds_min - padding` and `padded_requested_max = bounds_max + padding`. Compute `extent = padded_requested_max - padded_min` [S1, unofficial].
+1. **Initialization (`__post_init__`)**: Convert `bounds_min_xyz`, `bounds_max_xyz`, and `voxel_size_xyz` to contiguous `Float32Array` reshaped to `(3,)` [S1, unofficial]. Convert `grid_size_xyz` to contiguous `Int32Array` reshaped to `(3,)` [S1, unofficial]. Validate that `grid_size_xyz` elements are $> 0$, `voxel_size_xyz` elements are $> 0$, and `bounds_max_xyz` is strictly larger than `bounds_min_xyz` [S1, unofficial].
+2. **Construction from mesh (`from_mesh`)**: Apply an optional transform matrix to the input mesh vertices [S1, unofficial]. Compute `bounds_min_xyz` as the axis-wise minimum of the transformed vertices [S1, unofficial]. Compute `bounds_max_xyz` as the axis-wise maximum of the transformed vertices [S1, unofficial]. Call `from_bounds` with these computed bounds, the provided `voxel_size`, `padding`, and `pixel_size` [S1, unofficial].
+3. **Construction from bounds (`from_bounds`)**: Convert inputs to `Float32`/`Int32` arrays [S1, unofficial]. Expand `padding` to a 3D vector [S1, unofficial]. Compute `padded_min = bounds_min - padding` and `padded_requested_max = bounds_max + padding` [S1, unofficial]. Compute `extent = padded_requested_max - padded_min` [S1, unofficial].
    - If `voxel_size` is provided and `grid_size_xyz` is `None`: compute `voxel_size_xyz`, `safe_extent = np.maximum(extent, voxel_size_xyz)`, `grid_size = np.maximum(np.ceil(safe_extent / voxel_size_xyz).astype(np.int32), 1)`, `aligned_max = padded_min + grid_size.astype(np.float32) * voxel_size_xyz` [S1, unofficial].
    - If `grid_size_xyz` is provided and `voxel_size` is `None`: validate `grid_size > 0`, compute `voxel_size_xyz = extent / grid_size.astype(np.float32)`, `aligned_max = padded_requested_max` [S1, unofficial].
    - If both are provided: validate `grid_size > 0`, compute `computed_max = padded_min + grid_size.astype(np.float32) * voxel_size_xyz`, set `aligned_max` to `computed_max` if `align_bounds_max` is `True`, else `padded_requested_max` [S1, unofficial].
    - Return instance with `padded_min`, `aligned_max`, `grid_size`, `voxel_size_xyz`, and `pixel_size` [S1, unofficial].
-4. **Legacy construction (`from_legacy`)**: Convert `num_voxels_zyx` to `Int32Array`. Map legacy ZYX order to `grid_size_xyz` (X, Y, Z) by reversing indices: `grid_size_xyz = [legacy_num_voxels[2], legacy_num_voxels[1], legacy_num_voxels[0]]` [S1, unofficial]. If `voxel_size` is `None`, call `from_bounds` with `grid_size_xyz` [S1, unofficial]. If `voxel_size` is provided, call `from_bounds` with both `voxel_size` and `grid_size_xyz`, setting `align_bounds_max=True` [S1, unofficial].
+4. **Legacy construction (`from_legacy`)**: Convert `num_voxels_zyx` to `Int32Array` [S1, unofficial]. Map legacy ZYX order to `grid_size_xyz` (X, Y, Z) by reversing indices: `grid_size_xyz = [legacy_num_voxels[2], legacy_num_voxels[1], legacy_num_voxels[0]]` [S1, unofficial]. If `voxel_size` is `None`, call `from_bounds` with `grid_size_xyz` [S1, unofficial]. If `voxel_size` is provided, call `from_bounds` with both `voxel_size` and `grid_size_xyz`, setting `align_bounds_max=True` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -112,19 +112,17 @@ class VoxelizationGrid:
                     pixel_size: Optional[float] = None) -> 'VoxelizationGrid':
         legacy_arr = np.asarray(num_voxels_zyx, dtype=np.int32).reshape(3)
         grid_size_xyz = np.array([legacy_arr[2], legacy_arr[1], legacy_arr[0]], dtype=np.int32)
+        # [G] Source does not specify bounds for legacy construction; using unit bounds to satisfy signature.
+        dummy_min = np.zeros(3, dtype=np.float32)
+        dummy_max = np.ones(3, dtype=np.float32)
         if voxel_size is None:
-            # [G] Source note says call from_bounds with grid_size_xyz, but bounds are required.
-            # Assuming default unit bounds [0,0,0] to [1,1,1] to satisfy signature.
-            return cls.from_bounds(np.zeros(3, dtype=np.float32), np.ones(3, dtype=np.float32),
-                                   voxel_size=None, padding=padding, grid_size=grid_size_xyz, pixel_size=pixel_size)
+            return cls.from_bounds(dummy_min, dummy_max, voxel_size=None, padding=padding, grid_size=grid_size_xyz, pixel_size=pixel_size)
         else:
-            return cls.from_bounds(np.zeros(3, dtype=np.float32), np.ones(3, dtype=np.float32),
-                                   voxel_size=voxel_size, padding=padding, grid_size=grid_size_xyz,
-                                   align_bounds_max=True, pixel_size=pixel_size)
+            return cls.from_bounds(dummy_min, dummy_max, voxel_size=voxel_size, padding=padding, grid_size=grid_size_xyz, align_bounds_max=True, pixel_size=pixel_size)
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Floating-point division in `voxel_size_xyz` calculation may introduce small errors. Using `np.maximum` with `voxel_size_xyz` in Case A ensures `safe_extent` is never smaller than the voxel size, preventing division by zero or negative grid sizes [S1, unofficial].
+*   **Precision:** Floating-point division in `voxel_size_xyz` calculation may introduce small errors. Using `np.maximum` with `voxel_size_xyz` in the voxel-size-only case ensures `safe_extent` is never smaller than the voxel size, preventing division by zero or negative grid sizes [S1, unofficial].
 *   **Alignment:** When `align_bounds_max` is `False`, the grid bounds may not align with integer voxel boundaries relative to the original request [S1, unofficial].
 *   **Degenerate Input:** If `bounds_max` equals `bounds_min`, the extent is zero. The validation step catches this, but if padding is large enough to create a non-zero extent, the grid will be generated based on the padded bounds [S1, unofficial].
 

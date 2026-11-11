@@ -1,38 +1,40 @@
 # Progressive and Multi-stage Training
 
-Also called: Coarse-to-fine training, Curriculum learning for 3DGS, Multi-stage optimization
+Also called: Coarse-to-Fine Training, Curriculum Learning for Gaussians, Progressive Densification
 
 ## Overview
-Progressive and Multi-stage Training refers to methodologies that decouple the initialization of 3D Gaussian primitives from the fine-grained optimization process, typically through distinct phases or a curriculum of supervision [S1, unofficial]. Unlike single-stage training, which optimizes a fixed or uniformly densified cloud from the start, these methods progressively refine the representation to prevent local minima and stabilize convergence [S1, unofficial]. They set themselves apart by explicitly managing the density and complexity of the Gaussian cloud over time, either by spatially propagating primitives or by changing the supervision signal [S1, unofficial][S2].
+Progressive and Multi-stage Training divides the optimization of 3D Gaussian representations into distinct phases or stages to improve convergence stability and final rendering quality [S1, unofficial]. It addresses the difficulty of converging a dense, high-fidelity point cloud from a sparse or coarse initialization by progressively refining the spatial distribution of primitives [S1, unofficial]. Unlike single-stage training, which applies densification uniformly from the start, these methods decouple structural initialization from fine-grained detail recovery, yielding significantly higher PSNR and SSIM metrics [S1, unofficial].
 
 ## Shared principles
-The core mechanism of progressive and multi-stage training involves a temporal separation of optimization goals. Common principles include:
-1.  **Phase Separation:** The training process is divided into distinct stages (e.g., coarse vs. fine, or structural vs. global) [S1, unofficial].
-2.  **Progressive Densification:** New primitives are introduced iteratively based on error metrics or spatial propagation, rather than all at once [S1, unofficial].
-3.  **Curriculum Supervision:** The loss function or sampling strategy evolves, often starting with simpler or more local constraints before introducing global or complex ones [S1, unofficial].
+The core mechanism of progressive training in 3DGS builds on [Densification Strategy](6234-densification-strategy.md). While specific triggers vary, the family shares the following principles:
+
+1.  **Stage Decomposition:** The training process is partitioned into sequential phases (e.g., Coarse, Fine, Fine-tuning) or alternating modes (e.g., Spatial, Temporal). Each phase targets a specific aspect of the reconstruction, such as global geometry, local texture, or temporal consistency [S1, unofficial][S2].
+2.  **Progressive Densification:** The density of Gaussians is not static. It increases over time, often starting with a sparse set and densifying based on error metrics or predefined schedules [S1, unofficial]. This prevents the optimizer from getting stuck in local minima caused by too many degrees of freedom early in training [S1, unofficial].
+3.  **Supervision Decoupling:** In multi-stage approaches, the loss function or supervision signal changes between stages. For example, early stages may rely on coarse geometric constraints or slice-based supervision, while later stages focus on pixel-level photometric loss [S1, unofficial].
+4.  **Initialization Sensitivity:** These methods often start from a specific initialization (e.g., SfM points, feed-forward predictions, or downsampled meshes) that is refined rather than replaced [S1, unofficial].
 
 ## Subtopics
 
 ### [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md)
-A methodology that decouples initialization from fine-grained optimization through multiple stages of refinement. It yields significantly higher rendering quality than single-stage approaches by preventing the optimization from getting stuck in local minima associated with sparse initializations. See [Hybrid Coarse-to-Fine Strategy](7173-hybrid-coarse-to-fine-strategy.md).
+A mesh-based implementation of coarse-to-fine training. It initializes a mesh from edge strength in a downsampled image and iteratively densifies it by splitting triangles with high DSSIM. It sets itself apart by using a Delaunay triangulation and area-weighted scoring ($\alpha=0.75$) to prevent noise-driven splitting of tiny triangles. Choose this when working with explicit mesh representations or when high-frequency detail recovery from a coarse structure is required.
 
 ### [Training Objective and Densification](7448-training-objective-and-densification.md)
-Defines specific loss functions and densification protocols for **MeshGS**, a variant of 3D Gaussian Splatting that aligns primitives with an explicit mesh surface. It differs from siblings by explicitly separating the Gaussian cloud into "tightly-bound" and "loosely-bound" subsets, applying distinct densification rules (mesh-sampling vs. gradient-based) and specialized losses to maintain tight alignment. See [Training Objective and Densification](7448-training-objective-and-densification.md).
+Defines the loss and densification for **MeshGS**, a variant that aligns Gaussians with an explicit mesh. It splits primitives into tightly-bound ($G^t$) and loosely-bound ($G^l$) sets. Tightly-bound splats are constrained by normal consistency and projection losses to stay on the mesh surface, while loosely-bound splats follow standard 3DGS rules. Choose this for surface reconstruction tasks where geometry fidelity is paramount.
 
 ### [Fine-tuning](9138-fine-tuning.md)
-A post-initialization optimization phase where parameters of a pre-generated set of 3D Gaussian primitives are refined. It addresses the trade-off between reconstruction fidelity and memory efficiency by allowing growing and pruning during optimization, thereby removing redundant Gaussians introduced by initial feed-forward prediction. It sets itself apart by leveraging pretrained priors to accelerate convergence. See [Fine-tuning](9138-fine-tuning.md).
+A training phase that refines an initial set of Gaussians (e.g., from a feed-forward network) by optimizing all attributes directly. It distinguishes itself by starting from a pre-initialized state and actively managing the population through growing and pruning to reduce redundancy. Choose this when using pretrained models or sparse initializations to accelerate convergence and improve photorealism.
 
 ### [Curriculum Learning with Slice and Voxel Supervision](12921-curriculum-learning-with-slice-and-voxel-supervision.md)
-Stabilizes the optimization of 3D Gaussian representations for volumetric data by decoupling local structural learning from global spatial consistency. It addresses instability caused by random voxel sampling by enforcing a specific order: planar slice constraints first, followed by sparse voxel supervision. See [Curriculum Learning with Slice and Voxel Supervision](12921-curriculum-learning-with-slice-and-voxel-supervision.md).
+Addresses instability in shear-warp rendering by structuring training into two phases: Slice Supervision (local planar constraints) followed by Voxel Supervision (global volumetric consistency). It sets itself apart by explicitly decoupling local and global learning to ensure Gaussian kernels align with the slice-based renderer. Choose this for volumetric data (e.g., MRI) where global consistency is difficult to achieve with pixel loss alone.
 
 ### Progressive Propagation Strategy
-Introduces a progressive propagation strategy to expand the Gaussian cloud, ensuring smooth expansion and better coverage [S1, unofficial].
+Introduces a progressive propagation strategy to expand the Gaussian cloud, ensuring smooth expansion and better coverage [S1, unofficial]. It expands the cloud in a fronto-parallel manner, likely prioritizing regions with higher reconstruction error to guide densification [S1, unofficial].
 
 ### Interleaved Densification
-Alternates between spatial and temporal densification every 2 epochs to avoid Gaussians failing to reconstruct either motion or appearance detail [S2].
+Alternates between spatial and temporal densification every 2 epochs to avoid Gaussians failing to reconstruct either motion or appearance detail [S2]. This is critical for dynamic scenes where static densification strategies may fail to capture temporal variations [S2].
 
 ## Background
-The concept of progressive training in 3D Gaussian Splatting emerged to address the instability of optimizing large numbers of primitives simultaneously. The Hybrid Coarse-to-Fine strategy was introduced to improve detail in visually salient areas by computing local perceptual error maps [S1, unofficial]. GaussianPro introduced a progressive propagation strategy for fronto-parallel expansion [S1, unofficial]. In the context of dynamic scenes, Adaptive Spatio-Temporal 3D Gaussian Splatting proposed interleaved densification to handle oscillatory motion [S2]. Curriculum learning approaches were developed for volumetric data to ensure global spatial consistency [S1, unofficial].
+The concept of coarse-to-fine optimization is well-established in computer graphics and neural rendering. In the context of 3D Gaussian Splatting, the original method [22] uses a fixed densification schedule. Subsequent works have explored more sophisticated multi-stage approaches to handle complex geometries, dynamic scenes, and specific data modalities (e.g., volumetric medical data). The Hybrid Coarse-to-Fine Strategy [S2] adapts these principles to mesh-based representations, while Fine-tuning [S1, unofficial] leverages pretrained priors. Curriculum learning approaches [S1, unofficial] draw from machine learning best practices, gradually increasing task difficulty to stabilize training.
 
 ## Sources
 [S1] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)

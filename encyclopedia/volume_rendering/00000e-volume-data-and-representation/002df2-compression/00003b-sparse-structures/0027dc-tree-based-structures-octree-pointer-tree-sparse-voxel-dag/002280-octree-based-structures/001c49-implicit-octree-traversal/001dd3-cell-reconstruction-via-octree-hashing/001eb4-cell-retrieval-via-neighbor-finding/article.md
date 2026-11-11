@@ -1,144 +1,138 @@
 # Cell Retrieval via Neighbor-Finding
 
-Also called: 8-voxel cell intersection, Cell-based ray tracing, Forward-neighbor retrieval, Neighbor-Finding on Octree, Octree Scalar Field Mapping via Forward Neighbors, voxel to cell mapping
+Also called: 8-voxel cell intersection, Cell-based ray tracing, Forward-neighbor retrieval, Neighbor-Finding for Cell Retrieval, Neighbor-Finding on Octree, Octree Hashing, Octree Scalar Field Mapping via Forward Neighbors, voxel to cell mapping
 
 ## Overview
-This method enables isosurface reconstruction from sparse octree volumes that store only a single scalar value per leaf voxel, avoiding the 8x storage expansion required to store full 8-voxel cells explicitly [S1, S2, S3]. It solves the problem of needing 8 corner values for a cell intersection primitive when only 1 scalar value is stored per leaf node by retrieving the 7 forward neighbors at intersection time [S2, S3]. Unlike [Cell Reconstruction via Octree Hashing](1595-cell-reconstruction-via-octree-hashing.md), which uses a bitwise arithmetic hash scheme for point location, this method relies on neighbor-finding techniques to retrieve forward-neighboring voxels, skewing heavily toward O(1) performance when neighbors share a parent node [S1, S2, S3].
+This method enables isosurface reconstruction (e.g., Marching Cubes) on sparse octree volumes that store only a single scalar value per leaf voxel, by logically mapping each voxel to the lower-left corner of an 8-voxel cell and retrieving the 7 forward neighbors at intersection time. It solves the storage explosion problem of explicitly storing full cells (which would require 8x the original data size) by performing neighbor-finding on the octree structure to assemble the required 8 corner values on the fly. It differs from [Cell Reconstruction via Octree Hashing](1595-cell-reconstruction-via-octree-hashing.md) in its specific application to the "forward-neighbor" retrieval pattern for cell-based primitives, and from [Octree Hashing for Point Location and Neighbor Finding](1984-octree-hashing-for-point-location-and-neighbor-finding.md) by focusing on the runtime assembly of the intersection primitive rather than just the point location mechanism itself.
 
 ## How it works
-**Inputs:**
-- An octree structure storing single scalar values at leaf nodes [S1, S2].
-- A ray traversing the octree structure [S5, unofficial].
-- The voxel width $w$ (assumed uniform) [S1, S2, S3].
 
-**Outputs:**
-- Intersection points and normals for the isosurface defined within 8-voxel cells [S1, S2].
+### Inputs and Outputs
+*   **Input:** An octree structure where each leaf node stores a single scalar value $v$ at its center. A ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ intersecting the volume.
+*   **Output:** A set of 8 scalar values corresponding to the corners of the 8-voxel cell containing the intersection point, used for isosurface reconstruction.
 
-**Data Structures:**
-- **Octree Node:** Contains pointers to 8 children (octants) and a scalar value if it is a leaf [S1, S2][S5, unofficial].
-- **Leaf Node:** Stores a single scalar value $v$ [S1, S2][S5, unofficial].
-- **Cell Primitive:** Defined by 8 voxels: the target voxel and its 7 forward neighbors (positive X, Y, Z directions) [S1, S2, S3].
+### Data Structures
+The octree nodes are standard. Leaf nodes contain a single scalar field. Interior nodes contain pointers to 8 children (octants). The spatial layout assumes a regular grid where voxel width is 1 unit.
 
-**Logical Mapping:**
-The scalar field is mapped to cells by logically shifting the position of all scalars backward by half a unit of voxel width [S1, S2, S3][S4, unofficial]. This re-maps the scalar field such that each voxel is treated as the lower-left corner of a cell [S4, unofficial]. Values outside the octree data are defined to be zero [S4, unofficial].
+### Logical Mapping and Coordinate Shift
+The scalar field is defined at voxel centers. To support cell-based intersection (where values are at corners), the field is logically shifted backward by half a voxel width.
+*   Let a leaf node be at integer grid coordinates $(i, j, k)$.
+*   This voxel is mapped to the minimum vertex (lower-left-front corner) of a cell.
+*   The cell spans the range $[i, i+1] \times [j, j+1] \times [k, k+1]$.
+*   The 8 corners of this cell correspond to the 8 voxels with indices:
+    $$ (i+\delta_x, j+\delta_y, k+\delta_z) $$
+    where $\delta_x, \delta_y, \delta_z \in \{0, 1\}$.
+*   The target voxel is $(i, j, k)$ ($\delta_x=\delta_y=\delta_z=0$).
+*   The 7 forward neighbors are those where at least one $\delta$ is 1.
 
-**Algorithm Steps:**
-1. **Ray Traversal:** Traverse the octree using the ray [S5, unofficial]. The traversal algorithm finds the order of intersection of the X, Y, and Z mid-planes to determine the exact order of traversal of child octants [S5, unofficial].
-2. **Leaf Hit Detection:** Identify the leaf node intersected by the ray [S5, unofficial]. Let this be the target voxel $V_{target}$ with scalar value $v_{target}$ [S2][S5, unofficial].
-3. **Neighbor Retrieval:** Perform neighbor-finding on the octree structure to retrieve the 7 forward-neighboring voxels [S2][S5, unofficial]. These neighbors are located in the positive X, Y, and Z directions relative to $V_{target}$ [S1, S2, S3]. If a neighbor lies outside the octree bounds, its value is 0 [S4, unofficial]. If a neighbor is not a leaf, the value is determined by its leaf descendants or treated as 0 [S4, S5, unofficial].
-4. **Cell Construction:** Form an 8-voxel cell using $V_{target}$ and its 7 retrieved forward neighbors [S2][S5, unofficial].
-5. **Intersection:** Use the retrieved cell of 8 voxels as the intersection primitive to reconstruct the isosurface [S5, unofficial]. This typically involves computing the min/max values of the cell for early rejection and then performing a detailed intersection test if the ray passes the bounding box [S2][S5, unofficial].
+### Algorithm Steps
 
-**Pseudocode:**
+1.  **Ray Traversal:** Traverse the octree using standard ray-triangle or ray-box intersection logic for interior nodes. Identify the leaf node $L$ intersected by the ray. Let the grid coordinates of $L$ be $(i, j, k)$.
+2.  **Target Value Retrieval:** Retrieve the scalar value $v_{0,0,0}$ stored in leaf $L$.
+3.  **Neighbor-Finding:** For each of the 7 forward neighbor directions $(\delta_x, \delta_y, \delta_z) \in \{0,1\}^3 \setminus \{(0,0,0)\}$:
+    *   Compute the target grid coordinates $(i+\delta_x, j+\delta_y, k+\delta_z)$.
+    *   Perform neighbor-finding on the octree to locate the leaf node at these coordinates.
+    *   Retrieve the scalar value $v_{\delta_x, \delta_y, \delta_z}$ from that leaf.
+    *   **Edge Case:** If the neighbor coordinates lie outside the bounds of the octree data, define the scalar value as 0 [S4, unofficial].
+4.  **Cell Assembly:** Assemble the 8 values $\{v_{\delta_x, \delta_y, \delta_z}\}$ into the cell primitive.
+5.  **Intersection:** Perform the isosurface intersection test (e.g., Marching Cubes) on the 8-voxel cell using the retrieved values.
+
+### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_trace_octree_cell(ray_origin, ray_direction, octree_root, voxel_width, iso_value):
+def retrieve_cell_values(octree_root, leaf_coords):
     """
-    Ray trace an isosurface defined within 8-voxel cells using neighbor-finding.
+    Retrieves the 8 scalar values for the cell defined by the target leaf.
+    leaf_coords: tuple (i, j, k) of the intersected leaf node.
+    Returns: list of 8 values [v_000, v_001, v_010, v_011, v_100, v_101, v_110, v_111]
     """
-    intersections = []
-    t_min = 0.0
-    t_max = float('inf')
-    stack = [(octree_root, t_min, t_max)]
+    i, j, k = leaf_coords
+    values = []
+    
+    # Iterate through all 8 combinations of deltas (0 or 1)
+    for dx in [0, 1]:
+        for dy in [0, 1]:
+            for dz in [0, 1]:
+                # Compute neighbor coordinates
+                ni = i + dx
+                nj = j + dy
+                nk = k + dz
+                
+                # Retrieve value from octree
+                # If neighbor is outside octree bounds, value is 0
+                val = octree_get_value(octree_root, ni, nj, nk)
+                values.append(val)
+                
+    return values
 
-    while stack:
-        node, t_enter, t_exit = stack.pop()
-        if node is None or t_enter > t_exit:
-            continue
-
-        if node.scalar is not None:
-            # 1. Identify target voxel coordinates
-            tx, ty, tz = node.coords
-
-            # 2. Retrieve 7 forward neighbors
-            neighbor_offsets = [
-                (0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1),
-                (1, 1, 0), (1, 0, 1), (0, 1, 1), (1, 1, 1)
-            ]
-
-            cell_scalars = []
-            for dx, dy, dz in neighbor_offsets:
-                nx, ny, nz = tx + dx, ty + dy, tz + dz
-                # Point location to find neighbor leaf [G]
-                neighbor_node = octree_root
-                while neighbor_node is not None and neighbor_node.scalar is None:
-                    child_idx = compute_child_index(neighbor_node, nx, ny, nz)
-                    neighbor_node = neighbor_node.children[child_idx]
-                if neighbor_node is not None:
-                    cell_scalars.append(neighbor_node.scalar)
-                else:
-                    cell_scalars.append(0.0) # Values outside octree data are zero [S4, unofficial]
-
-            # 3. Check cell bounds for early rejection
-            min_val = min(cell_scalars)
-            max_val = max(cell_scalars)
-            if not (min_val <= iso_value <= max_val):
-                continue
-
-            # 4. Map logical voxel positions to physical positions
-            # Shift scalars backward by half a voxel width [S1, S2, S3]
-            cell_origin_x = (tx - 0.5) * voxel_width
-            cell_origin_y = (ty - 0.5) * voxel_width
-            cell_origin_z = (tz - 0.5) * voxel_width
-            cell_size = voxel_width
-
-            # 5. Intersect ray with the 8-voxel cell primitive
-            # Define the 8 corners of the cell in physical space
-            corners = []
-            for cx, cy, cz in [(0,0,0), (1,0,0), (0,1,0), (0,0,1), (1,1,0), (1,0,1), (0,1,1), (1,1,1)]:
-                px = cell_origin_x + cx * cell_size
-                py = cell_origin_y + cy * cell_size
-                pz = cell_origin_z + cz * cell_size
-                corners.append((px, py, pz))
-
-            # Perform Marching Cubes intersection on the 8 corners and scalars [G]
-            hit_point, hit_normal = intersect_cell_with_ray(
-                ray_origin, ray_direction, corners, cell_scalars, iso_value
-            )
-            if hit_point is not None:
-                intersections.append((hit_point, hit_normal))
-        else:
-            # Internal node: push children to stack in traversal order
-            for i in range(8):
-                child = node.children[i]
-                if child is not None:
-                    child_t_enter, child_t_exit = compute_child_bounds_and_t(child, t_enter, t_exit)
-                    stack.append((child, child_t_enter, child_t_exit))
-
-    return intersections
-
-def compute_child_index(node, x, y, z):
-    # Standard octree child index calculation based on relative position [G]
-    return 0
-
-def compute_child_bounds_and_t(child, t_enter, t_exit):
-    # Standard ray-box intersection bounds calculation for octree children [G]
-    return t_enter, t_exit
-
-def intersect_cell_with_ray(origin, direction, corners, scalars, iso_value):
-    # Standard Marching Cubes ray intersection algorithm [G]
-    return None, None
+def octree_get_value(root, x, y, z):
+    """
+    Performs neighbor-finding/point location to retrieve the scalar value
+    at grid coordinates (x, y, z).
+    Returns 0 if the coordinates are outside the defined octree volume.
+    """
+    # Implementation depends on the specific neighbor-finding algorithm
+    # (e.g., hash-based, pointer-based traversal).
+    # This function encapsulates the O(log N) or O(1) lookup.
+    leaf = find_leaf_node(root, x, y, z)
+    if leaf is None:
+        return 0.0
+    return leaf.scalar_value
 ```
 
-**Edge Cases and Pitfalls:**
-- **Boundary Conditions:** Values outside the octree data are defined to be zero [S4, unofficial]. Implementers must handle cases where forward neighbors lie outside the defined volume bounds by returning zero values [S4, unofficial].
-- **Neighbor-Finding Cost:** Neighbor-finding on octrees is computationally intensive compared to array indexing [S1, S2, S3]. The worst-case complexity is O(log N), but it skews heavily toward O(1) when neighbors lie within the same parent [S1, S2, S3].
-- **Point Location Overhead:** Querying neighbors in an octree is more intensive than in a 3D array, requiring full top-down point location from the root in the worst case [S1, S2, S3].
+### Parameters and Typical Values
+*   **Voxel Width:** 1 unit (logical).
+*   **Shift:** 0.5 units backward.
+*   **Out-of-Bounds Value:** 0.0 [S4, unofficial].
+
+### Pitfalls and Edge Cases
+*   **Boundary Conditions:** Neighbors may lie outside the octree. These must be handled by returning a default value (0) rather than crashing [S4, unofficial].
+*   **Complexity Skew:** While worst-case neighbor-finding is $O(\log N)$, it skews heavily toward $O(1)$ when neighbors reside in the same parent node [S3]. Implementations should optimize for this common case.
+*   **Cache Performance:** Unlike 3D arrays where neighbors are contiguous in memory, octree neighbors are scattered. This can lead to cache misses, making the $O(1)$ skew critical for performance [S3].
+
+## Subtopics
+
+### Octree Hashing for Point Location and Neighbor Finding
+*   **What it is:** A specific hashing scheme using binary arithmetic on integer coordinates to accelerate point location and neighbor finding in regular binary trees.
+*   **Difference:** Focuses on the underlying hash mechanism for coordinate lookup, whereas Cell Retrieval focuses on the application of that lookup to assemble 8-voxel cells.
+*   **When to choose:** When the octree is static and coordinate-based hashing is feasible.
+*   **Link:** [Octree Hashing for Point Location and Neighbor Finding](1984-octree-hashing-for-point-location-and-neighbor-finding.md)
+
+### Min/Max Tree Construction with Forward Neighbors
+*   **What it is:** A method to compute min/max pairs for interior nodes based on the min/max pairs of their 8 children, specifically for ray tracing cells defined by forward neighbors.
+*   **Difference:** This is an acceleration structure construction step that complements cell retrieval, allowing early ray termination.
+*   **When to choose:** When ray tracing performance is critical and the volume has significant empty space.
+*   **Link:** [Min/Max Tree Construction with Forward Neighbors](2020-min-max-tree-construction-with-forward-neighbors.md)
+
+### Neighbor Cell Access via Hash Table and Morton Code
+*   **What it is:** Uses Morton codes and hash tables to map voxel coordinates to values, enabling fast neighbor access.
+*   **Difference:** Uses a flat hash table structure rather than a hierarchical octree pointer structure for neighbor lookup.
+*   **When to choose:** When memory layout favors flat arrays and Morton code generation is efficient.
+*   **Link:** [Neighbor Cell Access via Hash Table and Morton Code](6715-neighbor-cell-access-via-hash-table-and-neighbor-finding.md)
 
 ## Operating characteristics
-- **Time Complexity:** Full top-down point location for neighbor retrieval is $O(\log N)$, where $N$ is the number of nodes [S1, S2, S3]. However, with neighbor-finding techniques, the complexity skews heavily toward $O(1)$ when neighboring voxels lie within the same parent node [S1, S2, S3].
-- **Memory Complexity:** The method avoids the 8x storage expansion required to store full cells explicitly, keeping storage close to the raw octree size [S1, S2, S3][S4, unofficial].
-- **Performance:** Neighbor-finding on octree data must perform competitively with the $O(1)$ complexity of lookup on uncompressed 3D arrays [S1, S2, S3]. In practice, the algorithm is efficient because most neighbors are found within the same parent node [S1, S2, S3].
-- **Strengths:** Allows ray tracing of compressed data where leaf nodes store only a single scalar value [S1, S2, S3][S4, unofficial].
-- **Limitations:** Neighbor-finding on octrees is computationally intensive compared to array indexing [S1, S2, S3]. The worst-case complexity is $O(\log N)$ [S1, S2, S3].
+
+*   **Time Complexity:** Worst-case $O(\log N)$ per neighbor lookup, where $N$ is the number of leaf nodes. In practice, it skews heavily toward $O(1)$ when neighbors are in the same parent node [S3].
+*   **Memory Complexity:** No additional storage for neighbor data (unlike the 8x expansion alternative). The octree structure itself is unchanged [S1].
+*   **Performance:** Neighbor-finding on octrees is more intensive than array indexing ($O(1)$, cache-friendly) [S3]. It must compete with the performance of uncompressed 3D array lookups.
+*   **Strengths:** Allows ray tracing of compressed sparse data without expanding storage. Enables traversal of interior nodes while intersecting well-defined cell primitives [S1].
+*   **Limitations:** Higher computational cost per intersection compared to dense grids. Sensitive to cache performance due to scattered memory access.
+*   **When to use:** When storage is a constraint and the volume is sparse.
+*   **When not to use:** When the volume is dense and fits in memory, or when cache performance is critical and the overhead of neighbor-finding outweighs the benefits of sparsity.
 
 ## Background
-This method was introduced by Parker et al. [S1, S2, S3][S4, unofficial] and is a fundamental algorithmic component of interactive isosurface ray tracing of large octree volumes [S1, S2, S3]. It addresses the trade-off between storage efficiency and intersection speed in volume rendering [S1, S2, S3][S4, unofficial]. The approach is detailed in "Interactive Isosurface Ray Tracing of Large Octree Volumes" [S1, S2, S3][S4, S5, unofficial].
+
+*   **Origin:** The concept of mapping voxels to cells for isosurface reconstruction in octrees was introduced by Parker et al. [15, 17, 18] in the context of interactive isosurface ray tracing of large octree volumes [S1, S2, S3][S4, unofficial].
+*   **History:** Point location and neighbor-finding algorithms were pioneered by Glassner [32] and Samet [105] in ray tracing [S6, unofficial]. Frisken and Perry [26] proposed an efficient hashing scheme using binary arithmetic on integer coordinates, which later works built upon [S6, unofficial].
+*   **Usage:** Used in interactive isosurface ray tracing of large volumes, particularly where compression is a goal [S1, S2, S3][S4, unofficial].
 
 ## Sources
+
 [S1] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
 [S2] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~knolla/octiso-rt06.pdf, fetched 2026-10-28
 [S3] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://collections.lib.utah.edu/dl_files/1d/58/1d589a03a725c9d894a3866ad32f1386f0613f9d.pdf, fetched 2026-10-28
 [S4] Interactive isosurface ray tracing of large octree volumes, https://www.researchgate.net/publication/310054812_Interactive_isosurface_ray_tracing_of_large_octree_volumes, fetched 2026-10-29 (unofficial)
 [S5] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)
+[S6] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

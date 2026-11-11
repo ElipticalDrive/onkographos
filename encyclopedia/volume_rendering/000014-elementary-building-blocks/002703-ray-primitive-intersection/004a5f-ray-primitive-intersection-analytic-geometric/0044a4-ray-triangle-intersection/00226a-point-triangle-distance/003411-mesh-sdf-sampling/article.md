@@ -3,79 +3,107 @@
 Also called: Signed Distance Field Sampler from Geometry, createGeometrySdfSampler
 
 ## Overview
-Mesh SDF Sampling creates a signed distance sampler function from a `THREE.BufferGeometry` and a world transform matrix, returning a function that computes the shortest signed distance to the mesh at any given world-space coordinate [S1, unofficial]. It solves the problem of evaluating continuous signed distance fields (SDFs) for arbitrary triangle meshes without precomputing a voxel grid, enabling ray-marching or ray-casting against complex geometry in real-time volume rendering contexts. It differs from [Unsigned Triangle Distance](3587-unsigned-triangle-distance.md) by providing signed values (inside/outside) rather than only the magnitude of the distance, and from [Triangle-Box Intersection Voxelization](7408-triangle-box-intersection-voxelization.md) by operating in continuous world space rather than discrete voxel space.
+Mesh SDF Sampling creates a signed distance sampler function from a `THREE.BufferGeometry` and a world transform matrix, returning a function that computes the shortest signed distance to the mesh at any given world-space coordinate [S1, unofficial]. Negative values indicate the point is inside the mesh, and positive values indicate it is outside [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `geometry`: A `THREE.BufferGeometry` instance containing position attributes and an index array.
-- `transformMatrix`: A `THREE.Matrix4` representing the world transform of the geometry.
+- `geometry`: A `THREE.BufferGeometry` instance containing position attributes and an index array [S1, unofficial].
+- `transformMatrix`: A `THREE.Matrix4` representing the world transform of the geometry [S1, unofficial].
 
 **Outputs:**
-- A function `sampler(x, y, z)` returning a `number`: the signed distance. Negative values indicate the point is inside the mesh; positive values indicate it is outside [S1, unofficial].
+- A function `sampler(x, y, z)` returning a `number`: the signed distance [S1, unofficial].
 
 **Data Structures:**
-- `worldPositions`: An array of `Vector3` objects, precomputed from the geometry's position attributes transformed by `transformMatrix`. Size: `geometry.attributes.position.count`.
-- Temporary vectors (allocated once to avoid garbage collection): `va`, `vb`, `vc` (triangle vertices), `ab`, `ac`, `bc` (edge vectors), `ap`, `bp`, `cp` (vectors from vertices to point `p`), `n` (triangle normal), `p` (query point), `q` (closest point on triangle), `bestPoint` (closest point found so far), `bestNormal` (normal at `bestPoint`), `toPoint` (vector from `bestPoint` to `p`).
+- `worldPositions`: An array of `Vector3` objects, precomputed from the geometry's position attributes transformed by `transformMatrix`. Size: `geometry.attributes.position.count` [S1, unofficial].
+- Temporary vectors (allocated once to avoid allocations): `va`, `vb`, `vc` (triangle vertices), `ab`, `ac` (edge vectors), `p` (query point), `q` (closest point on triangle), `bestPoint` (closest point found so far), `bestNormal` (normal at `bestPoint`), `toPoint` (vector from `bestPoint` to `p`) [S1, unofficial].
 
 **Algorithm Steps:**
-1.  **Validation:** Check if `geometry.index` exists. If falsy, throw an error "Geometry must be indexed" [S1, unofficial].
-2.  **Precomputation:** Iterate `i` from 0 to `position.count`. For each `i`, create a `Vector3` from `position` buffer, apply `transformMatrix`, and store in `worldPositions[i]` [S1, unofficial].
-3.  **Sampler Function Definition:** Return a function `sampler(x, y, z)`:
+1. **Validation:** Check if `geometry.index` exists. If falsy, throw an error "Geometry must be indexed" [S1, unofficial].
+2. **Precomputation:** Iterate `i` from 0 to `position.count`. For each `i`, create a `Vector3` from the buffer attribute, apply `transformMatrix`, and store in `worldPositions[i]` [S1, unofficial].
+3. **Sampler Function Definition:** Return a function `sampler(x, y, z)`:
     a. Set `p = (x, y, z)`. Initialize `closestDistance2 = Infinity` [S1, unofficial].
-    b. Iterate through triangles using `index` array with step 3. For each triangle `i`:
-        i. Get indices `idx0 = index[i]`, `idx1 = index[i+1]`, `idx2 = index[i+2]`.
-        ii. Retrieve vertices `va = worldPositions[idx0]`, `vb = worldPositions[idx1]`, `vc = worldPositions[idx2]` [S1, unofficial].
-        iii. Compute `q = closestPointOnTriangle(p, va, vb, vc)` using the algorithm from [Point-Triangle Distance](2776-point-triangle-distance.md) [S1, unofficial].
-        iv. Compute `distance2 = p.distanceToSquared(q)` [S1, unofficial].
-        v. If `distance2 < closestDistance2`:
+    b. Iterate through triangles in the index array with step 3. For each triangle `i`:
+        i. Get vertices `va`, `vb`, `vc` from `worldPositions` using indices `index[i]`, `index[i+1]`, `index[i+2]` [S1, unofficial].
+        ii. Compute `q = closestPointOnTriangle(p, va, vb, vc)` using the algorithm from [Point-Triangle Distance](2776-point-triangle-distance.md) [S1, unofficial].
+        iii. Compute `distance2 = p.distanceToSquared(q)` [S1, unofficial].
+        iv. If `distance2 < closestDistance2`:
             - Update `closestDistance2 = distance2`.
             - Copy `q` to `bestPoint`.
             - Compute edge vectors `ab = vb - va`, `ac = vc - va`.
             - Compute `bestNormal = normalize(ab × ac)` [S1, unofficial].
-4.  **Sign Determination:** After the loop, compute `toPoint = p - bestPoint`. Calculate `dot = toPoint · bestNormal`.
-5.  **Return:** Return `sqrt(closestDistance2) * sign`, where `sign = 1` if `dot >= 0`, else `-1` [S1, unofficial].
+4. **Sign Determination:** After the loop, compute `toPoint = p - bestPoint`. Calculate `dot = toPoint · bestNormal` [S1, unofficial].
+5. **Return:** Return `sqrt(closestDistance2) * sign`, where `sign = 1` if `dot >= 0`, else `-1` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+class Vector3:
+    def __init__(self, x=0.0, y=0.0, z=0.0): self.x, self.y, self.z = x, y, z
+    def copy(self, other): self.x, self.y, self.z = other.x, other.y, other.z
+    def subVectors(self, a, b): self.x, self.y, self.z = a.x-b.x, a.y-b.y, a.z-b.z
+    def crossVectors(self, a, b): self.x, self.y, self.z = a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x
+    def normalize(self):
+        l = math.sqrt(self.x**2 + self.y**2 + self.z**2)
+        if l > 1e-12: self.x, self.y, self.z = self.x/l, self.y/l, self.z/l
+    def dot(self, other): return self.x*other.x + self.y*other.y + self.z*other.z
+    def distanceToSquared(self, other): return (self.x-other.x)**2 + (self.y-other.y)**2 + (self.z-other.z)**2
+
 def createGeometrySdfSampler(geometry, transformMatrix):
     if not geometry.index:
-        raise Error("Geometry must be indexed")
+        raise ValueError("Geometry must be indexed")
 
     position = geometry.attributes.position
     index = geometry.index.array
     vertexCount = position.count
 
-    # Precompute world-space vertices
-    worldPositions = []
+    worldPositions = [Vector3() for _ in range(vertexCount)]
     for i in range(vertexCount):
-        x = position.getX(i)
-        y = position.getY(i)
-        z = position.getZ(i)
-        # Apply transform matrix to vector (x, y, z, 1)
-        # Assuming transformMatrix is a 4x4 matrix stored as array or object
-        # Standard matrix-vector multiplication:
+        x, y, z = position.getX(i), position.getY(i), position.getZ(i)
         wx = transformMatrix.elements[0]*x + transformMatrix.elements[4]*y + transformMatrix.elements[8]*z + transformMatrix.elements[12]
         wy = transformMatrix.elements[1]*x + transformMatrix.elements[5]*y + transformMatrix.elements[9]*z + transformMatrix.elements[13]
         wz = transformMatrix.elements[2]*x + transformMatrix.elements[6]*y + transformMatrix.elements[10]*z + transformMatrix.elements[14]
-        worldPositions.append(Vector3(wx, wy, wz))
+        worldPositions[i] = Vector3(wx, wy, wz)
 
-    # Temporary vectors for reuse
-    va = Vector3()
-    vb = Vector3()
-    vc = Vector3()
-    ab = Vector3()
-    ac = Vector3()
-    toPoint = Vector3()
-    bestPoint = Vector3()
-    bestNormal = Vector3()
-    q = Vector3()
+    va, vb, vc = Vector3(), Vector3(), Vector3()
+    ab, ac = Vector3(), Vector3()
+    toPoint, bestPoint, bestNormal, q = Vector3(), Vector3(), Vector3(), Vector3()
 
     def closestPointOnTriangle(p, a, b, c, target):
-        # Implementation from Point-Triangle Distance article
-        # Returns closest point on triangle abc to p in target
-        pass # See [2776-point-triangle-distance.md]
+        # Standard barycentric closest point algorithm [G]
+        v0 = Vector3(); v0.subVectors(c, a)
+        v1 = Vector3(); v1.subVectors(b, a)
+        v2 = Vector3(); v2.subVectors(p, a)
+        dot00 = v0.dot(v0); dot01 = v0.dot(v1); dot02 = v0.dot(v2)
+        dot11 = v1.dot(v1); dot12 = v1.dot(v2)
+        invDenom = 1.0 / (dot00 * dot11 - dot01 * dot01)
+        u = (dot11 * dot02 - dot01 * dot12) * invDenom
+        v = (dot00 * dot12 - dot01 * dot02) * invDenom
+        if u < 0.0:
+            if v < 0.0:
+                target.copy(a)
+            elif v > 1.0:
+                target.copy(c)
+            else:
+                target.x = a.x + v * (c.x - a.x); target.y = a.y + v * (c.y - a.y); target.z = a.z + v * (c.z - a.z)
+        elif v < 0.0:
+            if u > 1.0:
+                target.copy(b)
+            else:
+                target.x = a.x + u * (b.x - a.x); target.y = a.y + u * (b.y - a.y); target.z = a.z + u * (b.z - a.z)
+        elif u + v > 1.0:
+            if u > 1.0:
+                target.copy(b)
+            elif v > 1.0:
+                target.copy(c)
+            else:
+                target.x = b.x + (1.0 - (u + v)) * (c.x - b.x); target.y = b.y + (1.0 - (u + v)) * (c.y - b.y); target.z = b.z + (1.0 - (u + v)) * (c.z - b.z)
+        else:
+            target.x = a.x + u * (b.x - a.x) + v * (c.x - a.x)
+            target.y = a.y + u * (b.y - a.y) + v * (c.y - a.y)
+            target.z = a.z + u * (b.z - a.z) + v * (c.z - a.z)
 
     def sampler(x, y, z):
         p = Vector3(x, y, z)
@@ -117,26 +145,19 @@ def createGeometrySdfSampler(geometry, transformMatrix):
 **Edge Cases and Pitfalls:**
 - **Non-indexed Geometry:** The method requires an index array. If `geometry.index` is falsy, it throws an error [S1, unofficial].
 - **Precision:** Uses squared distances for comparison to avoid square root operations during the loop, improving performance and stability [S1, unofficial].
-- **Degenerate Triangles:** The `closestPointOnTriangle` function (from [Point-Triangle Distance](2776-point-triangle-distance.md)) handles degenerate cases (collinear vertices, zero-area triangles) via barycentric coordinate logic [S1, unofficial].
-- **Normal Direction:** The sign depends on the winding order of the triangle vertices. If the mesh has inconsistent winding, the inside/outside distinction may be unreliable for some regions [S1, unofficial].
 
 ## Subtopics
 
 ### Signed Distance Field Sampler from Mesh
-Creates a signed distance sampler function from a `THREE.Mesh` instance [S1, unofficial]. It validates that the input is a `THREE.Mesh`, updates its world matrix via `instance.updateMatrixWorld(true)`, and delegates to `createGeometrySdfSampler` using `instance.geometry` and `instance.matrixWorld` [S1, unofficial]. This variant simplifies usage for scene graph objects that already maintain world transforms.
+Creates a signed distance sampler function from a `THREE.Mesh` instance [S1, unofficial]. It validates that the input is a `THREE.Mesh`, updates its world matrix via `instance.updateMatrixWorld(true)`, and delegates to `createGeometrySdfSampler` using `instance.geometry` and `instance.matrixWorld` [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** $O(N)$ per query, where $N$ is the number of triangles in the mesh. Each query iterates through all triangles to find the closest one [S1, unofficial].
 - **Memory Complexity:** $O(V)$, where $V$ is the number of vertices, for storing `worldPositions` [S1, unofficial].
 - **Measured Performance:** Not given in the sources.
-- **Scaling:** Performance degrades linearly with mesh complexity. For large meshes, this method is impractical without spatial acceleration structures (e.g., BVH, which are not implemented here) [S1, unofficial].
-- **Strengths:** No preprocessing required; works with any indexed triangle mesh; provides exact signed distances [S1, unofficial].
-- **Limitations:** Slow for high-poly meshes due to linear scan; requires indexed geometry; sensitive to triangle winding for sign correctness [S1, unofficial].
-- **When to Use:** Small to medium-sized meshes where preprocessing is undesirable or geometry is dynamic [S1, unofficial].
-- **When Not to Use:** Large static meshes where voxelization or BVH-based acceleration is feasible [S1, unofficial].
 
 ## Background
-Originated in the `three.js-volume-renderer` project by Donitzo, an unofficial implementation for volume rendering in JavaScript using Three.js [S1, unofficial]. It leverages Christer Ericson's "Real-Time Collision Detection" algorithm for point-triangle distance computation [S1, unofficial].
+The method leverages Christer Ericson's "Real-Time Collision Detection" algorithm for point-triangle distance computation [S1, unofficial].
 
 ## Sources
 [S1] three.js-volume-renderer, https://github.com/Donitzo/three.js-volume-renderer, fetched 2026-10-28 (unofficial)

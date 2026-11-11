@@ -1,0 +1,66 @@
+# Oriented Ellipse Splatting
+
+Also called: Anisotropic Splat Rendering, Screen-space 2D Covariance Rendering, not round blobs, oriented ellipses
+
+## Overview
+Oriented Ellipse Splatting renders each Gaussian splat as an oriented ellipse in screen space, derived from its 3D rotation and 3-axis scale projected to a 2D covariance matrix, replacing the previous method of drawing round blobs sized by the largest axis [S2, unofficial]. This approach improves visual fidelity by eliminating the "hazy" appearance of isotropic billboards and reduces overdraw, resulting in crisp edges and equal or better frame times [S1, unofficial]. It differs from its parent [Gaussian Splat Fragment Shader](3258-gaussian-splat-fragment-shader.md) by explicitly computing the bounding quad from the covariance eigenvectors and evaluating the Gaussian kernel over the full anisotropic shape rather than a circular disc [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Splat attributes: center position, 3D rotation matrix $R$, 3-axis scale vector $S$, and color (SH degree 0 only) [S1, S2, unofficial].
+- Camera matrices: View matrix and Projection matrix (or clip-from-view transformation) [S1, unofficial].
+- Low-pass filter constant: $0.3 \text{ px}^2$ [S1, unofficial].
+- Extent scaling factor: $3$ (standard deviations) [S1, unofficial].
+
+**Outputs:**
+- A screen-space quad for each splat, rendered with fragment shader evaluation of the Gaussian kernel.
+- A 4-byte-per-splat order texture for re-sorting [S2, unofficial].
+
+**Data Structures:**
+- **Splat Instance:** Contains position, rotation, scale, and color. The API provides a 4-texture overload for instance data; the previous 2-texture overload is deprecated [S2, unofficial].
+- **Order Texture:** A 4-byte-per-splat texture storing the sorted indices, re-uploaded to the GPU on re-sort [S2, unofficial].
+
+**Steps:**
+
+1. **Compute 3D Covariance:** Calculate the 3D covariance matrix $\Sigma_3$ in view space using the rotation $R$ and scale $S$:
+   $$ \Sigma_3 = R \cdot S^2 \cdot R^T $$
+   where $S^2$ is a diagonal matrix with elements $S_x^2, S_y^2, S_z^2$ [S1, unofficial].
+
+2. **Project to Screen Space:** Project $\Sigma_3$ to screen space using the perspective Jacobian $J$ (derived from the clip-from-view matrix focal terms) [S1, unofficial]:
+   $$ \Sigma_2 = J \cdot \Sigma_3 \cdot J^T $$
+   Add a low-pass filter of $0.3 \text{ px}^2$ to $\Sigma_2$ to prevent aliasing and singularities [S1, unofficial].
+
+3. **Compute Eigen-decomposition:** Calculate the eigenvalues $\lambda_1, \lambda_2$ and corresponding eigenvectors $v_1, v_2$ of the 2D covariance matrix $\Sigma_2$ [S1, unofficial].
+
+4. **Determine Bounding Quad Corners:** Calculate the corners of the quad in screen space using the center $c$, eigenvalues, eigenvectors, and the scaling factor $k=3$:
+   $$ \text{corners} = c \pm 3 \cdot \sqrt{\lambda_i} \cdot v_i \quad \text{for } i \in \{1, 2\} $$
+   Clamp the calculated corners to the valid quad bounds [S1, unofficial].
+
+5. **Render Quad:** Render the splat as a screen-space quad defined by the calculated corners [S2, unofficial].
+
+6. **Fragment Shader Evaluation:** For each fragment within the quad, calculate the distance vector $d$ from the splat center to the fragment's interpolated screen coordinate. Evaluate the Gaussian kernel:
+   $$ \text{opacity} = \exp\left(-\frac{1}{2} d^T \Sigma_2^{-1} d\right) $$
+   Multiply the splat's color by this opacity [S1, unofficial].
+
+**Parameters:**
+- **Scaling Factor:** $3$ standard deviations for bounding box calculation [S1, unofficial].
+- **Low-pass Filter:** $0.3 \text{ px}^2$ added to $\Sigma_2$ [S1, unofficial].
+- **Color Bandwidth:** SH degree 0 only [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Camera Position:** If a `cameraPositionProvider` is not supplied, the compositing order remains as loaded, causing visual popping when the camera orbits [S2, unofficial].
+- **Web Implementation:** The web port (tracked in #4046) currently still uses isotropic billboards; anisotropic rendering is planned but not yet implemented in the web version [S1, S2, unofficial].
+- **Tone Mapping:** The material must cancel the View's tone mapping to ensure colors display as captured; otherwise, they may appear washed out [S2, unofficial].
+
+## Operating characteristics
+- **Performance:** Frame time is equal or better compared to the previous round-blob implementation, attributed to less overdraw [S1, unofficial].
+- **Memory:** On re-sort, only a 4-byte-per-splat order texture is re-uploaded to the GPU [S2, unofficial].
+- **Visual Quality:** Produces crisp edges and eliminates the haze associated with isotropic billboards [S1, S2, unofficial].
+- **Limitations:** Currently restricted to SH degree 0 color [S2, unofficial]. The web implementation does not yet support this feature [S2, unofficial].
+
+## Background
+This method was introduced in the `sceneview` project to improve the rendering of Gaussian splats in AR and mobile contexts. It was implemented in commit `e956f46` by Thomas Gorisse, addressing issues where previous isotropic billboards resulted in hazy scans [S1, S2, unofficial]. The change aligns the rendering with the reference 3DGS renderer's approach to anisotropic splats [S2, unofficial]. It is part of a broader effort to support SPZ v4 and improve visual fidelity in "Your scan, in your room" AR demos [S1, unofficial].
+
+## Sources
+[S1] Explore: Gaussian splatting, OpenUSD, AI world generation, volumetric video — study, https://github.com/sceneview/sceneview/issues/4023, fetched 2026-10-27 (unofficial)
+[S2] feat(sceneview): render splats as oriented ellipses, not round blobs ( #…, https://github.com/sceneview/sceneview/commit/e956f46c42655dc8754cef86ec88ab5634a13244, fetched 2026-10-30 (unofficial)

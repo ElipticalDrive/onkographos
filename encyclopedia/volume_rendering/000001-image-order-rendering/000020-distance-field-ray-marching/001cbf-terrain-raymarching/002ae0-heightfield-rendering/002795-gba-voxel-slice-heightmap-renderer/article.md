@@ -7,15 +7,8 @@ A software rendering technique for 3D voxel terrain on constrained hardware that
 
 ## How it works
 ### Inputs and Outputs
-- **Inputs**:
-  - Camera position: `posx`, `posy`, `posz` (fixed-point integers) [S1, unofficial].
-  - Camera rotation state: `posr` (integer 0–11) [S1, unofficial].
-  - Heightmap data: `rawprof` (heights) and `rawcolor` (colors) for a 1024x1024 world map [S1, unofficial].
-  - Precomputed lookup tables: `matrizx` (x-offsets), `tempgfxp` (vertical line offsets) [S1, unofficial].
-  - Rendering parameters: `minstep`, `maxstep`, `INC_STEP` [S1, unofficial].
-- **Outputs**:
-  - Frame buffer (VRAM) with terrain pixels drawn [S1, unofficial].
-  - Per-column height buffer `alturas` updated for occlusion [S1, unofficial].
+- **Inputs**: Camera position `posx`, `posy`, `posz` (fixed-point integers) [S1, unofficial]. Camera rotation state `posr` (integer 0–11) [S1, unofficial]. Heightmap data `rawprof` (heights) and `rawcolor` (colors) for a 1024x1024 world map [S1, unofficial]. Precomputed lookup tables `matrizx` (x-offsets) and `tempgfxp` (vertical line offsets) [S1, unofficial]. Rendering parameters `minstep`, `maxstep`, `INC_STEP` [S1, unofficial].
+- **Outputs**: Frame buffer (VRAM) with terrain pixels drawn [S1, unofficial]. Per-column height buffer `alturas` updated for occlusion [S1, unofficial].
 
 ### Data Structures
 - **`alturas[MODE5_WIDTH]`**: Array of `u8`. Stores the current drawn height per screen column. Size: 240 bytes. Initialized to 0 at the start of each frame [S1, unofficial].
@@ -42,14 +35,10 @@ A software rendering technique for 3D voxel terrain on constrained hardware that
 5. **Load X-Offset Pointer**: Set `punterox = matrizx + MODE5_WIDTH * tmpalturas` [S1, unofficial].
 6. **Scale Slice Index**: Compute `tmpalturas_scaled = tmpalturas << 8` (multiply by 256) [S1, unofficial].
 7. **Iterate Screen Columns**: Loop `i` from 0 to `MODE5_WIDTH - 1` [S1, unofficial].
-8. **Compute Intermediate Coordinates**:
-   - `x = posx + punterox[i]` [S1, unofficial].
-   - `y = posy + step` [S1, unofficial].
-9. **Compute World Coordinates**: Apply rotation-specific transformation to `x` and `y` to get `xf` and `yf`, then mask with `(dim_mapa - 1)` to wrap within map bounds [S1, unofficial].
-10. **Sample Heightmap**: Compute index `idx = tmpalturas_scaled + getprof(xf, yf)`. Read `alt = punterosalturas[posz][idx]` [S1, unofficial].
-11. **Check Occlusion**: If `alt > alturas[i]`:
-    - Draw vertical line from `alturas[i]` to `alt` with color `getcolor(xf, yf)` [S1, unofficial].
-    - Update `alturas[i] = alt` [S1, unofficial].
+8. **Compute Intermediate Coordinates**: $x = posx + punterox[i]$ and $y = posy + step$ [S1, unofficial].
+9. **Compute World Coordinates**: Apply rotation-specific transformation to $x$ and $y$ to get $xf$ and $yf$, then mask with `(dim_mapa - 1)` to wrap within map bounds [S1, unofficial].
+10. **Sample Heightmap**: Compute index $idx = tmpalturas\_scaled + getprof(xf, yf)$. Read $alt = punterosalturas[posz][idx]$ [S1, unofficial].
+11. **Check Occlusion**: If $alt > alturas[i]$: draw vertical line from $alturas[i]$ to $alt$ with color $getcolor(xf, yf)$, then update $alturas[i] = alt$ [S1, unofficial].
 
 ### Formulas
 - **Column Offset Lookup**: $x = posx + punterox[i]$ [S1, unofficial].
@@ -61,19 +50,11 @@ A software rendering technique for 3D voxel terrain on constrained hardware that
 - **Vertical Line Offset**: $offset = tempgfxp[alt]$ [S1, unofficial].
 
 ### Rotation Cases for World Coordinates
-The transformation from screen-space intermediate coordinates $(x, y)$ to world coordinates $(xf, yf)$ depends on `posr`. All results are masked with `(dim_mapa - 1)` (i.e., `& 1023`). Note that integer division truncates toward zero [S1, unofficial].
-- **Case 0, 3, 6, 9**:
-  - $xf = (-y + x/2) \& (dim\_mapa - 1)$
-  - $yf = (y/2 + x) \& (dim\_mapa - 1)$
-- **Case 1, 4, 7, 10**:
-  - $xf = -y \& (dim\_mapa - 1)$
-  - $yf = x \& (dim\_mapa - 1)$
-- **Case 2, 5, 8, 11**:
-  - $xf = (-y/2 - x) \& (dim\_mapa - 1)$
-  - $yf = (-y + x/2) \& (dim\_mapa - 1)$
-- **Alternative mappings observed in source code**:
-  - $xf = -x \& (dim\_mapa - 1)$, $yf = -y \& (dim\_mapa - 1)$
-  - $xf = y \& (dim\_mapa - 1)$, $yf = -x \& (dim\_mapa - 1)$ [S1, unofficial].
+The transformation from screen-space intermediate coordinates $(x, y)$ to world coordinates $(xf, yf)$ depends on `posr` [S1, unofficial]. All results are masked with `(dim_mapa - 1)` (i.e., `& 1023`) [S1, unofficial]. Note that integer division truncates toward zero [S1, unofficial].
+- **Case 0, 3, 6, 9** (`render11`): $xf = (-y + x/2) \& (dim\_mapa - 1)$, $yf = (y/2 + x) \& (dim\_mapa - 1)$ [S1, unofficial].
+- **Case 1, 4, 7, 10** (`render3`): $xf = -y \& (dim\_mapa - 1)$, $yf = x \& (dim\_mapa - 1)$ [S1, unofficial].
+- **Case 2, 5, 8, 11** (`render4`): $xf = (-y/2 - x) \& (dim\_mapa - 1)$, $yf = (-y + x/2) \& (dim\_mapa - 1)$ [S1, unofficial].
+- **Alternative mappings observed in source code**: $xf = -x \& (dim\_mapa - 1)$, $yf = -y \& (dim\_mapa - 1)$ (`render6`); $xf = y \& (dim\_mapa - 1)$, $yf = -x \& (dim\_mapa - 1)$ (`render9`) [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -93,7 +74,6 @@ posz = 0
 posr = 0
 minstep = 0
 maxstep = 100
-INC_STEP = 2  # Computed as ((step>>6)+2) in source
 
 # Precomputed Data
 # matrizx: u16 array of size numalturas * MODE5_WIDTH
@@ -123,11 +103,13 @@ def render_frame():
     # Iterate depth slices
     step = minstep
     while step < maxstep:
+        # INC_STEP is computed dynamically in source as ((step>>6)+2)
+        inc_step = (step >> 6) + 2
         tmpalturas = step - minstep
         mueve_pantalla_step(tmpalturas)
         
-        # Load x-offset pointer
-        punterox = matrizx[tmpalturas * MODE5_WIDTH : (tmpalturas + 1) * MODE5_WIDTH]
+        # Load x-offset pointer (flat array indexing)
+        punterox = matrizx[tmpalturas * MODE5_WIDTH]
         
         # Scale slice index
         tmpalturas_scaled = tmpalturas << 8
@@ -138,17 +120,18 @@ def render_frame():
             y = posy + step
             
             # Compute world coordinates based on posr
+            # Integer division truncates toward zero [G]
             if posr in [0, 3, 6, 9]:
-                xf = (-y + x // 2) & dim_mapa_minus_1
-                yf = (y // 2 + x) & dim_mapa_minus_1
+                xf = (-y + int(x / 2)) & dim_mapa_minus_1
+                yf = (int(y / 2) + x) & dim_mapa_minus_1
             elif posr in [1, 4, 7, 10]:
                 xf = -y & dim_mapa_minus_1
                 yf = x & dim_mapa_minus_1
             elif posr in [2, 5, 8, 11]:
-                xf = (-y // 2 - x) & dim_mapa_minus_1
-                yf = (-y + x // 2) & dim_mapa_minus_1
+                xf = (int(-y / 2) - x) & dim_mapa_minus_1
+                yf = (-y + int(x / 2)) & dim_mapa_minus_1
             else:
-                # Fallback or other cases
+                # Fallback or other cases from source
                 xf = -x & dim_mapa_minus_1
                 yf = -y & dim_mapa_minus_1
             
@@ -161,7 +144,7 @@ def render_frame():
                 DrawVerticalLine(i, alt, alturas[i], getcolor(xf, yf))
                 alturas[i] = alt
         
-        step += INC_STEP
+        step += inc_step
 
 def incr_a():
     tmpx = posx
@@ -174,7 +157,7 @@ def incr_a():
         posy = (2 * tmpy - tmpx) // 2
     else:
         posx = (4 * tmpx + 2 * tmpy) // 5
-        posy = (4 * tmpy - 2 * tmpx) // 5  # Corrected typo from source
+        posy = (4 * tmpy - 2 * tmpx) // 5
     posr = (posr + 1) % 12
 
 def decr_a():
@@ -199,10 +182,7 @@ def decr_a():
 - **Source Disagreement**: The source code snippets show variations in rotation cases. Implementers should verify the exact mapping for their specific `posr` values against the source code's switch statements [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(N \cdot M)$, where $N$ is the number of depth slices and $M$ is the screen width. Each pixel is processed once per slice [S1, unofficial].
-- **Memory Complexity**: $O(M + N \cdot M)$ for lookup tables and height buffer. The heightmap data is $O(W^2)$ where $W$ is the map dimension [S1, unofficial].
 - **Measured Performance**: Optimized for the Game Boy Advance's ARM7TDMI CPU. Uses precomputed lookup tables to minimize runtime calculations [S1, unofficial].
-- **Scaling**: Performance scales linearly with screen width and number of depth slices [S1, unofficial].
 - **Strengths**: Fast on constrained hardware, simple occlusion handling, easy to implement [S1, unofficial].
 - **Limitations**: Limited to heightmap-based terrain, fixed resolution, potential for visual artifacts due to fixed-point math [S1, unofficial].
 

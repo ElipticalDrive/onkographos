@@ -1,0 +1,186 @@
+# Laplacian Pyramid
+
+Also called: Burt and Adelson pyramid, 拉普拉斯金字塔
+
+## Overview
+The Laplacian Pyramid is a multiresolution decomposition technique that represents a volume by a coarse approximation and a series of detail residuals (deltas) between levels of a Gaussian pyramid [S1, unofficial][S3]. It solves the problem of high inter-pixel correlation in volume data by decorrelating the signal, concentrating values around zero, and reducing entropy to enable efficient compression [S1, unofficial]. Unlike orthogonal wavelet transforms, it uses a non-orthogonal, redundant representation where the original data is perfectly reconstructed by adding the predicted low-resolution version back to the detail residuals [S1, unofficial].
+
+## How it works
+**Inputs:** A 3D volume data array $V_0$ of dimensions $N_x \times N_y \times N_z$.
+**Outputs:** A set of coefficient arrays: the coarsest approximation $C_L$ and a series of detail residuals $D_0, D_1, \dots, D_{L-1}$, where $D_l$ has the same dimensions as $V_l$.
+
+**Data Structures:**
+The decomposition produces a pyramid structure. For each level $l$ from $0$ to $L-1$:
+- $D_l$: The Laplacian detail at level $l$. Dimensions: $\lceil N_x/2^l \rceil \times \lceil N_y/2^l \rceil \times \lceil N_z/2^l \rceil$.
+- $C_l$: The Gaussian approximation at level $l$. Dimensions: $\lceil N_x/2^l \rceil \times \lceil N_y/2^l \rceil \times \lceil N_z/2^l \rceil$.
+The final output is the tuple $(D_0, D_1, \dots, D_{L-1}, C_L)$.
+
+**Parameters:**
+- $L$: Number of decomposition levels. Typical values are 5 or 6 [S1, unofficial].
+- $w$: 1D low-pass filter kernel. For 3D, a separable 5x5x5 Gaussian kernel is used, decomposable into three 1D operators [S1, unofficial]. The kernel weights $w(n)$ are real, symmetric ($w(n) = w(-n)$), and normalized ($\sum w(n) = 1$) [S1, unofficial].
+- The "equal contribution constraint" requires $\sum_n w(2n) = \sum_n w(2n+1)$ to ensure stable reconstruction [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Set $V_0$ as the input volume. Initialize empty lists for details $D$ and approximations $C$.
+
+2.  **Decomposition Loop:** For $l = 0$ to $L-1$:
+    a.  **Reduce (Low-pass filter and downsample):** Compute the approximation $V_{l+1}$ from $V_l$.
+        The operation is separable. Apply the 1D filter $w$ along each axis (x, y, z) and then downsample by a factor of 2.
+        Mathematically, for a 1D signal $c^l$, the next level $c^{l+1}$ is:
+        $$ c^{l+1}_k = \sum_n w(n - 2k) c^l_n $$
+        In 3D, this is applied sequentially along x, y, and z [S1, unofficial].
+        Let $V_{l+1} = \text{REDUCE}(V_l)$.
+    
+    b.  **Expand (Upsample and filter):** Compute the predicted version of $V_l$ from $V_{l+1}$.
+        Upsample $V_{l+1}$ by inserting zeros between samples, then convolve with the same filter $w$.
+        Mathematically, the blurred version $\bar{V}_l$ is:
+        $$ \bar{V}_l = \text{EXPAND}(V_{l+1}) $$
+        Where $\text{EXPAND}$ reverses the decimation. For 1D:
+        $$ \bar{c}^l_n = \sum_k w(n - 2k) c^{l+1}_k $$
+        Note: $\bar{V}_l$ has the same dimensions as $V_l$ [S1, unofficial].
+
+    c.  **Laplacian Detail:** Compute the residual.
+        $$ D_l = V_l - \bar{V}_l $$
+        Store $D_l$.
+
+    d.  **Update:** Set $V_l \leftarrow V_{l+1}$ for the next iteration.
+
+3.  **Final Approximation:** After $L$ iterations, the remaining volume $V_L$ is stored as the coarsest approximation $C_L = V_L$.
+
+4.  **Reconstruction:** To recover $V_0$ from $(D_0, \dots, D_{L-1}, C_L)$:
+    a.  Set $R_{L-1} = D_{L-1} + \text{EXPAND}(C_L)$.
+    b.  For $i = L-2$ down to $0$:
+        $$ R_i = D_i + \text{EXPAND}(R_{i+1}) $$
+    c.  The original volume is $V_0 = R_0$.
+    This guarantees perfect reconstruction if no quantization is applied [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def laplacian_pyramid_decompose(volume, levels=5, kernel_1d=None):
+    """
+    Decomposes a 3D volume into a Laplacian pyramid.
+    
+    Args:
+        volume: 3D numpy array (Nx, Ny, Nz).
+        levels: Integer L, number of decomposition steps.
+        kernel_1d: 1D array representing the low-pass filter w.
+                   If None, a default Gaussian-like kernel is assumed.
+    
+    Returns:
+        details: List of L arrays [D_0, ..., D_{L-1}].
+        coarsest: The final approximation C_L.
+    """
+    if kernel_1d is None:
+        # Default 5-tap Gaussian-like kernel for demonstration
+        # Must satisfy sum(w) = 1 and symmetry
+        kernel_1d = np.array([0.05, 0.25, 0.4, 0.25, 0.05])
+    
+    current_vol = volume.copy()
+    details = []
+    
+    for l in range(levels):
+        # 1. Reduce: Filter and Downsample
+        # Apply 1D filter along X, then Y, then Z, then downsample by 2
+        reduced = filter_and_downsample(current_vol, kernel_1d)
+        
+        # 2. Expand: Upsample and Filter
+        # Upsample by inserting zeros, then apply 1D filter along X, Y, Z
+        expanded = filter_and_upsample(reduced, kernel_1d)
+        
+        # 3. Detail: Difference
+        detail = current_vol - expanded
+        details.append(detail)
+        
+        # Update current volume for next level
+        current_vol = reduced
+        
+    return details, current_vol
+
+def filter_and_downsample(vol, kernel):
+    """
+    Separable low-pass filtering followed by downsampling by 2.
+    """
+    # Filter along X
+    filtered = apply_1d_filter(vol, kernel, axis=0)
+    # Filter along Y
+    filtered = apply_1d_filter(filtered, kernel, axis=1)
+    # Filter along Z
+    filtered = apply_1d_filter(filtered, kernel, axis=2)
+    
+    # Downsample: take every second element
+    downsampled = filtered[::2, ::2, ::2]
+    return downsampled
+
+def filter_and_upsample(vol, kernel):
+    """
+    Upsampling by 2 followed by separable low-pass filtering.
+    """
+    # Upsample: Insert zeros
+    # New shape is 2x old shape
+    old_shape = vol.shape
+    new_shape = (old_shape[0] * 2, old_shape[1] * 2, old_shape[2] * 2)
+    upscaled = np.zeros(new_shape, dtype=vol.dtype)
+    upscaled[::2, ::2, ::2] = vol
+    
+    # Filter along X
+    filtered = apply_1d_filter(upscaled, kernel, axis=0)
+    # Filter along Y
+    filtered = apply_1d_filter(filtered, kernel, axis=1)
+    # Filter along Z
+    filtered = apply_1d_filter(filtered, kernel, axis=2)
+    
+    return filtered
+
+def apply_1d_filter(vol, kernel, axis):
+    """
+    Applies 1D convolution along a specific axis.
+    Assumes 'same' padding or appropriate boundary handling.
+    """
+    # Convolve kernel with vol along axis
+    # Using scipy.signal.convolve for clarity, but implementation should be efficient
+    from scipy.signal import convolve
+    # Note: For production, use FFT-based convolution or optimized FIR filters
+    result = convolve(vol, kernel.reshape(-1, 1, 1), axis=axis, mode='same') if axis == 0 else \
+             convolve(vol, kernel.reshape(1, -1, 1), axis=axis, mode='same') if axis == 1 else \
+             convolve(vol, kernel.reshape(1, 1, -1), axis=axis, mode='same')
+    return result
+
+def laplacian_pyramid_reconstruct(details, coarsest):
+    """
+    Reconstructs the volume from Laplacian pyramid coefficients.
+    """
+    # Start from the deepest level
+    # The last detail D_{L-1} is added to the expanded coarsest approximation
+    current = details[-1] + filter_and_upsample(coarsest, kernel_1d) # kernel_1d needed here
+    
+    # Iterate backwards
+    for detail in reversed(details[:-1]):
+        current = detail + filter_and_upsample(current, kernel_1d)
+        
+    return current
+```
+
+**Edge Cases and Pitfalls:**
+- **Oversampling:** The representation is redundant. The total size of the pyramid is larger than the original volume (approx. 2x for 2D, similar for 3D) because the full-resolution difference signals are stored alongside the low-resolution version [S1, unofficial].
+- **Boundary Conditions:** The filter operations at volume boundaries require careful handling (e.g., zero-padding, reflection, or periodic extension) to avoid artifacts. The sources do not specify the exact boundary condition used in the original Burt and Adelson implementation, but standard practice involves padding [G].
+- **Precision:** Perfect reconstruction is guaranteed only with infinite precision. Quantization introduces errors [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Decomposition and reconstruction are $O(N \log N)$ or $O(N)$ depending on implementation, where $N$ is the number of voxels, due to the separable filter bank and logarithmic number of levels [S1, unofficial]. Reconstruction has a constant speedup of roughly a factor of 8 compared to non-separable methods [S1, unofficial].
+- **Memory Complexity:** The storage requirement is approximately double the original volume size due to the redundant representation (oversampling) [S1, unofficial].
+- **Performance:** Achieves compression ratios of about 10:1 with uniform quantization on CT volume data, with a root mean square error (RMSE) of 1.3 [S1, S4, unofficial].
+- **Strengths:** Simple to implement; removes inter-pixel correlation effectively; allows progressive rendering (coarse to fine); perfect reconstruction without quantization [S1, unofficial].
+- **Limitations:** Redundant representation increases memory usage compared to orthogonal wavelets; not strictly a basis (non-orthogonal); oversampling can be inefficient for very high compression ratios [S1, unofficial].
+
+## Background
+The Laplacian Pyramid was introduced by Burt and Adelson [3] as an early multiresolution decomposition technique, predating the rapid development of wavelet transforms in the late 1980s [S1, unofficial]. It was recognized in wavelet research for its strong connection to multiresolution analysis and orthonormal bases [S1, unofficial]. It is widely used in volume rendering for compression, adaptive rendering, and progressive visualization [S1, unofficial][S2, S3].
+
+## Sources
+[S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S2] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S4] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

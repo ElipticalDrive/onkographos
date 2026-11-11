@@ -34,7 +34,7 @@ An iterative method to diagonalize a $3 \times 3$ symmetric matrix using a seque
   If $a_{pq} = 0$, then $c=1, s=0$ [S1, unofficial].
 
 - **Update for `rot01`** (zeroing $m_{01}$):
-  Let $cc = c^2, ss = s^2, mix = 2cs m_{01}$.
+  Let $cc = c^2, ss = s^2, mix = 2cs m_{01}$ [S1, unofficial].
   $$ m_{00} \leftarrow cc \cdot m_{00} - mix + ss \cdot m_{11} $$
   $$ m_{01} \leftarrow 0 $$
   $$ m_{02} \leftarrow c \cdot m_{02} - s \cdot m_{12} $$
@@ -44,7 +44,7 @@ An iterative method to diagonalize a $3 \times 3$ symmetric matrix using a seque
   All right-hand side values use the pre-rotation matrix state [S1, unofficial].
 
 - **Update for `rot02`** (zeroing $m_{02}$):
-  Let $cc = c^2, ss = s^2, mix = 2cs m_{02}$.
+  Let $cc = c^2, ss = s^2, mix = 2cs m_{02}$ [S1, unofficial].
   $$ m_{00} \leftarrow cc \cdot m_{00} - mix + ss \cdot m_{22} $$
   $$ m_{01} \leftarrow c \cdot m_{01} - s \cdot m_{12} $$
   $$ m_{02} \leftarrow 0 $$
@@ -54,7 +54,7 @@ An iterative method to diagonalize a $3 \times 3$ symmetric matrix using a seque
   All right-hand side values use the pre-rotation matrix state [S1, unofficial].
 
 - **Update for `rot12`** (zeroing $m_{12}$):
-  Let $cc = c^2, ss = s^2, mix = 2cs m_{12}$.
+  Let $cc = c^2, ss = s^2, mix = 2cs m_{12}$ [S1, unofficial].
   $$ m_{00} \leftarrow m_{00} $$
   $$ m_{01} \leftarrow c \cdot m_{01} - s \cdot m_{02} $$
   $$ m_{02} \leftarrow s \cdot m_{01} + c \cdot m_{02} $$
@@ -91,9 +91,10 @@ def rot01(m, v):
     new_m11 = ss * m.m00 + mix + cc * m.m11
     new_m12 = s * m.m02 + c * m.m12
     m.m00, m.m01, m.m02, m.m11, m.m12, m.m22 = new_m00, 0.0, new_m02, new_m11, new_m12, m.m22
-    v.m00, v.m10 = c * v.m00 + s * v.m10, -s * v.m00 + c * v.m10
-    v.m01, v.m11 = c * v.m01 + s * v.m11, -s * v.m01 + c * v.m11
-    v.m02, v.m12 = c * v.m02 + s * v.m12, -s * v.m02 + c * v.m12
+    # Post-multiply V by Givens rotation in plane (0,1)
+    v.m00, v.m01 = c * v.m00 + s * v.m01, -s * v.m00 + c * v.m01
+    v.m10, v.m11 = c * v.m10 + s * v.m11, -s * v.m10 + c * v.m11
+    v.m20, v.m21 = c * v.m20 + s * v.m21, -s * v.m20 + c * v.m21
 
 def rot02(m, v):
     if m.m02 == 0:
@@ -107,9 +108,10 @@ def rot02(m, v):
     new_m12 = s * m.m01 + c * m.m12
     new_m22 = ss * m.m00 + mix + cc * m.m22
     m.m00, m.m01, m.m02, m.m11, m.m12, m.m22 = new_m00, new_m01, 0.0, m.m11, new_m12, new_m22
-    v.m00, v.m20 = c * v.m00 + s * v.m20, -s * v.m00 + c * v.m20
-    v.m01, v.m21 = c * v.m01 + s * v.m21, -s * v.m01 + c * v.m21
-    v.m02, v.m22 = c * v.m02 + s * v.m22, -s * v.m02 + c * v.m22
+    # Post-multiply V by Givens rotation in plane (0,2)
+    v.m00, v.m02 = c * v.m00 + s * v.m02, -s * v.m00 + c * v.m02
+    v.m10, v.m12 = c * v.m10 + s * v.m12, -s * v.m10 + c * v.m12
+    v.m20, v.m22 = c * v.m20 + s * v.m22, -s * v.m20 + c * v.m22
 
 def rot12(m, v):
     if m.m12 == 0:
@@ -123,9 +125,10 @@ def rot12(m, v):
     new_m11 = cc * m.m11 - mix + ss * m.m22
     new_m22 = ss * m.m11 + mix + cc * m.m22
     m.m00, m.m01, m.m02, m.m11, m.m12, m.m22 = m.m00, new_m01, new_m02, new_m11, 0.0, new_m22
-    v.m10, v.m20 = c * v.m10 + s * v.m20, -s * v.m10 + c * v.m20
-    v.m11, v.m21 = c * v.m11 + s * v.m21, -s * v.m11 + c * v.m21
-    v.m12, v.m22 = c * v.m12 + s * v.m22, -s * v.m12 + c * v.m22
+    # Post-multiply V by Givens rotation in plane (1,2)
+    v.m01, v.m02 = c * v.m01 + s * v.m02, -s * v.m01 + c * v.m02
+    v.m11, v.m12 = c * v.m11 + s * v.m12, -s * v.m11 + c * v.m12
+    v.m21, v.m22 = c * v.m21 + s * v.m22, -s * v.m21 + c * v.m22
 
 def get_symmetric_svd(a, vtav, v, tol, max_sweeps):
     vtav.m00, vtav.m01, vtav.m02, vtav.m11, vtav.m12, vtav.m22 = a.m00, a.m01, a.m02, a.m11, a.m12, a.m22
@@ -151,13 +154,13 @@ def get_symmetric_svd(a, vtav, v, tol, max_sweeps):
 Computes the eigenvalues and eigenvectors of a 3x3 symmetric matrix using the Jacobi iterative diagonalization method. It sets itself apart from direct algebraic solvers by using a sequence of orthogonal Givens rotations to zero out off-diagonal elements. It is generally slower than closed-form solutions for small fixed dimensions.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **Time Complexity:** Not given in the sources [S1, unofficial].
+- **Memory Complexity:** Not given in the sources [S1, unofficial].
+- **Measured Performance:** Not given in the sources [S1, unofficial].
+- **Strengths:** Not given in the sources [S1, unofficial].
+- **Limitations:** Not given in the sources [S1, unofficial].
+- **When to use:** Not given in the sources [S1, unofficial].
+- **When not to use:** Not given in the sources [S1, unofficial].
 
 ## Background
 Originated in the DualContouringCSharp repository by tuckbone, implemented via `Schur2` and `SVD` classes [S1, unofficial]. It is used in dual contouring algorithms for implicit surface reconstruction, where symmetric matrices arise from quadratic error functions [S1, unofficial].

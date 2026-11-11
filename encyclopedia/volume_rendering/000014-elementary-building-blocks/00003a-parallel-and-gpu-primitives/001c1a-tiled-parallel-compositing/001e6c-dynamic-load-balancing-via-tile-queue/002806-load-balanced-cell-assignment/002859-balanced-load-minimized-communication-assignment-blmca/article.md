@@ -1,87 +1,150 @@
 # Balanced-Load Minimized-Communication Assignment (BLMCA)
+Also called: Minimized-Communication Assignment, Minimum-Communication Assignment (MCA)
+
 ## Overview
-BLMCA is a load-balanced cell assignment method for tiled parallel volume rendering that simultaneously minimizes inter-processor communication volume and load imbalance [S1, unofficial]. It improves upon pure Minimized-Communication Assignment (MCA) and pure Best-Fit Decreasing (BFD) load balancing by incorporating MCA’s greedy communication criterion into the BFD heuristic, prioritizing the assignment of heavily loaded mesh-cells to reduce communication overhead while maintaining balanced workloads [S1, unofficial].
+BLMCA is a hybrid mesh-cell assignment heuristic for tiled parallel volume rendering that simultaneously minimizes communication volume during the Ray-Segment Migration (RSM) step and mitigates load imbalance during the Local Pixel Merging (LPM) step [S1, unofficial]. It improves upon pure Minimum-Communication Assignment (MCA) by incorporating load-balancing constraints, and improves upon pure Best-Fit Decreasing (BFD) load balancing by prioritizing communication efficiency for heavily loaded cells [S1, unofficial]. It is chosen when both inter-processor communication overhead and computational load imbalance are critical bottlenecks [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A set of mesh-cells $M$, a set of processors $P = \{P_0, \dots, P_{N-1}\}$, the global ray-segment count $R_m$ for each mesh-cell $m \in M$, and the local ray-segment count $L_{m,p}$ for each mesh-cell $m$ on each processor $p$ [S1, unofficial]. The maximum allowable part size (bin capacity) $C_{max}$ is defined by the load balance criterion [S1, unofficial].
-*   **Output:** An assignment map $A: M \rightarrow P$, where $A(m)$ is the processor assigned to mesh-cell $m$ [S1, unofficial].
+*   **Input:** A set of $N$ mesh-cells $\mathcal{M} = \{m_1, \dots, m_N\}$, a set of $P$ processors $\mathcal{P} = \{P_0, \dots, P_{P-1}\}$, and local workload data.
+*   **Output:** An assignment map $A: \mathcal{M} \rightarrow \mathcal{P}$, where $A(m)$ is the processor assigned to mesh-cell $m$.
 
 **Data Structures:**
-*   **Workload Vector:** An array $WL$ of size $N$, where $WL[p]$ stores the current total load (sum of global ray-segment counts of assigned mesh-cells) of processor $p$ [S1, unofficial]. Initialized to zero for all $p$ [S1, unofficial].
-*   **Sorted Mesh-Cells:** A list of mesh-cells sorted in decreasing order of their global ray-segment counts $R_m$ [S1, unofficial].
+1.  **Local Workload Matrix ($WL_{local}$):** A matrix of size $N \times P$. Entry $WL_{local}[m, k]$ stores the number of ray-segments for mesh-cell $m$ currently residing on processor $P_k$.
+2.  **Global Workload Vector ($WL_{global}$):** A vector of size $N$. Entry $WL_{global}[m]$ stores the total number of ray-segments for mesh-cell $m$ across all processors.
+3.  **Processor Load Vector ($Load$):** A vector of size $P$. Entry $Load[k]$ stores the current cumulative load (sum of global ray-segment counts of assigned mesh-cells) of processor $P_k$.
+4.  **Maximum Part Size ($C_{max}$):** The maximum allowable load capacity for any single processor, determined by a load balance criterion [S1, unofficial].
 
-**Pre-computation (Parallelization Step):**
-Before the assignment algorithm runs, processors must determine the global ray-segment counts and the processor with the maximum local ray-segment count for each mesh-cell [S1, unofficial]. This is achieved via a parallel global-sum and global-max operation on local workload matrices [S1, unofficial]. After this "fold and expand" communication step, every processor possesses the complete global data required to run the assignment algorithm locally [S1, unofficial].
+**Pre-computation (Parallel Phase):**
+Before the assignment algorithm runs, each processor $P_k$ must compute the necessary global statistics. This is done in parallel by all processors simultaneously:
+1.  Each processor $P_k$ traverses its local `RayBuffer` to populate $WL_{local}[m, k]$ for all $m \in \mathcal{M}$ [S1, unofficial].
+2.  A **global-maximum** operation is performed on $WL_{local}$ across all processors. This determines, for each mesh-cell $m$, the index $k^* = \arg\max_k WL_{local}[m, k]$ of the processor holding the most local ray-segments for $m$ [S1, unofficial].
+3.  A **global-sum** operation is performed on $WL_{local}$ across all processors. This computes $WL_{global}[m] = \sum_{k=0}^{P-1} WL_{local}[m, k]$ for each mesh-cell $m$ [S1, unofficial].
+4.  After these "fold and expand" communication steps, every processor holds the complete $WL_{global}$ vector and the index of the processor with the maximum local count for each mesh-cell [S1, unofficial].
 
-**Algorithm Steps:**
-1.  Initialize $WL[p] = 0$ for all $p \in P$ [S1, unofficial].
-2.  Sort mesh-cells $M$ in descending order of $R_m$ [S1, unofficial].
-3.  For each mesh-cell $m$ in the sorted list:
-    a. Identify the processor $P_{max}$ that has the maximum local ray-segment count for $m$ (i.e., $P_{max} = \arg\max_{p \in P} L_{m,p}$) [S1, unofficial].
-    b. Check if assigning $m$ to $P_{max}$ keeps the load within bounds: if $WL[P_{max}] + R_m \le C_{max}$ [S1, unofficial].
-    c. If the condition is met, assign $m$ to $P_{max}$ ($A(m) = P_{max}$) [S1, unofficial].
-    d. Otherwise, assign $m$ to the minimally loaded processor $P_{min}$ (i.e., $P_{min} = \arg\min_{p \in P} WL[p]$) [S1, unofficial]. This corresponds to the best-fit criterion in BFD [S1, unofficial].
-    e. Update the workload: $WL[A(m)] \leftarrow WL[A(m)] + R_m$ [S1, unofficial].
+**Assignment Algorithm (Sequential/Parallel Phase):**
+Each processor runs the following logic to determine the final assignment $A$. The logic is identical on all processors, ensuring consistency.
+
+1.  **Sort:** Sort mesh-cells $\mathcal{M}$ in decreasing order of their global ray-segment counts $WL_{global}[m]$ [S1, unofficial].
+2.  **Initialize:** Set $Load[k] = 0$ for all $k \in \{0, \dots, P-1\}$ [S1, unofficial].
+3.  **Iterate:** For each mesh-cell $m$ in the sorted order:
+    a.  Let $k_{max}$ be the index of the processor with the maximum local ray-segment count for $m$ (obtained in the pre-computation phase).
+    b.  Check feasibility: If $Load[k_{max}] + WL_{global}[m] \le C_{max}$:
+        i.  Assign $A(m) = k_{max}$ [S1, unofficial].
+        ii. Update load: $Load[k_{max}] \leftarrow Load[k_{max}] + WL_{global}[m]$ [S1, unofficial].
+    c.  Else (if assigning to $k_{max}$ exceeds capacity):
+        i.  Find $k_{min}$, the index of the minimally loaded processor: $k_{min} = \arg\min_k Load[k]$ [S1, unofficial].
+        ii. Assign $A(m) = k_{min}$ [S1, unofficial].
+        iii. Update load: $Load[k_{min}] \leftarrow Load[k_{min}] + WL_{global}[m]$ [S1, unofficial].
+
+**Communication Volume Formula:**
+The communication volume incurred by assigning mesh-cell $m$ to processor $P_i$ is given by:
+$$ V(m, P_i) = R_m - r_{km} $$
+Where:
+*   $R_m$ is the global ray-segment count for mesh-cell $m$ ($WL_{global}[m]$).
+*   $r_{km}$ is the local ray-segment count of mesh-cell $m$ on the processor $P_k$ that currently holds the maximum local count for $m$ (i.e., $WL_{local}[m, k_{max}]$) [S1, unofficial].
+*   Note: If $m$ is assigned to $P_{k_{max}}$, the communication volume is minimized to $R_m - r_{k_{max}m}$, which is the volume of segments that must be migrated from other processors to $P_{k_{max}}$. If $m$ is assigned to a different processor $P_j$, the communication volume is higher, as segments from $P_{k_{max}}$ must also be migrated [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def BLMCA(mesh_cells, num_processors, max_part_size):
     """
-    mesh_cells: list of objects with attributes .id, .R_m (global ray-segment count), 
-                and .L_m_p (dict mapping processor_id -> local ray-segment count)
-    num_processors: int N
+    mesh_cells: List of objects, each having:
+        - id: unique identifier
+        - local_counts: list of integers, local_counts[k] is ray-segment count on processor k
+    num_processors: int P
     max_part_size: float C_max
     
     Returns:
-    assignment: dict mapping mesh_cell.id -> processor_id
+        assignment: dict mapping mesh_cell.id -> processor_index
+        loads: list of floats, loads[k] is final load of processor k
     """
-    # 1. Initialize workloads
-    workload = [0.0] * num_processors
+    P = num_processors
     
-    # 2. Sort mesh-cells by global ray-segment count in descending order
-    # Note: The global counts and max-local-processor indices must be pre-computed
-    # via parallel global-sum and global-max operations before this function runs.
-    sorted_cells = sorted(mesh_cells, key=lambda c: c.R_m, reverse=True)
+    # Pre-computation: Global Sum and Global Max
+    # In a real parallel implementation, this uses MPI_Allreduce or similar
+    global_counts = []
+    max_local_indices = []
+    
+    for m in mesh_cells:
+        R_m = sum(m.local_counts)
+        global_counts.append(R_m)
+        
+        # Find processor with max local count
+        k_max = 0
+        max_val = m.local_counts[0]
+        for k in range(1, P):
+            if m.local_counts[k] > max_val:
+                max_val = m.local_counts[k]
+                k_max = k
+        max_local_indices.append(k_max)
+        
+    # Create list of (global_count, mesh_cell, k_max)
+    cell_data = []
+    for i, m in enumerate(mesh_cells):
+        cell_data.append({
+            'id': m.id,
+            'global_count': global_counts[i],
+            'k_max': max_local_indices[i]
+        })
+        
+    # Sort by global count descending
+    cell_data.sort(key=lambda x: x['global_count'], reverse=True)
+    
+    # Initialize loads
+    loads = [0.0] * P
     
     assignment = {}
     
-    for cell in sorted_cells:
-        # Find processor with maximum local ray-segment count for this cell
-        # cell.L_m_p is a dict {processor_id: local_count}
-        max_local_proc = max(cell.L_m_p, key=cell.L_m_p.get)
+    for item in cell_data:
+        m_id = item['id']
+        R_m = item['global_count']
+        k_max = item['k_max']
         
-        # Check if assigning to max_local_proc violates capacity constraint
-        if workload[max_local_proc] + cell.R_m <= max_part_size:
-            # MCA criterion: assign to processor with max local data
-            assigned_proc = max_local_proc
+        # Check if assigning to k_max keeps load within capacity
+        if loads[k_max] + R_m <= max_part_size:
+            assignment[m_id] = k_max
+            loads[k_max] += R_m
         else:
-            # BFD criterion: assign to minimally loaded processor
-            assigned_proc = min(range(num_processors), key=lambda p: workload[p])
-        
-        # Assign and update workload
-        assignment[cell.id] = assigned_proc
-        workload[assigned_proc] += cell.R_m
-        
-    return assignment
+            # Find minimally loaded processor
+            k_min = 0
+            min_load = loads[0]
+            for k in range(1, P):
+                if loads[k] < min_load:
+                    min_load = loads[k]
+                    k_min = k
+            assignment[m_id] = k_min
+            loads[k_min] += R_m
+            
+    return assignment, loads
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Capacity Constraint:** If a single mesh-cell's global ray-segment count $R_m$ exceeds $C_{max}$, the load balance criterion is violated [S1, unofficial]. The sources do not specify a fallback for this degenerate case [S1, unofficial].
-*   **Tie Breaking:** The sources do not specify tie-breaking rules for $\arg\max$ or $\arg\min$ operations [S1, unofficial]. Implementers should choose a deterministic rule (e.g., lowest processor ID) [G].
-*   **Pre-computation Dependency:** The algorithm assumes global data is available [S1, unofficial].
+*   **Precision:** Load values are sums of integer ray-segment counts, so floating-point precision issues are minimal unless $C_{max}$ is derived from non-integer metrics.
+*   **Tie Breaking:** The $\arg\min$ and $\arg\max$ operations may have ties. The sources do not specify a tie-breaking rule. Implementers should choose a deterministic rule (e.g., lowest index) to ensure reproducibility [G].
+*   **Degenerate Input:** If a mesh-cell has zero ray-segments, it contributes zero load and zero communication. It can be assigned to any processor without affecting the objective functions significantly.
+
+## Subtopics
+
+### Minimum-Communication Assignment (MCA)
+Assigns each mesh-cell to the processor with the maximum local ray-segment count, minimizing communication volume but ignoring load balance. Used when communication is the sole bottleneck [S1, unofficial].
+
+### Best-Fit Decreasing (BFD) Load Balancing
+Assigns mesh-cells in decreasing order of global load to the minimally loaded processor. Used when load balance is the sole bottleneck, ignoring communication costs [S1, unofficial].
 
 ## Operating characteristics
-*   **Complexity:** Not given in the sources.
-*   **Performance:** BLMCA reduces communication volume compared to pure BFD by prioritizing local data locality for heavy mesh-cells, while reducing load imbalance compared to pure MCA [S1, unofficial].
-*   **Strengths:** Balances two conflicting objectives (communication and load) using a heuristic that prioritizes the most impactful assignments (heavy mesh-cells) [S1, unofficial].
-*   **Limitations:** The load balancing sub-problem is NP-hard; BLMCA is a heuristic and may not find the optimal partition [S1, unofficial].
+*   **Time Complexity:** The parallel pre-computation requires $O(N \cdot P)$ work for local traversal and $O(N \log P)$ or $O(N)$ for global reduction depending on the communication topology. The sorting step is $O(N \log N)$. The assignment loop is $O(N \cdot P)$ if finding the min/max load naively, or $O(N \log P)$ with a heap. Overall complexity is dominated by sorting and global reductions [S1, unofficial].
+*   **Memory Complexity:** $O(N \cdot P)$ for the local workload matrix if stored explicitly, though typically only the global counts and max indices are needed after reduction, reducing it to $O(N + P)$ [S1, unofficial].
+*   **Measured Performance:** The sources do not provide specific numerical performance benchmarks (e.g., speedup factors) for BLMCA compared to MCA or BFD alone [S1, unofficial].
+*   **Strengths:** Explicitly addresses both communication and load imbalance. The greedy strategy for heavily loaded cells ensures that the largest potential communication savings are captured first [S1, unofficial].
+*   **Limitations:** The load balancing component is a heuristic for an NP-hard problem (n-way number partitioning), so it does not guarantee optimal load balance [S1, unofficial].
+*   **When to use:** When both RSM communication volume and LPM computational load are significant bottlenecks [S1, unofficial].
+*   **When not to use:** If communication is negligible compared to computation, pure BFD may be simpler. If load balance is perfect by construction, pure MCA is optimal for communication [S1, unofficial].
 
 ## Background
-BLMCA was proposed for tiled parallel volume rendering based on object-space decomposition [S1, unofficial]. It addresses the limitations of using either communication-minimizing or load-balancing strategies in isolation for assigning mesh-cells to processors [S1, unofficial].
+BLMCA was proposed in the context of parallel direct volume rendering of unstructured grids based on object-space decomposition [S1, unofficial]. It addresses the deficiencies of the Minimum-Communication Assignment (MCA) scheme, which ignores load balancing for the Local Pixel Merging (LPM) step [S1, unofficial]. The method combines the greedy communication minimization of MCA with the Best-Fit Decreasing (BFD) heuristic from bin-packing theory to solve the n-way number-partitioning problem for load balancing [S1, unofficial].
 
 ## Sources
 [S1] Parallel direct volume rendering of unstructured grids based on object-space decomposition, http://hdl.handle.net/11693/17897, fetched 2026-10-26 (unofficial)

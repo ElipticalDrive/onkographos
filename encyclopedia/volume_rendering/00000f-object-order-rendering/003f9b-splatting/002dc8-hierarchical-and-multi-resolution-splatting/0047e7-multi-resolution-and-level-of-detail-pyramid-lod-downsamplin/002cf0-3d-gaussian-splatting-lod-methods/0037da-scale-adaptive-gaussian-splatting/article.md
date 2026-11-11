@@ -3,43 +3,95 @@
 Also called: SA-GS
 
 ## Overview
-Scale-Adaptive Gaussian Splatting (SA-GS) addresses the aliasing artifacts inherent in standard 3D Gaussian Splatting when rendering at varying resolutions or camera distances [S1]. Unlike methods that rely on fixed pre-computed dilation scales, SA-GS employs an adaptive 2D low-pass filter during the rendering phase, dynamically adjusted based on the current rendering resolution and camera distance [S1]. This approach ensures that the projected Gaussian footprint is appropriately filtered to match the sampling frequency of the pixel grid, preventing high-frequency artifacts without requiring changes to the underlying Gaussian representation [S1].
+Scale-Adaptive Gaussian Splatting (SA-GS) is a rendering optimization for 3D Gaussian Splatting that mitigates aliasing artifacts by applying an adaptive 2D low-pass filter during the splatting process [S1]. It distinguishes itself from sibling methods like [Alias-free 4D Gaussian Splatting](9872-alias-free-4d-gaussian-splatting.md) by performing this filtering at test time based on immediate rendering parameters, rather than modifying the Gaussian geometry or training loss [S1].
 
 ## How it works
-**Inputs:**
-- A set of 3D Gaussians, each defined by mean position $\mu$, covariance matrix $\Sigma$ (or rotation $R$ and scale $S$), opacity $\alpha$, and spherical harmonic coefficients for color.
-- Camera parameters: intrinsic matrix $K$ and extrinsic matrix $[R|t]$.
-- Rendering resolution $(W, H)$.
-
-**Outputs:**
-- A rendered image $I \in \mathbb{R}^{H \times W \times 3}$.
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussians (position, covariance, color, opacity), camera intrinsics (focal length, resolution), and camera extrinsics (view matrix).
+*   **Output:** A rendered 2D image.
 
 **Data Structures:**
-- The Gaussian attributes are stored in standard 3DGS format. No additional hierarchical structures are required for the filtering step itself [S1].
+The method operates on the standard 3D Gaussian Splatting representation. Each Gaussian $i$ is defined by:
+*   Mean position $\mu_i \in \mathbb{R}^3$.
+*   Covariance matrix $\Sigma_i \in \mathbb{R}^{3 \times 3}$ (or rotation $R_i$ and scale $s_i$).
+*   Opacity $\alpha_i \in [0, 1]$.
+*   Spherical Harmonics coefficients $c_{i, l}$ for view-dependent color.
 
-**Steps:**
-1. **Rasterization Setup:** For each camera, project the 3D Gaussians to 2D screen space. Compute the 2D covariance matrix $\Sigma'$ using the Jacobian of the projection transformation [S1].
-2. **Adaptive Filter Calculation:** Determine the adaptive dilation scale factor $k$ for each Gaussian based on the rendering resolution and camera distance [S1]. The sources indicate this factor is derived from the ratio of Gaussian scales or directly linked to the pixel footprint size relative to the resolution [S1]. Specifically, the filter adapts to the sampling frequency implied by the camera distance and resolution [S1].
-3. **Filter Application:** Apply a 2D low-pass filter to the projected Gaussian kernel. This is typically implemented by dilating the 2D covariance matrix $\Sigma'$ by the factor $k$, resulting in a modified covariance $\Sigma'' = k^2 \Sigma'$ [S1]. This dilation effectively blurs the Gaussian to match the pixel sampling rate.
-4. **Compositing:** Perform standard alpha compositing using the filtered Gaussians. The opacity and color are accumulated in screen space as usual, but the spatial extent of each Gaussian is now governed by the adaptive filter [S1].
+**Algorithm:**
+The core modification occurs during the rasterization step. Standard 3DGS projects 3D Gaussians to 2D ellipses and accumulates color. SA-GS inserts a filtering stage.
+
+1.  **Compute Rendering Scale Factor:** Determine the effective scale of the Gaussian relative to the pixel grid. This involves the camera distance $d$ and the rendering resolution $R$ (width/height). Let $k$ be a scaling factor derived from the ratio of the Gaussian's projected size to the pixel size.
+2.  **Determine Filter Kernel:** Based on $k$, select the parameters for a 2D low-pass filter. The filter is adaptive; as the Gaussian becomes smaller relative to the pixel (high frequency content), the filter width increases to suppress aliasing.
+3.  **Apply Filter to Gaussian:** Convolve the 2D projected Gaussian density function with the low-pass filter kernel. This effectively dilates the Gaussian's support or reduces its peak intensity to match the Nyquist limit of the current rendering resolution.
+4.  **Rasterize:** Project the filtered Gaussians onto the image plane.
+5.  **Composite:** Sort the filtered Gaussians by depth and perform alpha compositing to produce the final pixel color.
+
+**Formulas:**
+Let $G(x, y)$ be the 2D Gaussian density function projected onto the image plane. The filtered density $G'(x, y)$ is:
+$$ G'(x, y) = G(x, y) * K(x, y; \sigma) $$
+where $*$ denotes convolution and $K$ is the 2D low-pass filter kernel with standard deviation $\sigma$. The parameter $\sigma$ is a function of the camera distance $d$ and resolution $R$.
 
 **Parameters:**
-- The adaptive scale factor $k$ is not a fixed constant but a function of rendering resolution and camera distance [S1]. Exact functional form is not detailed in the provided sources, but it is applied at test time [S1].
+*   Filter type: 2D Low-pass (e.g., Gaussian blur).
+*   Adaptive factor: Function of $d$ and $R$. [G] Specific functional form (e.g., linear, logarithmic) is not given in the sources.
 
 **Edge Cases:**
-- At very high resolutions, the filter may become negligible, approaching standard 3DGS behavior [S1].
-- At very low resolutions or large distances, the filter prevents aliasing by sufficiently blurring the Gaussians [S1].
+*   **Near Plane:** If the camera is extremely close, the Gaussian may exceed the pixel size significantly. The filter must handle large $\sigma$ without causing excessive blurring of valid detail.
+*   **Far Plane:** If the Gaussian is smaller than a pixel, the filter prevents high-frequency noise.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_sa_gs(gaussians, camera):
+    # 1. Project Gaussians to 2D
+    projected_gaussians = []
+    for g in gaussians:
+        # Standard 3DGS projection
+        pos_2d, cov_2d, depth = project_3d_to_2d(g, camera)
+        
+        # 2. Compute adaptive filter scale
+        # Estimate Gaussian size in pixels
+        sigma_gaussian = sqrt(cov_2d.trace()) / 2.0
+        # Determine filter sigma based on resolution and distance
+        # Note: Exact formula for filter_sigma is not provided in sources [S1]
+        filter_sigma = compute_adaptive_filter_sigma(sigma_gaussian, camera.resolution, camera.distance)
+        
+        # 3. Apply low-pass filter
+        # The Gaussian is effectively convolved with a filter of width filter_sigma
+        # This modifies the covariance or opacity to simulate the blur
+        filtered_gaussian = apply_low_pass_filter(g, filter_sigma)
+        
+        projected_gaussians.append(filtered_gaussian)
+    
+    # 4. Rasterize and Composite
+    image = rasterize_and_composite(projected_gaussians, camera.resolution)
+    return image
+
+def compute_adaptive_filter_sigma(gaussian_sigma, resolution, distance):
+    # Placeholder for the specific adaptive logic
+    # Sources state it depends on resolution and camera distance [S1]
+    # A common implementation might scale sigma by the ratio of pixel size to gaussian size
+    return gaussian_sigma * (resolution / distance) # [G] Example heuristic
+```
 
 ## Subtopics
 
 ### [Alias-free 4D Gaussian Splatting](9872-alias-free-4d-gaussian-splatting.md)
-Eliminates high-frequency artifacts in dynamic scenes by adapting dilation scales based on temporal changes and camera parameters, unlike SA-GS's static resolution/distance adaptation.
+Eliminates high-frequency artifacts in dynamic scenes by adapting dilation scale via temporal changes, unlike SA-GS's static spatial adaptation.
+
+### [Adaptive-Scale Color Offset](13019-adaptive-scale-color-offset.md)
+Corrects scale-dependent color mismatch at training time by modifying SH DC coefficients, whereas SA-GS filters geometry/density at test time.
 
 ## Operating characteristics
-SA-GS introduces minimal computational overhead during rendering as the adaptive filtering is applied to the covariance matrix before compositing [S1]. It does not require additional memory for hierarchical structures or pre-computed mipmaps [S1]. The method is effective at reducing aliasing artifacts across varying view distances and resolutions [S1]. However, it may slightly reduce sharpness in high-resolution renders if the filter is too aggressive [S1].
+*   **Time Complexity:** Adds a filtering step to the rasterization pipeline. The complexity depends on the filter kernel size. If implemented as a convolution, it is $O(N \cdot K^2)$ where $N$ is the number of Gaussians and $K$ is the kernel size.
+*   **Memory Complexity:** No significant additional memory overhead compared to standard 3DGS, as filtering is applied during rendering.
+*   **Strengths:** Simple to implement as a post-processing or pre-rasterization step; effective at reducing aliasing without retraining the model.
+*   **Limitations:** Requires runtime computation of filter parameters; may blur fine details if the adaptive factor is not tuned correctly.
+*   **When to use:** When rendering 3DGS scenes at varying resolutions or distances where aliasing is visible.
 
 ## Background
-SA-GS was introduced as a solution to the aliasing problem in 3D Gaussian Splatting [S1]. It builds upon the standard 3DGS framework by adding a post-projection filtering step that adapts to the rendering context [S1]. The method is cited in recent surveys of 3D Gaussian Splatting advancements [S1].
+Scale-Adaptive Gaussian Splatting (SA-GS) was introduced to address the aliasing problem inherent in 3D Gaussian Splatting when rendering at different scales [S1]. It utilizes an adaptive 2D low-pass filter at test time, adjusted according to the rendering resolution and camera distance [S1]. The method is cited in recent surveys of 3D Gaussian Splatting advancements [S1].
 
 ## Sources
 [S1] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

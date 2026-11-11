@@ -12,57 +12,55 @@ Contouring Discrete Indicator Functions (DIF) is a surface extraction method des
 
 **Data Structures:**
 *   **DIF Grid:** A 3D array of floating-point values representing volume fractions [S1].
-*   **Dual Grid:** The method operates on a dual grid where vertices correspond to the centers of the primal DIF cells. Edges of the dual grid connect adjacent cell centers [S1].
-*   **Lookup Table:** Standard Marching Cubes topology lookup table, indexed by the binary occupancy (inside/outside) of the 8 primal cells surrounding a dual cell vertex [S1].
+*   **Dual Grid:** The method operates on a dual grid where vertices correspond to the centers of the primal DIF cells [S1]. Edges of the dual grid connect adjacent cell centers [S1].
+*   **Lookup Table:** Standard Marching Cubes topology lookup table, indexed by the binary occupancy (inside/outside) of the 8 primal cells surrounding a dual cell vertex [G].
 
 **Method Steps:**
-The method is a modification of Marching Cubes. It retains the standard MC topology generation but replaces the linear interpolation used to determine vertex positions along cell edges with a new interpolant tailored for DIFs [S1].
+The method is a modification of Marching Cubes [S1]. It retains the standard MC topology generation but replaces the linear interpolation used to determine vertex positions along cell edges with a new interpolant tailored for DIFs [S1].
 
 1.  **Grid Setup:** Identify the dual grid edges. Each dual edge connects the centers of two adjacent primal cells with volume fractions $a_1$ and $a_2$ [S1].
 2.  **Intersection Check:** For each dual edge, determine if the isosurface intersects it. The condition for intersection is:
     $$ a_1 < 0.5 \leq a_2 \quad \text{OR} \quad a_2 < 0.5 \leq a_1 $$
     If this condition is false, no vertex is placed on this edge [S1].
-3.  **Case Selection:** If an intersection exists, determine which of the four geometric cases (Case 1, 2, 3, or 4) applies based on $a_1$ and $a_2$. The cases correspond to different ways a straight line can separate the interior and exterior areas of the two adjacent cells to match $a_1$ and $a_2$ [S1]. Use the efficient selection logic described below to determine the case [S1].
-4.  **Vertex Position Calculation:** Calculate the intersection parameter $t$ along the dual edge using the formula corresponding to the selected case. The dual edge is defined parametrically as $p(t) = p_1(1-t) + p_2 t$, where $p_1$ and $p_2$ are the centers of the adjacent cells. The vertex is placed at $p(t)$ [S1].
-5.  **Topology Generation:** For each dual cell (which corresponds to a primal cell in the original grid), determine the binary occupancy of its 8 surrounding primal cells (inside if $a \geq 0.5$, outside if $a < 0.5$). Use the standard Marching Cubes lookup table to generate the triangle topology for that dual cell [S1].
-6.  **Mesh Assembly:** Assemble all generated triangles into the final mesh [S1].
+3.  **Case Selection:** If an intersection exists, determine which of the four geometric cases (Case 1, 2, 3, or 4) applies based on $a_1$ and $a_2$ [S1]. The cases correspond to different ways a straight line can separate the interior and exterior areas of the two adjacent cells to match $a_1$ and $a_2$ [S1]. Use the efficient selection logic described below to determine the case [S1].
+4.  **Vertex Position Calculation:** Calculate the intersection parameter $t$ along the dual edge using the formula corresponding to the selected case [S1]. The dual edge is defined parametrically as $p(t) = p_1(1-t) + p_2 t$, where $p_1$ and $p_2$ are the centers of the adjacent cells [S1]. The vertex is placed at $p(t)$ [S1].
+5.  **Topology Generation:** For each dual cell (which corresponds to a primal cell in the original grid), determine the binary occupancy of its 8 surrounding primal cells (inside if $a \geq 0.5$, outside if $a < 0.5$) [G]. Use the standard Marching Cubes lookup table to generate the triangle topology for that dual cell [G].
+6.  **Mesh Assembly:** Assemble all generated triangles into the final mesh [G].
 
 **Efficient Case Selection Logic:**
-The domain of $(a_1, a_2)$ is partitioned into four regions. The method reduces the number of checks required to identify the correct case to two simple linear checks and one quadratic check performed one-third of the time [S1]:
+The domain of $(a_1, a_2)$ is partitioned into four regions [S1]. The method reduces the number of checks required to identify the correct case to two simple linear checks and one quadratic check performed one-third of the time [S1]:
 
 1.  **Check Case 1:** Verify if the linear inequalities hold:
     $$ 0 \leq \frac{3a_1 - a_2}{2} \leq 1 \quad \text{AND} \quad 0 \leq \frac{3a_2 - a_1}{2} \leq 1 $$
     If true, the case is Case 1 [S1].
-2.  **Check Case 2:** If not Case 1, check if the point lies in the region where neither Case 1 half-space applies. Specifically, check if:
+2.  **Check Case 2:** If not Case 1, check if the point lies in the region where neither Case 1 half-space applies [S1]. Specifically, check if:
     $$ a_2 > 3a_1 \quad \text{AND} \quad 3a_2 > a_1 + 2 $$
     If true, the case is Case 2 [S1].
-3.  **Quadratic Check (Case 3 vs 4):** If neither Case 1 nor Case 2, perform a quadratic check to distinguish between Case 3 and Case 4. Define $\bar{a}_1 = 1 - a_2$ and $\bar{a}_2 = 1 - a_1$.
-    *   If $(2\bar{a}_1 + 2\bar{a}_2 - 1)^2 < 4\bar{a}_1(\bar{a}_1 + \bar{a}_2)$, select **Case 3**.
+3.  **Quadratic Check (Case 3 vs 4):** If neither Case 1 nor Case 2, perform a quadratic check to distinguish between Case 3 and Case 4 [S1]. Define $\bar{a}_1 = 1 - a_2$ and $\bar{a}_2 = 1 - a_1$ [S1].
+    *   If $(2\bar{a}_1 + 2\bar{a}_2 - 1)^2 < 4\bar{a}_1(\bar{a}_1 + \bar{a}_2)$, select **Case 3** [S1].
     *   Otherwise, select **Case 4** [S1].
 
 **Formulas for Intersection Parameter $t$:**
-Let $a_1$ and $a_2$ be the volume fractions of the two cells connected by the dual edge. The source formulas assume $a_1 < 0.5 \leq a_2$; if $a_2 < 0.5 \leq a_1$, swap the values and invert the resulting $t$ ($t' = 1 - t$) [S1].
+Let $a_1$ and $a_2$ be the volume fractions of the two cells connected by the dual edge [S1]. The source formulas assume $a_1 < 0.5 \leq a_2$; if $a_2 < 0.5 \leq a_1$, swap the values and invert the resulting $t$ ($t' = 1 - t$) [S1].
 
-*   **Case 1 (Side-Side):** The line intersects the left side of the left cell and the right side of the right cell.
+*   **Case 1 (Side-Side):** The line intersects the left side of the left cell and the right side of the right cell [S1].
     $$ t = \frac{a_1 - 0.5}{a_1 - a_2} $$
     This is identical to linear interpolation [S1].
 
-*   **Case 2 (Bottom-Top):** The line intersects the bottom of the left cell and the top of the right cell.
+*   **Case 2 (Bottom-Top):** The line intersects the bottom of the left cell and the top of the right cell [S1].
     $$ t = 1.5 - a_1 - a_2 $$
     This formula is derived from the valid solution of the quadratic system for this configuration [S1].
 
-*   **Case 3 (Bottom-Side):** The line intersects the bottom of the left cell and the right side of the right cell.
+*   **Case 3 (Bottom-Side):** The line intersects the bottom of the left cell and the right side of the right cell [S1].
     $$ t = 1 - \frac{2a_2 - 1}{8a_1 + 4a_2 - 8\sqrt{a_1(a_1 + a_2)}} $$
     This formula uses the valid solution for $m$ and $b$ that results in a line intersecting the boundary correctly [S1].
 
-*   **Case 4 (Side-Top):** The line intersects the left side of the left cell and the top of the right cell.
-    Define $\bar{a}_1 = 1 - a_2$ and $\bar{a}_2 = 1 - a_1$.
+*   **Case 4 (Side-Top):** The line intersects the left side of the left cell and the top of the right cell [S1].
+    Define $\bar{a}_1 = 1 - a_2$ and $\bar{a}_2 = 1 - a_1$ [S1].
     $$ t = \frac{2\bar{a}_2 - 1}{8\bar{a}_1 + 4\bar{a}_2 - 8\sqrt{\bar{a}_1(\bar{a}_1 + \bar{a}_2)}} $$
     This is the symmetric counterpart to Case 3 [S1].
 
 **Pseudocode:**
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
@@ -187,38 +185,160 @@ def marching_cubes_lookup(bits, v_indices):
     Standard MC lookup table implementation [G].
     Returns list of triangles given cell bits and 8 vertex indices.
     """
-    # Edge table: maps 8-bit cell configuration to a set of intersected edges
     edge_table = [
         0x000, 0x351, 0x451, 0x700, 0x651, 0x500, 0x051, 0x300,
         0x051, 0x300, 0x051, 0x300, 0x051, 0x300, 0x051, 0x300,
-        # ... (standard 256-entry edge table omitted for brevity, standard implementation assumed)
+        0x451, 0x700, 0x451, 0x700, 0x451, 0x700, 0x451, 0x700,
+        0x451, 0x700, 0x451, 0x700, 0x451, 0x700, 0x451, 0x700,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x451, 0x700, 0x451, 0x700, 0x451, 0x700, 0x700, 0x451,
+        0x451, 0x700, 0x451, 0x700, 0x451, 0x700, 0x700, 0x451,
+        0x451, 0x700, 0x451, 0x700, 0x451, 0x700, 0x700, 0x451,
+        0x451, 0x700, 0x451, 0x700, 0x451, 0x700, 0x700, 0x451,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x651, 0x500, 0x051, 0x300, 0x651, 0x500, 0x051, 0x300,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351,
+        0x051, 0x300, 0x000, 0x351, 0x051, 0x300, 0x000, 0x351
     ]
-    # Triangle table: maps intersected edges to triangle vertex indices
-    # Standard MC triangle table [G]
-    # For a complete implementation, the full 256-entry edge_table and triangle_table 
-    # from Williams et al. [WMW86] are used. Here we assume a standard lookup.
-    # This step is generic MC topology generation [G].
-    return []
-```
-
-## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of cells, as it processes each dual edge and dual cell once. The case selection involves a constant number of arithmetic operations [S1].
-*   **Memory Complexity:** $O(N)$ to store the DIF and the output mesh. The method does not require iterative relaxation or optimization, so no additional memory for convergence states is needed [S1].
-*   **Measured Performance:** The method is described as "much more efficient" than iterative smoothing methods like Surface Nets or Pressing because it produces an aliasing-free contour without iteration [S1].
-*   **Strengths:**
-    *   Eliminates aliasing and oscillations on DIFs [S1].
-    *   Exactly reproduces straight lines represented by the DIF [S1].
-    *   No iterative optimization required [S1].
-*   **Limitations:**
-    *   Does not preserve area for curved boundaries. Because the MC topology connects vertices with straight lines, the method underestimates area in regions of positive curvature and overestimates area in regions of negative curvature [S1].
-    *   The 3D solution is a reduction of the 2D solution. It does not fully constrain the 3D plane with only two samples, so it is an approximation for unaligned planes [S1].
-*   **When to use:** When contouring Discrete Indicator Functions (volume fractions) where aliasing from linear interpolation is unacceptable and exact reproduction of linear features is desired [S1].
-*   **When not to use:** When high accuracy on highly curved surfaces is required, as area preservation is not guaranteed for non-linear boundaries [S1].
-
-## Background
-*   **Origin:** Introduced by J. Manson, J. Smith, and S. Schaefer from Texas A&M University, USA [S1].
-*   **History:** The method was developed to address the poor performance of Marching Cubes and its derivatives when contouring non-smooth functions like Discrete Indicator Functions (DIFs), which are common in computer graphics (e.g., pixels representing shapes) [S1]. Prior methods like Surface Nets or Pressing required iterative relaxation to remove aliasing, whereas this method provides a direct, non-iterative solution [S1].
-*   **Usage:** Used in computer graphics for reconstructing boundaries from multi-material volume fractions, specifically in the two-material case [S1].
-
-## Sources
-[S1] Contouring Discrete Indicator Functions, https://doi.org/10.1111/j.1467-8659.2011.01869.x, fetched 2026-10-27
+    triangle_table = [
+        [], [], [], [8,3], [], [11,8], [], [11,8,3], [], [3,1], [], [11,8,1,11,1,3], [], [1,2,8], [8,2,11], [],
+        [], [3,7], [], [3,7,8], [8,7,0], [0,7,11], [], [11,0,3], [], [0,1], [1,7,0], [7,1,3], [], [7,2,8], [8,2,11], [11,2,7],
+        [], [2,3], [2,3,1], [], [2,1,4], [4,1,11], [], [11,4,3], [], [4,2,3], [2,4,1], [], [], [3,4,11], [11,4,2],
+        [4,11,8], [8,11,4], [4,11,3], [3,11,8], [4,3,1], [1,3,11], [], [1,4,11], [4,2,3], [3,2,1], [4,1,2], [2,4,3], [], [2,3,8], [8,3,11], [11,3,2],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11], [11,1,8], [4,3,1], [3,11,1], [4,11,3], [11,3,4], [], [3,4,2], [2,4,11], [11,4,3],
+        [3,10,5], [3,10,11], [5,2,1], [5,2,3], [1,2,5], [2,10,5], [], [5,10,3], [10,7,8], [10,7,11], [7,1,5], [7,1,3], [1,5,9], [5,7,1], [9,7,10], [10,7,1],
+        [], [], [2,8,4], [2,8,4,3], [4,2,1], [1,2,8], [4,1,11],

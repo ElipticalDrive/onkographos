@@ -1,0 +1,143 @@
+# Spherical Harmonics Lighting Calculation
+
+Also called: SH Evaluation with Lighting, SH Lighting
+
+## Overview
+This method computes the RGB color contribution of a 3D Gaussian splat by evaluating real spherical harmonics (SH) against a viewing direction vector. It solves the problem of representing view-dependent lighting effects (such as specular highlights and ambient occlusion) compactly within the Gaussian representation. It differs from [Spherical Harmonics Evaluation](3848-spherical-harmonics-evaluation.md) by explicitly defining the lighting calculation pipeline, including the specific Condon–Shortley phase conventions, the mandatory 0.5 bias for numeric stability, and the exact polynomial expansions for degrees 0 through 3.
+
+## How it works
+**Inputs:**
+- $SH_{l,m}$: The spherical harmonic coefficients for the Gaussian. These are stored as RGB vectors. For each degree $l$, there are $2l+1$ coefficients (orders $m = -l \dots l$). Each coefficient contains 3 floats (R, G, B).
+- $\mathbf{v} = (x, y, z)$: The normalized viewing direction vector.
+
+**Outputs:**
+- $\mathbf{C}_{final}$: The resulting RGB color vector.
+
+**Data Structures:**
+The coefficients are typically stored in a flat array or interleaved structure. For degree $l$, the coefficients are indexed by order $m$. The source specifies that for degree $n$, the total number of coefficients is $SH_n \times 3 = SH_{total}$, where $SH_n$ is the count of SH basis functions for that degree (3 for $l=0$, 9 for $l=1$, 15 for $l=2$, 21 for $l=3$).
+
+**Step-by-Step Calculation:**
+
+1.  **Normalize Direction:** Ensure the direction vector $\mathbf{v}$ is a unit vector. In 3D Gaussian Splatting, direction vectors are normalized, so $r = \sqrt{x^2 + y^2 + z^2} = 1$. If not normalized, compute $r$ and divide $x, y, z$ by $r$.
+2.  **Compute Degree 0 (Diffuse):**
+    Calculate the zeroth-order contribution. This represents the base diffuse color.
+    $$Color_{SH_0} = SH_{0,0} \cdot 0.2820947917738781$$
+    Where $SH_{0,0}$ is the vector of 3 RGB coefficients for the zeroth-order harmonic.
+3.  **Compute Degree 1 (First Order):**
+    $$Color_{SH_1} = SH_{1,-1} \cdot y \cdot -0.4886025119029199 + SH_{1,0} \cdot z \cdot 0.4886025119029199 + SH_{1,1} \cdot x \cdot -0.4886025119029199$$
+    Where $SH_{1,m}$ are the RGB coefficient vectors for orders $-1, 0, 1$.
+4.  **Compute Degree 2 (Second Order):**
+    $$Color_{SH_2} = SH_{2,-2} \cdot xy \cdot 1.092548430592079 + SH_{2,-1} \cdot yz \cdot -1.092548430592079 + SH_{2,0} \cdot (2z^2 - x^2 - y^2) \cdot 0.3153915652525200 + SH_{2,1} \cdot xz \cdot -1.092548430592079 + SH_{2,2} \cdot (x^2 - y^2) \cdot 0.5462742152960395$$
+5.  **Compute Degree 3 (Third Order):**
+    $$Color_{SH_3} = SH_{3,-3} \cdot y(3x^2 - y^2) \cdot -0.5900435899266435 + SH_{3,-2} \cdot xyz \cdot 2.890611442640554 + SH_{3,-1} \cdot y(4z^2 - x^2 - y^2) \cdot -0.4570457994644657 + SH_{3,0} \cdot z(2z^2 - 3x^2 - 3y^2) \cdot 0.3731763325901154 + SH_{3,1} \cdot x(4z^2 - x^2 - y^2) \cdot -0.4570457994644657 + SH_{3,2} \cdot z(x^2 - y^2) \cdot 1.445305721320277 + SH_{3,3} \cdot x(x^2 - 3y^2) \cdot -0.5900435899266435$$
+6.  **Sum and Bias:**
+    Sum the contributions from all available degrees and apply the 0.5 bias.
+    $$Color_{final} = Color_{SH_0} + Color_{SH_1} + Color_{SH_2} + Color_{SH_3} + 0.5$$
+    The 0.5 bias is applied to keep the spherical harmonics within the [0, 1] range during training and rendering, ensuring numeric stability and allowing coefficients to remain in a valid range for unsigned normalized color buffers [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def spherical_harmonics_lighting(sh_coeffs, direction_x, direction_y, direction_z):
+    """
+    Computes the RGB color of a Gaussian using Spherical Harmonics.
+    
+    Args:
+        sh_coeffs: A dictionary or structured object containing SH coefficients.
+                   Keys are tuples (l, m). Values are numpy arrays of shape (3,) for RGB.
+                   Example: sh_coeffs[(0,0)], sh_coeffs[(1,-1)], etc.
+        direction_x, direction_y, direction_z: Components of the normalized viewing direction vector.
+        
+    Returns:
+        numpy array of shape (3,) representing the final RGB color.
+    """
+    # Constants
+    C0 = 0.2820947917738781
+    C1 = 0.4886025119029199
+    C2_2m2 = 1.092548430592079
+    C2_2m1 = -1.092548430592079
+    C2_20 = 0.3153915652525200
+    C2_21 = -1.092548430592079
+    C2_22 = 0.5462742152960395
+    C3_3m3 = -0.5900435899266435
+    C3_3m2 = 2.890611442640554
+    C3_3m1 = -0.4570457994644657
+    C3_30 = 0.3731763325901154
+    C3_31 = -0.4570457994644657
+    C3_32 = 1.445305721320277
+    C3_33 = -0.5900435899266435
+    
+    color = np.zeros(3)
+    
+    # Degree 0
+    if (0, 0) in sh_coeffs:
+        color += sh_coeffs[(0, 0)] * C0
+        
+    # Degree 1
+    if (1, -1) in sh_coeffs and (1, 0) in sh_coeffs and (1, 1) in sh_coeffs:
+        color += sh_coeffs[(1, -1)] * direction_y * -C1
+        color += sh_coeffs[(1, 0)] * direction_z * C1
+        color += sh_coeffs[(1, 1)] * direction_x * -C1
+        
+    # Degree 2
+    if all((2, m) in sh_coeffs for m in [-2, -1, 0, 1, 2]):
+        xy = direction_x * direction_y
+        yz = direction_y * direction_z
+        xz = direction_x * direction_z
+        term_20 = 2 * direction_z**2 - direction_x**2 - direction_y**2
+        term_22 = direction_x**2 - direction_y**2
+        
+        color += sh_coeffs[(2, -2)] * xy * C2_2m2
+        color += sh_coeffs[(2, -1)] * yz * C2_2m1
+        color += sh_coeffs[(2, 0)] * term_20 * C2_20
+        color += sh_coeffs[(2, 1)] * xz * C2_21
+        color += sh_coeffs[(2, 2)] * term_22 * C2_22
+        
+    # Degree 3
+    if all((3, m) in sh_coeffs for m in [-3, -2, -1, 0, 1, 2, 3]):
+        term_3m3 = direction_y * (3 * direction_x**2 - direction_y**2)
+        term_3m2 = direction_x * direction_y * direction_z
+        term_3m1 = direction_y * (4 * direction_z**2 - direction_x**2 - direction_y**2)
+        term_30 = direction_z * (2 * direction_z**2 - 3 * direction_x**2 - 3 * direction_y**2)
+        term_31 = direction_x * (4 * direction_z**2 - direction_x**2 - direction_y**2)
+        term_32 = direction_z * (direction_x**2 - direction_y**2)
+        term_33 = direction_x * (direction_x**2 - 3 * direction_y**2)
+        
+        color += sh_coeffs[(3, -3)] * term_3m3 * C3_3m3
+        color += sh_coeffs[(3, -2)] * term_3m2 * C3_3m2
+        color += sh_coeffs[(3, -1)] * term_3m1 * C3_3m1
+        color += sh_coeffs[(3, 0)] * term_30 * C3_30
+        color += sh_coeffs[(3, 1)] * term_31 * C3_31
+        color += sh_coeffs[(3, 2)] * term_32 * C3_32
+        color += sh_coeffs[(3, 3)] * term_33 * C3_33
+        
+    # Apply bias
+    color += 0.5
+    
+    return color
+```
+
+**Parameters:**
+- $r$: Magnitude of the direction vector. In 3D Gaussian Splatting, this is always 1 due to normalization [S1].
+- $SH_{l,m}$: RGB coefficients for degree $l$ and order $m$ [S1].
+- $x, y, z$: Components of the direction vector [S1].
+
+**Pitfalls:**
+- **Partial Definitions:** Higher order spherical harmonics are optional, but if used, lower order spherical harmonics MUST also be provided. Each order MUST be fully defined; partial definitions (e.g., providing $SH_{2,0}$ but not $SH_{2,-2}$) are not allowed [S1].
+- **Clamping:** If using unsigned normalized color buffers, values less than 0 or greater than 1 are clamped automatically. The 0.5 bias helps keep values within [0, 1] [S1].
+- **Condon–Shortley Phase:** Odd values for order ($m$) are negated. This is handled by the negative signs in the constants provided above [S1].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per Gaussian, as the number of degrees (up to 3) is fixed. The number of multiplications and additions is constant (approx. 50-60 FLOPs for degree 3).
+- **Memory Complexity:** $O(1)$ per Gaussian for coefficients. Degree 0 requires 9 floats (3 RGB $\times$ 3 coeffs), Degree 1 adds 27, Degree 2 adds 45, Degree 3 adds 63. Total for degree 3 is 144 floats per Gaussian.
+- **Strengths:** Compact representation of view-dependent effects. Efficient evaluation.
+- **Limitations:** Limited angular resolution with low degrees. Higher degrees increase memory and compute cost.
+- **When to use:** When view-dependent lighting (specular, anisotropy) is important and memory/compute budget allows for higher SH degrees.
+- **When not to use:** When only diffuse lighting is needed (use Degree 0 only). When memory is extremely constrained.
+
+## Background
+This method is defined in the KHR_gaussian_splatting extension for glTF, which standardizes the storage and rendering of 3D Gaussian Splatting assets. It builds on the mathematical foundations of spherical harmonics used in computer graphics for lighting approximation. The specific constants and biasing strategy are tailored for the 3D Gaussian Splatting pipeline to ensure compatibility with standard graphics APIs and color buffers.
+
+## Sources
+[S1] KHR_gaussian_splatting README, https://github.com/KhronosGroup/glTF/blob/main/extensions/2.0/Khronos/KHR_gaussian_splatting/README.md, fetched 2026-10-30

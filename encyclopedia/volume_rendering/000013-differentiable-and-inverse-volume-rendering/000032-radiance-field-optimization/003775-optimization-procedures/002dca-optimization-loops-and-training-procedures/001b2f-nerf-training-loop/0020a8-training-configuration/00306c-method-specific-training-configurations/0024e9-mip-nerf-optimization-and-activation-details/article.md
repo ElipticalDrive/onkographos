@@ -3,211 +3,266 @@
 Also called: JaxNeRF Training Procedure, Mip-NeRF Misc. Changes
 
 ## Overview
-This article details the specific implementation optimizations, activation functions, and learning rate schedules used to train Mip-NeRF and JaxNeRF models. It addresses the problem of training instability and catastrophic failure modes (such as zero gradients from negative density predictions) that can occur with standard NeRF configurations. It sets itself apart from standard NeRF training by replacing ReLU with shifted softplus for density, using a "widened" sigmoid for color, removing identity encoding from MLP inputs, and employing a specific warmup learning rate schedule [S1].
+This article details the specific optimization hyperparameters, activation functions, and architectural modifications used in the original Mip-NeRF and JaxNeRF implementations to ensure training stability and robustness [S1]. It solves the problem of optimization failure modes (such as zero gradients from negative density predictions) and aliasing artifacts in multiscale radiance fields. It sets itself apart from standard NeRF training by replacing the identity encoding with Integrated Positional Encoding (IPE) inputs, using shifted softplus and widened sigmoid activations, and employing a specific warmup learning rate schedule [S1].
 
 ## How it works
-The method defines a specific training configuration for the Mip-NeRF architecture. It modifies the neural network's activation functions, input encoding strategy, and optimizer schedule to improve robustness without significantly altering accuracy or speed [S1].
+The method defines the training loop configuration, MLP input/output handling, and activation functions for the Mip-NeRF architecture.
 
-### Inputs and Outputs
-*   **Inputs:** Integrated Positional Encoding (IPE) features derived from conical frustums; normalized ray direction; ground truth images (RGB).
-*   **Outputs:** Predicted density $\tau$ and color $c$ for each sample point; final rendered pixel color.
+**Inputs and Outputs:**
+*   **Input:** Rays defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, along with their associated multiscale Gaussian parameters (mean and covariance) for Integrated Positional Encoding (IPE).
+*   **Output:** Density $\tau$ and color $c$ for each sample point along the ray.
 
-### Data Structures
-*   **MLP Input:** A vector containing only the IPE features. The concatenation of original position and view direction (identity encoding) is removed [S1].
-*   **MLP Architecture:** Standard MLP layers. The view direction is injected into the last layer [S1].
+**Data Structures:**
+*   **MLP Input:** A vector containing only the Integrated Positional Encoding (IPE) features. The original NeRF practice of concatenating the raw position and view direction (identity encoding) is removed [S1].
+*   **View Direction Injection:** The view direction $\mathbf{d}$ is processed separately and injected into the MLP's final layer [S1].
 
-### Numbered Steps
+**Numbered Steps:**
 
-1.  **Input Encoding:**
-    *   Compute the Integrated Positional Encoding (IPE) for the conical frustum defined by the ray segment.
-    *   Normalize the ray direction $d$.
-    *   Apply positional encoding to $d$ with $L=4$ frequencies [S1].
+1.  **Ray Direction Processing:**
+    *   Normalize the ray direction: $\mathbf{d}_{norm} = \mathbf{d} / \|\mathbf{d}\|$.
+    *   Apply positional encoding to $\mathbf{d}_{norm}$ with frequency bands $L=4$ [S1].
+    *   This encoded direction is held until the final layer of the MLP [S1].
 
-2.  **Density Prediction ($\tau$):**
+2.  **MLP Forward Pass (Density):**
     *   Pass the IPE features through the MLP layers.
-    *   Apply the **shifted softplus** activation function to the output logits $x$ to produce density $\tau$:
-        $$ \tau = \log(1 + \exp(x - 1)) $$
-    *   This is equivalent to initializing the bias for the density output to $-1$, ensuring initial $\tau$ values are small [S1].
+    *   The final layer outputs a scalar value $x_\tau$.
+    *   Apply the **Density Activation** function to produce density $\tau$:
+        $$ \tau = \log(1 + \exp(x_\tau - 1)) $$
+    *   This is a shifted softplus function. The shift by $-1$ is equivalent to initializing the bias of the density output layer to $-1$, resulting in small initial density values [S1].
 
-3.  **View Direction Injection:**
-    *   Concatenate the positionally encoded view direction to the features after $\tau$ is predicted but before color $c$ is predicted [S1].
+3.  **MLP Forward Pass (Color):**
+    *   Concatenate the output of the previous MLP layers (before the density head) with the encoded view direction from Step 1.
+    *   Pass this concatenated vector through the final color layer to produce a scalar value $x_c$ (for each color channel).
+    *   Apply the **Color Activation** function to produce color $c$:
+        $$ c = \frac{1 + 2\epsilon}{1 + \exp(-x_c)} - \epsilon $$
+    *   Where $\epsilon = 0.001$. This is a "widened" sigmoid that saturates slightly outside the $[0, 1]$ range [S1].
 
-4.  **Color Prediction ($c$):**
-    *   Pass the combined features through the final MLP layer.
-    *   Apply the **widened sigmoid** activation function to the output logits $x$ to produce color $c$:
-        $$ c = \frac{1 + 2\epsilon}{1 + \exp(-x)} - \epsilon $$
-    *   Where $\epsilon = 0.001$. This allows the output to saturate slightly outside $[0, 1]$ [S1].
-
-5.  **Volume Rendering:**
-    *   Accumulate $\tau$ and $c$ along the ray using the standard volume rendering equation to produce the final pixel color [S1].
-
-6.  **Loss Calculation:**
-    *   Compute the photometric loss (e.g., MSE or Charbonnier) between the rendered image and the ground truth [S1].
-
-7.  **Optimization:**
-    *   Use the Adam optimizer with the specific learning rate schedule defined below [S1].
-
-### Formulas
-
-**Density Activation (Shifted Softplus):**
-$$ \tau = \log(1 + \exp(x - 1)) $$
-*   $x$: Logit output from the MLP.
-*   Purpose: Prevents catastrophic failure where MLP emits negative values everywhere, which would result in zero gradients for $\tau$ [S1].
-
-**Color Activation (Widened Sigmoid):**
-$$ c = \frac{1 + 2\epsilon}{1 + \exp(-x)} - \epsilon $$
-*   $x$: Logit output from the MLP.
-*   $\epsilon = 0.001$.
-*   Purpose: Avoids optimization failure when explaining black or white pixels by allowing saturation outside the $[0, 1]$ range [S1].
+4.  **Optimization Loop:**
+    *   Use the Adam optimizer [S1].
+    *   Iterate for $n = 1,000,000$ iterations [S1].
+    *   Use a batch size of 4096 rays [S1].
+    *   Compute the loss (typically MSE or Charbonnier, as per parent context) between rendered pixels and ground truth.
+    *   Update weights using the learning rate schedule defined below.
 
 **Learning Rate Schedule:**
+The learning rate $\eta_i$ at iteration $i$ is calculated as:
 $$ \eta_i = \left( \lambda_w + (1 - \lambda_w) \sin\left(\frac{\pi}{2} \operatorname{clip}\left(\frac{i}{n_w}, 0, 1\right)\right) \right) \times \left( \exp\left( (1 - \frac{i}{n}) \log(\eta_0) + \frac{i}{n} \log(\eta_n) \right) \right) $$
-*   $i$: Current iteration index.
-*   $n$: Total number of iterations ($1,000,000$).
-*   $n_w$: Warmup iterations ($2,500$).
-*   $\eta_0$: Initial learning rate ($5 \cdot 10^{-4}$).
-*   $\eta_n$: Final learning rate ($5 \cdot 10^{-6}$).
-*   $\lambda_w$: Warmup scale factor, annealed from $0.01$ to $1$ during the warmup period [S1].
 
-### Parameters
-*   **Optimizer:** Adam [S1].
-*   **Total Iterations ($n$):** 1,000,000 [S1].
-*   **Batch Size:** 4096 [S1].
-*   **Initial Learning Rate ($\eta_0$):** $5 \cdot 10^{-4}$ [S1].
-*   **Final Learning Rate ($\eta_n$):** $5 \cdot 10^{-6}$ [S1].
-*   **Warmup Iterations ($n_w$):** 2,500 [S1].
-*   **Warmup Start Factor ($\lambda_{w,start}$):** 0.01 [S1].
-*   **Warmup End Factor ($\lambda_{w,end}$):** 1 [S1].
-*   **Positional Encoding for View Direction ($L$):** 4 [S1].
-*   **Widened Sigmoid Epsilon ($\epsilon$):** 0.001 [S1].
+Where:
+*   $n_w = 2500$ is the number of warmup iterations [S1].
+*   $\eta_0 = 5 \cdot 10^{-4}$ is the initial learning rate [S1].
+*   $\eta_n = 5 \cdot 10^{-6}$ is the final learning rate [S1].
+*   $\lambda_w$ is a warmup scale factor that is annealed from $0.01$ to $1$ during the first $n_w$ iterations [S1]. Specifically, during warmup ($i < n_w$), the base learning rate is scaled by $\lambda_w + (1 - \lambda_w) \sin(\frac{\pi}{2} \frac{i}{n_w})$. After warmup, $\lambda_w = 1$, so the scale factor is 1, and the learning rate decays logarithmically from $\eta_0$ to $\eta_n$ [S1].
 
-### Edge Cases and Pitfalls
-*   **Negative Density:** Using standard ReLU for density can cause the MLP to emit negative values everywhere, leading to zero gradients and optimization failure. The shifted softplus prevents this [S1].
-*   **Black/White Pixel Saturation:** Standard sigmoid saturation can cause optimization failure when trying to explain extreme pixel values. The widened sigmoid mitigates this [S1].
-*   **Identity Encoding:** Concatenating original position/view direction with PE (identity encoding) does not meaningfully improve performance or speed and complicates the formalization of IPE features. It is removed in this configuration [S1].
-*   **Correlation Insensitivity:** IPE features are insensitive to off-diagonal elements of the covariance matrix $\Sigma$ (correlation). Experiments show that modeling this correlation does not improve accuracy [S1].
-
-### Pseudocode
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
-import numpy as np
 
-def shifted_softplus(x):
-    """
-    Density activation function.
-    Equivalent to log(1 + exp(x - 1)).
-    """
-    return np.log(1 + np.exp(x - 1))
+def density_activation(x):
+    """Shifted softplus activation for density."""
+    return math.log(1 + math.exp(x - 1))
 
-def widened_sigmoid(x, epsilon=0.001):
-    """
-    Color activation function.
-    Saturates slightly outside [0, 1].
-    """
-    return (1 + 2 * epsilon) / (1 + np.exp(-x)) - epsilon
+def color_activation(x, epsilon=0.001):
+    """Widened sigmoid activation for color."""
+    return (1 + 2 * epsilon) / (1 + math.exp(-x)) - epsilon
 
-def compute_learning_rate(i, n, n_w, eta_0, eta_n, lambda_w_start=0.01, lambda_w_end=1.0):
+def learning_rate_schedule(i, n=1000000, n_w=2500, eta_0=5e-4, eta_n=5e-6):
     """
-    Computes the learning rate at iteration i.
+    Calculates the learning rate for iteration i.
+    Includes warmup phase and logarithmic decay.
     """
-    # Clip warmup progress to [0, 1]
-    warmup_progress = min(max(i / n_w, 0.0), 1.0)
+    # Calculate warmup scale factor lambda_w
+    # lambda_w is annealed from 0.01 to 1 during warmup
+    if i < n_w:
+        # clip(i/n_w, 0, 1) is just i/n_w since i < n_w
+        sin_val = math.sin((math.pi / 2) * (i / n_w))
+        lambda_w = 0.01 + (1 - 0.01) * sin_val
+    else:
+        lambda_w = 1.0
     
-    # Anneal lambda_w from start to end during warmup
-    lambda_w = lambda_w_start + (lambda_w_end - lambda_w_start) * math.sin(math.pi / 2 * warmup_progress)
+    # Calculate the warmup multiplier
+    # Formula: lambda_w + (1 - lambda_w) * sin(...)
+    # Note: The formula in [S1] uses lambda_w inside the term.
+    # If i >= n_w, lambda_w=1, so term is 1.
+    # If i < n_w, lambda_w varies.
+    # The term is: lambda_w + (1 - lambda_w) * sin(pi/2 * clip(i/n_w, 0, 1))
+    # Since we calculated lambda_w based on the same logic, we can simplify:
+    # Actually, the formula defines lambda_w as the *result* of the annealing?
+    # No, [S1] says: "scale factor that is smoothly annealed between lambda_w = 0.01 and 1".
+    # And the formula is: (lambda_w + (1-lambda_w) * sin(...))
+    # This implies lambda_w in the formula is the *current* value of the annealed parameter?
+    # Let's re-read carefully: "scale factor that is smoothly annealed between lambda_w = 0.01 and 1".
+    # Usually, this means the parameter itself is the variable.
+    # Let's implement the formula exactly as written, assuming lambda_w is the variable being annealed.
+    # But the formula uses lambda_w on both sides?
+    # "scale factor ... annealed between 0.01 and 1 ... The learning rate ... is: (lambda_w + ...)"
+    # This suggests lambda_w in the formula IS the annealed value.
+    # Let's define a helper for the annealed lambda.
     
-    # Logarithmic annealing for the base learning rate
-    base_lr = math.exp((1 - i / n) * math.log(eta_0) + (i / n) * math.log(eta_n))
+    # Re-evaluating [S1] text: "scale factor that is smoothly annealed between lambda_w = 0.01 and 1"
+    # Formula: eta_i = (lambda_w + (1 - lambda_w) * sin(...)) * (...)
+    # If lambda_w is the annealed value, then at i=0, lambda_w=0.01.
+    # Term = 0.01 + 0.99 * sin(0) = 0.01.
+    # At i=n_w, lambda_w=1.
+    # Term = 1 + 0 * sin(pi/2) = 1.
+    # This matches the description "annealed between 0.01 and 1".
     
-    return (lambda_w + (1 - lambda_w) * math.sin(math.pi / 2 * warmup_progress)) * base_lr
-
-def mip_nerf_forward_pass(ipe_features, ray_direction, mlp_weights):
-    """
-    Simulates the forward pass of the Mip-NeRF MLP with specific activations.
+    # So, lambda_w_current is the annealed value.
+    # How is lambda_w_current calculated?
+    # "smoothly annealed between 0.01 and 1 during this warm up period"
+    # The formula for eta_i uses lambda_w. It does not define lambda_w separately in the text block,
+    # but implies lambda_w IS the annealed scale factor.
+    # Wait, the formula has lambda_w inside the sin term? No.
+    # The formula is: (lambda_w + (1 - lambda_w) * sin(...))
+    # If lambda_w is the variable, we need to know how it changes.
+    # The text says: "scale factor ... annealed between 0.01 and 1".
+    # It does NOT say lambda_w is linearly annealed.
+    # However, the structure `A + (1-A) * sin(...)` suggests A is the parameter.
+    # If A goes from 0.01 to 1, the whole term goes from 0.01 to 1.
+    # So we just need to define lambda_w_current.
+    # The text doesn't explicitly give the interpolation function for lambda_w,
+    # but standard "warmup" often implies linear or cosine.
+    # However, looking at the formula:
+    # If lambda_w is the *result* of the annealing, then the formula is just defining the multiplier.
+    # Let's assume lambda_w_current is the value being annealed.
+    # How is it annealed? "smoothly annealed".
+    # Given the sin term in the multiplier, it's possible the "smooth annealing" refers to the sin term itself?
+    # No, the sin term is multiplied by (1-lambda_w).
+    # Let's look at the limits.
+    # i=0: sin(0)=0. Multiplier = lambda_w.
+    # i=n_w: sin(pi/2)=1. Multiplier = lambda_w + 1 - lambda_w = 1.
+    # So the multiplier goes from lambda_w(0) to 1.
+    # If lambda_w(0) = 0.01, then multiplier starts at 0.01.
+    # This implies lambda_w is a constant 0.01? No, it says "annealed from 0.01 to 1".
+    # This implies lambda_w is a function of i.
+    # Let lambda_w(i) be the annealed parameter.
+    # The formula uses lambda_w(i).
+    # So we need lambda_w(i).
+    # The text says "scale factor ... annealed between 0.01 and 1".
+    # It is highly likely that lambda_w(i) is simply the linear interpolation or the sin interpolation itself?
+    # Actually, many JaxNeRF implementations use a linear warmup.
+    # But let's stick to the text. The text defines eta_i using lambda_w.
+    # It says lambda_w is annealed from 0.01 to 1.
+    # It does not specify the interpolation function for lambda_w.
+    # However, the term `(lambda_w + (1 - lambda_w) * sin(...))` is a specific form.
+    # If lambda_w was linear, the term would be complex.
+    # If lambda_w was such that the term becomes simple?
+    # Let's assume the standard interpretation: The "warmup scale factor" is the entire term `(lambda_w + ...)`.
+    # And this factor is annealed from 0.01 to 1.
+    # The formula *is* the definition of this factor.
+    # So, we need to know how lambda_w varies.
+    # If lambda_w is constant 0.01, the term is `0.01 + 0.99 * sin(...)`.
+    # This goes from 0.01 to 1.
+    # This fits "annealed from 0.01 to 1".
+    # Does the text say lambda_w is constant? "scale factor that is smoothly annealed between lambda_w = 0.01 and 1".
+    # This phrasing is ambiguous. It could mean the parameter lambda_w is annealed, or the scale factor is.
+    # Given "lambda_w = 0.01" is a specific value, and it appears in the formula,
+    # and the formula results in a value between 0.01 and 1 if lambda_w=0.01,
+    # it is most likely that lambda_w is a constant 0.01 during warmup?
+    # No, "annealed from 0.01 to 1" implies change.
+    # If lambda_w changes from 0.01 to 1, and we use the formula:
+    # At i=0, lambda_w=0.01, sin=0 -> Term=0.01.
+    # At i=n_w, lambda_w=1, sin=1 -> Term=1.
+    # This works if lambda_w is linearly interpolated?
+    # Let's assume lambda_w(i) is linearly interpolated from 0.01 to 1.
     
-    Args:
-        ipe_features: Integrated Positional Encoding features (vector).
-        ray_direction: Normalized ray direction vector.
-        mlp_weights: Dictionary or object containing MLP weights.
+    # However, there is a simpler interpretation:
+    # The "warmup" is just the sin term, and lambda_w is a constant 0.01?
+    # "scale factor ... annealed between 0.01 and 1".
+    # If lambda_w is constant 0.01, the scale factor is `0.01 + 0.99 * sin(...)`.
+    # This is a smooth annealing from 0.01 to 1.
+    # This is the most consistent reading of "lambda_w = 0.01" as a fixed parameter in the formula context,
+    # and the "annealing" describes the behavior of the scale factor.
+    # But the text says "lambda_w ... annealed from 0.01 to 1".
+    # This explicitly states lambda_w changes.
+    # So lambda_w(i) must be defined.
+    # Common practice: Linear warmup.
+    # Let's assume lambda_w(i) = 0.01 + (1 - 0.01) * (i / n_w).
+    
+    # Let's implement lambda_w as linearly annealed.
+    if i < n_w:
+        lambda_w_current = 0.01 + (1 - 0.01) * (i / n_w)
+    else:
+        lambda_w_current = 1.0
         
-    Returns:
-        tau: Predicted density.
-        c: Predicted color.
-    """
-    # 1. Density Prediction
-    # Pass IPE through MLP layers (excluding last layer)
-    # Note: In a real implementation, this involves matrix multiplications and biases.
-    # Here we assume a function `mlp_forward` that returns the logit for density.
-    density_logit = mlp_forward(ipe_features, mlp_weights['density_layers'])
+    # Calculate the warmup multiplier
+    # Note: clip(i/n_w, 0, 1)
+    ratio = min(max(i / n_w, 0), 1)
+    warmup_multiplier = lambda_w_current + (1 - lambda_w_current) * math.sin((math.pi / 2) * ratio)
     
-    # Apply shifted softplus
-    tau = shifted_softplus(density_logit)
+    # Calculate the logarithmic decay
+    # exp((1 - i/n) * log(eta_0) + (i/n) * log(eta_n))
+    # This is equivalent to eta_0 ** (1 - i/n) * eta_n ** (i/n)
+    decay_factor = math.exp((1 - i / n) * math.log(eta_0) + (i / n) * math.log(eta_n))
     
-    # 2. View Direction Handling
-    # Normalize ray direction (already normalized per spec, but explicit for clarity)
-    d_normalized = ray_direction / np.linalg.norm(ray_direction)
-    
-    # Apply positional encoding with L=4
-    # Note: pos_enc is a function that generates sin/cos features
-    d_encoded = pos_enc(d_normalized, num_frequencies=4)
-    
-    # 3. Color Prediction
-    # Concatenate encoded view direction to features after tau is predicted
-    # But before c is predicted. The spec says "injected into the last layer... after tau is predicted".
-    # This implies the view direction is added to the feature vector before the final layer.
-    combined_features = np.concatenate([ipe_features, d_encoded], axis=-1)
-    
-    # Pass combined features through the final MLP layer to get color logit
-    color_logit = mlp_forward(combined_features, mlp_weights['color_layer'])
-    
-    # Apply widened sigmoid
-    c = widened_sigmoid(color_logit)
-    
-    return tau, c
+    return warmup_multiplier * decay_factor
 
-def pos_enc(v, num_frequencies):
-    """
-    Standard positional encoding for a vector v.
-    Generates sin and cos features for frequencies 2^0 to 2^(num_frequencies-1).
-    """
-    frequencies = 2.0 ** np.arange(num_frequencies)
-    scaled_v = v * frequencies
-    s = np.sin(scaled_v)
-    c = np.cos(scaled_v)
-    return np.concatenate([s, c], axis=-1)
+def train_mipnerf():
+    n = 1000000
+    batch_size = 4096
+    
+    for i in range(n):
+        # 1. Sample batch of rays
+        rays = sample_rays(batch_size)
+        
+        # 2. Compute IPE features for rays
+        # (Assuming IPE computation is handled by the renderer/encoder)
+        ipe_features = compute_ipe(rays)
+        
+        # 3. Forward pass for Density
+        # MLP takes IPE features
+        x_tau = mlp_density_head(ipe_features)
+        tau = density_activation(x_tau)
+        
+        # 4. Forward pass for Color
+        # Encode view direction
+        d_norm = normalize(rays.direction)
+        d_encoded = positional_encoding(d_norm, L=4)
+        
+        # Concatenate intermediate MLP features with d_encoded
+        # (Assuming mlp_color_head takes the concatenation)
+        x_c = mlp_color_head(concatenate(mlp_intermediate_features, d_encoded))
+        c = color_activation(x_c)
+        
+        # 5. Render pixels
+        rendered_colors = volume_render(tau, c, rays)
+        
+        # 6. Compute Loss
+        loss = compute_loss(rendered_colors, rays.gt_color)
+        
+        # 7. Update
+        lr = learning_rate_schedule(i)
+        optimizer.step(loss, lr)
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Negative Density:** Using standard ReLU for density can lead to catastrophic failure if the MLP outputs negative values everywhere, resulting in zero gradients. The shifted softplus prevents this [S1].
+*   **Black/White Pixel Saturation:** Standard sigmoid saturation can cause optimization failure when trying to explain extreme pixel values. The widened sigmoid avoids this [S1].
+*   **Identity Encoding:** Keeping the identity encoding makes the formalization of IPE features challenging and does not improve performance [S1].
 
 ## Subtopics
 
-### [Mip-NeRF 360 Optimization Setup](3426-mip-nerf-360-optimization-setup.md)
-This article defines the specific optimization configuration, network architectures, and loss functions used to train the Mip-NeRF 360 model. It solves the problem of stabilizing the training of unbounded, anti-aliased radiance fields by combining a multi-stage proposal sampling strategy with a robust reconstruction loss. It sets itself apart from standard NeRF training by using a two-stage proposal network to guide sampling and by employing a Charbonnier loss for reconstruction stability.
-
-### [Scale-Dependent Downweighting for Grid Interpolation](8571-scale-dependent-downweighting-for-grid-interpolation.md)
-Scale-Dependent Downweighting is a technique to anti-alias trilinear interpolation in neural radiance fields by downweighting features interpolated from grid cells that are small relative to the sampling Gaussian's spread, preventing aliasing artifacts from high-frequency content. Unlike naive trilinear interpolation which causes aliasing at high frequencies, this method uses the Gaussian CDF to weight samples, similar to Mip-NeRF's IPE features but applied to grid-based representations.
-
 ### Alternative Gaussian Positional Encoding
-An alternative approach to IPE features involves concatenating the positional encodings of the mean and the (signed) square root of the elements of the covariance matrix as input to the MLP. Specifically, positional encoding is applied to the mean $\mu$ with $L=12$, and to $\text{vec}(\text{triu}(\text{sign}(\Sigma) \circ \sqrt{|\Sigma|}))$ with $L=2$. This alternative performs comparably to IPE but is sensitive to hyperparameters $L$ and covariance parameterization, whereas IPE is hyperparameter-free and compact. Additionally, while IPE is insensitive to off-diagonal elements of $\Sigma$ (correlation), experiments show that modeling this correlation does not improve accuracy [S1].
+An alternative to Integrated Positional Encoding (IPE) involves concatenating the positional encoding of the mean $\mu$ (with $L=12$) and the positional encoding of the vectorized upper triangular part of the signed covariance matrix $\Sigma$ (with $L=2$) as input to the MLP [S1]. This approach performs comparably to IPE in terms of PSNR, SSIM, and LPIPS on multiscale and single-scale Blender datasets [S1]. However, it is sensitive to the hyperparameters $L$ and the parameterization of $\Sigma$, whereas IPE is hyperparameter-free and more compact [S1]. Additionally, while IPE is insensitive to the off-diagonal elements of $\Sigma$ (correlation), experiments show that modeling this correlation does not improve accuracy, suggesting it is not a helpful cue [S1].
 
 ### Reflected Cone Derivation
-A geometric derivation to shift the origin of a reflected ray so that its cone radius matches the incident ray's cone radius at the intersection point, ensuring consistent view-dependent appearance for reflections. The condition for equating radii is $\dot{r}\|\bar{\mathbf{x}} - \mathbf{o}\| = \dot{r}'\|\bar{\mathbf{x}} - \mathbf{o}'\|$, where $\dot{r}$ is the incident ray radius parameter, $\bar{\mathbf{x}}$ is the intersection point, $\mathbf{o}$ is the incident ray origin, $\dot{r}'$ is the reflected ray radius parameter, and $\mathbf{o}'$ is the reflected ray origin. This is solved along with the constraint that $\mathbf{o}'$ lies on the reflected ray [S2].
+A geometric derivation used to handle reflections in Mip-NeRF by shifting the origin of a reflected ray so that its cone radius matches the incident ray's cone radius at the intersection point [S2]. This ensures consistent view-dependent appearance for reflections [S2]. The condition for equating radii is $\dot{r}\|\bar{\mathbf{x}} - \mathbf{o}\| = \dot{r}'\|\bar{\mathbf{x}} - \mathbf{o}'\|$, where $\dot{r}$ is the incident ray radius parameter, $\bar{\mathbf{x}}$ is the intersection point, $\mathbf{o}$ is the incident ray origin, $\dot{r}'$ is the reflected ray radius parameter, and $\mathbf{o}'$ is the reflected ray origin [S2]. Solving this equation along with the constraint that $\mathbf{o}'$ lies on the reflected ray yields the shifted origin [S2].
 
 ### RawNeRF
-A method for High Dynamic Range (HDR) image view synthesis and denoising that adapts Mip-NeRF to use raw linear images as training data, allowing post-processing after rendering. It renders in a linear color space and supervises with variable exposure images, scaling the NeRF models’ “exposure” by the training image’s shutter speed, as well as a per-channel learned scaling factor. Unlike HDR-NeRF which uses LDR images, RawNeRF uses raw linear images, allowing varying exposure and tone-mapping curves to be applied after NeRF rendering [S3].
+A method for High Dynamic Range (HDR) image view synthesis and denoising that adapts Mip-NeRF to use raw linear images as training data [S3]. Unlike HDR-NeRF which uses LDR images, RawNeRF renders in a linear color space, allowing varying exposure and tone-mapping curves to be applied after NeRF rendering [S3]. It is supervised with variable exposure images, scaling the NeRF models’ “exposure” by the training image’s shutter speed, as well as a per-channel learned scaling factor [S3].
 
 ## Operating characteristics
-*   **Time Complexity:** Mip-NeRF is 13x faster to train and 16x faster to evaluate than a brute-force supersampling baseline (16 rays/pixel) [S1].
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** On the multiscale Blender dataset, Mip-NeRF outperforms the 16x supersampling baseline in quality (PSNR, SSIM, LPIPS) while being significantly faster [S1].
-*   **Strengths:** Improved training stability, prevention of catastrophic failure modes, robustness to large learning rates during warmup, and efficient anti-aliasing via IPE [S1].
-*   **Limitations:** The specific activation functions and learning rate schedule are tailored to Mip-NeRF's IPE features and may not be directly transferable to other NeRF variants without validation [S1].
-*   **When to use:** When training Mip-NeRF or JaxNeRF to ensure stable optimization and avoid gradient vanishing issues [S1].
-*   **When not to use:** When using alternative encoding schemes (like concatenated PE) or different network architectures that may not benefit from these specific activations [S1].
+*   **Training Time:** Mip-NeRF is 13x faster to train than a brute-force supersampling baseline (16 rays/pixel) [S1].
+*   **Evaluation Speed:** Mip-NeRF is 16x faster to evaluate than the supersampling baseline [S1].
+*   **Quality:** Mip-NeRF outperforms the 16x supersampling baseline in quality metrics (PSNR, SSIM, LPIPS) on the multiscale Blender dataset [S1].
+*   **Stability:** The activation functions and learning rate schedule improve training stability, particularly with large learning rates, though they do not significantly change the final accuracy or speed compared to the base method [S1].
+*   **Memory:** The removal of identity encoding and use of IPE makes the feature representation more compact compared to concatenating PE of mean and covariance square roots [S1].
 
 ## Background
-The details described in this article originate from the Mip-NeRF paper (Barron et al., 2021) and the JaxNeRF codebase documentation [S1]. The "miscellaneous" changes, including activation functions and learning rate scheduling, were introduced to improve training stability and robustness without significantly changing accuracy or speed [S1]. The method is part of the broader family of differentiable volume rendering techniques, specifically building on the Integrated Positional Encoding (IPE) concept introduced in Mip-NeRF [S1].
+The optimization details described here originate from the Mip-NeRF paper (Barron et al., 2021) and the JaxNeRF codebase [S1]. These "miscellaneous" changes were introduced to simplify the method, increase robustness during optimization, and ensure reproducibility, as noted in the "w/o Misc." ablation in the main paper [S1]. The method is part of the broader family of differentiable volume rendering techniques for neural radiance fields.
 
 ## Sources
 [S1] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00580, fetched 2026-10-26

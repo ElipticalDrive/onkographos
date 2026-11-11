@@ -3,61 +3,64 @@
 Also called: Confidence-Based Depth Filtering
 
 ## Overview
-Guided Optimization of NeRF mitigates shape-radiance ambiguity in indoor scenes by constraining the sampling of points along camera rays using adapted monocular depth priors [S1]. It refines these priors using per-pixel confidence scores derived from RGB reconstruction error and plane bilateral filtering [S1]. Unlike standard NeRF, which samples uniformly between sparse reconstruction bounds, this method adaptively narrows the sampling interval based on multi-view geometric consistency errors, ensuring sampled points are concentrated around the true geometry even in texture-less regions [S1].
+Guided Optimization of NeRF mitigates shape-radiance ambiguity in indoor scenes by restricting the sampling range of points along camera rays using adapted monocular depth priors [S1]. Unlike standard NeRF, which samples uniformly between near and far bounds derived from sparse 3D reconstruction, this method computes adaptive bounds based on cross-view geometric consistency errors, ensuring samples are concentrated around plausible depths [S1]. It further refines the output depth map using confidence scores derived from RGB reconstruction errors and plane bilateral filtering [S1].
 
 ## How it works
 **Inputs:**
 - $N$ input views with RGB images and camera parameters (intrinsics $K$, poses $T$).
-- Adapted monocular depth priors $\{D^i\}_{i=1}^N$ for each view, obtained by fine-tuning a pre-trained monocular depth network on the target scene [S1].
-- Hyperparameters: $K=4$ (number of cross-view errors for error map calculation), $\alpha_l = 0.05$ (lower bound for range), $\alpha_h = 0.15$ (upper bound for range), $M$ (number of samples per ray) [S1].
+- Adapted monocular depth priors $\{D^i\}_{i=1}^N$ for each view, obtained via scene-specific fine-tuning of a pre-trained monocular depth network [S1].
+- Hyperparameters: $K=4$ (number of cross-view errors for error map calculation), $\alpha_l = 0.05$ (lower bound for range), $\alpha_h = 0.15$ (upper bound for range) [S1].
 
 **Outputs:**
-- Optimized NeRF parameters (density $\sigma$ and color $\mathbf{c}$ fields).
-- Refined depth maps for input and novel views.
+- Optimized NeRF parameters $\theta$ representing the implicit radiance field $F_\theta: (x, d) \rightarrow (c, \sigma)$ [S1].
+- Refined depth map $D(\mathbf{r})$ for each ray $\mathbf{r}$ [S1].
 
 **Data Structures:**
-- **Depth Priors:** $D^i \in \mathbb{R}^{H \times W}$, float32, representing depth values for each pixel in view $i$.
-- **Error Maps:** $e^i \in \mathbb{R}^{H \times W}$, float32, representing the reprojection error for each pixel.
-- **Confidence Scores:** $S^i \in \mathbb{R}^{H \times W}$, float32, in range $[0, 1]$.
-- **NeRF Model:** $F_\theta: (\mathbf{x}, \mathbf{d}) \rightarrow (\mathbf{c}, \sigma)$, a multi-layer perceptron mapping 3D position $\mathbf{x}$ and viewing direction $\mathbf{d}$ to color $\mathbf{c}$ and volume density $\sigma$ [S1].
+- **Depth Prior Map:** $D^i \in \mathbb{R}^{H \times W}$ for view $i$.
+- **Error Map:** $e_i \in \mathbb{R}^{H \times W}$ for view $i$, storing the average of the $K$ minimum cross-view reprojection errors.
+- **Confidence Map:** $S^i \in \mathbb{R}^{H \times W}$ for view $i$, storing per-pixel confidence scores.
+- **NeRF Model:** A multi-layer perceptron (MLP) taking position $x$ and direction $d$ as input, outputting color $c$ and density $\sigma$ [S1].
 
-**Algorithm Steps:**
+**Steps:**
 
-1.  **Acquire Adapted Depth Priors:**
-    Initialize monocular depth network weights (e.g., from Mannequin Challenge [S1]) and fine-tune on the $N$ input views for 15 epochs to obtain scene-specific priors $\{D^i\}_{i=1}^N$ [S1].
+1.  **Compute Error Maps:**
+    For each view $i$, project its depth map $D^i$ to all other views $j \neq i$ using camera intrinsics $K$ and relative pose $T^{i \rightarrow j}$ to obtain projected depth $D^{i \rightarrow j}$ [S1].
+    For each pixel $p$ in view $i$, calculate the reprojection error against the depth of view $j$ at the projected location. Collect these errors for all $j \neq i$.
+    The error map value $e_i(p)$ for pixel $p$ in view $i$ is the average of the $K$ minimum cross-view depth projection errors [S1].
 
-2.  **Compute Error Maps:**
-    For each view $i$, project its depth map $D^i$ to all other views $j \neq i$ using camera intrinsics $K$ and relative pose $T^{i \rightarrow j}$:
-    $$ p^{i \rightarrow j}, D^{i \rightarrow j} = \text{proj}(K, T^{i \rightarrow j}, D^i) $$
-    $$ D^{j'} = D^j(p^{i \rightarrow j}) $$
-    where $p^{i \rightarrow j}$ are the 2D coordinates and $D^{i \rightarrow j}$ are the projected depth values in view $j$ [S1].
-    Calculate the relative reprojection error for overlapping pixels. For each pixel in view $i$, the error map value $e^i$ is the average of the top $K$ minimum cross-view depth projection errors [S1].
-
-3.  **Calculate Adaptive Sample Ranges:**
-    For each ray $\mathbf{r}$ corresponding to a pixel in view $i$, determine the near ($t_n$) and far ($t_f$) bounds for sampling using the adapted depth prior $D$ (the depth value at that pixel) and the error map value $e$ [S1]:
+2.  **Calculate Adaptive Sample Ranges:**
+    For each ray $\mathbf{r}$ corresponding to pixel $p$ in view $i$, let $D$ be the adapted depth prior value $D^i(p)$ and $e$ be the error map value $e_i(p)$ [S1].
+    Compute the near bound $t_n$ and far bound $t_f$ using clamping:
     $$ t_n = D(1 - \text{clamp}(e, \alpha_l, \alpha_h)) $$
     $$ t_f = D(1 + \text{clamp}(e, \alpha_l, \alpha_h)) $$
     where $\text{clamp}(x, a, b) = \max(a, \min(b, x))$ [S1].
-    *Note:* If $e$ is small, the range is narrow around $D$. If $e$ is large, the range expands towards the original NeRF bounds (implicitly, as the clamp saturates at $\alpha_h$, but the formula scales relative to $D$).
+    *Note:* If the depth prior is unreliable (high error), the range expands towards the original NeRF bounds. If the prior is accurate (low error), the range contracts around $D$ [S1].
 
-4.  **Stratified Sampling:**
-    Partition the interval $[t_n, t_f]$ into $M$ bins. For each bin $i \in [1, M]$, sample a point $t_i$ uniformly:
-    $$ t_i \sim \mathcal{U} \left[ t_n + \frac{i-1}{M}(t_f - t_n), \,\, t_n + \frac{i}{M}(t_f - t_n) \right] $$
-    Query the NeRF model $F_\theta$ at positions $\mathbf{x}_i$ along the ray at distances $t_i$ to obtain color $\mathbf{c}_i$ and density $\sigma_i$ [S1].
+3.  **Stratified Sampling:**
+    Partition the interval $[t_n, t_f]$ into $M$ bins [S1].
+    For each bin $i \in [1, M]$, sample a point $t_i$ uniformly from the bin interval:
+    $$ t_i \sim \mathcal{U} \left[ t_n + \frac{i-1}{M}(t_f - t_n), \, t_n + \frac{i}{M}(t_f - t_n) \right] $$
+    Query the NeRF at positions $t_i \cdot \mathbf{d}$ (where $\mathbf{d}$ is the ray direction) to obtain color $c_i$ and density $\sigma_i$ [S1].
 
-5.  **Volume Rendering:**
-    Compute the rendered color $\mathbf{C}(\mathbf{r})$ and depth $D(\mathbf{r})$ for the ray:
-    $$ \mathbf{C}(\mathbf{r}) = \sum_{i=1}^{M} T_i (1 - e^{-\sigma_i \delta_i}) \mathbf{c}_i $$
+4.  **Volume Rendering:**
+    Compute accumulated transmittance $T_i$:
+    $$ T_i = \exp \left( -\sum_{j=1}^{i-1} \sigma_j \delta_j \right) $$
+    where $\delta_i = t_{i+1} - t_i$ is the distance between adjacent samples [S1].
+    Render the color $C(\mathbf{r})$ and depth $D(\mathbf{r})$:
+    $$ C(\mathbf{r}) = \sum_{i=1}^{M} T_i (1 - e^{-\sigma_i \delta_i}) c_i $$
     $$ D(\mathbf{r}) = \sum_{i=1}^{M} T_i (1 - e^{-\sigma_i \delta_i}) t_i $$
-    where $\delta_i = t_{i+1} - t_i$ is the distance between adjacent samples, and $T_i = \exp \left(-\sum_{j=1}^{i-1} \sigma_j \delta_j \right)$ is the accumulated transmittance [S1].
+    [S1]
 
-6.  **Compute Confidence Scores:**
-    Calculate the confidence score $S^i_j$ for pixel $j$ in view $i$ based on the $L_1$ difference between the ground truth RGB image $C_{gt}^i(j)$ and the rendered RGB image $C_{render}^i(j)$, normalized by 255:
+5.  **Compute Confidence Scores:**
+    For each pixel $j$ in view $i$, compute the confidence score $S^i_j$ based on the $L_1$ difference between the ground truth RGB image $C_{gt}^i(j)$ and the rendered RGB image $C_{render}^i(j)$, normalized by 255 [S1]:
     $$ S^i_j = 1 - \frac{1}{3} \| C_{gt}^i(j) - C_{render}^i(j) \|_1 $$
-    The $L_1$ norm is taken over the 3 color channels [S1].
+    The norm is taken over the 3 color channels [S1].
 
-7.  **Depth Refinement (Post-Processing):**
-    Apply plane bilateral filtering to the rendered depth map, weighted by the confidence scores $S^i_j$, to produce the final output depth map [S1].
+6.  **Depth Refinement (Post-Processing):**
+    Apply plane bilateral filtering to the rendered depth map, weighted by the confidence scores $S^i_j$ [S1]. This step improves depth quality in regions where the rendered RGB images are not accurate [S1].
+
+7.  **Optimization Loop:**
+    Backpropagate gradients from the photometric loss $\mathcal{L}_{\text{photo}} = \| C_{gt} - C(\mathbf{r}) \|^2$ through the volume rendering process to update NeRF parameters $\theta$ [S1]. The guided sampling ensures that the optimization focuses on geometrically plausible regions, reducing shape-radiance ambiguity [S1].
 
 **Pseudocode:**
 
@@ -66,243 +69,163 @@ Guided Optimization of NeRF mitigates shape-radiance ambiguity in indoor scenes 
 ```python
 import numpy as np
 
-def guided_optimization_neRF(N, views, K=4, alpha_l=0.05, alpha_h=0.15, M=48):
+def guided_optimization_neRF(views, adapted_depth_priors, K=4, alpha_l=0.05, alpha_h=0.15, M=48):
     """
-    N: Number of input views
-    views: List of view objects containing 'rgb' (H,W,3), 'K' (3,3), 'T' (4,4), 'depth_prior' (H,W)
-    K: Number of cross-view errors for error map
-    alpha_l, alpha_h: Bounds for sample range expansion
-    M: Number of samples per ray
+    views: List of view objects containing RGB image, camera intrinsics K_cam, pose T.
+    adapted_depth_priors: List of depth maps D^i corresponding to each view.
+    K: Number of minimum cross-view errors to average for error map.
+    alpha_l, alpha_h: Bounds for adaptive range expansion.
+    M: Number of samples per ray.
     """
-    
-    # Step 1: Acquire Adapted Depth Priors (Assumed pre-computed from fine-tuning)
-    # D_priors[i] is the depth map for view i
-    D_priors = [view['depth_prior'] for view in views]
-    
-    # Step 2: Compute Error Maps
+    N = len(views)
     error_maps = []
+    
+    # Step 1: Compute Error Maps
     for i in range(N):
-        H, W = views[i]['rgb'].shape[:2]
-        e_map = np.zeros((H, W))
-        valid_pixels = 0
+        H, W = views[i].rgb.shape[:2]
+        error_map = np.zeros((H, W))
+        depths_for_avg = []
         
-        # Project depth of view i to all other views j
         for j in range(N):
             if i == j:
                 continue
             
-            # Project points from view i to view j
-            # proj(K, T_i_to_j, D_i) returns 2D coords and projected depth
-            # Note: Implementation of proj depends on specific library, 
-            # here we assume a helper that handles perspective projection and depth retrieval.
-            coords_j, projected_depth_j = project_depth(
-                views[i]['K'], 
-                views[i]['T'] @ np.linalg.inv(views[j]['T']), 
-                D_priors[i]
-            )
+            # Project depth from view i to view j
+            # proj(K, T, D) returns projected coordinates and depth values
+            # Note: Implementation details of proj depend on specific projection library,
+            # but logically it uses K and T^{i->j} to map D^i to view j's coordinate system.
+            proj_coords, proj_depth = project_depth(views[i].K, views[i].T, views[j].T, adapted_depth_priors[i])
             
-            # Get ground truth depth from view j at projected coordinates
-            # D_j(p) retrieves depth from view j's prior at pixel p
-            gt_depth_j = get_depth_at_coords(views[j]['depth_prior'], coords_j)
+            # Get depth from view j at projected coordinates
+            # Handle occlusions/invalid projections by masking or ignoring
+            depth_j_at_proj = sample_depth_at_coords(views[j].depth_map, proj_coords)
             
-            # Calculate relative error
-            # Avoid division by zero
-            abs_diff = np.abs(projected_depth_j - gt_depth_j)
-            rel_error = np.where(gt_depth_j > 1e-6, abs_diff / gt_depth_j, 0.0)
+            # Calculate reprojection error
+            # Only consider valid pixels where both depths are available
+            valid_mask = (proj_depth > 0) & (depth_j_at_proj > 0)
+            errors = np.abs(proj_depth[valid_mask] - depth_j_at_proj[valid_mask]) / proj_depth[valid_mask]
             
-            # Store errors for top-K calculation
-            # Flatten valid pixels
-            valid_mask = gt_depth_j > 1e-6
-            errors = rel_error[valid_mask]
+            # Store errors for this view pair
+            # We need to aggregate errors across all j to find the K minimums per pixel
+            # This requires a more complex aggregation structure, simplified here conceptually
+            depths_for_avg.append(errors)
             
-            # Update error map for view i
-            # We need to map errors back to view i's pixel grid
-            # This is complex; simplified: accumulate errors in a list per pixel
-            pass 
-            
-        # Simplified Error Map Calculation:
-        # In practice, for each pixel in view i, collect reprojection errors from all j.
-        # Take the average of the K smallest errors.
-        # For brevity, assuming a function `compute_cross_view_error` handles the projection and aggregation.
-        e_map = compute_cross_view_error(D_priors[i], views, K)
-        error_maps.append(e_map)
+        # Aggregate errors to find K minimums per pixel
+        # In practice, this involves collecting all cross-view errors for each pixel
+        # and taking the average of the K smallest.
+        # For pseudocode clarity, assuming a helper function exists:
+        error_map = compute_k_min_average_errors(depths_for_avg, K)
+        error_maps.append(error_map)
 
-    # Step 3-6: Training Loop
-    # Initialize NeRF model F_theta
-    model = init_nerf_model()
+    # Step 2-7: Training Loop
+    nerf_model = initialize_NeRF()
     
-    for epoch in range(num_epochs):
-        for view_idx in range(N):
-            view = views[view_idx]
-            rgb_gt = view['rgb'] / 255.0
-            H, W = rgb_gt.shape[:2]
+    for iteration in range(num_iterations):
+        for i in range(N):
+            view = views[i]
+            depth_prior = adapted_depth_priors[i]
+            err_map = error_maps[i]
             
-            # Create rays
-            rays = create_rays(view['K'], view['T'], H, W)
+            # Sample rays for this view
+            rays = generate_rays(view)
+            rendered_colors = []
+            rendered_depths = []
             
-            # Render and Compute Loss
-            # For each ray, determine t_n and t_f
-            t_ns = []
-            t_fs = []
-            
-            for r_idx, ray in enumerate(rays):
-                # Get depth prior D and error e for the pixel corresponding to this ray
-                # ray.u, ray.v are pixel coordinates
-                D = D_priors[view_idx][ray.u, ray.v]
-                e = error_maps[view_idx][ray.u, ray.v]
+            for ray in rays:
+                pixel_idx = ray.pixel_index
+                D = depth_prior[pixel_idx]
+                e = err_map[pixel_idx]
                 
-                # Clamp error to bounds
-                e_clamped = np.clip(e, alpha_l, alpha_h)
+                # Step 2: Adaptive Ranges
+                clamped_e = np.clip(e, alpha_l, alpha_h)
+                t_n = D * (1 - clamped_e)
+                t_f = D * (1 + clamped_e)
                 
-                # Calculate bounds
-                t_n = D * (1 - e_clamped)
-                t_f = D * (1 + e_clamped)
+                # Step 3: Stratified Sampling
+                t_samples = np.linspace(t_n, t_f, M + 1)
+                # Add uniform noise within each bin
+                noise = np.random.uniform(0, 1, M)
+                t_samples = t_n + (t_samples[1:] - t_samples[:-1]) * noise + t_samples[:-1]
                 
-                t_ns.append(t_n)
-                t_fs.append(t_f)
+                # Query NeRF
+                positions = ray.origin + t_samples[:, np.newaxis] * ray.direction
+                colors, densities = nerf_model(positions, ray.direction)
+                
+                # Step 4: Volume Rendering
+                deltas = t_samples[1:] - t_samples[:-1]
+                deltas = np.append(deltas, 1e-10) # Avoid division by zero
+                
+                alpha = 1 - np.exp(-densities * deltas)
+                transmittance = np.cumprod(np.concatenate([[1.0], 1 - alpha[:-1]]))
+                
+                weights = alpha * transmittance
+                C_render = np.sum(weights[:, np.newaxis] * colors, axis=0)
+                D_render = np.sum(weights * t_samples, axis=0)
+                
+                rendered_colors.append(C_render)
+                rendered_depths.append(D_render)
+                
+            # Step 5: Confidence Scores (for post-processing, not used in loss directly in this variant)
+            # S^i_j = 1 - 1/3 * L1(C_gt, C_render)
             
-            # Stratified Sampling
-            # Sample M points per ray within [t_n, t_f]
-            # This is vectorized in practice
-            samples_t = stratified_sample(t_ns, t_fs, M)
+            # Optimization
+            gt_rgb = view.rgb
+            loss = np.mean((np.array(rendered_colors) - gt_rgb) ** 2)
+            loss.backward()
+            optimizer.step()
             
-            # Query NeRF
-            # samples_x, samples_d are positions and directions along rays
-            samples_x, samples_d = get_ray_points(rays, samples_t)
-            colors, densities = model(samples_x, samples_d)
-            
-            # Volume Rendering
-            rendered_colors, rendered_depths = volume_render(samples_t, densities, colors, samples_x)
-            
-            # Loss Calculation
-            # Photometric Loss (MSE)
-            loss_photo = np.mean((rendered_colors - rgb_gt) ** 2)
-            
-            # Backpropagate to update model
-            update_model(model, loss_photo)
-            
-            # Step 6: Compute Confidence Scores (for refinement, not necessarily for loss gradient)
-            # S_j = 1 - 1/3 * L1(C_gt, C_render)
-            confidence = 1.0 - (1.0/3.0) * np.mean(np.abs(rgb_gt - rendered_colors), axis=2)
-            
-        # Step 7: Depth Refinement
-        # Apply plane bilateral filtering weighted by confidence
-        final_depth = plane_bilateral_filter(rendered_depths, confidence)
+    # Step 6: Depth Refinement
+    final_depth_maps = []
+    for i in range(N):
+        # Render depth for all pixels
+        # ... (rendering logic for full image) ...
+        depth_map = render_full_depth(nerf_model, views[i])
+        confidence_map = compute_confidence(views[i].rgb, depth_map, nerf_model, views[i])
+        refined_depth = plane_bilateral_filter(depth_map, confidence_map)
+        final_depth_maps.append(refined_depth)
         
-    return model, final_depth
+    return nerf_model, final_depth_maps
 
-def project_depth(K, T_src_to_dst, depth_src):
+def project_depth(K, T_src_to_tgt, D_src):
     """
-    Projects depth map from source to destination view.
-    Returns 2D coordinates in dst view and projected depth values.
+    Projects depth map D_src from source view to target view using K and relative pose.
+    Returns projected coordinates and depth values.
     """
-    # Inverse K to get normalized coordinates
-    inv_K = np.linalg.inv(K)
-    H, W = depth_src.shape
-    
-    # Create grid of pixel coordinates
-    u, v = np.meshgrid(np.arange(W), np.arange(H))
-    ones = np.ones_like(u)
-    pts_2d_src = np.stack([u, v, ones], axis=-1) # (H, W, 3)
-    
-    # Convert to 3D in source camera frame
-    pts_3d_src = pts_2d_src * depth_src[..., np.newaxis] # (H, W, 3)
-    pts_3d_src_hom = np.concatenate([pts_3d_src, np.ones((H, W, 1))], axis=-1) # (H, W, 4)
-    
-    # Transform to destination camera frame
-    # T_src_to_dst transforms points from src to dst
-    pts_3d_dst_hom = (T_src_to_dst @ pts_3d_src_hom.reshape(-1, 4).T).T # (H*W, 4)
-    pts_3d_dst = pts_3d_dst_hom[:, :3] / pts_3d_dst_hom[:, 3:4] # (H*W, 3)
-    
-    # Project to 2D in destination view
-    pts_2d_dst_hom = (K @ pts_3d_dst.T).T # (H*W, 3)
-    pts_2d_dst = pts_2d_dst_hom[:, :2] / pts_2d_dst_hom[:, 2:3] # (H*W, 2)
-    
-    # Reshape to image coordinates
-    coords = pts_2d_dst.reshape(H, W, 2)
-    projected_depth = pts_3d_dst[..., 2].reshape(H, W)
-    
-    return coords, projected_depth
-
-def get_depth_at_coords(depth_map, coords):
-    """
-    Retrieves depth values from depth_map at given 2D coordinates.
-    Uses bilinear interpolation.
-    """
-    # Implementation depends on library (e.g., torch.nn.functional.grid_sample)
-    # Placeholder for interpolation logic
+    # Implementation depends on specific projection math (e.g., using inverse depth or disparity)
+    # This is a placeholder for the geometric projection step described in [S1]
     pass
 
-def compute_cross_view_error(D_prior, views, K):
+def compute_k_min_average_errors(errors_list, K):
     """
-    Computes the error map for a single view by averaging the K smallest 
-    cross-view reprojection errors.
+    Computes the average of the K minimum errors for each pixel across all views.
     """
-    H, W = D_prior.shape
-    # Initialize list of errors for each pixel
-    pixel_errors = [[], []] # Simplified structure
-    
-    # This function is complex to implement in pure Python without libraries.
-    # It involves projecting to all other views, retrieving depth, calculating error,
-    # and storing the K smallest errors per pixel.
-    pass
-
-def stratified_sample(t_ns, t_fs, M):
-    """
-    Samples M points per ray using stratified sampling within [t_n, t_f].
-    """
-    # Vectorized implementation
-    # t_ns, t_fs are arrays of shape (num_rays,)
-    # Returns array of shape (num_rays, M)
-    pass
-
-def volume_render(t_samples, densities, colors, rays):
-    """
-    Performs volume rendering to compute color and depth.
-    """
-    # Compute deltas
-    # t_samples shape: (num_rays, M)
-    # Add t_n and t_f to compute deltas? 
-    # Standard NeRF: delta_i = t_{i+1} - t_i
-    # T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+    # Implementation details omitted for brevity
     pass
 
 def plane_bilateral_filter(depth_map, confidence_map):
     """
-    Applies plane bilateral filtering to depth map weighted by confidence.
+    Applies plane bilateral filtering weighted by confidence.
     """
+    # Implementation details omitted for brevity
     pass
 ```
 
 ## Subtopics
 
 ### ENeRF with Guided Sampling Training
-Integrates pixel and depth-guided ray sampling into the ENeRF framework [S2]. It samples fewer rays per iteration than standard ENeRF, achieving improved performance with lower GPU memory usage [S2]. It uses a total loss $\mathcal{L} = \mathcal{L}_{mse} + \lambda' \mathcal{L}_{perc}$, where $\mathcal{L}_{mse}$ is the MSE between rendered and ground-truth colors, and $\mathcal{L}_{perc}$ is a perceptual loss computed on image blocks using a perceptual function $\Phi$ [S2]. The weight $\lambda'$ is set to 0.01 [S2]. It is used for experiments on DTU (pre-training), fine-tuned on novel scenes, and tested on Real Forward-facing, NeRF Synthetic, ZJU-MoCap, and digital human datasets [S2].
+Integrates pixel and depth-guided ray sampling into the Efficient NeRF (ENeRF) framework [S2]. It samples fewer rays per iteration than standard ENeRF, achieving improved performance with lower GPU memory usage [S2]. The loss function combines MSE loss $\mathcal{L}_{mse} = \frac{1}{N_r} \sum_{i=1}^{N_r} \| \hat{C}_i - C_i \|^2$ and perceptual loss $\mathcal{L}_{perc} = \frac{1}{N_i} \sum_{i=1}^{N_i} \| \Phi(\hat{I}_i) - \Phi(I_i) \|$, with total loss $\mathcal{L} = \mathcal{L}_{mse} + \lambda' \mathcal{L}_{perc}$ where $\lambda' = 0.01$ [S2]. It is used for generalization on DTU, fine-tuning on novel scenes, and testing on Real Forward-facing, NeRF Synthetic, ZJU-MoCap, and digital human datasets [S2].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-- The method adds overhead for computing error maps and confidence scores, but reduces the number of samples needed per ray by concentrating them around the true depth, potentially reducing computation per iteration compared to uniform sampling over large ranges [S1, S2].
-- ENeRF variant uses fewer rays per iteration, reducing GPU memory usage [S2].
-
-**Measured Performance:**
-- Outperforms state-of-the-art depth estimation methods on ScanNet in all metrics [S1].
-- Significantly outperforms original NeRF in view synthesis quality on indoor scenes [S1].
-- Applied successfully on DTU, Real Forward-facing, NeRF Synthetic, ZJU-MoCap, and digital human datasets [S2].
-
-**Strengths and Limitations:**
-- **Strengths:** Mitigates shape-radiance ambiguity in poorly textured indoor areas (e.g., walls) where standard NeRF fails [S1]. Provides accurate depth estimation by directly optimizing over RGB images using adapted priors [S1].
-- **Limitations:** Relies on the quality of adapted monocular depth priors [S1]. Applying existing correspondence-based neural optimization (like CVD) to adapted depth priors can degrade quality due to unreliable flow correspondences in poorly textured regions [S1].
-
-**When to Use:**
-- Use for indoor multi-view stereo and depth estimation where texture is sparse [S1].
-- Use when GPU memory is constrained and fewer rays per iteration are acceptable (ENeRF variant) [S2].
-
-**When Not to Use:**
-- Avoid if high-quality monocular depth priors cannot be obtained or fine-tuned [S1].
-- Avoid if correspondence-based optimization is attempted on the priors, as it may degrade results [S1].
+- **Time Complexity:** Depends on the number of samples $M$ per ray and the number of rays sampled per iteration. The guided sampling reduces the effective search space, potentially accelerating convergence in texture-less regions [S1]. ENeRF variant uses fewer rays per iteration [S2].
+- **Memory Complexity:** Standard NeRF memory usage is proportional to the number of samples and network size. The ENeRF variant with guided sampling occupies less GPU memory due to fewer rays sampled per iteration [S2].
+- **Performance:** Outperforms original NeRF in depth estimation quality on indoor scenes (e.g., ScanNet) by mitigating shape-radiance ambiguity [S1].
+- **Strengths:** Effectively handles poorly textured indoor areas (walls) where standard NeRF fails due to shape-radiance ambiguity [S1]. Improves depth accuracy by constraining sampling to plausible ranges [S1].
+- **Limitations:** Relies on the quality of adapted monocular depth priors. Applying existing correspondence-based neural optimization (like CVD) to adapted depth priors can degrade quality due to unreliable flow correspondences in poorly textured regions [S1].
+- **When to use:** Indoor multi-view stereo and depth estimation where texture is sparse and monocular depth priors are available.
+- **When not to use:** Outdoor scenes with rich texture where standard NeRF sampling is sufficient, or when high-quality monocular depth priors are not available.
 
 ## Background
-Originated from the paper "Depth-Guided Optimization of Neural Radiance Fields for Indoor Multi-View Stereo" [S1]. The method addresses the shape-radiance ambiguity inherent in NeRF, particularly in indoor scenes with texture-less surfaces [S1]. It builds on the original NeRF formulation [33] and integrates adapted monocular depth priors [S1]. The ENeRF variant builds on Efficient NeRF (ENeRF) [S2].
+Guided Optimization of NeRF was proposed to address the shape-radiance ambiguity inherent in Neural Radiance Fields (NeRF) [S1]. NeRF, initially proposed in [33], represents implicit radiance fields with an MLP [S1]. While NeRF works well for richly textured outdoor scenes, it struggles in poorly textured indoor environments, synthesizing high-quality RGB images with incorrect geometry [S1]. The method integrates adapted monocular depth priors into the NeRF optimization process, using cross-view consistency to guide sampling [S1]. It was evaluated on the ScanNet dataset for multi-view depth estimation [S1].
 
 ## Sources
 [S1] Depth-Guided Optimization of Neural Radiance Fields for Indoor Multi-View Stereo, https://doi.org/10.1109/tpami.2023.3263464, fetched 2026-10-27

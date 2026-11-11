@@ -1,0 +1,162 @@
+--- v004.md
++++ v005.md
+@@ -4,95 +4,99 @@
+ 
+ ## Overview
+-Statistical Depth Refinement is a post-processing step applied during the training of radiance fields to mitigate the impact of corrupt stereo depth data caused by fuzzy pixels and specular highlights [S1]. It prevents the model from overfitting to these erroneous depth values, which would otherwise lead to abrupt geometric artifacts in the reconstruction [S1]. Unlike direct depth supervision, this method leverages the smoothing properties of an underfitting model to identify and replace corrupt depth pixels with statistically smoother alternatives [S1].
++Statistical Depth Refinement is a training-time regularization technique that mitigates overfitting to noisy or corrupt depth priors (such as those from stereo matching in specular or fuzzy regions) by replacing outlier depth values with smoother estimates from an underfitting model. It differs from standard depth supervision [8687-depth-supervised-nerf.md] by actively identifying and patching corrupt pixels based on residual statistics rather than applying a uniform loss, and differs from [Geometric Baseline Regularization](7475-geometric-baseline-regularization.md) by using temporal model state (early training outputs) rather than static geometric priors.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:**
+-    *   $D_i$: The initial stereo depth map for the $i$-th frame [S1].
+-    *   $D_b^K_i$: The depth map rendered from the radiance field after $K$ iterations of training (the "underfitting" output) [S1].
+-    *   $\alpha$: A threshold parameter representing the quantile for identifying corrupt pixels [S1].
+-*   **Outputs:**
+-    *   $\tilde{D}_i$: The patched depth map used for subsequent optimization [S1].
++**Inputs:**
++- $D_i$: The noisy stereo depth map for frame $i$.
++- $\theta$: Current NeRF parameters.
++- $K$: The iteration count at which the "underfitting" model state is captured.
++- $\alpha$: The quantile threshold for identifying corrupt pixels ($\alpha \in [0, 1]$).
++
++**Outputs:**
++- $\hat{D}_i^{\text{patched}}$: The refined depth map for frame $i$, used for subsequent gradient updates.
+ 
+ **Data Structures:**
+-*   Depth maps are represented as 2D arrays of floating-point values, where each element corresponds to the depth $t$ along the ray for a specific pixel $(u, v)$ [S1].
+-*   Residual maps are 2D arrays of the same dimensions, storing the absolute difference between the stereo depth and the model's current depth estimate [S1].
++- Depth maps $D \in \mathbb{R}^{H \times W}$, stored as dense arrays of floating-point values.
++- Residual maps $R \in \mathbb{R}^{H \times W}$, storing absolute differences.
++
++**Steps:**
++1. **Capture Underfitting State:** Train the NeRF for $K$ iterations. At iteration $K$, render the expected depth map $D_b^K_i$ for frame $i$ using the current parameters $\theta_K$. This map represents the model's smoothed, underfitting estimate.
++   $$ D_b^K_i(\mathbf{r}) = \sum_{j=1}^{N} w_j t_j $$
++   where $w_j$ and $t_j$ are the rendering weights and sample distances for ray $\mathbf{r}$ [S1, 8687-depth-supervised-nerf.md].
++
++2. **Compute Residuals:** Calculate the absolute difference between the underfitting depth and the noisy stereo depth prior for each pixel $(u, v)$:
++   $$ R_i[u, v] = | D_b^K_i[u, v] - D_i[u, v] | $$
++
++3. **Determine Threshold:** Compute the $\alpha$-quantile of the residual distribution across all pixels in $R_i$. Let $Q_\alpha$ be this threshold value. Pixels with $R_i[u, v] > Q_\alpha$ are identified as having large residuals.
++
++4. **Patch Corrupt Depths:** For each pixel $(u, v)$ where $R_i[u, v] > Q_\alpha$, replace the noisy depth $D_i[u, v]$ with the smoother underfitting depth $D_b^K_i[u, v]$. Pixels with residuals below the threshold remain unchanged.
++   $$ \hat{D}_i^{\text{patched}}[u, v] = \begin{cases} D_b^K_i[u, v] & \text{if } R_i[u, v] > Q_\alpha \\ D_i[u, v] & \text{otherwise} \end{cases} $$
++
++5. **Optimize:** Use $\hat{D}_i^{\text{patched}}$ as the target for the geometric loss $\mathcal{L}_{\text{geom}}$ in subsequent training iterations.
+ 
+ **Parameters:**
+-*   $K$: The number of training iterations after which the underfitting depth map is sampled. The typical value is 4000 [S1].
+-*   $\alpha$: The quantile threshold for identifying corrupt pixels. The typical value is 0.1 [S1].
+-*   $\lambda$: The weight for the depth loss term in the total loss function. The typical value is 1 [S1].
++- $K = 4000$: The number of iterations to train before capturing the underfitting depth map [S1].
++- $\alpha = 0.1$: The quantile threshold; pixels in the top 10% of residuals are considered corrupt [S1].
++- $\lambda = 1$: Weight for the depth loss term in the total loss function [S1].
+ 
+-**Steps:**
+-1.  **Train to Underfitting State:** Train the radiance field for $K$ iterations. At this stage, the model has not fully converged and tends to average learned colors and occupancy, resulting in smoother depth estimates [S1].
+-2.  **Compute Residuals:** Calculate the residual map $R_i$ between the underfitting depth $D_b^K_i$ and the stereo depth $D_i$:
+-    $$ R_i[u, v] = |D_b^K_i[u, v] - D_i[u, v]| $$
+-    where $(u, v)$ is the pixel location [S1].
+-3.  **Identify Corrupt Pixels:** Compute the probabilistic distribution of the residual values in $R_i$. Identify pixels with residuals in the top $\alpha$-quantile (i.e., the largest $\alpha \times 100\%$ of residuals) [S1]. These pixels are statistically identified as corrupt depth [S1].
+-4.  **Patch Depth:** Replace the depth values of the identified corrupt pixels in the stereo depth map $D_i$ with the corresponding smoother values from the underfitting depth map $D_b^K_i$. Let the resulting patched depth map be $\tilde{D}_i$ [S1].
+-5.  **Resume Optimization:** Use the patched depth map $\tilde{D}_i$ for depth supervision in subsequent training iterations [S1].
++**Edge Cases and Pitfalls:**
++- **Precision:** The residual calculation must use sufficient precision to distinguish between minor noise and significant corruption [S1].
++- **Boundary Conditions:** If all residuals are below the threshold (unlikely with $\alpha=0.1$ and noisy stereo data), no patching occurs. If all are above, the entire depth map is replaced by the underfitting estimate [S1].
++- **Temporal Consistency:** The method assumes the underfitting model at iteration $K$ provides a valid "smooth" prior. If $K$ is too large, the model may have already overfit; if too small, the depth may be too noisy [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def statistical_depth_refinement(stereo_depth: Tensor, model: RadianceField, K: int, alpha: float) -> Tensor:
++def statistical_depth_refinement(noisy_depth_map, nerf_model, k_iterations, alpha):
+     """
+-    Refines stereo depth by patching corrupt pixels with underfitting model output.
++    Refines a noisy depth map by patching outliers with underfitting model output.
+     
+     Args:
+-        stereo_depth: The initial stereo depth map D_i [H, W].
+-        model: The radiance field model.
+-        K: Number of iterations to train before sampling underfitting depth.
+-        alpha: Quantile threshold for identifying corrupt pixels.
++        noisy_depth_map: Tensor of shape (H, W), the stereo depth prior D_i.
++        nerf_model: The NeRF model parameters theta.
++        k_iterations: Integer, the iteration count K to capture underfitting state.
++        alpha: Float in [0, 1], the quantile threshold.
+         
+     Returns:
+-        patched_depth: The refined depth map.
++        patched_depth_map: Tensor of shape (H, W), the refined depth.
+     """
+-    # Step 1: Train to underfitting state
+-    # Note: This assumes the model is trained for K iterations.
+-    # In practice, this might involve a separate training loop or checkpoint.
+-    model.train_for_iterations(K)
++    # Step 1: Capture underfitting depth at iteration K
++    # Note: In practice, this requires pausing training or saving checkpoint at K.
++    # We assume nerf_model is the state at iteration K.
++    underfitting_depth = nerf_model.render_expected_depth() # Shape (H, W)
+     
+-    # Step 2: Obtain underfitting depth map
+-    # Render depth map from the model for the same camera pose as stereo_depth
+-    underfitting_depth = model.render_depth(stereo_depth.camera_pose)
++    # Step 2: Compute residual maps
++    residuals = torch.abs(underfitting_depth - noisy_depth_map)
+     
+-    # Step 3: Compute residual map
+-    residual_map = torch.abs(underfitting_depth - stereo_depth)
++    # Step 3: Determine threshold based on alpha-quantile
++    # Flatten residuals to compute quantile
++    flat_residuals = residuals.view(-1)
++    threshold = torch.quantile(flat_residuals, 1.0 - alpha)
+     
+-    # Step 4: Identify corrupt pixels based on alpha quantile
+-    # Find the threshold value corresponding to the top alpha quantile
+-    threshold = torch.quantile(residual_map, 1 - alpha)
++    # Step 4: Patch corrupt depths
++    # Create mask for pixels with residuals > threshold
++    corrupt_mask = residuals > threshold
+     
+-    # Create a mask for pixels with residual >= threshold
+-    corrupt_mask = residual_map >= threshold
+-    
+-    # Step 5: Patch depth
+-    # Replace corrupt pixels in stereo_depth with values from underfitting_depth
+-    patched_depth = torch.where(corrupt_mask, underfitting_depth, stereo_depth)
++    # Replace noisy depth with underfitting depth where mask is true
++    patched_depth = torch.where(corrupt_mask, underfitting_depth, noisy_depth_map)
+     
+     return patched_depth
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** The method relies on the statistical significance of residuals. If the stereo depth is uniformly corrupt, the method may fail to identify specific outliers [S1].
+-*   **Boundaries:** The method assumes that the underfitting model provides a "smoother" but still geometrically plausible estimate. If the model is too far from convergence, the underfitting depth may be inaccurate [S1].
+-*   **Degenerate Input:** If the stereo depth is missing or invalid for a large portion of the image, the residual computation may be unreliable [S1].
+-
+ ## Subtopics
+ 
+ ### Perceptual Distillation
+-Perceptual Distillation is a technique that transfers deblurred texture information from pre-deblurred images to the NeRF using perceptual loss on rendered patches [S2]. It overcomes the geometric inconsistency of pre-deblurred images by not using them as direct pixel-wise color supervision [S2]. Instead, it uses an off-the-shelf deep learning-based image deblurring network to generate pre-deblurred images from blurred inputs [S2]. It then renders color patches $\hat{C}_{ptc}$ from the NeRF using patch-wise sampled rays $r_{ptc}^{pd}$ at the same pixel locations as the pre-deblurred color patches $\bar{C}_{ptc}$ [S2]. Perceptual loss is applied by extracting features from both the pre-deblurred color patch and the rendered color patch using a shared pre-trained image feature extractor [S2]. A key pitfall is that pre-deblurred images cannot be used as direct pixel-wise color supervision due to the lack of 3D consistency caused by the ill-posed property of image deblurring and independent processing across multi-view images [S2].
++A technique that transfers deblurred texture information from pre-deblurred images to the NeRF using perceptual loss on rendered patches, overcoming geometric inconsistency of pre-deblurred images [S2]. It uses an off-the-shelf deep learning-based image deblurring network $\Theta_D$ to generate pre-deblurred images $\bar{I}$ from blurred inputs $I$ ($\bar{I} = \Theta_D(I)$) [S2]. Perceptual loss is applied by extracting features from both the pre-deblurred color patch $\bar{C}_{ptc}$ and the rendered color patch $\hat{C}_{ptc}$ (rendered from patch-wise sampled rays $r_{ptc}^{pd}$) using a shared pre-trained image feature extractor $\phi$ [S2]. A key pitfall is that pre-deblurred images cannot be used as direct pixel-wise color supervision due to lack of 3D consistency caused by the ill-posed property of image deblurring and independent processing across multi-view images [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method adds a one-time cost of training the model for $K$ iterations and rendering a depth map. The patching operation is $O(H \times W)$, where $H$ and $W$ are the image dimensions [S1].
+-*   **Memory Complexity:** Requires storing the stereo depth map, the underfitting depth map, and the residual map, all of size $O(H \times W)$ [S1].
+-*   **Measured Performance:** Evaluated on robotic surgery stereo videos with 807 frames across 6 cases [S1]. The method improves PSNR, SSIM, and LPIPS metrics compared to direct depth supervision [S1].
+-*   **Strengths:** Effectively handles corrupt depth caused by fuzzy pixels and specular highlights [S1]. Prevents overfitting to corrupt depth [S1].
+-*   **Limitations:** Requires a separate training phase to obtain the underfitting depth map [S1]. The quality of the refinement depends on the choice of $K$ and $\alpha$ [S1].
+-*   **When to Use:** When stereo depth data is noisy or contains artifacts due to specular highlights or motion blur [S1].
+-*   **When Not to Use:** When the stereo depth is accurate and reliable [S1].
++- **Time Complexity:** Adds negligible overhead during training, primarily the cost of rendering an additional depth map at iteration $K$ and computing residuals. The patching operation is $O(HW)$ [S1].
++- **Memory Complexity:** Requires storing the underfitting depth map $D_b^K_i$ temporarily, $O(HW)$ [S1].
++- **Measured Performance:** Evaluated on robotic surgery stereo videos (DaVinci prostatectomy data, 807 frames, 15fps) [S1]. Metrics include PSNR, SSIM, and LPIPS [S1].
++- **Strengths:** Effectively handles corrupt stereo depth caused by fuzzy pixels and specular highlights, preventing abrupt artifacts in reconstruction [S1].
++- **Limitations:** Relies on the assumption that early training outputs are smoother and more accurate for corrupt regions, which may not hold for all scenes or noise distributions [S1].
++- **When to Use:** When stereo depth priors are noisy due to specularities, motion blur, or textureless regions, and direct supervision leads to overfitting artifacts [S1].
++- **When Not to Use:** When high-quality, clean depth priors are available, or when the scene geometry is simple enough that standard depth supervision suffices [S1].
+ 
+ ## Background
+-Statistical Depth Refinement was proposed in the context of neural rendering for stereo 3D reconstruction of deformable tissues in robotic surgery [S1]. The method addresses the challenge of reconstructing scenes with non-rigid deformation and tool occlusion, where standard stereo depth estimation can produce errors [S1]. The authors observed that underfitting models tend to produce smoother depth estimates, which can be used to identify and correct corrupt depth pixels [S1]. The method was evaluated on in-house DaVinci robotic prostatectomy data [S1].
++Originated in the context of neural rendering for stereo 3D reconstruction of deformable tissues in robotic surgery [S1]. The method addresses the challenge of using stereo depth in surgical scenes where specular highlights and fuzzy pixels corrupt the depth estimates [S1]. Preliminary findings indicated that underfitting models at early training stages produce smoother depth results, which can be leveraged to correct corrupt depth [S1]. The method was implemented with a depth refinement iteration count $K=4000$ and threshold $\alpha=0.1$ [S1].
+ 
+ ## Sources
