@@ -3,158 +3,111 @@
 Also called: Hexagonal Prism SDF, Signed Hexagonal Prism, sdHexPrism
 
 ## Overview
-Computes the signed distance from a point to a hexagonal prism aligned with the Z-axis, defined by its cross-section radius and half-height. It differs from the [Triangular Prism SDF](2865-triangular-prism-signed-distance-function.md) by utilizing six-fold rotational symmetry to reflect points into a fundamental domain, whereas the triangular variant uses a simpler absolute-value reflection.
+Computes the signed distance from a point to a hexagonal prism aligned with the Z-axis, defined by its half-width $h_x$ and half-height $h_y$ [S1, S2, unofficial]. It differs from the [Triangular Prism SDF](2865-triangular-prism-signed-distance-function.md) by using six-fold rotational symmetry to define the cross-section, allowing for more efficient culling or smoother interpolation in hexagonal grid-based scenes [S1, S2, unofficial].
 
 ## How it works
 **Inputs:**
-- $p \in \mathbb{R}^3$: The query point $(p_x, p_y, p_z)$.
-- $h \in \mathbb{R}^2$: The shape parameters. $h_x$ is the radius of the hexagon (distance from center to vertex or edge, depending on definition; see formula). $h_y$ is the half-height of the prism.
+- `p`: Input point $(p_x, p_y, p_z)$ [S1, S2, unofficial].
+- `h`: Parameter vector $(h_x, h_y)$, where $h_x$ is the hexagon radius (distance from center to vertex or flat edge, depending on orientation convention) and $h_y$ is the half-height of the prism [S1, S2, unofficial].
 
 **Outputs:**
-- $d \in \mathbb{R}$: The signed distance. Positive outside, negative inside, zero on the surface.
+- `d`: Signed distance. Positive outside, negative inside [S1, S2, unofficial].
 
 **Data Structures:**
-- No persistent data structures. The computation is stateless and vectorizable.
+- Vectors are 3D Cartesian coordinates.
+- Constants: $\sqrt{3}/2 \approx 0.8660254$ [S1, S2, unofficial].
 
 **Steps:**
-1.  **Symmetry Reduction (Absolute Value):** Compute $q = |p|$. This exploits the symmetry of the prism across the XY and Z planes, restricting the calculation to the first octant ($q_x, q_y, q_z \ge 0$).
-2.  **Hexagonal Cross-Section Distance:** Calculate the distance to the 2D hexagonal base in the XY plane.
-    -   The formula provided in [S2, unofficial] uses a specific orientation where the hexagon is "pointy-topped" relative to the standard basis, or effectively computes the distance to a hexagon with specific edge normals.
-    -   Compute $d_{xy} = \max(q_x \cdot \frac{\sqrt{3}}{2} + q_y \cdot \frac{1}{2}, q_y) - h_x$.
-    -   Note: The constant $0.866025 \approx \frac{\sqrt{3}}{2}$ and $0.5 = \frac{1}{2}$.
-3.  **Vertical Distance:** Compute the distance to the top/bottom caps.
-    -   $d_z = q_z - h_y$.
-4.  **Combine:** The signed distance is the maximum of the cross-section distance and the vertical distance, but clamped to ensure correct sign handling for the interior.
-    -   $d = \max(d_{xy}, d_z)$.
-    -   *Correction based on [S1, unofficial] and [S2, unofficial] discrepancy:* [S2, unofficial] returns `max(q.z-h.y, max(q.x*0.866025+q.y*0.5, q.y)-h.x)`. This is a simple max. However, [S1, unofficial] provides a more robust implementation using the `min(max(...), 0) + length(max(..., 0))` pattern, which is the standard SDF composition for primitives. The [S2, unofficial] version is a simplified approximation or specific to a certain orientation where the "corner" logic is simplified. We must adhere to the most complete definition. The [S1, unofficial] implementation is the general SDF for a hexagonal prism. The [S2, unofficial] implementation is likely for a specific "flat-topped" or "pointy-topped" variant where the distance function is simpler but potentially less accurate at corners or requires specific $h$ definitions. Given [S1, unofficial] is a "Torch-Sphere-Tracer" (implies ray marching context) and [S2, unofficial] is a GLSL primitive library, we present the [S1, unofficial] method as the primary robust implementation, noting the [S2, unofficial] variant.
+1.  Reflect the point into the fundamental domain of the hexagon to exploit symmetry. This involves taking the absolute value of the coordinates and projecting onto the symmetry axes [S1, unofficial].
+2.  Calculate the distance to the hexagonal cross-section in the XY plane [S1, S2, unofficial].
+3.  Calculate the distance to the top and bottom caps in the Z direction [S1, S2, unofficial].
+4.  Combine the planar and axial distances using the standard SDF min/max formula [S1, S2, unofficial].
 
-    *Re-evaluating [S2, unofficial]:* The [S2, unofficial] code `max(q.z-h.y, max(q.x*0.866025+q.y*0.5, q.y)-h.x)` is actually the SDF for a **hexagonal prism** where the hexagon is oriented such that one vertex is on the X-axis? No, the term `q.x*0.866 + q.y*0.5` suggests a rotation. Let's look at [S1, unofficial] again.
-    [S1, unofficial] uses a reflection vector $k$. This is the general method for any regular polygon.
-    [S2, unofficial] is a closed-form approximation or exact solution for a specific orientation.
-    The prompt asks for "Hexagonal Prism SDF". The [S1, unofficial] method is the general "Hexagonal Prism" SDF found in standard ray marching libraries (like Inigo Quilez's, though his is slightly different). The [S2, unofficial] code is explicitly labeled `sdHexPrism`.
-    Let's check the orientation in [S2, unofficial]: `q.x*0.866 + q.y*0.5`. If $q_y=0$, dist is $q_x \frac{\sqrt{3}}{2} - h_x$. If $q_x=0$, dist is $q_y - h_x$. This implies the hexagon has a vertical edge at $x=0$? No.
-    Actually, the [S2, unofficial] formula is often cited for a hexagon with a **flat top** (horizontal edges at top/bottom) or **pointy top**.
-    Let's stick to the [S1, unofficial] implementation as it is algorithmically complete and handles the general case via reflection, which is the standard "How it works" for polyhedral primitives. The [S2, unofficial] formula is a specific case. I will provide the [S1, unofficial] algorithm as it is more robust and "from plain text alone" implementable without guessing the orientation implied by [S2, unofficial]'s constants.
+**Formulas:**
+Two distinct implementations exist in the sources, differing in the orientation of the hexagon (flat-topped vs. pointy-topped) and the reflection method.
 
-    **Refined Steps (based on [S1, unofficial]):**
-    1.  Define the reflection vector $k$ for hexagonal symmetry. $k = (-\frac{\sqrt{3}}{2}, \frac{1}{2}, \frac{1}{\sqrt{3}})$. Note: The Z component in [S1, unofficial] `k.z` is used for clamping, but the reflection is in XY.
-    2.  Compute $q = |p|$.
-    3.  Reflect $q_{xy}$ into the fundamental domain of the hexagon.
-        -   Calculate $t = 2 \cdot \max(0, -\text{dot}(k_{xy}, q_{xy}))$.
-        -   $q_{xy} \leftarrow q_{xy} + t \cdot k_{xy}$.
-    4.  Compute the distance to the hexagonal cross-section.
-        -   Clamp $q_x$ to the range $[-k_z h_x, k_z h_x]$. Let this be $q_{x,clamped}$.
-        -   $d_{xy} = \text{length}(q_{xy} - (q_{x,clamped}, h_x)) - h_x$? No, [S1, unofficial] says:
-        -   $d_x = \text{length}(q_{xy} - \text{vec2}(\text{clamp}(q_x, -k_z h_x, k_z h_x), h_x)) \cdot \text{sign}(q_y - h_x)$.
-        -   Wait, [S1, unofficial] code: `length(p.xy-vec2(clamp(p.x,-k.z*h.x,k.z*h.x), h.x))*sign(p.y-h.x)`.
-        -   Here $p$ is already $q$ (abs).
-        -   So, $d_{xy} = \text{length}( (q_x - \text{clamp}(q_x, -k_z h_x, k_z h_x), q_y - h_x) ) \cdot \text{sign}(q_y - h_x)$.
-    5.  Compute vertical distance $d_z = q_z - h_y$.
-    6.  Combine: $d = \min(\max(d_{xy}, d_z), 0) + \text{length}(\max(d_{xy}, d_z, 0))$.
+**Method A (Marklundin/S2 - Pointy-Topped/Standard):**
+This method assumes a hexagon with vertices at specific angles, effectively treating the Y-axis as an axis of symmetry for the "pointy" top/bottom or flat sides depending on interpretation, but the formula provided is standard for a specific orientation [S2, unofficial].
 
-    **Parameters:**
-    -   $h_x$: Radius of the hexagon.
-    -   $h_y$: Half-height.
-    -   $k_x = -\frac{\sqrt{3}}{2} \approx -0.8660254$.
-    -   $k_y = \frac{1}{2} = 0.5$.
-    -   $k_z = \frac{1}{\sqrt{3}} \approx 0.57735$.
+$$
+\begin{aligned}
+q_x &= |p_x| \\
+q_y &= |p_y| \\
+q_z &= |p_z| \\
+d_{hex} &= \max(q_x \cdot 0.866025 + q_y \cdot 0.5, q_y) - h_x \\
+d_{cap} &= q_z - h_y \\
+d &= \max(d_{cap}, d_{hex})
+\end{aligned}
+$$
 
-    **Edge Cases:**
-    -   $h_x = 0$ or $h_y = 0$: Degenerate to a line or point.
-    -   Precision: Clamping and sign functions must handle values near zero carefully.
+Note: This formula [S2, unofficial] does not use the `min(max(...), 0) + length(max(..., 0))` structure, implying it returns the distance to the boundary directly without the explicit signed logic of Method B, or assumes a specific quadrant handling. However, standard SDF composition requires the signed logic. The source [S2, unofficial] code snippet shows `return max(...)`, which is technically the distance to the *surface*, but for a *signed* distance function, the interior must be negative. The source [S1, unofficial] provides the complete signed logic.
 
-**Pseudocode:**
+**Method B (skmhrk1209/S1 - Flat-Topped/Reflected):**
+This method uses a reflection vector `k` to fold the point into the fundamental sector [S1, unofficial].
 
+$$
+\begin{aligned}
+k_x &= -\cos(\pi/6) \approx -0.8660254 \\
+k_y &= \sin(\pi/6) = 0.5 \\
+k_z &= \tan(\pi/6) \approx 0.57735 \\
+q &= |p| \\
+t &= 2 \cdot \max(0, -(k_x q_x + k_y q_y)) \\
+q'_x &= q_x + t \cdot k_x \\
+q'_y &= q_y + t \cdot k_y \\
+d_{cap} &= q_z - h_y \\
+d_{hex} &= \sqrt{(q'_x - \text{clamp}(q'_x, -k_z h_x, k_z h_x))^2 + (q'_y - h_x)^2} - h_x \quad \text{(Simplified interpretation of S1 logic)} \\
+\text{Actually from S1: } d_x &= \text{length}(q'_{xy} - \text{clamp}(q'_{xy}, \dots)) \cdot \text{sign}(q'_y - h_x) \\
+d &= \min(\max(d_x, d_{cap}), 0) + \text{length}(\max(d_x, d_{cap}, 0))
+\end{aligned}
+$$
+
+The source [S1, unofficial] pseudocode is:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
-
-def sd_hex_prism(p: np.ndarray, h: np.ndarray) -> float:
-    """
-    Computes the signed distance to a hexagonal prism.
+def sdf(p, h):
+    # p is vec3, h is vec2 (hx, hy)
+    k = [-0.8660254, 0.5, 0.57735]
+    q = abs(p)
+    # Reflect into fundamental domain
+    # dot(k.xy, q.xy)
+    dot_val = k[0]*q[0] + k[1]*q[1]
+    t = 2.0 * max(0.0, -dot_val)
+    qx = q[0] + t * k[0]
+    qy = q[1] + t * k[1]
     
-    Args:
-        p: Query point (3,)
-        h: Shape parameters (2,), h[0] is radius, h[1] is half-height
-        
-    Returns:
-        Signed distance
-    """
-    # Constants for hexagonal symmetry
-    k_x = -np.cos(np.pi / 6.0)  # -sqrt(3)/2
-    k_y = np.sin(np.pi / 6.0)   # 0.5
-    k_z = np.tan(np.pi / 6.0)   # 1/sqrt(3)
+    # Distance to hexagon edge
+    # The clamp limits the x-coordinate of the reflected point
+    # The target point on the edge is (clamp(qx, -kz*hx, kz*hx), hx)
+    # But S1 code: length(p.xy - vec2(clamp(p.x, ...), h.x))
+    # Note: S1 uses 'p' in the length calculation after modification, let's call it qx, qy
+    clamp_x = clamp(qx, -k[2]*h[0], k[2]*h[0])
+    dist_sq = (qx - clamp_x)**2 + (qy - h[0])**2
+    d_hex = sqrt(dist_sq) * sign(qy - h[0])
     
-    # Step 1: Absolute value for symmetry
-    q = np.abs(p)
-    qx, qy, qz = q[0], q[1], q[2]
+    d_cap = q[2] - h[1]
     
-    # Step 2: Reflect into fundamental domain
-    # Dot product of k_xy and q_xy
-    dot_kq = k_x * qx + k_y * qy
-    
-    # t = 2 * max(0, -dot_kq)
-    t = 2.0 * max(0.0, -dot_kq)
-    
-    # Reflect q_xy
-    qx_ref = qx + t * k_x
-    qy_ref = qy + t * k_y
-    
-    # Step 3: Distance to hexagonal cross-section
-    # Clamp qx_ref to [-k_z * h[0], k_z * h[0]]
-    h_x = h[0]
-    h_y = h[1]
-    
-    clamp_min = -k_z * h_x
-    clamp_max = k_z * h_x
-    
-    qx_clamped = np.clip(qx_ref, clamp_min, clamp_max)
-    
-    # Vector from clamped point to the edge of the hexagon
-    # The hexagon edge in the fundamental domain is at y = h_x
-    # Distance vector: (qx_ref - qx_clamped, qy_ref - h_x)
-    dx = qx_ref - qx_clamped
-    dy = qy_ref - h_x
-    
-    # Length of this vector
-    dist_xy_raw = np.sqrt(dx*dx + dy*dy)
-    
-    # Sign based on whether we are outside the y=h_x boundary
-    sign_y = 1.0 if qy_ref > h_x else -1.0
-    
-    d_xy = dist_xy_raw * sign_y
-    
-    # Step 4: Vertical distance
-    d_z = qz - h_y
-    
-    # Step 5: Combine
-    # d = min(max(d_xy, d_z), 0) + length(max(d_xy, d_z, 0))
-    max_d = max(d_xy, d_z)
-    min_d = min(max_d, 0.0)
-    
-    # Vector for length calculation
-    vec_d = np.array([max_d, 0.0]) # Only one component is non-zero in 1D max? 
-    # Actually, the formula is: min(max(d1, d2), 0) + length(max(d1, d2, 0))
-    # Since d_xy and d_z are scalars, max(d_xy, d_z, 0) is a scalar.
-    # Wait, the standard SDF composition for two primitives A and B is:
-    # min(max(A, B), 0) + length(max(A, B, 0))
-    # Here A = d_xy, B = d_z.
-    
-    val = max(d_xy, d_z, 0.0)
-    
-    return min_d + val
+    # Combine
+    d = min(max(d_hex, d_cap), 0.0) + length(max(vec2(d_hex, d_cap), 0.0))
+    return d
 ```
 
+**Parameters:**
+- $h_x$: Hexagon radius. Typical values depend on scene scale.
+- $h_y$: Half-height. Typical values depend on scene scale.
+
+**Edge Cases:**
+- Precision: The constant $0.8660254$ is an approximation of $\sqrt{3}/2$. Using higher precision is recommended for large distances [S1, S2, unofficial].
+- Boundaries: The `clamp` operation in Method B handles the transition between the hexagonal faces and the corners [S1, unofficial].
+
 ## Operating characteristics
--   **Time Complexity:** $O(1)$ per sample. Involves a few arithmetic operations, a square root, and clamping.
--   **Memory Complexity:** $O(1)$. No auxiliary data structures.
--   **Strengths:** Exact signed distance, efficient for ray marching, handles arbitrary positions relative to the prism.
--   **Limitations:** The reflection method requires careful handling of the fundamental domain. The [S2, unofficial] closed-form is faster but orientation-specific.
--   **When to use:** When rendering hexagonal prisms in ray marching or voxel-based rendering where exact SDFs are required for smooth shading and accurate marching.
+- **Time Complexity:** $O(1)$ per point. Involves basic arithmetic, square root, and comparisons.
+- **Memory Complexity:** $O(1)$.
+- **Strengths:** Efficient for rendering hexagonal structures. Method B is robust for all quadrants due to reflection.
+- **Limitations:** Method A [S2, unofficial] is simpler but may be orientation-specific or less numerically stable at boundaries compared to the reflection method [S1, unofficial].
 
 ## Background
-The hexagonal prism SDF is a standard primitive in Signed Distance Field (SDF) ray marching. The general method for regular polygons using reflection into a fundamental domain was popularized by Inigo Quilez in his "Real-Time Rendering" blog posts and subsequent GLSL libraries. The specific implementation in [S1, unofficial] follows this general pattern. [S2, unofficial] provides a simplified closed-form for a specific orientation.
+Signed distance functions for polyhedra are widely used in ray marching and implicit modeling. The hexagonal prism SDF is a specific case of polyhedral SDFs. The implementation in [S2, unofficial] is part of a collection of GLSL SDF primitives by Mark Lundin. The implementation in [S1, unofficial] is from a Python-based sphere tracer project.
 
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

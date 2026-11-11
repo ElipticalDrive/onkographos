@@ -1,0 +1,177 @@
+# Reversible Discrete Volume Polyhedrization using Marching Cubes Simplification
+
+Also called: MC simplification using DPS, Marching Cubes Simplification with Digital Plane Segmentation, RDP-MC, Reversible MC Simplification, Reversible discrete volume polyhedrization using MC simplification
+
+## Overview
+This method constructs a reversible and topologically correct polyhedron from a binary 3D discrete volume by simplifying a Marching Cubes (MC) surface using Digital Plane Segmentation (DPS) information [S1]. It reduces the facet count of the MC mesh while strictly preserving the Object Boundary Quantization (OBQ) digitization property, ensuring the simplified polyhedron reconstructs the exact original voxel set [S1]. Unlike standard simplification methods that approximate geometry, this approach restricts reconstruction to the cells defined by the original MC surface, allowing topology and reversibility to be ensured via local analysis [S1]. It is distinct from [Simplified Marching Cubes](3759-simplified-marching-cubes.md) and [Modified Marching Cubes with Triangle Decimation](3903-modified-marching-cubes-with-triangle-decimation.md) by its reliance on DPS preimages and linear programming to guarantee reversibility rather than visual fidelity alone [S1].
+
+## How it works
+**Inputs:** A binary 3D discrete volume $V$ where $V(x,y,z) \in \{0, 1\}$, and an iso-level $\lambda \in ]0, 1[$.
+**Outputs:** A simplified polyhedron (potentially with polygonal facets) that is reversible to $V$.
+
+**Data Structures:**
+1.  **MC Surface:** A triangular mesh where each vertex $v$ corresponds one-to-one to a surfel $\{p, q\}$. $p$ is a voxel in the object ($V(p)=1$) and $q$ is a voxel in the background ($V(q)=0$). The vertex $v$ lies on the open segment $]pq[$.
+2.  **Digital Plane Segment (DPS):** A set of voxels $V$ that is coplanar. Defined by parameters $(\alpha, \beta, \gamma) \in [0, 1]^2 \times [0, 1[$ such that $V \subset P = \{(x, y, z) \in \mathbb{Z}^3 \mid 0 \le \alpha x + \beta y + \gamma + z < 1\}$ [S1].
+3.  **Preimage:** The set of Euclidean plane parameters $(\alpha, \beta, \gamma)$ that satisfy the DPS condition for a given set of voxels. For a direction $d \in D = \{(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)\}$, the directional preimage is the set of Euclidean planes crossing all segments $[pq[$ where $p \in V$ and $q = p + d$ [S1].
+4.  **Triangle Classification:**
+    *   **Homogeneous (H):** An MC triangle where all three vertices are associated with surfels belonging to the same DPS (same label) [S1].
+    *   **Non-Homogeneous (NH):** An MC triangle where vertices belong to surfels of different DPSs. Classified as 2-NH (2 distinct segments) or 3-NH (3 distinct segments) [S1].
+
+**Algorithm Steps:**
+
+1.  **MC Extraction:** Compute the initial MC surface from $V$ using iso-level $\lambda \in ]0, 1[$. This ensures the initial surface is a reversible polyhedrization according to the OBQ model [S1].
+2.  **DPS Decomposition:** Label every surfel of the object's surface with a DPS label. Compute the preimage for each labeled segment. This is typically done using a directional decomposition algorithm [S1].
+3.  **Homogeneous Triangle Simplification:**
+    *   Identify connected sets $S$ of H-triangles with the same label.
+    *   Extract an Euclidean plane $P$ from the DPS preimage associated with $S$.
+    *   Project all vertices of $S$ onto $P$ along the direction $pq$ of their associated surfels. This projection preserves reversibility [S1].
+    *   Convert the connected set $S$ into a single polygonal facet.
+4.  **Non-Homogeneous Triangle Optimization:**
+    *   **Constraint:** The algorithm restricts optimization to MC configurations with a single surface patch (configurations $\{1, 2, 5, 8, 9, 11\}$). Complex configurations with two or three surface patches are excluded because defining sufficient conditions to avoid self-crossings in dimension 3 is too restrictive [S1].
+    *   **Step 1: Global Simplification:**
+        *   Process an unsorted list of all 2-NH triangles.
+        *   For each 2-NH triangle, arbitrarily remove an edge by adding linear constraints over the two associated planes (preimages $P_1, P_2$).
+        *   If a constraint makes a preimage empty, remove the constraints and defer the removal to the next step [S1].
+        *   Skip 3-NH triangles in this step [S1].
+    *   **Step 2: Greedy Simplification:**
+        *   Arbitrarily choose a 2-NH triangle.
+        *   Fix one of its planes $P_1$ using the barycenter of its preimage.
+        *   Add linear constraints over the second plane $P_2$ to remove the triangle if possible.
+        *   Move to an adjacent triangle and repeat.
+        *   If a 3-NH triangle is encountered, skip it until two of its three associated planes are fixed.
+        *   If a triangle cannot be removed and the adjacent list is empty, choose a new 2-NH triangle [S1].
+    *   **Edge Removal Condition:** For an edge $e$ with associated preimages $P_1$ and $P_2$, the edge can be removed if for all $P_1 \in P_1$ and $P_2 \in P_2$, the intersection of $P_1$ and $P_2$ belongs to the MC cell face associated with $e$. Sufficient conditions are derived based on voxel counts on the face $ABCD$:
+        *   **Case 1 (1 voxel A in face):** Plane $P_1$ (associated to surfel $\{A,B\}$) crosses segment $CD$, and $P_2$ (associated to surfel $\{A,D\}$) crosses segment $BC$. This ensures the intersection is inside the square [S1].
+        *   **Case 2 (2 voxels in face):** No interesting linear constraints are generated [S1].
+        *   **Case 3 (1 voxel C NOT in face):** Plane $P_1$ (associated to surfel $\{D,C\}$) crosses segment $AB$, and $P_2$ (associated to surfel $\{B,C\}$) crosses segment $AD$. This ensures the intersection is inside the square [S1].
+    *   **Linear Constraints:** To ensure the intersection point $I$ of fixed plane $P_1$ and mobile plane $P_2$ is inside square face $ABCD$, the following linear constraints are applied to $P_2$'s parameters:
+        $$ x_A < x_I < x_A + 1 $$
+        $$ y_A < y_I < y_A + 1 $$
+        Since $x_A, y_A$ are constants and $x_I, y_I$ depend on $P_2$, these are linear constraints [S1]. For 3-NH triangles, once 2 planes are fixed, similar constraints apply to the third plane to ensure the intersection is inside the MC cell:
+        $$ x_A < x_I < x_A + 1, \quad y_A < y_I < y_A + 1, \quad z_A < z_I < z_A + 1 $$
+        [S1].
+    *   **Dimension Limit:** The dimension of the linear constraint system is bounded by 3 to limit computational cost [S1].
+5.  **Finalization:**
+    *   Displace all vertices to the intersection of their Euclidean plane and their $]pq[$ segment.
+    *   Group coplanar triangles into polygons [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reversible_mc_simplification(volume, iso_level):
+    # 1. MC Extraction
+    # Ensure iso_level is in (0, 1) for reversibility [S1]
+    mc_mesh = marching_cubes(volume, iso_level)
+    
+    # 2. DPS Decomposition
+    # Label surfels and compute preimages. 
+    # Direction d in {(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)} [S1]
+    surfel_labels, preimages = digital_plane_segmentation(mc_mesh)
+    
+    # 3. Homogeneous Triangle Simplification
+    h_triangles = get_homogeneous_triangles(mc_mesh, surfel_labels)
+    for label, connected_set in h_triangles:
+        # Extract plane P from preimage of the label [S1]
+        plane_P = extract_plane_from_preimage(preimages[label])
+        
+        # Project vertices onto P along pq direction [S1]
+        for triangle in connected_set:
+            for vertex in triangle.vertices:
+                surfel = vertex.surfel # {p, q}
+                direction = q - p
+                vertex.position = project_along_direction(plane_P, vertex.position, direction)
+        
+        # Convert connected set to single polygonal facet
+        convert_to_facet(connected_set)
+
+    # 4. Non-Homogeneous Triangle Optimization
+    # Filter NH triangles to only include configurations {1, 2, 5, 8, 9, 11} [S1]
+    nh_triangles = get_non_homogeneous_triangles(mc_mesh, surfel_labels)
+    valid_nh = [t for t in nh_triangles if t.config in {1, 2, 5, 8, 9, 11}]
+    
+    # Step 1: Global Simplification (2-NH only)
+    global_2nh = [t for t in valid_nh if t.type == '2-NH']
+    for triangle in global_2nh:
+        # Arbitrarily remove an edge by adding constraints to P1 and P2 [S1]
+        p1, p2 = triangle.preimages
+        constraints = generate_edge_removal_constraints(p1, p2, triangle.face)
+        if not make_preimage_empty(p1, constraints) and not make_preimage_empty(p2, constraints):
+            apply_constraints(p1, constraints)
+            apply_constraints(p2, constraints)
+            remove_edge(triangle)
+        else:
+            # Constraints removed, handled in greedy step [S1]
+            pass
+
+    # Step 2: Greedy Simplification
+    remaining_2nh = [t for t in valid_nh if t.type == '2-NH' and not t.removed]
+    remaining_3nh = [t for t in valid_nh if t.type == '3-NH' and not t.removed]
+    
+    while remaining_2nh:
+        triangle = remaining_2nh.pop(0)
+        
+        # Fix one plane with barycenter of its preimage [S1]
+        p1 = triangle.preimages[0]
+        p1.fixed = True
+        p1.params = barycenter(p1.preimage_set)
+        
+        # Try to remove triangle by constraining second plane [S1]
+        p2 = triangle.preimages[1]
+        constraints = generate_edge_removal_constraints(p1, p2, triangle.face)
+        if not make_preimage_empty(p2, constraints):
+            apply_constraints(p2, constraints)
+            remove_edge(triangle)
+            # Propagate to adjacent triangles
+            propagate_fixes(triangle, remaining_2nh, remaining_3nh)
+        else:
+            # Cannot remove, try adjacent or next triangle [S1]
+            pass
+
+    # Handle 3-NH triangles: skip until 2 planes are fixed [S1]
+    for triangle in remaining_3nh:
+        if triangle.preimages[0].fixed and triangle.preimages[1].fixed:
+            p3 = triangle.preimages[2]
+            constraints = generate_3nh_constraints(triangle)
+            if not make_preimage_empty(p3, constraints):
+                apply_constraints(p3, constraints)
+                remove_edge(triangle)
+
+    # 5. Finalization
+    # Displace vertices to intersection of Euclidean plane and ]pq[ segment [S1]
+    for vertex in mc_mesh.vertices:
+        surfel = vertex.surfel
+        plane = get_fixed_plane_for_surfel(surfel)
+        vertex.position = intersect_plane_and_segment(plane, surfel.p, surfel.q)
+        
+    # Group coplanar triangles into polygons
+    polygons = group_coplanar_triangles(mc_mesh)
+    
+    return polygons
+```
+
+**Edge Cases and Pitfalls:**
+*   **Complex MC Configurations:** Configurations with two or three surface patches (not in $\{1, 2, 5, 8, 9, 11\}$) are excluded from optimization. Defining sufficient conditions to avoid self-crossings using constraints in dimension 3 would be too restrictive [S1].
+*   **Rational Arithmetic Bottleneck:** For large volumes, exact DPS recognition requires rational arithmetic. The arithmetical size of internal rational numbers increases quickly, creating a computational bottleneck [S1].
+*   **Visual Quality vs. Reversibility:** Multiple polygons may satisfy reversibility (OBQ), but visual quality varies. The algorithm restricts reconstruction to MC cells to ensure local analysis suffices for topology/reversibility, which may limit visual optimality [S1].
+*   **Empty Preimages:** If adding constraints makes a preimage empty, the constraints are removed, and the triangle removal is deferred or skipped [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Highly dependent on the size of the DPS preimages. A bound on preimage size allows for bounded costs in DPS decomposition and linear programming solver efficiency [S1]. The linear programming dimension is bounded by 3 [S1].
+*   **Memory Complexity:** Requires storing MC mesh, DPS labels, and preimages. Preimages can grow large, especially with rational arithmetic [S1].
+*   **Measured Performance:**
+    *   Pyramid object ($4^3$): 512 MC triangles, 342 H triangles, 170 NH triangles. NH removal rate 62%, Global removal rate 87% [S1].
+    *   Cube object ($7^3$): 2024 MC triangles, 1720 H triangles, 304 NH triangles. NH removal rate 89%, Global removal rate 98% [S1].
+    *   Cube object ($10^3$): 3656 MC triangles, 2200 H triangles, 1456 NH triangles. NH removal rate 37%, Global removal rate 75% [S1].
+    *   Global removal rate is always greater than 75% in presented experiments [S1].
+*   **Strengths:** Guarantees reversibility to the original binary volume; preserves topology; reduces facet count significantly (often >75%) [S1].
+*   **Limitations:** Restricted to specific MC configurations; computational bottleneck with large volumes due to rational arithmetic; visual quality is secondary to reversibility [S1].
+*   **When to use:** When exact reconstruction of the binary volume from the simplified mesh is required (e.g., medical imaging, voxel-based modeling).
+*   **When not to use:** When visual fidelity is the primary goal and reversibility is not required; for very large volumes where rational arithmetic performance is unacceptable.
+
+## Background
+The method was proposed by David Coeurjolly, Florent Dupont, and Isabelle Sivignon from LIRIS, CNRS, France [S1]. It is based on the Object Boundary Quantization (OBQ) model, which establishes that the Marching Cubes surface with an iso-level in $]0, 1[$ is a reversible polyhedrization of a binary object [S1]. The work builds on previous research in digital plane segmentation and discrete geometry [S1, S2, S3, S4, S10, S13, S14, S15, S16, S17]. The algorithm was presented in the context of optimizing reversible discrete volume polyhedrization [S1].
+
+## Sources
+[S1] Optimization schemes for the reversible discrete volume polyhedrization using Marching Cubes simplification, https://doi.org/10.1007/11907350_35, fetched 2026-10-26

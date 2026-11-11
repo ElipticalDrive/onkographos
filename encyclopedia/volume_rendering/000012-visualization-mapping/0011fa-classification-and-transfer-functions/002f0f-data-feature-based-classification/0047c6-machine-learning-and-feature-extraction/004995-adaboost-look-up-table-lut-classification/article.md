@@ -1,0 +1,211 @@
+# AdaBoost Look Up Table (LUT) Classification
+
+Also called: Discrete AdaBoost with ECOC, Voxel-based AdaBoost Classification
+
+## Overview
+AdaBoost Look Up Table (LUT) Classification is a machine learning method for volume rendering that accelerates multi-class segmentation by storing trained AdaBoost weak classifiers in a compact lookup structure [S1, unofficial]. It solves the problem of interactive volume classification by replacing iterative model evaluation with fast table lookups, enabling real-time testing after an interactive training phase [S1, unofficial]. It differs from [AdaBoost Volume Classification](12549-adaboost-volume-classification.md) by explicitly encoding the decision stumps into a 3-row LUT structure optimized for GPU parallel testing, and from [K-means-based hybrid segmentation](7597-k-means-based-hybrid-segmentation.md) by using boosting-based binary dichotomizers within an Error Correcting Output Codes (ECOC) framework rather than centroid-based clustering [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ classes (volume structures) and a training dataset $T$ consisting of voxel samples. Each sample is a feature vector $\rho$ and a label $l(\rho)$ [S1, unofficial].
+*   **Output:** A Look Up Table (LUT) $L$ containing the parameters for $n$ dichotomizers, and a classification map assigning each voxel in the volume to one of the $N$ classes [S1, unofficial].
+
+**Data Structures:**
+The core data structure is the LUT $L$, which stores the parameters for all weak classifiers across all dichotomizers. It is organized as a table with 3 rows and $8 \times n$ columns (where $n$ is the number of dichotomizers) [S1, unofficial]:
+*   **Row 1:** Codifies the 8 sample features $\rho_s$ ($s \in [1..8]$) used for splitting. The features are: $x, y, z$ coordinates; gradients $g_x, g_y, g_z$; gradient magnitude $|g|$; and density value $v$ [S1, unofficial].
+*   **Row 2:** Codifies the polarity ($p$) for each weak classifier. Polarity determines the direction of the inequality check [S1, unofficial].
+*   **Row 3:** Codifies the threshold ($t$) for each weak classifier [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Define Classes:** Define $N$ classes representing the volume structures to be segmented [S1, unofficial].
+2.  **Form Dichotomizers:** Create $n$ binary partitions (dichotomizers) of the $N$ classes using an ECOC design (specifically one-versus-one in the source implementation) [S1, unofficial].
+3.  **Train Dichotomizers:** For each dichotomizer $h_i$:
+    a.  Select a subset of training voxels $T$ (typically 0.1% to 4% of the total volume) [S1, unofficial].
+    b.  Train an AdaBoost classifier using Decision Stumps as weak learners. The source uses 30 decision stumps per dichotomizer [S1, unofficial].
+    c.  Extract the polarity and threshold for each stump's selected feature.
+    d.  Populate the corresponding columns in the LUT $L$ with the feature index (Row 1), polarity (Row 2), and threshold (Row 3) [S1, unofficial].
+4.  **Test (Classify):** For each voxel in the volume:
+    a.  Compute the 8 features $\rho$ for the voxel [S1, unofficial].
+    b.  For each dichotomizer $i$ (column group in LUT):
+        i.  Retrieve the feature index $s$, polarity $p$, and threshold $t$ from LUT $L$ [S1, unofficial].
+        ii. Evaluate the decision stump: if $p=1$, check if $\rho_s > t$; if $p=-1$, check if $\rho_s < t$. Output the binary result [S1, unofficial].
+    c.  Aggregate the binary outputs from all $n$ dichotomizers using the ECOC decoding scheme to determine the final class label [S1, unofficial].
+
+**Formulas:**
+*   **Training Cost:** The total cost of sequential training for one dichotomizer is $O(|T| \times M)$, where $|T|$ is the number of training samples and $M$ is the number of iterations (stumps) [S1, unofficial].
+*   **Feature Vector:** $\rho = [x, y, z, d, g_x, g_y, g_z, |g|, v]$ [S1, unofficial]. Note: The source lists 8 features but includes 'd' in the vector definition; the text clarifies the 8 features are coordinates, gradients, magnitude, and density. 'd' likely refers to density or is a typo for one of the others, but the explicit list is: $x, y, z, g_x, g_y, g_z, |g|, v$ [S1, unofficial].
+
+**Parameters:**
+*   **Features:** 8 features per voxel [S1, unofficial].
+*   **Weak Classifier:** Decision Stumps [S1, unofficial].
+*   **Number of Stumps:** 30 per dichotomizer [S1, unofficial].
+*   **Training Data Size:** Small subset of voxels, ranging from 1,880 (first iteration) to 14,200 (last iteration) in simulations [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Training Data Selection:** The method relies on user-selected voxels. Insufficient or biased selection can lead to lower accuracy, though the method converges quickly [S1, unofficial].
+*   **Serial Bottleneck:** While dichotomizers are trained in parallel, the training of a single dichotomizer is serial due to dependencies between AdaBoost iterations [S1, unofficial].
+*   **ECOC Design:** The choice of ECOC design affects the number of dichotomizers $n$. The source uses one-versus-one, which scales as $N(N-1)/2$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# AdaBoost LUT Classification
+
+def train_adaboost_lut(classes, training_samples, num_stumps=30):
+    """
+    Trains the AdaBoost LUT for a given set of classes.
+    :param classes: List of class labels.
+    :param training_samples: List of tuples (feature_vector, label).
+    :param num_stumps: Number of decision stumps per dichotomizer.
+    :return: LUT (3D array/list of lists)
+    """
+    n_classes = len(classes)
+    # One-versus-one ECOC design
+    dichotomizers = []
+    for i in range(n_classes):
+        for j in range(i + 1, n_classes):
+            dichotomizers.append((classes[i], classes[j]))
+    
+    n_dichotomizers = len(dichotomizers)
+    
+    # LUT structure: 3 rows, 8 * n_dichotomizers columns
+    # Row 0: Feature indices (0-7)
+    # Row 1: Polarity (-1 or 1)
+    # Row 2: Thresholds (float)
+    lut = [[0] * (8 * n_dichotomizers) for _ in range(3)]
+    
+    # Parallelize across dichotomizers (simulated here sequentially)
+    for idx, (class_a, class_b) in enumerate(dichotomizers):
+        # Create binary labels: class_a -> 1, class_b -> -1, others -> ignore
+        binary_labels = []
+        for features, label in training_samples:
+            if label == class_a:
+                binary_labels.append(1)
+            elif label == class_b:
+                binary_labels.append(-1)
+            else:
+                continue # Skip samples not in this dichotomy
+        
+        if not binary_labels:
+            continue
+            
+        # Train AdaBoost with Decision Stumps
+        stumps = []
+        weights = [1.0 / len(binary_labels)] * len(binary_labels)
+        
+        for m in range(num_stumps):
+            stump = train_decision_stump(training_samples, binary_labels, weights)
+            stumps.append(stump)
+            
+            # Update weights (standard AdaBoost)
+            errors = []
+            for i, (features, _) in enumerate(training_samples):
+                if binary_labels[i] == 0: continue
+                pred = stump.evaluate(features)
+                errors.append(1 if pred != binary_labels[i] else 0)
+            
+            # Calculate error rate
+            error_rate = sum(w * e for w, e in zip(weights, errors)) / sum(w for w in weights if training_samples[[i for i, l in enumerate(binary_labels) if l != 0]][0] is not None) # Simplified weight update logic for pseudocode clarity
+            # Note: Full weight update requires careful indexing. 
+            # For implementation, use standard AdaBoost weight update formula.
+            
+        # Store stump parameters in LUT
+        for m, stump in enumerate(stumps):
+            col_idx = idx * 8 + stump.feature_index
+            lut[0][col_idx] = stump.feature_index
+            lut[1][col_idx] = stump.polarity
+            lut[2][col_idx] = stump.threshold
+            
+    return lut
+
+def train_decision_stump(features, labels, weights):
+    """
+    Trains a single decision stump.
+    :return: Stump object with feature_index, polarity, threshold
+    """
+    best_stump = None
+    min_weighted_error = float('inf')
+    
+    # Iterate over all features and possible thresholds
+    for feature_idx in range(8):
+        values = [f[feature_idx] for f in features]
+        thresholds = sorted(set(values))
+        
+        for threshold in thresholds:
+            # Evaluate stump
+            weighted_error = 0.0
+            for i, label in enumerate(labels):
+                if label == 0: continue
+                pred = 1 if values[i] > threshold else -1
+                # Polarity is implicitly handled by the threshold comparison direction
+                # We need to find the best polarity for this threshold
+                pass
+            
+            # Simplified: Find best polarity for this threshold
+            pos_error = sum(w for i, w in enumerate(weights) if labels[i] != 0 and values[i] > threshold and labels[i] == -1)
+            neg_error = sum(w for i, w in enumerate(weights) if labels[i] != 0 and values[i] <= threshold and labels[i] == 1)
+            
+            # This is a simplified error calculation. 
+            # In practice, evaluate both polarities and pick the one with lower error.
+            
+    # Return best stump found
+    return best_stump
+
+def classify_voxel(lut, voxel_features):
+    """
+    Classifies a single voxel using the LUT.
+    :param lut: The trained LUT.
+    :param voxel_features: List of 8 feature values.
+    :return: Predicted class label
+    """
+    n_dichotomizers = len(lut[0]) // 8
+    binary_votes = [0] * n_dichotomizers
+    
+    for idx in range(n_dichotomizers):
+        vote = 0
+        for k in range(8):
+            col = idx * 8 + k
+            feature_idx = lut[0][col]
+            polarity = lut[1][col]
+            threshold = lut[2][col]
+            
+            feature_val = voxel_features[feature_idx]
+            
+            # Evaluate stump
+            if polarity == 1:
+                if feature_val > threshold:
+                    vote += 1
+                else:
+                    vote -= 1
+            else: # polarity == -1
+                if feature_val < threshold:
+                    vote += 1
+                else:
+                    vote -= 1
+        binary_votes[idx] = vote
+        
+    # Decode ECOC votes to class label
+    # This requires the ECOC codebook matrix which maps classes to binary vectors
+    # The source uses one-versus-one, so decoding is majority vote among dichotomizers
+    # involving the class.
+    return decode_ecoc(binary_votes, n_dichotomizers)
+```
+
+## Operating characteristics
+*   **Time Complexity:** Training one dichotomizer is $O(|T| \times M)$ [S1, unofficial]. Total training time is interactive, with a worst-case bound of 5 seconds for the tested datasets [S1, unofficial]. Testing is real-time [S1, unofficial].
+*   **Memory Complexity:** The LUT size is proportional to $8 \times n \times 3$ entries, where $n$ is the number of dichotomizers. For $N$ classes using one-versus-one, $n = N(N-1)/2$. This is very small compared to the volume data [S1, unofficial].
+*   **Performance:** Mean accuracy exceeds 90% by the 5th iteration across datasets [S1, unofficial].
+    *   Brain: 0.960 accuracy (Ref: 0.968) [S1, unofficial].
+    *   Foot: 0.989 accuracy (Ref: 1.000) [S1, unofficial].
+    *   Thorax: 0.922 accuracy (Ref: 0.922) [S1, unofficial].
+*   **Data Efficiency:** High accuracy is achieved with very few training samples (0.1% to 4% of voxels) [S1, unofficial].
+*   **Strengths:** Real-time testing, interactive training, high accuracy with minimal user input, GPU parallelization of dichotomizer training [S1, unofficial].
+*   **Limitations:** Training of individual dichotomizers is serial; accuracy depends on user-provided training samples; ECOC design complexity grows with number of classes [S1, unofficial].
+
+## Background
+The method was proposed by S. Grau, A. Puig, S. Escalera, and M. Salamó in the paper "Intelligent Interactive Volume Classification" presented at Eurographics 2013 [S1, unofficial]. It builds on Discrete AdaBoost and ECOC frameworks for multi-class classification, adapting them for volume rendering by using decision stumps and a LUT for efficient evaluation [S1, unofficial]. The approach addresses the need for interactive segmentation in volume visualization, where traditional machine learning methods are too slow for real-time feedback [S1, unofficial].
+
+## Sources
+[S1] Intelligent Interactive Volume Classification, https://doi.org/10.2312/pe.pg.pg2013short.023-028, fetched 2026-10-26 (unofficial)

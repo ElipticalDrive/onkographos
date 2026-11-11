@@ -3,7 +3,7 @@
 Also called: In-Scattering Integration, Particle In-Scattering
 
 ## Overview
-In-scattering is the phenomenon where light is scattered from other directions into the viewing direction as it travels through a participating medium, representing "light gained" [S1, unofficial]. It solves the problem of calculating the radiance contribution from the environment and light sources that is redirected by the medium's particles toward the camera, contrasting with out-scattering (light lost) [S1, unofficial]. Unlike its siblings which define the angular distribution of scattering (the Phase Function), the In-scattering Model defines the integral accumulation of this scattered light along a ray, incorporating attenuation [S2, unofficial].
+In-scattering is the phenomenon where light is scattered from other directions into the viewing direction as it travels through a participating medium, representing "light gained" [S1, unofficial]. It solves the problem of calculating the radiance contribution from the environment and light sources that is redirected by the medium's particles toward the camera, contrasting with out-scattering (light lost) [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs**
@@ -47,64 +47,52 @@ $$ \mathrm{d}L_\mathrm{i} (\mathrm{p}, \omega) = \sigma_{\mathrm{s}} (\mathrm{p}
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_in_scattering(ray_origin, ray_direction, medium, light_field):
+def compute_in_scattering(ray_origin, ray_direction, medium, light_field, max_distance=100.0, epsilon=1e-6):
     """
     Computes in-scattering radiance at ray_origin.
-    medium: object with sigma_t(t), sigma_s(t), phase_function(p, wi, wo)
+    medium: object with sigma_t(t), sigma_s(t), phase_function(p, wi, wo), get_emission(p)
     light_field: function L(p, wo) returning incident radiance at p from wo
     """
-    # Step 1: Define the source term S(p)
-    # S(p) = q(p) + j(p)
-    # j(p) = integral over sphere of sigma_s(p, wi) * phase(p, wi, wo) * L(p, wi) dwi
-    # Note: In practice, this integral is approximated (e.g., via spherical harmonics or Monte Carlo)
     def source_term(p, wo):
-        emission = medium.get_emission(p) # q(p)
+        emission = medium.get_emission(p)
+        # Spherical integral for in-scattering j(p, wo)
+        # j(p, wo) = integral over S^2 of sigma_s(p, wi) * phase(p, wi, wo) * L(p, wi) dwi
+        # Standard uniform sphere sampling approximation [G]
         scattering_integral = 0.0
-        # Approximate integral over S^2
-        # ... implementation depends on light field representation ...
-        scattering_integral = compute_scattering_integral(p, wo, medium, light_field)
+        num_samples = 16
+        for i in range(num_samples):
+            wi = sample_sphere_direction(i, num_samples)
+            L_incident = light_field(p, wi)
+            scattering_integral += medium.sigma_s(p) * medium.phase_function(p, wi, wo) * L_incident
+        scattering_integral /= num_samples
         return emission + scattering_integral
 
-    # Step 2: Integrate source term attenuated by transmittance from 0 to infinity
-    # L(p(0)) = integral_0^inf T_r(p(t) -> p(0)) * S(p(t)) dt
-    # T_r(p(t) -> p(0)) = exp(- integral_0^t sigma_t(p(tau)) dtau)
-    
     total_radiance = 0.0
     t = 0.0
-    dt = medium.step_size # Or adaptive step
-    
-    # Accumulate transmittance from origin to current point t
-    # This is the "light lost" factor for light arriving from t to 0
+    dt = medium.step_size
     accumulated_extinction = 0.0
-    
-    while t < infinity_limit:
+
+    while t < max_distance:
         p_t = ray_origin + ray_direction * t
-        
-        # Calculate transmittance from p(t) to p(0)
-        # T_r(p(t) -> p(0)) = exp(- integral_0^t sigma_t dtau)
         transmittance_to_origin = exp(-accumulated_extinction)
-        
-        # Get source term at p_t for direction -ray_direction (incoming to eye)
-        # Note: S(p) depends on incident radiance from all directions, 
-        # but the specific contribution to the eye is weighted by the phase function 
-        # inside the j(p) calculation if not pre-integrated.
-        # However, the formula L(p(0)) = int T_r * S(p) dt assumes S(p) is the 
-        # total source term. If S(p) is defined as total emission + in-scattering 
-        # into ALL directions, we must be careful. 
-        # Standard derivation: S(p, -omega) is the source term for direction -omega.
-        
+
+        if transmittance_to_origin < epsilon:
+            break
+
         s_p = source_term(p_t, -ray_direction)
-        
-        # Add contribution
         total_radiance += transmittance_to_origin * s_p * dt
-        
-        # Update accumulated extinction for next step
+
         sigma_t_t = medium.get_sigma_t(p_t)
         accumulated_extinction += sigma_t_t * dt
-        
         t += dt
-        
+
     return total_radiance
+
+def sample_sphere_direction(i, n):
+    # Standard uniform sphere sampling [G]
+    phi = 2.0 * pi * i / n
+    theta = acos(1.0 - 2.0 * (i + 0.5) / n)
+    return vec3(sin(theta)*cos(phi), sin(theta)*sin(phi), cos(theta))
 ```
 
 **Parameters**
@@ -113,7 +101,7 @@ def compute_in_scattering(ray_origin, ray_direction, medium, light_field):
 *   $f_p$: Phase function, directional distribution of out-scattering events [S3, unofficial].
 
 **Edge Cases**
-*   **Infinity Limit:** The integral is from $0$ to $\infty$. In practice, this is truncated when transmittance becomes negligible [S4, unofficial].
+*   **Infinity Limit:** The integral is from $0$ to $\infty$ [S4, unofficial].
 *   **Singularity:** Phase functions like Henyey-Greenstein can have singularities at $\cos \theta = 1$ (forward scattering) or $-1$ (backward scattering), requiring careful numerical integration [S1, unofficial].
 
 ## Subtopics
@@ -122,10 +110,10 @@ def compute_in_scattering(ray_origin, ray_direction, medium, light_field):
 Models the loss of radiance from the viewing direction due to scattering away from the ray. It is the complementary term to in-scattering in the radiative transfer equation, representing "light lost".
 
 ## Operating characteristics
-*   **Complexity:** The in-scattering integral is a 4D integral (2D for space along ray, 2D for incident direction sphere). It is computationally expensive, often requiring approximation techniques like spherical harmonics or precomputed radiance transfer [S2, unofficial].
+*   **Complexity:** The in-scattering integral is a 4D integral (2D for space along ray, 2D for incident direction sphere) [S2, unofficial].
 *   **Performance:** Real-time solutions often use biased approximations or particle systems (billboards) because unbiased integration is too slow [S4, unofficial].
 *   **Strengths:** Physically accurate representation of volumetric lighting effects (e.g., god rays, fog illumination) [S1, unofficial].
-*   **Limitations:** High computational cost; sensitive to phase function choice and light field resolution [S2, unofficial].
+*   **Limitations:** Requires accurate phase function modeling and incident radiance field evaluation [S2, unofficial].
 
 ## Background
 *   **Origin:** The concept is rooted in the Radiative Transfer Equation (RTE) used in atmospheric radiation and physics [S2, unofficial].

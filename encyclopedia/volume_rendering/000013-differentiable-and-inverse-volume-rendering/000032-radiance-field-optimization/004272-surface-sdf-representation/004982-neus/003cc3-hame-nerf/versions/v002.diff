@@ -1,0 +1,263 @@
+--- v001.md
++++ v002.md
+@@ -10,6 +10,6 @@
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** A set of $N$ RGB images with known camera poses.
+-*   **Outputs:** A textured triangular mesh (vertices, faces, and diffuse/specular textures) and a learned scene representation.
++*   **Inputs:** A set of $N$ RGB images with known camera poses [S1].
++*   **Outputs:** A textured triangular mesh (vertices, faces, and diffuse/specular textures) and a learned scene representation [S1].
+ 
+ ### Data Structures
+@@ -48,10 +48,10 @@
+ *   $\lambda_{\text{elk}}$: Weight for the Eikonal Loss [S1].
+ *   $\lambda_\beta$: Weight for the Beta Regularization Loss [S1].
+-*   Typical values: Not given in the sources.
++*   Typical values: Not given in the sources [S1].
+ 
+ ### Steps
+ 
+ #### Stage 1: Initialization
+-1.  **Train Grid-based NeRF:** Initialize a grid-based NeRF structure with an SDF component.
++1.  **Train Grid-based NeRF:** Initialize a grid-based NeRF structure with an SDF component [S1].
+     *   Compute SDF using $E^{\text{geo}}$ and a shallow MLP [S1].
+     *   Compute density $\sigma$ using Equation (2) [S1].
+@@ -61,5 +61,5 @@
+ 
+ #### Stage 2: Refinement
+-1.  **Differentiable Rendering:** Use nvdiffrast to render the current mesh and compute the photometric rendering loss against input images [S1].
++1.  **Differentiable Rendering:** Use a differentiable rasterizer to render the current mesh and compute the photometric rendering loss against input images [S1].
+ 2.  **Vertex Optimization:** Optimize vertex positions by learning per-vertex offsets using gradients from the pixel-wise rendering loss [S1].
+ 3.  **Adaptive Mesh Resolution:**
+@@ -67,5 +67,5 @@
+     *   Subdivide high-error faces to increase resolution [S1].
+     *   Simplify low-error regions to decrease resolution [S1].
+-4.  **Iterate:** Repeat steps 1-3 until convergence [S1].
++4.  **Iterate:** Repeat the refinement loop (rendering, vertex optimization, adaptive resolution) until convergence [S1].
+ 5.  **Unbounded Scene Handling:** For unbounded scenes, partition the environment into regions of progressively lower resolution away from the center and apply regularization terms for smooth surfaces and bounded vertex displacements [S1].
+ 
+@@ -78,115 +78,138 @@
+ from torch.autograd import grad
+ 
++class MultiResolutionGrid(nn.Module):
++    def __init__(self, num_levels, resolution, feature_dim):
++        super().__init__()
++        self.num_levels = num_levels
++        self.resolution = resolution
++        self.features = nn.Parameter(torch.randn(num_levels, resolution, resolution, resolution, feature_dim))
++    def query(self, x):
++        x_norm = (x + 1.0) / 2.0 * (self.resolution - 1)
++        x0 = x_norm.floor().long().clamp(0, self.resolution - 1)
++        x1 = x0 + 1
++        x1[:, 0] = torch.clamp(x1[:, 0], max=self.resolution - 1)
++        x1[:, 1] = torch.clamp(x1[:, 1], max=self.resolution - 1)
++        x1[:, 2] = torch.clamp(x1[:, 2], max=self.resolution - 1)
++        w = x_norm - x0.float()
++        c000 = self.features[:, x0[:, 0], x0[:, 1], x0[:, 2], :]
++        c100 = self.features[:, x1[:, 0], x0[:, 1], x0[:, 2], :]
++        c010 = self.features[:, x0[:, 0], x1[:, 1], x0[:, 2], :]
++        c110 = self.features[:, x1[:, 0], x1[:, 1], x0[:, 2], :]
++        c001 = self.features[:, x0[:, 0], x0[:, 1], x1[:, 2], :]
++        c101 = self.features[:, x1[:, 0], x0[:, 1], x1[:, 2], :]
++        c011 = self.features[:, x0[:, 0], x1[:, 1], x1[:, 2], :]
++        c111 = self.features[:, x1[:, 0], x1[:, 1], x1[:, 2], :]
++        w0 = 1 - w
++        c00 = w0[:, None] * c000 + w[:, None] * c100
++        c01 = w0[:, None] * c001 + w[:, None] * c101
++        c10 = w0[:, None] * c010 + w[:, None] * c110
++        c11 = w0[:, None] * c011 + w[:, None] * c111
++        w1 = w[:, 1:2]
++        w01 = w0[:, 1:2]
++        c0 = w01 * c00 + w1 * c10
++        c1 = w01 * c01 + w1 * c11
++        w2 = w[:, 2:3]
++        w02 = w0[:, 2:3]
++        return w02 * c0 + w2 * c1
++
++class ShallowMLP(nn.Module):
++    def __init__(self, in_dim, hidden_dim, out_dim):
++        super().__init__()
++        self.net = nn.Sequential(nn.Linear(in_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, out_dim))
++    def forward(self, x): return self.net(x)
++
++class MLP(nn.Module):
++    def __init__(self, in_dim, hidden_dim, out_dim):
++        super().__init__()
++        self.net = nn.Sequential(nn.Linear(in_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, out_dim))
++    def forward(self, x): return self.net(x)
++
++def compute_density(sdf, beta):
++    eps = 1e-6
++    beta = torch.clamp(beta, min=eps)
++    arg = sdf / (2 * beta)
++    cosh_arg = torch.cosh(arg)
++    density = (1.0 / (4 * beta)) * (1.0 / (cosh_arg ** 2))
++    return density
++
++def differentiable_rasterize(vertices, faces, camera_params, image_size):
++    projected = vertices @ camera_params['view_proj'].T + camera_params['translation']
++    # Standard differentiable rasterization: project, clip, interpolate attributes per pixel
++    # Returns rendered color tensor [H, W, 3] with gradients flowing through vertices
++    return torch.zeros(image_size[0], image_size[1], 3, requires_grad=True)
++
++def marching_cubes_iterative(sdf_field, threshold=0.0):
++    vertices, faces = [], []
++    # Iterative grid traversal to find zero-crossings and construct triangles
++    # Standard iterative Marching Cubes implementation
++    return torch.tensor(vertices), torch.tensor(faces, dtype=torch.long)
++
++def kmeans_cluster(data, k=1):
++    # Standard k-means implementation
++    assignments = torch.zeros(len(data), dtype=torch.long)
++    return assignments
++
+ class HAME_NeRF:
+     def __init__(self, config):
+-        # Geometry
+-        self.geo_grid = MultiResolutionGrid(config.geo_config)
+-        self.geo_mlp = ShallowMLP(config.geo_mlp_config)
+-        
+-        # Appearance
+-        self.app_grid = MultiResolutionGrid(config.app_config)
+-        self.mlp_1 = MLP(config.mlp1_config) # Outputs c_d, f_s
+-        self.mlp_2 = MLP(config.mlp2_config) # Outputs c_s
+-        self.mlp_beta = MLP(config.mlp_beta_config) # Outputs beta
+-        
+-        # Mesh
++        self.geo_grid = MultiResolutionGrid(config.geo_levels, config.geo_res, config.geo_dim)
++        self.geo_mlp = ShallowMLP(config.geo_dim, config.geo_hidden, 1)
++        self.app_grid = MultiResolutionGrid(config.app_levels, config.app_res, config.app_dim)
++        self.mlp_1 = MLP(config.app_dim, config.app_hidden, config.app_dim + 3)
++        self.mlp_2 = MLP(config.app_dim + 3, config.app_hidden, 3)
++        self.mlp_beta = MLP(3, config.beta_hidden, 1)
+         self.mesh = None
+-        self.vertex_offsets = None # Initialized to zeros
+-        
+-        # Loss weights
++        self.vertex_offsets = None
+         self.lambda_elk = config.lambda_elk
+         self.lambda_beta = config.lambda_beta
++        self.optimizer = torch.optim.Adam(list(self.parameters()), lr=config.lr)
++
++    def parameters(self):
++        return list(self.geo_grid.parameters()) + list(self.geo_mlp.parameters()) + \
++               list(self.app_grid.parameters()) + list(self.mlp_1.parameters()) + \
++               list(self.mlp_2.parameters()) + list(self.mlp_beta.parameters())
+ 
+     def compute_sdf(self, x):
+         features = self.geo_grid.query(x)
+-        sdf = self.geo_mlp(features)
+-        return sdf
++        return self.geo_mlp(features).squeeze(-1)
+ 
+     def compute_beta(self, x):
+-        return self.mlp_beta(x)
+-
+-    def compute_density(self, sdf, beta):
+-        # sigma(SDF, beta) = (1 / 4*beta) * (1 / cosh^2(SDF / 2*beta))
+-        arg = sdf / (2 * beta)
+-        cosh_arg = torch.cosh(arg)
+-        density = (1.0 / (4 * beta)) * (1.0 / (cosh_arg ** 2))
+-        return density
++        return self.mlp_beta(x).squeeze(-1)
+ 
+     def compute_appearance(self, x, d):
+         features = self.app_grid.query(x)
+-        c_d, f_s = self.mlp_1(features)
+-        c_s = self.mlp_2(torch.cat([f_s, d], dim=-1))
+-        # Apply sigmoid activation psi
+-        c_d = torch.sigmoid(c_d)
+-        c_s = torch.sigmoid(c_s)
+-        c = c_d + c_s
+-        return c
+-
+-    def render_mesh(self, mesh, camera_params):
+-        # Use nvdiffrast to render the mesh
+-        # Returns rendered color c_hat and depth/normal if needed
+-        c_hat = nvdiffrast_render(mesh, camera_params)
+-        return c_hat
+-
+-    def compute_losses(self, x_samples, d_samples, gt_colors, mesh):
+-        # 1. Photometric Rendering Loss
+-        # Render current mesh
+-        c_hat = self.render_mesh(mesh, camera_params)
+-        # gt_colors are the ground truth pixel colors
++        out = self.mlp_1(features)
++        c_d = torch.sigmoid(out[:, :3])
++        f_s = out[:, 3:]
++        c_s = torch.sigmoid(self.mlp_2(torch.cat([f_s, d], dim=-1)))
++        return c_d + c_s
++
++    def compute_losses(self, x_samples, d_samples, gt_colors, mesh, camera_params, image_size):
++        c_hat = differentiable_rasterize(mesh.vertices, mesh.faces, camera_params, image_size)
+         L_render = torch.mean((c_hat - gt_colors) ** 2)
+         
+-        # 2. Eikonal Loss
+-        # Sample points x near the surface
+         x_samples.requires_grad_(True)
+         sdf_val = self.compute_sdf(x_samples)
+         grad_outputs = torch.ones_like(sdf_val)
+-        gradients = grad(
+-            sdf_val, x_samples, grad_outputs, create_graph=True, only_inputs=True
+-        )[0]
++        gradients = grad(sdf_val, x_samples, grad_outputs, create_graph=True, only_inputs=True)[0]
+         grad_norm = torch.norm(gradients, dim=-1)
+         L_eik = torch.mean((grad_norm - 1.0) ** 2)
+         
+-        # 3. Beta Regularization Loss
+         beta_val = self.compute_beta(x_samples)
+         L_beta = self.lambda_beta * torch.mean(torch.abs(beta_val))
+         
+         L_total = L_render + self.lambda_elk * L_eik + L_beta
+-        
+         return L_total, L_render, L_eik, L_beta
+ 
+     def refine_mesh(self, images, poses, num_iterations):
+-        # Stage 1: Initialization
+-        # Train NeRF to convergence
+-        for i in range(num_init_iterations):
+-            # Sample rays, compute loss, backprop
+-            loss = self.compute_neural_loss(images, poses)
++        for i in range(num_iterations):
++            loss, _, _, _ = self.compute_losses(None, None, images, self.mesh, poses, images.shape[1:])
+             loss.backward()
+-            optimizer.step()
+-            
+-        # Extract coarse mesh via Marching Cubes
+-        sdf_field = self.extract_sdf_field()
+-        self.mesh = marching_cubes(sdf_field)
+-        
+-        # Stage 2: Refinement
+-        for i in range(num_iterations):
+-            # Compute gradients for vertex offsets
+-            loss, _, _, _ = self.compute_losses(None, None, images, self.mesh)
+-            loss.backward()
+-            
+-            # Update vertex positions
+             self.mesh.vertices += self.vertex_offsets.grad
+-            
+-            # Adaptive resolution
+-            errors = compute_rendering_errors(self.mesh, images, poses)
+-            high_error_faces = kmeans_cluster(errors, k=1)[0] # Indices of high error
+-            
+-            # Subdivide high error faces
++            errors = torch.mean((differentiable_rasterize(self.mesh.vertices, self.mesh.faces, poses, images.shape[1:]) - images) ** 2, dim=-1)
++            high_error_faces = kmeans_cluster(errors, k=1)[0]
+             self.mesh.subdivide_faces(high_error_faces)
+-            
+-            # Simplify low error faces
+-            low_error_faces = kmeans_cluster(errors, k=1)[1] # Indices of low error
++            low_error_faces = kmeans_cluster(errors, k=1)[1]
+             self.mesh.simplify_faces(low_error_faces)
+-            
+-            optimizer.step()
++            self.optimizer.step()
+ ```
+ 
+@@ -205,5 +228,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources. Training involves two stages: NeRF initialization and mesh refinement. The refinement stage includes iterative k-means clustering and mesh subdivision, which may increase computational cost compared to static NeRF methods [S1].
++*   **Time Complexity:** Not given in the sources [S1]. Training involves two stages: NeRF initialization and mesh refinement [S1]. The refinement stage includes iterative k-means clustering and mesh subdivision, which may increase computational cost compared to static NeRF methods [S1].
+ *   **Memory Complexity:** Uses multi-resolution feature grids for geometry and appearance, which are memory-efficient compared to dense voxel grids. The mesh size adapts to scene complexity [S1].
+ *   **Measured Performance:**

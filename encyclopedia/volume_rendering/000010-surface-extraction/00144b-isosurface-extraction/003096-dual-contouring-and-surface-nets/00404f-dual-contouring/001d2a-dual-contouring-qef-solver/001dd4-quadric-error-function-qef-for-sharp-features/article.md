@@ -28,17 +28,17 @@ The method accumulates constraints into a symmetric data structure [S2, unoffici
     [S1, unofficial]
 
 2.  **Construct Tangent Plane Quadrics ($Q_I$):**
-    For each intersection point $p_i$ with normal $n_i$, define a tangent plane equation $n_i^T (v - p_i) = 0$. This corresponds to the standard QEM formulation [S3, unofficial].
+    For each intersection point $p_i$ with normal $n_i$, define a tangent plane equation $n_i^T (v - p_i) = 0$ [S3, unofficial]. This corresponds to the standard QEM formulation [S3, unofficial].
     The quadric for a single plane $n^T v + d = 0$ (where $d = -n^T p_i$) is defined by:
     $$ A = n n^T $$
     $$ b = d n $$
     $$ c = d^2 $$
-    Accumulate these into the global $ATA$, $ATB$, and $btb$ matrices/vectors. Specifically, for each $i$:
+    Accumulate these into the global $ATA$, $ATB$, and $btb$ matrices/vectors [S2, unofficial]. Specifically, for each $i$:
     *   Normalize $n_i$.
-    *   Compute $d_i = -n_i \cdot p_i$.
+    *   Compute $dot_i = n_i \cdot p_i$.
     *   Update $ATA \leftarrow ATA + n_i n_i^T$ [S2, unofficial].
-    *   Update $ATB \leftarrow ATB + d_i n_i$ [S2, unofficial].
-    *   Update $btb \leftarrow btb + d_i^2$ [S2, unofficial].
+    *   Update $ATB \leftarrow ATB + dot_i n_i$ [S2, unofficial].
+    *   Update $btb \leftarrow btb + dot_i^2$ [S2, unofficial].
     [S1, unofficial]
 
 3.  **Construct Supporting Plane Quadrics ($Q_S$):**
@@ -52,17 +52,17 @@ The method accumulates constraints into a symmetric data structure [S2, unoffici
     *   Compute the supporting plane normal $n_s$:
         $$ n_s = \frac{n_e \times e}{\| n_e \times e \|} $$
         *Pitfall:* If $e$ is parallel to $n_e$, the cross product is zero and the supporting plane normal is undefined [S1, unofficial].
-    *   The supporting plane passes through $p_{mass}$ with normal $n_s$. The plane equation is $n_s^T (v - p_{mass}) = 0$ [S1, unofficial].
-    *   Let $d_s = -n_s \cdot p_{mass}$.
+    *   The supporting plane passes through $p_{mass}$ with normal $n_s$ [S1, unofficial]. The plane equation is $n_s^T (v - p_{mass}) = 0$.
+    *   Let $dot_s = n_s \cdot p_{mass}$.
     *   Accumulate the supporting plane quadric into $ATA$, $ATB$, and $btb$ using the same logic as Step 2, but scaled by a factor $a$ [S1, unofficial].
 
 4.  **Combine Quadrics:**
     The final error function $E(v)$ is the sum of the tangent quadrics $Q_I$ and the supporting quadrics $Q_S$, weighted by factor $a$:
     $$ Q = Q_I + a Q_S $$
-    The parameter $a$ controls feature sharpness. A typical value is $0.5$ [S1, unofficial]. Small values produce sharper features but may introduce instability; large values smooth the feature more [S1, unofficial].
+    The parameter $a$ controls feature sharpness [S1, unofficial]. A typical value is $0.5$ [S1, unofficial]. Small values produce sharper features but may introduce instability; large values smooth the feature more [S1, unofficial].
 
 5.  **Solve the Linear System:**
-    The problem is to minimize $E(v) = v^T (ATA) v - 2 (ATB)^T v + btb$. This is equivalent to solving the linear system:
+    The problem is to minimize $E(v) = v^T (ATA) v - 2 (ATB)^T v + btb$ [S2, unofficial]. This is equivalent to solving the linear system:
     $$ (ATA) v = ATB $$
     Since $ATA$ may be rank-deficient or ill-conditioned (especially for edges where $N < 3$), use Singular Value Decomposition (SVD) [S2, unofficial] [S3, unofficial].
     
@@ -86,7 +86,7 @@ The method accumulates constraints into a symmetric data structure [S2, unoffici
 *   $a$: Scaling factor for supporting planes. Typical value: $0.5$ [S1, unofficial].
 *   `svd_tol`: Tolerance for SVD convergence/singular value thresholding. Not specified in sources.
 *   `svd_sweeps`: Maximum number of Givens rotation sweeps for the SVD algorithm. Not specified in sources.
-*   `pinv_tol`: Tolerance for pseudoinverse computation. Singular values below this are treated as zero. Not specified in sources.
+*   `pinv_tol`: Tolerance for pseudoinverse computation. Singular values below this are treated as zero [S2, unofficial]. Not specified in sources.
 
 **Pseudocode**
 
@@ -94,8 +94,9 @@ The method accumulates constraints into a symmetric data structure [S2, unoffici
 
 ```python
 import math
+import numpy as np
 
-def solve_qef_sharp_features(intersection_points, intersection_normals, a=0.5):
+def solve_qef_sharp_features(intersection_points, intersection_normals, a=0.5, pinv_tol=1e-8):
     """
     Solves the QEF for sharp features using supporting planes and SVD.
     
@@ -103,6 +104,7 @@ def solve_qef_sharp_features(intersection_points, intersection_normals, a=0.5):
         intersection_points: List of 3D vectors (p_i).
         intersection_normals: List of 3D vectors (n_i).
         a: Weight for supporting planes (default 0.5).
+        pinv_tol: Tolerance for pseudoinverse computation.
         
     Returns:
         Vertex position v.
@@ -145,18 +147,18 @@ def solve_qef_sharp_features(intersection_points, intersection_normals, a=0.5):
         n_i = [n_i[0]/norm_n_i, n_i[1]/norm_n_i, n_i[2]/norm_n_i]
 
         # --- Tangent Plane Quadric (Q_I) ---
-        d_i = -(n_i[0]*p_i[0] + n_i[1]*p_i[1] + n_i[2]*p_i[2])
+        dot_i = n_i[0]*p_i[0] + n_i[1]*p_i[1] + n_i[2]*p_i[2]
         
         # A = n_i * n_i^T
         ata[0][0] += n_i[0]*n_i[0]; ata[0][1] += n_i[0]*n_i[1]; ata[0][2] += n_i[0]*n_i[2]
         ata[1][0] += n_i[1]*n_i[0]; ata[1][1] += n_i[1]*n_i[1]; ata[1][2] += n_i[1]*n_i[2]
         ata[2][0] += n_i[2]*n_i[0]; ata[2][1] += n_i[2]*n_i[1]; ata[2][2] += n_i[2]*n_i[2]
         
-        # b = d_i * n_i
-        atb[0] += d_i * n_i[0]; atb[1] += d_i * n_i[1]; atb[2] += d_i * n_i[2]
+        # b = dot_i * n_i
+        atb[0] += dot_i * n_i[0]; atb[1] += dot_i * n_i[1]; atb[2] += dot_i * n_i[2]
         
-        # c += d_i^2
-        btb += d_i ** 2
+        # c += dot_i^2
+        btb += dot_i ** 2
 
         # --- Supporting Plane Quadric (Q_S) ---
         diff = [mass_point[0]-p_i[0], mass_point[1]-p_i[1], mass_point[2]-p_i[2]]
@@ -178,15 +180,15 @@ def solve_qef_sharp_features(intersection_points, intersection_normals, a=0.5):
                 if norm_n_s > 1e-8:
                     n_s = [n_s[0]/norm_n_s, n_s[1]/norm_n_s, n_s[2]/norm_n_s]
                     
-                    d_s = -(n_s[0]*mass_point[0] + n_s[1]*mass_point[1] + n_s[2]*mass_point[2])
+                    dot_s = n_s[0]*mass_point[0] + n_s[1]*mass_point[1] + n_s[2]*mass_point[2]
                     
                     # Accumulate with weight a
                     ata[0][0] += a * n_s[0]*n_s[0]; ata[0][1] += a * n_s[0]*n_s[1]; ata[0][2] += a * n_s[0]*n_s[2]
                     ata[1][0] += a * n_s[1]*n_s[0]; ata[1][1] += a * n_s[1]*n_s[1]; ata[1][2] += a * n_s[1]*n_s[2]
                     ata[2][0] += a * n_s[2]*n_s[0]; ata[2][1] += a * n_s[2]*n_s[1]; ata[2][2] += a * n_s[2]*n_s[2]
                     
-                    atb[0] += a * d_s * n_s[0]; atb[1] += a * d_s * n_s[1]; atb[2] += a * d_s * n_s[2]
-                    btb += a * d_s ** 2
+                    atb[0] += a * dot_s * n_s[0]; atb[1] += a * dot_s * n_s[1]; atb[2] += a * dot_s * n_s[2]
+                    btb += a * dot_s ** 2
 
     # Step 5: Solve (ATA) v = ATB using SVD with centering
     tmp = [0.0, 0.0, 0.0]
@@ -197,10 +199,9 @@ def solve_qef_sharp_features(intersection_points, intersection_normals, a=0.5):
     rhs = [atb[0]-tmp[0], atb[1]-tmp[1], atb[2]-tmp[2]]
     
     # SVD of ATA (symmetric)
-    u, s, vh = __import__('numpy').linalg.svd(ata)
+    u, s, vh = np.linalg.svd(ata)
     
     # Pseudoinverse of singular values
-    pinv_tol = 1e-8
     s_inv = [0.0]*len(s)
     for j in range(len(s)):
         if s[j] > pinv_tol:
@@ -208,7 +209,7 @@ def solve_qef_sharp_features(intersection_points, intersection_normals, a=0.5):
         else:
             s_inv[j] = 0.0
             
-    # x = V * D^+ * U^T * rhs
+    # x = Vh.T @ diag(s_inv) @ U.T @ rhs
     x = [0.0, 0.0, 0.0]
     for r in range(3):
         for c in range(3):
@@ -224,7 +225,7 @@ def solve_qef_sharp_features(intersection_points, intersection_normals, a=0.5):
 A fallback strategy for when the unconstrained QEF solution lies outside the voxel cell. It constrains the search space hierarchically (interior -> faces -> edges -> corners). It sets itself apart by handling boundary violations explicitly rather than relying solely on SVD minimization.
 
 ## Operating characteristics
-*   **Time Complexity:** Dominated by the SVD of a $3 \times 3$ matrix, which is constant time $O(1)$ per cell. Accumulating the quadrics is $O(N)$ where $N$ is the number of intersection points (typically 3 to 12) [S1, unofficial] [S2, unofficial].
+*   **Time Complexity:** Dominated by the SVD of a $3 \times 3$ matrix, which is constant time $O(1)$ per cell [G]. Accumulating the quadrics is $O(N)$ where $N$ is the number of intersection points (typically 3 to 12) [S1, unofficial] [S2, unofficial].
 *   **Memory Complexity:** $O(1)$ per cell for storing the accumulated $ATA$, $ATB$, and $btb$ values [S2, unofficial].
 *   **Performance:** Computationally efficient compared to general-purpose QEF solvers or iterative methods [S1, unofficial].
 *   **Strengths:** Preserves sharp features (edges and corners) better than standard Dual Contouring or Marching Cubes. Stabilizes the solution against numerical instabilities that occur with standard QEM when planes are nearly parallel or coincident [S1, unofficial].
