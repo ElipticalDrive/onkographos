@@ -1,199 +1,145 @@
 # Ray-AABB Intersection (Slab/Min-Max)
 
-Also called: CUDA Octree Box Intersection, Min-Max method, Slab method
+Also called: CUDA Octree Box Intersection, Min-Max Method, Slab Test, Slab method
 
 ## Overview
-The Slab/Min-Max method determines if a ray intersects an Axis-Aligned Bounding Box (AABB) by computing the entry ($t_{near}$) and exit ($t_{far}$) distances along the ray. It treats the box as the intersection of three pairs of parallel planes (slabs) [Parent]. Unlike [Ray-Box Intersection via OpenGL Geometry Shaders](1768-ray-box-intersection-via-opengl-geometry-shaders.md) which relies on GPU geometry processing, or [Ray-OBB Intersection Test](6603-ray-obb-intersection-test.md) which handles rotated boxes, this method exploits axis-alignment for maximum computational efficiency [S1, S2, unofficial]. It serves as the fundamental primitive for [Ray-box intersection](776-ray-box-intersection.md) and is the basis for [Ray-Bounding Box Intersection and Sampling Preparation](2364-ray-bounding-box-intersection-and-sampling-preparation.md) in volume rendering pipelines.
+The Slab/Min-Max method determines if a ray intersects an Axis-Aligned Bounding Box (AABB) by computing the entry ($t_{near}$) and exit ($t_{far}$) distances along the ray's parametric domain. It solves the problem of efficiently clipping rays to volumetric datasets or primitives, accelerating rendering by skipping rays that miss the volume entirely [S1, unofficial][S3, unofficial][S4, unofficial]. It differs from [Ray-OBB Intersection Test](6603-ray-obb-intersection-test.md) by exploiting axis-alignment to avoid rotation costs, and from [Ray-Cube Intersection](2466-ray-cube-intersection.md) by returning scalar interval bounds rather than precise boundary face normals and positions.
 
 ## How it works
 **Inputs:**
-*   Ray origin $\mathbf{o} = (o_x, o_y, o_z)$
-*   Ray direction $\mathbf{d} = (d_x, d_y, d_z)$
-*   AABB defined by minimum corner $\mathbf{b}_{min} = (b_{min,x}, b_{min,y}, b_{min,z})$ and maximum corner $\mathbf{b}_{max} = (b_{max,x}, b_{max,y}, b_{max,z})$
-*   Optional: Ray clipping range $[t_{min}, t_{max}]$ (default $[0, \infty)$)
+- Ray origin $\mathbf{o} = (o_x, o_y, o_z)$
+- Ray direction $\mathbf{d} = (d_x, d_y, d_z)$
+- AABB defined by minimum corner $\mathbf{b}_{min} = (b_{min,x}, b_{min,y}, b_{min,z})$ and maximum corner $\mathbf{b}_{max} = (b_{max,x}, b_{max,y}, b_{max,z})$ [S1, unofficial][S3, unofficial].
 
 **Outputs:**
-*   Boolean intersection status.
-*   Intersection interval $[t_{entry}, t_{exit}]$ relative to ray origin.
-*   (Optional) Closest hit position and normal vector.
+- Intersection interval $[t_{near}, t_{far}]$ where the ray overlaps with the box.
+- Boolean hit status (intersection exists if $t_{near} \le t_{far}$ and $t_{far} \ge 0$).
 
 **Data Structures:**
-*   `Hit` struct (optional, for closest hit):
-    *   `t`: float, distance to hit.
-    *   `p`: vec3, 3D position of hit.
-    *   `ng`: vec3, surface normal.
-    *   `valid`: bool, true if intersection found.
+- No persistent data structures required. Computation is stateless per ray-box pair.
 
-**Algorithm Steps:**
+**Steps:**
+1. **Compute Slab Intersections:** For each axis $i \in \{x, y, z\}$, calculate the parametric distances to the two planes defining the slab:
+   $$ t_{i,1} = \frac{b_{min,i} - o_i}{d_i} $$
+   $$ t_{i,2} = \frac{b_{max,i} - o_i}{d_i} $$
+   [S1, unofficial][S3, unofficial].
 
-1.  **Compute Inverse Directions:**
-    To avoid division by zero and handle parallel rays, compute the inverse direction components:
-    $$ i_x = \frac{1}{d_x}, \quad i_y = \frac{1}{d_y}, \quad i_z = \frac{1}{d_z} $$
-    [G] If $d_k = 0$, $i_k$ is set to $\pm \infty$ (sign determined by the direction of the slab test) or handled via branchless min/max logic to prevent NaN propagation [S2, unofficial].
+2. **Sort Slab Bounds:** For each axis, ensure $t_{i,1} \le t_{i,2}$. If $d_i < 0$, the values are already sorted correctly by the subtraction order in step 1 if we define $t_{min,i} = \min(t_{i,1}, t_{i,2})$ and $t_{max,i} = \max(t_{i,1}, t_{i,2})$.
+   $$ t_{min,i} = \min\left(\frac{b_{min,i} - o_i}{d_i}, \frac{b_{max,i} - o_i}{d_i}\right) $$
+   $$ t_{max,i} = \max\left(\frac{b_{min,i} - o_i}{d_i}, \frac{b_{max,i} - o_i}{d_i}\right) $$
+   [S3, unofficial].
 
-2.  **Compute Slab Intersections:**
-    For each axis $k \in \{x, y, z\}$, calculate the intersection distances with the two planes defining the slab:
-    $$ t_{k1} = (b_{min,k} - o_k) \cdot i_k $$
-    $$ t_{k2} = (b_{max,k} - o_k) \cdot i_k $$
+3. **Compute Global Entry and Exit:** The ray enters the box at the maximum of all local entry points and exits at the minimum of all local exit points:
+   $$ t_{near} = \max(t_{min,x}, t_{min,y}, t_{min,z}) $$
+   $$ t_{far} = \min(t_{max,x}, t_{max,y}, t_{max,z}) $$
+   [S3, unofficial].
 
-3.  **Determine Local Entry and Exit:**
-    For each axis, identify the local entry ($t_{k,entry}$) and exit ($t_{k,exit}$) distances. Since $t_{k1}$ and $t_{k2}$ may be in any order depending on the sign of $d_k$:
-    $$ t_{k,entry} = \min(t_{k1}, t_{k2}) $$
-    $$ t_{k,exit} = \max(t_{k1}, t_{k2}) $$
+4. **Validate Intersection:** The ray intersects the AABB if:
+   $$ t_{near} \le t_{far} \quad \text{and} \quad t_{far} \ge 0 $$
+   [S1, unofficial]. If $t_{near} < 0$, the ray origin is inside the box, and the intersection interval starts at 0 (or $t_{near}$ depending on whether back-face intersection is desired).
 
-4.  **Compute Global Entry and Exit:**
-    The ray enters the box when it has entered *all* slabs, and exits when it has exited *any* slab.
-    $$ t_{near} = \max(t_{x,entry}, t_{y,entry}, t_{z,entry}) $$
-    $$ t_{far} = \min(t_{x,exit}, t_{y,exit}, t_{z,exit}) $$
+**Parameters:**
+- None. The method is deterministic based on input geometry.
 
-5.  **Check Intersection:**
-    An intersection exists if:
-    $$ t_{near} \le t_{far} $$
-    Additionally, if a ray clipping range $[t_{min}, t_{max}]$ is provided, the valid interval is the intersection of $[t_{near}, t_{far}]$ and $[t_{min}, t_{max}]$. The intersection is valid if:
-    $$ t_{far} \ge t_{min} \quad \text{and} \quad t_{near} \le t_{max} $$
-
-6.  **Compute Hit Details (Optional):**
-    If the closest hit is required:
-    *   Let $t_{hit} = t_{near}$ if $t_{near} \ge t_{min}$, else $t_{hit} = t_{far}$ (if $t_{far} \ge t_{min}$).
-    *   Hit position: $\mathbf{p} = \mathbf{o} + t_{hit} \mathbf{d}$.
-    *   Hit Normal: The normal corresponds to the slab that determined $t_{near}$. If $t_{near} = t_{x,entry}$, normal is $(-1, 0, 0)$ if $d_x > 0$ else $(1, 0, 0)$, etc.
+**Edge Cases and Pitfalls:**
+- **Zero Direction Component:** If $d_i = 0$, the division in step 1 produces infinity or NaN. The ray is parallel to the slab planes. If the origin is outside the slab ($o_i < b_{min,i}$ or $o_i > b_{max,i}$), the ray misses the box entirely. If inside, it passes through. Standard implementations must handle this to avoid NaN propagation [S2, unofficial].
+- **Ray Origin on Boundary:** If $\mathbf{o}$ lies exactly on a box face, $t=0$ is a valid intersection. The logic $t_{near} \le t_{far}$ holds.
+- **NaN Propagation:** If not handled, NaNs from $0/0$ or $x/0$ can corrupt the min/max operations, causing false negatives or positives. Robust implementations use branchless logic or pre-checks [S2, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_aabb_intersect_slab(o, d, b_min, b_max, t_min=0.0, t_max=float('inf')):
+def ray_aabb_slab(o, d, b_min, b_max):
     """
-    Computes ray-AABB intersection using the slab method.
+    Computes the intersection interval [t_near, t_far] of a ray with an AABB.
     
     Args:
         o: tuple (ox, oy, oz), ray origin
-        d: tuple (dx, dy, dz), ray direction
+        d: tuple (dx, dy, dz), ray direction (assumed non-zero length, but components may be zero)
         b_min: tuple (xmin, ymin, zmin), box minimum corner
         b_max: tuple (xmax, ymax, zmax), box maximum corner
-        t_min: float, near clipping plane
-        t_max: float, far clipping plane
         
     Returns:
-        bool: True if intersection exists within [t_min, t_max]
-        float: t_entry, the distance to the entry point (or None if no hit)
-        float: t_exit, the distance to the exit point (or None if no hit)
+        (t_near, t_far, hit): tuple of floats and bool. 
+        hit is True if the ray intersects the box.
     """
-    # Step 1: Compute inverse directions
-    # Handle division by zero by using large number or infinity logic
-    # Standard implementation assumes non-zero d or handles via min/max
-    inv_d = [1.0 / d[i] if d[i] != 0 else float('inf') for i in range(3)]
+    t_near = -float('inf')
+    t_far = float('inf')
     
-    # Step 2 & 3: Compute slab intersections and local entry/exit
-    t1 = [(b_min[i] - o[i]) * inv_d[i] for i in range(3)]
-    t2 = [(b_max[i] - o[i]) * inv_d[i] for i in range(3)]
-    
-    t_entry_local = [min(t1[i], t2[i]) for i in range(3)]
-    t_exit_local = [max(t1[i], t2[i]) for i in range(3)]
-    
-    # Step 4: Compute global entry and exit
-    t_near = max(t_entry_local)
-    t_far = min(t_exit_local)
-    
-    # Step 5: Check intersection and clipping
-    # Intersection is valid if t_near <= t_far
-    # And the interval overlaps with [t_min, t_max]
-    
-    if t_near > t_far:
-        return False, None, None
+    # Process each axis
+    for i in range(3):
+        ox, oy, oz = o
+        dx, dy, dz = d
+        xmin, ymin, zmin = b_min
+        xmax, ymax, zmax = b_max
         
-    # Adjust for ray clipping range
-    # The ray hits the box if the box interval [t_near, t_far] 
-    # overlaps with the ray segment [t_min, t_max]
-    
-    hit_t_near = max(t_near, t_min)
-    hit_t_far = min(t_far, t_max)
-    
-    if hit_t_near > hit_t_far:
-        return False, None, None
+        # Handle division by zero for direction component
+        if d[i] == 0:
+            # Ray is parallel to the slab planes for this axis
+            # Check if origin is within the slab bounds
+            if o[i] < b_min[i] or o[i] > b_max[i]:
+                return (0.0, 0.0, False) # Miss
+            else:
+                # Origin is inside the slab, no constraint on t from this axis
+                continue
         
-    return True, hit_t_near, hit_t_far
-
-def ray_aabb_closest_hit(o, d, b_min, b_max, t_min=0.0, t_max=float('inf')):
-    """
-    Returns the closest hit point and normal.
-    """
-    hit, t_entry, t_exit = ray_aabb_intersect_slab(o, d, b_min, b_max, t_min, t_max)
-    if not hit:
-        return None, None, False
+        # Calculate t values for the two planes
+        t1 = (b_min[i] - o[i]) / d[i]
+        t2 = (b_max[i] - o[i]) / d[i]
         
-    t_hit = t_entry
-    p = [o[i] + t_hit * d[i] for i in range(3)]
-    
-    # Determine normal based on which slab determined t_near
-    # We need to re-evaluate which slab gave the max t_entry_local
-    inv_d = [1.0 / d[i] if d[i] != 0 else float('inf') for i in range(3)]
-    t1 = [(b_min[i] - o[i]) * inv_d[i] for i in range(3)]
-    t2 = [(b_max[i] - o[i]) * inv_d[i] for i in range(3)]
-    t_entry_local = [min(t1[i], t2[i]) for i in range(3)]
-    
-    # Find index of max t_entry_local
-    max_idx = 0
-    max_val = t_entry_local[0]
-    for i in range(1, 3):
-        if t_entry_local[i] > max_val:
-            max_val = t_entry_local[i]
-            max_idx = i
+        # Ensure t1 is the entry and t2 is the exit for this slab
+        if t1 > t2:
+            t1, t2 = t2, t1
             
-    # Normal points outward. 
-    # If d[max_idx] > 0, we hit the min plane (normal is -1)
-    # If d[max_idx] < 0, we hit the max plane (normal is +1)
-    # If d[max_idx] == 0, normal is ambiguous but typically 0 or based on b_min
-    if d[max_idx] > 0:
-        normal = [0.0, 0.0, 0.0]
-        normal[max_idx] = -1.0
-    elif d[max_idx] < 0:
-        normal = [0.0, 0.0, 0.0]
-        normal[max_idx] = 1.0
-    else:
-        # Parallel to axis, hit min plane if t1 was min, else max
-        # Simplified: assume min plane
-        normal = [0.0, 0.0, 0.0]
-        normal[max_idx] = -1.0
+        # Update global near and far
+        if t1 > t_near:
+            t_near = t1
+        if t2 < t_far:
+            t_far = t2
+            
+        # Early exit if interval is invalid
+        if t_near > t_far:
+            return (0.0, 0.0, False)
+            
+    # Check if the intersection is in front of the ray origin
+    if t_far < 0:
+        return (0.0, 0.0, False)
         
-    return p, normal, True
+    # If t_near is negative, the ray starts inside the box
+    # Depending on requirements, we might clamp t_near to 0
+    # Here we return the raw interval as per standard slab method
+    return (t_near, t_far, True)
 ```
-
-**Parameters:**
-*   `voxelsize`: Used in voxel-based implementations to derive `b_min` and `b_max` from voxel indices [S2, unofficial].
-*   `n_max`: Maximum number of intersections to store per ray in batched implementations [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Zero Direction Component:** If $d_k = 0$, the ray is parallel to the slab planes. Division by zero must be handled. The standard approach uses $\pm \infty$ for inverse direction, which propagates correctly through min/max operations if implemented carefully [S2, unofficial].
-*   **NaN Propagation:** If not handled, $0 \cdot \infty$ results in NaN. Branchless implementations using `min`/`max` with precomputed inverses suppress NaN propagation [S2, unofficial].
-*   **Ray Origin on Boundary:** If the ray origin lies exactly on a box boundary, $t_{near}$ may be 0. This is a valid intersection but may cause self-intersection artifacts in subsequent steps [S2, unofficial].
-*   **Hollow Objects:** In volume rendering, if a ray starts inside a hollow object (e.g., Stanford Bunny), the gradient at the start may be 0 if the gradient calculation uses data before the ray start, leading to incorrect shading [S3, unofficial].
 
 ## Subtopics
 
 ### [Ray-Bounding Box Intersection and Sampling Preparation](2364-ray-bounding-box-intersection-and-sampling-preparation.md)
-This method extends the basic intersection test by computing the intersection interval and then discretizing it into sample points for volume rendering. It determines the number of samples based on a fixed step distance and generates 3D query coordinates. It differs from the parent method by adding discretization logic and point generation, and from [Ray Point Sampling](2382-ray-point-sampling.md) by explicitly handling bounding box culling and ray indexing. A key pitfall is that for hollow objects, rays starting inside the material may yield zero gradients if pre-ray data is used.
+This method extends the basic intersection test by computing the intersection interval of camera rays with a scene bounding box, determining the number of sample points per ray based on a fixed step distance, and generating query points along the rays for volume rendering. It bridges the gap between ray geometry and voxel grid lookups by returning sampled points, their associated ray and step IDs, and a mask for points outside the bounding box. It differs from its parent by adding the discretization of the intersection interval into discrete sample points and the generation of metadata (ray/step IDs) required for batched rendering. It differs from [Ray Point Sampling](2382-ray-point-sampling.md) by handling the initial bounding box clipping and interval calculation before point generation.
 
 ### [Ray-Cube Intersection](2466-ray-cube-intersection.md)
-This variant computes precise entry ($t_0$) and exit ($t_1$) points along with the specific geometric face indices crossed. Unlike the standard slab method which returns a boolean or interval, this method resolves exact boundary coordinates and face normals required to initialize brick-level traversal.
+Ray-Cube Intersection calculates the precise entry ($t_0$) and exit ($t_1$) points of a ray intersecting an axis-aligned cube defined by lower and upper bounds. It solves the problem of determining the exact boundary face and intersection parameter for ray-casting into voxel grids, serving as the foundational primitive for traversal algorithms. Unlike the parent, which computes the overlapping interval $[t_{min}, t_{max}]$ for traversal logic, this method returns the specific 3D position and face normal of the first and last intersection points, enabling precise boundary clamping and face-based traversal state updates.
 
 ### [Branchless Ray/AABB Intersection with NaN Handling](3297-branchless-ray-aabb-intersection-with-nan-handling.md)
-This method implements the slab intersection using a branchless algorithm that correctly handles IEEE 754 floating-point edge cases, specifically NaNs generated when a ray direction component is zero. It replaces conditional checks for zero direction with precomputed inverse directions and nested min/max operations that suppress NaN propagation. This guarantees robustness for degenerate cases where the ray origin lies exactly on a box boundary or the ray is parallel to an axis, preventing false positives.
+This method computes the intersection of a ray with an Axis-Aligned Bounding Box (AABB) using a branchless algorithm that correctly handles IEEE 754 floating-point edge cases, specifically NaNs generated when a ray direction component is zero. It builds on the parent by replacing conditional checks for zero direction with precomputed inverse directions and nested min/max operations that suppress NaN propagation. Unlike the standard branchless slab method, this variant guarantees robustness for degenerate cases where the ray origin lies exactly on a box boundary or the ray is parallel to an axis, preventing false positives caused by NaN propagation.
+
+### [AABB Ray Intersection](11086-aabb-ray-intersection.md)
+This method performs parallel ray-axis-aligned bounding box (AABB) intersection tests for volume rendering, specifically designed to handle large-scale ray-voxel queries on GPUs without exceeding memory limits. It differs from standard single-ray implementations by batching rays into chunks and processing them via a CUDA kernel that outputs intersection depths ($t_{min}, t_{max}$) and hit status for multiple rays and AABBs simultaneously. It is chosen when the number of rays and voxels is too large for a single contiguous memory allocation, requiring explicit chunking to stay within hardware constraints (e.g., <2GB VRAM).
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per ray-box pair. The number of operations is constant (approx. 10-15 floating point operations).
-*   **Memory Complexity:** $O(1)$ auxiliary space.
-*   **Performance:** Extremely fast, suitable for real-time ray tracing and large-scale volume rendering. It is the standard method for GPU implementations due to its branchless potential and low register pressure [S2, unofficial].
-*   **Strengths:** Simplicity, speed, axis-alignment exploitation.
-*   **Limitations:** Only works for axis-aligned boxes. Does not provide face normals without additional computation. Requires careful handling of degenerate cases (zero direction) to avoid NaNs [S2, unofficial].
-*   **When to use:** When bounding volumes are axis-aligned and performance is critical. Ideal for voxel grids, octrees, and spatial partitioning structures.
-*   **When not to use:** For rotated bounding boxes (use [Ray-OBB Intersection Test](6603-ray-obb-intersection-test.md)) or when face normals are immediately required without post-processing.
+- **Time Complexity:** $O(1)$ per ray-box pair. The method performs a constant number of arithmetic operations (6 subtractions, 6 divisions, 6 mins/maxs).
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Measured Performance:** Highly efficient on CPUs and GPUs due to lack of branching (in optimized forms) and simple arithmetic. In volume rendering, it serves as the primary culling step, significantly reducing the number of voxel lookups [S4, unofficial].
+- **Strengths:** Simple to implement, numerically stable (with NaN handling), fast.
+- **Limitations:** Does not provide surface normals or precise entry/exit points without additional computation. Sensitive to floating-point precision issues if not handled (see Subtopics).
+- **When to use:** As the first stage of ray traversal in volume rendering, ray tracing, or collision detection for axis-aligned primitives.
+- **When not to use:** For oriented bounding boxes (use [Ray-OBB Intersection Test](6603-ray-obb-intersection-test.md)) or when precise boundary face information is required immediately (use [Ray-Cube Intersection](2466-ray-cube-intersection.md)).
 
 ## Background
-The slab method is a classic algorithm in computational geometry and computer graphics. It is widely used in ray tracing, collision detection, and volume rendering. The method is referenced in various implementations, including CUDA-based voxel intersection kernels [S2, unofficial] and solid voxelization pipelines [S1, unofficial]. In volume rendering, it is used to accelerate ray casting by skipping rays that miss the volumetric dataset [S3, unofficial]. The method is often implemented in batched fashion to mitigate out-of-memory errors in large-scale rendering [S2, unofficial].
+The slab method is a classic technique in computer graphics for ray-box intersection. It is widely used in ray tracing and volume rendering pipelines. The method treats the AABB as the intersection of three pairs of parallel planes (slabs). The intersection of the ray with the box is the intersection of the ray with each slab, which results in an interval. The overlap of these intervals gives the final intersection segment.
 
 ## Sources
 [S1] Mike-Leo-Smith/SolidVoxelization, https://github.com/Mike-Leo-Smith/SolidVoxelization, fetched 2026-10-27 (unofficial)
 [S2] facebookresearch/NSVF, https://github.com/facebookresearch/NSVF, fetched 2026-10-27 (unofficial)
-[S3] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)
+[S3] GitHub - mlavik1/UnityVolumeRendering: Volume rendering, implemented in ..., https://github.com/mlavik1/UnityVolumeRendering, fetched 2026-10-28 (unofficial)
+[S4] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)

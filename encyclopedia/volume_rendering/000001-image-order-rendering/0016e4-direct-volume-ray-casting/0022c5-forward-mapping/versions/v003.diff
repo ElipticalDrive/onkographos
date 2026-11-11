@@ -1,0 +1,148 @@
+--- v002.md
++++ v003.md
+@@ -4,58 +4,84 @@
+ 
+ ## Overview
+-Forward mapping is a direct volume ray casting technique that projects each voxel directly onto the image plane, relying on the traversal order of the data to ensure proper hidden surface removal [S1, unofficial]. Unlike image-order methods that cast rays from pixels into the volume, forward mapping iterates over the volume data and determines the contribution of each reconstruction kernel to the screen pixels [S2, unofficial]. It is distinguished by its object-order nature, where the data drives the rendering process rather than the image plane.
++Forward mapping is a direct volume ray casting technique that projects each voxel directly onto the image plane, relying on the traversal order of the data to ensure proper hidden surface removal [S1, unofficial]. Unlike image-order methods that cast rays from pixels into the volume, forward mapping iterates over the volume data and determines the contribution of each reconstruction kernel to the screen pixels [S3, unofficial]. It is distinguished by its object-order nature, where the data drives the rendering process rather than the image plane [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** Volume data (typically a cuberille), viewing parameters (camera position, direction), transfer function.
+-**Outputs:** 2D image (color and opacity per pixel).
++**Inputs:** Volume data (typically a cuberille), viewing parameters (camera position, direction), transfer function [S1, S2, S3, unofficial].
++**Outputs:** 2D image (color and opacity per pixel) [G].
+ 
+ **Data Structures:**
+-The volume is stored as a 3D grid. A "cuberille" is the subset of voxels belonging to an object [S1, unofficial]. Each voxel contains a scalar value and potentially other attributes.
++The volume is stored as a 3D grid. A "cuberille" is the subset of voxels belonging to an object [S1, unofficial]. Each voxel contains a scalar value and potentially other attributes [G].
+ 
+ **Steps:**
+ 1.  **Determine Traversal Order:** For any viewing direction, determine the foremost corner voxel. Establish a traversal order by stepping through rows, columns, and slices such that the foremost voxel is visited last. This requires determining the traversal direction along each of the major axes [S1, unofficial].
+-2.  **Iterate and Project:** Iterate over the volume data in the established order. For each voxel, determine its contribution to the image plane [S2, unofficial].
+-3.  **Kernel Convolution (Splatting):** The traditional forward mapping algorithm is splatting. It convolves every voxel in object space with a reconstruction kernel and accumulates their contributions on the image plane [S2, unofficial].
+-4.  **Accumulation:** Contributions are accumulated on the image plane. Because the traversal order ensures the foremost voxel is visited last, standard alpha compositing (or additive accumulation for specific kernels) can be used without explicit sorting of fragments per pixel.
++2.  **Iterate and Project:** Iterate over the volume data in the established order. For each voxel, determine its contribution to the image plane [S2, S3, unofficial].
++3.  **Kernel Convolution (Splatting):** The traditional forward mapping algorithm is splatting. It convolves every voxel in object space with a reconstruction kernel and accumulates their contributions on the image plane [S3, unofficial].
++4.  **Accumulation:** Contributions are accumulated on the image plane. Because the traversal order ensures the foremost voxel is visited last, standard alpha compositing (or additive accumulation for specific kernels) can be used without explicit sorting of fragments per pixel [S1, S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Initialize image buffer
+-image = zeros((width, height, 4))
++def forward_mapping(volume, origin, direction, image_width, image_height, voxel_size, transfer_function, kernel_radius):
++    # Initialize accumulation buffers with zeros
++    acc_color = [[(0.0, 0.0, 0.0) for _ in range(image_width)] for _ in range(image_height)]
++    acc_alpha = [[0.0 for _ in range(image_width)] for _ in range(image_height)]
+ 
+-# Determine traversal directions based on view vector
+-# dx, dy, dz are step signs (-1 or 1) for x, y, z axes
+-# such that the foremost voxel is visited last
+-dx, dy, dz = determine_traversal_direction(view_vector)
++    # Determine traversal direction: back-to-front so foremost voxel is visited last [S1, unofficial]
++    step_x = -1 if direction[0] > 0 else 1
++    step_y = -1 if direction[1] > 0 else 1
++    step_z = -1 if direction[2] > 0 else 1
+ 
+-# Iterate over volume data in traversal order
+-for z in range(volume_depth, -1, -dz) if dz > 0 else range(0, volume_depth + 1, dz):
+-    for y in range(volume_height, -1, -dy) if dy > 0 else range(0, volume_height + 1, dy):
+-        for x in range(volume_width, -1, -dx) if dx > 0 else range(0, volume_width + 1, dx):
+-            
+-            # Get voxel value
+-            val = volume[x, y, z]
+-            
+-            # Map to optical properties (color C, opacity alpha)
+-            # Using transfer function T
+-            C, alpha = transfer_function(val)
+-            
+-            # Project voxel center to image plane
+-            # This step involves transforming voxel coordinates to screen space
+-            # and determining the footprint of the reconstruction kernel
+-            screen_coords = project_to_screen(x, y, z, view_matrix)
+-            
+-            # Splat: Convolve voxel with reconstruction kernel
+-            # Accumulate contribution to image pixels covered by kernel
+-            accumulate_splat(screen_coords, C, alpha, image)
++    # Compute loop bounds correctly for Python range
++    dim_x, dim_y, dim_z = len(volume[0][0]), len(volume[0]), len(volume)
++    start_x = dim_x - 1 if step_x == -1 else 0
++    stop_x = -1 if step_x == -1 else dim_x
++    start_y = dim_y - 1 if step_y == -1 else 0
++    stop_y = -1 if step_y == -1 else dim_y
++    start_z = dim_z - 1 if step_z == -1 else 0
++    stop_z = -1 if step_z == -1 else dim_z
++
++    for z in range(start_z, stop_z, step_z):
++        for y in range(start_y, stop_y, step_y):
++            for x in range(start_x, stop_x, step_x):
++                val = volume[z][y][x]
++                color, alpha = transfer_function(val)
++                if alpha <= 0.0:
++                    continue
++
++                # Project voxel center to screen space [G]
++                wx, wy, wz = x * voxel_size, y * voxel_size, z * voxel_size
++                vx, vy, vz = wx - origin[0], wy - origin[1], wz - origin[2]
++                depth = vx * direction[0] + vy * direction[1] + vz * direction[2]
++                if depth <= 0.0:
++                    continue
++                fov_scale = image_width / 2.0
++                sx = (vx * direction[1] - vy * direction[0]) / depth * fov_scale + image_width / 2.0
++                sy = (vx * direction[0] * direction[2] - vy * (1.0 - direction[1] * direction[2])) / depth * fov_scale + image_height / 2.0
++                footprint = int(kernel_radius * voxel_size / depth * fov_scale) + 1
++
++                # Accumulate splat contribution to covered pixels
++                for dy in range(-footprint, footprint + 1):
++                    for dx in range(-footprint, footprint + 1):
++                        px, py = int(sx + dx), int(sy + dy)
++                        if 0 <= px < image_width and 0 <= py < image_height:
++                            dist = (dx * dx + dy * dy) / (footprint * footprint)
++                            weight = max(0.0, 1.0 - dist)
++                            r, g, b = acc_color[py][px]
++                            a = acc_alpha[py][px]
++                            contrib = alpha * weight
++                            acc_color[py][px] = (r + (1.0 - a) * color[0] * contrib,
++                                                 g + (1.0 - a) * color[1] * contrib,
++                                                 b + (1.0 - a) * color[2] * contrib)
++                            acc_alpha[py][px] = a + (1.0 - a) * contrib
++
++    return acc_color, acc_alpha
+ ```
+ 
+ **Parameters:**
+--   Kernel size: Determines the footprint of the splat.
+--   Transfer function: Maps scalar values to color and opacity.
++- Kernel size: Determines the footprint of the splat [S3, unofficial].
++- Transfer function: Maps scalar values to color and opacity [S2, unofficial].
+ 
+ **Edge Cases:**
+--   Precision issues in projection calculations.
+--   Boundary conditions for voxels near the edge of the volume.
++- Precision issues in projection calculations require careful handling of floating-point arithmetic [G].
++- Boundary conditions for voxels near the edge of the volume must be clamped or padded to avoid out-of-bounds access [G].
+ 
+ ## Subtopics
+@@ -68,15 +94,16 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(V)$, where $V$ is the number of voxels. Each voxel is processed once.
+--   **Memory Complexity:** $O(I)$, where $I$ is the number of image pixels, for the accumulation buffer.
+--   **Strengths:** Simple implementation, efficient for sparse data (using cuberilles), naturally handles hidden surface removal via traversal order.
+--   **Limitations:** Can suffer from overdraw and blending artifacts if not carefully implemented. Performance depends on the number of voxels rather than the number of pixels.
+--   **When to use:** When the volume is sparse or when hardware acceleration for splatting is available.
+--   **When not to use:** When high-quality anti-aliasing is required without additional filtering, or when the volume is dense and most voxels contribute to the final image.
++- **Time Complexity:** $O(V)$, where $V$ is the number of voxels. Each voxel is processed once [G].
++- **Memory Complexity:** $O(I)$, where $I$ is the number of image pixels, for the accumulation buffer [G].
++- **Strengths:** Simple implementation, efficient for sparse data (using cuberilles), naturally handles hidden surface removal via traversal order [S1, S2, unofficial].
++- **Limitations:** Can suffer from overdraw and blending artifacts if not carefully implemented. Performance depends on the number of voxels rather than the number of pixels [S2, unofficial].
++- **When to use:** When the volume is sparse or when hardware acceleration for splatting is available [S2, unofficial].
++- **When not to use:** When high-quality anti-aliasing is required without additional filtering, or when the volume is dense and most voxels contribute to the final image [G].
+ 
+ ## Background
+-Forward mapping was introduced as an alternative to backward mapping (ray casting) methods. The term "splatting" was introduced by Westover in 1991 [S2, unofficial]. The concept relies on the intrinsic spatial presorting of volumetric data sets [S1, unofficial].
++Forward mapping was introduced as an alternative to backward mapping (ray casting) methods. The term "splatting" was introduced by Westover in 1991 [S3, unofficial]. The concept relies on the intrinsic spatial presorting of volumetric data sets [S1, unofficial].
+ 
+ ## Sources
+ [S1] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
+-[S2] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)+[S2] DTIC ADA215533: Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)
++[S3] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)

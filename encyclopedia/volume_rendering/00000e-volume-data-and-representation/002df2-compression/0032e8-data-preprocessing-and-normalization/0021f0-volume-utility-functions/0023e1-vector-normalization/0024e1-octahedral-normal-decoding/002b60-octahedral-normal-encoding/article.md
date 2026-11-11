@@ -1,0 +1,79 @@
+# Octahedral Normal Encoding
+
+Also called: Normal Packing
+
+## Overview
+Octahedral Normal Encoding compresses a 3D unit normal vector into a single 8-bit integer by identifying the dominant axis and its sign. This method maps the normal to one of six discrete octahedral directions, serving as a lightweight alternative to full octahedral coordinate quantization. It differs from [Octahedral Normal Decoding](3373-octahedral-normal-decoding.md) by performing the forward mapping (vector to index) rather than the inverse, and from [Cubic Normal Encoding](11140-cubic-normal-encoding.md) by using a coarser 6-value representation instead of a 32-bit face-projected format.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D unit normal vector $\mathbf{n} = (n_x, n_y, n_z)$.
+- Output: An 8-bit unsigned integer index $i \in \{0, 1, 2, 3, 4, 5\}$.
+
+**Data Structures:**
+- The output is a single byte. No intermediate data structures are required.
+
+**Steps:**
+The encoding selects the axis with the largest absolute component. If multiple axes tie for the maximum absolute value, the order of checks determines the result. The specific implementation provided in the sources uses a fixed priority order based on threshold comparisons against 0.5.
+
+1. Check if $n_x > 0.5$. If true, return index 1.
+2. Else, check if $n_x < -0.5$. If true, return index 0.
+3. Else, check if $n_y > 0.5$. If true, return index 3.
+4. Else, check if $n_y < -0.5$. If true, return index 2.
+5. Else, check if $n_z > 0.5$. If true, return index 5.
+6. Else, return index 4. [G] (Default fallback for remaining cases, e.g., near origin or negative Z).
+
+**Parameters:**
+- Normal indices mapping:
+  - 0: $-X$
+  - 1: $+X$
+  - 2: $-Y$
+  - 3: $+Y$
+  - 4: $-Z$
+  - 5: $+Z$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pack_normal(n_x: float, n_y: float, n_z: float) -> int:
+    """
+    Encodes a 3D normal vector into a single u8 representing one of 6 octahedral directions.
+    Based on the logic in [S1, unofficial].
+    """
+    if n_x > 0.5:
+        return 1
+    elif n_x < -0.5:
+        return 0
+    elif n_y > 0.5:
+        return 3
+    elif n_y < -0.5:
+        return 2
+    elif n_z > 0.5:
+        return 5
+    else:
+        # Fallback for cases not covered by explicit checks (e.g., n_z <= 0.5)
+        # Based on the source structure, index 4 (-Z) is the remaining option.
+        return 4
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The thresholds (0.5) are arbitrary and do not correspond to the geometric boundaries of the octants (which are at 0 or $1/\sqrt{3}$). This leads to significant quantization error for normals not aligned with the axes.
+- **Degenerate Input:** If the input is not a unit vector, the thresholds may fail to capture the direction correctly. The method assumes normalized input.
+- **Ambiguity:** The source logic does not explicitly handle the case where $n_z \le 0.5$ but is not clearly $-Z$ (e.g., small positive $n_z$). The fallback to 4 assumes $-Z$ dominance or a specific bias.
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$. Constant time with a maximum of 5 comparisons.
+- **Memory Complexity:** $O(1)$. Single byte output.
+- **Strengths:** Extremely fast and low memory footprint. Suitable for scenarios where only axis-aligned normals are expected or high precision is not required.
+- **Limitations:** Very low accuracy. Only 6 possible output values. Not suitable for general normal storage. The thresholds (0.5) are not geometrically optimal for unit vectors.
+- **When to use:** When memory bandwidth is critical and normals are known to be axis-aligned or near-axis.
+- **When not to use:** For general-purpose normal compression. Use [Octahedral Normal Decoding](3373-octahedral-normal-decoding.md) or [Cubic Normal Encoding](11140-cubic-normal-encoding.md) for better fidelity.
+
+## Background
+The method is derived from an implementation in the `Minerust` project [S1, unofficial]. It represents a simplified, threshold-based approach to normal quantization, likely intended for specific game engine or rendering optimizations where speed outweighs accuracy. It is not a standard academic technique but rather a pragmatic coding solution.
+
+## Sources
+[S1] B4rtekk1/Minerust, https://github.com/B4rtekk1/Minerust, fetched 2026-10-27 (unofficial)

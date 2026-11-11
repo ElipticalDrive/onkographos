@@ -3,238 +3,158 @@
 Also called: 2-Level DDA Voxel Rendering, DDA voxel traversal, Two-level DDA
 
 ## Overview
-Voxel Ray Marching with Cube-Level DDA is a GPU-based fragment shader technique for rendering voxel volumes by casting rays through a hierarchical grid of voxel cubes and individual voxels, using a two-level Digital Differential Analyzer (DDA) to skip empty space efficiently [S1, unofficial]. It builds on [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by explicitly decoupling the empty-space skipping logic into a separate coarse grid layer (cubes), whereas the parent uses a fixed-size macrocell DDA that may not align with the data structure's logical blocks [S1, unofficial]. Unlike its siblings, it operates on a fixed 16x16x16 cube structure with a rigid two-level traversal loop, prioritizing simplicity and shader reusability over adaptive step sizing [S1, unofficial].
+Voxel Ray Marching with Cube-Level DDA is a GPU-based fragment shader technique for rendering voxel volumes by casting rays through a hierarchical grid of voxel cubes and individual voxels, using a two-level Digital Differential Analyzer (DDA) to skip empty space efficiently [S1, unofficial]. It builds on [Adaptive Ray Marching with Macrocell DDA](1500-adaptive-ray-marching-with-macrocell-dda.md) by replacing the adaptive macrocell traversal with a fixed two-level DDA structure: a coarse traversal over $16^3$ voxel blocks to skip empty regions, followed by a fine traversal over individual voxels within occupied blocks to find the first opaque surface [S1, unofficial]. Unlike its parent, which adapts step sizes based on opacity bounds, this method uses a rigid hierarchical grid structure to minimize branching and memory access overhead [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input Geometry:** A simple box mesh with 8 vertices and 12 faces, rendered with front-face culling (`render_mode cull_front`) to allow viewing from inside or outside [S1, unofficial].
-*   **Input Data:** Voxel grid stored in textures, accessed via custom samplers (`get_cube`, `get_voxel`) [S1, unofficial].
-*   **Output:** Depth, light vertex position, and PBR material properties (Albedo, Emission, Normal, Roughness, Specular, Metallic, AO) for the first opaque surface hit, or accumulated transmittance/emission for transparent passes [S1, unofficial].
+The method renders a voxel volume by mapping a view ray into model space and traversing a 3D grid composed of $16 \times 16 \times 16$ voxel cubes. The algorithm operates in two nested loops: an outer loop traverses the cubes, and an inner loop traverses the voxels within a cube if it is occupied.
 
-**Data Structures:**
-*   **DDA State:** A structure holding the current position in grid coordinates (`position`), the ray direction reciprocal (`ray_rec`), the traversal step direction (`step`), and accumulated distance (`t`) [S1, unofficial]. The exact field layout is implementation-specific but must support initialization, stepping, and face-hit calculations [S1, unofficial].
-*   **Cube Size:** Fixed at 16x16x16 voxels per cube [S1, unofficial].
+### Inputs and Outputs
+**Inputs:**
+*   `model_size`: The dimensions of the voxel volume in voxels ($vec3$).
+*   `MODEL_MATRIX`, `MODELVIEW_MATRIX`, `PROJECTION_MATRIX`: Transformation matrices.
+*   `CAMERA_POSITION_WORLD`: World-space camera position.
+*   `SCREEN_TEXTURE`: Background texture for transparency blending.
+*   Voxel data: Accessed via custom samplers (`get_cube`, `get_voxel`).
 
-**Parameters:**
-*   **Max Steps:** 49 steps per cube (outer loop) and 49 steps per voxel (inner loop) [S1, unofficial].
-*   **Model Size Reciprocal:** `MODEL_SIZE_REC = 1.0 / vec3(model_size)` [S1, unofficial].
+**Outputs:**
+*   Fragment color (`ALBEDO`), depth (`DEPTH`), and geometry properties (`NORMAL_MAP`, `ROUGHNESS`, etc.).
+*   Discard: If no surface is hit, the fragment is discarded.
 
-**Algorithm Steps:**
+### Data Structures
+The algorithm uses a `DDA` structure to track the current position and step direction in the grid.
 
-1.  **Vertex Shader Setup:**
-    *   Pass the ModelView matrix.
-    *   Calculate `MODEL_SIZE_REC = 1.0 / vec3(model_size)` [S1, unofficial].
-    *   Store the back vertex position as `BACK` [S1, unofficial].
-    *   Compute the ray direction in model space: `RAY = safe_vector(VERTEX - (inverse(MODEL_MATRIX) * vec4(CAMERA_POSITION_WORLD, 1.0)).xyz)` [S1, unofficial].
+**DDA Structure Fields:**
+*   `position`: Current integer grid coordinate ($vec3$ or $uvec3$).
+*   `step`: Direction of traversal ($vec3$, values $\pm 1$).
+*   `t`: Distance to the next grid boundary along the ray ($vec3$).
+*   `tDelta`: Distance between grid boundaries ($vec3$).
 
-2.  **Fragment Shader Initialization:**
-    *   Calculate ray reciprocal: `ray_rec = 1.0 / ray` [S1, unofficial].
-    *   Calculate front face intersection: `front = to_front_face(BACK, ray, ray_rec)` [S1, unofficial].
-    *   Initialize outer DDA structure for cubes: `dda_init(ddc, model_size, front, ray, ray_rec)` [S1, unofficial].
+**Initialization:**
+The vertex shader computes the ray in model space:
+$$ \mathbf{RAY} = \text{safe\_vector}(\mathbf{VERTEX} - (\mathbf{MODEL\_MATRIX}^{-1} \cdot [CAMERA\_POSITION\_WORLD, 1]^T).xyz) $$
+$$ \mathbf{MODEL\_SIZE\_REC} = \frac{1}{\mathbf{model\_size}} $$
 
-3.  **Outer Loop (Cube Traversal):**
-    *   Loop `csteps` from 0 to 48 (max 49 steps) [S1, unofficial].
-    *   Check if the current cube contains any opaque voxels using `get_cube(ddc.position, layer, has_opaque)` [S1, unofficial].
-    *   If `has_opaque` is true, proceed to inner traversal; otherwise, step to the next cube using `dda_step(ddc)` and continue [S1, unofficial].
-    *   If `dda_step(ddc)` returns true (end of ray/cube list reached), set `no_more_cubes = true` [S1, unofficial].
+The fragment shader initializes the outer DDA (`ddc`) for cubes. The front face intersection is calculated as:
+$$ \mathbf{front} = \text{to\_front\_face}(\mathbf{BACK}, \mathbf{ray}, \mathbf{ray\_rec}) $$
+where $\mathbf{ray\_rec} = 1.0 / \mathbf{ray}$.
 
-4.  **Inner Loop (Voxel Traversal):**
-    *   Initialize inner DDA state: `dda_init_inner(ddv, ddc, model_size, MODEL_SIZE_REC, ray, ray_rec, origin)` [S1, unofficial].
-    *   Calculate the exit point of the cube from the ray: `exit = dda_voxel_face_hit(ddc, MODEL_SIZE_REC)` [S1, unofficial].
-    *   Transform the cube exit point to view space: `exit_vertex, depth = calc_vertex(exit, PROJECTION_MATRIX, _MODELVIEW_MATRIX)` [S1, unofficial].
-    *   If `exit_vertex.z >= 0.0` (behind or on the camera plane), skip the inner loop and step to the next cube [S1, unofficial].
-    *   Loop `vsteps` from 0 to 48 (max 49 steps) [S1, unofficial].
-    *   Retrieve voxel data: `get_voxel(ddv.position, layer, tpos, voxel, color, opaque)` [S1, unofficial].
-    *   If `opaque` is true, proceed to shading; otherwise, step to the next voxel using `dda_step(ddv)` and continue [S1, unofficial].
-    *   Calculate the precise ray intersection hit point in model coordinates: `hit = origin + dda_voxel_face_hit(ddv, vec3(1.0 / 16.0)) * MODEL_SIZE_REC` [S1, unofficial].
-    *   Transform the hit point to view space: `light_vertex, hit_depth = calc_vertex(hit, PROJECTION_MATRIX, _MODELVIEW_MATRIX)` [S1, unofficial].
-    *   If `light_vertex.z < 0.0` (in front of the screen):
-        *   Assign depth to `DEPTH` and hit position to `LIGHT_VERTEX` [S1, unofficial].
-        *   Compute surface geometry: `dda_voxel_face_normals(ddv, NORMALS, NORMAL, TANGENT, BINORMAL)` and `dda_voxel_face_uv(ddv, model_size, hit, face)` [S1, unofficial].
-        *   Fetch material properties: `get_opaque_material(tpos, voxel, color, face, uv, ALBEDO, EMISSION, normal_map, rsma)` [S1, unofficial].
-        *   Map results to shader outputs: `NORMAL_MAP` from `normal_map.xy`, `NORMAL_MAP_DEPTH` from `normal_map.z`, `ROUGHNESS` from `rsma.r`, `SPECULAR` from `rsma.g`, `METALLIC` from `rsma.b`, `AO` from `rsma.a` [S1, unofficial].
-        *   Set `found = true` and `break` the inner loop [S1, unofficial].
-    *   If `dda_step(ddv)` returns true (end of cube reached), break the inner loop [S1, unofficial].
-
-5.  **Loop Termination:**
-    *   If `found` is true or `no_more_cubes` is true, break the outer loop [S1, unofficial].
-
-6.  **Finalization:**
-    *   If `found` is false, execute `discard` to discard the fragment (transparent background) [S1, unofficial].
-    *   **Transparent Pass Specifics:** If no opaque voxel was found (`!found`), discard if `first` is true. Otherwise, sample background from `SCREEN_TEXTURE`. Blend paint color with background using transmittance: `ALBEDO = mix(paint, background, totalTrans)`. If no opaque voxel was hit, approximate alpha using the gray component of transmittance: `ALPHA = 1.0 - gray` and `ALBEDO = paint + color * background` [S1, unofficial].
-
-**Pseudocode:**
+### Pseudocode
+The following pseudocode implements the opaque pass logic described in [S1, unofficial]. It assumes standard DDA helper functions (`dda_init`, `dda_step`, `dda_voxel_face_hit`) and custom voxel samplers (`get_cube`, `get_voxel`).
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Standard DDA and math helpers [G]
-def safe_vector(v):
-    return v if max(abs(v)) > 1e-6 else vec3(1.0)
+# Vertex Shader Pre-computation
+MODEL_SIZE_REC = 1.0 / model_size
+RAY = safe_vector(VERTEX - inverse(MODEL_MATRIX) * vec4(CAMERA_POSITION_WORLD, 1.0)).xyz
+BACK = VERTEX
 
-def to_front_face(back, ray, ray_rec):
-    t = min(ray_rec) * (1.0 - max(back * ray_rec))
-    return back + t * ray
+# Fragment Shader
+ray = RAY
+ray_rec = 1.0 / ray
+front = to_front_face(BACK, ray, ray_rec)
 
-def dda_init(model_size, front, ray, ray_rec):
-    pos = floor(front * model_size)
-    step = sign(ray)
-    return {'pos': pos, 'ray_rec': ray_rec, 'step': step, 't': 0.0}
+# Initialize outer DDA for 16x16x16 cubes
+ddc = dda_init(model_size, front, ray, ray_rec)
 
-def dda_init_inner(ddc, model_size, model_size_rec, ray, ray_rec, origin):
-    return {'pos': ddc['pos'], 'ray_rec': ray_rec, 'step': ddc['step'], 'origin': origin, 't': 0.0}
+found = false
+no_more_cubes = false
 
-def dda_voxel_face_hit(dda, step_size):
-    # Distance to next face in grid coordinates [G]
-    t = (dda['step'] - (dda['pos'] + 0.5) * step_size) / dda['ray_rec']
-    return t
-
-def calc_vertex(point, proj, view):
-    # Transform point to view space, return vertex and depth [G]
-    v = view * point
-    return v, v.z
-
-def dda_step(dda):
-    dda['pos'] += dda['step']
-    dda['t'] += 1.0
-    return dda['t'] > 48.0
-
-def get_cube(pos):
-    # Returns (layer, has_opaque) from occupancy texture [G]
-    return 0, True
-
-def get_voxel(pos):
-    # Returns (tpos, voxel, color, opaque) from voxel texture [G]
-    return 0, 0, vec3(0), False
-
-def get_opaque_material(tpos, voxel, color, face, uv):
-    # Returns (ALBEDO, EMISSION, normal_map, rsma) [G]
-    return vec3(0), vec3(0), vec2(0), vec4(0)
-
-def gray(v):
-    return dot(v, vec3(0.299, 0.587, 0.114))
-
-def discard():
-    raise StopIteration
-
-# Opaque Pass
-def fragment_shader_opaque(BACK, RAY, model_size, _MODELVIEW_MATRIX, PROJECTION_MATRIX):
-    ray = RAY
-    ray_rec = 1.0 / ray
-    front = to_front_face(BACK, ray, ray_rec)
-    ddc = dda_init(model_size, front, ray, ray_rec)
-    found = False
-    no_more_cubes = False
-
-    for csteps in range(49):
-        layer, has_opaque = get_cube(ddc['pos'])
+# Outer Loop: Traverse Cubes
+for csteps from 0 to 48:
+    layer = 0 # Placeholder for layer index if multi-layered
+    has_opaque = false
+    
+    # Check if current cube contains any opaque voxels
+    if get_cube(ddc.position, layer, has_opaque):
         if has_opaque:
-            ddv = dda_init_inner(ddc, model_size, 1.0/model_size, ray, ray_rec, vec3(0))
-            exit_dist = dda_voxel_face_hit(ddc, 1.0/model_size)
-            exit = ddc['pos'] + exit_dist * ray
-            exit_vertex, depth = calc_vertex(exit, PROJECTION_MATRIX, _MODELVIEW_MATRIX)
-
-            if exit_vertex.z < 0.0:
-                for vsteps in range(49):
-                    tpos, voxel, color, opaque = get_voxel(ddv['pos'])
+            # Initialize inner DDA for individual voxels within the cube
+            origin = ddc.position * 16.0 # Cube start in voxel coordinates
+            ddv = dda_init_inner(ddc, model_size, MODEL_SIZE_REC, ray, ray_rec, origin)
+            
+            # Inner Loop: Traverse Voxels
+            for vsteps from 0 to 48:
+                tpos = vec3(0) # Texture position
+                voxel = 0      # Voxel data
+                color = vec3(0)
+                opaque = false
+                
+                # Retrieve voxel data
+                if get_voxel(ddv.position, layer, tpos, voxel, color, opaque):
                     if opaque:
-                        hit_dist = dda_voxel_face_hit(ddv, vec3(1.0 / 16.0))
-                        hit = ddv['origin'] + hit_dist * ray
-                        light_vertex, hit_depth = calc_vertex(hit, PROJECTION_MATRIX, _MODELVIEW_MATRIX)
+                        # Calculate precise hit point in model coordinates
+                        hit = origin + dda_voxel_face_hit(ddv, vec3(1.0 / 16.0)) * MODEL_SIZE_REC
+                        
+                        # Transform hit point to view space
+                        light_vertex = calc_vertex(hit, PROJECTION_MATRIX, _MODELVIEW_MATRIX, depth)
+                        
+                        # Check if voxel is in front of the view plane
                         if light_vertex.z < 0.0:
                             DEPTH = depth
                             LIGHT_VERTEX = light_vertex
-                            NORMALS, NORMAL, TANGENT, BINORMAL = dda_voxel_face_normals(ddv)
-                            face, uv = dda_voxel_face_uv(ddv, model_size, hit)
-                            ALBEDO, EMISSION, normal_map, rsma = get_opaque_material(tpos, voxel, color, face, uv)
+                            
+                            # Compute surface geometry
+                            dda_voxel_face_normals(ddv, NORMALS, NORMAL, TANGENT, BINORMAL)
+                            dda_voxel_face_uv(ddv, model_size, hit, face)
+                            
+                            # Fetch material properties
+                            get_opaque_material(tpos, voxel, color, face, uv, ALBEDO, EMISSION, normal_map, rsma)
+                            
+                            # Map to shader outputs
                             NORMAL_MAP = normal_map.xy
                             NORMAL_MAP_DEPTH = normal_map.z
                             ROUGHNESS = rsma.r
                             SPECULAR = rsma.g
                             METALLIC = rsma.b
                             AO = rsma.a
-                            found = True
-                            break
-                    if dda_step(ddv):
-                        break
-        else:
-            no_more_cubes = dda_step(ddc)
+                            
+                            found = true
+                            break # Stop inner loop on first opaque voxel
+                
+                # Step to next voxel
+                if dda_step(ddv):
+                    break # End of cube reached
+            
+            if found:
+                break # Stop outer loop
+    
+    # Step to next cube
+    no_more_cubes = dda_step(ddc)
+    
+    if found or no_more_cubes:
+        break
 
-        if found or no_more_cubes:
-            break
-
-    if not found:
-        discard()
-
-# Transparent Pass
-def fragment_shader_transparent(BACK, RAY, model_size, _MODELVIEW_MATRIX, PROJECTION_MATRIX, SCREEN_TEXTURE):
-    ray = RAY
-    ray_rec = 1.0 / ray
-    front = to_front_face(BACK, ray, ray_rec)
-    ddc = dda_init(model_size, front, ray, ray_rec)
-    totalEmission = vec3(0.0)
-    totalTrans = vec3(1.0)
-    paint = vec3(0.0)
-    first = True
-    stop = False
-    no_more_cubes = False
-
-    for csteps in range(49):
-        layer, has_opaque = get_cube(ddc['pos'])
-        if has_opaque:
-            ddv = dda_init_inner(ddc, model_size, 1.0/model_size, ray, ray_rec, vec3(0))
-            exit_dist = dda_voxel_face_hit(ddc, 1.0/model_size)
-            exit = ddc['pos'] + exit_dist * ray
-            exit_vertex, depth = calc_vertex(exit, PROJECTION_MATRIX, _MODELVIEW_MATRIX)
-
-            if exit_vertex.z < 0.0:
-                for vsteps in range(49):
-                    tpos, voxel, color, opaque = get_voxel(ddv['pos'])
-                    if opaque:
-                        hit_dist = dda_voxel_face_hit(ddv, vec3(1.0 / 16.0))
-                        hit = ddv['origin'] + hit_dist * ray
-                        light_vertex, hit_depth = calc_vertex(hit, PROJECTION_MATRIX, _MODELVIEW_MATRIX)
-                        if light_vertex.z < 0.0:
-                            DEPTH = depth
-                            LIGHT_VERTEX = light_vertex
-                            stop = True
-                            found = True
-                            break
-                    # Accumulate transparent voxels [G]
-                    if dda_step(ddv):
-                        break
-        else:
-            no_more_cubes = dda_step(ddc)
-
-        if found or no_more_cubes:
-            break
-
-    if not found:
-        if first:
-            discard()
-        else:
-            background = sample(SCREEN_TEXTURE)
-            ALBEDO = mix(paint, background, totalTrans)
-            ALPHA = 1.0 - gray(totalTrans)
-            ALBEDO = paint + color * background
+if not found:
+    discard
 ```
+
+### Parameters
+*   **Cube Size**: $16 \times 16 \times 16$ voxels. This determines the step size for the inner DDA: `vec3(1.0 / 16.0)` [S1, unofficial].
+*   **Max Steps**: 49 steps per cube and 49 steps per voxel (total max iterations $\approx 49 \times 49$) [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **View Plane Culling**: Voxels or cubes behind the camera plane ($z \ge 0$ in view space) are skipped to avoid rendering artifacts and unnecessary computation [S1, unofficial].
+*   **Transparent Background**: If no opaque voxel is found, the fragment is discarded, resulting in a transparent background [S1, unofficial].
+*   **Precision**: The algorithm relies on `ray_rec` (reciprocal of ray direction) for DDA stability. Zero components in the ray direction must be handled (e.g., by `safe_vector`) to avoid division by zero [S1, unofficial].
+*   **Inside/Outside Viewing**: The mesh uses front-face culling (`cull_front`), allowing the ray to enter from the back face, enabling viewing from inside the volume [S1, unofficial].
 
 ## Subtopics
 
 ### [MultiDDA](3123-multidda.md)
-MultiDDA is an acceleration method for volume rendering that performs incremental Digital Differential Analyzer (DDA) traversal over a two-level hierarchical grid to skip empty space more efficiently than a flat grid. It builds on [Voxel Ray Marching with Cube-Level DDA](3069-voxel-ray-marching-with-cube-level-dda.md) by replacing the single-level voxel traversal with a nested approach: a coarse traversal over "bricks" (8³ voxel blocks) followed by a fine traversal over individual voxels only within occupied bricks. It differs from its parent by explicitly decoupling the empty-space skipping logic into a separate coarse grid layer, whereas the parent uses a fixed-size cube-level DDA that may not align with the data structure's logical blocks.
+MultiDDA is an acceleration method for volume rendering that performs incremental Digital Differential Analyzer (DDA) traversal over a two-level hierarchical grid to skip empty space more efficiently than a flat grid. It builds on [Voxel Ray Marching with Cube-Level DDA](3069-voxel-ray-marching-with-cube-level-dda.md) by replacing the single-level voxel traversal with a nested approach: a coarse traversal over "bricks" (8³ voxel blocks) followed by a fine traversal over individual voxels only within occupied bricks. It differs from its parent by introducing a dedicated coarse occupancy grid layer, whereas the parent uses a flat voxel grid traversal without hierarchical skipping.
+
+### [Efficient Voxel Marking for Hierarchical Volumetric Fusion](12765-efficient-voxel-marking-for-hierarchical-volumetric-fusion.md)
+This method marks hierarchical macro-cells as either empty or intersected by a noisy depth surface, enabling efficient culling in volumetric fusion pipelines. Unlike gathering-type approaches that project geometry to screen space and suffer from high thread divergence, this method is input-driven (scattering type), assigning one GPU thread per depth image pixel to traverse the macro-voxel grid, thereby automatically ignoring invisible cells and minimizing divergence.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of cubes and voxels traversed along the ray, bounded by the maximum step counts (49 cubes, 49 voxels per cube) [S1, unofficial].
-*   **Memory Complexity:** Constant per fragment, storing DDA state and a few accumulators [G].
-*   **Performance:** Designed for GPU fragment shaders, allowing for good performance and runtime changes to voxels at relatively low cost [S1, unofficial].
-*   **Strengths:** Simple implementation, reusable DDA algorithm, supports custom samplers for PBR materials, allows viewing from inside or outside the volume [S1, unofficial].
-*   **Limitations:** Fixed cube size (16x16x16) may not be optimal for all data structures; transparency handling relies on screen texture sampling which can cause limitations with color filtering and shadows [S1, unofficial].
-*   **When to Use:** When rendering voxel volumes on the GPU with a need for simple, reusable ray marching code and support for custom PBR materials [S1, unofficial].
-*   **When Not to Use:** When adaptive step sizing is required for highly sparse or variable-density volumes, or when advanced shadow casting for transparent voxels is needed [G].
+*   **Time Complexity**: $O(C + V)$, where $C$ is the number of cubes traversed and $V$ is the number of voxels traversed within occupied cubes. In the worst case (fully occupied volume), it is $O(N)$ where $N$ is the total number of voxels along the ray. However, empty space skipping reduces $C$ significantly.
+*   **Memory Complexity**: $O(1)$ auxiliary memory per fragment, plus the storage for the voxel grid and occupancy grid.
+*   **Performance**: The method is designed for GPU fragment shaders, leveraging parallelism across pixels. The two-level DDA reduces branching overhead compared to single-level traversal by skipping entire cubes [S1, unofficial].
+*   **Strengths**: Efficient empty space skipping, simple implementation, supports runtime voxel updates, allows viewing from inside or outside [S1, unofficial].
+*   **Limitations**: Fixed cube size ($16^3$) may not be optimal for all volumes. Transparency handling is limited (grayscale alpha fallback mentioned in plans) [S1, unofficial]. No support for multi-resolution grids natively (requires extension like MultiDDA) [S1, unofficial].
 
 ## Background
-The method is based on an efficient 2-level DDA algorithm, implemented 100% on the GPU as a fragment shader, as part of the "Voxel rendering addon for Godot 4.3+" [S1, unofficial]. It was developed by Viktor Ferenczi and is available on the Godot Asset Library [S1, unofficial]. The algorithm is designed to be reusable, allowing for custom samplers and material definitions without modifying the core raymarching logic [S1, unofficial].
+The method is implemented as part of the "Voxel rendering addon for Godot 4.3+" by Viktor Ferenczi [S1, unofficial]. It is based on an efficient 2-level DDA algorithm, implemented 100% on the GPU as a fragment shader [S1, unofficial]. The approach allows for good performance and opens up the possibility of making runtime changes to voxels at a relatively low cost [S1, unofficial]. The shader code is designed to be reusable, allowing custom samplers for different PBR materials and voxel types [S1, unofficial].
 
 ## Sources
 [S1] viktor-ferenczi/godot-voxel, https://github.com/viktor-ferenczi/godot-voxel, fetched 2026-10-24 (unofficial)

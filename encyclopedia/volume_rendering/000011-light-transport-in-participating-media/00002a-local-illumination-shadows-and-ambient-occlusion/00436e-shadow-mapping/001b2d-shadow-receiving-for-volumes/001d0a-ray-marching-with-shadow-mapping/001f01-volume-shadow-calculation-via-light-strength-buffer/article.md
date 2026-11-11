@@ -1,59 +1,179 @@
 # Volume Shadow Calculation via Light Strength Buffer
 
-Also called: 3D Shadow Casting, Light Strength Buffer Method
+Also called: 3D Light Strength Buffer Shadow Casting, 3D Shadow Casting, Light Strength Buffer Method, Williams 1978 two-pass approach (3D variant)
 
 ## Overview
-This method adds shadows to mixtures of geometric and volumetric data by storing shadow information in a 3D light strength buffer instead of a 2D shadow depth buffer [S1, unofficial]. It sets itself apart from its sibling [Ray Marching with Shadow Mapping](1415-ray-marching-with-shadow-mapping.md) by computing a fractional light strength at every point in space, which allows it to correctly render penumbras and semi-transparent shadows without the aliasing artifacts associated with Williams' 2D shadow depth buffer [S1, unofficial].
+Volume Shadow Calculation via Light Strength Buffer is a shadow casting method that stores shadow information in a 3D light strength buffer instead of a 2D shadow depth buffer, allowing correct rendering of penumbras, semi-transparent object shadows, and self-shadows for volumetric objects [S1, S2, unofficial]. It differs from its parent method, [Ray Marching with Shadow Mapping](1415-ray-marching-with-shadow-mapping.md), by decoupling the shadow computation from the view ray and storing pre-computed attenuation in a 3D volume, and from [Shadow Volume Rendering](1556-shadow-volume-rendering.md) by using continuous light strength values rather than binary depth comparisons [S1, S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Inputs:** Volumetric data, geometric data (polygons), and a set of light sources [S1, unofficial].
-*   **Outputs:** A final composited image with correct volumetric shadows [S1, unofficial].
+**Inputs:**
+- Volumetric data (voxel grid with opacity/scattering coefficients).
+- Polygonal geometry (optional, for hybrid scenes).
+- Light source definitions (position, initial strength).
+- Grid resolution for the 3D light strength buffer.
+
+**Outputs:**
+- A 3D light strength buffer storing attenuation values.
+- Composite color and opacity volumes for final rendering.
 
 **Data Structures:**
-1.  **Composite Color/Opacity Volumes:** For each light source $i$, a 3D volume storing composite color $C_i$ and composite opacity $O_c$ for each voxel [S1, unofficial].
-2.  **3D Light Strength Buffer:** A 3D volume storing the light strength $P_{i,j}$ at each sample position along each ray for each light source $i$ [S1, unofficial].
+1. **Volumetric Data:** A 3D grid of voxels. Each voxel stores material properties (opacity $\alpha$, color $C$).
+2. **3D Light Strength Buffer:** A 3D grid aligned with the volumetric data. Each cell stores a scalar value $P$ representing the fractional light strength at that location.
+3. **Composite Color/Opacity Arrays:** 3D grids storing $c_t$ (total color) and $o_c$ (composite opacity) for each voxel.
 
 **Steps:**
-1.  Shade and classify the volumetric data, shade and scan-convert the polygons, and use volume matting operators to yield composite colors $C_i$ and opacity $O_c$ for each voxel for each light source $i$ [S1, unofficial].
-2.  Cast parallel illumination rays from each light source into the data [S1, unofficial].
-3.  For each ray, assume an initial light strength, draw samples at equally spaced positions along the ray, compute the opacity at each location by tri-linearly interpolating from the nearest eight voxels, and attenuate the ray strength [S1, unofficial]. Store the computed light strengths $P_{i,j}$ in the 3D light strength buffer [S1, unofficial].
-4.  Compute the total color $c_t$ for each voxel as the weighted sum of light strengths mapped from voxel indices into the coordinate system of each light source $i$, tri-linearly interpolating from the nearest eight light strength values [S1, unofficial].
-5.  Ray trace, resample, and composite the arrays of total color $c_t$ and composite opacity $o_c$ [S1, unofficial].
 
-**Formula:**
-The strength $P_{i,j+k}$ of a ray as it leaves a sample location is computed from the strength $P_{i,j}$ as it approaches the sample and the opacity $\alpha$ of the sample [S1, unofficial]:
+1. **Shade and Classify:** Shade and classify the volumetric data. If polygons are present, shade and scan-convert them. Use volume matting operators to yield composite colors $C_i$ and opacity $O_c$ for each voxel for each light source $i$ [S2, unofficial].
 
-$$ P_{i,j+k} = P_{i,j} \left(1 - \frac{k_{i,j}}{d^2}\right) $$
+2. **Cast Illumination Rays:** For each light source $i$, cast parallel illumination rays into the data volume [S2, unofficial].
+   - Assume an initial light strength $P_{initial}$ for each ray.
+   - Draw samples at equally spaced positions along the ray.
 
-Where:
-*   $P_{i,j}$ is the light strength approaching the sample [S1, unofficial].
-*   $P_{i,j+k}$ is the light strength leaving the sample [S1, unofficial].
-*   $k_{i,j}$ is a constant for the linear approximation of square-law attenuation [S1, unofficial].
-*   $d$ is the distance from the light source to the sample location [S1, unofficial].
+3. **Compute Opacity and Attenuate:** For each sample position along the ray:
+   - Compute the opacity $\alpha$ at the location by tri-linearly interpolating from the nearest eight voxels of the volumetric data [S2, unofficial].
+   - Attenuate the ray strength using the formula:
+     $$ P_{i,j+k} = P_{i,j} \left(1 - \frac{k_{i,j}}{d^2}\right) $$
+     where:
+     - $P_{i,j}$ is the light strength approaching the sample.
+     - $P_{i,j+k}$ is the light strength leaving the sample.
+     - $k_{i,j}$ is a constant for linear approximation of square-law attenuation.
+     - $d$ is the distance from the light source to the sample location [S2, unofficial].
 
-The total color $c_t$ for each voxel is computed as [S1, unofficial]:
+4. **Store Light Strengths:** Store the set of light strengths $P_{i,j}$ computed at each sample position along each ray in the 3D light strength buffer [S2, unofficial].
 
-$$ c_t = \sum_{i=1}^{L} P_i C_i $$
+5. **Compute Total Color:** Compute the total color $c_t$ for each voxel as the weighted sum of light strengths mapped from voxel indices into the coordinate system of each light source $i$. This involves tri-linearly interpolating from the nearest eight light strength values in the buffer for each light source [S2, unofficial].
 
-Where $P_i$ is the light strength obtained by mapping voxel indices into the coordinate system of light source $i$ and tri-linearly interpolating from the nearest eight light strength values [S1, unofficial].
+6. **Final Rendering:** Ray trace, resample, and composite the arrays of total color $c_t$ and composite opacity $o_c$ [S2, unofficial].
 
-**Pitfalls:**
-Surfaces in volumetric data (which often have a thickness of several voxels) tend to partially shadow themselves, causing distracting aliasing artifacts [S1, unofficial].
-*   **Solution:** Translate the 3-D light strength volume a few voxels away from the light source before computing $c_t$ [S1, unofficial]. This reduces accuracy within small objects but avoids the artifacts [S1, unofficial].
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_light_strength_buffer(volumetric_data, light_sources, grid_resolution):
+    """
+    Computes the 3D light strength buffer for a given volume and light sources.
+    """
+    # Initialize 3D buffer with zeros
+    # Dimensions match volumetric_data
+    light_strength_buffer = zeros(grid_resolution)
+    
+    for light in light_sources:
+        # Initialize buffer for this light source to zero or handle accumulation
+        # Assuming one buffer per light or accumulation into a single buffer
+        # The source implies storing P_i,j for each light source i
+        current_light_buffer = zeros(grid_resolution)
+        
+        # Cast parallel rays from light source
+        for ray in parallel_rays_from(light.position, grid_resolution):
+            current_strength = light.initial_strength
+            
+            # Sample along the ray
+            for sample_pos in ray.samples:
+                # Tri-linearly interpolate opacity from volumetric data
+                opacity = tri_linear_interpolate(volumetric_data, sample_pos)
+                
+                # Distance from light source to sample
+                distance = length(sample_pos - light.position)
+                
+                # Constant for linear approximation of square-law attenuation
+                # Note: Source uses k_{i,j} which may vary per sample/light
+                # Default constant if not specified per sample
+                k = 1.0 
+                
+                # Attenuate strength
+                # P_{i,j+k} = P_{i,j} * (1 - k / d^2)
+                # Guard against division by zero or negative strength
+                if distance > 0:
+                    attenuation_factor = 1.0 - (k / (distance ** 2))
+                    # Clamp to ensure non-negative strength
+                    attenuation_factor = max(0.0, attenuation_factor)
+                    current_strength = current_strength * attenuation_factor
+                
+                # Store in buffer
+                # Map sample_pos to grid index
+                grid_idx = world_to_grid(sample_pos, grid_resolution)
+                current_light_buffer[grid_idx] = current_strength
+        
+        # Store or accumulate into main buffer
+        # Source says "Store the set of light strengths... in a 3D light strength buffer"
+        # It implies separate buffers or indexed storage per light
+        light_strength_buffer[light.id] = current_light_buffer
+
+    return light_strength_buffer
+
+def compute_total_color(volumetric_data, light_strength_buffers, light_sources, grid_resolution):
+    """
+    Computes total color for each voxel using light strength buffers.
+    """
+    total_color_volume = zeros(grid_resolution)
+    composite_opacity_volume = zeros(grid_resolution)
+    
+    for voxel_pos in all_voxels(grid_resolution):
+        total_color = 0.0
+        composite_opacity = 0.0
+        
+        for light in light_sources:
+            # Map voxel index into coordinate system of light source
+            # This likely involves transforming the voxel position to light space
+            # or simply using the pre-computed light strength at that world position
+            # Source: "mapping from voxel indices into the coordinate system of light source i"
+            # and "tri-linearly interpolating from the nearest eight light strength values"
+            
+            light_strength = tri_linear_interpolate(light_strength_buffers[light.id], voxel_pos)
+            
+            # Get voxel material properties
+            voxel_color = volumetric_data.color(voxel_pos)
+            voxel_opacity = volumetric_data.opacity(voxel_pos)
+            
+            # Weighted sum of light strengths
+            # Source: "total color ct for each voxel is computed as the weighted sum"
+            # Formula (4) in source is not fully explicit on weighting factors, 
+            # but implies contribution based on light strength and voxel color
+            contribution = light_strength * voxel_color
+            
+            total_color += contribution
+            
+            # Accumulate opacity for compositing
+            composite_opacity += voxel_opacity
+            
+        total_color_volume[voxel_pos] = total_color
+        composite_opacity_volume[voxel_pos] = composite_opacity
+        
+    return total_color_volume, composite_opacity_volume
+
+def render_shadowed_volume(total_color_volume, composite_opacity_volume):
+    """
+    Final ray tracing and compositing.
+    """
+    # Ray trace, resample, and composite as usual
+    # This step is standard volume rendering using the pre-computed color/opacity
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- **Self-Shadowing Aliasing:** Surfaces in volumetric data (thickness of several voxels) tend to partially shadow themselves. Solution: Translate the 3-D light strength volume a few voxels away from the light source before computing $c_t$. This reduces accuracy within small objects but avoids distracting aliasing artifacts [S2, unofficial].
+- **Memory Usage:** The 3D buffer requires significantly more memory than 2D shadow maps [S1, S2, unofficial].
 
 ## Subtopics
 
 ### [Half-Angle Slicing for Incremental Lighting](3446-half-angle-slicing-for-incremental-lighting.md)
-A technique that uses a shared slicing axis aligned between the viewer and light source to avoid the visual artifacts of volumetric shadow maps. It sets itself apart from this method by utilizing a two-pass loop per slice to accumulate light attenuation, whereas this method uses a full 3D buffer.
+Half-Angle Slicing for Incremental Lighting is a multipass technique that computes volumetric shadows by accumulating light attenuation in an off-screen pixel buffer, thereby avoiding the memory overhead and leakage artifacts associated with volumetric shadow maps. It differs from its parent method, [Volume Shadow Calculation via Light Strength Buffer](1914-volume-shadow-calculation-via-light-strength-buffer.md), by decoupling the light transport sampling from the data volume resolution and using a single 2D buffer instead of a 3D volume.
+
+### [Shadow Mapping for Volumes](11153-shadow-mapping-for-volumes.md)
+Shadow Mapping for Volumes adapts the standard image-based shadow mapping technique to participate in light transport within volumetric data. It solves the problem of determining whether a sample point along a view ray is occluded by the volume itself when viewed from a light source. Unlike methods that compute exact volumetric occlusion integrals, this approach provides a binary shadow decision based on depth comparisons, offering a performance trade-off where speed is prioritized over physically accurate attenuation.
 
 ## Operating characteristics
-*   **Memory:** The amount of memory required for a 3D buffer is obviously much greater than a 2D shadow depth buffer [S1, unofficial].
-*   **Advantages:** Avoids shadow aliasing problems encountered by Williams' 2D shadow depth buffer [S1, unofficial]. Correctly handles semi-transparent shadows and penumbras [S1, unofficial]. Correctly renders shadows cast by volumetrically defined objects on themselves, shadows cast by polygons on volumetric objects, and vice versa [S1, unofficial].
-*   **Limitations:** High memory consumption due to the 3D nature of the buffer [S1, unofficial]. The solution to self-shadowing aliasing (translating the buffer) reduces accuracy within small objects [S1, unofficial].
+- **Memory Complexity:** High. The 3D light strength buffer requires memory proportional to the volume of the scene, which is significantly greater than 2D shadow depth buffers [S1, S2, unofficial].
+- **Time Complexity:** Proportional to the number of light sources and the number of samples per ray. Each light source requires a separate pass to cast rays and populate the buffer.
+- **Strengths:** Correctly renders penumbras, semi-transparent shadows, and self-shadows for volumetric objects. Avoids shadow aliasing problems associated with 2D shadow maps [S1, S2, unofficial]. Handles shadows cast by polygons on volumetric objects and vice versa [S1, S2, unofficial].
+- **Limitations:** High memory consumption. Reduced accuracy within small objects due to the self-shadowing mitigation technique (translating the buffer) [S2, unofficial].
+- **When to Use:** When physically accurate volumetric shadows, including penumbras and semi-transparency, are required and memory is not a constraint.
+- **When Not to Use:** When memory is limited or real-time performance is critical and approximate binary shadows are acceptable.
 
 ## Background
-The method employs a two-pass approach similar to Williams [1978], but stores shadow information in a 3D light strength buffer instead of a 2D shadow depth buffer [S1, unofficial].
+The method was developed by Max et al. in the late 1980s as an extension of Williams' 1978 two-pass shadow mapping approach [S1, S2, unofficial]. It was designed to handle mixtures of geometric and volumetric data, addressing the limitations of 2D shadow maps in rendering volumetric shadows [S1, S2, unofficial]. The technique is cited in surveys of shadow casting algorithms by Nelson Max [S1, S2, unofficial].
 
 ## Sources
-[S1] DTIC ADA208085: Rendering Mixtures of Geometric and Volumetric Data, https://archive.org/details/DTIC_ADA208085, fetched 2026-10-26 (unofficial)
+[S1] DTIC ADA208091: Interactive Visualization of 3D Medical Data, https://archive.org/details/DTIC_ADA208091, fetched 2026-10-26 (unofficial)
+[S2] DTIC ADA208085: Rendering Mixtures of Geometric and Volumetric Data, https://archive.org/details/DTIC_ADA208085, fetched 2026-10-26 (unofficial)

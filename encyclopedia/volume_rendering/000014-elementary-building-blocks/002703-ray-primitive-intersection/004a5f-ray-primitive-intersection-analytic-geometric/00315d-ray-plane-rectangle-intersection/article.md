@@ -1,54 +1,42 @@
 # Ray-Plane/Rectangle Intersection
-Also called: Ray-Plane Intersection, Ray-Rectangle Intersection, Ray-Square Intersection
+Also called: Ray-Plane Intersection, Ray-Rectangle Intersection
 
 ## Overview
-This family provides closed-form analytical methods to determine the intersection of a ray with planar primitives (infinite planes, rectangles, squares) and related shapes (spheres, cylinders, cubes) by reducing the problem to solving linear or quadratic equations. It differs from [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) by avoiding iterative root-finding, and from [Ray-Triangle Intersection](11312-ray-triangle-intersection.md) by handling axis-aligned or general rectangular domains often used as bounding volumes or ground planes in volume rendering.
+This family computes the geometric intersection between a viewing ray and planar primitives, ranging from infinite planes to bounded rectangles and squares. It solves the problem of determining entry and exit points for volume rendering traversal or shading calculations on flat surfaces. Unlike [Ray-Triangle Intersection](11312-ray-triangle-intersection.md) which relies on barycentric coordinate checks for triangular domains, or [Ray-Box Intersection](776-ray-box-intersection.md) which uses slab intersection for axis-aligned volumes, this family focuses on planar geometry defined by normals and points, often serving as the foundational test for more complex primitives like cylinders or cubes.
 
 ## Shared principles
-All methods in this family rely on the parametric representation of a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the origin, $\mathbf{d}$ is the direction, and $t \ge 0$ is the distance along the ray.
-
-1.  **Implicit Equation**: The primitive is defined by an implicit function $f(\mathbf{x}) = 0$. For a plane with normal $\mathbf{n}$ and point $\mathbf{p}_0$, $f(\mathbf{x}) = \mathbf{n} \cdot (\mathbf{x} - \mathbf{p}_0)$. For a sphere centered at $\mathbf{c}$ with radius $r$, $f(\mathbf{x}) = \|\mathbf{x} - \mathbf{c}\|^2 - r^2$.
-2.  **Substitution**: Substitute $\mathbf{r}(t)$ into $f(\mathbf{x}) = 0$.
-    *   For planes, this yields a linear equation $At + B = 0$.
-    *   For spheres and cylinders (curved parts), this yields a quadratic equation $At^2 + Bt + C = 0$.
-3.  **Solving**:
-    *   Linear: $t = -B/A$.
-    *   Quadratic: $t = \frac{-B \pm \sqrt{B^2 - 4AC}}{2A}$.
-4.  **Validation**:
-    *   **Distance**: Check if $t$ lies within the valid ray segment $[t_{min}, t_{max}]$ (typically $t_{min}=0$).
-    *   **Domain**: For bounded primitives (rectangles, spheres, cylinders), verify that the intersection point $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ lies within the primitive's bounds (e.g., barycentric coordinates for triangles, radius checks for cylinders, coordinate ranges for axis-aligned rectangles).
-5.  **Output**: Return the smallest valid $t$, the intersection point $\mathbf{p}$, and the surface normal $\mathbf{n}$ (computed as $\nabla f(\mathbf{p})$ normalized).
+The shared principles of this family are the geometric definition of rays and the parallel execution model [G].
+**Ray Definition**
+Rays are defined by an origin $\mathbf{o}$ and a direction $\mathbf{d}$ [G]. The direction is typically normalized. The origin is often the camera eye position, but can vary based on the camera model [G].
+**Parallel Execution**
+Computations are mapped to parallel threads [G]. Each thread typically processes one or more pixels or samples [G]. Memory access patterns are optimized for coalescing [G]. Synchronization is used to manage data dependencies between threads [G].
 
 ## Subtopics
 
 ### [Ray-Sphere Intersection](3539-ray-sphere-intersection.md)
-Computes entry and exit distances for a ray intersecting a sphere. It uses a closed-form quadratic solution derived from the sphere's implicit equation. Unlike [Ray-Triangle Intersection](11312-ray-triangle-intersection.md) which requires barycentric checks, or [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) which uses iteration, this method is purely analytical. Choose it for spherical primitives or bounding volumes.
+Ray-sphere intersection computes the geometric points where a ray intersects the surface of a sphere, providing the entry and exit distances along the ray parameter $t$. It solves the problem of efficiently determining if and where a viewing ray hits a spherical primitive, which is a fundamental building block for volume rendering. Unlike [Ray-Triangle Intersection](909-general-ray-triangle-intersection-pl-cker-coordinates.md) which requires barycentric coordinate checks, or [Implicit Surface and SDF Intersection](2795-implicit-surface-and-sdf-intersection.md) which relies on iterative root-finding, this method uses a closed-form analytical solution to the quadratic equation derived from the sphere's implicit definition.
 
 ### [Ray-Cylinder Intersection](5014-ray-cylinder-intersection.md)
-Computes entry and exit distances for a cylinder defined by radius, height, and rectangular cross-section faces. It differs from [Ray-box intersection](776-ray-box-intersection.md) by handling the curved lateral surface via quadratic solving and cylindrical coordinate checks. Choose it for cylindrical structures or pipe-like volumes.
+Computes the entry and exit distances for a ray intersecting a cylinder defined by `geomSize`, composed of front/back rectangles, top/bottom faces, and a lateral curved surface. It differs from [Ray-box intersection](776-ray-box-intersection.md) by handling the curved lateral surface via quadratic solving and cylindrical coordinate checks.
 
 ### [Infinite Plane Ray Intersection](5021-infinite-plane-ray-intersection.md)
-Computes the intersection of a ray with an infinite plane defined by a point and a normal. It is typically used as a ground plane kept separate from the scene's BVH for ray intersection testing. Choose it for unbounded planar boundaries or shadow planes.
+Computes the intersection of a ray with an infinite plane defined by a point and a normal, returning the intersection distance and filling an intersection structure, or rejecting if the ray is parallel or outside the ray segment. It is typically used as a ground plane kept separate from the scene's BVH for ray intersection testing.
 
 ### [Axis-Aligned Rectangle Hit Test](5279-axis-aligned-rectangle-hit-test.md)
-Tests intersection with an axis-aligned rectangle. It is a specialized case of ray-plane intersection where the domain check is simplified to coordinate comparisons. Choose it for fast culling against axis-aligned bounding boxes (AABBs) or screen-space rectangles.
+Not given in the sources.
 
 ### [Plane-Cube Intersection](11468-plane-cube-intersection.md)
-Determines the volume of the intersection between a plane and a cube, resulting in an irregular polyhedron. It extends the method of Salama & Kolb (2005) by constructing an ordered list of face vertices. Choose it when computing the exact volume of a clipped voxel or cube.
+The Plane-Cube Intersection method computes the geometric intersection between an infinite plane and a cube, resulting in an inscribed irregular polygon with 3 to 6 vertices. It is primarily used to calculate the volume of the portion of the cube sliced by the plane, a computation relevant in computational astrophysics for determining partial cell coverage (e.g., by burning fronts) and in solid modeling. Unlike standard ray-primitive intersection which returns a single point or segment, this method constructs the full cross-sectional polygon to enable volume integration.
 
-#### Ray-Square Intersection
-**Definition**: A ray-squared plane intersection test that computes intersection with a square primitive defined by a corner, two edge vectors $\mathbf{v}_1, \mathbf{v}_2$, and normal [S1, unofficial].
-**Steps**:
-1. Compute the intersection point $\mathbf{p} = \mathbf{o} + \mathbf{d} t_{hit}$ [S1, unofficial].
-2. Check if $\mathbf{p}$ is inside the square using barycentric-like coordinates:
-   - $\mathbf{w} = \text{normalize}(\mathbf{v}_1 \times \mathbf{v}_2)$
-   - $\mathbf{planar\_hitpt\_vector} = \mathbf{p} - \text{corner}$
-   - $\alpha = \mathbf{w} \cdot (\mathbf{planar\_hitpt\_vector} \times \mathbf{v}_2)$
-   - $\beta = \mathbf{w} \cdot (\mathbf{v}_1 \times \mathbf{planar\_hitpt\_vector})$
-   - Return false if $\alpha \le 0$ or $\alpha \ge 1$ or $\beta \le 0$ or $\beta \ge 1$ [S1, unofficial].
+### Ray-Square Intersection
+#### definition
+- [S1, unofficial] Ray-squared plane intersection test that computes intersection with a square primitive defined by corner, v1, v2, and normal.
+#### step
+- [S1, unofficial] Compute intersection point: p = ray.o + ray.d * tHit.
+- [S1, unofficial] Check if point is inside square: planar_hitpt_vector = p - corner, alpha = dot(w, cross(planar_hitpt_vector, v2)), beta = dot(w, cross(v1, planar_hitpt_vector)), where w = cross(v1, v2) / dot(cross(v1, v2), cross(v1, v2)). Return false if !(alpha > 0.0 && alpha < 1.0) || !(beta > 0.0 && beta < 1.0).
 
 ## Background
-Ray-primitive intersection is a fundamental building block in ray tracing and volume rendering, originating from the early days of computer graphics (Whitted, 1980). The analytical solutions for planes and spheres are standard in all graphics literature. The specific implementations for cylinders and cubes in volume rendering contexts often appear in specialized volumetric path tracing repositories [S1, unofficial]. The plane-cube volume intersection method is based on work by Salama & Kolb (2005) for voxel clipping [S1, unofficial].
+Origin: The analytical solution for ray-plane intersection is a standard technique in computer graphics, foundational to ray tracing algorithms introduced by Whitted (1980) and later detailed in standard texts like [PBRT](https://www.pbr-book.org/). The specific implementation details for volumetric path tracing using these primitives are documented in [S1, unofficial].
 
 ## Sources
 [S1] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)

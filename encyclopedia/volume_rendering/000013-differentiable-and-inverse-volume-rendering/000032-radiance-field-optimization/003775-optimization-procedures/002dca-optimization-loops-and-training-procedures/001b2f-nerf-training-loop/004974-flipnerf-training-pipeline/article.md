@@ -1,0 +1,99 @@
+# FlipNeRF Training Pipeline
+
+Also called: FlipNeRF Ablation Sequence
+
+## Overview
+FlipNeRF is a training procedure for few-shot novel view synthesis that enhances the mip-NeRF representation by introducing flipped reflection rays into the training loop [S1]. It distinguishes itself from standard NeRF pipelines by enforcing consistency between original and geometrically flipped rays through specific uncertainty-aware and bottleneck feature losses, rather than relying solely on color reconstruction [S1].
+
+## How it works
+The method builds on [mip-NeRF](52-name.md) and [Ref-NeRF](12051-camera-pose-and-extrinsic-intrinsic-optimization.md) concepts.
+
+**Inputs and Outputs:**
+*   **Input:** A set of sparse input views (few-shot).
+*   **Output:** Optimized radiance field parameters yielding novel view images and depth maps.
+
+**Data Structures:**
+*   **Ray Pairs:** Each training step samples an original ray $r$ and its corresponding flipped reflection ray $r'$ [S1].
+*   **Bottleneck Features:** Intermediate features extracted from the network, used for consistency constraints [S1].
+
+**Steps:**
+1.  **Baseline Initialization:** Start with the baseline mip-NeRF representation [S1].
+2.  **Ray Sampling:** Add flipped reflection rays to the training loop. For every sampled ray $r$, generate a flipped counterpart $r'$ [S1].
+3.  **Uncertainty Loss (LUE):** Apply the Uncertainty-aware Loss (LUE) to both the original ray $r$ and the flipped ray $r'$ [S1]. This replaces naive empirical regularization which degrades performance [S1].
+4.  **Bottleneck Feature Consistency (LBFC):** Apply the Local Bottleneck Feature Consistency (LBFC) loss, which utilizes the Jensen-Shannon Divergence (JSD) on bottleneck features [S1].
+5.  **Feature Consistency Enforcement:** Enforce consistency of bottleneck features between the original ray $r$ and the flipped ray $r'$ pairs [S1].
+6.  **Normal Refinement (LOri):** Integrate the Orientation Loss (LOri) from Ref-NeRF to refine normal estimation [S1]. This step ensures that the flipped rays are geometrically accurate, leading to more effective regularization [S1].
+7.  **Optimization:** Update network parameters using the combined loss from steps 3-6 [S1].
+
+**Formulas and Parameters:**
+*   **Loss Components:** The total loss combines LUE, LBFC, and LOri [S1].
+*   **Performance Metrics:** The full model (all components enabled) achieves PSNR 19.55, SSIM 0.767, LPIPS 0.180, Average Error 0.101, and NLL 2.56 on the Realistic Synthetic 360◦ dataset [S1].
+*   **Ablation Impact:** Removing LUE or LBFC significantly degrades performance. Naive application of empirical regularization ($L_{Emp}$) performs worse than MixNeRF [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def train_flipnerf(input_views, num_epochs):
+    # Initialize mip-NeRF model
+    model = MipNeRFModel()
+    
+    for epoch in range(num_epochs):
+        for batch in input_views:
+            # 1. Sample original rays
+            rays_r = sample_rays(batch)
+            
+            # 2. Generate flipped reflection rays
+            rays_r_prime = generate_flipped_reflection(rays_r)
+            
+            # 3. Forward pass for original rays
+            rgb_r, depth_r, uncertainty_r = model.forward(rays_r)
+            
+            # 4. Forward pass for flipped rays
+            rgb_r_prime, depth_r_prime, uncertainty_r_prime = model.forward(rays_r_prime)
+            
+            # 5. Compute Uncertainty Loss (LUE) for both
+            loss_lue = compute_lue(rgb_r, uncertainty_r, batch.target_rgb) + \
+                       compute_lue(rgb_r_prime, uncertainty_r_prime, batch.target_rgb_prime)
+            
+            # 6. Extract bottleneck features
+            feat_r = model.get_bottleneck_features(rays_r)
+            feat_r_prime = model.get_bottleneck_features(rays_r_prime)
+            
+            # 7. Compute LBFC using JSD on bottleneck features
+            loss_lbfc = compute_jsd(feat_r, feat_r_prime)
+            
+            # 8. Compute Orientation Loss (LOri) for normal refinement
+            loss_lori = compute_orientation_loss(depth_r, rays_r)
+            
+            # 9. Total Loss
+            total_loss = loss_lue + loss_lbfc + loss_lori
+            
+            # 10. Backpropagate and update
+            model.backward(total_loss)
+```
+
+## Subtopics
+
+### 360FusionNeRF Training Pipeline
+A training method for panoramic neural radiance fields using a single 360° RGB-D image, incorporating color, geometric, and semantic consistency losses [S2]. It differs from OmniNeRF by using geometric and semantic priors to generalize better to unseen views and avoid overfitting [S2].
+*   **Input:** A single 360° RGB-D panorama [S2].
+*   **Steps:**
+    1.  Generate new training images and depth maps with various virtual camera poses by reprojecting the input panorama [S2].
+    2.  Optimize network parameters $\theta$ using the Adam optimizer [S2].
+    3.  Compute Semantic Consistency Loss ($L_{SC}$) over a smaller resolution every $k$ iterations, alongside Color ($L_{Color}$) and Geometric ($L_{Geo}$) losses [S2].
+*   **Parameters:** Learning rate initialized to $5 \times 10^{-4}$, exponentially reduced to $5 \times 10^{-5}$; 200,000 epochs; Batch size 1,400; Hardware: DGX A100 GPU [S2].
+*   **Loss Formula:** $L_{SC} (I_1, I_2) = \lambda \phi(I_1)^T \phi(I_2)$, where $\phi(.)$ is the normalized image embedding [S2].
+
+## Operating characteristics
+*   **Performance:** The full FlipNeRF model achieves PSNR 19.55, SSIM 0.767, LPIPS 0.180, Average Error 0.101, and NLL 2.56 on the Realistic Synthetic 360◦ dataset [S1].
+*   **Strengths:** Significantly reduces artifacts and improves depth map reliability compared to MixNeRF [S1]. The uncertainty-aware regularization provides more reliable rendering results with lower NLL [S1].
+*   **Limitations:** Performance degrades if naive empirical regularization ($L_{Emp}$) is used instead of LUE [S1]. The reduced feature dimension of bottleneck features can limit capacity if not carefully sized [S1].
+*   **Scaling:** Not given in the sources.
+
+## Background
+FlipNeRF was introduced in the paper "FlipNeRF: Flipped Reflection Rays for Few-shot Novel View Synthesis" [S1]. It addresses the challenge of few-shot novel view synthesis by leveraging geometric consistency via flipped reflection rays. The method builds on mip-NeRF [S1] and incorporates orientation refinement from Ref-NeRF [S1].
+
+## Sources
+[S1] FlipNeRF: Flipped Reflection Rays for Few-shot Novel View Synthesis, https://doi.org/10.1109/iccv51070.2023.02092, fetched 2026-10-29
+[S2] 360FusionNeRF: Panoramic Neural Radiance Fields with Joint Guidance, https://doi.org/10.1109/iros55552.2023.10341346, fetched 2026-10-26

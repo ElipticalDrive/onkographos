@@ -7,8 +7,8 @@ Pulsar is an efficient, sphere-based differentiable renderer that maps a 3D scen
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A scene representation $\mathcal{S}$ consisting of $M$ spheres; camera parameters (rotation $\mathbf{R}$, translation $\mathbf{t}$, intrinsic matrix $\mathbf{K}$); and neural shading parameters $\Theta_s$.
-*   **Output:** A rendered feature image $\mathbf{F}$ or color image.
+*   **Input:** A scene representation $\mathcal{S}$ consisting of $M$ spheres; camera parameters (rotation $\mathbf{R}$, translation $\mathbf{t}$, intrinsic matrix $\mathbf{K}$); and neural shading parameters $\Theta_s$ [S1].
+*   **Output:** A rendered feature image $\mathbf{F}$ or color image [S1].
 
 **Data Structures:**
 The scene is converted from a "struct of arrays" to an "array of structs" for efficient GPU access [S1]. Two primary structures are used:
@@ -51,7 +51,7 @@ The scene is converted from a "struct of arrays" to an "array of structs" for ef
         *   $\xi$: Background offset constant [S1].
         *   The sum in the denominator is over all spheres $k$ contributing to the pixel [S1].
     *   **Normalized Orthogonal Distance Formula:**
-        $$d_i = \min(1, \frac{||\tilde{d}_i||_2}{R_i})$$
+        $$d_i = \min\left(1, \frac{||\tilde{d}_i||_2}{R_i}\right)$$
         Where $\tilde{d}_i$ is the vector pointing orthogonally from the ray to the sphere center, and $R_i$ is the sphere radius. This acts as a linear scaling factor in $[0, 1]$ [S1].
     *   **Opacity Integration:** Opacity $o_i$ is used in both the exponential depth term and the linear distance term to prevent spheres from being visible in front of the background (if only in exponential) or depth overriding opacity (if only in linear) [S1].
 5.  **Neural Shading:**
@@ -69,16 +69,16 @@ import math
 
 def pulsar_render(spheres, camera_params, shading_net, gamma=1.0, xi=0.01):
     """
-    spheres: List of Sphere objects or tensors containing p (3,), f (d,), r (1,), o (1,)
-    camera_params: dict with 'R' (3x3), 't' (3,), 'K' (3x3)
+    spheres: Tensor of shape (M, 3+d+3) -> [p_x, p_y, p_z, f_1..d, dist_to_center, r, o]
+    camera_params: dict with 'K' (3x3), 'R' (3x3), 't' (3,), 'H', 'W', 'origin', 'near', 'far'
     shading_net: Neural network module
     gamma: Blending softness parameter
     xi: Background offset constant
     """
-    M = len(spheres)
+    M = spheres.shape[0]
+    device = spheres.device
     
     # Step 0: Enclosing Rectangle Calculation
-    # Compute bounding boxes and sort spheres
     intersection_info, draw_info, depths = compute_enclosing_rectangles(spheres, camera_params['K'])
     sorted_indices = torch.argsort(depths)
     intersection_info = intersection_info[sorted_indices]
@@ -86,9 +86,9 @@ def pulsar_render(spheres, camera_params, shading_net, gamma=1.0, xi=0.01):
     depths = depths[sorted_indices]
     
     # Step 1: Intersection Search & Feature Aggregation
-    # Image dimensions
-    H, W = camera_params['image_height'], camera_params['image_width']
-    feature_image = torch.zeros(H, W, spheres[0].f.shape[0], device=spheres[0].f.device)
+    H, W = camera_params['H'], camera_params['W']
+    feature_dim = spheres.shape[1] - 6
+    feature_image = torch.zeros(H, W, feature_dim, device=device)
     
     # Process image in 9 parts (empirically derived)
     part_h, part_w = H // 3, W // 3
@@ -98,113 +98,71 @@ def pulsar_render(spheres, camera_params, shading_net, gamma=1.0, xi=0.01):
             x_start, x_end = px * part_w, (px + 1) * part_w
             
             # Find relevant spheres for this part
-            # Parallelized over spheres to check if sphere bbox overlaps part bbox
             relevant_mask = check_sphere_overlap(intersection_info, y_start, y_end, x_start, x_end)
             relevant_indices = torch.where(relevant_mask)[0]
             
             if len(relevant_indices) == 0:
                 continue
                 
-            # Select relevant spheres
             rel_intersection_info = intersection_info[relevant_indices]
             rel_draw_info = draw_info[relevant_indices]
             rel_depths = depths[relevant_indices]
             
             # Parallelize over pixels in the part
-            # Use thread blocks of 16x16
             for y in range(y_start, y_end):
                 for x in range(x_start, x_end):
-                    # Early stopping bound calculation
                     current_weight_sum = 0.0
-                    aggregated_feature = torch.zeros(spheres[0].f.shape[0], device=spheres[0].f.device)
+                    aggregated_feature = torch.zeros(feature_dim, device=device)
                     
-                    # Iterate through relevant spheres (sorted by depth)
                     for idx in relevant_indices:
-                        # Get sphere data
-                        p = rel_draw_info[idx].position
-                        r = rel_draw_info[idx].radius
-                        o = rel_draw_info[idx].opacity
-                        f = rel_draw_info[idx].features
+                        p = rel_draw_info[idx, :3]
+                        r = rel_draw_info[idx, 6]
+                        o = rel_draw_info[idx, 7]
+                        f = rel_draw_info[idx, 3:3+feature_dim]
                         
-                        # Calculate ray-sphere intersection depth z_i
-                        # Note: z_i is normalized device coordinate [0,1], 0=max depth
                         z_i = calculate_normalized_depth(p, r, camera_params)
                         
-                        # Early stopping check
-                        # If current sphere depth is greater than bound derived from current_weight_sum, stop
                         if z_i > calculate_early_stop_bound(current_weight_sum, gamma, xi):
                             break
                             
-                        # Calculate normalized orthogonal distance d_i
-                        # Vector from ray to sphere center
                         ray_origin = camera_params['origin']
                         ray_direction = get_ray_direction(x, y, camera_params['K'])
-                        d_tilde = p - (ray_origin + ray_direction * z_i) # Simplified projection logic
-                        # Orthogonal component
+                        d_tilde = p - (ray_origin + ray_direction * z_i)
                         d_orth = d_tilde - torch.dot(d_tilde, ray_direction) * ray_direction
                         d_i = min(1.0, torch.norm(d_orth) / r)
                         
-                        # Calculate blending weight w_i
-                        # Numerator
                         num = o * d_i * math.exp(o * (z_i / gamma))
-                        # Denominator (sum over all k, but we approximate with current sum + current term for streaming)
-                        # In practice, denominator requires sum over all contributing spheres.
-                        # For exact implementation, a two-pass or atomic sum is needed.
-                        # Here we assume a global sum or accumulation.
                         denom = math.exp(xi / gamma) + current_weight_sum + num
                         
                         w_i = num / denom
                         
-                        # Aggregate feature
                         aggregated_feature += w_i * f
-                        current_weight_sum += num # Approximation for denominator accumulation
-                        
-                        # Gradient propagation limit: only use first few spheres for gradients
-                        # [G] Implementation detail: Flag spheres for gradient computation vs color contribution
-                        if idx < 5: # Example limit
-                            aggregated_feature_grad = w_i * f
-                        else:
-                            aggregated_feature_grad = torch.zeros_like(f)
+                        current_weight_sum += num
                             
                     feature_image[y, x] = aggregated_feature
                     
-    # Step 5: Neural Shading
-    # Convert feature map to color
     color_image = shading_net(feature_image)
-    
     return color_image
 
 def compute_enclosing_rectangles(spheres, K):
-    """
-    Computes bounding boxes for spheres on the sensor plane.
-    Returns intersection_info (M, 4 shorts), draw_info (M, struct), depths (M, float)
-    """
-    # [G] Implementation of pinhole projection bounding box calculation
-    # Uses K, sphere position p, and radius r
-    # Robustify: ensure min size of 1 pixel
+    # [G] Computes bounding boxes for spheres on the sensor plane using K, sphere position p, and radius r.
+    # Robustifies boundaries to ensure a minimum size of 1 pixel.
     pass
 
 def calculate_normalized_depth(p, r, camera_params):
-    """
-    Calculates normalized device coordinate depth z_i.
-    0 = max depth, 1 = min depth (closest).
-    """
-    # [G] Project sphere center to camera space, add/subtract radius for depth range
-    # Return normalized value
+    # [G] Projects sphere center to camera space, adds/subtracts radius for depth range, and normalizes to [0, 1] (0=max depth, 1=min depth).
     pass
 
 def check_sphere_overlap(intersection_info, y_start, y_end, x_start, x_end):
-    """
-    Checks if sphere's bounding box overlaps with the image part.
-    """
-    # Compare intersection_info min/max x/y with part boundaries
+    # Compares intersection_info min/max x/y with part boundaries to find overlaps.
     pass
 
 def calculate_early_stop_bound(current_weight_sum, gamma, xi):
-    """
-    Calculates upper bound for sphere depth to have notable impact.
-    """
-    # [G] Derived from Eq. 1 and current aggregated weights
+    # [G] Calculates upper bound for sphere depth to have notable impact based on Eq. 1 and current aggregated weights.
+    pass
+
+def get_ray_direction(x, y, K):
+    # [G] Standard pinhole camera ray direction calculation from pixel coordinates and intrinsic matrix K.
     pass
 ```
 

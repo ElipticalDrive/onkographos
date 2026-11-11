@@ -3,75 +3,89 @@
 Also called: VMesh
 
 ## Overview
-VMesh is a hybrid 3D representation that combines a textured triangular mesh for primary geometry with an auxiliary sparse volume to capture subtle, thin structures that are difficult to represent with polygons alone [S1]. It solves the trade-off between the editability and rendering efficiency of meshes and the high-fidelity detail capture of neural volumes, enabling real-time view synthesis (2K 60FPS) on consumer devices [S1]. Unlike methods that use meshes only as geometric guidance for volume rendering, VMesh renders the mesh directly for its surface appearance while using the volume to enhance specific regions, allowing for compact storage (<50MB) and integration into standard graphics pipelines [S1].
+VMesh is a hybrid representation that depicts an object using a textured triangular mesh for primary geometry and an auxiliary sparse volume for subtle structures, obtained from multi-view images via an implicit signed distance-density field [S1]. It sets itself apart from sibling methods by using the mesh and volume to represent separate geometries rather than using the mesh merely as guidance for volume rendering, allowing the mesh to be directly used for rendering while retaining the ability to model thin structures via the volumetric counterpart [S1].
 
 ## How it works
-VMesh is trained in three stages: a contiguous implicit stage, a mesh optimization stage, and a discretization stage [S1]. The core representation is derived from an implicit signed distance-density field, which is jointly optimized via volume rendering and then converted into explicit assets [S1].
+**Inputs and Outputs:**
+*   **Input:** Multi-view images of an object.
+*   **Output:** A hybrid asset consisting of a triangular mesh, texture maps, and a sparse volume (voxels) with associated density and color data, optimized for real-time rendering [S1].
 
-### Inputs and Outputs
-*   **Inputs:** A set of multi-view images of an object.
-*   **Outputs:** A triangular mesh with texture maps (diffuse color, specular tint, metallic property, and basis weights) and a sparse volume (voxels with density values) [S1].
-
-### Data Structures
+**Data Structures:**
 1.  **Implicit Fields (Training):**
-    *   Signed Distance Field (SDF) $f_{sdf}(\mathbf{x})$: A neural network outputting a scalar signed distance value for any 3D point $\mathbf{x}$ [S1].
-    *   Density Field $\sigma(\mathbf{x})$: A neural network outputting a scalar volume density for any 3D point $\mathbf{x}$ [S1].
-    *   Color/Texture Parameters: Neural networks predicting diffuse color $\mathbf{c}_d$, specular tint $\mathbf{s}$, metallic property $m$, and basis weights $\mathbf{w}$ for each point [S1].
+    *   Signed Distance Field (SDF) $f_{sdf}$: A neural network outputting scalar distance $d$.
+    *   Density Field $\sigma$: A neural network outputting volume density $\sigma_{vol}$.
+    *   Color/Texture Fields: MLPs or look-up tables predicting diffuse color $\mathbf{c}_d$, specular tint $\mathbf{s}$, metallic property $m$, and basis weights.
 2.  **Explicit Assets (Rendering):**
-    *   **Mesh:** A set of triangles with vertex attributes including diffuse color, specular tint, metallic property, and weights for the basis functions [S1].
-    *   **Sparse Volume:** A sparse voxel grid where each active voxel stores a density value $\sigma_{vol}$ [S1].
+    *   **Mesh:** Triangular mesh with vertex attributes (position, normal, UV coordinates).
+    *   **Sparse Volume:** A sparse voxel grid storing density $\sigma_{vol}$ and color features.
+    *   **RefBasis Texture:** Look-up tables or small networks for specular basis colors $\{\mathbf{c}_{s1}, \dots, \mathbf{c}_{sN}\}$ and attenuation factor $A(\theta, m)$ [S1].
 
-### Formulas and Definitions
-*   **Sigmoid Mapping:** Converts signed distance $d$ to volume opacity $\alpha_{surf}$ using a scene-wise learnable parameter $s$ [S1]:
-    $$ \Phi_s(x) = (1 + e^{-sx})^{-1} $$
-    $$ \alpha_{surf} = \Phi_s(d) $$
-    The parameter $s$ controls the uncertainty of the surface; $1/s = 0$ corresponds to a sharp surface [S1].
-*   **Discretized Opacity:** For volume rendering along a ray with sample points $t_i$ having signed distances $d_i$ and $d_{i+1}$:
-    $$ \alpha_i = \max\left(\frac{\Phi_s(d_i) - \Phi_s(d_{i+1})}{\Phi_s(d_i)}, 0\right) $$
-    [S1]
-*   **Hybrid Density and Opacity:** The total density $\sigma_{hyb}$ is the sum of surface-derived density $\sigma_{surf}$ and volume density $\sigma_{vol}$ [S1]:
+**Numbered Steps:**
+
+1.  **Contiguous Stage (Joint Optimization):**
+    Initialize implicit neural representations for the SDF $f_{sdf}$ and density $\sigma_{vol}$. Jointly optimize these fields using volume rendering from multi-view images. The hybrid density is computed as:
     $$ \sigma_{hyb} = \sigma_{surf} + \sigma_{vol} $$
-    This is equivalent to combining opacities:
+    where $\sigma_{surf}$ is derived from the SDF. The hybrid opacity is:
     $$ \alpha_{hyb} = 1 - (1 - \alpha_{surf})(1 - \alpha_{vol}) $$
     [S1]
-*   **Normals and Reflection:** The analytic normal $\mathbf{n}$ is the gradient of the SDF [S1]:
+
+2.  **Discretization Stage (Quantization):**
+    Convert the optimized implicit fields into explicit representations through quality-preserving quantization:
+    *   Extract the triangular mesh from the SDF $f_{sdf}$ (e.g., using marching cubes or similar isosurface extraction).
+    *   Extract the sparse volume from the density field $\sigma_{vol}$ [S1].
+
+3.  **Texture Representation (RefBasis):**
+    Model view-dependent specular color using the RefBasis representation. This involves:
+    *   Predicting a set of $N$ base specular colors $\{\mathbf{c}_{s1}, \dots, \mathbf{c}_{sN}\}$ for each reflected ray direction $\omega_r$.
+    *   Predicting an $N$-dimensional weighting vector $\mathbf{w}$ for each point.
+    *   Computing specular color $\mathbf{c}_s$ as a weighted sum:
+        $$ \mathbf{c}_s(\omega_r) = \sum_{i=1}^{N} w_i \mathbf{c}_{si} $$
+    *   Predicting an attenuation factor $A(\theta, m)$ based on incident angle $\theta$ and metallic property $m$ to model Fresnel effects.
+    *   Final color $\mathbf{c}$ is:
+        $$ \mathbf{c} = \gamma (\mathbf{c}_d + \mathbf{s} \odot A(\theta, m)\mathbf{c}_s(\hat{\omega}_r)) $$
+        where $\gamma$ is tone-mapping, $\odot$ is element-wise multiplication, and $\mathbf{s}$ is specular tint [S1].
+
+**Formulas and Definitions:**
+
+*   **Sigmoid Mapping:** Maps signed distance $x$ to opacity.
+    $$ \Phi_s(x) = (1 + e^{-sx})^{-1} $$
+    where $s$ is a scene-wise learnable parameter [S1].
+
+*   **Discretized Volume Opacity:**
+    $$ \alpha_i = \max\left(\frac{\Phi_s(d_i) - \Phi_s(d_{i+1})}{\Phi_s(d_i)}, 0\right) $$
+    where $d_i$ and $d_{i+1}$ are signed distance values at sample points $t_i$ and $t_{i+1}$ along a ray, and $\Phi_s$ is the Sigmoid function [S1].
+
+*   **Normal Computation:**
     $$ \mathbf{n} = \nabla f_{sdf}(\mathbf{x}) $$
-    The reflected ray direction $\omega_r$ is computed from the incident/viewing direction $\omega_o$ and normal $\mathbf{n}$ [S1]:
+    The normal $\mathbf{n}$ is the gradient of the SDF [S1].
+
+*   **Reflected Ray Direction:**
     $$ \omega_r = 2(\omega_o \cdot \mathbf{n}) - \omega_o $$
-    [S1]
-*   **RefBasis Texture Model:** View-dependent specular color $\mathbf{c}_s$ is modeled using learned basis functions $\{\mathbf{c}_{s1}, \dots, \mathbf{c}_{sN}\}$ and point-specific weights $\mathbf{w} = (w_1, \dots, w_N)$ [S1]:
-    $$ \mathbf{c}_s(\omega_r) = \sum_{i=1}^{N} w_i \mathbf{c}_{si} $$
-    [S1]
-    The final color $\mathbf{c}$ combines diffuse color $\mathbf{c}_d$, specular tint $\mathbf{s}$, attenuation factor $A(\theta, m)$ (where $\theta$ is incident angle and $m$ is metallic property), and tone-mapping $\gamma$ [S1]:
-    $$ \mathbf{c} = \gamma (\mathbf{c}_d + \mathbf{s} \odot A(\theta, m)\mathbf{c}_s(\hat{\omega}_r)) $$
-    [S1]
+    where $\omega_o$ is the incident/viewing direction [S1].
 
-### Training Pipeline and Losses
-The training proceeds in three stages [S1]:
-
-1.  **Contiguous Stage:** Jointly optimize $f_{sdf}$ and $\sigma$ using volume rendering.
-    *   **Eikonal Loss:** Regularizes the SDF gradient magnitude to 1 [S1]:
+*   **Loss Functions:**
+    *   **Eikonal Loss:** Regularizes the SDF gradient magnitude.
         $$ L_{eik} = \sum_i (\|\nabla f_{sdf}(\mathbf{x}(t_i))\| - 1)^2 $$
         [S1]
-    *   **Mask Loss:** Binary cross-entropy between estimated opacity $\hat{M} = \sum_i \omega_i$ and ground truth mask $M$ [S1]:
-        $$ L_{mask} = BCE(\hat{M}, M) $$
+    *   **Mask Loss:** Binary cross entropy between estimated opacity $\hat{M} = \sum_i \omega_i$ and ground truth mask $M$.
+        $$ L_{mask} = \text{BCE}(\hat{M}, M) $$
         [S1]
-    *   **Normal Smoothness Loss:** Encourages a predicted normal $\hat{\mathbf{n}}$ to align with the analytic normal $\mathbf{n}$ [S1]:
+    *   **Normal Smoothness Loss:** Encourages predicted normal $\hat{\mathbf{n}}$ to align with analytic normal $\mathbf{n}$.
         $$ L_{norm} = 1 - \hat{\mathbf{n}} \cdot \mathbf{n} $$
         [S1]
-    *   **Photometric Loss:** Applies to both hybrid rendered color $\hat{\mathbf{C}}_i^{hyb}$ and surface-only rendered color $\hat{\mathbf{C}}_i^{surf}$ to prioritize surface usage [S1]:
+    *   **Photometric Loss:** Applies to both hybrid and surface-only renders to prioritize surface usage.
         $$ L_{pm} = \sum_i \left( \|\hat{\mathbf{C}}_i^{hyb} - \mathbf{C}_i\|^2 + \|\hat{\mathbf{C}}_i^{surf} - \mathbf{C}_i\|^2 \right) $$
         [S1]
-    *   **Sparsity Loss:** Penalizes volume density to encourage sparsity [S1]:
+    *   **Sparsity Loss:** Penalizes volume density to encourage sparsity.
         $$ L_{sp} = \sum_i |1 - \exp(-\lambda \sigma_i)| $$
         [S1]
 
-2.  **Mesh Optimization Stage:** Extract the mesh from $f_{sdf}$ and optimize texture attributes on the mesh vertices using the RefBasis model [S1].
+**Parameters:**
+*   $s$: Scene-wise learnable parameter for the Sigmoid function. $1/s$ represents surface uncertainty; $1/s=0$ is equivalent to surface rendering [S1].
+*   $N$: Number of learned basis functions for specular color [S1].
+*   $\lambda$: Density sparsity regularization coefficient [S1].
 
-3.  **Discretization Stage:** Convert the implicit fields and texture parameters into explicit mesh textures and a sparse volume grid [S1].
-
-### Pseudocode
-The following pseudocode outlines the core volume rendering and loss computation during the contiguous training stage.
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
@@ -79,166 +93,282 @@ The following pseudocode outlines the core volume rendering and loss computation
 import math
 
 def sigmoid(x, s):
-    """Sigmoid function with learnable sharpness parameter s."""
+    """Sigmoid function with learnable sharpness s."""
     return 1.0 / (1.0 + math.exp(-s * x))
 
-def compute_surface_opacity(d_i, d_next, s):
-    """Compute discretized surface opacity between two sample points."""
+def compute_opacity_from_sdf(d_i, d_i_plus_1, s):
+    """
+    Compute discretized volume opacity from signed distance values.
+    d_i, d_i_plus_1: Signed distance values at consecutive sample points.
+    s: Scene-wise learnable parameter.
+    """
     phi_i = sigmoid(d_i, s)
-    phi_next = sigmoid(d_next, s)
+    phi_i_plus_1 = sigmoid(d_i_plus_1, s)
     if phi_i == 0:
         return 0.0
-    alpha = (phi_i - phi_next) / phi_i
+    alpha = (phi_i - phi_i_plus_1) / phi_i
     return max(alpha, 0.0)
 
 def compute_normal(sdf_network, x):
-    """Compute analytic normal from SDF gradient."""
-    # In practice, this uses automatic differentiation.
-    # Here we denote the gradient operation.
-    return gradient(sdf_network, x)
+    """
+    Compute analytic normal from SDF using numerical or automatic differentiation.
+    sdf_network: Neural network outputting signed distance.
+    x: 3D point (x, y, z).
+    """
+    # In practice, use automatic differentiation (e.g., PyTorch torch.autograd.grad)
+    # to compute gradient of sdf_network(x) w.r.t x.
+    # Here we denote the gradient operation as grad.
+    n = grad(sdf_network, x)
+    return n / norm(n)
 
-def compute_reflected_direction(view_dir, normal):
-    """Compute reflected ray direction."""
-    # omega_r = 2(omega_o . n) - omega_o
-    dot_product = dot(view_dir, normal)
-    return 2.0 * dot_product * normal - view_dir
+def compute_reflected_direction(omega_o, n):
+    """
+    Compute reflected ray direction.
+    omega_o: Incident/viewing direction vector.
+    n: Normal vector.
+    """
+    dot = dot_product(omega_o, n)
+    return 2.0 * dot * n - omega_o
 
-def compute_color(sdf_network, density_network, x, view_dir):
-    """Compute color at point x for view direction view_dir."""
-    # 1. Get geometric properties
+def compute_specular_color(omega_r, basis_colors, weights):
+    """
+    Compute specular color using RefBasis.
+    omega_r: Reflected ray direction.
+    basis_colors: List of N base specular color vectors.
+    weights: N-dimensional weighting vector.
+    """
+    c_s = [0.0, 0.0, 0.0]
+    for i in range(len(basis_colors)):
+        c_s += weights[i] * basis_colors[i]
+    return c_s
+
+def compute_attenuation(theta, m):
+    """
+    Compute Fresnel attenuation factor.
+    theta: Incident angle.
+    m: Metallic property.
+    """
+    # Modeled by an MLP or LUT in implementation.
+    # Placeholder for the specific function A(theta, m).
+    return A_network(theta, m)
+
+def render_color(x, omega_o, sdf_network, density_network, 
+                 diffuse_color_net, specular_tint_net, metallic_net,
+                 basis_colors, weights_net, tone_mapping):
+    """
+    Render color for a point using the hybrid representation.
+    """
+    # 1. Get SDF and Density
     d = sdf_network(x)
     sigma_vol = density_network(x)
     
-    # 2. Compute surface opacity and density
-    # Note: sigma_surf is derived from alpha_surf via the volume rendering equation
-    # For the hybrid model, we combine sigma_surf and sigma_vol.
-    # However, the paper defines alpha_surf from d.
-    # We assume a standard volume rendering step where alpha_surf contributes to transmittance.
+    # 2. Compute Surface Opacity and Density
+    # Note: sigma_surf is derived from alpha_surf via volume rendering definition
+    # alpha_surf = Phi_s(d) - Phi_s(d_next) approx Phi_s(d) for infinitesimal step
+    # However, for point query, we use the sigmoid directly as opacity proxy
+    alpha_surf = sigmoid(d, s_learnable)
     
-    # 3. Compute normals
+    # 3. Compute Hybrid Opacity
+    # alpha_vol is derived from sigma_vol via standard volume rendering discretization
+    # For simplicity in point query, assume alpha_vol is computed from sigma_vol
+    alpha_vol = 1.0 - math.exp(-sigma_vol * step_size) # step_size depends on sampling
+    
+    alpha_hyb = 1.0 - (1.0 - alpha_surf) * (1.0 - alpha_vol)
+    
+    # 4. Compute Normal
     n = compute_normal(sdf_network, x)
     
-    # 4. Compute reflected direction
-    omega_r = compute_reflected_direction(view_dir, n)
+    # 5. Compute Reflected Direction
+    omega_r = compute_reflected_direction(omega_o, n)
     
-    # 5. Compute RefBasis color components
-    # Predict diffuse color, specular tint, metallic, and basis weights
-    c_d = diffuse_color_network(x)
-    s_tint = specular_tint_network(x)
-    m = metallic_network(x)
-    w = basis_weights_network(x)
+    # 6. Compute Diffuse Color
+    c_d = diffuse_color_net(x)
     
-    # Get basis colors for the reflected direction
-    c_s_basis = basis_colors_network(omega_r) # Returns array of N basis colors
+    # 7. Compute Specular Components
+    s_tint = specular_tint_net(x)
+    m = metallic_net(x)
+    weights = weights_net(x)
     
-    # Compute specular color
-    c_s = sum(w[i] * c_s_basis[i] for i in range(N))
+    # Get basis colors for this direction (interpolated from LUT or MLP)
+    c_s_basis = get_basis_colors_for_direction(omega_r, basis_colors)
     
-    # Compute attenuation (Fresnel-like)
-    # theta is incident angle, m is metallic
-    theta = acos(dot(-view_dir, n))
-    A = attenuation_network(theta, m)
+    c_s = compute_specular_color(omega_r, c_s_basis, weights)
     
-    # Final color
+    # Compute attenuation
+    # theta is angle between omega_o and n
+    theta = acos(dot_product(normalize(omega_o), n))
+    A = compute_attenuation(theta, m)
+    
+    # 8. Final Color
     c = tone_mapping(c_d + s_tint * A * c_s)
     
-    return c, sigma_vol, d
+    return c, alpha_hyb, alpha_surf
 
-def render_ray(ray_origin, ray_direction, sdf_network, density_network, s, num_samples):
-    """Render a single ray using hybrid volume rendering."""
-    t_min, t_max = ray_origin.bounds()
-    t = linspace(t_min, t_max, num_samples)
-    points = ray_origin + t * ray_direction
+def train_step(images, masks, camera_params, sdf_net, density_net, 
+               color_nets, basis_params, s_param):
+    """
+    Training step for VMesh.
+    """
+    loss = 0.0
     
-    T = 1.0  # Transmittance
-    C = [0.0, 0.0, 0.0]  # Accumulated color
-    
-    for i in range(num_samples):
-        x = points[i]
-        d = sdf_network(x)
-        sigma_vol = density_network(x)
+    for img, mask, cam in zip(images, masks, camera_params):
+        ray_o, ray_d = generate_rays(cam)
         
-        # Surface opacity
-        alpha_surf = compute_surface_opacity(d, sdf_network(points[i+1]) if i < num_samples-1 else d, s)
+        # Sample points along rays
+        points = sample_points(ray_o, ray_d)
         
-        # Volume opacity (simplified from sigma_vol, assuming step size delta_t)
-        # The paper uses alpha_i formula for surface. For volume, standard alpha = 1 - exp(-sigma * delta_t)
-        # However, the paper combines sigma_hyb = sigma_surf + sigma_vol.
-        # We need sigma_surf from alpha_surf.
-        # alpha_surf = 1 - exp(-sigma_surf * delta_t) => sigma_surf = -ln(1-alpha_surf)/delta_t
-        # This is complex. The paper uses alpha_surf directly in the hybrid opacity formula.
+        # Get SDF and Density
+        d_vals = sdf_net(points)
+        sigma_vol_vals = density_net(points)
         
-        # Hybrid Opacity
-        # alpha_vol is derived from sigma_vol. Let's assume standard volume rendering for vol part.
-        # alpha_vol = 1 - exp(-sigma_vol * delta_t)
-        delta_t = t[i+1] - t[i] if i < num_samples-1 else 0.001
-        alpha_vol = 1.0 - math.exp(-sigma_vol * delta_t)
-        
-        alpha_hyb = 1.0 - (1.0 - alpha_surf) * (1.0 - alpha_vol)
-        
-        if alpha_hyb > 0:
-            c, _, _ = compute_color(sdf_network, density_network, x, ray_direction)
-            C = C + T * alpha_hyb * c
-            T = T * (1.0 - alpha_hyb)
+        # Compute Opacities
+        alphas = []
+        for i in range(len(points) - 1):
+            alpha = compute_opacity_from_sdf(d_vals[i], d_vals[i+1], s_param)
+            alphas.append(alpha)
             
-        if T < 1e-4:
-            break
+        # Compute Hybrid Density for Volume Rendering
+        # sigma_surf is implicit in alpha_surf, but for hybrid density sum:
+        # sigma_surf = -log(1 - alpha_surf) / step_size approx
+        # We use the direct alpha combination for rendering color
+        # But for L_sp, we use sigma_vol directly
+        
+        # Render Color
+        c_hyb, c_surf, alpha_hyb, alpha_surf = [], [], [], []
+        for i, p in enumerate(points):
+            c_h, a_h, a_s = render_color(p, ray_d, sdf_net, density_net, 
+                                         color_nets, basis_params, s_param)
+            c_hyb.append(c_h)
+            c_surf.append(c_h) # Simplified: same color logic, different alpha weighting
+            alpha_hyb.append(a_h)
+            alpha_surf.append(a_s)
             
-    return C
-
-def compute_losses(ray_origin, ray_direction, gt_color, gt_mask, sdf_network, density_network, s):
-    """Compute training losses for a ray."""
-    # Render hybrid color
-    C_hyb = render_ray(ray_origin, ray_direction, sdf_network, density_network, s, 128)
-    
-    # Render surface-only color (alpha_vol = 0)
-    # Simplified: re-render with sigma_vol = 0
-    C_surf = render_ray_surface_only(ray_origin, ray_direction, sdf_network, s, 128)
-    
-    # Photometric Loss
-    L_pm = sum((C_hyb[i] - gt_color[i])**2 for i in range(3)) + \
-           sum((C_surf[i] - gt_color[i])**2 for i in range(3))
-    
-    # Mask Loss
-    # Estimated opacity M_hat is sum of alpha_hyb along ray
-    # This requires re-running the ray march to sum alphas
-    M_hat = compute_opacity_sum(ray_origin, ray_direction, sdf_network, density_network, s, 128)
-    L_mask = binary_cross_entropy(M_hat, gt_mask)
-    
-    # Eikonal Loss (sample points randomly in space)
-    L_eik = 0.0
-    for x in random_points_in_bounds():
-        grad = gradient(sdf_network, x)
-        L_eik += (norm(grad) - 1.0)**2
-    L_eik = sum(L_eik)
-    
-    # Normal Smoothness Loss
-    # Predict normal vs analytic normal
-    n_analytic = compute_normal(sdf_network, x)
-    n_predicted = predicted_normal_network(x)
-    L_norm = 1.0 - dot(normalize(n_predicted), normalize(n_analytic))
-    
-    # Sparsity Loss
-    L_sp = sum(abs(1.0 - math.exp(-lambda_param * density_network(x))) for x in volume_samples)
-    
-    return L_pm, L_mask, L_eik, L_norm, L_sp
+        # Composite Colors
+        C_hyb = composite(c_hyb, alpha_hyb)
+        C_surf = composite(c_surf, alpha_surf)
+        
+        # Losses
+        # Photometric Loss
+        L_pm = sum((C_hyb[i] - img[i])**2 + (C_surf[i] - img[i])**2 for i in range(len(img)))
+        
+        # Mask Loss
+        M_hat = sum(alpha_hyb)
+        L_mask = bce(M_hat, mask)
+        
+        # Eikonal Loss
+        L_eik = sum((norm(grad(sdf_net, p)) - 1)**2 for p in points)
+        
+        # Normal Smoothness Loss (if predicted normal available)
+        # L_norm = 1 - dot(predicted_n, analytic_n)
+        
+        # Sparsity Loss
+        L_sp = sum(abs(1 - math.exp(-lambda_param * sigma_vol_vals[i])) for i in range(len(sigma_vol_vals)))
+        
+        total_loss = L_pm + L_mask + L_eik + L_sp
+        total_loss.backward()
+        
+    return total_loss
 ```
 
-### Edge Cases and Pitfalls
-*   **Precision:** The sigmoid parameter $s$ is scene-wise learnable. If $s$ is too small, the surface becomes too fuzzy; if too large, it may become numerically unstable or too sharp for the volume sampling resolution [S1].
-*   **Boundaries:** The hybrid opacity formula $\alpha_{hyb} = 1 - (1 - \alpha_{surf})(1 - \alpha_{vol})$ assumes independence. At the boundary of the sparse volume, discontinuities may occur if the mesh and volume do not align perfectly [S1].
-*   **Degenerate Input:** The method relies on multi-view images. Objects with large unobserved regions may result in poor SDF reconstruction or sparse volume artifacts [S1].
+**Edge Cases and Pitfalls:**
+*   **Precision:** The Sigmoid parameter $s$ controls surface uncertainty. If $s$ is too small, the surface becomes too thick; if too large, it may become unstable or numerically sensitive [S1].
+*   **Boundaries:** The hybrid opacity combination assumes independence between surface and volume opacity. Degenerate cases where $\Phi_s(d_i) = 0$ require guards to avoid division by zero in opacity calculation [S1].
+*   **Normal Quality:** The analytic normal from the SDF can be noisy. The normal smoothness loss $L_{norm}$ is crucial to stabilize normals during early training [S1].
+
+## Subtopics
+
+### Neural and primitive-based representations
+The parent category. VMesh builds on [Neural and primitive-based representations](10-neural-and-primitive-based-representations.md) by combining implicit neural fields with explicit mesh and sparse volume structures.
+
+### VoISDF Volume Rendering and Adaptive Sampling
+A sibling method focusing on adaptive sampling for volume rendering. VMesh differs by explicitly discretizing into mesh and sparse volume for real-time efficiency, whereas VoISDF may rely more on continuous sampling strategies [S1, Sibling Link].
+
+### Gaussian Head Avatar (GHA)
+A sibling method using Gaussians for head avatars. VMesh uses mesh and sparse volume, offering better editability and integration with standard graphics pipelines compared to Gaussian splatting [S1, Sibling Link].
+
+### MAtCha
+A sibling method for multi-view stereo. VMesh extends this by incorporating neural rendering and hybrid representation for view synthesis [S1, Sibling Link].
+
+### Explicit Neural Feature Volume
+A sibling method using feature grids. VMesh uses a sparse volume for density and a mesh for geometry, differing in the explicit geometric representation [S1, Sibling Link].
+
+### Joint Learning with Shared MLPs
+A sibling method. VMesh uses separate networks for SDF, density, and color, rather than shared MLPs for all features [S1, Sibling Link].
+
+### Per-Primitive Color Representations
+A sibling method. VMesh uses RefBasis for view-dependent color, which is a form of per-primitive (or per-point) color representation but with learned basis functions [S1, Sibling Link].
+
+### 2D Feature Fusion
+A sibling method. VMesh operates in 3D space with hybrid representation, whereas 2D Feature Fusion may operate on 2D feature maps [S1, Sibling Link].
+
+### Structure-aware primitive learning
+A sibling method. VMesh's sparse volume captures subtle structures, similar to structure-aware primitives, but uses a hybrid mesh-volume approach [S1, Sibling Link].
+
+### Splat the Net
+A sibling method using splatting. VMesh uses ray-marching for the volume and rasterization for the mesh, differing in rendering technique [S1, Sibling Link].
+
+### Neural Primitive Splatting
+A sibling method. VMesh avoids splatting for the primary geometry, using mesh rasterization instead [S1, Sibling Link].
+
+### K-planes
+A sibling method using planar factors. VMesh uses implicit neural fields and sparse volumes, differing in the factorization approach [S1, Sibling Link].
+
+### Neural Geometric Level of Detail
+A sibling method for LOD. VMesh's hybrid representation allows for efficient rendering at various scales, but does not explicitly implement LOD in the same way [S1, Sibling Link].
+
+### MLP Neural Fields
+A sibling method. VMesh replaces the pure MLP field with a hybrid mesh-volume representation for efficiency [S1, Sibling Link].
+
+### Hash Grid Neural Fields
+A sibling method. VMesh uses sparse volumes instead of hash grids for the volumetric part [S1, Sibling Link].
+
+### VEG
+A sibling method. VMesh differs in its hybrid representation and texture modeling [S1, Sibling Link].
+
+### Forplane
+A sibling method. VMesh differs in its use of mesh and sparse volume [S1, Sibling Link].
+
+### Feature Grid as Radiance Field
+A sibling method. VMesh uses feature grids for color but combines them with mesh geometry [S1, Sibling Link].
+
+### Atlas-Net
+A sibling method. VMesh differs in its representation and rendering pipeline [S1, Sibling Link].
+
+### Dynamic MLP Maps
+A sibling method. VMesh is static in its representation, though it can be extended [S1, Sibling Link].
+
+### Neural Voxel Fields
+A sibling method. VMesh uses sparse volumes, which are a form of voxel fields, but combines them with mesh [S1, Sibling Link].
+
+### Viewshed Fields (VF) Learning
+A sibling method. VMesh differs in its hybrid approach [S1, Sibling Link].
+
+### Primitive-bound feature embedding
+A sibling method. VMesh uses RefBasis, which is a form of feature embedding [S1, Sibling Link].
+
+### Masked Wavelet Representation
+A sibling method. VMesh differs in its representation and rendering [S1, Sibling Link].
+
+### Marching Neurons
+A sibling method. VMesh uses marching cubes-like extraction from SDF, similar to Marching Neurons, but adds volume rendering [S1, Sibling Link].
+
+### Neural Network 3D Object Representation
+A sibling method. VMesh is a specific instance of this, focusing on hybrid mesh-volume [S1, Sibling Link].
 
 ## Operating characteristics
-*   **Time Complexity:** Rendering is real-time. VMesh achieves 60FPS at 2K resolution on common consumer devices (laptops, tablets, mobile phones) [S1].
-*   **Memory Complexity:** Storage is compact, typically under 50MB per object [S1].
-*   **Strengths:** High view synthesis quality comparable to real-time NeRF variants; efficient rendering; compact storage; editable mesh geometry; handles thin structures via volume [S1].
-*   **Limitations:** Requires multi-view input; not a strict physically-based rendering model (uses approximate RefBasis); quality depends on the accuracy of the initial SDF reconstruction [S1].
-*   **When to use:** Real-time view synthesis of static objects where high fidelity and editability are required, and hardware is limited to consumer-grade GPUs [S1].
-*   **When not to use:** Dynamic scenes with complex deformations (unless extended), or scenes requiring strict physical light transport simulation [S1].
+*   **Time Complexity:** Real-time rendering at 2K resolution and 60FPS on common consumer devices (laptops, tablets, mobile phones) [S1].
+*   **Memory Complexity:** Compact storage, occupying moderate disk space (<50MB) [S1].
+*   **Measured Performance:** Achieves comparable view synthesis quality to existing real-time NeRF variants on the NeRF-Synthetic dataset [S1].
+*   **Scaling:** Efficient in storage and processing, suitable for integration into modern graphics engines [S1].
+*   **Strengths:** Retains advantages of mesh-based assets (efficient rendering, compact storage, easy editing) while incorporating the ability to represent subtle geometric structures provided by the volumetric counterpart [S1].
+*   **Limitations:** Does not assume a strict physically-based rendering model, which may limit physical accuracy compared to inverse rendering methods [S1].
+*   **When to use:** When real-time view synthesis with high fidelity and compact storage is required, especially for objects with subtle structures [S1].
+*   **When not to use:** When strict physical accuracy is required, or when the scene is too complex for mesh representation [S1].
 
 ## Background
-VMesh was introduced by Guo et al. in 2023 [S1]. It draws inspiration from implicit neural surface reconstruction methods like NeuS [S1] and Ref-NeRF [S1]. The work addresses the limitations of modern graphics engines that rely on polygonal meshes (hard to model subtle details) and NeRF (high rendering cost, hard to edit) [S1]. It is used for efficient view synthesis and can be integrated into web-based graphics pipelines via WebGL [S1].
+*   **Origin:** VMesh was proposed by Guo et al. in the paper "VMesh: Hybrid Volume-Mesh Representation for Efficient View Synthesis" [S1].
+*   **History and Development:** The work draws inspiration from recent implicit neural surface reconstruction methods where signed distance values can be converted to volume densities [S1]. It aims to address the high rendering costs and difficulty in editing associated with pure neural radiance fields [S1].
+*   **Where it is used:** Real-time immersive applications, web-based rendering via WebGL2, and integration with modern graphics engines [S1].
 
 ## Sources
 [S1] VMesh: Hybrid Volume-Mesh Representation for Efficient View Synthesis, https://core.ac.uk/download/560406650.pdf, fetched 2026-10-27

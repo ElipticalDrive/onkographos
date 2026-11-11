@@ -1,0 +1,291 @@
+--- v006.md
++++ v007.md
+@@ -4,136 +4,193 @@
+ 
+ ## Overview
+-Ray Marching with Shadow Mapping computes self-shadowing in participating media by precomputing transmittance values from the light's perspective into a 3D texture, avoiding the need to cast individual shadow rays for every sample during the main view-ray traversal [S2, unofficial]. It solves the problem of efficient direct illumination occlusion in volumes by trading memory for computational speed, allowing the renderer to sample a pre-integrated opacity field instead of performing expensive light-space ray marches [S2, unofficial]. Unlike [Shadow Volume Rendering](1556-shadow-volume-rendering.md), which constructs explicit volumetric shadow buffers, or [Volume Shadow Calculation via Light Strength Buffer](1914-volume-shadow-calculation-via-light-strength-buffer.md), which stores fractional light strength in 3D space, this method relies on a 2D-to-3D projection of transmittance layers [S2, unofficial]. It differs from [Deep Shadow Maps](2166-deep-shadow-maps.md) by using a uniform spatial grid for 3D texture interpolation, whereas deep opacity maps start samples from the volume surface and cannot use a uniform 3D texture [S2, unofficial].
++Ray Marching with Shadow Mapping is a technique for computing self-shadowing in participating media by precomputing transmittance values from the light's perspective into a 3D texture, which is then sampled during the view-dependent ray march [S2, unofficial][S3, unofficial]. It solves the problem of efficiently determining how much light reaches a sample point through a volume without performing a secondary ray march toward the light for every sample [S3, unofficial]. It differs from [Shadow Volume Rendering](1556-shadow-volume-rendering.md) by using a 2D-depth-based 3D texture stack rather than a full 3D geometric volume, and from [Deep Shadow Maps](2166-deep-shadow-maps.md) by storing discrete transmittance layers rather than hierarchical density curves [S2, unofficial].
+ 
+ ## How it works
+-The method consists of two passes: a shadow map generation pass and a main volume rendering pass [S2, unofficial].
++**Inputs and Outputs:**
++*   **Inputs:** Volume density function $D(x)$, extinction coefficient $\sigma_t$, scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, light direction, light camera matrix, shadow volume range $[z_{min}, z_{max}]$, step count, step size.
++*   **Outputs:** Illuminated volume color (RGB) and final transmittance (A) per pixel.
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-* Volume density function $density(\mathbf{p})$ [S2, unofficial].
+-* Extinction coefficient $\sigma_t = \sigma_a + \sigma_s$ (absorption + scattering) [S2, unofficial].
+-* Scattering coefficient $\sigma_s$ [S2, unofficial].
+-* Light direction $\mathbf{l}$ (for directional lights) or light position (for point lights) [S2, unofficial].
+-* Shadow volume range $[z_{min}, z_{max}]$ defining the depth interval in light space [S2, unofficial].
+-* Number of slices/layers $N$ (minimum 8 for standard MRT, or higher with multiple passes) [S2, unofficial].
+-* Step size $\Delta z = (z_{max} - z_{min}) / N$ [S2, unofficial].
++**Data Structures:**
++1.  **Opacity Shadow Map:** A 3D texture storing transmittance values.
++    *   Dimensions: $W \times H \times L$, where $W, H$ are the shadow map resolution and $L$ is the number of layers (samples along the light ray).
++    *   Format: Single channel (R) or multiple channels if MRT is not used for layer separation. [S2, unofficial]
++    *   Note: Storing different layers in different color channels (e.g., Layer 1 in R, Layer 2 in G) prevents correct bilinear/trilinear interpolation during sampling [S2, unofficial].
++2.  **Light Camera:** Orthographic for directional lights, perspective for point lights [S2, unofficial].
+ 
+-**Outputs:**
+-* A 3D texture `opacityShadowMap` storing transmittance values [S2, unofficial].
+-* Final pixel color with self-shadowing applied [S2, unofficial].
++**Preprocessing (Shadow Map Generation):**
++1.  Render the volume from the light source's perspective.
++2.  Ray march along the light direction (Z-axis in light space) from $z_{min}$ to $z_{max}$ with constant step size $\Delta z$.
++3.  For each layer $i$ from $0$ to $L-1$:
++    *   Calculate position: $pos_i = pos_{start} + i \cdot \Delta z$.
++    *   Sample density: $d_i = D(pos_i)$.
++    *   Accumulate optical depth and compute transmittance using Beer's Law.
++    *   Store transmittance in the 3D texture at coordinate $(u, v, i/L)$.
+ 
+-### Data Structures
+-**Opacity Shadow Map:**
+-* Format: 3D texture (e.g., `sampler3D`) [S2, unofficial].
+-* Dimensions: $W \times H \times N$, where $W, H$ are the shadow map resolution and $N$ is the number of depth slices [S2, unofficial].
+-* Channel: Single channel (e.g., Red) is required to allow correct trilinear interpolation [S2, unofficial]. Storing different layers in different color channels (R, G, B, A) prevents correct interpolation [S2, unofficial].
+-* Content: The value at $(u, v, z)$ represents the transmittance from the light source to the depth $z$ at screen coordinates $(u, v)$ [S2, unofficial].
++**Main Rendering Pass (Ray Marching):**
++1.  For each pixel, cast a view ray.
++2.  Initialize `transmittance` = 1.0, `illumination` = $(0,0,0)$.
++3.  Loop for $i$ from $0$ to `stepCount`:
++    *   Advance sample position: $x = x_{start} + i \cdot \text{stepSize} \cdot \text{marchDirection}$.
++    *   **Shadow Lookup:**
++        *   Transform $x$ to light space: $x_{light} = M_{light} \cdot x$.
++        *   Normalize depth to $[0, 1]$: $z = \frac{-x_{light}.z - z_{min}}{z_{max} - z_{min}}$. [S2, unofficial]
++        *   Normalize UV: $uv = \frac{x_{light}.xy}{\text{lightCamSize}} \cdot 0.5 + 0.5$. [S2, unofficial]
++        *   Sample transmittance: $T_{shadow} = \text{texture}(\text{opacityShadowMap}, (uv, z)).r$. [S2, unofficial]
++    *   **Lighting Calculation:**
++        *   Sample density: $d = D(x)$.
++        *   Compute extinction: $\sigma_t = \sigma_a + \sigma_s$.
++        *   Update volume transmittance: $T_{vol} = T_{vol} \cdot \exp(-\sigma_t \cdot d \cdot \text{stepSize})$.
++        *   Compute in-scattering: $L_{in} = L_{ambient} + L_{direct} \cdot \Phi(v, -l) \cdot T_{shadow}$.
++        *   Compute out-scattering: $L_{out} = \sigma_s \cdot d$.
++        *   Accumulate illumination: $I = I + T_{vol} \cdot L_{in} \cdot L_{out} \cdot \text{stepSize}$.
++4.  Return $(I, T_{vol})$.
+ 
+-### Steps
+-
+-1.  **Render Opacity Shadow Map (Light Pass):**
+-    *   Set up a camera from the light source's perspective. Use an orthographic camera for directional lights and a perspective camera for point lights [S2, unofficial].
+-    *   Ray march through the volume along the light direction (z-axis in light space) from $z_{min}$ to $z_{max}$ with uniform steps $\Delta z$ [S2, unofficial].
+-    *   For each slice $i$ from $0$ to $N-1$:
+-        *   Calculate the position $\mathbf{p}_i = \mathbf{p}_{start} + i \cdot \Delta z \cdot \mathbf{l}$ [S2, unofficial].
+-        *   Sample density $d_i = density(\mathbf{p}_i)$ [S2, unofficial].
+-        *   Accumulate optical depth and compute transmittance using Beer's Law [S2, unofficial]:
+-            $$ T_i = \exp\left(-\sum_{j=0}^{i} d_j \cdot \sigma_t \cdot \Delta z\right) $$
+-        *   Store $T_i$ in the $i$-th layer of the 3D texture [S2, unofficial].
+-    *   Use Multiple Render Targets (MRT) to write up to 8 layers per pass. If $N > 8$, perform multiple passes [S2, unofficial].
+-
+-2.  **Main Rendering Pass (View Pass):**
+-    *   For each pixel, ray march from the camera through the volume with step size $\Delta x$ [S2, unofficial].
+-    *   Initialize `transmittance` = 1.0 and `illumination` = $\vec{0}$ [S2, unofficial].
+-    *   For each sample position $\mathbf{p}$ along the view ray:
+-        *   Transform $\mathbf{p}$ to light space: $\mathbf{p}_L = M_{light} \cdot \mathbf{p}$ [S2, unofficial].
+-        *   Normalize coordinates to sample the 3D texture [S2, unofficial]:
+-            $$ z = \frac{-\mathbf{p}_L.z - z_{min}}{z_{max} - z_{min}} $$
+-            $$ u = \frac{\mathbf{p}_L.x}{W_{light}} + 0.5 $$
+-            $$ v = \frac{\mathbf{p}_L.y}{H_{light}} + 0.5 $$
+-        *   Sample transmittance from the shadow map:
+-            $$ \tau = \text{texture}(\text{opacityShadowMap}, (u, v, z)).r $$
+-        *   Compute in-scattering [S2, unofficial]:
+-            $$ \mathbf{I}_{in} = \mathbf{L}_{ambient} + \mathbf{L}_{direct} \cdot p(\mathbf{v}, -\mathbf{l}) \cdot \tau $$
+-            Where $p(\mathbf{v}, -\mathbf{l})$ is the phase function (e.g., Schlick's approximation) [S2, unofficial].
+-        *   Compute out-scattering [S2, unofficial]:
+-            $$ \sigma_s' = \sigma_s \cdot density(\mathbf{p}) $$
+-        *   Accumulate illumination [S2, unofficial]:
+-            $$ \text{illumination} += \text{transmittance} \cdot \mathbf{I}_{in} \cdot \sigma_s' \cdot \Delta x $$
+-        *   Update view-ray transmittance [S2, unofficial]:
+-            $$ \text{transmittance} *= \exp(-density(\mathbf{p}) \cdot \sigma_t \cdot \Delta x) $$
+-    *   Return `vec4(illumination, transmittance)` [S2, unofficial].
+-
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
++# Preprocessing: Generate Opacity Shadow Map
+ def generate_opacity_shadow_map(light_cam_matrix, shadow_volume_range, slice_count, density_func, extinction_coef):
++    """
++    Generates a 3D texture storing transmittance layers.
++    shadow_volume_range: (z_min, z_max)
++    slice_count: Number of layers (L)
++    """
+     z_min, z_max = shadow_volume_range
+     step_size = (z_max - z_min) / slice_count
+-    layers = [0.0] * slice_count
+-    total_optical_depth = 0.0
+-    for i in range(slice_count):
+-        z_pos = z_min + i * step_size
+-        world_pos = inverse(light_cam_matrix) * vec4(0.0, 0.0, z_pos, 1.0)
+-        d = density_func(world_pos.xyz)
+-        total_optical_depth += d * step_size * extinction_coef
+-        layers[i] = exp(-total_optical_depth)
+-    return layers
++    
++    # Initialize 3D texture of size (W, H, slice_count)
++    shadow_map = Texture3D(width=512, height=512, depth=slice_count)
++    
++    for layer in range(slice_count):
++        # Calculate position along the light ray for this layer
++        # In light space, we march along Z. 
++        # Note: The source code implies marching backwards from z_min or forwards.
++        # Based on [S2, unofficial], we accumulate density.
++        
++        current_optical_depth = 0.0
++        
++        # We need to store transmittance at each layer. 
++        # Transmittance T(z) = exp(-integral_0^z sigma_t * D(x) dx)
++        # However, the source code [S2, unofficial] accumulates total density and applies Beer's law 
++        # for the *current* step's contribution to the layer's value? 
++        # Actually, the source code calculates layer[i] as exp(-total_density * step * coef).
++        # This implies layer[i] stores the transmittance from the start (z_min) to layer i.
++        
++        total_density = 0.0
++        for k in range(slice_count):
++            # Position for layer k
++            pos_z = z_min + k * step_size
++            # Assuming density function takes world or light space pos. 
++            # Here we assume density_func returns density at the specific 3D point.
++            # For simplicity, we assume we are marching through a volume defined in light space.
++            pos = vec3(0, 0, pos_z) # Simplified 1D march for density sampling logic
++            d = density_func(pos)
++            total_density += d
++            
++            # Transmittance from start to this point
++            t = exp(-total_density * step_size * extinction_coef)
++            
++            # Store in texture. 
++            # Note: [S2, unofficial] uses MRT to write multiple layers. 
++            # Here we simulate writing to the 3D texture.
++            shadow_map.set(layer, t)
++            
++    return shadow_map
+ 
+-def raymarch_with_shadow_map(sample_pos, march_dir, step_count, step_size, light_cam_matrix, shadow_map, shadow_volume_range, light_cam_size, ambient_light, direct_light, scattering_coef, extinction_coef, phase_func):
++# Main Rendering: Ray Marching with Shadow Map
++def raymarch_with_shadow_map(view_ray_origin, view_ray_dir, step_count, step_size, 
++                             light_cam_matrix, shadow_map, shadow_volume_range,
++                             ambient_light, direct_light, scattering_coef, extinction_coef,
++                             phase_func):
++    """
++    Renders the volume using precomputed shadow map.
++    """
++    z_min, z_max = shadow_volume_range
++    light_cam_size = light_cam_matrix.get_width() # Or specific uniform
++    
+     transmittance = 1.0
+     illumination = vec3(0.0)
++    
++    current_pos = view_ray_origin
++    
+     for i in range(step_count):
+-        sample_pos += march_dir * step_size
+-        current_density = density_func(sample_pos)
++        # Advance sample position
++        current_pos += view_ray_dir * step_size
++        
++        # 1. Shadow Lookup
++        # Transform to light space
++        light_pos = light_cam_matrix * vec4(current_pos, 1.0)
++        
++        # Normalize Z to [0, 1]
++        # Note: Source [S2, unofficial] uses -shadowMapPosition.z. This assumes Z is negative in view space 
++        # or the light camera has a specific projection.
++        z = (-light_pos.z - z_min) / (z_max - z_min)
++        
++        # Clamp Z to avoid out-of-bounds sampling
++        z = clamp(z, 0.0, 1.0)
++        
++        # Normalize UV
++        # Source [S2, unofficial]: uv = shadowMapPosition.xy / lightCamSize / 2.0 + vec2(0.5)
++        uv = light_pos.xy / light_cam_size / 2.0 + vec2(0.5)
++        
++        # Sample transmittance from 3D texture
++        shadow_factor = shadow_map.sample(uv, z).r
++        
++        # 2. Volume Integration
++        current_density = density_func(current_pos)
++        
++        # Update volume transmittance (Beer's Law)
+         transmittance *= exp(-current_density * extinction_coef * step_size)
+-        light_space_pos = light_cam_matrix * vec4(sample_pos, 1.0)
+-        z = (-light_space_pos.z - shadow_volume_range[0]) / (shadow_volume_range[1] - shadow_volume_range[0])
+-        uv = light_space_pos.xy / light_cam_size / 2.0 + vec2(0.5)
+-        shadow_factor = texture(shadow_map, vec3(uv, z)).r
+-        phase_val = phase_func(march_dir, -normalize(light_space_pos.xyz))
+-        in_scattering = ambient_light + direct_light * phase_val * shadow_factor
++        
++        # Compute In-Scattering
++        # L_in = Ambient + Direct * Phase * Shadow
++        # Note: phase_func(v, -l) computes phase function for view vector v and light direction -l
++        phase = phase_func(view_ray_dir, -view_ray_dir) # Simplified direction assumption
++        in_scattering = ambient_light + direct_light * phase * shadow_factor
++        
++        # Compute Out-Scattering
+         out_scattering = scattering_coef * current_density
++        
++        # Accumulate Illumination
+         current_light = in_scattering * out_scattering
+         illumination += transmittance * current_light * step_size
++        
+     return vec4(illumination, transmittance)
+ ```
+ 
+-### Parameters
+-*   $z_{min}, z_{max}$: Define the depth range of the shadow volume in light space. If $z_{min}$ is too large, the shadow map slice starts inside the volume, causing the side facing the light to be incorrectly dark [S2, unofficial].
+-*   $k$: Anisotropy parameter for Schlick's phase function approximation [S2, unofficial].
+-*   $\alpha, \beta$: Azimuth and elevation angles controlling the directional light direction [S2, unofficial].
+-*   Step jitter: A small random offset added to the step size in the main pass to hide visible banding artifacts caused by low layer counts, at the cost of introducing noise [S2, unofficial].
++**Parameters:**
++*   $z_{min}, z_{max}$: Define the volume range for slicing the shadow map. If $z_{min}$ is too large, the shadow map slice starts inside the volume, making the side facing the light incorrectly dark [S2, unofficial].
++*   $k = k_{Schlick}$: Anisotropy parameter for Schlick's approximation phase function [S2, unofficial].
++*   $\alpha$ (azimuth), $\beta$ (elevation): Control directional light direction [S2, unofficial].
++*   Step Size: Can be jittered with a small random offset to hide visible banding caused by low layer counts, at the cost of adding noise [S2, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Interpolation Artifacts:** Storing different layers in different color channels (e.g., Layer 1 in Red, Layer 2 in Green) prevents correct bilinear/trilinear interpolation during sampling. All layers must be stored in a single channel or rendered in separate passes [S2, unofficial].
+-*   **Banding:** Low number of layers ($N$) can cause visible banding. Solution: Add random jitter to the step size [S2, unofficial].
+-*   **Shadow Volume Bounds:** Incorrect $z_{min}$ leads to incorrect shadowing (too dark or too bright) [S2, unofficial].
+-*   **MRT Limitations:** Hardware limits the number of simultaneous render targets (minimum 8). For higher resolution in depth, multiple passes are required [S2, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Banding:** Visible bands may occur due to a low number of layers in the opacity shadow map. Solution: Add a small random offset in each step of the ray marcher to create visual noise, which can be blurred if too noticeable [S2, unofficial].
++*   **Channel Storage:** Storing different layer values in different color channels (e.g., Layer 1 in Red, Layer 2 in Green) prevents correct bilinear/trilinear interpolation during sampling. Store all layers in a single channel or use separate passes [S2, unofficial].
++*   **Depth Range:** Incorrect $z_{min}$ causes incorrect shading [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Shadow Volume Rendering](1556-shadow-volume-rendering.md)
+-Computes accumulated alpha to generate shadow maps, explicitly constructing a volumetric shadow buffer. Choose when you need explicit volumetric shadow buffers rather than projected opacity maps.
++Precomputes a 3D texture of transmittance from each voxel toward the light. Decouples shadow calculation from the view-dependent ray march, trading memory bandwidth for reduced compute during the final image pass. Choose when view-independent shadow accuracy is prioritized over memory usage.
+ 
+ ### [Volume Shadow Calculation via Light Strength Buffer](1914-volume-shadow-calculation-via-light-strength-buffer.md)
+-Stores shadow info in a 3D light strength buffer, computing fractional light strength at every point. Choose for correct penumbra rendering and semi-transparent shadows without aliasing artifacts of 2D buffers.
++Stores shadow information in a 3D light strength buffer instead of a 2D shadow depth buffer. Allows correct rendering of penumbras and semi-transparent object shadows. Choose when continuous light attenuation values are needed rather than binary depth comparisons.
+ 
+ ### [Deep Shadow Maps](2166-deep-shadow-maps.md)
+-Stores a curve of volume density vs. distance per pixel. Choose when you need to capture the entire volumetric structure along the light ray for accurate occlusion, rather than just discrete layers.
++Stores a curve of volume density (or accumulated alpha) as a function of distance in each pixel. Offers a more compact representation than storing full alpha values per layer. Choose when memory is constrained and hierarchical approximation is acceptable.
+ 
+ ### [Light Injection Pass](2759-light-injection-pass.md)
+-Post-processing technique for volumetric light scattering using ray marching over a depth buffer. Choose for adding light shafts/glow as a post-process step using pre-existing shadow maps.
++Post-processing technique for volumetric light scattering. Uses pre-existing shadow maps for occlusion. Choose for adding light shafts/glow effects in post-process rather than direct volume integration.
+ 
+ ## Operating characteristics
+-*   **Time and Memory Complexity:** Not given in the sources.
+-*   **Performance:** More efficient than sampling light rays for each view ray sample [S2, unofficial]. In a test case (640x480, 3 deep opacity maps, 7x512x512 transmittance array), it achieved 28.5 FPS on an AMD Ryzen 7 4700U [S3, unofficial].
+-*   **Strengths:** Efficient self-shadowing; avoids per-view-ray light sampling; allows trilinear interpolation for smooth shadows [S2, unofficial].
+-*   **Limitations:** Limited by MRT count (usually 8); requires uniform grid for 3D texture interpolation (unlike Deep Opacity Maps which can start from surface); potential for banding and noise [S2, unofficial].
+-*   **When to use:** Real-time volume rendering where self-shadowing is required and performance is critical [G].
+-*   **When not to use:** When penumbra accuracy is paramount (use Light Strength Buffer) or when non-uniform sampling is needed (use Deep Opacity Maps) [S2, unofficial].
++*   **Time Complexity:** Preprocessing is $O(W \cdot H \cdot L)$ where $L$ is the number of layers. Rendering is $O(N)$ per pixel for $N$ steps, with $O(1)$ shadow lookup cost.
++*   **Memory Complexity:** $O(W \cdot H \cdot L)$ for the 3D opacity shadow map. [S2, unofficial]
++*   **Performance:** On an AMD Ryzen 7 4700U with 640x480 resolution, 3 deep opacity maps (512x512 offset, 7x512x512 transmittance array) achieved 28.5 FPS [S3, unofficial].
++*   **Strengths:** Efficient self-shadowing without per-sample light ray marching. Supports interpolation for smooth shadows.
++*   **Limitations:** Limited by the number of layers (MRT limits to 8+ layers per pass). Aliasing if interpolation is not used or if layers are sparse. Requires precomputation for static lights.
+ 
+ ## Background
+-The technique was proposed by Benoit Mayaux in "Real-Time Volumetric Rendering" (2013) as an alternative to casting shadow rays for every sample [S2, unofficial]. It is based on the concept of Opacity Shadow Maps, which record transparency along different depths from the light's perspective [S2, unofficial]. The method builds on standard shadow mapping but extends it to participating media by ray marching through the volume from the light's view [S2, unofficial]. It is also referenced in Jan Wedekind's "Procedural Volumetric Clouds" (2023) as a method for efficient self-shadowing in clouds [S3, unofficial].
++Originated as a method for efficient self-shadowing in volumetric rendering, specifically clouds and participating media [S3, unofficial]. It builds on standard shadow mapping by extending the depth buffer to store transmittance values along the light ray [S2, unofficial]. The technique is often referred to as "Deep Opacity Maps" in the context of cloud rendering [S3, unofficial].
+ 
+ ## Sources

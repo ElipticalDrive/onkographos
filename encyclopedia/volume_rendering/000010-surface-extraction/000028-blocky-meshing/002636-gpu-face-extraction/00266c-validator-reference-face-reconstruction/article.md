@@ -1,6 +1,4 @@
 # Validator Reference Face Reconstruction
-
-
 ## Overview
 Validator Reference Face Reconstruction generates a canonical, sorted list of surface face tokens from a voxel chunk to serve as ground truth for validating optimized GPU-based face extraction methods like [GPU Face Extraction](3760-gpu-face-extraction.md) [S1, unofficial]. It reconstructs individual face tokens by iterating every voxel and its neighbors, ensuring a complete representation of the mesh topology without packing optimizations [S1, unofficial].
 
@@ -15,15 +13,15 @@ The method takes a voxel chunk and outputs a sorted vector of 64-bit face tokens
 The 64-bit token layout is defined as follows [S1, unofficial]:
 - Bits 0–5 (6 bits): `u` coordinate.
 - Bits 6–11 (6 bits): `v` coordinate.
-- Bits 12–17 (6 bits): `depth` coordinate.
-- Bits 18–19 (2 bits): `axis` (0, 1, or 2).
-- Bit 20 (1 bit): `positive` (normal direction).
+- Bits 12–17 (6 bits): `depth` coordinate [S1, unofficial].
+- Bits 18–19 (2 bits): `axis` (0, 1, or 2) [S1, unofficial].
+- Bit 20 (1 bit): `positive` (normal direction) [S1, unofficial].
 - Bits 21–31 (11 bits): `material` ID.
 
 **Algorithm Steps:**
 1. Initialize an empty vector `faces`.
 2. Iterate through every voxel coordinate $(x, y, z)$ where $0 \le x, y, z < kChunkSize$, using the loop order $x$, then $z$, then $y$ [S1, unofficial].
-3. Let $m = \text{voxels}[x \cdot kChunkSize^2 + y \cdot kChunkSize + z]$. If $m == 0$, skip to the next voxel [S1, unofficial].
+3. Let $m = \text{voxels}[x \cdot kChunkSize^2 + y \cdot kChunkSize + z]$ [S1, unofficial]. If $m == 0$, skip to the next voxel [S1, unofficial].
 4. Iterate through 6 directions defined by offsets:
    - Direction 0 (Face 0): $(-1, 0, 0)$
    - Direction 1 (Face 1): $(+1, 0, 0)$
@@ -32,13 +30,13 @@ The 64-bit token layout is defined as follows [S1, unofficial]:
    - Direction 4 (Face 4): $(0, -1, 0)$
    - Direction 5 (Face 5): $(0, +1, 0)$ [S1, unofficial].
 5. For each direction, calculate neighbor coordinates $(nx, ny, nz)$ [S1, unofficial].
-6. If the neighbor is out of bounds or $\text{voxels}[nx \cdot kChunkSize^2 + ny \cdot kChunkSize + nz] \neq 0$, skip this face [S1, unofficial].
+6. If the neighbor voxel is not empty ($\text{voxels}[nx \cdot kChunkSize^2 + ny \cdot kChunkSize + nz] \neq 0$), skip this face [S1, unofficial].
 7. Determine face properties [S1, unofficial]:
-   - $\text{axis} = \lfloor \text{direction} / 2 \rfloor$
-   - $\text{positive} = (\text{direction} \pmod 2) \neq 0$
-   - $\text{depth} = \begin{cases} x & \text{if axis} = 0 \\ y & \text{if axis} = 1 \\ z & \text{if axis} = 2 \end{cases}$
-   - $\text{u} = \begin{cases} y & \text{if axis} = 0 \\ z & \text{if axis} = 1 \\ x & \text{if axis} = 2 \end{cases}$
-   - $\text{v} = \begin{cases} z & \text{if axis} = 0 \\ x & \text{if axis} = 1 \\ y & \text{if axis} = 2 \end{cases}$
+   - $\text{axis} = \lfloor \text{direction} / 2 \rfloor$ [S1, unofficial]
+   - $\text{positive} = (\text{direction} \pmod 2) \neq 0$ [S1, unofficial]
+   - $\text{depth} = \begin{cases} x & \text{if axis} = 0 \\ y & \text{if axis} = 1 \\ z & \text{if axis} = 2 \end{cases}$ [S1, unofficial]
+   - $\text{u} = \begin{cases} y & \text{if axis} = 0 \\ z & \text{if axis} = 1 \\ x & \text{if axis} = 2 \end{cases}$ [S1, unofficial]
+   - $\text{v} = \begin{cases} z & \text{if axis} = 0 \\ x & \text{if axis} = 1 \\ y & \text{if axis} = 2 \end{cases}$ [S1, unofficial]
 8. Create a token using `face_token(axis, positive, depth, u, v, m)` and append to `faces` [S1, unofficial].
 9. Sort `faces` lexicographically [S1, unofficial].
 10. Return `faces` [S1, unofficial].
@@ -64,22 +62,25 @@ def validator_reference_face_reconstruction(voxels, kChunkSize=16):
                 for direction in range(6):
                     nx, ny, nz = x + dx[direction], y + dy[direction], z + dz[direction]
                     
-                    if 0 <= nx < kChunkSize and 0 <= ny < kChunkSize and 0 <= nz < kChunkSize:
-                        nidx = nx * kChunkSize * kChunkSize + ny * kChunkSize + nz
-                        if voxels[nidx] == 0:
-                            continue
+                    # Bounds check [G]
+                    if not (0 <= nx < kChunkSize and 0 <= ny < kChunkSize and 0 <= nz < kChunkSize):
+                        continue
                         
-                        axis = direction // 2
-                        positive = (direction % 2) != 0
+                    nidx = nx * kChunkSize * kChunkSize + ny * kChunkSize + nz
+                    if voxels[nidx] != 0:  # Skip if neighbor is not empty
+                        continue
                         
-                        if axis == 0:
-                            depth, u, v = x, y, z
-                        elif axis == 1:
-                            depth, u, v = y, z, x
-                        else:
-                            depth, u, v = z, x, y
+                    axis = direction // 2
+                    positive = (direction % 2) != 0
+                    
+                    if axis == 0:
+                        depth, u, v = x, y, z
+                    elif axis == 1:
+                        depth, u, v = y, z, x
+                    else:
+                        depth, u, v = z, x, y
                         
-                        faces.append(face_token(axis, positive, depth, u, v, material))
+                    faces.append(face_token(axis, positive, depth, u, v, material))
     
     faces.sort()
     return faces

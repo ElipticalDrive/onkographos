@@ -3,7 +3,7 @@
 Also called: Diffusion-CMA-ES Inverse Rendering, Diffusion-based CMA-ES, FGD, Feature-Guided Diffusion, Feature-Guided Diffusion for Non-Differentiable Inverse Rendering, Feature-Informed Diffusion Evolution
 
 ## Overview
-Feature-Guided Diffusion for Inverse Rendering (FIDE) is a fully black-box framework for solving non-differentiable inverse rendering problems by combining a diffusion-based inverse prediction model with Covariance Matrix Adaptation Evolution Strategy (CMA-ES) [S1, unofficial]. It solves the problem of finding parameters $\mathbf{x}$ that produce a target image $\mathbf{y}^*$ without requiring gradients from the renderer, treating the rendering function $f$ as an opaque black box. Unlike scalar-loss baselines like DiBO or DiffBBO, FIDE conditions the proposal distribution on dense visual features extracted from the target image, avoiding the information bottleneck of scalar loss values and mitigating mode averaging in ill-posed inverse problems [S1, unofficial].
+Feature-Guided Diffusion for Inverse Rendering (FIDE) is a fully black-box framework for solving non-differentiable inverse rendering problems by combining a diffusion-based inverse prediction model with Covariance Matrix Adaptation Evolution Strategy (CMA-ES) [S1, unofficial]. It solves the problem of finding parameters $\mathbf{x}$ that produce a target image $\mathbf{y}^*$ without requiring gradients from the renderer, treating the rendering function $f$ as an opaque black box [S1, unofficial]. Unlike scalar-loss baselines like DiBO or DiffBBO, FIDE conditions the proposal distribution on dense visual features extracted from the target image, avoiding the information bottleneck of scalar loss values and mitigating mode averaging in ill-posed inverse problems [S1, unofficial].
 
 ## How it works
 FIDE operates within the standard inverse rendering loop defined by [Optimization Loops and Training Procedures](5622-optimization-loops-and-training-procedures.md), minimizing a photometric loss $\mathcal{L}$ between rendered color $\hat{C}(\mathbf{r})$ and ground-truth $C(\mathbf{r})$ [G]. The core mechanism involves maintaining a search distribution $\mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma})$ over the parameter space $\mathbb{R}^d$, where $\boldsymbol{\mu}$ is the mean and $\boldsymbol{\Sigma}$ is the anisotropic covariance matrix capturing correlations between parameters [S1, unofficial].
@@ -12,57 +12,57 @@ The method alternates between an inverse prediction step (using a diffusion mode
 
 ### Inputs and Outputs
 *   **Inputs**:
-    *   Black-box renderer $f: \mathbb{R}^d \rightarrow \mathcal{I}$, where $\mathcal{I}$ is the image space.
-    *   Target image $\mathbf{y}^* \in \mathcal{I}$.
-    *   Pretrained frozen feature extractor $E: \mathcal{I} \rightarrow \mathbb{R}^{h \times w \times c}$ (default: DINOv3).
-    *   Population size $k$ (default: 500).
-    *   Number of evolution cycles $N$ (default: 50).
-    *   Initial standard deviation $\sigma_0$ (default: $1/6$).
+    *   Black-box renderer $f: \mathbb{R}^d \rightarrow \mathcal{I}$, where $\mathcal{I}$ is the image space [S1, unofficial].
+    *   Target image $\mathbf{y}^* \in \mathcal{I}$ [S1, unofficial].
+    *   Pretrained frozen feature extractor $E: \mathcal{I} \rightarrow \mathbb{R}^{h \times w \times c}$ (default: DINOv3) [S1, unofficial].
+    *   Population size $k$ (default: 500) [S1, unofficial].
+    *   Number of evolution cycles $N$ (default: 50) [S1, unofficial].
+    *   Initial standard deviation $\sigma_0$ (default: $1/6$) [S1, unofficial].
 *   **Outputs**:
-    *   Optimized parameter vector $\mathbf{x}^*$ (the mean $\boldsymbol{\mu}$ of the final CMA-ES distribution).
+    *   Optimized parameter vector $\mathbf{x}^*$ (the mean $\boldsymbol{\mu}$ of the final CMA-ES distribution) [S1, unofficial].
 
 ### Data Structures
 1.  **CMA-ES State**:
-    *   Mean $\boldsymbol{\mu} \in \mathbb{R}^d$.
-    *   Covariance Matrix $\boldsymbol{\Sigma} \in \mathbb{R}^{d \times d}$.
+    *   Mean $\boldsymbol{\mu} \in \mathbb{R}^d$ [S1, unofficial].
+    *   Covariance Matrix $\boldsymbol{\Sigma} \in \mathbb{R}^{d \times d}$ [S1, unofficial].
 2.  **Diffusion Denoiser $\tilde{f}_{\theta}^{-1}$**:
-    *   Transformer-based architecture.
+    *   Transformer-based architecture [S1, unofficial].
     *   **Input Tokens**:
-        *   Image features $\mathbf{E}(\mathbf{y})$ flattened into tokens with learned positional embeddings.
-        *   Noisy parameters $\mathbf{z}$ projected into tokens via a learned linear layer.
-    *   **Processing**: Four self-attention blocks on parameter tokens, followed by cross-attention with image tokens.
-    *   **Conditioning**: Feature-wise Linear Modulation (FiLM) injects timestep information into each attention block.
-    *   **Output**: Parameter tokens concatenated and projected back to $\mathbb{R}^d$ via a linear layer.
+        *   Image features $\mathbf{E}(\mathbf{y})$ flattened into tokens with learned positional embeddings [S1, unofficial].
+        *   Noisy parameters $\mathbf{z}$ projected into tokens via a learned linear layer [S1, unofficial].
+    *   **Processing**: Four self-attention blocks on parameter tokens, followed by cross-attention with image tokens [S1, unofficial].
+    *   **Conditioning**: Feature-wise Linear Modulation (FiLM) injects timestep information into each attention block [S1, unofficial].
+    *   **Output**: Parameter tokens concatenated and projected back to $\mathbb{R}^d$ via a linear layer [S1, unofficial].
 3.  **Training Dataset**:
-    *   Pairs of $(\mathbf{x}_i, \mathbf{y}_i)$ where $\mathbf{y}_i = f(\mathbf{x}_i)$, generated each iteration.
+    *   Pairs of $(\mathbf{x}_i, \mathbf{y}_i)$ where $\mathbf{y}_i = f(\mathbf{x}_i)$, generated each iteration [S1, unofficial].
 
 ### Parameters
-*   **Feature Extractor**: DINOv3 (small) is the default due to speed; VGG-19 is an alternative. A simple learnable one-layer patch embedding (16x16) can be used but yields slower convergence [S1, unofficial].
+*   **Feature Extractor**: DINOv3 (small) is the default due to speed; VGG-19 is an alternative [S1, unofficial]. A simple learnable one-layer patch embedding (16x16) is mentioned as an alternative feature extractor [S1, unofficial].
 *   **Loss Function**: LPIPS features are used for the cost function $\mathcal{L}$ to avoid pixel-level objective issues [S1, unofficial].
 *   **Training Epochs**: 20 epochs per iteration (default). More epochs improve convergence but increase runtime [S1, unofficial].
-*   **Optimizer**: Adam with learning rate 0.001 [S1, unofficial].
+*   **Diffusion Optimizer**: Adam with learning rate 0.001 [S1, unofficial].
 *   **Reverse ODE Steps**: 3 steps with schedule $[0.3, 0.2, 0.1]$ [S1, unofficial].
-*   **Parameter Normalization**: All task parameters are normalized to $[0, 1]$ and initialized at 0.5 [S1, unofficial].
+*   **Parameter Normalization**: All task parameters are normalized to the $[0, 1]$ interval and initialized at 0.5 [S1, unofficial].
 
 ### Numbered Steps
-1.  **Initialize CMA-ES**: Set mean $\boldsymbol{\mu} = \mathbf{0}_d$ and covariance $\boldsymbol{\Sigma} = \sigma_0 \mathbf{I}_{d \times d}$, where $\sigma_0 = 1/6$ [S1, unofficial]. Initialize denoiser weights $\theta$.
+1.  **Initialize CMA-ES**: Set mean $\boldsymbol{\mu} = \mathbf{0}_d$ and covariance $\boldsymbol{\Sigma} = \sigma_0 \mathbf{I}_{d \times d}$, where $\sigma_0 = 1/6$ [S1, unofficial]. Initialize denoiser weights $\theta$ [S1, unofficial].
 2.  **Loop for $i = 1$ to $N$**:
     3.  **Sampling**: Draw $k$ candidates $\{\mathbf{x}_j\}_{j=0}^{k-1}$ from the current CMA-ES distribution $\mathcal{N}(\boldsymbol{\mu}, \boldsymbol{\Sigma})$ [S1, unofficial].
     4.  **Inverse Prediction (Partial Denoising)**:
         *   Extract target features $\mathbf{e}^* = E(\mathbf{y}^*)$ [S1, unofficial].
-        *   Select the first half of candidates $\{\mathbf{x}_j\}_{j=0}^{k/2-1}$.
+        *   Select the first half of candidates $\{\mathbf{x}_j\}_{j=0}^{k/2-1}$ [S1, unofficial].
         *   Denoise these candidates using the trained denoiser $\tilde{f}_{\theta}^{-1}$ conditioned on $\mathbf{e}^*$ and the current covariance $\boldsymbol{\Sigma}$ (used as a timestep proxy/context) [S1, unofficial].
-        *   The denoiser input is the noisy parameters and the covariance $\boldsymbol{\Sigma}$. Specifically, the timestep scalar $s$ is replaced by $\boldsymbol{\Sigma}$; in practice, using the diagonal of the matrix as input is sufficient [S1, unofficial].
+        *   The denoiser input is the noisy parameters and the covariance $\boldsymbol{\Sigma}$ [S1, unofficial]. Specifically, the timestep scalar $s$ is replaced by $\boldsymbol{\Sigma}$; in practice, using the diagonal of the matrix as input is sufficient [S1, unofficial].
         *   Generate refined candidates $\{\tilde{\mathbf{x}}_j\}$ by solving the reverse-time ODE with Euler's method (3 steps) [S1, unofficial].
-        *   Replace the first half of the population with these denoised candidates. The remainder $\{\mathbf{x}_j\}_{j=k/2}^{k-1}$ are passed through unmodified to preserve diversity and avoid mode collapse [S1, unofficial].
+        *   Replace the first half of the population with these denoised candidates [S1, unofficial]. The remainder $\{\mathbf{x}_j\}_{j=k/2}^{k-1}$ are passed through unmodified to preserve diversity and avoid mode collapse [S1, unofficial].
     5.  **Evaluation**: Render all $k$ candidates using the black-box function $f$ to create a dataset of parameter-image pairs $\{(\mathbf{x}_j, \mathbf{y}_j)\}_{j=0}^{k-1}$ where $\mathbf{y}_j = f(\mathbf{x}_j)$ [S1, unofficial].
     6.  **Feature Extraction**: Extract visual features for all rendered images: $\{\mathbf{e}_j\}_{j=0}^{k-1} = E(\{\mathbf{y}_j\}_{j=0}^{k-1})$ [S1, unofficial].
-    7.  **Online Training**: Update the diffusion network weights $\theta$ by training on the current dataset.
-        *   **Training Objective**: $\| \tilde{f}_{\theta}^{-1}(z, f(x), s) - x \|_2^2$, where $z \sim \mathcal{N}(x, \sigma(s)^2)$ [S1, unofficial].
-        *   **Noise Model**: Use the anisotropic Gaussian distribution derived by CMA-ES to create training samples, replacing the usual isotropic noise model. The CMA distribution is used for both training and sampling [S1, unofficial].
+    7.  **Online Training**: Update the diffusion network weights $\theta$ by training on the current dataset [S1, unofficial].
+        *   **Training Objective**: $\| \tilde{f}_{\theta}^{-1}(z, f(x), \Sigma) - x \|_2^2$, where $z \sim \mathcal{N}(x, \Sigma)$ [S1, unofficial].
+        *   **Noise Model**: Use the anisotropic Gaussian distribution derived by CMA-ES to create training samples, replacing the usual isotropic noise model [S1, unofficial].
         *   **Timestep**: Determine timestep for each parameter using the square root of the diagonal of the CMA covariance matrix at the end of the diffusion process [S1, unofficial].
         *   Train for the specified number of epochs (default 20) starting from the weights of the previous iteration [S1, unofficial].
-    8.  **CMA-ES Update**: Evaluate the cost $c_j = \mathcal{L}(f(\mathbf{x}_j), \mathbf{y}^*)$ for each candidate. Update $\boldsymbol{\mu}$ and $\boldsymbol{\Sigma}$ by computing a weighted average of the candidates, ranked by their cost. Higher weights are assigned to top-scoring candidates to adapt the search distribution to the local loss landscape [S1, unofficial].
+    8.  **CMA-ES Update**: Evaluate the cost $c_j = \mathcal{L}(f(\mathbf{x}_j), \mathbf{y}^*)$ for each candidate [S1, unofficial]. Update $\boldsymbol{\mu}$ and $\boldsymbol{\Sigma}$ by computing a weighted average of the candidates, ranked by their cost. Higher weights are assigned to top-scoring candidates to adapt the search distribution to the local loss landscape [S1, unofficial].
 
 ### Pseudocode
 
@@ -75,10 +75,10 @@ def feature_guided_diffusion_inverse_rendering(
     renderer: callable,
     target_image: np.ndarray,
     feature_extractor: callable,
+    d: int,
     k: int = 500,
     N: int = 50,
     sigma_0: float = 1.0/6.0,
-    d: int,
     epochs: int = 20,
     lr: float = 0.001
 ):
@@ -89,15 +89,15 @@ def feature_guided_diffusion_inverse_rendering(
         renderer: Black-box function f: R^d -> Image
         target_image: Target image y*
         feature_extractor: Frozen feature extractor E (e.g., DINOv3)
+        d: Dimensionality of parameter space
         k: Population size
         N: Number of evolution cycles
         sigma_0: Initial standard deviation
-        d: Dimensionality of parameter space
         epochs: Training epochs per iteration
         lr: Learning rate for diffusion model
         
     Returns:
-        x_opt: Optimized parameters
+        x_opt: Optimized parameters (mean of final CMA-ES distribution)
     """
     
     # 1. Initialize CMA-ES
@@ -108,7 +108,7 @@ def feature_guided_diffusion_inverse_rendering(
     # Architecture: Transformer with cross-attention
     # Input: Noisy params z, Image features E(y), Covariance Sigma (as timestep proxy)
     # Output: Predicted clean params x
-    denoiser = initialize_denoiser() 
+    denoiser = initialize_denoiser()  # [G] Standard transformer initialization
     
     # Extract target features once
     target_features = feature_extractor(target_image)
@@ -164,6 +164,7 @@ def feature_guided_diffusion_inverse_rendering(
         costs = np.array([compute_lpips_loss(img, target_image) for img in rendered_images])
         
         # Update mu and Sigma based on ranked costs
+        # [G] Standard CMA-ES covariance update step
         mu, Sigma = update_cma_es(mu, Sigma, candidates, costs)
         
     return mu
@@ -199,7 +200,7 @@ def train_diffusion_model(denoiser, clean_params, rendered_features, Sigma, epoc
     """
     Trains the diffusion network online.
     Objective: || f_theta^-1(z, f(x), s) - x ||_2^2
-    where z ~ N(x, sigma(s)^2)
+    where z ~ N(x, Sigma)
     """
     # In practice, we generate noisy versions of the clean_params
     # using the anisotropic Gaussian from CMA
@@ -213,7 +214,7 @@ def train_diffusion_model(denoiser, clean_params, rendered_features, Sigma, epoc
     loss = np.mean((predicted_params - clean_params) ** 2)
     
     # Update weights using Adam optimizer
-    # (Implementation detail: standard gradient descent step)
+    # [G] Standard gradient descent step with Adam
     update_weights(denoiser, loss, lr)
 ```
 
@@ -227,10 +228,10 @@ def train_diffusion_model(denoiser, clean_params, rendered_features, Sigma, epoc
 *   **Time Complexity**: The per-iteration runtime stays roughly constant across dimensionality settings, but the number of render calls required to converge grows non-linearly with dimensionality. Convergence is fast up to 60 parameters; reaching comparable loss at 80 parameters requires more than 50,000 render calls [S1, unofficial].
 *   **Memory Complexity**: Quadratic in the parameter dimension $d$ due to CMA-ES covariance matrix storage and the diffusion model's self-attention mechanism [S1, unofficial].
 *   **Measured Performance**: On the Beads task (25,000 render calls, 224x224 pixels, LPIPS loss), the method takes 6-13 minutes (depending on epochs) on a desktop computer. This is slower than differentiable baselines like Mitsuba 3 (4.5 minutes) but avoids getting stuck in poor local optima [S1, unofficial].
-*   **Strengths**: Robust against local minima and strong Monte Carlo noise. Handles non-differentiable black-box renderers. Escapes local minima where gradient-based methods stall.
-*   **Limitations**: Higher overhead than scalar-conditioned methods like DiBO (which takes ~4 hours on the same task but fails to converge). Limited to ~100 parameters.
-*   **When to Use**: Non-differentiable black-box renderers, ill-posed inverse problems with multiple modes, or when gradient estimation is unstable or unavailable.
-*   **When Not to Use**: Large-scale parameter spaces (>100 dimensions) or when differentiable gradients are available and the problem is well-posed.
+*   **Strengths**: Robust against local minima and strong Monte Carlo noise. Handles non-differentiable black-box renderers. Escapes local minima where gradient-based methods stall [S1, unofficial].
+*   **Limitations**: Higher overhead than scalar-conditioned methods like DiBO (which takes ~4 hours on the same task but fails to converge). Limited to ~100 parameters [S1, unofficial].
+*   **When to Use**: Non-differentiable black-box renderers, ill-posed inverse problems with multiple modes, or when gradient estimation is unstable or unavailable [S1, unofficial].
+*   **When Not to Use**: Large-scale parameter spaces (>100 dimensions) or when differentiable gradients are available and the problem is well-posed [S1, unofficial].
 
 ## Background
 Feature-Informed Diffusion Evolution (FIDE) was introduced by Andrei-Timotei Ardelean, Michael Fischer, Tim Weyrich, and Tomáš Iser [S1, unofficial]. It addresses the limitations of existing black-box optimization methods (like CMA-ES and Bayesian optimization) which rely on scalar fitness values, discarding spatial information present in rendered images. The method builds on the principles of diffusion models for generative modeling and CMA-ES for derivative-free optimization, combining them to solve inverse rendering problems without differentiability requirements [S1, unofficial].

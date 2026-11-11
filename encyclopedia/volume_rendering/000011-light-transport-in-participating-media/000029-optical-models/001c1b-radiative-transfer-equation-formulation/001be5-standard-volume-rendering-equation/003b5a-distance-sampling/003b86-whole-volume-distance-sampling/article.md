@@ -3,34 +3,41 @@
 Also called: Histogram-based Transmittance Sampling, Importance Sampling for Volume Rendering, Monte Carlo with Whole Volume Distance Sampling
 
 ## Overview
-Whole Volume Distance Sampling (WVDS) is a Monte Carlo importance sampling strategy for estimating the Radiative Transfer Equation (VRE) in participating media. It addresses the limitation of standard distance sampling, which only accounts for transmittance along the current path segment, by distributing samples proportional to the transmittance integrand across the entire camera line segment geometry [S1]. This approach reduces variance in occluded areas compared to ray marching and converges in a single sample in unoccluded sections [S1].
+Whole Volume Distance Sampling (WVDS) is a Monte Carlo technique for estimating the Volume Rendering Equation (VRE) that importance samples the integration domain according to the geometry-dependent transmittance of the entire participating medium, rather than limiting sampling to the transmittance along a single ray [S1]. It solves the high-variance noise inherent in standard distance sampling by incorporating both camera and light ray geometries into the probability density function (PDF), resulting in superior convergence for finite media [S1]. It differs from classic techniques by accounting for the global geometry of the medium, not just local transmittance [S1].
 
 ## How it works
-**Inputs:** Camera ray origin $\mathbf{o}$ and direction $\tilde{\omega}_o$, light direction $\tilde{\omega}_i$, medium extinction coefficient $\sigma_t$, and the geometric definition of the medium boundaries (typically axis-aligned boxes or trapezoidal segments formed by the intersection of camera and light rays) [S1].
-**Outputs:** A sampled distance $t$ along the camera ray and the corresponding transmittance/weight [S1].
+**Inputs:**
+*   Camera ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
+*   Light ray geometry defining the trapezoid segments (corners $\tilde{\mathbf{p}}_i$ and distance vectors $\tilde{\mathbf{w}}_i$).
+*   Medium extinction coefficient $\sigma_t$.
+*   Speed of light $c$ (used in the sampling function derivation).
+*   Uniform random number $r \in [0, 1]$.
+
+**Outputs:**
+*   Distance $t$ along the camera ray from the origin to the scattering event.
 
 **Data Structures:**
-The method relies on a histogram of trapezoid segment integrals. Each segment $i$ is defined by:
-- $\tilde{\mathbf{p}}_i$: Corner positions of the trapezoid segment [S1].
-- $\tilde{\mathbf{w}}_i$: Distance vectors between corners [S1].
-- $\mathcal{I}_i$: The integral of transmittance for segment $i$ [S1].
-- $t_{C,i-1}$: Cumulative distance or offset for previous segments [S1].
-- $d_i$: Distance to the box boundary for segment $i$ [S1].
+*   **Histogram of Integrals:** An array $\mathcal{I}$ where $\mathcal{I}_k$ is the integral of transmittance for the $k$-th trapezoid segment.
+*   **Cumulative Distribution Function (CDF):** Derived from $\mathcal{I}$, stored as cumulative sums normalized by the total unoccluded integral $T_{\text{total}}$.
+*   **Segment Geometry:** For each segment $i$, the corner positions $\tilde{\mathbf{p}}_i$ (or $\tilde{\mathbf{p}}_L, \tilde{\mathbf{p}}_1, \tilde{\mathbf{p}}_2$ depending on indexing) and distance vectors $\tilde{\mathbf{w}}_i$ (or $\tilde{\mathbf{w}}_1, \tilde{\mathbf{w}}_2, \tilde{\mathbf{w}}_3$).
+*   **Boundary Distances:** $d_{E,S}$ (distance to entry boundary) and $d_{E,E}$ (distance to exit boundary) for the segment.
+*   **Camera Ray Bounds:** $t_{C,S}$ (start distance) and $t_{C,E}$ (end distance) for the segment.
 
 **Steps:**
 
-1.  **Build Histogram:** Integrate the transmittance of each trapezoid segment using the trapezoid integration algorithm [S1]. Let $\mathcal{I}_i$ be the integral value for segment $i$.
-2.  **Compute CDF:** Calculate the Cumulative Distribution Function (CDF) by summing the integrals. The total unoccluded integral is $T_{\text{total}} = T_{\text{box}}(\tilde{\omega}_i, \tilde{\omega}_o, t_S)$ [S1]. The cumulative integral up to segment $k$ is $\sum_{k} \mathcal{I}_k$ [S1].
-3.  **Select Segment:** Generate a uniform random number $r \in [0, 1]$. Select the trapezoid segment $i$ such that:
-    $$ \sum_{k=1}^{i-1} \mathcal{I}_k < T_{\text{total}} \cdot r \le \sum_{k=1}^{i} \mathcal{I}_k $$
-    [S1]
-4.  **Transform Random Value:** Transform $r$ to an intermediate value $T_i(r) \in [0, 1]$ for the selected segment $i$ using Equation (10) from [S1]:
-    $$ T_i(r) = \frac{\mathcal{I}_{\text{total}} r - \sum_{k=1}^{i} \mathcal{I}_{k-1}}{\mathcal{I}_i} $$
-    where $\mathcal{I}_0 = 0$ [S1].
-5.  **Determine Distance:** Use the inversion method to derive the sampling component. Transform $T_i(r)$ to distance using a scaled logarithm function [S1]:
-    $$ t = -\frac{\log(1 - (1 - E_u) T_i(r))}{\sigma_t c} $$
-    where $c$ is the slope and $E_u$ is the upper bound component of the trapezoid segment radiance integral [S1]. The final distance offset is adjusted by the starting distance $t_{C,S}$ [S1].
-    *Note:* The position of corners ($\tilde{\mathbf{p}}_1, \tilde{\mathbf{p}}_2, \tilde{\mathbf{p}}_3$) and distance vectors ($\tilde{\mathbf{w}}_1, \tilde{\mathbf{w}}_2, \tilde{\mathbf{w}}_3$) are required to determine the distance between the camera ray and box boundary [S1].
+1.  **Build Histogram:** Integrate the transmittance of each trapezoid segment using the trapezoid integration algorithm to obtain $\mathcal{I}_k$ for all segments $k$ [S1].
+2.  **Compute CDF:** Calculate the total unoccluded integral $T_{\text{total}} = T_{\text{box}}(\tilde{\omega}_i, \tilde{\omega}_o, t_S)$ [S1]. Compute the cumulative integral for segment $i$ as $\sum_{k=1}^i \mathcal{I}_{k-1}$ with $\mathcal{I}_0 = 0$ [S1].
+3.  **Select Segment:** Compare the random value $r$ against the normalized cumulative integrals to select the appropriate trapezoid segment $i$ [S1].
+4.  **Transform Random Value:** Map $r$ to an intermediate value $T_i(r) \in [0, 1]$ specific to segment $i$ using the formula:
+    $$ T_i(r) = \frac{\mathcal{I}_{\text{total}} r - \sum_{k=1}^i \mathcal{I}_{k-1}}{\mathcal{I}_i} $$
+    where $\mathcal{I}_{\text{total}}$ is the sum of all segment integrals [S1].
+5.  **Compute Distance:** Use the inversion method to derive the distance offset from $T_i(r)$. The sampling function $S_{\text{hist}}(r)$ selects the segment-specific function $S_s$:
+    $$ S_{\text{hist}}(r) = S_s(T_i(r), \tilde{\mathbf{p}}_i, \tilde{\mathbf{w}}_i, t_{C,i-1}, d_i) $$
+    The core calculation involves a scaled logarithm function:
+    $$ \text{offset} = \frac{-\log(1 - (1 - E_u) T_i(r))}{\sigma_t c} $$
+    where $E_u$ is the upper bound component of the trapezoid segment radiance integral [S1].
+6.  **Handle Degeneracy:** If the slope $c \to 0$, the sampling simplifies to multiplication by the distance between the starting and end point [S1].
+7.  **Final Distance:** Add the starting distance $t_{C,S}$ to the offset to get the final distance from the origin along the camera ray [S1].
 
 **Pseudocode:**
 
@@ -39,126 +46,109 @@ The method relies on a histogram of trapezoid segment integrals. Each segment $i
 ```python
 import math
 
-def whole_volume_distance_sampling(r, segments, sigma_t):
+def whole_volume_distance_sampling(r, sigma_t, c, segments, total_integral):
     """
-    r: uniform random float in [0, 1]
-    segments: list of dicts, each containing:
-        - 'integral': float, the transmittance integral I_i
-        - 'p': tuple, corner positions (p1, p2, p3)
-        - 'w': tuple, distance vectors (w1, w2, w3)
-        - 't_C_prev': float, cumulative distance offset from previous segment
-        - 'd': float, distance to box boundary
-        - 'c': float, slope
-        - 'E_u': float, upper bound component
-    sigma_t: float, extinction coefficient
-    """
-    # Step 1 & 2: Compute total integral and find segment
-    total_integral = sum(seg['integral'] for seg in segments)
+    r: Uniform random float in [0, 1]
+    sigma_t: Extinction coefficient
+    c: Slope parameter
+    segments: List of segment objects, each containing:
+        - integral: I_i (integral of transmittance for this segment)
+        - cum_integral: Sum of I_k for k < i
+        - p: Corner positions (tilde_p)
+        - w: Distance vectors (tilde_w)
+        - t_C_S: Start distance along camera ray
+        - d_E_S: Distance to entry boundary
+        - d_E_E: Distance to exit boundary
+        - E_u: Upper bound component of radiance integral
+    total_integral: T_total (sum of all segment integrals)
     
-    current_cumulative = 0.0
+    Returns: Distance t along the camera ray.
+    """
+    # Step 1 & 2: Select segment and transform random value
+    # Find segment i such that cum_integral_i / total_integral < r <= cum_integral_{i+1} / total_integral
+    # In practice, iterate or use binary search on the CDF
     selected_segment = None
-    
     for seg in segments:
-        if current_cumulative + seg['integral'] >= total_integral * r:
+        # Check if r falls within this segment's range
+        # Range start: seg.cum_integral / total_integral
+        # Range end: (seg.cum_integral + seg.integral) / total_integral
+        range_start = seg.cum_integral / total_integral
+        range_end = (seg.cum_integral + seg.integral) / total_integral
+        
+        if range_start <= r < range_end:
             selected_segment = seg
             break
-        current_cumulative += seg['integral']
-        
+    
     if selected_segment is None:
-        # Fallback or error handling if r is exactly 1.0 and precision issues occur
+        # Fallback or error handling if r is exactly 1.0 or out of bounds
         selected_segment = segments[-1]
-        
-    # Step 4: Transform random value
+        # Adjust r to be within the last segment's range if necessary
+        # This is a guard [G]
+        r = range_end - 1e-9 
+
+    # Step 4: Transform random value T_i(r)
+    # T_i(r) = (I_total * r - sum(I_{k-1})) / I_i
+    # Note: sum(I_{k-1}) is seg.cum_integral
+    # I_i is seg.integral
     # I_total is total_integral
-    # Sum_{k=1}^{i-1} I_{k-1} is current_cumulative (since current_cumulative holds sum of previous I's)
-    # Note: The formula uses sum_{k=1}^i I_{k-1}. In the loop, current_cumulative is sum_{k=1}^{i-1} I_k.
-    # The source formula (10) is: T_i(r) = (I_total * r - sum_{k=1}^i I_{k-1}) / I_i
-    # Here, sum_{k=1}^i I_{k-1} corresponds to the cumulative integral BEFORE the current segment's integral I_i is added?
-    # Let's trace: For i=1, sum_{k=1}^1 I_{k-1} = I_0 = 0.
-    # For i=2, sum_{k=1}^2 I_{k-1} = I_0 + I_1.
-    # In the loop, when we are at segment i, current_cumulative is sum_{k=1}^{i-1} I_k.
-    # The formula requires sum_{k=1}^i I_{k-1}.
-    # I_{k-1} for k=1 is I_0. For k=2 is I_1.
-    # So sum_{k=1}^i I_{k-1} = I_0 + I_1 + ... + I_{i-1}.
-    # This is exactly current_cumulative.
     
-    prev_integral_sum = current_cumulative
-    I_i = selected_segment['integral']
+    numerator = total_integral * r - selected_segment.cum_integral
+    denominator = selected_segment.integral
     
-    numerator = total_integral * r - prev_integral_sum
-    T_i_r = numerator / I_i
+    # Guard against division by zero if integral is 0 [G]
+    if denominator == 0:
+        return selected_segment.t_C_S # Return start distance if no transmittance
+        
+    T_i_r = numerator / denominator
     
-    # Clamp to [0, 1] to handle floating point errors
+    # Clamp T_i_r to [0, 1] to handle floating point errors
     T_i_r = max(0.0, min(1.0, T_i_r))
     
-    # Step 5: Determine distance
-    c = selected_segment['c']
-    E_u = selected_segment['E_u']
-    
-    # Pitfall: When slope approaches zero (c -> 0), sampling simplifies
-    if abs(c) < 1e-6:
-        # Simplified multiplication by distance between starting and end point
-        # The source says "multiplication by the distance between starting and end point"
-        # This likely refers to a linear interpolation or direct scaling if transmittance is constant/linear
-        # However, standard distance sampling with c=0 implies constant extinction or specific geometry.
-        # Given the formula -log(...)/(sigma_t * c), c=0 is a singularity.
-        # The source states: "sampling simplifies to multiplication by the distance between starting and end point."
-        # We assume this means a linear distribution or specific geometric distance.
-        # Without explicit formula for c=0, we use a safe fallback or linear interpolation based on T_i_r
-        # But strictly, if c->0, the exponential becomes linear? 
-        # Let's stick to the source's description: "multiplication by the distance between starting and end point"
-        # This is ambiguous. We will use a standard linear interpolation for the distance within the segment as a [G] guard.
-        dist = selected_segment['t_C_prev'] + T_i_r * (selected_segment['d']) 
+    # Step 5: Compute distance using inversion method
+    # Check for degenerate case c -> 0
+    if abs(c) < 1e-9:
+        # Simplifies to multiplication by distance between start and end point [S1]
+        # The distance is proportional to the segment length in parameter space
+        # Assuming linear mapping for degenerate case
+        offset = T_i_r * (selected_segment.d_E_E - selected_segment.d_E_S)
     else:
         # Scaled logarithm function
-        # -log(1 - (1 - E_u) * r) / (sigma_t * c)
-        # Note: Source uses r in the formula description but T_i(r) in the context of the segment.
-        # The formula is: -log(1 - (1 - E_u) * T_i(r)) / (sigma_t * c)
-        term = 1.0 - (1.0 - E_u) * T_i_r
-        if term <= 0:
-            term = 1e-10 # Guard against log(0)
-        dist = -math.log(term) / (sigma_t * c)
+        # offset = -log(1 - (1 - E_u) * T_i(r)) / (sigma_t * c)
+        # Note: The source formula uses E_u. E_u is part of the segment geometry.
+        E_u = selected_segment.E_u
         
-    # Offset by starting distance
-    final_distance = dist + selected_segment['t_C_prev']
+        # Guard against log(0) or log(negative) [G]
+        arg = 1.0 - (1.0 - E_u) * T_i_r
+        if arg <= 0:
+            arg = 1e-9
+            
+        offset = -math.log(arg) / (sigma_t * c)
+        
+    # Step 7: Final distance
+    t = selected_segment.t_C_S + offset
     
-    return final_distance
+    return t
 ```
-
-**Parameters:**
-- $\sigma_t$: Extinction coefficient.
-- $c$: Slope of the trapezoid segment.
-- $E_u$: Upper bound component of the trapezoid segment radiance integral.
-- Typical values are scene-dependent. The method is implemented following the optimized algorithm explained in Sec. 6 of [S1].
-
-**Edge Cases and Pitfalls:**
-- When the slope $c$ approaches zero ($c \to 0$), the logarithmic function is undefined. The sampling simplifies to multiplication by the distance between the starting and end point [S1].
-- The algorithm depends on a logarithmic function which is not directly supported by the GPU; in corner cases, it falls back to linear segment sampling through branching [S1].
-- Precision issues may arise when $r$ is very close to 1.0 or when integrals are very small.
 
 ## Subtopics
 
 ### [Whole Volume Importance Sampling](9008-whole-volume-importance-sampling.md)
-An importance sampling scheme for Monte Carlo integrators that samples according to the geometry of the entire medium, incorporating both camera and light rays, rather than limiting sampling to transmittance along a single ray.
+Whole Volume Importance Sampling is a Monte Carlo strategy for volume rendering that samples the integration domain according to the geometry-dependent transmittance of the entire participating medium, rather than limiting sampling to the transmittance along a single ray. It solves the high-variance noise inherent in standard distance sampling by incorporating both camera and light ray geometries into the probability density function (PDF), resulting in superior convergence for finite media. It differs from classic techniques by accounting for the global geometry of the medium, not just local transmittance.
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-The method requires building a histogram of trapezoid segments, which involves integrating transmittance for each segment. The selection of a segment is $O(N)$ where $N$ is the number of segments, or $O(\log N)$ with a precomputed CDF tree. The distance calculation is $O(1)$ per sample. Memory usage is proportional to the number of segments to store the histogram and CDF [S1].
-
-**Measured Performance:**
-On an RTX 8000 GPU at 1024 spp, MCWVDS on a room scene took $10.4 \pm 0.1$ ms, compared to $11.0 \pm 0.5$ ms for Ray Marching (RM) [S1].
-On a GTX 980 Ti GPU at 256 spp, MCWVDS on a room scene took $9.2 \pm 0.1$ ms, compared to $10.3 \pm 0.2$ ms for RM [S1].
-On a Pro 560X GPU at 128 spp, MCWVDS on a room scene took $40 \pm 4$ ms, compared to $37 \pm 4$ ms for RM [S1].
-
-**Strengths and Limitations:**
-- **Strengths:** Converges in a single sample in unoccluded sections. Leads to noticeable variance reduction in occluded areas compared to ray marching and distance sampling at low sample counts [S1].
-- **Limitations:** Depends on a logarithmic function not directly supported by GPU hardware, requiring fallbacks [S1]. Equivalent to distance sampling only when evaluating a single segment where distance to boundary is constant ($d_{E,S} = d_{E,E}$) [S1].
-
-**When to Use:**
-Use when variance reduction in occluded areas is critical and low sample counts are used. It is particularly effective for single-scattering integrators [S1].
+*   **Time Complexity:** The algorithm requires building a histogram and CDF, which is $O(N)$ where $N$ is the number of trapezoid segments. Sampling is $O(\log N)$ with binary search or $O(N)$ with linear scan.
+*   **Memory Complexity:** $O(N)$ to store the histogram and segment geometry.
+*   **Measured Performance:**
+    *   On an RTX 8000 GPU at 1024 spp, MCWVDS on a room scene took 10.4 ± 0.1 ms, compared to 11.0 ± 0.5 ms for Ray Marching (RM) [S1].
+    *   On a GTX 980 Ti GPU at 256 spp, MCWVDS on a room scene took 9.2 ± 0.1 ms, compared to 10.3 ± 0.2 ms for RM [S1].
+    *   On a Pro 560X GPU at 128 spp, MCWVDS on a room scene took 40 ± 4 ms, compared to 37 ± 4 ms for RM [S1].
+*   **Strengths:** Converges in a single sample in unoccluded sections and leads to noticeable variance reduction in the rest of the scene, outperforming ray marching and distance sampling at low sample counts [S1].
+*   **Limitations:** Depends on a logarithmic function which is not directly supported by the GPU, requiring fallback to linear segment sampling in corner cases, which may impact performance [S1].
+*   **When to Use:** When variance reduction is critical in finite media with complex occlusion, and low sample counts are used.
+*   **When Not to Use:** When hardware does not support logarithmic functions efficiently, or when the medium is simple and unoccluded, where standard distance sampling or ray marching may suffice.
 
 ## Background
-Whole Volume Distance Sampling, also known as Monte Carlo with Whole Volume Distance Sampling (MCWVDS), was introduced in the paper "Collimated Whole Volume Light Scattering in Homogeneous Finite Media" [S1]. It generalizes rendering light scattered in finite media by incorporating a sampling strategy that considers the geometry along the entire camera line segment, unlike existing distance sampling techniques which account only for transmittance along the current path segment [S1]. The method is implemented as part of a suite of stochastic integration algorithms including Ratio Estimator with Distance Sampling (REDS) and Ratio Estimator with Equidistant Sampling (REES) [S1].
+Whole Volume Distance Sampling was introduced in the paper "Collimated Whole Volume Light Scattering in Homogeneous Finite Media" [S1]. It is a generalization of distance sampling that incorporates the geometry of the entire participating medium into the sampling strategy. The method is implemented as part of the Monte Carlo with Whole Volume Distance Sampling (MCWVDS) integrator [S1].
 
 ## Sources
 [S1] Collimated Whole Volume Light Scattering in Homogeneous Finite Media, https://doi.org/10.1109/tvcg.2021.3135764, fetched 2026-10-27

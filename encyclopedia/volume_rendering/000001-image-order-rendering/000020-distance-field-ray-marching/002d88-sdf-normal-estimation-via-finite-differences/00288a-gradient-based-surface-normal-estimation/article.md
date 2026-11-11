@@ -3,122 +3,156 @@
 Also called: CalculateSurfaceNormal, Density Computation & Normal Estimation, Density Field Normal Estimation, Gradient Normal Estimation, Gradient-Based Surface Normal Calculation, Gradient-based normal estimation, Local density field, Normals Renderer
 
 ## Overview
-Gradient-Based Surface Normal Estimation computes surface normals by evaluating the gradient of a local density field (resembling a signed distance field) on the fly, rather than storing or retrieving pre-computed normal vectors [S1, unofficial]. It solves the problem of deriving high-resolution, coherent surface orientations for ray marching or particle systems without relying on explicit mesh normals or expensive depth-peeling techniques [S1, unofficial]. It differs from its sibling [Lambertian Shading with Gradient Normals](1229-lambertian-shading-with-gradient-normals.md) by focusing on the general estimation mechanism for any shading model, and from [Scene-Space Normal Estimation](10497-scene-space-normal-estimation.md) by operating directly on the volumetric density data rather than post-processed image-space depth buffers.
+Gradient-Based Surface Normal Estimation computes surface normals for a volumetric representation by evaluating the spatial gradient of a local density field (resembling a signed distance field) and normalizing the resulting vector [S1, S2, S3, unofficial]. It solves the problem of deriving shading normals for voxelized or implicit geometry without storing explicit normal textures or relying on mesh topology [S1, unofficial]. Unlike sibling methods that may use pre-computed normal maps or tetrahedral interpolation, this approach derives normals "on the fly" from the scalar field itself, ensuring coherence with the voxelized volume resolution [S1, unofficial]. It is distinct from [Scene-Space Normal Estimation](10497-scene-space-normal-estimation.md) by operating in volume space rather than image space, and from [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md) by using axis-aligned finite differences rather than geometric interpolation within cells.
 
 ## How it works
 **Inputs:**
-*   A voxelized density field $D$ representing a localized distance field [S1, unofficial].
-*   A query point $p$ in 3D space [S2, unofficial].
-*   A sampling kernel size $k$ (typically $2^3$) [S1, unofficial].
+- A 3D scalar volume $V$ representing density or distance, with dimensions $W \times H \times D$ (e.g., $256 \times 256 \times 100$) [S2, unofficial].
+- A query point $p = (x, y, z)$ in voxel coordinates [S3, unofficial].
 
 **Outputs:**
-*   A normalized surface normal vector $N$ at point $p$ [S2, unofficial].
+- A normalized surface normal vector $\mathbf{N} = (N_x, N_y, N_z)$ [S2, S3, unofficial].
+- Optionally, an encoded RGB texture where $\mathbf{N}$ components are mapped to $[0, 255]$ [S2, unofficial].
 
 **Data Structures:**
-*   **Density Field:** A 3D grid (e.g., $512^3$) where each voxel stores a scalar density value [S1, unofficial]. The density is computed via a localized kernel, often using bitwise arithmetic for efficiency on GPU hardware to avoid large lookup textures [S1, unofficial].
-*   **Gradient Vector:** A 3D vector $(g_x, g_y, g_z)$ representing the partial derivatives of the density field at $p$ [S2, unofficial].
+- The volume $V$ is stored as a 1D array of unsigned chars (or floats) with interleaved RGB if encoding normals, or single channel for density [S2, unofficial].
+- For pre-computed normal textures: a 2D texture of size $W \times H$ (flattened from 3D slices) with format `GL_RGB` and type `GL_UNSIGNED_BYTE` [S2, unofficial]. Memory layout is interleaved: index $3 \cdot (v \cdot W + u) + c$ where $c \in \{0, 1, 2\}$ for R, G, B [S2, unofficial].
 
 **Steps:**
-1.  **Evaluate Density Gradient:** Compute the gradient of the density field at point $p$. This can be done by calling a sampler function `SampleGradient(p)` which internally computes finite differences or by explicitly calculating the central differences of the density values around $p$ [S2, unofficial].
-    *   Formula: $g = \nabla D(p) = \left( \frac{\partial D}{\partial x}, \frac{\partial D}{\partial y}, \frac{\partial D}{\partial z} \right)$ [S2, unofficial].
-    *   Implementation Note: If using explicit finite differences with a step size $\epsilon$, $g_x = D(p + \epsilon \hat{x}) - D(p - \epsilon \hat{x})$, and similarly for $y$ and $z$ [S2, unofficial].
-2.  **Normalize Gradient:** Normalize the gradient vector to obtain the surface normal $N$ [S2, unofficial].
-    *   Formula: $N = \frac{g}{\|g\|}$ [S2, unofficial].
-3.  **Optional: Distance Offset:** If the signed distance $d$ at $p$ is also required, it can be retrieved via `EvaluateDistanceAt(p)` [S4, unofficial]. The vector from $p$ to the closest surface approximation is then $p + d \cdot N$ [S4, unofficial].
 
-**Parameters:**
-*   **Kernel Size:** $2^3$ (8 voxels) is sufficient for acceptable quality in practice [S1, unofficial].
-*   **Voxelgrid Resolution:** $512^3$ is a typical resolution for particle system demos [S1, unofficial].
-*   **Finite Difference Step ($\epsilon$):** If not using a built-in gradient sampler, a fixed epsilon (e.g., $0.0001f$) may be used, but this risks precision loss or aliasing if not aligned with the volume sampling frequency [S2, unofficial].
+1. **Sample Gradient:** Compute the gradient $\mathbf{G} = (G_x, G_y, G_z)$ at point $p$ using central finite differences.
+   $$
+   G_x = \frac{V(x+1, y, z) - V(x-1, y, z)}{2}
+   $$
+   $$
+   G_y = \frac{V(x, y+1, z) - V(x, y-1, z)}{2}
+   $$
+   $$
+   G_z = \frac{V(x, y, z+1) - V(x, y, z-1)}{2}
+   $$
+   [S2, unofficial]
+
+2. **Normalize:** Compute the surface normal $\mathbf{N}$ by normalizing $\mathbf{G}$. The normal points in the direction of the gradient (or opposite, depending on convention; sources use negative gradient for outward normals in some contexts, but standard gradient points to increasing density) [S2, S3, unofficial].
+   $$
+   \mathbf{N} = -\frac{\mathbf{G}}{\|\mathbf{G}\|} = -\frac{(G_x, G_y, G_z)}{\sqrt{G_x^2 + G_y^2 + G_z^2}}
+   $$
+   [S2, unofficial]
+   *Note: Some implementations return $\mathbf{N} = \frac{\mathbf{G}}{\|\mathbf{G}\|}$ [S3, unofficial]. The sign depends on whether the field is a distance field (negative inside) or density (positive inside).*
+
+3. **Encode (Optional):** If storing in a texture, map $\mathbf{N} \in [-1, 1]$ to $C \in [0, 255]$:
+   $$
+   C_R = 255 \cdot (N_x + 1) \cdot 0.5
+   $$
+   $$
+   C_G = 255 \cdot (N_y + 1) \cdot 0.5
+   $$
+   $$
+   C_B = 255 \cdot (N_z + 1) \cdot 0.5
+   $$
+   [S2, unofficial]
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def estimate_normal(density_field, point, epsilon=0.0001):
+def estimate_normal(volume, x, y, z, width, height, depth):
     """
-    Estimates the surface normal at 'point' using the gradient of the density field.
-    
-    Args:
-        density_field: A function or array-like object that returns density D(x,y,z).
-        point: A 3D vector (x, y, z) where the normal is estimated.
-        epsilon: Step size for finite differences.
-        
-    Returns:
-        A normalized 3D vector representing the surface normal.
+    Estimates the surface normal at voxel (x, y, z) using central finite differences.
+    volume: 1D array of floats or bytes representing the 3D grid.
+    x, y, z: Integer coordinates within bounds.
+    width, height, depth: Dimensions of the volume.
+    Returns: (nx, ny, nz) normalized normal vector.
     """
-    # Compute partial derivatives using central differences
-    # Note: In a GPU implementation, this might be replaced by a hardware gradient sampler
-    # or a pre-computed gradient texture lookup to avoid multiple texture fetches.
+    # Helper to get voxel value with boundary clamping
+    def get_voxel(ix, iy, iz):
+        # Clamp coordinates to valid range
+        ix = max(0, min(ix, width - 1))
+        iy = max(0, min(iy, height - 1))
+        iz = max(0, min(iz, depth - 1))
+        # Assuming row-major or slice-major layout; adjust index calculation as needed
+        # Example: iz * width * height + iy * width + ix
+        return volume[iz * width * height + iy * width + ix]
+
+    # Compute central differences
+    # Note: Sources [S2, unofficial] use integer offsets. For continuous sampling, 
+    # one might use fractional offsets, but this method uses voxel neighbors.
+    gx = (get_voxel(x + 1, y, z) - get_voxel(x - 1, y, z)) / 2.0
+    gy = (get_voxel(x, y + 1, z) - get_voxel(x, y - 1, z)) / 2.0
+    gz = (get_voxel(x, y, z + 1) - get_voxel(x, y, z - 1)) / 2.0
+
+    # Compute magnitude
+    mag_sq = gx * gx + gy * gy + gz * gz
     
-    # Gradient X
-    p_plus_x = point + vector(epsilon, 0, 0)
-    p_minus_x = point - vector(epsilon, 0, 0)
-    grad_x = density_field(p_plus_x) - density_field(p_minus_x)
+    # Handle zero gradient (constant region) to avoid division by zero [S2, unofficial]
+    if mag_sq < 1e-9:
+        return (0.0, 0.0, 1.0) # Default normal or NaN handling [G]
+
+    mag = mag_sq ** 0.5
     
-    # Gradient Y
-    p_plus_y = point + vector(0, epsilon, 0)
-    p_minus_y = point - vector(0, epsilon, 0)
-    grad_y = density_field(p_plus_y) - density_field(p_minus_y)
+    # Normalize and invert (assuming outward normal for distance field) [S2, unofficial]
+    nx = -gx / mag
+    ny = -gy / mag
+    nz = -gz / mag
     
-    # Gradient Z
-    p_plus_z = point + vector(0, 0, epsilon)
-    p_minus_z = point - vector(0, 0, epsilon)
-    grad_z = density_field(p_plus_z) - density_field(p_minus_z)
-    
-    # Construct gradient vector
-    gradient = vector(grad_x, grad_y, grad_z)
-    
-    # Normalize to get surface normal
-    length = sqrt(gradient.x**2 + gradient.y**2 + gradient.z**2)
-    
-    # Handle degenerate case where gradient is zero (inside or outside empty space)
-    if length < 1e-6:
-        return vector(0, 1, 0) # Default normal or handle as error
-        
-    normal = gradient / length
-    return normal
+    return (nx, ny, nz)
+
+def encode_normal_to_rgb(nx, ny, nz):
+    """
+    Encodes a normalized normal vector into 8-bit RGB values [0, 255].
+    """
+    r = int(255 * (nx + 1.0) * 0.5)
+    g = int(255 * (ny + 1.0) * 0.5)
+    b = int(255 * (nz + 1.0) * 0.5)
+    # Clamp to 0-255 just in case of precision errors
+    r = max(0, min(255, r))
+    g = max(0, min(255, g))
+    b = max(0, min(255, b))
+    return (r, g, b)
 ```
 
+**Parameters:**
+- **Kernel Size:** The gradient estimation uses a local kernel of size $2^3$ (i.e., 7 samples per axis, or specifically the immediate neighbors $\pm 1$) [S1, unofficial].
+- **Volume Resolution:** Typical implementations use resolutions like $512^3$ for particle systems or $256 \times 256 \times 100$ for specific volume datasets [S1, S2, unofficial].
+- **Epsilon:** If using continuous sampling instead of voxel neighbors, a fixed epsilon (e.g., $0.0001$) may be used, but this risks precision loss or aliasing if not aligned with sampling frequency [S3, unofficial].
+
 **Edge Cases and Pitfalls:**
-*   **Hardware Limitations:** On DX10 hardware (e.g., G80), using a 32-bit integer lookup texture is not feasible due to memory constraints ($2^{32}$ entries). Bitwise arithmetic is preferred over breaking integers into 16-bit parts, which would require 64 lookups per 1024-bit voxel column [S1, unofficial].
-*   **Precision Loss:** Using a fixed epsilon for finite differences can cause precision loss or aliasing if the volume sampling frequency is not aligned with the epsilon scale [S2, unofficial].
-*   **Degenerate Gradients:** If the point is far from the surface or in a region of constant density, the gradient magnitude may be near zero, leading to normalization errors [G].
+- **Boundary Conditions:** Voxels at the boundaries ($x=0, x=W-1$, etc.) request out-of-bounds neighbors. The implementation must clamp coordinates or replicate boundary values, which can cause gradient inaccuracies at edges [S2, unofficial].
+- **Zero Gradient:** In constant regions (empty space or solid interior), $\|\mathbf{G}\| = 0$, leading to division by zero and NaN/Inf normals. A guard check is required [S2, unofficial].
+- **Hardware Limits:** On older DX10 hardware, large lookup textures (e.g., $2^{32}$ entries) are not feasible. Bitwise arithmetic or breaking integers into smaller parts is more efficient than large texture lookups for dense voxel storage [S1, unofficial].
+- **Precision:** Using fixed epsilon for finite differences can cause aliasing if the volume sampling frequency is not aligned with the epsilon scale [S3, unofficial].
 
 ## Subtopics
 
 ### [SDF Bevel Generation](4312-sdf-bevel-generation.md)
-SDF Bevel Generation estimates 3D surface normals for lighting by sampling a Signed Distance Function (SDF) height field at four cardinal offsets, computing finite differences, and applying bevel shaping parameters to smooth sharp edges. It differs from standard gradient estimation by introducing explicit control over edge rounding and thickness, making it suitable for stylized or physically plausible beveled geometry in ray marching. It builds on [SDF Normal Estimation via Finite Differences](4619-sdf-normal-estimation-via-finite-differences.md).
+SDF Bevel Generation estimates 3D surface normals by sampling a Signed Distance Function (SDF) height field at four cardinal offsets, computing finite differences, and applying bevel shaping parameters to smooth sharp edges. It differs from standard gradient estimation by introducing explicit control over edge rounding and thickness, making it suitable for stylized or physically plausible beveled geometry in ray marching. It builds on [SDF Normal Estimation via Finite Differences](4619-sdf-normal-estimation-via-finite-differences.md).
 
 ### [2D Gradient Estimation for Shading](10739-2d-gradient-estimation-for-shading.md)
-Estimates surface normals from a rendered depth image (distance from the view plane to the surface) using 2D central differences, enabling post-processing shading without recomputing the volume render. It sets itself apart from 3D gradient estimation by operating on the final 2D image plane rather than the volumetric data, offering significantly faster performance and allowing quick lighting/surface property changes without depth image recomputation, though at the cost of lower accuracy and potential edge blurring.
+This method estimates surface normals for shading by computing 2D spatial gradients from a rendered depth image (distance from the view plane to the surface). It enables post-processing illumination (ambient, diffuse, specular) without recomputing the volume rendering. Unlike 3D gradient estimation which operates on volumetric data, this approach operates on the 2D image plane, making it computationally cheaper but susceptible to artifacts when depth values represent disjoint volumetric regions.
 
 ### Specular Highlight via Gradient Normal
-Computes specular highlights by finding the volume surface intersection, estimating the surface normal via finite differences of the volume texture, and applying a Blinn-Phong shading model [S5, unofficial].
-1.  **Ray March:** Loop `MAX_STEPS` times, sampling the volume at `pos`. If density $v > 0.0$, break (surface found); else `pos += step`. If `pos` is outside $[0,1]$ bounds, return 0.0 [S5, unofficial].
-2.  **Normal Estimation:** Compute normal $N$ using central finite differences: $N.x = \text{sampleVolTex}(pos+gStepSize, pos.y, pos.z) - \text{sampleVolTex}(pos-gStepSize, pos.y, pos.z)$, similarly for $N.y$ and $N.z$, then normalize $N$ [S5, unofficial].
-3.  **Shading:** Compute light direction $L$, view direction $V$, halfway vector $H = \text{normalize}(L+V)$, and return specular intensity as $\text{pow}(\text{dot}(\text{normalize}(H), N), 2.0)$ [S5, unofficial].
+Computes specular highlights by finding the volume surface intersection, estimating the surface normal via finite differences of the volume texture, and applying a Blinn-Phong shading model [S6, unofficial]. The ray marches to find the surface intersection (looping MAX_STEPS times, sampling volume at pos, breaking if $v > 0.0$), then computes the normal $\mathbf{N}$ using central finite differences ($N_x = \text{sample}(pos+gStepSize) - \text{sample}(pos-gStepSize)$, etc.) and normalizes it. The specular intensity is returned as $\text{pow}(\text{dot}(\text{normalize}(\mathbf{H}), \mathbf{N}), 2.0)$ where $\mathbf{H}$ is the halfway vector [S6, unofficial].
+
+### Gradient-Based Diffuse Shading
+Computes diffuse lighting for a voxel by estimating the surface normal via finite differences and applying a dot product with a light direction vector [S7, unofficial]. It calculates the surface normal using `getSurfaceNormal`. If `isGradientInterpolation` is true, it finds the exact intersection $z$ via linear interpolation and recalculates the normal at the exact sub-voxel position. The light direction is computed from the light source position (controlled by sliders) to the intersection point, and the diffuse term is $\max(0, \mathbf{N} \cdot \mathbf{L})$ [S7, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per query, as it involves a fixed number of density field samples (typically 6 for central differences or a single gradient sampler call) [S2, unofficial].
-*   **Memory Complexity:** $O(N)$ for the density field storage, where $N$ is the number of voxels. No additional memory is required for storing normals explicitly [S1, unofficial].
-*   **Measured Performance:** In a particle system collision response demo with a $512^3$ voxelgrid, timings were 0.32 ms for $256^2$ particles, 1.0 ms for $512^2$ particles, and 4.0 ms for $1024^2$ particles [S1, unofficial].
-*   **Strengths:**
-    *   Does not rely on mesh normals, using voxelized surface normals for high resolution and coherence [S1, unofficial].
-    *   Faster to compute than larger-support distance fields; preferred when only limited distance information is needed [S1, unofficial].
-    *   Simpler to handle than depth peeling [S1, unofficial].
-*   **Limitations:**
-    *   Accuracy is limited by the voxel resolution and the kernel size [S1, unofficial].
-    *   Requires a valid density field; cannot be used on non-voxelized data without preprocessing [S1, unofficial].
-*   **When to Use:** Ideal for dynamic scenes, particle systems, or ray marching where explicit mesh normals are unavailable or too expensive to compute, and high-frequency detail is not critical [S1, unofficial].
-*   **When Not to Use:** When exact analytical normals are required, or when the scene geometry is static and mesh normals are already available and sufficient [S1, unofficial].
+- **Time Complexity:** $O(1)$ per query for gradient estimation, as it involves a fixed number of texture fetches (7 samples) and arithmetic operations [S1, S2, unofficial].
+- **Memory Complexity:** $O(W \cdot H \cdot D)$ for the volume data. If pre-computing normals, an additional $O(W \cdot H)$ texture storage is required [S2, unofficial].
+- **Measured Performance:** In a particle system collision response test with a $512^3$ voxelgrid, timings were 0.32 ms for $256^2$ particles, 1.0 ms for $512^2$ particles, and 4.0 ms for $1024^2$ particles [S1, unofficial].
+- **Strengths:** Does not rely on mesh normals, providing high-resolution normals coherent with the voxelized volume [S1, unofficial]. Faster to compute than larger-support distance fields [S1, unofficial]. Simple to implement and does not require explicit normal storage [S1, unofficial].
+- **Limitations:** Susceptible to aliasing if the sampling frequency is not aligned with the gradient step [S3, unofficial]. Boundary artifacts due to clamping [S2, unofficial]. Zero-gradient regions cause numerical instability [S2, unofficial].
+- **When to Use:** When only limited distance information is needed, or when working with dynamic voxelized scenes where mesh normals are unavailable or expensive to update [S1, unofficial].
+- **When Not to Use:** When high-quality smooth shading is required without aliasing artifacts, or when the volume has large constant regions that cause zero gradients.
 
 ## Background
-The method was introduced in the context of single-pass GPU solid voxelization for dynamic scenes [S1, unofficial]. It was presented as a way to derive a local distance field and estimate normals efficiently without storing them explicitly, leveraging the fact that gradient computation is not very costly compared to the size of the density map [S1, unofficial]. The approach was shown to be accurate and simple, appealing for applications like collision detection and particle systems [S1, unofficial].
+The method originates from single-pass GPU solid voxelization techniques, where density computation is used to derive a localized distance field [S1, unofficial]. The approach was highlighted in works discussing GPU-based voxelization for dynamic scenes, emphasizing efficiency and coherence with the voxel grid [S1, unofficial]. It has been applied in particle system collision detection and real-time volume rendering [S1, S2, unofficial]. The technique is often implemented in GLSL for GPU acceleration, leveraging texture sampling capabilities [S2, unofficial].
 
 ## Sources
 [S1] Single-pass GPU Solid Voxelization and Applications, https://inria.hal.science/inria-00345291, fetched 2026-10-26 (unofficial)
-[S2] Tsarpf/procgen, https://github.com/Tsarpf/procgen, fetched 2026-10-26 (unofficial)
-[S3] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
-[S4] 2JacT/Marching-Cubes-Terrain, https://github.com/2JacT/Marching-Cubes-Terrain, fetched 2026-10-27 (unofficial)
-[S5] rbaravalle/webgl-volumetric, https://github.com/rbaravalle/webgl-volumetric, fetched 2026-10-27 (unofficial)
+[S2] JINKEJIN/CGprject-VolumeRendering, https://github.com/JINKEJIN/CGprject-VolumeRendering, fetched 2026-10-26 (unofficial)
+[S3] Tsarpf/procgen, https://github.com/Tsarpf/procgen, fetched 2026-10-26 (unofficial)
+[S4] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
+[S5] 2JacT/Marching-Cubes-Terrain, https://github.com/2JacT/Marching-Cubes-Terrain, fetched 2026-10-27 (unofficial)
+[S6] rbaravalle/webgl-volumetric, https://github.com/rbaravalle/webgl-volumetric, fetched 2026-10-27 (unofficial)
+[S7] joshcodd/volume-rendering, https://github.com/joshcodd/volume-rendering, fetched 2026-10-26 (unofficial)
