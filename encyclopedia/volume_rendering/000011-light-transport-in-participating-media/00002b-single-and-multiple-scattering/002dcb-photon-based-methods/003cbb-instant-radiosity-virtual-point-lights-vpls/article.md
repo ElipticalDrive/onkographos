@@ -2,60 +2,113 @@
 Also called: Instant Radiosity
 
 ## Overview
-Instant Radiosity, also known as Virtual Point Lights (VPLs), is a method for computing indirect illumination that approximates the global illumination solution by treating stored photons as discrete light sources rather than using density estimation [S1]. It solves the problem of efficiently calculating diffuse interreflection and caustics on surfaces by replacing the complex integral of incoming radiance with a summation of contributions from a smaller set of virtual point lights [S1][S2, unofficial]. Unlike sibling methods such as Photon-based Estimation, which rely on kernel density estimation to smooth photon contributions, VPLs require explicit visibility computation for each light, resulting in significantly fewer samples but introducing singularity artifacts at close distances [S1].
+Instant Radiosity, also known as Virtual Point Lights (VPLs), is a method for computing indirect illumination that approximates the global illumination solution by treating stored photons as discrete light sources emitting into the scene [S1]. It differs from density estimation methods (such as [Photon-based Estimation](2521-photon-based-estimation.md)) by replacing the smoothing kernel summation with a visibility-based gathering pass, where each photon acts as a point light [S1]. This approach requires significantly fewer samples than density estimation but introduces singularity artifacts due to potential proximity between VPLs and shading points [S1].
 
 ## How it works
-**Inputs and Outputs**
-*   **Inputs:** A scene geometry with surface materials (BRDFs), a set of photons stored from a previous lighting pass, and camera parameters.
-*   **Outputs:** The final radiance $L_o(\mathbf{x}, \boldsymbol{\omega}_o)$ for each pixel.
+**Inputs and Outputs:**
+*   **Input:** A set of photons stored from a previous lighting pass, each containing position $\mathbf{p}$, direction $\mathbf{d}$, and power $\Phi$.
+*   **Output:** The final radiance or irradiance at shading points in the scene.
 
-**Data Structures**
-*   **VPL List:** A list of Virtual Point Lights. Each VPL $j$ contains:
-    *   Position $\mathbf{p}_j$: The 3D position where the photon hit a surface.
-    *   Direction $\boldsymbol{\omega}_j$: The incoming direction of the photon at $\mathbf{p}_j$ (used to determine emission direction).
-    *   Power $P_j$: The radiant flux carried by the photon, scaled by the surface reflectance and geometric factors.
-    *   *Note:* The number of VPLs is typically much smaller than the total number of photons generated, as only photons contributing to visible indirect illumination are retained or processed [S1].
+**Data Structures:**
+*   **VPL List:** A list of Virtual Point Lights. Each VPL stores:
+    *   Position $\mathbf{p}_i$ (3D vector).
+    *   Power $\Phi_i$ (scalar, typically spectral or RGB).
+    *   Direction $\mathbf{d}_i$ (3D vector, often the incoming photon direction).
+    *   *Note:* The number of VPLs is much smaller than the total number of photons because each VPL requires a visibility computation [S1].
 
-**Steps**
-1.  **Lighting Pass (Photon Shooting):** Shoot photons from light sources into the scene. Store photons that hit surfaces in a spatial data structure (e.g., a hash map or kd-tree) [S1].
-2.  **VPL Generation:** Iterate through the stored photons. For each photon $j$ hitting a surface at $\mathbf{p}_j$ with incoming direction $\boldsymbol{\omega}_{in}$:
-    *   Calculate the power $P_j$ to be emitted. This typically involves the photon's energy, the surface albedo $\rho(\mathbf{p}_j)$, and geometric attenuation.
-    *   Create a VPL at $\mathbf{p}_j$ emitting light primarily in the hemisphere defined by the surface normal $\mathbf{n}_j$ [S1].
-3.  **Rendering Pass (Gathering):** For each shading point $\mathbf{x}$ on a surface with normal $\mathbf{n}_x$ and outgoing direction $\boldsymbol{\omega}_o$:
-    *   Initialize accumulated radiance $L_{acc} = 0$.
-    *   For each VPL $j$ in the scene:
-        *   Compute the vector $\mathbf{r}_j = \mathbf{p}_j - \mathbf{x}$ and distance $d_j = \|\mathbf{r}_j\|$.
-        *   Compute the direction from shading point to VPL: $\boldsymbol{\omega}_j = \mathbf{r}_j / d_j$.
-        *   **Visibility Test:** Trace a shadow ray from $\mathbf{x}$ to $\mathbf{p}_j$. If occluded, skip this VPL [S1].
-        *   **Contribution Calculation:** If visible, add the contribution of VPL $j$ to $L_{acc}$. The irradiance $E_j$ from VPL $j$ at $\mathbf{x}$ is approximated by:
-            $$ E_j = \frac{P_j}{\pi d_j^2} \max(0, \mathbf{n}_x \cdot \boldsymbol{\omega}_j) \max(0, \mathbf{n}_j \cdot (-\boldsymbol{\omega}_j)) $$
-            *   $\frac{P_j}{\pi d_j^2}$: Approximation of irradiance from a point light (assuming Lambertian emission distribution over a hemisphere, the factor $\pi$ arises from the integral of cosine lobe). *Note: Some implementations use $4\pi$ or other geometric factors depending on how $P_j$ is defined.*
-            *   $\max(0, \mathbf{n}_x \cdot \boldsymbol{\omega}_j)$: Cosine term for the receiving surface.
-            *   $\max(0, \mathbf{n}_j \cdot (-\boldsymbol{\omega}_j))$: Cosine term for the emitting VPL surface.
-        *   Convert irradiance to radiance using the BRDF $f_r(\mathbf{x}, \boldsymbol{\omega}_i, \boldsymbol{\omega}_o)$ where $\boldsymbol{\omega}_i = -\boldsymbol{\omega}_j$:
-            $$ L_{contrib} = f_r(\mathbf{x}, -\boldsymbol{\omega}_j, \boldsymbol{\omega}_o) E_j $$
-        *   $L_{acc} \leftarrow L_{acc} + L_{contrib}$
-    *   Final radiance $L_o(\mathbf{x}, \boldsymbol{\omega}_o) = L_{acc} + L_e(\mathbf{x}, \boldsymbol{\omega}_o)$ [S1][S2, unofficial].
+**Steps:**
+1.  **Lighting Pass:** Shoot photons into the scene using a method similar to photon mapping. Store photons that hit surfaces or participate in scattering [S1].
+2.  **VPL Generation:** Select a subset of the stored photons to serve as Virtual Point Lights. Each selected photon $i$ is converted into a VPL with position $\mathbf{p}_i$, power $\Phi_i$, and direction $\mathbf{d}_i$ [S1].
+3.  **Rendering Pass (Gathering):** For each shading point $\mathbf{x}$ on a surface:
+    a. Initialize accumulated irradiance $E(\mathbf{x}) = 0$.
+    b. For each VPL $i$:
+        i. Compute the vector $\mathbf{v}_i = \mathbf{p}_i - \mathbf{x}$.
+        ii. Compute distance $r_i = \|\mathbf{v}_i\|$.
+        iii. Compute visibility $V_i$ by casting a shadow ray from $\mathbf{x}$ to $\mathbf{p}_i$. If the ray is occluded, $V_i = 0$; otherwise, $V_i = 1$ [S1].
+        iv. Compute the contribution of VPL $i$ to $\mathbf{x}$. The irradiance contribution is proportional to the power $\Phi_i$, the visibility $V_i$, and the geometric attenuation $1/r_i^2$, modulated by the BRDF at $\mathbf{x}$ and the angle between the surface normal and $\mathbf{v}_i$ [S2, unofficial].
+        v. Add the contribution to $E(\mathbf{x})$.
+    c. Compute final radiance from $E(\mathbf{x})$ using the surface BRDF [S2, unofficial].
 
-**Parameters**
-*   **Number of VPLs:** Significantly fewer than the number of photons in density estimation methods due to the cost of visibility tests [S1].
-*   **Clamping Distance:** A minimum distance $d_{min}$ used to prevent singularity artifacts. If $d_j < d_{min}$, the contribution is clamped or the VPL is ignored [S1].
+**Formulas:**
+The irradiance $E(\mathbf{x})$ at a point $\mathbf{x}$ is approximated by the sum of contributions from all VPLs:
+$$ E(\mathbf{x}) = \sum_{i} \Phi_i \cdot V_i \cdot \frac{\cos \theta_i}{r_i^2} \cdot f_r(\mathbf{x}, \mathbf{d}_i, \mathbf{v}_i) $$
+Where:
+*   $\Phi_i$: Power of the $i$-th VPL.
+*   $V_i$: Visibility (1 if visible, 0 if occluded).
+*   $r_i$: Distance between $\mathbf{x}$ and $\mathbf{p}_i$.
+*   $\theta_i$: Angle between the surface normal at $\mathbf{x}$ and the vector $\mathbf{v}_i$.
+*   $f_r$: The Bidirectional Reflectance Distribution Function (BRDF) [S2, unofficial].
 
-**Edge Cases and Pitfalls**
-*   **Singularity Artifacts:** When a VPL is very close to a shading point, the $1/d^2$ term causes extremely high irradiance, resulting in bright spikes [S1].
-*   **Mitigation:** Clamping the distance or blurring the VPL contributions removes spikes but introduces bias or missing energy [S1].
-*   **Visibility Cost:** The requirement for a shadow ray per VPL makes the method computationally expensive for large numbers of VPLs. Hierarchical pruning (e.g., Lightcuts) is often used to accelerate this [S1].
+**Parameters:**
+*   **Number of VPLs:** Significantly fewer than the total number of photons [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Singularity Artifacts:** Tiny distances between VPLs and shading points can cause spike artifacts in the rendered results [S1].
+*   **Mitigation:** These artifacts are removed by clamping distances or blurring the contributions, which introduces bias or missing energy [S1].
+*   **Bias Compensation:** Novák et al. proposed a method to approximately compensate for the bias introduced by clamping/blurring [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_irradiance(shading_point, vpl_list, scene):
+    """
+    Computes irradiance at a shading point by gathering contributions from VPLs.
+    """
+    total_irradiance = 0.0
+    normal = shading_point.normal
+    position = shading_point.position
+
+    for vpl in vpl_list:
+        # Vector from shading point to VPL
+        v = vpl.position - position
+        distance = length(v)
+        
+        # Avoid division by zero and singularity spikes
+        # [G] Clamping distance is a standard mitigation for singularity artifacts
+        if distance < 0.001:
+            distance = 0.001
+            
+        # Visibility check
+        # [G] Shadow ray cast from shading_point.position towards vpl.position
+        visible = not scene.is_occluded(shading_point.position, vpl.position)
+        
+        if visible:
+            # Cosine term: angle between surface normal and incoming light direction
+            # Light direction is normalized v
+            light_dir = normalize(v)
+            cos_theta = max(0.0, dot(normal, light_dir))
+            
+            # Geometric attenuation (inverse square law)
+            attenuation = 1.0 / (distance * distance)
+            
+            # BRDF evaluation
+            # [G] f_r depends on the specific surface material model
+            brdf = shading_point.material.brdf(normal, light_dir, -light_dir)
+            
+            # Contribution
+            contribution = vpl.power * attenuation * cos_theta * brdf
+            total_irradiance += contribution
+            
+    return total_irradiance
+```
+
+## Subtopics
+
+### Multi-dimensional Lightcuts
+Extends VPLs to participating media and other effects like motion blur using efficient hierarchy pruning [S1].
+
+### Lightcuts with Diffusion Dipoles
+Combines lightcuts with diffusion dipoles to approximate subsurface scattering [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N_{shading} \cdot N_{VPL})$ in the worst case, where $N_{shading}$ is the number of shading points and $N_{VPL}$ is the number of virtual point lights. Visibility tests dominate the cost.
-*   **Memory Complexity:** $O(N_{VPL})$ to store the VPL list.
-*   **Strengths:** Produces sharp caustics and accurate indirect illumination without the blurring inherent in density estimation. Requires fewer samples than density estimation methods for comparable visual quality in many scenarios [S1].
-*   **Limitations:** Susceptible to singularity artifacts. Computationally expensive due to visibility checks. Not naturally suited for participating media without extensions (e.g., diffusion dipoles) [S1].
-*   **When to use:** Surface rendering with diffuse interreflection and caustics where sharp details are desired.
-*   **When not to use:** Real-time applications with high VPL counts without acceleration structures; scenes with participating media (unless extended).
+*   **Complexity:** Requires visibility computation for each VPL, making it more expensive per sample than density estimation but requiring fewer samples overall [S1].
+*   **Performance:** Acceleration techniques using hierarchical pruning have been developed to speed up visibility computation [S1].
+*   **Strengths:** Widely used for indirect illumination on surfaces; requires significantly fewer samples than density estimation methods [S1].
+*   **Limitations:** Suffers from singularity artifacts (spikes) due to small distances between VPLs and shading points; mitigation techniques (clamping/blurring) introduce bias or missing energy [S1].
 
 ## Background
-Instant Radiosity was proposed by Christoph Keller [S1]. It has been widely used in surface rendering algorithms for indirect illumination [S1]. The method was later extended to participating media by Arbree et al., who combined lightcuts with diffusion dipoles to approximate subsurface scattering [S1]. Multi-dimensional lightcuts further extended VPLs to handle effects like motion blur in participating media [S1].
+Instant Radiosity was proposed by Keller [S1]. It has been used in a large number of surface rendering algorithms [S1]. Later, VPLs were extended to participating media [S1].
 
 ## Sources
 [S1] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

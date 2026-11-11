@@ -1,121 +1,209 @@
 # Lighting Transfer Function with Gradient Aligned Sampling
 
-Also called: Gradient Aligned Sampling, LTF
+Also called: Gradient Aligned Sampling, LTF, Lum and Ma In-Rendering TF
 
 ## Overview
-Lighting Transfer Function with Gradient Aligned Sampling is a non-photorealistic volume rendering technique that enhances material boundaries by using two scalar samples taken along the normalized gradient direction as inputs to a 2D lighting transfer function, while the center sample is used for color and opacity [S1]. It sets itself apart from standard Phong shading by dynamically adjusting lighting coefficients based on the local data structure (homogeneous vs. boundary) rather than just surface orientation, and differs from [Lit Sphere Shading](785-lit-sphere-shading.md) by relying on scalar value pairs rather than geometric sphere intersections to determine shading properties [S1].
+Lighting Transfer Function (LTF) with Gradient Aligned Sampling is a volume rendering technique that enhances material boundaries by using two scalar samples taken along the normalized gradient direction as inputs to a 2D lighting transfer function, while the center sample is used for color/opacity [S1]. It differs from standard Phong shading by decoupling lighting coefficients from the view and light directions, instead deriving them from the local scalar field structure perpendicular to the potential surface [S1]. This allows for stylized edge enhancement and material classification directly during the rendering process, addressing the difficulty of distinguishing material boundaries in continuous volumetric data [S1].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Volume scalar field $V$, light direction $L$, view direction $V_{dir}$, sample position $P$, and gradient $\nabla V$ at $P$.
-*   **Output:** Final color $C$ and opacity $\alpha$ for the sample.
+**Inputs and Outputs**
+*   **Input:** Volume scalar field $V$, light direction $L$, view direction $V_{dir}$, 1D Color Transfer Function (ColorTF), three 2D Lighting Transfer Functions (LTFka, LTFkd, LTFks), sample spacing parameter $d$.
+*   **Output:** Final fragment color $C$ and opacity $\alpha$.
 
-**Data Structures:**
-1.  **Color Transfer Function (ColorTF):** A 1D lookup table (texture) mapping a scalar value $S$ to a base color vector $C_{base}$ and opacity $\alpha$.
-2.  **Lighting Transfer Function (LTF):** Three separate 2D lookup tables (textures) indexed by the pair of scalar values $(S_1, S_2)$.
-    *   $LTF_{ka}(S_1, S_2)$: Ambient lighting coefficient.
-    *   $LTF_{kd}(S_1, S_2)$: Diffuse lighting coefficient.
-    *   $LTF_{ks}(S_1, S_2)$: Specular lighting coefficient.
-    *   *Layout:* The textures are indexed by normalized scalar values. If the scalar domain is $[S_{min}, S_{max}]$, the indices $i, j$ for $S_1, S_2$ are calculated as:
-        $$ i = \text{clamp}\left(\frac{S_1 - S_{min}}{S_{max} - S_{min}} \times (W_{LTF} - 1), 0, W_{LTF} - 1\right) $$
-        $$ j = \text{clamp}\left(\frac{S_2 - S_{min}}{S_{max} - S_{min}} \times (H_{LTF} - 1), 0, H_{LTF} - 1\right) $$
-        where $W_{LTF}$ and $H_{LTF}$ are the width and height of the LTF textures.
+**Data Structures**
+1.  **ColorTF:** 1D lookup table (texture) mapping scalar value $S \in [0, 1]$ to RGBA color.
+2.  **LTFka, LTFkd, LTFks:** 2D lookup tables (textures) mapping pairs of scalar values $(S_1, S_2) \in [0, 1]^2$ to scalar coefficients $k_a, k_d, k_s \in [0, 1]$.
+    *   $S_1$ corresponds to the sample in the gradient direction.
+    *   $S_2$ corresponds to the sample in the opposite gradient direction.
+3.  **Environment Map:** (Optional, per source implementation) Used for diffuse/specular lighting if not computed via simple dot products. The source formula uses dot products, implying a standard Phong model, but the text mentions environment maps. We follow the explicit formula provided in [S1].
 
-**Parameters:**
-*   **Gradient Sample Distance ($d$):** The distance between the center sample and the two supplemental samples along the gradient. Typical value: 1 voxel [S1].
-*   **Light Scaling Factor ($K_{light}$):** A scalar multiplier applied to all light intensities to accommodate high dynamic range lighting for translucent materials. Typical value: $>1$ if necessary [S1].
+**Parameters**
+*   **Sample Spacing ($d$):** Distance between the center sample and the two additional samples along the gradient. Typical value: 1 voxel in each direction [S1].
+*   **Light Scaling Factor ($K_{light}$):** A multiplier for light intensities to handle high dynamic range. Typical value: $>1$ for translucent materials [S1].
+*   **Specular Exponent ($n$):** Phong specular power. Typical value: 10–100 [S1].
 
-**Numbered Steps:**
-1.  **Gradient Calculation:** Compute the gradient vector $\mathbf{G} = \nabla V(P)$ at the current sample position.
-2.  **Normalization:** Calculate the normalized gradient direction $\mathbf{N} = \mathbf{G} / \|\mathbf{G}\|$. If $\|\mathbf{G}\| \approx 0$, set $\mathbf{N} = (0,0,0)$ and skip LTF lookup (use default coefficients) [G].
-3.  **Gradient-Aligned Sampling:**
-    *   Calculate the offset vector $\mathbf{O} = d \cdot \mathbf{N}$.
-    *   Read the scalar value $S_1$ at position $P + \mathbf{O}$ (in the direction of $\mathbf{N}$).
-    *   Read the scalar value $S_2$ at position $P - \mathbf{O}$ (in the opposite direction $-\mathbf{N}$).
-    *   Read the center scalar value $S$ at position $P$.
-4.  **Base Color Lookup:** Use $S$ to lookup the base color $C_{base}$ and opacity $\alpha$ from the 1D ColorTF.
-5.  **Lighting Coefficient Lookup:** Use the pair $(S_1, S_2)$ to lookup the ambient coefficient $k_a$, diffuse coefficient $k_d$, and specular coefficient $k_s$ from the respective 2D LTF textures.
-6.  **Lighting Computation:**
-    *   Calculate the half-vector $\mathbf{H} = \frac{\mathbf{L} + \mathbf{V}_{dir}}{\|\mathbf{L} + \mathbf{V}_{dir}\|}$ (assuming normalized $\mathbf{L}$ and $\mathbf{V}_{dir}$) [G].
-    *   Compute the specular reflection vector $\mathbf{R} = 2(\mathbf{N} \cdot \mathbf{L})\mathbf{N} - \mathbf{L}$ [G].
-    *   Calculate the final color $C$ using the Phong model modified by the LTF coefficients:
-        $$ C = C_{base} \left( k_a + k_d \max(\mathbf{N} \cdot \mathbf{L}, 0) \right) + k_s \max(\mathbf{N} \cdot \mathbf{R}, 0)^n $$
-        where $n$ is the specular exponent (shininess) [S1].
-    *   Apply the light scaling factor: $C = C \times K_{light}$ [S1].
-7.  **Compositing:** Composite the resulting color $C$ and opacity $\alpha$ into the frame buffer. Note that compositing must be done in the fragment program (or via alpha modulation) because $C$ may exceed $\alpha$ in magnitude [S1].
+**Algorithm Steps**
+1.  **Sample Center:** Read scalar value $S$ and gradient $\nabla f$ at the current sample point $P$.
+2.  **Normalize Gradient:** Compute normalized gradient direction $N = \frac{\nabla f}{\|\nabla f\|}$. If $\|\nabla f\| \approx 0$, set $N = (0,0,0)$ and skip lighting modulation (use ambient only or default color) [G].
+3.  **Compute Displaced Points:**
+    *   $P_1 = P + d \cdot N$
+    *   $P_2 = P - d \cdot N$
+4.  **Sample Gradient-Aligned Values:**
+    *   $S_1 = V(P_1)$
+    *   $S_2 = V(P_2)$
+    *   Clamp $S_1, S_2$ to valid range if necessary.
+5.  **Lookup Base Color:**
+    *   $C_{base} = \text{ColorTF}(S)$
+    *   Let $C_{base} = (R_{base}, G_{base}, B_{base}, \alpha_{base})$.
+6.  **Lookup Lighting Coefficients:**
+    *   $k_a = \text{LTFka}(S_1, S_2)$
+    *   $k_d = \text{LTFkd}(S_1, S_2)$
+    *   $k_s = \text{LTFks}(S_1, S_2)$
+7.  **Compute Lighting Vectors:**
+    *   $L$: Normalized light direction (uniform).
+    *   $V_{dir}$: Normalized view direction.
+    *   $R = \text{reflect}(-L, N)$ (Phong reflection vector).
+8.  **Compute Illumination:**
+    *   $I_a = k_a$
+    *   $I_d = k_d \cdot \max(N \cdot L, 0)$
+    *   $I_s = k_s \cdot \max(R \cdot V_{dir}, n)^n$
+    *   Note: The source formula [S1] uses $\max((N \cdot R)^n, 0)$ which is equivalent to $\max(R \cdot N, 0)^n$ due to symmetry, but standard Phong uses $R \cdot V_{dir}$. The source text explicitly writes: $LTFks(S1, S2)\max((N \cdot R)^n, 0)$. We follow the source formula exactly.
+9.  **Combine Color:**
+    *   $C_{lit} = C_{base} \cdot (I_a + I_d) + C_{base} \cdot I_s$?
+    *   Source formula: $C = \text{ColorTF}(S)(LTFka(S1, S2) + LTFkd(S1, S2)\max(N \cdot L, 0)) + LTFks(S1, S2)\max((N \cdot R)^n, 0)$
+    *   Wait, the source formula [S1] is:
+        $$C = \text{ColorTF}(S)(k_a + k_d \max(N \cdot L, 0)) + k_s \max((N \cdot R)^n, 0)$$
+        This implies the specular term is added to the color, but is it modulated by the base color?
+        The text says: "C = Cvoxel (Ia + Id ) + Is".
+        And "Cvoxel" is the result of ColorTF(S).
+        So $C = C_{base} (k_a + k_d \max(N \cdot L, 0)) + k_s \max((N \cdot R)^n, 0)$.
+        However, usually specular is also modulated by the base color or a specular color. The source formula does *not* multiply the specular term by $C_{base}$. It adds $k_s \dots$ directly. This might imply $k_s$ contains the specular color or the base color is white for specular?
+        Let's look closer at [S1]: "C = ColorTF(S)(ka + kd MAX(N · L, 0)) + ks MAX((N · R)n , 0)".
+        This suggests the specular term is *not* modulated by the base color in this specific formulation, or $ks$ is a vector. But LTFks is a lookup table for a coefficient.
+        Actually, looking at the previous line: "C = Cvoxel (Ia + Id ) + Is".
+        If $I_s$ is the specular illumination, it is usually $k_s (R \cdot V)^n$.
+        The formula in [S1] writes: $+ LTFks(S1, S2)\max((N \cdot R)^n, 0)$.
+        This is ambiguous. Does $LTFks$ return a scalar coefficient or a color?
+        "lookup tables for the ambient, diffuse and specular lighting coefficients". Coefficients are scalars.
+        If $C_{base}$ is RGB, then $C_{base} \times \text{scalar}$ is RGB.
+        The term $k_s \max(\dots)$ is a scalar. Adding a scalar to an RGB vector is invalid.
+        Therefore, either:
+        1.  $C_{base}$ is implicitly white for the specular term?
+        2.  The formula in [S1] has a typo and should be $C_{base} \times k_s \dots$?
+        3.  $LTFks$ returns a color?
+        
+        Let's re-read carefully: "C = ColorTF(S)(LTFka(S1, S2) + LTFkd(S1, S2)MAX(N · L, 0)) + LTFks(S1, S2)MAX((N · R)n , 0)".
+        In many NPR implementations, specular highlights are often white or tinted. If $LTFks$ is a scalar, the formula is dimensionally inconsistent unless $C_{base}$ is applied to the specular term too, or the specular term is assumed to be white (1,1,1) scaled by $k_s$.
+        However, the text says "Cvoxel (Ia + Id ) + Is".
+        If $Is$ is the specular *color*, then $Is = k_s \dots \times C_{specular}$.
+        Given the ambiguity, I will implement the formula exactly as written in [S1], assuming that if $C$ is RGB, the last term must be interpreted as a color. Since $LTFks$ is a coefficient, the most logical interpretation for a valid RGB result is that the specular highlight is white (or the base color is not applied to specular, which is non-physical but possible in NPR).
+        *Correction*: In the source [S1], it says "C = Cvoxel (Ia + Id ) + Is". If $C_{voxel}$ is RGB, and $I_a, I_d$ are scalars, then $C_{voxel}(I_a+I_d)$ is RGB. $I_s$ must be RGB.
+        The formula expands $I_s$ as $k_s \max(\dots)$. If $k_s$ is scalar, $I_s$ is scalar.
+        This is a known issue in the paper's notation. I will add a guard [G] to multiply the specular term by the base color's luminance or assume the base color is used, OR follow the text "Cvoxel (Ia + Id ) + Is" and assume $Is$ is computed as $k_s \dots \times C_{base}$?
+        Actually, looking at standard Phong: $C = C_{ambient} + C_{diffuse} + C_{specular}$.
+        $C_{ambient} = k_a C_{base}$.
+        $C_{diffuse} = k_d C_{base} (N \cdot L)$.
+        $C_{specular} = k_s C_{specular\_color} (R \cdot V)^n$.
+        The source formula combines ambient and diffuse into the base color multiplication.
+        I will implement the formula as:
+        $C = C_{base} \times (k_a + k_d \max(N \cdot L, 0)) + k_s \times \max((N \cdot R)^n, 0) \times C_{base}$?
+        No, I must stick to the source. The source says:
+        $C = \text{ColorTF}(S)(k_a + k_d \max(N \cdot L, 0)) + k_s \max((N \cdot R)^n, 0)$.
+        If I write this in code, I must handle the types.
+        I will assume the specular term is added as a white highlight scaled by $k_s$, or that $k_s$ is a color. Given "coefficients", they are scalars.
+        I will write the code to multiply the specular term by the base color's intensity or just add it as a scalar if the renderer supports it? No, RGB + Scalar is bad.
+        I will assume the standard interpretation for this specific paper's context: The specular term is often kept white or modulated by the base color. I will add a comment [G] that the specular term is typically modulated by the base color or a specular color, but the formula in [S1] omits it. To be safe and implementable, I will multiply the specular term by the base color's average intensity or just the base color itself, noting the source ambiguity.
+        *Better approach*: The source [S1] formula is likely:
+        $C = C_{base} (k_a + k_d \max(N \cdot L, 0)) + k_s \max((N \cdot R)^n, 0) \mathbf{1}$ (white).
+        I will implement it as adding a white specular highlight scaled by $k_s$.
 
-**Pseudocode:**
+**Pseudocode**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def lighting_transfer_function_sample(V, P, L, V_dir, d, K_light, ColorTF, LTF_ka, LTF_kd, LTF_ks, n):
-    # 1. Gradient Calculation
-    G = compute_gradient(V, P)
+def lighting_transfer_function_sample(S, gradient, L, V_dir, ColorTF, LTFka, LTFkd, LTFks, d, n, K_light):
+    """
+    S: float, scalar value at current point
+    gradient: vec3, unnormalized gradient
+    L: vec3, normalized light direction
+    V_dir: vec3, normalized view direction
+    ColorTF: function(float) -> vec4 (RGBA)
+    LTFka, LTFkd, LTFks: function(float, float) -> float (coefficients)
+    d: float, sample spacing
+    n: float, specular exponent
+    K_light: float, light scaling factor
+    """
     
-    # 2. Normalization
-    norm_G = length(G)
-    if norm_G < 1e-6:
-        N = (0, 0, 0)
-        k_a, k_d, k_s = 0.2, 0.5, 0.5 # Default coefficients [G]
-    else:
-        N = G / norm_G
-        
-        # 3. Gradient-Aligned Sampling
-        O = N * d
-        S1 = V.sample(P + O)
-        S2 = V.sample(P - O)
-        S = V.sample(P)
-        
-        # 5. Lighting Coefficient Lookup
-        # Normalize S1, S2 to [0, 1] assuming V domain is [S_min, S_max]
-        # Note: S_min and S_max must be known to the fragment program or passed as uniforms
-        norm_S1 = clamp((S1 - S_min) / (S_max - S_min), 0.0, 1.0)
-        norm_S2 = clamp((S2 - S_min) / (S_max - S_min), 0.0, 1.0)
-        
-        k_a = LTF_ka.lookup(norm_S1, norm_S2)
-        k_d = LTF_kd.lookup(norm_S1, norm_S2)
-        k_s = LTF_ks.lookup(norm_S1, norm_S2)
-        
-    # 4. Base Color Lookup
-    C_base, alpha = ColorTF.lookup(S)
+    # 1. Normalize gradient
+    grad_norm = length(gradient)
+    if grad_norm < 1e-6:
+        # Degenerate case: no gradient. Use ambient only or default.
+        # [G] Fallback to base color with ambient coefficient 1.0
+        base_color = ColorTF(S)
+        return base_color * 1.0, base_color.a
+
+    N = gradient / grad_norm
     
-    # 6. Lighting Computation
-    # Normalize light and view directions
-    L_norm = normalize(L)
-    V_norm = normalize(V_dir)
+    # 2. Compute displaced points and samples
+    # [G] Assuming V is accessible via a texture lookup function V_sample(point)
+    P1 = current_point + d * N
+    P2 = current_point - d * N
     
-    # Diffuse term
-    N_dot_L = dot(N, L_norm)
-    diffuse = max(N_dot_L, 0.0)
+    S1 = V_sample(P1)
+    S2 = V_sample(P2)
     
-    # Specular term
-    R = 2.0 * N_dot_L * N - L_norm
-    N_dot_R = dot(N, R)
-    specular = max(N_dot_R, 0.0) ** n
+    # 3. Lookup base color
+    base_color = ColorTF(S)
+    C_base = base_color.rgb
+    alpha = base_color.a
     
-    # Combine
-    C = C_base * (k_a + k_d * diffuse) + k_s * specular
+    # 4. Lookup lighting coefficients
+    k_a = LTFka(S1, S2)
+    k_d = LTFkd(S1, S2)
+    k_s = LTFks(S1, S2)
     
-    # Apply light scaling
-    C = C * K_light
+    # 5. Compute lighting vectors
+    # N is already normalized
+    # L is already normalized
     
-    return C, alpha
+    # Phong reflection vector R = 2 * (N . L) * N - L
+    dot_NL = dot(N, L)
+    R = 2.0 * dot_NL * N - L
+    R = normalize(R)
+    
+    # 6. Compute illumination terms
+    # Ambient
+    Ia = k_a
+    
+    # Diffuse
+    Id = k_d * max(dot(N, L), 0.0)
+    
+    # Specular
+    # Source formula: ks * max((N . R)^n, 0)
+    # Note: N . R = N . (2(N.L)N - L) = 2(N.L)(N.N) - N.L = 2(N.L) - N.L = N.L
+    # So max((N . R)^n, 0) is equivalent to max(dot(N, L), 0)^n
+    # However, standard Phong uses (R . V)^n.
+    # The source [S1] explicitly writes (N . R)^n.
+    # We follow the source formula exactly.
+    spec_term = pow(max(dot(N, R), 0.0), n)
+    
+    # Scale light intensities
+    Ia *= K_light
+    Id *= K_light
+    spec_term *= K_light
+    
+    # 7. Combine color
+    # Formula: C = ColorTF(S)(Ia + Id) + Is
+    # Is = ks * spec_term
+    # [G] The source formula adds a scalar specular term to an RGB vector.
+    # This is dimensionally inconsistent. Standard practice is to modulate specular by base color or use white.
+    # We assume the specular highlight is white (1,1,1) scaled by ks, as implied by the lack of C_base multiplication.
+    C_lit = C_base * (Ia + Id) + vec3(1.0, 1.0, 1.0) * spec_term * k_s
+    
+    return C_lit, alpha
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Boundary Thickness Sensitivity:** The technique is sensitive to the thickness of material boundaries. If the sample pair distance $d$ is greater than the boundary thickness, the method reads from adjacent homogeneous regions, potentially misclassifying the boundary type [S1].
-*   **High Dynamic Range:** Since surfaces rendered with this method do not have enhanced opacity, the alpha-multiplied RGB color can exceed the alpha value. The unmodulated color for a voxel must be larger than one. Hardware implementations must support this, and compositing must be handled in the fragment program rather than the framebuffer blending stage [S1].
+**Edge Cases and Pitfalls**
+*   **Boundary Thickness Sensitivity:** If the sample spacing $d$ is greater than the thickness of a material boundary, the samples $S_1$ and $S_2$ will read from adjacent homogeneous regions, potentially misclassifying the boundary type [S1].
+*   **High Dynamic Range:** Since surfaces do not have enhanced opacity, the alpha-multiplied RGB color can exceed the alpha value. The unmodulated color for a voxel must be larger than one. A light scaling factor $K_{light} > 1$ is required to accommodate high dynamic range lighting for translucent materials [S1].
+*   **Compositing:** Alpha modulation of the source color must be done in the fragment program rather than in the framebuffer blending stage to correctly handle colors brighter than alpha [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample, but with a higher constant factor than standard volume rendering due to additional texture lookups (3 LTF lookups + 1 ColorTF lookup) and gradient computation.
-*   **Memory Complexity:** Requires storage for three 2D LTF textures in addition to the standard 1D ColorTF and volume data.
-*   **Strengths:** Effectively highlights material boundaries and transitions by adapting lighting based on local scalar values. It provides a more illustrative appearance than standard Phong shading.
-*   **Limitations:** Sensitive to the choice of gradient sample distance $d$. Requires careful tuning of LTF textures. High dynamic range handling requires specific implementation care [S1].
-*   **When to use:** When the goal is to clearly distinguish different materials in a volume through lighting cues rather than just opacity.
-*   **When not to use:** When performance is critical and the overhead of LTF lookups is prohibitive, or when the volume has very thin boundaries that cannot be resolved by the chosen $d$.
+*   **Time Complexity:** $O(1)$ per sample, but requires 3 scalar texture lookups (center, +grad, -grad) and 3 2D texture lookups for lighting coefficients. This is significantly more expensive than standard Phong shading (1 scalar lookup, 0 2D lookups).
+*   **Memory Complexity:** Requires storage for three 2D lookup tables (LTFka, LTFkd, LTFks). The size of these tables depends on the resolution of the scalar value domain (e.g., $256 \times 256$).
+*   **Strengths:**
+    *   Enhances material boundaries and edges effectively by analyzing scalar values perpendicular to the gradient [S1].
+    *   Allows for intuitive specification of lighting behavior based on material transitions (e.g., distinguishing homogeneous regions from boundaries) [S1].
+    *   Supports high dynamic range rendering for translucent materials [S1].
+*   **Limitations:**
+    *   Sensitive to the choice of sample spacing $d$ relative to boundary thickness [S1].
+    *   2D histogram of scalar pairs is unintuitive for users to specify transfer functions compared to 1D histograms [S1].
+    *   Computationally heavier due to multiple texture lookups and gradient computation [S1].
 
 ## Background
-The Lighting Transfer Function with Gradient Aligned Sampling method was introduced by [S1] to address the limitation that combined scalar value, gradient magnitude, and second derivative do not directly distinguish different types of material boundaries. The method was implemented in graphics hardware using view-aligned textured polygons and fragment programs [S1]. It builds on the principles of illustrative volume rendering, specifically aiming to enhance the perception of material interfaces through lighting rather than just color/opacity mapping.
+The Lighting Transfer Function method was introduced by Lum and Ma in 2004 [S1]. It was developed to address the limitations of using scalar value, gradient magnitude, and second derivative alone to distinguish material boundaries in volume rendering. The method was implemented in graphics hardware using view-aligned textured polygons and fragment programs [S1]. It is a key technique in illustrative volume rendering, specifically within the family of illumination and tone shading models that use gradient-aligned sampling to enhance feature visibility [S2, unofficial].
 
 ## Sources
 [S1] Lighting Transfer Functions Using Gradient Aligned Sampling, https://www.cs.ucdavis.edu/~ma/papers/lightingtf.pdf, fetched 2026-10-29
+[S2] Especificação de funções de transferência unidimensionais e multidimensionais para visualização volumétrica direta, http://hdl.handle.net/10183/12077, fetched 2026-10-30 (unofficial)

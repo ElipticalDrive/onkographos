@@ -1,0 +1,82 @@
+--- v001.md
++++ v002.md
+@@ -15,7 +15,7 @@
+ 
+ **Data Structures:**
+-The method relies on the hierarchical structure of the source VDB grid. The VDB tree consists of nodes (internal and leaf) and voxels.
+-- **Active Voxels:** Voxels containing significant data. For a narrow-band level set (truncated signed distance field), active voxels "uniformly sandwich" the zero-crossing surface [S1][S2, unofficial].
+-- **Inactive Voxels:** Background values encoded in the VDB tree, which are excluded from training [S1][S2, unofficial].
++The method relies on the hierarchical structure of the source VDB grid, which consists of internal nodes and leaf nodes containing voxels [S1][S2, unofficial].
++- **Active Voxels:** Voxels containing significant data that "uniformly sandwich" the zero-crossing surface for narrow-band level sets [S1][S2, unofficial].
++- **Inactive Voxels:** Background values encoded in the VDB tree, which are explicitly excluded from training [S1][S2, unofficial].
+ - **Masking Structure:** The hierarchical structure from the source VDB is embedded as part of the NeuralVDB data (excluding dense leaf nodes) to mask out random access outside active voxel regions [S1][S2, unofficial].
+ 
+@@ -36,38 +36,40 @@
+ ```python
+ def sparse_field_training(vdb_grid, mlp, epochs):
+-    """
+-    Train an MLP using only active voxels from a VDB grid.
++    # 1. Initialize the value regression MLP
++    mlp.initialize()
+     
+-    Args:
+-        vdb_grid: An OpenVDB or NanoVDB grid object.
+-        mlp: A value regression MLP model.
+-        epochs: Number of training epochs.
+-    """
+-    # Pre-compute the mask from the VDB hierarchy
+-    # This mask prevents extrapolation outside active regions
+-    # The mask is embedded in NeuralVDB data, excluding dense leaf nodes
+-    out_of_bounds_mask = extract_vdb_hierarchy_mask(vdb_grid)
++    # 2. Collect all active voxels from the VDB grid
++    active_voxels = []
++    for node in vdb_grid.nodes:
++        for voxel in node.voxels:
++            if voxel.is_active():
++                active_voxels.append((voxel.position, voxel.value))
++                
++    # 3. Build out-of-bounds mask from the VDB hierarchy
++    # The mask covers the active region bounds, excluding dense leaf nodes
++    min_pos = min(v for v, _ in active_voxels)
++    max_pos = max(v for v, _ in active_voxels)
++    out_of_bounds_mask = build_tree_mask(vdb_grid, min_pos, max_pos)
+     
+     for epoch in range(epochs):
+-        # Step 1: Sample active voxels from the VDB tree
+-        # This explicitly excludes inactive/background values
+-        active_samples = sample_active_voxels(vdb_grid)
++        # 4. Randomly sample active voxels for this epoch
++        batch_size = min(len(active_voxels), 2048)
++        indices = random.sample(range(len(active_voxels)), batch_size)
++        coordinates = [active_voxels[i][0] for i in indices]
++        targets = [active_voxels[i][1] for i in indices]
+         
+-        if not active_samples:
+-            continue
+-            
+-        # Step 2: Prepare training batch
+-        # active_samples contains coordinates and target values
+-        # for voxels within the active range (e.g., [-3*dx, 3*dx] for width 6)
+-        coordinates = [sample.coord for sample in active_samples]
+-        targets = [sample.value for sample in active_samples]
+-        
+-        # Step 3: Train the MLP on these samples
+-        # The network learns to regress values only within the active field
++        # 5. Train the network using only these sampled active voxels
+         loss = mlp.train_step(coordinates, targets)
+         
+-        # Note: The network will not extrapolate well outside active voxels
+-        # This is by-design. The out_of_bounds_mask is used during inference
+-        # to handle queries outside the trained region.
++    return mlp, out_of_bounds_mask
++
++def build_tree_mask(vdb_grid, min_pos, max_pos):
++    """Construct a mask from the VDB hierarchy to block out-of-bounds access."""
++    mask = {}
++    for node in vdb_grid.nodes:
++        if node.is_leaf() and node.is_dense():
++            continue  # Dense leaf nodes are excluded from masking per sources
++        mask[node.bounds] = True
++    return mask
+ ```
+ 

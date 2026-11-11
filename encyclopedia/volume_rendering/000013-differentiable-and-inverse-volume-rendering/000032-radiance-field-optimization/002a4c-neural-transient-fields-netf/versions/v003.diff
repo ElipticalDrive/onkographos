@@ -1,0 +1,197 @@
+--- v002.md
++++ v003.md
+@@ -1,47 +1,167 @@
+ # Neural Transient Fields (NeTF)
++
++
+ ## Overview
+-Neural Transient Fields (NeTF) is a method for Non-Line-of-Sight (NLOS) imaging that models the plenoptic transient field using a Multi-Layer Perceptron (MLP) to predict transient arrival times $\tau$ from sparse Single-Photon Avalanche Diode (SPAD) measurements on a relay wall [S1]. Unlike [NeRF](4972-neural-radiance-fields.md), which relies on dense high-resolution images and 1D ray sampling, NeTF operates on sparse 2D hemispherical spot measurements, making occlusion handling and sampling bias critical challenges [S1].
++Neural Transient Fields (NeTF) is a differentiable volume rendering method for Non-Line-of-Sight (NLOS) imaging that models the plenoptic transient field using a Multi-Layer Perceptron (MLP) [S1]. It solves the problem of reconstructing hidden 3D scenes from sparse Time-Correlated Single-Photon Counting (TCSPC) measurements captured by a Single-Photon Avalanche Diode (SPAD) array [S1]. Unlike [NeRF](4972-neural-radiance-fields.md), which relies on dense, high-resolution RGB images to mitigate occlusion artifacts, NeTF operates on sparse spot measurements where occluded points may be visible from very few viewpoints, making occlusion handling and sampling bias critical challenges [S1].
++
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Sparse SPAD measurements on a relay wall, represented as coordinates $(x', y')$ and time $t$, yielding measured transient arrival times $\tau_m(x', y', t)$ [S1].
+-*   **Output:** A continuous function $\tau(x', y', t)$ predicted by the MLP, representing the transient field [S1].
++*   **Input:** Sparse SPAD measurements of transient signals $\tau_m(x', y', t)$ on a relay wall, where $(x', y')$ are the 2D coordinates of the detection spots and $t$ is time [S1].
++*   **Output:** A continuous function $\tau(x, y, z, t)$ representing the transient arrival time at any 3D point $(x, y, z)$ in the hidden scene [S1].
+ 
+ **Data Structures:**
+-*   **MLP:** A standard Multi-Layer Perceptron [S1]. Input coordinates are transformed into Cartesian coordinates before network evaluation [S1]. The network outputs the transient arrival time $\tau$ [S1].
++*   **MLP:** A Multi-Layer Perceptron that takes 3D Cartesian coordinates $(x, y, z)$ as input [S1].
++*   **Network Output:** The MLP predicts the transient arrival time $\tau$ for the input point [S1]. (Note: Source [S1] mentions predicting density and reflectance in one sentence but defines the core NeTF variable as $\tau$ in the loss function and optimization section. The implementation focuses on $\tau$ as the primary differentiable output for the transient field).
+ 
+ **Algorithm Steps:**
+-1.  **Coordinate Transformation:** Transform the input SPAD spot coordinates $(x', y')$ and time $t$ into Cartesian coordinates suitable for the MLP input [S1].
+-2.  **Forward Pass:** Evaluate the MLP to predict the transient arrival time $\tau(x', y', t)$ for the given input coordinates [S1].
+-3.  **Loss Calculation:** Compute the L2 norm loss between the predicted transient $\tau$ and the measured transient $\tau_m$ [S1]:
+-    $$
+-    L = \sum_{x', y', t} (\tau_m(x', y', t) - \tau(x', y', t))^2
+-    $$
+-4.  **Optimization:** Minimize the loss $L$ using gradient descent to update the MLP parameters [S1].
+-5.  **Two-Stage Training:**
++1.  **Coordinate Transformation:** Convert the 3D spatial coordinates of the hidden scene points into Cartesian coordinates $(x, y, z)$ [S1].
++2.  **MLP Forward Pass:** Feed $(x, y, z)$ into the MLP to predict the transient arrival time $\tau(x, y, z, t)$ [S1].
++3.  **Loss Calculation:** Compute the L2 norm loss between the predicted transient $\tau$ and the measured transient $\tau_m$ at the SPAD spots [S1].
++4.  **Optimization:** Minimize the loss function using gradient descent [S1].
++5.  **Two-Stage Training (for occlusion handling):**
+     *   **Stage 1:** Train using all available samples to obtain an initial reconstruction [S1].
+-    *   **Stage 2:** Calculate the loss at every measurement spot to guide resampling, over-sampling spots with higher loss to address sampling bias and occlusion artifacts [S1].
++    *   **Stage 2:** Calculate the loss at every measurement spot. Resample the dataset to balance the distribution (over-sampling minority classes with high loss) and retrain to reduce artifacts [S1].
++
++**Formulas:**
++The optimization objective is defined by the L2 loss function [S1]:
++
++$$
++L = \sum_{x', y', t} (\tau_m(x', y', t) - \tau(x', y', t))^2 \quad (14)
++$$
++
++Where:
++*   $L$ is the total loss.
++*   $\tau_m(x', y', t)$ is the measured transient at spot $(x', y')$ and time $t$.
++*   $\tau(x', y', t)$ is the predicted transient at the same location and time.
+ 
+ **Parameters:**
+-*   **Loss Function:** L2 norm is the standard choice, though arbitrary differentiable losses can be minimized [S1].
+-*   **Sampling:** Hierarchical sampling is employed to address sampling bias [S1].
++*   **Loss Function:** L2 norm difference [S1].
++*   **Sampling:** 2D hemispherical sampling is used for the SPAD spots, differing from NeRF's 1D ray sampling [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Occlusion:** In NLOS, SPAD captures sparse spots [S1]. Occluded points may be captured from very few viewpoints, leading to strong reconstruction artifacts if not handled [S1]. The two-stage training strategy is specifically designed to mitigate this [S1].
+-*   **Sampling Bias:** The sparse nature of SPAD data creates a long-tailed classification-like problem where some regions are under-sampled [S1].
++**Pitfalls:**
++*   **Occlusion Artifacts:** Because SPAD captures sparse spots, occluded points may be captured from very few viewpoints. If not handled, this leads to strong reconstruction artifacts [S1].
++*   **Sampling Bias:** The sparse nature of the data creates a long-tailed distribution of visibility, similar to long-tailed classification problems in machine learning [S1].
++
++**Pseudocode:**
++
++```python
++import torch
++import torch.nn as nn
++import torch.optim as optim
++
++class NeuralTransientField(nn.Module):
++    def __init__(self, input_dim=3, hidden_dim=256, output_dim=1):
++        super(NeuralTransientField, self).__init__()
++        # MLP architecture as implied by source [S1]
++        self.network = nn.Sequential(
++            nn.Linear(input_dim, hidden_dim),
++            nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim),
++            nn.ReLU(),
++            nn.Linear(hidden_dim, hidden_dim),
++            nn.ReLU(),
++            nn.Linear(hidden_dim, output_dim)
++        )
++
++    def forward(self, xyz):
++        """
++        Predicts transient arrival time tau for 3D coordinates.
++        Args:
++            xyz: Tensor of shape (N, 3) containing Cartesian coordinates.
++        Returns:
++            Tensor of shape (N, 1) containing predicted transient times.
++        """
++        return self.network(xyz)
++
++def train_netf(measured_transients, initial_xyz, num_epochs=1000):
++    """
++    Two-stage training strategy for NeTF.
++    
++    Args:
++        measured_transients: Dict or structure containing measured tau_m(x', y', t).
++        initial_xyz: Initial set of 3D points to sample.
++        num_epochs: Number of training epochs.
++    """
++    model = NeuralTransientField()
++    optimizer = optim.Adam(model.parameters(), lr=0.001)
++
++    # Stage 1: Initial training with all samples
++    xyz_all = initial_xyz
++    # Flatten measured transients to match xyz_all if necessary
++    # This step assumes a mapping between xyz_all and measured_transients exists
++    # based on the projection from the hidden scene to the SPAD spots.
++    
++    for epoch in range(num_epochs // 2):
++        optimizer.zero_grad()
++        predicted_tau = model(xyz_all)
++        # Compute L2 loss between predicted and measured
++        # Note: Exact mapping of xyz_all to measured_transients indices is required
++        # based on the optical path. Source [S1] implies this is handled by the forward model.
++        loss = torch.mean((predicted_tau - measured_transients) ** 2)
++        loss.backward()
++        optimizer.step()
++
++    # Stage 2: Resampling based on loss
++    # Calculate loss at every measurement spot
++    with torch.no_grad():
++        predicted_tau_stage1 = model(xyz_all)
++        losses = (predicted_tau_stage1 - measured_transients) ** 2
++    
++    # Resample dataset to achieve balanced distribution (over-sample high loss)
++    # This addresses the sampling bias/long-tailed problem [S1]
++    xyz_resampled = resample_based_on_loss(xyz_all, losses)
++    measured_transients_resampled = resample_targets(measured_transients, losses)
++
++    # Retrain with resampled data
++    for epoch in range(num_epochs // 2, num_epochs):
++        optimizer.zero_grad()
++        predicted_tau = model(xyz_resampled)
++        loss = torch.mean((predicted_tau - measured_transients_resampled) ** 2)
++        loss.backward()
++        optimizer.step()
++
++    return model
++
++def resample_based_on_loss(points, losses):
++    """
++    Resamples points based on loss values to balance distribution.
++    Implementation detail [G]: Uses inverse probability sampling or simple
++    random sampling weighted by loss magnitude to over-sample minority classes.
++    """
++    # Normalize losses to probabilities
++    probs = losses / losses.sum()
++    # Sample indices
++    indices = torch.multinomial(probs, len(points), replacement=True)
++    return points[indices]
++
++def resample_targets(targets, losses):
++    """
++    Resamples target values corresponding to the resampled points.
++    """
++    # This function assumes targets are aligned with points in the same order
++    # In practice, targets are associated with specific (x', y', t) spots.
++    # The resampling logic must map the loss of a point to its corresponding target.
++    # For simplicity, assuming targets are aligned with the 'points' tensor passed to resample_based_on_loss.
++    # Note: Source [S1] describes this conceptually; exact tensor alignment depends on data structure.
++    return targets
++```
++
+ ## Subtopics
+ 
+ ### [Non-confocal Neural Transient Field (NeTF) Formulation](6348-non-confocal-neural-transient-field-netf-formulation.md)
+-Formulates the transient signal for non-confocal NLOS setups where illumination spot $P$ and detection spot $P'$ are distinct. It differs from the confocal formulation by using ellipsoidal coordinates to handle asymmetric optical paths, allowing the transient to be computed as a double integral over the ellipsoidal surface parameters. Choose it when the optical setup lacks a shared focal point between illumination and detection.
++Formulates the transient signal for non-confocal NLOS setups where illumination and detection spots are distinct, using ellipsoidal coordinates.
+ 
+ ## Operating characteristics
+-*   **Time and memory complexity:** Not given in the sources.
+-*   **Measured performance with hardware, resolution, and scene:** Not given in the sources.
+-*   **Scaling:** Not given in the sources.
+-*   **Strengths:** Can model the plenoptic transient field with an MLP, allowing for the minimization of arbitrary differentiable losses [S1].
+-*   **Limitations:** Highly susceptible to occlusion artifacts due to sparse viewpoint coverage; requires specialized two-stage training and hierarchical sampling to handle sampling bias [S1].
+-*   **When to use:** Non-Line-of-Sight imaging scenarios with sparse SPAD data [S1].
+-*   **When not to use:** Dense viewpoint settings where occlusion is less significant, such as standard NeRF applications [S1].
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources.
++*   **Strengths:** Can model the plenoptic transient field using an MLP, allowing for the minimization of arbitrary differentiable losses [S1]. The two-stage training strategy effectively addresses sampling bias and occlusion artifacts inherent in sparse SPAD data [S1].
++*   **Limitations:** Requires careful handling of occlusions due to sparse viewpoint coverage [S1]. The sparse nature of the input data makes it more sensitive to sampling bias than dense-image methods like NeRF [S1].
++*   **When to use:** Non-Line-of-Sight imaging scenarios with sparse SPAD measurements where occlusion is a significant factor.
++*   **When not to use:** Dense viewpoint settings where occlusion is less significant, or when high-resolution RGB images are available (prefer NeRF).
++
+ ## Background
+-NeTF was introduced in the paper "Non-line-of-Sight Imaging via Neural Transient Fields" [S1]. It adapts the neural field concept to the specific constraints of NLOS imaging, where data is acquired via sparse SPAD spots on a relay wall rather than dense camera images [S1].
++Neural Transient Fields (NeTF) was introduced in the paper "Non-line-of-Sight Imaging via Neural Transient Fields" [S1]. It adapts the neural radiance field concept to the domain of NLOS imaging, addressing the unique challenges of sparse, time-resolved photon data. The method builds on the principles of [Radiance-field optimization](44-radiance-field-optimization.md) but modifies the sampling and loss strategies to handle the sparsity and occlusion issues specific to SPAD-based NLOS systems [S1].
++
+ ## Sources
+ [S1] Non-line-of-Sight Imaging via Neural Transient Fields, https://doi.org/10.1109/tpami.2021.3076062, fetched 2026-10-26

@@ -1,82 +1,83 @@
 # SDF-based Binary Voxelization
 
-Also called: Level Set Voxelization, SDF Voxelization
+Also called: Binary Voxelization, Level Set Voxelization, SDF Voxelization
 
 ## Overview
-SDF-based Binary Voxelization converts a continuous Signed Distance Field (SDF) into a discrete binary volume representation [S1, unofficial]. It discretizes implicit surfaces defined by distance fields into a grid of occupied and unoccupied voxels [S1, unofficial].
+SDF-based Binary Voxelization converts a continuous signed distance field (SDF) into a discrete binary volume representation, where each voxel is classified as either "inside" or "outside" the target geometry. It solves the problem of creating a topologically consistent binary mask from a continuous scalar field, serving as a foundational step for generating voxel-based meshes (e.g., Minecraft-style cubes) or preparing data for binary volume rendering. Unlike dense SDF generation which preserves distance magnitudes, this method discards geometric precision in favor of a clean, binary boundary definition [S2, unofficial]. It builds on [Signed Distance Field Voxelization](3849-signed-distance-field-voxelization.md) by applying a thresholding operation to the resulting scalar field.
 
 ## How it works
-**Inputs:** A 3D grid of signed distance values (e.g., `MeshSignedDistanceGrid`) [S1, unofficial].
-**Outputs:** A 3D boolean bitmap (`Bitmap3`) where each voxel indicates occupancy [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A 3D Signed Distance Field (SDF) grid, typically represented as a `MeshSignedDistanceGrid` or similar structure, containing floating-point distance values $D(x,y,z)$ for every voxel center [S2, unofficial].
+*   **Output:** A binary 3D bitmap (voxel grid) where each voxel is a boolean value: `true` (inside) or `false` (outside) [S2, unofficial].
 
 **Data Structures:**
-*   `MeshSignedDistanceGrid`: A 3D array storing `float` values representing the signed distance to the surface at each grid point [S1, unofficial].
-*   `Bitmap3`: A 3D array of `bool` values with dimensions identical to the input SDF grid [S1, unofficial].
+*   **SDF Grid:** A 3D array or texture storing `float` values. Dimensions match the target resolution.
+*   **Binary Bitmap:** A 3D array of `bool` or packed bits. Dimensions must match the SDF grid exactly [S2, unofficial].
 
-**Steps:**
-1. Initialize a `Bitmap3` object with dimensions identical to the input `MeshSignedDistanceGrid` [S1, unofficial].
-2. Iterate through every index $(i, j, k)$ in the `Bitmap3` grid [S1, unofficial].
-3. Retrieve the signed distance value $d$ from the SDF at the corresponding index: $d = \text{SDF}[i, j, k]$ [S1, unofficial].
-4. Evaluate the occupancy condition: if $d < 0$, set `Bitmap3[i, j, k] = true`; otherwise ($d \ge 0$), set `Bitmap3[i, j, k] = false` [S1, unofficial].
+**Algorithm Steps:**
+1.  **Initialize Output Grid:** Create a binary bitmap data structure with dimensions identical to the input SDF grid [S2, unofficial].
+2.  **Iterate Voxels:** Loop through every voxel index $(i, j, k)$ in the output grid [S2, unofficial].
+3.  **Sample Distance:** Retrieve the signed distance value $d$ from the input SDF at the corresponding index $(i, j, k)$ [S2, unofficial].
+4.  **Threshold and Classify:**
+    *   If $d < 0$, the voxel center is inside the surface. Set the output voxel to `true` (inside) [S2, unofficial].
+    *   If $d \ge 0$, the voxel center is outside or on the surface. Set the output voxel to `false` (outside) [S2, unofficial].
+5.  **Finalize:** Return the populated binary bitmap [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-class Grid:
-    def __init__(self, width, height, depth, default_value=None):
-        self.width = width
-        self.height = height
-        self.depth = depth
-        self.data = [[[default_value for _ in range(depth)] for _ in range(height)] for _ in range(width)]
-    def get(self, x, y, z):
-        return self.data[x][y][z]
-    def set(self, x, y, z, value):
-        self.data[x][y][z] = value
-
-def sdf_to_binary_voxelization(sdf_grid: Grid) -> Grid:
+def sdf_to_binary_voxelization(sdf_grid: Grid3D[float], dimensions: Vector3i) -> Grid3D[bool]:
     """
-    Converts a signed distance field grid to a binary voxel grid.
+    Converts a Signed Distance Field grid into a binary voxel grid.
     
     Args:
-        sdf_grid: A 3D grid where each cell contains a float representing 
-                  the signed distance to the nearest surface.
-    
+        sdf_grid: A 3D grid containing signed distance values.
+        dimensions: The (x, y, z) resolution of the grid.
+        
     Returns:
-        A 3D boolean grid where True indicates inside the surface (negative distance)
-        and False indicates outside (non-negative distance).
+        A 3D grid of booleans where True indicates 'inside' and False indicates 'outside'.
     """
-    binary_grid = Grid(sdf_grid.width, sdf_grid.height, sdf_grid.depth, default_value=False)
-    for x in range(sdf_grid.width):
-        for y in range(sdf_grid.height):
-            for z in range(sdf_grid.depth):
-                distance = sdf_grid.get(x, y, z)
-                binary_grid.set(x, y, z, distance < 0)
+    # Initialize output binary grid with False (outside) by default
+    binary_grid = Grid3D[bool](dimensions, default=False)
+    
+    # Iterate over all voxel indices
+    for x in range(dimensions.x):
+        for y in range(dimensions.y):
+            for z in range(dimensions.z):
+                # Sample the signed distance at the current voxel center
+                distance = sdf_grid.get_value(x, y, z)
+                
+                # Classify based on sign of distance
+                # Negative distance implies inside the surface
+                if distance < 0:
+                    binary_grid.set_value(x, y, z, True)
+                else:
+                    binary_grid.set_value(x, y, z, False)
+                    
     return binary_grid
 ```
 
-**Parameters:** Not given in the sources.
-
-**Edge Cases and Pitfalls:**
-*   **Zero Distance:** Points exactly on the surface ($d=0$) are classified as outside (`false`) [S1, unofficial].
-*   **Boundary Conditions:** The grid boundaries must align with the SDF domain; no extrapolation is performed [S1, unofficial].
+**Parameters and Edge Cases:**
+*   **Threshold:** The threshold is strictly $0$. Points exactly on the surface ($d=0$) are classified as outside (`false`) in the reference implementation [S2, unofficial].
+*   **Precision:** Floating-point comparison errors near $d=0$ may cause jitter in the binary boundary if the SDF is not computed with sufficient precision [G].
+*   **Consistency:** The output resolution must match the input SDF resolution exactly to maintain spatial correspondence [S2, unofficial].
 
 ## Subtopics
 
 ### [LOD Ground Truth Generation from Surface Intersections](4466-lod-ground-truth-generation-from-surface-intersections.md)
-Constructs a Level-of-Detail (LOD) representation for a scene by downsampling high-resolution binary voxels and Signed Distance Fields (SDFs), extracting surface intersections along axes, and storing them in a sparse pointer/data structure per grid cell. It differs from standard binary voxelization by preserving continuous surface geometry information (intersections and normals) at lower resolutions, enabling more accurate ground truth generation for neural rendering or implicit surface reconstruction tasks.
+Constructs a Level-of-Detail (LOD) representation for a scene by downsampling high-resolution binary voxels and Signed Distance Fields (SDFs), extracting surface intersections along axes, and storing them in a sparse pointer/data structure per grid cell.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$, where $N$ is the total number of voxels, as the method iterates through every grid index exactly once [S1, unofficial].
-*   **Memory Complexity:** $O(N)$ for the output boolean bitmap, plus $O(N)$ for the input SDF grid [S1, unofficial].
-*   **Performance:** Extremely fast, requiring only array traversal and a single comparison per voxel [S1, unofficial].
-*   **Strengths:** Simple to implement; deterministic; preserves the exact resolution of the input SDF [S1, unofficial].
-*   **Limitations:** Not given in the sources.
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **Time Complexity:** $O(N)$, where $N$ is the total number of voxels in the grid. The operation is a simple per-voxel threshold check [S2, unofficial].
+*   **Memory Complexity:** $O(N)$ bits (or bytes, depending on implementation) for the output binary grid. The input SDF requires $O(N)$ floats.
+*   **Strengths:** Extremely fast conversion from continuous to discrete; produces clean, watertight binary masks suitable for voxel-based rendering or mesh generation (e.g., marching cubes on binary data) [S2, unofficial].
+*   **Limitations:** Loses all distance information; sensitive to the resolution of the input SDF. If the SDF is coarse, the binary boundary will be jagged or inaccurate [S2, unofficial].
+*   **When to use:** When a binary mask is required for collision detection, voxel-based rendering, or generating blocky meshes. Not suitable when smooth shading or precise distance queries are needed.
 
 ## Background
-This method is a standard post-processing step in pipelines that generate meshes from SDFs [S1, unofficial]. It is described in the context of creating "Minecraft-style" voxel meshes from signed distance fields [S1, unofficial]. The technique is attributed to gradientspace in their tutorial on 3D bitmaps and mesh winding numbers [S1, unofficial].
+Binary voxelization is an early technique for the digitization of solids, historically employing spatial enumeration or recursive subdivision [S1, unofficial]. While modern implementations often rely on efficient SDF generation followed by thresholding, early methods focused on direct voxelization of primitives using scan-line algorithms or forward differencing [S1, unofficial]. The specific implementation described here, converting a `MeshSignedDistanceGrid` to a `Bitmap3`, is a practical application popularized in tutorials for generating voxel art and Minecraft-style meshes [S2, unofficial].
 
 ## Sources
-[S1] 3D Bitmaps, Minecraft Cubes, and Mesh Winding Numbers — gradientspace, https://www.gradientspace.com/tutorials/2017/12/14/3d-bitmaps-and-minecraft-meshes, fetched 2026-10-29 (unofficial)
+[S1] Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)
+[S2] 3D Bitmaps, Minecraft Cubes, and Mesh Winding Numbers — gradientspace, https://www.gradientspace.com/tutorials/2017/12/14/3d-bitmaps-and-minecraft-meshes, fetched 2026-10-29 (unofficial)

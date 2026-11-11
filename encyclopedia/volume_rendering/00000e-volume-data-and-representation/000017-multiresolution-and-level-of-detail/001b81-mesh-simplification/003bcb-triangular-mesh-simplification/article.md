@@ -3,77 +3,105 @@
 Also called: Mesh Decimation, Simplified Step
 
 ## Overview
-Triangular Mesh Simplification reduces the vertex and triangle count of a 3D surface mesh while preserving its geometric appearance, primarily to improve rendering performance and reduce memory usage in volume rendering pipelines [S1]. It serves as a post-processing or pre-processing step for isosurfaces (e.g., from Marching Cubes) to enable real-time interaction [S1]. Unlike vertex clustering which snaps vertices to a grid, this method typically operates by collapsing edges or removing vertices based on geometric error metrics [S1].
+Triangular Mesh Simplification reduces the vertex and face count of a 3D mesh to improve rendering performance while preserving geometric fidelity [S1]. It solves the computational bottleneck of processing high-resolution isosurfaces, particularly in real-time 3D reconstruction and volume visualization contexts [S1]. Unlike general mesh simplification techniques that may prioritize topological correctness or specific error metrics, this method is often integrated as a preprocessing step for isosurface extraction (e.g., Marching Cubes) to balance the trade-off between reconstruction accuracy and interactive rotation speed [S1].
 
 ## How it works
-**Inputs:** A triangular mesh $M = (V, F)$ where $V$ is the set of vertices and $F$ is the set of faces. A target simplification rate $R$ (percentage of triangles to remove) [S1].
-
-**Outputs:** A simplified mesh $M'$ with reduced triangle count [S1].
+**Inputs and Outputs:**
+*   **Input:** A triangular mesh $M = (V, F)$, where $V$ is the set of vertices and $F$ is the set of faces. A target simplification rate $R$ (percentage of reduction) [S1].
+*   **Output:** A simplified mesh $M' = (V', F')$ with fewer elements [S1].
 
 **Data Structures:**
-*   **Mesh:** Stores vertex positions (3D coordinates) and face indices (triplets of vertex indices).
-*   **Edge List:** Implicit or explicit list of edges connecting vertices.
+*   **Mesh:** Standard adjacency representation. Vertices are stored as 3D coordinates. Faces are stored as indices into the vertex array [S1].
+*   **Simplification Rate:** A scalar value $R \in [0, 100]$ representing the percentage of triangles to remove [S1].
 
 **Steps:**
-1.  **Error Calculation:** For each edge in the mesh, calculate a cost metric representing the geometric distortion caused by collapsing that edge (e.g., distance to the plane of adjacent triangles) [S1]. *Note: Specific error formulas are not detailed in the provided sources, but the method relies on selecting edges with minimal error.*
-2.  **Priority Queue:** Insert all edges into a priority queue ordered by their collapse cost (lowest cost first) [S1].
-3.  **Iterative Collapse:**
-    a. Extract the edge with the lowest cost from the queue.
-    b. Collapse the edge by merging its two vertices into one (typically the one with lower error or centroid).
-    c. Update the mesh topology: remove the collapsed edge, update adjacent faces, and recalculate costs for affected edges.
-    d. Repeat until the target simplification rate $R$ is reached [S1].
+1.  **Evaluate Complexity:** Calculate the initial number of faces $N_{orig}$ in the input mesh [S1].
+2.  **Determine Target:** Calculate the target number of faces $N_{target}$ based on the simplification rate $R$:
+    $$ N_{target} = N_{orig} \times (1 - \frac{R}{100}) $$
+    [S1]
+3.  **Apply Simplification:** Execute a mesh decimation algorithm to reduce the face count from $N_{orig}$ to $N_{target}$. The specific algorithm details (e.g., edge collapse, vertex clustering) are not specified in the primary source, but the result is a mesh with reduced distortion [S1]. [G] *Note: In practice, this often involves iterative edge collapses based on a cost metric (e.g., quadric error metrics) until the target count is reached.*
+4.  **Validation:** Verify the resulting mesh integrity. If the simplification process fails or produces invalid geometry, the operation is aborted or handled via error catching [S2, unofficial].
 
 **Parameters:**
-*   **Simplification Rate ($R$):** The percentage of triangles to remove. Typical values tested are 50% and 90% [S1].
+*   **Simplification Rate ($R$):** The percentage of mesh reduction. Typical values tested include 50% and 90% [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Distortion:** Aggressive simplification can distort the 3D reconstruction model, potentially affecting the accuracy of the volume data representation [S1].
-*   **Topology:** Edge collapse must maintain manifold topology to avoid cracks or non-manifold geometry, especially in adaptive multiresolution contexts [S2].
+*   **Distortion:** Higher simplification rates lead to increased distortion of the 3D reconstruction model [S1].
+*   **Failure Handling:** If a subsequent remeshing step (e.g., Botsch remeshing) fails, the error must be caught and printed [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def simplify_mesh(mesh, simplification_rate):
+    """
+    Simplifies a triangular mesh by a given percentage.
+    
+    Args:
+        mesh: A mesh object with attributes 'faces' and 'vertices'.
+        simplification_rate: Float, percentage of faces to remove (0-100).
+        
+    Returns:
+        Simplified mesh object.
+    """
+    # Step 1: Get original face count
+    n_orig = len(mesh.faces)
+    
+    # Step 2: Calculate target face count
+    # Formula: N_target = N_orig * (1 - R/100)
+    n_target = n_orig * (1 - simplification_rate / 100.0)
+    
+    # Step 3: Apply decimation
+    # The specific decimation algorithm (e.g., edge collapse) is implementation-dependent.
+    # This step reduces the mesh to approximately n_target faces.
+    simplified_mesh = decimate(mesh, target_face_count=n_target)
+    
+    # Step 4: Return result
+    return simplified_mesh
+```
 
 ## Subtopics
 
-### Terrain Multiresolution Representation
-A multiresolution terrain representation using a bintree hierarchy formed by 4-8 subdivision (longest edge bisection), where each node represents a patch of triangles [S2]. The patch interior uses regular grid connectivity with $n$ rows of triangles, allowing $n$ to be any integer (not just power of two) [S2]. Each patch has $V = (n + 1)(n + 2)/2$ vertices and $T = n^2$ triangles [S2]. Terrain dimensions are limited to $(2mn + 1)^2$ for non-negative integer $m$ [S2]. This method allows adaptive refinement to produce a conforming mesh free of cracks [S2].
+### [Terrain Multiresolution Representation](10004-terrain-multiresolution-representation.md)
+Terrain Multiresolution Representation (TMR) is a method for adaptive, view-dependent level-of-detail (LOD) rendering of regular height field terrain using a Binary Triangle Tree (BTT) hierarchy. It solves the performance-quality trade-off in real-time terrain rendering by dynamically refining the mesh density based on the observer's distance, ensuring high resolution near the viewer and lower resolution at a distance. Unlike Quad-Tree approaches which rely on recursive square subdivisions, BTT is inherently triangle-based, splitting each triangle into two right-triangle children via longest-edge bisection, which provides a more natural fit for triangle-strip rendering and continuous mesh generation.
 
-### Botsch Remeshing
-Re-meshes a triangular surface using the Botsch algorithm to achieve a target edge length, improving mesh uniformity [S3, unofficial]. It is often used as a preprocessing step before simplification or rendering [S3, unofficial].
-
-**Steps:**
-1.  Calculate average edge length: `avg_edge_len = mesh.edges_unique_length.mean()` [S3, unofficial].
-2.  Determine target edge length: if `args.remesh_len < 0`, use `min(avg_edge_len, voxel_model.inside_extent.item() / 1024)`; otherwise use `args.remesh_len` [S3, unofficial].
-3.  Execute remeshing with 5 iterations and target length: `v, f = remesh_botsch(mesh.vertices, mesh.faces, i=5, h=target_edge_len)` [S3, unofficial].
-4.  Reconstruct mesh from new vertices and faces: `mesh = trimesh.Trimesh(vertices=v, faces=f)` [S3, unofficial].
-
-**Pitfalls:** If remeshing fails, the error is caught and printed: `print(f"Remesh failed.")` [S3, unofficial].
+#### Botsch Remeshing
+Re-meshes a triangular surface using the Botsch algorithm to achieve a target edge length, improving mesh uniformity [S2, unofficial].
+*   **Step:** Calculate average edge length: `avg_edge_len = mesh.edges_unique_length.mean()` [S2, unofficial].
+*   **Step:** Determine target edge length: if `args.remesh_len < 0`, use `min(avg_edge_len, voxel_model.inside_extent.item() / 1024)`; otherwise use `args.remesh_len` [S2, unofficial].
+*   **Step:** Execute remeshing with 5 iterations and target length: `v, f = remesh_botsch(mesh.vertices, mesh.faces, i=5, h=target_edge_len)` [S2, unofficial].
+*   **Step:** Reconstruct mesh from new vertices and faces: `mesh = trimesh.Trimesh(vertices=v, faces=f)` [S2, unofficial].
+*   **Pitfall:** If remeshing fails, the error is caught and printed: `print(f"Remesh failed.")` [S2, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** Not explicitly given in the sources. However, performance is measured by rotation time in a viewer [S1].
+**Time and Memory Complexity:**
+*   **Time:** The simplification process itself is not explicitly timed in the sources, but the impact on rendering time is measured.
+*   **Memory:** Not given in the sources.
 
 **Measured Performance:**
-*   **Hardware/Scene:** Not specified [S1].
-*   **Resolution:** Tested on a 3D reconstruction model (CT images) [S1].
+*   **Hardware/Scene:** Not given in the sources.
+*   **Resolution/Scene:** Tested on a 3D reconstruction model derived from CT images [S1].
 *   **Results:**
-    *   Unsimplified average rotation time: 3.91415s [S1].
-    *   50% simplification average rotation time: 3.44978s (11.86% reduction) [S1].
-    *   90% simplification average rotation time: 2.91094s (25.63% reduction) [S1] [S1].
-*   **Scaling:** Higher simplification rates lead to shorter rotation times, indicating improved real-time interactivity [S1].
+    *   Unsimplified mesh average rotation time: 3.91415s [S1].
+    *   50% simplification rate: Average rotation time 3.44978s (11.86% reduction) [S1].
+    *   90% simplification rate: Average rotation time 2.91094s (25.63% reduction) [S1] [S1].
+
+**Scaling:**
+*   Higher simplification rates result in shorter continuous rotation times, indicating linear or near-linear performance gains with respect to face count reduction [S1].
 
 **Strengths and Limitations:**
-*   **Strengths:** Significantly reduces rendering time for complex isosurfaces, enabling real-time rotation and interaction [S1].
-*   **Limitations:** Can introduce distortion in the 3D reconstruction model, potentially compromising geometric accuracy [S1].
+*   **Strengths:** Significantly reduces rendering time for real-time interaction (e.g., rotation) [S1].
+*   **Limitations:** Introduces distortion to the 3D reconstruction model, which increases with higher simplification rates [S1].
 
 **When to Use:**
-*   Use when real-time interaction with complex isosurfaces is required and some geometric distortion is acceptable [S1].
-*   Use when memory bandwidth or rendering throughput is a bottleneck [S1].
+*   Use when real-time interactivity is required and some geometric distortion is acceptable [S1].
 
 **When Not to Use:**
-*   Use when high geometric fidelity is critical and distortion must be minimized [S1].
-*   Use when the mesh is already simple enough to render in real-time without simplification [S1].
+*   Use when high-fidelity geometric accuracy is critical and performance constraints are loose [S1].
 
 ## Background
-Triangular mesh simplification is a fundamental technique in computer graphics for managing polygonal complexity. In the context of volume rendering, it is often applied to isosurfaces generated by algorithms like Marching Cubes to facilitate interactive visualization [S1]. The method described in [S1] is applied as a "simplified step" before drawing the isosurface to test real-time interactivity [S1].
+The method originates from improvements to 3D reconstruction algorithms based on the Marching Cubes (MC) algorithm [S1]. It was introduced to address the computational cost of rendering high-resolution isosurfaces in real-time applications [S1]. The specific performance metrics were published in 2020 [S1].
 
 ## Sources
 [S1] A Novel 3D Reconstruction Algorithm of CT Images Based on Improved Marching Cubes Algorithm, https://doi.org/10.4108/eai.27-8-2020.2295136, fetched 2026-10-26
-[S2] On-the-fly decompression and rendering of multiresolution terrain, https://doi.org/10.1145/1730804.1730815, fetched 2026-11-01
-[S3] leonhardrobin/svraster-win10, https://github.com/leonhardrobin/svraster-win10, fetched 2026-10-27 (unofficial)
+[S2] leonhardrobin/svraster-win10, https://github.com/leonhardrobin/svraster-win10, fetched 2026-10-27 (unofficial)

@@ -3,41 +3,93 @@
 Also called: Photon Beam Methods
 
 ## Overview
-Photon Beam Mapping is a photon-based method for rendering participating media that replaces discrete photon points with continuous photon beams to create a more compact representation of light transport [S1]. By storing light transport as beams rather than points, the method achieves faster convergence for media such as fog compared to standard photon mapping [S1]. It operates in two phases: a lighting pass that stores light transport as photon beams, and a rendering pass that uses a beam-to-beam estimator to gather contributions [S1].
+Photon Beam Mapping is a photon-based method for rendering participating media that replaces discrete point photons with continuous beam segments during the lighting pass to create a more compact representation of light transport [S1]. This approach solves the high variance and memory overhead associated with traditional photon mapping in homogeneous media like fog by allowing the rendering pass to gather contributions via a beam-to-beam estimator, resulting in faster convergence [S1]. It differs from [Photon-based Estimation](2521-photon-based-estimation.md) by storing energy as extended beams rather than points, and from [Instant Radiosity / Virtual Point Lights (VPLs)](9319-instant-radiosity-virtual-point-lights-vpls.md) by maintaining the continuous trajectory structure of the light source rather than discretizing it into point sources.
 
 ## How it works
-**Inputs:** Light source positions, directions, and intensities; volumetric scene description (extinction, scattering, phase function); camera parameters.
-**Outputs:** Final image radiance.
+The method consists of two distinct passes: a lighting pass that stores light transport as photon beams, and a rendering pass that uses a beam-to-beam estimator to gather contributions [S1].
 
-**Data Structures:**
-*   **Photon Beam:** A geometric primitive representing a differential cylinder of light. It is defined by a central ray (origin $\mathbf{o}$, direction $\boldsymbol{\omega}$) and a cross-sectional radius or area. It carries accumulated energy/weight.
-*   **Photon Map:** A spatial data structure (e.g., k-d tree) storing the photon beams for efficient nearest-neighbor queries during the rendering pass.
+**Inputs and Outputs**
+*   **Inputs:** Scene geometry, participating media properties (scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, phase function $p$), light source definitions, and camera parameters.
+*   **Outputs:** Radiance values for each pixel in the final image.
 
-**Steps:**
-1.  **Photon Shooting (Lighting Pass):**
-    *   Shoot photons from light sources into the volume.
-    *   Instead of storing interaction points, trace the path of the photon as a continuous beam segment through the medium.
-    *   Store these segments as photon beams in the photon map. The energy of the beam is attenuated according to the medium's extinction coefficient along the segment [S1].
-2.  **Rendering Pass (Beam-to-Beam Estimation):**
-    *   For each pixel, trace a camera ray.
-    *   Identify photon beams in the photon map that intersect or are near the camera ray.
-    *   Use a beam-to-beam estimator to calculate the contribution of the stored photon beams to the camera ray's radiance. This estimator integrates the energy of the nearby photon beams weighted by the scattering phase function and transmittance [S1].
+**Data Structures**
+The core data structure is a collection of photon beams. Each beam is defined by:
+1.  **Origin:** The starting position of the beam in the medium.
+2.  **Direction:** The unit vector indicating the beam's propagation direction.
+3.  **Length:** The distance the beam travels before scattering or termination.
+4.  **Power:** The radiometric power carried by the beam.
+5.  **Wavelength/Color:** The spectral or RGB energy distribution.
 
-**Formulas:**
-The core advantage is the compactness of the representation. While specific beam-to-beam estimator formulas are not detailed in the provided sources, the method relies on the principle that a beam represents a differential cylinder of light, allowing for smoother density estimation than point-based methods [S1].
+**Steps**
+1.  **Photon Beam Tracing (Lighting Pass):**
+    *   Shoot beams from light sources into the participating medium [S1].
+    *   For each beam, trace its path through the medium. At each step, determine if a scattering event occurs based on the optical depth.
+    *   If a scattering event occurs, record the beam segment up to that point, update the beam's direction according to the phase function, attenuate the power by the albedo, and continue tracing.
+    *   Store the resulting beam segments in a volumetric photon map. Unlike point photons, these segments represent continuous paths of light [S1].
 
-**Parameters:**
-*   Number of photons/beams: Not given in the sources.
-*   Beam radius/width: Not given in the sources.
+2.  **Beam-to-Beam Estimation (Rendering Pass):**
+    *   For each pixel, trace a camera ray into the scene [S1].
+    *   Identify photon beams that intersect or come within a certain proximity of the camera ray.
+    *   Estimate the radiance contribution at the shading point by integrating the power of the intersecting beams over the beam's length and cross-section.
+    *   The estimator accounts for the geometric relationship between the camera ray and the photon beam, effectively performing density estimation on the continuous beam segments rather than discrete points [S1].
 
-**Edge Cases and Pitfalls:**
-*   **Memory Usage:** Standard photon beam methods rely on a huge volumetric photon map, which is memory costly [S1].
-*   **Surface Interactions:** The basic method is unable to handle medium interactions immediately following scattering from a surface (e.g., volumetric caustics) [S1].
+**Formulas**
+The radiance $L$ at a point $\vec{x}$ on the camera ray is estimated by summing contributions from nearby photon beams. While the exact beam-to-beam estimator formula is not explicitly detailed in the provided sources, it is described as a "beam-to-beam" estimator that gathers the contribution of the photon map along camera rays [S1]. This implies an integration over the beam's volume intersected by the camera ray's kernel.
+
+**Parameters**
+*   **Beam Length:** Determined by the mean free path in the medium.
+*   **Kernel Size:** The radius or width used to determine if a beam contributes to a camera ray sample. Not given in the sources.
+
+**Edge Cases and Pitfalls**
+*   **Memory Usage:** Traditional photon maps are memory costly due to the huge number of points required for low variance [S1]. Photon Beam Mapping reduces this by using beams, but a progressive strategy is often required to eliminate memory limitations by generating, using, and discarding small photon maps iteratively [S1].
+*   **Surface Interactions:** The method is unable to handle medium interactions immediately following scattering from a surface, such as volumetric caustics, if the beam tracing does not account for these specific boundary conditions [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def photon_beam_mapping(scene, camera):
+    # Lighting Pass
+    photon_beams = []
+    for light in scene.lights:
+        # Shoot beams from light source
+        beam = trace_beam_from_light(light, scene.media)
+        while beam.active:
+            # Record beam segment
+            photon_beams.append(beam.segment)
+            # Determine next scattering event
+            beam = beam.scatter(scene.media)
+    
+    # Rendering Pass
+    image = empty_image(camera.resolution)
+    for pixel in camera.rays:
+        radiance = 0.0
+        for beam in photon_beams:
+            # Beam-to-beam estimator
+            # Check intersection/proximity between camera ray and beam
+            if beam_intersects_camera_ray(beam, pixel.ray):
+                contribution = estimate_beam_contribution(beam, pixel.ray)
+                radiance += contribution
+        image[pixel] = radiance
+    return image
+
+def trace_beam_from_light(light, media):
+    # Initialize beam at light position with light direction
+    beam = Beam(origin=light.position, direction=light.direction, power=light.power)
+    # Trace through medium
+    # ... implementation details omitted ...
+    return beam
+
+def estimate_beam_contribution(beam, camera_ray):
+    # Integrate beam power over intersection with camera ray kernel
+    # ... implementation details omitted ...
+    return contribution
+```
 
 ## Subtopics
 
 ### [Transient Photon Beams](3296-transient-photon-beams.md)
-Transient Photon Beams is a numerical method for rendering participating media in the transient state, extending the steady-state Photon Beam algorithm by accounting for photon time-of-flight along continuous beam trajectories. It solves the time-resolved Radiative Transfer Equation (RTE) by combining photon beam tracing with 2D density estimation to mitigate variance in the temporal domain. Unlike standard kernel density estimation which remains biased even with infinite photons, the Progressive variant uses a spatio-temporal kernel reduction scheme to converge to the correct solution with finite memory. It differs from Photon Beam Diffusion by preserving the full directional and temporal structure of light transport rather than diffusing it, and from Photon Marching by using continuous beam segments for density estimation rather than discrete point interactions.
+Transient Photon Beams is a numerical method for rendering participating media in the transient state, extending the steady-state Photon Beam algorithm by accounting for photon time-of-flight along continuous beam trajectories. It solves the time-resolved Radiative Transfer Equation (RTE) by combining photon beam tracing with 2D density estimation to mitigate variance in the temporal domain. Unlike standard kernel density estimation which remains biased even with infinite photons, the Progressive variant uses a spatio-temporal kernel reduction scheme to converge to the correct solution with finite memory. It differs from [Photon Beam Diffusion](3768-photon-beam-diffusion.md) by preserving the full directional and temporal structure of light transport rather than diffusing it, and from [Photon Marching](4775-photon-marching.md) by using continuous beam segments for density estimation rather than discrete point interactions.
 
 ### [Photon Beam Diffusion](3768-photon-beam-diffusion.md)
 Photon Beam Diffusion (PBD) is a hybrid Monte Carlo method for rendering subsurface scattering in translucent materials that interprets incident light as a continuous beam of photons and solves the diffusion equation via numerical integration. It eliminates the need for quantization and sum-of-Gaussians approximations used in Quantized Diffusion (QD) by treating the beam as an extended source, providing increased speed, flexibility, and numerical stability. Unlike QD, which requires 20–60 Gaussians for equivalent quality, PBD achieves similar results with only 3–5 Monte Carlo samples.
@@ -46,31 +98,34 @@ Photon Beam Diffusion (PBD) is a hybrid Monte Carlo method for rendering subsurf
 Photon Marching is a photon shooting method that deposits energy at uniform intervals along rays originating from light sources, creating a "discrete photon beam". It differs from standard photon tracing (Markov random-walk) by distributing the power of a single photon among multiple photons deposited at fixed steps, analogous to the difference between random-walk volumetric path tracing and ray marching.
 
 ### Diffuse Single Scattering Integration
-An explicit calculation of the diffuse single-scattering term using the same Monte Carlo integration strategy as multi-scattering, replacing the multi-scattering Green's function with a single-scattering response [S2, unofficial]. Compute the single-scattering profile $R^{(1)}(\vec{x}, \vec{\omega})$ using the same Monte Carlo estimator, but with $f(\vec{x}, \vec{\omega}, t_i) = r^{(1)}(\vec{x}, \vec{x}_r(t_i)) Q(t_i)$ [S2, unofficial]. The single-scattering response is given by:
+An explicit calculation of the diffuse single-scattering term using the same Monte Carlo integration strategy as multi-scattering, replacing the multi-scattering Green's function with a single-scattering response [S2, unofficial]. Compute the single-scattering profile $R^{(1)}(\vec{x}, \vec{\omega})$ using the same Monte Carlo estimator, but with $f(\vec{x}, \vec{\omega}, t_i) = r^{(1)}(\vec{x}, \vec{x}_r(t_i)) Q(t_i)$. The single-scattering response is given by:
 $$ r^{(1)}(\vec{x}, \vec{x}_r(t)) = \frac{f_s(\vec{\omega} - \vec{x}_r(t)) e^{-t_0 d_r(t)} F_t(\theta_o, \eta) F_t(\theta_i, 1/\rho) \cos \theta_o}{d_r^2(t)} $$
 where $\vec{x}_r(t)$ and $d_r(t)$ are the direction and distance from $\vec{x}_r(t)$ to $\vec{x}$, $\theta_o = \arccos(\vec{x}_r(t) - \vec{x} \cdot \vec{n})$, $\theta_i = \arccos(\vec{\omega} \cdot \vec{n})$, and $F_t$ and $f_s$ are transmissive Fresnel and phase function terms [S2, unofficial]. If the surface separates volumes with different indices of refraction, use a separate sample sequence for single-scattering starting from the critical angle, as contributions below the critical angle are zero [S2, unofficial].
 
 ### Unbiased Photon Gathering
-An unbiased photon gathering method by Qin et al. that combines each photon's path with the camera path into one path [S1]. It considers all factors in Monte Carlo methods such as visibility and probability to remove bias [S1].
+An unbiased photon gathering method by Qin et al. that combines each photon's path with the camera path into one path [S1]. It considers all factors in Monte Carlo methods such as visibility and probability to remove the bias [S1].
 
 ### Krueger's Transport Theory Model
-A model describing existing volume rendering methods as special cases of an underlying transport theory model of particle transfer in inhomogeneous media [S3, unofficial]. A beam of 'virtual' particles is sent through the volume with user-selected properties and interaction laws [S3, unofficial]. The intensity $I$ at a pixel is a path integral along the view ray:
-$$ I = \int_{p_{near}}^{p_{far}} \frac{(a(p) + \rho_{sc}(p) Q(p)) dp}{e^{\tau(p)}} $$
-Emission at each point $p$ is scaled by optical depth to eye [S3, unofficial]. The generalized source $Q(p)$ is:
-$$ Q(p) = q(p) + \int \frac{\rho_{sc}(p)}{\rho_{sc}} I(S, u) d\eta $$
-Consists of emission $q(p)$ and incoming intensity along all directions scaled by scattering phase $\rho_{sc}$ [S3, unofficial]. Typically, a low albedo approximation is used to simplify calculations, reducing the integral to a sum over all light sources [S3, unofficial]. If virtual particles have photon properties and interaction laws are governed by optical laws, the model becomes a generalized ray tracer [S3, unofficial].
+A model describing existing volume rendering methods as special cases of an underlying transport theory model of particle transfer in inhomogeneous media. A beam of 'virtual' particles is sent through the volume with user-selected properties and interaction laws [S3, unofficial]. The intensity $I$ at a pixel is a path integral along the view ray:
+$$ I = \frac{p_{far}}{p_{near}} \int \frac{(a(p) + \rho_{sc}(p) Q(p)) dp}{e^{\tau(p)}} $$
+Emission at each point $p$ is scaled by optical depth to eye. The generalized source $Q(p)$ is:
+$$ Q(p) = q(p) + \frac{\rho_{sc}(p)}{\rho_{sc}} \int I(S, \vec{u}) d\eta $$
+Typically, a low albedo approximation is used to simplify calculations, reducing the integral to a sum over all light sources [S3, unofficial]. If virtual particles have photon properties and interaction laws are governed by optical laws, the model becomes a generalized ray tracer [S3, unofficial].
 
 ### Visibility Tracing
-Problem of visibility of lighted exit signs in buildings through fire-caused non-uniform smoke, using parallelized Monte Carlo particle tracing method [S4]. Perform single step: just a particle tracing phase [S4]. Whenever bundle hits image plane (receiver), update corresponding pixel [S4]. Use small number of bundles to obtain coarse solution [S4]. If higher accuracy required, re-scale energy of already traced bundles and shoot more bundles [S4].
+A parallelized Monte Carlo particle tracing method for the visibility of lighted exit signs in buildings through fire-caused non-uniform smoke [S4]. Perform a single step: just a particle tracing phase. Whenever a bundle hits the image plane (receiver), update the corresponding pixel. Use a small number of bundles to obtain a coarse solution. If higher accuracy is required, re-scale energy of already traced bundles and shoot more bundles [S4].
 
 ## Operating characteristics
-*   **Memory:** Standard implementations rely on a huge volumetric photon map, which is memory costly [S1].
-*   **Convergence:** Replacing photons with photon beams results in a more compact representation, leading to faster convergence for media like fog [S1].
-*   **Limitations:** The basic method cannot handle medium interactions immediately following scattering from a surface (e.g., volumetric caustics) [S1].
-*   **Progressive Variant:** A progressive method with photon beams was proposed to eliminate memory limitations by replacing the huge volumetric photon map with many small photon maps generated iteratively [S1].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Significantly reduced compared to traditional photon mapping due to the compact representation of beams, though a progressive strategy is often used to further limit memory usage by discarding small photon maps iteratively [S1].
+*   **Measured Performance:** Results in faster convergence for media like fog compared to point-based photon mapping [S1].
+*   **Strengths:** Compact representation of light transport, faster convergence in homogeneous media, supports all types of scattering [S1].
+*   **Limitations:** Unable to handle medium interactions immediately following scattering from a surface (e.g., volumetric caustics) in some implementations [S1].
+*   **When to use:** Rendering homogeneous participating media like fog where compact light transport representation is beneficial.
+*   **When not to use:** Scenes with complex surface-to-medium interactions like volumetric caustics if the specific implementation does not support them [S1].
 
 ## Background
-Photon Beam Mapping was introduced by Jarosz et al. [10] as an improvement over previous photon-based methods [S1]. Jarosz et al. [9] had previously improved photon mapping by gathering the contribution of the photon map along camera rays rather than camera samples, speeding up convergence [S1]. Jarosz et al. [10] then replaced photons with photon beams in the lighting pass, making the representation more compact and resulting in further faster convergence for some media, like fog [S1]. The estimator used is beam-to-beam [S1].
+Photon Beam Mapping was developed as an improvement over traditional photon mapping for participating media. Jarosz et al. [9] initially improved photon mapping by gathering contributions along camera rays. Jarosz et al. [10] then replaced photons with photon beams in the lighting pass, creating a more compact representation and faster convergence for media like fog [S1]. To address the memory costs of huge volumetric photon maps, a progressive method with photon beams was proposed [11], replacing the huge map with many small maps generated iteratively [S1]. Křivánek et al. [1] noted that different representations (points, beams, paths) are suitable for different media [S1].
 
 ## Sources
 [S1] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

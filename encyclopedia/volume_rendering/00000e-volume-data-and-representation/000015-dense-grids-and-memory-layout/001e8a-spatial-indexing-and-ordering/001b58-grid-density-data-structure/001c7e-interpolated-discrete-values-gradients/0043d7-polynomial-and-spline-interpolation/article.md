@@ -1,67 +1,61 @@
 # Polynomial and Spline Interpolation
 
-Also called: Continuous Field Reconstruction, Basis Function Interpolation
+Also called: Continuous Field Reconstruction from Discrete Samples
 
 ## Overview
-Polynomial and Spline Interpolation provides a continuous scalar or vector field from discrete grid data by evaluating weighted sums of basis functions, solving the problem of aliasing and discontinuity inherent in nearest-neighbor sampling [S1, unofficial][S2][S3, unofficial]. Unlike [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md) which selects a single representative value, or [Piecewise Quadratic Hermite Interpolation](4001-piecewise-quadratic-hermite-interpolation.md) which uses derivative information for $C^1$ continuity with fewer points, this family generally relies on higher-order polynomials (cubic or higher) over larger support regions to ensure smoothness and differentiability [S1, unofficial][S2].
+Polynomial and Spline Interpolation methods reconstruct continuous scalar or vector fields from discrete grid data by evaluating piecewise polynomial basis functions, providing $C^0$ to $C^2$ continuity depending on the basis order [S1, unofficial][S2]. Unlike [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md) which yields discontinuous step functions, or [Grid Cell Collection via Corner Indices](1518-grid-cell-collection-via-corner-indices.md) which provides the raw neighborhood data for lower-order schemes, this family explicitly defines the mathematical basis (Hermite, B-spline, Box-spline) used to blend those samples into a smooth, differentiable field suitable for ray casting and gradient-based shading [S1, unofficial][S2][S3, unofficial].
 
 ## Shared principles
-All methods in this family reconstruct a continuous function $u(\mathbf{p})$ from discrete samples $w_i$ located at grid positions $\mathbf{p}_i$ using a set of basis functions $B(\mathbf{x})$. The general evaluation formula is:
-$$
-u(\mathbf{p}) = \sum_{i} w_i B(\mathbf{p} - \mathbf{p}_i)
-$$
-The key shared characteristics are:
-1.  **Local Support**: The basis functions have finite support, meaning only a fixed number of nearby grid points influence the value at a query point $\mathbf{p}$. This limits computational cost to a constant number of operations per query, independent of the total grid size.
-2.  **Continuity**: The choice of basis function determines the continuity of the resulting field. Linear bases yield $C^0$ continuity (continuous values, discontinuous derivatives), while cubic bases typically yield $C^1$ continuity (continuous values and first derivatives) [S1, unofficial][S2].
-3.  **Separability**: In 3D, the basis function is often separable, allowing the 3D evaluation to be decomposed into three 1D evaluations. For example, in B-spline interpolation:
-    $$
-    B_3(\mathbf{x}, \mathbf{y}, \mathbf{z}) = B_1(x) B_1(y) B_1(z)
-    $$
-    This reduces the complexity from $O(N^3)$ to $O(3N)$ for a support of size $N$ per dimension [S1, unofficial].
-4.  **Normalization**: The basis functions are typically normalized such that $\sum_i B(\mathbf{p} - \mathbf{p}_i) = 1$ for all $\mathbf{p}$, ensuring that constant fields are reproduced exactly [S1, unofficial].
+All methods in this family operate on a regular or structured grid of discrete samples (control points or voxel values) and evaluate a continuous function $u(\mathbf{p})$ at arbitrary query coordinates $\mathbf{p}$.
+
+1.  **Local Support**: Evaluation at $\mathbf{p}$ depends only on a finite neighborhood of grid indices. For a basis with support width $k$ in each dimension, $k^d$ samples are accessed, where $d$ is the spatial dimension [S1, unofficial][S2].
+2.  **Basis Function Evaluation**: The method computes weights $w_i$ for each sample $s_i$ using a basis function $B(\cdot)$ evaluated at the normalized local coordinates $\tilde{\mathbf{p}}$ of $\mathbf{p}$ within its support cell:
+    $$ u(\mathbf{p}) = \sum_{i \in \text{Support}} B_i(\tilde{\mathbf{p}}) s_i $$
+3.  **Continuity**: The order of the polynomial determines the continuity $C^{n-1}$, where $n$ is the polynomial degree. Cubic bases generally provide $C^2$ continuity for B-splines and $C^1$ for Hermite/Box-splines, ensuring smooth gradients for normal estimation [S1, unofficial][S2].
+4.  **Normalization**: Local coordinates are typically normalized to $[0, 1]$ or $[-1, 1]$ relative to the grid spacing and origin to allow basis functions to be evaluated independently of the grid's physical scale [S1, unofficial][S2].
 
 ## Subtopics
 
 ### [Grid Cell Collection via Corner Indices](1518-grid-cell-collection-via-corner-indices.md)
-Grid Cell Collection via Corner Indices is a sampling strategy that extracts the values and positions of the eight vertices defining the grid cell enclosing a set of input points. It serves as the foundational data retrieval step for trilinear interpolation and surface extraction methods, solving the problem of mapping arbitrary continuous coordinates to the discrete tensor indices required for dense volume rendering. Unlike [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md) which selects a single representative value, or [Piecewise Quadratic Hermite Interpolation](4001-piecewise-quadratic-hermite-interpolation.md) which uses derivative information, this method explicitly gathers the full local neighborhood to enable higher-order reconstruction. See [Grid Cell Collection via Corner Indices](1518-grid-cell-collection-via-corner-indices.md).
+A sampling strategy that extracts the values and positions of the eight vertices defining the grid cell enclosing a set of input points. It serves as the foundational data retrieval step for trilinear interpolation and surface extraction methods, solving the problem of mapping arbitrary continuous coordinates to the discrete tensor indices required for dense volume rendering. Unlike [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md) which selects a single representative value, or [Piecewise Quadratic Hermite Interpolation](4001-piecewise-quadratic-hermite-interpolation.md) which uses derivative information, this method explicitly gathers the full local neighborhood to enable higher-order reconstruction.
 
 ### [Piecewise Quadratic Hermite Interpolation](4001-piecewise-quadratic-hermite-interpolation.md)
-A method for interpolating a normalized scalar field within a 1D interval using two piecewise quadratic Bézier curves to satisfy Hermite data (value and derivative) at both endpoints. It solves the incompatibility of single quadratic interpolation with four constraints (two values, two derivatives) by splitting the interval, providing a $C^1$ continuous interpolant that is more numerically stable and efficient than cubic interpolation, particularly for root isolation in volume rendering. See [Piecewise Quadratic Hermite Interpolation](4001-piecewise-quadratic-hermite-interpolation.md).
+A method for interpolating a normalized scalar field within a 1D interval using two piecewise quadratic Bézier curves to satisfy Hermite data (value and derivative) at both endpoints. It solves the incompatibility of single quadratic interpolation with four constraints (two values, two derivatives) by splitting the interval, providing a $C^1$ continuous interpolant that is more numerically stable and efficient than cubic interpolation, particularly for root isolation in volume rendering.
 
 ### [B-spline Field Interpolation](11066-b-spline-field-interpolation.md)
-B-spline field interpolation is a method for evaluating a continuous function from a discrete grid of control points using cubic B-splines, where the basis functions have local support. It differs from nearest-neighbor or trilinear interpolation by providing $C^1$ continuity (continuous first derivatives) and smoother results, at the cost of a larger support region (64 control points in 3D) and higher computational overhead per query. It is distinct from Piecewise Quadratic Hermite Interpolation, which uses fewer points but lower continuity, and Voxel Data Interpolation, which typically refers to lower-order or non-spline methods. See [B-spline Field Interpolation](11066-b-spline-field-interpolation.md).
+B-spline field interpolation represents a continuous scalar or vector field using a grid of control points and associated weights, evaluated via cubic B-spline basis functions. It solves the problem of reconstructing smooth, differentiable fields from discrete data, particularly in contexts like dynamic tomography where continuous spatial and temporal queries are required. It is distinguished from its siblings by its specific cubic polynomial basis which ensures $C^1$ continuity (continuous first derivatives) and its local support of $4 \times 4 \times 4$ control points, providing a balance between smoothness and computational efficiency. Unlike [Voxel Data Interpolation and Sampling](12781-voxel-data-interpolation-and-sampling.md) which uses piecewise constant or linear approximations, or [Grid Cell Collection via Corner Indices](1518-grid-cell-collection-via-corner-indices.md) which may use trilinear interpolation, B-spline interpolation yields smoother gradients essential for accurate normal estimation in ray casting.
 
 ### [Voxel Data Interpolation and Sampling](12781-voxel-data-interpolation-and-sampling.md)
-This method retrieves scalar values, gradients, and transformed colors at arbitrary 3D positions within a volume grid, supporting configurable interpolation and transfer function input modes. It differs from its siblings by explicitly exposing the mechanism for selecting between nearest-neighbor and trilinear interpolation, and by defining specific transfer function modes that feed either raw voxel values or gradient magnitudes into the color mapping stage. See [Voxel Data Interpolation and Sampling](12781-voxel-data-interpolation-and-sampling.md).
+This method retrieves scalar values, gradients, and transformed colors at arbitrary 3D positions within a volume grid, supporting configurable interpolation and transfer function modes. It differs from its siblings by explicitly exposing the gradient magnitude for transfer function input and providing a specific indexing scheme for dense grid storage, whereas [Grid Cell Collection via Corner Indices](1518-grid-cell-collection-via-corner-indices.md) focuses on geometric cell identification and [B-spline Field Interpolation](11066-b-spline-field-interpolation.md) relies on higher-order continuity.
 
 ### Hermite Interpolation of Scalar Fields
-**Definition**: A technique for rendering scalar valued functions (height and signed distance fields) by storing partial derivatives with function values and using Hermite interpolation between samples to guarantee a globally $C^1$-continuous result [S1, unofficial].
-**Steps**:
-1. Store the partial derivatives of the scalar valued function with the function values [S1, unofficial].
-2. Use Hermite interpolation between the samples [S1, unofficial].
-3. Use the exact normals of the reconstructed cubic Hermite surface as shading normals [S1, unofficial].
-4. Derive an approximation for mixed partial derivatives for three dimensional first order fields, akin to Adini's method for parametric surface patches [S1, unofficial].
-**Comparison**: Provides a storage efficient replacement for normal mapping with richer visual appearance, as it does not necessarily require extra storage if surface normals are already part of the discrete field of samples [S1, unofficial].
+- **Definition**: A technique for rendering scalar valued functions (height and signed distance fields) by storing partial derivatives with function values and using Hermite interpolation between samples to guarantee a globally $C^1$-continuous result [S1, unofficial].
+- **Steps**:
+    1. Store the partial derivatives of the scalar valued function with the function values [S1, unofficial].
+    2. Use Hermite interpolation between the samples [S1, unofficial].
+    3. Use the exact normals of the reconstructed cubic Hermite surface as shading normals [S1, unofficial].
+    4. Derive an approximation for mixed partial derivatives for three dimensional first order fields, akin to Adini's method for parametric surface patches [S1, unofficial].
+- **Comparison**: Provides a storage efficient replacement for normal mapping with richer visual appearance, as it does not necessarily require extra storage if surface normals are already part of the discrete field of samples [S1, unofficial].
 
 ### Box Spline Interpolation
-**Definition**: A piecewise polynomial interpolation function with finite support, uniquely defined by a direction matrix, used for reconstructing continuous splines from discrete datasets [S2].
-**Steps**:
-1. Construct the box-spline by taking consecutive directional convolutions along each column direction of the direction matrix $\Xi$ [S2].
-2. For non-Cartesian lattices, apply a change-of-variables to the Cartesian lattice theory [S2].
-**Formula**: Recursive definition: $M_{\Xi \cup \{\mathbf{d}\}}(\mathbf{x}) = \int_0^1 M_\Xi(\mathbf{x} - t\mathbf{d}) dt, \mathbf{x} \in \mathbb{R}^n$ (Eq 6) [S2].
-**Comparison**: Provides higher quality and reasonable performance compared to trilinear or tricubic interpolations commonly used on mobile devices [S2].
-**Usage**: Mobile volume rendering, FCC datasets, GPU ray casting [S2].
+- **Definition**: A piecewise polynomial interpolation function with finite support, uniquely defined by a direction matrix, used for reconstructing continuous splines from discrete datasets [S2].
+- **Steps**:
+    1. Construct the box-spline by taking consecutive directional convolutions along each column direction of the direction matrix $\Xi$ [S2].
+    2. For non-Cartesian lattices, apply a change-of-variables to the Cartesian lattice theory [S2].
+- **Formula**: Recursive definition: $M_{\Xi \cup \{\mathbf{d}\}}(\mathbf{x}) = \int_0^1 M_\Xi(\mathbf{x} - t\mathbf{d}) dt, \mathbf{x} \in \mathbb{R}^n$ (Eq 6) [S2].
+- **Comparison**: Provides higher quality and reasonable performance compared to trilinear or tricubic interpolations commonly used on mobile devices [S2].
+- **Usage**: Mobile volume rendering, FCC datasets, GPU ray casting [S2].
 
 ### Distance Weighting Filter
-**Definition**: A spatial interpolation filter that assigns weights based on distance to preserve data structure during grid mapping [S3, unofficial].
-**Parameter**: Filter radius determines the spatial extent of the weighting; must be shortened to increase sampling rate [S3, unofficial].
-**Pitfall**: Assumes a constant, second-order distribution of weighting terms based on the filter radius; under-samples areas with high data frequency, causing inner and outer shells to disappear where data density varies [S3, unofficial].
-**Comparison**: Performs worse than the Gaussian filter for preserving accuracy because it lacks a degree of freedom for adjusting sampling frequency independently of radius [S3, unofficial].
+- **Definition**: A spatial interpolation filter that assigns weights based on distance to preserve data structure during grid mapping [S3, unofficial].
+- **Parameter**: Filter radius determines the spatial extent of the weighting; must be shortened to increase sampling rate [S3, unofficial].
+- **Pitfall**: Assumes a constant, second-order distribution of weighting terms based on the filter radius; under-samples areas with high data frequency, causing inner and outer shells to disappear where data density varies [S3, unofficial].
+- **Comparison**: Performs worse than the Gaussian filter for preserving accuracy because it lacks a degree of freedom for adjusting sampling frequency independently of radius [S3, unofficial].
 
 ## Background
-Polynomial interpolation has long been a staple in computer graphics for texture mapping and volume rendering. Trilinear interpolation, a first-order polynomial method, is ubiquitous due to its low computational cost [S1, unofficial]. Higher-order methods like cubic B-splines were adopted to address the visual artifacts (blockiness, discontinuous gradients) of linear methods, particularly in implicit surface rendering and smooth volume visualization [S1, unofficial][S2]. Hermite interpolation was introduced to explicitly preserve derivative information (normals) within the scalar field, enabling more accurate shading without additional storage [S1, unofficial]. Box splines, introduced by de Boor et al., provide a flexible framework for non-Cartesian lattices (like Face-Centered Cubic) and offer improved isotropy and smoothness for mobile and real-time rendering applications [S2]. Distance weighting filters emerged in the context of scattered data interpolation onto regular grids for visualization, though they are less common in modern dense volume rendering compared to spline-based methods [S3, unofficial].
+Hermite interpolation in volume rendering was proposed to replace standard trilinear filtering with $C^1$-continuous fields, allowing the use of exact surface normals for shading without additional storage overhead [S1, unofficial]. Box-spline interpolation, specifically the 6-direction cubic box-spline, was adapted for mobile platforms to handle Face-Centered Cubic (FCC) datasets, offering a balance between visual quality and computational cost on embedded hardware [S2]. Distance weighting filters were explored in early volume visualization research for mapping scattered data to rectangular grids, though they were found to be less accurate than Gaussian filters for preserving high-frequency data structures [S3, unofficial].
 
 ## Sources
-[S1] (PDF) Accelerating Sphere Tracing - ResearchGate, https://www.researchgate.net/publication/329152815_Accelerating_Sphere_Tracing, fetched 2026-11-04 (unofficial)
+[S1] Accelerating Sphere Tracing, https://www.researchgate.net/publication/329152815_Accelerating_Sphere_Tracing, fetched 2026-11-04 (unofficial)
 [S2] Real-Time Volume Rendering of FCC Datasets Using Box-Splines on the Mobile Platforms, https://hal.science/hal-05467237v1, fetched 2026-10-27
-[S3] DTIC ADA215533: Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)
+[S3] Sampling Scattered Data Onto Rectangular Grids for Volume Visualization, https://archive.org/details/DTIC_ADA215533, fetched 2026-10-26 (unofficial)

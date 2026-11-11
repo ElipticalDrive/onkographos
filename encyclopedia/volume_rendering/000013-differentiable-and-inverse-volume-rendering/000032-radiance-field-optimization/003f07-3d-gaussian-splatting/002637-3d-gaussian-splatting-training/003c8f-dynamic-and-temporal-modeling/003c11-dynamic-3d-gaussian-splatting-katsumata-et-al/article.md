@@ -1,0 +1,122 @@
+# Dynamic 3D Gaussian Splatting (Katsumata et al.)
+Also called: Dynamic 3DGS, Fourier-based Dynamic 3DGS, Katsumata et al
+
+## Overview
+Dynamic 3D Gaussian Splatting (Katsumata et al.) models dynamic scenes by maintaining static Gaussian attributes (opacity, scale, color) while explicitly parameterizing the temporal evolution of position and orientation [S1, S2]. It distinguishes itself from implicit deformation networks by using continuous parametric functions (Fourier series and linear approximations) to ensure temporal continuity and robustness against overfitting, which is common in high-parameter implicit models [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of 3D Gaussians $\{G_i\}$ with static attributes (center $\mathbf{c}$, scale $\mathbf{s}$, rotation $\mathbf{r}$, opacity $\alpha$, spherical harmonic coefficients $\mathbf{c}_{sh}$) and a sequence of images with associated timestamps $t$.
+*   **Output:** A dynamic scene representation where each Gaussian's position $\mathbf{p}_i(t)$ and rotation $\mathbf{q}_i(t)$ are functions of time, allowing for novel view synthesis at any $t$.
+
+**Data Structures:**
+Each Gaussian $i$ stores:
+1.  **Static Attributes:** $\mathbf{s}_i, \alpha_i, \mathbf{c}_{sh}$ (unchanged over time).
+2.  **Deformation Parameters:**
+    *   **Position:** Fourier series coefficients $\{\mathbf{a}_{i,k}, \mathbf{b}_{i,k}\}_{k=1}^K$ for each axis.
+    *   **Rotation:** Linear function coefficients $\{\mathbf{m}_i, \mathbf{n}_i\}$ for quaternion components or axis-angle representation.
+
+**Method Steps:**
+1.  **Initialization:** Initialize 3D Gaussians from static reconstruction or SfM points. Assign initial deformation parameters (e.g., zero for Fourier, identity for rotation).
+2.  **Temporal Position Calculation:** For a Gaussian $i$ at time $t$, compute the offset $\Delta \mathbf{p}_i(t)$ using a Fourier series:
+    $$ \Delta \mathbf{p}_i(t) = \sum_{k=1}^{K} \left( \mathbf{a}_{i,k} \cos(2\pi k t) + \mathbf{b}_{i,k} \sin(2\pi k t) \right) $$
+    The current position is $\mathbf{p}_i(t) = \mathbf{p}_{i,0} + \Delta \mathbf{p}_i(t)$, where $\mathbf{p}_{i,0}$ is the initial center [S2].
+3.  **Temporal Rotation Calculation:** Approximate rotation change using a linear function. If using quaternions $\mathbf{q}_i(t)$, update via linear interpolation or a linear function of $t$ applied to the rotation vector, ensuring normalization [S2].
+4.  **Rendering:** Render the scene at time $t$ using the standard 3D Gaussian Splatting rasterizer with $\mathbf{p}_i(t)$ and $\mathbf{q}_i(t)$ [S1, S2].
+5.  **Optimization:** Minimize a loss function combining image reconstruction and optical flow:
+    $$ \mathcal{L} = \mathcal{L}_{image} + \lambda_{flow} \mathcal{L}_{flow} $$
+    where $\mathcal{L}_{flow}$ is a bidirectional optical flow loss between rendered frames and ground truth frames [S2].
+6.  **Parameter Update:** Optimize Fourier coefficients and linear rotation parameters. The number of parameters is independent of the number of time steps [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_position_offset(fourier_coeffs, time):
+    """
+    fourier_coeffs: List of tuples (a_k, b_k) for k=1..K
+    time: Normalized time in [0, 1]
+    """
+    offset = np.zeros(3)
+    for k, (a_k, b_k) in enumerate(fourier_coeffs, start=1):
+        freq = 2 * np.pi * k * time
+        offset += a_k * np.cos(freq) + b_k * np.sin(freq)
+    return offset
+
+def get_dynamic_gaussian(gaussian, time):
+    """
+    gaussian: Object with static attributes and deformation parameters
+    time: Normalized time in [0, 1]
+    """
+    # Compute position
+    pos_offset = compute_position_offset(gaussian.fourier_coeffs, time)
+    current_pos = gaussian.initial_pos + pos_offset
+    
+    # Compute rotation (Linear approximation)
+    # Assuming rotation is stored as linear coeffs for axis-angle or quaternion components
+    current_rot = gaussian.linear_rot_coeffs * time + gaussian.initial_rot
+    
+    return current_pos, current_rot, gaussian.static_attrs
+
+def render_dynamic_scene(gaussians, time, camera):
+    """
+    Render scene at specific time t
+    """
+    dynamic_gaussians = []
+    for g in gaussians:
+        pos, rot, attrs = get_dynamic_gaussian(g, time)
+        dynamic_gaussians.append(Gaussian(pos=pos, rot=rot, attrs=attrs))
+    
+    # Standard 3DGS rasterization
+    image = rasterize(dynamic_gaussians, camera)
+    return image
+
+def train_step(gaussians, images, times, optimizer):
+    """
+    Single optimization step
+    """
+    optimizer.zero_grad()
+    total_loss = 0
+    
+    for img, t in zip(images, times):
+        rendered = render_dynamic_scene(gaussians, t, camera)
+        
+        # Image loss (e.g., L1 + SSIM)
+        img_loss = compute_image_loss(rendered, img)
+        
+        # Bidirectional optical flow loss
+        flow_loss = compute_bidirectional_flow_loss(rendered, img, t)
+        
+        total_loss += img_loss + lambda_flow * flow_loss
+    
+    total_loss.backward()
+    optimizer.step()
+    return total_loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **Periodicity Assumption:** Fourier series assumes periodic motion. Non-periodic or abrupt motions may require higher $K$ or hybrid models (e.g., Gaussian-Flow) [S2].
+*   **Rotation Normalization:** Linear approximation of rotation may drift from unit quaternion space; normalization steps are required [S2].
+*   **Temporal Aliasing:** Insufficient Fourier terms $K$ may fail to capture high-frequency motion [S2].
+
+## Subtopics
+
+### Gaussian-Flow
+Combines Fourier approximation (for violent motion) and polynomial fitting (for smooth motion) in a Dual-Domain Deformation Model (DDDM), considering position, rotation, and color changes over time [S2].
+
+### 4D Gaussian Splatting (Yang et al.)
+Uses additional properties to represent 4D rotations and spherical harmonics, approximating the spatial-temporal volume directly, unlike the explicit deformation in Katsumata et al. [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training time is independent of the number of time steps, as parameters are shared across time [S2]. Rendering time is similar to static 3DGS, with minor overhead for computing time-dependent positions/rotations.
+*   **Memory Complexity:** Memory usage increases by the size of Fourier coefficients and linear rotation parameters per Gaussian, but remains independent of the number of frames [S2].
+*   **Strengths:** Ensures temporal continuity; robust against overfitting compared to implicit methods; fast training due to parameter sharing [S2].
+*   **Limitations:** Assumes periodic or smooth motion; may struggle with highly non-periodic or chaotic dynamics without extended models (e.g., Gaussian-Flow) [S2].
+*   **When to Use:** Suitable for scenes with periodic or smooth motion (e.g., human animation, articulated objects) where temporal continuity is critical [S2].
+
+## Background
+Dynamic 3D Gaussian Splatting was proposed by Katsumata et al. as an explicit deformation method for 3D Gaussian Splatting [S2]. It was inspired by the observation that human and articulated object motion is often periodic, leading to the use of Fourier series for position deformation [S2]. This approach addresses the overfitting issues associated with implicit deformation networks in NeRF-based dynamic methods [S2].
+
+## Sources
+[S1] A Survey on 3D Gaussian Splatting, https://doi.org/10.1145/3807511, fetched 2026-10-27
+[S2] Recent advances in 3D Gaussian splatting, https://doi.org/10.1007/s41095-024-0436-y, fetched 2026-10-26

@@ -75,8 +75,6 @@ def alpha_blending_back_to_front(samples, background_color):
 ```
 
 **Pseudocode (Front-to-Back with Early Termination):**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 def alpha_blending_front_to_back(samples, threshold=0.99):
     """

@@ -1,161 +1,194 @@
 # VESTA
-
 Also called: Marching VESTA, Original VESTA
 
 ## Overview
-VESTA (Volume-Enclosing Surface exTraction Algorithm) is a surface extraction method that constructs isosurfaces by generating N-cycles from 3-cell configurations, resolving ambiguities at voxel face junctures to prevent surface holes, unlike the original Marching Cubes Algorithm [S1, unofficial]. It processes voxel face vectors (VFVs) to generate a closed, oriented surface composed of triangles (3-cycles) [S1, unofficial]. VESTA differs from template-based methods like Marching Cubes by using a single building block based on vector decomposition, ensuring the surface is non-degenerate, volume-enclosing, and hole-free without requiring post-processing repair [S1, unofficial].
+VESTA (Volume-Enclosing Surface exTraction) is an isosurface extraction algorithm that constructs non-degenerate, closed 3D surfaces from voxel data by generating N-cycles from 3-cell configurations [S1, unofficial]. Unlike template-based methods such as Marching Cubes, VESTA uses a single building block based on vector decomposition to resolve 3D cell ambiguities at voxel face junctures, guaranteeing surfaces that are hole-free, non-self-intersecting, and volume-enclosing [S1, unofficial]. It operates by treating 2x2x2 neighborhoods (marching VESTA) or the entire dataset (original VESTA) to form closed vector cycles which are then triangulated [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar field on a regular cubic lattice. Voxels are classified as "active" (value $\ge$ isovalue $T_f$) or "inactive" (value $< T_f$) [S1, unofficial].
-*   **Output:** A mesh of oriented triangles (3-cycles) forming a closed surface [S1, unofficial].
+*   **Input:** A 3D scalar field defined on a regular cubic lattice. Each voxel has a scalar value (e.g., density, temperature).
+*   **Parameters:**
+    *   `iso_value`: Threshold separating active (value $\ge$ iso_value) and inactive voxels [S2, unofficial].
+    *   `connectivity_mode`: Global or local mode for handling Points of Ambiguity (POA). Options: `disconnect`, `connect`, or `mixed` [S1, unofficial].
+    *   `resolution_mode`: Determines triangulation detail. Options: `Low` (L, no extra points) or `High` (H, uses average points) [S1, unofficial].
+*   **Output:** A mesh of oriented triangles (2-simplices) forming the isosurface.
 
 **Data Structures:**
-*   **Voxel Face Vector (VFV):** A directed vector connecting a boundary face center (support point) to a juncture (edge midpoint) [S1, unofficial].
-*   **Juncture:** The midpoint of a voxel edge [S1, unofficial].
-*   **Support Point:** The center of a voxel face separating an active and an inactive voxel [S1, unofficial].
-*   **VESTA Cycle Vector:** A vector connecting two support points, formed by replacing connected VFV pairs [S1, unofficial].
-*   **N-cycle:** A closed loop of VESTA cycle vectors [S1, unofficial].
-
-**Parameters:**
-*   **Isovalue ($T_f$):** Threshold for active voxels [S1, unofficial].
-*   **Connectivity Mode:** Determines handling of Points of Ambiguity (POAs) [S1, unofficial]. Options:
-    *   *Disconnect:* Successor VFV belongs to the same voxel (left turn in 2D analog) [S1, unofficial].
-    *   *Connect:* Successor VFV belongs to the other voxel (right turn in 2D analog) [S1, unofficial].
-    *   *Mixed:* Mode determined locally by gray-level thresholds [S1, unofficial].
-*   **Resolution Mode:** Determines N-cycle decomposition [S1, unofficial].
-    *   *Low (L):* No additional points; N-cycles decomposed by inserting antiparallel vector pairs [S1, unofficial].
-    *   *High (H):* Additional average point (center of mass of cycle vertices) inserted for decomposition [S1, unofficial].
+1.  **Voxel Grid:** 3D array of scalar values.
+2.  **Boundary Face Vectors (VFVs):** For each boundary face between an active and inactive voxel, four vectors connect the face center to the four edge midpoints (junctures) in counter-clockwise order relative to the range vector [S1, unofficial].
+3.  **Vector Path Table:** A lookup table mapping a quadrant ID and orientation ($\oplus$ or $\ominus$) to a path sequence of junctures. The table stores 24 directed paths (half due to symmetry) [S1, unofficial].
+    *   Columns: `Center ID`, `Orientation` ($\oplus/\ominus$), `Path` (sequence of juncture indices).
+    *   Example (ID 0): $\oplus$ Path: $13 \to 0 \to 12$; $\ominus$ Path: $12 \to 0 \to 13$ [S1, unofficial].
+4.  **Support Points:** Initially the centers of boundary faces. May be displaced within range vectors for isosurface accuracy [S1, unofficial].
+5.  **Junctures:** Endpoints of VFVs (edge midpoints). Points where multiple VFVs meet.
+6.  **Points of Ambiguity (POA):** Junctures where two incoming and two outgoing VFVs meet (typically where voxels share only an edge or corner) [S2, unofficial].
 
 **Algorithm Steps:**
 
-1.  **Identify Boundary Faces:** For every active voxel, check its 6 neighbors. If a neighbor is inactive, record the shared face as a boundary face. The center of this face is a support point [S1, unofficial].
-2.  **Define VFVs:** For each boundary face, define 4 VFVs connecting the face center to the 4 edge midpoints (junctures) in counterclockwise order relative to the range vector (from active voxel center to inactive neighbor center) [S1, unofficial].
-3.  **Connect VFVs:** At each juncture, connect the origin of a VFV to the tip of a VFV from a neighboring boundary face. Only attach origins to tips. This forms oriented paths between support points [S1, unofficial].
-4.  **Resolve Ambiguities (POAs):** A POA occurs when two active voxels share only a single edge (in 3D) or point (in 2D analog). At a POA, 4 incoming and 4 outgoing VFVs exist. Apply the chosen Connectivity Mode globally or locally to select the successor VFV. This prevents surface tearing [S1, unofficial].
-5.  **Form Cycles:** Replace connected VFV pairs with VESTA cycle vectors. Group these into closed N-cycles. All cycles are confined to a $2 \times 2 \times 2$ voxel neighborhood [S1, unofficial].
-6.  **Decompose N-cycles:**
-    *   If $N=3$, the cycle is a triangle.
-    *   If $N>3$:
-        *   In *Low* mode: Insert antiparallel vector pairs to break the N-cycle into 3-cycles, preserving orientation [S1, unofficial].
-        *   In *High* mode: Calculate the average point of all support points in the cycle. Connect this average point to all vertices of the N-cycle to form triangles. Determine the average point *after* displacing support points if isosurface interpolation is used [S1, unofficial].
-7.  **Displace Support Points (Optional for Isosurfaces):** Move support points along their range vectors based on linear interpolation of field values to approximate the isosurface. Recalculate average points for High mode if displaced [S1, unofficial].
+1.  **Segmentation:** Classify voxels as active ($v \ge \text{iso\_value}$) or inactive ($v < \text{iso\_value}$) [S2, unofficial].
+2.  **Identify Boundary Faces:** For each active voxel, check its 6 neighbors. If a neighbor is inactive, record the shared face as a boundary face [S1, unofficial].
+3.  **Define VFVs:** For each boundary face, define the face center (support point) and four VFVs connecting the center to the four edge midpoints (junctures) in counter-clockwise order [S1, unofficial].
+4.  **Connect VFVs (Cycle Formation):**
+    *   Traverse the boundary faces. At each juncture, connect the origin of a VFV to the tip of a VFV from a neighboring boundary face [S1, unofficial].
+    *   **Ambiguity Resolution:** If a juncture is a POA (multiple valid connections exist), apply the `connectivity_mode`:
+        *   `disconnect`: Connect VFVs belonging to the *same* voxel (prevents linking shapes touching at a single point/edge) [S1, unofficial].
+        *   `connect`: Connect VFVs belonging to *different* voxels (links shapes) [S1, unofficial].
+        *   `mixed`: Use local gray-level thresholds to decide mode per POA [S1, unofficial].
+    *   Replace connected VFV pairs with **VESTA cycle vectors** connecting support points [S1, unofficial].
+    *   Group vectors into closed cycles (N-cycles) [S1, unofficial].
+5.  **Displacement (Optional for Isosurfaces):** Displace support points (face centers) along the range vector (from active voxel center to inactive neighbor center) based on linear interpolation of scalar values [S1, unofficial].
+6.  **Triangulation (Decomposition):**
+    *   Decompose N-cycles into triangles (3-cycles).
+    *   **Low Resolution (L):** For N > 3, insert antiparallel vector pairs to break cycles into 3-cycles without adding new vertices [S1, unofficial].
+    *   **High Resolution (H):** For N > 3, calculate an additional point (average of all cycle support points) and connect it to the cycle vertices to form triangles [S1, unofficial].
+7.  **Filtering:** Discard unphysical triangles (e.g., if corner points have negative radial/temporal values) [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def vesta_extract(volume, isovalue, connectivity_mode, resolution_mode):
+def vesta_extract(volume, iso_value, connectivity_mode, resolution_mode):
     """
-    volume: 3D list of lists of lists of scalar values
-    isovalue: threshold for active voxels
+    volume: 3D array of scalars
+    iso_value: float
     connectivity_mode: 'disconnect', 'connect', or 'mixed'
-    resolution_mode: 'L' (low) or 'H' (high)
+    resolution_mode: 'L' or 'H'
     """
-    # 1. Classify voxels
-    shape = (len(volume), len(volume[0]), len(volume[0][0]))
-    active = [[[volume[x][y][z] >= isovalue for z in range(shape[2])] for y in range(shape[1])] for x in range(shape[0])]
+    active_voxels = find_active_voxels(volume, iso_value)
+    boundary_faces = []
     
-    # 2. Identify boundary faces and define VFVs
-    vfvs = [] # List of dicts: {'origin': (x,y,z), 'tip': (x,y,z), 'voxel': (x,y,z)}
-    for x in range(shape[0]):
-        for y in range(shape[1]):
-            for z in range(shape[2]):
-                if not active[x][y][z]:
-                    continue
-                for dx, dy, dz in [(1,0,0), (-1,0,0), (0,1,0), (0,-1,0), (0,0,1), (0,0,-1)]:
-                    nx, ny, nz = x + dx, y + dy, z + dz
-                    if 0 <= nx < shape[0] and 0 <= ny < shape[1] and 0 <= nz < shape[2] and not active[nx][ny][nz]:
-                        center = (x + dx/2, y + dy/2, z + dz/2)
-                        # Compute 4 junctures in CCW order around range vector (dx, dy, dz)
-                        if dx != 0:
-                            offsets = [(0, 1, 0), (0, 0, 1), (0, -1, 0), (0, 0, -1)]
-                        elif dy != 0:
-                            offsets = [(0, 0, 1), (-1, 0, 0), (0, 0, -1), (1, 0, 0)]
-                        else:
-                            offsets = [(1, 0, 0), (0, 1, 0), (-1, 0, 0), (0, -1, 0)]
-                        junctures = [(center[0] + ox, center[1] + oy, center[2] + oz) for ox, oy, oz in offsets]
-                        for j in junctures:
-                            vfvs.append({'origin': center, 'tip': j, 'voxel': (x,y,z)})
-                            
-    # 3. Connect VFVs at junctures
-    juncture_map = {}
-    for vfv in vfvs:
-        tip = vfv['tip']
-        if tip not in juncture_map:
-            juncture_map[tip] = []
-        juncture_map[tip].append(vfv)
-        
-    adj = {} # Maps support point (center) to next support point
-    for j, vfv_list in juncture_map.items():
-        origins = [v['origin'] for v in vfv_list]
-        if len(origins) == 2:
-            adj[origins[0]] = origins[1]
-            adj[origins[1]] = origins[0]
-        elif len(origins) == 4: # POA
-            if connectivity_mode == 'disconnect':
-                for i in range(0, 4, 2):
-                    adj[origins[i]] = origins[i+1]
-                    adj[origins[i+1]] = origins[i]
-            elif connectivity_mode == 'connect':
-                adj[origins[0]] = origins[2]
-                adj[origins[2]] = origins[0]
-                adj[origins[1]] = origins[3]
-                adj[origins[3]] = origins[1]
-            else: # mixed
-                for i in range(0, 4, 2):
-                    adj[origins[i]] = origins[i+1]
-                    adj[origins[i+1]] = origins[i]
-                    
-    # 4. Form cycles
-    visited = set()
+    # Step 2 & 3: Identify boundary faces and define VFVs
+    for voxel in active_voxels:
+        for neighbor in voxel.neighbors:
+            if neighbor not in active_voxels:
+                face = voxel.get_shared_face(neighbor)
+                face_center = face.center
+                # Define 4 VFVs from center to edge midpoints (junctures)
+                vfvs = face.get_vfv_pairs() 
+                boundary_faces.append({'face': face, 'center': face_center, 'vfvs': vfvs})
+                
+    # Step 4: Connect VFVs into cycles
     cycles = []
-    for start in adj:
-        if start in visited:
-            continue
-        cycle = []
-        curr = start
-        while curr not in visited:
-            visited.add(curr)
-            cycle.append(curr)
-            curr = adj.get(curr)
-            if curr is None:
-                break
-        if len(cycle) > 0:
-            cycles.append(cycle)
+    visited_vfvs = set()
+    
+    for face in boundary_faces:
+        for vfv in face['vfvs']:
+            if vfv.id in visited_vfvs:
+                continue
             
-    # 5. Decompose N-cycles into triangles
+            current_vfv = vfv
+            cycle = [current_vfv]
+            visited_vfvs.add(current_vfv.id)
+            
+            while True:
+                # Find next VVF at the tip of current_vfv
+                tip_juncture = current_vfv.tip
+                next_vfv = find_next_vfv(tip_juncture, current_vfv, boundary_faces, connectivity_mode)
+                
+                if next_vfv is None:
+                    break # Should not happen in valid closed surface
+                
+                if next_vfv.id in visited_vfvs:
+                    # Cycle closed
+                    break
+                
+                cycle.append(next_vfv)
+                visited_vfvs.add(next_vfv.id)
+                current_vfv = next_vfv
+                
+            if len(cycle) > 0:
+                cycles.append(cycle)
+                
+    # Step 5: Displace support points (if isosurface)
+    if resolution_mode == 'H' or isosurface_mode:
+        for cycle in cycles:
+            for vfv in cycle:
+                vfv.support_point.displace_along_range_vector(volume)
+                
+    # Step 6: Triangulate
     triangles = []
     for cycle in cycles:
-        n = len(cycle)
-        if n == 3:
-            triangles.append(cycle)
+        if len(cycle) == 3:
+            triangles.extend(decompose_3_cycle(cycle))
         else:
             if resolution_mode == 'L':
-                for i in range(1, n - 1):
-                    triangles.append([cycle[0], cycle[i], cycle[i+1]])
+                triangles.extend(decompose_n_cycle_low_res(cycle))
             else: # 'H'
-                avg = tuple(sum(c[i] for c in cycle) / n for i in range(3))
-                for i in range(n):
-                    triangles.append([cycle[i], cycle[(i+1)%n], avg])
+                avg_point = calculate_average_point(cycle)
+                triangles.extend(decompose_n_cycle_high_res(cycle, avg_point))
                 
+    return triangles
+
+def find_next_vfv(juncture, current_vfv, boundary_faces, mode):
+    """
+    Resolves ambiguity at juncture.
+    Returns the next VVF to connect to current_vfv.tip.
+    """
+    # Get all VFVs ending at this juncture (incoming) and starting from it (outgoing)
+    # In VESTA, we connect tip of current to origin of next.
+    # We look for VFVs originating at this juncture.
+    
+    candidates = get_outgoing_vfvs(juncture, boundary_faces)
+    
+    if len(candidates) == 1:
+        return candidates[0]
+    
+    # POA detected
+    if mode == 'disconnect':
+        # Select successor belonging to same voxel as current_vfv
+        return select_same_voxel_vfv(candidates, current_vfv)
+    elif mode == 'connect':
+        # Select successor belonging to different voxel
+        return select_diff_voxel_vfv(candidates, current_vfv)
+    elif mode == 'mixed':
+        # Use local gray level threshold
+        return select_mixed_vfv(candidates, current_vfv, juncture)
+        
+    return None
+
+def decompose_n_cycle_low_res(cycle):
+    """Break N-cycle into 3-cycles using antiparallel vector pairs."""
+    # Insert edges between non-adjacent vertices to triangulate
+    # Specifically, insert antiparallel pairs to preserve orientation
+    triangles = []
+    n = len(cycle)
+    for i in range(1, n - 1):
+        # Form triangle using first vertex, i-th, and (i+1)-th support points
+        # Note: Exact triangulation logic depends on specific N-cycle geometry
+        # Standard fan triangulation from first vertex
+        p0 = cycle[0].support_point
+        p1 = cycle[i].support_point
+        p2 = cycle[i+1].support_point
+        triangles.append(Triangle(p0, p1, p2))
+    return triangles
+
+def decompose_n_cycle_high_res(cycle, avg_point):
+    """Break N-cycle into 3-cycles using an average point."""
+    triangles = []
+    n = len(cycle)
+    for i in range(n):
+        p1 = cycle[i].support_point
+        p2 = cycle[(i + 1) % n].support_point
+        triangles.append(Triangle(avg_point, p1, p2))
     return triangles
 ```
 
 ## Subtopics
 
-### DICONEX
-DICONEX (DIlated CONtour EXtraction) is the 2D analog of VESTA. It constructs gap-free contours from binary image data by connecting Initial Contour Vectors (ICVs) into closed cycles. ICVs are oriented pixel edges separating active from inactive pixels, with the active pixel to the left. At Points of Ambiguity (POAs) where active pixels touch at a single point, DICONEX uses a "disconnect" mode (left turn, same pixel) or "connect" mode (right turn, different pixel) to resolve gaps. It displaces ICV origins to pixel edge midpoints to form final contours [S1, unofficial].
+### [STEVE Hypersurface Generation](9503-steve-hypersurface-generation.md)
+STEVE (Space-Time-Enclosing Volume Extraction) is an algorithm for extracting iso-valued hypersurfaces from 4D data sets, guaranteeing that the resulting hypersurface is free from accidental rifts and fully encloses a region in 4D space. It generates simplex-based manifolds of codimension 1, specifically consisting purely of 3-simplices (tetrahedrons) embedded in 4D space. Unlike methods that extrude 4D data to 5D, STEVE works directly in 4D. It builds on the VESTA framework, using a similar flowchart for mesh features, data segmentation, and ambiguity handling, but extends the vector path logic to four dimensions.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of active voxels and boundary faces. The marching variant is more memory-efficient than the original global processing.
-*   **Memory Complexity:** Original VESTA requires large memory to process the entire dataset at once. Marching VESTA reduces this by processing $2 \times 2 \times 2$ neighborhoods.
-*   **Strengths:** Guarantees hole-free, non-self-intersecting surfaces. Does not require template tables. Minimizes redundant support points compared to MCA.
-*   **Limitations:** Weak connectivity (voxels sharing only a corner are not connected). Requires careful handling of POAs. High resolution mode adds computational overhead for average point calculation.
+*   **Time Complexity:** Linear with respect to the number of active voxels and boundary faces. The marching variant processes 2x2x2 neighborhoods independently, allowing for parallelization [S1, unofficial].
+*   **Memory Complexity:** Original VESTA requires storing the entire dataset and all cycles in memory, which can be high for large volumes. Marching VESTA reduces memory usage by processing local 3-cells [S1, unofficial].
+*   **Performance:** In benchmarks on 200 x-ray microtomography images (256x256 pixels, ~512k active voxels), Original VESTA L took 5.34s, Mixed L took 4.62s, and MCA L took 4.71s [S1, unofficial]. VESTA generates significantly fewer support points than MCA (e.g., 932k points vs 5.5M points for the same triangle count), reducing redundancy [S1, unofficial].
+*   **Strengths:** Guarantees hole-free, non-self-intersecting, volume-enclosing surfaces. No template management required. Robust against topological ambiguities [S1, unofficial].
+*   **Limitations:** Does not connect voxels sharing only a single point (corner contact) by default, which may require post-processing or template insertion for weak connectivity [S1, unofficial]. High-resolution mode requires calculating average points, adding computational overhead [S1, unofficial].
 
 ## Background
-VESTA was introduced by Schleiermacher in 2010/2011 as a robust alternative to Marching Cubes, inspired by the 2D DICONEX algorithm. It was developed to address the issue of surface holes and ambiguities in standard isosurface extraction methods without relying on extensive template sets [S1, unofficial]. It has been applied to relativistic hydrodynamic simulations and X-ray microtomography data.
+VESTA was introduced as a novel volume-enclosing surface extraction technique for 3D data sets on cubic lattices [S1, unofficial]. It was developed to address the limitations of the Marching Cubes Algorithm (MCA), particularly the generation of holes and the need for extensive template sets to handle ambiguities [S1, unofficial]. The method is analogous to the 2D DICONEX algorithm [S1, unofficial]. It has been applied to computer tomographic scan data and relativistic hydrodynamic simulation data [S1, unofficial].
 
 ## Sources
 [S1] Volume-Enclosing Surface Extraction, https://arxiv.org/abs/1011.1787v4, fetched 2026-10-26 (unofficial)
+[S2] STEVE - Space-Time-Enclosing Volume Extraction, https://arxiv.org/abs/1302.5683, fetched 2026-10-27 (unofficial)

@@ -2,7 +2,7 @@
 Also called: Batched Render Operation (Adjoint/Backward), BatchedRenderOp
 
 ## Overview
-Pixel Batching is a ray-centric batched rendering operation that computes gradients of rendered images with respect to scene parameters using automatic differentiation (AD) in backward mode, supporting multiple sensors and pixels in a single batch [S2, unofficial]. It serves as a Python-side wrapper that samples `batch_size` random (sensor, pixel) pairs across all sensors, renders those rays to a 1xN box-filter film, and supports a decorrelated PRB (Path Reuse/Reparameterization) backward pass without requiring kernel changes [S1, unofficial]. Unlike the sensor-centric `mi.render` or sibling methods like [Batch Ray Sampling](2767-batch-ray-sampling.md) which prepare rays, this method encapsulates the full forward and backward rendering pipeline for a specific batch of pixels, enabling efficient training loops for inverse volume rendering [S2, unofficial].
+Pixel Batching is a ray-centric batched rendering operation that computes gradients of rendered images with respect to scene parameters using automatic differentiation (AD) in backward mode, supporting multiple sensors and pixels in a single batch [S2, unofficial]. It serves as a Python-side wrapper that samples `batch_size` random (sensor, pixel) pairs across all sensors, renders those rays to a 1xN box-filter film, and supports a decorrelated PRB backward pass without requiring kernel changes [S1, unofficial]. Unlike the sensor-centric `mi.render` or sibling methods like [Batch Ray Sampling](2767-batch-ray-sampling.md) which prepare rays, this method encapsulates the full forward and backward rendering pipeline for a specific batch of pixels, enabling efficient training loops for inverse volume rendering [S2, unofficial].
 
 ## How it works
 ### Inputs and Outputs
@@ -22,14 +22,14 @@ Pixel Batching is a ray-centric batched rendering operation that computes gradie
 - `spp_grad`: Integer, samples per pixel for gradient pass (optional, defaults to `spp`).
 
 **Outputs:**
-- The method returns a custom AD operation object (`dr.custom`) that, when evaluated, produces the rendered image tensor and computes gradients with respect to `params` and other differentiable inputs.
+- The method returns a custom AD operation object (`dr.custom`) that, when evaluated, produces the rendered image tensor and computes gradients with respect to `params` and other differentiable inputs [S2, unofficial].
 
 ### Data Structures
 **Batch Samplers:**
 A list of three independent samplers, seeded from a base seed using `mi.sample_tea_32(seed, 17*i + 5)` [S1, unofficial]:
-1.  Index 0: Size `batch_size`. Used for selecting sensor and pixel indices.
-2.  Index 1: Size `batch_size * spp`. Used for primal subpixel sampling.
-3.  Index 2: Size `batch_size * spp_grad`. Used for adjoint (gradient) subpixel sampling.
+1.  Index 0: Size `batch_size`. Used for selecting sensor and pixel indices [S1, unofficial].
+2.  Index 1: Size `batch_size * spp`. Used for primal subpixel sampling [S2, unofficial].
+3.  Index 2: Size `batch_size * spp_grad`. Used for adjoint (gradient) subpixel sampling [S2, unofficial].
 
 **Film:**
 A 1xN HDR film with a box reconstruction filter. The width is `wavefront_size // spp`, where `wavefront_size` is `batch_size * spp` [S2, unofficial]. The box filter is mandatory because wavefront order does not preserve spatial proximity in sensor space [S1, S2, unofficial].
@@ -37,8 +37,8 @@ A 1xN HDR film with a box reconstruction filter. The width is `wavefront_size //
 ### Steps
 1.  **Input Validation:** Ensure `params` is `mi.SceneParameters`, `scene` is `mi.Scene`, and `integrator` is `mi.Integrator`. If `integrator` is `None`, use `scene.integrator()`. If `pixel_format` is `None`, default to `RGB` [S2, unofficial].
 2.  **Seed Initialization:** If `seed_grad` is 0, compute it as `mi.sample_tea_32(seed, 1)[0]` to de-correlate primal and differential phases. If `seed_grad == seed`, raise an exception [S2, unofficial].
-3.  **Pixel Sampling:** Call `sample_batch_pixels` to obtain `sensors_idx`, `sampled_pixels`, and `batch_samplers`.
-    -   Select sensor indices: `sensor_idx = dr.minimum(n_sensors - 1, mi.UInt32(n_sensors * batch_samplers[0].next_1d()))` [S1, unofficial].
+3.  **Pixel Sampling:** Call `sample_batch_pixels` to obtain `sensors_idx`, `sampled_pixels`, and `batch_samplers` [S2, unofficial].
+    -   Select sensor indices: `sensor_idx = mi.UInt32(dr.minimum(n_sensors - 1, mi.UInt32(n_sensors * batch_samplers[0].next_1d())))` [S1, unofficial].
     -   Select pixel coordinates: `pixels = mi.Point2u(mi.Point2f(film_size) * batch_samplers[0].next_2d())` [S1, unofficial].
 4.  **Custom Op Registration:** Return `dr.custom(_BatchedRenderOp, ...)` with all arguments (scene, sensors, indices, film, samplers, params, integrator, seed, spp) [S2, unofficial].
 5.  **Forward Pass (Primal):** Inside `_BatchedRenderOp.forward`:
@@ -65,32 +65,24 @@ A 1xN HDR film with a box reconstruction filter. The width is `wavefront_size //
 ```python
 import drjit as dr
 import mitsuba as mi
+import gc
 
 def sample_batch_pixels(batch_size, spp, spp_grad, sensors, film_size, seed):
-    """
-    Samples batch_size random (sensor, pixel) pairs.
-    Returns sensors_idx, sampled_pixels, batch_samplers.
-    """
     n_sensors = len(sensors)
-    # Create 3 independent samplers seeded from base seed
-    # Sampler 0: size batch_size (pixel selection)
-    # Sampler 1: size batch_size * spp (primal subpixel)
-    # Sampler 2: size batch_size * spp_grad (adjoint subpixel)
-    # Seeding logic: mi.sample_tea_32(seed, 17*i + 5) for i in 0,1,2
     batch_samplers = []
     for i in range(3):
         s = mi.sample_tea_32(seed, 17 * i + 5)
         size = batch_size if i == 0 else (batch_size * spp if i == 1 else batch_size * spp_grad)
-        batch_samplers.append(mi.Sampler(size))
-        batch_samplers[-1].seed(s[0]) # Assuming sampler accepts seed or similar init
+        sampler = mi.load_dict({'type': 'independent'})
+        sampler.set_sample_count(size)
+        sampler.seed(s[0])
+        batch_samplers.append(sampler)
 
-    # Select sensor indices
-    sensor_idx = dr.minimum(
+    sensor_idx = mi.UInt32(dr.minimum(
         n_sensors - 1,
         mi.UInt32(n_sensors * batch_samplers[0].next_1d())
-    )
+    ))
 
-    # Select pixel coordinates
     pixels = mi.Point2u(
         mi.Point2f(film_size) * batch_samplers[0].next_2d()
     )
@@ -98,31 +90,21 @@ def sample_batch_pixels(batch_size, spp, spp_grad, sensors, film_size, seed):
     return sensor_idx, pixels, batch_samplers
 
 def sample_batch_rays(sensors_idx, sampled_pixels, film_size, sampler, spp):
-    """
-    Generates rays for the batched pixels.
-    Returns rays, ray_weight, pos.
-    """
-    # Repeat sensor and pixel indices spp times
-    repeat_idx = dr.arange(mi.UInt32, len(sampled_pixels) * spp) // spp
-    repeated_sensors = dr.gather(sensors, repeat_idx)
+    repeat_idx = dr.arange(mi.UInt32, batch_size * spp) // spp
+    repeated_sensors = dr.gather(sensors_idx, repeat_idx)
     repeated_pixels = dr.gather(sampled_pixels, repeat_idx)
 
-    # Add random offset from sampler to pixel positions
     offset = sampler.next_2d()
     pos_unit = mi.Point2f(repeated_pixels) / mi.Point2f(film_size) + offset
 
-    # Sample rays using vectorized sensor API
-    # sensors.sample_ray_differential(time=0.0, sample1=wavelength_sample, sample2=pos_unit, sample3=mi.Point2f(0.0))
-    # Note: wavelength_sample is typically handled by sampler or fixed
     rays = repeated_sensors.sample_ray_differential(
         time=0.0,
-        sample1=sampler.next_1d(), # Placeholder for wavelength sample
+        sample1=sampler.next_1d(),
         sample2=pos_unit,
         sample3=mi.Point2f(0.0)
     )
     
     ray_weight = 1.0
-    # Position in film coordinates for splatting
     pos = mi.Point2f(
         0.5 + mi.Float(dr.arange(mi.UInt32, dr.width(rays)) // spp),
         0.5
@@ -130,35 +112,27 @@ def sample_batch_rays(sensors_idx, sampled_pixels, film_size, sampler, spp):
     return rays, ray_weight, pos
 
 def prepare_batch(rays, seed, spp, aovs, film, pixel_format, sampler):
-    """
-    Prepares film and sampler for batched rendering.
-    """
     wavefront_size = dr.width(rays)
     assert (wavefront_size % spp) == 0
     
-    # Determine channels
-    if pixel_format == mi.Bitmap.PixelFormat.RGB:
-        n_channels = 3
-    elif pixel_format == mi.Bitmap.PixelFormat.RGBA:
-        n_channels = 4
-    else:
-        n_channels = 3 # Default to RGB if not specified
-        
-    n_channels += 1 + len(aovs) # +1 for alpha/weight?
+    n_channels, pixel_format_str = {
+        mi.Bitmap.PixelFormat.RGB: (3, 'rgb'),
+        mi.Bitmap.PixelFormat.RGBA: (4, 'rgba'),
+        mi.Bitmap.PixelFormat.XYZ: (3, 'xyz'),
+    }[pixel_format]
+    n_channels += 1 + len(aovs)
 
     if film is None:
         film = mi.load_dict({
             'type': 'hdrfilm',
             'width': wavefront_size // spp,
             'height': 1,
-            'pixel_format': 'rgb',
+            'pixel_format': pixel_format_str,
             'rfilter': {'type': 'box'},
         })
     else:
-        # Check film compatibility
-        pass
+        assert dr.all(film.crop_size() == mi.Vector2u(wavefront_size // spp, 1))
 
-    # Configure sampler
     if sampler is None:
         sampler = mi.load_dict({'type': 'independent'})
     sampler.set_sample_count(spp)
@@ -167,15 +141,11 @@ def prepare_batch(rays, seed, spp, aovs, film, pixel_format, sampler):
     return film, sampler, spp
 
 def render_batch_backward(integrator, film, sampler, scene, params, grad_in, rays, seed, spp, pixel_format):
-    """
-    Backward pass for pixel batching.
-    """
     aovs = integrator.aovs()
     
     with dr.suspend_grad():
         film, sampler, spp = prepare_batch(rays, seed, spp, aovs, film, pixel_format, sampler)
         
-        # Handle reparameterization
         if hasattr(integrator, 'reparam'):
             reparam = mi.ad.common._ReparamWrapper(
                 scene=scene,
@@ -194,7 +164,6 @@ def render_batch_backward(integrator, film, sampler, scene, params, grad_in, ray
             0.5
         )
 
-        # (1) Primal rendering (detached)
         L, valid, state_out = integrator.sample(
             mode=dr.ADMode.Primal,
             scene=scene,
@@ -206,11 +175,9 @@ def render_batch_backward(integrator, film, sampler, scene, params, grad_in, ray
             reparam=None,
         )
 
-        # Prepare block
         block = film.create_block()
         alpha = dr.select(valid, mi.Float(1), mi.Float(0))
 
-        # Accumulate
         if mi.has_flag(film.flags(), mi.FilmFlags.Special):
             aovs_out = film.prepare_sample(L * ray_weight * det, rays.wavelengths, block.channel_count(), weight=det, alpha=alpha)
             block.put(pos, aovs_out)
@@ -220,20 +187,16 @@ def render_batch_backward(integrator, film, sampler, scene, params, grad_in, ray
 
         film.put_block(block)
         del valid
-        import gc
         gc.collect()
 
-        # Launch kernel
         dr.schedule(state_out, block.tensor())
         image = film.develop()
 
-        # Differentiate splatting
         dr.set_grad(image, grad_in)
         dr.enqueue(dr.ADMode.Backward, image)
         dr.traverse(mi.Float, dr.ADMode.Backward)
         δL = dr.grad(L)
 
-    # (2) Launch Backward Monte Carlo
     L_2, valid_2, state_out_2 = integrator.sample(
         mode=dr.ADMode.Backward,
         scene=scene,
@@ -266,19 +229,16 @@ class _BatchedRenderOp(dr.CustomOp):
         self.spp = spps
 
     def forward(self):
-        # Primal
         rays, ray_weight, pos = sample_batch_rays(
             self.sensors_idx, self.sampled_pixels,
             self.film_size, self.batch_samplers[1], self.spp[0]
         )
         
-        # Prepare batch
         film, sampler, spp = prepare_batch(
             rays, self.seed[0], self.spp[0],
             self.integrator.aovs(), self.film, self.pixel_format, self.sampler
         )
 
-        # Render
         L, valid, state_out = self.integrator.sample(
             mode=dr.ADMode.Primal,
             scene=self.scene,
@@ -303,7 +263,6 @@ class _BatchedRenderOp(dr.CustomOp):
         self.film.put_block(block)
         image = self.film.develop()
         
-        # Store for backward
         self.rays = rays
         self.state_out = state_out
         self.L = L
@@ -312,7 +271,6 @@ class _BatchedRenderOp(dr.CustomOp):
         return image
 
     def backward(self):
-        # Sample separate rays for adjoint
         rays, ray_weight, pos = sample_batch_rays(
             self.sensors_idx, self.sampled_pixels,
             self.film_size, self.batch_samplers[2], self.spp[0]
@@ -359,16 +317,16 @@ def render_batch(batch_size, scene, sensors, film_size, params=None, integrator=
 -   **Integrator API:** The `integrator.sample` API in mi3.9 returns a 4-tuple `(L, valid, aovs, state)` instead of the old 3-tuple [S1, unofficial].
 -   **Reparameterization:** `prbvolpath` has no reparameterization support, and forward mode is unsupported [S1, unofficial].
 -   **Wavefront Size:** For LLVM backend, max wavefront size is `0xffffffff`. For OptiX, max is `0x40000000`. Exceeding this raises an exception [S2, unofficial].
--   **Ray Weight:** The current implementation assumes `ray_weight = 1.0`. Support for `ray_weight != 1.0` is marked as TODO [S2, unofficial].
+-   **Ray Weight:** The current implementation assumes `ray_weight = 1.0`. Support for `ray_weight != 1.0` is not implemented [S2, unofficial].
 
 ## Operating characteristics
--   **Time Complexity:** The method performs one primal pass and one backward pass per batch. The primal pass cost dominates training as it renders 64x more samples than the adjoint pass (e.g., spp 1024 vs 16) [S1, unofficial].
--   **Memory Complexity:** Memory usage is proportional to the batch size and the number of samples per pixel (spp). The film is 1xN, minimizing memory overhead for the image buffer.
+-   **Time Complexity:** The method performs one primal pass and one backward pass per batch [S2, unofficial]. The primal pass cost dominates training as it renders 64x more samples than the adjoint pass (e.g., spp 1024 vs 16) [S1, unofficial].
+-   **Memory Complexity:** Memory usage is proportional to the batch size and the number of samples per pixel (spp) [G]. The film is 1xN, minimizing memory overhead for the image buffer [S2, unofficial].
 -   **Measured Performance:** On an A40 GPU, with batch size 32768, primal spp 1024, adjoint spp 16, and final 256^3 state:
     -   SM linear (OptiX): 5.57 s per step (4.68 s primal, 0.90 s adjoint) [S1, unofficial].
     -   prbvolpath (stock OptiX): 9.32 s per step (8.63 s primal, 0.70 s adjoint) [S1, unofficial].
     -   SM linear is 1.7x faster per training step than stock prbvolpath [S1, unofficial].
--   **Strengths:** Ray-centric design allows flexible pixel selection across multiple sensors. Decorrelated seeds ensure unbiased gradients. No kernel changes required for the backward pass [S1, S2, unofficial].
+-   **Strengths:** Ray-centric design allows flexible pixel selection across multiple sensors. Decorrelated seeds ensure unbiased gradients [S2, unofficial]. No kernel changes required for the backward pass [S1, unofficial].
 -   **Limitations:** Limited to box filter. Forward mode AD is not supported. Wavefront size limits on GPU backends [S1, S2, unofficial].
 
 ## Background

@@ -3,92 +3,129 @@
 Also called: Cubic Vignette, Vignette, Vignette Effect
 
 ## Overview
-Vignette Shading is a post-processing effect applied to display images before tonemapping to darken the corners, simulating the reduction in light intensity at the edges of an image due to projection onto a flat plane [S1, S2, unofficial]. It is distinct from sibling methods like [Lit Sphere Shading](785-lit-sphere-shading.md) or [Orientation-Based Color Modification](798-orientation-based-color-modification.md) because it operates on the final 2D image plane based on pixel orientation relative to the camera frame, rather than modifying volume density or surface normals in 3D space [S2, unofficial].
+Vignette Shading is a post-processing technique applied to display images to darken the corners and edges, simulating the optical falloff of light intensity due to projection onto a flat plane [S1, S2, unofficial]. It enhances the visual focus on the center of the image by modulating brightness based on the distance from the focal point or the alignment of the view ray with the camera's optical axis [S2, unofficial]. Unlike physically based illumination models, it is a stylized effect often used in illustrative rendering to guide viewer attention [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: The rendered display image (before tonemapping), ray directions for each pixel, and the pixel frame orientation matrices.
-- Output: The image with darkened corners.
+The method operates on the final rendered image (or fragment color) before tonemapping. Inputs include the pixel coordinates (or UVs), the ray direction $\mathbf{r}$, and camera frame information [S2, S3, unofficial]. The output is a modulated color $c_{final} = c_{base} \cdot V$, where $V$ is the vignette factor [S3, unofficial].
 
 **Data Structures:**
-- `ray_directions`: Tensor of shape $(H, W, 3)$ containing the normalized direction vector $\mathbf{r}$ for each pixel.
-- `pixel_frames`: Tensor of shape $(H, W, 3, 3)$ or $(H, W, 9)$ representing the local coordinate frame for each pixel. The third column (index 2) corresponds to the z-axis of the pixel frame, denoted as $\mathbf{f}_z$ [S2, unofficial].
+No complex volumetric data structures are required. The method relies on screen-space coordinates or ray vectors [S2, S3, unofficial].
 
-**Formula:**
-The vignette factor $V$ is calculated based on the alignment between the ray direction and the pixel frame's z-axis [S2, unofficial]:
+**Formulas and Parameters:**
+Two primary formulations exist in the sources:
 
-$$
-V = (\mathbf{r} \cdot \mathbf{f}_z)^3
-$$
+1.  **Cubic Alignment Vignette:** This variant calculates the factor based on the alignment between the ray direction and the camera's z-axis (the third component of the pixel frame) [S2, unofficial].
+    $$ V = (\mathbf{r} \cdot \mathbf{f}_z)^3 $$
+    Where:
+    *   $\mathbf{r}$ is the normalized ray direction [S2, unofficial].
+    *   $\mathbf{f}_z$ is the third component (z-axis) of the pixel frame [S2, unofficial].
+    *   The result is cubed to create a smooth falloff [S2, unofficial].
 
-Where:
-- $\mathbf{r}$ is the ray direction vector.
-- $\mathbf{f}_z$ is the unit normal vector of the pixel frame (the third component of `pixel_frames`) [S2, unofficial].
-- The exponent 3 creates a "cubic" falloff, ensuring the effect is smooth and differentiable [S2, unofficial].
+    Alternatively, expressed using geometric parameters [S2, unofficial]:
+    $$ \text{Factor} = \frac{f^2}{f^2+r_p^2}(\mathbf{v}_p \cdot \mathbf{n}_p) = (\cos \theta)^3 = (\mathbf{v}_p \cdot \mathbf{n}_p)^3 $$
+    Where:
+    *   $f$ is the focal distance [S2, unofficial].
+    *   $r_p$ is the radial distance between pixel $p$ and the line of focus [S2, unofficial].
+    *   $\mathbf{n}_p$ is the unit normal of pixel $p$ [S2, unofficial].
+    *   $\mathbf{v}_p$ is a unit vector from pixel $p$ to the focal point [S2, unofficial].
+    *   $\theta$ is the angle between the view vector and the normal [S2, unofficial].
 
-This is equivalent to the geometric derivation:
-$$
-\text{Factor} = \frac{f^2}{f^2+r_p^2}(\mathbf{v}_p \cdot \mathbf{n}_p) = (\cos \theta)^3 = (\mathbf{v}_p \cdot \mathbf{n}_p)^3
-$$
-Where $f$ is focal distance, $r_p$ is radial distance, $\mathbf{v}_p$ is the vector from pixel to focal point, and $\mathbf{n}_p$ is the pixel normal [S2, unofficial]. In the implementation, the dot product $\mathbf{r} \cdot \mathbf{f}_z$ directly computes $\cos \theta$.
+2.  **UV Coordinate Vignette Effect:** This variant uses normalized UV coordinates to darken corners [S3, unofficial].
+    $$ V = 0.5 + 0.5 \cdot (16 \cdot u \cdot v \cdot (1-u) \cdot (1-v))^{0.25} $$
+    Where:
+    *   $u, v$ are normalized UV coordinates ranging from 0 to 1 [S3, unofficial].
+    *   The term $16 \cdot u \cdot v \cdot (1-u) \cdot (1-v)$ peaks at the center $(0.5, 0.5)$ and drops to 0 at the edges [S3, unofficial].
 
 **Pseudocode:**
+The following implementation combines the cubic alignment method (common in ray marching contexts) and the UV method.
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def vignette_shading(image, ray_directions, pixel_frames):
+def vignette_shading_cubic(ray_directions, pixel_frames):
     """
-    Apply cubic vignette shading to the image.
+    Applies cubic vignette shading based on ray alignment with camera z-axis.
     
     Args:
-        image: Tensor of shape (H, W, 3) or (H, W, 4), pre-tonemapping.
-        ray_directions: Tensor of shape (H, W, 3), normalized ray directions.
-        pixel_frames: Tensor of shape (H, W, 3, 3), where pixel_frames[..., 2] is the z-axis normal.
-        
+        ray_directions: Tensor of shape (..., 3) containing normalized ray directions.
+        pixel_frames: Tensor of shape (..., 3, 3) containing camera frame vectors.
+                      The z-axis is at index 2.
+                      
     Returns:
-        Tensor of shape (H, W, 3) or (H, W, 4) with vignette applied.
+        Tensor of vignette factors.
     """
-    # Extract the z-axis normal from the pixel frame (f_z)
-    # pixel_frames shape: (H, W, 3, 3)
-    # We want the third column (index 2) for each pixel
-    f_z = pixel_frames[..., 2]  # Shape: (H, W, 3)
+    # Extract the z-axis (third component) of the pixel frame
+    # pixel_frames[..., 2] gives the z-axis vector for each pixel
+    camera_z = pixel_frames[..., 2]
     
-    # Compute dot product between ray direction and f_z
-    # ray_directions shape: (H, W, 3)
-    dot_product = (ray_directions * f_z).sum(dim=-1, keepdim=True)  # Shape: (H, W, 1)
+    # Calculate dot product between ray direction and camera z-axis
+    # This computes cos(theta)
+    dot_product = (ray_directions * camera_z).sum(dim=-1, keepdim=True)
     
-    # Apply cubic falloff
-    vignette_factor = dot_product.pow(3)  # Shape: (H, W, 1)
+    # Cube the result to create the vignette falloff
+    # This matches the formula V = (r . fz)^3
+    vignette_factor = dot_product.pow(3)
     
-    # Apply vignette to the image
-    # Assuming image has shape (H, W, C)
-    shaded_image = image * vignette_factor
+    return vignette_factor
+
+def vignette_shading_uv(uv_coords):
+    """
+    Applies vignette shading based on UV coordinates.
     
-    return shaded_image
+    Args:
+        uv_coords: Tensor of shape (..., 2) containing normalized UV coordinates (u, v).
+                   
+    Returns:
+        Tensor of vignette factors.
+    """
+    u = uv_coords[..., 0]
+    v = uv_coords[..., 1]
+    
+    # Calculate the term inside the root
+    # 16 * u * v * (1-u) * (1-v)
+    term = 16.0 * u * v * (1.0 - u) * (1.0 - v)
+    
+    # Apply the formula: 0.5 + 0.5 * (term)^0.25
+    vignette_factor = 0.5 + 0.5 * term.pow(0.25)
+    
+    return vignette_factor
 ```
 
-**Parameters:**
-- Exponent: 3 (fixed for cubic vignette) [S2, unofficial].
-- Focal distance $f$: Implicitly handled by the ray direction normalization and frame alignment [S2, unofficial].
-
 **Edge Cases and Pitfalls:**
-- If $\mathbf{r} \cdot \mathbf{f}_z$ is negative (ray pointing away from the frame normal), the cubic power preserves the sign, potentially inverting colors. In practice, ray directions are typically oriented such that this dot product is positive for visible pixels [G].
-- Precision issues may arise if ray directions are not normalized. Ensure `ray_directions` are unit vectors [G].
+*   **Ray Direction Normalization:** The cubic method requires $\mathbf{r}$ to be normalized; otherwise, the dot product will scale with ray length, causing incorrect shading [S2, unofficial].
+*   **Negative Dot Products:** If the ray direction points away from the camera's forward axis (e.g., in back-facing surfaces or specific camera setups), the dot product may be negative. Cubing a negative number preserves the sign, potentially leading to inverted or dark artifacts. Clamping the dot product to $[0, 1]$ or using absolute values may be necessary depending on the desired visual effect [G].
+*   **UV Coordinate Range:** The UV method assumes $u, v \in [0, 1]$. Coordinates outside this range will produce unexpected results [S3, unofficial].
 
 ## Subtopics
 
+### Vignette Effect
+A specific variant of vignette shading that relies solely on screen-space UV coordinates rather than ray geometry [S3, unofficial]. It is simpler to implement as it does not require access to ray directions or camera frames, making it suitable for standard rasterization pipelines or post-processing passes where ray data is unavailable [S3, unofficial]. It produces a symmetric darkening centered on the image midpoint [S3, unofficial].
+
 ## Operating characteristics
-- **Time Complexity:** $O(H \times W)$, where $H$ and $W$ are image dimensions. The operation is a simple element-wise multiplication after a dot product.
-- **Memory Complexity:** $O(H \times W)$ for storing intermediate tensors.
-- **Performance:** Extremely fast, as it is a post-processing step applied to the final image [S1, unofficial].
-- **Strengths:** Simple to implement, adds a cinematic look, simulates optical effects [S1, S2, unofficial].
-- **Limitations:** Does not account for 3D scene geometry, only 2D image plane orientation [S2, unofficial].
-- **When to use:** When a post-processing vignette effect is desired for stylistic reasons [S1, unofficial].
-- **When not to use:** When physically accurate illumination modeling is required, or when the effect needs to vary with 3D depth [S2, unofficial].
+**Time and Memory Complexity:**
+The method is $O(1)$ per pixel and requires minimal memory, as it only needs local pixel data (UVs or ray vectors) [S2, S3, unofficial]. It is computationally inexpensive compared to volumetric illumination models.
+
+**Measured Performance:**
+Not given in the sources.
+
+**Scaling:**
+The effect scales linearly with resolution, as it is applied per-pixel [S2, S3, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Simple to implement; effective at directing viewer attention; works well with both ray marching and rasterization [S1, S2, S3, unofficial].
+*   **Limitations:** It is a post-processing effect and does not interact with volumetric density or material properties; it may look artificial if over-applied [S1, S2, unofficial].
+
+**When to Use:**
+Use when a stylized, cinematic look is desired, or when the optical properties of the camera need to be simulated for illustrative purposes [S1, S2, unofficial].
+
+**When Not to Use:**
+Avoid when physical accuracy is required, as the effect is not based on light transport physics [S2, unofficial].
 
 ## Background
-Vignette Shading is used in real-time rendering pipelines to enhance the visual appeal of images by darkening corners, simulating lens effects [S1, unofficial]. It is implemented in projects like `mypbr` as a post-processing step before tonemapping [S1, unofficial]. The cubic formulation is derived from the geometric relationship between ray direction and pixel frame orientation in ray marching contexts [S2, unofficial].
+Vignette shading originates from photographic optics, where lenses naturally produce darker corners due to light falloff and sensor orientation [S2, unofficial]. In computer graphics, it has been adopted as a stylized post-processing effect to enhance image composition [S1, unofficial]. The cubic variant described in [S2, unofficial] appears in modern ray marching implementations to simulate camera lens characteristics in real-time rendering.
 
 ## Sources
 [S1] Milestone 13: MagicaVoxel look (.vox, DDA voxel grid, sun/sky, bloom, style voxel), https://github.com/adriendjn/mypbr/pull/10, fetched 2026-10-25 (unofficial)
 [S2] kyle-rosa/ray_marching, https://github.com/kyle-rosa/ray_marching, fetched 2026-10-26 (unofficial)
+[S3] arguskern/lumina-graphics-lab, https://github.com/arguskern/lumina-graphics-lab, fetched 2026-10-26 (unofficial)

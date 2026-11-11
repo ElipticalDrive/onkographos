@@ -92,10 +92,10 @@ To determine which faces are intersected, the algorithm can be extended as shown
 - No tunable parameters. Relies on IEEE 754 standard behavior for min/max with NaNs [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Zero Direction:** If $d_i = 0$, $\text{dir\_inv}_i = \pm \infty$. If the ray origin is inside the box along that axis, $t_1$ and $t_2$ become $\pm \infty$. The NaN suppression logic handles this by ignoring the NaN/Inf results from that slab [S2, unofficial].
-- **Ray on Boundary:** If the ray origin lies exactly on a box face, $t_1$ or $t_2$ may be NaN (0 * $\infty$). The nested min/max suppresses these NaNs [S2, unofficial].
+- **Zero Direction:** If $d_i = 0$, $\text{dir\_inv}_i = \pm \infty$ [S2, unofficial]. If the ray origin is inside the box along that axis, $t_1$ and $t_2$ become $\pm \infty$ [S2, unofficial]. The NaN suppression logic handles this by ignoring the NaN/Inf results from that slab [S2, unofficial].
+- **Ray on Boundary:** If the ray origin lies exactly on a box face, $t_1$ or $t_2$ may be NaN (0 * $\infty$) [S2, unofficial]. The nested min/max suppresses these NaNs [S2, unofficial].
 - **Degenerate Boxes:** For boxes with zero thickness (e.g., planes), use $\ge$ in the final return condition to avoid false negatives due to precision [S2, unofficial].
-- **Precision Errors:** Floating-point inaccuracies may cause $t_{max} == t_{min}$ at edges/corners. Using $\ge$ helps mitigate this [S2, unofficial].
+- **Precision Errors:** Floating-point inaccuracies may cause $t_{max} == t_{min}$ at edges/corners [S2, unofficial]. Using $\ge$ helps mitigate this [S2, unofficial].
 
 ## Operating characteristics
 - **Time Complexity:** $O(1)$ with a fixed number of operations (unrolled loop for 3 dimensions) [S2, unofficial].

@@ -3,74 +3,86 @@
 Also called: B-spline deformation field, Cubic B-spline field
 
 ## Overview
-B-spline field interpolation reconstructs a continuous scalar or vector field from discrete control points using cubic B-spline basis functions [S1, unofficial]. It is chosen when $C^1$ continuity (smooth first derivatives) is required and local support is needed to limit computational cost per query [S1, unofficial]. It differs from linear interpolation by providing smooth gradients and from higher-order splines by using a fixed, small support kernel that is computationally efficient [S1, unofficial].
+B-spline Field Interpolation is a method for evaluating a continuous function $u(\mathbf{p})$ from a discrete grid of control points using cubic B-spline basis functions [S1, unofficial]. It solves the problem of smooth, differentiable interpolation in volume rendering and deformation networks by providing $C^2$ continuity and local support, ensuring that the value at any query point depends only on a finite neighborhood of grid indices [S1, unofficial]. It is distinguished from linear or nearest-neighbor methods by its smoothness and from global basis methods (like Fourier) by its locality; it differs from [Voxel Data Interpolation and Sampling](12781-voxel-data-interpolation-and-sampling.md) by using control points that do not directly equal the field values at grid nodes [S1, unofficial].
 
 ## How it works
 **Inputs:**
-*   Query point $\mathbf{p} = (x, y, z)$.
-*   Grid origin $\mathbf{p}_0 = (x_0, y_0, z_0)$.
-*   Grid spacing $\mathbf{d} = (dx, dy, dz)$.
-*   Control point weights $w_{i,j,k}$ stored in a 3D array.
+- Query point coordinates $\mathbf{p} = (x, y, z)$.
+- Grid origin $\mathbf{o} = (x_0, y_0, z_0)$.
+- Grid spacing $\mathbf{s} = (dx, dy, dz)$.
+- Control point weights $w_{i,j,k}$ stored in a 3D array.
 
 **Outputs:**
-*   Interpolated value $u(\mathbf{p})$.
+- Scalar value $u(x, y, z)$. For vector fields, this is repeated for each component (e.g., $u_x, u_y, u_z$).
 
 **Data Structures:**
-*   Weights $w$ are stored in a 3D grid. For a vector field (e.g., displacement), three separate weight grids are maintained for components $u_x, u_y, u_z$.
-*   Minimum grid size is $4 \times 4 \times 4$ control points [S1, unofficial].
+- The field is defined on a regular 3D grid.
+- Minimum grid size for a valid 3D field is $4 \times 4 \times 4$ control points [S1, unofficial].
+- For a scalar field, the data structure is a 3D array of floats `weights[ix][iy][iz]`.
+- For a vector field (e.g., displacement), three such arrays are required, totaling $3 \times 4^3 = 192$ degrees of freedom for the minimum grid [S1, unofficial].
 
-**Steps:**
-1.  **Calculate Integer Indices:** Determine the base index $(i_x, i_y, i_z)$ of the $4 \times 4 \times 4$ support grid surrounding the query point. The indices are calculated as:
-    $$
-    i_x = \left\lfloor \frac{x - x_0}{dx} - 1 \right\rfloor, \quad i_y = \left\lfloor \frac{y - y_0}{dy} - 1 \right\rfloor, \quad i_z = \left\lfloor \frac{z - z_0}{dz} - 1 \right\rfloor
-    $$
-    where $\lfloor \cdot \rfloor$ denotes the floor function [S1, unofficial].
+**Algorithm Steps:**
 
-2.  **Calculate Normalized Coordinates:** Compute the local coordinates $(\tilde{x}, \tilde{y}, \tilde{z})$ within the support cell. These coordinates represent the position relative to the grid structure and are bounded within $[0, 1]$ for the central cell:
-    $$
-    \tilde{x} = \frac{x - x_0}{dx} - 1 - i_x, \quad \tilde{y} = \frac{y - y_0}{dy} - 1 - i_y, \quad \tilde{z} = \frac{z - z_0}{dz} - 1 - i_z
-    $$
-    [S1, unofficial].
+1.  **Calculate Integer Indices:** Determine the base index $(i_x, i_y, i_z)$ of the support grid. The support grid consists of $4 \times 4 \times 4$ control points centered around the query point's cell.
+    $$ i_x = \left\lfloor \frac{x - x_0}{dx} - 1 \right\rfloor $$
+    $$ i_y = \left\lfloor \frac{y - y_0}{dy} - 1 \right\rfloor $$
+    $$ i_z = \left\lfloor \frac{z - z_0}{dz} - 1 \right\rfloor $$
+    where $\lfloor \cdot \rfloor$ denotes the floor function (integer part) [S1, unofficial].
 
-3.  **Evaluate Basis Functions:** Compute the cubic B-spline basis values for each dimension using the normalized coordinates. The basis functions $B_0, B_1, B_2, B_3$ are defined as:
-    $$
-    B_0(\tilde{x}) = \frac{(1 - \tilde{x})^3}{6}
-    $$
-    $$
-    B_1(\tilde{x}) = \frac{3\tilde{x}^3 - 6\tilde{x}^2 + 4}{6}
-    $$
-    $$
-    B_2(\tilde{x}) = \frac{-3\tilde{x}^3 + 3\tilde{x}^2 + 3\tilde{x} + 1}{6}
-    $$
-    $$
-    B_3(\tilde{x}) = \frac{\tilde{x}^3}{6}
-    $$
-    [S1, unofficial].
+2.  **Calculate Normalized Coordinates:** Compute the local coordinates $\tilde{x}, \tilde{y}, \tilde{z}$ within the support cell. These values lie in the range $[0, 1]$ [S1, unofficial].
+    $$ \tilde{x} = \frac{x - x_0}{dx} - 1 - i_x $$
+    $$ \tilde{y} = \frac{y - y_0}{dy} - 1 - i_y $$
+    $$ \tilde{z} = \frac{z - z_0}{dz} - 1 - i_z $$
 
-4.  **Compute Interpolated Value:** Sum the weighted contributions of the 64 control points in the support region. The value $u$ is:
-    $$
-    u = \sum_{l=0}^3 \sum_{m=0}^3 \sum_{n=0}^3 B_l(\tilde{x}) B_m(\tilde{y}) B_n(\tilde{z}) w_{i_x+l, i_y+m, i_z+n}
-    $$
-    [S1, unofficial].
+3.  **Evaluate Basis Functions:** Compute the cubic B-spline basis weights for each dimension. The basis functions $B_0, B_1, B_2, B_3$ are defined as [S1, unofficial]:
+    $$ B_0(\tilde{x}) = \frac{(1 - \tilde{x})^3}{6} $$
+    $$ B_1(\tilde{x}) = \frac{3\tilde{x}^3 - 6\tilde{x}^2 + 4}{6} $$
+    $$ B_2(\tilde{x}) = \frac{-3\tilde{x}^3 + 3\tilde{x}^2 + 3\tilde{x} + 1}{6} $$
+    $$ B_3(\tilde{x}) = \frac{\tilde{x}^3}{6} $$
+    Note that $\sum_{k=0}^3 B_k(\tilde{x}) = 1$ [S1, unofficial].
+
+4.  **Interpolate Value:** Sum the weighted contributions of the $4 \times 4 \times 4 = 64$ control points in the support region.
+    $$ u(x, y, z) = \sum_{l=0}^3 \sum_{m=0}^3 \sum_{n=0}^3 B_l(\tilde{x}) B_m(\tilde{y}) B_n(\tilde{z}) w_{i_x+l, i_y+m, i_z+n} $$
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def cubic_b_spline_interpolate(x, y, z, x0, y0, z0, dx, dy, dz, weights):
+def cubic_b_spline_basis(t):
     """
-    Interpolate a value at (x, y, z) using cubic B-splines.
+    Evaluates the 4 cubic B-spline basis functions at normalized coordinate t.
+    t is expected to be in [0, 1].
+    Returns a list [B0, B1, B2, B3].
+    """
+    t2 = t * t
+    t3 = t2 * t
+    b0 = (1.0 - t) ** 3 / 6.0
+    b1 = (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0
+    b2 = (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0
+    b3 = t3 / 6.0
+    return [b0, b1, b2, b3]
+
+def interpolate_b_spline_field(x, y, z, origin, spacing, weights):
+    """
+    Interpolates a value from a 3D B-spline field.
     
     Args:
-        x, y, z: Query coordinates.
-        x0, y0, z0: Grid origin.
-        dx, dy, dz: Grid spacing.
-        weights: 3D array of control point weights.
-        
+        x, y, z: Query point coordinates.
+        origin: Tuple (x0, y0, z0) of the grid origin.
+        spacing: Tuple (dx, dy, dz) of the grid spacing.
+        weights: 3D array/list of control point weights. 
+                 Accessible as weights[ix][iy][iz].
+                 
     Returns:
-        Interpolated scalar value.
+        Interpolated scalar value u.
     """
+    x0, y0, z0 = origin
+    dx, dy, dz = spacing
+    
     # Step 1: Calculate integer indices
+    # Using floor division logic compatible with negative numbers if necessary,
+    # but standard floor is specified in source.
     ix = int((x - x0) / dx - 1)
     iy = int((y - y0) / dy - 1)
     iz = int((z - z0) / dz - 1)
@@ -81,62 +93,48 @@ def cubic_b_spline_interpolate(x, y, z, x0, y0, z0, dx, dy, dz, weights):
     z_tilde = (z - z0) / dz - 1 - iz
     
     # Step 3: Evaluate basis functions
-    def b0(t):
-        return (1 - t)**3 / 6.0
+    bx = cubic_b_spline_basis(x_tilde)
+    by = cubic_b_spline_basis(y_tilde)
+    bz = cubic_b_spline_basis(z_tilde)
     
-    def b1(t):
-        return (3 * t**3 - 6 * t**2 + 4) / 6.0
-    
-    def b2(t):
-        return (-3 * t**3 + 3 * t**2 + 3 * t + 1) / 6.0
-    
-    def b3(t):
-        return t**3 / 6.0
-    
-    # Precompute basis values for x, y, z
-    bx = [b0(x_tilde), b1(x_tilde), b2(x_tilde), b3(x_tilde)]
-    by = [b0(y_tilde), b1(y_tilde), b2(y_tilde), b3(y_tilde)]
-    bz = [b0(z_tilde), b1(z_tilde), b2(z_tilde), b3(z_tilde)]
-    
-    # Step 4: Compute sum
+    # Step 4: Interpolate
     u = 0.0
     for l in range(4):
         for m in range(4):
             for n in range(4):
-                # Access weight at (ix+l, iy+m, iz+n)
-                # Note: In practice, boundary checks should be added if the query
-                # point is near the edge of the grid. [G]
-                w = weights[ix + l, iy + m, iz + n]
+                # Access weight at index (ix+l, iy+m, iz+n)
+                # [G] In a real implementation, bounds checking for grid edges is required.
+                w = weights[ix + l][iy + m][iz + n]
                 u += bx[l] * by[m] * bz[n] * w
                 
     return u
 ```
 
 **Parameters:**
-*   Grid origin $[x_0, y_0, z_0]$: The coordinate of the first control point [S1, unofficial].
-*   Grid spacing $dx, dy, dz$: Distance between adjacent control points [S1, unofficial].
-*   Control point weight $w_{i,j,k}$: Scalar value associated with control point $(i,j,k)$ [S1, unofficial].
+- **Grid Origin $(x_0, y_0, z_0)$**: The physical coordinates of the first control point (index 0,0,0) [S1, unofficial].
+- **Grid Spacing $(dx, dy, dz)$**: The distance between adjacent control points along each axis [S1, unofficial].
+- **Control Point Weights**: The scalar values associated with each grid index. These are the degrees of freedom [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Non-Interpolating Property:** The field value at a control point (where $\tilde{x}=0$) is not equal to the weight of that control point due to blending with neighbors. For example, if a single control point has weight 1 and all others 0, the field value at that point is $2/3$ [S1, unofficial].
-*   **Boundary Conditions:** The method assumes the query point falls within the valid range of the grid. Queries outside the grid bounds require clamping or extrapolation strategies not defined in the base method [G].
-*   **Minimum Grid Size:** A minimum of $4 \times 4 \times 4$ control points is required to define a valid 3D B-spline field [S1, unofficial].
+- **Non-Interpolation Property**: The field value at a control point (where $\tilde{x}=0$) is generally *not* equal to the weight of that control point due to blending with neighbors. For example, a single non-zero weight of 1 surrounded by zeros results in a field value of $2/3$ at the control point location [S1, unofficial].
+- **Minimum Grid Size**: A 3D B-spline field requires at least $4 \times 4 \times 4$ control points to be well-defined [S1, unofficial].
+- **Boundary Conditions**: The source does not specify behavior for query points outside the grid bounds. Standard implementations must clamp indices or handle out-of-bounds weights [G].
 
 ## Subtopics
 
 ### Time-varying B-spline Deformation Field
-A variant where the displacement field $u(\mathbf{x}, t)$ is parametrized by cubic B-splines on a fixed 3D spatial grid, but the weights $w(t)$ vary with time [S1, unofficial]. The grid control points remain fixed in space, while the weights are generated implicitly as a function of time $t$ using a Multi-Layer Perceptron (MLP) $\phi(t) \rightarrow w(t)$ [S1, unofficial]. This approach allows arbitrary continuous position and time queries, ensures implicit time continuity, and is more efficient than discretizing time into timesteps [S1, unofficial]. For a 3D displacement field, the minimum degrees of freedom is $3 \times 64 = 192$ weights [S1, unofficial].
+A variant where the displacement field $u(\mathbf{x}, t)$ is parametrized by cubic B-splines on a fixed 3D spatial grid, but the control point weights $w(t)$ vary with time [S1, unofficial]. It is chosen when representing dynamic deformations in neural rendering or tomography, allowing arbitrary continuous position and time queries [S1, unofficial]. Unlike static fields, the weights are not stored explicitly as a 4D array but are generated implicitly by a Multi-Layer Perceptron (MLP) $\phi(t) \rightarrow w(t)$ that takes time $t$ as input and outputs the full set of weights for that timestep [S1, unofficial]. This approach ensures implicit time continuity and is more efficient than discretizing time into separate timesteps [S1, unofficial]. The spatial interpolation formula remains identical to the static case, but $w$ is replaced by $w(t)$ [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per query, as it always accesses exactly 64 control points ($4 \times 4 \times 4$) regardless of grid size [S1, unofficial].
-*   **Memory Complexity:** $O(N_x N_y N_z)$ to store the control point weights, where $N_x, N_y, N_z$ are the grid dimensions [S1, unofficial].
-*   **Strengths:** Provides $C^1$ continuity (smooth gradients), local support limits memory access patterns, and separability reduces computational cost [S1, unofficial].
-*   **Limitations:** The field does not interpolate the control points exactly (values at control points are blended) [S1, unofficial]. Requires a minimum grid size of $4 \times 4 \times 4$ [S1, unofficial].
-*   **When to Use:** When smooth derivatives are required for deformation or density fields, and computational efficiency per sample is critical [S1, unofficial].
-*   **When Not to Use:** When exact interpolation of control point values is required, or when the grid size is too small to capture field complexity [S1, unofficial].
+- **Time Complexity**: $O(1)$ per query, as it always accesses exactly $4^3 = 64$ control points and performs a fixed number of arithmetic operations [S1, unofficial].
+- **Memory Complexity**: $O(N)$ where $N$ is the number of control points. For a minimum 3D displacement field, this is 192 weights [S1, unofficial].
+- **Continuity**: Provides $C^2$ continuity for the scalar field, which ensures smooth gradients suitable for normal estimation and differentiable rendering [S1, unofficial].
+- **Strengths**: Local support allows for efficient updates and queries; smoothness reduces artifacts compared to linear interpolation; differentiable with respect to weights and coordinates.
+- **Limitations**: The field does not interpolate the control points directly (values are blended); requires a minimum grid density; boundary handling is non-trivial [S1, unofficial].
+- **When to use**: When smooth, differentiable interpolation of a dense grid is required, such as in neural deformation fields for volume rendering or medical image registration [S1, unofficial].
 
 ## Background
-The method is based on cubic B-splines introduced by Rueckert et al. [S1, unofficial]. It was adapted for neural rendering in the context of dynamic tomography, where it is used to represent time-varying deformation fields and density fields as continuous functions rather than discrete voxel grids [S1, unofficial]. The approach was compared to other time-variation methods (discrete timesteps, summation of weights) and found to be the most efficient and continuous [S1, unofficial].
+The method is based on cubic B-splines as described by Rueckert et al. [S1, unofficial]. It was adapted for dynamic tomography and neural rendering by [S1, unofficial] to represent time-varying displacement fields. The approach was compared against discrete timestep fitting and summation of previous weights, with the implicit time-varying weight generation via MLP yielding the best results [S1, unofficial].
 
 ## Sources
 [S1] Neural rendering enables dynamic tomography, https://doi.org/10.48550/arxiv.2410.20558, fetched 2026-10-26 (unofficial)

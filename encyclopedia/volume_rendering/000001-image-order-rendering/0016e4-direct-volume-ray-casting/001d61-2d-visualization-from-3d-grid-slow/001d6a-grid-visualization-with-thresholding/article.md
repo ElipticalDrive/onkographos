@@ -3,34 +3,44 @@
 Also called: 3D Scatter Plot Visualization, Thresholded Grid Visualization
 
 ## Overview
-Grid Visualization with Thresholding filters a 3D scalar grid based on opacity and gradient magnitude thresholds, then renders the surviving cells as a 3D scatter plot [S1, unofficial]. It solves the problem of visualizing sparse volumetric structures without the computational overhead of full volume ray casting [S1, unofficial]. It differs from its parent method, [2D Visualization from 3D Grid (Slow)](1507-2d-visualization-from-3d-grid-slow.md), by explicitly encoding scalar values into point coordinates and colors rather than projecting slices, and from [3D Table Computation on GPU](2083-3d-table-computation-on-gpu.md) by operating in CPU-space Python libraries (Plotly/Matplotlib) rather than GPU shader pipelines [S1, unofficial].
+Grid Visualization with Thresholding is a sparse visualization technique that filters a 3D grid tensor based on opacity and gradient magnitude thresholds, then renders the surviving cells as a 3D scatter plot [S1, unofficial]. It solves the problem of visualizing volumetric data without the computational overhead of ray casting or volume integration, making it suitable for rapid inspection of sparse structures [S1, unofficial]. It sets itself apart from its sibling [3D Table Computation on GPU](2083-3d-table-computation-on-gpu.md) by avoiding precomputed lookup tables and instead performing direct scalar filtering and point plotting, and from its parent [2D Visualization from 3D Grid (Slow)](1507-2d-visualization-from-3d-grid-slow.md) by explicitly leveraging gradient magnitude for structural filtering and outputting a 3D point cloud rather than 2D slices [S1, unofficial].
 
 ## How it works
-**Inputs:** A 3D grid tensor of scalar values (typically normalized to $[0, 1]$), optional gradient data tensor, and boolean flags for thresholding and cleaning.
-**Outputs:** A 3D scatter plot visualization where each point represents a grid cell with coordinates $(x, y, z)$ and color $(R, G, B)$ derived from the scalar value.
+**Inputs:**
+- `grid_cells`: A tensor of shape $(D, H, W, C)$ containing density/opacity values and RGB color channels, where $C \ge 1$.
+- `gradients`: (Optional) A tensor of shape $(D, H, W, 3)$ containing the gradient vector for each cell.
+- `threshold`: Float. Opacity threshold for visualization. Default: $0.0$ [S1, unofficial].
+- `do_threshold`: Boolean. Whether to apply the opacity threshold. Default: `True` [S1, unofficial].
+- `clean_strays`: Boolean. Whether to apply noise cleaning. Default: `False` [S1, unofficial].
+
+**Outputs:**
+- A list of 3D coordinates $(x, y, z)$ and corresponding RGB colors $(r, g, b)$ for all cells where the final alpha value is greater than $0$.
 
 **Data Structures:**
-- `grid_cells`: Tensor of shape $(D, H, W)$ containing scalar values.
-- `gradients`: Optional tensor of shape $(D, H, W, 3)$ containing gradient vectors $\nabla f$.
-- `threshold`: Float, opacity threshold for visualization (default 0.0).
-- `do_threshold`: Boolean, whether to apply thresholding (default True).
-- `clean_strays`: Boolean, whether to remove stray voxels (default False).
+- The grid is stored as a dense tensor. No explicit sparse structures (like linked lists or hash maps) are used in the core algorithm; sparsity is achieved by filtering.
 
 **Steps:**
-1. Load the grid cells tensor.
-2. If gradient data exists and thresholding is enabled, compute the gradient norm $\|\nabla f\|$ for each cell. Zero out cells where $\|\nabla f\| < 3.0 \times 10^{-6}$ [S1, unofficial].
-3. Clip all grid values to the range $[0, 1]$ [S1, unofficial].
-4. If thresholding is enabled, zero out alpha values below the `threshold` parameter. Set all non-zero alpha values to 1.0 [S1, unofficial].
-5. If `clean_strays` is enabled, apply noise removal by convolving the grid twice: first with a kernel of size 3 and radius 1, then with a kernel of size 7 and radius 3 [S1, unofficial].
-6. Extract coordinates $(x, y, z)$ and RGB values for all cells where the final alpha value is greater than 0 [S1, unofficial].
-7. Plot the extracted points using a 3D plotting library such as Plotly or Matplotlib [S1, unofficial].
+1. **Load Grid:** Load the `grid_cells` tensor onto the target device (e.g., CPU or GPU) [S1, unofficial].
+2. **Gradient Filtering (if applicable):** If gradient data exists and thresholding is enabled, compute the gradient norm for each cell. Zero out cells where the gradient norm is below $3.0 \times 10^{-6}$ [S1, unofficial].
+   - Formula: If $||\nabla f_{i,j,k}|| < 3.0 \times 10^{-6}$, then $grid\_cells_{i,j,k} = 0$.
+3. **Clipping:** Clip all values in `grid_cells` to the range $[0, 1]$ [S1, unofficial].
+4. **Opacity Thresholding:** If `do_threshold` is `True`:
+   - Zero out alpha values (the first channel or the density channel) below the `threshold`.
+   - Set all non-zero alpha values to $1.0$ [S1, unofficial].
+   - Formula: If $alpha_{i,j,k} < threshold$, then $alpha_{i,j,k} = 0$. Else, $alpha_{i,j,k} = 1$.
+5. **Noise Cleaning (if applicable):** If `clean_strays` is `True`, apply a convolution-based noise removal process twice with different parameters [S1, unofficial]:
+   - First pass: Convolve with a kernel of size $3$ and radius $1$.
+   - Second pass: Convolve with a kernel of size $7$ and radius $3$.
+   - Note: The specific convolution implementation (e.g., mean filter, Gaussian) is not detailed in the source, but the sequence is fixed [S1, unofficial].
+6. **Extraction:** Extract coordinates $(x, y, z)$ and RGB values for all cells where the final alpha value is $> 0$ [S1, unofficial].
+7. **Plotting:** Render the extracted points using a 3D plotting library such as Plotly or Matplotlib [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
 import torch
+import numpy as np
 
 def grid_visualization_with_thresholding(grid_cells, gradients=None, threshold=0.0, do_threshold=True, clean_strays=False):
     """
@@ -38,134 +48,124 @@ def grid_visualization_with_thresholding(grid_cells, gradients=None, threshold=0
     then plotting as a 3D scatter plot.
     
     Args:
-        grid_cells: Tensor of shape (D, H, W) with scalar values.
-        gradients: Optional Tensor of shape (D, H, W, 3) with gradient vectors.
-        threshold: Opacity threshold for visualization. Default is 0.0.
-        do_threshold: Whether to apply thresholding. Default is True.
-        clean_strays: Whether to remove stray voxels. Default is False.
+        grid_cells (torch.Tensor): Tensor of shape (D, H, W, C) with density/opacity in the first channel.
+        gradients (torch.Tensor, optional): Tensor of shape (D, H, W, 3) with gradient vectors.
+        threshold (float): Opacity threshold for visualization.
+        do_threshold (bool): Whether to apply thresholding.
+        clean_strays (bool): Whether to remove stray voxels.
         
     Returns:
-        x, y, z, r, g, b: Arrays of coordinates and colors for plotting.
+        list: List of tuples (x, y, z, r, g, b) for visualization.
     """
-    # Step 1: Load grid cells tensor (already loaded as input)
-    # Ensure grid is on CPU for numpy operations if needed, or keep on device
-    grid = grid_cells.clone()
+    # 1. Load grid cells tensor (assumed already on device)
+    # grid_cells is expected to be a torch.Tensor
     
-    # Step 2: Gradient-based filtering
+    # 2. Gradient filtering
     if gradients is not None and do_threshold:
         # Compute gradient norm
-        grad_norm = torch.norm(gradients, dim=-1) # Shape (D, H, W)
+        grad_norm = torch.norm(gradients, dim=-1) # Shape: (D, H, W)
         # Zero out cells where gradient norm is below 3.0e-06
-        grid[grad_norm < 3.0e-06] = 0.0
+        mask = grad_norm < 3.0e-06
+        grid_cells[mask] = 0
         
-    # Step 3: Clip values to [0, 1]
-    grid = torch.clamp(grid, 0.0, 1.0)
+    # 3. Clip values to [0, 1]
+    grid_cells = torch.clamp(grid_cells, 0.0, 1.0)
     
-    # Step 4: Opacity thresholding
+    # 4. Opacity thresholding
     if do_threshold:
-        # Create alpha mask: 1.0 if grid > threshold, else 0.0
-        alpha = (grid > threshold).float()
+        # Assuming the first channel is opacity/density
+        opacity = grid_cells[..., 0]
         # Zero out alpha values below threshold
-        grid = grid * alpha
-        # Set non-zero alphas to 1 (for visualization purposes, we keep the scalar value for color)
-        # Note: The source says "set non-zero alphas to 1", implying the alpha channel is binary
-        # but the scalar value is preserved for RGB mapping.
-        # We will use the original grid value for color, but mask out invalid cells.
-        valid_mask = (grid > 0)
+        opacity[opacity < threshold] = 0.0
+        # Set non-zero alphas to 1
+        opacity[opacity > 0] = 1.0
+        # Update grid_cells
+        grid_cells[..., 0] = opacity
         
-    else:
-        valid_mask = (grid > 0)
-        
-    # Step 5: Cleaning strays
+    # 5. Noise cleaning
     if clean_strays:
         # Apply convolve_grid_to_remove_noise twice
-        # Kernel 3/radius 1
-        grid = convolve_grid_to_remove_noise(grid, kernel_size=3, radius=1)
-        # Kernel 7/radius 3
-        grid = convolve_grid_to_remove_noise(grid, kernel_size=7, radius=3)
-        # Re-apply valid mask after cleaning if necessary, or re-evaluate threshold
-        if do_threshold:
-            valid_mask = (grid > 0)
-            
-    # Step 6: Extract coordinates and RGB values
-    # Get indices of valid cells
-    indices = torch.nonzero(valid_mask, as_tuple=True)
-    x = indices[0].float()
-    y = indices[1].float()
-    z = indices[2].float()
-    
-    # Get scalar values for color mapping
-    values = grid[valid_mask]
-    
-    # Map scalar values to RGB (simple grayscale or jet colormap implementation)
-    # For simplicity, we map value to RGB directly (grayscale)
-    r = values
-    g = values
-    b = values
-    
-    # Step 7: Plot using Plotly or Matplotlib
-    # This step is external to the data extraction logic
-    return x.numpy(), y.numpy(), z.numpy(), r.numpy(), g.numpy(), b.numpy()
-
-def convolve_grid_to_remove_noise(grid, kernel_size, radius):
-    """
-    Simple noise removal by convolving with a box filter.
-    """
-    # Pad the grid
-    pad = radius
-    padded_grid = torch.nn.functional.pad(grid, (pad, pad, pad, pad, pad, pad), mode='constant', value=0)
-    
-    # Create a box kernel
-    kernel = torch.ones((1, 1, kernel_size, kernel_size, kernel_size))
-    
-    # Convolve
-    # Note: This is a simplified implementation. Real implementation might use scipy or torch.nn.functional.conv3d
-    # Assuming grid is (D, H, W), we need to add channel dimension for conv3d
-    if grid.dim() == 3:
-        grid = grid.unsqueeze(0).unsqueeze(0)
+        # Note: The specific convolution function is not provided in the source.
+        # We assume a placeholder for the convolution operation.
+        # Pass 1: kernel 3, radius 1
+        grid_cells = convolve_grid(grid_cells, kernel_size=3, radius=1)
+        # Pass 2: kernel 7, radius 3
+        grid_cells = convolve_grid(grid_cells, kernel_size=7, radius=3)
         
-    convolved = torch.nn.functional.conv3d(grid, kernel, padding=radius)
+    # 6. Extract coordinates and RGB values for cells with alpha > 0
+    # Assuming alpha is the first channel
+    alpha = grid_cells[..., 0]
+    valid_mask = alpha > 0
     
-    # Normalize by kernel volume
-    convolved = convolved / (kernel_size ** 3)
+    # Get indices of valid cells
+    indices = torch.nonzero(valid_mask, as_tuple=False)
     
-    # Remove padding and channel dimensions
-    convolved = convolved.squeeze(0).squeeze(0)
+    # Extract coordinates (z, y, x) from indices
+    # Note: Plotly/Matplotlib usually expect (x, y, z)
+    x = indices[:, 2].float()
+    y = indices[:, 1].float()
+    z = indices[:, 0].float()
     
-    return convolved
+    # Extract RGB values (assuming channels 1, 2, 3 are RGB)
+    # If C < 4, handle appropriately. Assuming C >= 4 for RGB.
+    if grid_cells.shape[-1] >= 4:
+        r = grid_cells[valid_mask, 1]
+        g = grid_cells[valid_mask, 2]
+        b = grid_cells[valid_mask, 3]
+    else:
+        # Fallback if RGB is not present, use grayscale or default
+        r = grid_cells[valid_mask, 0]
+        g = grid_cells[valid_mask, 0]
+        b = grid_cells[valid_mask, 0]
+        
+    # 7. Plot using Plotly or Matplotlib
+    # This step is external; return data for plotting
+    points = []
+    for i in range(len(x)):
+        points.append((x[i].item(), y[i].item(), z[i].item(), r[i].item(), g[i].item(), b[i].item()))
+        
+    return points
+
+def convolve_grid(tensor, kernel_size, radius):
+    """
+    Placeholder for the convolution operation described in the source.
+    The source mentions 'convolve_grid_to_remove_noise' with specific kernel/radius parameters.
+    The exact implementation is not provided in the source.
+    """
+    # Not given in the sources.
+    return tensor
 ```
 
 **Parameters:**
-- `threshold`: Opacity threshold for visualization. Default is 0.0 [S1, unofficial].
-- `do_threshold`: Whether to apply thresholding. Default is True [S1, unofficial].
-- `clean_strays`: Whether to remove stray voxels. Default is False [S1, unofficial].
+- `threshold`: Opacity threshold for visualization. Default: $0.0$ [S1, unofficial].
+- `do_threshold`: Whether to apply thresholding. Default: `True` [S1, unofficial].
+- `clean_strays`: Whether to remove stray voxels. Default: `False` [S1, unofficial].
 
 **Pitfalls:**
-- Gradient-based thresholding uses a fixed threshold of $3.0 \times 10^{-6}$ for gradient norm, which may not be suitable for all datasets [S1, unofficial].
-- Visualization thresholding uses a configurable opacity threshold, which must be tuned per dataset [S1, unofficial].
-- The cleaning step assumes a specific noise structure; inappropriate kernel sizes may blur important features [S1, unofficial].
+- Gradient-based thresholding uses a fixed threshold of $3.0 \times 10^{-6}$ for gradient norm, which may not be optimal for all datasets [S1, unofficial].
+- Visualization thresholding uses a configurable opacity threshold, which is distinct from the gradient threshold [S1, unofficial].
+- The noise cleaning step relies on an unspecified convolution function, which may lead to implementation gaps if the exact kernel is not defined [S1, unofficial].
 
 ## Subtopics
+
+### [Density Range Windowing](1571-density-range-windowing.md)
+Density Range Windowing restricts rendering to voxels whose density falls within a specified $[min, max]$ range, allowing selective visualization of specific structures within a volume. It sets itself apart from its parent method, Grid Visualization with Thresholding, by operating on a continuous density interval rather than a single binary opacity threshold or gradient magnitude, enabling finer control over semi-transparent vs. dense core separation.
 
 ### [Glyph Lines](8934-glyph-lines.md)
 Glyph Lines is a sparse visualization technique for 3D vector fields that samples the field on a 2D grid at a fixed coordinate and renders each sample as a line segment. It solves the problem of visualizing flow direction and magnitude in a specific slice of a volumetric dataset without the computational cost of full volume ray casting. It differs from its parent method, Grid Visualization with Thresholding, by explicitly encoding vector direction and magnitude into geometric primitives (lines) rather than plotting scalar grid cells as points.
 
-### Density Range Windowing
-Density Range Windowing restricts rendering to voxels whose density falls within a specified $[min, max]$ range, allowing selective visualization of structures [S2, unofficial]. It raises `min` to drop semi-transparent structures (skin/foliage) and retain dense cores (bone), and lowers `max` to peel off densest structures [S2, unofficial]. Parameters `m_densityMin` (default 0.0f) and `m_densityMax` (default 1.0f) define the visible density interval [S2, unofficial].
-
 ## Operating characteristics
-**Time Complexity:** $O(N)$ where $N$ is the number of grid cells, for filtering and extraction. Plotting time depends on the number of visible points and the rendering engine.
-**Memory Complexity:** $O(N)$ to store the grid and intermediate tensors.
-**Measured Performance:** Not given in the sources.
-**Scaling:** Performance degrades linearly with grid size. Plotting libraries may struggle with very large point clouds.
-**Strengths:** Simple to implement, fast for sparse data, easy to integrate with standard Python visualization tools.
-**Limitations:** Not suitable for dense volumetric data, lacks depth cues and occlusion handling, limited to scalar fields (unless extended).
-**When to use:** Quick inspection of sparse volumetric data, debugging, or when GPU-based rendering is not available.
-**When not to use:** Dense volumetric visualization, real-time applications, or when accurate depth perception is required.
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as it involves a single pass over the grid for filtering and extraction.
+- **Memory Complexity:** $O(N)$ for storing the grid and the resulting point cloud.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with the number of voxels. Performance is limited by the extraction and plotting steps for very large grids.
+- **Strengths:** Simple to implement; fast for sparse data; no need for complex ray casting or volume integration.
+- **Limitations:** Loses depth information and occlusion handling; not suitable for dense volumes; relies on external plotting libraries for visualization.
+- **When to use:** Rapid inspection of sparse volumetric data; debugging; educational purposes.
+- **When not to use:** Dense volumes; production-quality rendering; when occlusion or depth cues are critical.
 
 ## Background
-Grid Visualization with Thresholding originates from practical implementations in Python-based volumetric data analysis, specifically within the Plenoxels project [S1, unofficial]. It is used for rapid visualization of 3D scalar fields, particularly in contexts where full volume ray casting is overkill or unavailable. The method leverages standard scientific computing libraries (NumPy, PyTorch) and visualization tools (Plotly, Matplotlib) to provide an accessible entry point for 3D data exploration.
+Origin: The method is described in the unofficial source [S1, unofficial], which appears to be a GitHub repository (DanJbk/Plenoxels). The specific origin date and author are not provided in the source.
 
 ## Sources
 [S1] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)
-[S2] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)

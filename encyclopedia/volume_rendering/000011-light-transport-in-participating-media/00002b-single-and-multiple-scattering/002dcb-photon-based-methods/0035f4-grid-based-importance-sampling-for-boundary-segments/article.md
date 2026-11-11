@@ -3,64 +3,95 @@
 Also called: Photon/importon map sampling
 
 ## Overview
-This method provides a preprocessing-based importance sampling strategy for boundary path integrals in differentiable rendering [S1, unofficial]. It addresses the difficulty of analytically computing the probability density $P(\mathbf{x}_B, \boldsymbol{\omega}_B)$ by discretizing it into a regular 3D grid [S1, unofficial]. Unlike standard path guiding which accelerates unidirectional path tracing, this technique is specifically designed for the boundary integrals required for gradient computation [S1, unofficial]. It builds on [Photon-based Methods](5620-photon-based-methods.md) by applying photon/importon map concepts to the low-dimensional boundary space [S1, unofficial].
+This method provides an importance sampling strategy for boundary path integrals in differentiable rendering by discretizing the integrand's probability density into a precomputed regular 3D grid [S1, unofficial]. It addresses the inefficiency of uniform sampling for complex, potentially discontinuous boundary integrands by leveraging the low dimensionality of the boundary domain (3D total: 1D for position on mesh edges, 2D for direction on the sphere) [S1, unofficial]. Unlike [Photon-based Estimation](2521-photon-based-estimation.md) which focuses on radiance estimation in participating media, this technique is specialized for gradient computation in differentiable rendering, building on [Photon-based Methods](5620-photon-based-methods.md) but replacing rigid grids with adaptive structures in its variants like [Primary-Sample-Space Guiding with Kd-Trees](8206-primary-sample-space-guiding-with-kd-trees.md).
 
 ## How it works
-**Inputs:**
-*   Scene geometry (e.g., polygonal meshes) defining the boundary manifold $\mathbf{x}_B$ [S1, unofficial].
-*   Light source radiance distribution [S1, unofficial].
-*   Detector importance distribution [S1, unofficial].
-
-**Outputs:**
-*   A precomputed regular 3D grid representing the piecewise constant approximation of the probability density $P(\mathbf{x}_B, \boldsymbol{\omega}_B)$ [S1, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A scene geometry (e.g., polygonal meshes), light sources, and detector parameters.
+*   **Output:** A piecewise constant probability density function (PDF) represented by a 3D grid, used to sample boundary segments $\mathbf{x}_B$ and directions $\boldsymbol{\omega}_B$ for gradient estimation.
 
 **Data Structures:**
-*   **Grid:** A regular 3D grid where each cell $C_i$ stores a weight $P_i$ [S1, unofficial].
-*   **Photon Map:** Stores photons carrying radiance from the light source [S1, unofficial].
-*   **Importon Map:** Stores importons carrying importance from the detector [S1, unofficial].
-
-**Notation:**
-*   $\mathbf{x}_B$: Position on the boundary manifold (1D for mesh edges) [S1, unofficial].
-*   $\boldsymbol{\omega}_B$: Direction on the sphere subset (2D) [S1, unofficial].
-*   $F_B(\mathbf{x}_B, \boldsymbol{\omega}_B)$: The integrand function for the boundary segment [S1, unofficial].
-*   $P(\mathbf{x}_B, \boldsymbol{\omega}_B)$: The probability density function to be sampled [S1, unofficial].
-*   $C_i$: A cell in the discretized 3D grid [S1, unofficial].
+*   **Grid:** A regular 3D grid covering the combined domain of $\mathbf{x}_B$ and $\boldsymbol{\omega}_B$. The grid cells $C_i$ store a weight $P_i$.
+*   **Photon Map:** Stores photons traced from light sources, carrying radiance information.
+*   **Importon Map:** Stores importons traced from the detector, carrying importance information.
 
 **Steps:**
-1.  **Preprocessing - Map Generation:** Trace photons from the light source to build a photon map, and trace importons from the detector to build an importon map [S1, unofficial].
-2.  **Discretization:** Define a regular 3D grid covering the combined domain of $\mathbf{x}_B$ and $\boldsymbol{\omega}_B$, noting that the total dimensionality is three (1D for $\mathbf{x}_B$ on mesh edges, 2D for $\boldsymbol{\omega}_B$ on the sphere subset) [S1, unofficial].
-3.  **Weight Calculation:** For each cell $C_i$, compute the weight $P_i$ by integrating the integrand $F_B$ over the cell volume using uniform sampling of $\mathbf{x}_B$ and $\boldsymbol{\omega}_B$ [S1, unofficial]:
-    $$ P_i = \int_{C_i} F_B(\mathbf{x}_B, \boldsymbol{\omega}_B) \, d\boldsymbol{\omega}_B \, d\mathbf{x}_B $$
-4.  **Rendering/Sampling:** Use the grid weights $P_i$ to importance sample $\mathbf{x}_B$ and $\boldsymbol{\omega}_B$ during the evaluation of boundary path integrals [S1, unofficial].
+1.  **Preprocessing - Map Generation:**
+    *   Trace photons from light sources to build a photon map. Photons carry radiance information relevant to the boundary integrand $F_B(\mathbf{x}_B, \boldsymbol{\omega}_B)$ [S1, unofficial].
+    *   Trace importons from the detector to build an importon map. Importons carry importance information [S1, unofficial].
+2.  **Preprocessing - Grid Weight Calculation:**
+    *   For each cell $C_i$ in the regular 3D grid, compute the weight $P_i$ by uniformly sampling positions $\mathbf{x}_B$ and directions $\boldsymbol{\omega}_B$ within the cell and integrating the boundary integrand $F_B$:
+        $$ P_i = \int_{C_i} F_B(\mathbf{x}_B, \boldsymbol{\omega}_B) d\boldsymbol{\omega}_B d\mathbf{x}_B $$
+    *   This provides a piecewise constant representation of the probability density $P(\mathbf{x}_B, \boldsymbol{\omega}_B) \propto F_B(\mathbf{x}_B, \boldsymbol{\omega}_B)$ [S1, unofficial].
+3.  **Rendering - Sampling:**
+    *   To sample a boundary segment, select a cell $C_i$ based on the weights $P_i$ (normalized to form a PDF).
+    *   Uniformly sample $\mathbf{x}_B$ and $\boldsymbol{\omega}_B$ within the selected cell $C_i$ [S1, unofficial].
+
+**Parameters:**
+*   **Grid Resolution:** Not given in the sources.
+*   **Sampling Strategy:** Uniform sampling within cells for weight calculation [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Dimensionality:** The method relies on the total dimensionality of $\mathbf{x}_B$ and $\boldsymbol{\omega}_B$ being low (3D). If the domain dimensionality increases, the grid approach may become inefficient due to the curse of dimensionality [S1, unofficial].
+*   **Discontinuities:** The integrand $F_B$ can be complex and discontinuous. The piecewise constant approximation may not capture sharp features if the grid resolution is insufficient [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def preprocess_grid(scene, light, detector, grid_resolution):
-    photon_map = trace_photons(light, scene)
-    importon_map = trace_importons(detector, scene)
-    grid = create_3d_grid(grid_resolution)
-    for cell in grid.cells:
-        samples_x = uniform_sample_1d(cell.domain_x)
-        samples_w = uniform_sample_2d(cell.domain_w)
-        cell.weight = integrate_Fb(samples_x, samples_w, scene)
-    return grid
+def preprocess_boundary_grid(scene, light_sources, detector, grid_resolution):
+    """
+    Precomputes a regular 3D grid for importance sampling boundary segments.
+    """
+    # Initialize grid with zeros
+    grid_weights = np.zeros(grid_resolution)
+    
+    # Step 1: Generate photon map
+    photon_map = trace_photons(scene, light_sources)
+    
+    # Step 2: Generate importon map
+    importon_map = trace_importons(scene, detector)
+    
+    # Step 3: Calculate grid weights
+    for each cell C_i in grid:
+        # Uniformly sample x_B and omega_B within the cell
+        samples_x = uniform_sample_in_cell(C_i, num_samples)
+        samples_omega = uniform_sample_in_cell(C_i, num_samples)
+        
+        # Compute integrand F_B for each sample
+        # F_B depends on scene, photon_map, importon_map, x_B, omega_B
+        integrand_values = []
+        for x_B, omega_B in zip(samples_x, samples_omega):
+            val = compute_boundary_integrand_F_B(scene, photon_map, importon_map, x_B, omega_B)
+            integrand_values.append(val)
+        
+        # Integrate F_B over the cell (approximated by sum * cell_volume / num_samples)
+        # P_i = integral_{C_i} F_B d omega_B d x_B
+        cell_volume = get_cell_volume(C_i)
+        P_i = sum(integrand_values) * cell_volume / len(integrand_values)
+        grid_weights[i] = P_i
+    
+    # Normalize grid weights to form a PDF
+    total_weight = sum(grid_weights)
+    if total_weight > 0:
+        grid_weights /= total_weight
+        
+    return grid_weights
 
-def sample_boundary(grid):
-    cell = weighted_random_choice(grid.cells, grid.weights)
-    x_B = uniform_sample_1d(cell.domain_x)
-    omega_B = uniform_sample_2d(cell.domain_w)
+def sample_boundary_segment(grid_weights, grid_resolution):
+    """
+    Samples a boundary segment using the precomputed grid.
+    """
+    # Select a cell based on grid weights
+    cell_index = categorical_sample(grid_weights)
+    cell = get_cell_from_index(cell_index, grid_resolution)
+    
+    # Uniformly sample x_B and omega_B within the selected cell
+    x_B = uniform_sample_in_position_domain(cell)
+    omega_B = uniform_sample_in_direction_domain(cell)
+    
     return x_B, omega_B
 ```
-
-**Parameters:**
-*   Grid resolution: Not given in the sources.
-*   Number of photons/importons: Not given in the sources.
-
-**Edge Cases and Pitfalls:**
-*   The method assumes the domain can be effectively covered by a regular 3D grid [S1, unofficial].
-*   Precision issues may arise if the integrand $F_B$ varies significantly within a single cell, as the grid provides only a piecewise constant representation [S1, unofficial].
 
 ## Subtopics
 
@@ -68,18 +99,18 @@ def sample_boundary(grid):
 This method efficiently estimates boundary path integrals in differentiable rendering by constructing Kd-trees over the 3D primary sample space to importance sample boundary segments. It addresses the challenge that the integrand is complex and potentially discontinuous, making uniform sampling inefficient. Unlike forward rendering path guiding, which accelerates unidirectional path tracing, this technique focuses on the unique boundary integrals required for gradient computation in differentiable rendering. It builds on [Grid-based Importance Sampling for Boundary Segments](7643-grid-based-importance-sampling-for-boundary-segments.md) by replacing the rigid regular grid with an adaptive Kd-tree structure that automatically refines based on the local structure of the approximated integrand.
 
 ### Grid-based Guiding for Boundary Path Sampling
-A simple regular-grid-based scheme used to guide the sampling of boundary paths for implicit surfaces, helping to find un-occluded regions of light [S2]. It assumes at most one intersection for each sample point on the proxy curve, which may be violated when AABBs are not small enough, introducing bias [S2]. It has difficulties handling reflections off of highly glossy surfaces [S2].
+A simple regular-grid-based scheme used to guide the sampling of boundary paths for implicit surfaces, helping to find un-occluded regions of light [S2]. Regular-grid-based guiding has difficulties handling reflections off of highly glossy surfaces [S2]. It assumes at most one intersection for each sample point on the proxy curve, which may be violated when AABBs are not small enough, introducing bias [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** Preprocessing requires tracing photons and importons and integrating over grid cells [S1, unofficial]. Rendering time depends on grid lookup and sampling [S1, unofficial].
-*   **Memory Complexity:** Proportional to the number of grid cells and the size of the photon/importon maps [S1, unofficial].
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Not given in the sources.
-*   **Strengths:** Exploits the low dimensionality (3D) of the boundary space to provide efficient importance sampling for differentiable rendering [S1, unofficial].
-*   **Limitations:** Regular grids struggle with glossy reflections and may introduce bias if proxy curve intersections are not unique [S2]. It lacks adaptivity for complex integrands compared to tree-based structures [S2].
+*   **Time Complexity:** Preprocessing time depends on the number of photons/importons traced and the number of grid cells. Sampling time is $O(1)$ after preprocessing.
+*   **Memory Complexity:** $O(N_{grid} + N_{photons} + N_{importons})$, where $N_{grid}$ is the number of grid cells, and $N_{photons}, N_{importons}$ are the number of particles in the maps.
+*   **Strengths:** Simple to implement; leverages low dimensionality of the boundary domain; effective for differentiable rendering gradients.
+*   **Limitations:** Struggles with high-dimensional domains; regular grids may not adapt well to complex integrand structures; difficulties with glossy reflections [S2].
+*   **When to use:** When computing gradients for differentiable rendering with boundary paths, especially when the domain dimensionality is low (e.g., 3D).
+*   **When not to use:** For high-dimensional domains or when high accuracy is required for glossy reflections without additional techniques [S2].
 
 ## Background
-Originated in the context of path-space differentiable rendering [S1, unofficial]. It adapts standard path guiding techniques using photon maps [Jensen 1995] to the specific requirements of computing derivatives of boundary integrals [S1, unofficial].
+This method originates from research in path-space differentiable rendering [S1, unofficial][S2]. It was developed to address the challenges of efficiently sampling boundary paths for gradient computation, building on standard path guiding techniques using photon maps [S1, unofficial]. The approach was validated against finite-difference methods for derivative estimation [S1, unofficial].
 
 ## Sources
 [S1] Path-Space Differentiable Rendering, https://core.ac.uk/download/541724175.pdf, fetched 2026-10-29 (unofficial)

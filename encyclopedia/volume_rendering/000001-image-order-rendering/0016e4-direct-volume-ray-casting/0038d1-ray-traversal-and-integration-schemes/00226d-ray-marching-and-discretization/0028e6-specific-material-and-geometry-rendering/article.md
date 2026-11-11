@@ -1,33 +1,60 @@
 # Specific Material and Geometry Rendering
+
+Also called: Material-specific Volume Rendering, Geometry-based Volume Rendering
+
 ## Overview
-Specific Material and Geometry Rendering defines how volumetric data is mapped to visual appearance and handles specific projection requirements during ray marching [G]. It decouples physical density or scattering data from the final pixel color computation, allowing distinct rendering modes and material parameterization to be applied per sample point [G]. It differs from [Ray Marching and Discretization](2788-ray-marching-and-discretization.md) by explicitly exposing material interfaces and rendering modes that alter the fragment shader's output logic, rather than relying solely on the integration of the radiative transfer equation [G].
+Specific Material and Geometry Rendering encompasses techniques that extend standard ray marching by introducing material-specific optical properties, procedural density generation, and alternative geometric representations (such as SDFs or procedural meshes) for participating media. It solves the problem of rendering complex, heterogeneous volumes—such as clouds, fog, and multi-material medical scans—that require more than simple scalar field integration. What sets this family apart from its siblings is the explicit handling of material composition (e.g., bone vs. muscle), procedural noise-based density shaping (e.g., clouds), or geometric approximations (e.g., V-Ray's Volumetric Geometry) rather than relying solely on uniform or pre-baked voxel grids.
 
 ## Shared principles
-The family shares the mechanism of decoupling physical volume data from visual appearance rules through:
-- **Material Parameterization:** Defining optical properties (e.g., reflection coefficients, shininess) that are applied to voxels based on their geometric orientation relative to the viewer [G].
-- **Rendering Mode Selection:** Using a uniform variable to switch the fragment shader's computation between different output definitions (e.g., Phong shading vs. attenuation-only vs. maximum intensity) [S1, unofficial].
-- **Gradient-Based Classification:** Determining surface properties (exterior vs. interior) based on the sign of the volume gradient vector at the sample point [G].
+All methods in this family operate within the image-order ray marching framework defined by [Ray Marching and Discretization](2788-ray-marching-and-discretization.md). They share the following core mechanisms:
+
+1.  **Ray-Volume Intersection:** The ray is intersected with a volume domain (bounding box, sphere, or implicit surface). The integration interval $[t_{near}, t_{far}]$ is determined.
+2.  **Discretization:** The interval is divided into steps of size $\Delta t$ (or $\Delta l$). Steps may be fixed, adaptive, or jittered to reduce aliasing [S1, S2, unofficial].
+3.  **Accumulation Loop:** For each step $i$ at position $x_i$:
+    *   **Density/Opacity Sampling:** The local density $\sigma_t(x_i)$ or opacity $\alpha$ is retrieved from a data source (texture, procedural function, or SDF) [S1, S2, unofficial][S3].
+    *   **Transmittance Update:** The transmittance $T$ is updated: $T \leftarrow T \cdot e^{-\sigma_t(x_i) \Delta t}$ [S1, S2, unofficial].
+    *   **In-Scattering:** The in-scattered radiance $L_{in}$ is computed based on lighting, phase functions, and material properties [S1, S2, unofficial][S3].
+    *   **Color Accumulation:** The final color is accumulated: $C \leftarrow C + L_{in} \cdot T \cdot \Delta t$ [S1, S2, unofficial].
+4.  **Termination:** The loop terminates when $T$ drops below a threshold (e.g., $0.01$) or the ray exits the volume [S1, S2, unofficial].
 
 ## Subtopics
 
 ### [Procedural Volumetric Cloud Rendering](3480-procedural-volumetric-cloud-rendering.md)
-Procedural volumetric cloud rendering is a real-time technique that ray-marches a spherical cloud layer built from tileable 3D noise fields, lighting it with multiple-scattering approximations and Mie phase functions. It solves the problem of rendering physically plausible, large-scale cloudscapes with dynamic lighting and shadows at interactive frame rates. What sets it apart from [Mr-Voxel Volume Rendering](3874-mr-voxel-volume-rendering.md) is the use of procedural noise for density generation rather than pre-computed voxel grids, and from [Ray-marched Volumetric Fog](4248-ray-marched-volumetric-fog.md) by employing specific cloud physics (Mie scattering, multiple scattering approximations, and vertical density profiles) rather than generic volumetric fog.
+A real-time GPU technique that ray-marches a spherical cloud layer built from tileable 3D noise fields, lighting it with multiple-scattering approximations and Mie phase functions. It solves the problem of rendering physically plausible, large-scale cloudscapes that interact with solid geometry and atmospheric lighting without pre-baking weather maps. What sets it apart from its siblings is the combination of Nubis-style noise shaping (Perlin-Worley fbm) with Frostbite-style energy-conserving integration and temporal reprojection, allowing half-resolution marching to converge to full-resolution quality. Unlike [Mr-Voxel Volume Rendering](3874-mr-voxel-volume-rendering.md) which relies on voxel grids, this method uses procedural textures, and unlike [Ray-marched Volumetric Fog](4248-ray-marched-volumetric-fog.md) which typically uses simple exponential density, it employs complex multi-octave noise and anisotropic scattering.
 
 ### [Mr-Voxel Volume Rendering](3874-mr-voxel-volume-rendering.md)
-Mr-Voxel Volume Rendering is a direct volume ray casting method implemented within the Mr-Voxel library's `VolumeIntegrator` class. It solves the problem of computing the radiance contribution of a single light source through a single homogeneous or heterogeneous volume region by marching along a ray and accumulating emitted and scattered light. It is distinguished from its siblings by its specific implementation of Russian Roulette for transmittance termination and its reliance on a pre-computed optical depth (`tau`) function for transmittance updates, rather than integrating extinction coefficients directly per step.
+Mr-Voxel Volume Rendering is a direct volume ray casting method implemented within the Mr-Voxel library's `VolumeIntegrator` class. It solves the problem of computing the radiance contribution of a single light source through a single volume region by marching along a ray and accumulating emitted and scattered light. It is distinguished from its siblings by its specific implementation of Russian Roulette for transmittance termination and its reliance on a pre-computed optical depth (`tau`) function for transmittance updates, rather than integrating extinction coefficients directly per step.
 
 ### [Ray-marched Volumetric Fog](4248-ray-marched-volumetric-fog.md)
-Ray-marched volumetric fog simulates light absorption, scattering, soft shadows, and light shafts (god rays) by treating fog as a 3D volume of participating media traced via forward ray-marching from the camera to the scene. It differs from backward ray-marching by allowing early-out optimizations when transmittance becomes negligible, and it decouples the physical density data from visual appearance rules via material parameterization and gradient-based classification as defined in [Specific Material and Geometry Rendering](4395-specific-material-and-geometry-rendering.md).
+Ray-marched volumetric fog simulates light absorption, scattering, soft shadows, and light shafts by treating fog as a 3D volume of participating media traced via forward ray-marching from the camera to the scene. It differs from backward ray-marching by allowing early-out optimizations when transmittance becomes negligible.
 
 ### [Material Parameter Setting](5335-material-parameter-setting.md)
-Material Parameter Setting defines the optical properties (albedo, metalness, roughness, reflectivity) and texture mappings applied to volume voxels during ray casting. It solves the problem of decoupling physical density data from visual appearance rules by allowing surface properties to be determined based on geometric orientation (gradient direction) relative to the viewer. It differs from sibling methods by providing a structured object layout for physically-based rendering (PBR) parameters alongside a legacy API for classical Phong-style shading coefficients.
+Material Parameter Setting defines the optical properties and texture mappings applied to volume voxels during ray casting. It solves the problem of decoupling physical density data from visual appearance rules by allowing surface properties to be determined based on geometric orientation relative to the viewer. It differs from sibling methods by providing a structured object layout for physically-based rendering parameters alongside a legacy API for classical shading coefficients.
+
+### [DVGO Density and Color Rendering](12839-dvgo-density-and-color-rendering.md)
+DVGO uses a shifted softplus as density activation to map stored values to non-negative densities, and a shallow MLP to map color features and positional encodings to view-dependent color emission.
 
 ### Surface and DRR Rendering Modes
-**Definition:** Surface rendering mode computes $C(s)$ according to the Phong equation using the volume gradient [S1, unofficial]. Digitally Reconstructed Radiographs (DRRs) mode sets $C(s) = (0,0,0)$, attenuating only the backlight by accumulated transmittance $t$ [S1, unofficial]. Maximum Intensity Projections (MIPs) mode outputs the opacity $\alpha$ of the maximum-opacity interval along the ray [S1, unofficial].
-**Parameter:** A uniform variable tells the fragment shader which rendering mode to use [S1, unofficial].
+*   **Definition:** Surface rendering mode computes color $C(s)$ according to the Phong equation using the volume gradient [S1, unofficial]. Digitally Reconstructed Radiographs (DRRs) mode sets $C(s) = (0,0,0)$, attenuating only the backlight by accumulated transmittance $t$ [S1, unofficial]. Maximum Intensity Projections (MIPs) output the opacity $\alpha$ of the maximum-opacity interval along the ray [S1, unofficial].
+*   **Parameter:** A uniform variable tells the fragment shader which rendering mode to use [S1, unofficial].
+
+### Material Percentage Volume Rendering
+*   **Definition:** A technique for rendering volumes with mixtures of materials (e.g., bone, muscle) by creating material percentage volumes and compositing them [S2, unofficial].
+*   **Steps:** Assume the scalar field was sampled above the Nyquist frequency or low-pass filtered. Differentiate materials by scalar value or additional composition info. Create material percentage volumes, where each is a scalar field representing one material. Associate color and opacity with each material. Obtain composite color and opacity by linearly combining the color and opacity for each material percentage volume. Use a matte volume (scalar field 0-1) to slice the volume or perform spatial set operations. Transform the volume so one axis is perpendicular to the image plane. Project plane by plane in a back-to-front manner and composite to form the final image [S2, unofficial].
+
+### Volumetric Heat Haze
+*   **Definition:** Produces the same result as Volumetric Geometry but adds heat haze refraction effect. Requires V-Ray. Uses Surface channel gradient to change ray direction [S3].
+*   **Parameter:** Heat Haze (`hhfactor`): Multiplier for refraction based on Surface channel gradient. 1 approximates normal air heat haze from temperature. 0 produces no effect. Larger values needed if using smoke/other channels as source. Only available in Volumetric Heat Haze mode [S3].
+*   **Pitfall:** Heat Haze only affects camera view, not shadows cast through volume. If Heat Haze shader intersects with VRayMtl refraction, Max depth of VRayMtl may need increase [S3].
+
+### Volumetric Geometry Rendering
+*   **Definition:** Produces the same visual result as Volumetric mode but uses procedural geometry made of multiple transparent layers. Requires V-Ray. Used for exporting deep images and render elements (normals, velocity, multi matte) not available in standard Volumetric mode [S3].
+*   **Pitfall:** Approximate and Approximate+Shadows options for Scattering in Smoke color window are not supported in this mode. Cutter Geom does not work when Mode is set to Volumetric Geometry [S3].
 
 ## Background
-Not given in the sources.
+Volume rendering techniques have evolved from object-order methods (like ray casting through voxel grids) to image-order methods (like ray marching) to improve performance and flexibility [S2, unofficial]. The specific handling of materials and geometry emerged from the need to render heterogeneous data (e.g., medical CT scans with bone and soft tissue) [S2, unofficial] and complex atmospheric phenomena (e.g., clouds) [S3]. Early work by Drebin, Carpenter, and Hanrahan introduced material percentage volumes for multi-material rendering [S2, unofficial]. Later, real-time techniques incorporated procedural noise for clouds [S3] and PBR material parameters for volumetric surfaces [S1, S2, unofficial]. V-Ray introduced "Volumetric Geometry" to allow standard render elements to be generated from volumetric data by approximating it with transparent geometry [S3].
 
 ## Sources
 [S1] CISC/CMPE 454, GPU Volume Rendering, https://watkins.cs.queensu.ca/~jstewart/454/notes/44/44-gpu-volume-rendering.html, fetched 2026-10-30 (unofficial)
+[S2] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)
+[S3] FireSmoke Rendering - Phoenix for 3ds Max, https://documentation.chaos.com/space/PHX4MAX/124396558, fetched 2026-10-27
