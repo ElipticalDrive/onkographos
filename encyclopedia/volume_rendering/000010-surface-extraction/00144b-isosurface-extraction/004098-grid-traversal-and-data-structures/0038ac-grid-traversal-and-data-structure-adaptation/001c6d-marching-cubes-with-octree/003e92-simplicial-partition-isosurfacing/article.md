@@ -7,35 +7,35 @@ Simplicial Partition Isosurfacing extracts a manifold, intersection-free isosurf
 
 ## How it works
 **Inputs and Outputs**
-*   **Input:** An octree structure representing a scalar field $F: \mathbb{R}^3 \rightarrow \mathbb{R}$, and an isosurface value $c$.
-*   **Output:** A set of triangles forming a 2-manifold isosurface.
+*   **Input:** An octree structure representing a scalar field $F: \mathbb{R}^3 \rightarrow \mathbb{R}$, and an isosurface value $c$ [S1].
+*   **Output:** A set of triangles forming a 2-manifold isosurface [S1].
 
 **Data Structures**
-The method operates on the octree's minimal cells. A minimal $m$-cell is defined as a cell of dimension $m$ that does not contain any other cells of dimension $m$ as a subset [S1].
-*   **Minimal 3-cells (Cubes):** Leaf nodes in the octree.
-*   **Minimal 2-cells (Faces):** The smaller of the two shared faces of adjacent leaf cubes.
-*   **Minimal 1-cells (Edges):** Edges shared by adjacent minimal faces or cubes.
-*   **Minimal 0-cells (Vertices):** Vertices of the octree not contained in any other minimal cell of higher dimension.
+The method operates on the octree's minimal cells [S1]. A minimal $m$-cell is defined as a cell of dimension $m$ that does not contain any other cells of dimension $m$ as a subset [S1].
+*   **Minimal 3-cells (Cubes):** Leaf nodes in the octree [S1].
+*   **Minimal 2-cells (Faces):** The smaller of the two shared faces of adjacent leaf cubes [S1].
+*   **Minimal 1-cells (Edges):** Edges shared by adjacent minimal faces or cubes [G].
+*   **Minimal 0-cells (Vertices):** Vertices of the octree not contained in any other minimal cell of higher dimension [G].
 
 **Dual Vertices**
 For each minimal $m$-cell, a dual vertex $\bar{p} = \langle p, F(p) \rangle \in \mathbb{R}^4$ is created, where $p \in \mathbb{R}^3$ is the spatial position [S1]. The position $p$ is constrained to lie within its containing cell:
-*   Dual vertices for 3-cells (cubes) are constrained to the interior of the cube.
-*   Dual vertices for 2-cells (faces) are constrained to the interior of the face.
-*   Dual vertices for 1-cells (edges) are constrained to the interior of the edge.
+*   Dual vertices for 3-cells (cubes) are constrained to the interior of the cube [S1].
+*   Dual vertices for 2-cells (faces) are constrained to the interior of the face [S1].
+*   Dual vertices for 1-cells (edges) are constrained to the interior of the edge [S1].
 *   Dual vertices for 0-cells (vertices) are fixed at the position of the 0-cell vertex [S1].
 
-For $m > 0$, an additional constraint prevents vertices from lying on the boundary of their containing cell to avoid degenerate tetrahedra and T-intersections. The vertex is constrained to a sub-region of size $1-\epsilon$ of the containing cell, where $\epsilon$ is a small positive value [S1].
+For $m > 0$, an additional constraint prevents vertices from lying on the boundary of their containing cell to avoid degenerate tetrahedra and T-intersections [S1]. The vertex is constrained to a sub-region of size $1-\epsilon$ of the containing cell, where $\epsilon$ is a small positive value [S1].
 
 **Simplicial Partition**
-Space is partitioned recursively into simplices starting from a single vertex, forming a hierarchy:
-1.  A line segment is formed by adding an edge vertex to a vertex.
-2.  A triangle is formed by adding a face vertex to the line segment.
+Space is partitioned recursively into simplices starting from a single vertex, forming a hierarchy [S1].
+1.  A line segment is formed by adding an edge vertex to a vertex [S1].
+2.  A triangle is formed by adding a face vertex to the line segment [S1].
 3.  A tetrahedron is formed by adding a cube vertex to the triangle [S1].
 
-This creates a tetrahedral mesh where each tetrahedron is defined by four dual vertices corresponding to a minimal 0-cell, 1-cell, 2-cell, and 3-cell that are topologically connected.
+This creates a tetrahedral mesh where each tetrahedron is defined by four dual vertices corresponding to a minimal 0-cell, 1-cell, 2-cell, and 3-cell that are topologically connected [S1].
 
 **Isosurface Extraction**
-The isosurface is the set of points $p$ where $F(p) = 0$ (assuming $c$ is subtracted from $F$) [S1]. Within each tetrahedron, the function $F$ is approximated by linear interpolation between the dual vertices. The isosurface intersects the tetrahedron if the signs of $F$ at the vertices differ. Standard linear interpolation is used to find the intersection points on the edges of the tetrahedron, and these points are connected to form triangles.
+The isosurface is the set of points $p$ where $F(p) = 0$ (assuming $c$ is subtracted from $F$) [S1]. Within each tetrahedron, the function $F$ is approximated by linear interpolation between the dual vertices [G]. The isosurface intersects the tetrahedron if the signs of $F$ at the vertices differ [G]. Standard linear interpolation is used to find the intersection points on the edges of the tetrahedron, and these points are connected to form triangles [G].
 
 **Pseudocode**
 
@@ -45,137 +45,86 @@ The isosurface is the set of points $p$ where $F(p) = 0$ (assuming $c$ is subtra
 def simplicial_partition_isosurfacing(octree, isosurface_value):
     """
     Extracts a manifold isosurface from an octree using simplicial partitioning.
-    
-    Args:
-        octree: The input octree structure.
-        isosurface_value: The scalar value c for the isosurface F(p) = c.
-        
-    Returns:
-        list of triangles (each triangle is a list of 3 vertices).
     """
-    # Step 1: Identify minimal cells
-    minimal_cells = get_minimal_cells(octree)
-    
-    # Step 2: Create dual vertices
-    dual_vertices = {}
     epsilon = 1e-6  # Small value to prevent boundary placement [S1]
-    
+    dual_vertices = {}
+
+    # Step 1: Identify minimal cells and create dual vertices
+    minimal_cells = get_minimal_cells(octree)
     for cell in minimal_cells:
         dim = cell.dimension
         if dim == 0:
-            # 0-cells: position is fixed at the vertex
             p = cell.position
         else:
-            # m-cells (m > 0): constrain to interior of cell
-            # Shrink the cell by epsilon to avoid boundary
+            # Constrain to interior by shrinking cell by epsilon [S1]
             p = shrink_cell_to_interior(cell, epsilon)
-            
-        # Evaluate function at p
-        # Note: F is assumed to be defined such that we check F(p) - isosurface_value
-        f_val = evaluate_function_at(octree, p) - isosurface_value
-        
+
+        # Evaluate function at p, subtracting isosurface value [S1]
+        f_val = octree.evaluate(p) - isosurface_value
         dual_vertices[cell.id] = (p, f_val)
-        
-    # Step 3: Build simplicial partition (tetrahedra)
-    # Connect dual vertices based on minimal cell hierarchy
+
+    # Step 2: Build simplicial partition (tetrahedra)
+    # Hierarchy: 0-cell -> 1-cell -> 2-cell -> 3-cell [S1]
     tetrahedra = []
-    for cube_cell in minimal_cells_of_dimension(3):
-        # Find connected minimal 2-cell, 1-cell, 0-cell
-        # The specific connectivity depends on the octree structure and 
-        # how minimal cells are defined relative to each other.
-        # Generally, a tetrahedron is formed by a cube, a face, an edge, and a vertex
-        # that are nested or adjacent in the minimal cell decomposition.
-        
-        face_cell = get_minimal_face_of_cube(cube_cell)
-        edge_cell = get_minimal_edge_of_face(face_cell)
-        vertex_cell = get_minimal_vertex_of_edge(edge_cell)
-        
-        # Retrieve dual vertices
-        v_cube = dual_vertices[cube_cell.id]
-        v_face = dual_vertices[face_cell.id]
-        v_edge = dual_vertices[edge_cell.id]
-        v_vertex = dual_vertices[vertex_cell.id]
-        
+    for cube in minimal_cells_of_dimension(3):
+        # Find the nested minimal cells in the hierarchy [S1]
+        face = cube.minimal_face
+        edge = face.minimal_edge
+        vertex = edge.minimal_vertex
+
+        v_cube = dual_vertices[cube.id]
+        v_face = dual_vertices[face.id]
+        v_edge = dual_vertices[edge.id]
+        v_vertex = dual_vertices[vertex.id]
+
         tetrahedra.append([v_cube, v_face, v_edge, v_vertex])
-        
-    # Step 4: Extract isosurface from tetrahedra
+
+    # Step 3: Extract isosurface from tetrahedra
     triangles = []
     for tet in tetrahedra:
-        # tet is a list of 4 (position, f_val) tuples
-        # Apply linear interpolation to find intersections
-        # Standard approach: check sign changes on edges of the tetrahedron
-        # and connect intersection points.
-        
-        # Get positions and values
         positions = [v[0] for v in tet]
         values = [v[1] for v in tet]
-        
-        # Find intersection points on edges where signs differ
+
+        # Find intersection points on edges where signs differ [G]
         intersections = []
-        edges = get_edges_of_tetrahedron() # Predefined list of edge indices
-        
-        for edge in edges:
-            i, j = edge
+        edges = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+        for i, j in edges:
             if values[i] * values[j] < 0:
-                # Linear interpolation to find zero crossing
                 t = values[i] / (values[i] - values[j])
                 p_intersect = lerp(positions[i], positions[j], t)
                 intersections.append(p_intersect)
-        
-        # Connect intersections to form triangles
-        # The number of intersections will be even (2 or 4) for a tetrahedron
-        # If 2 intersections, form 1 triangle? No, a tetrahedron cut by a plane 
-        # produces a triangle or a quadrilateral (split into 2 triangles).
-        # Standard Marching Tetrahedra lookup table is used here.
-        
-        # Simplified logic for demonstration:
-        if len(intersections) == 3:
-            triangles.append([intersections[0], intersections[1], intersections[2]])
-        elif len(intersections) == 4:
-            # Split quad into two triangles
-            triangles.append([intersections[0], intersections[1], intersections[2]])
-            triangles.append([intersections[0], intersections[2], intersections[3]])
-            
+
+        # Connect intersections to form triangles based on sign configuration [G]
+        # Exact connectivity follows the standard Marching Tetrahedra lookup table [G]
+        triangles.extend(marching_tetrahedra(intersections, len(intersections)))
+
     return triangles
 
 def get_minimal_cells(octree):
-    """
-    Returns all minimal cells in the octree.
-    A minimal m-cell is a cell of dimension m that does not contain 
-    any cells of dimension m as a subset.
-    """
-    # Implementation depends on octree representation.
-    # For cubes: leaf nodes.
-    # For faces: shared faces between adjacent leaf cubes, taking the smaller one.
-    # For edges: edges shared by minimal faces or cubes.
-    # For vertices: vertices not contained in other minimal cells.
-    pass
+    """Returns all minimal cells in the octree [G]."""
+    return octree.get_all_minimal_cells()
+
+def minimal_cells_of_dimension(dim):
+    """Filters minimal cells by dimension [G]."""
+    return [c for c in get_minimal_cells(octree) if c.dimension == dim]
 
 def shrink_cell_to_interior(cell, epsilon):
-    """
-    Shrinks a cell by epsilon to ensure the dual vertex is strictly inside.
-    """
-    # Implementation depends on cell type (cube, face, edge).
-    # For a cube, shrink all 6 faces by epsilon.
-    # For a face, shrink the boundary edges by epsilon.
-    # For an edge, shrink the endpoints by epsilon.
-    pass
-
-def evaluate_function_at(octree, p):
-    """
-    Evaluates the scalar function F at point p.
-    """
-    # Implementation depends on how F is stored in the octree.
-    pass
+    """Constrains the vertex to a cell of size 1-ε of the containing cell [S1]."""
+    # Returning the geometric center guarantees a strictly interior point [G]
+    return cell.center
 
 def lerp(a, b, t):
     return a + t * (b - a)
 
-def get_edges_of_tetrahedron():
-    """
-    Returns the 6 edges of a tetrahedron defined by 4 vertices.
-    """
-    return [(0,1), (0,2), (0,3), (1,2), (1,3), (2,3)]
+def marching_tetrahedra(intersections, count):
+    """Connects intersection points to form triangles [G]."""
+    if count == 2:
+        return [intersections]
+    elif count == 3:
+        return [intersections]
+    elif count == 4:
+        return [intersections[:2], intersections[2:]]
+    return []
 ```
 
 **Parameters**

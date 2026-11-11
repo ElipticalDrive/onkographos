@@ -1,0 +1,158 @@
+--- v011.md
++++ v012.md
+@@ -4,82 +4,61 @@
+ 
+ ## Overview
+-Data Consistency Loss minimizes the discrepancy between the forward-projected scene representation and the measured input data, serving as the primary reconstruction term in differentiable volume rendering and tomography [S1, unofficial]. It solves the inverse problem of recovering a volumetric field $x$ from projections $y$ by enforcing that the rendered output matches the observations [S1, unofficial]. It differs from sibling regularization methods like [Total Variation Regularization](860-total-variation-regularization.md) by directly supervising the pixel/voxel values against ground truth rather than penalizing spatial gradients, and from [Optimal Transport Loss](7472-optimal-transport-loss.md) by computing independent per-pixel errors rather than global distributional couplings [S1, unofficial].
++Data Consistency Loss minimizes the discrepancy between the forward-projected scene representation and the measured input data, serving as the primary reconstruction term in differentiable volume rendering and inverse problems [S1, unofficial]. It solves the problem of ensuring that the optimized radiance field or implicit surface accurately reproduces the observed projections or images, distinguishing itself from sibling regularization methods like [Total Variation Regularization](860-total-variation-regularization.md) by directly enforcing measurement fidelity rather than structural smoothness [S1, unofficial].
+ 
+ ## How it works
+-The method operates by differentiating the forward projection operator through the rendering pipeline.
++The method operates by computing a differentiable forward projection operator $A$ that maps the scene parameters $x$ (volume density, SDF values, or radiance field attributes) to the measurement space, and minimizing the distance between this projection and the ground truth data $y$ [S1, unofficial].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** The current scene representation (e.g., volume density field, neural radiance field parameters, or SDF field) and camera parameters.
+-*   **Input:** Measured projection data $y$ (e.g., pixel intensities in multi-view images or X-ray sinogram data).
+-*   **Output:** A scalar loss value $\mathcal{L}_{dc}$ representing the error between the rendered projection and the measured data.
++*   **Input:** Scene representation $x \in \mathbb{R}^n$ (e.g., voxel grid, neural network weights, or SDF field), measured projection data $y$, and camera parameters defining the projection geometry.
++*   **Output:** A scalar loss value $\mathcal{L}$ and gradients $\nabla_x \mathcal{L}$ with respect to the scene parameters.
+ 
+ **Data Structures:**
+-*   **Scene Representation ($x$):** Can be a 3D grid of densities, a neural network mapping coordinates to density/color, or an SDF field.
+-*   **Projection Operator ($A$):** A differentiable function mapping the scene representation to the image/sinogram space. In standard volume rendering, this is the emission-absorption integration defined in the parent article [44-radiance-field-optimization.md]. In tomography, this is the line integral along ray paths [S1, unofficial].
+-*   **Measured Data ($y$):** Tensor of shape $(N, H, W)$ for images or $(N, \theta, r)$ for sinograms, where $N$ is the number of views.
++*   **Scene $x$:** Layout depends on representation. For grid-based volumes, a 3D tensor of densities. For implicit fields, a neural network with weights $W$.
++*   **Projection Operator $A$:** Implemented as a differentiable module (e.g., a PyTorch `nn.Module`) that performs ray casting or line integration [S1, unofficial].
++*   **Data $y$:** Tensor of shape matching the output of $A(x)$, containing measured intensities or pixel values.
+ 
+ **Steps:**
+-1.  **Forward Projection:** Compute the rendered projection $\hat{y}$ from the current scene representation $x$ using the differentiable forward operator $A$.
+-    $$ \hat{y} = A(x) $$
+-    For volume rendering, $\hat{y}$ is computed via the standard volume rendering equation [44-radiance-field-optimization.md]. For tomography, $\hat{y}$ is computed via numerical integration along rays [S1, unofficial].
+-2.  **Error Calculation:** Compute the difference between the rendered projection $\hat{y}$ and the measured data $y$.
+-3.  **Loss Aggregation:** Aggregate the per-pixel errors into a scalar loss value.
+-
+-**Formulas:**
+-The general formulation minimizes the squared L2 norm difference between the forward-projected data and the original projection data [S1, unofficial]:
+-
+-$$ \mathcal{L}_{dc} = \| A(x) - y \|_2^2 = \sum_{i} (A(x)_i - y_i)^2 $$
+-
+-where $x$ is the volume/scene representation, $A$ is the forward projection operator, and $y$ is the measured data [S1, unofficial].
+-
+-In specific implementations involving color reconstruction, an L1 loss is often used for the radiance component [S2, unofficial]:
+-
+-$$ \mathcal{L}_{rgb} = \frac{1}{N} \sum_{i=1}^N |C_i - \hat{C}_i| $$
+-
+-where $N$ is the number of batch rays, $C_i$ is the ground truth color, and $\hat{C}_i$ is the rendered color [S2, unofficial].
++1.  **Forward Projection:** Compute the predicted projection $\hat{y} = A(x)$ using the current scene representation [S1, unofficial].
++2.  **Error Calculation:** Compute the squared L2 norm difference between the predicted projection and the measured data [S1, unofficial]:
++    $$
++    \mathcal{L}_{DC} = \| A(x) - y \|_2^2 = \sum_{k} (\hat{y}_k - y_k)^2
++    $$
++    where $k$ indexes the pixels or detector elements [S1, unofficial].
++3.  **Gradient Propagation:** Backpropagate through the differentiable forward projector $A$ to compute gradients $\frac{\partial \mathcal{L}_{DC}}{\partial x}$ [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Loss Weight:** The coefficient $\lambda_{dc}$ balancing the data consistency term against other regularization losses (e.g., Eikonal loss, TV). Typical values range from 1.0 to 10.0 depending on the noise level of the input data [S2, unofficial].
+-*   **Number of Samples ($N$):** The number of rays or pixels sampled per batch.
++*   **Weight $\lambda_{DC}$:** Scaling factor for the loss term in the total objective function. Typical values are not specified in the general formulation but are often set to 1.0 or tuned relative to other regularization terms [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Occlusion:** In multi-view rendering, occlusions cause pixels in one view to correspond to different 3D points than in another. Standard data consistency assumes a consistent projection, which can lead to artifacts if not handled by visibility masks or robust loss functions [S2, unofficial].
+-*   **Noise Sensitivity:** The L2 norm is sensitive to outliers and noise in the measured data $y$. L1 loss or robust norms may be preferred for noisy inputs [S2, unofficial].
+-*   **Differentiability:** The forward projection operator must be fully differentiable with respect to the scene parameters. Discrete sampling or non-differentiable visibility checks can break gradient flow [44-radiance-field-optimization.md].
++*   **Differentiability:** The forward projector must be fully differentiable. Standard ray casting with discrete sampling may require interpolation (e.g., trilinear) to ensure smooth gradients [S1, unofficial].
++*   **Noise Sensitivity:** The L2 norm is sensitive to outliers and noise in the measured data $y$. In noisy scenarios, robust loss functions (e.g., L1 or Huber) may be preferred, though the standard definition uses L2 [S1, unofficial].
++*   **Aliasings:** Insufficient sampling in the forward projection can lead to aliasing artifacts, causing gradients to be misleading [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def data_consistency_loss(scene_model, camera_params, measured_data, loss_type='l2'):
++def data_consistency_loss(scene_params, measured_data, projector):
+     """
+     Computes the Data Consistency Loss.
+     
+     Args:
+-        scene_model: A differentiable model representing the scene (e.g., NeRF, SDF).
+-        camera_params: Dictionary containing camera poses and intrinsics.
+-        measured_data: Tensor of ground truth projections (images or sinograms).
+-        loss_type: String, 'l2' or 'l1'.
++        scene_params: Parameters defining the scene (e.g., weights of a neural network or voxel grid).
++        measured_data: Ground truth projection data y.
++        projector: A differentiable forward projection operator A.
+         
+     Returns:
+-        Scalar loss value.
++        loss: Scalar loss value.
++        gradients: Gradients of the loss with respect to scene_params.
+     """
+-    # 1. Forward Projection
+-    # Render the scene from the given camera parameters
+-    # This involves sampling rays, querying the scene model for density/color/SDF,
+-    # and integrating along the rays.
+-    rendered_data = forward_render(scene_model, camera_params)
++    # Forward projection: compute predicted data
++    predicted_data = projector(scene_params)
+     
+-    # 2. Compute Error
+-    if loss_type == 'l2':
+-        # Squared L2 norm difference
+-        # Note: In practice, this is often computed as mean squared error
+-        error = (rendered_data - measured_data) ** 2
+-        loss = torch.mean(error)
+-    elif loss_type == 'l1':
+-        # L1 norm difference
+-        error = torch.abs(rendered_data - measured_data)
+-        loss = torch.mean(error)
+-    else:
+-        raise ValueError("Unsupported loss type")
+-        
++    # Compute squared L2 error
++    # Note: In practice, this might be averaged over the batch or number of pixels
++    error = predicted_data - measured_data
++    loss = torch.sum(error ** 2)
++    
++    # Backpropagation is handled automatically by the framework
++    # gradients = torch.autograd.grad(loss, scene_params)
++    
+     return loss
+ ```
+@@ -95,4 +74,7 @@
+ ### [Optimal Transport Loss](7472-optimal-transport-loss.md)
+ Optimal Transport (OT) Loss captures global and long-range correspondences between a rendered image $I$ and a target image $I_{ref}$ by solving a transportation problem, replacing local pixel-wise losses like L1 or L2. It sets itself apart from [Data Consistency Loss](2976-data-consistency-loss.md) by enforcing a global coupling between pixels rather than independent per-pixel errors, and from [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md) by operating directly in image space without explicit depth supervision.
++
++### [Cross-View Consistent Loss](12062-cross-view-consistent-loss.md)
++Cross-View Consistent Loss (CVCL) is a regularization term used in differentiable volume rendering, specifically within Gaussian Splatting frameworks, to enforce global geometric coherence and mitigate Gaussian overfitting. It operates by penalizing discrepancies between the residuals of paired views, weighted by their structural similarity. Unlike sibling methods such as [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md) which focuses on single-view depth priors, or [Optimal Transport Loss](7472-optimal-transport-loss.md) which aligns distributions, CVCL explicitly leverages the correlation between adjacent views to ensure that regions with high structural similarity in ground truth exhibit consistent error patterns in reconstruction.
+ 
+ ### [Scale-Aware Consistency Loss with Hard Mining](12181-scale-aware-consistency-loss-with-hard-mining.md)
+@@ -111,17 +93,17 @@
+ Barlow Twins Loss is a loss function used to supervise consistency between forward and reverse path pixel features, preventing network degradation by requiring features to be close in feature space while maintaining inter-dimensional independence [S5]. It uses a weighted coefficient $\lambda_{red}$ for the redundant loss term [S5].
+ 
+-### Cross-View Consistent Loss
+-Cross-View Consistent Loss penalizes discrepancies between the residuals of paired views, weighted by their structural similarity, to enforce global coherence and mitigate Gaussian overfitting [S6, unofficial]. It selects adjacent view pairs from the set of $M$ views, retaining only pairs with an SSIM value greater than 0.6 [S6, unofficial]. The loss is computed as $LCVC = \text{SSIM}(I^g_t, I^g_j) \times \text{L1}(I^g_t - I_i, I^g_j - I_j)$, where $I^g_t$ and $I^g_j$ are ground truth images for views $i$ and $j$, $I_i$ and $I_j$ are rendered images, and L1 is the L1 norm between residuals [S6, unofficial]. The SSIM threshold for view pair selection is 0.6 [S6, unofficial].
++### LBFC (Bottleneck Feature Consistency Loss)
++LBFC (Bottleneck Feature Consistency Loss) enhances feature-level consistency between original input rays and flipped reflection rays [S6]. It is a regularization loss that enforces consistency between bottleneck features of original and flipped reflection rays using Jensen-Shannon Divergence (JSD) [S6]. It computes the JSD between the probability distributions of the bottleneck features of the original and flipped rays [S6]. It extracts bottleneck feature $b$ from the network encoder [S6]. LBFC with JSD on $b$ achieves PSNR 19.55, SSIM 0.767, LPIPS 0.180, and Average Error 0.101, outperforming MSE (PSNR 18.83) and cosine similarity (PSNR 18.77) [S6]. Regularizing $b$ with MSE or cosine similarity yields no significant performance impact [S6]. Applying LBFC with JSD to $b_{\hat{d}}$ (bottleneck feature conditioned on viewing direction $\hat{d}$) degrades performance, likely due to reduced feature dimensionality limiting representation capacity [S6].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of rays/pixels and $S$ is the number of samples per ray. The gradient computation adds a similar factor depending on the differentiation strategy (AD, Adjoint, or Analytic) [44-radiance-field-optimization.md].
+-*   **Memory Complexity:** Depends on the differentiation strategy. Reverse-mode AD requires $O(N \cdot S)$ memory to store intermediate states [44-radiance-field-optimization.md]. Adjoint methods and analytic inversion reduce this to $O(N)$ or constant memory [44-radiance-field-optimization.md].
+-*   **Strengths:** Directly enforces fidelity to the input data, leading to high reconstruction accuracy when the input data is clean and complete [S1, unofficial].
+-*   **Limitations:** Prone to overfitting noise in the input data. Can lead to artifacts in regions with missing data or occlusions if not combined with regularization [S2, unofficial].
+-*   **When to Use:** When the primary goal is accurate reconstruction of known data and the input data is reliable.
+-*   **When Not to Use:** When the input data is very noisy, sparse, or when the goal is to generate novel views without ground truth (e.g., in generative settings).
++*   **Time Complexity:** Linear with respect to the number of pixels/samples in the projection and the number of parameters in the scene representation, as it requires a full forward pass and backpropagation through the projector [S1, unofficial].
++*   **Memory Complexity:** Depends on the differentiable implementation of the projector. Standard AD requires storing intermediate states for backpropagation, leading to high memory usage [44-radiance-field-optimization.md].
++*   **Strengths:** Directly minimizes the reconstruction error, ensuring the output matches the input data [S1, unofficial].
++*   **Limitations:** Can be sensitive to noise and outliers due to the L2 norm [S1, unofficial]. May lead to overfitting if used alone without regularization [S1, unofficial].
++*   **When to use:** When the primary goal is accurate reconstruction of measured data, such as in CT reconstruction or novel view synthesis with dense inputs [S1, unofficial].
++*   **When not to use:** When the input data is very noisy or sparse, or when structural/semantic consistency is more important than pixel-wise fidelity [S1, unofficial].
+ 
+ ## Background
+-Data Consistency Loss originates from the field of computed tomography (CT) and inverse problems, where it is used to minimize the difference between measured projections and forward-projected estimates [S1, unofficial]. In the context of differentiable volume rendering and neural radiance fields, it has been adapted as the primary reconstruction loss, leveraging the differentiability of the volume rendering equation [44-radiance-field-optimization.md]. It is widely used in NeRF, Neuralangelo, and other neural implicit surface reconstruction methods [S2, unofficial][S3, unofficial].
++Data Consistency Loss originates from the field of inverse problems and computed tomography, where it is used to enforce that the reconstructed image is consistent with the measured projections [S1, unofficial]. In the context of differentiable volume rendering and neural radiance fields, it has been adapted to minimize the difference between rendered images and ground truth images, serving as the fundamental supervision signal for training [S1, unofficial]. It is widely used in various neural rendering frameworks, including NeRF and its variants [S1, unofficial].
+ 
+ ## Sources
+@@ -131,3 +113,3 @@
+ [S4] PDF Deep Learning Methods and Neural Representations for Scientific Volume ..., https://www.cs.uoregon.edu/Reports/AREA-202603-Mathai.pdf, fetched 2026-10-27 (unofficial)
+ [S5] PI-NeRF: A Partial-Invertible Neural Radiance Fields for Pose Estimation, https://doi.org/10.1145/3581783.3612590, fetched 2026-11-08
+-[S6] SplatCo: Structure-View Collaborative Gaussian Splatting for Detail-Preserving Rendering of Large-Scale Unbounded Scenes, https://doi.org/10.48550/arXiv.2505.17951, fetched 2026-10-27 (unofficial)+[S6] FlipNeRF: Flipped Reflection Rays for Few-shot Novel View Synthesis, https://doi.org/10.1109/iccv51070.2023.02092, fetched 2026-10-29

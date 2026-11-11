@@ -1,0 +1,242 @@
+--- v003.md
++++ v004.md
+@@ -58,75 +58,67 @@
+     *   Write voxel-fragment values into the leaves of the tree [S2, unofficial].
+     *   Mipmap values into the interior nodes [S2, unofficial].
+-    *   *Solid Voxelization (Optional/Contextual):* If solid voxelization is required, hierarchically propagate bit flips in the +x direction. If the last bit in a level-0 node's SG voxel column is set, all SG voxels in the same column belonging to nodes in +x direction must be flipped. This is done by looping over all (even-indexed) level-0 nodes in parallel, identifying those with no level-0 -x neighbor, and navigating along +x-neighbor pointers to propagate flips [S1].
++    *   *Solid Voxelization (Optional/Contextual):* If solid voxelization is required, hierarchically propagate bit flips in the +x direction [S1]. If the last bit in a level-0 node's SG voxel column is set, all SG voxels in the same column belonging to nodes in +x direction must be flipped [S1]. This is done by looping over all (even-indexed) level-0 nodes in parallel, identifying those with no level-0 -x neighbor, and navigating along +x-neighbor pointers to propagate flips [S1].
+ 
+ ### Node Access and Navigation
+ *   **Initial Access:** Perform a full descent from the top level [S1].
+ *   **Intra-Tile Navigation:** Use x-neighbor pointers for fast navigation within a tile [S1].
+-*   **Inter-Tile Navigation:** When entering a new tile, derive the common ancestor node of the previous and desired node from their Morton codes. Depending on the ancestor's level, either ascend to this node and then descend, or perform a full descent [S1].
++*   **Inter-Tile Navigation:** When entering a new tile, derive the common ancestor node of the previous and desired node from their Morton codes [S1]. Depending on the ancestor's level, either ascend to this node and then descend, or perform a full descent [S1].
+ 
+ ### Pseudocode
+ ```python
+-# Constants
+-MAX_DEPTH = 10  # Example maximum depth
+-BITS_PER_COORD = 10
+-UNUSED_BITS = 2
+-
+-# Data Structures
+-class OctreeNode:
+-    pointer_to_children: int  # Index into octree pool, or null if leaf
+-    # Values stored in bricks or directly in node
+-
+-class VoxelFragment:
+-    coord_32bit: int  # 10 bits x, 10 bits y, 10 bits z, 2 unused
+-    color: vec3
+-
+-# Global Buffers
+-octree_pool: Buffer  # Linear video memory
+-fragment_list: Buffer  # Preallocated buffer
+-fragment_counter: Buffer  # 32-bit atomic counter
+-
+ def voxelize_mesh_to_list(mesh):
+     """
+     Step 1: Construct the voxel-fragment list.
+-    Voxelize mesh once at max resolution.
++    Voxelize mesh once at max resolution. Allocate one thread per triangle.
+     """
+     for triangle in mesh.triangles:
+-        # 2D rasterization in yz plane
+-        bbox_yz = compute_bounding_box_yz(triangle)
++        # 2D rasterization in yz plane to determine bounding box
++        bbox_yz = [min(triangle.y), max(triangle.y), min(triangle.z), max(triangle.z)]
+         
+-        # Check overlap with SG voxel centers in yz plane
+-        if check_sg_overlap(bbox_yz):
+-            # Derive yz range of level-0 tiles
+-            tile_range = compute_tile_range_yz(bbox_yz)
++        # Check for overlap with any Sparse Grid (SG) voxel center
++        if bbox_yz[0] < grid.max_y and bbox_yz[1] > grid.min_y and \
++           bbox_yz[2] < grid.max_z and bbox_yz[3] > grid.min_z:
+             
+-            # Set up edge functions for yz plane
+-            edge_funcs = compute_edge_functions(triangle)
++            # Derive yz range of level-0 voxels (tiles) containing overlapped SG voxel centers
++            tile_min_y = floor(bbox_yz[0] / TILE_SIZE)
++            tile_max_y = floor(bbox_yz[1] / TILE_SIZE)
++            tile_min_z = floor(bbox_yz[2] / TILE_SIZE)
++            tile_max_z = floor(bbox_yz[3] / TILE_SIZE)
+             
+-            # Loop over tiles
+-            for tile in tile_range:
+-                if evaluate_tile_active(tile, edge_funcs):
+-                    # Loop over 4x4 SG voxel columns in the tile
+-                    for col in tile.columns_4x4:
+-                        if ray_triangle_intersect_x(col.center, triangle):
+-                            # Project center along x-axis to triangle plane
+-                            x_index_bar_q = project_x_index(col.center, triangle)
+-                            
+-                            # Identify level-0 node
+-                            level0_node = map_to_level0_node(col.center)
+-                            
+-                            # Flip voxels in the column within local x-index range
+-                            start_local_x = x_index_bar_q % 4
+-                            for local_x in range(start_local_x, 4):
+-                                atomic_xor(level0_node.voxel_grid, local_x, col.y, col.z)
+-                            
+-                            # Encode fragment
+-                            coord_word = encode_coord(col.center)
+-                            color = get_triangle_color(triangle)
+-                            
+-                            # Append to list using atomic counter
+-                            index = atomic_add(fragment_counter, 1)
+-                            fragment_list[index] = VoxelFragment(coord_word, color)
++            # Set up edge functions for overlap testing
++            edge_funcs = compute_edge_functions(triangle) # [G] Standard 2D rasterization setup
++            
++            # Loop over tiles and check for triangle overlap
++            for ty in range(tile_min_y, tile_max_y + 1):
++                for tz in range(tile_min_z, tile_max_z + 1):
++                    tile = get_tile(ty, tz)
++                    if evaluate_tile_active(tile, edge_funcs): # [G] Standard edge function evaluation
++                        # Loop over its 4x4 SG voxel columns and test their centers for overlap
++                        for col in tile.columns_4x4:
++                            if ray_triangle_intersect_x(col.center, triangle): # [G] Standard ray-triangle intersection
++                                # Project the center along the x-axis onto the triangle's plane
++                                # to derive the x index q_bar of the first SG voxel to flip
++                                t = plane_intersection_t(col.center, triangle)
++                                x_coord = col.center.x + t * triangle.normal.x
++                                q_bar = floor(x_coord / VOXEL_SIZE)
++                                
++                                # Identify the level-0 node containing that voxel
++                                level0_node = map_to_level0_node(col.center)
++                                
++                                # Flip all voxels in the corresponding column of its voxel sub-grid
++                                # within the local x-index range (q_bar mod 4), ..., 3 via atomic xor
++                                start_local_x = q_bar % 4
++                                for local_x in range(start_local_x, 4):
++                                    atomic_xor(level0_node.voxel_grid, local_x, col.y, col.z)
++                                
++                                # Encode fragment coordinates: 10 bits per component, 2 unused bits
++                                coord_word = (int(col.center.x) << 20) | (int(col.center.y) << 10) | int(col.center.z)
++                                color = get_triangle_color(triangle)
++                                
++                                # Append voxel fragments to the list using an atomic counter
++                                index = atomic_add(fragment_counter, 1)
++                                fragment_list[index] = VoxelFragment(coord_word, color)
+ 
+-def build_octree_from_list():
++def build_octree_from_list(fragment_list):
+     """
+     Step 2 & 3: Build octree top-down using the fragment list.
+@@ -138,9 +130,9 @@
+         next_level_nodes = []
+         
+-        # Detect nonempty nodes by voxelizing at current level resolution
+-        # Using the pre-computed fragment list instead of re-rasterizing triangles
++        # Detect nonempty nodes by voxelizing the scene at the resolutions 
++        # corresponding to the level's resolution, using the fragment list
+         for node in current_level_nodes:
+-            if check_node_nonempty(node, fragment_list, level):
+-                # Create new tile of 2^3 subnodes
++            if check_node_nonempty(node, fragment_list, level): # [G] Check if any fragment falls within node bounds
++                # Create a new tile of 2^3 subnodes for each nonempty node
+                 children_indices = allocate_tile(octree_pool, 8)
+                 node.pointer_to_children = children_indices
+@@ -152,77 +144,8 @@
+         current_level_nodes = next_level_nodes
+ 
+-    # Write values to leaves and mip up
+-    scatter_fragments_to_leaves(fragment_list, current_level_nodes)
+-    aggregate_values_up_tree(octree_pool)
+-
+-# Helper definitions
+-def compute_bounding_box_yz(triangle):
+-    return min(triangle.y), max(triangle.y), min(triangle.z), max(triangle.z)
+-
+-def check_sg_overlap(bbox):
+-    return bbox.min_y < grid.max_y and bbox.max_y > grid.min_y and \
+-           bbox.min_z < grid.max_z and bbox.max_z > grid.min_z
+-
+-def compute_tile_range_yz(bbox):
+-    tile_min_y = floor(bbox.min_y / TILE_SIZE)
+-    tile_max_y = floor(bbox.max_y / TILE_SIZE)
+-    tile_min_z = floor(bbox.min_z / TILE_SIZE)
+-    tile_max_z = floor(bbox.max_z / TILE_SIZE)
+-    return [(ty, tz) for ty in range(tile_min_y, tile_max_y + 1) 
+-                        for tz in range(tile_min_z, tile_max_z + 1)]
+-
+-def compute_edge_functions(triangle):
+-    # Standard 2D edge function coefficients for yz plane
+-    return triangle.edge_coeffs_yz
+-
+-def evaluate_tile_active(tile, edge_funcs):
+-    return all(edge_funcs.evaluate(tile.center_y, tile.center_z) >= 0)
+-
+-def ray_triangle_intersect_x(center, triangle):
+-    # Ray along x-axis from center, test intersection with triangle
+-    return ray_triangle_intersection(center, triangle.direction_x, triangle)
+-
+-def project_x_index(center, triangle):
+-    # Intersect ray along x with triangle plane, return voxel index
+-    t = plane_triangle_intersection_t(center, triangle)
+-    x_coord = center.x + t
+-    return floor(x_coord / VOXEL_SIZE)
+-
+-def map_to_level0_node(center):
+-    # Map global coordinate to level-0 tile/node index
+-    return octree_pool.nodes[floor(center.y / TILE_SIZE)][floor(center.z / TILE_SIZE)]
+-
+-def encode_coord(center):
+-    x = int(center.x)
+-    y = int(center.y)
+-    z = int(center.z)
+-    return (x << 20) | (y << 10) | z
+-
+-def check_node_nonempty(node, fragment_list, level):
+-    # Check if any fragment falls within node's spatial bounds at this resolution
+-    for frag in fragment_list:
+-        if node.contains_coordinate(decode_coord(frag.coord_32bit), level):
+-            return True
+-    return False
+-
+-def allocate_node(pool):
+-    return pool.allocate(1)
+-
+-def allocate_tile(pool, count):
+-    return pool.allocate(count)
+-
+-def get_node_at_index(pool, idx):
+-    return pool[idx]
+-
+-def scatter_fragments_to_leaves(fragments, leaves):
+-    for frag in fragments:
+-        node = find_leaf_node(frag.coord_32bit)
+-        node.value = frag.color
+-
+-def aggregate_values_up_tree(pool):
+-    for level in reversed(range(1, MAX_DEPTH)):
+-        for node in pool.nodes_at_level(level):
+-            if node.has_children:
+-                node.value = interpolate_children(node)
++    # Write voxel-fragment values into the leaves of the tree
++    scatter_fragments_to_leaves(fragment_list, current_level_nodes) # [G] Scatter fragments to leaf nodes
++    # Mipmap values into the interior nodes
++    aggregate_values_up_tree(octree_pool) # [G] Interpolate/aggregate values up the tree
+ ```
+ 
+@@ -236,15 +159,15 @@
+ *   **Collision Rate:** Lower resolution voxelization can end up slower than higher resolution due to an increase in the number of collisions encountered per voxel [S2, unofficial].
+ *   **Precision:** The 10-bit coordinate encoding limits the maximum scene size/resolution. Ensure the scene bounds fit within the 10-bit range ($2^{10} = 1024$ units) or scale appropriately [S2, unofficial].
+-*   **Atomic Contention:** High triangle counts can lead to contention on the atomic counter and voxel grid updates. Use efficient atomic operations provided by the hardware (e.g., OpenGL 4.2) [S2, unofficial].
+-*   **Solid Voxelization:** Simple intersection testing may leave holes. Hierarchical propagation of bit flips in the +x direction is required for solid voxelization [S1].
++*   **Atomic Contention:** High triangle counts can lead to contention on the atomic counter and voxel grid updates [G]. Use efficient atomic operations provided by the hardware (e.g., OpenGL 4.2) [S2, unofficial].
++*   **Solid Voxelization:** Simple intersection testing may leave holes [G]. Hierarchical propagation of bit flips in the +x direction is required for solid voxelization [S1].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** The voxel-fragment list construction is $O(T)$ where $T$ is the number of triangles, with parallel execution per triangle [S1][S2, unofficial]. The octree building processes each level sequentially, subdividing nonempty nodes and allocating child tiles [S2, unofficial].
+-*   **Memory Complexity:** $O(N)$ where $N$ is the number of occupied voxels/nodes. The sparse structure avoids storing empty space [S2, unofficial].
++*   **Memory Complexity:** $O(N)$ where $N$ is the number of occupied voxels/nodes. The sparse structure avoids storing empty space [G].
+ *   **Measured Performance:** On the Stanford Dragon mesh, the voxelization algorithm execution time varies with resolution. At resolution 128, it takes 1.18 ms (RGBA8), while at 512, it takes 1.47 ms. Comparison with VoxelPipe shows times of 1.40 ms and 5.30 ms respectively at 128, and 1.63 ms and 2.07 ms at 512. Times marked with a star in the source correspond to results obtained with hardware `atomicAdd` instead of emulation [S2, unofficial].
+ *   **Strengths:** Handles large and complex scenes efficiently by storing only intersected voxels. Allows for mipmapped interior nodes, enabling fast filtered sampling at multiple resolutions [S2, unofficial].
+ *   **Limitations:** Requires atomic operations for concurrent writes, which can be a bottleneck. Lower resolution levels may suffer from higher collision rates, potentially slowing down the process [S2, unofficial].
+-*   **When to Use:** When memory is a constraint and the scene has sparse geometry. When multi-resolution access is needed for rendering or traversal [G].
+-*   **When Not to Use:** When the scene is dense and nearly fills the volume, as the overhead of the tree structure may outweigh the benefits. When hardware atomic operations are not available or slow [G].
++*   **When to Use:** When memory is a constraint and the scene has sparse geometry [G]. When multi-resolution access is needed for rendering or traversal [G].
++*   **When Not to Use:** When the scene is dense and nearly fills the volume, as the overhead of the tree structure may outweigh the benefits [G]. When hardware atomic operations are not available or slow [G].
+ 
+ ## Background

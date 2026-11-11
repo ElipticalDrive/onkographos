@@ -39,29 +39,31 @@ The method operates in an iterative loop that determines the number of currently
 - `n_alive`: Number of currently active rays [S1, unofficial].
 
 ### Algorithm Steps
-1. **Initialization**: Initialize `rays_alive[0]` to all `True` (all rays start alive). Initialize `rays_t[0]` to `near`. Initialize `weights_sum` and `depth` to $0$. Initialize `step` (global step counter) to $0$. Initialize `alive_counter` to $B \times N$ [S1, unofficial].
-2. **Loop Condition**: While `alive_counter > 0` and `step < max_steps` (if a global max step limit is enforced):
+1. **Initialization**: Initialize `rays_alive[0]` to all `True` (all rays start alive) [G]. Initialize `rays_t[0]` to `near` [G]. Initialize `weights_sum` and `depth` to $0$ [G]. Initialize `step` (global step counter) to $0$ [G]. Initialize `alive_counter` to $B \times N$ [G].
+2. **Loop Condition**: While `alive_counter > 0`:
    a. **Calculate Alive Rays**: Determine `n_alive = alive_counter.item()` [S1, unofficial].
    b. **Exit Check**: If `n_alive <= 0`, break the loop [S1, unofficial].
    c. **Calculate Steps**: Compute `n_step = max(min(B * N // n_alive, 8), 1)` [S1, unofficial].
-   d. **Ray Marching**: Call `raymarching.march_rays` with `n_alive`, `n_step`, `rays_alive[i % 2]`, `rays_t[i % 2]`, `rays_o`, `rays_d`, `bound`, `density_grid`, `mean_density`, `near`, `far`, `128`, `perturb` [S1, unofficial]. This function updates `rays_alive[(i+1) % 2]` and `rays_t[(i+1) % 2]` for the next iteration, marking rays as dead if they hit a surface or exceed bounds. It returns sampled positions `xyzs` and directions `dirs` for the active steps [S1, unofficial].
-   e. **Neural Network Query**: Compute densities (`sigmas`) and colors (`rgbs`) by passing `xyzs` and `dirs` through the neural network: `sigmas, rgbs = network_forward(xyzs, dirs)` [S1, unofficial].
+   d. **Ray Marching**: Call `raymarching.march_rays` with `n_alive`, `n_step`, `rays_alive[i % 2]`, `rays_t[i % 2]`, `rays_o`, `rays_d`, `bound`, `density_grid`, `mean_density`, `near`, `far`, `128`, `perturb` [S1, unofficial]. This function updates `rays_alive[(i+1) % 2]` and `rays_t[(i+1) % 2]` for the next iteration, marking rays as dead if they hit a surface or exceed bounds [G]. It returns sampled positions `xyzs` and directions `dirs` for the active steps [S1, unofficial].
+   e. **Neural Network Query**: Compute densities (`sigmas`) and colors (`rgbs`) by passing `xyzs` and `dirs` through the neural network: `sigmas, rgbs = self(xyzs, dirs)` [S1, unofficial].
    f. **Compositing**: Call `raymarching.composite_rays` with `n_alive`, `n_step`, `rays_alive[i % 2]`, `rays_t[i % 2]`, `sigmas`, `rgbs`, `deltas`, `weights_sum`, `depth`, `image` [S1, unofficial]. This function updates `weights_sum`, `depth`, and `image` based on volume rendering integration [S1, unofficial].
    g. **Update Step Counter**: `step += n_step` [S1, unofficial].
    h. **Background Compositing**: If `alpha_premultiplied` is true, `image = image + (1 - weights_sum).unsqueeze(-1) * bg_color` (default `bg_color = 1`) [S1, unofficial]. If `alpha_premultiplied` is false, `image /= (weights_sum + 1e-9).unsqueeze(-1)` [S1, unofficial].
    i. **Concatenate Weight Sum**: `image = torch.cat([image, weights_sum.unsqueeze(-1)], -1)` [S1, unofficial].
-   j. **Swap Buffers**: Swap `rays_alive` and `rays_t` buffers for the next iteration (toggle `i % 2`) [S1, unofficial].
-   k. **Update Alive Counter**: Recalculate `alive_counter` based on the new `rays_alive` mask [S1, unofficial].
+   j. **Swap Buffers**: Swap `rays_alive` and `rays_t` buffers for the next iteration (toggle `i % 2`) [G].
+   k. **Update Alive Counter**: Recalculate `alive_counter` based on the new `rays_alive` mask [G].
 3. **Final Reshape**: Reshape `image` to $[B, N, 4]$ [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def adaptive_ray_marching(rays_o, rays_d, near, far, bg_color=1.0, alpha_premultiplied=False, perturb=False, bound=None, density_grid=None, mean_density=None, B=1, N=1):
     # Initialize ping-pong buffers and accumulators
-    rays_alive = [ [True] * (B * N), [False] * (B * N) ]
-    rays_t = [ [near] * (B * N), [0.0] * (B * N) ]
+    rays_alive = [[True] * (B * N), [False] * (B * N)]
+    rays_t = [[near] * (B * N), [0.0] * (B * N)]
     weights_sum = [0.0] * (B * N)
     depth = [0.0] * (B * N)
     image = [0.0] * (B * N * 3)
@@ -77,13 +79,14 @@ def adaptive_ray_marching(rays_o, rays_d, near, far, bg_color=1.0, alpha_premult
         
         n_step = max(min((B * N) // n_alive, 8), 1)
         
-        # March rays: updates alive mask and t, returns sampled xyzs, dirs, deltas
+        # GPU kernel: marches rays, checks bounds/density, updates alive mask and t
+        # Returns: xyzs, dirs, deltas, new_alive_mask, new_t
         xyzs, dirs, deltas, new_alive_mask, new_t = march_rays(
             n_alive, n_step, rays_alive[i % 2], rays_t[i % 2],
             rays_o, rays_d, bound, density_grid, mean_density, near, far, 128, perturb
         )
         
-        # Query neural network for densities and colors
+        # Neural network forward pass
         sigmas, rgbs = network_forward(xyzs, dirs)
         
         # Composite rays: updates weights_sum, depth, image
@@ -107,10 +110,6 @@ def adaptive_ray_marching(rays_o, rays_d, near, far, bg_color=1.0, alpha_premult
                 image[k*3+1] /= denom
                 image[k*3+2] /= denom
         
-        # Concatenate weight sum to image channels
-        for k in range(B * N):
-            image.append(weights_sum[k])
-        
         # Swap ping-pong buffers
         rays_alive[(i + 1) % 2] = new_alive_mask
         rays_t[(i + 1) % 2] = new_t
@@ -119,18 +118,39 @@ def adaptive_ray_marching(rays_o, rays_d, near, far, bg_color=1.0, alpha_premult
         alive_counter = sum(1 for x in new_alive_mask if x)
         i += 1
         
-    # Reshape output to [B, N, 4]
-    image = image[:B * N * 4]
+    # Concatenate weight sum to image channels and reshape to [B, N, 4]
+    image.extend(weights_sum)
     return image
+
+def composite_rays(n_alive, n_step, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image):
+    for r in range(n_alive):
+        w_acc = 0.0
+        d_acc = 0.0
+        rgb_acc = [0.0, 0.0, 0.0]
+        T = 1.0
+        for s in range(n_step):
+            sigma = sigmas[r * n_step + s]
+            rgb = rgbs[r * n_step + s]
+            dt = deltas[r * n_step + s]
+            alpha = 1.0 - math.exp(-sigma * dt)
+            w = alpha * T
+            w_acc += w
+            d_acc += (rays_t[r] + dt) * w
+            rgb_acc[0] += rgb[0] * w
+            rgb_acc[1] += rgb[1] * w
+            rgb_acc[2] += rgb[2] * w
+            T *= (1.0 - alpha)
+        weights_sum[r] = w_acc
+        depth[r] = d_acc
+        image[r*3] = rgb_acc[0]
+        image[r*3+1] = rgb_acc[1]
+        image[r*3+2] = rgb_acc[2]
+    return weights_sum, depth, image
 
 def march_rays(n_alive, n_step, rays_alive, rays_t, rays_o, rays_d, bound, density_grid, mean_density, near, far, block_size, perturb):
     # GPU kernel: marches rays, checks bounds/density, updates alive mask and t
     # Returns: xyzs, dirs, deltas, new_alive_mask, new_t
     return [], [], [], [], []
-
-def composite_rays(n_alive, n_step, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image):
-    # GPU kernel: volume rendering integration, updates weights_sum, depth, image
-    return weights_sum, depth, image
 
 def network_forward(xyzs, dirs):
     # Neural network forward pass
@@ -138,9 +158,9 @@ def network_forward(xyzs, dirs):
 ```
 
 ### Edge Cases and Pitfalls
-- **Division by Zero**: When `alpha_premultiplied` is false, the normalization step divides by `weights_sum`. If a ray has zero accumulated opacity (e.g., passed through empty space), this causes division by zero. The implementation adds `1e-9` to the denominator to avoid this [S1, unofficial].
+- **Division by Zero**: When `alpha_premultiplied` is false, the normalization step divides by `weights_sum` [S1, unofficial]. If a ray has zero accumulated opacity (e.g., passed through empty space), this causes division by zero [G]. The implementation adds `1e-9` to the denominator to avoid this [S1, unofficial].
 - **Zero Alive Rays**: The loop checks `n_alive <= 0` to exit early, preventing unnecessary computation [S1, unofficial].
-- **Step Count Calculation**: The formula `max(min(B * N // n_alive, 8), 1)` ensures that `n_step` is at least $1$. If `n_alive` is very small, `n_step` becomes $1$, processing rays one by one in terms of step batches, which may reduce efficiency but prevents excessive steps per ray [S1, unofficial].
+- **Step Count Calculation**: The formula `max(min(B * N // n_alive, 8), 1)` ensures that `n_step` is at least $1$ [S1, unofficial]. If `n_alive` is very small, `n_step` becomes $1$, processing rays one by one in terms of step batches, which may reduce efficiency but prevents excessive steps per ray [G].
 
 ## Subtopics
 
@@ -152,7 +172,7 @@ This variant uses a hash grid (specifically a density bitfield) for acceleration
 - **Memory Complexity**: Requires storage for ping-pong buffers (`rays_alive`, `rays_t`), neural network weights, and the acceleration structure (density grid or hash grid) [S1, unofficial][S2, unofficial].
 - **Performance**: Not given in the sources.
 - **Strengths**: Efficient handling of sparse scenes, reduced computation on terminated rays, good hardware utilization [S1, unofficial][S2, unofficial].
-- **Limitations**: Performance may degrade if the number of active rays is very small (leading to small batch sizes) or very large (leading to many iterations). The fixed step cap ($8$) may limit accuracy in highly detailed regions [S1, unofficial].
+- **Limitations**: Performance may degrade if the number of active rays is very small (leading to small batch sizes) or very large (leading to many iterations) [G]. The fixed step cap ($8$) may limit accuracy in highly detailed regions [G].
 
 ## Background
 This method is derived from implementations in neural radiance fields (NeRF) and instant-NGP, where adaptive ray marching is used to optimize rendering speed [S1, unofficial][S2, unofficial]. The specific implementation with dynamic step count and hash grid acceleration is found in unofficial repositories [S1, unofficial][S2, unofficial].

@@ -1,92 +1,70 @@
 # Sparse Depth Consistency Loss
-Also called: Sparse Depth Loss
+Also called: Overall Loss Function, Sparse Depth Loss
 
 ## Overview
 The Sparse Depth Consistency Loss enforces geometric consistency between rendered depth maps and sparse, structure-from-motion (SfM) derived depth estimates in radiance field optimization [S1]. It distinguishes itself from photometric losses by directly penalizing depth discrepancies, thereby mitigating floaters and depth discontinuities common in sparse-input scenarios [S1].
 
 ## How it works
 **Inputs and Outputs**
-*   **Inputs:**
-    *   $z_m$: Depth map rendered from the main model.
-    *   $z_a$: Depth map rendered from the augmented model.
-    *   $\hat{z}$: Sparse depth map provided by the SfM model.
-*   **Output:** Scalar loss value $L_{sd}$.
+*   **Inputs:** $z_m$ (depth map from the main radiance field model), $z_a$ (depth map from the augmented radiance field model), and $\hat{z}$ (sparse depth map from the SfM model) [S1].
+*   **Output:** Scalar loss value $L_{sd}$ [S1].
 
 **Data Structures**
-*   Depth maps are typically 2D tensors of size $H \times W$ (height $\times$ width), matching the image resolution. Values represent Euclidean or signed distance to the camera plane, depending on the SfM implementation [S1].
+*   Depth maps are per-pixel values aligned with the image resolution [G]. Not given in the sources regarding exact bit packing or tensor layouts.
 
 **Steps**
-1.  Render the depth map $z_m$ from the primary radiance field model at the current camera pose.
-2.  Render the depth map $z_a$ from the augmented radiance field model at the same pose.
-3.  Retrieve the corresponding sparse depth $\hat{z}$ from the SfM point cloud or depth map for the same pixel locations.
-4.  Compute the L2 norm difference between the rendered depths and the sparse depth for both models.
-5.  Sum the differences to obtain the total loss.
+1. Render depth maps $z_m$ and $z_a$ from the main and augmented radiance field models at the current camera pose [S1].
+2. Retrieve sparse depth values $\hat{z}$ from the SfM model for corresponding pixel locations [S1].
+3. Compute the L2 norm difference between each rendered depth map and the sparse depth map [S1].
+4. Sum the two differences to obtain $L_{sd}$ [S1].
 
 **Formula**
 $$L_{sd} = ||z_m - \hat{z}||_2 + ||z_a - \hat{z}||_2$$
-
 Where:
-*   $||\cdot||_2$ denotes the L2 norm (Euclidean distance) applied element-wise or as a mean squared error over valid pixels [S1].
-*   $z_m$ is the depth from the main model.
-*   $z_a$ is the depth from the augmented model.
+*   $||\cdot||_2$ denotes the L2 norm applied element-wise over valid pixels [G].
+*   $z_m$ is the depth from the main model [S1].
+*   $z_a$ is the depth from the augmented model [S1].
 *   $\hat{z}$ is the sparse depth from SfM [S1].
 
 **Parameters**
-*   The loss is weighted by a hyperparameter $\lambda_{sd}$ in the total loss function: $L = \lambda_m L_m + \lambda_a L_a + \lambda_{sd} L_{sd} + \dots$ [S1]. Typical values are not specified in the sources.
+*   The loss is weighted by a hyperparameter $\lambda_{sd}$ in the total loss function: $L = \lambda_m L_m + \lambda_a L_a + \lambda_{sd} L_{sd} + \lambda_{aug} L_{aug} + \lambda_{cfc} L_{cfc} + \lambda_{mc} L_{mc}$ [S1]. Typical values are not specified in the sources.
 
 **Edge Cases and Pitfalls**
-*   **Sparse Coverage:** Since $\hat{z}$ is sparse, the loss is only computed where SfM provides valid depth estimates. Pixels without SfM depth are ignored [S1].
-*   **Scale Ambiguity:** SfM depth may have scale ambiguity relative to the NeRF coordinate system. Alignment or scaling normalization may be required before computing the loss [S1].
-*   **Noise:** SfM depth can be noisy in textureless regions, potentially leading to incorrect gradient signals [S1].
+*   **Sparse Coverage:** Since $\hat{z}$ is sparse, the loss is only computed where SfM provides valid depth estimates [S1].
+*   **Precision:** Standard floating-point arithmetic is used for the L2 norm computation [G].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def sparse_depth_consistency_loss(z_m, z_a, z_sparse):
-    """
-    Computes the Sparse Depth Consistency Loss.
-    
-    Args:
-        z_m (Tensor): Rendered depth from main model, shape (H, W).
-        z_a (Tensor): Rendered depth from augmented model, shape (H, W).
-        z_sparse (Tensor): Sparse depth from SfM, shape (H, W). 
-                           Invalid depths should be masked or NaN.
-    
-    Returns:
-        Tensor: Scalar loss value.
-    """
-    # Create a mask for valid sparse depth pixels
-    # Assuming invalid depths are NaN or 0. Adjust based on SfM output format.
-    valid_mask = ~torch.isnan(z_sparse)
-    
-    # Filter valid pixels
+    # z_m, z_a, z_sparse: 2D arrays of shape (H, W)
+    # z_sparse contains valid depth values where SfM provides estimates, and 0 elsewhere
+    valid_mask = z_sparse > 0
+    if not valid_mask.any():
+        return 0.0
     z_m_valid = z_m[valid_mask]
     z_a_valid = z_a[valid_mask]
     z_sparse_valid = z_sparse[valid_mask]
-    
-    # Compute L2 norms (mean squared error)
-    loss_m = torch.mean((z_m_valid - z_sparse_valid) ** 2)
-    loss_a = torch.mean((z_a_valid - z_sparse_valid) ** 2)
-    
-    # Sum the losses
-    total_loss = loss_m + loss_a
-    
-    return total_loss
+    diff_m = z_m_valid - z_sparse_valid
+    diff_a = z_a_valid - z_sparse_valid
+    loss_m = (sum(d**2 for d in diff_m) / len(diff_m)) ** 0.5
+    loss_a = (sum(d**2 for d in diff_a) / len(diff_a)) ** 0.5
+    return loss_m + loss_a
 ```
 
 ## Subtopics
 
 ### [EndoGaussian Optimization](9760-endogaussian-optimization.md)
-EndoGaussian Optimization is a training procedure for dynamic endoscopic scene reconstruction using 3D Gaussians, designed to handle non-rigid tissue deformation and tool occlusion in real-time. It distinguishes itself from standard Gaussian Splatting by incorporating binocular and monocular depth constraints alongside spatiotemporal Total Variation (TV) regularization, specifically tailored for endoscopic video sequences where absolute depth consistency is challenging but structural coherence is critical. Unlike static splatting methods, it employs a warmup phase for canonical Gaussians followed by joint optimization of the full deformable framework.
+EndoGaussian Optimization is a training procedure for dynamic endoscopic scene reconstruction using 3D Gaussians, designed to handle non-rigid tissue deformation and tool occlusion in real-time. It distinguishes itself from standard Gaussian Splatting by incorporating binocular and monocular depth constraints alongside spatiotemporal Total Variation (TV) regularization, specifically tailored for endoscopic video sequences where absolute depth consistency is challenging but structural coherence is critical. Unlike static splatting methods, it employs a warmup phase for canonical Gaussians followed by joint optimization of the full deformable framework. Choose it when optimizing endoscopic video sequences with non-rigid deformation and tool occlusion.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of valid pixels in the sparse depth map. Rendering depth maps is the dominant cost, typically $O(H \times W)$ per view.
-*   **Memory Complexity:** Requires storing the sparse depth map and the rendered depth maps. Memory usage is proportional to image resolution.
+*   **Time Complexity:** Linear with respect to the number of valid pixels in the sparse depth map [G].
+*   **Memory Complexity:** Requires storing the sparse depth map and the rendered depth maps, proportional to image resolution [G].
 *   **Strengths:** Provides strong geometric regularization in sparse input settings, reducing floaters and improving depth accuracy [S1].
-*   **Limitations:** Relies on the quality and coverage of the SfM sparse depth. Performance degrades if SfM fails to reconstruct key areas [S1].
+*   **Limitations:** Relies on the quality and coverage of the SfM sparse depth [S1].
 *   **When to use:** Sparse input radiance field optimization where geometric consistency is critical and photometric loss alone is insufficient [S1].
-*   **When not to use:** Dense input scenarios where photometric loss is sufficient, or when SfM reconstruction is poor [S1].
+*   **When not to use:** Not given in the sources.
 
 ## Background
 The Sparse Depth Consistency Loss was introduced in "Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions" [S1]. It addresses the challenge of optimizing radiance fields from very few input views by leveraging sparse geometric priors from Structure-from-Motion (SfM) [S1]. The method combines this loss with photometric and regularization losses to stabilize training [S1].

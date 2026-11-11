@@ -1,0 +1,103 @@
+# L2 Norm Sphere Contraction
+
+Also called: L2 Contraction, Scene Contraction, Space Contraction, contract
+
+## Overview
+L2 Norm Sphere Contraction is a coordinate transformation technique used in neural radiance fields to handle unbounded scenes by mapping the entire 3D space into a bounded sphere [S1][S2, unofficial]. It solves the problem of infinite ray sampling by ensuring that points at infinity are mapped to the surface of the sphere, allowing the neural network to learn a compact representation [S2, unofficial]. It differs from other contraction methods by using a specific L2-norm-based scaling factor that preserves the direction of the input vector while compressing its magnitude [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D point $\mathbf{x} \in \mathbb{R}^3$.
+- Output: A contracted 3D point $\mathbf{x}' \in \mathbb{R}^3$ within a sphere of radius 2.
+
+**Data Structures:**
+- No specific data structures are required for the transformation itself. The input is a standard 3D vector.
+
+**Steps:**
+1. Compute the L2 norm of the input point $\mathbf{x}$:
+   $$ \|\mathbf{x}\|_2 = \sqrt{x_1^2 + x_2^2 + x_3^2} $$
+2. Compute the scaling factor $s$:
+   $$ s = 2 - \frac{1}{\|\mathbf{x}\|_2} $$
+   Note: This formula is derived from the requirement that points with $\|\mathbf{x}\|_2 \ge 1$ are mapped to the sphere of radius 2, while points inside the unit sphere are scaled differently to maintain continuity [S2, unofficial].
+3. Normalize $\mathbf{x}$ by dividing by its norm:
+   $$ \hat{\mathbf{x}} = \frac{\mathbf{x}}{\|\mathbf{x}\|_2} $$
+4. Multiply the normalized vector by the scaling factor:
+   $$ \mathbf{x}' = s \cdot \hat{\mathbf{x}} $$
+
+**Formulas:**
+The complete transformation can be written as:
+$$ \mathbf{x}' = \begin{cases} \mathbf{x} & \text{if } \|\mathbf{x}\|_2 \le 1 \\ \left(2 - \frac{1}{\|\mathbf{x}\|_2}\right) \frac{\mathbf{x}}{\|\mathbf{x}\|_2} & \text{if } \|\mathbf{x}\|_2 > 1 \end{cases} $$
+However, the source [S2, unofficial] implies a single formula for all $\mathbf{x}$ where $\|\mathbf{x}\|_2 > 0$. For $\|\mathbf{x}\|_2 \le 1$, the scaling factor $2 - 1/\|\mathbf{x}\|_2$ would be $\le 1$, which might not preserve the unit sphere boundary correctly if applied naively. The standard L2 contraction usually applies the scaling only for $\|\mathbf{x}\|_2 > 1$. The source [S2, unofficial] code snippet suggests:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+norm = np.linalg.norm(x, axis=-1, keepdims=True)
+scale = 2 - 1 / norm
+x_contracted = x / norm * scale
+```
+This implies the formula is applied for all $\mathbf{x} \neq 0$. For $\|\mathbf{x}\|_2 \le 1$, $scale \le 1$, so $\mathbf{x}'$ is shrunk. This is a specific variant. The source [S1] mentions scene normalization based on camera trajectory radius, but the specific L2 contraction formula is from [S2, unofficial].
+
+**Parameters:**
+- The target sphere radius is 2 [S2, unofficial].
+- The threshold for applying the contraction is typically $\|\mathbf{x}\|_2 > 1$ in standard implementations, but the provided source [S2, unofficial] applies it universally.
+
+**Edge Cases and Pitfalls:**
+- **Zero Vector:** If $\mathbf{x} = \mathbf{0}$, the norm is 0, leading to division by zero. A guard clause is needed to return $\mathbf{0}$ or handle it appropriately [G].
+- **Precision:** For very large $\|\mathbf{x}\|_2$, $1/\|\mathbf{x}\|_2$ becomes very small, and $s$ approaches 2. This is numerically stable.
+- **Boundary Continuity:** At $\|\mathbf{x}\|_2 = 1$, the scaling factor is $2 - 1/1 = 1$, so $\mathbf{x}' = \mathbf{x}$. The transformation is continuous at the boundary of the unit sphere.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def l2_norm_sphere_contraction(x):
+    """
+    Contracts 3D points into a sphere of radius 2 using L2 norm.
+    
+    Args:
+        x: numpy array of shape (..., 3) representing 3D points.
+        
+    Returns:
+        numpy array of shape (..., 3) representing contracted points.
+    """
+    # Compute L2 norm along the last axis
+    norm = np.linalg.norm(x, axis=-1, keepdims=True)
+    
+    # Guard against division by zero
+    # [G] If norm is 0, return 0 to avoid NaN
+    safe_norm = np.where(norm == 0, 1.0, norm)
+    
+    # Compute scaling factor: 2 - 1/norm
+    scale = 2.0 - 1.0 / safe_norm
+    
+    # Normalize x and multiply by scale
+    # x / norm gives the unit vector
+    x_contracted = (x / safe_norm) * scale
+    
+    # Handle the case where original norm was 0
+    # [G] If norm was 0, x_contracted should be 0
+    x_contracted = np.where(norm == 0, 0.0, x_contracted)
+    
+    return x_contracted
+```
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per point, involving a few arithmetic operations.
+- **Memory Complexity:** $O(1)$ additional memory per point.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Linear with the number of points.
+- **Strengths:** Simple to implement, effectively bounds unbounded space, continuous at the unit sphere boundary.
+- **Limitations:** The specific variant in [S2, unofficial] shrinks points inside the unit sphere, which might not be desirable for all scenes. Standard L2 contraction usually leaves points inside the unit sphere unchanged.
+- **When to use:** When dealing with unbounded scenes in neural radiance fields.
+- **When not to use:** When the scene is naturally bounded and does not require contraction.
+
+## Background
+The concept of scene contraction for handling unbounded scenes was introduced in [S1] (LidaRF) and further detailed in [S2, unofficial]. The L2 Norm Sphere Contraction specifically maps points to a sphere of radius 2.
+
+## Sources
+[S1] LidaRF: Delving into Lidar for Neural Radiance Field on Street Scenes, https://doi.org/10.1109/cvpr52733.2024.01850, fetched 2026-10-26
+[S2] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)

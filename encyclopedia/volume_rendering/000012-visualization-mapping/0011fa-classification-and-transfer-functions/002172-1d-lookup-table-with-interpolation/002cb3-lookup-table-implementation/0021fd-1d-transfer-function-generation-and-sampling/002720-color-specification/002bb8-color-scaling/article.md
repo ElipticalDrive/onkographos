@@ -1,85 +1,65 @@
 # Color Scaling
 
-Also called: RGB Scaling, Color Intensity Scaling
 
 ## Overview
-Color scaling is a method for adjusting the intensity of the red, green, and blue components of a color value while preserving its alpha (opaqueness) channel [S1, unofficial]. It solves the problem of mapping computed color intensities to the displayable range or enhancing visual contrast in volume rendering [S1, unofficial]. It differs from general color transformation methods by strictly isolating the luminance/chromaticity components from the transparency component, ensuring that the perceived opacity remains constant regardless of the brightness adjustment [S1, unofficial].
+Color scaling adjusts the intensity of the red, green, and blue components of a color by a multiplicative factor while preserving the alpha channel [S1, unofficial]. It solves the problem of modulating color brightness independently of material opacity in volume rendering [S1, unofficial]. It differs from general color transformations by operating directly on the RGB components without altering the transparency channel [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: An integer color value (typically 32-bit RGBA), a scaling factor $s$ (float).
-- Output: A new integer color value with scaled RGB components and original alpha.
+- Input: An integer color value, a scaling factor.
+- Output: A new integer color value with scaled RGB components and the original alpha channel.
 
 **Data Structures:**
-The color is represented as a 32-bit integer. The layout is typically:
-- Bits 24-31: Alpha (A)
-- Bits 16-23: Red (R)
-- Bits 8-15: Green (G)
-- Bits 0-7: Blue (B)
-Each component is an 8-bit unsigned integer (0-255).
+The color is represented as an integer. The exact bit layout is Not given in the sources.
 
 **Steps:**
-1. Extract the alpha component from the input color integer.
-2. Extract the red, green, and blue components from the input color integer.
-3. Convert the RGB components to floating-point values in the range [0.0, 1.0] by dividing by 255.0.
-4. Multiply each floating-point RGB component by the scaling factor $s$.
-5. Clamp the resulting values to the range [0.0, 1.0] to prevent overflow or negative values [G].
-6. Convert the clamped floating-point values back to 8-bit integers by multiplying by 255.0 and casting to int.
-7. Reconstruct the output color integer by combining the original alpha component with the new scaled RGB components.
+1. Extract the alpha, red, green, and blue components from the integer color value using bit shifting and masking [S1, unofficial].
+2. Multiply each RGB component by the scaling factor [S1, unofficial].
+3. Cast the scaled RGB values to integers [S1, unofficial].
+4. Reconstruct the output color integer by combining the original alpha component with the new RGB values [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def color_scale(color_int: int, scale_factor: float) -> int:
-    # Extract components assuming 32-bit RGBA (A:24-31, R:16-23, G:8-15, B:0-7)
+    # Extract components using bit shifting and masking [S1, unofficial]
     alpha = (color_int >> 24) & 0xFF
     red = (color_int >> 16) & 0xFF
     green = (color_int >> 8) & 0xFF
     blue = color_int & 0xFF
 
-    # Convert to float [0.0, 1.0]
-    r_f = red / 255.0
-    g_f = green / 255.0
-    b_f = blue / 255.0
+    # Multiply each RGB component by the factor [S1, unofficial]
+    r_scaled = red * scale_factor
+    g_scaled = green * scale_factor
+    b_scaled = blue * scale_factor
 
-    # Scale
-    r_new = r_f * scale_factor
-    g_new = g_f * scale_factor
-    b_new = b_f * scale_factor
+    # Cast to int [S1, unofficial]
+    r_int = int(r_scaled)
+    g_int = int(g_scaled)
+    b_int = int(b_scaled)
 
-    # Clamp to [0.0, 1.0]
-    r_new = max(0.0, min(1.0, r_new))
-    g_new = max(0.0, min(1.0, g_new))
-    b_new = max(0.0, min(1.0, b_new))
-
-    # Convert back to int [0, 255]
-    r_int = int(round(r_new * 255.0))
-    g_int = int(round(g_new * 255.0))
-    b_int = int(round(b_new * 255.0))
-
-    # Reconstruct
+    # Reconstruct the color integer with the original alpha and the new RGB values [S1, unofficial]
     return (alpha << 24) | (r_int << 16) | (g_int << 8) | b_int
 ```
 
 **Parameters:**
-- `scale_factor`: A float value. Values > 1.0 increase brightness; values < 1.0 decrease it. Typical values range from 0.0 to 2.0, but can exceed 1.0 in high dynamic range contexts [S2].
+- `scale_factor`: A float value. Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- **Overflow:** If the scaling factor is large, RGB components may exceed 1.0. Clamping is required to fit the 8-bit integer representation [G].
-- **Precision:** Converting between integer and float representations can introduce quantization errors. Using 32-bit floats for intermediate calculations is recommended [G].
-- **Alpha Preservation:** The alpha channel must not be scaled. Scaling alpha would change the opacity, which is often semantically distinct from brightness [S1, unofficial].
+- **Overflow:** Large scaling factors may produce RGB values exceeding the integer range; clamping is required for standard 8-bit representations [G].
+- **Alpha Preservation:** The alpha channel must not be scaled [S1, unofficial].
 
 ## Subtopics
 
 ### Lighting Transfer Function with High Dynamic Range
-A rendering approach where the unmodulated color for a voxel exceeds 1.0 (intensity) to accommodate higher dynamic range lighting for translucent materials, requiring alpha modulation in the fragment program [S2]. It sets itself apart by allowing RGB values to exceed the standard [0.0, 1.0] range before final compositing, enabling physically valid compositing of colors brighter than their alpha value (e.g., reflective water, flames) [S2]. Choose this when rendering translucent materials with high-intensity lighting where standard hardware blending (which treats 1.0 as the brightest) would clip highlights [S2]. A light scaling factor larger than one is passed to the fragment program to modulate all light intensities [S2]. A key pitfall is that standard hardware implementations often treat 1.0 as the brightest intensity, so this method requires exceeding that limit [S2]. Alpha modulation must be done in the fragment program rather than in the framebuffer blending stage to correctly composite RGB colors larger than the alpha value [S2].
+A rendering approach where the unmodulated color for a voxel exceeds 1.0 (intensity) to accommodate higher dynamic range lighting for translucent materials, requiring alpha modulation in the fragment program [S2]. It sets itself apart by allowing RGB values to exceed the standard hardware limit of 1.0 before final compositing, enabling physically valid compositing of colors brighter than their alpha value (e.g., reflective water, flames) [S2]. Choose this when rendering translucent materials with high-intensity lighting where standard hardware blending would clip highlights [S2]. A light scaling factor larger than one is passed to the fragment program to modulate all light intensities [S2]. A key pitfall is that standard hardware implementations often treat 1.0 as the brightest intensity, so this method requires exceeding that limit [S2]. Alpha modulation must be done in the fragment program rather than in the framebuffer blending stage to correctly composite RGB colors larger than the alpha value [S2].
 
 ## Operating characteristics
-Time complexity: O(1) per color value. Memory complexity: O(1). Strengths: Simple to implement, preserves opacity semantics, allows for high dynamic range lighting in specific contexts [S2]. Limitations: Standard hardware blending may clip colors > 1.0 unless handled in the fragment program [S2]. Use for enhancing contrast or simulating high-intensity light sources in translucent materials. Do not use when strict adherence to standard sRGB [0.0, 1.0] range is required without post-processing.
+Time complexity: O(1) per color value. Memory complexity: O(1) [G]. Strengths: Preserves opacity semantics, allows for high dynamic range lighting in specific contexts [S2]. Limitations: Standard hardware blending may clip colors exceeding 1.0 unless handled in the fragment program [S2]. Use for enhancing contrast or simulating high-intensity light sources in translucent materials [S2]. Do not use when strict adherence to standard sRGB [0.0, 1.0] range is required without post-processing [G].
 
 ## Background
-Originated in the context of volume rendering and transfer function generation, specifically in implementations involving ray-marching shaders and lighting transfer functions [S1, unofficial][S2]. The method is used to adjust the visual intensity of colors derived from scalar data without altering the material's transparency properties [S1, unofficial][S2].
+Not given in the sources.
 
 ## Sources
 [S1] conradplake/ray-marching-shader, https://github.com/conradplake/ray-marching-shader, fetched 2026-10-27 (unofficial)

@@ -1,53 +1,76 @@
 # Hierarchical Sampling (Inverse CDF Sampling)
 
-Also called: Inverse CDF, Inverse CDF Sampling, PDF Sampling, PDF Sampling via Inverse CDF, Piecewise-Constant PDF Sampling
+Also called: Inverse CDF, Inverse CDF Sampling, PDF Sampling, PDF Sampling via Inverse CDF, PDF sampling from weights, Sorted Piecewise Constant PDF Sampling
 
 ## Overview
-
-Hierarchical Sampling (Inverse CDF Sampling) is a method for generating fine-grained depth samples along a ray in volume rendering by drawing from a probability distribution derived from coarse rendering weights [S1, S2, S3, unofficial]. It solves the problem of inefficient uniform sampling in empty space or low-density regions by concentrating computational effort on high-contribution areas identified during a coarse pass [S4, S5, unofficial]. Unlike [Uniform Ray Sampling](1261-uniform-ray-sampling.md) which distributes samples evenly regardless of scene content, or [Stochastic Jittering](924-stochastic-jittering.md) which only adds noise to fixed positions, this method adaptively resamples based on the estimated density or opacity of the scene [S1, S12, unofficial]. It builds on [Sampling and Jittering](2516-sampling-and-jittering.md) by providing a mechanism to refine sample locations based on learned or estimated importance [S1, unofficial].
+Hierarchical sampling (Inverse CDF Sampling) is a method for generating importance samples along a ray in volume rendering by inverting the cumulative distribution function (CDF) of the rendering contribution, which is mathematically equivalent to the transmittance function [S2, unofficial]. It solves the problem of efficiently placing sample points in regions of high density without redundant radiance queries, enabling differentiable end-to-end optimization of neural radiance fields [S1, unofficial]. Unlike standard hierarchical sampling which samples from a piecewise constant probability density defined by coarse weights, this method uses inverse transform sampling on a piecewise approximated density field (constant or linear), allowing gradients to back-propagate through the sampling process to the density parameters [S1, unofficial]. It builds on [Sampling and Jittering](2516-sampling-and-jittering.md) by providing a deterministic or stratified mechanism to concentrate fine samples where the coarse pass indicated high opacity.
 
 ## How it works
+**Inputs:**
+*   `bins`: Tensor of shape `(B, T)` containing the depth boundaries (bin edges) of the coarse samples, where $B$ is the batch size (number of rays) and $T$ is the number of bin edges ($N_{coarse} + 1$) [S11, unofficial].
+*   `weights`: Tensor of shape `(B, T-1)` containing the unnormalized importance weights (typically density or opacity contribution) for each bin [S11, unofficial].
+*   `N_samples`: Integer specifying the number of fine samples to generate per ray ($N_{importance}$) [S16, unofficial].
+*   `det`: Boolean flag. If `True`, uses deterministic stratified sampling (uniform $u$); if `False`, uses random uniform sampling [S14, unofficial].
 
-**Inputs and Outputs:**
-*   **Inputs:**
-    *   `bins`: A tensor of shape `(B, T)` containing the depth boundaries (z-values) of the coarse samples, where $B$ is the batch size (number of rays) and $T$ is the number of bin boundaries ($N_{coarse} + 1$) [S8, S10, unofficial].
-    *   `weights`: A tensor of shape `(B, T-1)` containing the unnormalized importance weights (typically densities or rendering contributions) for each coarse bin [S8, S10, unofficial].
-    *   `N_samples` (or `N_importance`): An integer specifying the number of fine samples to generate per ray [S5, S12, unofficial].
-    *   `det`: A boolean flag. If `True`, uses deterministic stratified sampling (uniformly spaced query values); if `False`, uses random uniform sampling [S1, S10, unofficial].
-*   **Outputs:**
-    *   `z_samples`: A tensor of shape `(B, N_samples)` containing the new depth values for the fine samples [S1, S12, unofficial].
+**Outputs:**
+*   `samples`: Tensor of shape `(B, N_samples)` containing the new depth values sampled from the fine distribution [S8, unofficial].
 
 **Data Structures:**
-*   The method operates on tensors representing the ray space discretization. `bins` defines the support of the distribution, and `weights` defines the probability mass [S1, unofficial].
+*   The method operates on 2D tensors (batched rays). The last dimension corresponds to the ray depth axis.
+*   `pdf`: Probability Density Function, shape `(B, T-1)`.
+*   `cdf`: Cumulative Distribution Function, shape `(B, T)`, padded with a leading zero.
 
-**Algorithm Steps:**
+**Parameters:**
+*   `eps`: Small constant for numerical stability, typically $10^{-5}$ [S2, unofficial].
+*   `perturb`: Controls jittering. $0$ disables jittering (deterministic midpoints), $1$ enables full stratified jittering [S1, unofficial]. Note: In the inverse CDF context, `det` usually handles the stratification logic directly via `linspace` vs `rand`.
 
-1.  **Stabilize Weights:** Add a small epsilon ($\epsilon = 10^{-5}$) to all weights to prevent division by zero during normalization [S1, S12, unofficial].
-    $$ w'_i = w_i + \epsilon $$
-2.  **Compute PDF:** Normalize the stabilized weights along the last dimension to form a Probability Density Function (PDF) [S1, unofficial]. For a batch of rays, the PDF for bin $i$ is:
-    $$ p_i = \frac{w'_i}{\sum_{j} w'_j} $$
-    where the sum is over all bins for that ray [S1, S7, S12, unofficial].
-3.  **Compute CDF:** Compute the Cumulative Distribution Function (CDF) by taking the cumulative sum of the PDF [S1, unofficial]. Prepend a zero tensor to the CDF to align indices with the bin boundaries (since CDF values correspond to bin edges, not centers) [S4, S5, S12, unofficial].
-    $$ \text{cdf}_i = \sum_{k=0}^{i} p_k, \quad \text{cdf}_{\text{padded}} = [0, \text{cdf}_0, \text{cdf}_1, \dots, \text{cdf}_{T-2}] $$
-    The resulting CDF has shape `(B, T)` [S1, unofficial].
-4.  **Generate Query Values ($u$):** Generate $N_{samples}$ query values $u$ uniformly distributed in $[0, 1]$ [S1, unofficial].
-    *   If `det` is `False`: $u \sim \text{Uniform}(0, 1)$ [S1, S12, unofficial].
-    *   If `det` is `True`: $u$ is a linearly spaced vector from 0 to 1, expanded to match the batch shape [S1, S12, unofficial].
-5.  **Find Bin Indices:** Use `searchsorted` to find the index `inds` in the CDF where each $u$ falls [S1, unofficial]. The `right=True` argument ensures that $u$ values exactly equal to a CDF boundary are assigned to the right bin [S1, S8, S13, unofficial].
-    $$ \text{inds} = \text{searchsorted}(\text{cdf}, u, \text{side}=\text{'right'}) $$
-6.  **Determine Interpolation Bounds:** Identify the lower (`below`) and upper (`above`) bin indices for interpolation [S1, unofficial]. Clamp indices to valid ranges $[0, T-1]$ [S1, S5, S13, unofficial].
-    $$ \text{below} = \max(0, \text{inds} - 1) $$
-    $$ \text{above} = \min(T - 1, \text{inds}) $$
-7.  **Gather CDF and Bin Values:** Gather the CDF values and bin boundaries corresponding to `below` and `above` for each sample [S1, unofficial].
-    $$ \text{cdf}_g = \text{gather}(\text{cdf}, [\text{below}, \text{above}]) $$
-    $$ \text{bins}_g = \text{gather}(\text{bins}, [\text{below}, \text{above}]) $$
-    $\text{cdf}_g$ and $\text{bins}_g$ have shape `(B, N_samples, 2)` [S1, S12, unofficial].
-8.  **Interpolate:** Compute the interpolation factor $t$ within each bin [S1, unofficial]. Handle zero-width bins (where $\text{cdf}_g[..., 1] - \text{cdf}_g[..., 0] \approx 0$) by clamping the denominator to $10^{-5}$ [S1, S12, unofficial].
-    $$ \text{denom} = \text{cdf}_g[..., 1] - \text{cdf}_g[..., 0] $$
-    $$ \text{denom} = \begin{cases} 10^{-5} & \text{if } \text{denom} < 10^{-5} \\ \text{denom} & \text{otherwise} \end{cases} $$
-    $$ t = \frac{u - \text{cdf}_g[..., 0]}{\text{denom}} $$
-    Finally, compute the sample depths:
-    $$ z_{\text{samples}} = \text{bins}_g[..., 0] + t \times (\text{bins}_g[..., 1] - \text{bins}_g[..., 0]) $$
+**Steps:**
+
+1.  **Stabilize Weights:** Add a small epsilon to weights to prevent division by zero during normalization.
+    $$weights = weights + \epsilon$$
+    Typical value: $\epsilon = 10^{-5}$ [S2, unofficial].
+
+2.  **Compute PDF:** Normalize the weights along the last dimension to form a Probability Density Function (PDF).
+    $$pdf = \frac{weights}{\sum_{j} weights_j}$$
+    Where the sum is over the bin index (last dimension), keeping dimensions for batch and ray [S9, unofficial].
+
+3.  **Compute CDF:** Compute the Cumulative Distribution Function (CDF) by taking the cumulative sum of the PDF along the last dimension. Prepend a tensor of zeros to align the CDF indices with the bin edges (since CDF values correspond to bin boundaries, not centers) [S5, unofficial].
+    $$cdf = \text{cumsum}(pdf, \text{dim}=-1)$$
+    $$cdf = \text{concat}([zeros\_like(cdf[..., :1]), cdf], \text{dim}=-1)$$
+    The resulting CDF has shape `(B, T)` and ranges from $0$ to $1$ [S6, unofficial].
+
+4.  **Generate Uniform Samples ($u$):** Generate $N_{samples}$ uniform random numbers in $[0, 1]$ for each ray.
+    *   If `det` is `True`: Use deterministic stratified sampling.
+        $$u = \text{linspace}(0, 1, N_{samples})$$
+        Expand $u$ to match the batch shape: `(B, N_samples)` [S14, unofficial].
+    *   If `det` is `False`: Use random uniform sampling.
+        $$u \sim U[0, 1]$$
+        Shape: `(B, N_samples)` [S11, unofficial].
+
+5.  **Find Bin Indices:** Determine which bin each sample $u$ falls into by searching the sorted CDF.
+    $$inds = \text{searchsorted}(cdf, u, \text{side}=\text{'right'})$$
+    This returns indices in the range $[0, T-1]$ indicating the position in the CDF array [S17, unofficial].
+
+6.  **Determine Bin Boundaries:** For each sample, identify the lower and upper CDF values and bin boundaries for interpolation.
+    $$below = \max(0, inds - 1)$$
+    $$above = \min(T - 1, inds)$$
+    Stack these to form indices for gathering:
+    $$inds\_g = \text{stack}([below, above], \text{dim}=-1)$$
+    Shape of `inds_g`: `(B, N_samples, 2)` [S16, unofficial].
+
+7.  **Gather CDF and Bin Values:** Retrieve the CDF values and bin depth boundaries corresponding to the lower and upper indices.
+    $$cdf\_g = \text{gather}(cdf, inds\_g)$$
+    $$bins\_g = \text{gather}(bins, inds\_g)$$
+    `cdf_g` has shape `(B, N_samples, 2)` containing $[cdf_{lower}, cdf_{upper}]$.
+    `bins_g` has shape `(B, N_samples, 2)` containing $[z_{lower}, z_{upper}]$ [S6, unofficial].
+
+8.  **Interpolate (Inverse CDF):** Calculate the relative position $t$ within the bin and map it to the depth space.
+    $$denom = cdf\_g[..., 1] - cdf\_g[..., 0]$$
+    Handle zero-width bins (division by zero) by clamping the denominator:
+    $$denom = \text{where}(denom < 10^{-5}, \text{ones\_like}(denom), denom)$$
+    $$t = \frac{u - cdf\_g[..., 0]}{denom}$$
+    $$samples = bins\_g[..., 0] + t \times (bins\_g[..., 1] - bins\_g[..., 0])$$
+    The result `samples` has shape `(B, N_samples)` [S16, unofficial].
 
 **Pseudocode:**
 
@@ -56,117 +79,141 @@ Hierarchical Sampling (Inverse CDF Sampling) is a method for generating fine-gra
 ```python
 import torch
 
-def hierarchical_sampling_inverse_cdf(bins, weights, N_samples, det=False):
+def hierarchical_sampling_inverse_cdf(bins, weights, N_samples, det=False, eps=1e-5):
     """
-    Performs hierarchical sampling using inverse CDF interpolation.
+    Samples depth values from a probability distribution defined by weights 
+    using inverse transform sampling on the cumulative distribution function (CDF).
     
     Args:
-        bins: Tensor of shape (B, T) containing coarse depth boundaries.
-        weights: Tensor of shape (B, T-1) containing coarse bin weights (densities).
-        N_samples: Integer, number of fine samples to generate.
+        bins: Tensor of shape (B, T) containing bin edges (depth boundaries).
+        weights: Tensor of shape (B, T-1) containing unnormalized weights for each bin.
+        N_samples: Integer, number of fine samples to generate per ray.
         det: Boolean, if True uses deterministic linspace, else random uniform.
+        eps: Float, numerical stability constant.
         
     Returns:
-        z_samples: Tensor of shape (B, N_samples) containing fine sample depths.
+        samples: Tensor of shape (B, N_samples) containing sampled depths.
     """
     # 1. Stabilize weights
-    weights = weights + 1e-5
+    weights = weights + eps
     
     # 2. Compute PDF
+    # Sum over the last dimension (bins), keep dimensions for broadcasting
     pdf = weights / torch.sum(weights, dim=-1, keepdim=True)
     
-    # 3. Compute CDF and prepend zero
+    # 3. Compute CDF and prepend zeros
     cdf = torch.cumsum(pdf, dim=-1)
+    # Prepend a zero tensor to align CDF indices with bin edges
     cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], dim=-1)
     
-    # 4. Generate query values u
+    # 4. Generate uniform samples u
+    # cdf shape: (B, T)
+    # We want u shape: (B, N_samples)
+    batch_shape = cdf.shape[:-1]
+    
     if det:
+        # Deterministic stratified sampling
         u = torch.linspace(0.0, 1.0, steps=N_samples, device=bins.device)
-        u = u.expand(list(cdf.shape[:-1]) + [N_samples])
+        u = u.expand(batch_shape + (N_samples,))
     else:
-        u = torch.rand(list(cdf.shape[:-1]) + [N_samples], device=bins.device)
+        # Random uniform sampling
+        u = torch.rand(batch_shape + (N_samples,), device=bins.device)
         
     # 5. Find bin indices
-    inds = torch.searchsorted(cdf, u, right=True)
+    # searchsorted finds the index where u would be inserted to maintain order
+    # side='right' means if u == cdf[i], it returns i+1 (or similar logic consistent with bin indexing)
+    inds = torch.searchsorted(cdf, u, side='right')
     
-    # 6. Determine interpolation bounds
-    below = torch.max(torch.zeros_like(inds - 1), inds - 1)
-    above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
-    inds_g = torch.stack([below, above], dim=-1)
+    # 6. Determine bin boundaries for interpolation
+    # below is the index of the lower bin edge, above is the index of the upper bin edge
+    # Clamp to valid range [0, T-1]
+    below = torch.clamp(inds - 1, min=0)
+    above = torch.clamp(inds, max=cdf.shape[-1] - 1)
     
-    # 7. Gather CDF and bin values
-    # Expand inds_g to match cdf dimensions for gather
-    # cdf shape: (B, T), inds_g shape: (B, N_samples, 2)
-    # We need to gather along the last dimension (T)
+    # Stack to create indices for gathering pairs
+    inds_g = torch.stack([below, above], dim=-1) # Shape: (B, N_samples, 2)
+    
+    # 7. Gather CDF and Bin values
+    # Expand inds_g to match dimensions for gather if necessary, 
+    # but gather works on the last dim if dim=2 is specified for 3D tensor
+    # cdf shape: (B, T), we want to gather from dim=1 (the T dim)
+    # inds_g shape: (B, N_samples, 2)
+    
+    # To use torch.gather, we need to expand inds_g to match the number of dims
+    # cdf is (B, T). We gather from dim 1.
+    # inds_g needs to be (B, N_samples, 2) and we gather 2 values.
+    
+    # Note: torch.gather(input, dim, index)
+    # input: (B, T)
+    # index: (B, N_samples, 2)
+    # output: (B, N_samples, 2)
+    
     cdf_g = torch.gather(cdf.unsqueeze(1).expand(-1, N_samples, -1), 2, inds_g)
     bins_g = torch.gather(bins.unsqueeze(1).expand(-1, N_samples, -1), 2, inds_g)
     
     # 8. Interpolate
     denom = cdf_g[..., 1] - cdf_g[..., 0]
-    denom = torch.where(denom < 1e-5, torch.ones_like(denom) * 1e-5, denom)
-    t = (u - cdf_g[..., 0]) / denom
-    z_samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
+    # Handle division by zero for zero-width bins
+    denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
     
-    return z_samples
+    t = (u - cdf_g[..., 0]) / denom
+    samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
+    
+    return samples
 ```
 
-**Parameters:**
-*   `N_samples` (or `N_importance`): Typically 128 or 256 in NeRF implementations, compared to 64 coarse samples [S3, S4, unofficial].
-*   `det`: Default is `False` (random) for training to reduce overfitting, `True` for testing [S1, S12, unofficial].
-*   `perturb`: Often set to 1.0 for training to enable stratified jittering in the coarse pass, which complements the fine hierarchical sampling [S2, S12, unofficial].
-
 **Edge Cases and Pitfalls:**
-*   **Zero Weights:** If all weights are zero, normalization fails. Adding epsilon prevents this [S1, unofficial].
-*   **Zero-Width Bins:** If two consecutive bin boundaries are identical (or very close), the denominator in interpolation becomes zero. Clamping the denominator to $10^{-5}$ prevents NaNs [S1, unofficial].
-*   **Boundary Conditions:** The CDF must be padded with a leading zero to correctly map the first bin (from index 0 to 1 in CDF) to the first bin boundary [S4, S12, unofficial].
+*   **Zero Weights:** If all weights in a ray are zero, normalization results in NaN. Adding $\epsilon$ prevents this [S1, unofficial].
+*   **Zero-Width Bins:** If `cdf_g[..., 1] == cdf_g[..., 0]`, the interpolation denominator is zero. Clamping the denominator to $10^{-5}$ or $1$ prevents NaNs and returns the lower bound or a safe default [S16, unofficial].
+*   **Index Out of Bounds:** `searchsorted` can return indices equal to the length of the CDF array if $u=1$. Clamping `above` to `T-1` prevents this [S13, unofficial].
 
 ## Subtopics
 
 ### [Inverse Opacity Calculation](1099-inverse-opacity-calculation.md)
-Inverse Opacity Calculation is a differentiable method for generating importance samples along a ray in volume rendering by inverting the cumulative distribution function (CDF) of the rendering contribution. It solves the problem of finding the ray parameter $t$ corresponding to a target cumulative density value $y$, allowing samples to be drawn directly from transmittance estimates rather than computing expensive integrals. Unlike standard NeRF hierarchical sampling, which interpolates exponentiated densities (probabilities) and requires auxiliary losses, this method interpolates the density field directly (piecewise linear or constant), offering better numerical stability for end-to-end optimization. It enables Monte Carlo estimates with fewer ray points and allows gradients to back-propagate through the sampling process to the density field parameters.
+Uses inverse transform sampling on a piecewise approximated density field (constant or linear) to allow gradients to back-propagate through the sampling process to the density parameters. Chosen when differentiable sampling is required for end-to-end optimization.
 
 ### [Proposal Network Sampling](1589-proposal-network-sampling.md)
-Proposal Network Sampling is a method that uses a coarse Multi-Layer Perceptron (MLP) to directly estimate the Probability Density Function (PDF) along a ray, enabling importance sampling that concentrates samples on high-contribution areas (surfaces) while spreading them in empty or occluded regions. Unlike spatial skipping methods (e.g., [RangeFineSampler](3141-rangefinesampler.md)) which skip empty space entirely, proposal networks always spread samples throughout the space but with varying density, providing more accurate transmittance estimation at the cost of higher sample counts in empty regions. It builds on [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md) by providing the discrete probability distribution via a learned neural estimator rather than a static grid or uniform distribution [G].
+Uses a coarse MLP to directly estimate the PDF, providing more accurate transmittance estimation at the cost of higher sample counts in empty regions. Chosen when a learned prior is available and computational budget allows for network inference per ray.
 
 ### [RangeFineSampler](3141-rangefinesampler.md)
-RangeFineSampler is a hierarchical sampling technique for direct volume ray casting that refines coarse samples by generating a dense uniform grid around the coarse sample with the highest weight, supplemented by random samples across the full ray extent. It addresses missing high-frequency details between coarse samples by concentrating computational effort near the most significant signal while maintaining global coverage through random jittering. Unlike [Inverse Opacity Calculation](1099-inverse-opacity-calculation.md) which derives samples from opacity gradients, or [Proposal Network Sampling](1589-proposal-network-sampling.md) which uses learned neural networks to predict sample locations, RangeFineSampler relies on a deterministic geometric expansion around the peak weight index combined with stochastic uniform sampling.
+Refines coarse samples by generating a dense uniform grid around the coarse sample with the highest weight, supplemented by random samples. Chosen when high-frequency details are missing between coarse samples and a deterministic geometric expansion is preferred over probabilistic CDF inversion.
+
+### [Inverse Sampling for Fine Rays](3235-inverse-sampling-for-fine-rays.md)
+Explicitly constructs a discrete PDF from coarse weights using deterministic inverse CDF lookup. Chosen when a strict deterministic mapping from coarse weights to fine samples is needed without neural network overhead.
 
 ### [Discrete Distribution Sampler](3906-discrete-distribution-sampler.md)
-The Discrete Distribution Sampler selects indices from a finite set of choices based on associated probability weights, using a uniform random number to drive the selection via cumulative distribution function (CDF) traversal. It serves as the core sampling primitive for Hierarchical Sampling (Inverse CDF Sampling), enabling efficient point selection along rays in volume rendering by prioritizing bins with higher density or opacity. Unlike [Inverse Opacity Calculation](1099-inverse-opacity-calculation.md) which computes transmittance, or [Proposal Network Sampling](1589-proposal-network-sampling.md) which uses learned neural networks, this method relies on explicit weight arrays and supports both stochastic and deterministic top-k selection modes.
+The core primitive selecting indices from a finite set based on weights via CDF traversal. Chosen as the foundational building block for hierarchical sampling, supporting both stochastic and deterministic top-k selection.
 
 ### [Hierarchical 3D Sampling](8510-hierarchical-3d-sampling.md)
-Hierarchical 3D Sampling generates a sequence of points within a unit cube such that any prefix of the sequence $\{P_0, \dots, P_{n-1}\}$ maintains uniform density and a minimum inter-point distance. This property allows the method to serve as a density control mechanism for volume rendering, enabling adaptive sampling based on opacity or managing the level of detail (LOD) by selecting a subset of pre-computed points. Unlike its siblings, which often rely on probabilistic distributions or neural networks, this method provides deterministic, hierarchical point sets where the "priority" of a point is defined by its index in the generation sequence.
+Generates deterministic, hierarchical point sets within a unit cube maintaining uniform density and minimum inter-point distance. Chosen for density control and LOD management in 3D space rather than 1D ray sampling.
 
 ## Operating characteristics
-
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** In NeRF implementations, using 64 coarse samples and 128 fine samples via hierarchical sampling significantly improves PSNR compared to uniform sampling with the same total sample count, particularly for scenes with thin structures or high-frequency details [S4, S12, unofficial].
-*   **Strengths:**
-    *   Reduces variance in regions of high density/opacity [S1, S12, unofficial].
-    *   Simple to implement and differentiable [S1, S12, unofficial].
-    *   Works well with MLP-based radiance fields where density is explicitly modeled [S1, S12, unofficial].
-*   **Limitations:**
-    *   Can still waste samples in empty space if the coarse density estimate is inaccurate [S1, unofficial].
-*   **When to Use:** When rendering scenes with varying density where uniform sampling is inefficient, and a coarse estimate of importance is available [S1, S12, unofficial].
-*   **When Not to Use:** When memory is extremely constrained (due to storing CDF), or when the scene is mostly empty and skipping is preferred [S1, unofficial].
+*   **Time Complexity:** $O(N \log M)$ or $O(N)$ depending on implementation of `searchsorted`, where $N$ is the number of fine samples and $M$ is the number of coarse bins. The dominant operations are `cumsum` ($O(M)$), `searchsorted` ($O(N \log M)$ or $O(N)$ with parallelization), and gathering ($O(N)$) [S16, unofficial].
+*   **Memory Complexity:** $O(M + N)$ per ray for storing CDF and samples. The CDF requires $M+1$ floats, and samples require $N$ floats [S11, unofficial].
+*   **Performance:** In NeRF implementations, this method is extremely fast, typically adding negligible overhead compared to the MLP query cost. It is widely used in standard NeRF pipelines (e.g., 64 coarse samples, 128 fine samples) [S4, S5, unofficial].
+*   **Strengths:** Differentiable (gradients flow through `searchsorted` and interpolation if implemented with differentiable ops like `torch.searchsorted` or custom CUDA kernels), efficient, and simple to implement. It effectively concentrates samples in high-density regions [S1, unofficial].
+*   **Limitations:** The piecewise constant assumption of the PDF may not perfectly match the true underlying density, leading to aliasing if the coarse grid is too sparse. It does not skip empty space (unlike spatial skipping methods) [S1, unofficial].
+*   **When to use:** When refining coarse samples in a hierarchical rendering pipeline, especially in Neural Radiance Fields (NeRF) where differentiability is crucial for training [S1, S16, unofficial].
+*   **When not to use:** When the scene is extremely sparse and empty space skipping is more important than density estimation accuracy, or when the coarse grid is too fine to justify the overhead of CDF construction [S1, unofficial].
 
 ## Background
-
-Hierarchical Sampling was introduced in the seminal NeRF paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" by Mildenhall et al. (2020) [S2, S12, unofficial]. It was designed to address the inefficiency of uniform sampling in volume rendering, where many samples fall in empty space [S2, S12, unofficial]. By using the density predicted by a coarse network to guide the sampling of a fine network, NeRF achieved high-quality novel view synthesis with manageable computational cost [S2, S12, unofficial].
+Hierarchical sampling via inverse CDF was introduced in the seminal paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" by Mildenhall et al. (2020) [S2, unofficial]. It was designed to improve the quality of volume rendering by adding fine samples in regions of high opacity identified by a coarse pass. The method leverages the fact that the probability of a ray interacting with a volume element is proportional to its density, allowing the CDF of the coarse weights to guide the placement of fine samples. This approach became a standard component in subsequent NeRF variants and differentiable rendering frameworks [S1, S16, unofficial].
 
 ## Sources
-
 [S1] GreatDrake/reparameterized-volume-sampling, https://github.com/GreatDrake/reparameterized-volume-sampling, fetched 2026-10-26 (unofficial)
 [S2] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)
-[S3] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
-[S4] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
-[S5] albertgassol1/vf-nerf, https://github.com/albertgassol1/vf-nerf, fetched 2026-10-26 (unofficial)
-[S6] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
-[S7] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)
-[S8] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
-[S9] InanXR/FLASH, https://github.com/InanXR/FLASH, fetched 2026-10-27 (unofficial)
-[S10] GitHub - nitthilan/neural_sparse_voxel_field: Neural scene ..., https://github.com/nitthilan/neural_sparse_voxel_field, fetched 2026-10-28 (unofficial)
-[S11] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
-[S12] NeRF: A Volume Rendering Perspective | Yue Yu - GitHub Pages, https://yconquesty.github.io/blog/ml/nerf/nerf_rendering.html, fetched 2026-10-29 (unofficial)
-[S13] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+[S3] google/nerfies, https://github.com/google/nerfies, fetched 2026-10-26 (unofficial)
+[S4] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S5] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S6] albertgassol1/vf-nerf, https://github.com/albertgassol1/vf-nerf, fetched 2026-10-26 (unofficial)
+[S7] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)
+[S8] AlexSheldrick/density_bounded_ray_weights, https://github.com/AlexSheldrick/density_bounded_ray_weights, fetched 2026-10-27 (unofficial)
+[S9] dgsmith7/nerf-mlp, https://github.com/dgsmith7/nerf-mlp, fetched 2026-10-27 (unofficial)
+[S10] YoujiaZhang/NeMF, https://github.com/YoujiaZhang/NeMF, fetched 2026-10-27 (unofficial)
+[S11] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
+[S12] YihangChen-ee/CNC, https://github.com/YihangChen-ee/CNC, fetched 2026-10-27 (unofficial)
+[S13] InanXR/FLASH, https://github.com/InanXR/FLASH, fetched 2026-10-27 (unofficial)
+[S14] GitHub - nitthilan/neural_sparse_voxel_field: Neural scene ..., https://github.com/nitthilan/neural_sparse_voxel_field, fetched 2026-10-28 (unofficial)
+[S15] GitHub - apchenstu/TensoRF: [ECCV 2022] Tensorial Radiance Fields, a ..., https://github.com/apchenstu/TensoRF, fetched 2026-10-29 (unofficial)
+[S16] NeRF: A Volume Rendering Perspective | Yue Yu - GitHub Pages, https://yconquesty.github.io/blog/ml/nerf/nerf_rendering.html, fetched 2026-10-29 (unofficial)
+[S17] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

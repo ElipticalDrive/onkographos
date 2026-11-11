@@ -1,81 +1,87 @@
 # Mass Point Centering for Dual Contouring
 
-Also called: Centered QEF Solver, Centroid-Shifted QEF
 
 ## Overview
-Mass Point Centering improves the numerical stability of the Quadratic Error Function (QEF) solver in Dual Contouring by shifting the solution space to the centroid of the sample points [S1, unofficial]. It addresses the problem of ill-conditioned linear systems that arise when intersection points are far from the origin, ensuring robust convergence for the dual vertex position [S1, unofficial]. It differs from [Brute-Force QEF Solver](4403-brute-force-qef-solver.md) by optimizing the conditioning of the matrix system rather than just accumulating errors, and from [QEF Solver Initialization](4722-qef-solver-initialization.md) by actively modifying the right-hand side vector to reflect the shifted coordinate system.
+Mass Point Centering improves the numerical stability of the Quadratic Error Function (QEF) solver in Dual Contouring by shifting the solution space to the centroid of the sample points [S1, unofficial]. It addresses precision loss in floating-point arithmetic by centering the linear system around the data distribution rather than the coordinate origin [S1, unofficial].
 
 ## How it works
 **Inputs:**
 - `data`: A structure containing:
   - `numPoints`: Integer count of edge intersection points.
-  - `massPoint_x, massPoint_y, massPoint_z`: Pre-computed centroid coordinates of the input points.
+  - `massPoint_x, massPoint_y, massPoint_z`: Sum of the coordinates of the input points (pre-computed centroid numerator).
   - `ata_00, ata_01, ata_02, ata_11, ata_12, ata_22`: Elements of the symmetric $3 \times 3$ matrix $A^T A$.
   - `atb_x, atb_y, atb_z`: Elements of the vector $A^T b$.
-- `svd_tol`: Tolerance for Singular Value Decomposition (SVD).
-- `svd_sweeps`: Number of SVD sweeps.
+- `svd_tol`: Tolerance for the symmetric linear solver.
+- `svd_sweeps`: Number of solver sweeps.
 - `pinv_tol`: Tolerance for pseudo-inverse calculation.
 
 **Outputs:**
-- `x`: The computed dual vertex position in the shifted coordinate system, shifted back to the original frame.
+- `x`: The computed dual vertex position in the original coordinate frame.
 - `hasSolution`: Boolean indicating if a valid solution was found.
 
 **Data Structures:**
-- `SMat3`: A symmetric $3 \times 3$ matrix stored with 6 floats: `m00, m01, m02, m11, m12, m22`.
 - `Vector3`: A 3D vector with components `x, y, z`.
+- `SMat3`: A symmetric $3 \times 3$ matrix stored with 6 floats: `m00, m01, m02, m11, m12, m22`.
 
 **Steps:**
-1. **Guard:** If `data.numPoints` is 0, throw an `ArgumentException` [S1, unofficial].
-2. **Compute Centroid:** Calculate the mass point (centroid) $M$ as the average of the input points. The source code assumes `data.massPoint` is pre-scaled or computed as:
-   $$ M = \frac{1}{N} \sum_{i=1}^{N} P_i $$
-   where $N$ is `data.numPoints` [S1, unofficial].
+1. **Guard:** If `data.numPoints` is 0, throw an exception [S1, unofficial].
+2. **Compute Centroid:** Calculate the mass point (centroid) $M$ by dividing the summed coordinates by the point count [S1, unofficial]:
+   $$ M = \frac{1}{\text{numPoints}} \begin{bmatrix} \text{massPoint\_x} \\ \text{massPoint\_y} \\ \text{massPoint\_z} \end{bmatrix} $$
 3. **Setup Matrices:** Initialize the symmetric matrix $A$ (stored in `ata`) and vector $B$ (stored in `atb`) from the input data [S1, unofficial].
-4. **Adjust Right-Hand Side:** Compute the adjustment term $T = A M$. Subtract this from $B$:
-   $$ B_{new} = B_{old} - A M $$
-   In the source, this is done via `vmul_symmetric` which computes $A \times M$ [S1, unofficial].
-5. **Solve System:** Solve the linear system $A x' = B_{new}$ for $x'$ using SVD [S1, unofficial].
-6. **Shift Solution:** Recover the final position $x$ by adding the centroid back:
+4. **Adjust Right-Hand Side:** Compute the adjustment term $T = A M$ and subtract it from $B$ [S1, unofficial]:
+   $$ B_{\text{new}} = B - A M $$
+5. **Solve System:** Solve the adjusted linear system $A x' = B_{\text{new}}$ for $x'$ using a symmetric linear solver [S1, unofficial].
+6. **Shift Solution:** Recover the final position $x$ by adding the centroid back [S1, unofficial]:
    $$ x = x' + M $$
-7. **Reset:** Reset `atb` to its original state if required by the caller's context, and return the result [S1, unofficial].
+7. **Reset:** Restore $B$ to its original values if required by the calling context [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+class Vector3:
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x, self.y, self.z = x, y, z
+    def __add__(self, other): return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __sub__(self, other): return Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
+    def scale(self, s): return Vector3(self.x * s, self.y * s, self.z * s)
+
+class SMat3:
+    def __init__(self, m00, m01, m02, m11, m12, m22):
+        self.m00, self.m01, self.m02 = m00, m01, m02
+        self.m11, self.m12, self.m22 = m11, m12, m22
+    def vmul(self, v):
+        return Vector3(
+            self.m00 * v.x + self.m01 * v.y + self.m02 * v.z,
+            self.m01 * v.x + self.m11 * v.y + self.m12 * v.z,
+            self.m02 * v.x + self.m12 * v.y + self.m22 * v.z
+        )
+
+class ArgumentException(Exception): pass
+
+def solve_symmetric(A, b, tol, sweeps, pinv_tol):
+    # Standard symmetric linear solver (e.g., SVD or Cholesky) [G]
+    # Returns (solution_vector, success_bool)
+    ...
+
 def mass_point_centering(data, svd_tol, svd_sweeps, pinv_tol):
-    # Step 1: Guard
     if data.numPoints == 0:
         raise ArgumentException("No points provided")
 
-    # Step 2: Compute Centroid (Assuming data.massPoint is sum, not average, based on scaling factor)
-    # Note: Source shows massPoint *= (1.0f / data.numPoints), implying data.massPoint is the sum.
-    massPoint = Vector3(data.massPoint_x, data.massPoint_y, data.massPoint_z)
-    massPoint.x /= data.numPoints
-    massPoint.y /= data.numPoints
-    massPoint.z /= data.numPoints
+    M = Vector3(data.massPoint_x, data.massPoint_y, data.massPoint_z).scale(1.0 / data.numPoints)
 
-    # Step 3: Setup Matrices
-    # A is symmetric 3x3
     A = SMat3(data.ata_00, data.ata_01, data.ata_02, data.ata_11, data.ata_12, data.ata_22)
-    # B is vector
+    B_original = Vector3(data.atb_x, data.atb_y, data.atb_z)
     B = Vector3(data.atb_x, data.atb_y, data.atb_z)
 
-    # Step 4: Adjust Right-Hand Side
-    # T = A * massPoint
-    T = A.vmul_symmetric(massPoint)
+    T = A.vmul(M)
     B_new = B - T
 
-    # Step 5: Solve System A * x_prime = B_new
-    x_prime = Vector3(0, 0, 0)
-    # SVD.solveSymmetric modifies x in-place
-    success = SVD.solveSymmetric(A, B_new, x_prime, svd_tol, svd_sweeps, pinv_tol)
+    x_prime, success = solve_symmetric(A, B_new, svd_tol, svd_sweeps, pinv_tol)
 
-    # Step 6: Shift Solution
-    x = x_prime + massPoint
+    x = x_prime + M
 
-    # Step 7: Reset ATB (if required by context, otherwise omitted in pure math)
-    # B is reset to original data.atb in source, but mathematically we just return x
-    
+    B = B_original
     return x, success
 ```
 
@@ -90,15 +96,18 @@ def mass_point_centering(data, svd_tol, svd_sweeps, pinv_tol):
 
 ## Subtopics
 
+### [Dual Vertex Positioning via Least Squares](4655-dual-vertex-positioning-via-least-squares.md)
+Computes the dual vertex position within a leaf cell by minimizing the squared algebraic distance to all edge intersection points on the isosurface boundary. Chosen when a direct least-squares formulation is preferred over the centered QEF adjustment.
+
 ## Operating characteristics
-**Time Complexity:** Dominated by the SVD solve, typically $O(1)$ for fixed-size $3 \times 3$ systems, but depends on the number of SVD sweeps.
-**Memory Complexity:** $O(1)$ auxiliary memory.
-**Strengths:** Improves numerical stability for ill-conditioned QEF systems [S1, unofficial].
-**Limitations:** Requires pre-computation of the centroid and matrix-vector multiplication overhead.
-**When to use:** When intersection points are far from the cell origin or when standard QEF solvers fail to converge due to precision loss.
+**Time Complexity:** Not given in the sources.
+**Memory Complexity:** Not given in the sources.
+**Strengths:** Improves numerical stability for QEF systems [S1, unofficial].
+**Limitations:** Requires pre-computation of the centroid and adds matrix-vector multiplication overhead [S1, unofficial].
+**When to use:** Not given in the sources.
 
 ## Background
-This method is implemented in the `DualContouringCSharp` repository by tuckbone [S1, unofficial]. It is a practical implementation detail for robust dual contouring rather than a widely published academic algorithm with a distinct citation.
+Not given in the sources.
 
 ## Sources
 [S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)

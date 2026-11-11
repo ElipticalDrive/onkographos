@@ -1,0 +1,381 @@
+--- v011.md
++++ v012.md
+@@ -4,47 +4,40 @@
+ 
+ ## Overview
+-Interpolated Discrete Values & Gradients computes a continuous scalar field and its gradient at arbitrary 3D points by interpolating discrete values stored at grid vertices using tri-cubic (trilinear or cubic spline) basis functions [S1, unofficial][S2]. It solves the problem of mapping continuous world-space coordinates to discrete memory indices in a dense volume grid while providing smooth derivatives essential for ray marching and isosurfacing [S1, unofficial][S2]. Unlike [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md), which produces a piecewise-constant field, this method blends adjacent voxels to ensure $C^0$ continuity (and $C^1$ if gradients are interpolated), reducing aliasing artifacts [S1, unofficial][S2]. It differs from [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by providing the gradient as an integral part of the interpolation process rather than a post-hoc numerical derivative [S2].
++Interpolated Discrete Values & Gradients computes a continuous scalar field and its spatial gradient from discrete grid data using tri-cubic interpolation [S1, unofficial][S2]. It solves the problem of mapping continuous world-space coordinates to discrete memory indices while providing smooth, differentiable values essential for ray marching and gradient-based shading [S1, unofficial][S2]. Unlike [Nearest Voxel Lookup with Periodic Boundary](1573-nearest-voxel-lookup-with-periodic-boundary.md), which produces a piecewise-constant field, this method blends adjacent voxels to ensure $C^0$ continuity of the scalar field and $C^0$ continuity of the gradient (assuming the gradient is also interpolated) [S1, unofficial][S2]. It differs from [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by providing the value and gradient simultaneously through a unified interpolation basis rather than post-processing discrete differences [S2].
+ 
+ ## How it works
+ **Inputs:**
+-- A dense 3D grid of discrete scalar values $V$ at integer coordinates $(i, j, k)$.
+-- A query point $p = (p_x, p_y, p_z)$ in world space.
+-- Grid parameters: bounding box bounds, voxel dimensions (or spacing), and grid dimensions $(N_x, N_y, N_z)$ [S1, unofficial][S2].
++- A query point $\mathbf{p} = (p_x, p_y, p_z)$ in world space.
++- A dense 3D grid of scalar values (voxels) with known bounding box $\mathbf{B}_{min}$ and voxel dimensions $\mathbf{d} = (d_x, d_y, d_z)$.
++- Optionally, pre-computed gradients at grid vertices, or a method to compute them from the scalar values.
+ 
+ **Outputs:**
+-- Scalar value $f(p)$ at the query point.
+-- Gradient vector $\nabla f(p) = (\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z})$ at the query point.
++- A scalar value $V(\mathbf{p})$.
++- A gradient vector $\nabla V(\mathbf{p}) = (\frac{\partial V}{\partial x}, \frac{\partial V}{\partial y}, \frac{\partial V}{\partial z})$.
+ 
+ **Data Structures:**
+-- `Grid`: A 3D array or linearized memory block storing scalar values. Layout is typically row-major or column-major contiguous memory. Accessor `field(data, i, j, k)` retrieves the value at integer indices.
+-- `Values`: A field object wrapping the grid data, providing bounds checking and coordinate conversion [S2].
+-- `Gradients`: A field object storing or computing gradient vectors at grid vertices. If not pre-computed, it is derived from `Values` using finite differences or analytical derivatives if the source function is known [S2].
++- The grid is stored as a 3D array `data[x][y][z]` of size $N_x \times N_y \times N_z$.
++- Indices are integer coordinates $v_i = (v_x, v_y, v_z)$ representing the voxel containing the query point.
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Coordinate Conversion:**
+-    Compute the integer voxel coordinates $v_i = (v_x, v_y, v_z)$ containing the query point $p$.
+-    $$ v_{axis} = \lfloor \frac{p_{axis} - bounds_{min, axis}}{voxel\_dim_{axis}} \rfloor $$
+-    where $axis \in \{x, y, z\}$ [S1, unofficial].
+-
+-2.  **Local Offset Calculation:**
+-    Compute the minimum corner $v_{min}$ of the voxel containing $p$ and the fractional offset $t$ within the voxel.
+-    $$ v_{min, axis} = bounds_{min, axis} + v_{i, axis} \cdot voxel\_dim_{axis} $$
+-    $$ t_{axis} = \frac{p_{axis} - v_{min, axis}}{voxel\_dim_{axis}} $$
+-    The offset $t$ is in the range $[0, 1)$ [S1, unofficial].
+-
+-3.  **Neighborhood Selection:**
+-    Tri-cubic interpolation requires a $4 \times 4 \times 4$ neighborhood of voxels. The indices relative to $v_i$ are $i \in \{-1, 0, 1, 2\}$, $j \in \{-1, 0, 1, 2\}$, $k \in \{-1, 0, 1, 2\}$ [S1, unofficial].
+-    *Edge Case:* If any neighbor index falls outside the grid boundaries, clamp the index to the nearest valid boundary or handle as an error depending on implementation [G].
+-
+-4.  **1D Cubic Interpolation (Hermite Basis):**
+-    The core interpolation function `CINT_CR` (Cubic Interpolation with Continuous Derivatives) computes the value along one axis using two points and their derivatives (or finite difference approximations).
+-    
+-    Let the interval be $[x_k, x_{k+1}]$ with length $\Delta x = x_{k+1} - x_k$. Let $p_k, p_{k+1}$ be the values and $m_k, m_{k+1}$ be the derivatives (scaled by $\Delta x$ if necessary, or $m$ represents the derivative directly). The normalized parameter is $t = \frac{x - x_k}{\Delta x}$ [S1, unofficial].
+-    
+-    Compute powers:
+-    $$ t_2 = t^2, \quad t_3 = t^3 $$
+-    
+-    Compute basis functions (Hermite coefficients):
++1.  **Coordinate Mapping:**
++    Compute the integer voxel coordinates $v_i$ containing $\mathbf{p}$:
++    $$ v_i[axis] = \lfloor \frac{p_{axis} - B_{min, axis}}{d_{axis}} \rfloor $$
++    Compute the minimum corner of the voxel:
++    $$ \mathbf{v}_{min} = \mathbf{B}_{min} + v_i \cdot \mathbf{d} $$
++    Compute the local fractional offset $\mathbf{t}$ in range $[0, 1]$:
++    $$ \mathbf{t} = \frac{\mathbf{p} - \mathbf{v}_{min}}{\mathbf{d}} $$
++    *Note: $\mathbf{t}$ components $t_x, t_y, t_z$ are used for interpolation along each axis.*
++
++2.  **Neighborhood Selection:**
++    Tri-cubic interpolation requires a $4 \times 4 \times 4$ neighborhood of voxels. The indices relative to $v_i$ are $i \in [-1, 2]$ and $j \in [-1, 2]$ for the y and z axes, and similarly for x. The global indices accessed are:
++    $$ \text{idx}(x, y, z) = (v_x + i, v_y + j, v_z + k) $$
++    for $i, j, k \in \{-1, 0, 1, 2\}$. Boundary checks must be applied if the query point is near the grid edge.
++
++3.  **1D Cubic Interpolation (Hermite Basis):**
++    The core interpolation function `CINT_CR` (Cubic Interpolation with Continuous Derivatives) computes the value at parameter $t \in [0, 1]$ given two values $p_k, p_{k+1}$ and their derivatives $m_k, m_{k+1}$ (scaled by interval length).
++    
++    Let $\Delta = 1$ (since $t$ is normalized to $[0,1]$). The basis functions are:
+     $$ h_{00} = 2t^3 - 3t^2 + 1 $$
+     $$ h_{10} = t^3 - 2t^2 + t $$
+@@ -52,104 +45,157 @@
+     $$ h_{11} = t^3 - t^2 $$
+     
+-    Result:
+-    $$ \text{result} = h_{00} p_k + h_{10} \Delta x m_k + h_{01} p_{k+1} + h_{11} \Delta x m_{k+1} $$
+-    
+-    *Note:* If derivatives $m$ are not available at vertices, they are computed via central differences from the `Values` field: $m_k \approx \frac{V_{k+1} - V_{k-1}}{2 \Delta x}$ [S2, G].
+-
+-5.  **Tri-Cubic Evaluation:**
+-    Perform interpolation sequentially along each axis.
+-    
+-    a. **Z-axis:** For each $j \in \{-1, 2\}$ and $i \in \{-1, 2\}$, interpolate along Z using 4 values:
+-       $$ z\_interp[j+1][i+1] = \text{CINT\_CR}(t_z, V_{v_x+i, v_y+j, v_z-1}, V_{v_x+i, v_y+j, v_z}, V_{v_x+i, v_y+j, v_z+1}, V_{v_x+i, v_y+j, v_z+2}) $$
+-       *Note:* The source code snippet in [S1, unofficial] uses indices $v_z-1$ to $v_z+2$. This implies the "derivative" inputs to `CINT_CR` are actually the values at the surrounding nodes if a standard cubic spline formulation is used where the derivative is approximated by the difference of neighbors, or the function signature in [S1, unofficial] abstracts the derivative calculation. Specifically, [S1, unofficial] shows `CINT_CR` taking 4 values. This corresponds to a Catmull-Rom spline or a cubic Hermite spline where the tangents are derived from the 4 points. The standard Catmull-Rom formula for point $P$ at parameter $t$ using $P_{-1}, P_0, P_1, P_2$ is:
+-       $$ P(t) = \frac{1}{2} \left( (2P_0) + (-P_{-1} + P_1)t + (2P_{-1} - 5P_0 + 4P_1 - P_2)t^2 + (-P_{-1} + 3P_0 - 3P_1 + P_2)t^3 \right) $$
+-       The source [S1, unofficial] explicitly lists `CINT_CR` arguments as 4 values. We implement `CINT_CR` as Catmull-Rom interpolation [S1, G, unofficial].
+-
+-    b. **Y-axis:** For each $i \in \{-1, 2\}$, interpolate the Z-interpolated results along Y:
+-       $$ y\_interp[i] = \text{CINT\_CR}(t_y, z\_interp[0][i], z\_interp[1][i], z\_interp[2][i], z\_interp[3][i]) $$
+-
+-    c. **X-axis:** Interpolate the Y-interpolated results along X:
+-       $$ f(p) = \text{CINT\_CR}(t_x, y\_interp[0], y\_interp[1], y\_interp[2], y\_interp[3]) $$
+-
+-6.  **Gradient Computation:**
+-    The gradient $\nabla f(p)$ can be computed analytically if the basis functions' derivatives are known, or by interpolating pre-computed vertex gradients.
+-    
+-    *Analytical Method:* Differentiate the basis functions $h_{00}, h_{10}, h_{01}, h_{11}$ with respect to $t$, then scale by $1/\Delta x$ for each axis.
+-    $$ \frac{\partial f}{\partial x} = \frac{1}{\Delta x} \frac{\partial f}{\partial t_x} $$
+-    
+-    *Discrete Method:* If `Gradients` field is populated with vertex gradients $G_{i,j,k}$, perform the same tri-cubic interpolation structure but on the gradient components $G_x, G_y, G_z$ separately [S2].
+-    
+-    $$ \nabla f(p) = \text{TriCubicInterpolate}(Gradients, p) $$
++    The interpolated value is:
++    $$ \text{CINT\_CR}(t, p_k, p_{k+1}, m_k, m_{k+1}) = h_{00} p_k + h_{10} m_k + h_{01} p_{k+1} + h_{11} m_{k+1} $$
++    
++    *Note: In standard tri-cubic interpolation of scalar fields without pre-computed vertex gradients, the derivatives $m$ are often approximated using finite differences of the scalar values, or the method defaults to trilinear if gradients are unavailable. However, the source [S1, unofficial] explicitly defines `CINT_CR` using derivatives, implying the availability of gradient data or a specific spline formulation.*
++
++4.  **Tri-Cubic Interpolation:**
++    Perform interpolation along the z-axis first, then y, then x.
++    
++    a. **Z-interpolation:** For each $j \in [-1, 2]$ and $i \in [-1, 2]$, compute 4 values along the z-axis using the 4 voxels at $z$-indices $v_z-1$ to $v_z+2$.
++    $$ z\_interp[j+1][i+1] = \text{CINT\_CR}(t_z, \text{data}[v_x+i][v_y+j][v_z-1], \text{data}[v_x+i][v_y+j][v_z], \text{data}[v_x+i][v_y+j][v_z+1], \text{data}[v_x+i][v_y+j][v_z+2]) $$
++    *Note: The source [S1, unofficial] code snippet shows `CINT_CR` taking 4 arguments for values, but the formula definition takes 4 arguments including derivatives. If derivatives are not provided, standard cubic spline coefficients or finite difference approximations for $m$ must be used. The source [S1, unofficial] pseudocode implies `CINT_CR` handles the basis evaluation.*
++
++    b. **Y-interpolation:** For each $i \in [-1, 2]$, interpolate the results from step (a) along the y-axis.
++    $$ y\_interp[i] = \text{CINT\_CR}(t_y, z\_interp[0][i], z\_interp[1][i], z\_interp[2][i], z\_interp[3][i]) $$
++
++    c. **X-interpolation:** Interpolate the results from step (b) along the x-axis.
++    $$ V(\mathbf{p}) = \text{CINT\_CR}(t_x, y\_interp[0], y\_interp[1], y\_interp[2], y\_interp[3]) $$
++
++5.  **Gradient Computation:**
++    The gradient $\nabla V(\mathbf{p})$ can be computed analytically if the basis functions' derivatives are used, or by interpolating pre-computed vertex gradients.
++    
++    If using pre-computed vertex gradients $\mathbf{g}_{ijk}$ at each voxel corner:
++    Apply the same tri-cubic interpolation structure to each component of the gradient vector independently.
++    $$ \nabla V(\mathbf{p}) = (\text{TriCubic}(t, \mathbf{g}_x), \text{TriCubic}(t, \mathbf{g}_y), \text{TriCubic}(t, \mathbf{g}_z)) $$
++    
++    If gradients are not pre-computed, they can be estimated using finite differences on the interpolated field or by computing the derivative of the basis functions directly if the scalar values are treated as samples of a cubic spline. The source [S2] mentions `gradients.compute_discrete_gradients(values)` as an alternative to analytical gradients.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def catmull_rom(t, p0, p1, p2, p3):
++def tri_cubic_interpolate(data, bounds_min, voxel_dim, p):
+     """
+-    Catmull-Rom interpolation for a single axis.
+-    t is in [0, 1].
+-    p0, p1, p2, p3 are values at indices -1, 0, 1, 2 relative to the interval [0, 1].
++    data: 3D array [nx, ny, nz]
++    bounds_min: (bx, by, bz)
++    voxel_dim: (dx, dy, dz)
++    p: (px, py, pz)
+     """
+-    t2 = t * t
+-    t3 = t2 * t
+-    # Basis functions for Catmull-Rom
+-    # P(t) = 0.5 * ((2*p1) + (-p0 + p2)*t + (2*p0 - 5*p1 + 4*p2 - p3)*t^2 + (-p0 + 3*p1 - 3*p2 + p3)*t^3)
+-    term1 = 2.0 * p1
+-    term2 = (-p0 + p2) * t
+-    term3 = (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+-    term4 = (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+-    return 0.5 * (term1 + term2 + term3 + term4)
+-
+-def tri_cubic_interpolate(grid, p, bounds_min, voxel_dim, grid_dims):
+-    """
+-    Computes scalar value at p using tri-cubic interpolation.
+-    """
+-    # 1. Compute voxel coordinates
+-    v_x = int((p.x - bounds_min.x) / voxel_dim.x)
+-    v_y = int((p.y - bounds_min.y) / voxel_dim.y)
+-    v_z = int((p.z - bounds_min.z) / voxel_dim.z)
+-    
+-    # 2. Compute local offset t
+-    t_x = (p.x - (bounds_min.x + v_x * voxel_dim.x)) / voxel_dim.x
+-    t_y = (p.y - (bounds_min.y + v_y * voxel_dim.y)) / voxel_dim.y
+-    t_z = (p.z - (bounds_min.z + v_z * voxel_dim.z)) / voxel_dim.z
+-    
+-    # 3. Fetch 4x4x4 neighborhood
+-    # Indices relative to v: -1, 0, 1, 2
+-    # We need to handle boundary clamping here [G]
+-    def get_val(ix, iy, iz):
+-        # Clamp indices to [0, grid_dims-1]
+-        ix = max(0, min(ix, grid_dims.x - 1))
+-        iy = max(0, min(iy, grid_dims.y - 1))
+-        iz = max(0, min(iz, grid_dims.z - 1))
+-        return grid[ix, iy, iz]
+-
+-    # 4. Interpolate along Z for each (i, j)
+-    z_interp = [[0.0 for _ in range(4)] for _ in range(4)]
++    # 1. Compute voxel coordinates and offset
++    vx = int((p[0] - bounds_min[0]) / voxel_dim[0])
++    vy = int((p[1] - bounds_min[1]) / voxel_dim[1])
++    vz = int((p[2] - bounds_min[2]) / voxel_dim[2])
++    
++    tx = (p[0] - (bounds_min[0] + vx * voxel_dim[0])) / voxel_dim[0]
++    ty = (p[1] - (bounds_min[1] + vy * voxel_dim[1])) / voxel_dim[1]
++    tz = (p[2] - (bounds_min[2] + vz * voxel_dim[2])) / voxel_dim[2]
++    
++    # 2. Define cubic basis functions
++    def h00(t): return 2*t**3 - 3*t**2 + 1
++    def h10(t): return t**3 - 2*t**2 + t
++    def h01(t): return -2*t**3 + 3*t**2
++    def h11(t): return t**3 - t**2
++    
++    # 3. Helper for 1D cubic interpolation with derivatives
++    # Note: If derivatives are not available, this function needs to approximate them
++    # or use a standard cubic spline solver. Here we assume derivatives are passed.
++    def cint_cr(t, p0, p1, m0, m1):
++        t2 = t * t
++        t3 = t2 * t
++        return h00(t)*p0 + h10(t)*m0 + h01(t)*p1 + h11(t)*m1
++
++    # 4. Z-interpolation
++    # We need 4x4x4 neighborhood. Indices relative to vx, vy, vz are -1, 0, 1, 2
++    z_interp = [[0.0]*4 for _ in range(4)]
++    for j in range(-1, 3): # y offset
++        for i in range(-1, 3): # x offset
++            # Get 4 z-values and their derivatives
++            # Assuming we have a function get_derivs that returns (val, deriv)
++            # For simplicity, if only values are known, m0, m1 must be estimated.
++            # Source [S1, unofficial] implies CINT_CR takes values and derivatives.
++            # If derivatives are not stored, one might use finite differences:
++            # m0 = (data[vx+i][vy+j][vz+1] - data[vx+i][vy+j][vz-1]) / 2
++            # But strictly following [S1, unofficial], we assume derivatives are inputs or computed.
++            
++            # Placeholder for derivative retrieval
++            # In a real implementation, `data` might be a struct containing value and gradient
++            # or gradients are computed separately.
++            
++            # For this pseudocode, we assume `get_val` and `get_grad` access the grid
++            # and return the scalar value and its partial derivative at the grid vertex.
++            
++            vals_z = [get_val(data, vx+i, vy+j, vz+k) for k in range(-1, 3)]
++            grads_z = [get_grad(data, vx+i, vy+j, vz+k) for k in range(-1, 3)] # Assuming gradient is stored or computed
++            
++            # Interpolate along Z using Hermite basis
++            # CINT_CR(t, p_k, p_{k+1}, m_k, m_{k+1})
++            # Here m_k is the derivative along Z.
++            
++            # Note: The source [S1, unofficial] code snippet uses CINT_CR with 4 arguments for values.
++            # This contradicts the formula definition. 
++            # Re-reading [S1, unofficial]: "CINT_CR(t.z, field(data, ...), ...)"
++            # It seems [S1, unofficial] might be using a cubic interpolation that only takes values 
++            # (like Catmull-Rom or cubic spline with computed slopes).
++            # However, the formula explicitly uses derivatives.
++            # We will stick to the formula definition which requires derivatives.
++            
++            # If derivatives are not available, we cannot use the exact formula from [S1, unofficial] 
++            # without approximation. We assume derivatives are available via `get_grad`.
++            
++            # Interpolate Z
++            # We need to interpolate 4 lines (for each i, j) along Z
++            # The result is a 4x4 grid of values at the Z-interpolated plane
++            
++            # Let's assume `cint_cr` handles the basis evaluation
++            # We need 4 values for the interpolation segment? 
++            # No, Hermite interpolation uses 2 points and 2 slopes.
++            # The source [S1, unofficial] loop: `CINT_CR(t.z, field(data, v_i[0]+i, v_i[1]+j, v_i[2]-1), ...)`
++            # It passes 4 values. This suggests a Catmull-Rom spline or similar 
++            # which converts 4 points to slopes internally.
++            
++            # Catmull-Rom to Hermite conversion:
++            # m0 = 0.5 * (p1 - p-1)
++            # m1 = 0.5 * (p2 - p0)
++            # Then use Hermite.
++            
++            p_m1 = vals_z[0]
++            p_0 = vals_z[1]
++            p_1 = vals_z[2]
++            p_2 = vals_z[3]
++            
++            m0 = 0.5 * (p_1 - p_m1)
++            m1 = 0.5 * (p_2 - p_0)
++            
++            z_interp[j+1][i+1] = cint_cr(tz, p_0, p_1, m0, m1)
++
++    # 5. Y-interpolation
++    y_interp = [0.0]*4
+     for i in range(-1, 3):
+-        for j in range(-1, 3):
+-            # Neighbors in Z: v_z-1, v_z, v_z+1, v_z+2
+-            p0 = get_val(v_x + i, v_y + j, v_z - 1)
+-            p1 = get_val(v_x + i, v_y + j, v_z)
+-            p2 = get_val(v_x + i, v_y + j, v_z + 1)
+-            p3 = get_val(v_x + i, v_y + j, v_z + 2)
+-            z_interp[j + 1][i + 1] = catmull_rom(t_z, p0, p1, p2, p3)
+-
+-    # 5. Interpolate along Y for each i
+-    y_interp = [0.0 for _ in range(4)]
+-    for i in range(-1, 3):
+-        # Neighbors in Y: v_y-1, v_y, v_y+1, v_y+2
+-        p0 = z_interp[0][i + 1]
+-        p1 = z_interp[1][i + 1]
+-        p2 = z_interp[2][i + 1]
+-        p3 = z_interp[3][i + 1]
+-        y_interp[i + 1] = catmull_rom(t_y, p0, p1, p2, p3)
+-
+-    # 6. Interpolate along X
+-    p0 = y_interp[0]
+-    p1 = y_interp[1]
+-    p2 = y_interp[2]
+-    p3 = y_interp[3]
+-    return catmull_rom(t_x, p0, p1, p2, p3)
++        # Get 4 Z-interpolated values for this X slice
++        vals_y = [z_interp[j+1][i+1] for j in range(-1, 3)]
++        
++        p_m1 = vals_y[0]
++        p_0 = vals_y[1]
++        p_1 = vals_y[2]
++        p_2 = vals_y[3]
++        
++        m0 = 0.5 * (p_1 - p_m1)
++        m1 = 0.5 * (p_2 - p_0)
++        
++        y_interp[i] = cint_cr(ty, p_0, p_1, m0, m1)
++
++    # 6. X-interpolation
++    vals_x = y_interp
++    p_m1 = vals_x[0]
++    p_0 = vals_x[1]
++    p_1 = vals_x[2]
++    p_2 = vals_x[3]
++    
++    m0 = 0.5 * (p_1 - p_m1)
++    m1 = 0.5 * (p_2 - p_0)
++    
++    result = cint_cr(tx, p_0, p_1, m0, m1)
++    
++    return result
+ ```
+ 
+@@ -172,5 +218,5 @@
+ 
+ ### [Polynomial and Spline Interpolation](11104-polynomial-and-spline-interpolation.md)
+-Polynomial and Spline Interpolation provides scalar value and gradient fields computed from discrete data at grid vertices using continuous basis functions, enabling smooth evaluation at arbitrary coordinates. It is distinguished from its parent [Interpolated Discrete Values & Gradients](1268-interpolated-discrete-values-gradients.md) by its explicit use of higher-order continuity (e.g., $C^1$ or $C^2$) and local support properties, and from its sibling [Data Interpolation](7180-data-interpolation.md) by its focus on piecewise polynomial bases (Hermite, B-splines) rather than general kernel methods.
++Polynomial and Spline Interpolation provides a continuous, differentiable scalar or vector field $u(\mathbf{p})$ from discrete grid data, enabling smooth volume rendering and gradient-based shading. It is distinguished from nearest-neighbor or simple linear methods by its higher-order continuity ($C^1$ or $C^2$) and from global basis methods by its local support, ensuring that the value at any query point depends only on a finite neighborhood of grid indices.
+ 
+ ### [Interpolated SDF Gradient Calculation](12389-interpolated-sdf-gradient-calculation.md)
+@@ -178,29 +224,33 @@
+ 
+ ### Uncertain Gradient Field Interpolation
+-Reconstruction of the gradient field from an uncertain scalar field, resulting in a trivariate random vector $Y$ representing the uncertainties of partial derivatives along x, y, and z [S3]. For voxels falling out of the support of the basis function $\rho$, zero weights are assigned [S3]. The uncertain gradient is computed as $\begin{bmatrix} Y_x \\ Y_y \\ Y_z \end{bmatrix} = \sum_i \begin{bmatrix} \alpha_i \\ \beta_i \\ \gamma_i \end{bmatrix} X_i$ with weights $\begin{bmatrix} \alpha_i \\ \beta_i \\ \gamma_i \end{bmatrix} = \rho(\mathbf{v} - \mathbf{v}_i)$, where $\rho$ is the basis function (derivative reconstruction filter) and $X_i$ are random variables at neighboring voxels [S3]. When data uncertainties are modeled as (scaled) uniform distributions, the distribution of each partial derivative is a box spline [S3]. The basis function $\rho$ is commonly a combination of linear interpolation and central difference [S3].
++Reconstruction of the gradient field from an uncertain scalar field, resulting in a trivariate random vector $\mathbf{Y}$ representing the uncertainties of partial derivatives along x, y, and z [S3]. For voxels falling out of the support of the basis function $\rho$, zero weights are assigned [S3]. The uncertain gradient is obtained from linear combinations of random variables at neighboring voxels:
++$$ \begin{bmatrix} Y_x \\ Y_y \\ Y_z \end{bmatrix} = \sum_i \begin{bmatrix} \alpha_i \\ \beta_i \\ \gamma_i \end{bmatrix} X_i $$
++with weights $\begin{bmatrix} \alpha_i \\ \beta_i \\ \gamma_i \end{bmatrix} = \rho(\mathbf{v} - \mathbf{v}_i)$, where $\rho$ is the basis function (derivative reconstruction filter) and $X_i$ are random variables at neighboring voxels [S3]. When data uncertainties are modeled as (scaled) uniform distributions, the distribution of each partial derivative is a box spline [S3].
+ 
+ ### Backprojection via Shepard's Interpolation
+-A technique to fit a continuous scale field $S(x)$ from a discrete set of LoG extrema $N=\{(x_i, t_i)\}$ by interpolating the representative scales $t_i$ using basis functions, allowing for a smooth transfer function [S4, unofficial]. The basis function $\Theta(d)$ uses the fourth-degree Wendland polynomial with compact support: $\Theta(d) = [1 - d/h]_0^1)^4 (4d/h + 1)$, where $[\cdot]_0^1$ is a clamping function between 0 and 1 [S4, unofficial]. The scale field is $S(x) = \sum_{x_i \in N} \Theta(||x - x_i||) t_i$ [S4, unofficial]. Alternatively, the maximum operator $S(x) = \max_{x_i \in N} \{\Theta(||x - x_i||) t_i\}$ can be used to give priority to larger features [S4, unofficial]. The parameter $h$ controls local support, typically $h = k \cdot t_i$ with $k=1$ [S4, unofficial]. A pitfall is "bleeding," where a small feature inherits the scale of a large feature, handled by a visibility test [S4, unofficial].
++A technique to fit a continuous scale field $S(\mathbf{x})$ from a discrete set of LoG extrema $N=\{(\mathbf{x}_i, t_i)\}$ by interpolating the representative scales $t_i$ using basis functions, allowing for a smooth transfer function [S4, unofficial]. The basis function $\Theta(d)$ uses the fourth-degree Wendland polynomial with compact support:
++$$ \Theta(d) = \left[ \left[ 1 - \frac{d}{h} \right]_0^1 \right]^4 \left( 4\frac{d}{h} + 1 \right) $$
++where $[\cdot]_0^1$ is a clamping function between 0 and 1, and $h$ is a parameter controlling the local support (typically $h = k \cdot t_i$ with $k \approx 1$) [S4, unofficial]. Alternatively, the maximum operator can be used: $S(\mathbf{x}) = \max_{\mathbf{x}_i \in N} \{\Theta(||\mathbf{x} - \mathbf{x}_i||) t_i\}$ to give priority to larger features [S4, unofficial]. A pitfall is "bleeding," where a small feature inherits the scale of a large feature, handled by a visibility test [S4, unofficial].
+ 
+ ### Kriging Interpolation
+-An interpolation algorithm used to construct a regular grid data model from limited and discrete 3D borehole data [S5]. Steps include: (1) Gridding: Set grid range and size; (2) Calculate estimated point coordinates $p_0$; (3) Select reference points $p_i$ via search strategy; (4) Calculate coefficients $K, \lambda, D$ of the equation set according to the variation function; (5) Solve equation set using LU method to get weight coefficient $\lambda_i$; (6) Round result $R'$ to $R$; (7) Repeat until all grid points are found [S5]. The formula is $R'(p_0) = \sum_{i=1}^n \lambda_i R(p_i)$, where $n$ is the number of interpolation points [S5].
++An interpolation algorithm used to construct a regular grid data model from limited and discrete 3D borehole data [S5]. The process involves gridding, selecting reference points, calculating coefficients using a variation function, and solving an equation set (e.g., via LU decomposition) to get weight coefficients $\lambda_i$. The estimated value is $R'(p_0) = \sum_{i=1}^n \lambda_i R(p_i)$ [S5].
+ 
+ ### Zero Set Initialization of Isosurfaces
+-Initialization of closest points for isosurfaces defined on regularly sampled scalar fields using local gradient estimates instead of trilinear interpolation [S6]. The algorithm examines each volume cell; if it contains the isosurface, distance samples at cell corners are initialized with closest point information [S6]. The scalar field gradient $\nabla f(s)$ is estimated using central differencing [S6]. The linear approximation is $f(s') = f(s) + \nabla f(s) \cdot (s' - s)$, and the closest point is computed by solving for $s'$ where $f(s') = f_0$ (isovalue) [S6]. This approximation is inaccurate for high curvature regions but efficient; accuracy can be improved by Newton iterations [S6].
++Initialization of closest points for isosurfaces defined on regularly sampled scalar fields using local gradient estimates instead of trilinear interpolation [S6]. The scalar field gradient $\nabla f(\mathbf{s})$ is estimated using central differencing. The closest point is computed by solving the linear approximation $f(\mathbf{s}') = f(\mathbf{s}) + \nabla f(\mathbf{s}) \cdot (\mathbf{s}' - \mathbf{s}) = f_0$ for $\mathbf{s}'$ [S6]. This approximation is inaccurate for high curvature regions [S6].
+ 
+ ### Constant Filter Radius Mapping
+-Maps curvilinear grid data to a rectangular grid using a user-set constant filter radius for spatial interpolation [S7, unofficial]. A pitfall is that it violates the Nyquist criteria when input data has a wide range of scales and spatial densities; a single radius cannot adequately sample all parts of the input grid [S7, unofficial].
++Maps curvilinear grid data to a rectangular grid using a user-set constant filter radius for spatial interpolation [S7, unofficial]. A pitfall is that it violates the Nyquist criteria when input data has a wide range of scales and spatial densities, as a single radius cannot adequately sample all parts of the input grid [S7, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per query point, as it accesses a fixed $4 \times 4 \times 4 = 64$ voxel neighborhood [S1, unofficial].
+-- **Memory Complexity:** $O(N_x N_y N_z)$ for the grid storage [S2].
+-- **Performance:** Requires 64 texture fetches or memory loads per sample point for tri-cubic interpolation [S1, unofficial]. This is more expensive than trilinear (8 fetches) or nearest-neighbor (1 fetch) but provides smoother results [S1, unofficial].
+-- **Strengths:** Provides $C^1$ continuity (if gradients are interpolated) or $C^0$ continuity (if only values are interpolated with Catmull-Rom), reducing aliasing and providing smooth normals for ray marching [S1, unofficial][S2].
+-- **Limitations:** Higher computational cost than lower-order interpolations. Boundary handling requires clamping or periodic extension, which can introduce artifacts at edges [G].
+-- **When to use:** High-quality volume rendering, isosurfacing (marching cubes, dual contouring) where smooth gradients are required [S2].
+-- **When not to use:** Real-time rendering with strict performance constraints where trilinear or nearest-neighbor is sufficient, or when sharp discontinuities must be preserved without blurring [S1, unofficial][S2].
++- **Time Complexity:** $O(1)$ per query, but with a high constant factor due to the $4 \times 4 \times 4 = 64$ voxel accesses and cubic basis function evaluations [S1, unofficial].
++- **Memory Complexity:** $O(N)$ for the grid storage, where $N$ is the number of voxels. If gradients are stored, memory usage doubles [S2].
++- **Measured Performance:** Performance depends heavily on cache locality. Accessing a $4 \times 4 \times 4$ block may cause cache misses if the grid is large. [S1, unofficial] reports successful ray marching with this method in CUDA.
++- **Strengths:** Provides smooth, continuous values and gradients, reducing aliasing artifacts compared to nearest-neighbor or trilinear interpolation. Essential for gradient-based shading and isosurfacing (e.g., Dual Contouring) [S2].
++- **Limitations:** Computationally expensive compared to trilinear or nearest-neighbor. Requires boundary handling for voxels near the grid edges. If gradients are not pre-computed, computing them adds overhead [S2].
++- **When to use:** When smooth shading, accurate normals, or high-quality isosurfaces are required.
++- **When not to use:** When performance is critical and visual quality can tolerate lower-order interpolation (e.g., simple volume rendering with transfer functions that don't rely on gradients).
+ 
+ ## Background
+-The method originates from the need to evaluate continuous fields from discrete samples in computer graphics and scientific visualization. It is implemented in libraries such as CGAL's Isosurfacing module (`CGAL::Isosurfacing::Interpolated_discrete_values_3` and `CGAL::Isosurfacing::Interpolated_discrete_gradients_3`) for isosurface extraction from discrete data [S2]. The specific cubic spline formulation using 4 points (Catmull-Rom) is a standard technique in computer graphics for smooth interpolation [S1, unofficial]. Variants like uncertain gradient interpolation extend the method to handle stochastic fields [S3], and Shepard's interpolation is used for scale-based transfer functions [S4, unofficial].
++The method originates from the use of cubic spline interpolation in volume rendering and isosurfacing. It is implemented in libraries such as CGAL's Isosurfacing module (`CGAL::Isosurfacing::Interpolated_discrete_values_3` and `CGAL::Isosurfacing::Interpolated_discrete_gradients_3`) for dual contouring and marching cubes [S2]. The specific tri-cubic formulation with Hermite basis functions is detailed in custom volume rendering implementations [S1, unofficial]. The handling of uncertain gradients extends this to probabilistic volume rendering [S3].
+ 
+ ## Sources

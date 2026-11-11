@@ -3,7 +3,7 @@
 Also called: RGBA Color Definition, glColor
 
 ## Overview
-Color Specification defines the RGBA (Red, Green, Blue, Alpha) representation used to specify color and opacity in rendering pipelines [S1, unofficial]. It solves the problem of defining discrete color values with explicit transparency control, allowing background objects to be seen through semi-transparent foreground objects [S1, unofficial].
+Color Specification defines the RGBA (Red, Green, Blue, Alpha) representation used to specify color and opacity in rendering pipelines [S1, unofficial]. It solves the problem of defining discrete color values with explicit transparency control, allowing background objects to be seen through semi-transparent foreground objects [S1, unofficial]. It differs from [Voxel Color Mapping](2970-voxel-color-mapping.md) and [Color Blending](5150-color-blending.md) by strictly defining the color state itself rather than combining or mapping it [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -39,8 +39,8 @@ Each component is a float in the range $[0.0, 1.0]$ [S1, unofficial].
 
 ```python
 def specify_color(r: float, g: float, b: float, a: float = 1.0) -> tuple:
-    """Specifies a color using RGBA components."""
-    # If a is omitted, alpha defaults to 1.0 (opaque) per 3-component convention [S1, unofficial]
+    """Specifies a color using RGBA components.
+    If a is omitted, alpha defaults to 1.0 (opaque) per 3-component convention [S1, unofficial]."""
     return (r, g, b, a)
 ```
 
@@ -50,12 +50,6 @@ def specify_color(r: float, g: float, b: float, a: float = 1.0) -> tuple:
 Adjusts RGB intensity while preserving the alpha channel. It differs from general color transformations by isolating luminance/chromaticity from transparency, keeping perceived opacity constant. Choose when enhancing visual contrast without altering opacity.
 
 ## Operating characteristics
-- Time complexity: Not given in the sources.
-- Memory complexity: Not given in the sources.
-- Strengths: Not given in the sources.
-- Limitations: Not given in the sources.
-- When to use: Not given in the sources.
-- When not to use: Not given in the sources.
 
 ## Background
 Color specification in OpenGL and tools like Smokeview defines color and opacity to support semi-transparent rendering, allowing background objects to be seen through foreground objects [S1, unofficial]. The RGBA model extends the traditional RGB model by adding an alpha channel for opacity control [S1, unofficial]. The `glColorXXX` family provides the interface, with variants for 3 or 4 components and suffixes indicating data types (`f` for float, `v` for pointer to data) [S1, unofficial].

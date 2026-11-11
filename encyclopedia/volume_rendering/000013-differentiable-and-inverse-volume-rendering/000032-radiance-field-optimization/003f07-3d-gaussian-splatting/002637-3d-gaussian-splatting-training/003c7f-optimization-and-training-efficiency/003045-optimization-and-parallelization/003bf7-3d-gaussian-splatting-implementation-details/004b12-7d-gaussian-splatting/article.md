@@ -1,0 +1,123 @@
+# 7D Gaussian Splatting
+
+Also called: 7DGS
+
+## Overview
+7D Gaussian Splatting (7DGS) is a unified framework for the real-time rendering of dynamic scenes with complex view-dependent effects, representing scene elements as seven-dimensional Gaussians spanning spatial position (3D), time (1D), and viewing direction (3D) [S1]. It solves the problem of simultaneously modeling spatial geometry, temporal dynamics, and view-dependent appearance (such as scattering and anisotropic reflections) in dynamic scenes, a challenge that prior methods like 4DGS and 6DGS addressed in isolation [S1]. Unlike its siblings, 7DGS jointly models all three dimensions in a single coherent framework, using a conditional slicing mechanism to transform 7D Gaussians into time- and view-conditioned 3D Gaussians compatible with existing 3DGS pipelines [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of 7D Gaussian primitives defined over joint space-time-direction coordinates, along with training images (multi-view or monocular video) containing dynamic scenes with view-dependent effects.
+*   **Outputs:** Rendered images for novel views at arbitrary times, and optimized 7D Gaussian parameters.
+
+**Data Structures:**
+Each scene element is represented as a 7D Gaussian. While the paper does not specify a raw memory layout (e.g., struct packing), the parameters are conceptually defined as:
+*   **Position:** $\mu_p \in \mathbb{R}^3$ (spatial mean).
+*   **Time:** $t \in \mathbb{R}$ (temporal coordinate).
+*   **Direction:** $\omega \in \mathbb{S}^2$ (viewing direction).
+*   **Covariance:** $\Sigma \in \mathbb{R}^{3 \times 3}$ (spatial covariance, potentially dependent on direction and time).
+*   **Appearance:** View-dependent color coefficients (e.g., Spherical Harmonics coefficients) dependent on direction and time.
+*   **Opacity:** $\alpha$ (scalar).
+
+**Method Steps:**
+1.  **7D Gaussian Definition:** Represent each scene element as a 7D Gaussian defined over the joint space of position and direction, extended with time. This captures interdependencies between geometry, dynamics, and appearance [S1].
+2.  **Conditional Slicing:** Apply a conditional slicing mechanism to transform the 7D Gaussians into time- and view-conditioned 3D Gaussians. This step extracts a 3D Gaussian slice conditioned on the specific time $t$ and viewing direction $d$ of the camera ray [S1]. The resulting conditioned 3D Gaussian has:
+    *   Position: $\mu_{cond}$ (time-view dependent).
+    *   Opacity: $\alpha_{cond}$ (time-view dependent).
+    *   3D Covariance: $\Sigma_{cond}$ (view $d$, time $t$ dependent) [S1].
+    This makes the primitives compatible with existing 3DGS rendering pipelines [S1].
+3.  **Adaptive Gaussian Refinement:** Use an adaptive Gaussian refinement technique that dynamically adjusts Gaussian parameters via neural network-predicted residuals. This allows the model to capture complex non-rigid deformations and time-varying appearance that cannot be represented by the base 7D Gaussian alone [S1].
+4.  **Rendering:** Render the conditioned 3D Gaussians using the standard 3DGS rasterization pipeline [S1].
+5.  **Optimization:** Optimize the 7D Gaussian parameters (including the neural network residuals) by minimizing the difference between rendered images and ground truth training images [S1].
+
+**Pseudocode:**
+The following pseudocode illustrates the conditional slicing and refinement process. Note that the specific mathematical formulation of the "conditional slicing" (e.g., marginalization vs. conditioning) and the architecture of the "neural network-predicted residuals" are not explicitly detailed in the provided source text beyond their names and purpose [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_7dgs(
+    gaussians_7d: List[7DGaussian],
+    camera_time: float,
+    camera_direction: Vector3,
+    camera_intrinsics: Intrinsics
+) -> Image:
+    """
+    Renders a frame using 7D Gaussian Splatting.
+    
+    Args:
+        gaussians_7d: List of 7D Gaussian primitives.
+        camera_time: The time instance for the current frame.
+        camera_direction: The viewing direction for the current pixel/ray.
+        camera_intrinsics: Camera projection parameters.
+        
+    Returns:
+        Rendered image.
+    """
+    # Step 1: Conditional Slicing
+    # Transform 7D Gaussians into time- and view-conditioned 3D Gaussians.
+    # The source [S1] describes this as a "conditional slicing mechanism"
+    # that produces mu_cond, alpha_cond, and Sigma_cond.
+    # The exact mathematical operation (e.g., marginalization of time/direction
+    # dimensions or conditioning on them) is not specified in the text.
+    conditioned_3d_gaussians = []
+    for g in gaussians_7d:
+        # Extract conditioned parameters based on camera_time and camera_direction
+        # [G] Placeholder for the specific slicing formula not provided in [S1]
+        mu_cond = g.slice_position(camera_time, camera_direction)
+        alpha_cond = g.slice_opacity(camera_time, camera_direction)
+        sigma_cond = g.slice_covariance(camera_time, camera_direction)
+        
+        # Step 2: Adaptive Refinement
+        # Adjust parameters via neural network-predicted residuals.
+        # [G] Placeholder for the residual network architecture and application
+        # not provided in [S1].
+        refined_mu = mu_cond + g.refine_position_residual(camera_time, camera_direction)
+        refined_alpha = alpha_cond + g.refine_opacity_residual(camera_time, camera_direction)
+        refined_sigma = sigma_cond + g.refine_covariance_residual(camera_time, camera_direction)
+        
+        conditioned_3d_gaussians.append(3DGaussian(
+            mu=refined_mu,
+            alpha=refined_alpha,
+            sigma=refined_sigma,
+            color=g.get_color(camera_direction, camera_time)
+        ))
+    
+    # Step 3: Standard 3DGS Rendering
+    # Render the conditioned 3D Gaussians using the existing 3DGS pipeline.
+    # [G] Standard 3DGS rasterization and alpha compositing logic.
+    image = render_3dgs(conditioned_3d_gaussians, camera_intrinsics)
+    return image
+```
+
+**Parameters and Typical Values:**
+*   **Rendering Performance:** 401 FPS on challenging dynamic scenes [S1].
+*   **Quality Improvement:** Up to 7.36 dB PSNR improvement over prior methods [S1].
+*   **Specific Performance Metrics:**
+    *   Heart Dynamics scene: 401.0 FPS [S1].
+    *   Cloud Dynamics scene: 386.2 FPS [S1].
+    *   PSNR on 7DGS-PBR dataset: 29.26 (7DGS) vs 27.30 (4DGS) [S1].
+    *   PSNR on another scene: 34.66 (7DGS) vs 24.63 (4DGS) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Complex Non-Rigid Deformations:** The method relies on adaptive refinement to handle these; failure to refine adequately may lead to artifacts in highly dynamic regions [S1].
+*   **View-Dependent Effects:** Capturing complex light transport (scattering, anisotropic reflections) requires sufficient angular resolution in the 7D representation [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Real-time performance is achieved, with reported speeds of 401 FPS on challenging dynamic scenes [S1]. This is significantly faster than volumetric ray tracing (0.125 FPS) and 4DGS (0.003 FPS) [S1].
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:**
+    *   Outperforms 4DGS by up to 7.36 dB in PSNR [S1].
+    *   Achieves 401 FPS on the Heart Dynamics dataset [S1].
+    *   Achieves 386.2 FPS on the Cloud Dynamics dataset [S1]
+*   **Scaling:** The method maintains compatibility with existing 3DGS pipelines, suggesting linear scaling with the number of Gaussians similar to 3DGS, but with the overhead of conditional slicing and refinement [S1].
+*   **Strengths:** Unified modeling of space, time, and direction; real-time performance; high PSNR improvements over prior methods [S1].
+*   **Limitations:** The specific computational overhead of the conditional slicing and refinement mechanisms is not quantified in the sources [S1].
+*   **When to Use:** When rendering dynamic scenes with complex view-dependent effects (e.g., specular highlights, scattering) is required, and real-time performance is necessary [S1].
+*   **When Not to Use:** For static scenes (use 3DGS) or scenes with only temporal dynamics but no significant view-dependent effects (use 4DGS) or only view-dependent effects but no dynamics (use 6DGS) [S1].
+
+## Background
+7D Gaussian Splatting was introduced by Zhongpai Gao, Benjamin Planche, Meng Zheng, Anwesa Choudhuri, Terrence Chen, and Ziyan Wu from United Imaging Intelligence in March 2025 (arXiv:2503.07946v1) [S1]. It builds upon 3D Gaussian Splatting (3DGS) [12] and 6D Gaussian Splatting (6DGS) [7] [S1]. The method addresses the limitations of 4DGS (which handles space+time) and 6DGS (which handles space+direction) by unifying these capabilities [S1]. It is evaluated on the D-NeRF dataset (synthetic monocular videos), the Technicolor dataset (in-the-wild multi-view videos), and a custom dataset 7DGS-PBR [S1].
+
+## Sources
+[S1] 7DGS: Unified Spatial-Temporal-Angular Gaussian Splatting, https://arxiv.org/abs/2503.07946v1, fetched 2026-10-26

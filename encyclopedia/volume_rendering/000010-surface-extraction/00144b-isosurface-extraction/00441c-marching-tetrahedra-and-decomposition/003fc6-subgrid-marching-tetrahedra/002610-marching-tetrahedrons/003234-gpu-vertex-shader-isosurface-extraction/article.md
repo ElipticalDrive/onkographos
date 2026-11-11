@@ -1,95 +1,173 @@
 # GPU Vertex Shader Isosurface Extraction
 
-Also called: Pascucci, Pascucci's Programmable Isosurfacing, Vertex Shader Isosurface Extraction
+Also called: Vertex Shader Isosurface Extraction, Vertex shader tetrahedral marching, Pascucci's Programmable Isosurfacing
 
 ## Overview
-GPU Vertex Shader Isosurface Extraction is a surface extraction method that computes isosurfaces by mapping the topology of marching tetrahedra directly onto the vertex shader stage of the graphics pipeline [S1, S2, unofficial]. It solves the problem of efficient parallel surface generation by drawing a single quadrilateral per tetrahedron and repositioning its vertices to the exact isosurface intersection points within the shader [S1, S2, unofficial]. It differs from its parent [Marching Tetrahedrons](3720-marching-tetrahedrons.md) by offloading the topological case analysis and geometric interpolation to the GPU vertex shader, rather than computing them on the CPU or using geometry shaders [S1, S2, unofficial].
+GPU Vertex Shader Isosurface Extraction is a hardware-accelerated method for tessellating large unstructured tetrahedral grids by storing grid data in textures and performing isosurface extraction in the vertex shading unit [S1]. It solves the problem of data redundancy and memory limitations inherent in previous register-based GPU methods, which could not handle grids larger than ~1 million tetrahedra due to register pressure and PCI-Express transfer bottlenecks [S1]. Unlike its siblings, it uses indirect indexing via vertex texture lookup (Shader Model 3.0) to avoid sending redundant geometry for shared vertices, enabling the processing of millions of tetrahedra [S1].
 
 ## How it works
-**Inputs:** A 3D scalar field discretized into tetrahedra (derived from the input grid).
-**Outputs:** A triangle mesh representing the isosurface.
+**Inputs and Outputs:**
+- **Input:** An unstructured tetrahedral grid defined by vertex positions, scalar values, and connectivity (tetrahedron-to-vertex indices). An isovalue threshold.
+- **Output:** A triangle mesh representing the isosurface.
 
 **Data Structures:**
-The method relies on look-up tables (LUTs) stored in vertex shader attributes or constant buffers. These tables contain:
-1.  **Tetrahedron Edges:** The indices or coordinates of the edges of the tetrahedron.
-2.  **Endpoints:** The vertex coordinates of the tetrahedron.
-3.  **Configurations:** All possible marching tetrahedra configurations (topological cases) [S1, S2, unofficial].
+The method relies on four 1D textures, where each texel stores 4 indices (RGBA components) or packed data [S1]:
+1.  **`tetra_texture`**: Stores the vertex indices for each tetrahedron. One texel per tetrahedron. The RGBA components correspond to the indices of the 4 vertices of the tetrahedron [S1].
+2.  **`vertices_texture`**: Stores vertex geometry and scalar values. One texel per vertex. The XYZ components represent the 3D location, and the Alpha (A) component represents the scalar value [S1]. An optional extra texel per vertex can store a precomputed gradient [S1].
+3.  **`table_of_cases_texture`**: A 1D lookup table mapping `(case_index, vertex_number)` pairs to the index of the intersected edge. The table is symmetric; only the first half is stored to save space. Some edge indexes are duplicated to handle all configurations, resulting in stacked vertices that are discarded during rendering [S1].
+4.  **`table_of_edges_texture`**: A 1D lookup table mapping edge indices to their two endpoint vertex indices [S1].
 
-**Steps:**
-1.  **Tessellation/Instancing:** For each tetrahedron in the domain, issue a draw call for a single quadrilateral (quad). This quad represents the most general topology an isosurface polygon can have inside a tetrahedron [S1, S2, unofficial].
-2.  **Vertex Shader Execution:** The vertex shader receives the quad vertices. It uses the tetrahedron data (edges, endpoints, configurations) from the LUTs to determine the scalar values at the tetrahedron vertices.
-3.  **Intersection Computation:** Inside the vertex shader, the algorithm computes the exact locations where the isosurface intersects the tetrahedron edges. This is typically done via linear interpolation (secant method) between vertices with scalar values above and below the isovalue [S3].
-4.  **Vertex Repositioning:** Each vertex of the input quad is repositioned to the exact intersection point computed in Step 3 [S1, S2, unofficial].
-5.  **Degeneracy Handling:** If a tetrahedron vertex lies exactly on the isosurface, or if the intersection logic results in coincident points, the resulting polygons may be degenerate (zero area) [S1, S2, unofficial]. The graphics pipeline handles these degenerate quads (which may render as lines or points) correctly, effectively discarding them or rendering them as empty space [S1, S2, unofficial].
-6.  **Rasterization:** The repositioned quads are rasterized into triangles. Since the quad vertices now lie on the isosurface, the resulting triangles form the continuous isosurface mesh [S1, S2, unofficial].
+**Algorithm Steps:**
+1.  **Preprocessing:**
+    -   Generate the `table_of_cases_texture` and `table_of_edges_texture` based on the Marching Tetrahedra topology.
+    -   Iterate over each vertex of the grid to pack its 3D geometry and scalar value into a texel in `vertices_texture` [S1].
+    -   Iterate over each tetrahedron to pack its four vertex indices into a texel in `tetra_texture` [S1].
+    -   Load all textures into graphics memory and load the vertex shading program [S1].
+
+2.  **Rendering Loop (Per Tetrahedron):**
+    -   Set the `isovalue` parameter for the shader [S1].
+    -   Send the current tetrahedron index to the GPU.
+    -   Issue a draw call for a single quadrilateral with 4 vertices (representing the 4 corners of the tetrahedron). The vertex shader is executed once for each vertex of the quadrilateral [S1][S2, unofficial].
+
+3.  **Vertex Shader Execution (for each vertex $v$ of the quadrilateral, $v \in \{0, 1, 2, 3\}$):**
+    -   **Retrieve Tetrahedron Indices:** Read the four vertex indices of the current tetrahedron from `tetra_texture` using the cell index [S1]:
+        ```python
+        vertices_index = tex1D(tetra_texture, cell_index)
+        ```
+    -   **Retrieve Vertex Data:** Read the location and scalar value for each of the four vertices from `vertices_texture` using the indices obtained above [S1]:
+        ```python
+        vertex_0 = tex1D(vertices_texture, vertices_index.r)
+        vertex_1 = tex1D(vertices_texture, vertices_index.g)
+        vertex_2 = tex1D(vertices_texture, vertices_index.b)
+        vertex_3 = tex1D(vertices_texture, vertices_index.a)
+        ```
+    -   **Determine Configuration:** Extract scalar values from the alpha channel and compare against the `isovalue` to determine the case index [S1]:
+        ```python
+        values = float4(vertex_0.a, vertex_1.a, vertex_2.a, vertex_3.a)
+        tested_vertices = (values >= isovalue)
+        index = dot(tested_vertices, float4(1, 2, 4, 8))
+        ```
+    -   **Exploit Symmetry:** Map the case index to the first half of the symmetric table [S1]:
+        ```python
+        if index >= 8:
+            index = 15 - index
+        ```
+    -   **Lookup Intersected Edge:** For the current vertex $v$ being processed, look up the intersected edge index from `table_of_cases_texture` using the key `index * 4 + v` [S1]:
+        ```python
+        intersected_edge = tex1D(table_of_cases_texture, index * 4 + v)
+        ```
+    -   **Lookup Edge Endpoints:** Retrieve the two endpoint vertex indices of the intersected edge from `table_of_edges_texture` [S1]:
+        ```python
+        endpoint_0 = tex1D(table_of_edges_texture, intersected_edge * 2)
+        endpoint_1 = tex1D(table_of_edges_texture, intersected_edge * 2 + 1)
+        ```
+    -   **Interpolate and Output:** Linearly interpolate the intersection point on the edge with the isosurface using the scalar values of the endpoints and the `isovalue`. Output the vertex at this interpolated location [S1]. Note: In cases where no intersection occurs for a specific vertex configuration, the shader may output degenerate polygons or stacked vertices which are discarded by the rasterizer [S1][S3, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Vertex Shader Logic (simplified)
-# Input: Quad vertex index (0-3), Tetrahedron ID, Isovalue
-# Attributes: Tetrahedron vertices (V0..V3), Scalar values (S0..S3), Edge table
+# Vertex Shader Program
+# Inputs: cell_index (uniform), isovalue (uniform), vertex_number (attribute, 0-3)
+# Textures: tetra_texture, vertices_texture, table_of_cases_texture, table_of_edges_texture
 
-def vertex_shader(vertex_id, tet_id, isovalue):
-    # Retrieve tetrahedron data from LUT
-    tet_vertices = get_tet_vertices(tet_id) # Array of 3D vectors
-    tet_scalars = get_tet_scalars(tet_id)   # Array of floats
+def vertex_shader(cell_index, isovalue, vertex_number):
+    # 1. Get tetrahedron vertex indices
+    tetra_indices = tex1D(tetra_texture, cell_index)
     
-    # Determine which edges of the tetrahedron intersect the isosurface
-    # The quad topology maps to the 4 edges of the tetrahedron
-    # Vertex 0 of quad -> Edge 0 of tet
-    # Vertex 1 of quad -> Edge 1 of tet
-    # etc.
+    # 2. Get vertex data (pos, scalar) for all 4 vertices
+    v0_data = tex1D(vertices_texture, tetra_indices.r)
+    v1_data = tex1D(vertices_texture, tetra_indices.g)
+    v2_data = tex1D(vertices_texture, tetra_indices.b)
+    v3_data = tex1D(vertices_texture, tetra_indices.a)
     
-    edge_index = get_edge_for_quad_vertex(vertex_id)
-    v1_idx, v2_idx = get_edge_endpoints(edge_index)
+    # 3. Extract scalars
+    scalars = float4(v0_data.a, v1_data.a, v2_data.a, v3_data.a)
     
-    s1 = tet_scalars[v1_idx]
-    s2 = tet_scalars[v2_idx]
+    # 4. Compute case index
+    # Boolean comparison: 1 if scalar >= isovalue, else 0
+    flags = float4(
+        1.0 if scalars.r >= isovalue else 0.0,
+        1.0 if scalars.g >= isovalue else 0.0,
+        1.0 if scalars.b >= isovalue else 0.0,
+        1.0 if scalars.a >= isovalue else 0.0
+    )
+    case_index = dot(flags, float4(1, 2, 4, 8))
     
-    # Linear interpolation to find intersection
-    # t = (isovalue - s1) / (s2 - s1)
-    # intersection = v1 + t * (v2 - v1)
+    # 5. Symmetry reduction
+    if case_index >= 8:
+        case_index = 15 - case_index
+        
+    # 6. Lookup intersected edge for this specific vertex of the quad
+    # The table maps (case_index, vertex_number) -> edge_index
+    edge_index = tex1D(table_of_cases_texture, case_index * 4 + vertex_number)
     
-    denom = s2 - s1
-    if abs(denom) < epsilon:
-        # Degenerate case: vertex on isosurface or parallel edge
-        # Return one of the endpoints or a degenerate position
-        return tet_vertices[v1_idx]
+    # 7. Lookup endpoints of the intersected edge
+    ep0_index = tex1D(table_of_edges_texture, edge_index * 2)
+    ep1_index = tex1D(table_of_edges_texture, edge_index * 2 + 1)
     
-    t = (isovalue - s1) / denom
-    intersection = lerp(tet_vertices[v1_idx], tet_vertices[v2_idx], t)
+    # 8. Get endpoint data
+    ep0_data = tex1D(vertices_texture, ep0_index)
+    ep1_data = tex1D(vertices_texture, ep1_index)
     
-    return intersection
+    # 9. Linear interpolation
+    # t = (isovalue - val0) / (val1 - val0)
+    val0 = ep0_data.a
+    val1 = ep1_data.a
+    
+    # Guard against division by zero (degenerate case)
+    if val1 == val0:
+        # If values are equal, the edge is parallel to the isosurface.
+        # Return one of the endpoints or a midpoint, depending on convention.
+        # Standard MT returns the vertex itself if no intersection, 
+        # but here we assume the table lookup guarantees an intersection 
+        # or a degenerate output.
+        return ep0_data.xyz 
+    else:
+        t = (isovalue - val0) / (val1 - val0)
+        
+    # Interpolate position
+    pos0 = float3(ep0_data.x, ep0_data.y, ep0_data.z)
+    pos1 = float3(ep1_data.x, ep1_data.y, ep1_data.z)
+    
+    intersection_pos = lerp(pos0, pos1, t)
+    
+    return intersection_pos
 ```
 
 **Parameters:**
-*   **Isovalue:** The scalar threshold defining the surface.
-*   **Epsilon:** A small value to handle division by zero in interpolation [G].
+-   **`isovalue`**: The scalar threshold value for isosurface extraction. It is updated dynamically between rendering passes [S1].
+-   **Hardware Requirement**: Shader Model 3.0 support is required for vertex texture lookup. This was supported by Nvidia 6th generation and above graphics cards at the time of publication [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Degenerate Polygons:** If the isosurface passes exactly through a tetrahedron vertex, the intersection calculation may produce coincident vertices, leading to degenerate triangles. The method relies on the GPU's ability to handle or cull these degenerate primitives [S1, S2, unofficial].
-*   **Precision:** Floating-point precision in the vertex shader can cause slight gaps or overlaps in the mesh if not handled carefully, though linear interpolation is generally robust [S1, S2, unofficial].
+-   **Degenerate Polygons:** The method draws a single quadrilateral per tetrahedron. In cases where the isosurface does not intersect the tetrahedron or intersects in a way that collapses vertices, degenerate polygons are produced. These are typically discarded by the rasterizer [S2, unofficial][S3, unofficial].
+-   **Stacked Vertices:** The `table_of_cases_texture` may contain duplicated edge indexes to handle all configurations, leading to stacked vertices at the same location. These are discarded during rendering [S1].
+-   **Texture Lookup Latency:** Vertex texture lookup has high latency, significantly reducing throughput compared to register-based methods on older hardware (e.g., GeForce 6800 dropped from 600M to 33M vertices/sec) [S1]. Grouping lookups helps mitigate this [S1].
+-   **Hardware Limitations:** ATI graphics cards did not support vertex texture lookup in Shader Model 3.0 at the time of the primary source's publication [S1].
 
 ## Subtopics
 
+### [GPU-based Marching Tetrahedra with Adaptive Tessellation](9477-gpu-based-marching-tetrahedra-with-adaptive-tessellation.md)
+A real-time isosurface extraction method that leverages the strengths of both Marching Cubes and Marching Tetrahedra, adapted for the GPU geometry shader pipeline (specifically DirectX 10). It solves the problem of high computational expense and register pressure associated with explicit isosurface extraction by using massive parallelism and dynamic load balancing. Unlike its siblings, it separates domain voxelization/tetrahedralization from polygon generation into a two-pass process to maximize SIMD utilization and reduce register pressure compared to Marching Cubes.
+
 ### GPU Stream-Out for Isosurface Re-Use
-A technique to output extracted isosurface triangles into a GPU stream-out buffer for re-use in subsequent rendering passes or disk storage, improving perceived frame rate by avoiding redundant extraction [S3]. It is chosen when the implicit domain or isovalue has not changed significantly between frames [S3]. The stream-out buffer size used in results was 85 MB [S3]. It is used to combine high quality direct volume rendering with isosurface rendering for medical training simulations, render isosurface faces as starting positions for ray casting in direct volume rendering, and render the isosurface directly into a shadow buffer for shadow generation on surrounding organs [S3].
+A technique to output extracted isosurface triangles into a GPU stream-out buffer for re-use in subsequent rendering passes or disk storage, improving perceived frame rate by avoiding redundant extraction. It computes the isosurface using marching tetrahedra, outputs the resulting triangles into a GPU stream-out buffer (e.g., 85 MB size), and reuses the geometry in later passes if the implicit domain or isovalue has not changed significantly. This is used to combine high quality direct volume rendering with isosurface rendering for medical training simulations, render isosurface faces as starting positions for ray casting, and render the isosurface directly into a shadow buffer [S4].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of tetrahedra, as each tetrahedron generates one quad processed in parallel [S1, S2, unofficial].
-*   **Memory Complexity:** Depends on the size of the look-up tables and the tetrahedron data stored in attributes [S1, S2, unofficial].
-*   **Performance:** Runs at real-time rates on modern GPUs [S3]. The use of vertex shaders allows for massive parallelism [S1, S2, unofficial].
-*   **Strengths:** Simple implementation leveraging early programmable hardware; efficient parallel processing [S1, S2, unofficial].
-*   **Limitations:** Can produce degenerate polygons; vertex shaders have limited parallelism compared to fragment shaders or later geometry/compute shaders [S1, S2, unofficial].
-*   **When to use:** When targeting older GPU architectures where vertex shaders were the primary programmable stage, or for simple real-time isosurface extraction [S1, S2, unofficial].
-*   **When not to use:** When higher precision or more complex topology handling is required, or when using modern pipelines with geometry/compute shaders [S1, S2, unofficial].
+-   **Time Complexity:** Linear with respect to the number of tetrahedra in brute-force mode. When combined with an Interval Tree to discard non-intersected cells, it achieves an average acceleration factor of 4x [S1].
+-   **Memory Complexity:** Linear with respect to the number of vertices and tetrahedra. One texel per vertex and one texel per tetrahedron, plus tables. For a 128MB graphics card, theoretical capacity is ~7 million tetrahedra [S1].
+-   **Measured Performance:** On an Nvidia QuadroFX Go 1400 (256MB VRAM), the method processes ~6.7 million tetrahedra/sec for grids < 600K (fitting in VRAM), ~4 million tetrahedra/sec at 1 million tetrahedra (with RAM swapping), and drops tremendously for >1 million due to hard-drive swapping [S1]. It is about 2 times faster than the same CPU-based extraction [S1].
+-   **Scaling:** The method remains linear and faster than CPU methods for larger grids (>1 million tetrahedra), whereas register-based methods suffer PCI-Express swapping penalties when data exceeds VRAM [S1].
+-   **Strengths:** Handles millions of tetrahedra; avoids data redundancy; limits AGP/PCI-Express transfers; supports large unstructured grids [S1].
+-   **Limitations:** Requires Shader Model 3.0; slower than register-based methods for small grids (<1 million tetrahedra); high texture lookup latency on older hardware [S1].
+-   **When to use:** Large unstructured tetrahedral grids (>1 million cells) where memory capacity is a constraint for register-based methods.
+-   **When not to use:** Small grids (<1 million cells) where register-based methods are faster; hardware lacking Shader Model 3.0 vertex texture support [S1].
 
 ## Background
-This technique was proposed by Pascucci [52] as a revision of the framework by Wylie et al. [72] [S1, S2, unofficial]. It represents one of the first solutions to explore programmable hardware (specifically vertex shaders) to compute isosurfaces [S1, S2, unofficial]. It was developed to leverage the massive parallelism of GPUs for surface extraction, moving away from CPU-based marching tetrahedra implementations [S1, S2, unofficial].
+The method was proposed by Luc Buatois, Guillaume Caumon, and Bruno Lévy from Nancy Université, ALICE Inria Lorraine, and CRPG-CNRS, and presented at the 2nd International Symposium on Visual Computing (ISVC06) in November 2006 [S1]. It revises the framework proposed by Wylie et al. and Pascucci, which were among the first to explore programmable hardware for isosurface computation using vertex shaders [S2, unofficial][S3, unofficial]. The primary innovation was the use of vertex texture lookup to store data in textures rather than registers, avoiding the strong redundancy of sending all required data for each tetrahedron [S1]. It is used in geological modeling for fluid pressure field visualization on tetrahedralized meshes up to 5 million cells [S1].
 
 ## Sources
-[S1] A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
-[S2] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
-[S3] Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline, https://doi.org/10.1145/1281500.1361219, fetched 2026-11-03
+[S1] GPU Accelerated Isosurface Extraction on Tetrahedral Grids, https://inria.hal.science/inria-00105584v1, fetched 2026-10-26
+[S2] PDF A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+[S3] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
+[S4] Real-Time Isosurface Extraction Using the GPU Programmable Geometry Pipeline, https://doi.org/10.1145/1281500.1361219, fetched 2026-11-03

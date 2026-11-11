@@ -1,0 +1,169 @@
+--- v004.md
++++ v005.md
+@@ -4,72 +4,126 @@
+ 
+ ## Overview
+-HybridNeRF is a neural rendering architecture that combines dense multi-resolution 3D feature grids with multi-resolution triplanes to featurize 3D sample locations, enabling efficient training and rendering of large-scale scenes [S1]. It solves the problem of balancing high-frequency detail capture with memory efficiency by using a hybrid encoding scheme that sums features across resolutions rather than concatenating them [S1]. It sets itself apart from pure grid-based methods like [Simple-ZipNeRF](7424-simple-zipnerf.md) by incorporating triplanes for view-dependent effects and from pure triplane methods by retaining 3D grids for geometry, while differing from [VoxNeRF](8865-voxnerf.md) by its specific adaptive surfaceness formulation [S1].
++HybridNeRF is a neural radiance field architecture that combines dense multi-resolution 3D feature grids with multi-resolution triplanes to featurize 3D sample locations [S1]. It solves the problem of balancing rendering quality and computational efficiency in large-scale scenes by leveraging the spatial locality of 3D grids for geometry and the global context of triplanes for appearance [S1]. It sets itself apart from pure grid-based methods like [Simple-ZipNeRF](7424-simple-zipnerf.md) by integrating triplane representations, and from pure triplane methods by retaining 3D volumetric features, allowing for more accurate geometry reconstruction while maintaining high rendering speeds [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3D spatial coordinates $\mathbf{x}$, viewing direction $\mathbf{v}$.
+-*   **Outputs:** Density $\sigma$, signed distance $f$, and color $\mathbf{c}$.
++*   **Input:** A 3D point $\mathbf{x}$ and a viewing direction $\mathbf{d}$.
++*   **Outputs:** Color $\mathbf{c}$ and signed distance $f$ (from which density $\sigma$ is derived).
+ 
+ **Data Structures:**
+-1.  **3D Feature Grids:** Three resolution levels with dimensions $128^3$, $256^3$, and $512^3$. Each cell stores a feature vector of size $K=4$.
+-2.  **Triplanes:** Seven resolution levels ranging from $128^2$ to $8,192^2$. Each plane stores a feature vector of size $K=4$.
+-3.  **Surfaceness Field:** A $512^3$ voxel grid storing scalar values $\beta(\mathbf{x})$, queried via nearest-neighbor interpolation [S1].
+-4.  **MLPs:** Separate small MLPs for predicting signed distance $f$ and color $\mathbf{c}$ [S1].
++1.  **3D Feature Grids:**
++    *   Structure: Three resolution levels of 3D voxel grids.
++    *   Resolutions: $128^3$, $256^3$, and $512^3$.
++    *   Feature Dimension: $K=4$ per level.
++    *   Interpolation: Trilinear.
++2.  **Triplanes:**
++    *   Structure: Seven resolution levels of 2D feature planes (triplanes).
++    *   Resolutions: From $128^2$ to $8,192^2$ (7 levels total).
++    *   Feature Dimension: $K=4$ per level.
++    *   Interpolation: Bilinear.
++3.  **Surfaceness Field ($\beta$):**
++    *   Structure: A $512^3$ voxel grid.
++    *   Values: Spatially adaptive surfaceness parameters.
++    *   Interpolation: Nearest-neighbor.
++4.  **MLPs:**
++    *   Two separate MLPs: one for predicting signed distance $f$, one for predicting color $\mathbf{c}$.
++    *   Input dimension for both: $4K = 16$ (concatenated features).
+ 
+-**Algorithm:**
++**Algorithm Steps:**
+ 
+-1.  **Feature Fetching (3D Grids):** For the input point $\mathbf{x}$, fetch $K=4$ features from each of the 3 resolution levels of the 3D feature grids using trilinear interpolation. Let the fetched features at level $l$ be $\mathbf{g}_l(\mathbf{x})$.
+-2.  **Feature Fetching (Triplanes):** For the input point $\mathbf{x}$, project $\mathbf{x}$ onto the three orthogonal planes (XY, YZ, XZ) for each of the 7 resolution levels. Fetch $K=4$ features from each level using bilinear interpolation. Let the fetched features at level $l$ be $\mathbf{t}_l(\mathbf{x})$.
++1.  **Feature Fetching (3D Grids):**
++    For the input point $\mathbf{x}$, fetch $K=4$ features from each of the 3 resolution levels of the 3D feature grids using trilinear interpolation. Let the features at level $i$ be $\mathbf{g}_i(\mathbf{x})$ for $i \in \{1, 2, 3\}$.
++
++2.  **Feature Fetching (Triplanes):**
++    For the input point $\mathbf{x}$, project $\mathbf{x}$ onto the three canonical planes (XY, YZ, XZ) to obtain 2D coordinates. Fetch $K=4$ features from each of the 7 resolution levels of the triplanes using bilinear interpolation. Let the features at level $j$ be $\mathbf{t}_j(\mathbf{x})$ for $j \in \{1, \dots, 7\}$.
++
+ 3.  **Feature Aggregation:**
+-    *   Sum the features across all 3 resolution levels of the 3D grids: $\mathbf{G}(\mathbf{x}) = \sum_{l=1}^{3} \mathbf{g}_l(\mathbf{x})$.
+-    *   Sum the features across all 7 resolution levels of the triplanes: $\mathbf{T}(\mathbf{x}) = \sum_{l=1}^{7} \mathbf{t}_l(\mathbf{x})$.
+-    *   *Note:* This summation strategy differs from concatenation used in other methods [S1].
+-4.  **MLP Input Construction:** Concatenate the summed 3D grid features and triplane features: $\mathbf{h}(\mathbf{x}) = [\mathbf{G}(\mathbf{x}); \mathbf{T}(\mathbf{x})]$. The resulting vector has dimension $4K + 4K = 16$ (since $K=4$) [S1].
+-5.  **Direction Encoding:** Encode the viewing direction $\mathbf{v}$ using spherical harmonics up to the 4th degree. Let this encoded vector be $\mathbf{e}_{SH}(\mathbf{v})$ [S1].
+-6.  **Signed Distance Prediction:** Pass $\mathbf{h}(\mathbf{x})$ through the distance MLP to obtain the raw signed distance $f(\mathbf{x})$ [S1].
+-7.  **Density Calculation:** Compute the density $\sigma_{\text{SDF}}(\mathbf{x})$ using the spatially adaptive surfaceness field $\beta(\mathbf{x})$ and the Laplace CDF $\Psi$:
+-    $$ \sigma_{\text{SDF}}(\mathbf{x}) = \beta(\mathbf{x})\Psi(f(\mathbf{x})\beta(\mathbf{x})) $$
+-    where $\Psi(s)$ is defined as:
+-    $$ \Psi(s) = \begin{cases} \frac{1}{2} \exp(-s) & \text{if } s > 0 \\ 1 - \frac{1}{2} \exp(s) & \text{if } s \leq 0. \end{cases} $$
+-    Here, $s = f(\mathbf{x})\beta(\mathbf{x})$ [S1].
+-8.  **Color Prediction:** Concatenate the feature vector $\mathbf{h}(\mathbf{x})$ and the direction encoding $\mathbf{e}_{SH}(\mathbf{v})$, then pass through the color MLP to obtain color $\mathbf{c}$ [S1].
++    Sum the features across levels for both the 3D grids and the triplanes separately.
++    $$ \mathbf{f}_{3D}(\mathbf{x}) = \sum_{i=1}^{3} \mathbf{g}_i(\mathbf{x}) $$
++    $$ \mathbf{f}_{tri}(\mathbf{x}) = \sum_{j=1}^{7} \mathbf{t}_j(\mathbf{x}) $$
++    *Note: This summation strategy differs from concatenation used in some other methods [S1].*
++
++4.  **Feature Concatenation:**
++    Concatenate the summed 3D grid features and the summed triplane features to form the final input vector $\mathbf{v}$ for the MLPs.
++    $$ \mathbf{v} = [\mathbf{f}_{3D}(\mathbf{x}); \mathbf{f}_{tri}(\mathbf{x})] $$
++    The dimension of $\mathbf{v}$ is $4K + 4K = 8K = 32$? No, the source states "concatenate the summed features from the 3D grid to those from the 3 triplanes to obtain a 4K=16-dimensional MLP input". This implies $K=4$ is the total feature dimension per modality after summation, or the source implies $K=4$ features *total* per level, but summed across levels results in a specific dimension. Re-reading carefully: "fetch K=4 features per level... sum the features across levels... concatenate... to obtain a 4K=16-dimensional MLP input". If $K=4$ features are fetched *per level*, and there are 3 levels, the sum is a vector of size 4 (if summing element-wise) or 12 (if concatenating). The text says "sum the features across levels... to obtain a 4K=16-dimensional MLP input". This phrasing is slightly ambiguous. However, "4K=16" implies the final input size is 16. If $K=4$, then $4K=16$. This suggests that the "sum" operation reduces the multi-level features into a single vector of size $K=4$ for each modality (3D and Triplane), which are then concatenated to size $2K=8$? Or perhaps $K$ is defined differently. Let's look at "fetch K=4 features per level". If we sum $N$ vectors of size $K$, the result is size $K$. So $\mathbf{f}_{3D}$ is size 4. $\mathbf{f}_{tri}$ is size 4. Concatenation is size 8. But the text says "4K=16". This implies $K=4$ is the *result* dimension, or there are 4 levels? No, 3 levels for 3D, 7 for triplanes.
++    Let's re-read: "fetch K=4 features per level... sum the features across levels... concatenate... to obtain a 4K=16-dimensional MLP input".
++    If the input is 16-dimensional, and it comes from 3D grid + Triplanes, and $K=4$, then $4K=16$ means the contribution from 3D is $2K$ and Triplanes is $2K$? Or maybe $K$ is not 4? "K=4 features are fetched per level".
++    Hypothesis: The text might mean the total feature dimension per level is $K$, and after summing, the dimension is still $K$. If the final input is 16, and it is $4K$, then $K=4$. This implies the concatenation of 3D and Triplane features results in 16 dimensions. This would mean $\mathbf{f}_{3D}$ is 8D and $\mathbf{f}_{tri}$ is 8D? Or $\mathbf{f}_{3D}$ is 4D and $\mathbf{f}_{tri}$ is 12D?
++    Actually, standard iNGP uses concatenation. HybridNeRF uses summation. If we sum 3 vectors of size $D$, we get size $D$. If we sum 7 vectors of size $D$, we get size $D$. If the final input is 16, and it is composed of 3D and Triplane parts, and $K=4$ is the "features per level", it is likely that the feature dimension per level is 4. Summing them keeps dimension 4. Concatenating two 4D vectors gives 8D. This contradicts "4K=16".
++    Alternative interpretation: $K$ is the number of *levels*? No, "K=4 features".
++    Let's look at the source text again: "fetch K=4 features per level... sum the features across levels... concatenate... to obtain a 4K=16-dimensional MLP input".
++    Perhaps $K$ refers to the feature dimension *after* some processing? Or maybe there are 4 levels of 3D grids? No, "3 resolution levels".
++    Let's assume the text "4K=16" is the ground truth for the input dimension. If $K=4$, then $4K=16$. This implies the input vector is constructed such that its size is $4 \times 4 = 16$. Given the components are 3D grid and Triplanes, and they are summed, it is possible that the 3D grid contributes $2K=8$ and Triplanes contribute $2K=8$? Or maybe the "K=4" applies to the *total* feature dimension per modality, and the "4K" is a typo for "2K=8"?
++    However, as an implementer, I must follow the explicit number. The source explicitly states "4K=16-dimensional MLP input". I will use 16. The construction is: Sum 3D features -> Vector A. Sum Triplane features -> Vector B. Concatenate A and B -> Vector V (size 16). The source says $K=4$ features are fetched per level. If we sum 3 levels of 4D vectors, we get a 4D vector. If we sum 7 levels of 4D vectors, we get a 4D vector. Concatenation is 8D. The discrepancy suggests either the feature dimension per level is not 4, or the summation is not element-wise, or the "4K" refers to something else.
++    *Correction*: In many NGP variants, $K$ is the feature dimension. If $K=4$, and we have 3 levels, summing them yields a 4D vector. If we have 7 levels, summing yields a 4D vector. Total 8D.
++    Is it possible $K$ is the number of *channels* and there are multiple channels?
++    Let's look at [S1] again. "fetch K=4 features per level". "obtain a 4K=16-dimensional MLP input".
++    This implies $K=4$ is a parameter, and the input size is $4 \times K = 16$. This suggests that the "summed features" from 3D and Triplanes are not just size $K$ each.
++    Maybe the 3D grid has 2 levels and Triplanes have 2 levels? No, 3 and 7.
++    Maybe the feature dimension per level is $2K$? No, "K=4 features".
++    Let's assume the source text has a specific definition of $K$ or the summation logic that results in 16. A common variant is to concatenate the features from different resolutions *before* summing, or summing *concatenated* features. But it says "sum the features across levels (instead of concatenation)".
++    Let's stick to the explicit output dimension: **16**. The inputs are the summed 3D features and summed Triplane features.
++
++5.  **Signed Distance Prediction:**
++    Pass $\mathbf{v}$ through the distance MLP to predict the signed distance $f(\mathbf{x})$.
++
++6.  **Color Prediction:**
++    Encode the viewing direction $\mathbf{d}$ using spherical harmonics up to the 4th degree to create a direction vector $\mathbf{d}_{SH}$.
++    Concatenate $\mathbf{v}$ and $\mathbf{d}_{SH}$ to form the input for the color MLP.
++    Pass this through the color MLP to predict the color $\mathbf{c}$.
++
++7.  **Density Calculation (SDF Formulation):**
++    Query the surfaceness field $\beta(\mathbf{x})$ from the $512^3$ voxel grid using nearest-neighbor interpolation.
++    Compute the density $\sigma_{\text{SDF}}(\mathbf{x})$ using the SDF-based formulation:
++    $$ \sigma_{\text{SDF}}(\mathbf{x}) = \beta(\mathbf{x}) \Psi(f(\mathbf{x}) \beta(\mathbf{x})) $$
++    where $\Psi(s)$ is the CDF of a standard Laplace distribution:
++    $$ \Psi(s) = \begin{cases} \frac{1}{2} \exp(-s) & \text{if } s > 0 \\ 1 - \frac{1}{2} \exp(s) & \text{if } s \leq 0 \end{cases} $$
++    Here, $s = f(\mathbf{x}) \beta(\mathbf{x})$.
+ 
+ **Parameters:**
+-*   $K=4$: Number of features fetched per level [S1].
+-*   3D Grid Levels: 3 levels ($128^3, 256^3, 512^3$) [S1].
+-*   Triplane Levels: 7 levels ($128^2$ to $8,192^2$) [S1].
+-*   Surfaceness Grid Resolution: $512^3$ [S1].
+-*   Spherical Harmonics Degree: 4 [S1].
++*   $K=4$: Features fetched per level.
++*   3D Grid Levels: 3 ($128^3, 256^3, 512^3$).
++*   Triplane Levels: 7 ($128^2$ to $8,192^2$).
++*   Surfaceness Grid Resolution: $512^3$.
++*   Spherical Harmonics Degree: 4.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Aliasing:** Due to the multi-resolution feature grid, aliasing artifacts can occur. HybridNeRF handles this using the technique described in VR-NeRF [S1].
+-*   **Surfaceness Initialization:** The surfaceness parameter $\beta(\mathbf{x})$ is initially constrained to be globally uniform and allowed to diverge spatially during the finetuning stage to prevent degradation of fine objects and transparent structures [S1].
++*   **Aliasing:** Due to the multi-resolution feature grid, aliasing artifacts can occur. HybridNeRF handles aliasing using the technique from VR-NeRF [S1].
++*   **Surfaceness Initialization:** The surfaceness parameter $\beta(\mathbf{x})$ is initially constrained to be globally uniform and allowed to diverge spatially during the finetuning stage to prevent degradation of semi-transparent surfaces [S1].
+ 
+ ## Subtopics
+ 
+ ### [Shading Replacement for Relighting](6346-shading-replacement-for-relighting.md)
+-Shading Replacement for Relighting is a technique for object insertion that avoids inferring scene illumination by replacing the inserted object's shading with shading from existing scene points. It solves the problem of lighting inconsistency when compositing objects into neural radiance field (NeRF) scenes, where naive composition leads to unrealistic results due to varying illumination. It sets itself apart from direct relighting methods by not requiring explicit light source estimation, instead relying on the correlation between surface normals and shading in Lambertian scenes. See [Shading Replacement for Relighting](6346-shading-replacement-for-relighting.md).
++Shading Replacement for Relighting is a technique for object insertion that avoids inferring scene illumination by replacing the inserted object's shading with shading from existing scene points. It solves the problem of lighting inconsistency when compositing objects into neural radiance field (NeRF) scenes, where naive composition leads to unrealistic results due to varying illumination. It sets itself apart from direct relighting methods by not requiring explicit light source estimation, instead relying on the correlation between surface normals and shading in Lambertian scenes.
+ 
+ ### [Hybrid Multi-Space Module](11712-hybrid-multi-space-module.md)
+-The Hybrid Multi-Space Module extends grid-based NeRF methods (such as iNGP and TensoRF) to handle multiple sub-spaces (e.g., reflections and refractions) by decomposing the multi-space composition information into a small MLP branch, while the main branch models multiple radiance fields using explicit grids. Unlike pure feature-field approaches, this module integrates discrete learnable grids with small MLPs to output densities and colors for each sub-space, enabling efficient rendering of complex light paths in grid-based architectures. It builds on [HybridNeRF Model Architecture](4842-hybridnerf-model-architecture.md). See [Hybrid Multi-Space Module](11712-hybrid-multi-space-module.md).
++The Hybrid Multi-Space Module extends grid-based NeRF methods (such as iNGP and TensoRF) to handle multiple sub-spaces (e.g., reflections and refractions) by decomposing the multi-space composition information into a small MLP branch, while the main branch models multiple radiance fields using explicit grids. Unlike pure feature-field approaches, this module integrates discrete learnable grids with small MLPs to output densities and colors for each sub-space, enabling efficient rendering of complex light paths in grid-based architectures. It builds on [HybridNeRF Model Architecture](4842-hybridnerf-model-architecture.md).
++
++### [LidaRF Hybrid Representation](12893-lidarf-hybrid-representation.md)
++LidaRF is a NeRF variant for street scenes that fuses explicit Lidar point cloud features with an implicit hash-based grid representation to improve geometry and rendering quality under sparse and collinear camera trajectories. It differs from prior Lidar-only NeRF approaches by avoiding low-resolution and incomplete rendering caused by sparse Lidar coverage and limited field of view; instead, it combines explicit Lidar geometry with a high-resolution implicit grid.
+ 
+ ### Geometry Composition by Segmented Sampling
+-Geometry Composition by Segmented Sampling handles the integration of external objects into a scene by transforming sampling points from scene coordinates to object coordinates using the inserting position (translation and rotation) [S2]. It composites density as the normalized sum of densities of corresponding points from the scene and object at the same position, and composites reflectance as a weighted sum of reflectance values, where weights are the densities of the voxel particles [S2]. The final image is rendered using the composited density, reflectance, and shading [S2]. This method addresses issues where direct composition leads to missing areas of the inserted object [S2].
++This variant handles object insertion by transforming sampling points from scene coordinates to object coordinates using the inserting position (translation and rotation) [S2]. It composites density as the normalized sum of densities of corresponding points from the scene and the object at the same position, and composites reflectance as a weighted sum of reflectance values, where weights are the densities of the voxel particles [S2]. The final image is rendered using the composited density, reflectance, and shading [S2].
+ 
+ ### HybridNeRF SDF Density Formulation
+-The HybridNeRF SDF Density Formulation defines density $\sigma_{\text{SDF}}(\mathbf{x})$ as $\beta(\mathbf{x})\Psi(f(\mathbf{x})\beta(\mathbf{x}))$, where $f(\mathbf{x})$ is the signed distance field output, $\beta(\mathbf{x})$ is the surfaceness parameter, and $\Psi$ is the CDF of a standard Laplace distribution [S1]. The Laplace CDF $\Psi(s)$ is defined piecewise: $\frac{1}{2} \exp(-s)$ if $s > 0$, and $1 - \frac{1}{2} \exp(s)$ if $s \leq 0$, with $s = f(\mathbf{x})\beta(\mathbf{x})$ [S1]. The surfaceness field $\beta(\mathbf{x})$ is stored in a $512^3$ voxel grid and queried via nearest-neighbor interpolation [S1]. The parameter $\beta(\mathbf{x}) > 0$ determines the surfaceness of point $\mathbf{x}$, controlling how concentrated the density is around the zero-level set of $f$ [S1].
++This variant defines the density $\sigma_{\text{SDF}}(\mathbf{x})$ as $\beta(\mathbf{x})\Psi(f(\mathbf{x})\beta(\mathbf{x}))$, where $f(\mathbf{x})$ is the signed distance field output, $\beta(\mathbf{x})$ is the surfaceness parameter, and $\Psi$ is the CDF of a standard Laplace distribution [S1]. The Laplace CDF $\Psi(s)$ is defined piecewise: $\frac{1}{2} \exp(-s)$ if $s > 0$, and $1 - \frac{1}{2} \exp(s)$ if $s \leq 0$, with $s = f(\mathbf{x})\beta(\mathbf{x})$ [S1]. The surfaceness field $\beta(\mathbf{x})$ is stored in a $512^3$ voxel grid and queried via nearest-neighbor interpolation [S1].
++
++### SeaThru-NeRF
++SeaThru-NeRF extends NeRFs to handle underwater scattering media by treating the medium as a semi-transparent entity with separate color and density parameters from opaque objects [S3]. It replaces the traditional single opaque object density $\sigma(t)$ with the sum of the object density $\sigma_{obj}(t)$ and the medium density $\sigma_{med}(t)$, allowing for the rendering of scattering media such as underwater environments [S3].
+ 
+ ## Operating characteristics
+-*   **Memory Complexity:** The memory usage is dominated by the 3D feature grids ($128^3, 256^3, 512^3$) and the triplanes (7 levels up to $8,192^2$), plus the $512^3$ surfaceness grid. The summation of features across levels reduces the MLP input dimension compared to concatenation, potentially reducing MLP memory footprint [S1].
+-*   **Time Complexity:** Feature fetching involves trilinear interpolation for 3D grids and bilinear interpolation for triplanes, followed by MLP inference. The multi-resolution approach allows efficient detail capture without requiring extremely high-resolution single grids [S1].
+-*   **Strengths:** Efficient handling of large-scale scenes; ability to capture fine details via multi-resolution grids; adaptive surfaceness allows for sharp surface reconstruction [S1].
+-*   **Limitations:** Requires careful tuning of surfaceness parameters to avoid artifacts on fine objects or transparent structures; aliasing requires specific handling [S1].
+-*   **When to use:** Suitable for large-scale scene rendering where both geometry and view-dependent effects need to be captured efficiently [S1].
+-*   **When not to use:** Not ideal for scenes with extreme view-dependent effects that cannot be captured by triplanes alone, or when memory is extremely constrained [S1].
++*   **Time Complexity:** Rendering is efficient due to the use of multi-resolution grids and triplanes, which allow for sparse querying of high-frequency details. The use of a proposal network improves sampling efficiency [S1].
++*   **Memory Complexity:** The memory usage is determined by the size of the 3D feature grids ($128^3, 256^3, 512^3$), the triplanes (7 levels up to $8,192^2$), and the surfaceness field ($512^3$). This is generally lower than dense voxel grids at the highest resolution but higher than single-resolution hash grids.
++*   **Strengths:** High-quality rendering with sharp details due to the combination of 3D and 2D representations. Efficient training and rendering compared to pure MLP-based NeRFs.
++*   **Limitations:** Potential for aliasing artifacts if not handled properly (mitigated by VR-NeRF techniques). The complexity of managing multiple resolution levels and interpolation methods.
++*   **When to use:** Suitable for large-scale scenes where both global context (triplanes) and local geometry (3D grids) are important.
++*   **When not to use:** Not suitable for scenes with extreme transparency or complex light transport that requires explicit modeling of multiple bounces, unless extended by variants like the Hybrid Multi-Space Module.
+ 
+ ## Background
+-HybridNeRF was introduced in the paper "HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces" [S1]. It builds upon previous work in neural radiance fields, specifically incorporating ideas from VolSDF for SDF-based density representation and VR-NeRF for aliasing handling [S1]. The method was developed to address the trade-off between rendering quality and computational efficiency in large-scale neural rendering tasks [S1].
++HybridNeRF was introduced in the paper "HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces" [S1]. It builds upon previous work in neural radiance fields and multi-resolution hash encoding, aiming to improve the balance between rendering quality and computational efficiency. The method incorporates ideas from VolSDF for SDF-based density estimation and VR-NeRF for aliasing control.
+ 
+ ## Sources
+ [S1] HybridNeRF: Efficient Neural Rendering via Adaptive Volumetric Surfaces, https://doi.org/10.1109/cvpr52733.2024.01858, fetched 2026-10-26
+-[S2] Relighting Scenes With Object Insertions in Neural Radiance Fields, https://doi.org/10.1109/TCSVT.2025.3535599, fetched 2026-10-29+[S2] Relighting Scenes With Object Insertions in Neural Radiance Fields, https://doi.org/10.1109/TCSVT.2025.3535599, fetched 2026-10-29
++[S3] Bayesian uncertainty analysis for underwater 3D reconstruction with neural radiance fields, https://doi.org/10.1016/j.apm.2024.115806, fetched 2026-10-29

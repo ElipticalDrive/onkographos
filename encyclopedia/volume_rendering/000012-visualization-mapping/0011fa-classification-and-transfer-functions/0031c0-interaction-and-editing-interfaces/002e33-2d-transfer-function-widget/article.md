@@ -3,70 +3,144 @@
 Also called: 2D TF Display, TF Widget, Transfer Function Widget
 
 ## Overview
-The 2D Transfer Function Widget is an interactive visualization component that maps a spatial query in a volume to a 2D slice of the multi-dimensional transfer function (TF) domain, allowing users to inspect local data characteristics and adjust classification parameters [S1]. It solves the ambiguity of how specific voxel structures map to TF variables by displaying the queried point and its eight voxel corners as points in the TF space, connected by edges reflecting spatial connectivity [S1]. Unlike standard point probes, it visualizes the local gradient and curvature structure, enabling users to distinguish between homogeneous regions and boundaries based on the geometric configuration of the projected points [S1].
+The 2D Transfer Function Widget is an interactive visualization component that presents a 2D slice of the 3D transfer function (TF) domain to facilitate manual classification and editing of volume rendering parameters [S1]. It solves the problem of interpreting high-dimensional TF data by projecting spatial volume queries (via probes or clipping planes) into the TF domain, allowing users to observe how local volume characteristics (data value, gradient, and second derivative) map to classification properties [S1]. It distinguishes itself from sibling methods by explicitly visualizing the geometric connectivity of voxel corners in the TF domain, enabling users to distinguish homogeneous regions from boundaries based on the spatial configuration of projected points [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A query point $\mathbf{p}$ in the volume domain, obtained via a Data Probe or Clipping Plane widget [S1].
-*   **Output:** A 2D graphical representation in the TF domain showing the query point, eight voxel corner points, connecting edges, and a texture-mapped slice of the 3D Lookup Table (LUT) [S1].
+*   **Input:** A 3D volume dataset $V$ with scalar values $f(\mathbf{x})$ and derived features (gradient magnitude $\|\nabla f\|$, second derivative). A query point $\mathbf{q}$ in spatial domain, obtained via a Data Probe or Clipping Plane widget [S1].
+*   **Output:** A 2D graphical widget displaying a slice of the 3D Lookup Table (LUT) and visual feedback elements (balls and edges) representing the queried voxel's properties in the TF domain [S1].
 
-**Data Structures:**
+**Data Structures and Layout:**
 The widget is implemented as a basic frame widget with the following layout [S1]:
-*   **Horizontal Axis:** Data value (scalar intensity).
-*   **Vertical Axis:** Gradient magnitude $\|\nabla f\|$.
-*   **Inner Plane:** A polygon texture-mapped with a slice through the 3D LUT containing the full 3D transfer function [S1].
+*   **Horizontal Axis:** Data value $v = f(\mathbf{x})$.
+*   **Vertical Axis:** Gradient magnitude $g = \|\nabla f(\mathbf{x})\|$.
+*   **Implicit Third Axis:** Second derivative $d = \nabla^2 f(\mathbf{x})$, represented via color mapping of visual elements rather than spatial position.
+*   **Inner Plane:** A polygon texture-mapped with a 2D slice of the 3D LUT containing the full transfer function definition [S1].
 *   **Controls:**
-    *   Balls at the four corners of the widget frame for resizing [S1].
+    *   Balls at the four corners of the frame for resizing the widget.
     *   Bars on the edges for translating the widget's position [S1].
-*   **Visual Elements:**
-    *   **Query Ball:** Represents the data value and derivatives at the query point $\mathbf{p}$ [S1].
-    *   **Corner Balls:** Represent the eight data sample points at the corners of the voxel containing $\mathbf{p}$ [S1].
-    *   **Edges:** Connect the corner balls to reflect the spatial connectivity of the voxel corners [S1].
-    *   **Color Mapping:** The balls are colormapped based on the second derivative value at that location: negative values are blue, zero is white, and positive values are yellow [S1].
 
-**Algorithm:**
-1.  **Query Acquisition:** Obtain the query point $\mathbf{p}$ from the volume via a Data Probe or Clipping Plane interaction [S1].
-2.  **Voxel Identification:** Identify the voxel $V$ containing $\mathbf{p}$ [S1].
-3.  **Feature Extraction:** Calculate the data value $v$, gradient magnitude $g = \|\nabla f\|$, and second derivative $s$ for the query point $\mathbf{p}$ [S1].
-4.  **Corner Extraction:** For each of the eight corners $c_i$ of voxel $V$ (where $i \in \{0, \dots, 7\}$), calculate the data value $v_i$, gradient magnitude $g_i = \|\nabla f(c_i)\|$, and second derivative $s_i$ [S1].
-5.  **TF Mapping:** Map the query point to coordinates $(v, g)$ in the widget [S1]. Map each corner $c_i$ to coordinates $(v_i, g_i)$ in the widget [S1].
-6.  **Rendering:**
-    *   Render a ball at $(v, g)$ for the query point [S1].
-    *   Render balls at $(v_i, g_i)$ for each corner [S1].
-    *   Color each ball (query and corners) based on its second derivative value $s$ or $s_i$:
-        *   If $s < 0$, color is blue.
-        *   If $s = 0$, color is white.
-        *   If $s > 0$, color is yellow.
-    *   Draw edges connecting the corner balls to reflect the spatial connectivity of the voxel [S1].
-    *   Display the inner plane as a texture-mapped slice of the 3D LUT [S1].
-7.  **Interaction:** Allow the user to observe how TF variables change near the probe and adjust the TF slice or parameters via the widget controls [S1].
+**Numbered Steps:**
+1.  **Query Acquisition:** The system receives a query point $\mathbf{q}$ from a spatial interaction widget (Data Probe or Clipping Plane) [S1].
+2.  **Voxel Identification:** The system identifies the voxel $V_{ijk}$ containing $\mathbf{q}$ within the volume grid [S1].
+3.  **Feature Calculation:** The system calculates the data value, gradient magnitude, and second derivative for:
+    *   The query point $\mathbf{q}$.
+    *   The eight corner samples of the voxel $V_{ijk}$ [S1].
+4.  **TF Domain Projection:** The system maps these nine points (1 query + 8 corners) into the 2D TF domain defined by axes $(v, g)$ [S1].
+5.  **Visual Rendering:**
+    *   **Query Point:** Rendered as a small ball at position $(v_q, g_q)$ in the TF widget [S1].
+    *   **Voxel Corners:** Rendered as eight balls at positions $(v_c, g_c)$ for each corner $c$ [S1].
+    *   **Connectivity:** Edges are drawn connecting the eight corner balls to reflect the spatial connectivity of the voxel corners in the 3D grid [S1].
+    *   **Second Derivative Encoding:** The balls are color-mapped based on the second derivative value $d$ of the corresponding point:
+        *   $d < 0$: Blue [S1].
+        *   $d = 0$: White [S1].
+        *   $d > 0$: Yellow [S1].
+6.  **User Interaction:** The user observes the geometric configuration of the projected points to understand how TF variables change near the probe location and manually adjusts the transfer function parameters via the LUT slice or widget controls [S1].
 
-**Parameters:**
-*   **Second Derivative Color Map:** Fixed mapping of sign to color (Blue/White/Yellow) [S1].
-*   **TF Axes:** Horizontal = Data Value, Vertical = Gradient Magnitude [S1].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Edge Cases and Pitfalls:**
-*   The second derivative axis is not explicitly represented in the 2D widget; it is encoded via ball color [S1].
-*   The widget displays only a single slice of the 3D LUT; other dimensions are controlled by other sub-widgets [S1].
+```python
+def render_tf_widget(volume, query_point, tf_slice_lut):
+    """
+    Renders the 2D Transfer Function Widget for a given query point.
+    
+    Args:
+        volume: 3D array of scalar values.
+        query_point: (x, y, z) coordinates in volume space.
+        tf_slice_lut: 2D texture representing the current TF slice.
+        
+    Returns:
+        Widget display data (balls, edges, colors).
+    """
+    # 1. Identify voxel containing query point
+    voxel_coords = get_voxel_containing(query_point)
+    x, y, z = voxel_coords
+    
+    # 2. Define the 8 corners of the voxel
+    corners = [
+        (x, y, z), (x+1, y, z), (x, y+1, z), (x, y, z+1),
+        (x+1, y+1, z), (x+1, y, z+1), (x, y+1, z+1), (x+1, y+1, z+1)
+    ]
+    
+    # 3. Calculate features for query point and corners
+    query_features = compute_features(volume, query_point)
+    corner_features = [compute_features(volume, c) for c in corners]
+    
+    # 4. Project to TF domain (v, g)
+    # v = data value, g = gradient magnitude
+    query_tf_pos = (query_features.value, query_features.gradient_mag)
+    corner_tf_positions = [(f.value, f.gradient_mag) for f in corner_features]
+    
+    # 5. Determine colors based on second derivative
+    # Blue: negative, White: zero, Yellow: positive
+    def get_color(second_deriv):
+        if second_deriv < 0:
+            return (0, 0, 1)  # Blue
+        elif second_deriv > 0:
+            return (1, 1, 0)  # Yellow
+        else:
+            return (1, 1, 1)  # White
+
+    query_color = get_color(query_features.second_deriv)
+    corner_colors = [get_color(f.second_deriv) for f in corner_features]
+    
+    # 6. Define edges for voxel connectivity
+    # Edges connect corners that are adjacent in the voxel grid
+    edges = [
+        (0, 1), (0, 2), (0, 3), (1, 5), (1, 4), (2, 6), (2, 4),
+        (3, 7), (3, 6), (4, 7), (5, 7), (6, 7)
+    ]
+    
+    return {
+        "query_ball": {"pos": query_tf_pos, "color": query_color},
+        "corner_balls": [{"pos": p, "color": c} for p, c in zip(corner_tf_positions, corner_colors)],
+        "edges": edges,
+        "lut_texture": tf_slice_lut
+    }
+
+def compute_features(volume, point):
+    """
+    Computes data value, gradient magnitude, and second derivative at a point.
+    Note: For voxel corners, this is direct sampling. For query point, interpolation may be needed.
+    """
+    # Implementation details for gradient and second derivative calculation
+    # are assumed to be handled by standard numerical differentiation routines.
+    value = sample_volume(volume, point)
+    gradient = compute_gradient(volume, point)
+    gradient_mag = length(gradient)
+    second_deriv = compute_laplacian(volume, point)
+    
+    return {
+        "value": value,
+        "gradient_mag": gradient_mag,
+        "second_deriv": second_deriv
+    }
+```
+
+**Parameters and Edge Cases:**
+*   **Second Derivative Threshold:** The boundary between blue and white, and white and yellow, is exactly zero [S1].
+*   **Precision:** The widget relies on accurate calculation of derivatives. Degenerate cases (e.g., flat regions with zero gradient) result in points clustering on the horizontal axis [S1].
+*   **Not Given in the sources:** Specific interpolation methods for the query point (if not on a grid corner) are not detailed, though the source implies calculation of derivatives at the query location [S1].
 
 ## Subtopics
 
 ### [Re-projected Voxel Visualization](6550-re-projected-voxel-visualization.md)
-An interaction technique that maps a spatial voxel to the TF domain to help users interpret local volume characteristics. It differs from the standard widget by explicitly visualizing the local gradient and curvature structure through the geometric configuration of projected points and edges, allowing distinction between homogeneous regions and boundaries.
+An interaction technique that maps a spatial voxel to the TF domain to help users interpret local volume characteristics. It represents the data value and derivatives at a query position and the eight corner samples of the containing voxel as points in the TF domain. Unlike standard point probes, it visualizes the local gradient and curvature structure by connecting corner points with edges reflecting spatial connectivity. This allows users to distinguish between homogeneous regions and boundaries based on the geometric configuration of the projected points.
 
 ### [Gaussian Widget for Transfer Function Design](6568-gaussian-widget-for-transfer-function-design.md)
-An interactive interface component that allows users to define and edit color and opacity transfer functions by placing Gaussian curves over a data histogram. It differs from the 2D TF Widget by focusing on histogram-based Gaussian curve editing rather than spatial re-projection of voxel corners.
+An interactive interface component that defines transfer functions in a reduced-dimensional domain (e.g., 3D) by mapping input feature vectors to colors using a Gaussian distribution centered at a user-selected location. It solves the problem of manually tuning volumetric appearance by providing a visual, direct-manipulation interface where Gaussian parameters (position and spread) map directly to transfer function properties. It differs from nearest alternatives by mapping feature vectors directly to colors via a single Gaussian distribution rather than composing piecewise segments or arbitrary shader parameters.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Provides dual-domain interaction, helping users understand how local volume structures map to TF variables [S1]. Allows manual setting and alteration of the transfer function based on visual feedback from queried voxels [S1].
-*   **Limitations:** Only displays a single slice of the 3D LUT; other dimensions require other sub-widgets [S1].
-*   **When to use:** When users need to inspect the relationship between spatial voxel structures (homogeneity vs. boundaries) and transfer function variables (data value, gradient) [S1].
-*   **When not to use:** When the full 3D transfer function space needs to be visualized simultaneously without slicing [S1].
+*   **Time Complexity:** The projection step is $O(1)$ per query as it involves calculating features for a fixed number of points (9) per voxel [S1].
+*   **Memory Complexity:** The widget requires storage for the 2D LUT slice and the visual state of the balls and edges, which is minimal and constant relative to volume size [S1].
+*   **Strengths:** Provides immediate visual feedback on how local volume structures (homogeneity vs. boundaries) map to the TF domain, aiding in intuitive classification [S1].
+*   **Limitations:** Only displays a 2D slice of the 3D TF domain; the third axis (second derivative) is encoded via color, which may be less precise than spatial mapping [S1].
+*   **When to use:** When users need to understand the local characteristics of the volume data at specific locations to refine the transfer function [S1].
+*   **When not to use:** When the full 3D TF domain needs to be manipulated simultaneously without slicing, or when color perception is a limiting factor for distinguishing second derivative values [S1].
 
 ## Background
-The 2D Transfer Function Widget was introduced in the context of interactive volume rendering using multi-dimensional transfer functions [S1]. It is part of a system that includes other widgets such as the Data Probe and Clipping Plane, designed to facilitate dual-domain interaction for volume rendering tasks, such as rendering CT tooth datasets [S1].
+The 2D Transfer Function Widget was introduced by Kindlmann and Westin in their work on interactive volume rendering using multi-dimensional transfer functions [S1]. It is part of a dual-domain interaction framework that combines spatial domain widgets (probes, clipping planes) with the TF domain widget to facilitate the classification of complex volume data, such as CT scans [S1].
 
 ## Sources
 [S1] Interactive Volume Rendering Using Multi-Dimensional Transfer Functions, https://publications.sci.utah.edu/publications/jmk01/simian-paper.pdf, fetched 2026-10-27
