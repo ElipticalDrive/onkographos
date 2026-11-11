@@ -16,11 +16,11 @@ Voxel Material Classification determines whether a voxel material is transparent
 *   **Status Enum:** `CollisionSampleStatus` with values `KnownAir`, `KnownSolid`, `KnownLiquid`, `UnknownBlocked` [S2, unofficial].
 
 **Steps:**
-1.  **Unpack Material:** Extract the material ID from the packed voxel using a helper function that returns a `uint8_t` [S2, unofficial].
+1.  **Unpack Material:** Extract the material ID from the packed voxel using `Utils::UnpackMaterial`, which returns a `uint8_t` [S2, unofficial].
 2.  **Classify by Type (Semantic):** Compare the unpacked material against predefined categories [S2, unofficial]:
-    *   If material equals `Air`, return `KnownAir`.
-    *   If material equals `Water`, `Lava`, or `Oil`, return `KnownLiquid`.
-    *   Otherwise, return `KnownSolid`.
+    *   If material equals `Air`, return `KnownAir` [S2, unofficial].
+    *   If material equals `Water`, `Lava`, or `Oil`, return `KnownLiquid` [S2, unofficial].
+    *   Otherwise, return `KnownSolid` [S2, unofficial].
 3.  **Classify by Transparency (Boolean):** Determine if the material allows ray traversal [S1, unofficial]. A material `m` is considered transparent if:
     *   $5 \le m \le 12$
     *   $m = 18$
@@ -31,18 +31,18 @@ Voxel Material Classification determines whether a voxel material is transparent
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Constants for semantic classification [S2, unofficial]
-MATERIAL_AIR = 0
-MATERIAL_WATER = 1
-MATERIAL_LAVA = 2
-MATERIAL_OIL = 3
-
 def classify_voxel(voxel: int) -> tuple:
     # Step 1: Unpack material from packed uint32_t voxel [S2, unofficial]
     # [G] Exact bit-packing scheme not given in sources; assumes lowest 8 bits.
     material_id = voxel & 0xFF
 
     # Step 2: Semantic classification [S2, unofficial]
+    # [G] Exact numeric values for material enums are implementation-specific.
+    MATERIAL_AIR = 0
+    MATERIAL_WATER = 1
+    MATERIAL_LAVA = 2
+    MATERIAL_OIL = 3
+
     if material_id == MATERIAL_AIR:
         status = "KnownAir"
     elif material_id in (MATERIAL_WATER, MATERIAL_LAVA, MATERIAL_OIL):
@@ -60,7 +60,7 @@ def classify_voxel(voxel: int) -> tuple:
 *   **Material 35 (`MAT_TURF`):** Explicitly treated as transparent because the geometry consists of blade cells that are 90% air [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Bit Packing Ambiguity:** The exact bit layout of the `uint32_t` voxel is not specified in the sources [S2, unofficial]. Implementers must refer to the specific unpacking implementation in their codebase.
+*   **Bit Packing Ambiguity:** The exact bit layout of the `uint32_t` voxel is not specified in the sources [S2, unofficial]. Implementers must refer to the specific unpacking implementation in their codebase [S2, unofficial].
 *   **Output Divergence:** Source [S1, unofficial] defines a boolean transparency check, while Source [S2, unofficial] defines a semantic enum classification. These serve different pipeline stages (culling vs. shading) and can be used together [G].
 
 ## Subtopics

@@ -1,28 +1,30 @@
 # Texture Packing and Atlas Organization
 
-Also called: Texture Packing, Atlas Packing, Multi-Channel Packing, Volume Atlas Packing, Image Texture Atlas Packing
+Also called: Texture Packing, Volume Atlas Packing, Multi-Channel Packing, Image Texture Atlas
 
 ## Overview
-Texture Packing and Atlas Organization encompasses techniques for consolidating multiple volumetric data sources or channels into fewer, larger texture resources to optimize memory bandwidth, reduce GPU state changes, and emulate 3D texture support on hardware lacking native capabilities. It differs from [3D Texture Storage and Sampling](3064-3d-texture-storage-and-sampling.md) by focusing on the logical layout and allocation strategy of the texture data rather than the low-level storage format or sampling hardware.
+Texture Packing and Atlas Organization consolidates multiple volumetric data sources or semantic channels into fewer, larger texture resources to optimize memory bandwidth, reduce state changes, and emulate 3D texture support in constrained environments [S1, unofficial]. It differs from [3D Texture Storage and Sampling](3064-3d-texture-storage-and-sampling.md) by focusing on the logical arrangement of data within the resource rather than the hardware storage format, and from [Sparse Volume Texture (SVT)](7011-sparse-volume-texture-svt.md) by keeping data dense and resident rather than sparse and paged.
 
 ## Shared principles
-The family shares the goal of reducing the number of active texture units or state changes by packing data into a single resource. This is achieved through two primary strategies:
-1.  **Multi-Channel Packing:** Storing different semantic channels (e.g., noise, detail, light, mask) into the RGBA components of a single 3D texture [2470-texture-uniting-multi-channel-packing.md]. This requires sampling all channels at the same normalized coordinate, often using linear clamping to handle resolution mismatches between source textures [2470-texture-uniting-multi-channel-packing.md].
-2.  **Spatial/Temporal Atlas Packing:** Arranging multiple discrete volumes (e.g., animation timesteps) or 2D slices into a contiguous 3D or 2D texture grid [7158-3d-volume-atlas-packing.md], [11896-image-texture-atlas-packing.md]. This requires calculating grid dimensions (e.g., cubic root for 3D, tiled grid for 2D) and mapping 3D coordinates to 2D atlas coordinates in the shader [7158-3d-volume-atlas-packing.md], [11896-image-texture-atlas-packing.md].
+The family shares the goal of reducing the number of active texture units and state transitions by grouping data. The core mechanism involves mapping logical data indices (whether semantic channels, discrete volumes, or spatial slices) into a single physical texture coordinate space. This requires a deterministic mapping function in the shader to reconstruct the logical coordinate from the physical one. The method assumes the target hardware supports the resulting texture format (e.g., 3D textures, 2D arrays, or multi-channel 2D textures).
 
 ## Subtopics
 
 ### [Texture Uniting (Multi-Channel Packing)](2470-texture-uniting-multi-channel-packing.md)
-Combines four separate 3D textures (noise, detail, light, mask) into a single RGBA 3D texture. It uses normalized coordinates and linear clamping to handle resolution differences. Choose this when optimizing memory bandwidth for multi-channel procedural or composite volumes.
+Packs semantic channels (e.g., noise, detail, light, mask) into the RGBA components of a single 3D texture. Chosen when channels are accessed simultaneously at the same coordinate.
 
 ### [3D Volume Atlas Packing](7158-3d-volume-atlas-packing.md)
-Consolidates multiple discrete volumes (e.g., animation timesteps) into a single contiguous 3D texture by tiling them in a cubic grid. It differs from Texture Uniting by packing identical channel structures across the depth dimension. Choose this for managing numerous individual texture objects to reduce state changes.
+Arranges discrete 3D volumes (e.g., animation timesteps) into a larger 3D grid. Chosen to handle multiple distinct datasets without increasing texture unit count.
 
 ### [Image Texture Atlas Packing](11896-image-texture-atlas-packing.md)
-Represents 3D volumetric data as a set of 2D image slices arranged into a single 2D texture (atlas) to emulate 3D textures in WebGL 1.0. It sets itself apart by avoiding hardware 3D textures, relying on fragment shader resampling. Choose this for WebGL 1.0 compatibility or when hardware 3D textures are unavailable.
+Maps 3D volume slices to a 2D texture atlas to support WebGL 1.0 or environments lacking native 3D texture support. Chosen for compatibility with legacy web standards.
+
+### [Per-tile empty-space skip with contrast-normalized min/max metadata](12685-per-tile-empty-space-skip-with-contrast-normalized-min-max-m.md)
+Uses metadata packed alongside volume data to skip empty tiles. Chosen to reduce shader execution time for resident but empty data.
 
 ## Background
-The techniques are primarily associated with WebGL 1.0 limitations and general GPU optimization strategies. [Image Texture Atlas Packing](11896-image-texture-atlas-packing.md) is specifically designed for WebGL 1.0, which lacks native 3D texture support (Texturing3D component) [11896-image-texture-atlas-packing.md]. [Texture Uniting](2470-texture-uniting-multi-channel-packing.md) and [3D Volume Atlas Packing](7158-3d-volume-atlas-packing.md) are general optimization techniques for reducing GPU state changes and memory fragmentation in volume rendering pipelines.
+The techniques originate from general graphics optimization practices to reduce driver overhead and memory bandwidth usage. Multi-channel packing is common in procedural generation [S1, unofficial]. 3D atlas packing is used in animation and multi-dataset visualization [S1, unofficial]. Image texture atlas packing was developed to enable volume rendering in WebGL 1.0 environments where `Texturing3D` is unsupported [S1]. The metadata-based skip method addresses gaps in residency-based skipping by optimizing resident empty space [S1, unofficial].
 
 ## Sources
-[S1] Unofficial notes on Texture Packing and Atlas Organization, fetched 2024.
+[S1] Unofficial notes on texture packing and atlas organization in volume rendering.
+[S2] Unofficial notes on texture formats and precision.

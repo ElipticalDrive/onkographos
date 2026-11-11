@@ -1,0 +1,188 @@
+--- v003.md
++++ v004.md
+@@ -4,116 +4,106 @@
+ 
+ ## Overview
+-This method implements neural network-based volume classification and rendering by executing the neural network logic directly within a GPU fragment program during rasterization [S1]. It solves the problem of real-time interactive classification and visualization of large 3D volumes by offloading the computational burden of the neural network to the graphics hardware, allowing users to receive immediate visual feedback while training or adjusting classification parameters [S1]. Unlike traditional ray casting which samples a volume texture, this approach renders a stack of view-aligned polygons that sample a 3D texture, using the fragment shader to perform the neural inference and compositing [S1]. It is distinguished from other neural volume rendering methods by its reliance on rasterization of polygonal slices rather than explicit ray marching, and its specific implementation of the network using vectorized MAD instructions and sigmoid activations within the fragment shader [S1].
++This method renders volumetric data by mapping a 3D texture to a stack of view-aligned polygons and executing a neural network classifier directly within the fragment shader for each pixel [S1]. It solves the problem of interactive, high-dimensional classification of volume data by offloading the inference logic to the GPU, allowing users to evaluate training results in real-time [S1]. Unlike standard volume rendering which uses fixed transfer functions, this approach uses a learned neural network to determine opacity and color, and it differs from [In-Shader Neural Volume Ray Marching](1495-in-shader-neural-volume-ray-marching.md) by relying on rasterization of textured polygons rather than explicit ray marching through the volume [S1].
+ 
+ ## How it works
+-The method replaces the traditional texture lookup and interpolation step of volume rendering with a neural network query executed per pixel [S1, S14, unofficial]. The neural network takes voxel values as input and outputs classification results (opacity and color) [S1].
+-
+ **Inputs and Outputs:**
+-*   **Input:** A 3D texture containing the volume data. The fragment program receives texture coordinates derived from the pixel's position on the rendered polygon [S1].
+-*   **Output:** The final color and opacity of the pixel, composited from the neural network's classification results [S1].
+-*   **Parameters:** Neural network weights, passed as input parameters to the fragment program [S1].
++*   **Input:** A 3D texture containing voxel data (e.g., medical imaging data resized to $256^3$ or similar) [S1]. Neural network weights (floating-point numbers) passed as parameters or textures [S1].
++*   **Output:** A 2D image (e.g., $512 \times 512$) where each pixel's color and opacity are determined by the neural network's classification of the local voxel neighborhood [S1].
+ 
+ **Data Structures:**
+-*   **Hidden Nodes Vector:** $H = (H_1, H_2, H_3, H_4)$ [S1].
+-*   **Weight Vector for Input Node $n$:** $W_n = (w(n, 1), w(n, 2), w(n, 3), w(n, 4))$ [S1].
+-*   **Texture Lookups:** Seven texture lookups are required per fragment to retrieve the center voxel value and its six immediate neighbors (assuming a 3D grid) [S1].
++*   **3D Texture:** Stores the scalar or RGB voxel values. The resolution is typically $256 \times 256 \times 256$ [S1].
++*   **Weight Vectors:** Weights are stored in vectors. For a network with 4 input nodes and 4 hidden nodes, the weight vector for input node $n$ is $W_n = (w(n, 1), w(n, 2), w(n, 3), w(n, 4))$ [S1].
++*   **Hidden Node Vector:** $H = (H_1, H_2, H_3, H_4)$ [S1].
++*   **Fragment Program Parameters:** The neural network weights are passed to the fragment program. Due to hardware limits on input parameters, large networks may require storing weights in textures, adding overhead [S1].
+ 
+-**Algorithm Steps:**
+-1.  **Polygon Rasterization:** Render a stack of view-aligned polygons that sample the 3D volume texture [S1].
+-2.  **Sample Position Derivation:** For each fragment (pixel), derive the 3D position in volume space from the texture coordinates of the pixel [S1].
+-3.  **Neural Input Retrieval:** Perform seven texture lookups to retrieve the value of the center voxel and its neighbors [S1]. Let these input values be $I_n$.
+-4.  **Neural Network Inference:**
+-    *   Compute the hidden nodes $H_m$ using vectorized MAD (multiply-add) instructions [S1]. For a network with 4 input nodes and 4 hidden nodes, the calculation is:
+-        $$
+-        H_m = \sum_{n=1}^{4} I_n \cdot w(n, m) \quad \text{for } m \in \{1, 2, 3, 4\}
+-        $$
+-        where $w(n, m)$ is the weight between input node $n$ and hidden node $m$ [S1].
+-    *   Apply the sigmoid excitation function to each hidden node $H_m$ to complete one layer of computation [S1].
+-    *   Repeat the process for additional layers if the network is deeper [S1].
+-5.  **Lighting Estimation (Optional):** Use the same nearest neighbors used for the neural network calculation to estimate lighting gradients, avoiding the need for separate normal map textures [S1].
+-6.  **Compositing:** The output of the neural network (opacity and color) is composited into the final pixel color. The specific compositing formula follows the standard front-to-back volume rendering equation defined in [Direct volume ray casting](19-direct-volume-ray-casting.md), using the neural network's output for $\sigma_i$ and $\mathbf{c}_i$ [S1, S14, unofficial].
++**Steps:**
++1.  **Polygon Generation:** Generate a stack of view-aligned polygons that sample the 3D texture. The number of slices corresponds to the depth of the volume or a subset thereof [S1].
++2.  **Rasterization:** Rasterize the polygons. For each fragment (pixel) covered by a polygon, the fragment program is executed [S1].
++3.  **Position Derivation:** Derive the 3D spatial position of the sample from the texture coordinates of the pixel [S1].
++4.  **Neighbor Sampling:** Perform seven texture lookups to retrieve the center voxel value and its immediate neighbors (likely the 6 face-connected neighbors plus the center) [S1]. Let $I_n$ be the input node values derived from these neighbors.
++5.  **Neural Network Inference:**
++    *   Compute the hidden nodes $H_m$ using vectorized Multiply-Add (MAD) instructions [S1].
++    *   The formula for hidden node $m$ is:
++        $$H_m = \sum_{n=1}^{4} I_n \cdot w(n, m)$$
++        where $n \in \{1, 2, 3, 4\}$ represents the input nodes and $m \in \{1, 2, 3, 4\}$ represents the hidden nodes [S1].
++    *   Apply the sigmoid excitation function to the computed hidden nodes $H$ to complete one layer of computation [S1].
++    *   Repeat this procedure for additional layers if the network is deeper [S1].
++6.  **Lighting Estimation:** Estimate lighting gradients using the same nearest neighbors used for the neural network calculation. This avoids the need for separate normal map textures [S1].
++7.  **Output:** The final output of the fragment program (color/opacity) is composited into the frame buffer [S1].
+ 
+ **Pseudocode:**
+ ```python
+-# Fragment Program Implementation
+-# Inputs: texture_coords (vec3), weights (uniforms)
+-# Outputs: frag_color (vec4)
++# Fragment Program Logic for Neural Network Volume Rendering
++# Inputs:
++#   tex_coords: Texture coordinates derived from pixel position
++#   weights: Array of neural network weights passed as parameters
++#   texture_3d: The 3D volume texture
+ 
+-def sigmoid(x):
+-    return 1.0 / (1.0 + exp(-x))
+-
+-def main():
+-    # 1. Derive 3D position from texture coordinates
+-    # (Implementation detail: mapping screen/polygon coords to volume space)
+-    pos = derive_3d_position(texture_coords)
++def fragment_shader(tex_coords, weights, texture_3d):
++    # Step 1: Retrieve center voxel and neighbors
++    # Requires 7 texture lookups
++    center_voxel = texture_3d.sample(tex_coords)
++    neighbor_1 = texture_3d.sample(tex_coords + offset_1)
++    neighbor_2 = texture_3d.sample(tex_coords + offset_2)
++    neighbor_3 = texture_3d.sample(tex_coords + offset_3)
++    neighbor_4 = texture_3d.sample(tex_coords + offset_4)
++    neighbor_5 = texture_3d.sample(tex_coords + offset_5)
++    neighbor_6 = texture_3d.sample(tex_coords + offset_6)
+     
+-    # 2. Retrieve voxel values (center + 6 neighbors)
+-    # Assuming a 3D grid, neighbors are at +/- 1 in x, y, z
+-    center_val = texture_lookup(volume_texture, pos)
+-    neighbor_vals = [
+-        texture_lookup(volume_texture, pos + vec3(1, 0, 0)),
+-        texture_lookup(volume_texture, pos + vec3(-1, 0, 0)),
+-        texture_lookup(volume_texture, pos + vec3(0, 1, 0)),
+-        texture_lookup(volume_texture, pos + vec3(0, -1, 0)),
+-        texture_lookup(volume_texture, pos + vec3(0, 0, 1)),
+-        texture_lookup(volume_texture, pos + vec3(0, 0, -1))
+-    ]
++    # Step 2: Form input vector I from neighbors
++    # Note: The source specifies 4 input nodes but 7 lookups.
++    # We assume the 4 inputs are derived from the retrieved values.
++    I = [center_voxel, neighbor_1, neighbor_2, neighbor_3] # [G] Assumption based on 4 inputs
+     
+-    # Combine into input vector I
+-    # Note: The source specifies 4 input nodes, but 7 lookups.
+-    # The exact mapping of 7 neighbors to 4 inputs is not specified in the source.
+-    # We assume a subset or aggregation is used for I_n.
+-    I = aggregate_neighbors(center_val, neighbor_vals) 
+-    
+-    # 3. Compute Hidden Nodes (4 inputs, 4 hidden nodes)
+-    H = vec4(0.0)
++    # Step 3: Compute Hidden Nodes H using MAD instructions
++    # H_m = sum(I_n * w(n, m)) for m in 1..4
++    H = [0.0, 0.0, 0.0, 0.0]
+     for m in range(4):
+         sum_val = 0.0
+         for n in range(4):
+-            sum_val += I[n] * weights[n][m]
++            # Access weight w(n, m) from weights array
++            w_nm = weights.get_weight(n, m)
++            sum_val += I[n] * w_nm
+         H[m] = sum_val
+         
+-    # 4. Apply Sigmoid Activation
+-    H = vec4(sigmoid(H[0]), sigmoid(H[1]), sigmoid(H[2]), sigmoid(H[3]))
++    # Step 4: Apply Sigmoid Activation
++    # Sigmoid(x) = 1 / (1 + exp(-x))
++    H_activated = [1.0 / (1.0 + exp(-h)) for h in H]
+     
+-    # 5. Output Layer (Not fully specified in source, assumed simple mapping)
+-    # The source mentions assigning opacity for color data sets.
+-    opacity = H[0] # Example mapping
+-    color = vec3(H[1], H[2], H[3]) # Example mapping
++    # Step 5: Further layers or output generation
++    # [G] The source mentions repeating for larger networks.
++    # For this basic 4x4 example, we assume H_activated maps to final color/opacity.
++    # Lighting gradients are estimated from neighbors (not shown in detail).
+     
+-    # 6. Compositing
+-    # The final color is composited using the standard volume rendering equation
+-    # as defined in [Direct volume ray casting](19-direct-volume-ray-casting.md).
+-    # This fragment outputs the raw classification result which is then composited
+-    # by the renderer or subsequent stages.
+-    return vec4(color, opacity)
++    return H_activated # Or mapped to RGB/Opacity
+ ```
+ 
+ **Parameters:**
+ *   **Hardware:** Tested on ATI Radeon 9700 Pro [S1].
+-*   **Volume Resolution:** 256x256x256 [S1].
+-*   **Window Resolution:** 512x512 [S1].
+-*   **Sampling:** One slice per voxel [S1].
++*   **Volume Resolution:** $256 \times 256 \times 256$ [S1].
++*   **Window Resolution:** $512 \times 512$ [S1].
++*   **Slices:** One slice per voxel [S1].
++*   **Data Transfer:** Neural network weights are under one kilobyte [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Weight Storage Limit:** The number of input parameters for fragment programs is limited. Large neural networks cannot pass all weights as uniform parameters; they must be stored in textures, which adds overhead from redundant texture reads [S1].
+-*   **Performance Bottleneck:** Rendering performance is limited by rasterization time, specifically the seven texture lookups and the length of the fragment program [S1].
++*   **Parameter Limits:** Large neural networks exceed the limit of input parameters for fragment programs. Weights must be stored in textures, which adds overhead from redundant texture reads [S1].
++*   **Performance:** Performance is limited by rasterization time and the length of the fragment program (7 texture lookups + MAD instructions) [S1].
+ 
+ ## Subtopics
+ 
+ ### Rasterization and Neural Shader
+-This variant uses the traditional rasterization pipeline in Unreal Engine 4 (UE4) to rasterize polygonal meshes [S2]. Instead of querying a 3D volume texture, it applies a decoder neural network to convert 17D features (8 learned feature channels + 9D view direction encoded via spherical harmonics) into RGB colors [S2]. The neural network is implemented as an HLSL fragment shader called "Neural Shader" [S2]. Translucent effects are achieved using alpha-dithering and temporal anti-aliasing, avoiding explicit volume rendering [S2].
++This variant uses the traditional rasterization pipeline in Unreal Engine 4 (UE4) to rasterize polygonal mesh faces [S2]. Instead of querying a 3D volume texture, it applies a decoder network (implemented as an HLSL fragment shader called "Neural Shader") to convert 17D features (8 channels of learned features + 9D view direction encoded via spherical harmonics) into RGB colors [S2]. It achieves translucent effects using alpha-dithering and temporal anti-aliasing, avoiding explicit volume rendering [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Performance is limited by rasterization time and the number of texture lookups (7 per fragment) [S1].
+-*   **Memory Complexity:** The neural network weights are small (under one kilobyte) and can be sent asynchronously from a training PC to the rendering PC [S1].
+-*   **Measured Performance:** On an ATI Radeon 9700 Pro, rendering a 256x256x256 volume to a 512x512 window at 1.5 frames per second using one slice per voxel [S1].
+-*   **Strengths:** Allows for interactive feedback during training; users can steer the network in real-time [S1]. Easier to implement in graphics hardware than SVMs [S1]. Avoids normal map textures by estimating lighting from voxel neighbors [S1].
+-*   **Limitations:** Limited by the number of input parameters for fragment programs; large networks require texture storage for weights, increasing overhead [S1]. Performance is constrained by the fragment program length and texture lookups [S1].
+-*   **When to Use:** When interactive classification and visualization of large volumes is required, and the neural network is small enough to fit within fragment program parameter limits or can be efficiently stored in textures [S1].
+-*   **When Not to Use:** For very large neural networks where weight storage overhead becomes prohibitive, or when higher frame rates are required than the rasterization-based approach can provide [S1].
++*   **Time Complexity:** Rendering performance is limited by the time required to rasterize textured polygons and execute the fragment program [S1].
++*   **Memory Complexity:** The volume data is stored in a 3D texture on the graphics card [S1]. The neural network weights are small (under 1 KB) and can be sent asynchronously [S1].
++*   **Measured Performance:** On an ATI Radeon 9700 Pro, rendering a $256 \times 256 \times 256$ volume to a $512 \times 512$ window at 1.5 frames per second using one slice per voxel [S1].
++*   **Strengths:** Interactive feedback during training; users can evaluate classification results while painting; easier to implement in graphics hardware than SVMs [S1].
++*   **Limitations:** Limited by fragment program input parameter sizes; performance drops with larger networks or more texture lookups; asynchronous data transfer required for training updates [S1].
++*   **When to use:** When interactive, high-dimensional classification of volume data is required during user interaction (e.g., painting) [S1].
++*   **When not to use:** When real-time frame rates are critical and the network is too large for the fragment program's parameter limits [S1].
+ 
+ ## Background
+-This method was introduced in a 2005 paper by the authors of [S1], titled "An Intelligent System Approach to Higher-Dimensional Classification of Volume Data" [S1]. It was developed to address the limitations of software-based neural network classification, which is too slow for interactive use on large volumes [S1]. The approach leverages the parallel processing capabilities of GPUs to accelerate the neural network inference, enabling real-time user interaction during the training and classification process [S1]. It was tested on medical imaging datasets including knee, chest, and brain MRI data [S1].
++This method was introduced in a 2005 paper by researchers investigating intelligent systems for volume data classification [S1]. It was developed to address the slowness of software-based neural network classification on large volumes, which prevented real-time user evaluation during training [S1]. The approach leverages the parallel processing power of GPUs to execute the neural network logic per-pixel during rasterization [S1]. It is cited as an early example of using graphics hardware for machine learning inference in visualization [S1].
+ 
+ ## Sources

@@ -46,7 +46,7 @@ Self-calibration via the absolute dual quadric is a method to recover metric (Eu
    - Zero skew: $\varpi_{12}^* = 0$ [S1, unofficial].
    - Aspect ratio equal to 1: $\varpi_{11}^* = \varpi_{22}^*$ [S1, unofficial].
    
-   These assumptions leave only the focal length as a variable. Each view provides 4 linear constraints on the elements of $\Omega^*$ [S1, unofficial].
+   These assumptions leave only the focal length as a variable [S1, unofficial]. Each view provides 4 linear constraints on the elements of $\Omega^*$ [S1, unofficial].
 
 4. **Solve for Absolute Dual Quadric:**
    Collect the linear constraints from all $m$ views into an overdetermined linear system $A \mathbf{x} = 0$, where $\mathbf{x}$ contains the independent elements of $\Omega^*$ [S1, unofficial]. The system has dimensions $4m \times 10$ (since $\Omega^*$ is symmetric $4 \times 4$ with 10 unique elements) [S1, unofficial].
@@ -58,7 +58,7 @@ Self-calibration via the absolute dual quadric is a method to recover metric (Eu
    The structure of $H$ is:
    $$ H = \begin{bmatrix} K_1 & 0 \\ -p^T K_1 & 1 \end{bmatrix} $$
    where $K_1$ is the calibration matrix of the first camera and $p$ is the vector from step 2/4 [S1, unofficial].
-   Specifically, from $\Omega^* = \begin{bmatrix} \varpi_1^* & -\varpi_1^* p \\ -p^T \varpi_1^* & p^T \varpi_1^* p \end{bmatrix}$, extract $\varpi_1^*$ and $p$. Then compute $K_1$ by Cholesky factorization of $\varpi_1^* = K_1 K_1^T$ [S1, unofficial].
+   Specifically, from $\Omega^* = \begin{bmatrix} \varpi_1^* & -\varpi_1^* p \\ -p^T \varpi_1^* & p^T \varpi_1^* p \end{bmatrix}$, extract $\varpi_1^*$ and $p$ [S1, unofficial]. Then compute $K_1$ by Cholesky factorization of $\varpi_1^* = K_1 K_1^T$ [S1, unofficial].
 
 6. **Upgrade to Metric Reconstruction:**
    Compute the metric camera matrices:
@@ -161,15 +161,15 @@ def self_calibration_absolute_dual_quadric(projective_cameras, num_views):
 - Original attempts at self-calibration yielded successful examples only for special cases; for general cases, new algorithms are needed to output explicit Euclidean structures from uncalibrated images [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Solving the linear system via SVD is $O(m)$ for the construction of $A$ and $O(1)$ for the SVD of a fixed-size matrix ($4m \times 10$). The decomposition of $H$ and upgrade is $O(m)$. Overall linear in the number of views [G].
-- **Memory Complexity:** $O(m)$ to store the camera matrices and the constraint matrix $A$ [G].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
 - **Strengths:** Linear solution; no initial guess required; robust for small numbers of views ($m \ge 3$) [G].
-- **Limitations:** Relies on strong assumptions about intrinsics (zero skew, square pixels). Sensitive to noise in projective reconstruction. Does not handle varying intrinsics [G].
+- **Limitations:** Relies on strong assumptions about intrinsics (zero skew, square pixels). Does not handle varying intrinsics [G].
 - **When to use:** When a projective reconstruction is available and the camera has fixed, simple intrinsics (e.g., standard digital cameras with known principal point) [G].
 - **When not to use:** When intrinsics are unknown and vary, or when high precision is required without subsequent non-linear refinement [G].
 
 ## Background
-The method was developed in the context of structure from motion and camera calibration, specifically as part of the stratified reconstruction approach. It relies on the geometric invariance of the absolute dual quadric under Euclidean transformations. The key paper is "Accelerated volumetric reconstruction from uncalibrated camera views" [S1, unofficial], which details the derivation and application of this method for upgrading projective reconstructions to metric ones. The concept of the absolute dual quadric and its role in self-calibration is rooted in the work of Triggs [Triggs97] and Hartley and Zisserman [HarZis00], as cited in [S1, unofficial].
+The method was developed in the context of structure from motion and camera calibration, specifically as part of the stratified reconstruction approach [S1, unofficial]. It relies on the geometric invariance of the absolute dual quadric under Euclidean transformations [S1, unofficial]. The key paper is "Accelerated volumetric reconstruction from uncalibrated camera views" [S1, unofficial], which details the derivation and application of this method for upgrading projective reconstructions to metric ones. The concept of the absolute dual quadric and its role in self-calibration is rooted in the work of Triggs [Triggs97] and Hartley and Zisserman [HarZis00], as cited in [S1, unofficial].
 
 ## Sources
 [S1] Accelerated volumetric reconstruction from uncalibrated camera views, http://doras.dcu.ie/157/, fetched 2026-10-26 (unofficial)

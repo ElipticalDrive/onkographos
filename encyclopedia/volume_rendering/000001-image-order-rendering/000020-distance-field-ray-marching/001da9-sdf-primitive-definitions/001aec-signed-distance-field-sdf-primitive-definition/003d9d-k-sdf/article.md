@@ -3,63 +3,59 @@
 Also called: Volumetric Surfaces, k-SDF network
 
 ## Overview
-k-SDF is a representation for real-time view synthesis of fuzzy geometries (e.g., hair, fur) using $k$ lightweight, semi-transparent mesh shells rendered via rasterization in a fixed order, bounding the number of sampling locations per ray to a small range ($3 \le k \le 9$) [S1]. It models implicit geometry as $k$ distinct signed distance fields combined with a view-dependent transparency field and a color field [S1]. Unlike [3D Gaussian Splatting](52-3d-gaussian-splatting.md) or [SMERF](53-smurf.md), it is sorting-free and bounds samples per ray, enabling real-time rendering on low-cost smartphones [S1]. Unlike [AdaptiveShells](54-adaptive-shells.md), it learns multiple SDFs and finds sampling locations via rasterization using 2D textures rather than volume rendering [S1].
+k-SDF is a representation for real-time view synthesis of fuzzy geometries using $k$ lightweight, semi-transparent mesh shells rendered via rasterization in a fixed order, bounding the number of sampling locations per ray to a small range ($3 \le k \le 9$) [S1]. It models implicit geometry as $k$ distinct signed distance fields combined with a view-dependent transparency field and a color field [S1]. Unlike [3D Gaussian Splatting](52-3d-gaussian-splatting.md) or [SMERF](53-smurf.md), it is sorting-free and bounds samples per ray, enabling real-time rendering on low-cost smartphones [S1]. Unlike [AdaptiveShells](54-adaptive-shells.md), it learns multiple SDFs and finds sampling locations via rasterization using 2D textures rather than volume rendering [S1].
 
 ## How it works
-**Inputs:** Multi-view images of a fuzzy scene.
-**Outputs:** A set of $k$ simplified meshes, UV atlases, and baked neural texture images (PNGs) representing color and transparency.
+**Inputs:** Multi-view images of a fuzzy scene [S1].
+**Outputs:** A set of $k$ simplified meshes, UV atlases, and baked neural texture images (PNGs) representing color and transparency [S1].
 
 **Data Structures:**
-1.  **k-SDF Network:** Encodes 3D points to output a signed distance $d$ and a geometric feature vector $z$.
-2.  **Offset MLP Heads:** $k-1$ tiny MLPs, each taking $z$ as input to predict relative offsets $\hat{o}_i$.
-3.  **Appearance Network:** Encodes position, view direction, normal, and feature vector to predict SH coefficients for color and transparency.
-4.  **Neural Textures:** Hash-grid based representation discretized into $(deg+1)^2$ PNG images per mesh, storing RGBA channels.
-5.  **Occupancy Grid:** Binary $256^3$ grid marking occupied space.
+1. **k-SDF Network:** Encodes 3D points to output a signed distance $d$ and a geometric feature vector $z$ [S1].
+2. **Offset MLP Heads:** $k-1$ tiny MLPs, each taking $z$ as input to predict relative offsets $\hat{o}_i$ [S1].
+3. **Appearance Network:** Encodes position, view direction, normal, and feature vector to predict SH coefficients for color and transparency [S1].
+4. **Neural Textures:** Hash-grid based representation discretized into $(deg+1)^2$ PNG images per mesh, storing RGBA channels [S1].
+5. **Occupancy Grid:** Binary $256^3$ grid marking occupied space [S1].
 
 **Parameters:**
-*   $k$: Number of shells, typically $3 \le k \le 9$ [S1].
-*   $\beta$: Controls density spread in the logistic distribution. Scheduled during training [S1].
-*   $\Delta_o$: Initialization spacing for support surfaces, $\Delta_o = \frac{1}{\beta_2} \frac{\pi}{\sqrt{3}}$ [S1].
-*   Grid resolution: $256^3$ [S1].
-*   Texture resolutions: Base color at $2048^2$, highest SH degree coefficients at $256^2$ [S1].
-*   Range $[v_{min}, v_{max}]$: $[-15, 15]$ for texture rescaling [S1].
+* $k$: Number of shells, typically $3 \le k \le 9$ [S1].
+* $\beta$: Controls density spread in the logistic distribution. Scheduled during training [S1].
+* $\Delta_o$: Initialization spacing for support surfaces, $\Delta_o = \frac{1}{\beta_2} \frac{\pi}{\sqrt{3}}$ [S1].
+* Grid resolution: $256^3$ [S1].
+* Texture resolutions: Base color at $2048^2$, highest SH degree coefficients at $256^2$ [S1].
+* Range $[v_{min}, v_{max}]$: $[-15, 15]$ for texture rescaling [S1].
 
 **Steps:**
 
-1.  **Implicit Surface Training:**
-    *   Train a standard NeuS-like model for 100k iterations to learn a single opaque main SDF $d$. Schedule $\beta$ exponentially from $\phi_{\beta_1}$ to $\phi_{\beta_2}$ [S1].
-    *   Initialize $k-1$ support surfaces as shells uniformly spaced from the main surface by $\Delta_o$. Initialize all on the inside to increase capacity [S1].
-    *   Train the k-SDF model for 50k iterations starting from $\phi_{\beta_2}$ until $\phi_{\beta_3}$, where densities are peaked [S1].
-    *   Loss function: $L = L_c + \lambda_e L_e + \lambda_s L_s$, with $\lambda_e = 0.04, \lambda_s = 0.65$ [S1].
-
-2.  **Sampling:**
-    *   Compute per-surface binary occupancy: a voxel is occupied if its center's $|d|$ value, combined with $\beta$ and the voxel's space diagonal, allows any point in the volume to have density $> 10^{-4}$ [S1].
-    *   Aggregate occupancy with OR operation to form a single binary grid [S1].
-    *   Traverse grid to sample $n$ points uniformly in occupied space [S1].
-    *   Perform hierarchical importance sampling: Evaluate all $k$ SDFs to compute $k$ CDFs, sum and normalize to get probability distribution. Sample $m/2$ additional points, add to previous $n$. Repeat once to add $m/2$ more. Total samples per ray: $n+m$ [S1].
-    *   In the first importance sampling iteration, use $\beta$ half of the rendering value; in the second, match it [S1].
-
-3.  **Rendering (Implicit):**
-    *   For each surface $i$, compute color $\mathcal{C}_i(\mathbf{r})$ and transparency $\mathcal{A}_i(\mathbf{r})$:
-        $$ \mathcal{C}_j(\mathbf{r}) = \sum_{i=1}^n w_{i,j} \xi(\mathbf{x}_i, \mathbf{v}, \mathbf{n}_{i,j}, \mathbf{z}_i) $$
-        $$ \mathcal{A}_j(\mathbf{r}) = \sum_{i=1}^n w_{i,j} \alpha(\mathbf{x}_i, \mathbf{v}, \mathbf{n}_{i,j}, \mathbf{z}_i) $$
-        where $w_{i,j}$ are sample weights [S1].
-    *   Compute final color:
-        $$ \mathcal{R}(\mathbf{r}) = \sum_{i=1}^k \mathcal{C}_i(\mathbf{r}) \mathcal{A}_i(\mathbf{r}) w_i, \quad w_i = \prod_{j=1}^{i-1} (1 - \mathcal{A}_j(\mathbf{r})) $$
-    *   Apply transparency attenuation: $\alpha_w = 2 \cdot \text{Sigmoid}(10 \cdot |\mathbf{v} \cdot \mathbf{n}|) - 1$. Multiply predicted transparencies by $\alpha_w$ [S1].
-
-4.  **Mesh Extraction and Baking:**
-    *   Extract zero-level sets of $d_{1:k}$ as high-resolution meshes using marching cubes [S1].
-    *   Simplify meshes to 0.02% of original triangle count [S1].
-    *   Generate UV atlases using xatlas [S1].
-    *   Train per-surface view-dependent appearance model using neural textures (hash-grid + small decoder MLP) on the fixed geometry [S1].
-    *   Discretize neural textures: Map $x \in \mathbb{R}^3$ to $x \in [0,1]^2$ in UV space. Predict SH coefficients via bilinear interpolation of texel centers [S1].
-    *   Squeeze values: $\hat{sh} = \text{Sigmoid}(sh)$. Quantize: $q(x) = \text{round}(255x)/255$. Rescale: $sh = v_{min} + (v_{max}-v_{min})q(\hat{sh})$ [S1].
-    *   Bake to $(deg+1)^2$ PNG images per mesh, where the $i$-th image stores the $i$-th coefficient of RGBA channels [S1].
-
-5.  **Rasterization (Explicit):**
-    *   Rasterize all meshes in a fixed order (outermost to innermost) in a WebGL renderer [S1].
-    *   Blend them in the final frame buffer using the baked textures [S1].
+1. **Implicit Surface Training:**
+   * Train a standard NeuS-like model for 100k iterations to learn a single opaque main SDF $d$. Schedule $\beta$ exponentially from $\phi_{\beta_1}$ to $\phi_{\beta_2}$ [S1].
+   * Initialize $k-1$ support surfaces as shells uniformly spaced from the main surface by $\Delta_o$. Initialize all on the inside to increase capacity [S1].
+   * Train the k-SDF model for 50k iterations starting from $\phi_{\beta_2}$ until $\phi_{\beta_3}$, where densities are peaked [S1].
+   * Loss function: $L = L_c + \lambda_e L_e + \lambda_s L_s$, with $\lambda_e = 0.04, \lambda_s = 0.65$ [S1].
+2. **Sampling:**
+   * Compute per-surface binary occupancy: a voxel is occupied if its center's $|d|$ value, combined with $\beta$ and the voxel's space diagonal, allows any point in the volume to have density $> 10^{-4}$ [S1].
+   * Aggregate occupancy with OR operation to form a single binary grid [S1].
+   * Traverse grid to sample $n$ points uniformly in occupied space [S1].
+   * Perform hierarchical importance sampling: Evaluate all $k$ SDFs to compute $k$ CDFs, sum and normalize to get probability distribution. Sample $m/2$ additional points, add to previous $n$. Repeat once to add $m/2$ more. Total samples per ray: $n+m$ [S1].
+   * In the first importance sampling iteration, use $\beta$ half of the rendering value; in the second, match it [S1].
+3. **Rendering (Implicit):**
+   * For each surface $i$, compute color $\mathcal{C}_i(\mathbf{r})$ and transparency $\mathcal{A}_i(\mathbf{r})$:
+     $$ \mathcal{C}_j(\mathbf{r}) = \sum_{i=1}^n w_{i,j} \xi(\mathbf{x}_i, \mathbf{v}, \mathbf{n}_{i,j}, \mathbf{z}_i) $$
+     $$ \mathcal{A}_j(\mathbf{r}) = \sum_{i=1}^n w_{i,j} \alpha(\mathbf{x}_i, \mathbf{v}, \mathbf{n}_{i,j}, \mathbf{z}_i) $$
+     where $w_{i,j}$ are sample weights [S1].
+   * Compute final color:
+     $$ \mathcal{R}(\mathbf{r}) = \sum_{i=1}^k \mathcal{C}_i(\mathbf{r}) \mathcal{A}_i(\mathbf{r}) w_i, \quad w_i = \prod_{j=1}^{i-1} (1 - \mathcal{A}_j(\mathbf{r})) $$
+   * Apply transparency attenuation: $\alpha_w = 2 \cdot \text{Sigmoid}(10 \cdot |\mathbf{v} \cdot \mathbf{n}|) - 1$. Multiply predicted transparencies by $\alpha_w$ [S1].
+4. **Mesh Extraction and Baking:**
+   * Extract zero-level sets of $d_{1:k}$ as high-resolution meshes using marching cubes [S1].
+   * Simplify meshes to 0.02% of original triangle count [S1].
+   * Generate UV atlases using xatlas [S1].
+   * Train per-surface view-dependent appearance model using neural textures (hash-grid + small decoder MLP) on the fixed geometry [S1].
+   * Discretize neural textures: Map $x \in \mathbb{R}^3$ to $x \in [0,1]^2$ in UV space. Predict SH coefficients via bilinear interpolation of texel centers [S1].
+   * Squeeze values: $\hat{sh} = \text{Sigmoid}(sh)$. Quantize: $q(x) = \text{round}(255x)/255$. Rescale: $sh = v_{min} + (v_{max}-v_{min})q(\hat{sh})$ [S1].
+   * Bake to $(deg+1)^2$ PNG images per mesh, where the $i$-th image stores the $i$-th coefficient of RGBA channels [S1].
+5. **Rasterization (Explicit):**
+   * Rasterize all meshes in a fixed order (outermost to innermost) in a WebGL renderer [S1].
+   * Blend them in the final frame buffer using the baked textures [S1].
 
 **Pseudocode:**
 
@@ -169,7 +165,7 @@ A neural network architecture that encodes 3D points to output a signed distance
 ### k-SDF Beta Scheduling
 A training schedule for the parameter $\beta$ that controls the sharpness of the logistic distribution used for density peaks in the k-SDF model [S1].
 - **Step:** During the main surface training phase, $v$ linearly transitions from $v_1 = 0.3$ to $v_2 = 0.7$ [S1].
-- **Step:** During the training of k-SDF, $v$ further progresses from $v_2 = 0.7$ to $v_3 = 1.0$ [S1]
+- **Step:** During the training of k-SDF, $v$ further progresses from $v_2 = 0.7$ to $v_3 = 1.0$ [S1].
 - **Parameter:** At $\beta_2$ (corresponding to $v_2=0.7$), the logistic distribution standard deviation is approximately 0.001. This value is used to initialize offsets as constants ($\Delta_o$) [S1].
 - **Parameter:** By the end of implicit surface training ($\beta_3$, corresponding to $v_3=1.0$), the standard deviation decreases to 0.00008, resulting in fully peaked densities [S1].
 

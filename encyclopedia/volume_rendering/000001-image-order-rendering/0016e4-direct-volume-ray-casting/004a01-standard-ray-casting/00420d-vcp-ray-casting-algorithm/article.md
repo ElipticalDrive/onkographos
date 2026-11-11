@@ -1,0 +1,111 @@
+# VCP Ray-Casting Algorithm
+Also called: Vector-to-Closest-Point Ray Casting
+
+## Overview
+The VCP Ray-Casting Algorithm renders a smooth surface approximation from a dense point cloud by storing vector-valued data in a grid structure, rather than rendering discrete points or scalar distance fields directly [S1, unofficial]. It solves the problem of noisy rendering caused by sensor noise and calibration errors in real-world LiDAR data, where points do not strictly lie on the scene surface [S2]. Unlike standard closest-point ray casting which selects the single nearest point (z-buffer), VCP uses the length of an interpolated vector to determine step sizes and the vector direction as the surface normal, allowing for adaptive marching and smooth shading [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A VCP grid (a sparse octree or uniform grid where each cell contains a 3D vector $\vec{V}$ and a scalar distance $d_{empty}$ for empty blocks) [S1, unofficial].
+*   **Input:** Camera parameters (origin $O$, direction $D$) [S1, unofficial].
+*   **Input:** Threshold $\epsilon$ (small positive value, e.g., $10^{-3}$) [S1, unofficial].
+*   **Output:** A rendered image with surface color and normals [S1, unofficial].
+
+**Data Structures**
+The VCP grid stores two types of data per block:
+1.  **Empty Block:** Stores a scalar distance value $d_{empty}$ representing the distance to the nearest surface point from the block center [S1, unofficial].
+2.  **Non-Empty Block:** Stores a 3D vector $\vec{V} = (V_x, V_y, V_z)$, which points from the block center to the closest surface point. The length $|\vec{V}|$ represents the distance to the surface [S1, unofficial].
+
+**Algorithm Steps**
+1.  **Ray Generation:** For each pixel, generate a ray $r(t) = O + tD$. Compute the intersection with the object's axis-aligned bounding box (AABB) to find entry $t_{start}$ and exit $t_{end}$ [S1, unofficial].
+2.  **Marching Loop:** March the ray from $t_{start}$ to $t_{end}$ using varying step sizes [S1, unofficial].
+    *   Let $P_{curr}$ be the current sampling position.
+    *   Determine the block containing $P_{curr}$.
+    *   **Case A (Empty Block):** Read the scalar distance $d_{empty}$ from the block [S1, unofficial].
+    *   **Case B (Non-Empty Block):** Interpolate the VCP vector $\vec{V}$ from the neighboring blocks (e.g., trilinear interpolation) [S1, unofficial]. Calculate the step size $s = |\vec{V}|$ [S1, unofficial].
+    *   **Step Size Selection:** Let $d_{next}$ be the distance value obtained ($d_{empty}$ or $|\vec{V}|$) [S1, unofficial].
+    *   **Termination Check:** If $d_{next} < \epsilon$, assume a ray-surface intersection has been found [S1, unofficial].
+    *   **Advance:** If $d_{next} \ge \epsilon$, set the step size for the next iteration to $s = d_{next}$ and advance the ray: $P_{next} = P_{curr} + s \cdot D$ [S1, unofficial].
+3.  **Intersection Refinement:** When $d_{next} < \epsilon$, the exact intersection point $P_{hit}$ is not exactly at $P_{curr}$. Interpolate between the previous sampling point $P_{prev}$ and the current point $P_{curr}$ to find the location where the distance is exactly $\epsilon$ [S1, unofficial].
+    *   Let $d_{prev}$ be the distance value at $P_{prev}$ and $d_{curr}$ be the value at $P_{curr}$ (which is $< \epsilon$).
+    *   Compute the interpolation factor $\lambda = \frac{d_{prev} - \epsilon}{d_{prev} - d_{curr}}$ [G].
+    *   Calculate $P_{hit} = P_{prev} + \lambda (P_{curr} - P_{prev})$ [G].
+4.  **Normal Estimation:** At $P_{hit}$, the surface normal $\vec{N}$ is the normalized VCP vector $\vec{V}$ interpolated at that location [S1, unofficial].
+    *   $\vec{N} = \frac{\vec{V}}{|\vec{V}|}$ [S1, unofficial].
+5.  **Lighting:** Evaluate a local lighting model (e.g., Phong or Lambertian) using $\vec{N}$ and the light direction to compute the pixel color [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def vcp_ray_casting(ray_origin, ray_dir, vcp_grid, epsilon):
+    # 1. Intersect ray with AABB
+    t_start, t_end = intersect_aabb(ray_origin, ray_dir, vcp_grid.bbox)
+    if t_start > t_end:
+        return None # Ray misses
+
+    # 2. Initialize marching
+    t = t_start
+    p_prev = ray_origin + t_start * ray_dir
+    d_prev = get_distance_at(vcp_grid, p_prev) # Helper to get d_empty or |V|
+
+    while t < t_end:
+        p_curr = ray_origin + t * ray_dir
+        d_curr = get_distance_at(vcp_grid, p_curr)
+
+        # 3. Check for intersection
+        if d_curr < epsilon:
+            # 4. Refine intersection point
+            # Linear interpolation between prev and curr to find exact epsilon distance
+            # Note: d_prev should be >= epsilon if we are just entering the surface region
+            if d_prev == d_curr:
+                # Degenerate case, avoid division by zero
+                p_hit = p_curr
+            else:
+                lambda_t = (d_prev - epsilon) / (d_prev - d_curr)
+                p_hit = p_prev + lambda_t * (p_curr - p_prev)
+            
+            # 5. Get Normal
+            # Interpolate VCP vector at p_hit
+            vcp_vec = interpolate_vcp_vector(vcp_grid, p_hit)
+            normal = normalize(vcp_vec)
+            
+            # 6. Lighting
+            color = compute_lighting(p_hit, normal, ray_dir)
+            return color
+
+        # 7. Determine step size
+        # If non-empty block, step size is |V|. If empty, step size is d_empty.
+        # The function get_distance_at returns this scalar value.
+        step_size = d_curr
+        
+        # Advance
+        p_prev = p_curr
+        d_prev = d_curr
+        t += step_size
+
+    return None # Ray exited volume without hitting surface
+```
+
+**Parameters**
+*   $\epsilon$: Threshold for surface intersection. Smaller values yield higher accuracy but may require more steps [S1, unofficial]. Typical value: Not given in the sources.
+
+## Subtopics
+
+### First Peak Averaging (FPA) Raycasting
+FPA is a variant used in LiDAR rendering (e.g., PCGen) to handle noise where points do not strictly lie on the surface [S2]. Instead of selecting the single closest point (standard CP ray-casting), FPA averages multiple points within a certain distance threshold near the closest point, weighting them by their inverse distance [S2]. This reduces noise in the rendered range image [S2]. It is often combined with a Ray-drop MLP to model return probability $p = MLP(\theta', d, i)$, where $\theta'$ is the viewing direction, $d$ is distance, and $i$ is intensity [S2]. The MLP has 4 layers, width 128, trained with Adam (lr 5e-3) for 10k iterations [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the density of the point cloud and the step size. Adaptive step sizes (using VCP vector length) can skip empty space, potentially speeding up rendering compared to fixed-step ray casting [S1, unofficial].
+*   **Memory Complexity:** Requires storing the VCP grid. The grid size depends on the resolution and the sparsity of the point cloud (if using an octree) [S1, unofficial].
+*   **Strengths:** Produces smooth surfaces from noisy point clouds; provides explicit surface normals for lighting; adaptive stepping allows efficient traversal of empty space [S1, unofficial].
+*   **Limitations:** Requires preprocessing to build the VCP grid; interpolation of vectors can be computationally expensive if not optimized; accuracy depends on the choice of $\epsilon$ [S1, unofficial].
+*   **When to use:** When rendering surfaces from dense, noisy LiDAR point clouds where smooth shading and normals are required [S1, unofficial][S2].
+*   **When not to use:** When the input is a clean, dense mesh or when real-time performance is critical and grid construction overhead is prohibitive [S1, unofficial].
+
+## Background
+The VCP (Vector-to-Closest-Point) method was introduced in the paper "Vector-to-Closest-Point Octree for Surface Ray-Casting" [S1, unofficial]. It addresses the limitations of standard closest-point ray casting, which is sensitive to noise and produces jagged surfaces [S1, unofficial]. The method uses an octree structure to store vector data, allowing for efficient ray traversal and smooth surface reconstruction [S1, unofficial]. It has been applied in computer graphics for surface rendering from point clouds [S1, unofficial].
+
+## Sources
+[S1] Vector-to-Closest-Point Octree for Surface Ray-Casting, https://doi.org/10.2312/vmv.20151259, fetched 2026-10-26 (unofficial)
+[S2] LiDAR-NeRF: Novel LiDAR View Synthesis via Neural Radiance Fields, https://arxiv.org/abs/2304.10406v2, fetched 2026-10-26

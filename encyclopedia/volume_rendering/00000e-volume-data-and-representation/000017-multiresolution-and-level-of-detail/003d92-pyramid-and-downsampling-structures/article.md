@@ -1,6 +1,4 @@
 # Pyramid and Downsampling Structures
-
-
 ## Overview
 Pyramid and Downsampling Structures generate a hierarchy of data representations at decreasing spatial resolutions to optimize rendering performance and memory usage for large volumetric datasets [S2, unofficial]. This family operates directly on spatial grid structures rather than transform coefficients, distinguishing it from [Wavelet-based Volume Rendering](1052-wavelet-based-volume-rendering.md), and preserves the voxel-based nature of the input data, distinguishing it from [Mesh Simplification](1032-mesh-simplification.md) [G].
 
@@ -22,7 +20,7 @@ Constructs a progressive coefficient stream from a morphological pyramid to allo
 Creates a low-resolution coordinate grid and an index map to map high-resolution coordinates to their corresponding low-resolution locations. It is used when coordinate mapping and grid scaling are required for downsampling operations.
 
 ### [Mipmap Generation](2602-mipmap-generation.md)
-Creates a hierarchy of downscaled volume data to enable multi-resolution rendering and faster traversal. It sets itself apart by explicitly organizing data into a structured mip-chain accessible via texture sampling, focusing on the generation pipeline rather than LOD selection logic[G].
+Creates a hierarchy of downscaled volume data to enable multi-resolution rendering and faster traversal. It sets itself apart by explicitly organizing data into a structured mip-chain accessible via texture sampling, focusing on the generation pipeline rather than LOD selection logic [G].
 
 ### [Progressive Downsampling](9860-progressive-downsampling.md)
 Not given in the sources.
@@ -31,13 +29,13 @@ Not given in the sources.
 Replaces standard pixel-wise image comparison with matching of local histograms to extend gradient support for sparse gradients caused by motion in image space. It solves poor convergence and local minima in inverse rendering by preserving local variations within neighborhoods, differing from Gaussian pyramids which average out local appearance and suppress high-frequency details.
 
 ### Patch Merging Layer
-Downsamples spatial resolution by half while doubling channels by concatenating four overlapping spatial patches [S1, unofficial]. Input tensor $x$ of shape $(B, H \times W, C)$ is verified for even dimensions, reshaped to $(B, H, W, C)$, and split into four overlapping patches $x_0, x_1, x_2, x_3$ via strided slicing. These are concatenated along the channel dimension, reshaped to $(B, -1, 4 \times C)$, normalized, and passed through a linear reduction layer to halve channels, yielding an output of shape $(B, H/2 \times W/2, 2 \times \text{dim})$ [S1, unofficial].
+Downsamples spatial resolution by half while doubling channels by concatenating four overlapping spatial patches [S1, unofficial]. Input tensor $x$ of shape $(B, H \times W, C)$ is verified for even dimensions, reshaped to $(B, H, W, C)$, and split into four overlapping patches $x_0, x_1, x_2, x_3$ via strided slicing [S1, unofficial]. These are concatenated along the channel dimension, reshaped to $(B, -1, 4 \times C)$, normalized, and passed through a linear reduction layer to halve channels, yielding an output of shape $(B, H/2 \times W/2, 2 \times \text{dim})$ [S1, unofficial].
 
 ### Volumetric Multi-Resolution Hierarchy (3D Mip-Map)
 A hierarchy of alias-free volume buffers at different resolutions, generated using volume-sampled voxelization to support time-critical and space-critical applications [S2, unofficial]. High frequencies exceeding the Nyquist frequency of each buffer are filtered out using an ideal low-pass filter (sinc) with infinite support, approximated in practice by finite-support filters whose support widens as resolution decreases [S2, unofficial]. Filter types include zero order, cubic, or Gaussian, selected based on required speed and accuracy [S2, unofficial].
 
 ## Background
-The general concept of pyramid structures in computer graphics dates back to the 1980s with the development of mipmapping for texture mapping [G]. Specific implementations and their origins are not detailed in the provided sources.
+Not given in the sources.
 
 ## Sources
 [S1] ApaarRaina/DiffTomo, https://github.com/ApaarRaina/DiffTomo, fetched 2026-10-27 (unofficial)

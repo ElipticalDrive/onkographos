@@ -11,12 +11,12 @@ Iterative Bisection Intersection Refinement is a post-detection technique used t
 *   **Outputs:** The refined intersection parameter $t_{hit}$ (or position $\mathbf{x}_{hit}$) [S1, unofficial][S4].
 
 **Data Structures:**
-The method operates on scalar values and 3D coordinates. No complex data structures are required beyond the ray parameters and the scalar field texture/volume access function [S1, unofficial][S4].
+The method operates on scalar values and 3D coordinates [G]. No complex data structures are required beyond the ray parameters and the scalar field texture/volume access function [S1, unofficial][S4].
 
 **Steps:**
 1.  **Initialization:** Define the search interval. Let $L$ (or $x_{near}$) be the point outside the isovalue (where $f(L) < \rho$) and $R$ (or $x_{far}$) be the point inside or at the isovalue (where $f(R) \ge \rho$) [S4]. In adaptive sampling contexts, these correspond to $t_{prev}$ and $t_{curr}$ respectively [S1, unofficial].
 2.  **Iteration Loop:** Repeat for a fixed number of iterations $N$ (typically 4 to 10) [S2, S4]:
-    a.  **Linear Interpolation:** Compute the new candidate point $\mathbf{x}_{new}$ (or parameter $M$) using linear interpolation between the current bounds. The position is calculated as:
+    a.  **Linear Interpolation:** Compute the new candidate point $\mathbf{x}_{new}$ (or parameter $M$) using linear interpolation between the current bounds [S2]. The position is calculated as:
         $$ \mathbf{x}_{new} = (\mathbf{x}_{far} - \mathbf{x}_{near}) \frac{\rho - f_{near}}{f_{far} - f_{near}} + \mathbf{x}_{near} $$
         Alternatively, in parameter space $t$:
         $$ t_{new} = t_{near} + (t_{far} - t_{near}) \frac{\rho - f_{near}}{f_{far} - f_{near}} $$
@@ -25,7 +25,7 @@ The method operates on scalar values and 3D coordinates. No complex data structu
     c.  **Interval Update:** Compare $f_{new}$ with $\rho$:
         *   If $f_{new} < \rho$ (the new point is outside the isovalue), update the lower bound: set $x_{near} = \mathbf{x}_{new}$ and $f_{near} = f_{new}$ [S4].
         *   If $f_{new} \ge \rho$ (the new point is inside or at the isovalue), update the upper bound: set $x_{far} = \mathbf{x}_{new}$ and $f_{far} = f_{new}$ [S4].
-        *   *Note:* Some implementations use strict inequality for the upper bound update ($d_M > 0$) and lower bound update ($d_M < 0$) assuming centered zero-level sets [S3, unofficial].
+        *   *Note:* Some implementations use strict inequality for the upper bound update ($d_M > 0$) and lower bound update ($d_M < 0$) assuming centered zero-level sets [S3, unofficial]. While the method is named "bisection", it primarily uses linear interpolation [S2, S4], though some variants use strict midpoint bisection ($M = (L+R)/2$) [S3, unofficial].
 3.  **Termination:** After $N$ iterations, the refined intersection position is $\mathbf{x}_{new}$ (or $t_{new}$) [S4]. If $N=0$, return the midpoint of the final interval $(t_{min} + t_{max}) / 2$ [S3, unofficial].
 4.  **Shading:** The refined point is shaded using the appropriate lighting model [S4].
 
@@ -35,12 +35,10 @@ The method operates on scalar values and 3D coordinates. No complex data structu
 ```python
 def sample_scalar_field(pos):
     """Standard volume lookup. Returns scalar value at pos."""
-    # Implementation depends on volume format (e.g., trilinear interpolation)
     return volume_lookup(pos)
 
 def intersect_domain_box(origin, direction, domain_min, domain_max):
     """Standard ray-AABB intersection. Returns (t_min, t_max)."""
-    # Standard slab method implementation
     t_min = -float('inf')
     t_max = float('inf')
     for i in range(3):
@@ -67,8 +65,7 @@ def refine_iso_hit_bisection(origin, direction, t_prev, t_curr, d_prev, d_curr, 
     if f_near >= isovalue or f_far < isovalue:
         return (t_near + t_far) / 2.0
 
-    for i in range(num_iterations):
-        # Linear interpolation to find new point
+    for _ in range(num_iterations):
         denom = f_far - f_near
         if abs(denom) < 1e-9:
             t_new = (t_near + t_far) / 2.0
@@ -125,9 +122,9 @@ def ray_march_with_refinement(origin, direction, domain_min, domain_max, isovalu
 *   `isovalue` ($\rho$): The scalar threshold defining the surface [S2, S4].
 
 **Edge Cases and Pitfalls:**
-*   **Division by Zero:** If $f_{far} \approx f_{near}$, the linear interpolation formula divides by zero. The pseudocode handles this by falling back to the midpoint [S3, unofficial][S4].
+*   **Division by Zero:** If $f_{far} \approx f_{near}$, the linear interpolation formula divides by zero [G]. The pseudocode handles this by falling back to the midpoint.
 *   **Sign Change Assumption:** The method assumes a single root within the interval [S4].
-*   **Precision:** Floating-point precision errors in $f_{new}$ comparisons can cause infinite loops if not bounded by iteration count. Using a fixed iteration count avoids this [S2, S4].
+*   **Precision:** Floating-point precision errors in $f_{new}$ comparisons can cause infinite loops if not bounded by iteration count [G]. Using a fixed iteration count avoids this [S2, S4].
 
 ## Subtopics
 
@@ -146,6 +143,9 @@ The Bisection Method for Surface Depth Refinement is an iterative root-finding a
 ### [Hitpoint Refinement](2712-hitpoint-refinement.md)
 Hitpoint Refinement is an iterative technique to achieve higher quality in detecting surface intersections without reducing rendering speed. It allows for coarser initial sampling steps to increase rendering speed, refining the detected intersection point through a specific heuristic procedure. It sets itself apart from its siblings by using a "half-step back, then check direction" adjustment rather than standard bisection or secant methods, enabling significant speedups when paired with large initial sampling distances.
 
+### Windowed Bisection for Isosurface Refinement
+Windowed Bisection for Isosurface Refinement refines the isosurface position along a ray using 4 iterations of bisection with windowing, ensuring correctness across brick boundaries by using `sampleWithIndirection` [S5, unofficial]. It initializes `lo = tLow` and `hi = tHigh`, then loops 4 times to calculate the midpoint `mid = (lo + hi) * 0.5`, position `pos = rayOrigin + rayDir * mid`, and voxel coordinates `voxel = normalizedToVoxel(pos, ...)` [S5, unofficial]. It samples density, normalizes it to [0,1] using `uniforms.floatMin` and `uniforms.floatMax`, then applies windowing: `density = applyWindow(normalizedDensity, windowCenter, windowWidth);` [S5, unofficial]. It updates bounds: if `density >= isoValue`, set `hi = mid`; else `lo = mid`, and returns `(lo + hi) * 0.5` [S5, unofficial].
+
 ## Operating characteristics
 *   **Time Complexity:** $O(N)$ scalar field evaluations per intersection, where $N$ is the number of refinement iterations [S4]. This is significantly cheaper than solving cubic polynomials for exact trilinear intersection but more expensive than a single-step detection [S1, unofficial].
 *   **Memory Complexity:** $O(1)$ auxiliary memory [G].
@@ -163,3 +163,4 @@ The method originates from real-time volume graphics research, specifically in t
 [S2] PDF Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces, https://cgl.ethz.ch/people/archive/siggc/publications/eg05.pdf, fetched 2026-10-26
 [S3] zichenwang01/relaxed-boundary, https://github.com/zichenwang01/relaxed-boundary, fetched 2026-10-27 (unofficial)
 [S4] Adding Refined Isosurface Rendering and Shadow Mapping to vtkGPUVolumeRayCastMapper, https://insight-journal.org/pdfs/880.pdf, fetched 2026-10-27
+[S5] Show HN: Kiln – WebGPU-native out-of-core volume rendering for multi-GB datasets, https://github.com/MPanknin/kiln-render, fetched 2026-10-26 (unofficial)

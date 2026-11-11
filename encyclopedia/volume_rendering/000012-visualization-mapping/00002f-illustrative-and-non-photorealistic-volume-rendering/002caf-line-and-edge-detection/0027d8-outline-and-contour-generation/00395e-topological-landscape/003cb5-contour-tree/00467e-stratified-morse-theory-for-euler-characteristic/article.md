@@ -3,287 +3,199 @@
 Also called: MMS-SMT, Method of Manufactured Solutions (MMS) using Stratified Morse Theory, SMT Verification, Stratified Morse Theory (SMT) Verification
 
 ## Overview
-Stratified Morse Theory (SMT) for Euler Characteristic is a method to compute the Euler characteristic $\chi$ of isosurfaces defined by piecewise trilinear interpolants on regular grids, specifically handling the non-smoothness at cell boundaries [S1, unofficial]. It serves two primary purposes: verifying the topological correctness of isosurface extraction algorithms via a Manufactured Solutions pipeline, and estimating noise levels in direct volume rendering transfer function design [S1, S2, unofficial]. Unlike smooth Morse theory, which fails on discontinuous derivatives, SMT stratifies the grid into vertices, edges, faces, and cells to apply local topological analysis [S1, unofficial]. It is distinct from the [Contour Tree](9312-contour-tree.md) in that it provides a scalar topological invariant ($\chi$) for verification or noise estimation rather than a hierarchical graph of critical points, and differs from [Reeb Graph](9315-reeb-graph.md) by focusing on the Euler characteristic specifically rather than component merging/splitting paths [S1, S2, unofficial].
+Stratified Morse Theory (SMT) for Euler Characteristic is a mathematical framework and verification pipeline used to compute the Euler characteristic ($\chi$) of isosurfaces generated from piecewise trilinear scalar fields, specifically handling non-smoothness at cell boundaries and surfaces with boundary components [S1, unofficial]. It solves the problem of verifying the topological correctness of isosurface extraction algorithms (such as Marching Cubes) by comparing the Euler characteristic derived from critical point analysis against the Euler characteristic of the extracted mesh [S1, unofficial]. Unlike its siblings, which often rely on smooth manifold assumptions or digital topology constraints, SMT explicitly stratifies the grid into vertices, edges, faces, and cells to apply Morse theory locally, making it robust for verifying algorithms that guarantee topological correctness in the presence of ambiguous configurations [S1, unofficial].
 
 ## How it works
-The method operates in two distinct contexts: **Verification** (computing $\chi$ from critical points of a trilinear field) and **Noise Estimation** (computing Total Euler Characteristic from an image/volume).
+The method operates as a verification pipeline, typically within a Method of Manufactured Solutions (MMS) context, where random scalar fields are generated, and the topological invariants of the resulting isosurfaces are computed via two independent methods: critical point analysis (SMT) and mesh analysis.
 
 ### Inputs and Outputs
-*   **Verification Input:** A rectilinear grid $G$ of size $n \times n \times n$ with scalar values sampled in $[-1, 1]$ [S1, unofficial].
-*   **Verification Output:** The Euler characteristic $\chi$ of the isosurface at a specific isovalue (typically 0) [S1, unofficial].
-*   **Noise Input:** An integer-valued image (2D) or volume (3D) (e.g., 8-bit or 16-bit) [S2, unofficial].
-*   **Noise Output:** The Total Euler Characteristic (TEC), a scalar noise measure [S2, unofficial].
+*   **Input:** A rectilinear grid $G$ of size $n \times n \times n$ with scalar values sampled in the interval $[-1, 1]$ [S1, unofficial].
+*   **Output:** A boolean verification result (Pass/Fail) indicating whether the Euler characteristic computed from critical points matches the Euler characteristic computed from the extracted mesh [S1, unofficial].
 
 ### Data Structures
-1.  **Stratified Grid:** The domain is partitioned into four strata:
-    *   $V$: Vertex set (0-dimensional).
-    *   $E$: Edge set (1-dimensional interiors).
-    *   $F$: Face set (2-dimensional interiors).
-    *   $C$: Cell set (3-dimensional interiors) [S1, unofficial].
-2.  **Histogram (Noise Context):** An array $H[T]$ indexed by intensity value $T$, with bin width 1. Size depends on data type (e.g., 256 for 8-bit) [S2, unofficial].
+1.  **Stratified Grid $M$:** The grid is partitioned into four disjoint strata:
+    *   **Vertex Set ($V$):** All grid vertices.
+    *   **Edge Set ($E$):** Interiors of all grid edges.
+    *   **Face Set ($F$):** Interiors of all grid faces.
+    *   **Cell Set ($C$):** Interiors of all grid cells [S1, unofficial].
+2.  **Critical Points ($CPs$):** A list of points $p$ where the gradient is zero within their respective stratum, plus all points in the Vertex Set (which are considered critical by definition in SMT) [S1, unofficial].
 
-### Algorithm: Verification (MMS-SMT)
-This pipeline verifies an isosurfacing algorithm by comparing the $\chi$ computed from the mesh against the $\chi$ computed from SMT critical points [S1, unofficial].
+### Numbered Steps
+1.  **Stratify the Grid:** Partition the grid $G$ into the four sets defined above: Vertex, Edge, Face, and Cell [S1, unofficial].
+2.  **Identify Critical Points:**
+    *   For each stratum (Edge, Face, Cell), find points where the gradient of the trilinear interpolant restricted to that stratum is zero.
+    *   Include all vertices in the Vertex Set as critical points [S1, unofficial].
+3.  **Check for Degeneracy:** If any critical point $p$ is degenerate or is an internal saddle close to edges or faces, discard the current grid sample and restart from Step 1 to avoid numerical instabilities [S1, unofficial].
+4.  **Extract Isosurface:** Extract the isosurface mesh $K$ from $G$ using the isosurfacing technique under verification, typically at an isovalue $\alpha$ that is not a critical value (e.g., $\alpha=0$) [S1, unofficial].
+5.  **Compute SMT Euler Characteristic ($\chi_v$):**
+    *   For each critical point $p$, determine its stratum (Vertex, Edge, Face, or Cell).
+    *   Compute the lower link $L^-(p)$ and upper link $L^+(p)$ Euler characteristics.
+    *   Calculate the change $\Delta\chi(p) = \chi(L^+(p)) - \chi(L^-(p))$ [S1, unofficial].
+    *   Sum the changes: $\chi_v = \sum_{p \in CPs} \Delta\chi(p)$ [S1, unofficial].
+6.  **Compute Mesh Euler Characteristic ($\chi_k$):**
+    *   Extract the triangle mesh $K$ from the isosurfacing algorithm.
+    *   Compute $\chi_k = V(K) - E(K) + F(K)$, where $V, E, F$ are the counts of vertices, edges, and triangles in $K$ [S1, unofficial].
+7.  **Compare:** If $\chi_v \neq \chi_k$, the verification fails [S1, unofficial].
 
-1.  **Generate Grid:** Let $G$ be an $n \times n \times n$ rectilinear grid.
-2.  **Loop Tests:** For $i$ from 1 to `#tests`:
-    3.  **Sample:** Randomly sample scalar values for $G$ from $[-1, 1]$ [S1, unofficial].
-    4.  **Compute Critical Points (CPs):**
-        *   Identify points with zero gradient on each stratum (Edge, Face, Cell) [S1, unofficial].
-        *   Include all points in the Vertex set as critical points [S1, unofficial].
-    5.  **Check Degeneracy:** If any critical point $p$ is degenerate or is an internal saddle close to edges/faces, restart from step 3 [S1, unofficial].
-    6.  **Extract Mesh:** Extract isosurface $K$ from $G$ using the algorithm under verification [S1, unofficial].
-    7.  **Compute $\chi_v$ (SMT):** Calculate $\chi$ from critical points using the stratified formulas below [S1, unofficial].
-    8.  **Compute $\chi_k$ (Mesh):** Calculate $\chi$ from mesh $K$ using $\chi(M) = V(M) - E(M) + F(M)$, where $V, E, F$ are counts of vertices, edges, and triangles [S1, unofficial].
-    9.  **Compare:** If $\chi_v \neq \chi_k$, verification fails [S1, unofficial].
+### Formulas
+The core of SMT is computing $\chi(L^-(p))$ and $\chi(L^+(p))$ for critical points in non-smooth strata.
 
-### Algorithm: Noise Estimation (TEC)
-This method computes the evolution of $\chi$ for all isovalues simultaneously using a raster scan [S2, unofficial].
+**General Recursive Formula:**
+For a critical point $p$ in a $d$-dimensional stratum, let $T_{L^-}(p)$ be the lower tangential link and $N_{L^-}(p)$ be the lower normal link. The Euler characteristic of the lower link is:
+$$ \chi(L^-(p)) = \chi(N_{L^-}(p)) + \chi(T_{L^-}(p)) - \chi(N_{L^-}(p))\chi(T_{L^-}(p)) $$
+This formula is applied recursively. If $T_{L^-}(p)$ or $T_{L^+}(p)$ are not 1-disks, the equation is applied to lower-dimensional strata until 1-disks are reached, where $\chi$ is simply the cardinality of the set (0, 1, or 2 points) [S1, unofficial].
 
-1.  **Initialize:** Create histogram $H[T]$ with bin width 1 for all possible intensity values $I$ [S2, unofficial].
-2.  **Raster Scan:** Perform a single pass over the image/volume using a sliding window:
-    *   **2D:** $2 \times 2$ neighborhood.
-    *   **3D:** $2 \times 2 \times 2$ neighborhood [S2, unofficial].
-3.  **Update Histogram:** For each neighborhood, update $H$ based on the topology of the super level set as the isovalue decreases from maximum to minimum:
-    *   **Vertices:** For each vertex in the neighborhood, increment $H[I(x,y)]$ (2D) or $H[I(x,y,z)]$ (3D). This corresponds to the creation of a connected component (island) [S2, unofficial].
-    *   **Edges (2D) / Faces (3D):**
-        *   In 2D, for each edge, decrement $H[\min(I_{neighbor1}, I_{neighbor2})]$. This corresponds to the creation of a hole (or merging of components) [S2, unofficial].
-        *   In 3D, for each face, increment $H[\min(I_{neighbors})]$. This corresponds to the creation of a tunnel (Betti-1 feature) [S2, unofficial].
-    *   **Cells (3D):** For each voxel (cell), decrement $H[\min(I_{voxel})]$. This corresponds to the closure of a tunnel [S2, unofficial].
-4.  **Accumulate:** After the scan, accumulate $H$ from the highest bin downwards. Each bin $H[T]$ now contains the cumulative Euler characteristic $\chi(T)$ for the super level set at isovalue $T$ [S2, unofficial].
-5.  **Compute TEC:** Calculate $TEC = \sum_T |\chi(T)|$ [S2, unofficial].
+**Vertex Critical Points:**
+For a critical point $p$ located at a vertex, let $nl_i$ be the number of adjacent vertices in Cartesian direction $i$ with scalar values less than $p$'s value.
+$$ \chi(L^-(p)) = nl_1 + nl_2 + nl_3 - nl_1(nl_2 + nl_3) $$
+$\chi(L^+(p))$ is computed similarly using neighbors with higher values [S1, unofficial].
 
-### Critical Point Analysis (Verification Context)
-For a critical point $p$, the change in Euler characteristic is $\Delta\chi(p) = \chi(L^+(p)) - \chi(L^-(p))$ [S1, unofficial]. The links $L^-$ and $L^+$ are defined by tangential ($T$) and normal ($N$) submanifolds [S1, unofficial].
+**Face Critical Points:**
+Critical points on faces are necessarily saddles. Let $r$ be the face containing $p$, and $r^\perp$ be the line segment orthogonal to $r$ passing through $p$. Let $nl$ be the number of ends of $r^\perp$ with scalar values less than $p$, and $nu$ be the number of ends with values higher than $p$.
+$$ \chi(L^-(p)) = nl + 2 - 2nl $$
+$$ \chi(L^+(p)) = nu + 2 - 2nu $$
+Solutions for face critical points are found by setting coordinates to 0 or 1 and solving the linear equation; solutions outside the unit cube are ignored [S1, unofficial].
 
-**Recursive Formula:**
-$$ \chi(L^-) = \chi(N_{L^-}) + \chi(T_{L^-}) - \chi(N_{L^-})\chi(T_{L^-}) $$
-This is applied recursively until 1-disks are reached [S1, unofficial].
+**Cell Critical Points:**
+For critical points in the interior of cubic cells, standard smooth Morse theory applies, as the normal Morse data is 0-dimensional. The change in Euler characteristic is determined by the index of the critical point (number of negative Hessian eigenvalues) [S1, unofficial].
 
-**Specific Cases:**
+**Total Euler Characteristic:**
+$$ \chi_\alpha = \sum_{p \in CP_\alpha} \Delta\chi(p) $$
+where $CP_\alpha$ is the set of critical points with value $\alpha$ [S1, unofficial].
 
-1.  **Vertex Critical Points:**
-    Let $nl_1, nl_2, nl_3$ be the number of adjacent vertices with scalar values less than $p$ in the $x, y, z$ directions respectively [S1, unofficial].
-    $$ \chi(L^-(p)) = nl_1 + nl_2 + nl_3 - nl_1(nl_2 + nl_3) $$
-    $$ \chi(L^+(p)) \text{ is computed similarly using neighbors with values greater than } p $$ [S1, unofficial].
-
-2.  **Face Critical Points (Saddles):**
-    Let $r$ be the face containing $p$. Let $r^\perp$ be the line segment orthogonal to $r$ through $p$.
-    Let $nl$ be the number of ends of $r^\perp$ with scalar value less than $p$.
-    Let $nu$ be the number of ends of $r^\perp$ with scalar value higher than $p$.
-    $$ \chi(L^-(p)) = nl + 2 - 2nl $$
-    $$ \chi(L^+(p)) = nu + 2 - 2nu $$ [S1, unofficial].
-
-3.  **Edge/Critical Points in Cell Interiors:**
-    *   Edge critical points are found by solving linear equations derived from the trilinear interpolant. Solutions outside the unit cube are ignored [S1, unofficial].
-    *   Cell interior critical points are handled by smooth Morse theory (Hessian eigenvalues) as the function is smooth within the cell [S1, unofficial].
-
-### Pseudocode: Verification (MMS-SMT)
-
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def verify_isosurface(grid, isosurfacing_func, num_tests):
+def verify_isosurface_topology(grid, isosurfacing_func, num_tests):
     """
     Verifies an isosurfacing algorithm using Stratified Morse Theory.
-    grid: n x n x n rectilinear grid with scalar values in [-1, 1]
-    isosurfacing_func: function that extracts a mesh from grid
-    num_tests: number of random tests to perform
+    
+    Args:
+        grid: n x n x n rectilinear grid structure.
+        isosurfacing_func: Function that takes a grid and returns a mesh K.
+        num_tests: Number of random samples to test.
+        
+    Returns:
+        True if all tests pass, False otherwise.
     """
     for i in range(num_tests):
-        # 1. Randomly sample grid
-        grid = random_sample_grid(grid)
+        # 1. Randomly sample the grid with values in [-1, 1]
+        scalar_field = random_sample_grid(grid, min_val=-1.0, max_val=1.0)
         
-        # 2. Compute Critical Points
-        critical_points = compute_stratified_critical_points(grid)
+        # 2. Compute Critical Points (CPs)
+        cps = compute_critical_points(scalar_field)
         
         # 3. Check for degeneracy
-        if has_degenerate_critical_point(critical_points):
+        if is_degenerate_or_boundary_saddle(cps):
             continue # Restart test
-        
-        # 4. Extract Mesh
-        mesh = isosurfacing_func(grid, isovalue=0)
-        
-        # 5. Compute Chi from Mesh
-        chi_mesh = compute_mesh_euler_characteristic(mesh)
-        
-        # 6. Compute Chi from SMT
-        chi_smt = 0
-        for p in critical_points:
-            delta_chi = compute_critical_point_delta_chi(p, grid)
-            chi_smt += delta_chi
             
+        # 4. Extract Isosurface
+        # Use isovalue 0, assuming it's not a critical value
+        mesh_k = isosurfacing_func(scalar_field, isovalue=0.0)
+        
+        # 5. Compute Euler Characteristic from Critical Points (SMT)
+        chi_v = 0.0
+        for p in cps:
+            stratum = get_stratum(p)
+            if stratum == 'vertex':
+                chi_v += compute_vertex_delta_chi(p, scalar_field)
+            elif stratum == 'face':
+                chi_v += compute_face_delta_chi(p, scalar_field)
+            elif stratum == 'cell':
+                chi_v += compute_cell_delta_chi(p, scalar_field)
+            elif stratum == 'edge':
+                chi_v += compute_edge_delta_chi(p, scalar_field)
+                
+        # 6. Compute Euler Characteristic from Mesh
+        v_count = count_vertices(mesh_k)
+        e_count = count_edges(mesh_k)
+        f_count = count_triangles(mesh_k)
+        chi_k = v_count - e_count + f_count
+        
         # 7. Compare
-        if chi_smt != chi_mesh:
-            return False, "Verification failed: Chi mismatch"
+        if abs(chi_v - chi_k) > 1e-9: # Allow small floating point error
+            return False
             
-    return True, "Verification passed"
+    return True
 
-def compute_critical_point_delta_chi(p, grid):
+def compute_vertex_delta_chi(p, scalar_field):
     """
-    Computes Delta Chi for a single critical point p.
+    Computes Delta Chi for a vertex critical point.
+    nl_i: number of neighbors in direction i with value < p.value
     """
-    stratum = get_stratum(p)
+    neighbors_less = get_adjacent_vertices_less_than(p, scalar_field)
+    nl1 = neighbors_less[0]
+    nl2 = neighbors_less[1]
+    nl3 = neighbors_less[2]
     
-    if stratum == 'vertex':
-        nl1 = count_adjacent_vertices_less_than(p, axis=0)
-        nl2 = count_adjacent_vertices_less_than(p, axis=1)
-        nl3 = count_adjacent_vertices_less_than(p, axis=2)
-        chi_L_minus = nl1 + nl2 + nl3 - nl1 * (nl2 + nl3)
-        
-        nu1 = count_adjacent_vertices_greater_than(p, axis=0)
-        nu2 = count_adjacent_vertices_greater_than(p, axis=1)
-        nu3 = count_adjacent_vertices_greater_than(p, axis=2)
-        chi_L_plus = nu1 + nu2 + nu3 - nu1 * (nu2 + nu3)
-        
-    elif stratum == 'face':
-        # p lies in face r
-        nl = count_ends_orthogonal_segment_less_than(p, grid)
-        nu = count_ends_orthogonal_segment_greater_than(p, grid)
-        
-        chi_L_minus = nl + 2 - 2 * nl
-        chi_L_plus = nu + 2 - 2 * nu
-        
-    elif stratum == 'edge':
-        # Solve for critical point on edge, compute links recursively
-        # Simplified: assume smooth theory applies if not degenerate
-        # Or use recursive stratified formula for 1D stratum
-        chi_L_minus = compute_recursive_link(p, 'minus', grid)
-        chi_L_plus = compute_recursive_link(p, 'plus', grid)
-        
-    elif stratum == 'cell':
-        # Smooth Morse Theory
-        hessian = compute_hessian(p, grid)
-        eigenvalues = compute_eigenvalues(hessian)
-        chi_L_minus = compute_smooth_chi_minus(eigenvalues)
-        chi_L_plus = compute_smooth_chi_plus(eigenvalues)
-        
-    else:
-        return 0
-        
+    chi_L_minus = nl1 + nl2 + nl3 - nl1 * (nl2 + nl3)
+    
+    neighbors_greater = get_adjacent_vertices_greater_than(p, scalar_field)
+    nu1 = neighbors_greater[0]
+    nu2 = neighbors_greater[1]
+    nu3 = neighbors_greater[2]
+    
+    chi_L_plus = nu1 + nu2 + nu3 - nu1 * (nu2 + nu3)
+    
     return chi_L_plus - chi_L_minus
 
-def compute_recursive_link(p, direction, grid):
+def compute_face_delta_chi(p, scalar_field):
     """
-    Recursively computes Chi(L) using the formula:
-    Chi(L) = Chi(N) + Chi(T) - Chi(N)*Chi(T)
+    Computes Delta Chi for a face critical point.
+    nl: number of ends of orthogonal line segment with value < p.value
+    nu: number of ends of orthogonal line segment with value > p.value
     """
-    # Determine Tangential (T) and Normal (N) submanifolds
-    T_submanifold = get_tangential_submanifold(p, grid)
-    N_submanifold = get_normal_submanifold(p, grid)
+    # Determine the orthogonal line segment r_perp through p on the face
+    r_perp = get_face_orthogonal_segment(p)
     
-    # Compute Chi for T and N
-    # Base case: if T or N are 1-disks, Chi is cardinality of boundary
-    if is_1_disk(T_submanifold):
-        chi_T = cardinality(boundary(T_submanifold, direction))
-    else:
-        chi_T = compute_recursive_link(T_submanifold, direction, grid)
-        
-    if is_1_disk(N_submanifold):
-        chi_N = cardinality(boundary(N_submanifold, direction))
-    else:
-        chi_N = compute_recursive_link(N_submanifold, direction, grid)
-        
-    return chi_N + chi_T - chi_N * chi_T
+    nl = count_segment_ends_less_than(r_perp, p.value, scalar_field)
+    nu = count_segment_ends_greater_than(r_perp, p.value, scalar_field)
+    
+    chi_L_minus = nl + 2 - 2 * nl
+    chi_L_plus = nu + 2 - 2 * nu
+    
+    return chi_L_plus - chi_L_minus
+
+def is_degenerate_or_boundary_saddle(cps):
+    """
+    Returns True if any critical point is degenerate or an internal saddle
+    close to edges or faces.
+    """
+    for p in cps:
+        if is_degenerate(p):
+            return True
+        if is_internal_saddle_close_to_boundary(p):
+            return True
+    return False
 ```
 
-### Pseudocode: Noise Estimation (TEC)
+### Parameters
+*   **Grid Size ($n \times n \times n$):** The resolution of the rectilinear grid [S1, unofficial].
+*   **Scalar Range:** Values are sampled in $[-1, 1]$ [S1, unofficial].
+*   **Isovalue:** Typically 0, chosen to avoid critical values [S1, unofficial].
+*   **#tests:** A large number of iterations to statistically verify the implementation [S1, unofficial].
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def compute_total_euler_characteristic(image):
-    """
-    Computes Total Euler Characteristic (TEC) for noise estimation.
-    image: 2D or 3D integer-valued array
-    """
-    # Determine dimensions
-    is_3d = image.ndim == 3
-    
-    # Initialize histogram
-    max_val = image.max()
-    min_val = image.min()
-    H = np.zeros(max_val - min_val + 1)
-    
-    # Raster scan with sliding window
-    if is_3d:
-        # 2x2x2 neighborhood
-        for x in range(image.shape[0] - 1):
-            for y in range(image.shape[1] - 1):
-                for z in range(image.shape[2] - 1):
-                    # Extract 2x2x2 block
-                    block = image[x:x+2, y:y+2, z:z+2]
-                    
-                    # Vertices: 8 vertices
-                    for v in block.flatten():
-                        H[v - min_val] += 1
-                    
-                    # Faces: 12 faces in 2x2x2 cube
-                    # Each face is a 2x2 square
-                    # Increment for min intensity of the 4 pixels in the face
-                    faces = get_faces_2x2x2()
-                    for face in faces:
-                        min_face_val = np.min(block[face])
-                        H[min_face_val - min_val] += 1
-                        
-                    # Cells: 1 voxel (the 2x2x2 block represents 1 cell in the dual sense? 
-                    # Note: Source says "decrementing the histogram for 8-voxel-cubes in a 2x2x2 neighborhood"
-                    # This implies the cell contribution is associated with the block itself)
-                    min_block_val = np.min(block)
-                    H[min_block_val - min_val] -= 1
-                    
-    else:
-        # 2x2 neighborhood
-        for x in range(image.shape[0] - 1):
-            for y in range(image.shape[1] - 1):
-                block = image[x:x+2, y:y+2]
-                
-                # Vertices: 4 vertices
-                for v in block.flatten():
-                    H[v - min_val] += 1
-                    
-                # Edges: 4 edges in 2x2 square
-                # Decrement for min intensity of the 2 pixels in the edge
-                edges = get_edges_2x2()
-                for edge in edges:
-                    min_edge_val = np.min(block[edge])
-                    H[min_edge_val - min_val] -= 1
-                    
-    # Accumulate from highest bin downwards
-    # H[T] should contain cumulative sum from max down to T
-    for t in range(len(H) - 2, -1, -1):
-        H[t] += H[t+1]
-        
-    # Compute TEC
-    tec = np.sum(np.abs(H))
-    return tec
-```
+### Edge Cases and Pitfalls
+*   **Degenerate Critical Points:** If a critical point is degenerate or an internal saddle is too close to an edge or face, the test is restarted to avoid numerical instability [S1, unofficial].
+*   **Masking Errors:** SMT may fail to detect topological errors if the algorithm introduces features that preserve the Euler characteristic. For example, a torus ($\chi=0$) plus three "cycling" triangles (each sharing two vertices but no edges, also $\chi=0$) results in a total $\chi=0$, masking the error [S1, unofficial].
+*   **Face Critical Point Detection:** Critical points on faces are found by solving linear equations with coordinates set to 0 or 1; solutions outside the unit cube $[0, 1]^3$ must be ignored [S1, unofficial].
 
 ## Subtopics
 
-### Euler Characteristic from Mesh
-A simple topological invariant calculation for a simplicial complex mesh $M$. It computes $\chi(M) = V(M) - E(M) + F(M)$, where $V, E, F$ are the number of vertices, edges, and triangles respectively [S1, unofficial]. This is used as the ground truth in the verification pipeline to compare against the SMT-computed $\chi$ [S1, unofficial].
+### [Total Euler Characteristic (TEC)](12667-total-euler-characteristic-tec.md)
+Total Euler Characteristic (TEC) is a noise level estimation metric for direct volume rendering transfer function design, defined as the L1-norm of the evolution curve of the Euler Characteristic across all possible isovalues. It solves the problem of distinguishing true topological structures (islands and holes) from noise-induced speckles in rendered images, offering a more accurate noise assessment than gradient-based measures like Total Variation (TV) or Total Second Derivatives (TSD). Unlike its siblings, TEC approximates zero for vanishing noise even in scenes with significant true gradients and curvatures, making it superior for automated transfer function optimization.
 
 ## Operating characteristics
-*   **Time Complexity:**
-    *   **Verification:** Depends on the number of critical points and the depth of recursion for link computation. The verification pipeline is repeated `#tests` times, making it a statistical verification tool rather than a real-time method [S1, unofficial].
-    *   **Noise Estimation (TEC):** Computation cost is comparable to Total Variation (TV). In 2D, it samples 4 intensity points per pixel; in 3D, 8 points [S2, unofficial]. The histogram accumulation is negligible relative to the scan [S2, unofficial].
-*   **Memory Complexity:**
-    *   **Verification:** Requires storage for the grid and critical points.
-    *   **Noise Estimation:** Requires a histogram array of size equal to the number of intensity levels (e.g., 256 for 8-bit) [S2, unofficial].
-*   **Strengths:**
-    *   **Verification:** Handles surfaces with boundary, which other topological verification methods (like Digital Surface tests) may struggle with without additional theory [S1, unofficial]. It is effective when used in unison with Digital Surface tests [S1, unofficial].
-    *   **Noise Estimation:** Superior to TV and Total Second Derivatives (TSD) for scenes with many true gradients and curvatures, as TEC approximates zero for vanishing noise better than TV/TSD [S2, unofficial]. It is computationally efficient and exact for integer-valued data [S2, unofficial].
-*   **Limitations:**
-    *   **Verification:** Less sensitive than Digital Surface tests because it only provides $\chi$, making it harder to identify the source of failure [S1, unofficial]. It may fail to detect errors if the code introduces features that preserve $\chi$ (e.g., a torus plus cycling triangles) [S1, unofficial].
-    *   **Noise Estimation:** Numerical inaccuracies at thin crests (e.g., Marschner-Lobb phantom) can produce speckles, causing TEC to not be exactly zero in the absence of noise [S2, unofficial]. Extending to floating-point data requires analysis of approximation error relative to histogram bin width [S2, unofficial].
-*   **When to Use:**
-    *   Use SMT Verification for debugging and verifying isosurface extraction algorithms that guarantee topology [S1, unofficial].
-    *   Use TEC for automated evaluation of direct volume renderings and transfer function design, especially when distinguishing noise from true signal gradients is critical [S2, unofficial].
+*   **Time Complexity:** The method requires iterating over a large number of random grid samples (#tests). For each sample, it involves finding critical points (analytically solvable for trilinear functions), extracting the mesh, and computing topological invariants. The complexity is dominated by the number of tests and the cost of isosurface extraction [S1, unofficial].
+*   **Memory Complexity:** Linear with respect to the grid size $n^3$ for storing the scalar field and the extracted mesh [S1, unofficial].
+*   **Strengths:** Handles surfaces with boundary components, which is a limitation for some other topological verification methods. It is effective when used in unison with Digital Surface (DS) tests [S1, unofficial].
+*   **Limitations:** Less sensitive than Digital Surface (DS) tests because it only provides the Euler characteristic, making it harder to identify the specific source of topological failure. It can be fooled by algorithms that preserve $\chi$ while introducing spurious features [S1, unofficial].
+*   **When to Use:** When verifying isosurface extraction algorithms that promise topological correctness for piecewise trilinear interpolants, especially in the presence of ambiguous configurations.
+*   **When Not to Use:** When detailed topological information (Betti numbers) is required, or when debugging specific topological errors, as SMT only provides a scalar invariant [S1, unofficial].
 
 ## Background
-Stratified Morse Theory for Euler Characteristic was introduced to handle the non-smoothness of piecewise trilinear interpolants in isosurface extraction [S1, unofficial]. The verification pipeline (MMS-SMT) was developed to provide a robust method for verifying isosurfacing algorithms, particularly those handling ambiguous cases [S1, unofficial]. The application of Euler Characteristic as a noise measure (TEC) was presented by R. Wiemker in 2013, copyrighted by The Eurographics Association [S2, unofficial]. The method builds on classical Morse theory but adapts it to stratified spaces to handle critical points on vertices, edges, and faces of grid cells [S1, unofficial].
+Stratified Morse Theory for Euler Characteristic was introduced by Etiene et al. as part of a verification pipeline for isosurface extraction algorithms. It extends classical Morse theory to handle the non-smooth nature of piecewise trilinear interpolants used in volume rendering. The method was developed to address the limitations of smooth Morse theory, which cannot be directly applied to functions with discontinuities in derivatives at cell boundaries. The approach is integral to the Method of Manufactured Solutions (MMS) for topology verification, providing a robust way to test the correctness of algorithms like Marching Cubes [S1, unofficial].
 
 ## Sources
-[S1] Topology Verification for Isosurface Extraction, https://hal.science/hal-01211133, fetched 2026-10-26 (unofficial)
-[S2] Total Euler Characteristic as a Noise Measure to aid Transfer Function Design, https://doi.org/10.2312/pe.eurovisshort.eurovisshort2013.097-101, fetched 2026-10-29 (unofficial)
+[S1] Topology Verification for Isosurface Extraction Topology Verification for Isosurface Extraction, https://hal.science/hal-01211133, fetched 2026-10-26 (unofficial)

@@ -44,8 +44,6 @@ Zero Order Integration approximates the continuous volume rendering integral by 
 
 **Pseudocode (Front-to-Back with Early Termination):**
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 def zero_order_integration(ray_origin, ray_direction, volume_sampler, n_samples, near, far, threshold=1e-4):
     """

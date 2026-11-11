@@ -1,0 +1,42 @@
+# Pyramid and Downsampling Structures
+## Overview
+Pyramid and Downsampling Structures generate a hierarchy of data representations at decreasing spatial resolutions to optimize rendering performance and memory usage for large volumetric datasets [S2, unofficial]. This family operates directly on spatial grid structures rather than transform coefficients, distinguishing it from [Wavelet-based Volume Rendering](1052-wavelet-based-volume-rendering.md), and preserves the voxel-based nature of the input data, distinguishing it from [Mesh Simplification](1032-mesh-simplification.md) [G].
+
+## Shared principles
+All methods in this family share the core mechanism of generating a hierarchy of data representations at different spatial resolutions [S2, unofficial]. This hierarchy is typically constructed using spatial hierarchies (e.g., Octrees or Bricks) or frequency-domain transforms (e.g., Wavelets) [S2, unofficial]. Common operations include defining scale factors $s$ where $N_{\text{new}} = s \times N_{\text{prev}}$, applying interpolation or filtering kernels to estimate values at new grid points, and dynamically selecting or culling resolution levels based on spatial hierarchy and hardware constraints [G].
+
+## Subtopics
+
+### [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md)
+Reduces volumetric voxel grid resolution by a specified integer factor using max pooling over non-overlapping blocks. It is chosen when a strict block-wise maximum operation is required for coarser levels in a multiresolution hierarchy, differing from [Downscaled Grid Map Generation](2338-downscaled-grid-map-generation.md) by avoiding grid map aggregation and from [Pre-processing for Half Resolution](6436-pre-processing-for-half-resolution.md) by not filling transparent holes with median values.
+
+### [Morphological Pyramid](1641-morphological-pyramid.md)
+A multiresolution representation using morphological erosion and dilation combined with dyadic downsampling and upsampling to create approximation and detail signals. It enables perfect reconstruction and improves approximation accuracy when rendering from higher levels, differing from linear pyramid methods by exploiting the commutativity of the maximum intensity projection operator with morphological dilation and upsampling.
+
+### [Streaming MIP Implementation (Basic)](1803-streaming-mip-implementation-basic.md)
+Constructs a progressive coefficient stream from a morphological pyramid to allow interactive frame rates on large datasets that do not fit in GPU memory. It solves discrete quality jumps in level-by-level rendering by resorting detail coefficients based on decreasing error magnitude, offering finer granularity in approximation error control compared to basic texture-based MIP or level-by-level MMIP.
+
+### [Downscaled Grid Map Generation](2338-downscaled-grid-map-generation.md)
+Creates a low-resolution coordinate grid and an index map to map high-resolution coordinates to their corresponding low-resolution locations. It is used when coordinate mapping and grid scaling are required for downsampling operations.
+
+### [Mipmap Generation](2602-mipmap-generation.md)
+Creates a hierarchy of downscaled volume data to enable multi-resolution rendering and faster traversal. It sets itself apart by explicitly organizing data into a structured mip-chain accessible via texture sampling, focusing on the generation pipeline rather than LOD selection logic [G].
+
+### [Progressive Downsampling](9860-progressive-downsampling.md)
+Not given in the sources.
+
+### [Locally Orderless Image (LOI)](11018-locally-orderless-image-loi.md)
+Replaces standard pixel-wise image comparison with matching of local histograms to extend gradient support for sparse gradients caused by motion in image space. It solves poor convergence and local minima in inverse rendering by preserving local variations within neighborhoods, differing from Gaussian pyramids which average out local appearance and suppress high-frequency details.
+
+### Patch Merging Layer
+Downsamples spatial resolution by half while doubling channels by concatenating four overlapping spatial patches [S1, unofficial]. Input tensor $x$ of shape $(B, H \times W, C)$ is verified for even dimensions, reshaped to $(B, H, W, C)$, and split into four overlapping patches $x_0, x_1, x_2, x_3$ via strided slicing [S1, unofficial]. These are concatenated along the channel dimension, reshaped to $(B, -1, 4 \times C)$, normalized, and passed through a linear reduction layer to halve channels, yielding an output of shape $(B, H/2 \times W/2, 2 \times \text{dim})$ [S1, unofficial].
+
+### Volumetric Multi-Resolution Hierarchy (3D Mip-Map)
+A hierarchy of alias-free volume buffers at different resolutions, generated using volume-sampled voxelization to support time-critical and space-critical applications [S2, unofficial]. High frequencies exceeding the Nyquist frequency of each buffer are filtered out using an ideal low-pass filter (sinc) with infinite support, approximated in practice by finite-support filters whose support widens as resolution decreases [S2, unofficial]. Filter types include zero order, cubic, or Gaussian, selected based on required speed and accuracy [S2, unofficial].
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] ApaarRaina/DiffTomo, https://github.com/ApaarRaina/DiffTomo, fetched 2026-10-27 (unofficial)
+[S2] PDF Volume Visualization: Principles and Advances, https://courses.cs.duke.edu/spring03/cps296.8/papers/KaufmanVolumeVisualization.pdf, fetched 2026-10-28 (unofficial)

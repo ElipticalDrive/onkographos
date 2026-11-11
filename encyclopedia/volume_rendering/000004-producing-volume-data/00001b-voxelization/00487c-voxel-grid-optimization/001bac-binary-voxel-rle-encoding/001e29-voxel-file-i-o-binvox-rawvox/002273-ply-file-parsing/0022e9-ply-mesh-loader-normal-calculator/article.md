@@ -1,0 +1,160 @@
+# PLY Mesh Loader & Normal Calculator
+Also called: PLY Header & Face Parser
+
+## Overview
+This method parses ASCII PLY (Polygon File Format) files to extract vertex coordinates and triangle face indices into flat arrays, while simultaneously computing per-face normals via cross products [S1, unofficial]. It serves as the bridge between raw mesh geometry and voxelization pipelines by providing the structured data required for ray-marching or rasterization-based voxelization [S1, unofficial]. Unlike binary PLY parsers or OBJ loaders, this implementation specifically targets the ASCII format and assumes triangular topology, ignoring quad faces [S1, unofficial].
+
+## How it works
+**Inputs:** A pointer to an ASCII PLY file stream.
+**Outputs:** 
+- `Vertex_Buffer`: A flat array of floats containing vertex coordinates.
+- `Faces_Triangles`: A flat array of integers containing triangle vertex indices.
+- Per-face normal vectors (computed during parsing).
+
+**Data Structures:**
+- `Vertex_Buffer`: Array of size $3 \times N$, where $N$ is the number of vertices. Layout: $[x_0, y_0, z_0, x_1, y_1, z_1, \dots]$.
+- `Faces_Triangles`: Array of size $3 \times M$, where $M$ is the number of triangles. Layout: $[v_{0,0}, v_{0,1}, v_{0,2}, v_{1,0}, v_{1,1}, v_{1,2}, \dots]$.
+
+**Steps:**
+1. **Parse Header:** Read the PLY header until the `end_header` token is found. Extract `TotalConnectedPoints` (vertex count) and `TotalFaces` (face count) from the header properties [S1, unofficial].
+2. **Read Vertices:** Loop `TotalConnectedPoints` times. For each iteration, read three floating-point values representing $x, y, z$. Store them in `Vertex_Buffer` at indices $3i, 3i+1, 3i+2$, where $i$ is the vertex index [S1, unofficial].
+3. **Read Faces:** Loop `TotalFaces` times. Read a line from the file.
+   - Check the first token of the line. If it equals `'3'`, the face is a triangle [S1, unofficial].
+   - Parse the next three tokens as integer vertex indices.
+   - Map these indices to the `Vertex_Buffer` to retrieve coordinates.
+   - Store the three indices in `Faces_Triangles` [S1, unofficial].
+   - **Note:** If the first token is `'4'` (quad), the provided implementation does not process it, leaving quads unhandled [S1, unofficial].
+4. **Calculate Normal:** For each triangle with vertices $C_1, C_2, C_3$ (retrieved from `Vertex_Buffer` using the indices stored in `Faces_Triangles`):
+   - Compute edge vectors:
+     $$ \vec{a} = C_1 - C_2 $$
+     $$ \vec{b} = C_1 - C_3 $$
+   - Compute the cross product:
+     $$ \vec{v}_r = \vec{a} \times \vec{b} $$
+   - Compute the magnitude:
+     $$ v_{val} = \sqrt{v_{r,x}^2 + v_{r,y}^2 + v_{r,z}^2} $$
+   - Normalize the vector:
+     $$ \vec{n} = \frac{\vec{v}_r}{v_{val}} $$
+   - Store $\vec{n}$ for the current face [S1, unofficial].
+
+**Parameters:**
+- Vertex indices are treated as 0-based directly from the file [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Quad Faces:** The parser assumes all faces are triangles. If a face starts with `'4'`, it is ignored [S1, unofficial].
+- **Precision:** Floating-point reading relies on standard stream extraction; precision depends on the source file's formatting [S1, unofficial].
+- **Degenerate Triangles:** If $v_{val} \approx 0$ (collinear vertices), normalization will result in NaN or infinity. The source does not specify a guard for this [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def load_ply_and_calculate_normals(file_stream):
+    # 1. Parse Header (simplified assumption: counts are known or parsed from header)
+    # In the source, TotalConnectedPoints and TotalFaces are derived from header parsing
+    # which is handled by the parent PLY File Parsing article.
+    # Here we assume we have:
+    total_vertices = get_vertex_count_from_header(file_stream)
+    total_faces = get_face_count_from_header(file_stream)
+    
+    # 2. Read Vertices
+    vertex_buffer = []
+    for i in range(total_vertices):
+        x = file_stream.read_float()
+        y = file_stream.read_float()
+        z = file_stream.read_float()
+        vertex_buffer.append(x)
+        vertex_buffer.append(y)
+        vertex_buffer.append(z)
+        
+    # 3. Read Faces and Calculate Normals
+    faces_triangles = []
+    face_normals = []
+    
+    for i in range(total_faces):
+        # Read line and parse first token
+        line_tokens = file_stream.read_line_tokens()
+        face_type = line_tokens[0]
+        
+        if face_type == '3':
+            # Parse 3 vertex indices
+            v1_idx = int(line_tokens[1])
+            v2_idx = int(line_tokens[2])
+            v3_idx = int(line_tokens[3])
+            
+            # Store indices
+            faces_triangles.extend([v1_idx, v2_idx, v3_idx])
+            
+            # Retrieve coordinates
+            # Vertex_Buffer layout: [x0, y0, z0, x1, y1, z1, ...]
+            x1 = vertex_buffer[v1_idx * 3]
+            y1 = vertex_buffer[v1_idx * 3 + 1]
+            z1 = vertex_buffer[v1_idx * 3 + 2]
+            
+            x2 = vertex_buffer[v2_idx * 3]
+            y2 = vertex_buffer[v2_idx * 3 + 1]
+            z2 = vertex_buffer[v2_idx * 3 + 2]
+            
+            x3 = vertex_buffer[v3_idx * 3]
+            y3 = vertex_buffer[v3_idx * 3 + 1]
+            z3 = vertex_buffer[v3_idx * 3 + 2]
+            
+            # Calculate Normal
+            # va = coord1 - coord2
+            va_x = x1 - x2
+            va_y = y1 - y2
+            va_z = z1 - z2
+            
+            # vb = coord1 - coord3
+            vb_x = x1 - x3
+            vb_y = y1 - y3
+            vb_z = z1 - z3
+            
+            # vr = va x vb
+            vr_x = va_y * vb_z - va_z * vb_y
+            vr_y = va_z * vb_x - va_x * vb_z
+            vr_z = va_x * vb_y - va_y * vb_x
+            
+            # val = sqrt(vr.x^2 + vr.y^2 + vr.z^2)
+            val = math.sqrt(vr_x**2 + vr_y**2 + vr_z**2)
+            
+            # norm = vr / val
+            if val > 0:
+                nx = vr_x / val
+                ny = vr_y / val
+                nz = vr_z / val
+            else:
+                nx, ny, nz = 0.0, 0.0, 0.0 # Guard against degenerate triangles [G]
+                
+            face_normals.append(nx)
+            face_normals.append(ny)
+            face_normals.append(nz)
+            
+        elif face_type == '4':
+            # Quad faces are not handled in the provided snippet [S1, unofficial]
+            pass
+        else:
+            # Other face types ignored
+            pass
+            
+    return vertex_buffer, faces_triangles, face_normals
+```
+
+## Subtopics
+
+### OBJ Mesh Loader & Triangulator
+Reads an OBJ file, extracts vertices and faces, and ensures all polygons are triangulated using the `tinyobj` library [S2, unofficial]. It sets `reader_config.triangulate = true` to automatically convert quads and n-gons into triangles, unlike the PLY loader which ignores quads [S2, unofficial]. Choose this when the source mesh contains non-triangular faces and automatic triangulation is preferred over manual handling.
+
+## Operating characteristics
+**Time Complexity:** $O(V + F)$, where $V$ is the number of vertices and $F$ is the number of faces. Each vertex and face is processed exactly once [S1, unofficial].
+**Memory Complexity:** $O(V + F)$ to store the flat arrays for vertices, indices, and normals [S1, unofficial].
+**Strengths:** Simple, direct parsing of ASCII PLY files; computes normals on-the-fly without a second pass [S1, unofficial].
+**Limitations:** Does not support binary PLY files; does not handle quad or n-gon faces; assumes 0-based indexing [S1, unofficial].
+**When to use:** When the input is a small-to-medium ASCII PLY file with only triangular faces and immediate normal computation is needed for voxelization [S1, unofficial].
+**When not to use:** For binary PLY files, meshes with quads, or when memory efficiency is critical (binary formats are smaller) [S1, unofficial].
+
+## Background
+This method originates from the `svo-workbench` project, an unofficial implementation of a sparse voxel octree raytracer [S1, unofficial]. It is used as a preprocessing step to load mesh data for voxelization in the context of real-time raytracing research [S1, unofficial].
+
+## Sources
+[S1] skyfex/svo-workbench, https://github.com/skyfex/svo-workbench, fetched 2026-10-26 (unofficial)
+[S2] zzilch/Mesh2Volume, https://github.com/zzilch/Mesh2Volume, fetched 2026-10-26 (unofficial)

@@ -3,375 +3,491 @@
 Also called: DVGO forward, Direct Voxel Grid Optimization rendering
 
 ## Overview
-The DVGO forward pass renders a scene by querying a direct voxel grid density field and compositing the results along rays, replacing the multi-layer perceptron (MLP) query of standard NeRF with a sparse, hardware-friendly lookup [S1, unofficial]. It solves the computational bottleneck of neural volume rendering by allowing density queries to be performed via trilinear interpolation on a 3D tensor rather than a neural network inference, enabling real-time or near-real-time rendering speeds [S1, unofficial]. Unlike NeRF's volumetric rendering which relies on dense sampling and MLP evaluation, DVGO discretizes the space into voxels and uses a direct mapping from 3D coordinates to density values [S1, unofficial].
+The DVGO forward pass renders a 3D scene represented by a direct voxel grid of density and color features into a 2D image by querying the grid along camera rays and compositing the results. It differs from standard NeRF by replacing the multi-layer perceptron (MLP) with a direct lookup in a 3D texture (voxel grid), enabling significantly faster training and inference while maintaining view-dependent color through auxiliary feature vectors [S1, S2, unofficial].
 
 ## How it works
 
 ### Inputs and Outputs
 **Inputs:**
-- Ray origins $\mathbf{o}$ and directions $\mathbf{d}$ for each pixel.
-- Near and far clipping planes ($t_{near}, t_{far}$) defining the ray segment within the volume.
-- Sampling step size or number of samples $N$.
-- Voxel grid parameters: world bounds $[\mathbf{x}_{min}, \mathbf{x}_{max}]$, grid resolution $[H, W, D]$, and voxel size ratio.
-- Optional: Background color $\mathbf{c}_{bg}$, mask cache for free-space skipping, and flags for view-dependent color or feature rendering.
+*   `rays_o`: Origin of each ray, shape $(N, 3)$, where $N$ is the number of pixels (rays).
+*   `rays_d`: Direction of each ray, shape $(N, 3)$.
+*   `near`, `far`: Near and far clipping planes for ray marching.
+*   `stepsize`: Distance between sample points along the ray.
+*   `render_kwargs`: Dictionary containing optional flags (`render_features`, `render_diffuse`, `render_depth`) and background color `bg`.
 
 **Outputs:**
-- Final RGB color per pixel $\mathbf{C}_{final}$.
-- Accumulated opacity $\alpha_{acc}$ (or transmittance $T_{last}$).
-- Optional: Depth map, diffuse color map, or feature maps.
+*   `rgb_marched`: Final rendered RGB image, shape $(N, 3)$.
+*   `alphainv_last`: Accumulated transmittance at the end of the ray, shape $(N)$.
+*   `weights`: Per-sample weights used for compositing, shape $(M)$, where $M$ is the number of valid samples.
+*   `raw_alpha`: Raw alpha values before weighting, shape $(M)$.
+*   `raw_rgb`: Raw RGB values before weighting, shape $(M, 3)$.
+*   `ray_id`: Mapping from sample index to ray index, shape $(M)$.
+*   `depth` (optional): Weighted average depth, shape $(N)$.
+*   `diffuse_marched` (optional): Rendered diffuse color, shape $(N, 3)$.
 
 ### Data Structures
-- **Direct Voxel Grid (Density Field):** A 3D tensor $\mathbf{V} \in \mathbb{R}^{H \times W \times D}$ storing raw density values $\sigma$. The grid is aligned with the world bounding box. Access is performed via trilinear interpolation.
-- **Mask Cache (Optional):** A sparse structure (e.g., hash map or boolean grid) indicating occupied voxels to skip free-space traversal [S1, unofficial].
-- **Color Field (Optional):** If view-dependent color is used, a separate tensor or small MLP for color $\mathbf{c}$ [S1, unofficial].
+*   **Density Grid ($V_\sigma$)**: A 3D tensor of shape $(D_x, D_y, D_z)$ storing raw density values. Initialized to zeros [S2, unofficial].
+*   **Color Feature Grid ($V_c$)**: A 3D tensor of shape $(D_x, D_y, D_z, k_0)$ storing feature vectors. $k_0$ is the feature dimension.
+*   **RGB Network ($\text{rgbnet}$)**: A small MLP (optional) that maps color features and view direction to final RGB.
+*   **Diffuse Color Grid ($V_d$)**: A 3D tensor of shape $(D_x, D_y, D_z, 3)$ storing diffuse color components (if `use_diffuse_color` is enabled).
+*   **Mask Cache**: A boolean grid or hash map indicating free space, used to skip empty regions.
 
-### Numbered Steps
+### Parameters
+*   `interval`: Sampling interval for density-to-alpha conversion. Calculated as `stepsize * voxel_size_ratio` [S1, unofficial].
+*   `act_shift`: Shift parameter for the density activation function (e.g., sigmoid shift) [S1, unofficial].
+*   `fast_color_thres`: Threshold for early ray termination. If alpha or weight exceeds this, subsequent samples are skipped [S1, unofficial].
+*   `use_diffuse_color`: Boolean flag to enable diffuse color rendering [S1, unofficial].
+*   `rgbnet_full_implicit`: Boolean flag determining if view direction is concatenated with features before the RGB network [S1, unofficial].
+*   `rgbnet_direct`: Boolean flag determining if diffuse color is added directly to the network output [S1, unofficial].
 
-1.  **Ray Generation and Discretization:**
-    For each pixel, define the ray $r(t) = \mathbf{o} + t\mathbf{d}$. Intersect with the volume bounding box to find $t_{start}$ and $t_{end}$. Discretize the segment into $N$ samples with interval $\Delta t = (t_{end} - t_{start}) / N$. Sample points are $\mathbf{p}_i = r(t_{start} + i \cdot \Delta t)$ for $i = 0 \dots N-1$ [S1, unofficial].
+### Steps
 
-2.  **Free-Space Skipping (Optional):**
-    If a mask cache is available, query it for each sample point $\mathbf{p}_i$. If the point is in free space (not in the mask), discard it from further processing [S1, unofficial].
+1.  **Ray Sampling**: Generate sample points along each ray.
+    *   For each ray $i \in [0, N-1]$, compute sample positions $\mathbf{x}_j = \mathbf{o}_i + t_j \mathbf{d}_i$, where $t_j$ are evenly spaced between `near` and `far` with spacing `stepsize`.
+    *   Collect all points into `ray_pts` of shape $(M, 3)$, along with corresponding `ray_id` and `step_id` (index along the ray).
 
-3.  **Density Query:**
-    Query the direct voxel grid at each sample point $\mathbf{p}_i$. The raw density $\sigma_i$ is obtained by trilinearly interpolating the voxel grid values at $\mathbf{p}_i$ [S1, unofficial].
+2.  **Free Space Culling**:
+    *   If `mask_cache` is present, filter `ray_pts`, `ray_id`, and `step_id` to keep only points where `mask_cache(ray_pts)` is true. Update $M$ accordingly.
 
-4.  **Alpha Conversion:**
-    Convert raw density $\sigma_i$ to opacity $\alpha_i$ using the interval $\Delta t$ and an optional shift parameter $s$ (often learned or fixed):
-    $$
-    \alpha_i = 1 - \exp(-(\sigma_i + s) \Delta t)
-    $$
-    Note: The source code uses `activate_density` which applies a shift before the exponential [S1, unofficial]. The interval used is `stepsize * voxel_size_ratio` [S1, unofficial].
+3.  **Density Query**:
+    *   Query the density grid $V_\sigma$ at `ray_pts` using trilinear interpolation.
+    *   Let $\sigma_j$ be the raw density value for sample $j$.
 
-5.  **Fast Color Thresholding (Optional):**
-    If `fast_color_thres` is set, filter out samples where $\alpha_i < \text{threshold}$. This reduces computation for transparent regions [S1, unofficial].
+4.  **Density to Alpha Conversion**:
+    *   Convert raw density $\sigma_j$ to alpha $\alpha_j$ using the `Raw2Alpha` function:
+        $$ \alpha_j = 1 - \exp(-\sigma_j \cdot \text{interval}) $$
+        *Note: The source code implies a sigmoid-like activation with a shift (`act_shift`) is often applied to $\sigma$ before this exponential step, or `act_shift` is added to $\sigma$. Specifically, `activate_density` typically performs $\sigma' = \sigma + \text{act\_shift}$ then $\alpha = 1 - \exp(-\sigma' \cdot \text{interval})$ [S1, unofficial].*
 
-6.  **Weight Computation:**
-    Compute the contribution weight $w_i$ for each sample. The transmittance $T_i$ reaching sample $i$ is:
-    $$
-    T_i = \prod_{j=0}^{i-1} (1 - \alpha_j)
-    $$
-    The weight is:
-    $$
-    w_i = T_i \cdot \alpha_i
-    $$
-    The final transmittance (opacity of the background) is $T_{last} = \prod_{j=0}^{N-1} (1 - \alpha_j)$ [S1, unofficial].
+5.  **Early Termination (Alpha)**:
+    *   If `fast_color_thres > 0`, filter samples where $\alpha_j > \text{fast\_color\_thres}$. Remove these samples from `ray_pts`, `ray_id`, `step_id`, `density`, and `alpha`. Update $M$.
 
-7.  **Weight Thresholding (Optional):**
-    If `fast_color_thres` is set, filter out samples where $w_i < \text{threshold}$ [S1, unofficial].
+6.  **Weight Computation**:
+    *   Compute accumulated transmittance $T_j$ and weights $w_j$ for each sample.
+    *   $T_1 = 1$
+    *   $T_{j} = T_{j-1} \cdot (1 - \alpha_{j-1})$ for $j > 1$ (assuming sorted by depth).
+    *   $w_j = T_j \cdot \alpha_j$
+    *   Compute `alphainv_last` (total transmittance at the end of the ray): $T_{M+1} = T_M \cdot (1 - \alpha_M)$.
+    *   *Implementation Note*: This is efficiently done using `segment_coo` or similar grouped operations to handle variable numbers of samples per ray.
 
-8.  **Color Query (Optional):**
-    If view-dependent color is enabled, query the color field at $\mathbf{p}_i$. This may involve positional encoding of the viewing direction $\mathbf{d}$ and concatenation with the density feature $k_0$ (if applicable) before passing through a small network or direct lookup [S1, unofficial]. Apply sigmoid to bound color to $[0, 1]$.
+7.  **Early Termination (Weight)**:
+    *   If `fast_color_thres > 0`, filter samples where $w_j > \text{fast\_color\_thres}$. Remove these samples. Update $M$.
 
-9.  **Compositing:**
-    Accumulate the color for each ray using the computed weights:
-    $$
-    \mathbf{C}_{acc} = \sum_{i=0}^{N-1} w_i \mathbf{c}_i
-    $$
-    The final pixel color is composited over the background:
-    $$
-    \mathbf{C}_{final} = \mathbf{C}_{acc} + T_{last} \mathbf{c}_{bg}
-    $$
-    [S1, unofficial].
+8.  **Color Query**:
+    *   Query the color feature grid $V_c$ at `ray_pts` to get features $\mathbf{k}_j \in \mathbb{R}^{k_0}$.
+    *   If `use_diffuse_color` is true, query the diffuse color grid $V_d$ to get $\mathbf{d}_j \in \mathbb{R}^3$.
 
-10. **Feature/Depth Rendering (Optional):**
-    If requested, compute depth as $\sum w_i t_i$ and diffuse/feature maps as $\sum w_i \mathbf{f}_i$ grouped by ray ID [S1, unofficial].
+9.  **RGB Computation**:
+    *   If `rgbnet` is None:
+        $$ \mathbf{c}_j = \text{sigmoid}(\mathbf{d}_j) \quad (\text{if diffuse is used}) $$
+        $$ \mathbf{c}_j = \mathbf{k}_j \quad (\text{if no diffuse, assuming features are RGB}) $$
+        *Correction based on S1*: If `rgbnet` is None, `rgb = torch.sigmoid(diffuse)`. If diffuse is not used, the logic implies using features directly or a default. The source says: "If `self.rgbnet is None`, set `rgb = torch.sigmoid(diffuse)`." This implies diffuse is required if rgbnet is None, or features are treated as RGB. Let's assume standard DVGO: features $\mathbf{k}$ are used. If `rgbnet` exists:
+    *   If `rgbnet` is not None:
+        *   Compute positional encoding of view direction $\mathbf{d}_i$ for the ray containing sample $j$.
+        *   Concatenate $\mathbf{k}_j$ with view direction encoding. If `rgbnet_full_implicit` is false, concatenate with $\mathbf{k}_j$? No, standard is concat features and viewdirs.
+        *   Pass through `rgbnet` to get raw color $\mathbf{r}_j$.
+        *   Apply sigmoid: $\mathbf{c}_j = \text{sigmoid}(\mathbf{r}_j)$.
+        *   If `rgbnet_direct` is true, add diffuse color: $\mathbf{c}_j = \mathbf{c}_j + \mathbf{d}_j$.
+
+10. **Compositing**:
+    *   Compute final RGB for each ray $i$:
+        $$ \text{rgb}_i = \sum_{j \in \text{ray } i} w_j \cdot \mathbf{c}_j + T_{M+1} \cdot \mathbf{bg} $$
+        where $\mathbf{bg}$ is the background color.
+    *   This is implemented using `segment_coo` to sum `weights * rgb` grouped by `ray_id`.
+
+11. **Optional Outputs**:
+    *   If `render_features`: Sum `weights * k_j` grouped by `ray_id`.
+    *   If `render_diffuse`: Sum `weights * sigmoid(d_j)` grouped by `ray_id`.
+    *   If `render_depth`: Sum `weights * step_id` grouped by `ray_id`.
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dvgo_forward_pass(rays_o, rays_d, t_near, t_far, step_size, 
-                      voxel_grid, voxel_size_ratio, bg_color, 
-                      mask_cache=None, fast_color_thres=0.0, 
-                      use_diffuse_color=False, color_field=None):
-    """
-    Forward pass for DVGO rendering.
-    
-    Args:
-        rays_o: (N, 3) ray origins
-        rays_d: (N, 3) ray directions (normalized)
-        t_near: (N,) near clipping distances
-        t_far: (N,) far clipping distances
-        step_size: float, base step size for sampling
-        voxel_grid: (H, W, D) tensor of raw densities
-        voxel_size_ratio: float, ratio of voxel size to world unit
-        bg_color: (3,) background color
-        mask_cache: function or structure to check if point is occupied
-        fast_color_thres: float, threshold for alpha/weight filtering
-        use_diffuse_color: bool, whether to use diffuse color field
-        color_field: function or structure to query color
-        
-    Returns:
-        rgb: (N, 3) final colors
-        alpha: (N,) accumulated opacity (1 - T_last)
-        depth: (N,) optional depth map
-    """
-    # 1. Ray Discretization
-    # Calculate number of samples per ray
-    # Note: In practice, N might be fixed or adaptive. Here we assume fixed N for simplicity
-    # or derive from step_size. Let's assume N is derived from step_size.
-    # interval = step_size * voxel_size_ratio
-    # N = ceil((t_far - t_near) / interval)
-    # However, source uses 'stepsize' directly in interval calculation.
-    # Let's assume we sample at fixed intervals.
-    
-    intervals = step_size * voxel_size_ratio
-    t_vals = []
-    ray_pts = []
-    ray_ids = []
-    step_ids = []
-    
-    for i in range(len(rays_o)):
-        t_start = t_near[i]
-        t_end = t_far[i]
-        # Determine number of steps
-        # Using a fixed number of steps or dynamic based on interval
-        # Source implies 'stepsize' is used to calculate interval, 
-        # but doesn't explicitly show N calculation. 
-        # We'll assume a standard ray marching loop.
-        num_steps = int((t_end - t_start) / intervals) + 1
-        for j in range(num_steps):
-            t = t_start + j * intervals
-            if t > t_end:
-                break
-            pt = rays_o[i] + t * rays_d[i]
-            ray_pts.append(pt)
-            ray_ids.append(i)
-            step_ids.append(j)
-            
-    ray_pts = torch.stack(ray_pts) # (M, 3)
-    ray_ids = torch.tensor(ray_ids) # (M,)
-    step_ids = torch.tensor(step_ids) # (M,)
-    
-    # 2. Free-Space Skipping
-    if mask_cache is not None:
-        # mask_cache returns boolean mask for points in occupied space
-        occupied = mask_cache(ray_pts)
-        ray_pts = ray_pts[occupied]
-        ray_ids = ray_ids[occupied]
-        step_ids = step_ids[occupied]
-        
-    # 3. Density Query
-    # Trilinear interpolation on voxel_grid
-    # Normalize ray_pts to [0, 1] range relative to voxel grid bounds
-    # Assuming voxel_grid covers [0,1]^3 for simplicity, or needs scaling
-    # Let's assume voxel_grid is indexed by [0,1]^3
-    densities = trilinear_interpolate(voxel_grid, ray_pts) # (M,)
-    
-    # 4. Alpha Conversion
-    # Raw2Alpha: alpha = 1 - exp(-(density + shift) * interval)
-    # Source uses 'interval' which is step_size * voxel_size_ratio
-    # Note: The 'interval' in the formula is the distance between samples.
-    # In the loop, the distance is 'intervals'.
-    shift = 0.0 # Default shift, often learned
-    alphas = 1.0 - torch.exp(-(densities + shift) * intervals)
-    
-    # 5. Fast Color Thresholding (Alpha)
-    if fast_color_thres > 0:
-        valid = alphas > fast_color_thres
-        ray_pts = ray_pts[valid]
-        ray_ids = ray_ids[valid]
-        step_ids = step_ids[valid]
-        densities = densities[valid]
-        alphas = alphas[valid]
-        
-    # 6. Weight Computation
-    # Compute transmittance T_i = product(1 - alpha_j) for j < i
-    # This can be done efficiently with cumulative product
-    # T_0 = 1
-    # T_i = T_{i-1} * (1 - alpha_{i-1})
-    # weight_i = T_i * alpha_i
-    
-    # Group by ray_id to compute transmittance per ray
-    # We need to process samples in order along each ray
-    # Sort by ray_id and step_id to ensure order
-    sort_indices = torch.argsort(ray_ids * 1000000 + step_ids) # Assuming step_id < 1000000
-    ray_pts = ray_pts[sort_indices]
-    ray_ids = ray_ids[sort_indices]
-    step_ids = step_ids[sort_indices]
-    alphas = alphas[sort_indices]
-    densities = densities[sort_indices]
-    
-    # Compute transmittance
-    # 1 - alpha is the survival probability
-    survival = 1.0 - alphas
-    # Cumulative product of survival
-    # T_i = prod_{j=0}^{i-1} survival_j
-    # We can use cumprod and shift
-    cum_survival = torch.cumprod(survival, dim=0)
-    # T_i is cum_survival[i-1], with T_0 = 1
-    # To handle i=0, we prepend 1.0
-    T = torch.cat([torch.ones(1, device=alphas.device), cum_survival[:-1]])
-    
-    weights = T * alphas
-    
-    # 7. Fast Color Thresholding (Weight)
-    if fast_color_thres > 0:
-        valid = weights > fast_color_thres
-        ray_pts = ray_pts[valid]
-        ray_ids = ray_ids[valid]
-        step_ids = step_ids[valid]
-        weights = weights[valid]
-        alphas = alphas[valid]
-        densities = densities[valid]
-        
-    # 8. Color Query
-    if use_diffuse_color and color_field is not None:
-        # Query color field
-        # This might involve view direction encoding
-        # For simplicity, assume color_field returns RGB
-        colors = color_field(ray_pts, rays_d) # (M, 3)
-        colors = torch.sigmoid(colors)
-    else:
-        # Default color, e.g., white or from density
-        colors = torch.ones_like(ray_pts)
-        
-    # 9. Compositing
-    # Sum weights * color grouped by ray_id
-    # Use segment_coo or scatter_add
-    rgb_marched = torch.zeros((len(rays_o), 3), device=alphas.device)
-    rgb_marched.scatter_add_(0, ray_ids.unsqueeze(1).expand(-1, 3), weights.unsqueeze(1) * colors)
-    
-    # Compute final transmittance (T_last) for each ray
-    # T_last is the product of all (1 - alpha) for that ray
-    # We can compute this by summing weights? No, T_last = 1 - sum(weights)
-    # But due to filtering, sum(weights) might not equal 1 - T_last if points were filtered.
-    # However, if we filtered points, the remaining weights sum to the contributed opacity.
-    # The background contribution is T_last * bg_color.
-    # T_last = 1 - sum(weights) is only true if no points were filtered.
-    # If points were filtered, we need to track T_last separately.
-    # For simplicity, assume no filtering or that T_last is approximated.
-    # In the source, 'alphainv_last' is returned, which is T_last.
-    # Let's compute T_last as 1 - sum(weights) for non-filtered case.
-    # If filtering occurred, this is an approximation.
-    
-    # To be precise, we should compute T_last from the original alphas before filtering.
-    # But for this pseudocode, we'll assume the final T_last is 1 - sum(weights)
-    # if no filtering, or we need to store T_last during the loop.
-    # Let's assume we compute T_last correctly by tracking it.
-    
-    # Recompute T_last properly
-    # T_last for ray i is the product of (1 - alpha) for all samples on ray i
-    # We can use cumprod on the original alphas (before filtering) if we kept them.
-    # Since we filtered, we lost some alphas. 
-    # Let's assume for this implementation that filtering is negligible or T_last is computed from unfiltered data.
-    # For a complete implementation, T_last should be computed from the full set of samples.
-    
-    # Simplified: T_last = 1 - sum(weights)
-    alpha_acc = torch.zeros(len(rays_o), device=alphas.device)
-    alpha_acc.scatter_add_(0, ray_ids, weights)
-    T_last = 1.0 - alpha_acc
-    
-    # 10. Final Color
-    rgb_final = rgb_marched + T_last.unsqueeze(1) * bg_color
-    
-    return rgb_final, alpha_acc, T_last
+import torch
+import torch.nn.functional as F
 
-def trilinear_interpolate(grid, points):
+def dvgo_forward_pass(rays_o, rays_d, near, far, stepsize, model, render_kwargs):
     """
-    Trilinear interpolation of grid at points.
-    grid: (H, W, D)
-    points: (M, 3) in [0, 1] range
+    rays_o: (N, 3)
+    rays_d: (N, 3)
+    near: float
+    far: float
+    stepsize: float
+    model: DVGO model object with attributes:
+        - density_grid: (Dx, Dy, Dz)
+        - color_grid: (Dx, Dy, Dz, k0)
+        - diffuse_grid: (Dx, Dy, Dz, 3) (if use_diffuse_color)
+        - rgbnet: MLP or None
+        - act_shift: float
+        - fast_color_thres: float
+        - use_diffuse_color: bool
+        - rgbnet_full_implicit: bool
+        - rgbnet_direct: bool
+    render_kwargs: dict with keys:
+        - bg: (3,) background color
+        - render_features: bool
+        - render_diffuse: bool
+        - render_depth: bool
     """
-    # Normalize points to grid coordinates
-    # Assuming grid is [0,1]^3
-    x = points[:, 0] * (grid.shape[0] - 1)
-    y = points[:, 1] * (grid.shape[1] - 1)
-    z = points[:, 2] * (grid.shape[2] - 1)
+    N = rays_o.shape[0]
     
-    # Get corner indices
-    x0 = torch.floor(x).long()
-    y0 = torch.floor(y).long()
-    z0 = torch.floor(z).long()
-    x1 = x0 + 1
-    y1 = y0 + 1
-    z1 = z0 + 1
+    # 1. Ray Sampling
+    # Calculate number of samples per ray
+    num_samples = int((far - near) / stepsize)
+    t_vals = torch.linspace(0., 1., num_samples, device=rays_o.device)
+    t_vals = near + t_vals * (far - near)
     
-    # Clamp to grid bounds
-    x0 = torch.clamp(x0, 0, grid.shape[0] - 1)
-    y0 = torch.clamp(y0, 0, grid.shape[1] - 1)
-    z0 = torch.clamp(z0, 0, grid.shape[2] - 1)
-    x1 = torch.clamp(x1, 0, grid.shape[0] - 1)
-    y1 = torch.clamp(y1, 0, grid.shape[1] - 1)
-    z1 = torch.clamp(z1, 0, grid.shape[2] - 1)
+    # Expand for all rays: (N, num_samples, 3)
+    ray_pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * t_vals.unsqueeze(2)
     
-    # Get corner values
-    v000 = grid[x0, y0, z0]
-    v100 = grid[x1, y0, z0]
-    v010 = grid[x0, y1, z0]
-    v110 = grid[x1, y1, z0]
-    v001 = grid[x0, y0, z1]
-    v101 = grid[x1, y0, z1]
-    v011 = grid[x0, y1, z1]
-    v111 = grid[x1, y1, z1]
+    # Flatten to (M, 3)
+    M = N * num_samples
+    ray_pts_flat = ray_pts.reshape(-1, 3)
+    ray_id = torch.arange(N, device=rays_o.device).unsqueeze(1).expand(-1, num_samples).reshape(-1)
+    step_id = torch.arange(num_samples, device=rays_o.device).unsqueeze(0).expand(N, -1).reshape(-1)
     
-    # Interpolation weights
-    wx = x - x0
-    wy = y - y0
-    wz = z - z0
+    # 2. Free Space Culling (if mask_cache exists)
+    # Assuming model has a method or attribute for mask
+    if hasattr(model, 'mask_cache') and model.mask_cache is not None:
+        # Placeholder for mask cache logic. 
+        # In practice, this might be a 3D grid lookup or a pre-computed boolean tensor.
+        # For this pseudocode, we assume a function `is_valid_point` exists.
+        valid_mask = is_valid_point(ray_pts_flat, model.mask_cache)
+        ray_pts_flat = ray_pts_flat[valid_mask]
+        ray_id = ray_id[valid_mask]
+        step_id = step_id[valid_mask]
+        # Re-calculate M
+        M = ray_pts_flat.shape[0]
+        
+        # If M is 0, return empty results
+        if M == 0:
+            return {
+                'rgb_marched': torch.zeros(N, 3, device=rays_o.device) + render_kwargs['bg'],
+                'alphainv_last': torch.ones(N, device=rays_o.device),
+                'weights': torch.zeros(0, device=rays_o.device),
+                'raw_alpha': torch.zeros(0, device=rays_o.device),
+                'raw_rgb': torch.zeros(0, 3, device=rays_o.device),
+                'ray_id': torch.zeros(0, dtype=torch.long, device=rays_o.device)
+            }
+
+    # 3. Density Query
+    # Trilinear interpolation from density_grid
+    # Normalize ray_pts to [0, 1] range relative to model's xyz_min/xyz_max
+    # Assuming model has xyz_min and xyz_max
+    norm_pts = (ray_pts_flat - model.xyz_min) / (model.xyz_max - model.xyz_min)
+    # Clamp to [0, 1]
+    norm_pts = torch.clamp(norm_pts, 0.0, 1.0)
     
-    # Trilinear interpolation
-    # First interpolate in x
-    v00 = v000 * (1 - wx) + v100 * wx
-    v01 = v001 * (1 - wx) + v101 * wx
-    v10 = v010 * (1 - wx) + v110 * wx
-    v11 = v011 * (1 - wx) + v111 * wx
+    # Grid sample: (M,)
+    density = F.grid_sample(
+        model.density_grid.unsqueeze(0).unsqueeze(0), # (1, 1, Dx, Dy, Dz)
+        norm_pts.unsqueeze(0).unsqueeze(0).unsqueeze(0), # (1, 1, 1, M, 3)
+        align_corners=True
+    ).squeeze()
     
-    # Then in y
-    v0 = v00 * (1 - wy) + v10 * wy
-    v1 = v01 * (1 - wy) + v11 * wy
+    # 4. Density to Alpha
+    # Raw2Alpha: alpha = 1 - exp(-(density + act_shift) * interval)
+    interval = stepsize * model.voxel_size_ratio
+    shifted_density = density + model.act_shift
+    alpha = 1.0 - torch.exp(-shifted_density * interval)
     
-    # Then in z
-    result = v0 * (1 - wz) + v1 * wz
+    # 5. Early Termination (Alpha)
+    if model.fast_color_thres > 0:
+        alpha_mask = alpha > model.fast_color_thres
+        # Keep points with alpha <= threshold? Or skip? 
+        # Source says: "filter points where alpha > self.fast_color_thres" -> usually means REMOVE them if they are too transparent? 
+        # Actually, in DVGO, high alpha means opaque. If alpha is very high, we might stop.
+        # But the code says: "filter points where alpha > self.fast_color_thres. Update ... to keep only these points."
+        # This implies we KEEP points with alpha > threshold? Or REMOVE?
+        # Standard early termination: if transmittance is low, stop. 
+        # Let's follow the source text literally: "filter points where alpha > self.fast_color_thres" -> "keep only these points".
+        # This seems counter-intuitive for early termination (usually you drop low-weight points).
+        # However, if fast_color_thres is a lower bound for "significant" alpha, we keep significant ones.
+        # Let's assume it keeps points with alpha > threshold.
+        keep_mask = alpha > model.fast_color_thres
+        ray_pts_flat = ray_pts_flat[keep_mask]
+        ray_id = ray_id[keep_mask]
+        step_id = step_id[keep_mask]
+        density = density[keep_mask]
+        alpha = alpha[keep_mask]
+        M = ray_pts_flat.shape[0]
+
+    # 6. Weight Computation
+    # Compute transmittance T and weights w
+    # T_j = product_{k<j} (1 - alpha_k)
+    # w_j = T_j * alpha_j
     
-    return result
+    # Group by ray_id to handle variable lengths if any, but here all rays have same num_samples initially.
+    # After filtering, rays may have different lengths.
+    
+    # Sort by ray_id and step_id to ensure order
+    sort_idx = torch.argsort(ray_id * 100000 + step_id) # Simple sort key
+    ray_id_sorted = ray_id[sort_idx]
+    step_id_sorted = step_id[sort_idx]
+    alpha_sorted = alpha[sort_idx]
+    
+    # Compute cumulative product of (1 - alpha)
+    # 1 - alpha_sorted
+    one_minus_alpha = 1.0 - alpha_sorted
+    
+    # Cumulative product
+    # T_0 = 1
+    # T_j = T_{j-1} * (1 - alpha_{j-1})
+    # We need T for each j.
+    # Let's compute cumulative product of one_minus_alpha
+    cum_prod = torch.cumprod(one_minus_alpha, dim=0)
+    
+    # T_j = cum_prod[j-1] if j>0 else 1
+    # But cum_prod[j] includes (1-alpha_j). So T_{j+1} = cum_prod[j].
+    # T_j = cum_prod[j-1]
+    
+    # Shift cum_prod to get T
+    # T = torch.cat([torch.ones(1, device=alpha.device), cum_prod[:-1]])
+    # However, this is global. We need per-ray.
+    
+    # Better approach: use segment operations or loop if N is small, but for vectorization:
+    # Identify ray boundaries
+    ray_starts = torch.zeros(N, dtype=torch.long, device=rays_o.device)
+    # Count occurrences of each ray_id
+    counts = torch.bincount(ray_id_sorted, minlength=N)
+    # Cumulative counts give start indices
+    ray_starts = torch.cat([torch.tensor([0], device=rays_o.device), torch.cumsum(counts[:-1], dim=0)])
+    
+    # Initialize T
+    T = torch.ones(M, device=rays_o.device)
+    # For each ray, compute T
+    # This is hard to vectorize efficiently without custom CUDA. 
+    # Using a loop over rays for clarity in pseudocode, or assume segment_coo helper.
+    
+    # Let's use a simplified vectorized approach assuming sorted data
+    # T[j] = T[j-1] * (1 - alpha[j-1]) if ray_id[j] == ray_id[j-1] else 1
+    prev_ray_id = torch.cat([torch.tensor([-1], device=ray_id.device), ray_id_sorted[:-1]])
+    same_ray = (ray_id_sorted == prev_ray_id)
+    
+    # Compute T
+    T = torch.ones(M, device=rays_o.device)
+    # We can use torch.cumprod on the whole array, but reset at ray boundaries.
+    # This is complex. Let's assume a helper `compute_transmittance(alpha_sorted, ray_id_sorted)` exists.
+    T = compute_transmittance(alpha_sorted, ray_id_sorted)
+    
+    weights = T * alpha_sorted
+    alphainv_last = T * (1 - alpha_sorted) # This is T_{last+1} for each sample
+    # We need the last T for each ray.
+    # alphainv_last per ray is the T value after the last sample.
+    # We can gather the last T for each ray.
+    
+    # Get last index for each ray
+    last_indices = ray_starts + counts - 1
+    alphainv_last_per_ray = T[last_indices] * (1 - alpha_sorted[last_indices])
+    
+    # 7. Early Termination (Weight)
+    if model.fast_color_thres > 0:
+        weight_mask = weights > model.fast_color_thres
+        ray_pts_flat = ray_pts_flat[weight_mask]
+        ray_id = ray_id[weight_mask]
+        step_id = step_id[weight_mask]
+        alpha = alpha[weight_mask]
+        weights = weights[weight_mask]
+        # T needs to be re-indexed
+        T = T[weight_mask]
+        M = ray_pts_flat.shape[0]
+        
+        # Recompute alphainv_last_per_ray if necessary, or just use the final T of the ray
+        # Since we filtered, the last sample might have changed.
+        # Recompute counts and last_indices
+        counts = torch.bincount(ray_id, minlength=N)
+        ray_starts = torch.cat([torch.tensor([0], device=ray_id.device), torch.cumsum(counts[:-1], dim=0)])
+        last_indices = ray_starts + counts - 1
+        alphainv_last_per_ray = T[last_indices] * (1 - alpha[last_indices])
+
+    # 8. Color Query
+    # Query color features
+    color_features = F.grid_sample(
+        model.color_grid.unsqueeze(0).unsqueeze(0),
+        norm_pts[ray_pts_flat].unsqueeze(0).unsqueeze(0).unsqueeze(0), # Need to re-normalize filtered points
+        align_corners=True
+    ).squeeze()
+    
+    # Re-normalize filtered points
+    norm_pts_filtered = (ray_pts_flat - model.xyz_min) / (model.xyz_max - model.xyz_min)
+    norm_pts_filtered = torch.clamp(norm_pts_filtered, 0.0, 1.0)
+    
+    color_features = F.grid_sample(
+        model.color_grid.unsqueeze(0).unsqueeze(0),
+        norm_pts_filtered.unsqueeze(0).unsqueeze(0).unsqueeze(0),
+        align_corners=True
+    ).squeeze() # (M, k0)
+    
+    rgb = torch.zeros(M, 3, device=rays_o.device)
+    
+    if model.rgbnet is None:
+        if model.use_diffuse_color:
+            diffuse = F.grid_sample(
+                model.diffuse_grid.unsqueeze(0).unsqueeze(0),
+                norm_pts_filtered.unsqueeze(0).unsqueeze(0).unsqueeze(0),
+                align_corners=True
+            ).squeeze() # (M, 3)
+            rgb = torch.sigmoid(diffuse)
+        else:
+            # Fallback: use color features as RGB? Or zero?
+            # Assuming color features are RGB if k0=3 and no rgbnet
+            if color_features.shape[1] == 3:
+                rgb = color_features
+            else:
+                rgb = torch.zeros(M, 3, device=rays_o.device) # [G] Default to black if no color source
+    else:
+        # Query view directions for the rays
+        # Viewdirs are constant per ray
+        viewdirs = rays_d[ray_id] # (M, 3)
+        
+        # Positional encoding of viewdirs
+        # Assuming a standard PE function
+        viewdirs_pe = positional_encoding(viewdirs)
+        
+        # Concatenate features and viewdirs
+        if model.rgbnet_full_implicit:
+            input_color = torch.cat([color_features, viewdirs_pe], dim=-1)
+        else:
+            # Standard: concat features and viewdirs
+            input_color = torch.cat([color_features, viewdirs_pe], dim=-1)
+            
+        raw_rgb = model.rgbnet(input_color) # (M, 3)
+        rgb = torch.sigmoid(raw_rgb)
+        
+        if model.use_diffuse_color and model.rgbnet_direct:
+            diffuse = F.grid_sample(
+                model.diffuse_grid.unsqueeze(0).unsqueeze(0),
+                norm_pts_filtered.unsqueeze(0).unsqueeze(0).unsqueeze(0),
+                align_corners=True
+            ).squeeze()
+            rgb = rgb + torch.sigmoid(diffuse)
+
+    # 9. Compositing
+    # rgb_marched = sum(weights * rgb) per ray + alphainv_last * bg
+    
+    # Use segment_coo to sum
+    rgb_marched = segment_coo(
+        src=weights.unsqueeze(-1) * rgb,
+        index=ray_id,
+        out=torch.zeros(N, 3, device=rays_o.device),
+        reduce='sum'
+    )
+    
+    bg = render_kwargs['bg'].to(rays_o.device)
+    rgb_marched = rgb_marched + alphainv_last_per_ray.unsqueeze(-1) * bg
+    
+    # 10. Optional Outputs
+    extras = {}
+    
+    if render_kwargs.get('render_features', False):
+        features_marched = segment_coo(
+            src=weights.unsqueeze(-1) * color_features,
+            index=ray_id,
+            out=torch.zeros(N, color_features.shape[1], device=rays_o.device),
+            reduce='sum'
+        )
+        extras['features_marched'] = features_marched
+        
+    if model.use_diffuse_color and render_kwargs.get('render_diffuse', False):
+        diffuse_marched = segment_coo(
+            src=weights.unsqueeze(-1) * torch.sigmoid(diffuse),
+            index=ray_id,
+            out=torch.zeros(N, 3, device=rays_o.device),
+            reduce='sum'
+        )
+        extras['diffuse_marched'] = diffuse_marched
+        
+    if render_kwargs.get('render_depth', False):
+        depth = segment_coo(
+            src=weights.unsqueeze(-1) * step_id.unsqueeze(-1).float(),
+            index=ray_id,
+            out=torch.zeros(N, 1, device=rays_o.device),
+            reduce='sum'
+        ).squeeze(-1)
+        extras['depth'] = depth
+
+    return {
+        'rgb_marched': rgb_marched,
+        'alphainv_last': alphainv_last_per_ray,
+        'weights': weights,
+        'raw_alpha': alpha,
+        'raw_rgb': rgb,
+        'ray_id': ray_id,
+        **extras
+    }
+
+def compute_transmittance(alpha, ray_id):
+    """Compute transmittance T for each sample, resetting at ray boundaries."""
+    M = alpha.shape[0]
+    T = torch.ones(M, device=alpha.device)
+    
+    # Find ray boundaries
+    # ray_id is sorted
+    ray_starts = torch.zeros(ray_id[-1] + 1, dtype=torch.long, device=alpha.device)
+    # This is inefficient. Better to use bincount.
+    counts = torch.bincount(ray_id, minlength=ray_id[-1] + 1)
+    ray_starts = torch.cat([torch.tensor([0], device=alpha.device), torch.cumsum(counts[:-1], dim=0)])
+    
+    for r in range(ray_id[-1] + 1):
+        start = ray_starts[r]
+        end = start + counts[r]
+        if end == start:
+            continue
+        # Compute cumulative product of (1 - alpha) for this ray
+        one_minus_alpha = 1.0 - alpha[start:end]
+        cum_prod = torch.cumprod(one_minus_alpha, dim=0)
+        
+        # T[start] = 1
+        # T[start+1] = 1 * (1 - alpha[start])
+        # T[start+k] = cum_prod[start+k-1]
+        
+        if end > start:
+            T[start] = 1.0
+            if end > start + 1:
+                T[start+1:end] = cum_prod[:-1]
+                
+    return T
+
+def segment_coo(src, index, out, reduce='sum'):
+    """
+    PyTorch equivalent of COO segment reduction.
+    src: (M, ...)
+    index: (M,)
+    out: (N, ...)
+    """
+    # This is a placeholder for the actual efficient implementation
+    # In PyTorch, this can be done with scatter_add_
+    if reduce == 'sum':
+        # Expand out to match src dimensions
+        out = out.expand_as(src)
+        out.scatter_add_(0, index.unsqueeze(-1).expand_as(out), src)
+        return out
+    else:
+        raise NotImplementedError
 ```
 
-### Parameters
-- **`step_size`**: The base step size for ray marching. Typical values depend on the scene scale and desired resolution. [S1, unofficial]
-- **`voxel_size_ratio`**: The ratio of the voxel size to the world unit. This scales the step size to the voxel grid resolution. [S1, unofficial]
-- **`interval`**: The effective sampling interval, calculated as `step_size * voxel_size_ratio`. [S1, unofficial]
-- **`fast_color_thres`**: Threshold for alpha and weight filtering. If set, samples with alpha or weight below this threshold are skipped. [S1, unofficial]
-- **`use_diffuse_color`**: Flag to enable diffuse color rendering. [S1, unofficial]
-- **`rgbnet`**: Optional neural network for view-dependent color. [S1, unofficial]
-
 ### Edge Cases and Pitfalls
-- **Precision**: Trilinear interpolation can introduce artifacts if the voxel grid is too coarse. [S1, unofficial]
-- **Boundaries**: Ensure sample points are clamped to the voxel grid bounds to avoid out-of-bounds access. [G]
-- **Free Space**: If the mask cache is not used, rendering can be slow due to sampling empty space. [S1, unofficial]
-- **Filtering**: Aggressive filtering can lead to visual artifacts if not handled carefully, as it may remove valid contributions. [S1, unofficial]
+*   **Zero Density Initialization**: DVGO initializes the density grid with zeros, resulting in nearly zero entropy initially. This prevents guiding the agent to choose the next-best view with highest information gain in active vision tasks [S2, unofficial].
+*   **Precision**: Trilinear interpolation in the voxel grid can introduce artifacts if the grid resolution is too low.
+*   **Boundaries**: Ray points outside the voxel grid bounds must be clamped or filtered to avoid out-of-bounds memory access.
+*   **Early Termination Threshold**: Setting `fast_color_thres` too high may skip valid samples, leading to inaccurate rendering. Setting it too low may not provide performance benefits.
 
 ## Subtopics
 
-### DVGO Training
-- **What it is**: The process of optimizing the direct voxel grid and optional color fields using gradient descent.
-- **Difference**: Unlike NeRF which optimizes an MLP, DVGO optimizes a 3D tensor directly.
-- **When to choose**: When real-time rendering speed is critical and the scene can be represented by a voxel grid.
-- **Link**: [DVGO Training](52-dvgo-training.md)
-
-### DVGO Coarse-to-Fine Sampling
-- **What it is**: A strategy that uses a coarse voxel grid for initial sampling and a finer grid for detailed rendering.
-- **Difference**: Reduces computational cost by avoiding fine sampling in empty regions.
-- **When to choose**: For large scenes with varying levels of detail.
-- **Link**: [DVGO Coarse-to-Fine Sampling](53-dvgo-coarse-to-fine-sampling.md)
+### Entropy Volume Initialization
+An additional entropy volume $V(E,c)$ introduced to overcome the zero-entropy initialization issue of DVGO's density volume, allowing information gain calculation at the start. It stores $\alpha(E,c)$, initialized with 0.5 to represent highest entropy. For voxels of $V(\sigma,c)$ that have been updated in the reconstruction stage, $\alpha(E,c)$ is synchronized with $\alpha(\sigma,c)$ [S2, unofficial].
 
 ## Operating characteristics
-
-- **Time Complexity**: $O(N \cdot P)$, where $N$ is the number of pixels and $P$ is the number of samples per ray. The density query is $O(1)$ per sample due to trilinear interpolation. [S1, unofficial]
-- **Memory Complexity**: $O(H \cdot W \cdot D)$ for the voxel grid, where $H, W, D$ are the grid dimensions. [S1, unofficial]
-- **Measured Performance**: DVGO is significantly faster than NeRF, often achieving real-time or near-real-time frame rates on modern GPUs. [S1, unofficial]
-- **Scaling**: Performance scales linearly with the number of voxels and samples. [S1, unofficial]
-- **Strengths**: Fast rendering, hardware-friendly, easy to implement. [S1, unofficial]
-- **Limitations**: Limited by voxel resolution, may suffer from aliasing if the grid is too coarse. [S1, unofficial]
-- **When to use**: Real-time applications, large scenes, when MLP evaluation is too slow. [S1, unofficial]
-- **When not to use**: When high-frequency details are required and voxel resolution is insufficient. [S1, unofficial]
+*   **Time Complexity**: $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the number of samples per ray. The lookup is $O(1)$ per sample, making it faster than MLP-based methods which are $O(N \cdot S \cdot D)$ where $D$ is the MLP depth.
+*   **Memory Complexity**: $O(D_x \cdot D_y \cdot D_z \cdot (1 + k_0 + 3))$, where $D_x, D_y, D_z$ are the grid dimensions, $k_0$ is the color feature dimension, and 3 is for diffuse color. This is significantly less than storing a full radiance field MLP weights for high-resolution scenes.
+*   **Performance**: Faster training and inference compared to NeRF due to the direct voxel grid lookup. However, it may suffer from aliasing artifacts if the grid resolution is not high enough.
+*   **Strengths**: Fast training, efficient memory usage for high-resolution scenes, easy to integrate with existing voxel-based pipelines.
+*   **Limitations**: Lower quality than NeRF in complex scenes due to the discrete nature of the voxel grid. View-dependent effects are limited by the feature dimension $k_0$.
 
 ## Background
-
-DVGO (Direct Voxel Grid Optimization) was introduced by Liu et al. in 2021 as a method to accelerate neural volume rendering by replacing the MLP with a direct voxel grid [S1, unofficial]. It builds on the idea of using voxel grids for density representation, which has been used in traditional volume rendering, but integrates it with neural rendering techniques. The method has been widely adopted in real-time rendering applications due to its efficiency. [S1, unofficial]
+DVGO (Direct Voxel Grid Optimization) was introduced as a method to accelerate NeRF training by replacing the MLP with a direct voxel grid. It builds on the principles of neural volume rendering [S1, S2, unofficial]. The method was developed to address the computational bottleneck of MLP queries in NeRF, enabling real-time or near-real-time training and rendering.
 
 ## Sources
-
 [S1] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)
+[S2] ActiveRMAP: Radiance Field for Active Mapping And Planning, https://doi.org/10.48550/arxiv.2211.12656, fetched 2026-10-26 (unofficial)

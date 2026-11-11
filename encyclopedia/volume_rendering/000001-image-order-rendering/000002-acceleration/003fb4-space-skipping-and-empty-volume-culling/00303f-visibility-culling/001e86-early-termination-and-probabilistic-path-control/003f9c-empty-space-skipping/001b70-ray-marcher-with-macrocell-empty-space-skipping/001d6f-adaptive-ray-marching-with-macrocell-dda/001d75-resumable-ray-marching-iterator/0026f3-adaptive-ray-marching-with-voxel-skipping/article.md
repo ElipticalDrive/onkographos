@@ -3,41 +3,41 @@
 Also called: Sparse Ray Marching
 
 ## Overview
-Adaptive Ray Marching with Voxel Skipping is a visibility culling technique for direct volume rendering that accelerates ray marching by dynamically adjusting the step size based on local density. It solves the problem of excessive sampling in large empty volumes by using a low-precision traversal algorithm for empty regions and switching to a high-precision algorithm when approaching data. It differs from standard empty-space skipping by dynamically adjusting precision based on proximity to data, rather than using a static skip distance or hierarchical structure like [Adaptive Ray Marching with Macrocell DDA](3869-adaptive-ray-marching-with-macrocell-dda.md).
+Adaptive Ray Marching with Voxel Skipping is a visibility culling technique for direct volume rendering that accelerates ray marching by dynamically adjusting the step size based on local density [S1, unofficial]. It solves the problem of excessive sampling in large empty volumes by using a low-precision traversal algorithm for empty regions and switching to a high-precision algorithm when approaching data [S1, unofficial]. It differs from standard empty-space skipping by dynamically adjusting precision based on proximity to data, rather than using a static skip distance or hierarchical structure like [Adaptive Ray Marching with Macrocell DDA](3869-adaptive-ray-marching-with-macrocell-dda.md) [S1, unofficial].
 
 ## How it works
-The method operates in two passes to decouple step counting from sample storage, allowing for compact output buffers. It uses a single-resolution density grid to determine occupancy and adapts the step size exponentially in occupied regions while skipping linearly in empty regions.
+The method operates in two passes to decouple step counting from sample storage, allowing for compact output buffers [S1, unofficial]. It uses a single-resolution density grid to determine occupancy and adapts the step size exponentially in occupied regions while skipping linearly in empty regions [S1, unofficial].
 
 ### Inputs and Outputs
 **Inputs:**
-- `rays_o`: Ray origins, shape `[N, 3]`.
-- `rays_d`: Ray directions, shape `[N, 3]`.
-- `grid`: 3D density grid of shape `[H, H, H]`, flattened to 1D. Accessed via linear index `nx * H * H + ny * H + nz`.
-- `bound`: Half-width of the cubic scene volume `[-bound, bound]`.
-- `H`: Grid resolution (assumed cubic).
+- `rays_o`: Ray origins, shape `[N, 3]` [S1, unofficial].
+- `rays_d`: Ray directions, shape `[N, 3]` [S1, unofficial].
+- `grid`: 3D density grid of shape `[H, H, H]`, flattened to 1D [S1, unofficial].
+- `bound`: Half-width of the cubic scene volume `[-bound, bound]` [S1, unofficial].
+- `H`: Grid resolution (assumed cubic) [S1, unofficial].
 
 **Outputs:**
-- `xyzs`: Sampled point positions, shape `[M, 3]`.
-- `dirs`: Ray directions at sampled points, shape `[M, 3]`.
-- `deltas`: Step sizes (distances) at sampled points, shape `[M]`.
-- `rays`: Ray metadata, shape `[N, 3]`. Each row `i` contains `[ray_index, start_point_index, num_steps]`.
+- `xyzs`: Sampled point positions, shape `[M, 3]` [S1, unofficial].
+- `dirs`: Ray directions at sampled points, shape `[M, 3]` [S1, unofficial].
+- `deltas`: Step sizes (distances) at sampled points, shape `[M]` [S1, unofficial].
+- `rays`: Ray metadata, shape `[N, 3]` [S1, unofficial].
 
 ### Data Structures
-- **Grid**: A 3D array of floats representing density. The source uses a fixed resolution `H=128` for simplicity, though the algorithm is resolution-agnostic.
-- **Rays Metadata**: A 1D array of size `3*N` storing ray index, starting index in `xyzs`, and number of steps.
+- **Grid**: A 3D array of floats representing density, flattened to 1D and accessed via linear index `nx * H * H + ny * H + nz` [S1, unofficial]. The source uses a fixed resolution `H=128` for simplicity, though the algorithm is resolution-agnostic [S1, unofficial].
+- **Rays Metadata**: A 1D array of size `3*N` storing ray index, starting index in `xyzs`, and number of steps [S1, unofficial].
 
 ### Parameters
-- `DENSITY_THRESH`: Density threshold for occupancy. Default `10.0f`. [S1, unofficial]
-- `MAX_STEPS`: Maximum steps per ray. Default `1024`. [S1, unofficial]
-- `MIN_STEPSIZE`: Minimum step size in world units. Calculated as `2 * SQRT3() / MAX_STEPS()`. Represents the diagonal of the smallest voxel in a unit cube divided by max steps. Actual `dt_min` is `MIN_STEPSIZE() * bound`. [S1, unofficial]
-- `MIN_NEAR`: Minimum near clipping distance. Default `0.05f`. [S1, unofficial]
-- `DT_GAMMA`: Gamma factor for step size scaling. Default `1.f / 256.f`. [S1, unofficial]
-- `perturb`: Boolean flag. If true, adds random jitter to starting position `t0` using a PCG32 random number generator seeded by ray index `n`. [S1, unofficial]
+- `DENSITY_THRESH`: Density threshold for occupancy. Default `10.0f` [S1, unofficial].
+- `MAX_STEPS`: Maximum steps per ray. Default `1024` [S1, unofficial].
+- `MIN_STEPSIZE`: Minimum step size in world units. Calculated as `2 * SQRT3() / MAX_STEPS()`, representing the diagonal of the smallest voxel in a unit cube divided by max steps. Actual `dt_min` is `MIN_STEPSIZE() * bound` [S1, unofficial].
+- `MIN_NEAR`: Minimum near clipping distance for rays. Default `0.05f` [S1, unofficial].
+- `DT_GAMMA`: Gamma factor for step size scaling. Default `1.f / 256.f` [S1, unofficial].
+- `perturb`: Boolean flag. If true, adds random jitter to the starting position `t0` using a PCG32 random number generator seeded by ray index `n` [S1, unofficial].
 
 ### Algorithm Steps
 
 1.  **Ray-Box Intersection**:
-    For each ray, calculate near and far intersection distances with the bounding box `[-bound, bound]`.
+    For each ray, calculate near and far intersection distances with the bounding box `[-bound, bound]` [S1, unofficial].
     -   Compute inverse direction: `rdx = 1.0 / rays_d[n][0]`, etc.
     -   For each axis `i`:
         -   `near_i = (-bound - rays_o[n][i]) * rdx_i`
@@ -45,15 +45,15 @@ The method operates in two passes to decouple step counting from sample storage,
         -   If `near_i > far_i`, swap them.
     -   `t_near = max(near_x, near_y, near_z, MIN_NEAR)`
     -   `t_far = min(far_x, far_y, far_z)`
-    -   If `t_near >= t_far`, the ray misses the volume; skip.
+    -   If `t_near >= t_far`, the ray misses the volume; skip [S1, unofficial].
 
 2.  **Initialize Step Limits**:
     -   `dt_min = MIN_STEPSIZE() * bound`
     -   `dt_max = 2 * bound / (H - 1)`
-    -   `dt_gamma = DT_GAMMA()` if `bound > 1`, else `0.0f`.
+    -   `dt_gamma = DT_GAMMA()` if `bound > 1`, else `0.0f` [S1, unofficial].
 
 3.  **First Pass: Estimate Steps**:
-    Initialize `t = t_near`. Loop while `t < t_far` and `num_steps < MAX_STEPS`.
+    Initialize `t = t_near`. Loop while `t < t_far` and `num_steps < MAX_STEPS` [S1, unofficial].
     -   Calculate current position: `x = rays_o[n][0] + t * rays_d[n][0]`, etc.
     -   Clamp position to `[-bound, bound]`.
     -   Map to grid indices:
@@ -61,13 +61,12 @@ The method operates in two passes to decouple step counting from sample storage,
         -   `nx = clamp(0.5 * (x * rbound + 1) * H, 0.0, H - 1)`
         -   `ny = clamp(0.5 * (y * rbound + 1) * H, 0.0, H - 1)`
         -   `nz = clamp(0.5 * (z * rbound + 1) * H, 0.0, H - 1)`
-    -   Query density: `density = grid[nx * H * H + ny * H + nz]`.
+    -   Query density: `density = grid[nx * H * H + ny * H + nz]` [S1, unofficial].
     -   **If `density > DENSITY_THRESH`**:
         -   Increment `num_steps`.
-        -   Advance `t` by `dt = clamp(t * dt_gamma, dt_min, dt_max)`.
+        -   Advance `t` by `dt = clamp(t * dt_gamma, dt_min, dt_max)` [S1, unofficial].
     -   **Else (Empty Space)**:
-        -   Calculate distance to next voxel boundary `tt`.
-        -   Advance `t` in small steps (unit steps or minimal increments) until `t >= tt`. [S1, unofficial]
+        -   Calculate distance to next voxel boundary `tt` and advance `t` in small steps until `t >= tt` [S1, unofficial].
 
 4.  **Allocate Output Space**:
     -   `point_index = atomicAdd(counter, num_steps)`
@@ -75,10 +74,10 @@ The method operates in two passes to decouple step counting from sample storage,
     -   Store metadata:
         -   `rays[ray_index * 3] = n`
         -   `rays[ray_index * 3 + 1] = point_index`
-        -   `rays[ray_index * 3 + 2] = num_steps`
+        -   `rays[ray_index * 3 + 2] = num_steps` [S1, unofficial].
 
 5.  **Second Pass: Write Samples**:
-    Reset `t = t_near`. Initialize `step = 0`. Loop while `t < t_far` and `step < num_steps`.
+    Reset `t = t_near`. Initialize `step = 0`. Loop while `t < t_far` and `step < num_steps` [S1, unofficial].
     -   Calculate position, grid indices, and density (same as Step 3).
     -   **If `density > DENSITY_THRESH`**:
         -   Write `x, y, z` to `xyzs[point_index + step]`.
@@ -87,7 +86,7 @@ The method operates in two passes to decouple step counting from sample storage,
         -   Advance `t` by `dt = clamp(t * dt_gamma, dt_min, dt_max)`.
         -   Increment `step`.
     -   **Else (Empty Space)**:
-        -   Skip to next voxel boundary `tt` using the same logic as Step 3.
+        -   Skip to next voxel boundary `tt` using the same logic as Step 3 [S1, unofficial].
 
 ### Pseudocode
 
@@ -131,8 +130,8 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
     dt_gamma = DT_GAMMA if bound > 1 else 0.0
     
     # Storage for metadata and counts
-    rays_meta = np.zeros((N, 3), dtype=np.int32)
-    step_counts = np.zeros(N, dtype=np.int32)
+    rays_meta = []
+    step_counts = []
     
     # First Pass: Count steps
     for n in range(N):
@@ -161,7 +160,8 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
         t_far = min(far_x, far_y, far_z)
         
         if t_near >= t_far:
-            step_counts[n] = 0
+            step_counts.append(0)
+            rays_meta.append([n, 0, 0])
             continue
             
         t = t_near
@@ -169,9 +169,7 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
         
         # Perturbation [G]
         if perturb:
-            # Simple jitter implementation [G]
-            # In practice, use PCG32 seeded by n
-            t += (np.random.rand() - 0.5) * dt_min 
+            t += (math.random() - 0.5) * dt_min 
             
         while t < t_far and num_steps < MAX_STEPS:
             # Current position
@@ -185,9 +183,9 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
             z = max(-bound, min(bound, z))
             
             # Map to grid indices
-            nx = int(max(0, min(H - 1, 0.5 * (x * rbound + 1) * H)))
-            ny = int(max(0, min(H - 1, 0.5 * (y * rbound + 1) * H)))
-            nz = int(max(0, min(H - 1, 0.5 * (z * rbound + 1) * H))
+            nx = int(max(0.0, min(H - 1, 0.5 * (x * rbound + 1) * H)))
+            ny = int(max(0.0, min(H - 1, 0.5 * (y * rbound + 1) * H)))
+            nz = int(max(0.0, min(H - 1, 0.5 * (z * rbound + 1) * H)))
             
             # Query density
             density = grid[nx * H * H + ny * H + nz]
@@ -199,11 +197,8 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
                 dt = max(dt_min, min(dt_max, dt))
                 t += dt
             else:
-                # Skip to next voxel boundary [S1, unofficial]
-                # Calculate distance to next boundary for each axis
-                # This is a simplified linear skip [G]
-                # Exact implementation requires calculating t_next for each axis crossing
-                # and taking the minimum positive t_next > t
+                # Skip to next voxel boundary [G]
+                # Standard voxel traversal step to find next axis crossing
                 t_next_x = float('inf')
                 t_next_y = float('inf')
                 t_next_z = float('inf')
@@ -223,24 +218,28 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
                 elif dz < 0:
                     t_next_z = ((nz) / (0.5 * rbound * H) - 1) * 0.5 * bound - oz) / dz
                 
-                t_next = min(t_next_x, t_next_y, t_next_z)
-                if t_next > t:
-                    t = t_next
+                tt = min(t_next_x, t_next_y, t_next_z)
+                if tt > t:
+                    t = tt
                 else:
                     t += dt_min # Prevent infinite loop [G]
                     
-        step_counts[n] = num_steps
+        step_counts.append(num_steps)
+        rays_meta.append([n, 0, num_steps])
 
     # Allocate output buffers
     M = sum(step_counts)
-    xyzs = np.zeros((M, 3))
-    dirs = np.zeros((M, 3))
-    deltas = np.zeros(M)
+    xyzs = [[0.0, 0.0, 0.0] for _ in range(M)]
+    dirs = [[0.0, 0.0, 0.0] for _ in range(M)]
+    deltas = [0.0] * M
     
     # Compute start indices using cumulative sum
-    start_indices = np.zeros(N, dtype=np.int32)
+    start_indices = [0] * N
     if N > 0:
-        start_indices[1:] = np.cumsum(step_counts[:-1])
+        current_sum = 0
+        for i in range(N):
+            start_indices[i] = current_sum
+            current_sum += step_counts[i]
         
     # Second Pass: Write samples
     for n in range(N):
@@ -282,9 +281,9 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
             y = max(-bound, min(bound, y))
             z = max(-bound, min(bound, z))
             
-            nx = int(max(0, min(H - 1, 0.5 * (x * rbound + 1) * H)))
-            ny = int(max(0, min(H - 1, 0.5 * (y * rbound + 1) * H)))
-            nz = int(max(0, min(H - 1, 0.5 * (z * rbound + 1) * H)))
+            nx = int(max(0.0, min(H - 1, 0.5 * (x * rbound + 1) * H)))
+            ny = int(max(0.0, min(H - 1, 0.5 * (y * rbound + 1) * H)))
+            nz = int(max(0.0, min(H - 1, 0.5 * (z * rbound + 1) * H)))
             
             density = grid[nx * H * H + ny * H + nz]
             
@@ -300,7 +299,7 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
                 current_idx += 1
                 step += 1
             else:
-                # Skip to next voxel boundary
+                # Skip to next voxel boundary [G]
                 t_next_x = float('inf')
                 t_next_y = float('inf')
                 t_next_z = float('inf')
@@ -320,9 +319,9 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
                 elif dz < 0:
                     t_next_z = (((nz) / (0.5 * rbound * H) - 1) * 0.5 * bound - oz) / dz
                 
-                t_next = min(t_next_x, t_next_y, t_next_z)
-                if t_next > t:
-                    t = t_next
+                tt = min(t_next_x, t_next_y, t_next_z)
+                if tt > t:
+                    t = tt
                 else:
                     t += dt_min
                     
@@ -332,25 +331,28 @@ def adaptive_ray_marching(rays_o, rays_d, grid, H, bound, perturb=False):
 ```
 
 ### Edge Cases and Pitfalls
--   **Empty Rays**: Rays that miss the bounding box or have `t_near >= t_far` result in zero steps. The composite kernel should check `if (num_steps == 0)` and return early with zeroed outputs. [S1, unofficial]
--   **Max Steps Exceeded**: If a ray exceeds `MAX_STEPS`, the first pass stops counting. The second pass will only write the counted steps. The composite kernel should check `if (offset + num_steps >= M)` to prevent buffer overflows. [S1, unofficial]
--   **Precision**: The mapping from world coordinates to grid indices uses clamping. Ensure `rbound` and grid indices are computed consistently between passes. [S1, unofficial]
--   **Threshold Selection**: The source notes uncertainty about how to decide `DENSITY_THRESH`. [S1, unofficial]
+-   **Empty Rays**: Rays that miss the bounding box or have `t_near >= t_far` result in zero steps. The composite kernel should check `if (num_steps == 0)` and return early with zeroed outputs [S1, unofficial].
+-   **Max Steps Exceeded**: If a ray exceeds `MAX_STEPS`, the first pass stops counting. The second pass will only write the counted steps. The composite kernel should check `if (offset + num_steps >= M)` to prevent buffer overflows [S1, unofficial].
+-   **Precision**: The mapping from world coordinates to grid indices uses clamping. Ensure `rbound` and grid indices are computed consistently between passes [S1, unofficial].
+-   **Threshold Selection**: The source notes uncertainty about how to decide `DENSITY_THRESH` [S1, unofficial].
 
 ## Subtopics
 
+### [Adaptive Ray Traversal](8185-adaptive-ray-traversal.md)
+Adaptive ray traversal is a visibility culling technique for volume rendering that accelerates ray marching by distinguishing between empty space and regions near data. It differs from fixed-step ray marching by dynamically adjusting traversal speed based on local data density, and from pure empty-space skipping by maintaining precision continuity at the boundary between empty and occupied regions. Choose it when high precision continuity is required at data boundaries. See [Adaptive Ray Traversal](8185-adaptive-ray-traversal.md).
+
 ### Shadow ray bit-flag acceleration
-A technique to eliminate unnecessary shadow ray casts by storing per-voxel, per-light status flags in the spatial grid. Before casting a shadow ray to a light source, check the corresponding bit flag in the current voxel; if the flag indicates full shadow or clear visibility, skip the ray cast. Each voxel stores two bits per light source: bit 0 indicates the voxel is completely in shadow, bit 1 indicates the voxel is unobstructed from the light source. [S2, unofficial]
+A technique to eliminate unnecessary shadow ray casts by storing per-voxel, per-light status flags in the spatial grid [S2, unofficial]. Before casting a shadow ray to a light source, check the corresponding bit flag in the current voxel; if the flag indicates full shadow or clear visibility, skip the ray cast [S2, unofficial]. Each voxel stores two bits per light source: bit 0 indicates the voxel is completely in shadow, bit 1 indicates the voxel is unobstructed from the light source [S2, unofficial].
 
 ## Operating characteristics
--   **Time Complexity**: The first pass is $O(N \cdot S_{empty} + N \cdot S_{occupied})$ where $S_{empty}$ is the number of empty steps skipped and $S_{occupied}$ is the number of occupied steps. The second pass is proportional to the total number of samples $M$.
--   **Memory Complexity**: $O(M)$ for output buffers, where $M$ is the total number of samples. $O(H^3)$ for the density grid.
--   **Performance**: The method reduces the number of samples significantly in empty regions by skipping to voxel boundaries. In occupied regions, it uses adaptive step sizes to reduce samples in smooth areas. [S1, unofficial]
--   **Strengths**: Efficient for scenes with large empty spaces. Simple implementation. [S1, unofficial]
--   **Limitations**: Requires two passes. The density grid must be updated regularly. The threshold `DENSITY_THRESH` is heuristic. [S1, unofficial]
+-   **Time Complexity**: The first pass is $O(N \cdot S_{empty} + N \cdot S_{occupied})$ where $S_{empty}$ is the number of empty steps skipped and $S_{occupied}$ is the number of occupied steps [S1, unofficial]. The second pass is proportional to the total number of samples $M$ [S1, unofficial].
+-   **Memory Complexity**: $O(M)$ for output buffers, where $M$ is the total number of samples [S1, unofficial]. $O(H^3)$ for the density grid [S1, unofficial].
+-   **Performance**: The method reduces the number of samples significantly in empty regions by skipping to voxel boundaries [S1, unofficial].
+-   **Strengths**: Efficient for scenes with large empty spaces [S1, unofficial].
+-   **Limitations**: Requires two passes [S1, unofficial]. The density grid must be updated regularly [S1, unofficial]. The threshold `DENSITY_THRESH` is heuristic [S1, unofficial].
 
 ## Background
-The method is part of the Instant-NGP implementation, specifically the `march_rays_train` kernel. It is designed for training neural radiance fields (NeRF) with hash encodings. The approach builds on [Resumable Ray Marching Iterator](1505-resumable-ray-marching-iterator.md). [S1, unofficial]
+The method is part of the Instant-NGP implementation, specifically the `march_rays_train` kernel [S1, unofficial]. It is designed for training neural radiance fields (NeRF) with hash encodings [S1, unofficial].
 
 ## Sources
 [S1] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
